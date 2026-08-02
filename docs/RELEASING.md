@@ -14,6 +14,11 @@ the person who ran the compiler. The pieces already in place:
   tree produce byte-identical images.
 - `catcard-image` prints the digest it signed, so a rebuild can be checked against a
   published release without access to any key.
+- Nothing that reaches the output bytes depends on the ambient environment. In
+  particular there is no `rustflags` table in `.cargo/config.toml`: setting `RUSTFLAGS`
+  makes cargo ignore that table entirely, so anything in it would produce one binary
+  locally and a different one under CI. The linker script is emitted from
+  `catcard-fw/build.rs`, which `RUSTFLAGS` cannot override. CI asserts both properties.
 
 Still open: pinning the exact toolchain *version* rather than `stable`, and a container
 recipe so the build environment is reproducible too.

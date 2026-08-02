@@ -1,11 +1,22 @@
 # Cortex-M4F. STM32L496 and STM32L4S5 both have a single-precision FPU, so the
 # hard-float ABI (`eabihf`) is correct for both.
-[target.thumbv7em-none-eabihf]
-rustflags = [
-    "-C", "link-arg=-Tlink.x",     # cortex-m-rt's linker script
-    "-C", "link-arg=-Map=target/catcard.map",
-    "-C", "force-frame-pointers=yes",
-]
+#
+# There is deliberately no `[target.thumbv7em-none-eabihf] rustflags` table.
+#
+# Setting the `RUSTFLAGS` environment variable makes cargo ignore such a table
+# *entirely* — not merge with it. Two things went wrong when flags lived here:
+#
+#   1. CI sets `RUSTFLAGS=-D warnings`, which dropped `-Tlink.x`. The firmware still
+#      linked, against lld's default layout at 0x00020000 instead of the board's
+#      firmware base, and only failed later when `catcard-image` refused to flatten it.
+#   2. A codegen flag (`-C force-frame-pointers`) that is present locally and absent
+#      under CI produces two different binaries from one source tree. For a wallet whose
+#      releases are verified by digest, a build that depends on an ambient environment
+#      variable is not reproducible.
+#
+# So: the linker script is emitted from `catcard-fw/build.rs` via
+# `cargo:rustc-link-arg`, which `RUSTFLAGS` cannot override, and nothing else is set.
+# Anything added here in future must be inert with respect to the output bytes.
 
 [alias]
 # Firmware builds. A board feature is required -- there is no default board.

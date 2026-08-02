@@ -42,10 +42,11 @@ jobs:
 
       - name: Clippy
         run: |
+          # No --all-targets: it adds the test harness target, which needs libtest,
+          # which does not exist for a no_std thumb target.
           cargo clippy --release -p catcard-fw \
             --target thumbv7em-none-eabihf \
-            --no-default-features --features board-${{ matrix.board }} \
-            --all-targets
+            --no-default-features --features board-${{ matrix.board }}
 
       - name: Build
         run: cargo fw-${{ matrix.board }}
@@ -100,6 +101,22 @@ jobs:
           echo "second: $b"
           [ "$a" = "$b" ] || { echo "::error::build is not reproducible"; exit 1; }
           cmp /tmp/a.bin /tmp/b.bin
+
+      # Setting RUSTFLAGS makes cargo ignore .cargo/config.toml's rustflags table
+      # outright. That once dropped -Tlink.x (the firmware linked at lld's default
+      # base) and, separately, changed codegen between a local build and a CI build.
+      # Nothing that reaches the output bytes may depend on the ambient environment.
+      - name: Build is independent of ambient RUSTFLAGS
+        run: |
+          set -euo pipefail
+          cargo clean -p catcard-fw
+          env -u RUSTFLAGS cargo build --release -p catcard-fw \
+            --target thumbv7em-none-eabihf --no-default-features --features board-mk4
+          env -u RUSTFLAGS cargo run --release -q -p catcard-image -- build \
+            target/thumbv7em-none-eabihf/release/catcard-fw \
+            --board mk4 --version 0.0.1 --bin /tmp/no-rustflags.bin >/dev/null
+          cmp /tmp/a.bin /tmp/no-rustflags.bin || {
+            echo "::error::firmware bytes depend on whether RUSTFLAGS is set"; exit 1; }
 
   cleanroom:
     name: Clean-room boundary

@@ -1,0 +1,245 @@
+     VMA      LMA     Size Align Out     In      Symbol
+       0        0        0     1 _stext = ORIGIN(FLASH) + 0x4000
+       0        0        0     1 _bootloader_sram_start = 0x10006000
+       0        0        0     1 _bootloader_sram_end = 0x10007C00
+       0        0        0     1 PROVIDE(NonMaskableInt = DefaultHandler)
+       0        0        0     1 PROVIDE(MemoryManagement = DefaultHandler)
+       0        0        0     1 PROVIDE(BusFault = DefaultHandler)
+       0        0        0     1 PROVIDE(UsageFault = DefaultHandler)
+       0        0        0     1 PROVIDE(SVCall = DefaultHandler)
+       0        0        0     1 PROVIDE(DebugMonitor = DefaultHandler)
+       0        0        0     1 PROVIDE(PendSV = DefaultHandler)
+       0        0        0     1 PROVIDE(SysTick = DefaultHandler)
+       0        0        0     1 PROVIDE(DefaultHandler = DefaultHandler_)
+       0        0        0     1 PROVIDE(HardFault = HardFault_)
+       0        0        0     1 PROVIDE(__pre_init = DefaultPreInit)
+       0        0        0     1 PROVIDE(_ram_end = ORIGIN(RAM) + LENGTH(RAM))
+       0        0        0     1 PROVIDE(_stack_start = _ram_end)
+ 8020000  8020000      400     4 .vector_table
+ 8020000  8020000        0     1         __vector_table = .
+ 8020000  8020000        4     1         LONG(_stack_start & 0xFFFFFFF8)
+ 8020004  8020004        4     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.vector_table.reset_vector)
+ 8020004  8020004        4     1                 __RESET_VECTOR
+ 8020008  8020008        0     1         __exceptions = .
+ 8020008  8020008       38     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.vector_table.exceptions)
+ 8020008  8020008       38     1                 __EXCEPTIONS
+ 8020040  8020040        0     1         __eexceptions = .
+ 8020040  8020040      3c0     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.vector_table.interrupts)
+ 8020040  8020040      3c0     1                 __INTERRUPTS
+ 8024000  8024000     78ac     4 .text
+ 8024000  8024000        0     1         __stext = .
+ 8024000  8024000       58     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.Reset)
+ 8024000  8024000        0     1                 $t
+ 8024001  8024001       3e     1                 Reset
+ 8024040  8024040        0     1                 $d
+ 8024058  8024058       14     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvCspvQUrCnuW1_10catcard_fw18___cortex_m_rt_main)
+ 8024058  8024058        0     1                 $t
+ 8024059  8024059       14     1                 catcard_fw::__cortex_m_rt_main
+ 802406c  802406c      446     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvNtCspvQUrCnuW1_10catcard_fw4boot8bring_up)
+ 802406c  802406c        0     1                 $t
+ 802406d  802406d      446     1                 catcard_fw::boot::bring_up
+ 80244b2  80244b2       6c     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvNtCspvQUrCnuW1_10catcard_fw8selftest4park)
+ 80244b2  80244b2        0     1                 $t
+ 80244b3  80244b3       6c     1                 catcard_fw::selftest::park
+ 802451e  802451e        8     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text.main)
+ 802451e  802451e        0     1                 $t
+ 802451f  802451f        8     1                 main
+ 8024526  8024526       20     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvNtCsb9QjnEDZvSh_16catcard_callgate5entry6invoke)
+ 8024526  8024526        0     1                 $t
+ 8024527  8024527       20     1                 catcard_callgate::entry::invoke
+ 8024548  8024548      2e4     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvMs2_NtCs5ch72LLEEpK_15catcard_entropy4poolNtB5_11EntropyPool6absorb)
+ 8024548  8024548        0     1                 $t
+ 8024549  8024549      2e4     1                 <catcard_entropy::pool::EntropyPool>::absorb
+ 80245ca  80245ca        0     1                 $d
+ 80245d2  80245d2        0     1                 $t
+ 802482c  802482c      198     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvMs2_NtCs5ch72LLEEpK_15catcard_entropy4poolNtB5_11EntropyPool3add)
+ 802482c  802482c        0     1                 $t
+ 802482d  802482d      198     1                 <catcard_entropy::pool::EntropyPool>::add
+ 80249c4  80249c4       86     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvMNtCs1nO32TCy2h1_11catcard_hal3rngNtB2_3Rng4word)
+ 80249c4  80249c4        0     1                 $t
+ 80249c5  80249c5       86     1                 <catcard_hal::rng::Rng>::word
+ 8024a4a  8024a4a        8     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text.unlikely._RNvNtCs92e0Ppvf8WV_4core9panicking9panic_fmt)
+ 8024a4a  8024a4a        0     1                 $t
+ 8024a4b  8024a4b        8     1                 core::panicking::panic_fmt
+ 8024a52  8024a52        8     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text.unlikely._RNvNtNtCs92e0Ppvf8WV_4core9panicking11panic_const24panic_const_add_overflow)
+ 8024a52  8024a52        0     1                 $t
+ 8024a53  8024a53        8     1                 core::panicking::panic_const::panic_const_add_overflow
+ 8024a5a  8024a5a        6     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text.DefaultHandler_)
+ 8024a5a  8024a5a        0     1                 $t
+ 8024a5b  8024a5b        6     1                 DefaultHandler_
+ 8024a60  8024a60        6     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text.DefaultPreInit)
+ 8024a60  8024a60        0     1                 $t
+ 8024a61  8024a61        6     1                 DefaultPreInit
+ 8024a66  8024a66        6     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvCs9wFQrvczXsK_7___rustc17rust_begin_unwind)
+ 8024a66  8024a66        0     1                 $t
+ 8024a67  8024a67        6     1                 __rustc::rust_begin_unwind
+ 8024a6c  8024a6c     67ee     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.text._RNvNtCs4LHvOwOJo4y_4sha26sha51211compress512)
+ 8024a6c  8024a6c        0     1                 $t
+ 8024a6d  8024a6d     67ee     1                 sha2::sha512::compress512
+ 802b25a  802b25a       ae     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.text.__aeabi_memclr8)
+ 802b25a  802b25a        0     1                 $t
+ 802b25b  802b25b       ae     1                 __aeabi_memclr8
+ 802b308  802b308       9c     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.text.__aeabi_memcpy8)
+ 802b308  802b308        0     1                 $t
+ 802b309  802b309       9c     1                 __aeabi_memcpy8
+ 802b3a4  802b3a4      2da     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.text._RNvNtCs2lO1SO77HMC_17compiler_builtins3mem6memcpy)
+ 802b3a4  802b3a4        0     1                 $t
+ 802b3a5  802b3a5      2da     1                 compiler_builtins::mem::memcpy
+ 802b67e  802b67e       d0     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.text.__aeabi_memclr)
+ 802b67e  802b67e        0     1                 $t
+ 802b67f  802b67f       d0     1                 __aeabi_memclr
+ 802b74e  802b74e       9c     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.text.__aeabi_memcpy4)
+ 802b74e  802b74e        0     1                 $t
+ 802b74f  802b74f       9c     1                 __aeabi_memcpy4
+ 802b7ea  802b7ea        c     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.text.__aeabi_memcpy)
+ 802b7ea  802b7ea        0     1                 $t
+ 802b7eb  802b7eb        c     1                 __aeabi_memcpy
+ 802b7f6  802b7f6       ae     2         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.text.__aeabi_memclr4)
+ 802b7f6  802b7f6        0     1                 $t
+ 802b7f7  802b7f7       ae     1                 __aeabi_memclr4
+ 802b8a4  802b8a4        6     2         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.HardFault.default)
+ 802b8a4  802b8a4        0     1                 $t
+ 802b8a5  802b8a5        6     1                 HardFault_
+ 802b8aa  802b8aa        2     1         . = ALIGN(4)
+ 802b8ac  802b8ac        0     1         __etext = .
+ 802b8b0  802b8b0      38c     8 .rodata
+ 802b8b0  802b8b0        0     1         . = ALIGN(4)
+ 802b8b0  802b8b0        0     1         __srodata = .
+ 802b8b0  802b8b0        8     4         <internal>:(.rodata.cst4)
+ 802b8b8  802b8b8       16     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.15)
+ 802b8b8  802b8b8       16     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.15
+ 802b8ce  802b8ce       13     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.16)
+ 802b8ce  802b8ce       13     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.16
+ 802b8e1  802b8e1       14     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.17)
+ 802b8e1  802b8e1       14     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.17
+ 802b8f5  802b8f5       14     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.18)
+ 802b8f5  802b8f5       14     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.18
+ 802b909  802b909       17     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.19)
+ 802b909  802b909       17     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.19
+ 802b920  802b920        f     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.20)
+ 802b920  802b920        f     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.20
+ 802b92f  802b92f       16     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.21)
+ 802b92f  802b92f       16     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.21
+ 802b948  802b948       17     8         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.27)
+ 802b948  802b948       17     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.27
+ 802b960  802b960       40     8         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.e16ffc22b88f9f55a8e18713c75c7275.73)
+ 802b960  802b960       40     1                 .Lanon.e16ffc22b88f9f55a8e18713c75c7275.73
+ 802b9a0  802b9a0      280     8         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lanon.7c3c2e74d2bef165701e5334b7719d3f.2)
+ 802b9a0  802b9a0      280     1                 .Lanon.7c3c2e74d2bef165701e5334b7719d3f.2
+ 802bc20  802bc20       1c     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.rodata..Lswitch.table._RNvMs2_NtCs5ch72LLEEpK_15catcard_entropy4poolNtB5_11EntropyPool3add)
+ 802bc20  802bc20       1c     1                 .Lswitch.table._RNvMs2_NtCs5ch72LLEEpK_15catcard_entropy4poolNtB5_11EntropyPool3add
+ 802bc3c  802bc3c        0     1         . = ALIGN(4)
+ 802bc3c  802bc3c        0     1         __erodata = .
+20000000  802bc3c       14     4 .data
+20000000  802bc3c        0     1         . = ALIGN(4)
+20000000  802bc3c        0     1         __sdata = .
+20000000  802bc3c       14     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.data.CATCARD_BOOT_STATUS)
+20000000  802bc3c       14     1                 CATCARD_BOOT_STATUS
+20000014  802bc50        0     1         . = ALIGN(4)
+20000014  802bc50        0     1 . = ALIGN(4)
+20000014  802bc50        0     1 __edata = .
+20000014  802bc50        0     1 __sidata = LOADADDR(.data)
+ 802bc60  802bc60        0    32 .gnu.sgstubs
+ 802bc60  802bc60        0     1         . = ALIGN(32)
+ 802bc60  802bc60        0     1         __veneer_base = .
+ 802bc60  802bc60        0     1         . = ALIGN(32)
+ 802bc60  802bc60        0     1 . = ALIGN(32)
+ 802bc60  802bc60        0     1 __veneer_limit = .
+20000014 20000014        0     4 .bss
+20000014 20000014        0     1         . = ALIGN(4)
+20000014 20000014        0     1         __sbss = .
+20000014 20000014        0     1         . = ALIGN(4)
+20000014 20000014        0     1 . = ALIGN(4)
+20000014 20000014        0     1 __ebss = .
+20000014 20000014        0     4 .uninit
+20000014 20000014        0     1         . = ALIGN(4)
+20000014 20000014        0     1         __suninit = .
+20000014 20000014        0     1         . = ALIGN(4)
+20000014 20000014        0     1         __euninit = .
+20000014 20000014        0     1 . = ALIGN(4)
+20000014 20000014        0     1 PROVIDE(__sheap = .)
+20000014 20000014        0     1 PROVIDE(_stack_end = .)
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+20000014 20000014        0     1 
+       0        0    5c754     1 .debug_loc
+       0        0    5c754     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_loc)
+       0        0      cbb     1 .debug_abbrev
+       0        0      7f7     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_abbrev)
+     7f7      7f7       b2     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_abbrev)
+     8a9      8a9       8e     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_abbrev)
+     937      937      131     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_abbrev)
+     a68      a68       c5     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_abbrev)
+     b2d      b2d       7d     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_abbrev)
+     baa      baa       5f     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.debug_abbrev)
+     c09      c09       b2     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_abbrev)
+       0        0    23415     1 .debug_info
+       0        0    21eba     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_info)
+   21eba    21eba      1fa     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_info)
+   220b4    220b4      123     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_info)
+   221d7    221d7      bfe     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_info)
+   22dd5    22dd5      2ac     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_info)
+   23081    23081      105     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_info)
+   23186    23186       95     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.debug_info)
+   2321b    2321b      1fa     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_info)
+       0        0      270     1 .debug_aranges
+       0        0      180     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_aranges)
+     180      180       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_aranges)
+     1a0      1a0       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_aranges)
+     1c0      1c0       30     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_aranges)
+     1f0      1f0       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_aranges)
+     210      210       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_aranges)
+     230      230       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.debug_aranges)
+     250      250       20     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_aranges)
+       0        0    16ce8     1 .debug_ranges
+       0        0    166f0     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_ranges)
+   166f0    166f0       48     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_ranges)
+   16738    16738       48     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_ranges)
+   16780    16780      4a8     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_ranges)
+   16c28    16c28       30     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_ranges)
+   16c58    16c58       48     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_ranges)
+   16ca0    16ca0       48     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_ranges)
+       0        0    1120a     1 .debug_str
+       0        0    1120a     1         <internal>:(.debug_str)
+       0        0       8b     1 .comment
+       0        0       8b     1         <internal>:(.comment)
+       0        0       38     1 .ARM.attributes
+       0        0       38     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.ARM.attributes)
+       0        0      3c4     4 .debug_frame
+       0        0      20c     4         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_frame)
+     20c      20c       30     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_frame)
+     23c      23c       34     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_frame)
+     270      270       8c     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_frame)
+     2fc      2fc       34     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_frame)
+     330      330       34     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_frame)
+     364      364       30     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.debug_frame)
+     394      394       30     4         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_frame)
+       0        0     e119     1 .debug_line
+       0        0     c6db     1         /home/magicaltux/projects/coldcard/catcard/target/thumbv7em-none-eabihf/release/deps/catcard_fw-d02203a2d142e002.catcard_fw.4cb0b21fb7dc0cf-cgu.0.rcgu.o:(.debug_line)
+    c6db     c6db      310     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.207.rcgu.o):(.debug_line)
+    c9eb     c9eb      1f8     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.215.rcgu.o):(.debug_line)
+    cbe3     cbe3      bec     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.016.rcgu.o):(.debug_line)
+    d7cf     d7cf      368     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.252.rcgu.o):(.debug_line)
+    db37     db37      1f8     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.295.rcgu.o):(.debug_line)
+    dd2f     dd2f       da     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.353.rcgu.o):(.debug_line)
+    de09     de09      310     1         /home/magicaltux/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/thumbv7em-none-eabihf/lib/libcompiler_builtins-d8bd91292ef7e819.rlib(compiler_builtins-d8bd91292ef7e819.compiler_builtins.1b6459b95519dd6c-cgu.356.rcgu.o):(.debug_line)
+       0        0      6b0     4 .symtab
+       0        0      6b0     4         <internal>:(.symtab)
+       0        0       d6     1 .shstrtab
+       0        0       d6     1         <internal>:(.shstrtab)
+       0        0      87b     1 .strtab
+       0        0      87b     1         <internal>:(.strtab)

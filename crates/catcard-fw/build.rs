@@ -61,6 +61,16 @@ fn main() {
 
     fs::write(out.join("memory.x"), script).expect("writing memory.x");
     println!("cargo:rustc-link-search={}", out.display());
+
+    // Emitted here rather than in `.cargo/config.toml`, because setting the RUSTFLAGS
+    // environment variable makes cargo ignore that file's `rustflags` completely. When
+    // that happened the firmware still linked -- against lld's default layout, at
+    // 0x00020000 instead of the board's firmware base -- and only failed later, when
+    // `catcard-image` refused to flatten it. `cargo:rustc-link-arg` is not overridable,
+    // so the linker script cannot go missing.
+    println!("cargo:rustc-link-arg=-Tlink.x");
+    println!("cargo:rustc-link-arg=-Map=catcard.map");
+
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-env=CATCARD_BOARD={}", board.name);
 }
