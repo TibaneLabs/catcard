@@ -7,8 +7,24 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// `PIN_ATTEMPT_SIZE_V2`. Source: bootloader-callgate-abi.md [C]
+/// `PIN_ATTEMPT_SIZE_V2` — the ATECC608 layout, used by mk3 and later.
+/// Source: bootloader-callgate-abi.md [C]
 pub const PIN_ATTEMPT_SIZE: usize = 280;
+
+/// `PIN_ATTEMPT_SIZE_V1` — the mk2/ATECC508 layout, which has no `cached_main_pin`.
+/// Not implemented; recorded so a V1 device is diagnosed rather than silently corrupted.
+/// Source: generations-mk2-q-mk5.md §Mk2 [C]
+pub const PIN_ATTEMPT_SIZE_V1: usize = 248;
+
+/// `magic_value` for the V2 (ATECC608) struct. The caller sets this before
+/// [`PinOp::Setup`](crate::abi::PinOp::Setup); a mismatch returns
+/// [`err::BAD_MAGIC`](crate::abi::err::BAD_MAGIC).
+/// Source: gate18-pin-state-machine.md §1 [C]
+pub const PA_MAGIC_V2: u32 = 0x2eaf_6312;
+
+/// `magic_value` for the V1 (ATECC508 / mk2) struct.
+/// Source: generations-mk2-q-mk5.md §Mk2 [C]
+pub const PA_MAGIC_V1: u32 = 0x2eaf_6311;
 
 /// Maximum PIN length in the prefix/suffix fields.
 pub const MAX_PIN_LEN: usize = 32;
@@ -22,24 +38,27 @@ pub const LONG_SECRET_CHUNK: usize = 32;
 
 /// In-place I/O buffer for callgate 18.
 ///
-/// The reference lists the fields in order but gives only the aggregate size (280).
-/// Laying the documented fields out as C would, with `u32` for each scalar, sums to
-/// exactly 280 — which is what pins `delay_*` down to two words. The
-/// [`layout_matches_documented_size`](self) test is the guard on that reading: if the
-/// real struct differs, the size assertion here is what will catch it on hardware.
+/// Field order and signedness follow the documented `struct` format
+/// `"<Ii32si6I32si32si32si72s32s"` (gate18-pin-state-machine.md §1 [C]). The `6I` run
+/// is what fixes `delay_achieved`/`delay_required` at one word each, and the whole
+/// layout sums to exactly 280.
 ///
 /// Every privileged field is zeroed on drop; this struct holds a plaintext PIN and,
 /// after a fetch, the wallet secret.
 #[repr(C)]
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PinAttempt {
-    /// Set by the bootloader during [`PinOp::Setup`](crate::abi::PinOp::Setup).
+    /// [`PA_MAGIC_V2`]. Set by the caller before
+    /// [`PinOp::Setup`](crate::abi::PinOp::Setup); checked on every call.
     pub magic: u32,
-    /// Selects the secondary wallet on ATECC508 (mk2) hardware. Zero elsewhere.
-    pub is_secondary: u32,
+    /// Obsolete (secondary wallets were an ATECC508-era feature). Must be 0.
+    pub is_secondary: i32,
     /// The PIN being tested, as ASCII digits with a `-` separating prefix and suffix.
     pub pin: [u8; MAX_PIN_LEN],
-    pub pin_len: u32,
+    /// Valid bytes in `pin`. **Must be bounded to `0..=32`** — the audit of the stock
+    /// firmware found this unchecked on the caller side. [`Self::set_pin`] is the only
+    /// way this crate writes it.
+    pub pin_len: i32,
     /// Rate-limit delay already served. Obsolete on ATECC608.
     pub delay_achieved: u32,
     /// Rate-limit delay demanded. Obsolete on ATECC608.
@@ -52,14 +71,19 @@ pub struct PinAttempt {
     pub state_flags: u32,
     /// Bootloader-private; opaque to us, but covered by the HMAC.
     pub private_state: u32,
-    /// The bootloader's authenticator over this struct. Never modify it.
+    /// The bootloader's authenticator over this struct: double-SHA256 over
+    /// `pairing_secret || reboot_seed || struct[..hmac] || cached_main_pin`. It is
+    /// validated on every non-setup call and re-signed on return, so the struct must
+    /// round-trip unmodified from a prior call. `reboot_seed` is per-boot, so a struct
+    /// cannot be replayed across a reset. Never write to this.
     pub hmac: [u8; 32],
-    /// Which slots [`PinOp::Change`](crate::abi::PinOp::Change) should act on.
-    pub change_flags: u32,
+    /// Which slots [`PinOp::Change`](crate::abi::PinOp::Change) should act on, and the
+    /// long-secret block index. See [`change`](crate::abi::change).
+    pub change_flags: i32,
     pub old_pin: [u8; MAX_PIN_LEN],
-    pub old_pin_len: u32,
+    pub old_pin_len: i32,
     pub new_pin: [u8; MAX_PIN_LEN],
-    pub new_pin_len: u32,
+    pub new_pin_len: i32,
     /// The wallet secret, in `SecretStash` encoding. See [`SecretKind`].
     pub secret: [u8; SECRET_LEN],
     /// Main PIN cached by the bootloader across a duress-wallet login.
@@ -73,9 +97,10 @@ impl Default for PinAttempt {
 }
 
 impl PinAttempt {
+    /// A fresh V2 attempt struct, ready for [`PinOp::Setup`](crate::abi::PinOp::Setup).
     pub const fn new() -> Self {
         Self {
-            magic: 0,
+            magic: PA_MAGIC_V2,
             is_secondary: 0,
             pin: [0; MAX_PIN_LEN],
             pin_len: 0,
@@ -103,7 +128,7 @@ impl PinAttempt {
         }
         self.pin.zeroize();
         self.pin[..pin.len()].copy_from_slice(pin);
-        self.pin_len = pin.len() as u32;
+        self.pin_len = pin.len() as i32;
         Ok(())
     }
 
@@ -171,6 +196,24 @@ mod tests {
     #[test]
     fn layout_matches_documented_size() {
         assert_eq!(core::mem::size_of::<PinAttempt>(), 280);
+        assert_eq!(PIN_ATTEMPT_SIZE, 280);
+        // V1 differs by exactly the trailing cached_main_pin[32].
+        assert_eq!(PIN_ATTEMPT_SIZE - PIN_ATTEMPT_SIZE_V1, MAX_PIN_LEN);
+    }
+
+    #[test]
+    fn a_fresh_struct_carries_the_v2_magic() {
+        // Without this the bootloader returns BAD_MAGIC before doing anything.
+        assert_eq!(PinAttempt::new().magic, PA_MAGIC_V2);
+        assert_eq!(PA_MAGIC_V2, 0x2eaf_6312);
+        assert_eq!(PA_MAGIC_V1, 0x2eaf_6311);
+        assert_ne!(PA_MAGIC_V1, PA_MAGIC_V2);
+    }
+
+    #[test]
+    fn is_secondary_defaults_to_zero() {
+        // Obsolete field; a non-zero value selects mk2 secondary-wallet behaviour.
+        assert_eq!(PinAttempt::new().is_secondary, 0);
     }
 
     /// The field order is what the bootloader indexes by; these offsets are the

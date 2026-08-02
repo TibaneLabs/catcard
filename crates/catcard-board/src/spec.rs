@@ -139,18 +139,12 @@ pub struct BoardSpec {
     /// `true` once we can read the SE TRNGs through callgate 26 on this board.
     /// Source: bootloader-callgate-abi.md #26 — documented for mk4+ only.
     pub has_callgate_se_rng: bool,
-
-    /// Address of the bootloader callgate entry point.
-    ///
-    /// `None` on every board today: the callgate ABI is fully specified in
-    /// `hw-reference/bootloader-callgate-abi.md`, but the *address* to branch to is
-    /// not. It is reachable only through the STM32 Firewall's call gate, so it is a
-    /// fixed offset from the firewall code-segment start address — both of which must
-    /// be recovered from a device before any secret operation can work. This is the
-    /// single blocking unknown for wallet functionality; see
-    /// `docs/HARDWARE-OPEN-ITEMS.md#callgate-entry-address`.
-    pub callgate_entry: Option<u32>,
 }
+
+// The callgate entry address is deliberately NOT a field here. The bootloader
+// publishes it at runtime in a table at 0x0800_0040, and it moves between bootloader
+// versions and boards -- so it is read and validated by `catcard_callgate::entry`,
+// never baked into a board table. Source: bootloader-callgate-abi.md §0 [C].
 
 impl BoardSpec {
     /// Look a board up by the name used in build features and CLI flags.
@@ -248,7 +242,6 @@ pub const MK3: BoardSpec = BoardSpec {
     // Callgate 26 is documented as mk4+. On mk3 the STM32 TRNG plus user-input
     // timing must carry the entropy pool on their own.
     has_callgate_se_rng: false,
-    callgate_entry: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -312,7 +305,6 @@ pub const MK4: BoardSpec = BoardSpec {
     has_se2: true,
     has_psram: true,
     has_callgate_se_rng: true,
-    callgate_entry: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -353,7 +345,6 @@ pub const Q1: BoardSpec = BoardSpec {
     has_se2: true,
     has_psram: true,
     has_callgate_se_rng: true,
-    callgate_entry: None,
 };
 
 /// Every board, for host tools that must handle all of them.

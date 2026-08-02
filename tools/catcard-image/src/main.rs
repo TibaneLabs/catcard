@@ -417,9 +417,6 @@ fn cmd_boards() -> Result<()> {
             "      hw_compat {:#04x}   se2 {}   psram {}   se-rng-callgate {}",
             b.hw_compat_bit, b.has_se2, b.has_psram, b.has_callgate_se_rng
         );
-        if b.callgate_entry.is_none() {
-            println!("      callgate entry UNKNOWN — secret operations unavailable");
-        }
     }
     Ok(())
 }

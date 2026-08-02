@@ -62,16 +62,17 @@ pub fn bring_up() -> BootReport {
 
 /// Draw from SE1 and SE2 through bootloader callgate 26.
 ///
-/// Does nothing today: the callgate entry address is not yet known for any board, so
-/// [`Callgate::from_board`] returns `None`. The code path exists and is wired up so
-/// that filling in one address in `catcard-board` is the whole change.
+/// The entry address comes from the table the bootloader publishes at `0x0800_0040`,
+/// validated before use. A board whose bootloader does not publish a usable entry
+/// simply contributes nothing here — the entropy policy then decides whether boot can
+/// continue, rather than this silently falling back to something weaker.
 fn feed_secure_elements(pool: &mut EntropyPool) {
     if !BOARD.has_callgate_se_rng {
         return;
     }
-    // SAFETY: `from_board` only produces a handle if the board spec carries an address
-    // asserted to be correct for this hardware; today it always returns `None`.
-    let Some(gate) = (unsafe { Callgate::from_board(&BOARD) }) else {
+    // SAFETY: we are running on BOARD; `discover` validates the published address
+    // before it can be branched to.
+    let Ok(gate) = (unsafe { Callgate::discover(&BOARD) }) else {
         return;
     };
 
