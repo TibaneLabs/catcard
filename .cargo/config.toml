@@ -1,0 +1,17 @@
+# Cortex-M4F. STM32L496 and STM32L4S5 both have a single-precision FPU, so the
+# hard-float ABI (`eabihf`) is correct for both.
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",     # cortex-m-rt's linker script
+    "-C", "link-arg=-Map=target/catcard.map",
+    "-C", "force-frame-pointers=yes",
+]
+
+[alias]
+# Firmware builds. A board feature is required -- there is no default board.
+fw-mk3   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3"
+fw-mk4   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4"
+fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1"
+
+# Host-side: unit tests for the portable crates and the image tool.
+t        = "test --workspace --exclude catcard-fw"

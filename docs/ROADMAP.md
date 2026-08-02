@@ -1,0 +1,103 @@
+# Roadmap
+
+Ordered by dependency, not by ambition. Each milestone ends with something testable.
+
+## Done
+
+- Workspace, three-board abstraction, generated linker scripts
+- Signed image format: header, double-SHA256 digest, secp256k1 signing, DfuSe
+- `catcard-image`: build / sign / verify / info / dfuse / boards
+- Entropy accumulator, SP 800-90B health tests, HMAC-DRBG ([`ENTROPY.md`](ENTROPY.md))
+- STM32 TRNG, HSI48, DWT, GPIO drivers
+- Callgate ABI (typed, layout-pinned; not yet callable)
+- Boot path: clock → TRNG → entropy pool → policy check
+- 136 host tests, clippy clean on host and thumb
+
+## M1 — Prove it runs
+
+The image builds and is signed, but nothing has watched it execute.
+
+- [ ] Install a dev-signed image on real hardware ([`FLASHING.md`](FLASHING.md))
+- [ ] Confirm `CATCARD_BOOT_STATUS` shows the TRNG alive and the entropy policy met
+- [ ] Confirm the MSI range, then program the PLL (`HARDWARE-OPEN-ITEMS.md`)
+- [ ] Panic handler that wipes SRAM before halting — the current `panic-halt` leaves
+      whatever was in RAM sitting there
+
+**Exit:** a device boots CatCard and reports a healthy entropy pool.
+
+## M2 — Output and input
+
+- [ ] SPI driver
+- [ ] SSD1306 driver over `catcard-ui::Framebuffer` (mk3/mk4)
+- [ ] Text rendering: a bitmap font, no dependency on floating point
+- [ ] Numpad matrix scan with debounce, scan order shuffled from `domain::UI`
+- [ ] Feed keypress timing into the pool as `Source::UserTiming`
+- [ ] Selftest screen replacing `selftest::park`
+
+**Exit:** a device shows text and responds to keys. This is where development stops
+being blind.
+
+## M3 — Storage
+
+- [ ] SPI-NOR driver: `RDID`, read, page program, 4 KB sector erase
+- [ ] Confirm the CS/SCK pins and the part's size (`HARDWARE-OPEN-ITEMS.md`)
+- [ ] Settings store: our own format — wear-levelled, authenticated, with a defined
+      recovery path from a torn write
+- [ ] microSD over SDMMC, FAT32 read/write
+
+**Exit:** settings survive a power cycle; files can be read from and written to a card.
+
+## M4 — Secrets
+
+**Blocked on the callgate entry address.** Everything else can proceed in parallel; this
+cannot start.
+
+- [ ] Recover the callgate entry address
+- [ ] `gate 18` setup / login / fetch_secret against real hardware
+- [ ] PIN entry UX, including anti-phishing words (`gate 16`)
+- [ ] Seed generation from `EntropyPool`, stored via `gate 18/3`
+- [ ] Secure-element entropy via `gate 26` into the pool (code already written)
+- [ ] Genuine light, brick and duress handling
+
+**Exit:** a PIN unlocks a seed the device generated itself.
+
+## M5 — Wallet
+
+- [ ] BIP-39: wordlist, mnemonic ↔ entropy, passphrase
+- [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
+- [ ] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR
+- [ ] PSBT (BIP-174) parse, validate, sign, serialise
+- [ ] Deterministic nonces (RFC 6979), with `domain::SIGNING` as auxiliary randomness
+- [ ] Multisig and output descriptors
+- [ ] BIP-85 derived child seeds
+
+**Exit:** the device signs a testnet transaction correctly.
+
+## M6 — Host connectivity
+
+- [ ] USB OTG FS device stack
+- [ ] Register a VID/PID with pid.codes ([`USB.md`](USB.md))
+- [ ] Our own transport: framing, authenticated encryption, replay resistance
+- [ ] Host tooling
+- [ ] Self-upgrade: receive an image, stage to SPI-NOR, on-screen approval, reboot
+      (confirm the staging base first — `HARDWARE-OPEN-ITEMS.md`)
+
+**Exit:** a firmware update over USB, approved on the device.
+
+## M7 — Q1
+
+- [ ] Identify the LCD controller and resolution
+- [ ] ST77xx driver, colour framebuffer
+- [ ] QWERTY keyboard scan
+- [ ] QR camera, decoding, SeedQR
+
+## Ongoing
+
+- **Security review.** Every milestone that touches secrets needs one before it lands.
+- **Reproducible builds.** `SOURCE_DATE_EPOCH` is honoured; the rest of the toolchain
+  pinning is [`RELEASING.md`](RELEASING.md).
+- **NIST CAVP DRBG vectors** — `TODO(#1)`.
+- **Entropy estimation from real captures**, to replace the conservative credit rates
+  with measured ones.
+- **Constant-time review** of every comparison and arithmetic path that touches key
+  material.

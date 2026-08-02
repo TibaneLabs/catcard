@@ -1,0 +1,29 @@
+[package]
+name = "catcard-fw"
+description = "CatCard firmware binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
+board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
+board-q1 = ["catcard-board/board-q1", "catcard-hal/board-q1"]
+
+[dependencies]
+catcard-board.workspace = true
+catcard-callgate.workspace = true
+catcard-entropy = { workspace = true, default-features = false }
+catcard-fwhdr = { workspace = true, default-features = false }
+catcard-hal.workspace = true
+catcard-ui.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+panic-halt.workspace = true
+
+[build-dependencies]
+catcard-board.workspace = true

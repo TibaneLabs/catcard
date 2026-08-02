@@ -1,0 +1,22 @@
+[package]
+name = "catcard-image"
+description = "Build, sign, verify and package CatCard firmware images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "catcard-image"
+path = "src/main.rs"
+
+[dependencies]
+catcard-board.workspace = true
+catcard-fwhdr = { workspace = true, features = ["std"] }
+anyhow.workspace = true
+clap.workspace = true
+hex.workspace = true
+k256.workspace = true
+sha2.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "catcard-callgate"
+description = "Bootloader callgate ABI: the fixed platform contract for PIN, secrets, SE RNG and DFU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+catcard-board.workspace = true
+zeroize = { workspace = true, features = ["derive"] }

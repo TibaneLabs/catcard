@@ -1,0 +1,17 @@
+[package]
+name = "catcard-board"
+description = "Board definitions for CatCard: memory maps, pin assignments, peripheral presence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Exactly one board feature selects `catcard_board::BOARD`. Without any, only the
+# `spec::{MK3, MK4, Q1}` table is available (this is how the host tools use it).
+board-mk3 = []
+board-mk4 = []
+board-q1 = []

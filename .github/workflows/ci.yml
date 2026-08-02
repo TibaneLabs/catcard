@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Fixed build timestamp so image digests are comparable across runs.
+  SOURCE_DATE_EPOCH: "1785628800"
+
+jobs:
+  host:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --exclude catcard-fw --all-targets
+      - run: cargo test --workspace --exclude catcard-fw
+
+  firmware:
+    name: Firmware (${{ matrix.board }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [mk3, mk4, q1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: |
+          cargo clippy --release -p catcard-fw \
+            --target thumbv7em-none-eabihf \
+            --no-default-features --features board-${{ matrix.board }} \
+            --all-targets
+
+      - name: Build
+        run: cargo fw-${{ matrix.board }}
+
+      # The build only proves it links. This proves the image the bootloader would
+      # actually see is well-formed: header at 0x3F80, 512-aligned, signature over the
+      # double-SHA256 digest, hw_compat permitting this board.
+      - name: Assemble, sign and verify the image
+        run: |
+          mkdir -p out
+          cargo run --release -p catcard-image -- build \
+            target/thumbv7em-none-eabihf/release/catcard-fw \
+            --board ${{ matrix.board }} \
+            --version 0.0.1 \
+            --bin out/catcard-${{ matrix.board }}.bin \
+            --dfu out/catcard-${{ matrix.board }}.dfu
+          cargo run --release -p catcard-image -- verify \
+            out/catcard-${{ matrix.board }}.bin --board ${{ matrix.board }}
+          cargo run --release -p catcard-image -- info \
+            out/catcard-${{ matrix.board }}.dfu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catcard-${{ matrix.board }}
+          path: out/
+
+  reproducible:
+    name: Reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+
+      # With SOURCE_DATE_EPOCH fixed, the same tree must produce the same digest. If
+      # this fails, something nondeterministic leaked into the image.
+      - name: Build twice and compare digests
+        run: |
+          set -euo pipefail
+          build() {
+            cargo fw-mk4 >/dev/null
+            cargo run --release -q -p catcard-image -- build \
+              target/thumbv7em-none-eabihf/release/catcard-fw \
+              --board mk4 --version 0.0.1 --bin "$1" | grep '^digest'
+          }
+          a=$(build /tmp/a.bin)
+          cargo clean -p catcard-fw
+          b=$(build /tmp/b.bin)
+          echo "first:  $a"
+          echo "second: $b"
+          [ "$a" = "$b" ] || { echo "::error::build is not reproducible"; exit 1; }
+          cmp /tmp/a.bin /tmp/b.bin
+
+  cleanroom:
+    name: Clean-room boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The original firmware is not part of this repository and must not become part
+      # of it. This is a cheap tripwire, not a proof.
+      - name: No original-firmware artefacts in the tree
+        run: |
+          set -euo pipefail
+          if find . -path ./.git -prune -o \
+               \( -name '*.mpy' -o -name 'dis-*' -o -name 'libngu*' \
+                  -o -name 'micropython-*' \) -print | grep -q .; then
+            echo "::error::artefacts derived from the original firmware are present"
+            find . -path ./.git -prune -o \
+              \( -name '*.mpy' -o -name 'dis-*' -o -name 'libngu*' \
+                 -o -name 'micropython-*' \) -print
+            exit 1
+          fi
+      - name: MIT license is intact
+        run: grep -q "MIT License" LICENSE && grep -q "Karpeles Lab Inc" LICENSE

@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# build outputs
+/out
+*.bin
+*.dfu
+*.elf
+*.hex
+
+# editors
+.idea/
+.vscode/
+*.swp

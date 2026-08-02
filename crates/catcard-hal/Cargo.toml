@@ -1,0 +1,19 @@
+[package]
+name = "catcard-hal"
+description = "Register-level drivers for the STM32L4/L4+ peripherals CatCard uses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+board-mk3 = ["catcard-board/board-mk3"]
+board-mk4 = ["catcard-board/board-mk4"]
+board-q1 = ["catcard-board/board-q1"]
+
+[dependencies]
+catcard-board.workspace = true
+catcard-entropy = { workspace = true, default-features = false }

@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/catcard-board",
+    "crates/catcard-fwhdr",
+    "crates/catcard-callgate",
+    "crates/catcard-entropy",
+    "crates/catcard-hal",
+    "crates/catcard-ui",
+    "crates/catcard-fw",
+    "tools/catcard-image",
+]
+
+# `cargo build` / `cargo test` with no `-p` operates on host-buildable crates only.
+# The firmware crates need `--target thumbv7em-none-eabihf` (see `cargo fw`).
+default-members = [
+    "crates/catcard-board",
+    "crates/catcard-fwhdr",
+    "crates/catcard-entropy",
+    "tools/catcard-image",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/catcard/catcard"
+authors = ["Karpeles Lab Inc."]
+
+[workspace.dependencies]
+catcard-board = { path = "crates/catcard-board", default-features = false }
+catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
+catcard-callgate = { path = "crates/catcard-callgate" }
+catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
+catcard-hal = { path = "crates/catcard-hal" }
+catcard-ui = { path = "crates/catcard-ui" }
+
+# --- embedded ---
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7.6"
+critical-section = "1.2.0"
+heapless = "0.9.3"
+panic-halt = "1.0.0"
+
+# --- crypto (no_std-capable) ---
+sha2 = { version = "0.11.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+subtle = { version = "2.6.1", default-features = false }
+zeroize = { version = "1.9.0", default-features = false }
+
+# --- shared ---
+bitflags = { version = "2.13.1", default-features = false }
+
+# --- host tooling ---
+anyhow = "1.0.104"
+clap = { version = "4.6.5", features = ["derive"] }
+hex = "0.4.3"
+k256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
+object = "0.40.0"
+
+[profile.release]
+codegen-units = 1
+debug = 2          # keep DWARF in the ELF; the .bin is unaffected
+lto = "fat"
+opt-level = "s"    # firmware is flash-bound, not compute-bound
+overflow-checks = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1      # -O0 thumb builds do not fit comfortably and run too slowly
