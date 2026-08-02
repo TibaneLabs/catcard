@@ -63,7 +63,7 @@ Everything below now needs hardware rather than more specification.
 
 **Exit:** a PIN unlocks a seed the device generated itself.
 
-## M5 — Wallet
+## M5 — Wallet (Bitcoin)
 
 - [ ] BIP-39: wordlist, mnemonic ↔ entropy, passphrase
 - [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
@@ -75,6 +75,12 @@ Everything below now needs hardware rather than more specification.
 
 **Exit:** the device signs a testnet transaction correctly.
 
+Design note for this milestone: CatCard is intended to support chains beyond Bitcoin,
+including ed25519 ones (see "Multi-chain" below). Nothing here should be built in a way
+that assumes secp256k1 is the only curve — but the multi-chain design itself is not
+settled yet, so M5 ships Bitcoin and leaves the seams rather than speculating on an
+abstraction.
+
 ## M6 — Host connectivity
 
 - [ ] USB OTG FS device stack
@@ -85,6 +91,26 @@ Everything below now needs hardware rather than more specification.
       (confirm the staging base first — `HARDWARE-OPEN-ITEMS.md`)
 
 **Exit:** a firmware update over USB, approved on the device.
+
+## Multi-chain — not yet designed
+
+CatCard aims to support coins beyond Bitcoin, including ed25519 chains. The design is
+open; this section records only what is already known to constrain it, so M5 does not
+paint us into a corner.
+
+- **One seed, many curves.** SLIP-0010 derives ed25519 (and NIST P-256) master keys from
+  the same BIP-39 seed, so the secret we hand the bootloader does not need to change.
+  Storage is unaffected.
+- **ed25519 derivation is hardened-only.** SLIP-0010 defines no non-hardened path for
+  ed25519, so there is no xpub-equivalent and no watch-only public derivation. Any
+  account/descriptor model that assumes it can hand a host an extended *public* key and
+  let it derive addresses is Bitcoin-specific.
+- **Signing differs in kind, not just in curve.** EdDSA is deterministic by
+  construction; there is no RFC-6979 equivalent to reuse and no nonce to supply. The
+  signing interface has to accommodate both rather than being an secp256k1 signature
+  with a swapped curve parameter.
+- **Unaffected:** the firmware image signature is secp256k1 and fixed by the bootloader.
+  Nothing about multi-chain support touches it.
 
 ## M7 — Q1
 

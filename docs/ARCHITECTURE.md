@@ -28,9 +28,9 @@ including compile-time assertions where a mismatch would be silent, such as
 
 ### Ours — no external constraint
 
-USB application protocol, settings storage format, UX, all Bitcoin logic (BIP-32/39/85,
-PSBT, descriptors, multisig), and the seed RNG. Only the *secret storage* (through the
-callgate) and the *image format* are imposed.
+USB application protocol, settings storage format, UX, all wallet logic (BIP-32/39/85,
+PSBT, descriptors, multisig, and non-Bitcoin chains), and the seed RNG. Only the *secret
+storage* (through the callgate) and the *image format* are imposed.
 
 Where we differ deliberately from the stock design, the reason is written down:
 [`ENTROPY.md`](ENTROPY.md) for the RNG, [`USB.md`](USB.md) for USB identity.

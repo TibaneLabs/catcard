@@ -1,13 +1,13 @@
 # CatCard
 
 An independent, open-source firmware for Coldcard hardware, written from scratch in
-Rust.
+Rust. Bitcoin first, but not Bitcoin-only — see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 
 > **Status: scaffold.** The build system, image format, signing pipeline and entropy
 > subsystem are implemented and tested. There is no wallet yet — no display, keypad,
-> USB, or Bitcoin logic. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> USB, or wallet logic. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 >
 > Do not put funds on a device running this.
 
