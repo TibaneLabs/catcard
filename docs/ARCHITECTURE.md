@@ -29,7 +29,8 @@ including compile-time assertions where a mismatch would be silent, such as
 ### Ours — no external constraint
 
 USB application protocol, settings storage format, UX, all wallet logic (BIP-32/39/85,
-PSBT, descriptors, multisig, and non-Bitcoin chains), and the seed RNG. Only the *secret
+PSBT, descriptors, multisig, and non-Bitcoin chains including ed25519 with soft
+derivation), and the seed RNG. Only the *secret
 storage* (through the callgate) and the *image format* are imposed.
 
 Where we differ deliberately from the stock design, the reason is written down:

@@ -94,21 +94,60 @@ abstraction.
 
 ## Multi-chain — not yet designed
 
-CatCard aims to support coins beyond Bitcoin, including ed25519 chains. The design is
-open; this section records only what is already known to constrain it, so M5 does not
-paint us into a corner.
+CatCard aims to support coins beyond Bitcoin, including ed25519 chains, **with
+non-hardened (soft) derivation**. The design is open; this section records only what is
+already known to constrain it, so M5 does not paint us into a corner.
 
-- **One seed, many curves.** SLIP-0010 derives ed25519 (and NIST P-256) master keys from
-  the same BIP-39 seed, so the secret we hand the bootloader does not need to change.
-  Storage is unaffected.
-- **ed25519 derivation is hardened-only.** SLIP-0010 defines no non-hardened path for
-  ed25519, so there is no xpub-equivalent and no watch-only public derivation. Any
-  account/descriptor model that assumes it can hand a host an extended *public* key and
-  let it derive addresses is Bitcoin-specific.
+### Non-hardened ed25519
+
+SLIP-0010 is hardened-only, but that is a property of SLIP-0010, not of ed25519.
+**BIP32-Ed25519** (Khovratovich & Law, 2017 — the scheme Cardano uses) supports soft
+derivation, and it is what CatCard needs to support.
+
+It works by keeping the private key as the *expanded* scalar pair `(kL, kR)` rather than
+the 32-byte seed, which makes the keyspace linear enough to tweak:
+
+```
+soft:      Z = HMAC-SHA512(c_par, 0x02 || A_par || i)
+           kL_i = kL_par + 8*Z_L        A_i = A_par + [8*Z_L]B
+           kR_i = kR_par + Z_R  (mod 2^256)
+hardened:  Z = HMAC-SHA512(c_par, 0x00 || kL_par||kR_par || i)
+```
+
+Because `A_i` is computable from `A_par` alone, an extended *public* key does yield
+watch-only derivation — so the account model does **not** have to be Bitcoin-specific.
+
+Three consequences that are cheaper to get right than to retrofit:
+
+- **The signing implementation must accept an extended scalar.** Standard Ed25519
+  derives its scalar from the seed by SHA-512 internally; here the scalar arrives
+  pre-derived and tweaked. Most ed25519 crates do not expose that, and the ones that do
+  put it behind a `hazmat`-style API. This is a crate-selection constraint for M5, not
+  an afterthought.
+- **Store the BIP-39 entropy, not just the derived seed.** Cardano's Icarus master-key
+  generation runs PBKDF2 over the mnemonic *entropy*, not over the 64-byte BIP-39 seed.
+  If our secret blob holds only the seed, that derivation is impossible after the fact.
+  Storing entropy keeps both paths open and costs nothing — decide this at M4, when the
+  secret encoding is chosen, not at M5.
+- **Master-key generation has incompatible variants.** The original paper, Icarus, and
+  Ledger's variant all differ. Whichever we implement has to be named in the UI, because
+  picking the wrong one silently produces a valid wallet at the wrong addresses.
+
+Scalar growth is bounded by truncating `Z_L` to 28 bytes, which caps derivation depth —
+generously (order 2^20 levels), but it is not unlimited the way BIP-32 is.
+
+### Everything else
+
+- **One seed, many curves.** Both SLIP-0010 and BIP32-Ed25519 derive from BIP-39
+  material, so the secret we hand the bootloader stays a single master secret. Storage
+  is unaffected beyond the entropy-vs-seed point above.
 - **Signing differs in kind, not just in curve.** EdDSA is deterministic by
   construction; there is no RFC-6979 equivalent to reuse and no nonce to supply. The
   signing interface has to accommodate both rather than being an secp256k1 signature
   with a swapped curve parameter.
+- **Related but distinct:** Polkadot-style soft derivation uses sr25519/schnorrkel over
+  Ristretto — same underlying curve, different signature scheme. Out of scope until
+  someone asks for it, but it is a third shape the signing interface may have to take.
 - **Unaffected:** the firmware image signature is secp256k1 and fixed by the bootloader.
   Nothing about multi-chain support touches it.
 
