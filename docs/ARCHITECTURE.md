@@ -16,7 +16,8 @@ one of two piles.
 |---|---|---|
 | Install address, flash layout | `catcard-board::memory` | `platform.md §2` |
 | Image header, digest construction, signature | `catcard-fwhdr` | `firmware-signing.md` |
-| Callgate ABI, `pinAttempt_t` | `catcard-callgate` | `bootloader-callgate-abi.md` |
+| Callgate entry table, register convention | `catcard-callgate::entry` | `bootloader-callgate-abi.md §0` |
+| Callgate ABI, `pinAttempt_t` | `catcard-callgate` | `bootloader-callgate-abi.md`, `gate18-pin-state-machine.md` |
 | GPIO assignments | `catcard-board::spec` | `gpio-peripherals.md` |
 | DfuSe container | `catcard-image::dfuse` | ST UM0391 |
 
@@ -57,8 +58,18 @@ optional `std` feature, because both the firmware (reading its own header) and t
 tool (writing one) need it.
 
 **`catcard-callgate`** — the bootloader ABI. Typed methods, the 280-byte attempt struct,
-buffer range checks that mirror the bootloader's own. Currently unable to call anything:
-the entry *address* is unknown (see [`HARDWARE-OPEN-ITEMS.md`](HARDWARE-OPEN-ITEMS.md)).
+buffer range checks that mirror the bootloader's own, and the entry point itself.
+
+Two properties of that interface are worth knowing before touching it, because both fail
+in ways that do not look like the cause:
+
+- **The entry address is published, not fixed.** The bootloader writes it to a table at
+  `0x0800_0040` so it can move between versions and boards. `entry::validate_entry`
+  checks it before we branch, since the failure mode of a wrong target is a CPU reset
+  with no diagnostic.
+- **It is not an AAPCS call.** `r2` carries the buffer *length*, so an `extern "C"`
+  function pointer with three parameters compiles and passes garbage. It is inline asm,
+  with interrupts masked — an interrupt inside firewall code resets the CPU.
 
 **`catcard-entropy`** — accumulator, health tests, DRBG. Portable and host-tested; the
 firmware only feeds it. See [`ENTROPY.md`](ENTROPY.md).
@@ -90,9 +101,14 @@ Host tools enable no board feature and use `spec::ALL` or `BoardSpec::by_name`, 
 `catcard-image` binary handles every board.
 
 Boards carry their unknowns explicitly rather than by omission: `SpiBus::pins_confirmed`,
-`SflashPins::cs: Option<Pin>`, `BoardSpec::callgate_entry: Option<u32>`. Code that needs
-a fact that is not yet known does not compile against a plausible guess — it has to
-handle `None`.
+`SflashPins::cs: Option<Pin>`, `BoardSpec::se2: Option<Se2Pins>`. Code that needs a fact
+that is not yet known does not compile against a plausible guess — it has to handle
+`None`.
+
+A pin-conflict test asserts no two peripherals claim the same GPIO on a board. That is
+what surfaced the mk4 SE2-vs-numpad contradiction in `HARDWARE-OPEN-ITEMS.md`: filling in
+a plausible-looking pin fails the build rather than shipping a driver that fights the
+keypad for the bus.
 
 ## Image assembly
 

@@ -60,9 +60,32 @@ pub enum Input {
     /// columns are pulled-up inputs. 12 keys = `0-9`, cancel, OK.
     /// Source: gpio-peripherals.md §Mk3 [C]
     Numpad4x3 { rows: [Pin; 4], cols: [Pin; 3] },
-    /// Full QWERTY keyboard (Q / Q1). Scan topology is `[?]`.
-    /// Source: gpio-peripherals.md §Q
-    Qwerty,
+    /// 10x6 QWERTY matrix (Q / Q1), up to 60 keys. Replaces the numpad.
+    ///
+    /// The anti-Tempest scan randomisation the numpad uses applies here too — and, as
+    /// on the numpad, it must be driven from the UI DRBG and never from seed entropy.
+    /// Source: generations-mk2-q-mk5.md §Q [C] for pins; scan detail `[?]`
+    Qwerty { rows: [Pin; 6], cols: [Pin; 10] },
+}
+
+/// Second secure element, on I2C. Secrets go through the bootloader callgate, so this
+/// is only needed for direct non-secret access.
+/// Source: generations-mk2-q-mk5.md §Q [C]
+#[derive(Copy, Clone, Debug)]
+pub struct Se2Pins {
+    pub scl: Pin,
+    pub sda: Pin,
+}
+
+/// NFC interface, used for tap-to-transfer of PSBTs and addresses.
+/// Source: generations-mk2-q-mk5.md §Q [C]
+#[derive(Copy, Clone, Debug)]
+pub struct NfcPins {
+    /// Event/interrupt line from the tag.
+    pub ed: Pin,
+    pub scl: Pin,
+    /// The matching SDA line is not stated in the reference. `[?]`
+    pub sda: MaybePin,
 }
 
 /// Which SPI peripheral instance, and the data pins on it.
@@ -134,6 +157,11 @@ pub struct BoardSpec {
 
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
     pub has_se2: bool,
+    /// SE2's bus pins, where they are confirmed. `None` means the chip is present but
+    /// we do not know where — see `docs/HARDWARE-OPEN-ITEMS.md`.
+    pub se2: Option<Se2Pins>,
+    /// NFC bus pins, where confirmed.
+    pub nfc: Option<NfcPins>,
     /// External PSRAM. Source: gpio-peripherals.md §Mk4 [I]
     pub has_psram: bool,
     /// `true` once we can read the SE TRNGs through callgate 26 on this board.
@@ -238,6 +266,8 @@ pub const MK3: BoardSpec = BoardSpec {
         dp: pa(12),
     },
     has_se2: false,
+    se2: None,
+    nfc: None,
     has_psram: false,
     // Callgate 26 is documented as mk4+. On mk3 the STM32 TRNG plus user-input
     // timing must carry the entropy pool on their own.
@@ -303,6 +333,14 @@ pub const MK4: BoardSpec = BoardSpec {
         dp: pa(12),
     },
     has_se2: true,
+    // SE2 is confirmed present on mk4, but its pins are not. The Q1 board routes
+    // SE2 to PB13/PB14 -- which on mk3 are numpad rows. mk4 is documented as having
+    // both the mk3 numpad [I] and SE2 [C], and those two cannot both be true at
+    // PB13/PB14. Rather than pick one, both stay unresolved here: `se2: None`, and
+    // the numpad map below is inherited from mk3 but flagged in HARDWARE-OPEN-ITEMS.
+    se2: None,
+    // NFC is confirmed present on mk4 from image strings, pins unconfirmed.
+    nfc: None,
     has_psram: true,
     has_callgate_se_rng: true,
 };
@@ -338,11 +376,37 @@ pub const Q1: BoardSpec = BoardSpec {
         cs: pa(4),
         tear: Some(pb(11)),
     },
-    input: Input::Qwerty,
+    // Source: generations-mk2-q-mk5.md §Q [C]
+    input: Input::Qwerty {
+        rows: [pd(8), pd(9), pd(10), pd(11), pd(12), pd(7)],
+        cols: [
+            pb(0),
+            pb(1),
+            pb(2),
+            pb(5),
+            pb(8),
+            pb(9),
+            pb(10),
+            pd(13),
+            pd(14),
+            pd(15),
+        ],
+    },
     sdmmc: MK4.sdmmc,
     sflash: MK4.sflash,
     usb: MK4.usb,
     has_se2: true,
+    // Source: generations-mk2-q-mk5.md §Q [C]
+    se2: Some(Se2Pins {
+        scl: pb(13),
+        sda: pb(14),
+    }),
+    // Source: generations-mk2-q-mk5.md §Q [C] for ED/SCL; SDA `[?]`
+    nfc: Some(NfcPins {
+        ed: pd(6),
+        scl: pb(6),
+        sda: None,
+    }),
     has_psram: true,
     has_callgate_se_rng: true,
 };
@@ -448,13 +512,31 @@ mod tests {
                     claim(cs, "display CS", b.name);
                 }
             }
-            if let Input::Numpad4x3 { rows, cols } = b.input {
-                for r in rows {
-                    claim(r, "numpad row", b.name);
+            match b.input {
+                Input::Numpad4x3 { rows, cols } => {
+                    for r in rows {
+                        claim(r, "numpad row", b.name);
+                    }
+                    for c in cols {
+                        claim(c, "numpad col", b.name);
+                    }
                 }
-                for c in cols {
-                    claim(c, "numpad col", b.name);
+                Input::Qwerty { rows, cols } => {
+                    for r in rows {
+                        claim(r, "keyboard row", b.name);
+                    }
+                    for c in cols {
+                        claim(c, "keyboard col", b.name);
+                    }
                 }
+            }
+            if let Some(se2) = b.se2 {
+                claim(se2.scl, "SE2 SCL", b.name);
+                claim(se2.sda, "SE2 SDA", b.name);
+            }
+            if let Some(nfc) = b.nfc {
+                claim(nfc.ed, "NFC ED", b.name);
+                claim(nfc.scl, "NFC SCL", b.name);
             }
             for (p, what) in [
                 (b.sdmmc.d0, "SD D0"),

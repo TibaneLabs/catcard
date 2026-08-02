@@ -9,9 +9,10 @@ Ordered by dependency, not by ambition. Each milestone ends with something testa
 - `catcard-image`: build / sign / verify / info / dfuse / boards
 - Entropy accumulator, SP 800-90B health tests, HMAC-DRBG ([`ENTROPY.md`](ENTROPY.md))
 - STM32 TRNG, HSI48, DWT, GPIO drivers
-- Callgate ABI (typed, layout-pinned; not yet callable)
+- Callgate: entry-point discovery from the bootloader info table, the real register
+  convention in inline asm, the full `gate 18` ABI
 - Boot path: clock → TRNG → entropy pool → policy check
-- 136 host tests, clippy clean on host and thumb
+- 150 host tests, clippy clean on host and thumb
 
 ## M1 — Prove it runs
 
@@ -49,15 +50,16 @@ being blind.
 
 ## M4 — Secrets
 
-**Blocked on the callgate entry address.** Everything else can proceed in parallel; this
-cannot start.
+No longer blocked: the entry address is read from the bootloader's info table.
+Everything below now needs hardware rather than more specification.
 
-- [ ] Recover the callgate entry address
 - [ ] `gate 18` setup / login / fetch_secret against real hardware
 - [ ] PIN entry UX, including anti-phishing words (`gate 16`)
 - [ ] Seed generation from `EntropyPool`, stored via `gate 18/3`
 - [ ] Secure-element entropy via `gate 26` into the pool (code already written)
-- [ ] Genuine light, brick and duress handling
+- [ ] Genuine light; brick and duress handling (both are transparent by design — a
+      caller cannot tell a duress login from a real one, and the brickme PIN destroys
+      the pairing secret, so `-105 I_AM_BRICK` must be handled everywhere)
 
 **Exit:** a PIN unlocks a seed the device generated itself.
 
@@ -88,7 +90,7 @@ cannot start.
 
 - [ ] Identify the LCD controller and resolution
 - [ ] ST77xx driver, colour framebuffer
-- [ ] QWERTY keyboard scan
+- [ ] QWERTY keyboard scan (10x6 matrix; pins are in the board table)
 - [ ] QR camera, decoding, SeedQR
 
 ## Ongoing

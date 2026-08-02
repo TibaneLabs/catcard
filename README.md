@@ -38,11 +38,13 @@ accept and boot; it just does not do anything yet.
 |---|---|---|---|
 | `mk3` | STM32L496RG | `0x0800_8000` | builds; pin map from reference |
 | `mk4` | STM32L4S5xx | `0x0802_0000` | builds; pin map inferred |
-| `q1` | STM32L4S5xx | `0x0802_0000` | builds; LCD/keyboard/QR unimplemented |
+| `q1` | STM32L4S5xx | `0x0802_0000` | builds; keyboard/SE2/NFC pins mapped, drivers unwritten |
 
 The bootloader below our firmware is protected flash and cannot be replaced. CatCard
 builds against its fixed contract: image format, signature, and the callgate ABI for
-PIN, secrets and secure-element entropy.
+PIN, secrets and secure-element entropy. The callgate entry point is read from the table
+the bootloader publishes at `0x0800_0040` and validated before use — it moves between
+bootloader versions, so it must never be hardcoded.
 
 ## Build
 

@@ -99,6 +99,14 @@ When changing it:
 Boot path runs: clock → TRNG → entropy pool → policy check, then parks. No display,
 keypad, storage, USB, or wallet logic. `docs/ROADMAP.md` has the order.
 
-**The callgate entry address is unknown**, which blocks every secret operation. It is the
-first entry in `docs/HARDWARE-OPEN-ITEMS.md`. Do not work around it by inventing an
-address.
+The callgate is wired up end to end (entry discovery + the real register convention), so
+M4 needs hardware rather than more specification. `docs/HARDWARE-OPEN-ITEMS.md` lists
+what is still unknown; nothing there blocks wallet work.
+
+**Two traps in `catcard-callgate`:**
+
+- The entry address is *published* at `0x0800_0040`, not fixed. Never hardcode it, and
+  never add it back to `BoardSpec` — it moves between bootloader versions.
+- The gate is **not** an AAPCS call: `r2` is the buffer length, not `arg2`. Calling it
+  through an `extern "C"` function pointer compiles and passes garbage. Interrupts must
+  be masked across the call or the firewall resets the CPU.

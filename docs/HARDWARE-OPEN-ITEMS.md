@@ -3,44 +3,49 @@
 Everything the implementation needs that `hw-reference` marks `[?]`, could not answer,
 or answers ambiguously. Each entry says what is blocked and how to resolve it.
 
-Ordered by how much they block.
+Ordered by how much they block. **Nothing here currently blocks wallet functionality** —
+the callgate entry address, which did, is resolved.
 
 ---
 
-## Callgate entry address
+## mk4 SE2 bus pins vs. the inherited numpad map
 
-**Blocks: every secret operation.** PIN login, seed fetch, seed storage, secure-element
-entropy, genuine light, DFU entry, downgrade records. Without this, CatCard can boot but
-can never be a wallet.
+**Blocks: direct SE2 access on mk4** (not secrets, which go through the callgate).
 
-`hw-reference/bootloader-callgate-abi.md` specifies the ABI completely — method numbers,
-argument encodings, the 280-byte `pinAttempt_t`, error codes — but not the address to
-branch to.
+Two separately-sourced facts about mk4 cannot both be true:
 
-The bootloader is protected by the **STM32 Firewall** peripheral. Entry into a protected
-code segment is only legal through its call gate, at a fixed offset from the code
-segment start address. So the address is:
+- mk4 is documented as carrying the mk3 numpad `[I]`, whose rows are PB12/PB13/PB14.
+- The Q1 board routes SE2 to `SE2_SCL=PB13`, `SE2_SDA=PB14` `[C]`, and mk4 is confirmed
+  to have SE2 `[C]`.
 
-```
-callgate_entry = FW_CSSA (firewall code segment start) + <call gate offset>
-```
+Q1 has no numpad, so PB13/PB14 are free there and nothing conflicts. On mk4 something
+has to give: either its numpad is not wired like mk3's, or its SE2 is not wired like
+Q1's. The reference infers the numpad from mk3 and does not state mk4's SE2 pins at all,
+so the numpad map is the weaker claim — but it is not resolved here.
 
-Both parts need confirming:
+`MK4.se2` is `None` and the numpad map is inherited but flagged. The pin-conflict test in
+`catcard-board` covers SE2 and NFC, so filling either in without resolving this fails the
+build rather than producing a driver that fights the keypad for the bus.
 
-- `FW_CSSA` / `FW_CSL` are firewall configuration registers, readable on a device.
-- The call-gate offset convention is stated in RM0351 §5 (Firewall) — confirm whether
-  entry is at `CSSA` or at a fixed offset past it, and what the first words of the
-  segment must contain.
+**How to resolve.** Probe PB12–PB14 on an mk4, or read the board markings.
 
-**How to resolve.** On an RDP<2 unit, read the firewall registers over SWD and
-disassemble the first instructions of the code segment. Alternatively, an existing
-running firmware branches there — a single-step at the call site reveals the target.
-Either approach reads only the *address*, not the bootloader's source, so it stays
-inside the clean-room boundary.
+---
 
-**Where it goes:** `BoardSpec::callgate_entry` in `crates/catcard-board/src/spec.rs`.
-A test in `catcard-callgate` fails the moment it is filled in, as a prompt to write
-real integration tests for gate 18.
+## Callgate entry address — RESOLVED
+
+Kept as a note because it was the project's blocking unknown and the resolution is
+worth stating: the address is **published by the bootloader**, not fixed, in a table at
+`0x0800_0040` (`{callgate_entry, version_number, reserved[4]}`).
+
+Read it and validate it; never hardcode. mk3 yields `0x0800_0305`
+(firewall base `0x0800_0300` + 4 for the call gate + 1 for Thumb) but mk4 and Q differ,
+which is exactly why the table exists.
+
+Implemented in `catcard_callgate::entry`. Remaining `[?]` in this area:
+
+- Exact byte layout and CRC of the `gate 26` return across mk4/Q/Mk5.
+- Any callgate methods added after v5.0.3 beyond #26. The table's `version_number`
+  (BCD) is the intended way to detect these — we read it but do not yet gate on it.
 
 ---
 
@@ -160,10 +165,13 @@ board spec records 320×240 as a placeholder.
 
 ---
 
-## Q1 keyboard topology and QR camera bus
+## Q1 QR camera bus
 
-**Blocks: Q1 input and QR scanning.** Neither the keyboard scan topology (matrix vs.
-dedicated controller) nor the camera interface (SPI / DCMI / UART) is known.
+**Blocks: QR scanning.** The camera interface (SPI / DCMI / UART) is not identified.
+
+The keyboard is resolved: a 10x6 matrix, rows PD8–PD12 + PD7, cols PB0/PB1/PB2/PB5/
+PB8/PB9/PB10/PD13/PD14/PD15 `[C]`. The scan *detail* — settling time, debounce, ghosting
+handling for multi-key rollover — is still `[?]` and will come out of bring-up.
 
 ---
 
@@ -187,7 +195,12 @@ migration path.
 
 ---
 
-## SE1 single-wire UART pin; SE2 I²C pins and addresses
+## SE1 single-wire UART pin; SE2 I²C addresses
 
 Not needed while all secret operations go through the callgate, which is the design.
 Would only matter for direct non-secret SE access (config zone reads, `Random`).
+
+`se1-driver-spec.md` now gives the full SE1 transport — SWI-over-UART at 230400 bps,
+`0x7d`/`0x7f` bit encoding, the Microchip CRC-16, frame layout and per-opcode delays —
+so a direct driver is writable. The UART instance is UART4 on mk3 `[C]`, unconfirmed on
+mk4/Q `[?]`. SE2's I2C pins are confirmed on Q1 only; see the mk4 item above.

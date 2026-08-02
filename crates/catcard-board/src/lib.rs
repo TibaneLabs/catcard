@@ -22,7 +22,7 @@ pub mod spec;
 
 pub use memory::{MemoryMap, FW_HEADER_OFFSET, FW_HEADER_SIZE};
 pub use pin::{Pin, Port};
-pub use spec::{BoardSpec, Display, Input, Mcu};
+pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Se2Pins};
 
 #[cfg(any(
     all(
