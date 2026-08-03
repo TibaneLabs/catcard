@@ -85,7 +85,31 @@ so it tests on the host.
 **`catcard-fw`** — the binary. The only crate that cannot build for the host, and the
 only one that needs a board feature.
 
+**`catcard-bip39` / `catcard-bip32` / `catcard-encoding` / `catcard-address`** — the
+wallet stack, bottom to top. All portable, all verified against the official BIP test
+vectors, none aware of hardware.
+
+**`catcard-flash` / `catcard-settings`** — SPI-NOR and the store above it. Both take a
+bus/storage trait rather than owning hardware, so their failure modes (page-boundary
+wrap, programming as bitwise AND, torn writes) are modelled and tested on the host.
+
 **`tools/catcard-image`** — flatten, header, sign, verify, package.
+
+## Traits at the hardware seam
+
+Four drivers take a trait instead of owning their peripheral: `DisplayBus`, `Matrix`,
+`SpiDevice`, `SlotStorage`. That is not abstraction for its own sake — it is what makes
+the parts most likely to be silently wrong testable without a device:
+
+| trait | what the mock catches |
+|---|---|
+| `DisplayBus` | init before reset; pixel data sent as commands; window not set before a flush |
+| `Matrix` | debounce, key mapping, sampling before the row settles |
+| `SpiDevice` | page-boundary wrap, program-as-AND, write-protect ignored |
+| `SlotStorage` | torn writes at every byte offset |
+
+The firmware supplies the real implementations in `catcard-fw`, which is the only crate
+that cannot be tested on the host.
 
 ## Board abstraction
 
