@@ -20,6 +20,7 @@ use cortex_m_rt::entry;
 
 mod boot;
 mod display;
+mod keypad;
 mod panic;
 mod selftest;
 
@@ -35,7 +36,7 @@ fn main() -> ! {
 
     // Nothing to display on yet, so hold the result where a debugger can read it and
     // stop. Once the panel driver lands this becomes the selftest screen.
-    selftest::park(&report)
+    selftest::park(report)
 }
 
 /// Where our own signed header sits in flash, for self-inspection.
