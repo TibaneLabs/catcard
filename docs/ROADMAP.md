@@ -85,6 +85,8 @@ Everything below now needs hardware rather than more specification.
       wallet. Needs a normalisation table, or a decision to restrict passphrases.
 - [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
 - [ ] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR
+- [x] Transaction parsing (borrowed, allocation-free) and BIP-143 segwit v0 sighash
+- [ ] BIP-341 taproot sighash
 - [ ] PSBT (BIP-174) parse, validate, sign, serialise
 - [x] Deterministic nonces (RFC 6979); ECDSA with low-S, DER encoding, and BIP-340
       Schnorr for taproot

@@ -230,6 +230,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-tx"
+version = "0.0.1"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "catcard-ui"
 version = "0.0.1"
 dependencies = [

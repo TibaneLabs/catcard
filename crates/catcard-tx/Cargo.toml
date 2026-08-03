@@ -1,0 +1,16 @@
+[package]
+name = "catcard-tx"
+description = "Bitcoin transaction parsing, serialisation and sighash computation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sha2.workspace = true

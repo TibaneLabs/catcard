@@ -12,9 +12,11 @@ test:
     cargo test --workspace --exclude catcard-fw
 
 # Lint host crates and the firmware for its real target.
+#
+# RUSTFLAGS matches CI exactly, so a warning fails here rather than after a push.
 lint:
     cargo fmt --all -- --check
-    cargo clippy --workspace --exclude catcard-fw --all-targets
+    RUSTFLAGS="-D warnings" cargo clippy --workspace --exclude catcard-fw --all-targets
     @for b in mk3 mk4 q1; do \
         echo "clippy: $b"; \
         cargo clippy --release -p catcard-fw --target thumbv7em-none-eabihf \
