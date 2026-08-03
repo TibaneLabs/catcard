@@ -4,6 +4,8 @@
 
 # build outputs
 /out
+# linker map, emitted next to the invocation by catcard-fw/build.rs
+catcard.map
 *.bin
 *.dfu
 *.elf
