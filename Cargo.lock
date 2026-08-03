@@ -222,6 +222,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-sign"
+version = "0.0.1"
+dependencies = [
+ "k256",
+ "sha2",
+]
+
+[[package]]
 name = "catcard-ui"
 version = "0.0.1"
 dependencies = [

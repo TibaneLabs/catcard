@@ -86,7 +86,8 @@ Everything below now needs hardware rather than more specification.
 - [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
 - [ ] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR
 - [ ] PSBT (BIP-174) parse, validate, sign, serialise
-- [ ] Deterministic nonces (RFC 6979), with `domain::SIGNING` as auxiliary randomness
+- [x] Deterministic nonces (RFC 6979); ECDSA with low-S, DER encoding, and BIP-340
+      Schnorr for taproot
 - [ ] Multisig and output descriptors
 - [ ] BIP-85 derived child seeds
 
