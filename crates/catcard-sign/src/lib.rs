@@ -202,7 +202,6 @@ pub fn schnorr_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::elliptic_curve::sec1::ToSec1Point;
 
     fn pubkey_of(secret: &[u8; 32]) -> [u8; PUBKEY_LEN] {
         let key = SigningKey::from_slice(secret).unwrap();
