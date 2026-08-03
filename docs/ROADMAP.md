@@ -23,8 +23,8 @@ The image builds and is signed, but nothing has watched it execute.
 - [ ] Install a dev-signed image on real hardware ([`FLASHING.md`](FLASHING.md))
 - [ ] Confirm `CATCARD_BOOT_STATUS` shows the TRNG alive and the entropy policy met
 - [ ] Confirm the MSI range, then program the PLL (`HARDWARE-OPEN-ITEMS.md`)
-- [ ] Panic handler that wipes SRAM before halting — the current `panic-halt` leaves
-      whatever was in RAM sitting there
+- [x] Panic handler that wipes SRAM before halting (delegates to callgate 3, which can
+      clear memory it is not running out of)
 
 **Exit:** a device boots CatCard and reports a healthy entropy pool.
 

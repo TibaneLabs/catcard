@@ -176,7 +176,6 @@ dependencies = [
  "catcard-ui",
  "cortex-m",
  "cortex-m-rt",
- "panic-halt",
 ]
 
 [[package]]
@@ -559,12 +558,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "panic-halt"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
 
 [[package]]
 name = "pem-rfc7468"

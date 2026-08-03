@@ -23,7 +23,6 @@ catcard-hal.workspace = true
 catcard-ui.workspace = true
 cortex-m.workspace = true
 cortex-m-rt.workspace = true
-panic-halt.workspace = true
 
 [build-dependencies]
 catcard-board.workspace = true

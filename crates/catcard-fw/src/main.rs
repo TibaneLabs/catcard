@@ -11,16 +11,15 @@
 #![no_std]
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
+// The panic handler needs raw asm and linker symbols; everything else stays safe.
+#![allow(clippy::missing_safety_doc)]
 
 use catcard_board::BOARD;
 use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
-// Halts on panic. Placeholder: a wallet must wipe secrets from SRAM and show a
-// diagnostic before stopping. See docs/ROADMAP.md ("panic handler").
-use panic_halt as _;
-
 mod boot;
+mod panic;
 mod selftest;
 
 /// Board this image was built for, from `build.rs`.

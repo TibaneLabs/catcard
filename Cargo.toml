@@ -53,7 +53,6 @@ cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
 heapless = "0.9.3"
-panic-halt = "1.0.0"
 
 # --- crypto (no_std-capable) ---
 sha2 = { version = "0.11.0", default-features = false }
