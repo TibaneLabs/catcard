@@ -1,0 +1,22 @@
+[package]
+name = "catcard-address"
+description = "Bitcoin address construction: P2PKH, P2SH-P2WPKH, P2WPKH, P2TR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = ["catcard-encoding/std", "catcard-bip32/std"]
+
+[dependencies]
+catcard-bip32 = { workspace = true, default-features = false }
+catcard-encoding = { workspace = true, default-features = false }
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
+sha2.workspace = true
+
+[dev-dependencies]
+catcard-bip39 = { workspace = true }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/catcard-address",
     "crates/catcard-bip32",
     "crates/catcard-bip39",
     "crates/catcard-board",
@@ -17,6 +18,7 @@ members = [
 # `cargo build` / `cargo test` with no `-p` operates on host-buildable crates only.
 # The firmware crates need `--target thumbv7em-none-eabihf` (see `cargo fw`).
 default-members = [
+    "crates/catcard-address",
     "crates/catcard-bip32",
     "crates/catcard-bip39",
     "crates/catcard-board",
@@ -35,6 +37,7 @@ repository = "https://github.com/catcard/catcard"
 authors = ["Karpeles Lab Inc."]
 
 [workspace.dependencies]
+catcard-address = { path = "crates/catcard-address", default-features = false }
 catcard-bip32 = { path = "crates/catcard-bip32", default-features = false }
 catcard-bip39 = { path = "crates/catcard-bip39", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }

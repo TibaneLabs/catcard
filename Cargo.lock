@@ -101,6 +101,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-address"
+version = "0.0.1"
+dependencies = [
+ "catcard-bip32",
+ "catcard-bip39",
+ "catcard-encoding",
+ "k256",
+ "sha2",
+]
+
+[[package]]
 name = "catcard-bip32"
 version = "0.0.1"
 dependencies = [
