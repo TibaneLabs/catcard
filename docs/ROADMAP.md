@@ -50,10 +50,14 @@ both be checked on hardware without a debugger.
 
 ## M3 — Storage
 
-- [ ] SPI-NOR driver: `RDID`, read, page program, 4 KB sector erase
-- [ ] Confirm the CS/SCK pins and the part's size (`HARDWARE-OPEN-ITEMS.md`)
-- [ ] Settings store: our own format — wear-levelled, authenticated, with a defined
-      recovery path from a torn write
+- [x] SPI-NOR driver: `RDID`, read, page program, 4 KB sector erase
+- [x] Settings store: authenticated, two-slot, with a defined recovery path from a
+      torn write
+- [ ] Confirm the CS/SCK pins and the part's size (`HARDWARE-OPEN-ITEMS.md`) — until
+      then neither can be wired to a board
+- [ ] Derive the settings key from the secure element (currently a caller parameter)
+- [ ] Rollback resistance: bind the settings sequence to an SE monotonic counter, so
+      physical access cannot restore an older *authentic* slot
 - [ ] microSD over SDMMC, FAT32 read/write
 
 **Exit:** settings survive a power cycle; files can be read from and written to a card.

@@ -13,6 +13,7 @@ members = [
     "crates/catcard-hal",
     "crates/catcard-ui",
     "crates/catcard-fw",
+    "crates/catcard-settings",
     "tools/catcard-image",
 ]
 
@@ -27,6 +28,7 @@ default-members = [
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
     "crates/catcard-flash",
+    "crates/catcard-settings",
     "tools/catcard-image",
 ]
 
@@ -45,6 +47,7 @@ catcard-bip39 = { path = "crates/catcard-bip39", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
 catcard-encoding = { path = "crates/catcard-encoding", default-features = false }
 catcard-flash = { path = "crates/catcard-flash", default-features = false }
+catcard-settings = { path = "crates/catcard-settings", default-features = false }
 catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }

@@ -1,0 +1,19 @@
+[package]
+name = "catcard-settings"
+description = "Authenticated, power-fail-safe settings store over SPI-NOR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+zeroize = { workspace = true, features = ["derive"] }

@@ -212,6 +212,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-settings"
+version = "0.0.1"
+dependencies = [
+ "hmac",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-ui"
 version = "0.0.1"
 dependencies = [
