@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn ambiguous_characters_are_not_in_the_alphabet() {
-        for c in [b'0', b'O', b'I', b'l'] {
+        for c in *b"0OIl" {
             assert!(!ALPHABET.contains(&c), "{} should be excluded", c as char);
         }
         assert_eq!(ALPHABET.len(), 58);

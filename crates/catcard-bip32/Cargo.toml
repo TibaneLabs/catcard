@@ -1,0 +1,22 @@
+[package]
+name = "catcard-bip32"
+description = "BIP-32 hierarchical deterministic key derivation over secp256k1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = ["catcard-encoding/std"]
+
+[dependencies]
+catcard-encoding = { workspace = true, default-features = false }
+hmac.workspace = true
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
+ripemd = { version = "0.2.0", default-features = false }
+sha2.workspace = true
+subtle.workspace = true
+zeroize = { workspace = true, features = ["derive"] }
