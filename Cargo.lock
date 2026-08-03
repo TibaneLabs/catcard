@@ -101,6 +101,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-bip39"
+version = "0.0.1"
+dependencies = [
+ "hmac",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-board"
 version = "0.0.1"
 

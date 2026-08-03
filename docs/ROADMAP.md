@@ -12,7 +12,9 @@ Ordered by dependency, not by ambition. Each milestone ends with something testa
 - Callgate: entry-point discovery from the bootloader info table, the real register
   convention in inline asm, the full `gate 18` ABI
 - Boot path: clock → TRNG → entropy pool → policy check
-- 150 host tests, clippy clean on host and thumb
+- BIP-39: wordlist, entropy ↔ phrase, checksum, PBKDF2 seed — all 24 official English
+  vectors pass in both directions
+- 179 host tests, clippy clean on host and thumb
 
 ## M1 — Prove it runs
 
@@ -65,7 +67,10 @@ Everything below now needs hardware rather than more specification.
 
 ## M5 — Wallet (Bitcoin)
 
-- [ ] BIP-39: wordlist, mnemonic ↔ entropy, passphrase
+- [x] BIP-39: wordlist, mnemonic ↔ entropy, passphrase
+- [ ] NFKD normalisation, so non-ASCII passphrases work. `Mnemonic::to_seed` currently
+      **refuses** them rather than deriving a seed that diverges from every other
+      wallet. Needs a normalisation table, or a decision to restrict passphrases.
 - [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
 - [ ] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR
 - [ ] PSBT (BIP-174) parse, validate, sign, serialise
@@ -127,8 +132,8 @@ Three consequences that are cheaper to get right than to retrofit:
 - **Store the BIP-39 entropy, not just the derived seed.** Cardano's Icarus master-key
   generation runs PBKDF2 over the mnemonic *entropy*, not over the 64-byte BIP-39 seed.
   If our secret blob holds only the seed, that derivation is impossible after the fact.
-  Storing entropy keeps both paths open and costs nothing — decide this at M4, when the
-  secret encoding is chosen, not at M5.
+  **Settled:** `catcard_bip39::Mnemonic` stores entropy and renders words on demand, so
+  the secret encoding written at M4 carries entropy. Nothing is foreclosed.
 - **Master-key generation has incompatible variants.** The original paper, Icarus, and
   Ledger's variant all differ. Whichever we implement has to be named in the UI, because
   picking the wrong one silently produces a valid wallet at the wrong addresses.

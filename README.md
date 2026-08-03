@@ -72,6 +72,7 @@ Getting it onto hardware: [`docs/FLASHING.md`](docs/FLASHING.md).
 ```
 crates/
   catcard-board      board tables: memory maps, pin assignments, peripheral presence
+  catcard-bip39      mnemonics: entropy <-> phrase, checksum, PBKDF2 seed
   catcard-fwhdr      signed image header + the digest the bootloader verifies
   catcard-callgate   bootloader callgate ABI (PIN, secrets, SE entropy, DFU)
   catcard-entropy    entropy accumulator, SP 800-90B health tests, HMAC-DRBG
