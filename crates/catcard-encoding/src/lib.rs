@@ -8,3 +8,4 @@
 #![deny(unsafe_code)]
 
 pub mod base58;
+pub mod bech32;
