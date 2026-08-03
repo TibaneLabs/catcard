@@ -165,6 +165,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-flash"
+version = "0.0.1"
+
+[[package]]
 name = "catcard-fw"
 version = "0.0.1"
 dependencies = [

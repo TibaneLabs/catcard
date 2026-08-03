@@ -6,6 +6,7 @@ members = [
     "crates/catcard-bip39",
     "crates/catcard-board",
     "crates/catcard-encoding",
+    "crates/catcard-flash",
     "crates/catcard-fwhdr",
     "crates/catcard-callgate",
     "crates/catcard-entropy",
@@ -25,6 +26,7 @@ default-members = [
     "crates/catcard-encoding",
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
+    "crates/catcard-flash",
     "tools/catcard-image",
 ]
 
@@ -42,6 +44,7 @@ catcard-bip32 = { path = "crates/catcard-bip32", default-features = false }
 catcard-bip39 = { path = "crates/catcard-bip39", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
 catcard-encoding = { path = "crates/catcard-encoding", default-features = false }
+catcard-flash = { path = "crates/catcard-flash", default-features = false }
 catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }

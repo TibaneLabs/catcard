@@ -1,0 +1,15 @@
+[package]
+name = "catcard-flash"
+description = "SPI-NOR flash driver: JEDEC command set, page programming, sector erase"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
