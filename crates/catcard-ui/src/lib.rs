@@ -8,7 +8,11 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
 
+pub mod display;
+pub mod font;
 pub mod framebuffer;
 pub mod ssd1306;
+pub mod text;
 
+pub use display::{DisplayBus, Ssd1306};
 pub use framebuffer::{Framebuffer, Mono128x64};

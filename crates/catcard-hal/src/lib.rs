@@ -24,6 +24,7 @@ pub mod dwt;
 pub mod gpio;
 pub mod reg;
 pub mod rng;
+pub mod spi;
 pub mod uid;
 
 /// Everything that can go wrong during early bring-up.
