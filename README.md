@@ -83,6 +83,8 @@ crates/
   catcard-bip32      HD key derivation over secp256k1, xprv/xpub
   catcard-encoding   Base58Check, Bech32/Bech32m
   catcard-address    P2PKH, P2SH-P2WPKH, P2WPKH, P2TR
+  catcard-sign       deterministic ECDSA (RFC 6979) and BIP-340 Schnorr
+  catcard-tx         transaction parsing and BIP-143 sighash
   catcard-flash      SPI-NOR driver
   catcard-settings   authenticated, power-fail-safe settings store
   catcard-hal        STM32L4/L4+ register-level drivers (RNG, SPI, GPIO, DWT, clocks)

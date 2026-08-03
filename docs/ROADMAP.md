@@ -14,7 +14,18 @@ Ordered by dependency, not by ambition. Each milestone ends with something testa
 - Boot path: clock → TRNG → entropy pool → policy check
 - BIP-39: wordlist, entropy ↔ phrase, checksum, PBKDF2 seed — all 24 official English
   vectors pass in both directions
-- 179 host tests, clippy clean on host and thumb
+- BIP-32 derivation over secp256k1, xprv/xpub — all 17 official chain vectors
+- Base58Check and Bech32/Bech32m — Bitcoin Core and BIP-173/350 vectors
+- Addresses: P2PKH, P2SH-P2WPKH, P2WPKH, P2TR — BIP-49/84/86 vectors
+- Deterministic ECDSA (RFC 6979, low-S, DER) and BIP-340 Schnorr
+- Transaction parsing and BIP-143 sighash — the BIP-143 worked example
+- SPI, SSD1306 driver, 8x8 font, text rendering, debounced keypad scanning
+- SPI-NOR driver; authenticated, power-fail-safe settings store
+- Panic handler that hands SRAM wiping to callgate 3
+- 374 host tests, clippy clean on host and thumb
+
+**Nothing below the crypto has run on hardware.** See
+[`VALIDATION.md`](VALIDATION.md).
 
 ## M1 — Prove it runs
 
