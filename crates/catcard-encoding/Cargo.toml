@@ -1,0 +1,17 @@
+[package]
+name = "catcard-encoding"
+description = "Address and key encodings: Base58Check, Bech32/Bech32m"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sha2.workspace = true
+subtle.workspace = true

@@ -123,6 +123,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-encoding"
+version = "0.0.1"
+dependencies = [
+ "sha2",
+ "subtle",
+]
+
+[[package]]
 name = "catcard-entropy"
 version = "0.0.1"
 dependencies = [
