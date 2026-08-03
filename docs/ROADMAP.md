@@ -30,12 +30,17 @@ The image builds and is signed, but nothing has watched it execute.
 
 ## M2 — Output and input
 
-- [ ] SPI driver
-- [ ] SSD1306 driver over `catcard-ui::Framebuffer` (mk3/mk4)
-- [ ] Text rendering: a bitmap font, no dependency on floating point
+- [x] SPI driver
+- [x] SSD1306 driver over `catcard-ui::Framebuffer` (mk3/mk4)
+- [x] Text rendering: an 8x8 bitmap font, no floating point, no `core::fmt`
+- [x] Selftest screen replacing `selftest::park`
 - [ ] Numpad matrix scan with debounce, scan order shuffled from `domain::UI`
 - [ ] Feed keypress timing into the pool as `Source::UserTiming`
-- [ ] Selftest screen replacing `selftest::park`
+
+Everything ticked above is written but **unvalidated** — no hardware yet. The SPI
+pin assignments and the panel's SPI instance are inferred (see
+`HARDWARE-OPEN-ITEMS.md`), so the first validation step is confirming the panel
+lights up at all.
 
 **Exit:** a device shows text and responds to keys. This is where development stops
 being blind.

@@ -19,6 +19,7 @@ use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
 mod boot;
+mod display;
 mod panic;
 mod selftest;
 
