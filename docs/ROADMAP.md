@@ -126,7 +126,23 @@ abstraction.
 
 **Exit:** a firmware update over USB, approved on the device.
 
-## Multi-chain — not yet designed
+## Multi-chain — shape settled, chains not yet built
+
+**One firmware, no per-coin apps.** Unlike a Ledger-style app loader, a CatCard build
+carries every chain it supports and nothing else. Chains are cargo features, so a
+Bitcoin-only firmware is a distinct artefact with the other chains' parsers *absent from
+the image* — that is the difference between a smaller product and a smaller attack
+surface, and it is why the option is worth having.
+
+`catcard-chain` is the registry: curve, derivation scheme, SLIP-44 coin type per chain,
+plus the two guards that one-firmware-many-chains needs. CI builds and tests every
+feature combination, because feature-gated code rots silently.
+
+- [x] Chain registry, compile-time selection, build tag
+- [ ] Ethereum (M8), Solana, and their address/signing stacks
+- [ ] Capability report over the transport, so a host can see what a build carries
+
+### The original notes, still current
 
 CatCard aims to support coins beyond Bitcoin, including ed25519 chains, **with
 non-hardened (soft) derivation**. The design is open; this section records only what is

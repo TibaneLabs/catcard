@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/catcard-address",
     "crates/catcard-bip32",
+    "crates/catcard-chain",
     "crates/catcard-bip39",
     "crates/catcard-board",
+    "crates/catcard-chain",
     "crates/catcard-encoding",
     "crates/catcard-flash",
     "crates/catcard-fwhdr",
@@ -26,6 +28,7 @@ default-members = [
     "crates/catcard-bip32",
     "crates/catcard-bip39",
     "crates/catcard-board",
+    "crates/catcard-chain",
     "crates/catcard-encoding",
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
@@ -48,6 +51,7 @@ authors = ["Karpeles Lab Inc."]
 catcard-address = { path = "crates/catcard-address", default-features = false }
 catcard-bip32 = { path = "crates/catcard-bip32", default-features = false }
 catcard-bip39 = { path = "crates/catcard-bip39", default-features = false }
+catcard-chain = { path = "crates/catcard-chain", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
 catcard-encoding = { path = "crates/catcard-encoding", default-features = false }
 catcard-flash = { path = "crates/catcard-flash", default-features = false }

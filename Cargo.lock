@@ -147,6 +147,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-chain"
+version = "0.0.1"
+dependencies = [
+ "catcard-bip32",
+]
+
+[[package]]
 name = "catcard-encoding"
 version = "0.0.1"
 dependencies = [

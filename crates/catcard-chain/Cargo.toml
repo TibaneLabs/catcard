@@ -1,0 +1,22 @@
+[package]
+name = "catcard-chain"
+description = "Chain registry: curves, derivation schemes, and compile-time coin selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Every chain on by default. A single-coin build turns them off explicitly:
+#   --no-default-features --features chain-bitcoin
+default = ["std", "chain-bitcoin", "chain-ethereum", "chain-solana"]
+std = []
+
+chain-bitcoin = []
+chain-ethereum = []
+chain-solana = []
+
+[dependencies]
+catcard-bip32 = { workspace = true, default-features = false }

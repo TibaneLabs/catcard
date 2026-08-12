@@ -73,6 +73,38 @@ jobs:
           name: catcard-${{ matrix.board }}
           path: out/
 
+  chain-features:
+    name: Chain feature matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chains:
+          - chain-bitcoin
+          - chain-ethereum
+          - chain-solana
+          - chain-bitcoin,chain-ethereum
+          - chain-bitcoin,chain-solana
+          - chain-ethereum,chain-solana
+          - chain-bitcoin,chain-ethereum,chain-solana
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # A single-coin firmware is a product, not a configuration nobody builds.
+      # Feature-gated code rots silently unless every shape is compiled and tested.
+      - name: Test
+        run: |
+          cargo test -p catcard-chain \
+            --no-default-features --features std,${{ matrix.chains }}
+      - name: Clippy
+        run: |
+          cargo clippy -p catcard-chain --all-targets \
+            --no-default-features --features std,${{ matrix.chains }}
+
   reproducible:
     name: Reproducible build
     runs-on: ubuntu-latest
