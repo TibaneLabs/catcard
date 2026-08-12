@@ -117,6 +117,8 @@ abstraction.
 - [ ] USB OTG FS device stack
 - [x] USB identity allocated: `0x39F2:0x0401` ([`USB.md`](USB.md))
 - [ ] Decide whether the DfuSe suffix should stamp it, once our own loader exists
+- [ ] Vendor-class interface with MS OS 2.0 descriptors, so Chromium's WebUSB accepts it
+      and Windows binds WinUSB without a driver install ([`USB.md`](USB.md))
 - [ ] Our own transport: framing, authenticated encryption, replay resistance
 - [ ] Host tooling
 - [ ] Self-upgrade: receive an image, stage to SPI-NOR, on-screen approval, reboot
@@ -182,6 +184,24 @@ generously (order 2^20 levels), but it is not unlimited the way BIP-32 is.
   someone asks for it, but it is a third shape the signing interface may have to take.
 - **Unaffected:** the firmware image signature is secp256k1 and fixed by the bootloader.
   Nothing about multi-chain support touches it.
+
+## M8 — Ethereum, for wallet-extension support
+
+Serving MetaMask means an EVM signing stack, which shares only the curve with the
+Bitcoin path. Costed as its own milestone rather than treated as extra commands.
+
+- [ ] Keccak-256
+- [ ] EIP-55 address checksumming; `m/44'/60'` derivation
+- [ ] EIP-155 and EIP-1559 transaction encoding, and on-screen presentation of what is
+      actually being authorised — a contract call is not a payment, and must not look
+      like one
+- [ ] EIP-712 typed-data hashing, with the domain shown, not just the struct
+- [ ] Recoverable `(r, s, v)` signatures
+- [ ] A Keyring Snap plus its companion page, since Snaps cannot reach WebUSB or WebHID
+      directly
+
+Weigh the QR route first for Q1: MetaMask supports UR/EIP-4527 hardware wallets today
+with no MetaMask changes and no USB, and it keeps the device air-gapped.
 
 ## M7 — Q1
 
