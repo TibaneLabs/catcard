@@ -99,9 +99,11 @@ enum Cmd {
         board: String,
         #[arg(long)]
         out: PathBuf,
-        /// USB vendor ID for the DFU suffix. Default 0xFFFF = any device.
+        /// USB vendor ID for the DFU suffix. Defaults to 0xFFFF ("any device");
+        /// CatCard's allocated identity is 0x39F2:0x0401.
         #[arg(long)]
         vid: Option<String>,
+        /// USB product ID for the DFU suffix. See `--vid`.
         #[arg(long)]
         pid: Option<String>,
     },
@@ -427,7 +429,7 @@ mod tests {
 
     #[test]
     fn usb_id_parsing() {
-        assert_eq!(parse_u16("0x1209").unwrap(), 0x1209);
+        assert_eq!(parse_u16("0x39f2").unwrap(), catcard_board::usb::VENDOR_ID);
         assert_eq!(parse_u16("4617").unwrap(), 4617);
         assert!(parse_u16("nope").is_err());
     }

@@ -20,10 +20,16 @@
 
 use anyhow::{ensure, Result};
 
-/// DFU-spec wildcard: the file is accepted by any device. Preferred over asserting a
-/// VID/PID we do not own — see `docs/USB.md`.
-pub const VID_ANY: u16 = 0xFFFF;
-pub const PID_ANY: u16 = 0xFFFF;
+/// DFU-spec wildcard: the file is accepted by any device.
+///
+/// This stays the packaging default even though CatCard now has a real allocation. The
+/// bootstrap path runs the `.dfu` through *stock* Coldcard firmware's SD-card upgrade
+/// menu, and whether that checks the suffix against its own VID/PID is not documented
+/// either way. A wildcard cannot be rejected for naming the wrong device; naming
+/// ourselves might be. Pass `--vid`/`--pid` to stamp the real identity once the target
+/// is CatCard's own loader. See `docs/USB.md`.
+pub const VID_ANY: u16 = catcard_board::usb::ANY_ID;
+pub const PID_ANY: u16 = catcard_board::usb::ANY_ID;
 
 const PREFIX_LEN: usize = 11;
 const TARGET_PREFIX_LEN: usize = 274;

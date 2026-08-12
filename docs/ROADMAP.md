@@ -115,7 +115,8 @@ abstraction.
 ## M6 — Host connectivity
 
 - [ ] USB OTG FS device stack
-- [ ] Register a VID/PID with pid.codes ([`USB.md`](USB.md))
+- [x] USB identity allocated: `0x39F2:0x0401` ([`USB.md`](USB.md))
+- [ ] Decide whether the DfuSe suffix should stamp it, once our own loader exists
 - [ ] Our own transport: framing, authenticated encryption, replay resistance
 - [ ] Host tooling
 - [ ] Self-upgrade: receive an image, stage to SPI-NOR, on-screen approval, reboot
