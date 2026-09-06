@@ -196,8 +196,32 @@ image gets the bootloader's 25-second "Danger! Custom Firmware" countdown first,
 is the documented behaviour for `pubkey_num = 0` and not a fault.
 
 Read the result out of `CATCARD_BOOT_STATUS` (magic `0xCA7CA2D0`) in the RAM dump rather
-than off the screen — the framebuffer render is legible but it is pixel art, and reading
-a number out of it is guesswork.
+than eyeballing the screen — `tools/emu/bootstatus.py` does it and exits non-zero on any
+failure.
+
+### The screen decodes to text
+
+The emulator reads its own framebuffer back as characters, using the same zevv-peep and
+misc-fixed faces CatCard renders with. Since we adopted those faces, **CatCard's screens
+decode too**:
+
+```
+CatCard
+mk4 0.0.1
+HAL ok
+DWT ok
+RNG ok 832 bit
+```
+
+That is the practically valuable half of using those fonts, and it is worth more than the
+visual familiarity: a run can be asserted on strings rather than on a pixel hash, so a
+screen test survives a font tweak or a one-pixel layout shift that a hash would break on.
+
+**Lay text on the font's natural row pitch.** The status lines were first placed on an
+8-pixel pitch with a 6-pixel face, and the 2-pixel slivers between them decoded as rows
+of garbage. Moving to a 6-pixel pitch cleaned it up. A blank region can still produce one
+spurious row; that is the decoder's segmentation, not stray ink, and it is worth
+confirming against the raw render before chasing it.
 
 ### The limit, which matters more than the capability
 

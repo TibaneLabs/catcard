@@ -83,6 +83,14 @@ emu board=board emulator="../coldcard-emu/target/release/ccemu" bootloader="" st
         --board {{board}} --run-for {{steps}} \
         --screen-log out/emu-{{board}}-screens.txt --dump-ram out/emu-{{board}}-ram.bin
     python3 tools/emu/bootstatus.py out/emu-{{board}}-ram.bin
+    # The emulator decodes its own framebuffer back to characters using the same
+    # zevv-peep and misc-fixed faces CatCard renders with, so a run can be asserted on
+    # strings rather than on a pixel hash. Optional: it lives in the sibling repo.
+    decoder="$(dirname {{emulator}})/../../tools/screentext.py"
+    if [ -f "$decoder" ]; then
+        echo "--- decoded screen ---"
+        python3 "$decoder" out/emu-{{board}}-screens.txt | tail -12
+    fi
 
 # Board table, including which facts are still unknown.
 boards:

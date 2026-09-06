@@ -49,13 +49,13 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
     let body = &misc4x6::FONT;
     draw_text(&mut fb, title, centred(title, "CatCard", 128), 0, "CatCard");
     draw_text(&mut fb, body, 0, 16, BOARD_NAME);
-    draw_text(&mut fb, body, 40, 16, VERSION);
+    draw_text(&mut fb, body, 20, 16, VERSION);
 
     draw_text(
         &mut fb,
         body,
         0,
-        24,
+        22,
         match report.hal {
             Ok(()) => "HAL   ok",
             Err(_) => "HAL   FAIL",
@@ -65,7 +65,7 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
         &mut fb,
         body,
         0,
-        32,
+        28,
         if report.dwt_running {
             "DWT   ok"
         } else {
@@ -75,7 +75,7 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
 
     match report.entropy {
         Ok(bits) => {
-            draw_text(&mut fb, body, 0, 40, "RNG   ok");
+            draw_text(&mut fb, body, 0, 34, "RNG   ok");
             // Rendered without a formatter: core::fmt pulls in a large amount of code
             // for what is three digits.
             let mut buf = [b' '; 4];
@@ -90,21 +90,21 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
             draw_text(
                 &mut fb,
                 body,
-                48,
-                40,
+                36,
+                34,
                 core::str::from_utf8(&buf).unwrap_or("????"),
             );
-            draw_text(&mut fb, body, 72, 40, "bit");
+            draw_text(&mut fb, body, 56, 34, "bit");
         }
         Err(_) => {
-            draw_text(&mut fb, body, 0, 40, "RNG   FAIL");
-            draw_wrapped(&mut fb, body, 0, 48, "entropy policy not met");
+            draw_text(&mut fb, body, 0, 34, "RNG   FAIL");
+            draw_wrapped(&mut fb, body, 0, 40, "entropy policy not met");
         }
     }
 
     // Last key pressed, so the keypad can be validated without a debugger.
     if let Some(k) = last_key {
-        draw_text(&mut fb, body, 0, 56, "KEY");
+        draw_text(&mut fb, body, 0, 46, "KEY");
         let label: [u8; 1] = match k {
             Key::Digit(d) => [b'0' + d],
             Key::Cancel => *b"x",
