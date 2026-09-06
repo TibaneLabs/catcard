@@ -1,8 +1,9 @@
 //! Where boot ends until there is a display to report on.
 
 use catcard_entropy::{domain, spawn_drbg};
+use catcard_ui::font::{misc4x6, peep7x14};
 use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
-use catcard_ui::text::{draw_text, draw_wrapped};
+use catcard_ui::text::{centred, draw_text, draw_wrapped};
 use catcard_ui::Mono128x64;
 
 use crate::{display, keypad, BootReport, BOARD_NAME, VERSION};
@@ -42,12 +43,17 @@ pub struct BootStatus {
 fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel) {
     let mut fb = Mono128x64::new();
 
-    draw_text(&mut fb, 0, 0, "CatCard");
-    draw_text(&mut fb, 64, 0, BOARD_NAME);
-    draw_text(&mut fb, 0, 8, VERSION);
+    // Title in the 7x14 face, status in the dense 4x6 — the same split a Coldcard
+    // uses, and what makes six status lines fit under a legible heading.
+    let title = &peep7x14::FONT;
+    let body = &misc4x6::FONT;
+    draw_text(&mut fb, title, centred(title, "CatCard", 128), 0, "CatCard");
+    draw_text(&mut fb, body, 0, 16, BOARD_NAME);
+    draw_text(&mut fb, body, 40, 16, VERSION);
 
     draw_text(
         &mut fb,
+        body,
         0,
         24,
         match report.hal {
@@ -57,6 +63,7 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
     );
     draw_text(
         &mut fb,
+        body,
         0,
         32,
         if report.dwt_running {
@@ -68,7 +75,7 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
 
     match report.entropy {
         Ok(bits) => {
-            draw_text(&mut fb, 0, 40, "RNG   ok");
+            draw_text(&mut fb, body, 0, 40, "RNG   ok");
             // Rendered without a formatter: core::fmt pulls in a large amount of code
             // for what is three digits.
             let mut buf = [b' '; 4];
@@ -82,27 +89,34 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
             }
             draw_text(
                 &mut fb,
-                64,
+                body,
+                48,
                 40,
                 core::str::from_utf8(&buf).unwrap_or("????"),
             );
-            draw_text(&mut fb, 96, 40, "bit");
+            draw_text(&mut fb, body, 72, 40, "bit");
         }
         Err(_) => {
-            draw_text(&mut fb, 0, 40, "RNG   FAIL");
-            draw_wrapped(&mut fb, 0, 48, "entropy policy not met");
+            draw_text(&mut fb, body, 0, 40, "RNG   FAIL");
+            draw_wrapped(&mut fb, body, 0, 48, "entropy policy not met");
         }
     }
 
     // Last key pressed, so the keypad can be validated without a debugger.
     if let Some(k) = last_key {
-        draw_text(&mut fb, 0, 56, "KEY");
+        draw_text(&mut fb, body, 0, 56, "KEY");
         let label: [u8; 1] = match k {
             Key::Digit(d) => [b'0' + d],
             Key::Cancel => *b"x",
             Key::Confirm => *b"y",
         };
-        draw_text(&mut fb, 64, 56, core::str::from_utf8(&label).unwrap_or("?"));
+        draw_text(
+            &mut fb,
+            body,
+            48,
+            56,
+            core::str::from_utf8(&label).unwrap_or("?"),
+        );
     }
 
     let _ = panel.flush(&fb);

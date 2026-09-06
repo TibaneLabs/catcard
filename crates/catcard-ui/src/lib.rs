@@ -16,5 +16,6 @@ pub mod ssd1306;
 pub mod text;
 
 pub use display::{DisplayBus, Ssd1306};
+pub use font::Font;
 pub use framebuffer::{Framebuffer, Mono128x64};
 pub use keypad::{Event as KeyEvent, Key, Keypad, Matrix};

@@ -88,7 +88,7 @@ crates/
   catcard-flash      SPI-NOR driver
   catcard-settings   authenticated, power-fail-safe settings store
   catcard-hal        STM32L4/L4+ register-level drivers (RNG, SPI, GPIO, DWT, clocks)
-  catcard-ui         framebuffer, SSD1306 driver, font, text, keypad scanner
+  catcard-ui         framebuffer, SSD1306 driver, fonts, text, keypad scanner
   catcard-fw         the firmware binary
 tools/
   catcard-image      build, sign, verify and package images
@@ -105,6 +105,7 @@ correctness-critical logic lives.
 | | |
 |---|---|
 | [`CLEANROOM.md`](CLEANROOM.md) | what may and may not be consulted, and why |
+| [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) | licences that travel with the distribution |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | crate boundaries and the fixed-vs-ours split |
 | [`docs/ENTROPY.md`](docs/ENTROPY.md) | the seed RNG design and the bug it replaces |
 | [`docs/HARDWARE-OPEN-ITEMS.md`](docs/HARDWARE-OPEN-ITEMS.md) | unknowns blocking further work |
