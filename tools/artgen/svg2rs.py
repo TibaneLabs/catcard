@@ -58,17 +58,27 @@ class Canvas:
                     self.set(x, y)
 
     def triangle_filled(self, pts):
-        # Point-in-triangle over the bounding box. At a few pixels a scanline fill would
-        # be more code for no gain, and this runs once at build time.
-        xs = [p[0] for p in pts]
+        # Scanline fill, skipping any row the triangle meets at a single point.
+        #
+        # That skip is the whole reason this is a scanline fill rather than a
+        # point-in-triangle test. A vertex landing exactly on a pixel row covers no area
+        # on that row, but a naive test still lights the one pixel under it — and a
+        # single lit pixel above the body of a four-pixel nose reads as a stem growing
+        # out of it, not as the tip of a triangle.
         ys = [p[1] for p in pts]
-        def side(a, b, px, py):
-            return (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0])
-        for y in range(int(math.floor(min(ys))), int(math.ceil(max(ys))) + 1):
-            for x in range(int(math.floor(min(xs))), int(math.ceil(max(xs))) + 1):
-                d = [side(pts[i], pts[(i + 1) % 3], x, y) for i in range(3)]
-                if all(v >= 0 for v in d) or all(v <= 0 for v in d):
-                    self.set(x, y)
+        for y in range(math.ceil(min(ys)), math.floor(max(ys)) + 1):
+            xs = []
+            for i in range(3):
+                (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % 3]
+                if y0 == y1:
+                    if y == y0:
+                        xs += [x0, x1]
+                elif min(y0, y1) <= y <= max(y0, y1):
+                    xs.append(x0 + (x1 - x0) * (y - y0) / (y1 - y0))
+            if not xs or max(xs) - min(xs) <= 0:
+                continue
+            for x in range(math.ceil(min(xs)), math.floor(max(xs)) + 1):
+                self.set(x, y)
 
     def triangle_outline(self, pts):
         for i in range(3):

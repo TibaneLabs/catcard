@@ -95,8 +95,10 @@ mod tests {
             b - a + 1
         };
 
-        // Look for a band of rows down the middle that gets steadily wider: an apex at
-        // the top over a base at least four across.
+        // Look for a band of rows down the middle that gets **strictly** wider: an apex
+        // at the top over a base at least four across. Strictly, because a run of equal
+        // widths at the tip is a stem growing out of the nose rather than a point — the
+        // shape a naive fill produces when the apex lands exactly on a pixel row.
         let mut found = false;
         let mut y = 0;
         while y < c.height as usize {
@@ -110,8 +112,8 @@ mod tests {
             }
             let widths: Vec<usize> = (start..y).map(run).collect();
             if widths.len() >= 3
-                && widths.windows(2).all(|w| w[1] >= w[0])
-                && widths[0] <= 2
+                && widths.windows(2).all(|w| w[1] > w[0])
+                && widths[0] == 1
                 && *widths.last().unwrap() >= 4
             {
                 found = true;
