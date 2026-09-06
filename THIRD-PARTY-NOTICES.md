@@ -51,6 +51,14 @@ misc-fixed set — contributed by Janne V. Kujala, maintained by Markus Kuhn.
 
 ---
 
+## Cat logo
+
+`crates/catcard-ui/src/art/cat.rs` is rasterised from `cat-logo.svg`, a Karpeles Lab
+asset, by `tools/artgen/svg2rs.py`. Not third-party; listed so the provenance of every
+generated asset is in one place.
+
+---
+
 ## Coldcard developer signing key
 
 `keys/dev-privkey.pem` is the secp256k1 key Coinkite publishes so that anyone can build

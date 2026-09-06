@@ -49,6 +49,7 @@ hardware confirmation.
 - [x] SSD1306 driver over `catcard-ui::Framebuffer` (mk3/mk4)
 - [x] Text rendering: an 8x8 bitmap font, no floating point, no `core::fmt`
 - [x] Selftest screen replacing `selftest::park`
+- [x] Boot splash with the cat logo and a progress bar, drawn as init proceeds
 - [x] Numpad matrix scan with debounce, scan order shuffled from `domain::UI`
 - [x] Feed keypress timing into the pool as `Source::UserTiming`
 

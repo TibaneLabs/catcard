@@ -10,7 +10,7 @@ use catcard_callgate::{abi::RngSource, Callgate};
 use catcard_entropy::{EntropyPool, Source};
 use catcard_hal::{dwt, uid};
 
-use crate::{entropy_policy, BootReport};
+use crate::{display, entropy_policy, splash, BootReport};
 
 /// Bytes to draw from each hardware TRNG.
 ///
@@ -19,27 +19,43 @@ use crate::{entropy_policy, BootReport};
 /// agree that they are alive.
 const TRNG_BYTES: usize = 64;
 
-pub fn bring_up() -> BootReport {
-    // SAFETY: this is the reset path; nothing else has touched these peripherals.
-    let hal = unsafe { catcard_hal::init_core() };
+/// Bring the machine up, showing the splash as it goes.
+///
+/// `hal` comes in already initialised because the panel's reset pulse needs the cycle
+/// counter, so the display cannot be brought up before the core is. `panel` is optional
+/// throughout: a device whose display did not start must still finish booting and reach
+/// a state where the fault can be read out over SWD.
+pub fn bring_up(
+    hal: Result<catcard_hal::rng::Rng, catcard_hal::InitError>,
+    mut panel: Option<&mut display::Panel>,
+) -> BootReport {
     let dwt_running = dwt::is_running();
+    let step = |panel: &mut Option<&mut display::Panel>, pct: u8| {
+        if let Some(p) = panel.as_deref_mut() {
+            splash::show(p, pct);
+        }
+    };
 
+    step(&mut panel, 10);
     let mut pool = EntropyPool::new(entropy_policy());
 
     // Domain separation only. The UID is public (it is the USB serial number) and is
     // credited zero bits -- mixing it makes two devices' pools differ, nothing more.
     // SAFETY: reads the factory UID region, which is always mapped.
     unsafe { uid::feed_pool(&mut pool) };
+    step(&mut panel, 25);
 
     // The chip TRNG: the source the stock firmware never used for the seed.
     if let Ok(rng) = &hal {
         let _ = rng.feed_pool(&mut pool, TRNG_BYTES);
     }
+    step(&mut panel, 50);
 
     // The secure-element TRNGs, where the bootloader exposes them. Both are optional:
     // a missing callgate must not stop the pool from reaching its policy on a board
     // whose policy does not require them.
     feed_secure_elements(&mut pool);
+    step(&mut panel, 80);
 
     // A little startup timing jitter. Credited 1 bit per byte, so this cannot
     // meaningfully substitute for a TRNG -- it only ever tops up.
@@ -50,7 +66,9 @@ pub fn bring_up() -> BootReport {
         }
     }
 
+    step(&mut panel, 95);
     let entropy = pool.check().map(|()| pool.credited_bits());
+    step(&mut panel, 100);
 
     BootReport {
         hal: hal.map(|_| ()),

@@ -128,7 +128,7 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
 /// debounce on hardware without a debugger, and it exercises the display refresh path
 /// at the same time. It also feeds press timing into the entropy pool, which is where
 /// user-interaction jitter is supposed to come from.
-pub fn park(mut report: BootReport) -> ! {
+pub fn park(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     let status = BootStatus {
         magic: BOOT_STATUS_MAGIC,
         hal_ok: report.hal.is_ok() as u32,
@@ -143,8 +143,7 @@ pub fn park(mut report: BootReport) -> ! {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CATCARD_BOOT_STATUS), status);
     }
 
-    // SAFETY: bring-up is complete and nothing else has claimed the panel.
-    let mut panel = unsafe { display::init() };
+    let mut panel = panel;
     if let Some(p) = panel.as_mut() {
         render(&report, None, p);
     }

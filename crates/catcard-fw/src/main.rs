@@ -23,6 +23,7 @@ mod display;
 mod keypad;
 mod panic;
 mod selftest;
+mod splash;
 
 /// Board this image was built for, from `build.rs`.
 pub const BOARD_NAME: &str = env!("CATCARD_BOARD");
@@ -32,11 +33,19 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[entry]
 fn main() -> ! {
-    let report = boot::bring_up();
+    // SAFETY: this is the reset path; nothing else has touched these peripherals. The
+    // core comes up first because the panel's reset pulse is timed with the cycle
+    // counter.
+    let hal = unsafe { catcard_hal::init_core() };
+
+    // SAFETY: bring-up is single-threaded and nothing else has claimed the panel.
+    let mut panel = unsafe { display::init() };
+
+    let report = boot::bring_up(hal, panel.as_mut());
 
     // Nothing to display on yet, so hold the result where a debugger can read it and
     // stop. Once the panel driver lands this becomes the selftest screen.
-    selftest::park(report)
+    selftest::park(report, panel)
 }
 
 /// Where our own signed header sits in flash, for self-inspection.
