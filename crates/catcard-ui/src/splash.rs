@@ -135,6 +135,63 @@ mod tests {
         }
     }
 
+    /// The widest version we will ship: three numeric components, no pre-release or
+    /// build suffix, generous on each.
+    const LONGEST_VERSION: &str = "12.124.12445";
+
+    #[test]
+    fn the_art_leaves_room_for_the_wordmark_and_the_version() {
+        // Every position here is computed from CAT.width and CAT.height, so redrawing
+        // the cat re-flows the splash without touching this file — right up to the
+        // point where it squeezes the text column out, which is silent because
+        // draw_text clips at the panel edge. This is that point, stated as the two
+        // things that have to survive.
+        let col_x = CAT_X + CAT.width as usize + GUTTER;
+        let col_w = 128usize.saturating_sub(col_x);
+        assert!(
+            col_w >= width_of(&peep7x14::FONT, "CatCard"),
+            "cat is {} wide; only {col_w} left, and the wordmark needs {}",
+            CAT.width,
+            width_of(&peep7x14::FONT, "CatCard")
+        );
+        assert!(
+            col_w >= width_of(&misc4x6::FONT, LONGEST_VERSION),
+            "cat is {} wide; only {col_w} left, and {LONGEST_VERSION} needs {}",
+            CAT.width,
+            width_of(&misc4x6::FONT, LONGEST_VERSION)
+        );
+        // The bottom row is the progress bar's, so the art has the 63 above it.
+        assert!(
+            (CAT.height as usize) < 64,
+            "the art is {} tall and would reach the progress row",
+            CAT.height
+        );
+    }
+
+    #[test]
+    fn the_longest_version_is_drawn_in_full() {
+        // draw_text clips silently at the panel edge, so "it did not panic" is not the
+        // same as "it is all there". Count the version's ink against an unclipped
+        // render of the same string.
+        let mut fb = Mono128x64::new();
+        draw(&mut fb, LONGEST_VERSION, 0);
+        let with: usize = (0..64).map(|y| row_ink(&fb, y)).sum();
+
+        let mut blank = Mono128x64::new();
+        draw(&mut blank, "", 0);
+        let without: usize = (0..64).map(|y| row_ink(&blank, y)).sum();
+
+        let mut unclipped = Mono128x64::new();
+        draw_text(&mut unclipped, &misc4x6::FONT, 0, 0, LONGEST_VERSION);
+        let expected: usize = (0..64).map(|y| row_ink(&unclipped, y)).sum();
+
+        assert_eq!(
+            with - without,
+            expected,
+            "the version string is being clipped"
+        );
+    }
+
     #[test]
     fn the_splash_keeps_the_art_and_the_text_apart() {
         // The wordmark must not land on the cat: they overlap vertically by design, so

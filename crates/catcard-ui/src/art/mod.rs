@@ -52,8 +52,9 @@ mod tests {
         let c = &cat::CAT;
         assert_eq!(c.pixels.len(), c.height as usize * c.bytes_per_row as usize);
         assert_eq!(c.bytes_per_row, c.width.div_ceil(8));
-        // Fits the left of a 128x64 panel with room for text beside it.
-        assert!(c.width <= 48 && c.height <= 48, "{}x{}", c.width, c.height);
+        // Fits the panel at all. How much room it leaves for the wordmark and the
+        // version is the splash's constraint, and splash.rs tests it there.
+        assert!(c.width <= 128 && c.height <= 64, "{}x{}", c.width, c.height);
     }
 
     #[test]
