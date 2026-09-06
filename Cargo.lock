@@ -219,6 +219,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-pin"
+version = "0.0.1"
+dependencies = [
+ "catcard-bip39",
+ "catcard-callgate",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-settings"
 version = "0.0.1"
 dependencies = [

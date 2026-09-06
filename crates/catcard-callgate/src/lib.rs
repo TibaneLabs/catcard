@@ -235,6 +235,68 @@ impl Callgate {
         Ok(n)
     }
 
+    /// Callgate 16: the two anti-phishing words for a PIN prefix.
+    ///
+    /// The bootloader HMACs the prefix under a key only it holds and returns 32 bits,
+    /// which the caller renders as two words from a fixed list. Showing them between
+    /// the prefix and the suffix is what lets the user detect a substituted device:
+    /// an impostor cannot compute them, because it does not have the pairing secret.
+    ///
+    /// `buf` carries the prefix in and the four bytes out, so it must be at least
+    /// [`MAX_PIN_LEN`](pin::MAX_PIN_LEN) long. Returns the 32 bits.
+    ///
+    /// # Safety
+    /// See [`Self::call`].
+    pub unsafe fn anti_phishing_words(&self, prefix: &[u8]) -> Result<u32, Error> {
+        if prefix.len() > pin::MAX_PIN_LEN {
+            return Err(Error::Failed(err::RANGE_ERR));
+        }
+        // The gate reads the prefix from the buffer and writes its answer back into it,
+        // so the buffer is sized for the larger of the two rather than for the prefix.
+        let mut buf = [0u8; pin::MAX_PIN_LEN];
+        buf[..prefix.len()].copy_from_slice(prefix);
+        // SAFETY: `arg2` is the prefix length, as documented; the buffer is MAX_PIN_LEN.
+        unsafe { self.call(Method::AntiPhishingWords, &mut buf, prefix.len() as u32)? };
+        Ok(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
+    }
+
+    /// Callgate 3: wipe every byte of SRAM, then lock up or reboot.
+    ///
+    /// **This does not return, in any mode** — the bootloader clears the SRAM we are
+    /// running out of, so there is nothing to return to. That is the point: it can wipe
+    /// memory that code executing from SRAM could not.
+    ///
+    /// [`LogoutMode::LogoutAndReboot`] is how firmware asks for a clean restart, and is
+    /// the last step of staging an upgrade: the bootloader looks for a staged image
+    /// while it boots.
+    ///
+    /// # Safety
+    /// Everything in SRAM is gone afterwards. See [`Self::call_no_buf`].
+    pub unsafe fn logout(&self, mode: abi::LogoutMode) -> ! {
+        // SAFETY: this method takes no buffer.
+        let _ = unsafe { self.call_no_buf(Method::ShowLogout, mode as u32) };
+        // Only reached if the gate is not what we think it is. Nothing here is safe to
+        // carry on with — SRAM may be half-wiped — so stop rather than return.
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Callgate 2: wipe SRAM, show a screen, and reboot into DFU.
+    ///
+    /// **Does not return.** On an RDP=2 unit the bootloader refuses DFU and locks up
+    /// instead, which is the documented behaviour and not a fault.
+    ///
+    /// # Safety
+    /// Irreversible from the running firmware's point of view. See [`Self::call_no_buf`].
+    pub unsafe fn enter_dfu(&self, mode: abi::DfuMode) -> ! {
+        // SAFETY: this method takes no buffer.
+        let _ = unsafe { self.call_no_buf(Method::EnterDfu, mode as u32) };
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Callgate 18 with a [`PinAttempt`] buffer.
     ///
     /// # Safety

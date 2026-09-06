@@ -1,0 +1,18 @@
+[package]
+name = "catcard-pin"
+description = "PIN login state machine over bootloader callgate 18"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+catcard-bip39 = { workspace = true, default-features = false }
+catcard-callgate.workspace = true
+zeroize.workspace = true
