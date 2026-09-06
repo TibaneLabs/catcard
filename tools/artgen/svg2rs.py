@@ -8,7 +8,9 @@ ellipses, lines and one quadratic — which is why this needs no SVG library.
 A monochrome OLED cannot render the original's gradients, so the mapping is chosen for
 legibility at ~48 pixels rather than fidelity: the head and ears become **outlines**
 (a filled silhouette that size is a heavy blob and reads as nothing), while the eyes
-and nose stay **filled**, which is what makes it read as a face.
+and nose stay **filled**, which is what makes it read as a face. The whiskers are
+mirrored to point outward from the head, because inside an empty outline they read as
+stray dashes rather than as whiskers.
 """
 import math, re, sys
 
@@ -53,6 +55,19 @@ class Canvas:
         for y in range(int(cy - ry - 1), int(cy + ry + 2)):
             for x in range(int(cx - rx - 1), int(cx + rx + 2)):
                 if rx > 0 and ry > 0 and ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1.0:
+                    self.set(x, y)
+
+    def triangle_filled(self, pts):
+        # Point-in-triangle over the bounding box. At a few pixels a scanline fill would
+        # be more code for no gain, and this runs once at build time.
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        def side(a, b, px, py):
+            return (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0])
+        for y in range(int(math.floor(min(ys))), int(math.ceil(max(ys))) + 1):
+            for x in range(int(math.floor(min(xs))), int(math.ceil(max(xs))) + 1):
+                d = [side(pts[i], pts[(i + 1) % 3], x, y) for i in range(3)]
+                if all(v >= 0 for v in d) or all(v <= 0 for v in d):
                     self.set(x, y)
 
     def triangle_outline(self, pts):
@@ -130,12 +145,12 @@ def render(prim, size, view=64.0):
             if layer.px[y][x] and (x - hx) ** 2 + (y - hy) ** 2 > (hr - 0.5) ** 2:
                 c.set(x, y)
 
-    # Nose: the smallest triangle, filled by outlining then scanning — at 3 pixels the
-    # outline is the fill.
+    # Nose: the smallest triangle, **filled**. Outlined it is a hollow ring about four
+    # pixels across, which reads as a smudge rather than a triangle.
     nose = min(prim["tri"], key=lambda t: abs(
         (t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])
     ))
-    c.triangle_outline([(x * s, y * s) for x, y in nose])
+    c.triangle_filled([(x * s, y * s) for x, y in nose])
 
     # Eyes: filled, and what makes it read as a face rather than a circle.
     for cx, cy, rx, ry in prim["ellipse"]:
@@ -145,8 +160,29 @@ def render(prim, size, view=64.0):
     for p0, p1, p2 in prim["quad"]:
         c.quad(*[(x * s, y * s) for x, y in (p0, p1, p2)])
 
-    # Whiskers: only the ones outside the head outline would read; at this size they
-    # cross the outline and add noise, so they are dropped.
+    # Whiskers, mirrored to point *outward*. In the SVG they run inward across a filled
+    # face, which works there because the face is solid and they read as lighter strokes
+    # over it. Here the head is an outline and its interior is empty, so inward whiskers
+    # land next to the eyes and mouth and read as three stray dashes per cheek. Reflected
+    # about the head's edge they read immediately, and they are the reason a 48-pixel
+    # outline says "cat" rather than "face".
+    #
+    # Each is anchored where its line leaves the head rather than at the SVG endpoint:
+    # the SVG puts those endpoints on the circle only for the middle pair, and a whisker
+    # floating a pixel clear of the outline looks like dirt.
+    for x1, y1, x2, y2 in prim["line"]:
+        ax, ay = x1 * s, y1 * s
+        length = math.hypot(ax - x2 * s, ay - y2 * s)
+        if length == 0:
+            continue
+        dx, dy = (ax - x2 * s) / length, (ay - y2 * s) / length
+        # Where the ray from (ax, ay) along (dx, dy) exits the head circle.
+        fx, fy = ax - hx, ay - hy
+        b = fx * dx + fy * dy
+        disc = b * b - (fx * fx + fy * fy - hr * hr)
+        t0 = -b + math.sqrt(disc) if disc >= 0 else 0.0
+        c.line(ax + t0 * dx, ay + t0 * dy, ax + (t0 + length) * dx, ay + (t0 + length) * dy)
+
     return c
 
 
@@ -173,7 +209,8 @@ def main(svg_path, size, out_ident):
 //! Rasterised from `cat-logo.svg` by `tools/artgen/svg2rs.py` — regenerate rather than
 //! hand-editing. The original is gradient-filled, which a monochrome panel cannot show,
 //! so head and ears become outlines and only the eyes and nose stay solid: a filled
-//! silhouette at this size is a blob that reads as nothing.
+//! silhouette at this size is a blob that reads as nothing. The whiskers are mirrored
+//! outward from the head, where an empty outline lets them read.
 //!
 //! Row-major, most significant bit leftmost, {bpr} byte(s) per row.
 //!

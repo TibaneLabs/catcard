@@ -191,7 +191,12 @@ ccemu -q run --dfu out/catcard-mk4.dfu \
 ```
 
 CatCard's `.dfu` carries only the application, because on a device the bootloader is
-already in flash — hence `--bootloader`. Budget at least 2.1e9 instructions: a dev-key
+already in flash — hence `--bootloader`. **Match the bootloader to the board.** They are
+not interchangeable, and a Q1 loader given an mk4 image never reaches the firmware at
+all: the screen log stops at the loader's own splash and `bootstatus.py` reports the
+status block missing, which reads exactly like a firmware that failed to start.
+
+Budget at least 2.1e9 instructions: a dev-key
 image gets the bootloader's 25-second "Danger! Custom Firmware" countdown first, which
 is the documented behaviour for `pubkey_num = 0` and not a fault.
 

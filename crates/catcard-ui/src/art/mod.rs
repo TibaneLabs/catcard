@@ -74,6 +74,74 @@ mod tests {
     }
 
     #[test]
+    fn the_nose_is_a_triangle() {
+        // Reported from a real screen: outlined, a four-pixel nose is a hollow ring that
+        // reads as a smudge. It has to be solid and it has to widen downward.
+        let c = &cat::CAT;
+        let cx = c.width as usize / 2;
+        // Width of the horizontal run of ink through the centre column on row `y`.
+        let run = |y: usize| {
+            if !c.pixel(cx, y) {
+                return 0;
+            }
+            let mut a = cx;
+            let mut b = cx;
+            while a > 0 && c.pixel(a - 1, y) {
+                a -= 1;
+            }
+            while b + 1 < c.width as usize && c.pixel(b + 1, y) {
+                b += 1;
+            }
+            b - a + 1
+        };
+
+        // Look for a band of rows down the middle that gets steadily wider: an apex at
+        // the top over a base at least four across.
+        let mut found = false;
+        let mut y = 0;
+        while y < c.height as usize {
+            if run(y) == 0 {
+                y += 1;
+                continue;
+            }
+            let start = y;
+            while y < c.height as usize && run(y) > 0 {
+                y += 1;
+            }
+            let widths: Vec<usize> = (start..y).map(run).collect();
+            if widths.len() >= 3
+                && widths.windows(2).all(|w| w[1] >= w[0])
+                && widths[0] <= 2
+                && *widths.last().unwrap() >= 4
+            {
+                found = true;
+            }
+        }
+        assert!(found, "no filled triangle on the centre line");
+    }
+
+    #[test]
+    fn it_has_three_whiskers_a_side() {
+        // Also reported from a screen: they were being dropped. They live outside the
+        // head, so the outer columns are theirs alone — three separated bands each side.
+        let c = &cat::CAT;
+        let bands = |xs: core::ops::Range<usize>| {
+            let mut n = 0;
+            let mut prev = false;
+            for y in 0..c.height as usize {
+                let on = xs.clone().any(|x| c.pixel(x, y));
+                if on && !prev {
+                    n += 1;
+                }
+                prev = on;
+            }
+            n
+        };
+        assert_eq!(bands(0..5), 3, "left whiskers");
+        assert_eq!(bands(c.width as usize - 5..c.width as usize), 3, "right");
+    }
+
+    #[test]
     fn padding_bits_are_clear() {
         let c = &cat::CAT;
         let pad = c.bytes_per_row as usize * 8 - c.width as usize;

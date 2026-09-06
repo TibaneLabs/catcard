@@ -72,10 +72,13 @@ emu board=board emulator="../coldcard-emu/target/release/ccemu" bootloader="" st
     set -euo pipefail
     bl="{{bootloader}}"
     if [ -z "$bl" ]; then
-        bl=$(ls -1 ../coldcard-emu/*factory*.dfu 2>/dev/null | tail -1 || true)
+        # Newest factory image *for this board*. Matching on the board matters: the
+        # loaders are not interchangeable, and a Q1 loader handed an mk4 image simply
+        # never reaches the firmware, which looks like a firmware fault.
+        bl=$(ls -1 ../coldcard-emu/*-{{board}}-*factory*.dfu 2>/dev/null | tail -1 || true)
     fi
     if [ -z "$bl" ]; then
-        echo "no bootloader image: pass bootloader=<a factory .dfu>" >&2; exit 1
+        echo "no {{board}} bootloader: pass bootloader=<a {{board}} factory .dfu>" >&2; exit 1
     fi
     echo "bootloader: $bl"
     mkdir -p out
