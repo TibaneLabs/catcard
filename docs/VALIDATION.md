@@ -55,8 +55,10 @@ The selftest screen reports it directly, and so does `CATCARD_BOOT_STATUS`.
 | `DWT` | the cycle counter is not running; timing entropy contributes nothing |
 | `RNG` | the pool did not reach its policy — see below |
 
-**Expected:** `RNG ok` with **256 bits** on mk3, and 256 on mk4/Q as well (the SE
-sources add more, but the counter saturates at the policy).
+**Expected:** `RNG ok` with **256 bits** on mk3 (the STM32 TRNG alone, 64 bytes credited
+at 4 bits each) and **832** on mk4/Q — measured under the emulator, and it decomposes
+exactly: STM32 256 + SE1 256 + SE2 256 + keypress timing 64. A count below 832 on mk4
+means a secure-element source did not contribute; 256 exactly means neither did.
 
 **If `RNG FAIL` on mk4/Q:** most likely the callgate. mk4's policy demands two distinct
 hardware TRNGs, and the second comes from the secure elements via callgate 26. Check

@@ -29,7 +29,11 @@ Ordered by dependency, not by ambition. Each milestone ends with something testa
 
 ## M1 — Prove it runs
 
-The image builds and is signed, but nothing has watched it execute.
+Largely done under `../coldcard-emu`, against the real Mk4 bootloader binary: the image
+is accepted, the callgate works, the entropy pool reaches 832 bits from all three TRNGs,
+the panel initialises and the selftest screen renders. See
+[`VALIDATION.md`](VALIDATION.md) — including why emulator agreement is not the same as
+hardware confirmation.
 
 - [ ] Install a dev-signed image on real hardware ([`FLASHING.md`](FLASHING.md))
 - [ ] Confirm `CATCARD_BOOT_STATUS` shows the TRNG alive and the entropy policy met
