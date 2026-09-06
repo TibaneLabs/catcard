@@ -29,6 +29,24 @@ impl Bitmap {
 mod tests {
     use super::*;
 
+    /// The four orthogonal neighbours of `(x, y)` that are inside a `w` by `h` grid.
+    fn neighbours_of(x: usize, y: usize, w: usize, h: usize) -> Vec<(usize, usize)> {
+        let mut v = Vec::with_capacity(4);
+        if x > 0 {
+            v.push((x - 1, y));
+        }
+        if y > 0 {
+            v.push((x, y - 1));
+        }
+        if x + 1 < w {
+            v.push((x + 1, y));
+        }
+        if y + 1 < h {
+            v.push((x, y + 1));
+        }
+        v
+    }
+
     #[test]
     fn the_cat_is_the_size_it_says() {
         let c = &cat::CAT;
@@ -39,108 +57,93 @@ mod tests {
     }
 
     #[test]
-    fn it_is_cropped_to_its_ink() {
-        // The generator crops, so every edge row and column must carry something —
-        // otherwise the art is padded and the layout maths silently drifts.
+    fn the_cat_is_lit_on_a_dark_panel() {
+        // Polarity. An inverted re-emit still passes every size and format check, and
+        // the failure is not subtle: on an OLED it lights all 1824 pixels and shows a
+        // black cat in a white box. A silhouette does not reach its own corners, so
+        // clear corners are a cheap way to say which way round it is.
         let c = &cat::CAT;
-        let row_has = |y: usize| (0..c.width as usize).any(|x| c.pixel(x, y));
-        let col_has = |x: usize| (0..c.height as usize).any(|y| c.pixel(x, y));
-        assert!(row_has(0) && row_has(c.height as usize - 1));
-        assert!(col_has(0) && col_has(c.width as usize - 1));
-    }
-
-    #[test]
-    fn it_has_two_eyes() {
-        // A shape check that survives the art being redrawn: scan the upper-middle band
-        // for two separated runs of ink well inside the head outline. If the eyes ever
-        // merge or vanish, it stops reading as a face and this catches it.
-        let c = &cat::CAT;
-        let y = c.height as usize * 13 / 25;
-        let mut runs = 0;
-        let mut prev = false;
-        for x in 3..c.width as usize - 3 {
-            let on = c.pixel(x, y);
-            if on && !prev {
-                runs += 1;
-            }
-            prev = on;
+        let (w, h) = (c.width as usize - 1, c.height as usize - 1);
+        for (x, y) in [(0, 0), (w, 0), (0, h), (w, h)] {
+            assert!(
+                !c.pixel(x, y),
+                "ink in the corner at ({x}, {y}) — inverted?"
+            );
         }
-        // Two eyes plus the head outline on either side, which the 3-pixel inset skips
-        // for a circle but not always — allow the outline to contribute.
-        assert!(
-            (2..=4).contains(&runs),
-            "expected two eyes, found {runs} runs"
-        );
+        let lit = (0..c.height as usize)
+            .flat_map(|y| (0..c.width as usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| c.pixel(x, y))
+            .count();
+        let total = c.width as usize * c.height as usize;
+        assert!(lit * 4 < total * 3, "{lit} of {total} lit — inverted?");
     }
 
     #[test]
-    fn the_nose_is_a_triangle() {
-        // Reported from a real screen: outlined, a four-pixel nose is a hollow ring that
-        // reads as a smudge. It has to be solid and it has to widen downward.
+    fn the_face_is_cut_out_of_the_silhouette() {
+        // The cat is a filled shape and its features are holes in it: two eyes, two ear
+        // interiors, four whisker grooves, a nose and a mouth. Ten enclosed regions.
+        //
+        // Both defects reported off a real screen were a missing feature, so this counts
+        // them. It works on holes rather than on strokes because that is what they are —
+        // a test looking for ink where the nose is would pass on a solid blob.
         let c = &cat::CAT;
-        let cx = c.width as usize / 2;
-        // Width of the horizontal run of ink through the centre column on row `y`.
-        let run = |y: usize| {
-            if !c.pixel(cx, y) {
-                return 0;
-            }
-            let mut a = cx;
-            let mut b = cx;
-            while a > 0 && c.pixel(a - 1, y) {
-                a -= 1;
-            }
-            while b + 1 < c.width as usize && c.pixel(b + 1, y) {
-                b += 1;
-            }
-            b - a + 1
+        let (w, h) = (c.width as usize, c.height as usize);
+
+        // Flood the background inward from the border; whatever dark is left is enclosed.
+        let mut outside = vec![false; w * h];
+        let mut stack: Vec<(usize, usize)> = (0..w)
+            .flat_map(|x| [(x, 0), (x, h - 1)])
+            .chain((0..h).flat_map(|y| [(0, y), (w - 1, y)]))
+            .filter(|&(x, y)| !c.pixel(x, y))
+            .collect();
+        for &(x, y) in &stack {
+            outside[y * w + x] = true;
+        }
+        let neighbours = |x: usize, y: usize| {
+            let mut v = neighbours_of(x, y, w, h);
+            v.retain(|&(nx, ny)| !c.pixel(nx, ny));
+            v
         };
-
-        // Look for a band of rows down the middle that gets **strictly** wider: an apex
-        // at the top over a base at least four across. Strictly, because a run of equal
-        // widths at the tip is a stem growing out of the nose rather than a point — the
-        // shape a naive fill produces when the apex lands exactly on a pixel row.
-        let mut found = false;
-        let mut y = 0;
-        while y < c.height as usize {
-            if run(y) == 0 {
-                y += 1;
-                continue;
-            }
-            let start = y;
-            while y < c.height as usize && run(y) > 0 {
-                y += 1;
-            }
-            let widths: Vec<usize> = (start..y).map(run).collect();
-            if widths.len() >= 3
-                && widths.windows(2).all(|w| w[1] > w[0])
-                && widths[0] == 1
-                && *widths.last().unwrap() >= 4
-            {
-                found = true;
-            }
-        }
-        assert!(found, "no filled triangle on the centre line");
-    }
-
-    #[test]
-    fn it_has_three_whiskers_a_side() {
-        // Also reported from a screen: they were being dropped. They live outside the
-        // head, so the outer columns are theirs alone — three separated bands each side.
-        let c = &cat::CAT;
-        let bands = |xs: core::ops::Range<usize>| {
-            let mut n = 0;
-            let mut prev = false;
-            for y in 0..c.height as usize {
-                let on = xs.clone().any(|x| c.pixel(x, y));
-                if on && !prev {
-                    n += 1;
+        while let Some((x, y)) = stack.pop() {
+            for (nx, ny) in neighbours(x, y) {
+                if !outside[ny * w + nx] {
+                    outside[ny * w + nx] = true;
+                    stack.push((nx, ny));
                 }
-                prev = on;
             }
-            n
-        };
-        assert_eq!(bands(0..5), 3, "left whiskers");
-        assert_eq!(bands(c.width as usize - 5..c.width as usize), 3, "right");
+        }
+
+        let mut seen = outside.clone();
+        let mut holes = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if c.pixel(x, y) || seen[y * w + x] {
+                    continue;
+                }
+                seen[y * w + x] = true;
+                let (mut area, mut stack) = (0usize, vec![(x, y)]);
+                while let Some((a, b)) = stack.pop() {
+                    area += 1;
+                    for (nx, ny) in neighbours(a, b) {
+                        if !seen[ny * w + nx] {
+                            seen[ny * w + nx] = true;
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+                holes.push(area);
+            }
+        }
+
+        holes.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(holes.len(), 10, "expected ten cut-outs, found {holes:?}");
+        // The eyes are the largest pair, and equal to one another. If one fills in or
+        // gets nicked, the art is still a cat-shaped blob and only the sizes say so.
+        assert_eq!(holes[0], holes[1], "the eyes differ in size: {holes:?}");
+        assert!(
+            holes[1] > holes[2],
+            "the eyes are not the largest pair: {holes:?}"
+        );
     }
 
     #[test]
