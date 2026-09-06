@@ -54,7 +54,7 @@ misc-fixed set — contributed by Janne V. Kujala, maintained by Markus Kuhn.
 ## Cat logo
 
 `crates/catcard-ui/src/art/cat.rs` is the pixels of
-`crates/catcard-ui/src/art/cat-48x38.png`, a Karpeles Lab asset drawn at that size for
+`crates/catcard-ui/src/art/cat-60x60.png`, a Karpeles Lab asset drawn at that size for
 this panel. Not third-party; listed so the provenance of every asset is in one place.
 
 ---

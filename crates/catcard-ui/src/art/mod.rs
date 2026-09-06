@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn the_face_is_cut_out_of_the_silhouette() {
         // The cat is a filled shape and its features are holes in it: two eyes, two ear
-        // interiors, four whisker grooves, a nose and a mouth. Ten enclosed regions.
+        // interiors, six whisker grooves, a nose and a mouth. Twelve enclosed regions.
         //
         // Both defects reported off a real screen were a missing feature, so this counts
         // them. It works on holes rather than on strokes because that is what they are —
@@ -114,17 +114,21 @@ mod tests {
             }
         }
 
+        // (area, leftmost column, rightmost column) of each enclosed region.
         let mut seen = outside.clone();
-        let mut holes = Vec::new();
+        let mut holes: Vec<(usize, usize, usize)> = Vec::new();
         for y in 0..h {
             for x in 0..w {
                 if c.pixel(x, y) || seen[y * w + x] {
                     continue;
                 }
                 seen[y * w + x] = true;
-                let (mut area, mut stack) = (0usize, vec![(x, y)]);
+                let (mut area, mut lo, mut hi) = (0usize, x, x);
+                let mut stack = vec![(x, y)];
                 while let Some((a, b)) = stack.pop() {
                     area += 1;
+                    lo = lo.min(a);
+                    hi = hi.max(a);
                     for (nx, ny) in neighbours(a, b) {
                         if !seen[ny * w + nx] {
                             seen[ny * w + nx] = true;
@@ -132,18 +136,48 @@ mod tests {
                         }
                     }
                 }
-                holes.push(area);
+                holes.push((area, lo, hi));
             }
         }
 
-        holes.sort_unstable_by(|a, b| b.cmp(a));
-        assert_eq!(holes.len(), 10, "expected ten cut-outs, found {holes:?}");
+        let areas = || {
+            let mut v: Vec<usize> = holes.iter().map(|&(a, ..)| a).collect();
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            v
+        };
+        assert_eq!(
+            holes.len(),
+            12,
+            "expected twelve cut-outs, found {:?}",
+            areas()
+        );
+
         // The eyes are the largest pair, and equal to one another. If one fills in or
         // gets nicked, the art is still a cat-shaped blob and only the sizes say so.
-        assert_eq!(holes[0], holes[1], "the eyes differ in size: {holes:?}");
+        let sorted = areas();
+        assert_eq!(sorted[0], sorted[1], "the eyes differ in size: {sorted:?}");
         assert!(
-            holes[1] > holes[2],
-            "the eyes are not the largest pair: {holes:?}"
+            sorted[1] > sorted[2],
+            "the eyes are not the largest pair: {sorted:?}"
+        );
+
+        // Everything but the nose and the mouth comes in a left/right pair, so the two
+        // sides carry the same number of cut-outs. That is what notices a whisker lost
+        // from one cheek, which counting alone would let through if a stray hole opened
+        // somewhere else. The two are not compared by area: the whiskers are drawn to
+        // sit on the silhouette and its edge is not symmetric, so their areas differ by
+        // a pixel or two.
+        let mid = w / 2;
+        let left = holes.iter().filter(|&&(_, _, hi)| hi < mid).count();
+        let right = holes.iter().filter(|&&(_, lo, _)| lo > mid).count();
+        let centred = holes.len() - left - right;
+        assert_eq!(
+            left, right,
+            "{left} cut-outs on the left, {right} on the right"
+        );
+        assert_eq!(
+            centred, 2,
+            "expected the nose and the mouth astride the midline"
         );
     }
 
