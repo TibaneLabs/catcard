@@ -58,6 +58,32 @@ repro board=board:
     just image {{board}} && cp out/catcard-{{board}}.bin /tmp/repro-b.bin
     cmp /tmp/repro-a.bin /tmp/repro-b.bin && echo "reproducible"
 
+# Boot the firmware in ../coldcard-emu against a real bootloader.
+#
+# The emulator is consumed as a binary only — never its source or docs, which quote
+# stock firmware inline. Agreement between it and CatCard is evidence of consistency,
+# not correctness: both are ours and both derive from ../hw-reference. See
+# docs/VALIDATION.md.
+#
+# `bootloader` must point at a factory .dfu, which carries the bootloader element that
+# a firmware-only image does not. Budget past the 25-second dev-key warning.
+emu board=board emulator="../coldcard-emu/target/release/ccemu" bootloader="" steps="2100000000": (image board)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bl="{{bootloader}}"
+    if [ -z "$bl" ]; then
+        bl=$(ls -1 ../coldcard-emu/*factory*.dfu 2>/dev/null | tail -1 || true)
+    fi
+    if [ -z "$bl" ]; then
+        echo "no bootloader image: pass bootloader=<a factory .dfu>" >&2; exit 1
+    fi
+    echo "bootloader: $bl"
+    mkdir -p out
+    {{emulator}} -q run --dfu out/catcard-{{board}}.dfu --bootloader "$bl" \
+        --board {{board}} --run-for {{steps}} \
+        --screen-log out/emu-{{board}}-screens.txt --dump-ram out/emu-{{board}}-ram.bin
+    python3 tools/emu/bootstatus.py out/emu-{{board}}-ram.bin
+
 # Board table, including which facts are still unknown.
 boards:
     cargo run -q -p catcard-image -- boards
