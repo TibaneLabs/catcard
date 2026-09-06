@@ -63,9 +63,16 @@ const APB2ENR_SPI1: u32 = 1 << 12;
 const APB1ENR1_SPI2: u32 = 1 << 14;
 const APB1ENR1_SPI3: u32 = 1 << 15;
 
-/// Polls before declaring a transfer stalled. Generous: even at the slowest prescaler a
-/// byte completes in a few thousand core cycles.
-const POLL_LIMIT: u32 = 200_000;
+/// Polls before declaring a transfer stalled.
+///
+/// Sized against the worst case rather than picked round: at the slowest prescaler
+/// (/256) from a 4 MHz PCLK, one byte takes about 512 us — a couple of thousand core
+/// cycles, so a few hundred polls. 20,000 is two orders of magnitude of headroom.
+///
+/// It used to be 200,000, which is ~50 ms per byte on a slow core: a stalled 1 KB
+/// framebuffer flush would have spun for a minute before reporting anything. A bounded
+/// wait that takes a minute to give up is barely better than an unbounded one.
+const POLL_LIMIT: u32 = 20_000;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -234,12 +241,42 @@ impl Spi {
         Ok(got)
     }
 
-    /// Write a buffer, discarding what is received.
+    /// Write a buffer over a full-duplex bus, discarding what is received.
+    ///
+    /// Use this only where MISO is actually routed. For a write-only bus see
+    /// [`Self::write_only`].
     pub fn write(&mut self, data: &[u8]) -> Result<(), Error> {
         for &b in data {
             self.transfer_byte(b)?;
         }
         Ok(())
+    }
+
+    /// Write a buffer without reading the receive path.
+    ///
+    /// The display buses have no MISO pin at all (`SpiBus::miso` is `None`), so there is
+    /// nothing meaningful to receive and no reason to make progress depend on `RXNE`.
+    /// Waiting for a byte back on a bus with no return line couples the driver to
+    /// behaviour it does not need.
+    ///
+    /// Faster, too: one `TXE` wait per byte instead of a `TXE`/`RXNE` round trip, which
+    /// matters when a framebuffer flush is 1024 bytes.
+    ///
+    /// `OVR` will latch, since received bytes are never read. That is harmless here —
+    /// it only reports that a byte was discarded, which is the intent — and it is why
+    /// this path does not check it.
+    pub fn write_only(&mut self, data: &[u8]) -> Result<(), Error> {
+        for &b in data {
+            self.wait(SR_TXE, SR_TXE)?;
+            // SAFETY: 8-bit store to DR. A wider store would queue two frames — see
+            // the module docs.
+            unsafe {
+                core::ptr::write_volatile((self.base + DR) as *mut u8, b);
+            }
+        }
+        // The caller drops chip-select after this, so the shift register has to drain
+        // first or the last byte is truncated on the wire.
+        self.flush()
     }
 
     /// Read `out.len()` bytes, clocking out `0xFF`.

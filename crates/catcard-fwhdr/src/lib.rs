@@ -31,6 +31,13 @@ pub const SIG_END: usize = HEADER_OFFSET + HEADER_LEN; // 0x4000
 /// `firmware_length` must be a multiple of this. Source: firmware-signing.md §1 [C]
 pub const LENGTH_ALIGN: u32 = 512;
 
+/// Smallest `firmware_length` the bootloader accepts, on every generation.
+///
+/// Out-of-range images are rejected *before* any signature work, so a too-small image
+/// fails with no diagnosis about its contents. A minimal firmware has to be padded up to
+/// this whether or not it uses the space. Source: firmware-signing.md §1 [C]
+pub const MIN_FIRMWARE_LENGTH: u32 = 256 * 1024;
+
 /// Field offsets within the header. Source: firmware-signing.md §1 [C]
 mod off {
     pub const MAGIC: usize = 0;
@@ -40,7 +47,8 @@ mod off {
     pub const FIRMWARE_LENGTH: usize = 24;
     pub const INSTALL_FLAGS: usize = 28;
     pub const HW_COMPAT: usize = 32;
-    pub const FUTURE: usize = 36;
+    pub const BEST_TS: usize = 36;
+    pub const FUTURE: usize = 44;
     pub const SIGNATURE: usize = 64;
 }
 
@@ -51,21 +59,30 @@ pub mod hw_compat {
     pub const MK_2: u32 = 0x02;
     pub const MK_3: u32 = 0x04;
     pub const MK_4: u32 = 0x08;
-    pub const MK_5: u32 = 0x10;
+    /// **Q1**, not mk5. An earlier revision of the reference gave `0x10` as `MK_5_OK`;
+    /// it is `MK_Q1_OK`. A build that set `0x10` meaning "mk5" was claiming Q1
+    /// compatibility.
+    pub const MK_Q1: u32 = 0x10;
+    pub const MK_5: u32 = 0x20;
     /// Accepted on anything.
     pub const ANY: u32 = 0x00;
+
+    /// Every bit the reference defines.
+    pub const DEFINED: u32 = MK_1 | MK_2 | MK_3 | MK_4 | MK_Q1 | MK_5;
 }
 
-/// `install_flags` bits.
-///
-/// Only one bit is documented in the reference; the rest are unknown and must be left
-/// clear. Source: firmware-signing.md §1, install-and-usb-transport.md §2 [C] for
-/// HIGH_WATER; remaining bits `[?]`.
+/// `install_flags` bits. No others are defined.
+/// Source: firmware-signing.md §1 [C]
 pub mod install_flags {
     /// Boot records this image's timestamp as the new anti-downgrade high-water mark.
     /// Setting this makes the install **irreversible**: older images stop being
     /// accepted by the bootloader from then on.
     pub const HIGH_WATER: u32 = 0x01;
+    /// The header's `best_ts` carries a recommended minimum timestamp.
+    pub const BEST_TS: u32 = 0x02;
+
+    /// Every bit the reference defines. Anything else must be left clear.
+    pub const DEFINED: u32 = HIGH_WATER | BEST_TS;
 }
 
 /// The number of signing keys compiled into the bootloader. Slot 0 is the published
@@ -101,6 +118,13 @@ pub enum Error {
     },
     /// Timestamp is not valid packed BCD.
     BadTimestamp,
+    /// `firmware_length` is outside the bounds the bootloader enforces. Rejected before
+    /// any signature work, so a too-small image fails with no clue about its contents.
+    LengthOutOfBounds {
+        found: u32,
+        min: u32,
+        max: Option<u32>,
+    },
 }
 
 #[cfg(feature = "std")]
@@ -132,6 +156,13 @@ impl std::fmt::Display for Error {
                 )
             }
             Error::BadTimestamp => write!(f, "timestamp is not valid BCD"),
+            Error::LengthOutOfBounds { found, min, max } => match max {
+                Some(max) => write!(
+                    f,
+                    "firmware_length {found} is outside the bootloader's bounds [{min}, {max}]"
+                ),
+                None => write!(f, "firmware_length {found} is below the minimum {min}"),
+            },
         }
     }
 }
@@ -153,7 +184,10 @@ pub struct FirmwareHeader {
     pub firmware_length: u32,
     pub install_flags: u32,
     pub hw_compat: u32,
-    pub future: [u8; 28],
+    /// Recommended minimum timestamp for downgrade protection. Meaningful only when
+    /// `install_flags & BEST_TS` is set. Source: firmware-signing.md §1 [C]
+    pub best_ts: [u8; 8],
+    pub future: [u8; 20],
     /// secp256k1 ECDSA over the double-SHA256 digest, raw `r || s`.
     pub signature: [u8; 64],
 }
@@ -168,7 +202,8 @@ impl Default for FirmwareHeader {
             firmware_length: 0,
             install_flags: 0,
             hw_compat: hw_compat::ANY,
-            future: [0; 28],
+            best_ts: [0; 8],
+            future: [0; 20],
             signature: [0; 64],
         }
     }
@@ -185,8 +220,10 @@ impl FirmwareHeader {
         timestamp.copy_from_slice(&b[off::TIMESTAMP..off::TIMESTAMP + 8]);
         let mut version = [0u8; 8];
         version.copy_from_slice(&b[off::VERSION..off::VERSION + 8]);
-        let mut future = [0u8; 28];
-        future.copy_from_slice(&b[off::FUTURE..off::FUTURE + 28]);
+        let mut best_ts = [0u8; 8];
+        best_ts.copy_from_slice(&b[off::BEST_TS..off::BEST_TS + 8]);
+        let mut future = [0u8; 20];
+        future.copy_from_slice(&b[off::FUTURE..off::FUTURE + 20]);
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&b[off::SIGNATURE..off::SIGNATURE + 64]);
 
@@ -198,6 +235,7 @@ impl FirmwareHeader {
             firmware_length: rd_u32(b, off::FIRMWARE_LENGTH),
             install_flags: rd_u32(b, off::INSTALL_FLAGS),
             hw_compat: rd_u32(b, off::HW_COMPAT),
+            best_ts,
             future,
             signature,
         }
@@ -214,7 +252,8 @@ impl FirmwareHeader {
         b[off::INSTALL_FLAGS..off::INSTALL_FLAGS + 4]
             .copy_from_slice(&self.install_flags.to_le_bytes());
         b[off::HW_COMPAT..off::HW_COMPAT + 4].copy_from_slice(&self.hw_compat.to_le_bytes());
-        b[off::FUTURE..off::FUTURE + 28].copy_from_slice(&self.future);
+        b[off::BEST_TS..off::BEST_TS + 8].copy_from_slice(&self.best_ts);
+        b[off::FUTURE..off::FUTURE + 20].copy_from_slice(&self.future);
         b[off::SIGNATURE..off::SIGNATURE + 64].copy_from_slice(&self.signature);
         b
     }
@@ -254,8 +293,31 @@ impl FirmwareHeader {
                 image_len,
             });
         }
+        if self.firmware_length < MIN_FIRMWARE_LENGTH {
+            return Err(Error::LengthOutOfBounds {
+                found: self.firmware_length,
+                min: MIN_FIRMWARE_LENGTH,
+                max: None,
+            });
+        }
         if !is_bcd(&self.timestamp) {
             return Err(Error::BadTimestamp);
+        }
+        Ok(())
+    }
+
+    /// The upper length bound, which is per-board and so cannot be checked by
+    /// [`Self::validate`] alone.
+    ///
+    /// `max_length` is the board's firmware region: `0x0F8000` on mk3, `0x1E0000` on
+    /// mk4-class. Source: firmware-signing.md §1 [C]
+    pub fn check_max_length(&self, max_length: u32) -> Result<(), Error> {
+        if self.firmware_length > max_length {
+            return Err(Error::LengthOutOfBounds {
+                found: self.firmware_length,
+                min: MIN_FIRMWARE_LENGTH,
+                max: Some(max_length),
+            });
         }
         Ok(())
     }
@@ -343,6 +405,13 @@ mod tests {
         vec![0u8; len]
     }
 
+    /// The smallest image the bootloader would actually accept. Tests that call
+    /// `validate` have to use a realistic size, or they assert about images no device
+    /// would take.
+    fn min_len() -> usize {
+        MIN_FIRMWARE_LENGTH as usize
+    }
+
     #[test]
     fn offsets_match_the_spec() {
         assert_eq!(HEADER_OFFSET, 0x3F80);
@@ -358,10 +427,11 @@ mod tests {
             timestamp: pack_timestamp(2026, 8, 2, 14, 30, 5),
             version: *b"0.0.1\0\0\0",
             pubkey_num: 0,
-            firmware_length: 0x8000,
+            firmware_length: MIN_FIRMWARE_LENGTH,
             install_flags: 0,
             hw_compat: hw_compat::MK_3,
-            future: [0; 28],
+            best_ts: [0; 8],
+            future: [0; 20],
             signature: [0xab; 64],
         };
         assert_eq!(FirmwareHeader::from_bytes(&h.to_bytes()), h);
@@ -422,7 +492,7 @@ mod tests {
     fn digest_covers_every_other_header_field() {
         let mut img = blank_image(0x8000);
         let h = FirmwareHeader {
-            firmware_length: 0x8000,
+            firmware_length: MIN_FIRMWARE_LENGTH,
             ..Default::default()
         };
         place_header(&mut img, &h).unwrap();
@@ -459,7 +529,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_the_bootloaders_reasons() {
-        let len = 0x8000usize;
+        let len = min_len();
         let ok = FirmwareHeader {
             firmware_length: len as u32,
             timestamp: pack_timestamp(2026, 8, 2, 0, 0, 0),
@@ -476,9 +546,9 @@ mod tests {
         assert!(matches!(h.validate(len), Err(Error::BadPubkeyNum { .. })));
 
         let mut h = ok.clone();
-        h.firmware_length = 0x8001;
+        h.firmware_length = MIN_FIRMWARE_LENGTH + 1;
         assert!(matches!(
-            h.validate(0x8001),
+            h.validate(min_len() + 1),
             Err(Error::UnalignedLength { .. })
         ));
 
@@ -502,6 +572,86 @@ mod tests {
             FirmwareHeader::from_image(&blank_image(0x100)),
             Err(Error::ImageTooShort { .. })
         ));
+    }
+
+    #[test]
+    fn a_too_small_image_is_rejected() {
+        // Found by booting a real CatCard image against a real bootloader: a 62 KB
+        // image was refused before any signature work, with no diagnosis about its
+        // contents. The bootloader enforces a 256 KB floor on every generation.
+        let h = FirmwareHeader {
+            firmware_length: 0x_f600,
+            timestamp: pack_timestamp(2026, 8, 2, 0, 0, 0),
+            ..Default::default()
+        };
+        assert_eq!(
+            h.validate(0xf600),
+            Err(Error::LengthOutOfBounds {
+                found: 0xf600,
+                min: MIN_FIRMWARE_LENGTH,
+                max: None
+            })
+        );
+        assert_eq!(MIN_FIRMWARE_LENGTH, 256 * 1024);
+    }
+
+    #[test]
+    fn the_upper_bound_is_per_board() {
+        // 0x0F8000 on mk3, 0x1E0000 on mk4-class — which is each board's whole firmware
+        // region, so the board table already carries the right numbers.
+        let h = FirmwareHeader {
+            firmware_length: 0x10_0000,
+            ..Default::default()
+        };
+        assert!(h.check_max_length(0x1E_0000).is_ok(), "fits an mk4");
+        assert!(
+            matches!(
+                h.check_max_length(0x0F_8000),
+                Err(Error::LengthOutOfBounds { max: Some(_), .. })
+            ),
+            "should not fit an mk3"
+        );
+        for b in catcard_board::spec::ALL {
+            let expect = match b.mcu {
+                catcard_board::Mcu::Stm32L496 => 0x0F_8000,
+                catcard_board::Mcu::Stm32L4S5 => 0x1E_0000,
+            };
+            assert_eq!(b.memory.firmware_flash_len, expect, "{}", b.name);
+        }
+    }
+
+    #[test]
+    fn hw_compat_bit_0x10_is_q1_not_mk5() {
+        // An earlier revision of the reference gave 0x10 as MK_5_OK. It is MK_Q1_OK, so
+        // anything that set 0x10 meaning "mk5" was claiming Q1 compatibility.
+        assert_eq!(hw_compat::MK_Q1, 0x10);
+        assert_eq!(hw_compat::MK_5, 0x20);
+        assert_eq!(hw_compat::DEFINED, 0x3f);
+
+        let q1 = catcard_board::spec::Q1;
+        assert_eq!(q1.hw_compat_bit, hw_compat::MK_Q1);
+        assert_eq!(
+            q1.hw_compat_bit & hw_compat::MK_4,
+            0,
+            "Q1 must not claim mk4 compatibility"
+        );
+    }
+
+    #[test]
+    fn best_ts_occupies_its_own_field() {
+        // The reference previously showed one 28-byte `future`; the real struct splits
+        // it into best_ts[8] + future[20]. The signed bytes are the same, so a wrong
+        // reading is invisible until something writes best_ts.
+        let h = FirmwareHeader {
+            best_ts: pack_timestamp(2026, 1, 2, 3, 4, 5),
+            install_flags: install_flags::BEST_TS,
+            ..Default::default()
+        };
+        let b = h.to_bytes();
+        assert_eq!(&b[36..44], &h.best_ts, "best_ts is at offset 36");
+        assert_eq!(&b[44..64], &[0u8; 20], "future starts at 44");
+        assert_eq!(FirmwareHeader::from_bytes(&b), h);
+        assert_eq!(install_flags::DEFINED, 0x03);
     }
 
     #[test]

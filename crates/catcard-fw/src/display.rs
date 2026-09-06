@@ -93,10 +93,11 @@ impl PanelBus {
             gpio::write(self.dc, dc_high);
             gpio::write(self.cs, false);
         }
-        let r = self.spi.write(bytes);
-        // Drain before releasing chip-select: dropping CS while the shift register is
-        // busy truncates the last byte. Done even on error, so a failed transfer does
-        // not leave the panel selected.
+        // The panel has no MISO line, so nothing is received and progress must not
+        // depend on RXNE. `write_only` also drains the FIFO before returning.
+        let r = self.spi.write_only(bytes);
+        // Drain again even on the error path, so a failed transfer does not leave the
+        // panel selected with a byte still shifting.
         let flushed = self.spi.flush();
         // SAFETY: as above.
         unsafe {

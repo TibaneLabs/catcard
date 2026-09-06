@@ -170,6 +170,77 @@ applied and the SPI prescalers recomputed.
 
 ---
 
+## Testing against the emulator
+
+`../coldcard-emu` runs CatCard on an emulated STM32 with the **real Mk4 bootloader
+binary** taken from a factory `.dfu`. That is the closest thing to hardware available
+without hardware, and it already validates the things this document said needed a
+device.
+
+```sh
+cargo fw-mk4
+cargo run -p catcard-image -- build \
+    target/thumbv7em-none-eabihf/release/catcard-fw \
+    --board mk4 --version 0.0.1 --dfu out/catcard-mk4.dfu
+
+ccemu -q run --dfu out/catcard-mk4.dfu \
+    --bootloader <a factory .dfu> --board mk4 \
+    --run-for 2500000000 --screen-log screens.txt --dump-ram ram.bin
+```
+
+CatCard's `.dfu` carries only the application, because on a device the bootloader is
+already in flash — hence `--bootloader`. Budget at least 2.1e9 instructions: a dev-key
+image gets the bootloader's 25-second "Danger! Custom Firmware" countdown first, which
+is the documented behaviour for `pubkey_num = 0` and not a fault.
+
+Read the result out of `CATCARD_BOOT_STATUS` (magic `0xCA7CA2D0`) in the RAM dump rather
+than off the screen — the framebuffer render is legible but it is pixel art, and reading
+a number out of it is guesswork.
+
+### The limit, which matters more than the capability
+
+**The emulator and CatCard are both ours, and both derived from `../hw-reference/`.**
+Agreement between them is evidence of *consistency*, not of correctness. If the
+reference is wrong, both will be wrong together and every test will pass — which is the
+same failure that made 158 emulator tests unable to catch a slot-decode bug they had
+encoded themselves.
+
+So the rules are:
+
+- **The emulator is consumed as a binary.** CatCard does not read its source or its
+  docs — `coldcard-emu/docs/` quotes stock firmware inline, which `CLEANROOM.md`
+  forbids reaching this project by any route.
+- **Disagreements are resolved against `hw-reference` and the chip datasheets**, never
+  by reading the emulator to find out what it expects. If neither settles it, it goes to
+  `HARDWARE-OPEN-ITEMS.md` and waits for a device.
+- **Anything the reference marks `[I]` or `[?]` is not settled by an emulator run.**
+  Real hardware remains the arbiter for the display pins, the SPI-NOR pins, and the MSI
+  range.
+
+What it *does* settle: the image format against a real bootloader, the callgate ABI
+against a real callgate, regressions, and every place CatCard diverges from the spec
+both were built from.
+
+### What the first run found
+
+1. **`firmware_length` has a 256 KB floor.** `firmware-signing.md §1` documents it;
+   CatCard did not implement it, so a 62 KB image was refused before any signature work,
+   with no diagnosis about its contents. `catcard-image` now pads to the minimum and
+   `validate` enforces it.
+2. **The header spec had been revised** since CatCard implemented against it: `best_ts`
+   splits out of `future`, `install_flags` has a second defined bit, and `0x10` in
+   `hw_compat` is **Q1, not mk5** — the Q1 board was claiming mk4 compatibility and a
+   test was asserting the wrong bit names.
+3. **The SPI driver stalled waiting for `RXNE` on the display bus**, which has no MISO
+   line at all. Fixed with a transmit-only path, which is the right shape for that bus
+   independent of the emulator. Whether `RXNE` should assert on a real STM32 with MISO
+   unrouted is a datasheet question, not one to settle by reading the emulator.
+
+After those, CatCard boots: bootloader hands off, HAL comes up, the entropy pool reaches
+832 credited bits from all three TRNGs (STM32 + SE1 + SE2 through callgate 26), the
+SSD1306 driver initialises the panel, the selftest screen renders, and the keypad scan
+loop runs.
+
 ## Recording the results
 
 Every `[?]` this session resolves should move out of `HARDWARE-OPEN-ITEMS.md` and into

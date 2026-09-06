@@ -362,10 +362,11 @@ pub const Q1: BoardSpec = BoardSpec {
     name: "q1",
     mcu: Mcu::Stm32L4S5,
     memory: MK4.memory,
-    // The reference lists MK_5_OK=0x10 as the highest bit; which bit the bootloader
-    // checks for a Q is [?]. Both mk4 and mk5 bits are set so the image is accepted
-    // either way — `hw_compat` is a permit-list, not an identity.
-    hw_compat_bit: 0x08 | 0x10,
+    // MK_Q1_OK. An earlier revision of the reference gave 0x10 as MK_5_OK, and this
+    // board previously set 0x08|0x10 reasoning "mk4 or mk5" — which claimed Q1
+    // compatibility by accident and mk4 compatibility wrongly.
+    // Source: firmware-signing.md §1 [C]
+    hw_compat_bit: 0x10,
     display: Display::St77xx {
         // ~320x240 [?] — confirm the controller and resolution on a board.
         width: 320,
@@ -478,7 +479,8 @@ mod tests {
     fn hw_compat_bits_are_within_the_defined_mask() {
         // MK_1_OK..MK_5_OK. Source: firmware-signing.md §1 [C]
         for b in ALL {
-            assert_eq!(b.hw_compat_bit & !0x1f, 0, "{}", b.name);
+            // MK_1..MK_4, MK_Q1 (0x10), MK_5 (0x20).
+            assert_eq!(b.hw_compat_bit & !0x3f, 0, "{}", b.name);
             assert_ne!(b.hw_compat_bit, 0, "{}", b.name);
         }
     }

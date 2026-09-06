@@ -47,6 +47,14 @@ pub fn assemble(mut image: Vec<u8>, opts: &BuildOptions<'_>) -> Result<Vec<u8>> 
         image.resize(HEADER_OFFSET + HEADER_LEN, FILL);
     }
 
+    // The bootloader rejects anything below its minimum *before* any signature work,
+    // so a small firmware has to be padded up to it whether or not it uses the space.
+    // Without this a 62 KB image is refused with no diagnosis about its contents.
+    let min = catcard_fwhdr::MIN_FIRMWARE_LENGTH as usize;
+    if image.len() < min {
+        image.resize(min, FILL);
+    }
+
     // `firmware_length` must be 512-aligned.
     let aligned = image.len().next_multiple_of(LENGTH_ALIGN as usize);
     image.resize(aligned, FILL);
@@ -166,13 +174,14 @@ pub fn describe_hw_compat(mask: u32) -> String {
         (hw_compat::MK_2, "mk2"),
         (hw_compat::MK_3, "mk3"),
         (hw_compat::MK_4, "mk4"),
+        (hw_compat::MK_Q1, "q1"),
         (hw_compat::MK_5, "mk5"),
     ] {
         if mask & bit != 0 {
             parts.push(name);
         }
     }
-    let unknown = mask & !0x1f;
+    let unknown = mask & !hw_compat::DEFINED;
     if unknown != 0 {
         return format!("{} (+ unknown bits {unknown:#x})", parts.join(", "));
     }
@@ -279,6 +288,9 @@ pub const SFLASH_STAGING_OFFSET: u32 = 0;
 
 pub fn ensure_installable(board: &BoardSpec, image: &[u8]) -> Result<()> {
     let header = FirmwareHeader::from_image(image).map_err(|e| anyhow::anyhow!(e))?;
+    header
+        .check_max_length(board.memory.firmware_flash_len)
+        .map_err(|e| anyhow::anyhow!(e))?;
     if header.hw_compat != hw_compat::ANY && header.hw_compat & board.hw_compat_bit == 0 {
         bail!(
             "image hw_compat is {} but board {} needs bit {:#x}",
@@ -461,8 +473,13 @@ mod tests {
     fn hw_compat_descriptions() {
         assert_eq!(describe_hw_compat(0), "any hardware");
         assert_eq!(describe_hw_compat(hw_compat::MK_3), "mk3");
-        assert_eq!(describe_hw_compat(0x18), "mk4, mk5");
-        assert!(describe_hw_compat(0x20).contains("unknown bits"));
+        // 0x10 is Q1, not mk5 — this assertion used to say "mk4, mk5" and was
+        // encoding the same wrong reading the code had.
+        assert_eq!(describe_hw_compat(0x18), "mk4, q1");
+        assert_eq!(describe_hw_compat(hw_compat::MK_5), "mk5");
+        assert_eq!(describe_hw_compat(0x3f), "mk1, mk2, mk3, mk4, q1, mk5");
+        // Anything above the six defined bits is unknown and must be reported as such.
+        assert!(describe_hw_compat(0x40).contains("unknown bits"));
     }
 
     #[test]
