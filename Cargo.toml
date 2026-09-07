@@ -20,6 +20,7 @@ members = [
     "crates/catcard-sign",
     "crates/catcard-tx",
     "crates/catcard-upgrade",
+    "crates/catcard-usb",
     "tools/catcard-image",
 ]
 
@@ -38,6 +39,7 @@ default-members = [
     "crates/catcard-pin",
     "crates/catcard-settings",
     "crates/catcard-upgrade",
+    "crates/catcard-usb",
     "crates/catcard-sign",
     "crates/catcard-tx",
     "tools/catcard-image",
@@ -66,6 +68,7 @@ catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-pin = { path = "crates/catcard-pin", default-features = false }
 catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
+catcard-usb = { path = "crates/catcard-usb", default-features = false }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
 catcard-hal = { path = "crates/catcard-hal" }
 catcard-ui = { path = "crates/catcard-ui" }

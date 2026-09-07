@@ -1,0 +1,16 @@
+[package]
+name = "catcard-usb"
+description = "CatCard's USB HID transport framing and descriptors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+catcard-board.workspace = true

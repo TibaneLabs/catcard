@@ -273,6 +273,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-usb"
+version = "0.0.1"
+dependencies = [
+ "catcard-board",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
