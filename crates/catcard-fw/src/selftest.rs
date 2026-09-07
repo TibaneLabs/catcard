@@ -1,6 +1,5 @@
 //! Where boot ends until there is a display to report on.
 
-use catcard_entropy::{domain, spawn_drbg};
 use catcard_ui::font::{misc4x6, peep7x14};
 use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
 use catcard_ui::text::{centred, draw_text, draw_wrapped};
@@ -40,7 +39,7 @@ pub struct BootStatus {
 /// decide whether the device is usable at all: did the TRNG come up, and did the
 /// entropy pool meet its policy. A wallet that cannot answer both must not proceed to
 /// generating a seed.
-fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel) {
+fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut display::Panel) {
     let mut fb = Mono128x64::new();
 
     // Title in the 7x14 face, status in the dense 4x6 — the same split a Coldcard
@@ -119,16 +118,29 @@ fn render(report: &BootReport, last_key: Option<Key>, panel: &mut display::Panel
         );
     }
 
+    // Whether this screen is live. A parked device and one waiting for a key were
+    // pixel-identical before this line, so "nothing happens when I press y" had two
+    // very different causes and no way to tell them apart without a debugger.
+    draw_text(
+        &mut fb,
+        body,
+        0,
+        52,
+        if waiting {
+            "y  continue"
+        } else {
+            "stopped: no input"
+        },
+    );
+
     let _ = panel.flush(&fb);
 }
 
-/// Publish the boot result, show it, and then echo key presses.
+/// Write the boot result where a debugger can find it.
 ///
-/// The echo loop is not decoration: it is the only way to confirm the keypad map and
-/// debounce on hardware without a debugger, and it exercises the display refresh path
-/// at the same time. It also feeds press timing into the entropy pool, which is where
-/// user-interaction jitter is supposed to come from.
-pub fn park(mut report: BootReport, panel: Option<display::Panel>) -> ! {
+/// Separate from any screen because it is the only report a device with a dead panel
+/// can make, and it must happen whether or not the display came up.
+pub fn publish(report: &BootReport) {
     let status = BootStatus {
         magic: BOOT_STATUS_MAGIC,
         hal_ok: report.hal.is_ok() as u32,
@@ -136,59 +148,70 @@ pub fn park(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         credited_bits: *report.entropy.as_ref().unwrap_or(&0),
         dwt_running: report.dwt_running as u32,
     };
-
     // SAFETY: single-threaded, interrupts are not enabled yet, and this is the only
     // writer of this static.
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CATCARD_BOOT_STATUS), status);
     }
+}
 
+/// Show the bring-up result and echo key presses until `y` is pressed.
+///
+/// The echo is not decoration: it is the only way to confirm the keypad map and the
+/// debounce on hardware without a debugger, and it exercises the display refresh path
+/// at the same time. It also feeds press timing into the entropy pool, which is where
+/// user-interaction jitter is meant to come from.
+///
+/// Returns once the user acknowledges, so that boot can carry on to the PIN prompt.
+pub fn show(
+    report: &mut BootReport,
+    panel: &mut display::Panel,
+    matrix: &mut keypad::GpioMatrix,
+    drbg: &mut catcard_entropy::HmacDrbg,
+) {
+    render(report, None, true, panel);
+
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut last: Option<Key> = None;
+
+    loop {
+        let n = pad.scan(matrix, drbg, &mut events);
+        let mut changed = false;
+        for e in &events[..n] {
+            if let Event::Pressed(k) = e {
+                if *k == Key::Confirm {
+                    return;
+                }
+                last = Some(*k);
+                changed = true;
+                // Press timing is genuine, if weak, entropy; credited 1 bit/byte.
+                if let Some(pool) = report.pool.as_mut() {
+                    pool.add_timing(catcard_hal::dwt::cycles());
+                }
+            }
+        }
+        if changed {
+            render(report, last, true, panel);
+        }
+        // Roughly 60 Hz at the reset-default clock; three samples then give about
+        // 50 ms of debounce.
+        catcard_hal::dwt::delay_cycles(66_000);
+    }
+}
+
+/// Stop, with whatever we could report.
+///
+/// The path for a device that cannot offer a PIN prompt at all: no panel, no keypad, or
+/// an entropy pool that never met its policy so there is no UI DRBG to shuffle the scan
+/// order with. Seeding UI randomness from something weaker instead is the habit this
+/// project exists to break, so the keypad simply is not scanned.
+pub fn park(report: BootReport, panel: Option<display::Panel>) -> ! {
+    publish(&report);
     let mut panel = panel;
     if let Some(p) = panel.as_mut() {
-        render(&report, None, p);
+        render(&report, None, false, p);
     }
-
-    // SAFETY: bring-up is complete and nothing else has claimed the keypad pins.
-    let matrix = unsafe { keypad::GpioMatrix::init() };
-
-    // The scan-order shuffle draws from the UI domain, never from the seed pool. If the
-    // pool could not meet its policy there is no DRBG to spawn, and the keypad simply
-    // is not scanned — the alternative would be seeding UI randomness from something
-    // weaker, which is the habit this project exists to break.
-    let drbg = report
-        .pool
-        .as_mut()
-        .and_then(|pool| spawn_drbg(pool, domain::UI, &[]).ok());
-
-    if let (Some(mut matrix), Some(mut drbg)) = (matrix, drbg) {
-        let mut pad = Keypad::new();
-        let mut events = [Event::Pressed(Key::Cancel); KEYS];
-        let mut last: Option<Key> = None;
-
-        loop {
-            let n = pad.scan(&mut matrix, &mut drbg, &mut events);
-            let mut changed = false;
-            for e in &events[..n] {
-                if let Event::Pressed(k) = e {
-                    last = Some(*k);
-                    changed = true;
-                    // Press timing is genuine, if weak, entropy; credited 1 bit/byte.
-                    if let Some(pool) = report.pool.as_mut() {
-                        pool.add_timing(catcard_hal::dwt::cycles());
-                    }
-                }
-            }
-            if changed {
-                if let Some(p) = panel.as_mut() {
-                    render(&report, last, p);
-                }
-            }
-            // Roughly 60 Hz at the reset-default clock; three samples then give about
-            // 50 ms of debounce.
-            catcard_hal::dwt::delay_cycles(66_000);
-        }
-    }
-
     loop {
         cortex_m::asm::wfi();
     }

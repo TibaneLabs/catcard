@@ -267,6 +267,22 @@ both were built from.
    independent of the emulator. Whether `RXNE` should assert on a real STM32 with MISO
    unrouted is a datasheet question, not one to settle by reading the emulator.
 
+### What the second run found
+
+**mk4's numpad is not on the mk3 pins.** The board table had inherited them as an `[I]`,
+and `gpio-peripherals.md §Mk4` has since been corrected to say so outright, calling that
+exact inference wrong: mk4 keeps the 4x3 layout on cols `PB0..PB2` and rows `PD8..PD11`.
+Nothing reached the firmware because it was polling pins with nothing attached.
+
+That also resolved the SE2 contradiction this document's sibling had recorded — SE2 owns
+PB13/PB14, the numpad never did — and confirmed there is **no SPI-NOR from mk4 onward**,
+so upgrade staging is PSRAM at `0x9000_0000` with a recovery header at `0x907F_F800`.
+
+The symptom is worth remembering: a device waiting on a keypad and a device that has
+stopped looked pixel-identical, because `show()` and `park()` drew the same screen. The
+selftest screen now says which, and that one line was what turned "it is hung" into "it
+is polling the wrong pins".
+
 After those, CatCard boots: bootloader hands off, HAL comes up, the entropy pool reaches
 832 credited bits from all three TRNGs (STM32 + SE1 + SE2 through callgate 26), the
 SSD1306 driver initialises the panel, the selftest screen renders, and the keypad scan

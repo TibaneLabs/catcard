@@ -83,8 +83,12 @@ both be checked on hardware without a debugger.
 No longer blocked: the entry address is read from the bootloader's info table.
 Everything below now needs hardware rather than more specification.
 
-- [ ] `gate 18` setup / login / fetch_secret against real hardware
-- [ ] PIN entry UX, including anti-phishing words (`gate 16`)
+- [x] `gate 18` sequencing: setup / login / fetch_secret, with attempts and the brick
+      modelled (`catcard-pin`). `setup` confirmed against the real mk4 bootloader under
+      the emulator — a blank secure element reports `PA_IS_BLANK` and the device says so
+- [x] PIN entry UX, including anti-phishing words (`gate 16`). The suffix is refused
+      until the words have been shown, which is the only thing that makes them a defence
+- [ ] `login` / `fetch_secret` against a device that actually has a PIN set
 - [ ] Seed generation from `EntropyPool`, stored via `gate 18/3`
 - [ ] Secure-element entropy via `gate 26` into the pool (code already written)
 - [ ] Genuine light; brick and duress handling (both are transparent by design — a

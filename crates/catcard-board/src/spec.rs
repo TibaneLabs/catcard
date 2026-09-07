@@ -71,6 +71,33 @@ pub enum Input {
 /// Second secure element, on I2C. Secrets go through the bootloader callgate, so this
 /// is only needed for direct non-secret access.
 /// Source: generations-mk2-q-mk5.md §Q [C]
+/// External PSRAM, memory-mapped through OCTOSPI1.
+///
+/// Firmware upgrades are staged here on the boards that have it — there is no SPI-NOR
+/// on mk4 or later. The bootloader looks for a recovery header at [`Self::staging_header`]
+/// on boot and installs whatever it points at, so this is the address that decides
+/// whether an upgrade happens.
+///
+/// Source: gpio-peripherals.md §Mk4 [C], install-and-usb-transport.md §2 [C]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Psram {
+    /// Where the chip appears in the address space.
+    pub base: u32,
+    pub len: u32,
+    /// Where the bootloader reads the firmware-staging recovery header.
+    ///
+    /// `base + len - 2048`, but written out rather than computed: it is confirmed as an
+    /// absolute address, and a wrong `len` would silently move it.
+    pub staging_header: u32,
+}
+
+impl Psram {
+    /// One past the last byte.
+    pub const fn end(&self) -> u32 {
+        self.base + self.len
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct Se2Pins {
     pub scl: Pin,
@@ -152,7 +179,12 @@ pub struct BoardSpec {
     pub display: Display,
     pub input: Input,
     pub sdmmc: SdmmcPins,
-    pub sflash: SflashPins,
+    /// SPI-NOR flash, on the boards that have one.
+    ///
+    /// `None` from mk4 onward: SPI2 was "removed in Mk4 rev B", settings moved to
+    /// internal flash and upgrade staging moved to [`Psram`].
+    /// Source: gpio-peripherals.md §Mk4 [C]
+    pub sflash: Option<SflashPins>,
     pub usb: UsbPins,
 
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
@@ -162,8 +194,8 @@ pub struct BoardSpec {
     pub se2: Option<Se2Pins>,
     /// NFC bus pins, where confirmed.
     pub nfc: Option<NfcPins>,
-    /// External PSRAM. Source: gpio-peripherals.md §Mk4 [I]
-    pub has_psram: bool,
+    /// External PSRAM, where present. Source: gpio-peripherals.md §Mk4 [C]
+    pub psram: Option<Psram>,
     /// `true` once we can read the SE TRNGs through callgate 26 on this board.
     /// Source: bootloader-callgate-abi.md #26 — documented for mk4+ only.
     pub has_callgate_se_rng: bool,
@@ -255,12 +287,13 @@ pub const MK3: BoardSpec = BoardSpec {
         card_detect: Some(pa(9)), // [?]
         active: Some(pc(7)),
     },
-    sflash: SflashPins {
+    // The only board with one. Source: gpio-peripherals.md §Mk3 [C]; CS/SCK still [?]
+    sflash: Some(SflashPins {
         spi: MK3_SFLASH_SPI,
-        cs: None, // [?]
+        cs: None, // [?] -- see docs/HARDWARE-OPEN-ITEMS.md
         max_hz: 8_000_000,
         sector_len: 4096,
-    },
+    }),
     usb: UsbPins {
         dm: pa(11),
         dp: pa(12),
@@ -268,7 +301,7 @@ pub const MK3: BoardSpec = BoardSpec {
     has_se2: false,
     se2: None,
     nfc: None,
-    has_psram: false,
+    psram: None,
     // Callgate 26 is documented as mk4+. On mk3 the STM32 TRNG plus user-input
     // timing must carry the entropy pool on their own.
     has_callgate_se_rng: false,
@@ -307,10 +340,13 @@ pub const MK4: BoardSpec = BoardSpec {
         dc: pa(8),
         cs: pa(4),
     },
-    // Same numpad as mk3. Source: gpio-peripherals.md §Mk4 [I]
+    // Same 4x3 layout as mk3 but **different pins** — the reference calls out the
+    // "same as mk3" inference as wrong, and these are the corrected ones. They also
+    // free PB13/PB14 for SE2, which is what the old map collided with.
+    // Source: gpio-peripherals.md §Mk4 [C]
     input: Input::Numpad4x3 {
-        rows: [pb(12), pb(13), pb(14), pc(6)],
-        cols: [pa(1), pa(3), pa(2)],
+        rows: [pd(8), pd(9), pd(10), pd(11)],
+        cols: [pb(0), pb(1), pb(2)],
     },
     sdmmc: SdmmcPins {
         d0: pc(8),
@@ -322,26 +358,31 @@ pub const MK4: BoardSpec = BoardSpec {
         card_detect: Some(pa(9)), // [?]
         active: Some(pc(7)),
     },
-    sflash: SflashPins {
-        spi: MK3_SFLASH_SPI, // [I] — shared with mk3 per gpio-peripherals.md §Q
-        cs: None,            // [?]
-        max_hz: 8_000_000,
-        sector_len: 4096,
-    },
+    // No SPI-NOR: SPI2 is commented out of the board file as "removed in Mk4 rev B".
+    // Settings live in internal flash and upgrade staging is in PSRAM.
+    // Source: gpio-peripherals.md §Mk4 [C]
+    sflash: None,
     usb: UsbPins {
         dm: pa(11),
         dp: pa(12),
     },
     has_se2: true,
-    // SE2 is confirmed present on mk4, but its pins are not. The Q1 board routes
-    // SE2 to PB13/PB14 -- which on mk3 are numpad rows. mk4 is documented as having
-    // both the mk3 numpad [I] and SE2 [C], and those two cannot both be true at
-    // PB13/PB14. Rather than pick one, both stay unresolved here: `se2: None`, and
-    // the numpad map below is inherited from mk3 but flagged in HARDWARE-OPEN-ITEMS.
-    se2: None,
+    // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
+    // inherited mk3 numpad claiming the same pins -- resolved in SE2's favour: the
+    // numpad map above was the wrong half.
+    // Source: gpio-peripherals.md §Mk4 [C]
+    se2: Some(Se2Pins {
+        scl: pb(13),
+        sda: pb(14),
+    }),
     // NFC is confirmed present on mk4 from image strings, pins unconfirmed.
     nfc: None,
-    has_psram: true,
+    // 8 MB on OCTOSPI1, memory-mapped. Source: gpio-peripherals.md §Mk4 [C]
+    psram: Some(Psram {
+        base: 0x9000_0000,
+        len: 8 * 1024 * 1024,
+        staging_header: 0x907F_F800,
+    }),
     has_callgate_se_rng: true,
 };
 
@@ -394,7 +435,7 @@ pub const Q1: BoardSpec = BoardSpec {
         ],
     },
     sdmmc: MK4.sdmmc,
-    sflash: MK4.sflash,
+    sflash: MK4.sflash, // none, as mk4
     usb: MK4.usb,
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]
@@ -408,7 +449,12 @@ pub const Q1: BoardSpec = BoardSpec {
         scl: pb(6),
         sda: None,
     }),
-    has_psram: true,
+    // 8 MB on OCTOSPI1, memory-mapped. Source: gpio-peripherals.md §Mk4 [C]
+    psram: Some(Psram {
+        base: 0x9000_0000,
+        len: 8 * 1024 * 1024,
+        staging_header: 0x907F_F800,
+    }),
     has_callgate_se_rng: true,
 };
 
@@ -547,15 +593,17 @@ mod tests {
                 (b.sdmmc.d3, "SD D3"),
                 (b.sdmmc.cmd, "SD CMD"),
                 (b.sdmmc.ck, "SD CK"),
-                (b.sflash.spi.sck, "SPI-NOR SCK"),
-                (b.sflash.spi.mosi, "SPI-NOR MOSI"),
                 (b.usb.dm, "USB DM"),
                 (b.usb.dp, "USB DP"),
             ] {
                 claim(p, what, b.name);
             }
-            if let Some(p) = b.sflash.spi.miso {
-                claim(p, "SPI-NOR MISO", b.name);
+            if let Some(sf) = b.sflash {
+                claim(sf.spi.sck, "SPI-NOR SCK", b.name);
+                claim(sf.spi.mosi, "SPI-NOR MOSI", b.name);
+                if let Some(p) = sf.spi.miso {
+                    claim(p, "SPI-NOR MISO", b.name);
+                }
             }
         }
     }

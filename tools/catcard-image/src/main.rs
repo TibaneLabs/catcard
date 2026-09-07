@@ -417,7 +417,10 @@ fn cmd_boards() -> Result<()> {
         );
         println!(
             "      hw_compat {:#04x}   se2 {}   psram {}   se-rng-callgate {}",
-            b.hw_compat_bit, b.has_se2, b.has_psram, b.has_callgate_se_rng
+            b.hw_compat_bit,
+            b.has_se2,
+            b.psram.is_some(),
+            b.has_callgate_se_rng
         );
     }
     Ok(())

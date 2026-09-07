@@ -5,8 +5,12 @@
 //! policy before anything could ask it for a seed. That order is deliberate — it is
 //! the part the original firmware got wrong, so it is the part that exists first.
 //!
-//! Not yet implemented: display, keypad, SPI-NOR, microSD, USB, and every wallet
-//! operation. See `docs/ROADMAP.md`.
+//! After bring-up it shows the selftest screen and then asks for the PIN, which the
+//! bootloader checks -- see [`catcard_pin`] for the sequencing and why it refuses a
+//! suffix before the anti-phishing words have been shown.
+//!
+//! Not yet implemented: SPI-NOR, microSD, USB, and every wallet operation. See
+//! `docs/ROADMAP.md`.
 
 #![no_std]
 #![no_main]
@@ -22,7 +26,9 @@ mod boot;
 mod display;
 mod keypad;
 mod panic;
+mod pinentry;
 mod selftest;
+mod session;
 mod splash;
 
 /// Board this image was built for, from `build.rs`.
@@ -43,9 +49,9 @@ fn main() -> ! {
 
     let report = boot::bring_up(hal, panel.as_mut());
 
-    // Nothing to display on yet, so hold the result where a debugger can read it and
-    // stop. Once the panel driver lands this becomes the selftest screen.
-    selftest::park(report, panel)
+    // Selftest screen, then the PIN prompt. A device missing anything that needs --
+    // panel, keypad, UI DRBG or callgate -- stops at the selftest screen instead.
+    session::run(report, panel)
 }
 
 /// Where our own signed header sits in flash, for self-inspection.

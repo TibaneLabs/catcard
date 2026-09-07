@@ -379,9 +379,11 @@ mod tests {
 
     #[test]
     fn bus_config_from_a_board_is_representable() {
-        // The board table's max_hz must map onto a real prescaler.
+        // The board table's max_hz must map onto a real prescaler. Only mk3 has a
+        // SPI-NOR at all; the later boards moved settings to internal flash.
         for b in catcard_board::spec::ALL {
-            let p = Prescaler::for_max_hz(80_000_000, b.sflash.max_hz);
+            let Some(sf) = b.sflash else { continue };
+            let p = Prescaler::for_max_hz(80_000_000, sf.max_hz);
             assert!((p as u32) <= 7, "{}", b.name);
         }
     }

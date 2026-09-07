@@ -184,6 +184,7 @@ dependencies = [
  "catcard-entropy",
  "catcard-fwhdr",
  "catcard-hal",
+ "catcard-pin",
  "catcard-ui",
  "cortex-m",
  "cortex-m-rt",
@@ -258,6 +259,7 @@ version = "0.0.1"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
+ "zeroize",
 ]
 
 [[package]]

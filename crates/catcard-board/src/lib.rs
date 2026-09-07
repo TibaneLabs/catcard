@@ -23,7 +23,7 @@ pub mod usb;
 
 pub use memory::{MemoryMap, FW_HEADER_OFFSET, FW_HEADER_SIZE};
 pub use pin::{Pin, Port};
-pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Se2Pins};
+pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Psram, Se2Pins};
 pub use usb::{PRODUCT_ID, VENDOR_ID};
 
 #[cfg(any(

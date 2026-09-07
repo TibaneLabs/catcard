@@ -8,26 +8,37 @@ the callgate entry address, which did, is resolved.
 
 ---
 
-## mk4 SE2 bus pins vs. the inherited numpad map
+## mk4 SE2 bus pins vs. the inherited numpad map — RESOLVED
 
-**Blocks: direct SE2 access on mk4** (not secrets, which go through the callgate).
+The numpad map was the wrong half, exactly as this entry predicted. `gpio-peripherals.md
+§Mk4` now states it outright: mk4 keeps the 4x3 layout but **not the mk3 pins** — cols
+`M2_COL0..2 = PB0, PB1, PB2`, rows `M2_ROW0..3 = PD8, PD9, PD10, PD11` `[C]`, and it
+flags the "same as mk3" reading as an error in an earlier revision of the reference. That
+frees PB13/PB14, so `SE2_SCL=PB13`, `SE2_SDA=PB14` on I2C2 is no longer in contention and
+`MK4.se2` is filled in `[C]`.
 
-Two separately-sourced facts about mk4 cannot both be true:
+Worth recording how it surfaced, because it is the argument for keeping a keypad echo on
+the selftest screen: under the emulator no keypress reached the firmware at all. The
+symptom was a device that looked hung on a screen that was in fact polling a set of pins
+nothing was attached to.
 
-- mk4 is documented as carrying the mk3 numpad `[I]`, whose rows are PB12/PB13/PB14.
-- The Q1 board routes SE2 to `SE2_SCL=PB13`, `SE2_SDA=PB14` `[C]`, and mk4 is confirmed
-  to have SE2 `[C]`.
+## Which physical key sits at which matrix position
 
-Q1 has no numpad, so PB13/PB14 are free there and nothing conflicts. On mk4 something
-has to give: either its numpad is not wired like mk3's, or its SE2 is not wired like
-Q1's. The reference infers the numpad from mk3 and does not state mk4's SE2 pins at all,
-so the numpad map is the weaker claim — but it is not resolved here.
+**Blocks: nothing structurally — but a wrong answer mirrors the whole keypad.**
 
-`MK4.se2` is `None` and the numpad map is inherited but flagged. The pin-conflict test in
-`catcard-board` covers SE2 and NFC, so filling either in without resolving this fails the
-build rather than producing a driver that fights the keypad for the bus.
+`catcard_ui::keypad::LAYOUT` reads the matrix row-major as `1 2 3 / 4 5 6 / 7 8 9 /
+x 0 y`. That is the natural reading of the legend, and it is an inference `[I]`: the
+reference gives the pins and the scan model but never says which key is at which
+position, and explicitly lists the equivalent Q1 mapping as unknown.
 
-**How to resolve.** Probe PB12–PB14 on an mk4, or read the board markings.
+There is evidence it is **reversed** — that position 0 is `y` and position 11 is `1`.
+Under the emulator, holding `y` is read by CatCard as `1`, an exact reversal in both
+axes. But `VALIDATION.md` says an emulator run does not settle anything the reference
+marks `[I]`, and this is squarely that, so the constant has not been flipped to match.
+
+**How to resolve.** Press keys in order on a device and read the `KEY` echo on the
+selftest screen. It takes seconds and needs no debugger, which is what that echo is for.
+If they come out mirrored, reverse `LAYOUT` — a one-line change with no other caller.
 
 ---
 
@@ -70,8 +81,12 @@ writing and reading back the top of each bank on hardware.
 
 ## SPI-NOR chip select and SCK
 
-**Blocks: settings storage, PSBT scratch, and firmware upgrade staging** — i.e. the
-whole self-upgrade path.
+**Blocks: settings storage and PSBT scratch — on mk3 only.**
+
+Narrower than it was. `gpio-peripherals.md §Mk4` confirms there is **no SPI-NOR from mk4
+onward**: SPI2 is commented out of the board file as "removed in Mk4 rev B", settings
+moved to internal flash and upgrade staging moved to PSRAM. So this blocks nothing on
+mk4 or Q1, and `MK4.sflash` / `Q1.sflash` are `None` rather than an inherited guess.
 
 `hw-reference/gpio-peripherals.md` confirms SPI2 MISO=PC2 and MOSI=PC3 but not SCK or
 CS. PB12/PB13, the usual SPI2 NSS/SCK pins, are taken by numpad rows on this board,
@@ -128,18 +143,25 @@ upgrade path, which erases on our behalf).
 
 ---
 
-## SPI-flash staging base
+## Firmware staging base — RESOLVED on mk4 and Q1, still open on mk3
 
-**Blocks: the self-upgrade path.**
+**mk4 / Q1 `[C]`.** PSRAM is an 8 MB part on OCTOSPI1, memory-mapped at `0x9000_0000`,
+and the bootloader reads a firmware-staging recovery header at `0x907F_F800` — magics
+`0xDBCC_8350` and `0xBAFC_FBA3`, both of which must match or it ignores the region
+entirely. That "both magics or nothing" rule is what makes the mechanism safe to use:
+an unwritten or half-written header stages nothing rather than staging garbage. Recorded
+as [`Psram`](../crates/catcard-board/src/spec.rs) in the board table.
 
-`hw-reference/install-and-usb-transport.md §2` says the pending image is staged at
-SPI-NOR **offset 0**, sourced from a comment that the entire flash "starting at zero may
-be used" — which is weaker than a confirmation that the bootloader reads from exactly
-0. It also notes any header or marker the bootloader expects there is unconfirmed.
+**mk3 `[?]`, and still blocking self-upgrade there.**
+`install-and-usb-transport.md §2` says the pending image is staged at SPI-NOR **offset
+0**, sourced from a comment that the entire flash "starting at zero may be used" — which
+is weaker than a confirmation that the bootloader reads from exactly 0, and it says any
+header or marker expected there is unconfirmed. mk3 also still lacks its SPI-NOR CS/SCK
+pins, so nothing can be staged on it regardless.
 
 Getting this wrong means a reboot into a bootloader that installs garbage.
 
-**How to resolve.** Confirm on hardware before the first self-upgrade attempt, by
+**How to resolve.** Confirm on mk3 hardware before the first self-upgrade attempt, by
 staging an image and observing what the bootloader installs. Test on a unit you are
 willing to recover over DFU.
 
