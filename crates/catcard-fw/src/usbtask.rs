@@ -46,6 +46,13 @@ enum Stage {
 
 pub struct UsbTask {
     otg: Otg,
+    /// Reports taken from the host, and replies handed back. Shown on the idle screen
+    /// because the emulator decodes that screen to text, which makes it the only
+    /// diagnostic channel this firmware has that needs no debugger.
+    rx_count: u32,
+    tx_count: u32,
+    frame_errors: u32,
+    last_status: u16,
     /// Whether the PIN has been entered. Gates the upgrade opcodes only.
     unlocked: bool,
     frames: Reassembler,
@@ -76,6 +83,10 @@ impl UsbTask {
         let otg = unsafe { Otg::init(BOARD.usb.dm, BOARD.usb.dp, serial) }.ok()?;
         Some(Self {
             otg,
+            rx_count: 0,
+            tx_count: 0,
+            frame_errors: 0,
+            last_status: 0,
             unlocked: false,
             frames: Reassembler::new(),
             stage: Stage::Idle,
@@ -142,6 +153,7 @@ impl UsbTask {
                     self.reply = None;
                 }
                 Event::Report => {
+                    self.rx_count = self.rx_count.saturating_add(1);
                     let mut report = [0u8; REPORT_LEN];
                     report.copy_from_slice(&self.otg.rx);
                     self.otg.receive_next();
@@ -158,6 +170,7 @@ impl UsbTask {
         // SAFETY: as documented.
         unsafe {
             if self.outbox_len > 0 && self.otg.send(&self.outbox) {
+                self.tx_count = self.tx_count.saturating_add(1);
                 self.outbox_len = 0;
                 self.next_reply_frame();
             }
@@ -171,6 +184,7 @@ impl UsbTask {
                 // Framing is broken, so nothing that follows can be trusted. Drop any
                 // partial image rather than trying to resynchronise onto it.
                 self.frames.reset();
+                self.frame_errors = self.frame_errors.saturating_add(1);
                 if !matches!(self.stage, Stage::Approved) {
                     self.stage = Stage::Idle;
                 }
@@ -289,6 +303,7 @@ impl UsbTask {
     }
 
     fn begin_reply(&mut self, status: Status, body: &[u8]) {
+        self.last_status = status as u16;
         let mut buf = [0u8; 64];
         let n = body.len().min(64);
         buf[..n].copy_from_slice(&body[..n]);
@@ -386,6 +401,7 @@ pub fn pump() {
         // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs
         // in interrupt context.
         unsafe { t.poll() }
+        publish_status(t);
     }
 }
 
@@ -424,5 +440,89 @@ pub fn approve() -> Result<(), Reject> {
 pub fn decline() {
     if let Some(t) = task() {
         t.decline();
+    }
+}
+
+/// Counters mirrored into RAM, where a dump can read them.
+///
+/// The screen is the natural place for this and it works — but only when the emulator
+/// drives USB itself. In socket mode it emits no screens at all, which is exactly the
+/// mode a real host protocol has to be debugged in. So the same numbers go somewhere
+/// `--dump-ram` can reach.
+///
+/// `#[used]` and `#[no_mangle]` keep it in the image and findable by name at
+/// `opt-level = "s"` with LTO, the same as the boot status.
+#[no_mangle]
+#[used]
+pub static mut CATCARD_USB_STATUS: UsbStatus = UsbStatus {
+    magic: USB_STATUS_MAGIC,
+    configured: 0,
+    reports_in: 0,
+    replies_out: 0,
+    outbox_pending: 0,
+    frame_errors: 0,
+    staged_bytes: 0,
+    last_status: 0,
+    regs: [0; 6],
+    rearms: 0,
+};
+
+pub const USB_STATUS_MAGIC: u32 = 0xCA7C_05B0;
+
+#[repr(C)]
+pub struct UsbStatus {
+    pub magic: u32,
+    pub configured: u32,
+    pub reports_in: u32,
+    pub replies_out: u32,
+    pub outbox_pending: u32,
+    pub frame_errors: u32,
+    pub staged_bytes: u32,
+    /// The last status code we answered with, so a refusal is visible without a screen.
+    pub last_status: u32,
+    /// `[GINTSTS, DAINT, DOEPCTL(out), DOEPTSIZ(out), DIEPCTL(in)]`.
+    pub regs: [u32; 6],
+    /// Times the OUT endpoint has been armed.
+    pub rearms: u32,
+}
+
+/// Copy the counters into the dumpable static.
+fn publish_status(t: &UsbTask) {
+    let s = UsbStatus {
+        magic: USB_STATUS_MAGIC,
+        configured: t.otg.is_configured() as u32,
+        reports_in: t.rx_count,
+        replies_out: t.tx_count,
+        outbox_pending: t.outbox_len as u32,
+        frame_errors: t.frame_errors,
+        staged_bytes: match &t.stage {
+            Stage::Receiving(s) => s.received(),
+            Stage::Offered { staged, .. } => staged.received(),
+            _ => 0,
+        },
+        last_status: t.last_status as u32,
+        // SAFETY: the task owns OTG_FS; these are plain register reads.
+        regs: unsafe { t.otg.debug_regs() },
+        rearms: t.otg.rearms,
+    };
+    // SAFETY: single-threaded foreground, and this is the only writer.
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(CATCARD_USB_STATUS), s) };
+}
+
+/// USB state, for the idle screen.
+///
+/// `(configured, reports in, replies out, a reply is queued)`. Four numbers is enough to
+/// tell "the host is not talking to us" from "we are not answering" from "we answered
+/// and it did not go out", which are three very different bugs that look identical from
+/// the outside.
+pub fn stats() -> (bool, u32, u32, bool) {
+    match task() {
+        Some(t) => (
+            t.otg.is_configured(),
+            t.rx_count,
+            t.tx_count,
+            t.outbox_len > 0,
+        ),
+        None => (false, 0, 0, false),
     }
 }

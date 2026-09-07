@@ -107,6 +107,10 @@ const DCFG_DAD_MASK: u32 = 0x7F << 4;
 
 const DCTL_SDIS: u32 = 1 << 1;
 const DCTL_CGINAK: u32 = 1 << 8;
+/// Clear the global **OUT** NAK. Its counterpart `CGINAK` was here and this was not:
+/// while a global OUT NAK stands, no OUT endpoint receives anything and the core will
+/// not keep `EPENA` set, however often software writes it.
+const DCTL_CGONAK: u32 = 1 << 10;
 
 const EPCTL_USBAEP: u32 = 1 << 15;
 const EPCTL_STALL: u32 = 1 << 21;
@@ -116,6 +120,14 @@ const EPCTL_SD0PID: u32 = 1 << 28;
 const EPCTL_EPENA: u32 = 1 << 31;
 const EPCTL_EPTYP_INTR: u32 = 0b11 << 18;
 const EPCTL_TXFNUM_SHIFT: u32 = 22;
+
+/// The self-clearing command bits in an endpoint control register.
+///
+/// These are *write* commands, not state. A read-modify-write on `DxEPCTL` reads them
+/// back and writes them again, which asks the core to set and clear NAK in the same
+/// word — and an endpoint enable submitted alongside that contradiction does not take.
+/// Every enable here clears them first.
+const EPCTL_COMMANDS: u32 = EPCTL_SNAK | EPCTL_CNAK | EPCTL_SD0PID | (1 << 29);
 
 const EPINT_XFRC: u32 = 1 << 0;
 const DOEPINT_STUP: u32 = 1 << 3;
@@ -172,6 +184,10 @@ pub struct Otg {
     rx_len: usize,
     setup: [u8; Setup::LEN],
     scratch: [u8; 64],
+    /// How many times the OUT endpoint has been armed. Distinguishes "the arm never
+    /// runs" from "it runs and the core rejects it", which look the same in a register
+    /// dump taken after the fact.
+    pub rearms: u32,
 }
 
 impl Otg {
@@ -242,7 +258,30 @@ impl Otg {
             rx_len: 0,
             setup: [0; Setup::LEN],
             scratch: [0; 64],
+            rearms: 0,
         })
+    }
+
+    /// The endpoint registers, for a RAM-dump diagnostic.
+    ///
+    /// `[GINTSTS, DAINT, DOEPCTL(out), DOEPTSIZ(out), DIEPCTL(in), DCTL]`. Reading these back
+    /// is the only way to tell "we never armed the endpoint" from "we armed it and the
+    /// core closed it again", which are different bugs that present identically.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn debug_regs(&self) -> [u32; 6] {
+        // SAFETY: plain reads of registers this driver owns.
+        unsafe {
+            [
+                reg::read(GINTSTS),
+                reg::read(OTG + 0x818),
+                reg::read(DOEPCTL + EP_OUT_NUM * EP_STRIDE),
+                reg::read(DOEPTSIZ + EP_OUT_NUM * EP_STRIDE),
+                reg::read(DIEPCTL + EP_IN_NUM * EP_STRIDE),
+                reg::read(DCTL),
+            ]
+        }
     }
 
     /// Whether the host has configured us, so reports may be exchanged.
@@ -295,6 +334,12 @@ impl Otg {
             if sts & GINTSTS_IEPINT != 0 {
                 self.service_in_endpoints();
             }
+
+            // The OUT endpoint is armed once at configuration and again after each
+            // delivered report -- not on every poll. Rewriting DOEPTSIZ and DOEPCTL
+            // while a reception is in progress aborts it, so an unconditional re-arm
+            // here does not make the endpoint more available, it makes it permanently
+            // unavailable.
             Event::Idle
         }
     }
@@ -326,7 +371,7 @@ impl Otg {
                 DIEPTSIZ + EP_IN_NUM * EP_STRIDE,
                 (1 << 19) | REPORT_LEN as u32,
             );
-            reg::set_bits(ctl, EPCTL_EPENA | EPCTL_CNAK);
+            reg::modify(ctl, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
             write_fifo(EP_IN_NUM, report);
             true
         }
@@ -340,11 +385,16 @@ impl Otg {
         // SAFETY: as documented.
         unsafe {
             self.rx_len = 0;
+            self.rearms = self.rearms.saturating_add(1);
             reg::write(
                 DOEPTSIZ + EP_OUT_NUM * EP_STRIDE,
                 (1 << 19) | REPORT_LEN as u32,
             );
-            reg::set_bits(DOEPCTL + EP_OUT_NUM * EP_STRIDE, EPCTL_EPENA | EPCTL_CNAK);
+            reg::modify(
+                DOEPCTL + EP_OUT_NUM * EP_STRIDE,
+                EPCTL_COMMANDS,
+                EPCTL_EPENA | EPCTL_CNAK,
+            );
         }
     }
 
@@ -354,14 +404,15 @@ impl Otg {
         self.dev.reset();
         // SAFETY: as documented.
         unsafe {
-            reg::clear_bits(DCTL, DCTL_CGINAK);
+            // `CGINAK`/`CGONAK` are write-1 commands: clearing them did nothing at all.
+            reg::set_bits(DCTL, DCTL_CGINAK | DCTL_CGONAK);
             flush_fifos();
             reg::modify(DCFG, DCFG_DAD_MASK, 0);
             // Endpoint zero, ready for the first SETUP. Three back-to-back SETUP
             // packets is what the core expects to be armed for; fewer and a host that
             // retries during enumeration is answered with a NAK it does not expect.
             reg::write(DOEPTSIZ, (3 << 29) | (1 << 19) | 24);
-            reg::set_bits(DOEPCTL, EPCTL_EPENA | EPCTL_CNAK);
+            reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
         }
     }
 
@@ -371,7 +422,8 @@ impl Otg {
         // SAFETY: as documented. MPSIZ 0 on endpoint zero means 64 bytes.
         unsafe {
             reg::modify(DIEPCTL, 0b11, 0);
-            reg::set_bits(DCTL, DCTL_CGINAK);
+            // Both global NAKs, not just the IN one.
+            reg::set_bits(DCTL, DCTL_CGINAK | DCTL_CGONAK);
         }
     }
 
@@ -438,14 +490,14 @@ impl Otg {
                 Action::Data(data) => {
                     let len = data.len();
                     reg::write(DIEPTSIZ, (1 << 19) | len as u32);
-                    reg::set_bits(DIEPCTL, EPCTL_EPENA | EPCTL_CNAK);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
                     write_fifo_bytes(0, data);
                     // The host's status stage is an OUT; arm for it.
                     arm_ep0_out();
                 }
                 Action::Ack => {
                     reg::write(DIEPTSIZ, 1 << 19);
-                    reg::set_bits(DIEPCTL, EPCTL_EPENA | EPCTL_CNAK);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
                     arm_ep0_out();
                 }
                 Action::AckThenAddress(addr) => {
@@ -454,12 +506,12 @@ impl Otg {
                     // request is decoded, and handles the ordering itself.
                     reg::modify(DCFG, DCFG_DAD_MASK, (addr as u32) << DCFG_DAD_SHIFT);
                     reg::write(DIEPTSIZ, 1 << 19);
-                    reg::set_bits(DIEPCTL, EPCTL_EPENA | EPCTL_CNAK);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
                     arm_ep0_out();
                 }
                 Action::Stall => {
-                    reg::set_bits(DIEPCTL, EPCTL_STALL);
-                    reg::set_bits(DOEPCTL, EPCTL_STALL);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
+                    reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
                     arm_ep0_out();
                 }
             }
@@ -590,7 +642,7 @@ unsafe fn arm_ep0_out() {
     // SAFETY: as documented.
     unsafe {
         reg::write(DOEPTSIZ, (3 << 29) | (1 << 19) | 24);
-        reg::set_bits(DOEPCTL, EPCTL_EPENA | EPCTL_CNAK);
+        reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
     }
 }
 

@@ -79,14 +79,31 @@ fn idle(
     head: &str,
     note: &str,
 ) -> ! {
-    message(panel, head, note, "");
     let mut showing_offer = false;
+    let mut shown_stats = (false, u32::MAX, 0, false);
+    draw_usb(panel, head, note, usbtask::stats());
 
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
 
     loop {
         usbtask::pump();
+        // The same pause the selftest loop has. A poll loop with nothing between the
+        // polls does not service USB faster -- the host still sends on 1 ms frames --
+        // it just spins the core, and it is the difference between this screen carrying
+        // reports and not.
+        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+
+        // Redraw when the USB counters move. The emulator reads this screen back as
+        // text, so it is where a stuck transfer becomes visible without a debugger.
+        let stats = usbtask::stats();
+        if stats != shown_stats && !showing_offer {
+            shown_stats = stats;
+            // One draw, not two. Drawing the plain screen and then the counters meant
+            // the panel never held still, and the emulator only journals a screen once
+            // it settles -- so the diagnostic hid itself.
+            draw_usb(panel, head, note, stats);
+        }
 
         // An upgrade that passed inspection is waiting on a person. Ask.
         if let Some(a) = usbtask::pending() {
@@ -127,6 +144,47 @@ fn idle(
     }
 }
 
+/// Redraw the idle screen with the USB counters underneath.
+fn draw_usb(panel: &mut display::Panel, head: &str, note: &str, s: (bool, u32, u32, bool)) {
+    use catcard_ui::font::{misc4x6, peep7x14};
+    use catcard_ui::text::{centred, draw_text};
+    use catcard_ui::Mono128x64;
+
+    let mut fb = Mono128x64::new();
+    let t = &peep7x14::FONT;
+    let f = &misc4x6::FONT;
+    draw_text(&mut fb, t, centred(t, head, 128), 4, head);
+    draw_text(&mut fb, f, centred(f, note, 128), 24, note);
+
+    // "usb <state> in <n> out <n>", assembled without a formatter.
+    let mut x = 4;
+    for part in [
+        "usb ",
+        if s.0 { "up" } else { "down" },
+        " in ",
+        num3(s.1),
+        " out ",
+        num3(s.2),
+        if s.3 { " q" } else { "" },
+    ] {
+        draw_text(&mut fb, f, x, 44, part);
+        x += part.len() * f.width as usize;
+    }
+    let _ = panel.flush(&fb);
+}
+
+/// Up to three digits, into a fixed table so no formatter and no buffer is needed.
+fn num3(v: u32) -> &'static str {
+    const D: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    // Only the shape of the number matters here: exact counts past nine are read from
+    // the emulator's own tally, not from a 128-pixel screen.
+    match v {
+        0..=9 => D[v as usize],
+        10..=99 => "..",
+        _ => "many",
+    }
+}
+
 /// Ask about a staged firmware image.
 ///
 /// Says whether the signature was checked, in those words. "Unverified" here does not
@@ -163,6 +221,9 @@ fn serial() -> &'static str {
         core::str::from_utf8(out).unwrap_or("CATCARD")
     }
 }
+
+/// Idle poll interval, matching the selftest loop.
+const SCAN_CYCLES: u32 = 66_000;
 
 /// Draw up to three lines and return.
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
