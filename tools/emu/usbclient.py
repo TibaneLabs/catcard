@@ -52,9 +52,15 @@ def recv_report(sock):
     return buf
 
 
-def request(sock, opcode, payload=b""):
+def request(sock, opcode, payload=b"", progress=False):
+    n = 0
     for f in frames(opcode, payload):
         sock.sendall(f)
+        n += 1
+        if progress and n % 500 == 0:
+            print(f"  ... {n} frames sent", flush=True)
+    if progress:
+        print(f"  ... {n} frames sent, waiting for the reply", flush=True)
     r = recv_report(sock)
     if r[0] != KIND_START:
         raise ValueError(f"expected a START frame, got kind {r[0]}")
@@ -95,6 +101,7 @@ def main(path, image=None):
     s = connect(path)
     ok = True
 
+    print("connected", flush=True)
     st, body = request(s, PING, b"cat")
     print(f"ping      status={STATUS.get(st, st)} echo={body!r}")
     ok &= st == 0 and body == b"cat"
@@ -110,7 +117,7 @@ def main(path, image=None):
     if image:
         blob = open(image, "rb").read()
         t0 = time.time()
-        st, body = request(s, UPGRADE_OFFER, blob)
+        st, body = request(s, UPGRADE_OFFER, blob, progress=True)
         dt = time.time() - t0
         if st == 0:
             verified = body[0]

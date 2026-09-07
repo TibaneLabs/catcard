@@ -120,17 +120,18 @@ impl UsbTask {
         self.begin_reply(Status::Declined, &[]);
     }
 
-    /// Service USB once.
+    /// Service USB once. Returns whether anything happened.
     ///
     /// # Safety
     /// Exclusive access to OTG_FS.
-    pub unsafe fn poll(&mut self) {
+    pub unsafe fn poll(&mut self) -> bool {
         // SAFETY: as documented.
         unsafe {
             // Push any reply that is waiting for FIFO room before taking more in.
             self.drain_outbox();
 
-            match self.otg.poll() {
+            let event = self.otg.poll();
+            match event {
                 Event::Reset => {
                     // A cable event voids anything in flight. A half-received image
                     // must not be resumable across a reset -- the host would have to be
@@ -149,6 +150,7 @@ impl UsbTask {
                 }
                 _ => {}
             }
+            event != Event::Idle
         }
     }
 
@@ -380,12 +382,37 @@ pub unsafe fn init(serial: &'static str) {
     }
 }
 
+/// Consecutive polls that found nothing, for the idle backoff.
+static mut QUIET: u32 = 0;
+
+/// Polls of nothing before we stop spinning at full speed.
+const QUIET_BEFORE_BACKOFF: u32 = 256;
+/// How long to pause between polls once quiet. Short enough to be invisible against a
+/// 1 ms USB frame, long enough to stop the loop reading a register a million times a
+/// second for no reason.
+const BACKOFF_CYCLES: u32 = 400;
+
 /// Service USB. Safe to call from anywhere in the foreground.
+///
+/// Backs off when idle. A poll loop with no pause in it reads `GINTSTS` continuously
+/// and burns the core at full tilt for as long as the device is switched on and doing
+/// nothing, which is the normal state of a wallet. The pause is far shorter than the
+/// 1 ms between USB frames, so it costs no throughput; the counter resets the moment
+/// anything happens, and a transfer runs at full speed.
 pub fn pump() {
-    if let Some(t) = task() {
-        // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs
-        // in interrupt context.
-        unsafe { t.poll() }
+    let Some(t) = task() else { return };
+    // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs in
+    // interrupt context.
+    let busy = unsafe { t.poll() };
+    // SAFETY: single-threaded foreground; this is the only accessor.
+    let quiet = unsafe { &mut *core::ptr::addr_of_mut!(QUIET) };
+    if busy {
+        *quiet = 0;
+    } else {
+        *quiet = quiet.saturating_add(1);
+        if *quiet > QUIET_BEFORE_BACKOFF {
+            catcard_hal::dwt::delay_cycles(BACKOFF_CYCLES);
+        }
     }
 }
 
