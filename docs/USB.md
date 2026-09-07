@@ -124,6 +124,14 @@ is a fine trade.
 transport-independent and the vendor interface can be added beside the HID one if a case
 appears that HID cannot serve. That case has not appeared yet.
 
+### Status
+
+Enumeration works: the device is configured, and `Ping` and `Identify` round-trip
+against the emulator's register-level OTG model. **Reports stop being answered once the
+firmware leaves the selftest screen**, which is an open bug — see `ROADMAP.md`. Until it
+is fixed the upgrade path is not usable end to end, however well the staging half is
+tested.
+
 ### The protocol
 
 Only the transport is standard. The framing is `catcard-usb`:
