@@ -219,6 +219,8 @@ pub fn unlock(
             _ => {}
         }
 
+        crate::usbtask::pump();
+
         let n = pad.scan(matrix, drbg, &mut events);
         for e in &events[..n] {
             let Event::Pressed(key) = e else { continue };

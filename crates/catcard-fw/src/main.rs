@@ -30,6 +30,7 @@ mod pinentry;
 mod selftest;
 mod session;
 mod splash;
+mod usbtask;
 
 /// Board this image was built for, from `build.rs`.
 pub const BOARD_NAME: &str = env!("CATCARD_BOARD");

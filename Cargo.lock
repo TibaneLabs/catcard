@@ -186,6 +186,8 @@ dependencies = [
  "catcard-hal",
  "catcard-pin",
  "catcard-ui",
+ "catcard-upgrade",
+ "catcard-usb",
  "cortex-m",
  "cortex-m-rt",
 ]
@@ -204,6 +206,7 @@ version = "0.0.1"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
+ "catcard-usb",
 ]
 
 [[package]]

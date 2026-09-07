@@ -164,6 +164,11 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         })
     }
 
+    /// Bytes stored so far, which is also the offset the next chunk must carry.
+    pub fn received(&self) -> u32 {
+        self.received
+    }
+
     /// Bytes still to come.
     pub fn remaining(&self) -> u32 {
         self.length - self.received
