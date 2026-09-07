@@ -40,6 +40,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod control;
 pub mod descriptor;
 
 /// Every report is exactly this long, in both directions.
