@@ -131,18 +131,18 @@ abstraction.
       replaces the vendor-class/MS OS 2.0 plan — see [`USB.md`](USB.md) for why, and for
       why WebUSB stays addable beside it
 - [x] Our own framing and command set (`catcard-usb`), host-tested
-- [ ] **Open: the device does not reply to reports once it leaves the selftest screen.**
-      Ping and Identify round-trip while the selftest screen is up (`2 report(s) in,
-      2 out`); after the PIN flow hands off to the idle loop the same ping arrives and is
-      never answered (`1 report(s) in, 0 out`). Enumeration is unaffected either way, so
-      this is firmware state rather than the OTG registers. Next step is reading
-      `DIEPCTL`/`DTXFSTS` back after a stuck reply rather than guessing again
+- [ ] The bootloader's side of the install is not yet observed: the emulator stops when
+      the guest requests a system reset, so the run ends at `AIRCR.SYSRESETREQ` with the
+      recovery header published. Everything up to that point is confirmed
+- [ ] `IDLE_PAUSE_CYCLES` is measured rather than understood — no pause delivers no
+      reports at all, 4,000 cycles is as bad as none, 66,000 works. Revisit on hardware
+- [ ] mk3: no PSRAM, so staging needs the SPI-NOR pins first
 - [ ] Authenticated encryption and replay resistance over the framing
 - [x] Host tooling enough to drive it: `tools/emu/usbclient.py`
-- [~] Self-upgrade. Staging, validation and the approval screen are written and the
-      staging base is confirmed `[C]` for mk4/Q1; `catcard-upgrade` has 21 host tests
-      including a real dev-signed image verifying on-device. **The transfer does not
-      work yet** — see below
+- [x] Self-upgrade, end to end. Confirmed twice under the emulator: our own 256 KB
+      dev-signed image, and **Coldcard 5.4.5 (987 KB, production key)** — CatCard
+      installing stock firmware back onto the device, which is the case that matters
+      because it is the one a user needs when they want out
 - [ ] mk3 self-upgrade, which needs the SPI-NOR pins first
 
 **Exit:** a firmware update over USB, approved on the device.

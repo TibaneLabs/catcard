@@ -288,6 +288,66 @@ After those, CatCard boots: bootloader hands off, HAL comes up, the entropy pool
 SSD1306 driver initialises the panel, the selftest screen renders, and the keypad scan
 loop runs.
 
+## Firmware upgrade over USB — confirmed
+
+The whole path, twice, against the real mk4 bootloader:
+
+```
+ping      status=Ok
+identify  status=Ok protocol=1 board=mk4 version=0.0.1
+offer     status=Ok verified=True  len=262144 version=0.0.1 key_slot=0 older=False
+offer     status=Ok verified=False len=987136 version=5.4.5 key_slot=1 older=True
+stopped: guest requested a system reset (AIRCR.SYSRESETREQ)
+```
+
+The second line is the one worth having: **Coldcard 5.4.5, 987 KB, signed with a
+production key** — CatCard installing stock firmware back onto the device. It exercises
+what the dev-signed case cannot:
+
+- `verified=False`, `key_slot=1`. The five factory keys are not published, so the
+  signature **cannot** be checked here. The device says so rather than implying an
+  absence of evidence is evidence of absence.
+- `older=True`. Every build of this firmware is newer than any released stock firmware,
+  so an earlier version of `inspect` refused all of them — making a return to stock
+  impossible. That is now a warning, with the bootloader's OTP high-water left as the
+  real anti-rollback.
+
+Both facts reach the approval screen, and a person decides:
+
+```
+signature checked            checked, but OLDER
+SIGNATURE NOT CHECKED        NOT CHECKED, and OLDER
+```
+
+What is **not** confirmed is the bootloader installing the staged image, because the
+emulator stops when the guest asks for a system reset. The run ends with the recovery
+header published in PSRAM and `AIRCR.SYSRESETREQ` requested — the last observable step
+before the bootloader takes over.
+
+### What the USB work cost, and why the tools exist
+
+Five defects, four in the driver. Every one was found by reading state back, and none
+was visible from the code:
+
+| | |
+|---|---|
+| `SNAK`/`CNAK` reissued by read-modify-write | endpoint enables carried a contradictory NAK command |
+| global OUT NAK never cleared | `CGONAK` was simply absent beside `CGINAK` |
+| `clear_bits` on a write-1 command bit | dead code posing as reset handling |
+| poll loop with no pause | delivered no reports at all |
+| downgrade refused rather than reported | made a return to stock firmware impossible |
+
+`tools/emu/usbstatus.py` reads a status block out of a RAM dump: counters, the last
+status code, and `DOEPCTL`/`DOEPTSIZ`/`DIEPCTL`/`DCTL`. It exists because **the emulator
+emits no screens at all in `--usb-hid` mode**, which is the only mode our own protocol
+can be driven in — so the screen, the natural place for a diagnostic, is unreadable
+exactly where it is needed.
+
+Building that first would have saved most of the effort. Several rounds were spent
+reasoning about what the code should do, including one fix committed without validation
+that regressed enumeration and had to be reverted. The register dump answered the
+question in a single run.
+
 ## Recording the results
 
 Every `[?]` this session resolves should move out of `HARDWARE-OPEN-ITEMS.md` and into
