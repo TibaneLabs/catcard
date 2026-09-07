@@ -123,15 +123,19 @@ abstraction.
 
 ## M6 — Host connectivity
 
-- [ ] USB OTG FS device stack
+- [x] USB OTG FS device stack (`catcard-hal::otg`), polled, confirmed enumerating
+      against the emulator's register-level OTG model
 - [x] USB identity allocated: `0x39F2:0x0401` ([`USB.md`](USB.md))
 - [ ] Decide whether the DfuSe suffix should stamp it, once our own loader exists
-- [ ] Vendor-class interface with MS OS 2.0 descriptors, so Chromium's WebUSB accepts it
-      and Windows binds WinUSB without a driver install ([`USB.md`](USB.md))
-- [ ] Our own transport: framing, authenticated encryption, replay resistance
-- [ ] Host tooling
-- [ ] Self-upgrade: receive an image, stage to SPI-NOR, on-screen approval, reboot
-      (confirm the staging base first — `HARDWARE-OPEN-ITEMS.md`)
+- [x] HID interface with two 64-byte interrupt endpoints, reachable from WebHID. This
+      replaces the vendor-class/MS OS 2.0 plan — see [`USB.md`](USB.md) for why, and for
+      why WebUSB stays addable beside it
+- [x] Our own framing and command set (`catcard-usb`), host-tested
+- [ ] Authenticated encryption and replay resistance over the framing
+- [x] Host tooling enough to drive it: `tools/emu/usbclient.py`
+- [x] Self-upgrade: receive an image, stage to PSRAM, validate, on-screen approval,
+      reboot. Staging base confirmed `[C]` for mk4/Q1
+- [ ] mk3 self-upgrade, which needs the SPI-NOR pins first
 
 **Exit:** a firmware update over USB, approved on the device.
 

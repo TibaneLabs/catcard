@@ -48,7 +48,7 @@ Pass `--vid 0x39f2 --pid 0x0401` to stamp the real identity — appropriate once
 target is CatCard's own loader rather than the stock one. Revisit the default at M6,
 when that loader exists and the bootstrap path stops being the only way in.
 
-## Transport (not yet built)
+## Transport
 
 **Goal: reachable from a web browser**, so that wallet extensions can talk to the device
 without a native helper application.
@@ -95,18 +95,77 @@ page the user has granted permission to.
 It does not help mk3 or mk4, which have neither a camera nor a display big enough. So
 this is a per-board answer, not a replacement for the transport.
 
-### Recommended shape
+### The decision: HID, and what it cost
 
-- **A vendor-class interface with MS OS 2.0 descriptors.** Vendor class keeps Chromium's
-  WebUSB from refusing the interface — it blocks protected classes including HID — and
-  the MS OS 2.0 platform capability descriptor makes Windows bind WinUSB automatically,
-  which is what removes the driver-install step. The same interface is reachable from
-  libusb for native tooling and CI, so there is one protocol rather than two.
-- **Optionally a second HID interface** for reach: WebHID needs no special descriptors
-  and is the transport Ledger uses with MetaMask today. A composite device can offer
-  both; WebUSB claims only the vendor interface.
-- **Framing and command set are ours**, versioned from the first byte, with every
-  host-supplied length bounded before use.
+**Built as a HID device with two 64-byte interrupt endpoints.** This reverses the
+recommendation that stood in this file until the transport was written, which was a
+vendor-class interface with MS OS 2.0 descriptors. Both are reachable from a browser, so
+the deciding question is what a user has to do before either works:
+
+| | WebUSB (vendor class) | WebHID (HID class) |
+|---|---|---|
+| Windows | needs WinUSB bound via MS OS 2.0 descriptors | binds to the OS driver |
+| Linux | needs a `udev` rule | needs a `udev` rule for raw access, but `hidraw` is commonly permitted |
+| macOS | works | works |
+| Native tooling | libusb | hidapi |
+| What extensions speak | Trezor, via a hosted iframe | **Ledger, via WebHID** |
+
+A hardware wallet whose first instruction is "now edit a system file" has lost most of
+its users, and the MS OS 2.0 route is a descriptor most hosts get right and some do not.
+HID is the transport MetaMask's Ledger support already uses, which is the closest thing
+to evidence available about what actually works in that environment.
+
+The cost is throughput, and it is real: 64 bytes per 1 ms frame is **64 KB/s**, so a
+256 KB firmware upgrade takes about four seconds. A bulk endpoint would be far quicker.
+Four seconds, once, for something a user is already watching a confirmation screen for,
+is a fine trade.
+
+**Nothing forecloses WebUSB.** A composite device can carry both; the framing is
+transport-independent and the vendor interface can be added beside the HID one if a case
+appears that HID cannot serve. That case has not appeared yet.
+
+### The protocol
+
+Only the transport is standard. The framing is `catcard-usb`:
+
+```text
+byte 0   kind    0x01 START, 0x02 CONT
+byte 1   seq     increments per frame within a message, wrapping
+START:
+  2..4   u16     opcode (request) or status (response)
+  4..8   u32     total payload length
+  8..64  payload
+CONT:
+  2..64  payload
+```
+
+A message is one opcode and up to 4 GiB of payload, which is why a firmware image is a
+single message rather than a chunking scheme layered on a chunking scheme. The device
+never holds it: each frame's bytes go straight into PSRAM staging as they arrive.
+
+The sequence byte earns its place. USB retries interrupt transfers in hardware, so a
+dropped frame should not happen — but a host bug that drops one silently yields an image
+62 bytes shorter than what was sent, and without the check the only thing left to catch
+it is the signature.
+
+| opcode | | |
+|---|---|---|
+| `0x0001` | `Ping` | payload echoed |
+| `0x0002` | `Identify` | protocol version, board, firmware version |
+| `0x0010` | `UpgradeOffer` | payload is a complete signed image; stages and validates, installs nothing |
+| `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
+
+### Enumeration is not gated by the PIN; upgrades are
+
+The peripheral comes up during bring-up, before the PIN prompt, because a host presents
+the cable and begins enumerating within milliseconds and will not wait for someone to
+type a PIN — a device that only appears after unlocking looks broken. Enumerating
+discloses a name, an ID, and a serial number that is already the USB serial number.
+
+`UpgradeOffer` and `UpgradeCommit` answer `NotNow` until the unlock resolves. Someone
+holding the device therefore cannot replace its firmware without also being able to open
+it. A blank device with no PIN set reaches the unlocked state too, which is what keeps
+such a unit recoverable.
 
 ### Constraints that do not change
 
