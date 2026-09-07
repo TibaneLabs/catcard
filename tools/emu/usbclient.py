@@ -118,8 +118,10 @@ def main(path, image=None):
             ts = body[5:13].decode(errors="replace")
             ver = body[13:21].split(b"\0")[0].decode(errors="replace")
             slot = body[21]
+            older = bool(body[22]) if len(body) > 22 else False
             print(f"offer     status=Ok verified={bool(verified)} len={length} "
-                  f"version={ver} ts={ts} key_slot={slot}  [{len(blob)} B in {dt:.1f}s]")
+                  f"version={ver} key_slot={slot} older={older}"
+                  f"  [{len(blob)} B in {dt:.1f}s]")
         else:
             why = REJECT.get(body[0], body[0]) if body else "?"
             print(f"offer     status={STATUS.get(st, st)} reason={why}")

@@ -178,7 +178,7 @@ pub fn show(
     loop {
         // The host starts enumerating within milliseconds of the cable and will not wait
         // for this screen to be dismissed.
-        crate::usbtask::pump();
+        let _ = crate::usbtask::pump();
 
         let n = pad.scan(matrix, drbg, &mut events);
         let mut changed = false;

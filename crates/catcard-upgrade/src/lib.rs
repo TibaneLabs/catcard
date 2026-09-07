@@ -59,9 +59,6 @@ pub enum Reject {
     BadHeader(catcard_fwhdr::Error),
     /// Built for a different board. Installing it would brick this one.
     WrongBoard { hw_compat: u32, board: u32 },
-    /// Older than what is running. The bootloader has its own high-water check, but it
-    /// is only armed by a flag, so this one is not left to it.
-    Downgrade,
     /// The signature is present, we hold the key, and it does not verify.
     BadSignature,
     /// The staging area did not read back what was written.
@@ -101,6 +98,16 @@ pub struct Approval {
     pub signature: Signature,
     /// Bytes that will be written over the running firmware.
     pub length: u32,
+    /// The image is older than what is running.
+    ///
+    /// **Reported, not refused.** Anti-rollback belongs to the bootloader, which holds a
+    /// high-water mark in OTP and enforces it whatever we think. Refusing here as well
+    /// looked prudent and was not: every build of this firmware is newer than any
+    /// released stock firmware, so it made going back to stock impossible — a decision
+    /// no wallet should take away from its owner, and one the bootloader had not made.
+    ///
+    /// So it reaches the screen as a warning and a person decides.
+    pub older_than_running: bool,
 }
 
 impl Approval {
@@ -256,13 +263,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             });
         }
 
-        // Older than what is running. The bootloader's own high-water check only runs
-        // when the image asks for it, so refusing here does not duplicate it.
-        if let Some(cur) = running {
-            if header.timestamp < cur.timestamp {
-                return Err(Reject::Downgrade);
-            }
-        }
+        let older_than_running = running.is_some_and(|cur| header.timestamp < cur.timestamp);
 
         let digest = self.stored_digest()?;
         let signature = match header.pubkey_num {
@@ -283,6 +284,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             header,
             signature,
             length: self.length,
+            older_than_running,
         })
     }
 

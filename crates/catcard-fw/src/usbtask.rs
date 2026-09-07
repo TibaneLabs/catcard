@@ -135,13 +135,14 @@ impl UsbTask {
     ///
     /// # Safety
     /// Exclusive access to OTG_FS.
-    pub unsafe fn poll(&mut self) {
+    pub unsafe fn poll(&mut self) -> bool {
         // SAFETY: as documented.
         unsafe {
             // Push any reply that is waiting for FIFO room before taking more in.
             self.drain_outbox();
 
-            match self.otg.poll() {
+            let event = self.otg.poll();
+            match event {
                 Event::Reset => {
                     // A cable event voids anything in flight. A half-received image
                     // must not be resumable across a reset -- the host would have to be
@@ -161,6 +162,7 @@ impl UsbTask {
                 }
                 _ => {}
             }
+            event != Event::Idle || self.outbox_len > 0
         }
     }
 
@@ -351,7 +353,8 @@ fn describe(a: &Approval, out: &mut [u8; 64]) -> usize {
     out[5..13].copy_from_slice(&a.header.timestamp);
     out[13..21].copy_from_slice(&a.header.version);
     out[21] = a.header.pubkey_num as u8;
-    22
+    out[22] = a.older_than_running as u8;
+    23
 }
 
 /// Name a refusal in one byte, plus whatever detail fits.
@@ -365,7 +368,6 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::NotAnImage => 6,
         Reject::BadHeader(_) => 7,
         Reject::WrongBoard { .. } => 8,
-        Reject::Downgrade => 9,
         Reject::BadSignature => 10,
         Reject::StorageFault { .. } => 11,
     };
@@ -396,13 +398,29 @@ pub unsafe fn init(serial: &'static str) {
 }
 
 /// Service USB. Safe to call from anywhere in the foreground.
-pub fn pump() {
-    if let Some(t) = task() {
-        // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs
-        // in interrupt context.
-        unsafe { t.poll() }
-        publish_status(t);
-    }
+/// How long to pause after a poll that found nothing.
+///
+/// Measured, not chosen. Polling with no pause at all delivers **no reports whatsoever**;
+/// this value delivers them reliably; 4,000 cycles is as bad as none. Why the core wants
+/// this much quiet is not something the reference explains, and it is not something an
+/// emulator run can settle — so the number is recorded as what works, and revisiting it
+/// belongs with the hardware.
+///
+/// It also costs throughput, and that is the reason the pause is skipped whenever the
+/// previous poll did anything: at the reset-default 4 MHz this is 16 ms, so a pause on
+/// every poll would hold the link to one report per 16 USB frames.
+pub const IDLE_PAUSE_CYCLES: u32 = 66_000;
+
+/// Service USB. Safe to call from anywhere in the foreground.
+///
+/// Returns whether anything happened, so a caller can decide how hard to spin.
+pub fn pump() -> bool {
+    let Some(t) = task() else { return false };
+    // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs in
+    // interrupt context.
+    let busy = unsafe { t.poll() };
+    publish_status(t);
+    busy
 }
 
 /// The task, if USB came up.

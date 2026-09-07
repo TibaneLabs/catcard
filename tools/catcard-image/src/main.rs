@@ -20,7 +20,7 @@ mod elf;
 mod image;
 mod sign;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use catcard_board::BoardSpec;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -92,6 +92,17 @@ enum Cmd {
     /// Print the header of a `.bin` or `.dfu`.
     Info { file: PathBuf },
 
+    /// Unwrap a DfuSe container to the raw signed image inside it.
+    ///
+    /// A `.dfu` is a wrapper; what a device stages and what the bootloader installs is
+    /// the element inside. Anything that sends an image over the wire needs the element,
+    /// not the file -- including sending a stock firmware release back to a device.
+    Extract {
+        dfu: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+
     /// Wrap an already-signed `.bin` as a DfuSe container.
     Dfuse {
         bin: PathBuf,
@@ -136,6 +147,7 @@ fn main() -> Result<()> {
         } => cmd_sign(&bin, key, pubkey_num, out),
         Cmd::Verify { bin, board } => cmd_verify(&bin, board.as_deref()),
         Cmd::Info { file } => cmd_info(&file),
+        Cmd::Extract { dfu, out } => cmd_extract(&dfu, &out),
         Cmd::Dfuse {
             bin,
             board,
@@ -303,6 +315,26 @@ fn cmd_verify(bin: &Path, board: Option<&str>) -> Result<()> {
         image::ensure_installable(b, &img)?;
         println!("installable   yes, on {}", b.name);
     }
+    Ok(())
+}
+
+fn cmd_extract(dfu: &Path, out: &Path) -> Result<()> {
+    let raw = std::fs::read(dfu).with_context(|| format!("reading {}", dfu.display()))?;
+    ensure!(
+        raw.len() > 5 && &raw[0..5] == b"DfuSe",
+        "{} is not a DfuSe container",
+        dfu.display()
+    );
+    let p = dfuse::unpack(&raw)?;
+    ensure!(
+        p.elements.len() == 1,
+        "expected one element, found {} -- which one to install is not ours to guess",
+        p.elements.len()
+    );
+    let (addr, data) = p.elements.into_iter().next().unwrap();
+    std::fs::write(out, &data).with_context(|| format!("writing {}", out.display()))?;
+    println!("element       {:#010x}  {} bytes", addr, data.len());
+    println!("wrote         {}", out.display());
     Ok(())
 }
 

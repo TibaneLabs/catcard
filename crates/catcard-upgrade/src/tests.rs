@@ -223,12 +223,36 @@ fn an_image_for_another_board_is_refused() {
 }
 
 #[test]
-fn a_downgrade_is_refused_here_and_not_left_to_the_bootloader() {
-    // The bootloader's high-water check only runs when the image asks for it, so an
-    // image that does not set the flag would roll straight back.
+fn a_downgrade_is_reported_and_not_refused() {
+    // Anti-rollback is the bootloader's: it holds a high-water mark in OTP and enforces
+    // it whatever this code thinks. Refusing here as well made going back to stock
+    // firmware impossible, because every build of this firmware is newer than any
+    // released stock one -- so the flag reaches the approval screen and a person
+    // decides.
     let image = image_for(&MK4, OLDER, 0);
     let mut s = staged_with(&image);
-    assert_eq!(s.inspect(Some(&running(NEWER))), Err(Reject::Downgrade));
+    let a = s.inspect(Some(&running(NEWER))).unwrap();
+    assert!(a.older_than_running);
+    assert!(
+        a.is_verified(),
+        "still a well-formed, correctly signed image"
+    );
+}
+
+#[test]
+fn a_newer_image_is_not_flagged_as_older() {
+    let image = image_for(&MK4, NEWER, 0);
+    let mut s = staged_with(&image);
+    assert!(!s.inspect(Some(&running(OLDER))).unwrap().older_than_running);
+}
+
+#[test]
+fn with_no_running_header_nothing_is_claimed_about_age() {
+    // A device that cannot read its own header knows nothing about which is newer, and
+    // must not imply that it does.
+    let image = image_for(&MK4, OLDER, 0);
+    let mut s = staged_with(&image);
+    assert!(!s.inspect(None).unwrap().older_than_running);
 }
 
 #[test]
@@ -359,8 +383,11 @@ fn committing_publishes_the_marker_and_the_length() {
 fn inspect_never_publishes_anything() {
     // Inspection has to be safe to call and safe to refuse after. If it left a marker
     // behind, a refused image would install itself on the next reboot.
-    let image = image_for(&MK4, OLDER, 0);
+    //
+    // Refused for a reason that is still a refusal: an image built for another board.
+    // A downgrade is no longer one -- it is reported and left to a person.
+    let image = image_for(&MK3, NEWER, 0);
     let mut s = staged_with(&image);
-    assert!(s.inspect(Some(&running(NEWER))).is_err());
+    assert!(s.inspect(Some(&running(OLDER))).is_err());
     assert!(s.area.header.is_none(), "a refused image was staged anyway");
 }

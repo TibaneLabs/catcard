@@ -87,12 +87,10 @@ fn idle(
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
 
     loop {
-        usbtask::pump();
-        // The same pause the selftest loop has. A poll loop with nothing between the
-        // polls does not service USB faster -- the host still sends on 1 ms frames --
-        // it just spins the core, and it is the difference between this screen carrying
-        // reports and not.
-        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+        // Poll, then pause. The pause is not optional: with nothing between the polls
+        // the core delivers no reports at all. See `usbtask::IDLE_PAUSE_CYCLES`.
+        let _ = usbtask::pump();
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
 
         // Redraw when the USB counters move. The emulator reads this screen back as
         // text, so it is where a stuck transfer becomes visible without a debugger.
@@ -193,14 +191,21 @@ fn num3(v: u32) -> &'static str {
 /// behind and one we cannot, and the person about to overwrite their firmware is the one
 /// who should weigh it.
 fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
+    // Two facts, in the order they matter. Whether we could check the signature comes
+    // first: an image signed by one of the five unpublished factory keys cannot be
+    // verified here at all, and that is different from one that failed. Whether it is
+    // older than what is running comes second -- going back to stock firmware is a
+    // legitimate thing to want, and the bootloader still holds the final say through its
+    // high-water mark, so this is a warning and not a refusal.
     message(
         panel,
         "Install firmware?",
         a.header.version_str().unwrap_or("unknown version"),
-        if a.is_verified() {
-            "signature checked"
-        } else {
-            "SIGNATURE NOT CHECKED"
+        match (a.is_verified(), a.older_than_running) {
+            (true, false) => "signature checked",
+            (true, true) => "checked, but OLDER",
+            (false, false) => "SIGNATURE NOT CHECKED",
+            (false, true) => "NOT CHECKED, and OLDER",
         },
     );
 }
@@ -221,9 +226,6 @@ fn serial() -> &'static str {
         core::str::from_utf8(out).unwrap_or("CATCARD")
     }
 }
-
-/// Idle poll interval, matching the selftest loop.
-const SCAN_CYCLES: u32 = 66_000;
 
 /// Draw up to three lines and return.
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
