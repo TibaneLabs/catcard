@@ -51,6 +51,16 @@ impl PinGate for BootloaderGate<'_> {
     }
 }
 
+/// Look up the anti-phishing indices in the BIP-39 English list.
+///
+/// `catcard-pin` deliberately hands back positions rather than words: holding the list
+/// would let the PIN gate reach wallet code. The lookup belongs here, where a screen is
+/// being drawn anyway.
+fn anti_phishing_words(w: catcard_pin::words::Words) -> [&'static str; 2] {
+    use catcard_wallet::bip39::wordlist::ENGLISH;
+    [ENGLISH[w.index[0] as usize], ENGLISH[w.index[1] as usize]]
+}
+
 /// One line of 7x14, centred.
 fn title(fb: &mut Mono128x64, y: usize, s: &str) {
     let f = &peep7x14::FONT;
@@ -173,7 +183,7 @@ pub fn unlock(
         if redraw {
             match login.step() {
                 Step::Prefix => screen_field(panel, "PIN prefix", &field, login.attempts_left()),
-                Step::ConfirmWords(w) => screen_words(panel, w.as_str()),
+                Step::ConfirmWords(w) => screen_words(panel, anti_phishing_words(w)),
                 Step::Suffix => screen_field(panel, "PIN suffix", &field, login.attempts_left()),
                 Step::Wrong { attempts_left, .. } => {
                     let mut n = [0u8; 3];

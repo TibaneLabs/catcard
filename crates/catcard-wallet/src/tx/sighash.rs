@@ -18,7 +18,7 @@
 //! amount must come from the same source the signature commits to — never from a
 //! separate, unsigned field.
 
-use crate::{sha256d, Error, Sha256d, Transaction};
+use super::{sha256d, Error, Sha256d, Transaction};
 
 /// The sighash flag byte, as it appears in the preimage (4 bytes, little-endian).
 pub type SigHashFlag = u32;
@@ -71,7 +71,7 @@ impl Midstates {
 
 fn write_var_slice(h: &mut Sha256d, data: &[u8]) {
     let mut buf = [0u8; 9];
-    let n = crate::VarInt::write(data.len() as u64, &mut buf).expect("9 bytes is enough");
+    let n = super::VarInt::write(data.len() as u64, &mut buf).expect("9 bytes is enough");
     h.update(&buf[..n]);
     h.update(data);
 }

@@ -85,9 +85,18 @@ so it tests on the host.
 **`catcard-fw`** — the binary. The only crate that cannot build for the host, and the
 only one that needs a board feature.
 
-**`catcard-bip39` / `catcard-bip32` / `catcard-encoding` / `catcard-address`** — the
-wallet stack, bottom to top. All portable, all verified against the official BIP test
-vectors, none aware of hardware.
+**`catcard-wallet`** — the wallet stack as one crate: `bip39`, `bip32`, `encoding`,
+`address`, `tx`, `chain`. Portable, verified against the official BIP test vectors, and
+unaware of hardware.
+
+It was six crates. They are only ever used together, by one binary, and the boundaries
+between them cost six manifests and six sets of feature flags to keep in step while
+buying nothing the compiler could check. The boundaries kept elsewhere in this tree are
+the ones that do carry such a property: `catcard-entropy` cannot reach the display
+because it does not depend on it, `catcard-pin` cannot reach the wallet, and
+`catcard-sign` stays outside `catcard-wallet` because `catcard-upgrade` verifies
+firmware signatures and has no business being able to parse a transaction. That is the
+test a crate boundary has to pass here — not whether the code is a different topic.
 
 **`catcard-flash` / `catcard-settings`** — SPI-NOR and the store above it. Both take a
 bus/storage trait rather than owning hardware, so their failure modes (page-boundary

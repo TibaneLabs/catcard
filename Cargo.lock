@@ -101,40 +101,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "catcard-address"
-version = "0.0.1"
-dependencies = [
- "catcard-bip32",
- "catcard-bip39",
- "catcard-encoding",
- "k256",
- "sha2",
-]
-
-[[package]]
-name = "catcard-bip32"
-version = "0.0.1"
-dependencies = [
- "catcard-encoding",
- "hmac",
- "k256",
- "ripemd",
- "sha2",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "catcard-bip39"
-version = "0.0.1"
-dependencies = [
- "hmac",
- "sha2",
- "subtle",
- "zeroize",
-]
-
-[[package]]
 name = "catcard-board"
 version = "0.0.1"
 
@@ -144,21 +110,6 @@ version = "0.0.1"
 dependencies = [
  "catcard-board",
  "zeroize",
-]
-
-[[package]]
-name = "catcard-chain"
-version = "0.0.1"
-dependencies = [
- "catcard-bip32",
-]
-
-[[package]]
-name = "catcard-encoding"
-version = "0.0.1"
-dependencies = [
- "sha2",
- "subtle",
 ]
 
 [[package]]
@@ -188,6 +139,7 @@ dependencies = [
  "catcard-ui",
  "catcard-upgrade",
  "catcard-usb",
+ "catcard-wallet",
  "cortex-m",
  "cortex-m-rt",
 ]
@@ -226,8 +178,8 @@ dependencies = [
 name = "catcard-pin"
 version = "0.0.1"
 dependencies = [
- "catcard-bip39",
  "catcard-callgate",
+ "catcard-wallet",
  "zeroize",
 ]
 
@@ -246,13 +198,6 @@ name = "catcard-sign"
 version = "0.0.1"
 dependencies = [
  "k256",
- "sha2",
-]
-
-[[package]]
-name = "catcard-tx"
-version = "0.0.1"
-dependencies = [
  "sha2",
 ]
 
@@ -280,6 +225,18 @@ name = "catcard-usb"
 version = "0.0.1"
 dependencies = [
  "catcard-board",
+]
+
+[[package]]
+name = "catcard-wallet"
+version = "0.0.1"
+dependencies = [
+ "hmac",
+ "k256",
+ "ripemd",
+ "sha2",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

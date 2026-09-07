@@ -1,6 +1,6 @@
 //! Child numbers and derivation paths.
 
-use crate::Error;
+use super::Error;
 
 /// Indices at or above this are hardened.
 pub const HARDENED_OFFSET: u32 = 0x8000_0000;

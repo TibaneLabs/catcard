@@ -155,7 +155,7 @@ Bitcoin-only firmware is a distinct artefact with the other chains' parsers *abs
 the image* — that is the difference between a smaller product and a smaller attack
 surface, and it is why the option is worth having.
 
-`catcard-chain` is the registry: curve, derivation scheme, SLIP-44 coin type per chain,
+`catcard_wallet::chain` is the registry: curve, derivation scheme, SLIP-44 coin type per chain,
 plus the two guards that one-firmware-many-chains needs. CI builds and tests every
 feature combination, because feature-gated code rots silently.
 
@@ -198,7 +198,7 @@ Three consequences that are cheaper to get right than to retrofit:
 - **Store the BIP-39 entropy, not just the derived seed.** Cardano's Icarus master-key
   generation runs PBKDF2 over the mnemonic *entropy*, not over the 64-byte BIP-39 seed.
   If our secret blob holds only the seed, that derivation is impossible after the fact.
-  **Settled:** `catcard_bip39::Mnemonic` stores entropy and renders words on demand, so
+  **Settled:** `catcard_wallet::bip39::Mnemonic` stores entropy and renders words on demand, so
   the secret encoding written at M4 carries entropy. Nothing is foreclosed.
 - **Master-key generation has incompatible variants.** The original paper, Icarus, and
   Ledger's variant all differ. Whichever we implement has to be named in the UI, because

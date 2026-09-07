@@ -6,7 +6,7 @@
 //! transaction accepting either would have two valid serialisations and therefore two
 //! txids. Decoding here rejects any encoding that could have been shorter.
 
-use crate::{Error, Reader};
+use super::{Error, Reader};
 
 pub struct VarInt;
 

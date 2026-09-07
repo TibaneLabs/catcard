@@ -79,12 +79,12 @@ crates/
   catcard-fwhdr      signed image header + the digest the bootloader verifies
   catcard-callgate   bootloader callgate ABI (PIN, secrets, SE entropy, DFU)
   catcard-entropy    entropy accumulator, SP 800-90B health tests, HMAC-DRBG
-  catcard-bip39      mnemonics: entropy <-> phrase, checksum, PBKDF2 seed
-  catcard-bip32      HD key derivation over secp256k1, xprv/xpub
-  catcard-encoding   Base58Check, Bech32/Bech32m
-  catcard-address    P2PKH, P2SH-P2WPKH, P2WPKH, P2TR
+  catcard-wallet     mnemonics, HD derivation, encodings, addresses, transactions,
+                     and the chain registry -- one crate, six modules
   catcard-sign       deterministic ECDSA (RFC 6979) and BIP-340 Schnorr
-  catcard-tx         transaction parsing and BIP-143 sighash
+  catcard-pin        the login sequence over callgate 18
+  catcard-upgrade    staging and validating a firmware image
+  catcard-usb        HID transport framing, descriptors, control transfers
   catcard-flash      SPI-NOR driver
   catcard-settings   authenticated, power-fail-safe settings store
   catcard-hal        STM32L4/L4+ register-level drivers (RNG, SPI, GPIO, DWT, clocks)

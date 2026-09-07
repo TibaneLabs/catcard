@@ -13,6 +13,10 @@ default = ["std"]
 std = []
 
 [dependencies]
-catcard-bip39 = { workspace = true, default-features = false }
 catcard-callgate.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+# Only to check the index-to-word vectors below. Not a runtime dependency: the PIN gate
+# has no business being able to reach wallet code, and rendering words is the caller's.
+catcard-wallet = { workspace = true, features = ["std"] }

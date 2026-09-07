@@ -27,9 +27,6 @@
 //! Rather than diverge quietly, [`Mnemonic::to_seed`] refuses a non-ASCII passphrase
 //! with [`Error::PassphraseNotAscii`]. See `docs/ROADMAP.md`.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
-
 pub mod wordlist;
 
 #[cfg(test)]

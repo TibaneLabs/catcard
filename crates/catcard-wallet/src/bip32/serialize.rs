@@ -9,9 +9,9 @@
 //! the compressed point. The leading zero byte is what makes both 33 wide, so the two
 //! forms are the same length and only the version prefix distinguishes them.
 
-use catcard_encoding::base58;
+use crate::encoding::base58;
 
-use crate::{
+use super::{
     ChildNumber, ExtendedPrivKey, ExtendedPubKey, CHAIN_CODE_LEN, FINGERPRINT_LEN, PRIVKEY_LEN,
     PUBKEY_LEN,
 };
@@ -270,7 +270,7 @@ mod alloc_string {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_vectors::VECTORS;
+    use crate::bip32::test_vectors::VECTORS;
 
     fn unhex(s: &str) -> Vec<u8> {
         (0..s.len())

@@ -17,9 +17,6 @@
 //!
 //! Reference: BIP-32.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
-
 pub mod path;
 pub mod serialize;
 

@@ -20,9 +20,6 @@
 //! Legacy (pre-segwit) sighash has no such commitment, which is why signing a legacy
 //! input safely requires the *entire* previous transaction to check the amount against.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
-
 use sha2::{Digest, Sha256};
 
 pub mod varint;

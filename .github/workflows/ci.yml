@@ -98,11 +98,11 @@ jobs:
       # Feature-gated code rots silently unless every shape is compiled and tested.
       - name: Test
         run: |
-          cargo test -p catcard-chain \
+          cargo test -p catcard-wallet \
             --no-default-features --features std,${{ matrix.chains }}
       - name: Clippy
         run: |
-          cargo clippy -p catcard-chain --all-targets \
+          cargo clippy -p catcard-wallet --all-targets \
             --no-default-features --features std,${{ matrix.chains }}
 
   reproducible:

@@ -1,6 +1,6 @@
 [package]
-name = "catcard-chain"
-description = "Chain registry: curves, derivation schemes, and compile-time coin selection"
+name = "catcard-wallet"
+description = "Wallet logic: encodings, BIP-32/39, addresses, transactions, chain registry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,4 +19,9 @@ chain-ethereum = []
 chain-solana = []
 
 [dependencies]
-catcard-bip32 = { workspace = true, default-features = false }
+hmac.workspace = true
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
+ripemd = { version = "0.2.0", default-features = false }
+sha2.workspace = true
+subtle.workspace = true
+zeroize = { workspace = true, features = ["derive"] }

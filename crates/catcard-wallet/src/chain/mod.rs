@@ -29,10 +29,7 @@
 //! - [`Chain::accepts_path`] rejects a path whose SLIP-44 coin type belongs to a
 //!   different chain, so an Ethereum signature cannot be taken over `m/44'/0'/…`.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
-
-use catcard_bip32::{ChildNumber, DerivationPath};
+use crate::bip32::{ChildNumber, DerivationPath};
 
 /// Signature curve.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -152,7 +149,7 @@ impl Chain {
     }
 
     /// The account-level prefix for this chain: `m/<purpose>'/<coin>'`.
-    pub fn account_prefix(&self, purpose: u32) -> Result<DerivationPath, catcard_bip32::Error> {
+    pub fn account_prefix(&self, purpose: u32) -> Result<DerivationPath, crate::bip32::Error> {
         DerivationPath::from_slice(&[
             ChildNumber::hardened(purpose)?,
             ChildNumber::hardened(self.coin_type)?,
@@ -280,7 +277,7 @@ pub fn build_tag(out: &mut [u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catcard_bip32::HARDENED_OFFSET;
+    use crate::bip32::HARDENED_OFFSET;
     use core::str::FromStr;
 
     fn path(s: &str) -> DerivationPath {

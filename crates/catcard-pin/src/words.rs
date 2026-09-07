@@ -8,30 +8,27 @@
 //! permanent from the first device that ships. It is fixed here, with vectors, so a
 //! later refactor cannot quietly shift everybody's words by one.
 //!
+//! **Indices, not strings.** This crate hands back two positions in the BIP-39 English
+//! list and stops there. Holding the list would mean the PIN gate could reach wallet
+//! code, which is a boundary worth more than the convenience — so the caller, which is
+//! already drawing a screen, does the lookup. The tests here still check the words, via
+//! a dev-dependency, because the vectors are only meaningful as words.
+//!
 //! CatCard's words will **not** match stock Coldcard's for the same device and prefix,
 //! even though both are derived from the same 32 bits. Nothing is wrong when that is
 //! observed — the two firmwares simply chose different mappings.
 
-use catcard_bip39::wordlist::{ENGLISH, WORD_COUNT};
-
 /// Bits consumed per word — an index into the 2048-entry list.
 pub const BITS_PER_WORD: u32 = 11;
 
-/// The two words shown between the PIN prefix and the suffix.
+/// Entries in the BIP-39 wordlist, which is what an index addresses.
+pub const WORD_COUNT: u16 = 1 << BITS_PER_WORD;
+
+/// The two words shown between the PIN prefix and the suffix, as list positions.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Words {
-    /// Indices into [`ENGLISH`], in display order.
+    /// Positions in the BIP-39 English list, in display order. Always `< WORD_COUNT`.
     pub index: [u16; 2],
-}
-
-impl Words {
-    /// The words themselves, in display order.
-    pub fn as_str(&self) -> [&'static str; 2] {
-        [
-            ENGLISH[self.index[0] as usize],
-            ENGLISH[self.index[1] as usize],
-        ]
-    }
 }
 
 /// Split the gate's 32 bits into two 11-bit wordlist indices.
@@ -50,6 +47,12 @@ pub const fn from_bits(bits: u32) -> Words {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcard_wallet::bip39::wordlist::ENGLISH;
+
+    fn words_for(bits: u32) -> [&'static str; 2] {
+        let w = from_bits(bits);
+        [ENGLISH[w.index[0] as usize], ENGLISH[w.index[1] as usize]]
+    }
 
     #[test]
     fn the_mapping_is_pinned_to_these_vectors() {
@@ -66,7 +69,7 @@ mod tests {
             (0xdead_beef, ["report", "target"]),
             (0x5555_aaaa, ["find", "fetch"]),
         ] {
-            assert_eq!(from_bits(bits).as_str(), expect, "bits {bits:#010x}");
+            assert_eq!(words_for(bits), expect, "bits {bits:#010x}");
         }
     }
 
@@ -83,14 +86,14 @@ mod tests {
 
     #[test]
     fn every_index_is_inside_the_wordlist() {
-        // 11 bits addresses exactly 2048, so this cannot fail by arithmetic — it fails
-        // if the wordlist is ever not 2048 long, which would make `as_str` panic on a
-        // device rather than here.
-        assert_eq!(WORD_COUNT, 1 << BITS_PER_WORD);
+        // 11 bits addresses exactly 2048, so this cannot fail by arithmetic -- it fails
+        // if the wordlist is ever not 2048 long, which would make the caller's lookup
+        // panic on a device rather than here.
+        assert_eq!(ENGLISH.len(), WORD_COUNT as usize);
         for bits in [0u32, 0x003f_ffff, 0xffff_ffff, 0x5555_5555, 0xaaaa_aaaa] {
             let w = from_bits(bits);
-            assert!(w.index.iter().all(|&i| (i as usize) < WORD_COUNT));
-            let _ = w.as_str();
+            assert!(w.index.iter().all(|&i| i < WORD_COUNT));
+            let _ = words_for(bits);
         }
     }
 }

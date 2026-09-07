@@ -1,16 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/catcard-address",
-    "crates/catcard-bip32",
-    "crates/catcard-chain",
-    "crates/catcard-bip39",
     "crates/catcard-board",
-    "crates/catcard-chain",
-    "crates/catcard-encoding",
     "crates/catcard-flash",
     "crates/catcard-fwhdr",
     "crates/catcard-callgate",
+    "crates/catcard-wallet",
     "crates/catcard-entropy",
     "crates/catcard-pin",
     "crates/catcard-hal",
@@ -18,7 +13,6 @@ members = [
     "crates/catcard-fw",
     "crates/catcard-settings",
     "crates/catcard-sign",
-    "crates/catcard-tx",
     "crates/catcard-upgrade",
     "crates/catcard-usb",
     "tools/catcard-image",
@@ -27,12 +21,7 @@ members = [
 # `cargo build` / `cargo test` with no `-p` operates on host-buildable crates only.
 # The firmware crates need `--target thumbv7em-none-eabihf` (see `cargo fw`).
 default-members = [
-    "crates/catcard-address",
-    "crates/catcard-bip32",
-    "crates/catcard-bip39",
     "crates/catcard-board",
-    "crates/catcard-chain",
-    "crates/catcard-encoding",
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
     "crates/catcard-flash",
@@ -41,7 +30,7 @@ default-members = [
     "crates/catcard-upgrade",
     "crates/catcard-usb",
     "crates/catcard-sign",
-    "crates/catcard-tx",
+    "crates/catcard-wallet",
     "tools/catcard-image",
 ]
 
@@ -54,16 +43,11 @@ repository = "https://github.com/catcard/catcard"
 authors = ["Karpeles Lab Inc."]
 
 [workspace.dependencies]
-catcard-address = { path = "crates/catcard-address", default-features = false }
-catcard-bip32 = { path = "crates/catcard-bip32", default-features = false }
-catcard-bip39 = { path = "crates/catcard-bip39", default-features = false }
-catcard-chain = { path = "crates/catcard-chain", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
-catcard-encoding = { path = "crates/catcard-encoding", default-features = false }
 catcard-flash = { path = "crates/catcard-flash", default-features = false }
 catcard-settings = { path = "crates/catcard-settings", default-features = false }
 catcard-sign = { path = "crates/catcard-sign", default-features = false }
-catcard-tx = { path = "crates/catcard-tx", default-features = false }
+catcard-wallet = { path = "crates/catcard-wallet", default-features = false }
 catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-pin = { path = "crates/catcard-pin", default-features = false }

@@ -174,7 +174,7 @@ fn der_int(v: &[u8]) -> (&[u8], usize) {
 
 /// Sign for a taproot key-path spend (BIP-340 Schnorr).
 ///
-/// The key must already be tweaked — see `catcard_address::taproot_output_key`. Signing
+/// The key must already be tweaked — see `catcard_wallet::address::taproot_output_key`. Signing
 /// with the untweaked internal key produces a signature that verifies against the wrong
 /// public key and is rejected by consensus.
 pub fn schnorr_sign(secret: &[u8; 32], hash: &[u8; 32]) -> Result<[u8; SCHNORR_SIG_LEN], Error> {

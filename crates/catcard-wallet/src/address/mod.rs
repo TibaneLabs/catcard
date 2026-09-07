@@ -18,11 +18,8 @@
 //! that guesses the script type from `m/84'` and then encodes P2PKH would produce a
 //! valid-looking address nobody can spend from.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
-
-use catcard_bip32::{hash160, Network};
-use catcard_encoding::{base58, bech32};
+use crate::bip32::{hash160, Network};
+use crate::encoding::{base58, bech32};
 use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::elliptic_curve::PrimeField;
 use k256::{AffinePoint, ProjectivePoint, PublicKey, Scalar};
@@ -241,8 +238,8 @@ pub fn encode_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catcard_bip32::{DerivationPath, ExtendedPrivKey};
-    use catcard_bip39::Mnemonic;
+    use crate::bip32::{DerivationPath, ExtendedPrivKey};
+    use crate::bip39::Mnemonic;
 
     /// The seed every one of BIP-49/84/86's test vectors uses.
     const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon \
