@@ -170,12 +170,6 @@ pub struct Otg {
     /// The most recent report from the host, valid when `poll` returned [`Event::Report`].
     pub rx: [u8; REPORT_LEN],
     rx_len: usize,
-    /// Whether the OUT endpoint is enabled and waiting for a packet.
-    ///
-    /// Tracked because the core clears `EPENA` when a transfer completes. An endpoint
-    /// that finishes and is not re-armed simply stops receiving, and the host sees a
-    /// device that answered a few reports and then went silent for ever.
-    out_armed: bool,
     setup: [u8; Setup::LEN],
     scratch: [u8; 64],
 }
@@ -246,7 +240,6 @@ impl Otg {
             dev: Device::new(serial),
             rx: [0; REPORT_LEN],
             rx_len: 0,
-            out_armed: false,
             setup: [0; Setup::LEN],
             scratch: [0; 64],
         })
@@ -302,14 +295,6 @@ impl Otg {
             if sts & GINTSTS_IEPINT != 0 {
                 self.service_in_endpoints();
             }
-
-            // Never leave the OUT endpoint closed with nothing pending. This is the
-            // one piece of state the core changes behind our back: `EPENA` clears on
-            // completion, and the only symptom of forgetting to set it again is a
-            // device that answers a few reports and then stops for ever.
-            if self.dev.is_configured() && !self.out_armed && self.rx_len == 0 {
-                self.receive_next();
-            }
             Event::Idle
         }
     }
@@ -355,7 +340,6 @@ impl Otg {
         // SAFETY: as documented.
         unsafe {
             self.rx_len = 0;
-            self.out_armed = true;
             reg::write(
                 DOEPTSIZ + EP_OUT_NUM * EP_STRIDE,
                 (1 << 19) | REPORT_LEN as u32,
@@ -368,7 +352,6 @@ impl Otg {
     /// Exclusive access to OTG_FS.
     unsafe fn on_reset(&mut self) {
         self.dev.reset();
-        self.out_armed = false;
         // SAFETY: as documented.
         unsafe {
             reg::clear_bits(DCTL, DCTL_CGINAK);
@@ -427,13 +410,7 @@ impl Otg {
                     self.answer(&setup);
                     None
                 }
-                pktsts::OUT_DONE if ep == EP_OUT_NUM => {
-                    // The core has closed the endpoint. Whether a report came with it
-                    // decides who re-arms: a caller that has data to read does it after
-                    // reading, and an empty completion is re-armed by `poll`.
-                    self.out_armed = false;
-                    (self.rx_len > 0).then_some(Event::Report)
-                }
+                pktsts::OUT_DONE if ep == EP_OUT_NUM && self.rx_len > 0 => Some(Event::Report),
                 _ => {
                     discard_fifo(bytes);
                     None
