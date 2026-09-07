@@ -1,0 +1,21 @@
+[package]
+name = "catcard-upgrade"
+description = "Staging and validating a firmware image for the bootloader to install"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = ["catcard-fwhdr/std", "catcard-sign/std"]
+
+[dependencies]
+catcard-board.workspace = true
+catcard-fwhdr = { workspace = true, default-features = false }
+catcard-sign = { workspace = true, default-features = false }
+
+[dev-dependencies]
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "pem"] }

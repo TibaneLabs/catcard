@@ -38,8 +38,12 @@ pub const LENGTH_ALIGN: u32 = 512;
 /// this whether or not it uses the space. Source: firmware-signing.md §1 [C]
 pub const MIN_FIRMWARE_LENGTH: u32 = 256 * 1024;
 
-/// Field offsets within the header. Source: firmware-signing.md §1 [C]
-mod off {
+/// Field offsets within the header, relative to [`HEADER_OFFSET`].
+///
+/// Public because anything that has to reason about a header *in an image* — rather
+/// than about a parsed one — needs them, and reproducing the numbers at each call site
+/// is how two copies drift apart. Source: firmware-signing.md §1 [C]
+pub mod off {
     pub const MAGIC: usize = 0;
     pub const TIMESTAMP: usize = 4;
     pub const VERSION: usize = 12;
@@ -383,6 +387,74 @@ pub fn signed_digest(image: &[u8]) -> Result<[u8; 32], Error> {
     let digest = Sha256::digest(inner.finalize());
     Ok(digest.into())
 }
+
+/// [`signed_digest`], computed over an image fed in pieces.
+///
+/// The whole image does not have to be in RAM at once, which on a 256 KB minimum it
+/// cannot be. Feed the bytes in order from offset 0; the signature window is skipped
+/// for you.
+///
+/// Use it over the image **as stored**, not as received. Those differ exactly when the
+/// staging memory is faulty, which is the case worth catching: a digest taken on the way
+/// in would agree with the host and disagree with what the bootloader installs.
+pub struct DigestStream {
+    inner: Sha256,
+    at: usize,
+}
+
+impl Default for DigestStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DigestStream {
+    pub fn new() -> Self {
+        Self {
+            inner: Sha256::new(),
+            at: 0,
+        }
+    }
+
+    /// Feed the next bytes of the image, in order.
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut off = self.at;
+        for chunk in bytes.chunks(1) {
+            if !(SIG_START..SIG_END).contains(&off) {
+                self.inner.update(chunk);
+            }
+            off += 1;
+        }
+        self.at = off;
+    }
+
+    /// How many bytes have been fed.
+    pub fn position(&self) -> usize {
+        self.at
+    }
+
+    /// The double-SHA256 digest.
+    pub fn finish(self) -> [u8; 32] {
+        Sha256::digest(self.inner.finalize()).into()
+    }
+}
+
+/// `approved_pubkeys[0]` — the published developer key, raw `X || Y`.
+///
+/// Public by design: Coinkite publishes the matching private key so anyone can build
+/// firmware a Coldcard bootloader will load. It grants **no authenticity** — it is here
+/// so a device can tell "this is the image the host meant to send" from "this is
+/// corrupt", which is a different question from "this is trustworthy".
+///
+/// The five factory keys are not published, so an image signed with one of those cannot
+/// be checked before installing it. See `catcard-upgrade`.
+/// Source: firmware-signing.md §4 [C].
+pub const DEV_PUBKEY: [u8; 64] = [
+    0xb4, 0xcb, 0x41, 0x26, 0xf7, 0xe1, 0x6c, 0xf3, 0x8f, 0xf2, 0xb4, 0x71, 0x1d, 0xfb, 0x23, 0x01,
+    0x0d, 0x76, 0xd6, 0x66, 0xa7, 0x8a, 0xa3, 0x6c, 0x9b, 0x53, 0xf9, 0xf6, 0x7b, 0x58, 0x18, 0x05,
+    0x58, 0x0b, 0x3b, 0xe9, 0x31, 0xc4, 0x9f, 0xb8, 0x44, 0x04, 0x3c, 0x11, 0x96, 0x08, 0x0f, 0x47,
+    0x81, 0x25, 0xed, 0x37, 0x7a, 0x23, 0x9e, 0x4a, 0xaf, 0xb7, 0x18, 0x38, 0xba, 0x38, 0x04, 0xda,
+];
 
 /// Write `header` into `image` at the fixed offset.
 pub fn place_header(image: &mut [u8], header: &FirmwareHeader) -> Result<(), Error> {

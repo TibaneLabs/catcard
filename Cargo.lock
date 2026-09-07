@@ -263,6 +263,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-upgrade"
+version = "0.0.1"
+dependencies = [
+ "catcard-board",
+ "catcard-fwhdr",
+ "catcard-sign",
+ "k256",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
