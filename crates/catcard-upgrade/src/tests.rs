@@ -380,6 +380,46 @@ fn committing_publishes_the_marker_and_the_length() {
 }
 
 #[test]
+fn a_marker_that_does_not_read_back_stops_the_install() {
+    // The last thing before a reboot that overwrites the running firmware. The
+    // bootloader reads those sixteen bytes with no idea where they came from, so if the
+    // store did not land the alternative to catching it here is a device that reboots
+    // into an install of whatever they happen to be.
+    struct Deaf;
+    #[derive(Debug)]
+    struct DeafError;
+    impl StagingArea for Deaf {
+        type Error = DeafError;
+        fn capacity(&self) -> u32 {
+            1 << 20
+        }
+        fn write(&mut self, _: u32, _: &[u8]) -> Result<(), DeafError> {
+            Ok(())
+        }
+        fn read(&mut self, _: u32, out: &mut [u8]) -> Result<(), DeafError> {
+            out.fill(0);
+            Ok(())
+        }
+        /// Accepts the write and keeps nothing, which is what a bad mapping looks like.
+        fn publish(&mut self, _: u32) -> Result<(), DeafError> {
+            Err(DeafError)
+        }
+    }
+
+    let approval = Approval {
+        header: running(NEWER),
+        signature: Signature::DeveloperKey,
+        length: MIN_FIRMWARE_LENGTH,
+        older_than_running: false,
+    };
+    let staged = Staged::begin(Deaf, &MK4, MIN_FIRMWARE_LENGTH).unwrap();
+    assert!(
+        staged.commit(approval).is_err(),
+        "committed a marker the staging area did not keep"
+    );
+}
+
+#[test]
 fn inspect_never_publishes_anything() {
     // Inspection has to be safe to call and safe to refuse after. If it left a marker
     // behind, a refused image would install itself on the next reboot.

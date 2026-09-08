@@ -131,6 +131,30 @@ impl StagingArea for PsramArea {
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             core::ptr::write_volatile(at, MAGIC1);
         }
+
+        // Read it back before anyone acts on it.
+        //
+        // This is the last thing that happens before a reboot that overwrites the
+        // running firmware, and the bootloader reads these sixteen bytes with no idea
+        // where they came from. If the store did not land -- a mapping that is not what
+        // the board table says, memory that does not hold -- the alternative to catching
+        // it here is a device that reboots into an install of whatever those bytes
+        // happen to be.
+        //
+        // It also makes the reboot itself evidence: a device that resets is a device
+        // whose marker read back correctly.
+        // SAFETY: as above.
+        let seen = unsafe {
+            [
+                core::ptr::read_volatile(at as *const u32),
+                core::ptr::read_volatile(at.add(1) as *const u32),
+                core::ptr::read_volatile(at.add(2) as *const u32),
+                core::ptr::read_volatile(at.add(3) as *const u32),
+            ]
+        };
+        if seen != [MAGIC1, self.image_base, len, MAGIC2] {
+            return Err(OutOfRange);
+        }
         Ok(())
     }
 }

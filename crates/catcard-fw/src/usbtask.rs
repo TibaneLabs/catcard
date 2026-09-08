@@ -398,17 +398,38 @@ pub unsafe fn init(serial: &'static str) {
 }
 
 /// Service USB. Safe to call from anywhere in the foreground.
-/// How long to pause after a poll that found nothing.
+/// How long to pause between polls of the USB core.
 ///
-/// Measured, not chosen. Polling with no pause at all delivers **no reports whatsoever**;
-/// this value delivers them reliably; 4,000 cycles is as bad as none. Why the core wants
-/// this much quiet is not something the reference explains, and it is not something an
-/// emulator run can settle — so the number is recorded as what works, and revisiting it
-/// belongs with the hardware.
+/// **Measured, not derived.** Polling with nothing between the polls delivers no reports
+/// at all — not slowly, not at all — which is not behaviour the reference describes.
+/// Bracketed under the emulator at the reset-default 4 MHz, where a USB frame is 1 ms
+/// and so 4,000 cycles:
 ///
-/// It also costs throughput, and that is the reason the pause is skipped whenever the
-/// previous poll did anything: at the reset-default 4 MHz this is 16 ms, so a pause on
-/// every poll would hold the link to one report per 16 USB frames.
+/// ```text
+///        0 cycles                no reports at all
+///    4,000  (~1 frame)           no reports at all
+///   16,000  (~4 frames)          a two-frame ping succeeds
+///   33,000  (~8 frames)          a two-frame ping succeeds; a 256 KB transfer
+///                                returned a malformed report (`kind 0`)
+///   66,000 (~16 frames)          ping, identify, 256 KB and 987 KB, repeatedly
+/// ```
+///
+/// **The middle two are not "working" values.** They were called that on the strength
+/// of a two-frame ping, which is far too small a sample to judge a link by: at 33,000 a
+/// real transfer came back corrupted rather than absent, which is the worse failure of
+/// the two. Only 66,000 has carried a firmware image.
+///
+/// It costs throughput — 987 KB takes 72 seconds — and that is the right trade for the
+/// one operation on this device that overwrites its own firmware.
+///
+/// A corrupted report rather than a missing one also hints the fault may be ours: the
+/// IN endpoint is enabled and then filled, which is the documented order, but a core
+/// that transmits before the FIFO write lands would send exactly this. A longer pause
+/// would mask that. Worth an oscilloscope before trusting the mechanism.
+///
+/// **`VALIDATION.md` says an emulator run does not settle anything the reference marks
+/// `[I]`, and this is squarely that** — so it is carried as a measured number and
+/// revisited on hardware.
 pub const IDLE_PAUSE_CYCLES: u32 = 66_000;
 
 /// Service USB. Safe to call from anywhere in the foreground.
