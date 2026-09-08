@@ -28,6 +28,10 @@ struct Inner {
     next_signature: u32,
     secret: [u8; SECRET_LEN],
     zero_secret: bool,
+    /// The PIN a `Change` installed, so a later login can be checked against it.
+    set_pin: Vec<u8>,
+    /// The PIN field as it stood when the struct was last signed.
+    signed_pin: Vec<u8>,
 }
 
 impl Model {
@@ -43,6 +47,8 @@ impl Model {
                 next_signature: 1,
                 secret: [7; SECRET_LEN],
                 zero_secret: false,
+                set_pin: Vec::new(),
+                signed_pin: Vec::new(),
             }),
         }
     }
@@ -65,10 +71,20 @@ impl Model {
         inner.next_signature += 1;
         a.hmac = [0; 32];
         a.hmac[..4].copy_from_slice(&inner.signed.to_le_bytes());
+        // The real HMAC covers `struct[..hmac]`, and `pin`/`pin_len` sit inside it. The
+        // model records them so a struct edited after signing stops validating, exactly
+        // as it does on a device. Without this the model accepted a sequence the
+        // bootloader rejects, and the tests passed while every login on hardware failed
+        // with HMAC_FAIL.
+        inner.signed_pin.clear();
+        inner
+            .signed_pin
+            .extend_from_slice(&a.pin[..a.pin_len as usize]);
     }
 
     fn validate(&self, inner: &Inner, a: &PinAttempt) -> bool {
         u32::from_le_bytes([a.hmac[0], a.hmac[1], a.hmac[2], a.hmac[3]]) == inner.signed
+            && a.pin[..a.pin_len as usize] == *inner.signed_pin.as_slice()
     }
 }
 
@@ -91,7 +107,12 @@ impl PinGate for Model {
             }
             PinOp::Login => {
                 let n = a.pin_len as usize;
-                let ok = !inner.blank && &a.pin[..n] == self.correct;
+                let expected: &[u8] = if inner.set_pin.is_empty() {
+                    self.correct
+                } else {
+                    &inner.set_pin
+                };
+                let ok = !inner.blank && a.pin[..n] == *expected;
                 if ok {
                     inner.num_fails = 0;
                     inner.attempts_left = MAX_ATTEMPTS;
@@ -117,6 +138,28 @@ impl PinGate for Model {
                     }
                     Err(GateError::Pin(err::AUTH_FAIL))
                 }
+            }
+            PinOp::Change => {
+                // The only change a blank device takes: set the wallet PIN with an
+                // empty old_pin. Anything else needs a login the model has not seen.
+                let flags = a.change_flags;
+                if flags != catcard_callgate::abi::change::WALLET_PIN {
+                    return Err(GateError::Pin(err::BAD_REQUEST));
+                }
+                if !inner.blank {
+                    return Err(GateError::Pin(err::AUTH_FAIL));
+                }
+                if a.old_pin_len != 0 {
+                    return Err(GateError::Pin(err::AUTH_FAIL));
+                }
+                inner.set_pin.clear();
+                inner
+                    .set_pin
+                    .extend_from_slice(&a.new_pin[..a.new_pin_len as usize]);
+                inner.blank = false;
+                a.state_flags = 0;
+                self.sign(&mut inner, a);
+                Ok(0)
             }
             PinOp::FetchSecret => {
                 if a.state_flags & state::SUCCESSFUL == 0 {
@@ -300,10 +343,14 @@ fn the_longest_pin_the_ui_allows_fits_the_gates_field() {
 }
 
 #[test]
-fn a_stale_struct_asks_for_setup_rather_than_looking_like_a_wrong_pin() {
-    // The bootloader re-signs on every call and validates on the next, so a struct that
-    // did not round-trip is a programming error, not a bad PIN. Conflating the two would
-    // show "wrong PIN, 12 attempts left" to someone who typed it correctly.
+fn a_stale_struct_recovers_instead_of_looking_like_a_wrong_pin() {
+    // `attempt` re-runs setup before logging in -- it has to, because the HMAC covers
+    // the PIN field -- and setup re-signs. So a struct that stopped round-tripping is
+    // repaired rather than reported.
+    //
+    // That is the outcome worth having. The failure this replaces was showing "wrong
+    // PIN, 12 attempts left" to someone who had typed it correctly, and nothing about
+    // the counters is invented here: setup re-reads them from the device.
     let m = Model::new(b"12-3456");
     let mut l = Login::new(&m);
     l.prefix_entered(&m, b"12").unwrap();
@@ -314,8 +361,9 @@ fn a_stale_struct_asks_for_setup_rather_than_looking_like_a_wrong_pin() {
 
     assert_eq!(
         l.attempt(&m, b"3456").unwrap(),
-        Step::Failed(Failure::NeedsSetup)
+        Step::In { zero_secret: false }
     );
+    assert_eq!(l.attempts_left(), MAX_ATTEMPTS);
 }
 
 #[test]
@@ -342,5 +390,115 @@ fn a_logged_in_device_with_no_seed_says_so() {
     assert_eq!(
         login_with(&m, b"12", b"3456").1,
         Step::In { zero_secret: true }
+    );
+}
+
+#[test]
+fn a_blank_device_can_be_given_its_first_pin_and_then_asks_for_it() {
+    // The whole first-run sequence: blank, set a PIN, and from then on the device is
+    // PIN-gated. Untested until now because the emulator's secure element is blank, so
+    // every run took the `Blank` path and stopped there.
+    let m = Model::blank();
+    let mut l = Login::new(&m);
+    assert_eq!(l.step(), Step::Blank);
+
+    assert_eq!(l.set_first_pin(&m, b"12", b"3456").unwrap(), Step::Prefix);
+
+    // It is no longer blank, and the PIN just set is the one that works.
+    let mut l = Login::new(&m);
+    assert_eq!(l.step(), Step::Prefix, "still reporting itself blank");
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    assert_eq!(
+        l.attempt(&m, b"3456").unwrap(),
+        Step::In { zero_secret: false }
+    );
+}
+
+#[test]
+fn the_wrong_pin_after_setup_is_wrong_and_costs_an_attempt() {
+    let m = Model::blank();
+    let mut l = Login::new(&m);
+    l.set_first_pin(&m, b"12", b"3456").unwrap();
+
+    let mut l = Login::new(&m);
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    assert_eq!(
+        l.attempt(&m, b"9999").unwrap(),
+        Step::Wrong {
+            attempts_left: MAX_ATTEMPTS - 1,
+            num_fails: 1
+        }
+    );
+}
+
+#[test]
+fn setting_a_first_pin_is_refused_once_one_exists() {
+    // On a device that already has a PIN this is a *change*, which needs the old one --
+    // a different operation with a different failure mode, and not one to reach by
+    // walking into it.
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    assert_eq!(l.step(), Step::Prefix, "model should not be blank");
+    assert_eq!(l.set_first_pin(&m, b"99", b"9999").unwrap(), Step::Prefix);
+
+    // The original PIN still works, so nothing was changed.
+    let mut l = Login::new(&m);
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    assert_eq!(
+        l.attempt(&m, b"3456").unwrap(),
+        Step::In { zero_secret: false }
+    );
+}
+
+#[test]
+fn showing_the_words_does_not_stop_a_first_pin_being_set() {
+    // Setup shows the anti-phishing words before taking the suffix. Doing that through
+    // the login path moved the state machine off `Blank`, and `set_first_pin` then
+    // refused without saying so -- the device walked the whole setup flow and came back
+    // with no PIN set. `words_for` is a query, so the guard keeps its meaning.
+    let m = Model::blank();
+    let mut l = Login::new(&m);
+    assert_eq!(l.step(), Step::Blank);
+
+    let w = l.words_for(&m, b"12").expect("words");
+    assert_eq!(l.step(), Step::Blank, "asking for words changed the state");
+    assert_eq!(
+        l.words_for(&m, b"12"),
+        Some(w),
+        "not a pure function of the prefix"
+    );
+
+    assert_eq!(l.set_first_pin(&m, b"12", b"3456").unwrap(), Step::Prefix);
+
+    let mut l = Login::new(&m);
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    assert_eq!(
+        l.attempt(&m, b"3456").unwrap(),
+        Step::In { zero_secret: false }
+    );
+}
+
+#[test]
+fn the_same_login_can_be_used_to_sign_in_after_setting_the_first_pin() {
+    // The firmware carries one `Login` through setup and straight into the sign-in that
+    // follows. Every earlier test built a fresh one at that point, so the struct left
+    // behind by a `Change` was never exercised -- and on the device every login after
+    // setup failed with a gate error rather than a wrong PIN.
+    let m = Model::blank();
+    let mut l = Login::new(&m);
+    let w = l.words_for(&m, b"12").expect("words");
+    assert_eq!(l.set_first_pin(&m, b"12", b"3456").unwrap(), Step::Prefix);
+
+    // No new Login: continue with this one, as the screens do.
+    l.prefix_entered(&m, b"12").unwrap();
+    assert_eq!(l.step(), Step::ConfirmWords(w), "words changed after setup");
+    l.words_confirmed();
+    assert_eq!(
+        l.attempt(&m, b"3456").unwrap(),
+        Step::In { zero_secret: false }
     );
 }

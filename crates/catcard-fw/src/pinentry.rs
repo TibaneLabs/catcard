@@ -16,7 +16,7 @@ use catcard_callgate::abi::{DfuMode, LogoutMode, PinOp};
 use catcard_callgate::pin::PinAttempt;
 use catcard_callgate::{Callgate, Error as GateError};
 use catcard_entropy::HmacDrbg;
-use catcard_pin::{Login, PinGate, Step, MAX_ATTEMPTS, MAX_PART_LEN};
+use catcard_pin::{Failure, Login, PinGate, Step, MAX_ATTEMPTS, MAX_PART_LEN};
 use catcard_ui::font::{misc4x6, peep7x14};
 use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
 use catcard_ui::pinentry::PinBuffer;
@@ -153,12 +153,110 @@ fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     let _ = panel.flush(&fb);
 }
 
+/// Choose the first PIN on a blank device.
+///
+/// The prefix is taken, its anti-phishing words are shown — which is where a user learns
+/// the words they will be checking on every later unlock — and then the suffix. Returns
+/// true when a PIN was set.
+///
+/// **Not reversible.** After this the device is PIN-gated, and there is no path back to
+/// blank that does not go through knowing the PIN. So the words screen is not a
+/// formality here: it is the only time the user sees them without already being the
+/// person who set them.
+fn setup_first_pin(
+    g: &BootloaderGate<'_>,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    login: &mut Login,
+) -> bool {
+    let Some(prefix) = collect(panel, matrix, drbg, "New PIN prefix") else {
+        return false;
+    };
+    // A query, not the login path: `set_first_pin` only acts while the device is still
+    // blank, and walking the login state machine here would take it out of that state.
+    if let Some(w) = login.words_for(g, prefix.as_bytes()) {
+        screen_words(panel, anti_phishing_words(w));
+        if !wait_for_confirm(matrix, drbg) {
+            return false;
+        }
+    }
+    let Some(suffix) = collect(panel, matrix, drbg, "New PIN suffix") else {
+        return false;
+    };
+
+    screen_message(panel, "Setting PIN", "do not disconnect", "");
+    matches!(
+        login.set_first_pin(g, prefix.as_bytes(), suffix.as_bytes()),
+        Ok(Step::Prefix)
+    )
+}
+
+/// Collect one PIN part. `None` if the user backs out.
+fn collect(
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    heading: &str,
+) -> Option<PinBuffer<MAX_PART_LEN>> {
+    let mut field = PinBuffer::<MAX_PART_LEN>::new();
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    screen_field(panel, heading, &field, MAX_ATTEMPTS);
+
+    loop {
+        crate::usbtask::pump();
+        let n = pad.scan(matrix, drbg, &mut events);
+        let mut changed = false;
+        for e in &events[..n] {
+            let Event::Pressed(k) = e else { continue };
+            match k {
+                Key::Digit(d) => {
+                    field.push(*d);
+                    changed = true;
+                }
+                Key::Cancel => {
+                    if !field.pop() {
+                        return None;
+                    }
+                    changed = true;
+                }
+                Key::Confirm => {
+                    if !field.is_empty() {
+                        return Some(field);
+                    }
+                }
+            }
+        }
+        if changed {
+            screen_field(panel, heading, &field, MAX_ATTEMPTS);
+        }
+        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+    }
+}
+
+/// Wait for `y`. False if the user pressed `x` instead.
+fn wait_for_confirm(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    loop {
+        crate::usbtask::pump();
+        let n = pad.scan(matrix, drbg, &mut events);
+        for e in &events[..n] {
+            match e {
+                Event::Pressed(Key::Confirm) => return true,
+                Event::Pressed(Key::Cancel) => return false,
+                _ => {}
+            }
+        }
+        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+    }
+}
+
 /// Where the unlock ended.
 pub enum Unlocked {
     /// Logged in. `zero_secret` means there is no seed stored yet.
     In { zero_secret: bool },
-    /// No PIN has ever been set; the device needs first-time setup.
-    Blank,
 }
 
 /// Run the unlock loop until the device is in, or until it cannot be.
@@ -187,11 +285,24 @@ pub fn unlock(
                 Step::Suffix => screen_field(panel, "PIN suffix", &field, login.attempts_left()),
                 Step::Wrong { attempts_left, .. } => {
                     let mut n = [0u8; 3];
-                    screen_message(panel, "Wrong PIN", num(&mut n, attempts_left), "tries left");
+                    let mut m = [0u8; 3];
+                    // The length of what was submitted, never the digits. Distinguishes
+                    // "the wrong digits went in" from "nothing went in", which look the
+                    // same from a wrong-PIN answer.
+                    let left = num(&mut n, attempts_left);
+                    let sent = num(&mut m, login.last_pin_len() as u32);
+                    let mut fb = Mono128x64::new();
+                    let t = &peep7x14::FONT;
+                    let f = &misc4x6::FONT;
+                    draw_text(&mut fb, t, centred(t, "Wrong PIN", 128), 6, "Wrong PIN");
+                    let mut x = 8;
+                    for part in [left, " tries left, sent ", sent] {
+                        draw_text(&mut fb, f, x, 30, part);
+                        x += part.len() * f.width as usize;
+                    }
+                    let _ = panel.flush(&fb);
                 }
-                Step::Blank => {
-                    screen_message(panel, "No PIN set", "this device has no", "wallet yet")
-                }
+                Step::Blank => screen_message(panel, "No PIN set", "y  choose a PIN", ""),
                 Step::In { .. } => screen_message(panel, "Unlocked", "", ""),
                 // Terminal: the pairing secret is gone and no PIN will ever work again.
                 // Saying so and stopping is the only honest thing left.
@@ -205,8 +316,17 @@ pub fn unlock(
                     // SAFETY: nothing after this runs; the bootloader wipes SRAM.
                     unsafe { gate.enter_dfu(DfuMode::Brick) }
                 }
-                Step::Failed(_) => {
-                    screen_message(panel, "PIN error", "restarting the", "unlock sequence")
+                // Name the reason. "PIN error" alone sent me guessing at which of
+                // fourteen documented codes it was; the code is what says.
+                Step::Failed(f) => {
+                    let mut n = [0u8; 3];
+                    let (what, detail) = match f {
+                        Failure::NeedsSetup => ("hmac / stale struct", ""),
+                        Failure::MustWait => ("rate limited", ""),
+                        Failure::Gate(_) => ("callgate", "unreachable"),
+                        Failure::Code(c) => ("gate said -1", num(&mut n, c.unsigned_abs() % 100)),
+                    };
+                    screen_message(panel, "PIN error", what, detail)
                 }
             }
             redraw = false;
@@ -223,10 +343,8 @@ pub fn unlock(
             continue;
         }
 
-        match login.step() {
-            Step::In { zero_secret } => return Unlocked::In { zero_secret },
-            Step::Blank => return Unlocked::Blank,
-            _ => {}
+        if let Step::In { zero_secret } = login.step() {
+            return Unlocked::In { zero_secret };
         }
 
         let _ = crate::usbtask::pump();
@@ -236,6 +354,17 @@ pub fn unlock(
             let Event::Pressed(key) = e else { continue };
             redraw = true;
             match (login.step(), key) {
+                // A blank device: offer to set the first PIN rather than stopping.
+                // Until this existed the device simply said "no wallet yet" and there
+                // was no way forward from the front panel at all.
+                (Step::Blank, Key::Confirm) => {
+                    if !setup_first_pin(&g, panel, matrix, drbg, &mut login) {
+                        redraw = true;
+                    }
+                    field.clear();
+                }
+                (Step::Blank, _) => {}
+
                 (Step::ConfirmWords(_), Key::Confirm) => {
                     login.words_confirmed();
                     field.clear();

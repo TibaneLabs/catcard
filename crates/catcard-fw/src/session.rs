@@ -58,10 +58,12 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // which is what keeps a unit with no PIN set recoverable.
     usbtask::unlocked();
 
+    // `unlock` only returns once the PIN is in -- a blank device is offered setup
+    // rather than being turned away, so there is no longer a state where the front
+    // panel has nothing to offer.
     let (head, note) = match unlocked {
         pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet"),
         pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet"),
-        pinentry::Unlocked::Blank => ("Blank device", "set a PIN to begin"),
     };
     idle(&gate, &mut panel, &mut matrix, &mut drbg, head, note)
 }

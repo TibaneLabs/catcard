@@ -168,6 +168,15 @@ impl Login {
         self.attempt.num_fails
     }
 
+    /// Length of the PIN as the gate last saw it, for diagnostics.
+    ///
+    /// Not the PIN, and never the PIN: a length distinguishes "we sent the wrong
+    /// digits" from "we sent nothing", which are different bugs, without putting a
+    /// secret on a screen.
+    pub fn last_pin_len(&self) -> usize {
+        self.attempt.pin_len.max(0) as usize
+    }
+
     /// Submit the prefix and compute its anti-phishing words.
     ///
     /// Moves to [`Step::ConfirmWords`]. Calling it again re-derives the words for a new
@@ -188,6 +197,17 @@ impl Login {
             Err(e) => classify(e),
         };
         Ok(())
+    }
+
+    /// The anti-phishing words for a prefix, without touching the login state.
+    ///
+    /// [`prefix_entered`](Self::prefix_entered) is the login path and advances the state
+    /// machine. Setting a *first* PIN needs the same words for a prefix that is not being
+    /// logged in with, and using the login path for it moved the machine off
+    /// [`Step::Blank`] — which is the exact condition [`set_first_pin`](Self::set_first_pin)
+    /// requires, so the PIN was silently never set.
+    pub fn words_for<G: PinGate>(&self, gate: &G, prefix: &[u8]) -> Option<words::Words> {
+        gate.anti_phishing(prefix).ok().map(words::from_bits)
     }
 
     /// Acknowledge the words and move on to the suffix.
@@ -222,6 +242,19 @@ impl Login {
         joined.zeroize();
         set?;
 
+        // Re-run `setup` now the PIN is in the struct, before logging in.
+        //
+        // The bootloader's HMAC covers `struct[..hmac]`, and `pin`/`pin_len` are inside
+        // it — so a struct signed while the PIN field was empty stops validating the
+        // moment the PIN is written. §6 of the reference sets the PIN first and *then*
+        // calls setup, which is the same thing said from the other end. Getting this
+        // backwards fails as `HMAC_FAIL`, which reads like a stale struct rather than
+        // like "you filled this in in the wrong order".
+        if let Err(e) = gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
+            self.step = classify(e);
+            return Ok(self.step);
+        }
+
         self.step = match gate.pin_attempt(PinOp::Login, &mut self.attempt) {
             Ok(_) if self.attempt.logged_in() => Step::In {
                 zero_secret: self.attempt.has_zero_secret(),
@@ -239,6 +272,68 @@ impl Login {
             },
             Err(e) => classify(e),
         };
+        Ok(self.step)
+    }
+
+    /// Set the first PIN on a blank device.
+    ///
+    /// The one change a device with no PIN accepts: `CHANGE_WALLET_PIN` with an empty
+    /// `old_pin`. Only offered from [`Step::Blank`], because on a device that already
+    /// has a PIN this same call is a *change* and needs the old one — a different
+    /// operation with a different failure mode, and not one to reach by accident.
+    ///
+    /// **Not reversible.** After this the device is PIN-gated: there is no path back to
+    /// blank that does not go through knowing the PIN.
+    pub fn set_first_pin<G: PinGate>(
+        &mut self,
+        gate: &G,
+        prefix: &[u8],
+        suffix: &[u8],
+    ) -> Result<Step, TooLong> {
+        if !matches!(self.step, Step::Blank) {
+            return Ok(self.step);
+        }
+        if prefix.len() > MAX_PART_LEN || suffix.len() > MAX_PART_LEN {
+            return Err(TooLong);
+        }
+
+        let mut joined = [0u8; MAX_PIN_LEN];
+        let p = prefix.len();
+        joined[..p].copy_from_slice(prefix);
+        joined[p] = SEPARATOR;
+        joined[p + 1..p + 1 + suffix.len()].copy_from_slice(suffix);
+        let n = p + 1 + suffix.len();
+
+        self.attempt.change_flags = catcard_callgate::abi::change::WALLET_PIN;
+        let set = self
+            .attempt
+            .set_old_pin(&[])
+            .and_then(|()| self.attempt.set_new_pin(&joined[..n]));
+        joined.zeroize();
+        set?;
+
+        self.step = match gate.pin_attempt(PinOp::Change, &mut self.attempt) {
+            Ok(_) => {
+                // The device is no longer blank, and the struct that just performed a
+                // change is not a struct that can log in: re-run setup so what follows
+                // is a login against the PIN that now exists.
+                //
+                // Leaving this to the caller looked reasonable and was not. The tests
+                // built a fresh `Login` afterwards and passed; the firmware carried the
+                // same one forward and every login failed with a gate error rather than
+                // a wrong PIN — which is a confusing thing to show someone who has just
+                // chosen their PIN.
+                self.attempt.change_flags = 0;
+                match gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
+                    Ok(_) if self.attempt.is_blank() => Step::Blank,
+                    Ok(_) => Step::Prefix,
+                    Err(e) => classify(e),
+                }
+            }
+            Err(e) => classify(e),
+        };
+        self.attempt.change_flags = 0;
+        self.words_shown = false;
         Ok(self.step)
     }
 

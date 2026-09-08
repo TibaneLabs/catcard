@@ -122,6 +122,31 @@ impl PinAttempt {
     }
 
     /// Set the PIN to test. Fails if it does not fit.
+    /// Set `old_pin`, for [`PinOp::Change`](crate::abi::PinOp::Change).
+    ///
+    /// Empty when setting a PIN on a blank device, which is what makes that the one
+    /// change a device with no PIN will accept.
+    pub fn set_old_pin(&mut self, pin: &[u8]) -> Result<(), PinTooLong> {
+        if pin.len() > MAX_PIN_LEN {
+            return Err(PinTooLong { len: pin.len() });
+        }
+        self.old_pin = [0; MAX_PIN_LEN];
+        self.old_pin[..pin.len()].copy_from_slice(pin);
+        self.old_pin_len = pin.len() as i32;
+        Ok(())
+    }
+
+    /// Set `new_pin`, for [`PinOp::Change`](crate::abi::PinOp::Change).
+    pub fn set_new_pin(&mut self, pin: &[u8]) -> Result<(), PinTooLong> {
+        if pin.len() > MAX_PIN_LEN {
+            return Err(PinTooLong { len: pin.len() });
+        }
+        self.new_pin = [0; MAX_PIN_LEN];
+        self.new_pin[..pin.len()].copy_from_slice(pin);
+        self.new_pin_len = pin.len() as i32;
+        Ok(())
+    }
+
     pub fn set_pin(&mut self, pin: &[u8]) -> Result<(), PinTooLong> {
         if pin.len() > MAX_PIN_LEN {
             return Err(PinTooLong { len: pin.len() });
