@@ -94,6 +94,24 @@ impl PinGate for Model {
         if inner.bricked {
             return Err(GateError::Pin(err::I_AM_BRICK));
         }
+
+        // Everything the bootloader checks before it looks at the request, checked here
+        // too. A double that waves these through lets a malformed struct pass in tests
+        // and fail on a device, which is the failure this whole file exists to prevent.
+        if a.magic != catcard_callgate::pin::PA_MAGIC_V2 {
+            return Err(GateError::Pin(err::BAD_MAGIC));
+        }
+        if a.is_secondary != 0 {
+            return Err(GateError::Pin(err::BAD_REQUEST));
+        }
+        // The reference flags this one specifically: the audit found `pin_len`
+        // unchecked on the caller's side.
+        if a.pin_len < 0 || a.pin_len as usize > catcard_callgate::pin::MAX_PIN_LEN {
+            return Err(GateError::Pin(err::RANGE_ERR));
+        }
+        if a.change_flags & !catcard_callgate::abi::change::VALID_MASK != 0 {
+            return Err(GateError::Pin(err::BAD_REQUEST));
+        }
         if op != PinOp::Setup && !self.validate(&inner, a) {
             return Err(GateError::Pin(err::HMAC_FAIL));
         }
@@ -501,4 +519,78 @@ fn the_same_login_can_be_used_to_sign_in_after_setting_the_first_pin() {
         l.attempt(&m, b"3456").unwrap(),
         Step::In { zero_secret: false }
     );
+}
+
+/// The double must reject what the bootloader rejects, or a malformed struct passes
+/// here and fails on a device. Each of these is a documented refusal, and each is
+/// checked by corrupting exactly one field of an otherwise valid request.
+mod the_model_enforces_what_the_bootloader_does {
+    use super::*;
+
+    fn ready() -> (Model, PinAttempt) {
+        let m = Model::new(b"12-3456");
+        let mut a = PinAttempt::new();
+        m.pin_attempt(PinOp::Setup, &mut a).expect("setup");
+        (m, a)
+    }
+
+    #[test]
+    fn a_wrong_magic_is_bad_magic() {
+        let (m, mut a) = ready();
+        a.magic = 0xDEAD_BEEF;
+        assert_eq!(
+            m.pin_attempt(PinOp::Login, &mut a),
+            Err(GateError::Pin(err::BAD_MAGIC))
+        );
+    }
+
+    #[test]
+    fn a_secondary_request_is_refused() {
+        // Secondary wallets were an ATECC508-era feature and the field must be zero.
+        let (m, mut a) = ready();
+        a.is_secondary = 1;
+        assert_eq!(
+            m.pin_attempt(PinOp::Login, &mut a),
+            Err(GateError::Pin(err::BAD_REQUEST))
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_pin_len_is_a_range_error() {
+        // The reference names this one: the audit found `pin_len` unchecked on the
+        // caller's side, so a double that ignores it is reproducing the original bug.
+        let (m, mut a) = ready();
+        a.pin_len = catcard_callgate::pin::MAX_PIN_LEN as i32 + 1;
+        assert_eq!(
+            m.pin_attempt(PinOp::Login, &mut a),
+            Err(GateError::Pin(err::RANGE_ERR))
+        );
+
+        a.pin_len = -1;
+        assert_eq!(
+            m.pin_attempt(PinOp::Login, &mut a),
+            Err(GateError::Pin(err::RANGE_ERR))
+        );
+    }
+
+    #[test]
+    fn undefined_change_flags_are_a_bad_request() {
+        let (m, mut a) = ready();
+        a.change_flags = !catcard_callgate::abi::change::VALID_MASK;
+        assert_eq!(
+            m.pin_attempt(PinOp::Change, &mut a),
+            Err(GateError::Pin(err::BAD_REQUEST))
+        );
+    }
+
+    #[test]
+    fn a_valid_request_still_passes_all_of_them() {
+        // The guards have to admit the real thing, or every other test in this file is
+        // passing for the wrong reason.
+        let (m, mut a) = ready();
+        a.set_pin(b"12-3456").unwrap();
+        m.pin_attempt(PinOp::Setup, &mut a).expect("re-sign");
+        assert_eq!(m.pin_attempt(PinOp::Login, &mut a), Ok(0));
+        assert!(a.logged_in());
+    }
 }

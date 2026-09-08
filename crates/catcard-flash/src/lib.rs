@@ -322,11 +322,18 @@ mod tests {
     use super::*;
 
     /// A NOR part faithful enough to catch the mistakes that matter: it enforces
-    /// write-enable, models programming as bitwise AND, and wraps page programs at page
-    /// boundaries the way real silicon does.
+    /// write-enable, models programming as bitwise AND, wraps page programs at page
+    /// boundaries, and **stays busy after a write** the way real silicon does.
     struct MockNor {
         mem: Vec<u8>,
         wel: bool,
+        /// Status reads still owed before the part is ready again.
+        ///
+        /// Real NOR asserts WIP for milliseconds after a program or erase and ignores
+        /// every command but a status read until it clears. Completing instantly let a
+        /// driver that never waited pass: the data would be silently dropped on
+        /// hardware and nothing here would notice.
+        busy: u32,
         id: [u8; 3],
         programs: usize,
         erases: usize,
@@ -339,6 +346,7 @@ mod tests {
             Self {
                 mem: vec![ERASED; size],
                 wel: false,
+                busy: 0,
                 id: [0xEF, 0x40, 0x15], // Winbond, 2 MB
                 programs: 0,
                 erases: 0,
@@ -351,13 +359,25 @@ mod tests {
         type Error = ();
 
         fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), ()> {
+            if self.busy > 0 && write[0] != cmd::READ_STATUS {
+                panic!(
+                    "opcode {:#04x} issued while the part was busy: real NOR ignores it \
+                     and the write is lost",
+                    write[0]
+                );
+            }
             match write[0] {
                 cmd::RDID => {
                     read[..3].copy_from_slice(&self.id);
                 }
                 cmd::READ_STATUS => {
-                    // WIP is never set: the mock completes instantly.
-                    read[0] = if self.wel { status::WEL } else { 0 };
+                    let wip = if self.busy > 0 {
+                        self.busy -= 1;
+                        status::WIP
+                    } else {
+                        0
+                    };
+                    read[0] = wip | if self.wel { status::WEL } else { 0 };
                 }
                 cmd::WRITE_ENABLE => {
                     self.wel = !self.protected;
@@ -386,6 +406,7 @@ mod tests {
                     }
                     self.programs += 1;
                     self.wel = false;
+                    self.busy = 2;
                 }
                 cmd::SECTOR_ERASE | cmd::BLOCK_ERASE => {
                     assert!(self.wel, "erase without write-enable");
@@ -401,6 +422,7 @@ mod tests {
                     self.mem[base..base + unit].fill(ERASED);
                     self.erases += 1;
                     self.wel = false;
+                    self.busy = 3;
                 }
                 other => panic!("unexpected opcode {other:#04x}"),
             }

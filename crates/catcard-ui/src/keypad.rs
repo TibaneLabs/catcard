@@ -188,6 +188,8 @@ mod tests {
         /// `pressed[row][col]`.
         pressed: [[bool; COLS]; ROWS],
         selected: Option<usize>,
+        /// Whether `settle` has been called since the row was driven.
+        settled: bool,
         order_seen: Vec<usize>,
         settles: usize,
         releases: usize,
@@ -200,6 +202,7 @@ mod tests {
             Self {
                 pressed: [[false; COLS]; ROWS],
                 selected: None,
+                settled: false,
                 order_seen: Vec::new(),
                 settles: 0,
                 releases: 0,
@@ -222,12 +225,25 @@ mod tests {
             // is where that invariant actually has to hold, via one register write.
             assert!(row < ROWS, "row {row} out of range");
             self.selected = Some(row);
+            self.settled = false;
             self.order_seen.push(row);
             self.log.push("select");
         }
         fn read_columns(&mut self) -> u8 {
             self.log.push("read");
             let row = self.selected.expect("read without selecting a row");
+            // Settling is not optional, so the double does not treat it as optional.
+            //
+            // The columns are pulled up against the membrane's cable capacitance; read
+            // too early and the line has not risen yet, so a real matrix answers with
+            // the *previous* row's state. That presents as keys registering from the
+            // wrong row, which is a miserable fault to chase — and until this assert
+            // existed, deleting `matrix.settle()` from the scanner broke nothing here.
+            assert!(
+                self.settled,
+                "read row {row} without settling: a real matrix would answer with the \
+                 previous row and the scan would report the wrong key"
+            );
             let mut bits = 0u8;
             for (c, p) in self.pressed[row].iter().enumerate() {
                 if *p {
@@ -245,6 +261,7 @@ mod tests {
         }
         fn settle(&mut self) {
             self.settles += 1;
+            self.settled = true;
             self.log.push("settle");
         }
     }

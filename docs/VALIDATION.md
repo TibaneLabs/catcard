@@ -389,6 +389,33 @@ reasoning about what the code should do, including one fix committed without val
 that regressed enumeration and had to be reverted. The register dump answered the
 question in a single run.
 
+## Test doubles must refuse what the hardware refuses
+
+A double that is more permissive than the thing it stands in for does not merely fail to
+catch a bug — it manufactures confidence. Every one of these was written to make a test
+pass and quietly stopped testing anything:
+
+| double | let through | what it cost |
+|---|---|---|
+| `Model` (callgate 18) | `validate` checked a counter and ignored the PIN field | **login could never have worked on hardware**; every test passed |
+| `MockMatrix` | reading columns without settling | deleting `settle()` from the scanner broke nothing |
+| `MockNor` | commands while the part is busy | deleting `wait_ready()` broke nothing |
+
+The rule this leaves: **a double enforces every precondition the real part enforces**, and
+where that is not practical, the gap is written down rather than left to be discovered.
+
+The check that matters is whether an assertion ever fires. Both of the above were
+verified by breaking the driver on purpose and confirming the tests fail — dropping
+`settle()` produces 21 failures, dropping `wait_ready()` produces 11. An assertion that
+has never been seen to fail is not yet evidence of anything.
+
+Doubles that were already faithful, for the record: `MockStorage` models an erase
+followed by a partial rewrite, which is what an interrupted flash write leaves;
+`MockBus` records call order so an ordering bug is visible; the staging double in
+`catcard-upgrade` can corrupt a read-back and can accept a marker without keeping it.
+`catcard-entropy` has no double at all — its health tests reject all-zero, all-ones, long
+runs, biased sources and short samples, which is the same property from the other side.
+
 ## Recording the results
 
 Every `[?]` this session resolves should move out of `HARDWARE-OPEN-ITEMS.md` and into
