@@ -43,13 +43,21 @@ def frames(opcode, payload):
 
 
 def recv_report(sock):
-    buf = b""
-    while len(buf) < REPORT:
-        b = sock.recv(REPORT - len(buf))
-        if not b:
-            raise EOFError("device closed the port")
-        buf += b
-    return buf
+    """One 64-byte report, skipping empty ones.
+
+    An all-zero report is not ours: every frame this protocol emits carries kind 1 or 2
+    in its first byte. The port produces them when the device has nothing to send, so
+    treating one as a framing error turns "nothing happened yet" into a failed transfer.
+    """
+    while True:
+        buf = b""
+        while len(buf) < REPORT:
+            b = sock.recv(REPORT - len(buf))
+            if not b:
+                raise EOFError("device closed the port")
+            buf += b
+        if buf[0] in (KIND_START, KIND_CONT):
+            return buf
 
 
 def request(sock, opcode, payload=b""):
@@ -68,14 +76,16 @@ def request(sock, opcode, payload=b""):
 
 
 def identify(body):
+    """(protocol, unlocked, board, version)."""
     ver = struct.unpack("<H", body[:2])[0]
-    at = 2
+    unlocked = bool(body[2])
+    at = 3
     parts = []
     for _ in range(2):
         n = body[at]
         parts.append(body[at + 1:at + 1 + n].decode())
         at += 1 + n
-    return ver, parts[0], parts[1]
+    return ver, unlocked, parts[0], parts[1]
 
 
 def connect(path, timeout=300.0):
@@ -101,11 +111,54 @@ def main(path, image=None):
 
     st, body = request(s, IDENTIFY)
     if st == 0:
-        proto, board, ver = identify(body)
-        print(f"identify  status=Ok protocol={proto} board={board} version={ver}")
+        proto, unlocked, board, ver = identify(body)
+        print(f"identify  status=Ok protocol={proto} board={board} version={ver} "
+              f"unlocked={unlocked}")
     else:
         print(f"identify  status={STATUS.get(st, st)}")
         ok = False
+
+    if image and "--gate" in sys.argv:
+        # The PIN gate: an upgrade must be refused until someone has unlocked the device
+        # at the front panel, and accepted afterwards.
+        blob = open(image, "rb").read()
+
+        # While locked, send only the first frame of a properly-declared image. The
+        # device refuses on that frame and resets its reassembler, so nothing is left
+        # half-sent and the next message starts clean.
+        first = next(frames(UPGRADE_OFFER, blob))
+        s.sendall(first)
+        r = recv_report(s)
+        st = struct.unpack("<H", r[2:4])[0]
+        print(f"offer(locked)     status={STATUS.get(st, st)}")
+        ok &= st == 2  # NotNow
+
+        # Wait for the PIN to be entered at the panel. Ask Identify, which reports the
+        # state directly -- probing with an offer would leave a message half-open on the
+        # device the moment it started being accepted.
+        unlocked = False
+        for _ in range(120):
+            time.sleep(2.0)
+            st, body = request(s, IDENTIFY)
+            if st == 0 and identify(body)[1]:
+                unlocked = True
+                break
+        print(f"unlocked after wait: {unlocked}")
+        ok &= unlocked
+
+        # Now the whole image, for real.
+        t0 = time.time()
+        st, body = request(s, UPGRADE_OFFER, blob)
+        dt = time.time() - t0
+        if st == 0:
+            print(f"offer(unlocked)   status=Ok verified={bool(body[0])} "
+                  f"len={struct.unpack('<I', body[1:5])[0]}  [{len(blob)} B in {dt:.1f}s]")
+        else:
+            why = REJECT.get(body[0], body[0]) if body else "?"
+            print(f"offer(unlocked)   status={STATUS.get(st, st)} reason={why}")
+        ok &= st == 0
+        print("OK" if ok else "FAILED")
+        return 0 if ok else 1
 
     if image:
         blob = open(image, "rb").read()

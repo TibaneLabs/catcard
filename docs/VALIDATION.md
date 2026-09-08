@@ -288,6 +288,47 @@ After those, CatCard boots: bootloader hands off, HAL comes up, the entropy pool
 SSD1306 driver initialises the panel, the selftest screen renders, and the keypad scan
 loop runs.
 
+## The whole sequence, in one run — confirmed
+
+A device from cold, given a PIN, unlocked with it, and then upgraded over USB:
+
+```
+init -> selftest -> blank -> choose a PIN -> anti-phishing words -> login -> Unlocked
+ping              status=Ok
+identify          protocol=1 board=mk4 version=0.0.1 unlocked=False
+offer(locked)     status=NotNow
+unlocked after wait: True
+offer(unlocked)   status=Ok verified=True len=262144
+device: reports in 4290, replies out 62, frame errors 0, staged 262144 bytes
+```
+
+**The two lines in the middle are the point.** An upgrade is refused while the device is
+locked and accepted once a person has entered the PIN at the front panel — so someone
+holding the device cannot replace its firmware without also being able to open it. Every
+earlier upgrade run auto-unlocked as blank, so that gate had never actually been tested.
+
+Five callgate paths are now exercised against the genuine bootloader rather than a
+model: `gate 18` setup, `Change` and `login`, `gate 16` anti-phishing words, and
+`gate 26` secure-element entropy.
+
+### What running the whole thing found that the parts did not
+
+Every one of these sat in a seam between units that were individually correct, and every
+one passed its own tests:
+
+| | |
+|---|---|
+| the downgrade check refused **all** stock firmware | going back to stock was impossible |
+| the recovery header was written and never read back | the last unchecked write before an irreversible install |
+| setup showed the words through the login path | the device walked the whole flow and set no PIN, silently |
+| the struct left by a `Change` cannot log in | every login straight after setup failed |
+| **the HMAC covers `pin`, so the PIN must be set before `setup` signs** | **login could never have worked on hardware** |
+
+The last one is the one to remember. It was invisible because a blank secure element
+never reaches a login attempt, and the model was too permissive to catch it — its
+`validate` checked a counter and ignored the PIN field. The model now records the PIN as
+signed, which is what gives those tests teeth.
+
 ## Firmware upgrade over USB — confirmed
 
 The whole path, twice, against the real mk4 bootloader:

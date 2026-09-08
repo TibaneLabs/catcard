@@ -288,6 +288,12 @@ impl UsbTask {
         let mut at = 0;
         body[at..at + 2].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         at += 2;
+        // Whether an upgrade would be accepted. A host should be able to ask rather
+        // than find out by offering one and being refused -- probing with an offer
+        // leaves a message half-open on the device, which is a mess of my own making
+        // that this removes.
+        body[at] = self.unlocked as u8;
+        at += 1;
         for s in [BOARD_NAME, VERSION] {
             let b = s.as_bytes();
             let n = b.len().min(31);
