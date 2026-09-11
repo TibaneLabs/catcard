@@ -9,7 +9,16 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
+# `usb-key-injection` lets a host press keys, which removes the physical-presence
+# confirmation the rest of the design rests on -- with it compiled in, a host can
+# approve its own firmware upgrade. See docs/USB.md.
+#
+# It is deliberately NOT in `default`. Every firmware build goes through the `fw-*`
+# aliases, which pass `--no-default-features`, so a default here would be inert and
+# misleading -- it read as "on at this stage" while shipping nothing. Opt in with the
+# `fw-*-bringup` aliases instead, so the crutch is always a visible choice.
 default = []
+usb-key-injection = []
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-q1 = ["catcard-board/board-q1", "catcard-hal/board-q1"]
@@ -26,6 +35,7 @@ catcard-usb = { workspace = true, default-features = false }
 catcard-wallet = { workspace = true, default-features = false }
 catcard-ui.workspace = true
 cortex-m.workspace = true
+heapless.workspace = true
 cortex-m-rt.workspace = true
 
 [build-dependencies]

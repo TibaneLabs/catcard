@@ -360,10 +360,86 @@ signature checked            checked, but OLDER
 SIGNATURE NOT CHECKED        NOT CHECKED, and OLDER
 ```
 
-What is **not** confirmed is the bootloader installing the staged image, because the
-emulator stops when the guest asks for a system reset. The run ends with the recovery
-header published in PSRAM and `AIRCR.SYSRESETREQ` requested — the last observable step
-before the bootloader takes over.
+### The install itself is still unconfirmed, and now we know exactly why
+
+With `--reboot` the emulator survives the reset, so the run no longer ends there — and
+the device comes back up **still running the old version**. The staged image is not
+installed. The cause is not in the firmware:
+
+| | |
+|---|---|
+| PSRAM at the logout call (`--no-secure-die`) | both magics correct, header `start`/`size` point at a byte-identical copy of the offered image |
+| the same region after the reboot | seeded noise; no header, no image |
+
+The emulator refills PSRAM at reset — its own reset line says what carries over, and
+PSRAM is not in the list: *"flash, secure elements and card carry over"*. So a correctly
+staged image is gone before the bootloader ever looks for it, and this is a modelling
+gap rather than a defect in the upgrade path.
+
+What that leaves confirmed is everything up to the handover: transfer, validation,
+approval, staging, publication of the recovery header, and the reset. What it leaves
+open is the bootloader reading that header and installing — which needs either an
+emulator that carries PSRAM across a reset, or hardware.
+
+`tools/emu/psramcheck.py` is the check, so this does not have to be re-derived:
+
+```sh
+ccemu run ... --no-secure-die --dump-ram ram.bin
+tools/emu/psramcheck.py ram.bin --image out/catcard-mk4-v2.bin
+```
+
+Offer an image built with a *different* `--version` than the running one. Installing a
+byte-identical image over itself cannot be told apart from not installing at all, and an
+earlier version of this test reported success for exactly that reason.
+
+## The whole device driven over USB, with nothing touching the keypad — confirmed
+
+Insurance for the first run on real hardware, where the keypad map is inferred from
+photographs and the pad is mounted rotated 180°. A wrong map on a **locked production
+unit** means no PIN can be typed, no menu reached, and no firmware installed to fix it.
+
+```
+ping      status=Ok echo=b'cat'
+identify  status=Ok protocol=1 board=mk4 version=0.0.1 unlocked=False blank=False
+identify  key injection available
+setup     device is blank, setting a first PIN
+unlocked  True running=0.0.1
+offer     status=Ok verified=True len=262144
+approved  device stopped answering: it reset to install
+```
+
+No `--tap`, no `--press`. Selftest screen, first-PIN setup, anti-phishing words, login,
+a 256 KB upgrade and its approval — every keypress arriving over USB.
+
+### What driving it found that offering an image did not
+
+- **`Identify` said nothing about which screen you are on.** A host that cannot see the
+  panel had to infer it from what its keys did. "Not unlocked" is two different devices —
+  one wanting a PIN, one wanting to be *given* one — so the reply now carries a state
+  byte. The emulator's secure element is blank, which is the case the host was silently
+  getting wrong.
+- **A reply waited for the next poll to go out.** `drain_outbox` ran only at the start of
+  a poll, so the acknowledgement for a key that sent the firmware into a callgate call —
+  choosing a PIN, fetching the words, logging in — sat in the outbox for the length of a
+  secure element operation. From the host that is indistinguishable from a dead device.
+  The poll that handles a report now drains the reply too.
+- **The host waited out a boot-sized timeout for a stall.** One timeout covered both the
+  first reply (which waits on the bootloader, a signature check and a 25-second warning
+  screen) and every later one (which should be immediate). Now the client tightens it
+  once the device has answered, so a stall is visible in seconds and points at the key
+  that caused it.
+- **The approval press expected a reply that by design never comes.** It is the key that
+  reboots the device. Waiting for it hung the host against a device behaving correctly.
+- **"Approved" was printed from having sent a byte.** The device going quiet is the first
+  actual evidence the key landed; the client now waits for that.
+
+### The feature is opt-in, and `default` was a lie
+
+`usb-key-injection` was in `[features] default`, which never applied: every firmware
+build goes through the `fw-*` aliases and those pass `--no-default-features`. It read as
+"on at this stage" while shipping nothing — the first image tested this way had no key
+injection compiled in at all. It is now out of `default`, with `fw-*-bringup` aliases as
+the only way to enable it, so turning it on is always a visible choice.
 
 ### What the USB work cost, and why the tools exist
 

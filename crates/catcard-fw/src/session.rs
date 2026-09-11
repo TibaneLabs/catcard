@@ -112,8 +112,19 @@ fn idle(
                 showing_offer = true;
             }
             let n = pad.scan(matrix, drbg, &mut events);
+            let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
             for e in &events[..n] {
-                let Event::Pressed(k) = e else { continue };
+                if let Event::Pressed(k) = e {
+                    let _ = keys.push(*k);
+                }
+            }
+            // A host can press this too. On the first hardware run the panel and the
+            // key map are both unconfirmed, and this is the approval that installs a
+            // firmware -- so it must not be reachable only through them.
+            if let Some(k) = usbtask::take_injected_key() {
+                let _ = keys.push(k);
+            }
+            for k in keys.iter() {
                 match k {
                     Key::Confirm => {
                         match usbtask::approve() {

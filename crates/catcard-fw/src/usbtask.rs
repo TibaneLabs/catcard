@@ -46,6 +46,13 @@ enum Stage {
 
 pub struct UsbTask {
     otg: Otg,
+    /// Keys a host has pressed, waiting to be read by whichever screen is up.
+    ///
+    /// One deep. A host driving the UI is doing it a keystroke at a time and waiting to
+    /// see the result; queueing more would let it run ahead of the screen it is
+    /// answering, which is how a confirmation gets pressed before it is read.
+    #[cfg(feature = "usb-key-injection")]
+    injected: Option<u8>,
     /// Reports taken from the host, and replies handed back. Shown on the idle screen
     /// because the emulator decodes that screen to text, which makes it the only
     /// diagnostic channel this firmware has that needs no debugger.
@@ -55,6 +62,8 @@ pub struct UsbTask {
     last_status: u16,
     /// Whether the PIN has been entered. Gates the upgrade opcodes only.
     unlocked: bool,
+    /// Whether the device has no PIN set at all.
+    blank: bool,
     frames: Reassembler,
     stage: Stage,
     /// A reply waiting for FIFO room. Held rather than dropped, because a reply the host
@@ -83,11 +92,14 @@ impl UsbTask {
         let otg = unsafe { Otg::init(BOARD.usb.dm, BOARD.usb.dp, serial) }.ok()?;
         Some(Self {
             otg,
+            #[cfg(feature = "usb-key-injection")]
+            injected: None,
             rx_count: 0,
             tx_count: 0,
             frame_errors: 0,
             last_status: 0,
             unlocked: false,
+            blank: false,
             frames: Reassembler::new(),
             stage: Stage::Idle,
             outbox: [0; REPORT_LEN],
@@ -99,6 +111,11 @@ impl UsbTask {
     /// The PIN has been entered; upgrades may now be offered.
     pub fn set_unlocked(&mut self) {
         self.unlocked = true;
+    }
+
+    /// Report whether the device is still waiting to be given a first PIN.
+    pub fn set_blank(&mut self, blank: bool) {
+        self.blank = blank;
     }
 
     /// An upgrade the user should be asked about, if there is one.
@@ -159,6 +176,13 @@ impl UsbTask {
                     report.copy_from_slice(&self.otg.rx);
                     self.otg.receive_next();
                     self.on_report(&report);
+                    // Push the reply now rather than leaving it for the next poll.
+                    // A key that makes the firmware leave its polling loop for a
+                    // callgate call -- choosing a PIN, fetching the anti-phishing
+                    // words, logging in -- would otherwise strand its own
+                    // acknowledgement in the outbox for the length of a secure element
+                    // operation. The host cannot tell that from a device that died.
+                    self.drain_outbox();
                 }
                 _ => {}
             }
@@ -253,6 +277,18 @@ impl UsbTask {
                 self.begin_reply(Status::Ok, &body[..n]);
             }
             Some(Opcode::Identify) => self.identify(),
+            #[cfg(feature = "usb-key-injection")]
+            Some(Opcode::InjectKey) => match progress.payload.first() {
+                Some(&k)
+                    if k <= 9 || k == catcard_usb::KEY_CANCEL || k == catcard_usb::KEY_CONFIRM =>
+                {
+                    self.injected = Some(k);
+                    self.begin_reply(Status::Ok, &[]);
+                }
+                _ => self.begin_reply(Status::BadRequest, &[]),
+            },
+            #[cfg(not(feature = "usb-key-injection"))]
+            Some(Opcode::InjectKey) => self.begin_reply(Status::UnknownOpcode, &[]),
             Some(Opcode::UpgradeCommit) => {
                 // A host can ask, but only the device can answer. Approval happens at
                 // the screen; until then this is simply not the time.
@@ -282,17 +318,34 @@ impl UsbTask {
     fn identify(&mut self) {
         // Fixed layout rather than a text blob, so a host does not have to parse prose:
         //   [0..2] protocol version
-        //   [2]    board name length, then the name
+        //   [2]    device state, see `catcard_usb::state`
+        //   [3]    capabilities, see `catcard_usb::caps`
+        //   [4..]  board name length, then the name
         //   then   version string length, then the version
         let mut body = [0u8; 64];
         let mut at = 0;
         body[at..at + 2].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         at += 2;
-        // Whether an upgrade would be accepted. A host should be able to ask rather
-        // than find out by offering one and being refused -- probing with an offer
-        // leaves a message half-open on the device, which is a mess of my own making
-        // that this removes.
-        body[at] = self.unlocked as u8;
+        // Which screen a host is answering. `unlocked` alone was not enough: a device
+        // that is not unlocked is either asking for a PIN or asking to be given one,
+        // and those need different keys.
+        body[at] = (if self.unlocked {
+            catcard_usb::state::UNLOCKED
+        } else {
+            0
+        }) | (if self.blank {
+            catcard_usb::state::BLANK
+        } else {
+            0
+        });
+        at += 1;
+        // What this build will accept, so a host does not have to discover it by being
+        // refused -- and so an operator can see whether key injection is compiled in.
+        body[at] = if cfg!(feature = "usb-key-injection") {
+            catcard_usb::caps::KEY_INJECTION
+        } else {
+            0
+        };
         at += 1;
         for s in [BOARD_NAME, VERSION] {
             let b = s.as_bytes();
@@ -461,6 +514,13 @@ fn task() -> Option<&'static mut UsbTask> {
     unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }
 }
 
+/// Tell a host whether the device has a PIN at all.
+pub fn set_blank(blank: bool) {
+    if let Some(t) = task() {
+        t.set_blank(blank);
+    }
+}
+
 /// Let the host offer upgrades, now that the PIN has been entered.
 pub fn unlocked() {
     if let Some(t) = task() {
@@ -571,3 +631,29 @@ pub fn stats() -> (bool, u32, u32, bool) {
         None => (false, 0, 0, false),
     }
 }
+
+/// A key a host has pressed, if any. Consumes it.
+///
+/// Returns `None` on a build without `usb-key-injection`, so every caller compiles
+/// either way and the feature is one line in `Cargo.toml` rather than a thread through
+/// the UI.
+pub fn take_injected_key() -> Option<catcard_ui::keypad::Key> {
+    #[cfg(not(feature = "usb-key-injection"))]
+    {
+        None
+    }
+    #[cfg(feature = "usb-key-injection")]
+    {
+        use catcard_ui::keypad::Key;
+        let t = task()?;
+        let k = t.injected.take()?;
+        Some(match k {
+            catcard_usb::KEY_CANCEL => Key::Cancel,
+            catcard_usb::KEY_CONFIRM => Key::Confirm,
+            d => Key::Digit(d),
+        })
+    }
+}
+
+/// Whether this build accepts injected keys, for the screen to say so.
+pub const KEY_INJECTION: bool = cfg!(feature = "usb-key-injection");

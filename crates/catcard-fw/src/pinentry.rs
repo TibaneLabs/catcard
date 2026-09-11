@@ -25,6 +25,30 @@ use catcard_ui::Mono128x64;
 
 use crate::{display, keypad::GpioMatrix};
 
+/// Every key this iteration produced, from the pad and from a host.
+///
+/// The two are merged here rather than at each call site so no screen can honour one
+/// source and forget the other — which would show up as a device that answers the
+/// keypad but ignores a host, or worse, the reverse.
+fn pressed_keys(
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    events: &mut [Event; KEYS],
+    out: &mut heapless::Vec<Key, { KEYS + 1 }>,
+) {
+    out.clear();
+    let n = pad.scan(matrix, drbg, events);
+    for e in &events[..n] {
+        if let Event::Pressed(k) = e {
+            let _ = out.push(*k);
+        }
+    }
+    if let Some(k) = crate::usbtask::take_injected_key() {
+        let _ = out.push(k);
+    }
+}
+
 /// Scan interval, matching the selftest loop: roughly 60 Hz at the reset-default clock.
 const SCAN_CYCLES: u32 = 66_000;
 
@@ -202,14 +226,14 @@ fn collect(
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     screen_field(panel, heading, &field, MAX_ATTEMPTS);
 
     loop {
         crate::usbtask::pump();
-        let n = pad.scan(matrix, drbg, &mut events);
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         let mut changed = false;
-        for e in &events[..n] {
-            let Event::Pressed(k) = e else { continue };
+        for k in keys.iter() {
             match k {
                 Key::Digit(d) => {
                     field.push(*d);
@@ -239,13 +263,14 @@ fn collect(
 fn wait_for_confirm(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         crate::usbtask::pump();
-        let n = pad.scan(matrix, drbg, &mut events);
-        for e in &events[..n] {
-            match e {
-                Event::Pressed(Key::Confirm) => return true,
-                Event::Pressed(Key::Cancel) => return false,
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Confirm => return true,
+                Key::Cancel => return false,
                 _ => {}
             }
         }
@@ -275,9 +300,13 @@ pub fn unlock(
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     let mut redraw = true;
 
     loop {
+        // A host driving this device needs to know which screen it is looking at.
+        crate::usbtask::set_blank(matches!(login.step(), Step::Blank));
+
         if redraw {
             match login.step() {
                 Step::Prefix => screen_field(panel, "PIN prefix", &field, login.attempts_left()),
@@ -349,9 +378,8 @@ pub fn unlock(
 
         let _ = crate::usbtask::pump();
 
-        let n = pad.scan(matrix, drbg, &mut events);
-        for e in &events[..n] {
-            let Event::Pressed(key) = e else { continue };
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        for key in keys.iter() {
             redraw = true;
             match (login.step(), key) {
                 // A blank device: offer to set the first PIN rather than stopping.

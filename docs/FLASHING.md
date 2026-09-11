@@ -27,12 +27,16 @@ On the device running **stock** firmware: *Advanced → Upgrade Firmware → Fro
 The stock firmware stages the image to SPI-NOR flash and reboots; the bootloader
 installs it into main flash and verifies the signature.
 
-Once CatCard implements its own upgrade path (roadmap M6) it will accept images the same
-way, and this route stops depending on stock firmware being present.
+**Recovering.** CatCard now has its own USB upgrade path: it accepts a complete signed
+image over HID, stages it, and installs it after someone approves it at the device. That
+includes the stock firmware, so the route back exists without the DFU button or an
+unlocked bootloader — an older image is warned about, not refused, because returning to
+stock is a legitimate thing to want. The bootloader's OTP high-water mark still has the
+final say; see [`--high-water`](#--high-water) for the one way to lose that route
+permanently.
 
-**Recovering.** There is no CatCard UI yet, so a device running CatCard cannot be told to
-load anything. On a locked unit that means you cannot get back to stock firmware without
-the DFU button / an unlocked bootloader. **Do not install this on a device you rely on.**
+**Still: do not install this on a device you rely on.** The upgrade path is verified in
+the emulator, not yet on hardware.
 
 ---
 
@@ -82,6 +86,38 @@ address on the command line, so the DfuSe wrapper adds nothing here.
 
 On locked (RDP=2) units USB-DFU is refused, and callgate 2 locks the device up rather
 than entering it.
+
+---
+
+## Before you type a PIN: confirm the keypad
+
+Do this on the first run on any new board, and before anything that needs a correct
+keypress. The keypad map is inferred from board photographs, and the pad is mounted
+rotated 180° — so a wrong map is not a far-fetched failure, it is the expected one if
+the inference is off.
+
+The trap is specific: on a **locked production unit**, a wrong key map means you cannot
+type the PIN. You cannot reach a menu, and you cannot install a firmware that would fix
+the map, because approving an install is itself a keypress. Thirteen wrong PIN attempts
+brick the secure element, so guessing at a mirrored map is not free.
+
+The selftest screen is the check. It draws each key as you press it, before any PIN is
+involved:
+
+1. Press each digit `0`–`9` in turn and confirm the screen shows the digit you pressed.
+2. Confirm `x` and `y` are where the labels say, and not swapped.
+3. Only then continue to the PIN prompt.
+
+If the map is wrong, flash a bring-up image and drive the device over USB instead:
+
+```sh
+cargo fw-mk4-bringup          # adds `usb-key-injection`
+```
+
+That build lets a host press keys, which is how you reach the PIN prompt on a device
+whose panel or keypad is not working. It also means a host can approve its own firmware
+upgrade, so it must not outlive bring-up — see [`USB.md`](USB.md#key-injection-a-bring-up-crutch-with-an-expiry-date).
+The selftest screen shows `[USB KEYS]` whenever it is compiled in.
 
 ---
 

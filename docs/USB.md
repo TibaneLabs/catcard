@@ -163,6 +163,18 @@ it is the signature.
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 
+### A reply goes out in the poll that produced it
+
+Replies are staged into an outbox and pushed by `drain_outbox`. That used to run only at
+the *start* of the next poll, which is fine while the firmware is sitting in a key loop
+and wrong the moment a key makes it leave one: choosing a PIN, fetching the anti-phishing
+words and logging in are all callgate calls that mask interrupts and do not poll. The
+acknowledgement for the key that *started* that work sat in the outbox until it finished,
+and from the host that is indistinguishable from a device that died mid-operation.
+
+So the poll that handles a report also drains the reply. The host's timeout can then be
+short enough to be diagnostic — a late reply means stopped, not busy.
+
 ### Enumeration is not gated by the PIN; upgrades are
 
 The peripheral comes up during bring-up, before the PIN prompt, because a host presents
@@ -174,6 +186,46 @@ discloses a name, an ID, and a serial number that is already the USB serial numb
 holding the device therefore cannot replace its firmware without also being able to open
 it. A blank device with no PIN set reaches the unlocked state too, which is what keeps
 such a unit recoverable.
+
+### Key injection: a bring-up crutch with an expiry date
+
+`InjectKey` (`0x0020`) hands the firmware one keypress from the host. It is behind the
+cargo feature `usb-key-injection`, on by default **at this stage only**, and it
+contradicts the first constraint below on purpose. Be clear about what it is: with it
+compiled in, a host can approve its own firmware upgrade. The screen is no longer the
+boundary.
+
+It exists because of the order in which unknowns get resolved. The first run on real
+hardware is the run where the keypad map, the display init, and the panel wiring are all
+still `[I]` or `[?]` — and it is also a run on a **locked production unit**, where being
+unable to type the PIN means being unable to do anything at all, including install a
+firmware that would fix the typing. A mirrored key map is a plausible mistake that costs
+the device. `--drive` in `tools/emu/usbclient.py` is the whole device driven over USB
+with nothing touching the keypad, which is what turns that class of mistake back into an
+inconvenience.
+
+What it does not do: it does not bypass the PIN. An injected `4` is a `4` at the prompt
+and nothing more — the bootloader still checks the PIN, still rate-limits, still bricks
+on the thirteenth wrong answer. It buys a way to *reach* the prompt, not past it.
+
+The capability is advertised in `Identify` (`caps::KEY_INJECTION`) and shown on the
+selftest screen as `[USB KEYS]`, because a device that can be driven by its host should
+say so where its owner can read it.
+
+**It must not ship enabled.** The ordinary `fw-mk3` / `fw-mk4` / `fw-q1` aliases build
+without it; the `fw-*-bringup` aliases are the only way to turn it on, so enabling it is
+always a visible choice rather than an inherited default. The feature is the whole
+removal: without it the opcode, the queue, and the merge in every key loop compile out,
+and `Identify` stops advertising the capability. Once the key map is confirmed on
+hardware, stop building the bring-up image.
+
+### Identify reports which screen you are on
+
+A host driving the device blind needs to know what it is answering. `Identify` carries a
+state byte — `UNLOCKED` and `BLANK` — because "not unlocked" is two different devices:
+one asking for a PIN, and one asking to be given a first PIN. They take different keys,
+and inferring which from the outside is guesswork against a screen you may not be able
+to see.
 
 ### Constraints that do not change
 

@@ -126,10 +126,14 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
         body,
         0,
         52,
-        if waiting {
-            "y  continue"
-        } else {
-            "stopped: no input"
+        match (waiting, crate::usbtask::KEY_INJECTION) {
+            // Stated on the device itself: a build that accepts keys from a host is not
+            // a build to hand to anyone, and this is the screen that always gets looked
+            // at first.
+            (true, true) => "y  continue   [USB KEYS]",
+            (true, false) => "y  continue",
+            (false, true) => "stopped: no input   [USB KEYS]",
+            (false, false) => "stopped: no input",
         },
     );
 
@@ -182,17 +186,26 @@ pub fn show(
 
         let n = pad.scan(matrix, drbg, &mut events);
         let mut changed = false;
+        let mut seen: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
         for e in &events[..n] {
             if let Event::Pressed(k) = e {
-                if *k == Key::Confirm {
-                    return;
-                }
-                last = Some(*k);
-                changed = true;
-                // Press timing is genuine, if weak, entropy; credited 1 bit/byte.
-                if let Some(pool) = report.pool.as_mut() {
-                    pool.add_timing(catcard_hal::dwt::cycles());
-                }
+                let _ = seen.push(*k);
+            }
+        }
+        // Without this a host cannot get past the first screen, which would make the
+        // rest of the injected-key path unreachable on a device whose pad is mirrored.
+        if let Some(k) = crate::usbtask::take_injected_key() {
+            let _ = seen.push(k);
+        }
+        for k in seen.iter() {
+            if *k == Key::Confirm {
+                return;
+            }
+            last = Some(*k);
+            changed = true;
+            // Press timing is genuine, if weak, entropy; credited 1 bit/byte.
+            if let Some(pool) = report.pool.as_mut() {
+                pool.add_timing(catcard_hal::dwt::cycles());
             }
         }
         if changed {

@@ -74,6 +74,19 @@ pub enum Opcode {
     /// Nothing is installed by this. The device stages and validates it, then answers
     /// with what it found so a human can be asked.
     UpgradeOffer = 0x0010,
+    /// Press a key, as though someone had pressed it on the device.
+    ///
+    /// Payload is one byte: `0x00..=0x09` a digit, [`KEY_CANCEL`], [`KEY_CONFIRM`].
+    ///
+    /// **This removes physical presence**, which is the property the rest of this design
+    /// rests on: a host that can press keys can approve its own firmware once the device
+    /// has been unlocked by its owner. It exists because a keypad whose mapping is not
+    /// yet confirmed on hardware is the only way onto a device that has a PIN, and a
+    /// wrong mapping costs thirteen attempts and then the secure element.
+    ///
+    /// It is behind the `usb-key-injection` feature, reported by [`Opcode::Identify`],
+    /// and shown on the device's own screen. See `docs/USB.md`.
+    InjectKey = 0x0020,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -89,9 +102,33 @@ impl Opcode {
             0x0002 => Opcode::Identify,
             0x0010 => Opcode::UpgradeOffer,
             0x0011 => Opcode::UpgradeCommit,
+            0x0020 => Opcode::InjectKey,
             _ => return None,
         })
     }
+}
+
+/// The `x` key, in an [`Opcode::InjectKey`] payload.
+pub const KEY_CANCEL: u8 = 0x0A;
+/// The `y` / OK key.
+pub const KEY_CONFIRM: u8 = 0x0B;
+
+/// Device state bits reported by [`Opcode::Identify`].
+///
+/// A host driving the device needs to know which screen it is answering. Without this it
+/// has to infer the state from what its keypresses do, which is guesswork against a
+/// device it may not be able to see.
+pub mod state {
+    /// The PIN has been entered.
+    pub const UNLOCKED: u8 = 1 << 0;
+    /// No PIN has ever been set: the device wants setup, not a login.
+    pub const BLANK: u8 = 1 << 1;
+}
+
+/// Capability bits reported by [`Opcode::Identify`].
+pub mod caps {
+    /// This build accepts [`Opcode::InjectKey`](super::Opcode::InjectKey).
+    pub const KEY_INJECTION: u8 = 1 << 0;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.
