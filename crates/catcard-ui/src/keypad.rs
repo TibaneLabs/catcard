@@ -42,7 +42,10 @@ pub enum Key {
     Confirm,
 }
 
-/// Row-major key layout:
+/// Which key sits at which matrix position, indexed `row * COLS + col`.
+///
+/// **The pad is mounted rotated**, so this is the printed legend inverted on both axes —
+/// the same 180° turn the OLED gets. The legend reads:
 ///
 /// ```text
 /// 1 2 3
@@ -50,19 +53,37 @@ pub enum Key {
 /// 7 8 9
 /// x 0 y
 /// ```
+///
+/// and the matrix sees it upside down, so position 0 is `y` and position 11 is `1`:
+///
+/// ```text
+/// y 0 x
+/// 9 8 7
+/// 6 5 4
+/// 3 2 1
+/// ```
+///
+/// This was row-major until it was measured. Driving single keys under the emulator and
+/// echoing the decoded key back showed an exact reversal — position *i* there is *11 − i*
+/// here — and the maintainer of that model confirmed the mounting, which is a fact about
+/// where the panel sits in the case rather than anything about software.
+///
+/// Getting it wrong mirrors the whole pad: every digit of a PIN lands on a different key,
+/// and `x` and `y` swap, so a user cannot confirm anything. See
+/// `docs/HARDWARE-OPEN-ITEMS.md` for the provenance and what would settle it outright.
 pub const LAYOUT: [Key; KEYS] = [
-    Key::Digit(1),
-    Key::Digit(2),
-    Key::Digit(3),
-    Key::Digit(4),
-    Key::Digit(5),
-    Key::Digit(6),
-    Key::Digit(7),
-    Key::Digit(8),
-    Key::Digit(9),
-    Key::Cancel,
-    Key::Digit(0),
     Key::Confirm,
+    Key::Digit(0),
+    Key::Cancel,
+    Key::Digit(9),
+    Key::Digit(8),
+    Key::Digit(7),
+    Key::Digit(6),
+    Key::Digit(5),
+    Key::Digit(4),
+    Key::Digit(3),
+    Key::Digit(2),
+    Key::Digit(1),
 ];
 
 /// A press or release.
@@ -291,8 +312,8 @@ mod tests {
         assert!(!k.is_down(Key::Digit(1)));
 
         let now = scan_n(&mut k, &mut m, &mut d, 1);
-        assert_eq!(now, vec![Event::Pressed(Key::Digit(1))]);
-        assert!(k.is_down(Key::Digit(1)));
+        assert_eq!(now, vec![Event::Pressed(Key::Confirm)]);
+        assert!(k.is_down(Key::Confirm));
     }
 
     #[test]
@@ -317,7 +338,7 @@ mod tests {
         let (mut k, mut m, mut d) = (Keypad::new(), MockMatrix::new(), drbg());
         m.press(0, 0);
         let events = scan_n(&mut k, &mut m, &mut d, 50);
-        assert_eq!(events, vec![Event::Pressed(Key::Digit(1))]);
+        assert_eq!(events, vec![Event::Pressed(Key::Confirm)]);
     }
 
     #[test]
@@ -327,21 +348,26 @@ mod tests {
         scan_n(&mut k, &mut m, &mut d, 5);
         m.release(0, 0);
         let events = scan_n(&mut k, &mut m, &mut d, DEBOUNCE_SAMPLES as usize);
-        assert_eq!(events, vec![Event::Released(Key::Digit(1))]);
-        assert!(!k.is_down(Key::Digit(1)));
+        assert_eq!(events, vec![Event::Released(Key::Confirm)]);
+        assert!(!k.is_down(Key::Confirm));
     }
 
     #[test]
-    fn every_position_maps_to_its_printed_key() {
-        // A transposed layout would make the device silently enter the wrong PIN.
+    fn every_position_maps_to_the_key_above_it_on_a_rotated_pad() {
+        // The pad is mounted rotated, so a matrix position holds the key diagonally
+        // opposite the one printed at that position on an unrotated legend. Getting it
+        // wrong mirrors the whole pad: every digit of a PIN lands elsewhere and `x` and
+        // `y` swap, so nothing can be confirmed.
+        //
+        // These pairs were measured, not assumed -- see LAYOUT.
         let cases = [
-            (0, 0, Key::Digit(1)),
-            (0, 2, Key::Digit(3)),
-            (1, 0, Key::Digit(4)),
-            (2, 2, Key::Digit(9)),
-            (3, 0, Key::Cancel),
-            (3, 1, Key::Digit(0)),
-            (3, 2, Key::Confirm),
+            (0, 0, Key::Confirm),
+            (0, 1, Key::Digit(0)),
+            (0, 2, Key::Cancel),
+            (1, 0, Key::Digit(9)),
+            (2, 2, Key::Digit(4)),
+            (3, 0, Key::Digit(3)),
+            (3, 2, Key::Digit(1)),
         ];
         for (row, col, want) in cases {
             let (mut k, mut m, mut d) = (Keypad::new(), MockMatrix::new(), drbg());

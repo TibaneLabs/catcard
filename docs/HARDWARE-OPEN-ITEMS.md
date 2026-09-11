@@ -22,23 +22,49 @@ the selftest screen: under the emulator no keypress reached the firmware at all.
 symptom was a device that looked hung on a screen that was in fact polling a set of pins
 nothing was attached to.
 
-## Which physical key sits at which matrix position
+## Which physical key sits at which matrix position — RESOLVED, on a relayed fact
 
-**Blocks: nothing structurally — but a wrong answer mirrors the whole keypad.**
+**The pad is mounted rotated.** Matrix position 0 is `y`, position 11 is `1` — the
+printed legend inverted on both axes, the same 180° turn the OLED gets:
 
-`catcard_ui::keypad::LAYOUT` reads the matrix row-major as `1 2 3 / 4 5 6 / 7 8 9 /
-x 0 y`. That is the natural reading of the legend, and it is an inference `[I]`: the
-reference gives the pins and the scan model but never says which key is at which
-position, and explicitly lists the equivalent Q1 mapping as unknown.
+```text
+legend          matrix sees
+1 2 3           y 0 x
+4 5 6           9 8 7
+7 8 9           6 5 4
+x 0 y           3 2 1
+```
 
-There is evidence it is **reversed** — that position 0 is `y` and position 11 is `1`.
-Under the emulator, holding `y` is read by CatCard as `1`, an exact reversal in both
-axes. But `VALIDATION.md` says an emulator run does not settle anything the reference
-marks `[I]`, and this is squarely that, so the constant has not been flipped to match.
+`catcard_ui::keypad::LAYOUT` was row-major until this was settled, which would have
+mirrored the whole pad: every digit of a PIN landing on a different key, and `x` and `y`
+swapped, so a user could not confirm anything.
 
-**How to resolve.** Press keys in order on a device and read the `KEY` echo on the
-selftest screen. It takes seconds and needs no debugger, which is what that echo is for.
-If they come out mirrored, reverse `LAYOUT` — a one-line change with no other caller.
+**How it was settled, and why the provenance is written down.** It was *measured* first
+— driving single keys under the emulator and echoing the decoded key back showed an
+exact reversal, position *i* there being *11 − i* here, consistently. That measurement
+alone could not settle it: `VALIDATION.md` says an emulator run does not settle anything
+the reference marks `[I]`, and `gpio-peripherals.md` gives the pins and the scan model
+but never says which key sits where.
+
+It was settled by asking. The emulator's maintainer confirmed the mounting, sourced from
+**the stock firmware's own decoder table for the membrane numpad** — a twelve-character
+string indexed `row * 3 + col`.
+
+That source matters. `CLEANROOM.md` keeps stock firmware out of this project, and the
+answer arrived as a relayed fact rather than through reading it. Two things make it
+usable:
+
+- **It is a fact about where the panel sits in the case**, not about anybody's code. A
+  clean-room implementation may know that a connector is rotated; what it may not do is
+  copy an expression of it.
+- **Nothing was transcribed.** The table is not reproduced here or in the code; the
+  mounting is stated and `LAYOUT` derives from it in our own terms.
+
+**Still worth a bench.** The relayed fact is tagged `[C]` on the emulator's side because
+shipped firmware decodes real pads with that table and real pads work — which is a
+firmware fact, not a measurement of silicon, and neither project has checked it on a
+device. The `KEY` echo on the selftest screen settles it in seconds, and a disagreement
+there beats the table.
 
 ---
 
