@@ -230,6 +230,17 @@ pub fn park(report: BootReport, panel: Option<display::Panel>) -> ! {
         render(&report, None, false, p);
     }
     loop {
-        cortex_m::asm::wfi();
+        // Serve USB rather than sleeping. This is the device that cannot show or read
+        // anything, so a host is the only thing left that can ask it what went wrong --
+        // `Identify` still answers, and the boot report is still published for a RAM
+        // dump. A `wfi` here made the one device that most needs to be reachable the
+        // one that was unreachable.
+        //
+        // Upgrades stay shut: `unlocked` is never called on this path, so `UpgradeOffer`
+        // answers `NotNow`. Opening them would let anyone holding a locked device
+        // install a dev-signed firmware of their own without knowing the PIN, and a
+        // parked device is not a reason to give that away.
+        let _ = crate::usbtask::pump();
+        catcard_hal::dwt::delay_cycles(crate::usbtask::IDLE_PAUSE_CYCLES);
     }
 }

@@ -89,35 +89,45 @@ than entering it.
 
 ---
 
-## Before you type a PIN: confirm the keypad
+## Flash the bring-up build first, not the plain one
 
-Do this on the first run on any new board, and before anything that needs a correct
-keypress. The keypad map is inferred from board photographs, and the pad is mounted
-rotated 180° — so a wrong map is not a far-fetched failure, it is the expected one if
-the inference is off.
+On a **locked production unit**, decide this before you install anything. The keypad map
+is inferred from board photographs and the pad is mounted rotated 180°, so a mirrored map
+is not a far-fetched failure — it is what you get if the inference is off.
 
-The trap is specific: on a **locked production unit**, a wrong key map means you cannot
-type the PIN. You cannot reach a menu, and you cannot install a firmware that would fix
-the map, because approving an install is itself a keypress. Thirteen wrong PIN attempts
-brick the secure element, so guessing at a mirrored map is not free.
-
-The selftest screen is the check. It draws each key as you press it, before any PIN is
-involved:
-
-1. Press each digit `0`–`9` in turn and confirm the screen shows the digit you pressed.
-2. Confirm `x` and `y` are where the labels say, and not swapped.
-3. Only then continue to the PIN prompt.
-
-If the map is wrong, flash a bring-up image and drive the device over USB instead:
+If it is wrong you cannot type the PIN, cannot reach anything, and cannot install a
+firmware that would fix it, because approving an install is itself a keypress. Checking
+the map once the firmware is on the device tells you that you are stuck; it does not get
+you out. The only thing that gets you out has to already be in the image:
 
 ```sh
 cargo fw-mk4-bringup          # adds `usb-key-injection`
 ```
 
-That build lets a host press keys, which is how you reach the PIN prompt on a device
-whose panel or keypad is not working. It also means a host can approve its own firmware
-upgrade, so it must not outlive bring-up — see [`USB.md`](USB.md#key-injection-a-bring-up-crutch-with-an-expiry-date).
+That build lets a host press keys over USB, so a mirrored map or a dead panel costs you
+convenience instead of the device. USB comes up during bring-up — before the selftest
+screen, before the PIN, and before the checks that park a device that cannot show or read
+anything — so a host can drive it even when the front panel is useless. Verify it works
+against the emulator before you rely on it:
+
+```sh
+tools/emu/drive.sh <factory-bootloader.dfu>
+```
+
+It also means a host can approve its own firmware upgrade, which is why it must not
+outlive bring-up — see [`USB.md`](USB.md#key-injection-a-bring-up-crutch-with-an-expiry-date).
 The selftest screen shows `[USB KEYS]` whenever it is compiled in.
+
+### Then check the map, to avoid bricking the secure element
+
+Once it is running, the selftest screen draws each key as you press it, before any PIN is
+involved. This is worth doing even though it is only a diagnosis: **thirteen wrong PIN
+attempts brick the secure element**, so discovering a mirrored map by typing a PIN into
+it is the expensive way to find out.
+
+1. Press each digit `0`–`9` and confirm the screen shows the digit you pressed.
+2. Confirm `x` and `y` are where the labels say, and not swapped.
+3. If either is wrong, stop — drive the device over USB and do not type a PIN.
 
 ---
 

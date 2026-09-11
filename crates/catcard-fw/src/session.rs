@@ -32,6 +32,20 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // before anything can branch to it.
     let gate = unsafe { Callgate::discover(&BOARD) }.ok();
 
+    // USB before anything a person has to do, and before the checks below that can park
+    // the device. A host presents the cable and enumerates within milliseconds; a device
+    // that only appears after a PIN looks broken. What the PIN gates is the upgrade, not
+    // the enumeration -- see `usbtask`.
+    //
+    // Before the park branches specifically, because those fire on a dead panel, a
+    // keypad that would not initialise, an entropy pool that missed its policy, or an
+    // unreachable callgate -- the exact failures where a host is the only way to reach
+    // the device, and where it used to park with USB never started at all.
+    //
+    // SAFETY: nothing else has claimed OTG_FS or the USB pins, and HSI48 was started
+    // during bring-up.
+    unsafe { usbtask::init(serial()) };
+
     // Taken one at a time so a device with a working panel but no keypad still shows
     // the selftest screen -- which is exactly the device most likely to have one of
     // these missing, and the one where a blank display would be least diagnosable.
@@ -41,14 +55,6 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     let (Some(mut matrix), Some(mut drbg), Some(gate)) = (matrix, drbg, gate) else {
         selftest::park(report, Some(panel))
     };
-
-    // USB before anything a person has to do. A host presents the cable and enumerates
-    // within milliseconds; a device that only appears after a PIN looks broken. What the
-    // PIN gates is the upgrade, not the enumeration -- see `usbtask`.
-    //
-    // SAFETY: nothing else has claimed OTG_FS or the USB pins, and HSI48 was started
-    // during bring-up.
-    unsafe { usbtask::init(serial()) };
 
     selftest::show(&mut report, &mut panel, &mut matrix, &mut drbg);
 

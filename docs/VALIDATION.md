@@ -433,6 +433,30 @@ a 256 KB upgrade and its approval — every keypress arriving over USB.
 - **"Approved" was printed from having sent a byte.** The device going quiet is the first
   actual evidence the key landed; the client now waits for that.
 
+### A parked device used to be unreachable — confirmed fixed
+
+`usbtask::init` ran *after* the checks that park the device, and `park` was a `wfi`
+loop. So a dead panel, a keypad that would not initialise, an entropy pool that missed
+its policy, or an unreachable callgate all parked with USB never started: no
+enumeration, no injection, no diagnostics. Those are the exact bring-up failures where a
+host is the only way in, and they were the ones that got nothing.
+
+USB now comes up before the park branches, and `park` pumps it. Verified by forcing the
+panel to `None` in a throwaway build:
+
+```
+ping      status=Ok echo=b'cat'
+identify  status=Ok board=mk4 version=0.0.1 unlocked=False blank=False
+offer     status=NotNow  (expected NotNow)
+```
+
+The last line matters as much as the first two. A parked device is reachable and
+identifiable, but **not flashable**: `unlocked` is never called on that path, so an
+upgrade is still refused. Opening it would let anyone holding a locked device install a
+dev-signed firmware of their own — signing with the published developer key is something
+anyone can do — without ever knowing the PIN. That firmware would then be in a position
+to capture the PIN when it is typed.
+
 ### The feature is opt-in, and `default` was a lie
 
 `usb-key-injection` was in `[features] default`, which never applied: every firmware
