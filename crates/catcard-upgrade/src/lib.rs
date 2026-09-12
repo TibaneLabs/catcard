@@ -133,6 +133,13 @@ pub trait StagingArea {
     /// Bytes available for an image.
     fn capacity(&self) -> u32;
 
+    /// Address the image is staged at.
+    ///
+    /// Needed because `gate 18/7` names the region rather than looking for a marker:
+    /// mk4 and later install what a logged-in caller pointed them at, so the address has
+    /// to travel back out to whoever makes that call.
+    fn image_base(&self) -> u32;
+
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Self::Error>;
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), Self::Error>;
 
@@ -318,11 +325,28 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     ///
     /// Does not reboot. That is the caller's, so the last irreversible step is not
     /// buried in a function that also does bookkeeping.
-    pub fn commit(mut self, approval: Approval) -> Result<(), Reject> {
+    /// Publish the recovery header, and report the region it names.
+    ///
+    /// On mk3 that is the whole story: the bootrom installs what it finds staged. On
+    /// mk4 and later nothing happens until a logged-in `gate 18/7` authorises *this*
+    /// region, which is why the caller is handed it rather than left to recompute it.
+    pub fn commit(mut self, approval: Approval) -> Result<Region, Reject> {
+        let start = self.area.image_base();
         self.area
             .publish(approval.length)
-            .map_err(|_| Reject::StorageFault { offset: 0 })
+            .map_err(|_| Reject::StorageFault { offset: 0 })?;
+        Ok(Region {
+            start,
+            len: approval.length,
+        })
     }
+}
+
+/// Where a staged image sits, as `gate 18/7` wants it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Region {
+    pub start: u32,
+    pub len: u32,
 }
 
 /// Placeholder for a staging area's own error, which callers do not act on

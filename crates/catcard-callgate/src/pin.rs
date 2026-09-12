@@ -90,6 +90,22 @@ pub struct PinAttempt {
     pub cached_main_pin: [u8; MAX_PIN_LEN],
 }
 
+impl PinAttempt {
+    /// Point [`PinOp::FirmwareUpgrade`] at the image staged in PSRAM.
+    ///
+    /// The bootloader reads the region from the first eight bytes of `secret`, which is
+    /// otherwise where a wallet secret lives — the field is reused, not overloaded with
+    /// a second meaning at the same time, because a firmware authorisation never carries
+    /// one.
+    ///
+    /// Source: gate18-pin-state-machine.md §2 method 7 [C]
+    pub fn set_firmware_region(&mut self, start: u32, len: u32) {
+        self.secret[..4].copy_from_slice(&start.to_le_bytes());
+        self.secret[4..8].copy_from_slice(&len.to_le_bytes());
+        self.change_flags = crate::abi::change::FIRMWARE;
+    }
+}
+
 impl Default for PinAttempt {
     fn default() -> Self {
         Self::new()

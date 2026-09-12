@@ -119,6 +119,10 @@ impl StagingArea for PsramArea {
     /// `magic1` is the final store, every earlier state of these sixteen bytes reads as
     /// "no image staged". There is no window in which a partially written header
     /// describes a partially written image.
+    fn image_base(&self) -> u32 {
+        self.image_base
+    }
+
     fn publish(&mut self, len: u32) -> Result<(), OutOfRange> {
         let at = self.header_at as *mut u32;
         // SAFETY: `header_at` came from the board table's confirmed staging address and

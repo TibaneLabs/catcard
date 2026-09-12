@@ -30,6 +30,10 @@ struct Inner {
     zero_secret: bool,
     /// The PIN a `Change` installed, so a later login can be checked against it.
     set_pin: Vec<u8>,
+    /// Region passed to method 7, if it was called.
+    authorized: Option<(u32, u32)>,
+    /// Whether the bootloader should reject the staged image.
+    refuse_image: bool,
     /// The PIN field as it stood when the struct was last signed.
     signed_pin: Vec<u8>,
 }
@@ -48,6 +52,8 @@ impl Model {
                 secret: [7; SECRET_LEN],
                 zero_secret: false,
                 set_pin: Vec::new(),
+                authorized: None,
+                refuse_image: false,
                 signed_pin: Vec::new(),
             }),
         }
@@ -109,7 +115,10 @@ impl PinGate for Model {
         if a.pin_len < 0 || a.pin_len as usize > catcard_callgate::pin::MAX_PIN_LEN {
             return Err(GateError::Pin(err::RANGE_ERR));
         }
-        if a.change_flags & !catcard_callgate::abi::change::VALID_MASK != 0 {
+        // The mk4+ mask, which is the mk3 one plus CHANGE_FIRMWARE. Modelling mk3's
+        // would reject method 7 outright -- and did, until this test was written: the
+        // flag that authorises an upgrade is exactly the bit the older mask omits.
+        if a.change_flags & !catcard_callgate::abi::change::VALID_MASK_MK4 != 0 {
             return Err(GateError::Pin(err::BAD_REQUEST));
         }
         if op != PinOp::Setup && !self.validate(&inner, a) {
@@ -178,6 +187,27 @@ impl PinGate for Model {
                 a.state_flags = 0;
                 self.sign(&mut inner, a);
                 Ok(0)
+            }
+            // What the bootloader does for method 7, including what it refuses. The
+            // point of modelling the refusals is that a caller which forgets the flag,
+            // or asks before logging in, must fail here rather than on silicon.
+            PinOp::FirmwareUpgrade => {
+                if a.state_flags & state::SUCCESSFUL == 0 {
+                    return Err(GateError::Pin(err::PIN_REQUIRED));
+                }
+                if a.change_flags != catcard_callgate::abi::change::FIRMWARE {
+                    return Err(GateError::Pin(err::BAD_REQUEST));
+                }
+                let start = u32::from_le_bytes(a.secret[..4].try_into().unwrap());
+                let len = u32::from_le_bytes(a.secret[4..8].try_into().unwrap());
+                inner.authorized = Some((start, len));
+                // The real one verifies the staged image and refuses it with AUTH_FAIL.
+                if inner.refuse_image {
+                    return Err(GateError::Pin(err::AUTH_FAIL));
+                }
+                // And on success it does not return: it reboots. Nothing the test can
+                // model does that, so it reports the fact instead.
+                Err(GateError::Pin(err::WRONG_SUCCESS))
             }
             PinOp::FetchSecret => {
                 if a.state_flags & state::SUCCESSFUL == 0 {
@@ -576,7 +606,7 @@ mod the_model_enforces_what_the_bootloader_does {
     #[test]
     fn undefined_change_flags_are_a_bad_request() {
         let (m, mut a) = ready();
-        a.change_flags = !catcard_callgate::abi::change::VALID_MASK;
+        a.change_flags = !catcard_callgate::abi::change::VALID_MASK_MK4;
         assert_eq!(
             m.pin_attempt(PinOp::Change, &mut a),
             Err(GateError::Pin(err::BAD_REQUEST))
@@ -593,4 +623,54 @@ mod the_model_enforces_what_the_bootloader_does {
         assert_eq!(m.pin_attempt(PinOp::Login, &mut a), Ok(0));
         assert!(a.logged_in());
     }
+}
+
+// ---------------------------------------------------------------------------
+// gate 18 / 7 — authorising a staged firmware
+// ---------------------------------------------------------------------------
+
+/// The call must carry the region and the flag, or the bootloader rejects the request.
+///
+/// On mk4 and later this call *is* the upgrade: staging and rebooting, which is all mk3
+/// needs, leaves an L4S5 board booting what it booted before and reporting nothing.
+#[test]
+fn authorising_firmware_passes_the_region_and_the_change_flag() {
+    let g = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&g, b"12", b"3456");
+    assert!(matches!(l.step(), Step::In { .. }), "not logged in");
+
+    // The model cannot reboot, so a success arrives as WRONG_SUCCESS.
+    let r = l.authorize_firmware(&g, 0x9040_0000, 262_144);
+    assert!(r.is_err());
+    assert_eq!(
+        g.inner.borrow().authorized,
+        Some((0x9040_0000, 262_144)),
+        "the staged region did not reach the gate"
+    );
+}
+
+/// A refused image is not a refused PIN. The PIN was accepted to get this far, and
+/// reporting "wrong PIN" here would send someone to re-enter one that was right.
+#[test]
+fn an_image_the_bootloader_rejects_is_reported_as_such() {
+    let g = Model::new(b"12-3456");
+    g.inner.borrow_mut().refuse_image = true;
+    let (mut l, _) = login_with(&g, b"12", b"3456");
+    assert_eq!(
+        l.authorize_firmware(&g, 0x9040_0000, 262_144),
+        Err(Failure::ImageRefused)
+    );
+}
+
+/// Asking before logging in must fail here rather than at the gate.
+#[test]
+fn authorising_without_a_login_is_refused_before_the_call() {
+    let g = Model::new(b"12-3456");
+    let mut l = Login::new(&g);
+    assert!(l.authorize_firmware(&g, 0x9040_0000, 262_144).is_err());
+    assert_eq!(
+        g.inner.borrow().authorized,
+        None,
+        "the gate was called without a login"
+    );
 }

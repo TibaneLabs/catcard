@@ -144,14 +144,14 @@ impl UsbTask {
     /// on the next boot, after which rebooting installs the image over the running
     /// firmware. It does not itself reboot: the caller does that, so the last act is
     /// visible where the decision was made.
-    pub fn approve(&mut self) -> Result<(), Reject> {
+    pub fn approve(&mut self) -> Result<catcard_upgrade::Region, Reject> {
         let stage = core::mem::replace(&mut self.stage, Stage::Idle);
         let Stage::Offered { staged, approval } = stage else {
             return Err(Reject::Incomplete { have: 0, want: 0 });
         };
-        staged.commit(approval)?;
+        let region = staged.commit(approval)?;
         self.stage = Stage::Approved;
-        Ok(())
+        Ok(region)
     }
 
     /// The user declined. The staged image is dropped without being marked.
@@ -584,7 +584,7 @@ pub fn pending() -> Option<Approval> {
 }
 
 /// Approve the staged upgrade, publishing the bootloader's marker.
-pub fn approve() -> Result<(), Reject> {
+pub fn approve() -> Result<catcard_upgrade::Region, Reject> {
     match task() {
         Some(t) => t.approve(),
         None => Err(Reject::NotAnImage),

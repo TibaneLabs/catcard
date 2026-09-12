@@ -360,7 +360,41 @@ signature checked            checked, but OLDER
 SIGNATURE NOT CHECKED        NOT CHECKED, and OLDER
 ```
 
-### The install itself is still unconfirmed, and now we know exactly why
+### The install never happened because we never asked for it
+
+The real cause, and it was not PSRAM volatility. **mk4/mk5/Q1 do not install from staging
+on their own.** The L4S5 bootrom installs what a logged-in `gate 18/7` points it at, and
+nothing else:
+
+```text
+stage into PSRAM + recovery header
+  -> PIN login (gate 18/2)
+  -> pa.firmware_upgrade(start, len) = gate 18/7, change_flags = CHANGE_FIRMWARE
+       bootloader verifies the staged image itself, records world_check in SE slot 14,
+       then reboots. Returns -112 AUTH_FAIL if the image fails; does not return on success.
+```
+
+Source: `install-and-usb-transport.md §2b` and `gate18-pin-state-machine.md §2` method 7,
+both `[C]`. This firmware staged an image and called `logout(LogoutAndReboot)` — which is
+all mk3 needs, and on an L4S5 board means the device reboots and comes back running
+exactly what it was running, with nothing reporting a fault anywhere. Every "install
+UNPROVABLE" result above was measuring the wrong thing.
+
+Two consequences worth keeping:
+
+- **The bootloader's own verification is the one that gates an install**, not our
+  `inspect`. A `-112` is that check refusing, which is a better answer than ours and is
+  reported as such rather than as a wrong PIN — the PIN was accepted to get that far.
+- **An upgrade is PIN-authenticated.** The logged-in struct carries the bootloader's
+  HMAC, so `unlock` now hands it back instead of dropping it. Without it there is no
+  install at all.
+
+The drive test currently ends `approved but the device is still answering — no reset`,
+which is the correct new behaviour against an emulator that predates this documentation:
+we ask, it declines, and the device stays up and says "Not installed" rather than
+rebooting into the same image and calling it success.
+
+### What the emulator could not tell us either way
 
 With `--reboot` the emulator survives the reset, so the run no longer ends there — and
 the device comes back up **still running the old version**. The staged image is not

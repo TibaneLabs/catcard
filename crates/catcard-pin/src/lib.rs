@@ -88,7 +88,18 @@ pub enum Failure {
     /// A documented PIN error we have no specific handling for. Carried so the screen
     /// can show the number rather than a shrug.
     Code(i32),
+    /// The bootloader refused the staged firmware image. Only from
+    /// [`Login::authorize_firmware`], where an auth failure is about the image rather
+    /// than the PIN — the PIN was already accepted to get that far.
+    ImageRefused,
 }
+
+/// A return that cannot happen.
+///
+/// [`Login::authorize_firmware`] reboots inside the call on success, so its `Ok` arm has
+/// no value to carry and no caller to run.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Never {}
 
 /// Entering a PIN part that does not fit.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -197,6 +208,52 @@ impl Login {
             Err(e) => classify(e),
         };
         Ok(())
+    }
+
+    /// Authorise the firmware staged in PSRAM, and reboot to install it.
+    ///
+    /// **On mk4 and later this is what makes an upgrade happen.** That bootrom does not
+    /// install from staging on its own: it installs what a logged-in `gate 18/7` told it
+    /// to, and records the image's `world_check` in a secure-element slot on the way
+    /// past. Staging an image and rebooting — which is all mk3 needs — leaves an L4S5
+    /// board booting exactly what it booted before, with no error anywhere.
+    ///
+    /// Requires a successful login: the struct carries the bootloader's HMAC and the
+    /// call is refused without it. `Err` on return is the only outcome worth reporting,
+    /// because success does not return — the device reboots inside the call.
+    ///
+    /// `-112` means the bootloader's own verification rejected the staged image, which
+    /// is a different and more trustworthy answer than our `inspect`: it is the check
+    /// that actually gates the install.
+    ///
+    /// Source: gate18-pin-state-machine.md §2 method 7 [C],
+    /// install-and-usb-transport.md §2b [C]
+    pub fn authorize_firmware<G: PinGate>(
+        &mut self,
+        gate: &G,
+        start: u32,
+        len: u32,
+    ) -> Result<Never, Failure> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Err(Failure::Code(err::PIN_REQUIRED));
+        }
+        self.attempt.set_firmware_region(start, len);
+        match gate.pin_attempt(PinOp::FirmwareUpgrade, &mut self.attempt) {
+            // The call returned, so the install did not happen. The bootloader reports
+            // a rejected image as an auth failure, which would otherwise read as a wrong
+            // PIN -- it is not; the PIN was accepted and the image was not.
+            Ok(_) => Err(Failure::Code(0)),
+            Err(GateError::Pin(err::AUTH_FAIL)) => Err(Failure::ImageRefused),
+            Err(e) => {
+                let s = classify(e);
+                self.step = s;
+                Err(match s {
+                    Step::Failed(f) => f,
+                    Step::Bricked => Failure::Code(err::I_AM_BRICK),
+                    _ => Failure::Code(0),
+                })
+            }
+        }
     }
 
     /// The anti-phishing words for a prefix, without touching the login state.

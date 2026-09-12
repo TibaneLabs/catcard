@@ -89,15 +89,17 @@ const DEBUG_ITEMS: &[&str] = &[
 /// Also the idle loop: USB is polled here, and a staged upgrade takes over the screen
 /// wherever the user happens to be. Keeping one loop means there is no menu screen that
 /// quietly stops serving the host.
-pub fn run(
-    gate: &Callgate,
-    panel: &mut display::Panel,
-    matrix: &mut GpioMatrix,
-    drbg: &mut HmacDrbg,
-    report: &BootReport,
-    head: &str,
-    note: &str,
-) -> ! {
+pub fn run(session: Session<'_>) -> ! {
+    let Session {
+        gate,
+        login,
+        panel,
+        matrix,
+        drbg,
+        report,
+        head,
+        note,
+    } = session;
     let mut screen = Screen::Main;
     let mut showing_offer = false;
     let mut redraw = true;
@@ -141,11 +143,11 @@ pub fn run(
             if showing_offer {
                 match key {
                     Key::Confirm => match usbtask::approve() {
-                        Ok(()) => {
+                        Ok(region) => {
                             message(panel, "Installing", "do not disconnect", "");
-                            // SAFETY: the marker is published; the bootloader installs
-                            // on the next boot. Nothing after this runs.
-                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                            install(gate, login, panel, region);
+                            showing_offer = false;
+                            redraw = true;
                         }
                         Err(_) => {
                             message(panel, "Failed", "could not stage", "the image");
@@ -185,7 +187,7 @@ pub fn run(
 
             let next = step(gate, panel, screen, *key, v.sc.cursor);
             if next == Screen::SdInstall {
-                install_from_card(gate, panel, matrix, drbg);
+                install_from_card(gate, login, panel, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Main;
                 break;
@@ -261,6 +263,23 @@ fn step(
         // Every info screen leaves on any key.
         _ => Screen::Debug,
     }
+}
+
+/// What the menu runs on: the peripherals it drives and the state it reports.
+///
+/// A struct rather than eight positional arguments, which is one transposed pair away
+/// from driving the wrong thing.
+pub struct Session<'a> {
+    pub gate: &'a Callgate,
+    /// The logged-in PIN struct. `gate 18/7` authorises an upgrade through it, and only
+    /// a logged-in one carries the signature that call requires.
+    pub login: &'a mut catcard_pin::Login,
+    pub panel: &'a mut display::Panel,
+    pub matrix: &'a mut GpioMatrix,
+    pub drbg: &'a mut HmacDrbg,
+    pub report: &'a BootReport,
+    pub head: &'a str,
+    pub note: &'a str,
 }
 
 /// Everything a screen needs to draw itself.
@@ -653,6 +672,7 @@ fn confirm_dfu(panel: &mut display::Panel) {
 /// bootloader does the rest on the next boot.
 fn install_from_card(
     gate: &Callgate,
+    login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
@@ -680,17 +700,15 @@ fn install_from_card(
             match k {
                 Key::Confirm => {
                     match staged.commit(approval) {
-                        Ok(()) => {
+                        Ok(region) => {
                             message(panel, "Installing", "do not disconnect", "");
-                            // SAFETY: the recovery header is published; the bootloader
-                            // installs on the next boot. Nothing after this runs.
-                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                            install(gate, login, panel, region);
                         }
                         Err(_) => {
                             message(panel, "Failed", "could not stage", "any key to go back");
-                            wait_for_any_key(matrix, drbg);
                         }
                     }
+                    wait_for_any_key(matrix, drbg);
                     return;
                 }
                 Key::Cancel => return,
@@ -699,6 +717,35 @@ fn install_from_card(
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
+}
+
+/// Authorise a staged image, which is what actually installs it.
+///
+/// **Staging and rebooting is not an upgrade on mk4 or later.** That bootrom installs
+/// what a logged-in `gate 18/7` pointed it at and nothing else, so a device that stages
+/// an image and resets comes back running exactly what it was running, reporting nothing
+/// wrong — which is what this firmware did until the mechanism was documented.
+///
+/// Does not return when it works: the bootloader reboots inside the call. Everything
+/// below the call is the failure path.
+fn install(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    region: catcard_upgrade::Region,
+) {
+    let g = crate::pinentry::BootloaderGate::new(gate);
+    let why = match login.authorize_firmware(&g, region.start, region.len) {
+        Ok(never) => match never {},
+        // The bootloader ran its own verification and refused. That is a better answer
+        // than ours: it is the check that actually gates the install.
+        Err(catcard_pin::Failure::ImageRefused) => "bootloader refused it",
+        Err(catcard_pin::Failure::NeedsSetup) => "login went stale",
+        Err(catcard_pin::Failure::MustWait) => "rate limited",
+        Err(catcard_pin::Failure::Gate(_)) => "callgate unreachable",
+        Err(catcard_pin::Failure::Code(_)) => "refused",
+    };
+    message(panel, "Not installed", why, "any key to go back");
 }
 
 /// Block until something is pressed. Used only by screens that have already said so.

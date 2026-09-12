@@ -56,7 +56,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 
     selftest::show(&mut report, &mut panel, &mut matrix, &mut drbg);
 
-    let unlocked = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg);
+    let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg);
 
     // The PIN is in. Upgrades are allowed from here; a blank device reaches this too,
     // which is what keeps a unit with no PIN set recoverable.
@@ -69,15 +69,16 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet"),
         pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet"),
     };
-    menu::run(
-        &gate,
-        &mut panel,
-        &mut matrix,
-        &mut drbg,
-        &report,
+    menu::run(menu::Session {
+        gate: &gate,
+        login: &mut login,
+        panel: &mut panel,
+        matrix: &mut matrix,
+        drbg: &mut drbg,
+        report: &report,
         head,
         note,
-    )
+    })
 }
 
 /// Ask about a staged firmware image.

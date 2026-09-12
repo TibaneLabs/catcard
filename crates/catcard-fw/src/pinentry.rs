@@ -56,6 +56,13 @@ const SCAN_CYCLES: u32 = 66_000;
 ///
 /// Exists so [`Login`] can be driven by a model on the host and by the callgate here,
 /// with the same sequencing code in both.
+impl<'a> BootloaderGate<'a> {
+    /// Wrap a callgate so `catcard_pin` can drive it.
+    pub fn new(gate: &'a Callgate) -> Self {
+        Self { gate }
+    }
+}
+
 pub struct BootloaderGate<'a> {
     gate: &'a Callgate,
 }
@@ -337,7 +344,7 @@ pub fn unlock(
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
-) -> Unlocked {
+) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
@@ -394,6 +401,9 @@ pub fn unlock(
                     let mut n = [0u8; 3];
                     let (what, detail) = match f {
                         Failure::NeedsSetup => ("hmac / stale struct", ""),
+                        // Only from an upgrade authorisation, which does not run from
+                        // this screen -- listed so adding one cannot be forgotten.
+                        Failure::ImageRefused => ("image refused", ""),
                         Failure::MustWait => ("rate limited", ""),
                         Failure::Gate(_) => ("callgate", "unreachable"),
                         Failure::Code(c) => ("gate said -1", num(&mut n, c.unsigned_abs() % 100)),
@@ -416,7 +426,11 @@ pub fn unlock(
         }
 
         if let Step::In { zero_secret } = login.step() {
-            return Unlocked::In { zero_secret };
+            // The login travels back out with the result. On mk4 and later an upgrade is
+            // authorised through this same struct, and only a logged-in one carries the
+            // bootloader's signature that `gate 18/7` demands -- so throwing it away
+            // here would mean no install could ever happen.
+            return (Unlocked::In { zero_secret }, login);
         }
 
         let _ = crate::usbtask::pump();

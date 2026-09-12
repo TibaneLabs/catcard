@@ -134,6 +134,19 @@ pub enum PinOp {
     GreenLight = 5,
     /// Read or write the 416-byte long secret, 32 bytes at a time.
     LongSecret = 6,
+    /// **mk4+**: authorise the image staged in PSRAM and reboot to install it.
+    ///
+    /// The L4S5 bootrom does not install from staging on its own — it is this call that
+    /// makes an upgrade happen, and it is PIN-authenticated. Needs a logged-in struct,
+    /// `change_flags = `[`change::FIRMWARE`], and the region in
+    /// [`PinAttempt::set_firmware_region`](crate::pin::PinAttempt::set_firmware_region).
+    ///
+    /// Does **not** return on success. `-112` means the staged image failed the
+    /// bootloader's own verification.
+    ///
+    /// Source: gate18-pin-state-machine.md §2 method 7 [C],
+    /// install-and-usb-transport.md §2b [C]
+    FirmwareUpgrade = 7,
 }
 
 /// The largest `buf_io` the bootloader will accept.
@@ -195,11 +208,19 @@ pub mod change {
     pub const DURESS_SECRET: i32 = 0x010;
     /// Obsolete: secondary wallets existed only on the mk2's ATECC508.
     pub const SECONDARY_WALLET_PIN: i32 = 0x020;
+    /// **mk4+**: with [`PinOp::FirmwareUpgrade`](super::PinOp::FirmwareUpgrade), authorise
+    /// the staged image. Absent from the mk3 bootloader's mask, which is why that board
+    /// installs from SPI-NOR without being asked.
+    pub const FIRMWARE: i32 = 0x040;
     /// Long-secret block index, shifted left by 8.
     pub const LS_OFFSET_MASK: i32 = 0xf00;
     pub const LS_OFFSET_SHIFT: u32 = 8;
-    /// Every bit the bootloader accepts.
+    /// Every bit the mk3 bootloader accepts.
     pub const VALID_MASK: i32 = 0xf3f;
+    /// Every bit the mk4+ bootloader accepts: the mk3 mask plus [`FIRMWARE`].
+    ///
+    /// Source: gate18-pin-state-machine.md §4 [C] — `CHANGE__MASK` is `0xf7f` on mk4.
+    pub const VALID_MASK_MK4: i32 = 0xf7f;
 
     /// Encode a long-secret block index into `change_flags`.
     pub const fn ls_offset(block: u32) -> i32 {
