@@ -295,7 +295,24 @@ fn cmd_sign(bin: &Path, key: Option<PathBuf>, pubkey_num: u32, out: Option<PathB
 }
 
 fn cmd_verify(bin: &Path, board: Option<&str>) -> Result<()> {
-    let img = std::fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
+    let raw = std::fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
+    // Accept the container as well as the raw image. The `.dfu` is the file that
+    // actually gets flashed, so refusing it here meant the one artefact worth checking
+    // before touching a device was the one that could not be checked -- it failed on
+    // the DfuSe prefix with "bad header magic", which reads like a corrupt image rather
+    // than the wrong file type.
+    let img = if raw.len() > 5 && &raw[0..5] == b"DfuSe" {
+        println!("container     DfuSe (unwrapped to verify the image inside)");
+        let p = dfuse::unpack(&raw)?;
+        let (_, data) = p
+            .elements
+            .into_iter()
+            .next()
+            .context("DfuSe file has no elements")?;
+        data
+    } else {
+        raw
+    };
     let r = image::verify(&img)?;
     print_header(&r.header);
     println!("digest        {}", hex::encode(r.digest));
