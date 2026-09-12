@@ -365,6 +365,29 @@ work on real hardware, whatever USB does.
 
 ---
 
+## One image for mk4 and mk5 needs runtime board detection
+
+Coinkite ship a **single build for mk4 and mk5**, which is possible because `hw_compat`
+is a bitmask: one image declares both bits and either bootloader accepts it.
+`catcard-image build --hw-compat mk4,mk5` produces that, and it verifies as installable
+on both.
+
+What we cannot yet do is have that image *know which board it is on*. `BOARD` is a
+compile-time constant, so a combined image reports whichever board it was built for —
+an mk5 running it would call itself mk4 on the selftest screen, in `Identify`, and in
+any log taken from it.
+
+The hardware answers the question directly: `STRAP_MK5` is `PE0`, open on mk1-4 and
+pulled **low** on mk5, which is how the stock firmware derives `mk_num`
+(`generations-mk2-q-mk5.md` [C]). Reading that pin at boot and choosing between two
+otherwise identical specs would give one image with a correct identity.
+
+**Not done, and not urgent**: two builds are correct today, and a board that misreports
+itself is worse than two files. It matters when images are published rather than built
+per device.
+
+---
+
 ## SE1 single-wire UART pin; SE2 I²C addresses
 
 Not needed while all secret operations go through the callgate, which is the design.

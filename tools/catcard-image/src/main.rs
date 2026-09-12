@@ -68,7 +68,11 @@ enum Cmd {
         /// accepted by the bootloader from then on. Do not use for dev builds.
         #[arg(long)]
         high_water: bool,
-        /// Override `hw_compat`. `any` accepts every board.
+        /// Override `hw_compat`: `any`, a number, or a comma-separated list of board
+        /// names such as `mk4,mk5`.
+        ///
+        /// It is a bitmask, and one image may legitimately claim several boards —
+        /// Coinkite ship a single build for mk4 and mk5, which are the same hardware.
         #[arg(long)]
         hw_compat: Option<String>,
     },
@@ -212,13 +216,7 @@ fn cmd_build(
     let hw_compat_override = match hw_compat.as_deref() {
         None => None,
         Some("any") => Some(catcard_fwhdr::hw_compat::ANY),
-        Some(s) => Some(
-            u32::from_str_radix(
-                s.trim_start_matches("0x"),
-                if s.starts_with("0x") { 16 } else { 10 },
-            )
-            .with_context(|| format!("bad --hw-compat value {s:?}"))?,
-        ),
+        Some(s) => Some(parse_hw_compat(s)?),
     };
 
     let ts = match timestamp {
@@ -297,6 +295,34 @@ fn cmd_sign(bin: &Path, key: Option<PathBuf>, pubkey_num: u32, out: Option<PathB
     println!("digest {}", hex::encode(digest));
     println!("wrote  {}", dest.display());
     Ok(())
+}
+
+/// `mk4,mk5`, `0x28` or `40` — a bitmask of the boards an image may install on.
+///
+/// Names rather than only numbers because the bitmask is the one field where a typo is
+/// silent: `0x20` instead of `0x28` still builds, still signs, and is simply refused by
+/// half the devices it was meant for.
+fn parse_hw_compat(spec: &str) -> Result<u32> {
+    let mut bits = 0u32;
+    for token in spec.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(b) = catcard_board::spec::ALL.iter().find(|b| b.name == token) {
+            bits |= b.hw_compat_bit;
+            continue;
+        }
+        let n = if let Some(hex) = token.strip_prefix("0x") {
+            u32::from_str_radix(hex, 16)
+        } else {
+            token.parse()
+        };
+        bits |= n.with_context(|| {
+            let known: Vec<&str> = catcard_board::spec::ALL.iter().map(|b| b.name).collect();
+            format!("bad --hw-compat value {token:?}; expected a number or one of {known:?}")
+        })?;
+    }
+    if bits == 0 {
+        bail!("--hw-compat resolved to no boards at all, so nothing could install it");
+    }
+    Ok(bits)
 }
 
 /// Warn about a version the stock firmware's uploader will not stage.

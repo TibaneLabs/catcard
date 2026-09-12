@@ -65,6 +65,7 @@ enum Screen {
     Usb,
     Clocks,
     Psram,
+    PsramProbe,
     Boot,
     Keypad,
     ConfirmDfu,
@@ -229,6 +230,13 @@ fn step(
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
+        // The probe is reached by pressing the tick on the PSRAM screen, never by
+        // arriving there. An unmapped read faults and a fault needs a power cycle, so
+        // the risk is worth taking deliberately and not by navigation.
+        Screen::Psram => match key {
+            Key::Confirm => Screen::PsramProbe,
+            _ => Screen::Debug,
+        },
         Screen::ConfirmDfu => match key {
             Key::Confirm => {
                 message(panel, "Entering DFU", "refused if locked", "");
@@ -286,6 +294,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
+        Screen::PsramProbe => psram_probe(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
         Screen::ConfirmDfu => confirm_dfu(panel),
@@ -455,16 +464,18 @@ fn psram_screen(panel: &mut display::Panel) {
             let _ = write!(l, "base {:04x}_0000", p.base >> 16);
             let _ = lines.push(l);
 
-            // Deliberately not probed. The region is only readable once OCTOSPI has
-            // been configured to memory-map it, and this firmware never does -- so a
-            // read here would fault rather than report, and a fault needs a power
-            // cycle to clear. Naming the gap is more use than crashing to prove it.
             let mut l = Line::new();
-            let _ = write!(l, "OCTOSPI not configured");
+            let _ = write!(l, "we never configure OCTOSPI");
+            let _ = lines.push(l);
+
+            // Whether that matters is the open question: the bootloader maps PSRAM to
+            // read a staged image, and may leave it mapped.
+            let mut l = Line::new();
+            let _ = write!(l, "press ok to write+read back");
             let _ = lines.push(l);
 
             let mut l = Line::new();
-            let _ = write!(l, "staging will not work");
+            let _ = write!(l, "(hangs if not mapped)");
             let _ = lines.push(l);
 
             // SAFETY: reads only.
@@ -474,6 +485,55 @@ fn psram_screen(panel: &mut display::Panel) {
         }
     }
     info(panel, "PSRAM", &lines);
+}
+
+/// Write a word to PSRAM and read it back.
+///
+/// **The question this answers is whether an upgrade can work at all.** The bootloader
+/// installs from PSRAM, so it configures OCTOSPI to read one at boot; if it leaves that
+/// mapping in place for the firmware, staging works with no driver of ours. If it does
+/// not, every upgrade this device accepts writes into nothing.
+///
+/// A read of an unmapped region faults rather than returning a value, and the fault
+/// needs a power cycle — so **the device hanging on this screen is itself the answer**,
+/// and says the mapping is not inherited.
+///
+/// Writes into the staging area, which holds nothing unless an upgrade is in flight.
+fn psram_probe(panel: &mut display::Panel) {
+    let Some(p) = catcard_board::BOARD.psram else {
+        message(panel, "PSRAM", "none on this board", "");
+        return;
+    };
+    // Scratch at the base of the staging half, clear of the recovery header.
+    let at = (p.base + p.len / 2) as *mut u32;
+    const PATTERN: u32 = 0xCA7C_A2D0;
+
+    message(panel, "Probing PSRAM", "hangs if unmapped", "");
+    // SAFETY: `at` is inside the region `BoardSpec` describes as memory-mapped PSRAM,
+    // aligned, and in the staging half, which nothing else is using while the menu is
+    // up. If the region is not actually mapped this faults -- which is the result being
+    // measured, and is why the screen above is drawn first.
+    let (wrote, read) = unsafe {
+        core::ptr::write_volatile(at, PATTERN);
+        let back = core::ptr::read_volatile(at);
+        (PATTERN, back)
+    };
+
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+    let _ = lines.push(reg_line("wrote  ", wrote));
+    let _ = lines.push(reg_line("read   ", read));
+    let mut l = Line::new();
+    let _ = write!(
+        l,
+        "{}",
+        if read == wrote {
+            "MAPPED: staging works"
+        } else {
+            "NOT MAPPED: upgrades fail"
+        }
+    );
+    let _ = lines.push(l);
+    info(panel, "PSRAM probe", &lines);
 }
 
 /// What bring-up found, in the same words the selftest screen used.
