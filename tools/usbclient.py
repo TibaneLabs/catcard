@@ -354,6 +354,7 @@ def find_hidraw(vid=VID, pid=PID):
 
 
 READ_LOG = 0x0012
+DEBUG_PEEK, DEBUG_POKE, DEBUG_JSR = 0x0030, 0x0031, 0x0032
 
 
 def fetch_log(s):
@@ -392,6 +393,43 @@ def print_log(s):
         print(f"log       {total} bytes")
     for line in text.decode(errors="replace").splitlines():
         print(f"  | {line}")
+
+
+def peek(s, addr, count, width=4):
+    """Read `count` words of `width` bytes from `addr`; returns bytes."""
+    st, body = request(s, DEBUG_PEEK, struct.pack("<IBB", addr, width, count))
+    if st != 0:
+        raise RuntimeError(f"peek {addr:#x}: {STATUS.get(st, st)}")
+    return body
+
+
+def poke(s, addr, data, width=4):
+    """Write `data` (bytes) to `addr` in `width`-byte units.
+
+    Paged one frame per request: the device reassembles a multi-frame message only for a
+    firmware upgrade (it streams that to staging), so an ordinary poke has to fit one
+    frame -- 56 bytes minus the 5-byte addr+width header. Longer writes go as several
+    requests with the address advancing, which is transparent to the caller.
+    """
+    data = bytes(data)
+    if len(data) % width:
+        raise ValueError(f"poke length {len(data)} is not a multiple of width {width}")
+    per = ((56 - 5) // width) * width  # whole elements that fit one frame
+    at = 0
+    while at < len(data):
+        chunk = data[at : at + per]
+        st, _ = request(s, DEBUG_POKE, struct.pack("<IB", addr + at, width) + chunk)
+        if st != 0:
+            raise RuntimeError(f"poke {addr + at:#x}: {STATUS.get(st, st)}")
+        at += len(chunk)
+
+
+def jsr(s, addr, arg=0):
+    """Call `addr` as fn(u32)->u32; returns the u32 result."""
+    st, body = request(s, DEBUG_JSR, struct.pack("<II", addr, arg))
+    if st != 0:
+        raise RuntimeError(f"jsr {addr:#x}: {STATUS.get(st, st)}")
+    return struct.unpack("<I", body[:4])[0]
 
 
 def connect(path, timeout=300.0):
@@ -458,6 +496,51 @@ def main(path, image=None):
     else:
         print(f"identify  status={STATUS.get(st, st)}")
         ok = False
+
+    def arg_after(flag):
+        i = sys.argv.index(flag)
+        return sys.argv[i + 1 :]
+
+    if "--peek" in sys.argv:
+        a = arg_after("--peek")
+        addr = int(a[0], 0)
+        n = int(a[1], 0) if len(a) > 1 else 16
+        width = int(a[2], 0) if len(a) > 2 else 4
+        data = b""
+        # Page across requests. Each request now returns a multi-frame reply, so the page
+        # is a few hundred bytes rather than one frame -- `count` is a u8 and the device
+        # reply buffer is 512, so up to 128 words or 255 bytes go per request.
+        target = n * width
+        while len(data) < target:
+            remaining = (target - len(data)) // width
+            want = min(remaining, 512 // width, 255)
+            if want == 0:
+                break
+            got = peek(s, addr + len(data), want, width)
+            if not got:
+                break
+            data += got
+        for off in range(0, len(data), 16):
+            row = data[off : off + 16]
+            hexs = " ".join(f"{b:02x}" for b in row)
+            print(f"{addr + off:08x}  {hexs}")
+        return 0
+
+    if "--poke" in sys.argv:
+        a = arg_after("--poke")
+        addr = int(a[0], 0)
+        data = bytes.fromhex(a[1].replace("_", ""))
+        width = int(a[2], 0) if len(a) > 2 else 1
+        poke(s, addr, data, width)
+        print(f"poke      {len(data)} bytes to {addr:#010x}")
+        return 0
+
+    if "--jsr" in sys.argv:
+        a = arg_after("--jsr")
+        addr = int(a[0], 0)
+        arg = int(a[1], 0) if len(a) > 1 else 0
+        print(f"jsr       {addr:#010x}(arg={arg:#x}) -> {jsr(s, addr, arg):#010x}")
+        return 0
 
     if "--log" in sys.argv:
         # The whole point of the log: a device whose screen cannot be read can still say

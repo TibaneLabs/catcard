@@ -140,11 +140,17 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
     // press: a device that has stopped taking input must not show a prompt for it.
     if waiting {
         use catcard_ui::icons;
-        let label = match (crate::usbtask::KEY_INJECTION, cfg!(feature = "show-pin")) {
-            (true, true) => "continue  [USB KEYS][PIN]",
-            (true, false) => "continue  [USB KEYS]",
-            (false, true) => "continue  [PIN SHOWN]",
-            (false, false) => "continue",
+        // Every bring-up hazard the build carries, said on the screen that is always
+        // looked at first. `[MEM]` is the loudest: it means a host can read this RAM.
+        let label = if cfg!(feature = "usb-debug-mem") {
+            "continue  [MEM: UNSAFE]"
+        } else {
+            match (crate::usbtask::KEY_INJECTION, cfg!(feature = "show-pin")) {
+                (true, true) => "continue  [USB KEYS][PIN]",
+                (true, false) => "continue  [USB KEYS]",
+                (false, true) => "continue  [PIN SHOWN]",
+                (false, false) => "continue",
+            }
         };
         icons::draw_hint(&mut fb, &icons::CHECK, body, 0, 52, label);
     }

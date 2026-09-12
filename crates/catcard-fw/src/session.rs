@@ -33,6 +33,8 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         "boot: panel {}",
         if panel.is_some() { "up" } else { "ABSENT" }
     );
+    #[cfg(feature = "usb-debug-mem")]
+    crate::catlog!("boot: WARNING debug memory monitor is enabled (peek/poke/jsr)");
 
     // SAFETY: bring-up is complete and nothing else has claimed the keypad pins.
     let matrix = unsafe { keypad::GpioMatrix::init() };

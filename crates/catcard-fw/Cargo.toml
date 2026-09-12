@@ -25,6 +25,13 @@ usb-key-injection = []
 # they are different risks -- one lets a host press keys, this one puts a secret on a
 # screen someone may be pointing a camera at. See docs/FLASHING.md.
 show-pin = []
+# `usb-debug-mem` exposes peek / poke / jsr over USB: a host can read any address, write
+# any address, and call any address. It is a raw memory monitor -- the most dangerous
+# thing in this firmware. On a provisioned device it reads the seed and PIN out of RAM
+# and runs arbitrary code; it exists for bring-up on a device with no secret, and it must
+# never ship. Its own feature so it is impossible to enable by accident, and the
+# `fw-*-bringup` aliases leave it OFF -- turn it on only with `fw-*-debug`. See docs/USB.md.
+usb-debug-mem = []
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]

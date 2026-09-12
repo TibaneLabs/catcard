@@ -87,6 +87,15 @@ pub enum Opcode {
     /// It is behind the `usb-key-injection` feature, reported by [`Opcode::Identify`],
     /// and shown on the device's own screen. See `docs/USB.md`.
     InjectKey = 0x0020,
+    /// Read raw memory. Payload `[u32 addr][u8 width][u8 count]`; reply is the bytes.
+    /// **Bring-up only** (`usb-debug-mem`): reads anything, including secrets.
+    DebugPeek = 0x0030,
+    /// Write raw memory. Payload `[u32 addr][u8 width][bytes...]`.
+    /// **Bring-up only**: writes anywhere, including live code.
+    DebugPoke = 0x0031,
+    /// Call an address as `fn(u32) -> u32`, interrupts masked. Payload `[u32 addr][u32
+    /// arg]`; reply `[u32 ret]`. **Bring-up only**: runs whatever the host sends.
+    DebugJsr = 0x0032,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -120,6 +129,9 @@ impl Opcode {
             0x0011 => Opcode::UpgradeCommit,
             0x0012 => Opcode::ReadLog,
             0x0020 => Opcode::InjectKey,
+            0x0030 => Opcode::DebugPeek,
+            0x0031 => Opcode::DebugPoke,
+            0x0032 => Opcode::DebugJsr,
             _ => return None,
         })
     }
@@ -159,6 +171,10 @@ pub mod caps {
     /// because a device that cannot be upgraded is exactly the one worth being able to
     /// reach.
     pub const UPGRADE: u8 = 1 << 1;
+    /// This build exposes the raw memory monitor (`DebugPeek`/`Poke`/`Jsr`). It should
+    /// never be set on anything but a bench device -- a host seeing this bit is talking
+    /// to a build that will read its own RAM out to anyone.
+    pub const DEBUG_MEM: u8 = 1 << 2;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.
@@ -341,6 +357,28 @@ impl<'a> Writer<'a> {
             seq: 0,
             started: false,
         }
+    }
+
+    /// Resume a response partway through, from state saved between frames.
+    ///
+    /// A device that holds its reply in a buffer rather than a live `Writer` (because the
+    /// borrow would be self-referential) reconstructs the writer each frame from the
+    /// `(sent, seq, started)` it saved. Passing them back is how a multi-frame reply
+    /// keeps going instead of restarting at frame zero every call -- which it silently
+    /// did, capping every reply at one frame.
+    pub fn resume(status: Status, payload: &'a [u8], sent: usize, seq: u8, started: bool) -> Self {
+        Self {
+            status: status as u16,
+            payload,
+            sent,
+            seq,
+            started,
+        }
+    }
+
+    /// The framing state to save between frames: `(sent, seq, started)`.
+    pub fn state(&self) -> (usize, u8, bool) {
+        (self.sent, self.seq, self.started)
     }
 
     /// Fill `out` with the next report. Returns false when the message is finished.

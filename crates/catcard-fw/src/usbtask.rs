@@ -28,6 +28,8 @@ use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Reject, Staged};
 use catcard_usb::{FrameError, Opcode, Reassembler, Status, Writer, PROTOCOL_VERSION, REPORT_LEN};
 
+#[cfg(feature = "usb-debug-mem")]
+use crate::debug_mem;
 use crate::VERSION;
 
 /// What the task is in the middle of.
@@ -74,12 +76,24 @@ pub struct UsbTask {
 }
 
 /// A response being sent out, frame by frame.
+/// A reply in flight, possibly spanning several frames.
+///
+/// The body is held rather than a live `Writer`, because a writer borrows the payload and
+/// would make this self-referential. The framing state travels alongside it so each
+/// `next_reply_frame` resumes where the last left off. Sized for a bulk peek: a debug
+/// read that could only return one frame would not be worth having.
 struct ReplyState {
     status: Status,
-    body: [u8; 64],
+    body: [u8; REPLY_MAX],
     len: usize,
-    sent: bool,
+    /// Framing progress: bytes sent, next sequence number, whether the START frame went.
+    sent: usize,
+    seq: u8,
+    started: bool,
 }
+
+/// Largest reply body. Enough for a useful peek without making the task struct heavy.
+const REPLY_MAX: usize = 512;
 
 impl UsbTask {
     /// Bring USB up.
@@ -317,6 +331,61 @@ impl UsbTask {
                 let n = crate::logbuf::read(offset, &mut body[5..end]);
                 self.begin_reply(Status::Ok, &body[..5 + n]);
             }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugPeek) => {
+                let p = progress.payload;
+                if p.len() < 6 {
+                    self.begin_reply(Status::BadRequest, &[]);
+                } else {
+                    let addr = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                    let (width, count) = (p[4], p[5]);
+                    let mut body = [0u8; REPLY_MAX];
+                    match debug_mem::peek(addr, width, count, &mut body) {
+                        Some(n) => {
+                            crate::catlog!("peek {:#010x} w{} x{}", addr, width, count);
+                            self.begin_reply(Status::Ok, &body[..n]);
+                        }
+                        None => self.begin_reply(Status::BadRequest, &[]),
+                    }
+                }
+            }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugPoke) => {
+                let p = progress.payload;
+                if p.len() < 5 {
+                    self.begin_reply(Status::BadRequest, &[]);
+                } else {
+                    let addr = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                    let width = p[4];
+                    match debug_mem::poke(addr, width, &p[5..]) {
+                        true => {
+                            crate::catlog!("poke {:#010x} w{} +{}", addr, width, p.len() - 5);
+                            self.begin_reply(Status::Ok, &[]);
+                        }
+                        false => self.begin_reply(Status::BadRequest, &[]),
+                    }
+                }
+            }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugJsr) => {
+                let p = progress.payload;
+                if p.len() < 8 {
+                    self.begin_reply(Status::BadRequest, &[]);
+                } else {
+                    let addr = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                    let arg = u32::from_le_bytes([p[4], p[5], p[6], p[7]]);
+                    // Logged BEFORE the call: if it does not return, this is the last
+                    // thing in the log, which is exactly what says what was run.
+                    crate::catlog!("jsr {:#010x} arg {:#010x}", addr, arg);
+                    let ret = debug_mem::jsr(addr, arg);
+                    crate::catlog!("jsr returned {:#010x}", ret);
+                    self.begin_reply(Status::Ok, &ret.to_le_bytes());
+                }
+            }
+            #[cfg(not(feature = "usb-debug-mem"))]
+            Some(Opcode::DebugPeek | Opcode::DebugPoke | Opcode::DebugJsr) => {
+                self.begin_reply(Status::UnknownOpcode, &[]);
+            }
             Some(Opcode::Ping) => {
                 let n = progress.payload.len().min(64);
                 let mut body = [0u8; 64];
@@ -402,6 +471,10 @@ impl UsbTask {
             catcard_usb::caps::UPGRADE
         } else {
             0
+        } | if cfg!(feature = "usb-debug-mem") {
+            catcard_usb::caps::DEBUG_MEM
+        } else {
+            0
         };
         at += 1;
         for s in [crate::running_board(), VERSION] {
@@ -422,19 +495,19 @@ impl UsbTask {
 
     fn begin_reply(&mut self, status: Status, body: &[u8]) {
         self.last_status = status as u16;
-        let mut buf = [0u8; 64];
-        // Clamped to what a single frame carries, not to the report size. The reply
-        // writer emits one frame and marks the reply sent, so a longer body loses its
-        // tail while the frame header still declares the full length -- and a host that
-        // believes the header waits for a continuation that is never coming. That is
-        // indistinguishable from a device that died, which is how it was found.
-        let n = body.len().min(catcard_usb::START_PAYLOAD);
+        let mut buf = [0u8; REPLY_MAX];
+        // A reply may span several frames now, so a body is clamped only to the buffer,
+        // not to one frame. (It used to be clamped to one frame because the reply writer
+        // was rebuilt each frame and never advanced -- fixed by carrying its state.)
+        let n = body.len().min(REPLY_MAX);
         buf[..n].copy_from_slice(&body[..n]);
         self.reply = Some(ReplyState {
             status,
             body: buf,
             len: n,
-            sent: false,
+            sent: 0,
+            seq: 0,
+            started: false,
         });
         self.next_reply_frame();
     }
@@ -442,16 +515,16 @@ impl UsbTask {
     /// Move the next frame of the current reply into the outbox.
     fn next_reply_frame(&mut self) {
         let Some(r) = &mut self.reply else { return };
-        if r.sent {
-            self.reply = None;
-            return;
-        }
-        let mut w = Writer::response(r.status, &r.body[..r.len]);
-        // One frame, because `begin_reply` clamps a body to what one carries. The loop
-        // shape is kept so a multi-frame reply later cannot silently lose its tail.
+        // Resume from the saved framing state rather than rebuilding at frame zero, which
+        // is what capped every reply at one frame. The writer borrows the body only for
+        // this call, so nothing is self-referential.
+        let mut w = Writer::resume(r.status, &r.body[..r.len], r.sent, r.seq, r.started);
         if w.next(&mut self.outbox) {
             self.outbox_len = REPORT_LEN;
-            r.sent = true;
+            let (sent, seq, started) = w.state();
+            r.sent = sent;
+            r.seq = seq;
+            r.started = started;
         } else {
             self.reply = None;
         }

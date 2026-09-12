@@ -225,6 +225,39 @@ fn the_writer_and_the_reassembler_agree() {
     }
 }
 
+/// A writer rebuilt from saved state each frame -- which is how the firmware drives it,
+/// because holding a live `Writer` would borrow the reply buffer -- must produce exactly
+/// the same frames as one held across the whole reply. The firmware got this wrong by
+/// rebuilding at frame zero, which capped every reply at one frame.
+#[test]
+fn a_resumed_writer_matches_a_held_one() {
+    for len in [0usize, 1, START_PAYLOAD, START_PAYLOAD + 1, 512, 5000] {
+        let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+        let mut held = Writer::response(Status::Ok, &payload);
+        let mut a = [0u8; REPORT_LEN];
+        let mut held_frames = Vec::new();
+        while held.next(&mut a) {
+            held_frames.push(a);
+        }
+
+        // Rebuilt each frame from (sent, seq, started), as the device does.
+        let (mut sent, mut seq, mut started) = (0usize, 0u8, false);
+        let mut resumed_frames = Vec::new();
+        loop {
+            let mut w = Writer::resume(Status::Ok, &payload, sent, seq, started);
+            let mut b = [0u8; REPORT_LEN];
+            if !w.next(&mut b) {
+                break;
+            }
+            resumed_frames.push(b);
+            (sent, seq, started) = w.state();
+        }
+
+        assert_eq!(held_frames, resumed_frames, "len {len}");
+    }
+}
+
 #[test]
 fn the_writer_zeroes_the_tail_of_every_report() {
     // A report is 64 bytes on the wire whatever the payload. Leaving the tail as it was

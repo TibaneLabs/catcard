@@ -27,6 +27,8 @@ mod display;
 mod keypad;
 #[macro_use]
 mod logbuf;
+#[cfg(feature = "usb-debug-mem")]
+mod debug_mem;
 mod menu;
 mod panic;
 mod pinentry;

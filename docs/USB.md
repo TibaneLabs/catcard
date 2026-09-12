@@ -180,11 +180,47 @@ host that has not proved it knows the PIN, and it outlives a logout. The rule fo
 is that it must be safe to read aloud to a stranger holding the device: no PIN digits, no
 seed, no anti-phishing words.
 
-**A reply must fit one frame.** `begin_reply` clamps a body to `START_PAYLOAD` (56 bytes,
-the report minus its header) rather than to the 64-byte report. A longer body loses its
-tail in the writer while the frame header still declares the full length, and a host that
-believes the header waits for a continuation that never comes — which looks exactly like
-a device that stopped answering. That is how this was found.
+**Replies span frames, but only if the writer is resumed.** The reply writer is stateful,
+yet `next_reply_frame` used to rebuild it at frame zero every call — so it re-sent the
+first frame and, guarded by a `sent` flag, then stopped, capping every reply at one
+frame. A longer body's tail vanished while the frame header still declared the full
+length, and a host that believed the header waited for a continuation that never came,
+which looks exactly like a device that died. The writer now carries `(sent, seq,
+started)` between frames (`Writer::resume`), so a reply of any length goes out correctly —
+which is what makes a 512-byte peek possible.
+
+### The memory monitor: peek / poke / jsr (`usb-debug-mem`, bench only)
+
+Three opcodes turn USB into a raw monitor: `DebugPeek` (`0x0030`) reads any address,
+`DebugPoke` (`0x0031`) writes any address, `DebugJsr` (`0x0032`) calls any address as
+`fn(u32) -> u32` with interrupts masked and returns its result. The names are the
+ZX-Spectrum ones — peek, poke, and `RANDOMIZE USR`.
+
+```sh
+tools/usbclient.py hid --peek 0x08020000 64        # 64 words from the vector table
+tools/usbclient.py hid --poke 0x20002000 deadbeef  # write bytes (hex)
+tools/usbclient.py hid --jsr  0x20001000 0         # call it, print the return value
+```
+
+**This is the most dangerous thing in the firmware and it must never ship.** There is no
+access control and there cannot be: a monitor that refused to read an address would not
+be a monitor. On a provisioned device it reads the seed and the PIN out of RAM and runs
+whatever a host sends. It exists for bring-up on a device with no secret.
+
+So it is walled off:
+
+- Its own feature, `usb-debug-mem`, which the `fw-*-bringup` aliases leave **off**. Only
+  `fw-*-debug` turns it on.
+- Announced, not hidden: `Identify` sets `caps::DEBUG_MEM`, the selftest screen shows
+  `[MEM: UNSAFE]` instead of the usual markers, and the boot log carries a warning line.
+  A build that can do this says so everywhere it can.
+- Every access is logged (`peek`/`poke`/`jsr` lines), and a `jsr` is logged *before* the
+  call, so if the call never returns the log still records what ran.
+
+Peek reads span several frames — a request returns up to 512 bytes — so a range comes
+back in one round trip rather than one byte at a time. Poke is paged one frame per
+request by the client, because the device reassembles a multi-frame message only for a
+firmware upgrade.
 
 ### Talking to a real device
 

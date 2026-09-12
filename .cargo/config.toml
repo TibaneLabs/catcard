@@ -29,9 +29,13 @@ fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-de
 # the keypad over USB. For the first run on hardware whose key map is unconfirmed, and
 # for the emulator's `--drive` test. Never ship one of these -- see docs/USB.md.
 fw-mk3-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3,usb-key-injection,show-pin"
+fw-mk3-debug = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3,usb-key-injection,show-pin,usb-debug-mem"
 fw-mk4-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4,usb-key-injection,show-pin"
+fw-mk4-debug = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4,usb-key-injection,show-pin,usb-debug-mem"
 fw-mk5-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5,usb-key-injection,show-pin"
+fw-mk5-debug = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5,usb-key-injection,show-pin,usb-debug-mem"
 fw-q1-bringup  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,usb-key-injection,show-pin"
+fw-q1-debug  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,usb-key-injection,show-pin,usb-debug-mem"
 
 # Host-side: unit tests for the portable crates and the image tool.
 t        = "test --workspace --exclude catcard-fw"
