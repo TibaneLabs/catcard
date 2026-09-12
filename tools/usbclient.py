@@ -432,11 +432,70 @@ def jsr(s, addr, arg=0):
     return struct.unpack("<I", body[:4])[0]
 
 
+class LibUsbPort:
+    """A real device over libusb, driving its interrupt endpoints directly.
+
+    Same protocol as the hidraw path -- 64-byte frames on EP 0x81 IN / 0x01 OUT -- but
+    through usbfs instead of the kernel HID driver, which it detaches first. Needed when
+    the hidraw node is root-only but usbfs is reachable (the `usb` group), and it is the
+    one wire difference worth noting: **no leading report-ID byte.** hidraw prepends a 0
+    the kernel strips; here the 64-byte report goes on the wire as-is.
+    """
+
+    EP_IN, EP_OUT, INTF = 0x81, 0x01, 0
+
+    def __init__(self, vid=VID, pid=PID):
+        import usb.core
+
+        self.dev = usb.core.find(idVendor=vid, idProduct=pid)
+        if self.dev is None:
+            raise TimeoutError(f"no USB device {vid:04x}:{pid:04x}")
+        # Take the interface from the kernel HID driver so we can drive it.
+        if self.dev.is_kernel_driver_active(self.INTF):
+            self.dev.detach_kernel_driver(self.INTF)
+        self.dev.set_configuration()
+        usb.util.claim_interface(self.dev, self.INTF)
+        self._timeout_ms = 900_000
+        self._buf = b""
+
+    def settimeout(self, t):
+        self._timeout_ms = int(t * 1000)
+
+    def gettimeout(self):
+        return self._timeout_ms / 1000
+
+    def sendall(self, data):
+        # No report-ID byte here, unlike hidraw: the frame is already a whole report.
+        self.dev.write(self.EP_OUT, bytes(data), timeout=self._timeout_ms)
+
+    def recv(self, n):
+        while not self._buf:
+            try:
+                r = self.dev.read(self.EP_IN, REPORT, timeout=self._timeout_ms)
+            except Exception as e:
+                # pyusb raises USBTimeoutError (a subclass of USBError); treat any read
+                # failure the framing layer should retry on as a socket timeout.
+                if "timeout" in str(e).lower():
+                    raise TimeoutError("timed out") from None
+                raise
+            self._buf = bytes(r)
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def close(self):
+        import usb.util
+
+        usb.util.release_interface(self.dev, self.INTF)
+
+
 def connect(path, timeout=300.0):
     """Open the emulator socket, or a real device when asked for one."""
     if path.startswith("/dev/hidraw"):
         return HidRawPort(path)
-    if path in ("hid", "usb"):
+    if path == "usb":
+        # Raw libusb, for when the hidraw node is not readable.
+        return LibUsbPort()
+    if path in ("hid",):
         deadline = time.time() + timeout
         while True:
             found = find_hidraw()

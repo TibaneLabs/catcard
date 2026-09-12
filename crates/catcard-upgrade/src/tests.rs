@@ -32,8 +32,8 @@ struct MemError;
 impl StagingArea for Mem {
     type Error = MemError;
 
-    fn image_base(&self) -> u32 {
-        0x9040_0000
+    fn image_offset(&self) -> u32 {
+        0x0040_0000
     }
 
     fn capacity(&self) -> u32 {
@@ -394,8 +394,8 @@ fn a_marker_that_does_not_read_back_stops_the_install() {
     struct DeafError;
     impl StagingArea for Deaf {
         type Error = DeafError;
-        fn image_base(&self) -> u32 {
-            0x9040_0000
+        fn image_offset(&self) -> u32 {
+            0x0040_0000
         }
         fn capacity(&self) -> u32 {
             1 << 20

@@ -39,8 +39,13 @@ pub const HEADER_FROM_END: u32 = 2048;
 
 /// A PSRAM region set up to stage one image.
 pub struct PsramArea {
-    /// Where the image itself goes.
+    /// Where the image itself goes: an absolute address, for the writes.
     image_base: u32,
+    /// The same location as an **offset from the PSRAM base** -- which is what the
+    /// recovery header and `gate 18/7` want, not the absolute address. The bootloader
+    /// computes `PSRAM_base + start`; handing it an absolute `start` made it read a
+    /// gigabyte past the end and fail verification with -112. This is that `start`.
+    image_offset: u32,
     /// Bytes available for it.
     capacity: u32,
     /// Where the bootloader reads the recovery header.
@@ -70,6 +75,7 @@ impl PsramArea {
         let image_base = psram.base + psram.len / 2;
         Self {
             image_base,
+            image_offset: image_base - psram.base,
             // Stop short of the header: an image long enough to reach it would overwrite
             // the marker that describes it, and the resulting header would be whatever
             // the image's last sixteen bytes happen to be.
@@ -119,8 +125,8 @@ impl StagingArea for PsramArea {
     /// `magic1` is the final store, every earlier state of these sixteen bytes reads as
     /// "no image staged". There is no window in which a partially written header
     /// describes a partially written image.
-    fn image_base(&self) -> u32 {
-        self.image_base
+    fn image_offset(&self) -> u32 {
+        self.image_offset
     }
 
     fn publish(&mut self, len: u32) -> Result<(), OutOfRange> {
@@ -129,7 +135,7 @@ impl StagingArea for PsramArea {
         // lies inside the region claimed in `claim`. The writes are volatile and ordered
         // by a compiler fence so `magic1` cannot be hoisted above the fields it validates.
         unsafe {
-            core::ptr::write_volatile(at.add(1), self.image_base);
+            core::ptr::write_volatile(at.add(1), self.image_offset);
             core::ptr::write_volatile(at.add(2), len);
             core::ptr::write_volatile(at.add(3), MAGIC2);
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
@@ -156,7 +162,7 @@ impl StagingArea for PsramArea {
                 core::ptr::read_volatile(at.add(3) as *const u32),
             ]
         };
-        if seen != [MAGIC1, self.image_base, len, MAGIC2] {
+        if seen != [MAGIC1, self.image_offset, len, MAGIC2] {
             return Err(OutOfRange);
         }
         Ok(())
@@ -223,6 +229,17 @@ mod tests {
             let Some(p) = b.psram else { continue };
             assert_eq!(p.staging_header, 0x907F_F800, "{}", b.name);
             assert_eq!(p.base, 0x9000_0000, "{}", b.name);
+            // The value the recovery header and gate 18/7 carry must be an OFFSET from
+            // the PSRAM base, not the absolute staging address -- the bootloader adds it
+            // to the base, and an absolute value sent it a gigabyte past the end.
+            let a = unsafe { PsramArea::claim(&p) };
+            assert_eq!(
+                a.image_offset,
+                a.image_base - p.base,
+                "{}: staging start must be a PSRAM offset",
+                b.name
+            );
+            assert!(a.image_offset < p.len, "{}: offset inside PSRAM", b.name);
         }
     }
 }

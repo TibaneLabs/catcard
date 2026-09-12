@@ -133,12 +133,13 @@ pub trait StagingArea {
     /// Bytes available for an image.
     fn capacity(&self) -> u32;
 
-    /// Address the image is staged at.
+    /// Where the image is staged, as an **offset from the staging medium's base**.
     ///
-    /// Needed because `gate 18/7` names the region rather than looking for a marker:
-    /// mk4 and later install what a logged-in caller pointed them at, so the address has
-    /// to travel back out to whoever makes that call.
-    fn image_base(&self) -> u32;
+    /// `gate 18/7` names the region rather than looking for a marker, and the bootloader
+    /// reads `PSRAM_base + start` -- so this is an offset, not an absolute address.
+    /// Passing the absolute address made the bootloader read past the end of PSRAM and
+    /// reject the image with -112, which is the whole reason an install never took.
+    fn image_offset(&self) -> u32;
 
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Self::Error>;
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), Self::Error>;
@@ -331,7 +332,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// mk4 and later nothing happens until a logged-in `gate 18/7` authorises *this*
     /// region, which is why the caller is handed it rather than left to recompute it.
     pub fn commit(mut self, approval: Approval) -> Result<Region, Reject> {
-        let start = self.area.image_base();
+        let start = self.area.image_offset();
         self.area
             .publish(approval.length)
             .map_err(|_| Reject::StorageFault { offset: 0 })?;
@@ -342,7 +343,8 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     }
 }
 
-/// Where a staged image sits, as `gate 18/7` wants it.
+/// Where a staged image sits, as `gate 18/7` wants it: `start` is an **offset** from the
+/// staging medium's base, not an absolute address -- the bootloader adds it to the base.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Region {
     pub start: u32,
