@@ -60,11 +60,18 @@ usable:
 - **Nothing was transcribed.** The table is not reproduced here or in the code; the
   mounting is stated and `LAYOUT` derives from it in our own terms.
 
-**Still worth a bench.** The relayed fact is tagged `[C]` on the emulator's side because
-shipped firmware decodes real pads with that table and real pads work — which is a
-firmware fact, not a measurement of silicon, and neither project has checked it on a
-device. The `KEY` echo on the selftest screen settles it in seconds, and a disagreement
-there beats the table.
+**Settled on silicon.** On the first mk4 hardware run the device was unlocked with a PIN
+that had been **set by the stock firmware**, typed on CatCard. That is the test the map
+cannot fake: stock chose the digits using its own decoder, so a mirrored map here would
+have submitted different digits and the gate would have refused. It did not.
+
+Note what would *not* have proved it, since an earlier draft of this file claimed it
+would: setting a PIN through CatCard and then logging in with it. Both halves use the
+same map, so a mirrored one succeeds at both and agrees with itself.
+
+Confirmed for mk4. mk3 has the same membrane pad and the same decoder, so it is expected
+to match, but it is a different board and the `Debug → Keypad` screen settles it in
+seconds.
 
 ---
 

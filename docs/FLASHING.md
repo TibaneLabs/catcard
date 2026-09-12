@@ -131,6 +131,26 @@ than entering it.
 
 ---
 
+## mk3: there is no way back yet
+
+**Read this before flashing an mk3.** mk3 stages a firmware upgrade in SPI-NOR flash,
+and this firmware cannot write it: `SflashPins.cs` is `None`, because the chip select is
+not stated in the reference. So CatCard on an mk3 **cannot install any firmware, including
+stock**. USB comes up and answers everything else; `UpgradeOffer` is refused outright
+with `NoStagingArea`, which the host is told about in `Identify` before it sends anything.
+
+That leaves exactly one route off an mk3 running CatCard: *Debug → Enter DFU*, which asks
+the bootloader for `DfuMode::Normal`. **The bootloader refuses that on RDP=2**, so:
+
+- **Unlocked mk3** — recoverable. DFU or SWD puts stock back.
+- **Locked (RDP=2) mk3** — a one-way trip, exactly as an mk4 was.
+
+This is the same trap that stranded the first mk4, and it is worth saying plainly rather
+than discovering twice. Use a unit you can afford to leave on CatCard until the SPI-NOR
+driver exists.
+
+---
+
 ## Flash the bring-up build first, not the plain one
 
 On a **locked production unit**, decide this before you install anything. The keypad map

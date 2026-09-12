@@ -415,7 +415,8 @@ That single screen settles a list of things this project could only infer before
 | HSI48 | `HAL ok`, and the RNG cannot assert DRDY without it |
 | STM32 TRNG + callgate 26 | `RNG ok 832 bit`: the pool met its policy from real silicon |
 | callgate entry discovery at `0x0800_0040` | reached, or there would be no SE entropy and no PIN screen |
-| the PIN path | it gets past unlock to the idle screen |
+| the PIN path, **login branch** | unlocked with a PIN set by the *stock* firmware |
+| the keypad map, including the 180° mounting | same — stock chose those digits with its own decoder, so a mirrored map would have submitted different ones |
 | header version 7.0.0 | stock staged it, which it refuses below 3 |
 
 **USB was the exception: the idle screen reported `usb down in 0 out 0`,** and the host
@@ -468,6 +469,41 @@ person can actually see.
 `bring_up` now holds the finished splash until at least `SPLASH_MIN_CYCLES` have passed
 **since the first splash was drawn**, so the wait is only for the time bring-up did not
 already use.
+
+## mk3 in the emulator — confirmed, except the PIN
+
+The older mk3 releases carry a bootloader alongside the firmware, so mk3 emulates like
+mk4 does; only the *factory* naming suggested otherwise. `tools/emu/drive.sh <boot.dfu>
+mk3` runs the same test.
+
+```
+ping      status=Ok echo=b'cat'
+identify  status=Ok protocol=1 board=mk3 version=7.0.0 unlocked=False blank=False
+identify  key injection available
+identify  device cannot stage an upgrade (no staging area wired up)
+```
+
+Confirmed by screenshot with `--tap`: the selftest screen draws `MK3 7.0.0 / HAL ok /
+DWT ok / RNG ok 832 bit`, `✓` advances to **PIN prefix**, and entering a prefix reaches
+the **anti-phishing words** — so callgate 16 works through the mk3 bootloader, whose
+entry is at a different address (`0x0800_0305`, protocol `0x0100`).
+
+Not confirmed: a successful login. The emulator's mk3 secure element reports a PIN is
+set and we do not know it, so the drive test stops at a wrong-PIN. That is emulator
+state rather than firmware behaviour — `is_blank()` reads the bootloader's own PIN
+struct and is not board-specific.
+
+### USB used to be off on mk3 entirely
+
+`usbtask::init` returned early when the board had no PSRAM, on the reasoning that there
+was nowhere to stage an upgrade so nothing to serve. The effect was that mk3 brought up
+no USB at all: no enumeration, no diagnostics, no injected keys.
+
+That is the condition that stranded the mk4, except guaranteed rather than accidental —
+and it would have been the state of the *next* board to be flashed. A device that cannot
+be upgraded is precisely the one worth being able to reach, so USB now comes up
+regardless and the offer is what gets refused, with a reason (`NoStagingArea`) and a
+capability bit so a host knows before sending 256 KB.
 
 ## The whole device driven over USB, with nothing touching the keypad — confirmed
 

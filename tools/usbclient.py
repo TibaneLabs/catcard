@@ -67,7 +67,12 @@ STATUS = {0: "Ok", 1: "UnknownOpcode", 2: "NotNow", 3: "BadRequest",
           4: "Declined", 5: "Refused", 6: "Busy"}
 REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
           5: "Incomplete", 6: "NotAnImage", 7: "BadHeader", 8: "WrongBoard",
-          9: "Downgrade", 10: "BadSignature", 11: "StorageFault"}
+          9: "Downgrade", 10: "BadSignature", 11: "StorageFault",
+          12: "NoStagingArea"}
+
+# Capability bits, matching `catcard_usb::caps`.
+CAP_KEY_INJECTION = 1 << 0
+CAP_UPGRADE = 1 << 1
 
 
 def frames(opcode, payload):
@@ -198,6 +203,20 @@ def came_back(sock, path, wait=900.0):
                 return None
         time.sleep(2.0)
     return None
+
+
+# Firmware header, from `catcard_fwhdr::FirmwareHeader`: magic u32, timestamp[8], then
+# the NUL-padded ASCII version.
+HEADER_AT = 0x3F80
+VERSION_AT = HEADER_AT + 4 + 8
+
+
+def image_version(blob):
+    """The version string inside a raw signed image, or None."""
+    if len(blob) < VERSION_AT + 8:
+        return None
+    raw = blob[VERSION_AT:VERSION_AT + 8]
+    return raw.split(b"\x00")[0].decode(errors="replace") or None
 
 
 def load_image(path):
@@ -389,10 +408,14 @@ def main(path, image=None):
         # its approval. This is the escape route for a first run on hardware whose panel
         # and key map are both unconfirmed.
         st, body = request(s, IDENTIFY)
-        if not capabilities(body) & 1:
+        caps = capabilities(body)
+        if not caps & CAP_KEY_INJECTION:
             print("identify  this build does not accept injected keys")
             return 1
         print("identify  key injection available")
+        if not caps & CAP_UPGRADE:
+            # Say it here rather than letting the offer fail after a long transfer.
+            print("identify  device cannot stage an upgrade (no staging area wired up)")
 
         press(s, "y")                      # leave the selftest screen
 
@@ -429,7 +452,9 @@ def main(path, image=None):
         print(f"unlocked  {info[1] if info else '?'} running={info[4] if info else '?'}")
         ok &= bool(info and info[1])
 
-        if image and ok:
+        if image and ok and not caps & CAP_UPGRADE:
+            print("offer     skipped: this board has nowhere to stage an image")
+        elif image and ok:
             blob = load_image(image)
             st, body = request(s, UPGRADE_OFFER, blob)
             if st == 0:
@@ -453,10 +478,18 @@ def main(path, image=None):
                 # now running. Offer a differently-versioned image to make that visible.
                 if ok:
                     was = info[4] if info else None
+                    offered = image_version(blob)
                     back = came_back(s, path)
                     if back is None:
                         print("install   device did not come back")
                         ok = False
+                    elif offered == was:
+                        # The offered image carries the same version as the running one,
+                        # so coming back as that version proves nothing either way. Say
+                        # that, rather than reporting a pass or a failure we cannot tell
+                        # apart. Offer a differently-versioned image to make it provable.
+                        print(f"install   UNPROVABLE: offered and running are both "
+                              f"{back}; version cannot distinguish them")
                     elif was is not None and back == was and "--expect-install" not in sys.argv:
                         # Report it, but do not fail the run: under the emulator this
                         # cannot pass, because PSRAM does not survive the reset. Pass

@@ -244,6 +244,13 @@ impl UsbTask {
                     self.begin_reply(Status::NotNow, &[]);
                     return;
                 }
+                Some(Opcode::UpgradeOffer) if BOARD.psram.is_none() => {
+                    // Say so on the first frame rather than after 256 KB have crossed
+                    // the wire, and say which of the several reasons it is.
+                    self.frames.reset();
+                    self.refuse(Reject::NoStagingArea);
+                    return;
+                }
                 Some(Opcode::UpgradeOffer) => {
                     match Staged::begin(psram_area(), &BOARD, msg.total) {
                         Ok(s) => self.stage = Stage::Receiving(s),
@@ -357,6 +364,10 @@ impl UsbTask {
             catcard_usb::caps::KEY_INJECTION
         } else {
             0
+        } | if BOARD.psram.is_some() {
+            catcard_usb::caps::UPGRADE
+        } else {
+            0
         };
         at += 1;
         for s in [BOARD_NAME, VERSION] {
@@ -441,6 +452,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::WrongBoard { .. } => 8,
         Reject::BadSignature => 10,
         Reject::StorageFault { .. } => 11,
+        Reject::NoStagingArea => 12,
     };
     1
 }
@@ -456,10 +468,12 @@ static mut TASK: Option<UsbTask> = None;
 /// # Safety
 /// Call once, after the 48 MHz clock is running and before any call to [`pump`].
 pub unsafe fn init(serial: &'static str) {
-    if BOARD.psram.is_none() {
-        // Nowhere to stage an upgrade, so nothing to serve.
-        return;
-    }
+    // Deliberately not gated on having somewhere to stage an image. It used to be, and
+    // the effect was that a board without PSRAM -- mk3 -- brought up no USB at all: no
+    // enumeration, no diagnostics, no injected keys. That is the same condition that
+    // stranded an mk4 whose transceiver never powered on, except guaranteed rather than
+    // accidental. A device that cannot be upgraded is precisely the one worth being
+    // able to reach, so it enumerates and refuses the offer instead.
     // SAFETY: single-threaded bring-up; this is the only writer and no reader exists
     // until it returns.
     unsafe {

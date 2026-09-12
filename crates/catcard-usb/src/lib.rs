@@ -129,6 +129,11 @@ pub mod state {
 pub mod caps {
     /// This build accepts [`Opcode::InjectKey`](super::Opcode::InjectKey).
     pub const KEY_INJECTION: u8 = 1 << 0;
+    /// The device can stage and install a firmware image. Absent on a board with no
+    /// staging area wired up — USB still enumerates and still answers everything else,
+    /// because a device that cannot be upgraded is exactly the one worth being able to
+    /// reach.
+    pub const UPGRADE: u8 = 1 << 1;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.

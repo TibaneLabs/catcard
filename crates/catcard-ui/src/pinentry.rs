@@ -86,6 +86,24 @@ impl<const N: usize> PinBuffer<N> {
         &self.digits[..self.len]
     }
 
+    /// The digits themselves, as text, for a bring-up build.
+    ///
+    /// **This puts a PIN on the screen.** It exists because during bring-up the question
+    /// is whether the keypad decodes to the digit printed on the cap, and a row of
+    /// asterisks cannot answer it — a mirrored map produces a PIN that is wrong in a way
+    /// that looks exactly like a PIN that is right. Callers must keep it behind a
+    /// feature; nothing shipped should ever call it.
+    ///
+    /// `out` must be at least `N` bytes.
+    pub fn visible<'a>(&self, out: &'a mut [u8]) -> &'a str {
+        // The buffer already holds ASCII -- `push` stores `b'0' + d`, because that is
+        // what the gate hashes. Adding the offset again here turned `1` into `9`.
+        let n = self.len.min(out.len());
+        out[..n].copy_from_slice(&self.digits[..n]);
+        // SAFETY-free: every byte written came from `push`, which only stores digits.
+        core::str::from_utf8(&out[..n]).unwrap_or("")
+    }
+
     /// Fill `out` with one [`MASK`] per entered digit and return it as a `str`.
     ///
     /// `out` must be at least `N` bytes. The mask is what goes on screen; the digits
@@ -101,6 +119,25 @@ impl<const N: usize> PinBuffer<N> {
 
 #[cfg(test)]
 mod tests {
+    /// The bring-up renderer must show the digits that were entered, in order — that is
+    /// the entire point of it, and a mask that leaked through here would answer the
+    /// keypad question with a row of stars.
+    #[test]
+    fn visible_shows_the_digits_in_order() {
+        let mut b = super::PinBuffer::<8>::new();
+        for d in [1u8, 2, 9, 0] {
+            b.push(d);
+        }
+        let mut out = [0u8; 8];
+        assert_eq!(b.visible(&mut out), "1290");
+        let mut m = [0u8; 8];
+        assert_ne!(
+            b.masked(&mut m),
+            b.visible(&mut out),
+            "masking must still mask"
+        );
+    }
+
     use super::*;
 
     #[test]

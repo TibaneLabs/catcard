@@ -63,6 +63,10 @@ pub enum Reject {
     BadSignature,
     /// The staging area did not read back what was written.
     StorageFault { offset: u32 },
+    /// This board has nowhere to put an image. Not a fault in the offer: the device
+    /// cannot accept any upgrade over USB at all, and the host should stop rather than
+    /// send a quarter of a megabyte to find out.
+    NoStagingArea,
 }
 
 impl From<catcard_fwhdr::Error> for Reject {
