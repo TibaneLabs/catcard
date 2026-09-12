@@ -61,6 +61,7 @@ const _: () = assert!(MAX_LINES >= 2, "the panel must fit at least two menu rows
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Screen {
     Main,
+    SdInstall,
     Debug,
     Usb,
     Clocks,
@@ -72,7 +73,7 @@ enum Screen {
     ConfirmDfu,
 }
 
-const MAIN_ITEMS: &[&str] = &["Status", "Debug", "Reboot"];
+const MAIN_ITEMS: &[&str] = &["Status", "Install from SD", "Debug", "Reboot"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -183,6 +184,12 @@ pub fn run(
             }
 
             let next = step(gate, panel, screen, *key, v.sc.cursor);
+            if next == Screen::SdInstall {
+                install_from_card(gate, panel, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Main;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -214,7 +221,8 @@ fn step(
             // "Status" is the screen behind the menu, so choosing it just redraws --
             // there is no separate page.
             (Key::Confirm, 0) => Screen::Main,
-            (Key::Confirm, 1) => Screen::Debug,
+            (Key::Confirm, 1) => Screen::SdInstall,
+            (Key::Confirm, 2) => Screen::Debug,
             (Key::Confirm, _) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -301,6 +309,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
         Screen::Sd => sd_screen(panel),
+        // Handled in `run`: it needs the keypad, which the drawing half does not have.
+        Screen::SdInstall => {}
         Screen::ConfirmDfu => confirm_dfu(panel),
     }
 }
@@ -627,6 +637,79 @@ fn confirm_dfu(panel: &mut display::Panel) {
     let warn = "refused on locked units";
     draw_text(&mut fb, f, centred(f, warn, 128), 44, warn);
     let _ = panel.flush(&fb);
+}
+
+/// Read a firmware off the card, ask, and install it.
+///
+/// Blocking on purpose. It draws what it is doing at each step because the steps are
+/// slow — bringing a card up, then moving a quarter of a megabyte through a 512-byte
+/// buffer — and a screen that does not change is how a working device looks broken.
+///
+/// The approval is the same question the USB path asks, in the same words, and the
+/// install is the same two calls: `commit` publishes the recovery header, then the
+/// bootloader does the rest on the next boot.
+fn install_from_card(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    use crate::sdupgrade::{stage_from_card, Outcome};
+
+    message(panel, "Reading card", "please wait", "");
+    let (staged, approval) = match stage_from_card() {
+        Outcome::Offered(s, a) => (s, a),
+        Outcome::Failed(why) => {
+            message(panel, "No upgrade", why, "any key to go back");
+            wait_for_any_key(matrix, drbg);
+            return;
+        }
+    };
+
+    crate::session::show_offer(panel, &approval);
+
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Confirm => {
+                    match staged.commit(approval) {
+                        Ok(()) => {
+                            message(panel, "Installing", "do not disconnect", "");
+                            // SAFETY: the recovery header is published; the bootloader
+                            // installs on the next boot. Nothing after this runs.
+                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                        }
+                        Err(_) => {
+                            message(panel, "Failed", "could not stage", "any key to go back");
+                            wait_for_any_key(matrix, drbg);
+                        }
+                    }
+                    return;
+                }
+                Key::Cancel => return,
+                Key::Digit(_) => {}
+            }
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
+}
+
+/// Block until something is pressed. Used only by screens that have already said so.
+fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if !keys.is_empty() {
+            return;
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
 }
 
 /// microSD: does a card come up, and what does the controller say if not.

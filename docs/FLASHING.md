@@ -131,6 +131,29 @@ than entering it.
 
 ---
 
+## Installing from a microSD card
+
+*Main menu → Install from SD*, on mk4/mk5/Q1. Put the image on a FAT card as
+`catcard.dfu` in the root (`firmware.dfu` also works, either case):
+
+```sh
+tools/emu/mksd.sh out/catcard-mk4-mk5.dfu /dev/sdX   # or an image file
+```
+
+A fixed set of names, not "any `.dfu`": a card with two firmware files on it poses a
+question the device should not answer by itself.
+
+The card is only a transport. What it feeds is the same code a USB upgrade feeds — the
+same header and signature checks, the same approval screen with the same wording, the
+same `commit` — so there is no second implementation to disagree with the first. A `.dfu`
+is unwrapped on the device; a raw `.bin` is accepted too.
+
+**Untested on hardware.** The SDMMC driver beneath it has never moved a byte, because the
+emulator models no SD data path. Each step reports where it stopped rather than failing
+silently, and `Debug → microSD` exercises the same driver without touching an upgrade.
+
+---
+
 ## mk5: the same trap as mk4, for the same reason
 
 mk5 is an mk4 board revision and shares its upgrade path: staging into PSRAM, which

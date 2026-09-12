@@ -28,6 +28,7 @@ mod keypad;
 mod menu;
 mod panic;
 mod pinentry;
+mod sdupgrade;
 mod selftest;
 mod session;
 mod splash;

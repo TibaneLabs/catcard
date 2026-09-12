@@ -35,6 +35,7 @@ use catcard_fwhdr::{
     MIN_FIRMWARE_LENGTH,
 };
 
+pub mod dfuse;
 pub mod psram;
 
 /// Why an image was refused.

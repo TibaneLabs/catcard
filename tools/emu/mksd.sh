@@ -12,6 +12,8 @@ FW=${1:-out/catcard-mk4-mk5.dfu}
 OUT=${2:-out/sd-test.img}
 SRC=$(mktemp -d)
 trap 'rm -rf "$SRC"' EXIT
-cp "$FW" "$SRC/"
+# The firmware looks for a fixed set of names in the card's root, so the file goes on
+# under one of them rather than under its build name -- see `sdupgrade::CANDIDATES`.
+cp "$FW" "$SRC/catcard.dfu"
 fstool create --type fat32 --output "$OUT" --size 64M "$SRC"
 fstool ls "$OUT" /
