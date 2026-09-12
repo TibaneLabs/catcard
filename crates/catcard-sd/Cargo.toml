@@ -8,3 +8,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The FAT driver. `noalloc::fat` needs neither `std` nor an allocator: one sector of
+# scratch RAM whatever the size of the card. `alloc` must stay off here -- this crate is
+# linked into firmware that has no heap, and the build should fail rather than grow one.
+fstool = { version = "0.4.30", default-features = false, features = ["fat"] }
+
+[dev-dependencies]
+# Tests only: the hosted driver can *format* a volume, which the heapless one cannot, so
+# fixtures are built with it. Resolver 2 keeps these features out of the firmware build.
+#
+fstool = { version = "0.4.30", default-features = false, features = ["fat", "alloc"] }

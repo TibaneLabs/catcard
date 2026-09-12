@@ -388,6 +388,28 @@ per device.
 
 ---
 
+## SD: the FAT reader is in, the peripheral driver is not
+
+`catcard-sd` holds the card bring-up sequence and adapts an initialised card to
+`fstool`'s heapless FAT driver (`fstool::fs::fat`, `alloc` off — one sector of scratch
+RAM whatever the card's size, rather than the allocation table resident). Both halves are
+tested on the host against a fake card and a real FAT32 volume.
+
+What is missing is the bottom: a `Transport` implementation over the SDMMC peripheral.
+That is **two drivers, not one** — mk3 is an STM32L496 with SDMMC v1 on APB2, mk4/mk5/Q1
+are L4+ with the newer v2 on AHB2, and the register layouts differ.
+
+**And SD is not an escape route on its own.** The bootloader installs only from the
+staging medium — SPI-NOR offset 0 on mk3, the PSRAM recovery header on mk4+ — so a card
+is a transport into the same bottleneck USB already reaches. It becomes a second way in
+only once staging works.
+
+`tools/emu/mksd.sh` builds a FAT32 card image with a firmware file on it for the
+emulator's `--sd`, and `fstool ls` reads it back afterwards — so a write from the device
+can be checked without trusting the device's own report.
+
+---
+
 ## SE1 single-wire UART pin; SE2 I²C addresses
 
 Not needed while all secret operations go through the callgate, which is the design.

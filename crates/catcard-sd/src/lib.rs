@@ -38,6 +38,10 @@ pub enum Error {
     DataError { block: u32 },
     /// The peripheral itself did not start, which is not the card's fault.
     Peripheral,
+    /// A write was asked of a card this code only reads. Upgrading from a card needs
+    /// nothing written to it, and a firmware that cannot write the card cannot corrupt
+    /// someone's files either.
+    ReadOnly,
 }
 
 /// Which response shape a command expects, since that decides how long to wait and how
@@ -255,6 +259,73 @@ fn capacity_blocks(csd: &[u32; 4]) -> Result<u32, Error> {
                 .ok_or(Error::BadCsd)
         }
         _ => Err(Error::BadCsd),
+    }
+}
+
+/// The heapless FAT driver, re-exported so callers name one crate.
+///
+/// `fstool::fs::fat` with `alloc` off is the driver that needs no heap: one sector of
+/// scratch RAM whatever the size of the card, rather than holding the whole allocation
+/// table resident.
+pub use fstool::fs::fat;
+
+/// An initialised card, presented as the sectors a FAT volume is built from.
+///
+/// Owns its transport because a mounted [`fat::Volume`] owns its device for as long as
+/// it is mounted; handing it a borrow would tie the volume's lifetime to a peripheral
+/// the firmware needs back afterwards. [`Sectors::into_inner`] returns it.
+pub struct Sectors<T: Transport> {
+    t: T,
+    card: Card,
+}
+
+impl<T: Transport> Sectors<T> {
+    pub fn new(t: T, card: Card) -> Self {
+        Self { t, card }
+    }
+
+    /// The card, as initialised.
+    pub fn card(&self) -> &Card {
+        &self.card
+    }
+
+    /// Give the transport back.
+    pub fn into_inner(self) -> T {
+        self.t
+    }
+}
+
+impl<T: Transport> fat::SectorDriver for Sectors<T> {
+    type Error = Error;
+
+    fn sector_size(&self) -> u32 {
+        BLOCK_LEN as u32
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.card.blocks as u64
+    }
+
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), Error> {
+        // The driver asks for whole multiples of a sector and checks the range first, but
+        // this is the boundary to a card, so check again rather than trust a caller.
+        if buf.len() % BLOCK_LEN != 0 {
+            return Err(Error::DataError { block: u32::MAX });
+        }
+        for (i, chunk) in buf.chunks_exact_mut(BLOCK_LEN).enumerate() {
+            let block = lba
+                .checked_add(i as u64)
+                .and_then(|b| u32::try_from(b).ok())
+                .ok_or(Error::DataError { block: u32::MAX })?;
+            let chunk: &mut [u8; BLOCK_LEN] =
+                chunk.try_into().map_err(|_| Error::DataError { block })?;
+            read_block(&mut self.t, &self.card, block, chunk)?;
+        }
+        Ok(())
+    }
+
+    fn write_sectors(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), Error> {
+        Err(Error::ReadOnly)
     }
 }
 
