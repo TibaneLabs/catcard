@@ -172,19 +172,43 @@ consequences, none of them obvious from the outside:
 - **The bootloader never reads a microSD card.** Stock firmware stages *from* a card
   *into* SPI-NOR or PSRAM; the card itself is not a recovery medium.
 
+**Correction, relayed from the bootloader's own dispatch (not yet in `hw-reference`,
+which still says the opposite).** The boot path does not end at DFU. Sketched in our own
+words:
+
+```text
+verify_firmware() ok      -> boot it, and nothing below runs
+otherwise                 -> try to recover from PSRAM
+                          -> enter_dfu()          only when RDP < 2
+                          -> sdcard_recovery()    forever, which is where RDP=2 lands
+```
+
+`sdcard_recovery()` shows a screen, waits for a card, and installs a matching firmware
+from it. **It works at RDP=2 — it is reached precisely because `enter_dfu()` is skipped
+when the device is locked.** So mk4/mk5 do have a card-based recovery, and no DFU is
+needed for it.
+
 | | recovery at RDP=2 with a corrupt main flash |
 |---|---|
-| mk3 | an external SPI programmer clipped to the `MX25L8006E` NOR chip |
-| mk4 / mk5 / Q1 | **none** |
+| mk3 | `sf_firmware_upgrade()` from SPI-NOR, or an external programmer on the NOR chip |
+| mk4 / mk5 / Q1 | `sdcard_recovery()`, from a card, with no host and no DFU |
 
-So on mk4/mk5 the rule is simple: **a main flash that fails its signature check is a dead
-device.** Everything this firmware does to protect that — refusing to commit an image
-whose signature does not verify, reading back what it stages, leaving `--high-water`
-alone — is protecting the only thing that cannot be recovered.
+The catch is the trigger: **none of it runs while `verify_firmware()` passes.** A device
+whose firmware boots but cannot be talked to — no working USB, no SD path — never reaches
+the recovery that would save it, because from the bootloader's point of view nothing is
+wrong. That is the state the first mk4 is in.
 
-It also rules out a tempting idea: deliberately corrupting our own firmware to make the
-bootloader fall back to something. There is nothing to fall back to. On a locked mk4/mk5
-that is a one-way trip.
+Which makes deliberately corrupting main flash a real escape hatch rather than a way to
+lose a device: it is the only way to reach a recovery that already exists. Before relying
+on it, two things have to be true, and the order matters —
+
+1. **`sdcard_recovery()`'s matching rule is known.** It is described as needing "the
+   precise version they tried to install before", so which file it accepts is not
+   obvious. Putting the wrong image on the card leaves a device that cannot boot and
+   cannot be given anything it will take.
+2. **The card path is proven on that exact device first**, with `Debug → microSD`, while
+   the firmware still boots. Corrupting flash to reach a card reader that turns out not
+   to work is the one ordering that cannot be undone.
 
 ---
 
@@ -201,9 +225,10 @@ OCTOSPI at boot, and if it leaves that mapping in place the firmware inherits it
 **`Debug → PSRAM` reports what is actually true on the device**, and is worth looking at
 before trusting the upgrade path with the only route back.
 
-Until that is confirmed, treat an mk5 exactly like an mk4: on a locked (RDP=2) unit,
-assume flashing is one-way. `Debug → Enter DFU` is **not** an exit there — the bootloader
-locks up instead, and only a power cycle clears it. See the recovery table above.
+`Debug → Enter DFU` is **not** an exit on a locked unit — the bootloader locks up and
+only a power cycle clears it. The exit that does exist there is `sdcard_recovery()`, and
+reaching it means failing `verify_firmware()` deliberately; see the recovery section
+above for the two things that must be true first.
 
 ---
 
