@@ -252,6 +252,48 @@ driver exists.
 
 ---
 
+## Prove the escape hatches before you trust a locked device
+
+Learned the hard way, on a device that cannot be un-learned. An mk5 (RDP=2) ended up
+running a CatCard whose `gate 18/7` passed the staging **address** where the bootloader
+wanted an **offset** — so every USB and SD install failed with a silent `-112`, and the
+firmware on it had no log and no memory monitor to say so. A locked unit running a
+valid-but-broken image has no bootrom recovery (§`mk5: the same trap`). It is gone.
+
+The lesson is not "avoid bugs" — it is that on a locked device your only insurance is a
+**recovery channel you have proven works while the device is still healthy.** The
+bring-up build carries three, and on the first boot of a new locked device you verify all
+three over USB *before* relying on it for anything:
+
+```sh
+V=/path/to/usbvenv/bin/python     # a venv with pyusb, for the `usb` (libusb) transport
+
+# 1. The log answers -- the device can tell you what it is doing.
+$V tools/usbclient.py usb --log
+
+# 2. The monitor answers -- your recovery-of-last-resort works.
+#    Peek the reset vector; the first word is the initial stack pointer (0x2000xxxx).
+$V tools/usbclient.py usb --peek 0x08020000 2
+
+# 3. gate 18/7 actually installs. Offer the SAME image and approve: the device must go
+#    quiet and reboot. If it stays answering, the install path is broken -- STOP, and
+#    fix it while you still can, because the monitor is the only way back from here.
+$V tools/usbclient.py usb out/catcard-mk4-mk5.dfu --drive --pin=YOUR-PIN --expect-install
+```
+
+If all three pass, the device is recoverable: even a future firmware whose install path
+regresses can be driven back by hand through the memory monitor over USB, as long as it
+enumerates. If any fails on a locked unit, you are one bad flash from a brick — resolve it
+first.
+
+**Why the monitor is the keystone.** peek/poke/jsr is not a convenience; it is the reason
+a locked device stays recoverable. With it you can read any register, inspect the PSRAM
+staging the bootloader will install from, and — if it ever comes to it — call the
+bootloader callgate yourself with the right arguments, bypassing whatever the firmware got
+wrong. A device that enumerates and carries the monitor is one you can talk out of almost
+any state. A device without it, on a locked unit, is one bad install from silence. Flash
+the build that has it, and never a leaner one, onto anything you cannot reflash by SWD.
+
 ## Flash the bring-up build first, not the plain one
 
 On a **locked production unit**, decide this before you install anything. The keypad map

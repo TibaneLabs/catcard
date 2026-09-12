@@ -729,3 +729,33 @@ runs, biased sources and short samples, which is the same property from the othe
 Every `[?]` this session resolves should move out of `HARDWARE-OPEN-ITEMS.md` and into
 the board table with a `[C]` tag and a note saying it was confirmed on hardware rather
 than read from a document. Confidence tags are how the next person knows what to trust.
+
+
+## The install bug that cost a device: gate 18/7 start is an offset
+
+The single most expensive finding, made with a bricked mk5 on the bench. Every firmware
+install this project ever attempted failed for one reason: `gate 18/7` was handed the
+**absolute** staging address (`0x90400000`) where the bootloader wanted an **offset** from
+the PSRAM base. The bootloader computes `PSRAM_base + start`, so it read at `0x90000000 +
+0x90400000`, a gigabyte past the end of PSRAM, and rejected the garbage with `-112
+AUTH_FAIL` without rebooting.
+
+It hid perfectly. The offer succeeded (`verified=True`) because *our* staging and *our*
+signature check were correct — the bytes really were at `0x90400000` and read back. Only
+the bootloader's own verification, on the wrong address, failed. And the firmware that had
+the bug had neither the log nor the monitor, so on a locked device it failed in total
+silence.
+
+Two things were proven along the way, on real hardware, over the libusb transport:
+
+- **PSRAM is mapped on mk5.** Staging wrote 256 KB to `0x90400000` and read it back; the
+  offer would have been refused otherwise. The OCTOSPI-not-configured worry (a device
+  reset refills PSRAM) does not apply here — the bootloader leaves it mapped for the
+  firmware it launches.
+- **The device answers over raw libusb** when the hidraw node is root-only: detach the
+  kernel HID driver, drive the `0x81`/`0x01` interrupt endpoints, same 64-byte frames, no
+  leading report-ID byte. `tools/usbclient.py usb`.
+
+Fixed: `Region.start` and the recovery header carry `image_base - psram.base`, and a test
+pins that the value is an offset inside PSRAM on every board. Not yet confirmed installing
+on hardware -- the emulator that could confirm it predates the documentation of this path.
