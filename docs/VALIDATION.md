@@ -411,6 +411,24 @@ approved  device stopped answering: it reset to install
 No `--tap`, no `--press`. Selftest screen, first-PIN setup, anti-phishing words, login,
 a 256 KB upgrade and its approval — every keypress arriving over USB.
 
+### A `.dfu` can be offered directly — confirmed
+
+The device takes a raw signed image and knows nothing about DfuSe; the client unwraps
+the container before sending. Verified both ways: the bytes extracted from a `.dfu` are
+identical to the `.bin` built from the same ELF, a `.bin` passes through untouched, a
+container with one flipped byte is refused on the suffix CRC rather than truncated, and
+the full drive test passes offering a `.dfu` over the wire:
+
+```
+image     unwrapped DfuSe: 262144 bytes for 0x08020000
+offer     status=Ok verified=True len=262144
+approved  device stopped answering: it reset to install
+```
+
+So the file flashed through stock and the file offered to CatCard are the same file,
+without the firmware growing a parser for a container format. That parser is reachable
+by anything that can open the port, which is the reason to keep it small.
+
 ### What driving it found that offering an image did not
 
 - **`Identify` said nothing about which screen you are on.** A host that cannot see the

@@ -17,6 +17,7 @@ than shared with the firmware, so agreement between them means something.
 """
 import glob
 import os
+import zlib
 import select
 import socket, struct, sys, time
 
@@ -199,6 +200,60 @@ def came_back(sock, path, wait=900.0):
     return None
 
 
+def load_image(path):
+    """The raw signed image, unwrapping a DfuSe container if that is what was handed in.
+
+    The device takes a raw image and knows nothing about DfuSe. Keeping it that way is
+    deliberate -- the upgrade parser is reachable by anything that can open the port, so
+    it should stay as small as it can be, and a container format is the host's problem.
+
+    Doing it here rather than making the caller run `catcard-image extract` means the
+    file you flash through stock and the file you offer to CatCard can be the same file.
+    """
+    raw = open(path, "rb").read()
+    if raw[:5] != b"DfuSe":
+        return raw
+
+    # Layout, matching tools/catcard-image/src/dfuse.rs:
+    #   prefix 11 = "DfuSe" | version | DFUImageSize u32 | targets u8
+    #   target 274 = "Target" | alt | named u32 | name[255] | size u32 | elements u32
+    #   then per element: address u32 | size u32 | data
+    #   suffix 16, ending "UFD" + length + CRC over everything before it
+    if len(raw) < 11 + 274 + 16:
+        raise ValueError(f"{path}: too short to be a DfuSe container")
+    if raw[5] != 1:
+        raise ValueError(f"{path}: unsupported DfuSe version {raw[5]}")
+
+    suffix = raw[-16:]
+    if suffix[8:11] != b"UFD":
+        raise ValueError(f"{path}: missing UFD suffix")
+    want = struct.unpack("<I", suffix[12:16])[0]
+    got = zlib.crc32(raw[:-4]) ^ 0xFFFFFFFF
+    if got != want:
+        raise ValueError(f"{path}: DFU suffix CRC mismatch {got:#010x} != {want:#010x}")
+
+    size = struct.unpack("<I", raw[6:10])[0]
+    if size != len(raw) - 16:
+        raise ValueError(f"{path}: DFUImageSize {size} disagrees with the file length")
+    if raw[10] != 1:
+        raise ValueError(f"{path}: expected exactly one target, got {raw[10]}")
+
+    t = raw[11:]
+    if t[:6] != b"Target":
+        raise ValueError(f"{path}: missing Target signature")
+    count = struct.unpack("<I", t[270:274])[0]
+    if count < 1:
+        raise ValueError(f"{path}: container holds no elements")
+
+    addr, esize = struct.unpack("<II", t[274:282])
+    data = t[282:282 + esize]
+    if len(data) != esize:
+        raise ValueError(f"{path}: element data runs past the end of the file")
+    print(f"image     unwrapped DfuSe: {esize} bytes for {addr:#010x}"
+          + (f" ({count} elements, offering the first)" if count > 1 else ""))
+    return data
+
+
 # CatCard's own VID/PID. Source: docs/USB.md.
 VID = 0x39F2
 PID = 0x0401
@@ -369,7 +424,7 @@ def main(path, image=None):
         ok &= bool(info and info[1])
 
         if image and ok:
-            blob = open(image, "rb").read()
+            blob = load_image(image)
             st, body = request(s, UPGRADE_OFFER, blob)
             if st == 0:
                 print(f"offer     status=Ok verified={bool(body[0])} "
@@ -429,7 +484,7 @@ def main(path, image=None):
     if image and "--gate" in sys.argv:
         # The PIN gate: an upgrade must be refused until someone has unlocked the device
         # at the front panel, and accepted afterwards.
-        blob = open(image, "rb").read()
+        blob = load_image(image)
 
         # While locked, send only the first frame of a properly-declared image. The
         # device refuses on that frame and resets its reassembler, so nothing is left
@@ -474,7 +529,7 @@ def main(path, image=None):
         return 0 if ok else 1
 
     if image:
-        blob = open(image, "rb").read()
+        blob = load_image(image)
         t0 = time.time()
         st, body = request(s, UPGRADE_OFFER, blob)
         dt = time.time() - t0

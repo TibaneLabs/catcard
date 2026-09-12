@@ -160,7 +160,7 @@ it is the signature.
 |---|---|---|
 | `0x0001` | `Ping` | payload echoed |
 | `0x0002` | `Identify` | protocol version, board, firmware version |
-| `0x0010` | `UpgradeOffer` | payload is a complete signed image; stages and validates, installs nothing |
+| `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 
 ### Talking to a real device
@@ -194,6 +194,23 @@ grants the logged-in user access rather than a group, so nothing needs to be add
 The device sets no report ID, so hidraw takes a leading zero byte on every write; the
 client does that. Reads come back as whole 64-byte reports and are buffered, because a
 short read on hidraw discards the rest of the report rather than leaving it queued.
+
+### The device takes a raw image; the host unwraps the container
+
+`UpgradeOffer` carries the signed image itself, with the header at `0x3F80`. The
+firmware knows nothing about DfuSe and should not: this parser is reachable by anything
+that can open the port, so it stays as small as it can be, and a container format is
+work the host can do instead.
+
+`tools/usbclient.py` therefore accepts either. Hand it a `.dfu` and it checks the
+signature, the suffix CRC and the declared sizes, then offers the element inside; hand it
+a `.bin` and it passes it through untouched. So the file you flash through stock and the
+file you offer to CatCard can be the same file, without the device growing a parser for
+it.
+
+A container that does not check out is refused on the host, before anything is sent —
+a corrupted one fails on the CRC rather than being quietly truncated into a short image
+that the device would then reject for the wrong reason.
 
 ### A reply goes out in the poll that produced it
 

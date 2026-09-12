@@ -25,14 +25,16 @@ cargo fw-mk4-bringup || exit 1
 FW=target/thumbv7em-none-eabihf/release/catcard-fw
 cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 7.0.0 \
     --dfu out/catcard-mk4.dfu || exit 1
+# Offered as a .dfu on purpose: that is the artefact you actually have, and the client
+# unwraps it. The device never sees a container.
 cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 7.0.1 \
-    --bin out/catcard-mk4-v2.bin || exit 1
+    --dfu out/catcard-mk4-v2.dfu || exit 1
 
 SOCK=$(mktemp -u /tmp/catcard-XXXX.sock)
 "$EMU" -q run --dfu out/catcard-mk4.dfu --bootloader "$BOOTLOADER" --board mk4 \
     --reboot --usb-hid "$SOCK" --run-for 600000000000 >out/drive.log 2>&1 &
 PID=$!
-python3 -u tools/usbclient.py "$SOCK" out/catcard-mk4-v2.bin --drive "${@:2}"
+python3 -u tools/usbclient.py "$SOCK" out/catcard-mk4-v2.dfu --drive "${@:2}"
 RC=$?
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 rm -f "$SOCK"
