@@ -96,6 +96,59 @@ pub unsafe fn hsi48_ready() -> bool {
     unsafe { reg::read(RCC_CRRCR) & CRRCR_HSI48RDY != 0 }
 }
 
+/// Raw `PWR_CR2`, for the debug screens.
+///
+/// Bit 10 is `USV`. Reading it back is how "the USB supply never came up" stops being
+/// invisible — it was set by a write to an unclocked peripheral for the whole of the
+/// first hardware bring-up, and nothing said so.
+///
+/// # Safety
+/// Reads PWR.
+pub unsafe fn pwr_cr2() -> u32 {
+    unsafe { reg::read(fixed::PWR + 0x04) }
+}
+
+/// Raw `RCC_APB1ENR1`, whose bit 28 is `PWREN` — the gate that made the above silent.
+///
+/// # Safety
+/// Reads RCC.
+pub unsafe fn apb1enr1() -> u32 {
+    unsafe { reg::read(fixed::RCC + 0x58) }
+}
+
+/// Raw `RCC_AHB3ENR`. Bit 8 gates OCTOSPI1, which is what PSRAM hangs off on mk4.
+///
+/// # Safety
+/// Reads RCC.
+pub unsafe fn ahb3enr() -> u32 {
+    unsafe { reg::read(fixed::RCC + 0x48) }
+}
+
+/// The MSI range field of `RCC_CR`, `MSIRANGE[3:0]` at bits 7:4, as a frequency in kHz.
+///
+/// Reading this on a running device is what settles the open question about the system
+/// clock: the divisors are documented, the range they divide is not, and every
+/// cycle-count delay in this firmware is calibrated against the answer.
+///
+/// Source: RM0432 §RCC_CR [C]
+pub fn msi_range_khz(rcc_cr: u32) -> u32 {
+    match (rcc_cr >> 4) & 0xF {
+        0 => 100,
+        1 => 200,
+        2 => 400,
+        3 => 800,
+        4 => 1_000,
+        5 => 2_000,
+        6 => 4_000,
+        7 => 8_000,
+        8 => 16_000,
+        9 => 24_000,
+        10 => 32_000,
+        11 => 48_000,
+        _ => 0,
+    }
+}
+
 /// Raw `RCC_CR`, for diagnostics on the selftest screen.
 ///
 /// # Safety

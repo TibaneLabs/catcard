@@ -515,6 +515,15 @@ pub fn pump() -> bool {
     busy
 }
 
+/// The OTG endpoint registers, for the debug screen.
+///
+/// `[GINTSTS, DAINT, DOEPCTL, DOEPTSIZ, DIEPCTL, DCTL]`. On hardware there is no RAM
+/// dump to read these out of, so the screen is the only place they can be seen.
+pub fn otg_regs() -> Option<[u32; 6]> {
+    // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
+    task().map(|t| unsafe { t.otg.debug_regs() })
+}
+
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.
 static mut INIT_FAULT: &str = "";
 

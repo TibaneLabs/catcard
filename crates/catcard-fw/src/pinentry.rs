@@ -30,7 +30,7 @@ use crate::{display, keypad::GpioMatrix};
 /// The two are merged here rather than at each call site so no screen can honour one
 /// source and forget the other — which would show up as a device that answers the
 /// keypad but ignores a host, or worse, the reverse.
-fn pressed_keys(
+pub(crate) fn pressed_keys(
     pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,

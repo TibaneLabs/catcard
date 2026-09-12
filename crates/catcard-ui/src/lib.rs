@@ -13,6 +13,7 @@ pub mod display;
 pub mod font;
 pub mod framebuffer;
 pub mod keypad;
+pub mod menu;
 pub mod pinentry;
 pub mod splash;
 pub mod ssd1306;

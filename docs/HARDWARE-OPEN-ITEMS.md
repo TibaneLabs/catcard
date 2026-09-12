@@ -333,6 +333,31 @@ step 2 alone, that is also an answer.
 
 ---
 
+## OCTOSPI is never configured, so PSRAM is not mapped
+
+**Blocks: the firmware upgrade path, on hardware.** `PsramArea::claim` documents a
+safety contract that the PSRAM "must describe a memory-mapped PSRAM that is actually
+present and mapped". Nothing in this firmware maps it: there is no OCTOSPI driver, and
+`RCC_AHB3ENR.OSPI1EN` is never set.
+
+Every emulator run passed because the emulator maps the region unconditionally. On
+hardware, `0x9000_0000` is not backed until OCTOSPI1 is configured for memory-mapped
+mode, so staging an image writes nowhere it can be read back from — and staging is the
+last step before an irreversible install, and the only route back to stock firmware.
+
+This is the same shape as the `PWREN` fault: a peripheral used without being turned on,
+invisible to an emulator that does not model the gate.
+
+**Debug → PSRAM says so on the device**, and deliberately does not probe the region: a
+read of an unmapped address faults, and a fault needs a power cycle to clear, so naming
+the gap is worth more than crashing to prove it.
+
+**How to resolve.** Write the OCTOSPI1 driver: clock, pins on the GPIOE bank, the PSRAM
+part's read/write commands, then memory-mapped mode. Until then the upgrade path cannot
+work on real hardware, whatever USB does.
+
+---
+
 ## SE1 single-wire UART pin; SE2 I²C addresses
 
 Not needed while all secret operations go through the callgate, which is the design.

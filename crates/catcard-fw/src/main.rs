@@ -25,6 +25,7 @@ use cortex_m_rt::entry;
 mod boot;
 mod display;
 mod keypad;
+mod menu;
 mod panic;
 mod pinentry;
 mod selftest;
