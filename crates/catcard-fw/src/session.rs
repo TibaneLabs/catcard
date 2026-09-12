@@ -17,6 +17,23 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // First, unconditionally: the only report a device with a dead panel can make.
     selftest::publish(&report);
 
+    crate::catlog!(
+        "boot: {} {} built {}",
+        crate::running_board(),
+        crate::VERSION,
+        crate::BOARD_NAME
+    );
+    crate::catlog!(
+        "boot: hal {} dwt {} entropy {}",
+        if report.hal.is_ok() { "ok" } else { "FAIL" },
+        if report.dwt_running { "ok" } else { "FAIL" },
+        report.entropy.unwrap_or_default()
+    );
+    crate::catlog!(
+        "boot: panel {}",
+        if panel.is_some() { "up" } else { "ABSENT" }
+    );
+
     // SAFETY: bring-up is complete and nothing else has claimed the keypad pins.
     let matrix = unsafe { keypad::GpioMatrix::init() };
 
@@ -43,6 +60,14 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // SAFETY: nothing else has claimed OTG_FS or the USB pins, and HSI48 was started
     // during bring-up.
     unsafe { usbtask::init(serial()) };
+    crate::catlog!(
+        "usb: {}",
+        if usbtask::init_fault().is_empty() {
+            "started"
+        } else {
+            usbtask::init_fault()
+        }
+    );
 
     // Taken one at a time so a device with a working panel but no keypad still shows
     // the selftest screen -- which is exactly the device most likely to have one of
@@ -56,7 +81,9 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 
     selftest::show(&mut report, &mut panel, &mut matrix, &mut drbg);
 
+    crate::catlog!("pin: prompting");
     let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg);
+    crate::catlog!("pin: unlocked");
 
     // The PIN is in. Upgrades are allowed from here; a blank device reaches this too,
     // which is what keeps a unit with no PIN set recoverable.

@@ -163,6 +163,29 @@ it is the signature.
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 
+### The log, which is the only diagnostic that does not need a screen
+
+`Opcode::ReadLog` (`0x0012`) pages out a ring in RAM: `tools/usbclient.py hid --log`.
+The payload is a `u32` offset from the oldest byte held; the reply carries the total and
+a flag saying whether the ring wrapped, so a truncated boot log cannot be mistaken for a
+complete one.
+
+It exists because every other diagnostic this firmware had ended on the panel, and the
+first mk5 came up with a dark one — it enumerated, took a PIN typed blind, and refused an
+upgrade for a reason drawn where nobody could read it. The same buffer is marked with a
+magic so `--dump-ram` can find it, which is the other reader that cannot ask.
+
+**Nothing secret goes in it.** Anything that can open the port can read it, including a
+host that has not proved it knows the PIN, and it outlives a logout. The rule for a line
+is that it must be safe to read aloud to a stranger holding the device: no PIN digits, no
+seed, no anti-phishing words.
+
+**A reply must fit one frame.** `begin_reply` clamps a body to `START_PAYLOAD` (56 bytes,
+the report minus its header) rather than to the 64-byte report. A longer body loses its
+tail in the writer while the frame header still declares the full length, and a host that
+believes the header waits for a continuation that never comes — which looks exactly like
+a device that stopped answering. That is how this was found.
+
 ### Talking to a real device
 
 `tools/usbclient.py` speaks to both the emulator and hardware, over the same protocol

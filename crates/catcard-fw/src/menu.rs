@@ -150,7 +150,7 @@ pub fn run(session: Session<'_>) -> ! {
                             redraw = true;
                         }
                         Err(_) => {
-                            usbtask::set_last_install(catcard_usb::install::STAGING_FAILED);
+                            crate::catlog!("install: staging failed");
                             message(panel, "Failed", "could not stage", "the image");
                             showing_offer = false;
                         }
@@ -680,10 +680,12 @@ fn install_from_card(
 ) {
     use crate::sdupgrade::{stage_from_card, Outcome};
 
+    crate::catlog!("sd: looking for a firmware");
     message(panel, "Reading card", "please wait", "");
     let (staged, approval) = match stage_from_card() {
         Outcome::Offered(s, a) => (s, a),
         Outcome::Failed(why) => {
+            crate::catlog!("sd: {}", why);
             message(panel, "No upgrade", why, "any key to go back");
             wait_for_any_key(matrix, drbg);
             return;
@@ -736,22 +738,27 @@ fn install(
     region: catcard_upgrade::Region,
 ) {
     let g = crate::pinentry::BootloaderGate::new(gate);
-    use catcard_usb::install as code;
-    let (why, c) = match login.authorize_firmware(&g, region.start, region.len) {
+    crate::catlog!(
+        "install: authorizing {:#010x} len {}",
+        region.start,
+        region.len
+    );
+    let why = match login.authorize_firmware(&g, region.start, region.len) {
         Ok(never) => match never {},
         // The bootloader ran its own verification and refused. That is a better answer
         // than ours: it is the check that actually gates the install.
-        Err(catcard_pin::Failure::ImageRefused) => {
-            ("bootloader refused it", code::REFUSED_BY_BOOTLOADER)
+        Err(catcard_pin::Failure::ImageRefused) => "bootloader refused it (gate 18/7 -112)",
+        Err(catcard_pin::Failure::NeedsSetup) => "login went stale",
+        Err(catcard_pin::Failure::MustWait) => "rate limited",
+        Err(catcard_pin::Failure::Gate(_)) => "callgate unreachable",
+        Err(catcard_pin::Failure::Code(c)) => {
+            crate::catlog!("install: refused, gate code {}", c);
+            "refused"
         }
-        Err(catcard_pin::Failure::NeedsSetup) => ("login went stale", code::STALE_LOGIN),
-        Err(catcard_pin::Failure::MustWait) => ("rate limited", code::RATE_LIMITED),
-        Err(catcard_pin::Failure::Gate(_)) => ("callgate unreachable", code::GATE_UNREACHABLE),
-        Err(catcard_pin::Failure::Code(_)) => ("refused", code::REFUSED),
     };
-    // Say it over USB as well as on the panel. A dark screen is exactly when this
-    // matters, and it is the failure this device is in right now.
-    usbtask::set_last_install(c);
+    // The panel may be the broken thing, so this goes in the log too -- which is the
+    // only place a dark device can put it.
+    crate::catlog!("install: NOT INSTALLED: {}", why);
     message(panel, "Not installed", why, "any key to go back");
 }
 

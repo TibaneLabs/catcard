@@ -289,18 +289,33 @@ impl UsbTask {
         // whichever stage we are in.
         let opcode = progress.started.and_then(|m| Opcode::from_u16(m.opcode));
         match opcode {
-            // Two bytes: why the last install failed, and what the upgrade state
-            // machine is doing now. The second is what says whether an offer is sitting
-            // on the screen waiting for someone to approve it -- which, on a device with
-            // no screen, nobody can see.
-            Some(Opcode::LastInstall) => {
-                let stage = match self.stage {
-                    Stage::Idle => 0u8,
-                    Stage::Receiving(_) => 1,
-                    Stage::Offered { .. } => 2,
-                    Stage::Approved => 3,
+            // One page of the log. The upgrade state goes in as a line rather than as a
+            // field, so there is one place to look rather than two.
+            Some(Opcode::ReadLog) => {
+                let offset = if progress.payload.len() >= 4 {
+                    u32::from_le_bytes([
+                        progress.payload[0],
+                        progress.payload[1],
+                        progress.payload[2],
+                        progress.payload[3],
+                    ]) as usize
+                } else {
+                    0
                 };
-                self.begin_reply(Status::Ok, &[last_install(), stage]);
+                let mut body = [0u8; 64];
+                body[..4].copy_from_slice(&(crate::logbuf::len() as u32).to_le_bytes());
+                body[4] = if crate::logbuf::wrapped() {
+                    catcard_usb::log_flags::WRAPPED
+                } else {
+                    0
+                };
+                // A page has to fit one frame: a reply's first frame carries
+                // `START_PAYLOAD` bytes, and anything past that is dropped by the writer
+                // while the header still promises it -- which reads as a device that
+                // stopped answering.
+                let end = catcard_usb::START_PAYLOAD.min(body.len());
+                let n = crate::logbuf::read(offset, &mut body[5..end]);
+                self.begin_reply(Status::Ok, &body[..5 + n]);
             }
             Some(Opcode::Ping) => {
                 let n = progress.payload.len().min(64);
@@ -340,6 +355,12 @@ impl UsbTask {
             Ok(approval) => {
                 let mut body = [0u8; 64];
                 let n = describe(&approval, &mut body);
+                crate::catlog!(
+                    "usb: offered {} bytes, verified {}, older {}",
+                    approval.length,
+                    approval.is_verified(),
+                    approval.older_than_running
+                );
                 self.stage = Stage::Offered { staged, approval };
                 self.begin_reply(Status::Ok, &body[..n]);
             }
@@ -402,7 +423,12 @@ impl UsbTask {
     fn begin_reply(&mut self, status: Status, body: &[u8]) {
         self.last_status = status as u16;
         let mut buf = [0u8; 64];
-        let n = body.len().min(64);
+        // Clamped to what a single frame carries, not to the report size. The reply
+        // writer emits one frame and marks the reply sent, so a longer body loses its
+        // tail while the frame header still declares the full length -- and a host that
+        // believes the header waits for a continuation that is never coming. That is
+        // indistinguishable from a device that died, which is how it was found.
+        let n = body.len().min(catcard_usb::START_PAYLOAD);
         buf[..n].copy_from_slice(&body[..n]);
         self.reply = Some(ReplyState {
             status,
@@ -421,8 +447,8 @@ impl UsbTask {
             return;
         }
         let mut w = Writer::response(r.status, &r.body[..r.len]);
-        // Replies are at most 64 bytes, so they always fit one frame. The loop shape is
-        // kept so a longer reply later cannot silently lose its tail.
+        // One frame, because `begin_reply` clamps a body to what one carries. The loop
+        // shape is kept so a multi-frame reply later cannot silently lose its tail.
         if w.next(&mut self.outbox) {
             self.outbox_len = REPORT_LEN;
             r.sent = true;
@@ -549,21 +575,6 @@ pub fn pump() -> bool {
 pub fn otg_regs() -> Option<[u32; 6]> {
     // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
     task().map(|t| unsafe { t.otg.debug_regs() })
-}
-
-/// Why the last install attempt failed. `install::NONE` until one does.
-static mut LAST_INSTALL: u8 = catcard_usb::install::NONE;
-
-/// Record why an install did not happen, so a device with no screen can still say.
-pub fn set_last_install(code: u8) {
-    // SAFETY: single-threaded; nothing reads it in interrupt context.
-    unsafe { *core::ptr::addr_of_mut!(LAST_INSTALL) = code }
-}
-
-/// The last install result.
-pub fn last_install() -> u8 {
-    // SAFETY: as above.
-    unsafe { *core::ptr::addr_of!(LAST_INSTALL) }
 }
 
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.

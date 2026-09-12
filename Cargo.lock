@@ -147,6 +147,7 @@ dependencies = [
  "catcard-entropy",
  "catcard-fwhdr",
  "catcard-hal",
+ "catcard-log",
  "catcard-pin",
  "catcard-sd",
  "catcard-ui",
@@ -188,6 +189,10 @@ dependencies = [
  "k256",
  "sha2",
 ]
+
+[[package]]
+name = "catcard-log"
+version = "7.0.0"
 
 [[package]]
 name = "catcard-pin"

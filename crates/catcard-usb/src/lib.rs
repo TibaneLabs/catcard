@@ -93,49 +93,44 @@ pub enum Opcode {
     /// firmware before verifying it. Separate from the offer so that approval is a
     /// distinct act, and so a host cannot install by accident.
     UpgradeCommit = 0x0011,
-    /// What happened the last time an install was attempted.
+    /// Page out the device's log.
     ///
-    /// Exists because a device whose screen is dark cannot say. The install path ends
-    /// either in a reboot or in a message on a panel — and when the panel is the thing
-    /// that is broken, the only honest answer to "did it work?" was silence, which is
-    /// indistinguishable from a host that never asked.
-    LastInstall = 0x0012,
-}
-
-/// Why the last install attempt did not install anything.
-///
-/// The device reboots on success, so there is no success code: a device that can answer
-/// this at all did not install.
-pub mod install {
-    /// No install has been attempted since boot.
-    pub const NONE: u8 = 0;
-    /// The bootloader's own verification rejected the staged image (`gate 18/7`, -112).
-    pub const REFUSED_BY_BOOTLOADER: u8 = 1;
-    /// The login had gone stale, so the authorisation could not be signed.
-    pub const STALE_LOGIN: u8 = 2;
-    /// The secure element wanted more time.
-    pub const RATE_LIMITED: u8 = 3;
-    /// The callgate itself could not be reached.
-    pub const GATE_UNREACHABLE: u8 = 4;
-    /// Staging failed: the area refused the write, or did not read back what was
-    /// written. On mk4 and later that is what an unmapped PSRAM looks like.
-    pub const STAGING_FAILED: u8 = 5;
-    /// Refused for a reason with no more specific code.
-    pub const REFUSED: u8 = 6;
+    /// The payload is a `u32` offset counted from the oldest byte held; the reply is
+    /// `[u32 total][u8 flags][bytes...]`, where `flags` bit 0 means the log has wrapped
+    /// and dropped its oldest lines. A host reads with rising offsets until a reply
+    /// comes back empty.
+    ///
+    /// Exists because every other diagnostic this firmware has ends on a screen, and a
+    /// device whose panel is dark can still answer this.
+    ///
+    /// Carries nothing secret: see `logbuf`.
+    ReadLog = 0x0012,
 }
 
 impl Opcode {
+    /// Decode a wire opcode, or `None` if this build does not know it.
+    ///
+    /// Explicit rather than derived: an unknown opcode must be answerable with
+    /// `UnknownOpcode` rather than being mistaken for a neighbour.
     pub const fn from_u16(v: u16) -> Option<Self> {
         Some(match v {
             0x0001 => Opcode::Ping,
             0x0002 => Opcode::Identify,
             0x0010 => Opcode::UpgradeOffer,
             0x0011 => Opcode::UpgradeCommit,
-            0x0012 => Opcode::LastInstall,
+            0x0012 => Opcode::ReadLog,
             0x0020 => Opcode::InjectKey,
             _ => return None,
         })
     }
+}
+
+/// Bits in the flags byte of a [`Opcode::ReadLog`] reply.
+pub mod log_flags {
+    /// The log filled up and dropped its oldest lines, so the first line held is not the
+    /// first line written. Worth saying: a truncated boot log that looks complete is how
+    /// a reader concludes the wrong thing about what happened first.
+    pub const WRAPPED: u8 = 1 << 0;
 }
 
 /// The `x` key, in an [`Opcode::InjectKey`] payload.

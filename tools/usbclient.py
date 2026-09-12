@@ -26,7 +26,6 @@ KIND_START, KIND_CONT = 1, 2
 START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
 
 PING, IDENTIFY, UPGRADE_OFFER, UPGRADE_COMMIT = 0x0001, 0x0002, 0x0010, 0x0011
-LAST_INSTALL = 0x0012
 INJECT_KEY = 0x0020
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
 
@@ -354,47 +353,45 @@ def find_hidraw(vid=VID, pid=PID):
     return out
 
 
-# Why the last install did not install, matching `catcard_usb::install`. There is no
-# success code: a device that can answer at all did not install.
-INSTALL_WHY = {
-    0: "nothing attempted since boot",
-    1: "the bootloader refused the staged image (gate 18/7 said -112)",
-    2: "the login had gone stale",
-    3: "rate limited by the secure element",
-    4: "the callgate was unreachable",
-    5: "staging failed: the area would not take it, or did not read back",
-    6: "refused, no more specific reason",
-}
-
-# What the upgrade state machine is doing, which says whether an offer is still waiting.
-INSTALL_STAGE = {
-    0: "idle",
-    1: "receiving an image",
-    2: "offered, waiting for someone to approve it on the device",
-    3: "approved",
-}
+READ_LOG = 0x0012
 
 
-def install_status(s):
-    """(why, stage) of the last install attempt, or None if unsupported."""
-    st, body = request(s, LAST_INSTALL)
-    if st != 0 or len(body) < 2:
-        return None
-    return body[0], body[1]
+def fetch_log(s):
+    """The device's log, oldest first, as text.
+
+    Paged because a reply is one 64-byte report. The device reports the total and
+    whether it wrapped, so a truncated boot log cannot be mistaken for a complete one.
+    """
+    out = bytearray()
+    at = 0
+    total, wrapped = None, False
+    while True:
+        st, body = request(s, READ_LOG, struct.pack("<I", at))
+        if st != 0 or len(body) < 5:
+            break
+        total = struct.unpack("<I", body[:4])[0]
+        wrapped = bool(body[4] & 1)
+        chunk = body[5:]
+        if not chunk:
+            break
+        out += chunk
+        at += len(chunk)
+        if total is not None and at >= total:
+            break
+    return bytes(out), total, wrapped
 
 
-def report_install_status(s):
-    """Print why an install did not happen. For a device with no working screen."""
-    got = install_status(s)
-    if got is None:
-        print("install   device is too old to say why")
+def print_log(s):
+    text, total, wrapped = fetch_log(s)
+    if total is None:
+        print("log       device does not keep one")
         return
-    why, stage = got
-    # Unknown values are printed as raw numbers rather than mapped to the nearest known
-    # name: a wrong label here would be worse than no label, because this screen is the
-    # only thing a dark device can say.
-    print(f"install   last attempt: {INSTALL_WHY.get(why, f'unknown code {why}')}")
-    print(f"install   upgrade state: {INSTALL_STAGE.get(stage, f'unknown code {stage}')}")
+    if wrapped:
+        print(f"log       {total} bytes, WRAPPED -- oldest lines were dropped")
+    else:
+        print(f"log       {total} bytes")
+    for line in text.decode(errors="replace").splitlines():
+        print(f"  | {line}")
 
 
 def connect(path, timeout=300.0):
@@ -462,9 +459,10 @@ def main(path, image=None):
         print(f"identify  status={STATUS.get(st, st)}")
         ok = False
 
-    if "--why" in sys.argv:
-        # Just ask what happened. For a device whose screen cannot be read.
-        report_install_status(s)
+    if "--log" in sys.argv:
+        # The whole point of the log: a device whose screen cannot be read can still say
+        # what happened to it.
+        print_log(s)
         return 0
 
     if "--drive" in sys.argv:
@@ -536,8 +534,8 @@ def main(path, image=None):
                     print("approved  device stopped answering: it reset to install")
                 else:
                     print("approved  but the device is still answering -- no reset")
-                    # The device is up, so it can be asked why rather than guessed at.
-                    report_install_status(s)
+                    # The device is up, so it can be asked rather than guessed at.
+                    print_log(s)
                     ok = False
                 # The reset only proves the approval landed. Whether the image was
                 # actually installed is a different claim, and the only way to check it

@@ -25,6 +25,8 @@ use cortex_m_rt::entry;
 mod boot;
 mod display;
 mod keypad;
+#[macro_use]
+mod logbuf;
 mod menu;
 mod panic;
 mod pinentry;

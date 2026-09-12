@@ -204,6 +204,7 @@ unsafe fn enable_panel_rail() {
             Speed::Low,
         );
         gpio::write(pin, true);
+        crate::catlog!("display: V12EN (PC1) driven high, mk5 strap low");
         // Let the rail come up before the panel is spoken to. 40 ms at the MSI reset
         // default; a boost converter needs milliseconds, not microseconds.
         catcard_hal::dwt::delay_cycles(160_000);
