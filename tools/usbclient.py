@@ -26,6 +26,7 @@ KIND_START, KIND_CONT = 1, 2
 START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
 
 PING, IDENTIFY, UPGRADE_OFFER, UPGRADE_COMMIT = 0x0001, 0x0002, 0x0010, 0x0011
+LAST_INSTALL = 0x0012
 INJECT_KEY = 0x0020
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
 
@@ -55,6 +56,19 @@ def press(sock, keys, settle=0.35, expect_reply=True):
             for f in frames(INJECT_KEY, bytes([key_byte(k)])):
                 sock.sendall(f)
             time.sleep(settle)
+            # Take the acknowledgement if one comes, and throw it away. Not waiting for
+            # it is the point -- the device may be rebooting -- but leaving it unread
+            # shifts every later reply by one message, and the next thing read is the
+            # answer to the previous question. That is how an install diagnostic came
+            # back reading `117, 112`: the first two bytes of an earlier ping echo.
+            was = sock.gettimeout()
+            try:
+                sock.settimeout(2.0)
+                recv_report(sock)
+            except (TimeoutError, EOFError, OSError):
+                pass
+            finally:
+                sock.settimeout(was)
             continue
         try:
             st, _ = request(sock, INJECT_KEY, bytes([key_byte(k)]))
@@ -298,6 +312,9 @@ class HidRawPort:
     def settimeout(self, t):
         self.timeout = t
 
+    def gettimeout(self):
+        return self.timeout
+
     def sendall(self, data):
         # The report descriptor declares no report ID, so hidraw wants a leading 0.
         os.write(self.fd, b"\x00" + data)
@@ -335,6 +352,49 @@ def find_hidraw(vid=VID, pid=PID):
                 if len(parts) == 3 and int(parts[1], 16) == vid and int(parts[2], 16) == pid:
                     out.append("/dev/" + node.rsplit("/", 1)[1])
     return out
+
+
+# Why the last install did not install, matching `catcard_usb::install`. There is no
+# success code: a device that can answer at all did not install.
+INSTALL_WHY = {
+    0: "nothing attempted since boot",
+    1: "the bootloader refused the staged image (gate 18/7 said -112)",
+    2: "the login had gone stale",
+    3: "rate limited by the secure element",
+    4: "the callgate was unreachable",
+    5: "staging failed: the area would not take it, or did not read back",
+    6: "refused, no more specific reason",
+}
+
+# What the upgrade state machine is doing, which says whether an offer is still waiting.
+INSTALL_STAGE = {
+    0: "idle",
+    1: "receiving an image",
+    2: "offered, waiting for someone to approve it on the device",
+    3: "approved",
+}
+
+
+def install_status(s):
+    """(why, stage) of the last install attempt, or None if unsupported."""
+    st, body = request(s, LAST_INSTALL)
+    if st != 0 or len(body) < 2:
+        return None
+    return body[0], body[1]
+
+
+def report_install_status(s):
+    """Print why an install did not happen. For a device with no working screen."""
+    got = install_status(s)
+    if got is None:
+        print("install   device is too old to say why")
+        return
+    why, stage = got
+    # Unknown values are printed as raw numbers rather than mapped to the nearest known
+    # name: a wrong label here would be worse than no label, because this screen is the
+    # only thing a dark device can say.
+    print(f"install   last attempt: {INSTALL_WHY.get(why, f'unknown code {why}')}")
+    print(f"install   upgrade state: {INSTALL_STAGE.get(stage, f'unknown code {stage}')}")
 
 
 def connect(path, timeout=300.0):
@@ -401,6 +461,11 @@ def main(path, image=None):
     else:
         print(f"identify  status={STATUS.get(st, st)}")
         ok = False
+
+    if "--why" in sys.argv:
+        # Just ask what happened. For a device whose screen cannot be read.
+        report_install_status(s)
+        return 0
 
     if "--drive" in sys.argv:
         # The whole device over USB, with nothing touching the keypad: past the selftest
@@ -471,6 +536,8 @@ def main(path, image=None):
                     print("approved  device stopped answering: it reset to install")
                 else:
                     print("approved  but the device is still answering -- no reset")
+                    # The device is up, so it can be asked why rather than guessed at.
+                    report_install_status(s)
                     ok = False
                 # The reset only proves the approval landed. Whether the image was
                 # actually installed is a different claim, and the only way to check it

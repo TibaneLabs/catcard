@@ -289,6 +289,19 @@ impl UsbTask {
         // whichever stage we are in.
         let opcode = progress.started.and_then(|m| Opcode::from_u16(m.opcode));
         match opcode {
+            // Two bytes: why the last install failed, and what the upgrade state
+            // machine is doing now. The second is what says whether an offer is sitting
+            // on the screen waiting for someone to approve it -- which, on a device with
+            // no screen, nobody can see.
+            Some(Opcode::LastInstall) => {
+                let stage = match self.stage {
+                    Stage::Idle => 0u8,
+                    Stage::Receiving(_) => 1,
+                    Stage::Offered { .. } => 2,
+                    Stage::Approved => 3,
+                };
+                self.begin_reply(Status::Ok, &[last_install(), stage]);
+            }
             Some(Opcode::Ping) => {
                 let n = progress.payload.len().min(64);
                 let mut body = [0u8; 64];
@@ -536,6 +549,21 @@ pub fn pump() -> bool {
 pub fn otg_regs() -> Option<[u32; 6]> {
     // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
     task().map(|t| unsafe { t.otg.debug_regs() })
+}
+
+/// Why the last install attempt failed. `install::NONE` until one does.
+static mut LAST_INSTALL: u8 = catcard_usb::install::NONE;
+
+/// Record why an install did not happen, so a device with no screen can still say.
+pub fn set_last_install(code: u8) {
+    // SAFETY: single-threaded; nothing reads it in interrupt context.
+    unsafe { *core::ptr::addr_of_mut!(LAST_INSTALL) = code }
+}
+
+/// The last install result.
+pub fn last_install() -> u8 {
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of!(LAST_INSTALL) }
 }
 
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.

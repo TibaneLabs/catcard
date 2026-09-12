@@ -93,6 +93,35 @@ pub enum Opcode {
     /// firmware before verifying it. Separate from the offer so that approval is a
     /// distinct act, and so a host cannot install by accident.
     UpgradeCommit = 0x0011,
+    /// What happened the last time an install was attempted.
+    ///
+    /// Exists because a device whose screen is dark cannot say. The install path ends
+    /// either in a reboot or in a message on a panel — and when the panel is the thing
+    /// that is broken, the only honest answer to "did it work?" was silence, which is
+    /// indistinguishable from a host that never asked.
+    LastInstall = 0x0012,
+}
+
+/// Why the last install attempt did not install anything.
+///
+/// The device reboots on success, so there is no success code: a device that can answer
+/// this at all did not install.
+pub mod install {
+    /// No install has been attempted since boot.
+    pub const NONE: u8 = 0;
+    /// The bootloader's own verification rejected the staged image (`gate 18/7`, -112).
+    pub const REFUSED_BY_BOOTLOADER: u8 = 1;
+    /// The login had gone stale, so the authorisation could not be signed.
+    pub const STALE_LOGIN: u8 = 2;
+    /// The secure element wanted more time.
+    pub const RATE_LIMITED: u8 = 3;
+    /// The callgate itself could not be reached.
+    pub const GATE_UNREACHABLE: u8 = 4;
+    /// Staging failed: the area refused the write, or did not read back what was
+    /// written. On mk4 and later that is what an unmapped PSRAM looks like.
+    pub const STAGING_FAILED: u8 = 5;
+    /// Refused for a reason with no more specific code.
+    pub const REFUSED: u8 = 6;
 }
 
 impl Opcode {
@@ -102,6 +131,7 @@ impl Opcode {
             0x0002 => Opcode::Identify,
             0x0010 => Opcode::UpgradeOffer,
             0x0011 => Opcode::UpgradeCommit,
+            0x0012 => Opcode::LastInstall,
             0x0020 => Opcode::InjectKey,
             _ => return None,
         })
