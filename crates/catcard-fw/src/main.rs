@@ -34,7 +34,31 @@ mod splash;
 mod usbtask;
 
 /// Board this image was built for, from `build.rs`.
+/// The board this was *built* for, from the selected feature.
 pub const BOARD_NAME: &str = env!("CATCARD_BOARD");
+
+/// The board this is *running* on.
+///
+/// One image can carry both the mk4 and mk5 `hw_compat` bits and install on either, so
+/// the build-time name is not always the truth. mk5 pulls `STRAP_MK5` low; reading it
+/// means a combined image identifies itself correctly on screen, over USB, and in any
+/// log taken off it, rather than insisting it is whichever board it was compiled for.
+///
+/// Only meaningful between mk4 and mk5, which are the same board to within this strap.
+/// Every other board returns its own name unread: mk3 is a different MCU, and Q1
+/// differs in ways no strap covers.
+pub fn running_board() -> &'static str {
+    if !matches!(BOARD_NAME, "mk4" | "mk5") {
+        return BOARD_NAME;
+    }
+    // SAFETY: PE0 is not claimed by anything else on these boards -- the reference
+    // lists the straps as unused by firmware -- and this only reads.
+    if unsafe { catcard_hal::strap::is_mk5() } {
+        "mk5"
+    } else {
+        "mk4"
+    }
+}
 
 /// Version reported to the host and written into the signed header.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

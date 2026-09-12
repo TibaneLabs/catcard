@@ -470,6 +470,23 @@ person can actually see.
 **since the first splash was drawn**, so the wait is only for the time bring-up did not
 already use.
 
+## One image for mk4 and mk5, and it knows which it is on
+
+Coinkite ship a single build for both, which works because `hw_compat` is a bitmask:
+`catcard-image build --hw-compat mk4,mk5` declares both bits and verifies as installable
+on either while q1 still refuses it. `out/catcard-mk4-mk5.dfu` is that image.
+
+The cost of one image is identity, and it is worth being concrete about: `BOARD` is a
+compile-time constant, so a combined image would report whichever board it was compiled
+for — an mk5 insisting it was an mk4 on its own screen, in `Identify`, and in every log
+taken off it. `STRAP_MK5` (`PE0`, open on mk1-4, pulled low on mk5) settles it in
+hardware, and `running_board()` reads it. `Debug → Boot` shows `board mk5 (built mk4)`
+when they differ.
+
+Read with our own pull-up, so an open strap reads high and only a board actively pulling
+it down reads mk5 — a missing connection cannot be mistaken for a board revision.
+Confirmed in the emulator: an mk4 build still reports `board=mk4` over USB.
+
 ## mk5 — added as its own board, and driven end to end
 
 mk5 is electrically an mk4: same MCU, pins, PSRAM, secure elements and firmware base,

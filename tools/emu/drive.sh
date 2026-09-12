@@ -25,8 +25,17 @@ cd "$(dirname "$0")/../.."
 
 cargo "fw-$BOARD-bringup" || exit 1
 FW=target/thumbv7em-none-eabihf/release/catcard-fw
+
+# mk4 and mk5 are the same board to within a strap, so they get one image carrying both
+# `hw_compat` bits -- the same thing Coinkite ship. The firmware reads STRAP_MK5 at
+# runtime, so the one image still names the board it is actually on.
+case "$BOARD" in
+mk4 | mk5) IMAGE="out/catcard-mk4-mk5.dfu"; COMPAT="--hw-compat mk4,mk5" ;;
+*) IMAGE="out/catcard-$BOARD.dfu"; COMPAT="" ;;
+esac
+# shellcheck disable=SC2086
 cargo run -q -p catcard-image -- build "$FW" --board "$BOARD" --version 7.0.0 \
-    --dfu "out/catcard-$BOARD.dfu" || exit 1
+    $COMPAT --dfu "$IMAGE" || exit 1
 # The image offered over USB is the same file that was just built -- one version, one
 # artefact, nothing sitting in `out/` that could be mistaken for the thing to flash.
 #
@@ -38,11 +47,11 @@ cargo run -q -p catcard-image -- build "$FW" --board "$BOARD" --version 7.0.0 \
 # Only for boards that can stage: mk3 has nowhere to put an image.
 OFFER=""
 case "$BOARD" in
-mk4 | mk5 | q1) OFFER="out/catcard-$BOARD.dfu" ;;
+mk4 | mk5 | q1) OFFER="$IMAGE" ;;
 esac
 
 SOCK=$(mktemp -u /tmp/catcard-XXXX.sock)
-"$EMU" -q run --dfu "out/catcard-$BOARD.dfu" --bootloader "$BOOTLOADER" --board "$BOARD" \
+"$EMU" -q run --dfu "$IMAGE" --bootloader "$BOOTLOADER" --board "$BOARD" \
     --reboot --usb-hid "$SOCK" --run-for 600000000000 >out/drive.log 2>&1 &
 PID=$!
 python3 -u tools/usbclient.py "$SOCK" $OFFER --drive "${@:3}"

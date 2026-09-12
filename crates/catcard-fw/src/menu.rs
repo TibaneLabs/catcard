@@ -560,7 +560,13 @@ fn boot_screen(panel: &mut display::Panel, report: &BootReport) {
     let _ = lines.push(l);
 
     let mut l = Line::new();
-    let _ = write!(l, "board {}", catcard_board::BOARD.name);
+    // What it is running on, and what it was built for, when those differ.
+    let running = crate::running_board();
+    let _ = if running == crate::BOARD_NAME {
+        write!(l, "board {running}")
+    } else {
+        write!(l, "board {running} (built {})", crate::BOARD_NAME)
+    };
     let _ = lines.push(l);
     info(panel, "Boot", &lines);
 }

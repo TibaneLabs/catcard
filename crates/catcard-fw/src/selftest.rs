@@ -5,7 +5,7 @@ use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
 use catcard_ui::text::{centred, draw_text, draw_wrapped};
 use catcard_ui::Mono128x64;
 
-use crate::{display, keypad, BootReport, BOARD_NAME, VERSION};
+use crate::{display, keypad, BootReport, VERSION};
 
 /// Observable state, laid out so a debugger (or, later, the selftest screen) can read
 /// the outcome of bring-up without a protocol.
@@ -47,7 +47,7 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
     let title = &peep7x14::FONT;
     let body = &misc4x6::FONT;
     draw_text(&mut fb, title, centred(title, "CatCard", 128), 0, "CatCard");
-    draw_text(&mut fb, body, 0, 16, BOARD_NAME);
+    draw_text(&mut fb, body, 0, 16, crate::running_board());
     draw_text(&mut fb, body, 20, 16, VERSION);
 
     draw_text(

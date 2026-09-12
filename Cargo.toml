@@ -15,6 +15,7 @@ members = [
     "crates/catcard-sign",
     "crates/catcard-upgrade",
     "crates/catcard-usb",
+    "crates/catcard-sd",
     "tools/catcard-image",
 ]
 

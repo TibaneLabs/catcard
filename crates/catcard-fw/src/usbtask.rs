@@ -28,7 +28,7 @@ use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Reject, Staged};
 use catcard_usb::{FrameError, Opcode, Reassembler, Status, Writer, PROTOCOL_VERSION, REPORT_LEN};
 
-use crate::{BOARD_NAME, VERSION};
+use crate::VERSION;
 
 /// What the task is in the middle of.
 enum Stage {
@@ -370,7 +370,7 @@ impl UsbTask {
             0
         };
         at += 1;
-        for s in [BOARD_NAME, VERSION] {
+        for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
             let n = b.len().min(31);
             body[at] = n as u8;
