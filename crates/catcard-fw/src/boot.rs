@@ -19,6 +19,19 @@ use crate::{display, entropy_policy, splash, BootReport};
 /// agree that they are alive.
 const TRNG_BYTES: usize = 64;
 
+/// How long the finished splash stays up before the next screen replaces it.
+///
+/// Bring-up takes a few milliseconds on real hardware, so the splash was drawn and
+/// overwritten faster than anyone could read it -- it only ever looked right under the
+/// emulator, which is slow enough to hide the problem. The delay is deliberate and goes
+/// here rather than in the drawing code, because it is about the boot sequence being
+/// too fast to watch, not about how the screen is painted.
+///
+/// The core runs on the MSI reset default of 4 MHz (RM0351 §6.2.2 [C]), which makes this
+/// about 1.5 seconds. It is a cycle count, so programming the PLL changes what it means
+/// -- see `docs/HARDWARE-OPEN-ITEMS.md`.
+const SPLASH_MIN_CYCLES: u32 = 6_000_000;
+
 /// Bring the machine up, showing the splash as it goes.
 ///
 /// `hal` comes in already initialised because the panel's reset pulse needs the cycle
@@ -30,6 +43,7 @@ pub fn bring_up(
     mut panel: Option<&mut display::Panel>,
 ) -> BootReport {
     let dwt_running = dwt::is_running();
+    let splash_started = dwt::cycles();
     let step = |panel: &mut Option<&mut display::Panel>, pct: u8| {
         if let Some(p) = panel.as_deref_mut() {
             splash::show(p, pct);
@@ -69,6 +83,18 @@ pub fn bring_up(
     step(&mut panel, 95);
     let entropy = pool.check().map(|()| pool.credited_bits());
     step(&mut panel, 100);
+
+    // Hold the finished splash, measured from when the first one was drawn rather than
+    // slept for outright: bring-up has already used some of that time, and on a slower
+    // board or a longer boot it may have used all of it, in which case this waits for
+    // nothing. Skipped when there is no panel to look at, or no cycle counter to
+    // measure with.
+    if panel.is_some() && dwt_running {
+        let elapsed = dwt::cycles().wrapping_sub(splash_started);
+        if let Some(remaining) = SPLASH_MIN_CYCLES.checked_sub(elapsed) {
+            dwt::delay_cycles(remaining);
+        }
+    }
 
     BootReport {
         hal: hal.map(|_| ()),

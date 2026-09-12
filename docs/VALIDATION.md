@@ -392,6 +392,49 @@ Offer an image built with a *different* `--version` than the running one. Instal
 byte-identical image over itself cannot be told apart from not installing at all, and an
 earlier version of this test reported success for exactly that reason.
 
+## First boot on real mk4 hardware — confirmed
+
+It boots. The selftest screen reads:
+
+```
+                CatCard
+MK4  7.0.0
+HAL  ok
+DWT  ok
+RNG  ok   832 bit
+
+y  continue            [USB KEYS]
+```
+
+That single screen settles a list of things this project could only infer before:
+
+| | |
+|---|---|
+| SSD1306 on SPI1, `RESET=PA6 DC=PA8 CS=PA4` | the panel draws — mk4 display wiring is right |
+| numpad `rows PD8..PD11`, `cols PB0..PB2`, mounted rotated | `y` advances the screen, so the map and the 180° flip are right |
+| HSI48 | `HAL ok`, and the RNG cannot assert DRDY without it |
+| STM32 TRNG + callgate 26 | `RNG ok 832 bit`: the pool met its policy from real silicon |
+| callgate entry discovery at `0x0800_0040` | reached, or there would be no SE entropy and no PIN screen |
+| the PIN path | it gets past unlock to the idle screen |
+| header version 7.0.0 | stock staged it, which it refuses below 3 |
+
+**USB is the exception: the idle screen reports `usb down in 0 out 0`.** The device never
+enumerated, so key injection — the escape route the bring-up build exists for — is inert
+on hardware. Not a clock fault (`HAL ok` means HSI48 started) and not VBUS sensing
+(`GCCFG_VBDEN` is already cleared with `GOTGCTL` forcing B-session valid, for exactly the
+boards that do not route it). Under investigation.
+
+### The splash was invisible
+
+Bring-up takes a few milliseconds on silicon, so the splash was drawn and overwritten
+faster than it could be read. It only ever looked right under the emulator, which is slow
+enough to hide the problem — a reminder that emulator timing proves nothing about what a
+person can actually see.
+
+`bring_up` now holds the finished splash until at least `SPLASH_MIN_CYCLES` have passed
+**since the first splash was drawn**, so the wait is only for the time bring-up did not
+already use.
+
 ## The whole device driven over USB, with nothing touching the keypad — confirmed
 
 Insurance for the first run on real hardware, where the keypad map is inferred from

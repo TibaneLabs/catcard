@@ -420,6 +420,12 @@ def main(path, image=None):
             enter_pin()
         st, body = request(s, IDENTIFY)
         info = identify(body)
+        if info is None:
+            # Printing "?" here told me nothing when it happened. The status and the
+            # body are what say whether the device refused, answered something else, or
+            # answered nothing at all.
+            print(f"unlocked  ? identify status={STATUS.get(st, st)} "
+                  f"body={len(body)}B {body[:24].hex()}")
         print(f"unlocked  {info[1] if info else '?'} running={info[4] if info else '?'}")
         ok &= bool(info and info[1])
 
