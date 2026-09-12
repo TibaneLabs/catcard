@@ -89,7 +89,19 @@ impl UsbTask {
     /// already running.
     pub unsafe fn init(serial: &'static str) -> Option<Self> {
         // SAFETY: the caller promises this is the only initialisation.
-        let otg = unsafe { Otg::init(BOARD.usb.dm, BOARD.usb.dp, serial) }.ok()?;
+        let otg = match unsafe { Otg::init(BOARD.usb.dm, BOARD.usb.dp, serial) } {
+            Ok(otg) => otg,
+            Err(e) => {
+                // Keep the reason. Discarding it left a device that said "usb down" and
+                // nothing else, which is indistinguishable from a host that never
+                // spoke -- and on hardware there is no debugger to ask instead.
+                set_init_fault(match e {
+                    catcard_hal::otg::Error::UsbSupplyNotValid => "vddusb",
+                    catcard_hal::otg::Error::CoreStuck => "core",
+                });
+                return None;
+            }
+        };
         Some(Self {
             otg,
             #[cfg(feature = "usb-key-injection")]
@@ -501,6 +513,21 @@ pub fn pump() -> bool {
     let busy = unsafe { t.poll() };
     publish_status(t);
     busy
+}
+
+/// Why USB did not come up, as a word that fits on the screen. Empty if it did.
+static mut INIT_FAULT: &str = "";
+
+fn set_init_fault(why: &'static str) {
+    // SAFETY: written once during bring-up, before anything else can read it; the boot
+    // path is single-threaded and no interrupt touches it.
+    unsafe { *core::ptr::addr_of_mut!(INIT_FAULT) = why }
+}
+
+/// Why USB did not come up, or `""`.
+pub fn init_fault() -> &'static str {
+    // SAFETY: as above -- written once, read after.
+    unsafe { *core::ptr::addr_of!(INIT_FAULT) }
 }
 
 /// The task, if USB came up.

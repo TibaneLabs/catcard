@@ -303,6 +303,36 @@ the reference had these swapped).
 
 ---
 
+## `SYSCFG_CFGR3.ENREF_HSI48` — in the reference, not implemented
+
+`install-and-usb-transport.md §OTG bring-up` step 3 says to set
+`SYSCFG->CFGR3 |= SYSCFG_CFGR3_ENREF_HSI48` — "enable the VREFINT reference HSI48
+requires on L4" — and warns that omitting step 2 or 3 gives a device that runs but never
+enumerates.
+
+**Step 2 was the bug and is fixed** (the PWR clock gate, below). Step 3 is not
+implemented, deliberately, for two reasons:
+
+- **The hardware says it is not needed to start HSI48.** On the first mk4 boot the
+  selftest screen read `HAL ok` and `RNG ok 832 bit`. `enable_hsi48` spins on
+  `RCC_CRRCR.HSI48RDY` with a bounded wait and propagates failure into `hal`, and the
+  RNG cannot assert DRDY without CLK48. So HSI48 started and was driving the RNG with
+  nothing written to SYSCFG.
+- **We cannot place the register.** `SYSCFG_CFGR3` is not in the STM32L4/L4+ SYSCFG
+  block as we have it — that layout is `MEMRMP, CFGR1, EXTICR[4], SCSR, CFGR2, SWPR,
+  SKR, SWPR2`. A `CFGR3` carrying `ENREF_HSI48` is an STM32L0 register. Writing to a
+  guessed offset in SYSCFG is not a harmless no-op; it lands on whatever *is* there.
+
+So this may be an L0 detail that travelled into an L4 document, or it may be real and
+merely not required for HSI48 to *start* — "accurate enough for the RNG" and "accurate
+enough for USB" are not the same claim, and USB is the pickier of the two.
+
+**How to resolve.** Confirm against RM0432 whether `SYSCFG_CFGR3` exists on STM32L4S5 and
+what its offset is. If it does, implement it with a citation. If USB now enumerates with
+step 2 alone, that is also an answer.
+
+---
+
 ## SE1 single-wire UART pin; SE2 I²C addresses
 
 Not needed while all secret operations go through the callgate, which is the design.

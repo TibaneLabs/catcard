@@ -163,6 +163,9 @@ const RESET_TRIES: u32 = 200_000;
 pub enum Error {
     /// The AHB never went idle, or the soft reset never completed.
     CoreStuck,
+    /// `PWR_CR2.USV` would not stay set, so VDDUSB is not validated and the transceiver
+    /// has no supply. The device cannot appear on the bus at all in that state.
+    UsbSupplyNotValid,
 }
 
 /// What a poll produced.
@@ -203,7 +206,7 @@ impl Otg {
     pub unsafe fn init(dm: Pin, dp: Pin, serial: &'static str) -> Result<Self, Error> {
         // SAFETY: the caller promises exclusive ownership of the peripheral and pins.
         unsafe {
-            enable_clock();
+            enable_clock()?;
             gpio::enable_port(dm.port);
             gpio::enable_port(dp.port);
             for p in [dm, dp] {
@@ -559,18 +562,38 @@ impl Otg {
 
 /// # Safety
 /// Exclusive access to RCC and PWR.
-unsafe fn enable_clock() {
+unsafe fn enable_clock() -> Result<(), Error> {
     const RCC_AHB2ENR: u32 = catcard_board::memory::fixed::RCC + 0x4C;
     const RCC_AHB2ENR_OTGFSEN: u32 = 1 << 12;
+    /// `PWREN` — the PWR peripheral's own clock gate. Source: RM0432 §RCC_APB1ENR1 [C]
+    const RCC_APB1ENR1: u32 = catcard_board::memory::fixed::RCC + 0x58;
+    const APB1ENR1_PWREN: u32 = 1 << 28;
     const PWR_CR2: u32 = catcard_board::memory::fixed::PWR + 0x04;
     /// `USV` — validate the VDDUSB supply. Without it the transceiver has no power and
     /// the device never appears on the bus. Source: RM0432 §PWR_CR2 [C]
     const PWR_CR2_USV: u32 = 1 << 10;
     // SAFETY: as documented.
     unsafe {
+        // PWR's clock first. It is off after reset, and a write to an unclocked
+        // peripheral is discarded without any indication -- so setting USV before this
+        // did nothing at all, and the only symptom was a device that never appeared on
+        // the bus. An emulator does not model APB gating, so this passed there.
+        reg::set_bits(RCC_APB1ENR1, APB1ENR1_PWREN);
+        // The gate takes effect a cycle or two later; reading back stalls until it has.
+        let _ = reg::read(RCC_APB1ENR1);
+
         reg::set_bits(PWR_CR2, PWR_CR2_USV);
+        // Read it back. This is the write whose silent failure cost a hardware round
+        // trip, and a supply that did not come up is worth an error rather than a
+        // peripheral that is initialised perfectly and connected to nothing.
+        if reg::read(PWR_CR2) & PWR_CR2_USV == 0 {
+            return Err(Error::UsbSupplyNotValid);
+        }
+
         reg::set_bits(RCC_AHB2ENR, RCC_AHB2ENR_OTGFSEN);
+        let _ = reg::read(RCC_AHB2ENR);
     }
+    Ok(())
 }
 
 /// Wait for the AHB to idle, then soft-reset the core.

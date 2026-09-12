@@ -418,7 +418,24 @@ That single screen settles a list of things this project could only infer before
 | the PIN path | it gets past unlock to the idle screen |
 | header version 7.0.0 | stock staged it, which it refuses below 3 |
 
-**USB is the exception: the idle screen reports `usb down in 0 out 0`.** The device never
+**USB was the exception: the idle screen reported `usb down in 0 out 0`,** and the host
+saw nothing at all — no `lsusb` entry, nothing in `dmesg` across replugs. That is a
+device that never pulled up D+, not a protocol fault.
+
+The cause was `PWR_CR2.USV`. It was being set, but the PWR peripheral's own clock gate
+(`RCC_APB1ENR1.PWREN`) is off after reset and was never enabled — and a write to an
+unclocked peripheral is discarded with no indication. So VDDUSB was never validated, the
+transceiver had no supply, and everything downstream was initialised perfectly and
+connected to nothing.
+
+Three things made it invisible until hardware: the emulator does not model APB clock
+gating, so the write appeared to work; the register was written but never read back; and
+`Otg::init`'s error was discarded by `.ok()?`, so the device could only say "down". All
+three are fixed — the gate is enabled and read back, `USV` is verified and returns
+`UsbSupplyNotValid` if it will not stick, and the idle screen now prints the reason
+beside "down".
+
+**The original text, for the record:** The device never
 enumerated, so key injection — the escape route the bring-up build exists for — is inert
 on hardware. Not a clock fault (`HAL ok` means HSI48 started) and not VBUS sensing
 (`GCCFG_VBDEN` is already cleared with `GOTGCTL` forcing B-session valid, for exactly the

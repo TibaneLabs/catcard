@@ -178,6 +178,9 @@ fn draw_usb(panel: &mut display::Panel, head: &str, note: &str, s: (bool, u32, u
     for part in [
         "usb ",
         if s.0 { "up" } else { "down" },
+        // Only ever set when the peripheral refused to start, and then it is the whole
+        // story: "down" alone cannot be told apart from a host that never spoke.
+        usbtask::init_fault(),
         " in ",
         num3(s.1),
         " out ",
