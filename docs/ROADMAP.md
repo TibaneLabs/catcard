@@ -138,7 +138,7 @@ abstraction.
       reports at all, 4,000 cycles is as bad as none, 66,000 works. Revisit on hardware
 - [ ] mk3: no PSRAM, so staging needs the SPI-NOR pins first
 - [ ] Authenticated encryption and replay resistance over the framing
-- [x] Host tooling enough to drive it: `tools/emu/usbclient.py`
+- [x] Host tooling enough to drive it: `tools/usbclient.py`
 - [x] Self-upgrade, end to end. Confirmed twice under the emulator: our own 256 KB
       dev-signed image, and **Coldcard 5.4.5 (987 KB, production key)** — CatCard
       installing stock firmware back onto the device, which is the case that matters

@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
-"""Speak CatCard's USB protocol over the emulator's HID socket.
+"""Speak CatCard's USB protocol, to the emulator or to a real device.
+
+Two transports, because the protocol is the same either way and the point of this tool
+is that what is verified against the emulator is what runs against hardware:
+
+    tools/usbclient.py /tmp/x.sock ...      the emulator's --usb-hid socket
+    tools/usbclient.py hid ...              a real device, found by VID:PID
+    tools/usbclient.py /dev/hidraw3 ...     a real device, named outright
+
+Reading and writing /dev/hidraw* usually needs root or a udev rule -- see docs/USB.md.
 
 `ccemu --usb-hid PATH` hands the device's report pipe to whatever connects: one whole
 64-byte report per direction, with no framing of its own. This is the host half of
 `catcard-usb` -- the same framing, written independently from the doc comment rather
 than shared with the firmware, so agreement between them means something.
 """
+import glob
+import os
+import select
 import socket, struct, sys, time
 
 REPORT = 64
@@ -187,7 +199,92 @@ def came_back(sock, path, wait=900.0):
     return None
 
 
+# CatCard's own VID/PID. Source: docs/USB.md.
+VID = 0x39F2
+PID = 0x0401
+
+
+class HidRawPort:
+    """A real USB HID device, presented with the three calls a socket offers.
+
+    Duck-typed onto `socket` rather than abstracted behind an interface: every line of
+    protocol code above is then shared by the emulator and the hardware, which is the
+    only way running one proves anything about the other.
+    """
+
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDWR)
+        self.path = path
+        # Matches the socket transport: the first reply waits on the whole boot, and
+        # `main` tightens this once the device has answered once. Never None, or a
+        # device that says nothing hangs the tool with no way to tell.
+        self.timeout = 900.0
+        self._buf = b""
+
+    def settimeout(self, t):
+        self.timeout = t
+
+    def sendall(self, data):
+        # The report descriptor declares no report ID, so hidraw wants a leading 0.
+        os.write(self.fd, b"\x00" + data)
+
+    def recv(self, n):
+        # hidraw hands over one whole report per read, so a short request cannot be
+        # passed through -- it would drop the rest of the report. Buffer instead.
+        while not self._buf:
+            ready, _, _ = select.select([self.fd], [], [], self.timeout)
+            if not ready:
+                raise TimeoutError("timed out")
+            self._buf = os.read(self.fd, REPORT)
+            if not self._buf:
+                raise EOFError("device closed the port")
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def close(self):
+        os.close(self.fd)
+
+
+def find_hidraw(vid=VID, pid=PID):
+    """Every /dev/hidraw node matching a VID/PID, newest first."""
+    out = []
+    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(f"{node}/device/uevent") as f:
+                uevent = f.read()
+        except OSError:
+            continue
+        # HID_ID=0003:000039F2:00000401 -- bus:vendor:product, hex, zero-padded.
+        for line in uevent.splitlines():
+            if line.startswith("HID_ID="):
+                parts = line.split("=", 1)[1].split(":")
+                if len(parts) == 3 and int(parts[1], 16) == vid and int(parts[2], 16) == pid:
+                    out.append("/dev/" + node.rsplit("/", 1)[1])
+    return out
+
+
 def connect(path, timeout=300.0):
+    """Open the emulator socket, or a real device when asked for one."""
+    if path.startswith("/dev/hidraw"):
+        return HidRawPort(path)
+    if path in ("hid", "usb"):
+        deadline = time.time() + timeout
+        while True:
+            found = find_hidraw()
+            if found:
+                if len(found) > 1:
+                    print(f"note: {len(found)} matching devices; using {found[0]}")
+                return HidRawPort(found[0])
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"no USB device with VID:PID {VID:04x}:{PID:04x}. "
+                    "Is it plugged in, and can you read /dev/hidraw*? See docs/USB.md."
+                )
+            time.sleep(0.5)
+    return connect_unix(path, timeout)
+
+
+def connect_unix(path, timeout=300.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

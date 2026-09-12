@@ -32,7 +32,7 @@ SOCK=$(mktemp -u /tmp/catcard-XXXX.sock)
 "$EMU" -q run --dfu out/catcard-mk4.dfu --bootloader "$BOOTLOADER" --board mk4 \
     --reboot --usb-hid "$SOCK" --run-for 600000000000 >out/drive.log 2>&1 &
 PID=$!
-python3 -u tools/emu/usbclient.py "$SOCK" out/catcard-mk4-v2.bin --drive "${@:2}"
+python3 -u tools/usbclient.py "$SOCK" out/catcard-mk4-v2.bin --drive "${@:2}"
 RC=$?
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 rm -f "$SOCK"

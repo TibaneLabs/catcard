@@ -163,6 +163,38 @@ it is the signature.
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 
+### Talking to a real device
+
+`tools/usbclient.py` speaks to both the emulator and hardware, over the same protocol
+code — the transport is the only thing that differs, duck-typed onto the three calls a
+socket offers. That matters more than it sounds: if the hardware path were a separate
+tool, an emulator run would prove nothing about the device.
+
+```sh
+tools/usbclient.py /tmp/x.sock ...      # the emulator's --usb-hid socket
+tools/usbclient.py hid ...              # a real device, found by VID:PID
+tools/usbclient.py /dev/hidraw3 ...     # a real device, named outright
+```
+
+`hid` searches `/sys/class/hidraw/*/device/uevent` for `39F2:0401` and waits for one to
+appear, so it can be started before the cable goes in.
+
+**`/dev/hidraw*` is root-only by default**, which is the first thing that will stop you.
+A udev rule fixes it without `sudo` on every run:
+
+```
+# /etc/udev/rules.d/70-catcard.rules
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="39f2", ATTRS{idProduct}=="0401", TAG+="uaccess"
+```
+
+Then `sudo udevadm control --reload && sudo udevadm trigger`, and replug. `uaccess`
+grants the logged-in user access rather than a group, so nothing needs to be added to
+`plugdev`.
+
+The device sets no report ID, so hidraw takes a leading zero byte on every write; the
+client does that. Reads come back as whole 64-byte reports and are buffered, because a
+short read on hidraw discards the rest of the report rather than leaving it queued.
+
 ### A reply goes out in the poll that produced it
 
 Replies are staged into an outbox and pushed by `drain_outbox`. That used to run only at
@@ -200,7 +232,7 @@ hardware is the run where the keypad map, the display init, and the panel wiring
 still `[I]` or `[?]` — and it is also a run on a **locked production unit**, where being
 unable to type the PIN means being unable to do anything at all, including install a
 firmware that would fix the typing. A mirrored key map is a plausible mistake that costs
-the device. `--drive` in `tools/emu/usbclient.py` is the whole device driven over USB
+the device. `--drive` in `tools/usbclient.py` is the whole device driven over USB
 with nothing touching the keypad, which is what turns that class of mistake back into an
 inconvenience.
 

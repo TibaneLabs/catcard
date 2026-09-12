@@ -149,6 +149,17 @@ against the emulator before you rely on it:
 tools/emu/drive.sh <factory-bootloader.dfu>
 ```
 
+The same client drives the real device once it is running — same protocol code, only the
+transport differs:
+
+```sh
+tools/usbclient.py hid                          # ping + identify, to see it at all
+tools/usbclient.py hid out/x.bin --drive --expect-install
+```
+
+`/dev/hidraw*` is root-only until you add a udev rule; see
+[`USB.md`](USB.md#talking-to-a-real-device).
+
 It also means a host can approve its own firmware upgrade, which is why it must not
 outlive bring-up — see [`USB.md`](USB.md#key-injection-a-bring-up-crutch-with-an-expiry-date).
 The selftest screen shows `[USB KEYS]` whenever it is compiled in.
