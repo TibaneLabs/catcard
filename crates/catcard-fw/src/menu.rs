@@ -15,9 +15,13 @@
 //! names they have in the reference manual, so what is on the glass can be compared
 //! against RM0432 directly.
 //!
-//! Navigation is a cursor: `2` up, `8` down, `y` selects, `x` goes back. Those two
-//! digits sit above and below `5` on the pad, so the direction they move matches where
-//! they are under the finger.
+//! Navigation follows the arrows **printed on the keypad**: `5` up, `7` left, `8` down,
+//! `9` right. So `5`/`8` move the cursor, `9` and `y` both select, and `7` and `x` both
+//! go back.
+//!
+//! That is a fact about the hardware rather than a convention worth arguing over — the
+//! legend is on the keys, in front of whoever is holding the device, and a menu that
+//! moves some other way is simply wrong about the thing it is running on.
 //!
 //! The list scrolls rather than being capped at what fits. An earlier version drew a
 //! fixed number of rows and silently dropped the rest, which hid `Enter DFU` — the one
@@ -162,7 +166,8 @@ pub fn run(
             // transition table below.
             if let Some(items) = items_of(screen) {
                 match key {
-                    Key::Digit(2) => {
+                    // The up and down arrows on the keys.
+                    Key::Digit(5) => {
                         v.sc = v.sc.step(items.len(), MAX_LINES, false);
                         continue;
                     }
@@ -193,6 +198,14 @@ fn step(
     key: Key,
     cursor: usize,
 ) -> Screen {
+    // The right arrow goes in and the left arrow comes out, the same as `y` and `x`.
+    // Normalising here keeps every screen below written in terms of two actions rather
+    // than four keys, so a screen cannot accidentally honour one and forget the other.
+    let key = match key {
+        Key::Digit(9) => Key::Confirm,
+        Key::Digit(7) => Key::Cancel,
+        k => k,
+    };
     match screen {
         Screen::Main => match (key, cursor) {
             // "Status" is the screen behind the menu, so choosing it just redraws --
@@ -263,18 +276,19 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // number worth seeing without navigating anywhere, and losing it to a submenu
         // would undo the thing this menu exists to fix.
         Screen::Main => menu(panel, v.head, &usb_line(v.note), MAIN_ITEMS, v.sc),
-        Screen::Debug => menu(panel, "Debug", "2/8 move  y pick", DEBUG_ITEMS, v.sc),
+        Screen::Debug => menu(
+            panel,
+            "Debug",
+            "5/8 move  9 pick  7 back",
+            DEBUG_ITEMS,
+            v.sc,
+        ),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
-        Screen::ConfirmDfu => message(
-            panel,
-            "Enter DFU?",
-            "y  yes   x  no",
-            "refused on locked units",
-        ),
+        Screen::ConfirmDfu => confirm_dfu(panel),
     }
 }
 
@@ -524,6 +538,25 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
     let _ = write!(l, "x twice  back");
     let _ = lines.push(l);
     info(panel, "Keypad", &lines);
+}
+
+/// Ask before DFU, with the two keys drawn as they are printed on the caps.
+fn confirm_dfu(panel: &mut display::Panel) {
+    use catcard_ui::icons;
+    let mut fb = Mono128x64::new();
+    let t = &peep7x14::FONT;
+    let f = &misc4x6::FONT;
+    draw_text(&mut fb, t, centred(t, "Enter DFU?", 128), 6, "Enter DFU?");
+
+    let gap = 4 * f.width as usize;
+    let total = icons::hint_width(f, "yes") + gap + icons::hint_width(f, "no");
+    let mut x = (128usize).saturating_sub(total) / 2;
+    x = icons::draw_hint(&mut fb, &icons::CHECK, f, x, 30, "yes") + gap;
+    icons::draw_hint(&mut fb, &icons::CROSS, f, x, 30, "no");
+
+    let warn = "refused on locked units";
+    draw_text(&mut fb, f, centred(f, warn, 128), 44, warn);
+    let _ = panel.flush(&fb);
 }
 
 /// Draw up to three lines and return.

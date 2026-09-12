@@ -130,12 +130,23 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
             // Stated on the device itself: a build that accepts keys from a host is not
             // a build to hand to anyone, and this is the screen that always gets looked
             // at first.
-            (true, true) => "y  continue   [USB KEYS]",
-            (true, false) => "y  continue",
+            (true, _) => "",
             (false, true) => "stopped: no input   [USB KEYS]",
             (false, false) => "stopped: no input",
         },
     );
+
+    // The key is a tick on the cap, so draw a tick. Only when there is something to
+    // press: a device that has stopped taking input must not show a prompt for it.
+    if waiting {
+        use catcard_ui::icons;
+        let label = if crate::usbtask::KEY_INJECTION {
+            "continue   [USB KEYS]"
+        } else {
+            "continue"
+        };
+        icons::draw_hint(&mut fb, &icons::CHECK, body, 0, 52, label);
+    }
 
     let _ = panel.flush(&fb);
 }

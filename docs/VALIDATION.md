@@ -441,6 +441,23 @@ on hardware. Not a clock fault (`HAL ok` means HSI48 started) and not VBUS sensi
 (`GCCFG_VBDEN` is already cleared with `GOTGCTL` forcing B-session valid, for exactly the
 boards that do not route it). Under investigation.
 
+### Three things only a person holding the device could find
+
+None of these are faults the emulator can have an opinion about, and all three came out
+of one session with the hardware in hand.
+
+- **The splash was invisible.** Below.
+- **The device looked dead after the PIN was confirmed.** `prefix_entered` and `attempt`
+  block for as long as the secure element takes, with no redraw and no USB polling in
+  between, so the screen simply sat there. The natural response is to press the key
+  again — and on the suffix that spends a second PIN attempt, of thirteen. There is now
+  a "Checking" screen before each, drawn before the call rather than after it.
+- **The keys are labelled ✓ and ✗, not `y` and `x`.** Those are names from our own wiring
+  diagram. Every screen that named a key was asking the reader to translate, on a device
+  where the key map is precisely what is in doubt. The symbols are drawn now
+  (`catcard_ui::icons`), and the arrows printed on `5`, `7`, `8` and `9` are what the
+  menu cursor follows.
+
 ### The splash was invisible
 
 Bring-up takes a few milliseconds on silicon, so the splash was drawn and overwritten

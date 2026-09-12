@@ -12,6 +12,7 @@ pub mod art;
 pub mod display;
 pub mod font;
 pub mod framebuffer;
+pub mod icons;
 pub mod keypad;
 pub mod menu;
 pub mod pinentry;

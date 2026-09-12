@@ -146,17 +146,28 @@ fn screen_field(
     title(&mut fb, 2, heading);
     let mut mask = [0u8; MAX_PART_LEN];
     title(&mut fb, 24, buf.masked(&mut mask));
-    small(
-        &mut fb,
-        46,
-        if buf.is_empty() {
-            "0-9 to enter"
-        } else {
-            "y accept   x delete"
-        },
-    );
+    if buf.is_empty() {
+        small(&mut fb, 46, "0-9 to enter");
+    } else {
+        two_key_hint(&mut fb, 46, "accept", "delete");
+    }
     tries_left(&mut fb, left);
     let _ = panel.flush(&fb);
+}
+
+/// `✓ <yes>   ✗ <no>`, centred, using the symbols moulded into the keys.
+///
+/// The pad is labelled with a tick and a cross. Writing "y" and "x" asked the reader to
+/// translate our wiring names into what is under their thumb, which is one more thing to
+/// get wrong on a device where the key map is the thing in doubt.
+fn two_key_hint(fb: &mut Mono128x64, y: usize, yes: &str, no: &str) {
+    use catcard_ui::icons;
+    let f = &misc4x6::FONT;
+    let gap = 3 * f.width as usize;
+    let total = icons::hint_width(f, yes) + gap + icons::hint_width(f, no);
+    let mut x = (128usize).saturating_sub(total) / 2;
+    x = icons::draw_hint(fb, &icons::CHECK, f, x, y, yes) + gap;
+    icons::draw_hint(fb, &icons::CROSS, f, x, y, no);
 }
 
 fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
@@ -165,7 +176,7 @@ fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
     small(&mut fb, 8, "the ones you know");
     title(&mut fb, 18, w[0]);
     title(&mut fb, 34, w[1]);
-    small(&mut fb, 52, "y yes   x no, stop");
+    two_key_hint(&mut fb, 52, "yes", "no, stop");
     let _ = panel.flush(&fb);
 }
 
@@ -199,6 +210,7 @@ fn setup_first_pin(
     };
     // A query, not the login path: `set_first_pin` only acts while the device is still
     // blank, and walking the login state machine here would take it out of that state.
+    working(panel, "Checking");
     if let Some(w) = login.words_for(g, prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -214,6 +226,27 @@ fn setup_first_pin(
         login.set_first_pin(g, prefix.as_bytes(), suffix.as_bytes()),
         Ok(Step::Prefix)
     )
+}
+
+/// "No PIN set", with the tick drawn rather than named.
+fn screen_blank(panel: &mut display::Panel) {
+    use catcard_ui::icons;
+    let mut fb = Mono128x64::new();
+    title(&mut fb, 10, "No PIN set");
+    let f = &misc4x6::FONT;
+    let label = "choose a PIN";
+    let x = (128usize).saturating_sub(icons::hint_width(f, label)) / 2;
+    icons::draw_hint(&mut fb, &icons::CHECK, f, x, 34, label);
+    let _ = panel.flush(&fb);
+}
+
+/// "Working on it" — drawn before anything that blocks on the secure element.
+///
+/// Deliberately says what is happening rather than showing a spinner: there is no timer
+/// driving one, and a frozen spinner is worse than a still screen because it claims
+/// progress that is not being made.
+fn working(panel: &mut display::Panel, what: &str) {
+    screen_message(panel, what, "please wait", "");
 }
 
 /// Collect one PIN part. `None` if the user backs out.
@@ -331,7 +364,7 @@ pub fn unlock(
                     }
                     let _ = panel.flush(&fb);
                 }
-                Step::Blank => screen_message(panel, "No PIN set", "y  choose a PIN", ""),
+                Step::Blank => screen_blank(panel),
                 Step::In { .. } => screen_message(panel, "Unlocked", "", ""),
                 // Terminal: the pairing secret is gone and no PIN will ever work again.
                 // Saying so and stopping is the only honest thing left.
@@ -420,12 +453,19 @@ pub fn unlock(
                 }
                 (Step::Prefix, Key::Confirm) => {
                     if !field.is_empty() {
+                        // Both of these block for as long as the secure element takes,
+                        // with no display update and no USB polling in between. Without
+                        // a screen first, the device looks like it ignored the key --
+                        // and the natural response to that is to press it again, which
+                        // on the suffix means spending a second PIN attempt.
+                        working(panel, "Checking");
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         field.clear();
                     }
                 }
                 (Step::Suffix, Key::Confirm) => {
                     if !field.is_empty() {
+                        working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());
                         field.clear();
                     }

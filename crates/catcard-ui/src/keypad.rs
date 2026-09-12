@@ -68,6 +68,10 @@ pub enum Key {
 /// here — and the maintainer of that model confirmed the mounting, which is a fact about
 /// where the panel sits in the case rather than anything about software.
 ///
+/// **Four keys carry arrows printed on the cap**: `5` up, `7` left, `8` down, `9` right.
+/// Any screen that moves a cursor should move it the way those arrows say, because the
+/// legend is in front of whoever is holding the device — see `catcard-fw`'s `menu`.
+///
 /// Getting it wrong mirrors the whole pad: every digit of a PIN lands on a different key,
 /// and `x` and `y` swap, so a user cannot confirm anything. See
 /// `docs/HARDWARE-OPEN-ITEMS.md` for the provenance and what would settle it outright.
