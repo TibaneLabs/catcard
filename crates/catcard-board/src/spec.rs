@@ -447,7 +447,18 @@ pub const Q1: BoardSpec = BoardSpec {
             pd(15),
         ],
     },
-    sdmmc: MK4.sdmmc,
+    // Not `MK4.sdmmc`: Q1 has two slots, and PC13 -- mk4's card-detect -- is `SD_MUX`
+    // here, the line that selects between them. Inheriting mk4 wholesale pointed
+    // card-detect at the multiplexer.
+    //
+    // The second slot (`SD_DETECT2=PD4`, `SD_ACTIVE2=PD0`) and the mux itself are not
+    // modelled: `SdmmcPins` describes one slot, and a second one needs a decision about
+    // how the mux is driven rather than two more pins.
+    // Source: gpio-peripherals.md §Q1 Power/battery [C]
+    sdmmc: SdmmcPins {
+        card_detect: Some(pd(3)),
+        ..MK4.sdmmc
+    },
     sflash: MK4.sflash, // none, as mk4
     usb: MK4.usb,
     has_se2: true,

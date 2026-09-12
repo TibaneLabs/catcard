@@ -248,8 +248,15 @@ It also moves the line on mk4: `SD_DETECT=PC13`. Our mk4 entry had inherited the
 something else entirely. Corrected in `spec.rs`; Q1 inherits `MK4.sdmmc` and is fixed
 with it.
 
-Still open: the polarity on mk4/Q1, which is not stated. Nothing reads card-detect yet
-(storage is M3), so this is latent rather than blocking.
+Q1 is not mk4 here and must not inherit it: that board has **two** slots, and PC13 --
+mk4's card-detect -- is `SD_MUX`, the line selecting between them. Q1's detect is
+`SD_DETECT=PD3`, with `SD_DETECT2=PD4` and `SD_ACTIVE2=PD0` for the second slot. Q1 now
+carries its own entry.
+
+Still open: the polarity on mk4/Q1, which is not stated, and how the Q1 mux is driven.
+`SdmmcPins` describes a single slot, so the second one needs a design decision rather
+than two more pins. Nothing reads card-detect yet (storage is M3), so both are latent
+rather than blocking.
 
 ---
 
@@ -270,23 +277,23 @@ migration path.
 
 `gpio-peripherals.md §Mk4` lists three additions we carry no entry for: `V12EN=PC1`,
 `USB_ACTIVE=PC6`, and the straps `STRAP_S1/S2/S3 = PE1/PE2/PE3` (the reference marks the
-straps' purpose `[?]` and says the firmware does not use them).
+straps' purpose `[?]` and says the firmware does not use them). It gives names and pins
+and nothing else.
 
-The reference states the names and pins and nothing about what they do. `V12EN` reads
-like a 12 V rail enable, and an SSD1306 needs a boost supply for its panel voltage — so
-a plausible reading is that the OLED will not light until `PC1` is driven. **That is a
-hypothesis from a pin name, not something the reference says**, and the opposite reading
-(the rail is enabled by hardware, or belongs to something else entirely) is equally
-compatible with what is written.
+**`V12EN` is not a 12 V rail enable, and the display does not depend on it.** There is no
+12 V rail on mk4. The OLED runs from the SSD1306's own internal charge pump, which
+`ssd1306::init` enables (`0x8D`) precisely because there is no external panel supply —
+there is a test asserting that command is in the init sequence. And the only place this
+reference explains PC1 at all is the Q1 power section, where it is `NOT_BATTERY_OLD`, a
+battery-presence *input* on earlier revs.
 
-It matters because it is a candidate explanation for the one first-boot failure we
-cannot diagnose from the outside: a dark display. If a board comes up blank with USB
-answering — which is now what a dead panel looks like, since `park` serves USB — this is
-the first thing to try.
+So the name is the only evidence, the obvious reading of it is wrong, and the same pin
+means something unrelated one board over. Nothing drives it. **A dark display is not a
+reason to start toggling it** — the charge pump, the SPI wiring and the reset sequence
+are all upstream of anything PC1 could plausibly do.
 
-**How to resolve.** Probe `PC1` on a running stock unit, or read the schematic. Until
-then nothing drives it, because driving an unknown output on a guess is worse than a
-blank screen.
+**How to resolve.** The schematic, or the board file these names came from. Low priority:
+nothing we build needs any of the three.
 
 ---
 
