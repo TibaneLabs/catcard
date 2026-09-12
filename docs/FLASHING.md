@@ -1,6 +1,6 @@
 # Getting CatCard onto a device
 
-Three routes, in order of how likely they are to apply to you.
+Four routes, in order of how likely they are to apply to you.
 
 > Every route below installs an image signed with the **published developer key**. The
 > device will boot it with a 25-second warning screen and leave the "genuine" light red.
@@ -10,7 +10,41 @@ Three routes, in order of how likely they are to apply to you.
 
 ---
 
-## 1. microSD, on a locked production unit
+## 1. USB, on a locked production unit
+
+Works on any unit, including RDP=2. Needs the vendor's `ckcc-protocol` tool on the host
+and a device running **stock** firmware, unlocked with its PIN — stock's own uploader is
+doing the work, so this route stops being available the moment CatCard is installed (see
+*Recovering* below for what replaces it).
+
+```sh
+cargo fw-mk4-bringup        # see "Flash the bring-up build first" below
+cargo run -p catcard-image -- build \
+    target/thumbv7em-none-eabihf/release/catcard-fw \
+    --board mk4 --version 0.0.1 \
+    --dfu out/catcard-mk4.dfu
+```
+
+Then push `out/catcard-mk4.dfu` with the vendor tool's firmware-upgrade command — consult
+its own `--help` rather than anything here, since the invocation is theirs to define.
+Stock uploads the image, stages it, asks for confirmation on the device's screen, and
+reboots; the bootloader verifies the signature and installs.
+
+**We use that tool as a black box.** The stock `ckcc` protocol is deliberately not
+implemented and deliberately not studied — see [`../CLEANROOM.md`](../CLEANROOM.md).
+Running the vendor's own binary to move a file is not studying it; reading it to learn
+the wire format would be.
+
+**The one thing we cannot tell you** is whether stock's uploader applies checks of its
+own before handing the image to the bootloader. The *bootloader* accepts a dev-signed
+image with a warning — that is confirmed against the real one. What stock does first is
+not something we have verified, and not something we will read its source to find out.
+If it refuses the image, use the microSD route below; the bootloader behaves identically
+either way.
+
+---
+
+## 2. microSD, on a locked production unit
 
 Works on any unit, including RDP=2, and needs no host tooling or debug hardware. Slow
 loop: rebuild, copy, navigate the menu, reboot.
@@ -24,8 +58,9 @@ cargo run -p catcard-image -- build \
 ```
 
 On the device running **stock** firmware: *Advanced → Upgrade Firmware → From SD Card*.
-The stock firmware stages the image to SPI-NOR flash and reboots; the bootloader
-installs it into main flash and verifies the signature.
+The stock firmware stages the image and reboots; the bootloader installs it into main
+flash and verifies the signature. Where it stages differs by generation — SPI-NOR on
+mk3, PSRAM on mk4 and later, which has no SPI-NOR at all.
 
 **Recovering.** CatCard now has its own USB upgrade path: it accepts a complete signed
 image over HID, stages it, and installs it after someone approves it at the device. That
@@ -40,7 +75,7 @@ the emulator, not yet on hardware.
 
 ---
 
-## 2. SWD, on an unlocked unit
+## 3. SWD, on an unlocked unit
 
 The fast loop, and the only one that gives you a debugger. Requires RDP < 2 and access to
 the SWD pads.
@@ -71,7 +106,7 @@ Its fields are `magic, hal_ok, entropy_ok, credited_bits, dwt_running`
 
 ---
 
-## 3. ST USB-DFU, on an unlocked unit
+## 4. ST USB-DFU, on an unlocked unit
 
 The bootloader exposes ST's factory DFU (system ROM at `0x1FFF_0000`) on RDP < 2 units.
 The device appears as `0483:df11`.
