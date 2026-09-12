@@ -140,16 +140,31 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
     // press: a device that has stopped taking input must not show a prompt for it.
     if waiting {
         use catcard_ui::icons;
-        // Every bring-up hazard the build carries, said on the screen that is always
-        // looked at first. `[MEM]` is the loudest: it means a host can read this RAM.
-        let label = if cfg!(feature = "usb-debug-mem") {
-            "continue  [MEM: UNSAFE]"
-        } else {
-            match (crate::usbtask::KEY_INJECTION, cfg!(feature = "show-pin")) {
-                (true, true) => "continue  [USB KEYS][PIN]",
-                (true, false) => "continue  [USB KEYS]",
-                (false, true) => "continue  [PIN SHOWN]",
-                (false, false) => "continue",
+        // Every bring-up hazard the build carries, on the screen that is always looked
+        // at first. A bring-up build turns these on together, so the screen names each
+        // one rather than hiding the others behind the loudest -- `MEM` means a host can
+        // read this RAM, but `KEYS` and `PIN` are hazards too and should not vanish.
+        let label = match (
+            crate::usbtask::KEY_INJECTION,
+            cfg!(feature = "show-pin"),
+            cfg!(feature = "usb-debug-mem"),
+        ) {
+            (false, false, false) => "continue",
+            (k, p, m) => {
+                // Assemble "continue  [KEYS PIN MEM]" from whichever are on.
+                use catcard_ui::text::draw_text;
+                let f = &misc4x6::FONT;
+                draw_text(&mut fb, f, 0, 52, "continue  [");
+                let mut x = 11 * f.width as usize;
+                for (on, tag) in [(k, "KEYS "), (p, "PIN "), (m, "MEM")] {
+                    if on {
+                        draw_text(&mut fb, f, x, 52, tag);
+                        x += tag.len() * f.width as usize;
+                    }
+                }
+                draw_text(&mut fb, f, x, 52, "]");
+                let _ = panel.flush(&fb);
+                return;
             }
         };
         icons::draw_hint(&mut fb, &icons::CHECK, body, 0, 52, label);

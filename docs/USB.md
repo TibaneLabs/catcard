@@ -207,15 +207,21 @@ access control and there cannot be: a monitor that refused to read an address wo
 be a monitor. On a provisioned device it reads the seed and the PIN out of RAM and runs
 whatever a host sends. It exists for bring-up on a device with no secret.
 
-So it is walled off:
+It is in the **bring-up build** — the one with every diagnostic on, which is the build
+you flash to a device under test. There is one such build per board (`fw-<board>-bringup`)
+and one shipping build (`fw-<board>`, no features and none of this). The point of a
+bring-up build is that everything you might need to see what went wrong is on the single
+image you flash; splitting the monitor into its own image would just mean flashing the
+one without it and then wishing you hadn't.
 
-- Its own feature, `usb-debug-mem`, which the `fw-*-bringup` aliases leave **off**. Only
-  `fw-*-debug` turns it on.
-- Announced, not hidden: `Identify` sets `caps::DEBUG_MEM`, the selftest screen shows
-  `[MEM: UNSAFE]` instead of the usual markers, and the boot log carries a warning line.
-  A build that can do this says so everywhere it can.
+It is loud rather than hidden, which is the actual safety property here:
+
+- `Identify` sets `caps::DEBUG_MEM`, the selftest screen lists `MEM` among the build's
+  hazards (`[KEYS PIN MEM]`), and the boot log carries a warning line.
 - Every access is logged (`peek`/`poke`/`jsr` lines), and a `jsr` is logged *before* the
-  call, so if the call never returns the log still records what ran.
+  call, so if it never returns the log still records what ran.
+
+None of that belongs in a shipping build, and `fw-<board>` compiles all of it out.
 
 Peek reads span several frames — a request returns up to 512 bytes — so a range comes
 back in one round trip rather than one byte at a time. Poke is paged one frame per

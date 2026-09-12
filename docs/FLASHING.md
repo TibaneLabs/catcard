@@ -25,7 +25,7 @@ doing the work, so this route stops being available the moment CatCard is instal
 *Recovering* below for what replaces it).
 
 ```sh
-cargo fw-mk4-bringup        # see "Flash the bring-up build first" below
+cargo fw-mk4-bringup        # the bring-up build (every diagnostic on)
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
     --board mk4 --version 7.0.0 \
@@ -264,7 +264,7 @@ the map once the firmware is on the device tells you that you are stuck; it does
 you out. The only thing that gets you out has to already be in the image:
 
 ```sh
-cargo fw-mk4-bringup          # adds `usb-key-injection`
+cargo fw-mk4-bringup          # the bring-up build: keys, PIN shown, memory monitor
 ```
 
 That build lets a host press keys over USB, so a mirrored map or a dead panel costs you
