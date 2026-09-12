@@ -250,10 +250,10 @@ fn step(
         },
         Screen::ConfirmDfu => match key {
             Key::Confirm => {
-                message(panel, "Entering DFU", "refused if locked", "");
-                // SAFETY: nothing after this runs on a unit that accepts it. On an
-                // RDP=2 unit the bootloader refuses and locks up, which is why the
-                // screen says so before the key is pressed.
+                message(panel, "Entering DFU", "hangs if locked", "");
+                // SAFETY: nothing after this runs. On an RDP=2 unit the bootloader
+                // calls LOCKUP_FOREVER instead, so the device hangs until it is
+                // power-cycled -- which the screen says before the key is pressed.
                 unsafe { gate.enter_dfu(DfuMode::Normal) }
             }
             _ => Screen::Debug,
@@ -634,7 +634,10 @@ fn confirm_dfu(panel: &mut display::Panel) {
     x = icons::draw_hint(&mut fb, &icons::CHECK, f, x, 30, "yes") + gap;
     icons::draw_hint(&mut fb, &icons::CROSS, f, x, 30, "no");
 
-    let warn = "refused on locked units";
+    // Not "refused": at RDP=2 the bootloader calls LOCKUP_FOREVER, so the device hangs
+    // until it is power-cycled. Flash is untouched and it boots normally afterwards, but
+    // saying "refused" would suggest it simply returns here.
+    let warn = "locked unit: hangs, repower";
     draw_text(&mut fb, f, centred(f, warn, 128), 44, warn);
     let _ = panel.flush(&fb);
 }

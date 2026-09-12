@@ -154,6 +154,40 @@ silently, and `Debug → microSD` exercises the same driver without touching an 
 
 ---
 
+## What recovery exists, per board — read this before flashing anything
+
+`hw-reference/gpio-peripherals.md §Recovery paths [C]` gives the bootloader's boot order
+as `dfu_button_pressed()` → `sf_firmware_upgrade()` → `verify_firmware()`. Three
+consequences, none of them obvious from the outside:
+
+- **The BOOT0 / DFU button is dead at RDP=2.** `enter_dfu()` reaches
+  `flash_is_security_level2()` and calls `LOCKUP_FOREVER()`. The device hangs until it is
+  power-cycled; flash is untouched, so it boots normally afterwards. It is not a recovery
+  path and not a way out — our own *Debug → Enter DFU* has exactly this effect on a
+  locked unit.
+- **`sf_firmware_upgrade()` is the RDP=2 recovery, and it reads SPI-NOR.** It runs every
+  boot and installs a validly signed image staged there. **mk3 only** — mk4/mk5/Q1 have
+  no SPI-NOR, they stage in volatile PSRAM, and the reference says in as many words that
+  this is "a hardware recovery the Mk4/Mk5/Q1 do **not** have".
+- **The bootloader never reads a microSD card.** Stock firmware stages *from* a card
+  *into* SPI-NOR or PSRAM; the card itself is not a recovery medium.
+
+| | recovery at RDP=2 with a corrupt main flash |
+|---|---|
+| mk3 | an external SPI programmer clipped to the `MX25L8006E` NOR chip |
+| mk4 / mk5 / Q1 | **none** |
+
+So on mk4/mk5 the rule is simple: **a main flash that fails its signature check is a dead
+device.** Everything this firmware does to protect that — refusing to commit an image
+whose signature does not verify, reading back what it stages, leaving `--high-water`
+alone — is protecting the only thing that cannot be recovered.
+
+It also rules out a tempting idea: deliberately corrupting our own firmware to make the
+bootloader fall back to something. There is nothing to fall back to. On a locked mk4/mk5
+that is a one-way trip.
+
+---
+
 ## mk5: the same trap as mk4, for the same reason
 
 mk5 is an mk4 board revision and shares its upgrade path: staging into PSRAM, which
@@ -168,8 +202,8 @@ OCTOSPI at boot, and if it leaves that mapping in place the firmware inherits it
 before trusting the upgrade path with the only route back.
 
 Until that is confirmed, treat an mk5 exactly like an mk4: on a locked (RDP=2) unit,
-assume flashing is one-way. `Debug → Enter DFU` is the only exit and the bootloader
-refuses it on RDP=2.
+assume flashing is one-way. `Debug → Enter DFU` is **not** an exit there — the bootloader
+locks up instead, and only a power cycle clears it. See the recovery table above.
 
 ---
 
