@@ -132,7 +132,7 @@ any candidate SCK/CS pairing produces a response.
 
 ---
 
-## MSI range, and therefore the PLL configuration
+## MSI range, and therefore the PLL configuration — narrowed to 8 MHz `[I]`
 
 **Blocks: running faster than the reset default.** The core currently runs on the
 reset-default MSI clock. Everything works; it is just slow.
@@ -141,6 +141,21 @@ reset-default MSI clock. Everything works; it is just slow.
 from MSI, but not the MSI range. `SYSCLK = MSI / M * N / R` gives **40 MHz at MSI=4 MHz**
 and **80 MHz at MSI=8 MHz**. Programming the PLL on the wrong assumption either
 underclocks the device or overclocks it past its voltage-scaling limit.
+
+Two data points now pick the second: `platform.md §1` describes the mk3 part as
+"Cortex-M4F @ **~80 MHz**", and `gpio-peripherals.md` records `FLASH_LATENCY_4`, which
+on these parts at VOS range 1 is the setting for the top frequency band rather than for
+40 MHz. Both are consistent with **MSI = 8 MHz** (`RCC_CR.MSIRANGE = 0b0111`) and
+inconsistent with 4 MHz.
+
+That is an inference from two stated facts, not a stated fact, so it stays `[I]` and
+nothing is programmed on it yet. It does mean the PLL work is no longer blocked on an
+unknown — it is blocked on confirming one candidate.
+
+**Note on the USB idle pause.** `usbtask::IDLE_PAUSE_CYCLES` is a cycle count, and the
+device runs at the MSI reset default (4 MHz) rather than the PLL, so it is unaffected by
+the above. It becomes wrong the moment the PLL is programmed, and that is the change
+that has to revisit it.
 
 Note the RNG does **not** depend on this: `catcard-hal::clock::enable_hsi48` routes the
 independent HSI48 oscillator to the 48 MHz peripheral clock, which is correct on every
@@ -223,10 +238,18 @@ handling for multi-key rollover — is still `[?]` and will come out of bring-up
 
 ---
 
-## microSD card-detect polarity
+## microSD card-detect — RESOLVED on mk3, pin corrected on mk4
 
-`SD_SW=PA9` is marked `[?]` in the reference, and its active polarity is not stated.
-Recorded as `card_detect: Some(pa(9))` but not relied upon.
+The reference now states both pin and polarity for mk3: `SD_SW=PA9` `[C]`, pulled up,
+**card present = pin high**.
+
+It also moves the line on mk4: `SD_DETECT=PC13`. Our mk4 entry had inherited the mk3
+`PA9`, which on that board is USART1 TX — the REPL — so it named a pin that does
+something else entirely. Corrected in `spec.rs`; Q1 inherits `MK4.sdmmc` and is fixed
+with it.
+
+Still open: the polarity on mk4/Q1, which is not stated. Nothing reads card-detect yet
+(storage is M3), so this is latent rather than blocking.
 
 ---
 
@@ -240,6 +263,30 @@ since CatCard chooses its own encoding for secrets it writes — but needed for 
 migration path.
 
 `catcard_callgate::pin::classify_secret` returns the raw marker rather than guessing.
+
+---
+
+## mk4 pins we do not model: `V12EN`, `USB_ACTIVE`, `STRAP_S1/S2/S3`
+
+`gpio-peripherals.md §Mk4` lists three additions we carry no entry for: `V12EN=PC1`,
+`USB_ACTIVE=PC6`, and the straps `STRAP_S1/S2/S3 = PE1/PE2/PE3` (the reference marks the
+straps' purpose `[?]` and says the firmware does not use them).
+
+The reference states the names and pins and nothing about what they do. `V12EN` reads
+like a 12 V rail enable, and an SSD1306 needs a boost supply for its panel voltage — so
+a plausible reading is that the OLED will not light until `PC1` is driven. **That is a
+hypothesis from a pin name, not something the reference says**, and the opposite reading
+(the rail is enabled by hardware, or belongs to something else entirely) is equally
+compatible with what is written.
+
+It matters because it is a candidate explanation for the one first-boot failure we
+cannot diagnose from the outside: a dark display. If a board comes up blank with USB
+answering — which is now what a dead panel looks like, since `park` serves USB — this is
+the first thing to try.
+
+**How to resolve.** Probe `PC1` on a running stock unit, or read the schematic. Until
+then nothing drives it, because driving an unknown output on a guess is worse than a
+blank screen.
 
 ---
 

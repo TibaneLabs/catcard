@@ -111,7 +111,7 @@ pub struct NfcPins {
     /// Event/interrupt line from the tag.
     pub ed: Pin,
     pub scl: Pin,
-    /// The matching SDA line is not stated in the reference. `[?]`
+    /// I2C1 SDA. Source: gpio-peripherals.md §Bus instance summary [C]
     pub sda: MaybePin,
 }
 
@@ -284,7 +284,9 @@ pub const MK3: BoardSpec = BoardSpec {
         d3: pc(11),
         cmd: pd(2),
         ck: pc(12),
-        card_detect: Some(pa(9)), // [?]
+        // `SD_SW`, pulled up: **card present = pin high**.
+        // Source: gpio-peripherals.md §Mk3 [C]
+        card_detect: Some(pa(9)),
         active: Some(pc(7)),
     },
     // The only board with one. Source: gpio-peripherals.md §Mk3 [C]; CS/SCK still [?]
@@ -331,7 +333,10 @@ pub const MK4: BoardSpec = BoardSpec {
         bl_sram_len: 0x1c00,
     },
     hw_compat_bit: 0x08, // MK_4_OK
-    // Same OLED as mk3. Source: gpio-peripherals.md §Mk4 [I]
+    // "Same OLED 128x64" as mk3, in a section whose header reads `[C unless noted]`
+    // and which notes only the numpad as differing; the bus summary lists the SSD1306
+    // on SPI1 for mk3/4/5 outright. Control pins are the mk3 ones, unchanged.
+    // Source: gpio-peripherals.md §Mk4 and §Bus instance summary [C]
     display: Display::Ssd1306 {
         width: 128,
         height: 64,
@@ -355,7 +360,10 @@ pub const MK4: BoardSpec = BoardSpec {
         d3: pc(11),
         cmd: pd(2),
         ck: pc(12),
-        card_detect: Some(pa(9)), // [?]
+        // Moved off the mk3 pin: PA9 is USART1 TX (the REPL) on this board, so the
+        // inherited value named a line that does something else entirely.
+        // Source: gpio-peripherals.md §Mk4 [C]
+        card_detect: Some(pc(13)),
         active: Some(pc(7)),
     },
     // No SPI-NOR: SPI2 is commented out of the board file as "removed in Mk4 rev B".
@@ -375,8 +383,13 @@ pub const MK4: BoardSpec = BoardSpec {
         scl: pb(13),
         sda: pb(14),
     }),
-    // NFC is confirmed present on mk4 from image strings, pins unconfirmed.
-    nfc: None,
+    // ST25DV on I2C1, with its event line on PC4 (Q1 puts that on PD6 instead).
+    // Source: gpio-peripherals.md §Mk4 [C]
+    nfc: Some(NfcPins {
+        ed: pc(4),
+        scl: pb(6),
+        sda: Some(pb(7)),
+    }),
     // 8 MB on OCTOSPI1, memory-mapped. Source: gpio-peripherals.md §Mk4 [C]
     psram: Some(Psram {
         base: 0x9000_0000,
@@ -443,11 +456,12 @@ pub const Q1: BoardSpec = BoardSpec {
         scl: pb(13),
         sda: pb(14),
     }),
-    // Source: generations-mk2-q-mk5.md §Q [C] for ED/SCL; SDA `[?]`
+    // Source: generations-mk2-q-mk5.md §Q [C] for ED/SCL; SDA from the I2C1 bus
+    // summary in gpio-peripherals.md [C]
     nfc: Some(NfcPins {
         ed: pd(6),
         scl: pb(6),
-        sda: None,
+        sda: Some(pb(7)),
     }),
     // 8 MB on OCTOSPI1, memory-mapped. Source: gpio-peripherals.md §Mk4 [C]
     psram: Some(Psram {
