@@ -53,6 +53,10 @@ impl PanelBus {
             } => (spi, reset, dc, cs),
         };
 
+        // SAFETY: single-threaded bring-up; PC1 is unused on every board that is not an
+        // mk5, and on an mk5 the reference lists it as `V12EN` with nothing else on it.
+        unsafe { enable_panel_rail() };
+
         // SAFETY: single-threaded bring-up; these pins belong to the panel alone, which
         // the board table's pin-conflict test enforces.
         unsafe {
@@ -87,6 +91,7 @@ impl PanelBus {
     }
 
     /// Drive a transfer with D/C at `dc_high`, framed by chip-select.
+    #[allow(clippy::needless_lifetimes)]
     fn transfer(&mut self, dc_high: bool, bytes: &[u8]) -> Result<(), spi::Error> {
         // SAFETY: these pins were configured as outputs in `init`.
         unsafe {
@@ -160,4 +165,47 @@ pub unsafe fn init() -> Option<Panel> {
     let mut panel = Ssd1306::new_128x64(bus);
     panel.init().ok()?;
     Some(panel)
+}
+
+/// `V12EN` — the supply an mk5 panel needs and an mk4 one does not. `[?]`
+///
+/// mk4 and mk5 share every pin we know of except `STRAP_MK5` and this, and an mk5 came
+/// up with a dark screen on firmware that drew fine on an mk4. That is the whole of the
+/// evidence: the reference names `V12EN=PC1` and says nothing about what it switches.
+///
+/// The earlier argument that it could not be a display rail — that an SSD1306 makes its
+/// own panel voltage from the charge pump `ssd1306::init` enables — holds only for a
+/// module that has one. A board that supplies panel voltage itself, through a boost
+/// enabled here, fits the name and fits the symptom.
+///
+/// Driven only when the mk5 strap is low, so an mk4 is untouched. A settle delay follows,
+/// because a rail that is still rising when the panel is initialised gives exactly the
+/// symptom being chased.
+///
+/// **Unconfirmed.** If an mk5 lights up with this and not without it, that is the
+/// confirmation; see `docs/HARDWARE-OPEN-ITEMS.md`.
+///
+/// # Safety
+/// Claims PC1. Nothing else in this firmware drives it.
+unsafe fn enable_panel_rail() {
+    // SAFETY: as documented.
+    if !unsafe { catcard_hal::strap::is_mk5() } {
+        return;
+    }
+    let pin = catcard_board::Pin::new(catcard_board::Port::C, 1);
+    // SAFETY: as documented.
+    unsafe {
+        gpio::enable_port(pin.port);
+        gpio::configure(
+            pin,
+            Mode::Output,
+            OutputType::PushPull,
+            Pull::None,
+            Speed::Low,
+        );
+        gpio::write(pin, true);
+        // Let the rail come up before the panel is spoken to. 40 ms at the MSI reset
+        // default; a boost converter needs milliseconds, not microseconds.
+        catcard_hal::dwt::delay_cycles(160_000);
+    }
 }

@@ -280,7 +280,32 @@ migration path.
 
 ---
 
-## Pins we do not model: `V12EN`, `USB_ACTIVE`, `STRAP_S1/S2/S3`
+## `V12EN` (PC1) — now driven on mk5, on one piece of evidence
+
+An mk5 came up with a **dark screen** on firmware that drew correctly on an mk4. The two
+boards share every pin we know of except `STRAP_MK5` and `V12EN=PC1`, which is mk5-only.
+So PC1 is driven high before the panel is initialised, when the strap says mk5, with a
+40 ms settle.
+
+This reverses an argument made earlier in this file and it is worth recording why, since
+the reasoning was sound and the conclusion was wrong. The claim was that PC1 could not be
+a display rail because an SSD1306 makes its own panel voltage from the charge pump
+`ssd1306::init` enables. That holds only for a module that *has* one. A board that
+supplies panel voltage itself, through a boost enabled by this pin, fits both the name
+and the symptom — and "mk4 has no 12 V rail" was never evidence about mk5, which is
+precisely the board that carries the pin.
+
+**Still unconfirmed.** The reference names the pin and says nothing about what it
+switches. If an mk5 lights up with this and stays dark without it, that is the
+confirmation, and it belongs in `hw-reference`. If it stays dark either way, the fault is
+elsewhere and this should come back out rather than linger as a write to an unknown
+output.
+
+`USB_ACTIVE=PC6` and the `STRAP_S1/S2/S3` straps are still unmodelled and undriven.
+
+---
+
+## Pins we do not model: `USB_ACTIVE`, `STRAP_S1/S2/S3`
 
 `gpio-peripherals.md` lists three additions we carry no entry for: `V12EN=PC1`,
 `USB_ACTIVE=PC6`, and the straps `STRAP_S1/S2/S3 = PE1/PE2/PE3` (the reference marks the
