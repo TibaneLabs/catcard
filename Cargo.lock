@@ -108,11 +108,11 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "catcard-board"
-version = "0.0.1"
+version = "7.0.0"
 
 [[package]]
 name = "catcard-callgate"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "zeroize",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-entropy"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "hmac",
  "sha2",
@@ -130,11 +130,11 @@ dependencies = [
 
 [[package]]
 name = "catcard-flash"
-version = "0.0.1"
+version = "7.0.0"
 
 [[package]]
 name = "catcard-fw"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-callgate",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-fwhdr"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "sha2",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-hal"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-image"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "catcard-board",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-pin"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-callgate",
  "catcard-wallet",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-settings"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "hmac",
  "sha2",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-sign"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "k256",
  "sha2",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-ui"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "catcard-upgrade"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-fwhdr",
@@ -229,14 +229,14 @@ dependencies = [
 
 [[package]]
 name = "catcard-usb"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "catcard-board",
 ]
 
 [[package]]
 name = "catcard-wallet"
-version = "0.0.1"
+version = "7.0.0"
 dependencies = [
  "hmac",
  "k256",

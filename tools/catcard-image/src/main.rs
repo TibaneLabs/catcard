@@ -12,7 +12,7 @@
 //! cargo fw-mk4
 //! catcard-image build --board mk4 \
 //!     target/thumbv7em-none-eabihf/release/catcard-fw \
-//!     --version 0.0.1 --dfu out/catcard-mk4.dfu
+//!     --version 7.0.0 --dfu out/catcard-mk4.dfu
 //! ```
 
 mod dfuse;
@@ -41,7 +41,11 @@ enum Cmd {
         #[arg(long)]
         board: String,
         /// Version string; at most 7 ASCII characters.
-        #[arg(long, default_value = "0.0.1")]
+        ///
+        /// Defaults to the workspace version, which is what the firmware reports as its
+        /// own `VERSION` -- pass something else and the header will disagree with what
+        /// the running image says about itself.
+        #[arg(long, default_value = env!("CARGO_PKG_VERSION"))]
         version: String,
         /// Write the raw signed image here.
         #[arg(long)]
@@ -197,6 +201,7 @@ fn cmd_build(
     if bin.is_none() && dfu.is_none() {
         bail!("nothing to do: pass --bin and/or --dfu");
     }
+    warn_if_stock_would_refuse(version);
 
     let raw = std::fs::read(elf_path)
         .with_context(|| format!("reading firmware ELF {}", elf_path.display()))?;
@@ -292,6 +297,32 @@ fn cmd_sign(bin: &Path, key: Option<PathBuf>, pubkey_num: u32, out: Option<PathB
     println!("digest {}", hex::encode(digest));
     println!("wrote  {}", dest.display());
     Ok(())
+}
+
+/// Warn about a version the stock firmware's uploader will not stage.
+///
+/// Stock refuses an image whose header version is below 3, and installing CatCard onto a
+/// locked unit goes through stock -- over USB or from a card, both of its uploader. The
+/// refusal happens on the device, after the transfer, and says nothing about versions,
+/// so it is a long way from here to the cause.
+///
+/// A warning rather than an error: the constraint belongs to stock's uploader, not to
+/// the bootloader or to the image format. An image flashed over SWD, or offered to a
+/// device already running CatCard, is unaffected and may legitimately carry any version.
+fn warn_if_stock_would_refuse(version: &str) {
+    let major: Option<u32> = version.split('.').next().and_then(|m| m.parse().ok());
+    if let Some(m) = major {
+        if m < 3 {
+            eprintln!(
+                "warning:      version {version} is below 3.0.0 — the stock firmware \
+                 refuses to stage it"
+            );
+            eprintln!(
+                "              (only matters when installing through stock; SWD and \
+                 CatCard's own upgrade accept it)"
+            );
+        }
+    }
 }
 
 fn cmd_verify(bin: &Path, board: Option<&str>) -> Result<()> {

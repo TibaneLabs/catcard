@@ -59,7 +59,7 @@ cargo t                     # host tests for every portable crate
 cargo fw-mk4                # build the firmware
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
-    --board mk4 --version 0.0.1 \
+    --board mk4 --version 7.0.0 \
     --bin out/catcard-mk4.bin --dfu out/catcard-mk4.dfu
 ```
 

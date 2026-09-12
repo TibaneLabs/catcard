@@ -2,6 +2,13 @@
 
 Four routes, in order of how likely they are to apply to you.
 
+> **The header version must be at least 3.0.0.** Stock firmware refuses to stage
+> anything below that, and routes 1 and 2 both go through stock's uploader. The refusal
+> happens on the device, after the transfer, and does not mention versions — so it is
+> worth getting right rather than diagnosing. CatCard's version is **7.0.0**, which is
+> the workspace version and therefore also what the running firmware reports about
+> itself; `catcard-image build` warns if it is ever handed something lower.
+>
 > Every route below installs an image signed with the **published developer key**. The
 > device will boot it with a 25-second warning screen and leave the "genuine" light red.
 > That is not a bug — it is the bootloader correctly reporting that the image is not
@@ -21,7 +28,7 @@ doing the work, so this route stops being available the moment CatCard is instal
 cargo fw-mk4-bringup        # see "Flash the bring-up build first" below
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
-    --board mk4 --version 0.0.1 \
+    --board mk4 --version 7.0.0 \
     --dfu out/catcard-mk4.dfu
 ```
 
@@ -53,7 +60,7 @@ loop: rebuild, copy, navigate the menu, reboot.
 cargo fw-mk4
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
-    --board mk4 --version 0.0.1 \
+    --board mk4 --version 7.0.0 \
     --dfu /media/sdcard/catcard-mk4.dfu
 ```
 

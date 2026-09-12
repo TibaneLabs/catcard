@@ -23,9 +23,9 @@ cd "$(dirname "$0")/../.."
 # installing at all.
 cargo fw-mk4-bringup || exit 1
 FW=target/thumbv7em-none-eabihf/release/catcard-fw
-cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 0.0.1 \
+cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 7.0.0 \
     --dfu out/catcard-mk4.dfu || exit 1
-cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 0.0.2 \
+cargo run -q -p catcard-image -- build "$FW" --board mk4 --version 7.0.1 \
     --bin out/catcard-mk4-v2.bin || exit 1
 
 SOCK=$(mktemp -u /tmp/catcard-XXXX.sock)

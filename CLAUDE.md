@@ -37,7 +37,7 @@ Full pipeline check:
 ```sh
 cargo fw-mk4 && cargo run -p catcard-image -- build \
   target/thumbv7em-none-eabihf/release/catcard-fw \
-  --board mk4 --version 0.0.1 --bin out/x.bin --dfu out/x.dfu \
+  --board mk4 --version 7.0.0 --bin out/x.bin --dfu out/x.dfu \
   && cargo run -p catcard-image -- verify out/x.bin --board mk4
 ```
 

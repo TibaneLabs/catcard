@@ -183,7 +183,7 @@ device.
 cargo fw-mk4
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
-    --board mk4 --version 0.0.1 --dfu out/catcard-mk4.dfu
+    --board mk4 --version 7.0.0 --dfu out/catcard-mk4.dfu
 
 ccemu -q run --dfu out/catcard-mk4.dfu \
     --bootloader <a factory .dfu> --board mk4 \

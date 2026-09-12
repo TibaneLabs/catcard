@@ -35,7 +35,9 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+# Stock firmware refuses to stage an image whose header version is below 3, and that
+# is the route CatCard is installed through. See docs/FLASHING.md.
+version = "7.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
