@@ -273,27 +273,33 @@ migration path.
 
 ---
 
-## mk4 pins we do not model: `V12EN`, `USB_ACTIVE`, `STRAP_S1/S2/S3`
+## Pins we do not model: `V12EN`, `USB_ACTIVE`, `STRAP_S1/S2/S3`
 
-`gpio-peripherals.md §Mk4` lists three additions we carry no entry for: `V12EN=PC1`,
+`gpio-peripherals.md` lists three additions we carry no entry for: `V12EN=PC1`,
 `USB_ACTIVE=PC6`, and the straps `STRAP_S1/S2/S3 = PE1/PE2/PE3` (the reference marks the
 straps' purpose `[?]` and says the firmware does not use them). It gives names and pins
 and nothing else.
 
-**`V12EN` is not a 12 V rail enable, and the display does not depend on it.** There is no
-12 V rail on mk4. The OLED runs from the SSD1306's own internal charge pump, which
-`ssd1306::init` enables (`0x8D`) precisely because there is no external panel supply —
-there is a test asserting that command is in the init sequence. And the only place this
-reference explains PC1 at all is the Q1 power section, where it is `NOT_BATTERY_OLD`, a
-battery-presence *input* on earlier revs.
+**`V12EN` is mk5-only and is not on mk4** — relayed from the maintainer, the same class
+of fact as the keypad mounting above. It reads as an mk4 pin only because that section
+is headed *"Mk4 / Mk5 — deltas from mk3"* and treats the two as one board; the
+capability table in `generations-mk2-q-mk5.md` likewise lists mk4 and mk5 as identical in
+everything it covers. They are not identical here, so a pin in that section is not
+automatically an mk4 pin.
 
-So the name is the only evidence, the obvious reading of it is wrong, and the same pin
-means something unrelated one board over. Nothing drives it. **A dark display is not a
-reason to start toggling it** — the charge pump, the SPI wiring and the reset sequence
-are all upstream of anything PC1 could plausibly do.
+**It is also not a 12 V rail enable, on any board.** The OLED runs from the SSD1306's own
+internal charge pump, which `ssd1306::init` enables (`0x8D`) precisely because there is no
+external panel supply — there is a test asserting that command is in the init sequence.
+The only place this reference explains PC1 is the Q1 power section, where it is
+`NOT_BATTERY_OLD`, a battery-presence input on earlier revs.
 
-**How to resolve.** The schematic, or the board file these names came from. Low priority:
-nothing we build needs any of the three.
+Nothing drives any of the three, and **a dark display on mk4 is unrelated to all of
+them** — the charge pump, the SPI wiring and the reset sequence are the things upstream
+of it.
+
+**Where this bites later:** if mk5 support is ever added it cannot simply alias mk4, and
+`MK_5_OK=0x20` is its own `hw_compat` bit (`MK_Q1_OK` is `0x10` — an earlier revision of
+the reference had these swapped).
 
 ---
 
