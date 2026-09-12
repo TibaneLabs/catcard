@@ -131,6 +131,25 @@ than entering it.
 
 ---
 
+## mk5: the same trap as mk4, for the same reason
+
+mk5 is an mk4 board revision and shares its upgrade path: staging into PSRAM, which
+means **OCTOSPI, which this firmware never configures** (see
+[`HARDWARE-OPEN-ITEMS.md`](HARDWARE-OPEN-ITEMS.md)). So the `UpgradeOffer` path answers
+and reports success right up to the reboot, and whether the bootloader then finds
+anything is unknown — the emulator maps PSRAM unconditionally and cannot answer it.
+
+It may work: the bootloader reads a staged image from PSRAM itself, so it configures
+OCTOSPI at boot, and if it leaves that mapping in place the firmware inherits it.
+**`Debug → PSRAM` reports what is actually true on the device**, and is worth looking at
+before trusting the upgrade path with the only route back.
+
+Until that is confirmed, treat an mk5 exactly like an mk4: on a locked (RDP=2) unit,
+assume flashing is one-way. `Debug → Enter DFU` is the only exit and the bootloader
+refuses it on RDP=2.
+
+---
+
 ## mk3: there is no way back yet
 
 **Read this before flashing an mk3.** mk3 stages a firmware upgrade in SPI-NOR flash,

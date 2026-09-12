@@ -19,7 +19,7 @@
 set -u
 BOOTLOADER=${1:?usage: drive.sh <bootloader.dfu> [board]}
 BOARD=${2:-mk4}
-case "$BOARD" in mk3|mk4|q1) ;; *) echo "unknown board: $BOARD" >&2; exit 2 ;; esac
+case "$BOARD" in mk3|mk4|mk5|q1) ;; *) echo "unknown board: $BOARD" >&2; exit 2 ;; esac
 EMU=${CCEMU:-../coldcard-emu/target/release/ccemu}
 cd "$(dirname "$0")/../.."
 
@@ -38,7 +38,7 @@ cargo run -q -p catcard-image -- build "$FW" --board "$BOARD" --version 7.0.0 \
 # Only for boards that can stage: mk3 has nowhere to put an image.
 OFFER=""
 case "$BOARD" in
-mk4 | q1) OFFER="out/catcard-$BOARD.dfu" ;;
+mk4 | mk5 | q1) OFFER="out/catcard-$BOARD.dfu" ;;
 esac
 
 SOCK=$(mktemp -u /tmp/catcard-XXXX.sock)

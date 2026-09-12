@@ -27,6 +27,7 @@ usb-key-injection = []
 show-pin = []
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
+board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]
 board-q1 = ["catcard-board/board-q1", "catcard-hal/board-q1"]
 
 [dependencies]

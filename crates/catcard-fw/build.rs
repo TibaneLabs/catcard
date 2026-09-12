@@ -76,18 +76,32 @@ fn main() {
 }
 
 fn board_from_features() -> &'static catcard_board::BoardSpec {
-    let mk3 = env::var_os("CARGO_FEATURE_BOARD_MK3").is_some();
-    let mk4 = env::var_os("CARGO_FEATURE_BOARD_MK4").is_some();
-    let q1 = env::var_os("CARGO_FEATURE_BOARD_Q1").is_some();
+    // Driven off `spec::ALL` rather than a tuple match, so adding a board is one entry
+    // in the spec table and a feature -- the tuple grew a dimension per board, and
+    // forgetting this function gave "no board selected" for a board that exists.
+    let selected: Vec<&catcard_board::BoardSpec> = catcard_board::spec::ALL
+        .iter()
+        .filter(|b| {
+            env::var_os(format!(
+                "CARGO_FEATURE_BOARD_{}",
+                b.name.to_uppercase().replace('-', "_")
+            ))
+            .is_some()
+        })
+        .collect();
 
-    match (mk3, mk4, q1) {
-        (true, false, false) => &catcard_board::spec::MK3,
-        (false, true, false) => &catcard_board::spec::MK4,
-        (false, false, true) => &catcard_board::spec::Q1,
-        (false, false, false) => panic!(
-            "no board selected. Build with one of:\n  \
-             cargo fw-mk3\n  cargo fw-mk4\n  cargo fw-q1"
-        ),
+    match selected.as_slice() {
+        [one] => one,
+        [] => {
+            let aliases: Vec<String> = catcard_board::spec::ALL
+                .iter()
+                .map(|b| format!("  cargo fw-{}", b.name))
+                .collect();
+            panic!(
+                "no board selected. Build with one of:\n{}",
+                aliases.join("\n")
+            )
+        }
         _ => panic!("more than one board feature is enabled; pick exactly one"),
     }
 }

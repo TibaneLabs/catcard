@@ -14,4 +14,5 @@ default = []
 # `spec::{MK3, MK4, Q1}` table is available (this is how the host tools use it).
 board-mk3 = []
 board-mk4 = []
+board-mk5 = []
 board-q1 = []

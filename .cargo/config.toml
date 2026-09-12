@@ -22,6 +22,7 @@
 # Firmware builds. A board feature is required -- there is no default board.
 fw-mk3   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3"
 fw-mk4   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4"
+fw-mk5   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5"
 fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1"
 
 # Bring-up builds: the same firmware plus `usb-key-injection`, which lets a host drive
@@ -29,6 +30,7 @@ fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-de
 # for the emulator's `--drive` test. Never ship one of these -- see docs/USB.md.
 fw-mk3-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3,usb-key-injection,show-pin"
 fw-mk4-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4,usb-key-injection,show-pin"
+fw-mk5-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5,usb-key-injection,show-pin"
 fw-q1-bringup  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,usb-key-injection,show-pin"
 
 # Host-side: unit tests for the portable crates and the image tool.

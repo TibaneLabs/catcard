@@ -470,6 +470,32 @@ person can actually see.
 **since the first splash was drawn**, so the wait is only for the time bring-up did not
 already use.
 
+## mk5 — added as its own board, and driven end to end
+
+mk5 is electrically an mk4: same MCU, pins, PSRAM, secure elements and firmware base,
+differing by `STRAP_MK5` (`PE0`, low). `spec::MK5` borrows mk4's definition with `..MK4`
+rather than restating it, because a second copy is two places to fix a pin.
+
+What it must not borrow is `hw_compat`. `MK_5_OK` is `0x20`, and the separation is the
+entire reason this is a board rather than a flag — verified both ways:
+
+```
+$ catcard-image verify out/catcard-mk5.dfu --board mk5
+installable   yes, on mk5
+$ catcard-image verify out/catcard-mk5.dfu --board mk4
+Error: image hw_compat is mk5 but board mk4 needs bit 0x8
+```
+
+The emulator runs it with the mk4 factory bootloader, which is right — the two share a
+board definition — and the full drive test passes: enumerate, first PIN, unlock, offer a
+256 KB image, approve, reset.
+
+Adding it also turned up a shape problem. `build.rs` matched a tuple of board features,
+which grew a dimension per board; adding mk5 to the spec table and the features gave
+"no board selected" for a board that plainly existed. It reads `spec::ALL` now, so a new
+board is one spec and one feature. The same applied to the "exactly one board" check in
+`lib.rs`, which enumerated pairs.
+
 ## mk3 in the emulator — confirmed, except the PIN
 
 The older mk3 releases carry a bootloader alongside the firmware, so mk3 emulates like

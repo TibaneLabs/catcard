@@ -400,6 +400,32 @@ pub const MK4: BoardSpec = BoardSpec {
 };
 
 // ---------------------------------------------------------------------------
+// mk5 — an mk4 board revision, with its own compatibility bit
+// ---------------------------------------------------------------------------
+
+/// mk5: electrically an mk4, and deliberately **not** an alias for it.
+///
+/// The reference calls mk5 "a board rev" sharing mk4's board definition, differing only
+/// by `STRAP_MK5` (`PE0`, pulled low). Every pin, the MCU, PSRAM, both secure elements
+/// and the firmware base are mk4's, so this borrows them rather than restating them --
+/// a second copy would be two places to fix a pin.
+///
+/// What it must not borrow is `hw_compat`. `MK_5_OK` is `0x20`, its own bit, and an
+/// image built with mk4's `0x08` is refused by an mk5 bootloader and vice versa. That
+/// separation is the whole reason this is a board and not a feature flag on mk4.
+///
+/// `V12EN=PC1` exists on this board and not on mk4 (relayed from the maintainer). Its
+/// purpose is not documented and nothing here drives it — see
+/// `docs/HARDWARE-OPEN-ITEMS.md`.
+///
+/// Source: generations-mk2-q-mk5.md §Mk4/Mk5 [C], firmware-signing.md §1 [C]
+pub const MK5: BoardSpec = BoardSpec {
+    name: "mk5",
+    hw_compat_bit: 0x20, // MK_5_OK
+    ..MK4
+};
+
+// ---------------------------------------------------------------------------
 // Q / Q1 — STM32L4S5 with LCD, QWERTY and a QR scanner
 // ---------------------------------------------------------------------------
 
@@ -484,7 +510,7 @@ pub const Q1: BoardSpec = BoardSpec {
 };
 
 /// Every board, for host tools that must handle all of them.
-pub const ALL: &[BoardSpec] = &[MK3, MK4, Q1];
+pub const ALL: &[BoardSpec] = &[MK3, MK4, MK5, Q1];
 
 #[cfg(test)]
 mod tests {
