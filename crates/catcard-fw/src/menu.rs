@@ -66,6 +66,7 @@ enum Screen {
     Clocks,
     Psram,
     PsramProbe,
+    Sd,
     Boot,
     Keypad,
     ConfirmDfu,
@@ -78,6 +79,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "PSRAM",
     "Boot report",
     "Keypad",
+    "microSD",
     "Enter DFU",
 ];
 
@@ -226,6 +228,7 @@ fn step(
             (Key::Confirm, 2) => Screen::Psram,
             (Key::Confirm, 3) => Screen::Boot,
             (Key::Confirm, 4) => Screen::Keypad,
+            (Key::Confirm, 5) => Screen::Sd,
             (Key::Confirm, _) => Screen::ConfirmDfu,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
@@ -297,6 +300,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PsramProbe => psram_probe(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
+        Screen::Sd => sd_screen(panel),
         Screen::ConfirmDfu => confirm_dfu(panel),
     }
 }
@@ -623,6 +627,107 @@ fn confirm_dfu(panel: &mut display::Panel) {
     let warn = "refused on locked units";
     draw_text(&mut fb, f, centred(f, warn, 128), 44, warn);
     let _ = panel.flush(&fb);
+}
+
+/// microSD: does a card come up, and what does the controller say if not.
+///
+/// Brings the controller up and runs the card's bring-up conversation on the spot. This
+/// screen is where the SD driver is first exercised at all — the emulator models the
+/// SDMMC command registers and no data path, so nothing below `catcard_sd` has ever run
+/// against anything. `STA` is on screen for that reason: a failure here should say which
+/// step failed and what the controller thought, not just "no".
+fn sd_screen(panel: &mut display::Panel) {
+    use catcard_hal::sdmmc::Sdmmc;
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is the only user.
+    let dev = unsafe { Sdmmc::init(&catcard_board::BOARD) };
+    let mut dev = match dev {
+        Ok(d) => d,
+        Err(e) => {
+            let mut l = Line::new();
+            let _ = write!(l, "controller: {}", describe_sd(&e));
+            let _ = lines.push(l);
+            let mut l = Line::new();
+            let _ = write!(l, "clock gate or base wrong");
+            let _ = lines.push(l);
+            info(panel, "microSD", &lines);
+            return;
+        }
+    };
+
+    let mut l = Line::new();
+    let _ = write!(
+        l,
+        "slot: {}",
+        if catcard_sd::Transport::card_present(&dev) {
+            "card detected"
+        } else {
+            "empty"
+        }
+    );
+    let _ = lines.push(l);
+
+    match catcard_sd::init(&mut dev) {
+        Ok(card) => {
+            let mut l = Line::new();
+            let _ = write!(l, "{} MiB  rca {:04x}", card.mib(), card.rca);
+            let _ = lines.push(l);
+
+            let mut l = Line::new();
+            let _ = write!(
+                l,
+                "{}  {} bit",
+                match card.addressing {
+                    catcard_sd::Addressing::BlockAddressed => "SDHC",
+                    catcard_sd::Addressing::ByteAddressed => "SDSC",
+                },
+                if card.wide { 4 } else { 1 }
+            );
+            let _ = lines.push(l);
+
+            // One block, to prove the data path and not only the command path.
+            let mut block = [0u8; catcard_sd::BLOCK_LEN];
+            let mut l = Line::new();
+            match catcard_sd::read_block(&mut dev, &card, 0, &mut block) {
+                // The MBR/boot signature, which every formatted card carries.
+                Ok(()) if block[510] == 0x55 && block[511] == 0xAA => {
+                    let _ = write!(l, "block 0 ok (55 aa)");
+                }
+                Ok(()) => {
+                    let _ = write!(l, "block 0 read, no 55aa");
+                }
+                Err(e) => {
+                    let _ = write!(l, "read: {}", describe_sd(&e));
+                }
+            }
+            let _ = lines.push(l);
+        }
+        Err(e) => {
+            let mut l = Line::new();
+            let _ = write!(l, "init: {}", describe_sd(&e));
+            let _ = lines.push(l);
+        }
+    }
+
+    let _ = lines.push(reg_line("STA    ", dev.status()));
+    info(panel, "microSD", &lines);
+}
+
+/// An SD error in the few characters a line has.
+fn describe_sd(e: &catcard_sd::Error) -> &'static str {
+    use catcard_sd::Error as E;
+    match e {
+        E::NoCard => "no card",
+        E::Timeout { .. } => "timeout",
+        E::BadResponse { .. } => "bad response",
+        E::Unusable => "unusable card",
+        E::InitTimeout => "never ready",
+        E::BadCsd => "bad CSD",
+        E::DataError { .. } => "data error",
+        E::Peripheral => "peripheral",
+        E::ReadOnly => "read only",
+    }
 }
 
 /// Draw up to three lines and return.

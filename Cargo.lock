@@ -148,6 +148,7 @@ dependencies = [
  "catcard-fwhdr",
  "catcard-hal",
  "catcard-pin",
+ "catcard-sd",
  "catcard-ui",
  "catcard-upgrade",
  "catcard-usb",
@@ -171,6 +172,7 @@ version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
+ "catcard-sd",
  "catcard-usb",
 ]
 

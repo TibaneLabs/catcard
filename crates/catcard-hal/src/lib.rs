@@ -25,6 +25,7 @@ pub mod gpio;
 pub mod otg;
 pub mod reg;
 pub mod rng;
+pub mod sdmmc;
 pub mod spi;
 pub mod strap;
 pub mod uid;

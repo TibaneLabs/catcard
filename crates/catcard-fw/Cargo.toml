@@ -39,6 +39,7 @@ catcard-hal.workspace = true
 catcard-pin = { workspace = true, default-features = false }
 catcard-upgrade = { workspace = true, default-features = false }
 catcard-usb = { workspace = true, default-features = false }
+catcard-sd.workspace = true
 catcard-wallet = { workspace = true, default-features = false }
 catcard-ui.workspace = true
 cortex-m.workspace = true

@@ -18,6 +18,8 @@ struct FakeCard {
     selected: bool,
     /// Argument of the last CMD17.
     last_read_arg: u32,
+    /// Whether the data path was armed before the read command went out.
+    armed_before_cmd: bool,
 }
 
 /// A tiny growable vector, so the test file needs no dependency.
@@ -59,6 +61,7 @@ impl Default for FakeCard {
             accept_4bit: true,
             selected: false,
             last_read_arg: 0,
+            armed_before_cmd: false,
         }
     }
 }
@@ -89,6 +92,10 @@ impl Transport for FakeCard {
                 if !self.selected {
                     return Err(Error::BadResponse { cmd });
                 }
+                assert!(
+                    self.armed_before_cmd,
+                    "CMD17 went out before the data path was armed"
+                );
                 self.last_read_arg = arg;
                 Ok([0; 4])
             }
@@ -113,6 +120,10 @@ impl Transport for FakeCard {
 
     fn card_present(&self) -> bool {
         self.present
+    }
+
+    fn arm_block_read(&mut self) {
+        self.armed_before_cmd = true;
     }
 }
 

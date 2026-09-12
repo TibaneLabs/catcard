@@ -56,6 +56,7 @@ catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-pin = { path = "crates/catcard-pin", default-features = false }
 catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
 catcard-usb = { path = "crates/catcard-usb", default-features = false }
+catcard-sd = { path = "crates/catcard-sd" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
 catcard-hal = { path = "crates/catcard-hal" }
 catcard-ui = { path = "crates/catcard-ui" }

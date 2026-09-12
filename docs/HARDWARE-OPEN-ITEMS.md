@@ -388,6 +388,39 @@ per device.
 
 ---
 
+## SDMMC constants that no emulator run can check
+
+The driver in `catcard-hal::sdmmc` is written and **has never moved a byte**. The
+emulator models the SDMMC command registers and nothing else: a probe reading every
+offset from `0x00` to `0xFC` came back named only through `MASK` at `0x3C`, with no FIFO
+and no data path traced at all. So this driver meets its first card on hardware.
+
+What the probe did settle, by naming registers at both base addresses:
+
+| | |
+|---|---|
+| SDMMC1 base | `0x5006_2400` (L4+) and `0x4001_2800` (L496) |
+| `0x00..0x3C` | POWER, CLKCR, ARG, CMD, RESPCMD, RESP1-4, DTIMER, DLEN, DCTRL, DCOUNT, STA, ICR, MASK |
+
+What rests on the reference manual alone, and is therefore `[?]`:
+
+- **`FIFO` at `0x80`** — outside the range anything here names.
+- **The RCC gate bit**: `AHB2ENR` bit 22 on L4+, `APB2ENR` bit 10 on L496. Both are read
+  back after being set, so a wrong bit is `Error::Peripheral` on the screen rather than a
+  peripheral that never answers — the `PWR_CR2.USV` lesson applied in advance.
+- **`CMDTRANS`** (`CMD` bit 6), which the L4+ controller needs before a data command and
+  the older one ignores.
+- **AF12** for the six pins, and the clock dividers for 400 kHz then 12 MHz.
+- **Card-detect polarity on mk4/mk5/Q1.** mk3's `SD_SW` is documented as high when a card
+  is present; the others are assumed to match.
+
+**How to resolve.** `Debug → microSD` reports each step and leaves `STA` on the screen. A
+card that comes up prints its size, its addressing mode, and whether block 0 ends in
+`55 aa`. Every wait is bounded, so a wrong constant reads as a timeout rather than a
+device that has to be power-cycled.
+
+---
+
 ## SD: the FAT reader is in, the peripheral driver is not
 
 `catcard-sd` holds the card bring-up sequence and adapts an initialised card to
@@ -395,9 +428,9 @@ per device.
 RAM whatever the card's size, rather than the allocation table resident). Both halves are
 tested on the host against a fake card and a real FAT32 volume.
 
-What is missing is the bottom: a `Transport` implementation over the SDMMC peripheral.
-That is **two drivers, not one** — mk3 is an STM32L496 with SDMMC v1 on APB2, mk4/mk5/Q1
-are L4+ with the newer v2 on AHB2, and the register layouts differ.
+The `Transport` over the peripheral now exists for both families — the command-register
+half of the block is common to them, so one driver covers both with the base address and
+clock gate chosen by MCU. It is unexercised; see above.
 
 **And SD is not an escape route on its own.** The bootloader installs only from the
 staging medium — SPI-NOR offset 0 on mk3, the PSRAM recovery header on mk4+ — so a card

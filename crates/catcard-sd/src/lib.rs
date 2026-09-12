@@ -75,6 +75,13 @@ pub trait Transport {
 
     /// Whether a card is physically present, if the board can tell.
     fn card_present(&self) -> bool;
+
+    /// Arm the data path for one incoming block, before the read command is sent.
+    ///
+    /// The order is the point: a controller told to expect data only after the card has
+    /// been asked for it drops the first words on the floor. Split out so the sequence
+    /// lives here, where it is tested, rather than in the driver.
+    fn arm_block_read(&mut self) {}
 }
 
 /// How a card is addressed, which is the one thing that changes how blocks are read.
@@ -217,6 +224,7 @@ pub fn read_block<T: Transport>(
         Addressing::BlockAddressed => lba,
         Addressing::ByteAddressed => lba.saturating_mul(BLOCK_LEN as u32),
     };
+    t.arm_block_read();
     t.command(CMD_READ_SINGLE, arg, Response::Short)?;
     t.read_data(out)
 }

@@ -19,3 +19,4 @@ board-q1 = ["catcard-board/board-q1"]
 catcard-board.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
 catcard-usb = { workspace = true, default-features = false }
+catcard-sd.workspace = true
