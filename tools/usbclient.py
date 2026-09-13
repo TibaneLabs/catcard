@@ -649,7 +649,6 @@ def main(path, image=None):
         if not pin:
             print("unlock    pass --pin=PREFIX-SUFFIX, e.g. --pin=1111-1111")
             return 1
-        press(s, "y")  # leave the selftest screen; the PIN itself goes over the wire
         done = unlock_with_pin(s, pin)
         print(f"unlock    {'unlocked' if done else 'still locked (wrong PIN?)'}")
         return 0 if done else 1
@@ -668,8 +667,6 @@ def main(path, image=None):
         if not caps & CAP_UPGRADE:
             # Say it here rather than letting the offer fail after a long transfer.
             print("identify  device cannot stage an upgrade (no staging area wired up)")
-
-        press(s, "y")                      # leave the selftest screen
 
         pin = next((a for a in sys.argv if a.startswith("--pin=")), "--pin=12-3456")
         prefix, _, suffix = pin[len("--pin="):].partition("-")

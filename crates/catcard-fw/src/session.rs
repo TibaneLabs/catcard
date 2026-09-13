@@ -77,9 +77,9 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         }
     );
 
-    // Taken one at a time so a device with a working panel but no keypad still shows
-    // the selftest screen -- which is exactly the device most likely to have one of
-    // these missing, and the one where a blank display would be least diagnosable.
+    // Taken one at a time so a device with a working panel but no keypad still parks on
+    // a rendered screen -- which is exactly the device most likely to have one of these
+    // missing, and the one where a blank display would be least diagnosable.
     let Some(mut panel) = panel else {
         selftest::park(report, None)
     };
@@ -87,8 +87,9 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         selftest::park(report, Some(panel))
     };
 
-    selftest::show(&mut report, &mut panel, &mut matrix, &mut drbg);
-
+    // No boot selftest screen: boot goes straight to the PIN prompt, so a host can drive
+    // an unlock with nothing touching the keypad. The self-test view lives under
+    // Debug -> Selftest instead.
     crate::catlog!("pin: prompting");
     let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg);
     crate::catlog!("pin: unlocked");

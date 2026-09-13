@@ -2,10 +2,10 @@
 
 use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
+use catcard_ui::keypad::Key;
 use catcard_ui::text::{centred, draw_text, draw_wrapped};
 
-use crate::{BootReport, VERSION, display, keypad};
+use crate::{BootReport, VERSION, display};
 
 /// Observable state, laid out so a debugger (or, later, the selftest screen) can read
 /// the outcome of bring-up without a protocol.
@@ -188,62 +188,14 @@ pub fn publish(report: &BootReport) {
     }
 }
 
-/// Show the bring-up result and echo key presses until `y` is pressed.
+/// Render the bring-up result as a static screen.
 ///
-/// The echo is not decoration: it is the only way to confirm the keypad map and the
-/// debounce on hardware without a debugger, and it exercises the display refresh path
-/// at the same time. It also feeds press timing into the entropy pool, which is where
-/// user-interaction jitter is meant to come from.
-///
-/// Returns once the user acknowledges, so that boot can carry on to the PIN prompt.
-pub fn show(
-    report: &mut BootReport,
-    panel: &mut display::Panel,
-    matrix: &mut keypad::GpioMatrix,
-    drbg: &mut catcard_entropy::HmacDrbg,
-) {
-    render(report, None, true, panel);
-
-    let mut pad = Keypad::new();
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut last: Option<Key> = None;
-
-    loop {
-        // The host starts enumerating within milliseconds of the cable and will not wait
-        // for this screen to be dismissed.
-        let _ = crate::usbtask::pump();
-
-        let n = pad.scan(matrix, drbg, &mut events);
-        let mut changed = false;
-        let mut seen: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-        for e in &events[..n] {
-            if let Event::Pressed(k) = e {
-                let _ = seen.push(*k);
-            }
-        }
-        // Without this a host cannot get past the first screen, which would make the
-        // rest of the injected-key path unreachable on a device whose pad is mirrored.
-        if let Some(k) = crate::usbtask::take_injected_key() {
-            let _ = seen.push(k);
-        }
-        for k in seen.iter() {
-            if *k == Key::Confirm {
-                return;
-            }
-            last = Some(*k);
-            changed = true;
-            // Press timing is genuine, if weak, entropy; credited 1 bit/byte.
-            if let Some(pool) = report.pool.as_mut() {
-                pool.add_timing(catcard_hal::dwt::cycles());
-            }
-        }
-        if changed {
-            render(report, last, true, panel);
-        }
-        // Roughly 60 Hz at the reset-default clock; three samples then give about
-        // 50 ms of debounce.
-        catcard_hal::dwt::delay_cycles(66_000);
-    }
+/// The read-only half of what used to be the blocking boot screen: it draws the same
+/// self-test (HAL, DWT, RNG, board, version) but does not loop or wait -- the caller
+/// (Debug -> Selftest) redraws it and takes the key that dismisses it. Boot no longer
+/// shows this at all, so nothing stands between power-on and the PIN prompt.
+pub fn screen(report: &BootReport, panel: &mut display::Panel) {
+    render(report, None, false, panel);
 }
 
 /// Stop, with whatever we could report.
