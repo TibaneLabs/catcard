@@ -384,7 +384,7 @@ mod tests {
     fn wordlist_digest_matches_the_published_file() {
         // Pins provenance: if a word ever changes, every seed this crate derives
         // changes with it, so the list is checksummed rather than trusted.
-        use sha2::{Digest, Sha256};
+        use purecrypto::hash::{Digest, Sha256};
         let mut h = Sha256::new();
         for w in ENGLISH {
             h.update(w.as_bytes());

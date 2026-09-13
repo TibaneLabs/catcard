@@ -6,7 +6,7 @@
 //! everything CatCard encodes is small and fixed — an extended key is 78 bytes, an
 //! address payload 21.
 
-use sha2::{Digest, Sha256};
+use purecrypto::hash::{Digest, Sha256};
 
 /// Bitcoin's Base58 alphabet. Deliberately omits `0`, `O`, `I` and `l`.
 pub const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -40,7 +40,7 @@ pub enum Error {
 /// The 4-byte Base58Check checksum of `payload`.
 pub fn checksum(payload: &[u8]) -> [u8; CHECKSUM_LEN] {
     let first = Sha256::digest(payload);
-    let second = Sha256::digest(first);
+    let second = Sha256::digest(&first);
     let mut out = [0u8; CHECKSUM_LEN];
     out.copy_from_slice(&second[..CHECKSUM_LEN]);
     out
@@ -166,8 +166,8 @@ pub fn decode_check(text: &str, out: &mut [u8]) -> Result<usize, Error> {
     let split = n - CHECKSUM_LEN;
     let (payload, tail) = buf.split_at(split);
 
-    use subtle::ConstantTimeEq;
-    let ok: bool = checksum(payload).ct_eq(&tail[..CHECKSUM_LEN]).into();
+    use purecrypto::ct::ConstantTimeEq;
+    let ok: bool = checksum(payload)[..].ct_eq(&tail[..CHECKSUM_LEN]).into();
     if !ok {
         return Err(Error::BadChecksum);
     }
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn checksum_matches_double_sha256() {
         let payload = b"catcard";
-        let expect = Sha256::digest(Sha256::digest(payload));
+        let expect = Sha256::digest(&Sha256::digest(payload));
         assert_eq!(checksum(payload), expect[..4]);
     }
 }

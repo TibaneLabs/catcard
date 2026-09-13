@@ -13,5 +13,4 @@ default = ["std"]
 std = []
 
 [dependencies]
-k256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "schnorr"] }
-sha2.workspace = true
+purecrypto = { workspace = true, features = ["hash", "ec", "hazmat-secp256k1", "bip340"] }

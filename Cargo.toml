@@ -69,10 +69,13 @@ cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
 heapless = "0.9.3"
 
-# --- crypto (no_std-capable) ---
-sha2 = { version = "0.11.0", default-features = false }
-hmac = { version = "0.13.0", default-features = false }
-subtle = { version = "2.6.1", default-features = false }
+# --- crypto: purecrypto, our own pure-Rust no_std/no-alloc toolkit ---
+# One stack for hashing, HMAC, secp256k1 (ECDSA + BIP340 Schnorr + point ops) and
+# RIPEMD-160. `unsafe_code = "deny"` upstream, edition 2024 / Rust 1.89 like us.
+# Firmware crates take only no-alloc features (`hash`, `ec`, `hazmat-secp256k1`,
+# `bip340`); the host tool adds the alloc/`std` pieces (PEM key loading).
+purecrypto = { version = "0.8.4", default-features = false }
+# Memory hygiene, not a primitive: kept.
 zeroize = { version = "1.9.0", default-features = false }
 
 # --- shared ---
@@ -82,7 +85,6 @@ bitflags = { version = "2.13.1", default-features = false }
 anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive"] }
 hex = "0.4.3"
-k256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
 object = "0.40.0"
 
 [profile.release]

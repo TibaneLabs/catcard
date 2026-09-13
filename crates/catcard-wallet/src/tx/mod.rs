@@ -20,7 +20,7 @@
 //! Legacy (pre-segwit) sighash has no such commitment, which is why signing a legacy
 //! input safely requires the *entire* previous transaction to check the amount against.
 
-use sha2::{Digest, Sha256};
+use purecrypto::hash::{Digest, Sha256};
 
 pub mod varint;
 
@@ -84,7 +84,7 @@ pub struct TxOut<'a> {
 
 /// Double SHA-256, the hash Bitcoin uses nearly everywhere.
 pub fn sha256d(data: &[u8]) -> Hash {
-    Sha256::digest(Sha256::digest(data)).into()
+    Sha256::digest(&Sha256::digest(data))
 }
 
 /// Incremental double SHA-256, for preimages assembled piecewise.
@@ -108,7 +108,7 @@ impl Sha256d {
         self.inner.update(data);
     }
     pub fn finalize(self) -> Hash {
-        Sha256::digest(self.inner.finalize()).into()
+        Sha256::digest(&self.inner.finalize())
     }
 }
 
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn sha256d_is_two_rounds() {
         let d = sha256d(b"catcard");
-        let expect: [u8; 32] = Sha256::digest(Sha256::digest(b"catcard")).into();
+        let expect: [u8; 32] = Sha256::digest(&Sha256::digest(b"catcard"));
         assert_eq!(d, expect);
 
         let mut inc = Sha256d::new();

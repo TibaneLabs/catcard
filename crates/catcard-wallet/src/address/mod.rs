@@ -20,10 +20,8 @@
 
 use crate::bip32::{Network, hash160};
 use crate::encoding::{base58, bech32};
-use k256::elliptic_curve::PrimeField;
-use k256::elliptic_curve::sec1::ToSec1Point;
-use k256::{AffinePoint, ProjectivePoint, PublicKey, Scalar};
-use sha2::{Digest, Sha256};
+use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
+use purecrypto::hash::{Digest, Sha256};
 
 /// Longest address string: a Bech32m P2TR at 62 characters, with headroom.
 pub const MAX_ADDRESS_LEN: usize = bech32::MAX_LENGTH;
@@ -124,10 +122,10 @@ impl NetworkParams for Network {
 pub fn tagged_hash(tag: &[u8], data: &[u8]) -> [u8; 32] {
     let tag_hash = Sha256::digest(tag);
     let mut h = Sha256::new();
-    h.update(tag_hash);
-    h.update(tag_hash);
+    h.update(&tag_hash);
+    h.update(&tag_hash);
     h.update(data);
-    h.finalize().into()
+    h.finalize()
 }
 
 /// The x coordinate of a compressed key, discarding the parity byte (BIP-340).
@@ -149,21 +147,20 @@ pub fn taproot_output_key(internal: &[u8; PUBKEY_LEN]) -> Result<[u8; XONLY_LEN]
     let mut even = [0u8; PUBKEY_LEN];
     even[0] = 0x02;
     even[1..].copy_from_slice(&x);
-    let p = PublicKey::from_sec1_bytes(&even).map_err(|_| Error::InvalidKey)?;
+    let p = AffinePoint::from_sec1(&even).map_err(|_| Error::InvalidKey)?;
 
     let t = tagged_hash(b"TapTweak", &x);
-    let scalar: Scalar = Option::from(Scalar::from_repr(t.into())).ok_or(Error::TweakFailed)?;
+    let scalar = Scalar::from_bytes_be(&t).map_err(|_| Error::TweakFailed)?;
 
-    let q = ProjectivePoint::from(p.as_affine()) + ProjectivePoint::GENERATOR * scalar;
-    let affine = AffinePoint::from(&q);
-    let pk = PublicKey::from_affine(affine).map_err(|_| Error::TweakFailed)?;
-    let enc = pk.to_sec1_point(true);
-    let bytes = enc.as_bytes();
-    if bytes.len() != PUBKEY_LEN {
-        return Err(Error::TweakFailed);
-    }
+    let q = p
+        .to_projective()
+        .add(&ProjectivePoint::mul_generator(&scalar));
+    let compressed = q
+        .to_affine()
+        .ok_or(Error::TweakFailed)?
+        .to_sec1_compressed();
     let mut out = [0u8; XONLY_LEN];
-    out.copy_from_slice(&bytes[1..]);
+    out.copy_from_slice(&compressed[1..]);
     Ok(out)
 }
 
@@ -185,7 +182,7 @@ pub fn encode(
 ) -> Result<usize, Error> {
     // Reject anything that is not a point on the curve before hashing it: an address
     // derived from a malformed key is unspendable and looks perfectly normal.
-    if PublicKey::from_sec1_bytes(pubkey).is_err() {
+    if AffinePoint::from_sec1(pubkey).is_err() {
         return Err(Error::InvalidKey);
     }
 
@@ -463,7 +460,7 @@ mod tests {
         let mut flipped = k;
         flipped[0] = if k[0] == 0x02 { 0x03 } else { 0x02 };
         // The flipped key may not be a valid point; only compare when it is.
-        if PublicKey::from_sec1_bytes(&flipped).is_ok() {
+        if AffinePoint::from_sec1(&flipped).is_ok() {
             assert_eq!(
                 taproot_output_key(&k).unwrap(),
                 taproot_output_key(&flipped).unwrap()
@@ -480,10 +477,10 @@ mod tests {
         // And matches the BIP-340 construction explicitly.
         let t = Sha256::digest(b"TapTweak");
         let mut h = Sha256::new();
-        h.update(t);
-        h.update(t);
+        h.update(&t);
+        h.update(&t);
         h.update(b"x");
-        let expect: [u8; 32] = h.finalize().into();
+        let expect: [u8; 32] = h.finalize();
         assert_eq!(tagged_hash(b"TapTweak", b"x"), expect);
     }
 

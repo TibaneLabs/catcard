@@ -110,13 +110,15 @@ fn image_for(board: &BoardSpec, timestamp: [u8; 8], pubkey_num: u32) -> Vec<u8> 
 /// The key is public by design, so a test binary holding it is not a leak; it is the
 /// same key `catcard-image` signs with by default.
 fn sign_with_dev_key(digest: &[u8; 32]) -> [u8; 64] {
-    use k256::SecretKey;
-    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
-    let pem = include_str!("../../../keys/dev-privkey.pem");
-    let sk = SecretKey::from_sec1_pem(pem.trim()).unwrap();
-    let key = SigningKey::from(sk);
-    let sig: k256::ecdsa::Signature = key.sign_prehash(digest).unwrap();
-    sig.normalize_s().to_bytes().into()
+    // The scalar of `keys/dev-privkey.pem`, inlined so the test needs no PEM parser.
+    // It is public by design (see `keys/README.md`), and its matching public key is
+    // `catcard_fwhdr::DEV_PUBKEY`, which `inspect` verifies the fixture against.
+    const DEV_SECRET: [u8; 32] = [
+        0xa4, 0xc2, 0x38, 0x13, 0x84, 0x61, 0x65, 0x8f, 0xe0, 0xe1, 0x7a, 0xb1, 0x5d, 0x90, 0xf5,
+        0x19, 0x4f, 0x49, 0x3d, 0x34, 0x7a, 0x77, 0xd4, 0x64, 0xee, 0xff, 0xa3, 0x1f, 0x45, 0x4e,
+        0xa8, 0xdf,
+    ];
+    catcard_sign::ecdsa_sign(&DEV_SECRET, digest).unwrap()
 }
 
 const NEWER: [u8; 8] = *b"20260901";

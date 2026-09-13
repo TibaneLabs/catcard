@@ -17,5 +17,3 @@ catcard-board.workspace = true
 catcard-fwhdr = { workspace = true, default-features = false }
 catcard-sign = { workspace = true, default-features = false }
 
-[dev-dependencies]
-k256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "pem"] }

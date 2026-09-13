@@ -22,13 +22,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
-use hmac::digest::KeyInit;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
+use purecrypto::ct::ConstantTimeEq;
+use purecrypto::hash::HmacSha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Identifies a slot as ours and the format as this version.
 pub const MAGIC: u32 = 0xCA7C_5E77;
@@ -91,12 +87,12 @@ pub trait SlotStorage {
 /// take an authentic old payload and re-stamp it with a higher sequence number to force
 /// a rollback — the MAC would still verify.
 fn mac_of(key: &[u8; KEY_LEN], seq: u64, payload: &[u8]) -> [u8; 32] {
-    let mut m = HmacSha256::new_from_slice(key).expect("HMAC takes any key");
+    let mut m = HmacSha256::new(key);
     m.update(&MAGIC.to_le_bytes());
     m.update(&seq.to_le_bytes());
     m.update(&(payload.len() as u16).to_le_bytes());
     m.update(payload);
-    m.finalize().into_bytes().into()
+    m.finalize()
 }
 
 /// A parsed, authenticated slot.
@@ -120,7 +116,7 @@ fn parse(raw: &[u8; SLOT_LEN], key: &[u8; KEY_LEN]) -> Option<Slot> {
 
     // Constant time: a timing signal here would let an attacker with the flash in hand
     // search for a MAC byte at a time.
-    let ok: bool = expect.ct_eq(&raw[OFF_MAC..OFF_MAC + 32]).into();
+    let ok: bool = expect[..].ct_eq(&raw[OFF_MAC..OFF_MAC + 32]).into();
     if ok { Some(Slot { seq, len }) } else { None }
 }
 

@@ -23,19 +23,12 @@ pub mod serialize;
 #[cfg(test)]
 mod test_vectors;
 
-use hmac::digest::KeyInit;
-use hmac::{Hmac, Mac};
-use k256::elliptic_curve::PrimeField;
-use k256::elliptic_curve::sec1::ToSec1Point;
-use k256::{AffinePoint, ProjectivePoint, PublicKey, Scalar, SecretKey};
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256, Sha512};
+use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
+use purecrypto::hash::{Digest, HmacSha512, Ripemd160, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use path::{ChildNumber, DerivationPath, HARDENED_OFFSET, MAX_PATH_DEPTH};
 pub use serialize::Network;
-
-type HmacSha512 = Hmac<Sha512>;
 
 /// A compressed secp256k1 point.
 pub const PUBKEY_LEN: usize = 33;
@@ -76,7 +69,7 @@ pub enum Error {
 /// RIPEMD160(SHA256(data)) — the identifier BIP-32 fingerprints are taken from.
 pub fn hash160(data: &[u8]) -> [u8; 20] {
     let sha = Sha256::digest(data);
-    Ripemd160::digest(sha).into()
+    Ripemd160::digest(&sha)
 }
 
 /// An extended private key.
@@ -107,8 +100,10 @@ pub struct ExtendedPubKey {
 }
 
 fn scalar_from_bytes(b: &[u8; 32]) -> Option<Scalar> {
-    let sk = SecretKey::from_slice(b).ok()?;
-    Some(*sk.to_nonzero_scalar().as_ref())
+    // `from_bytes_be` rejects values >= n; BIP-32 also forbids zero.
+    Scalar::from_bytes_be(b)
+        .ok()
+        .filter(|s| !bool::from(s.is_zero()))
 }
 
 /// Interpret 32 bytes as a scalar, rejecting values at or above the curve order.
@@ -117,20 +112,12 @@ fn scalar_from_bytes(b: &[u8; 32]) -> Option<Scalar> {
 /// conversion would do — maps two distinct HMAC outputs onto the same key, so the
 /// canonical `from_repr` is used: it returns `None` rather than wrapping.
 fn scalar_in_range(b: &[u8; 32]) -> Option<Scalar> {
-    Option::from(Scalar::from_repr((*b).into()))
+    Scalar::from_bytes_be(b).ok()
 }
 
 fn compress(point: &ProjectivePoint) -> Option<[u8; PUBKEY_LEN]> {
-    let affine = AffinePoint::from(point);
-    let pk = PublicKey::from_affine(affine).ok()?;
-    let enc = pk.to_sec1_point(true);
-    let bytes = enc.as_bytes();
-    if bytes.len() != PUBKEY_LEN {
-        return None;
-    }
-    let mut out = [0u8; PUBKEY_LEN];
-    out.copy_from_slice(bytes);
-    Some(out)
+    // `to_affine` is `None` only for the identity, which is not a valid public key.
+    Some(point.to_affine()?.to_sec1_compressed())
 }
 
 impl ExtendedPrivKey {
@@ -142,9 +129,9 @@ impl ExtendedPrivKey {
         if !(MIN_SEED_LEN..=MAX_SEED_LEN).contains(&seed.len()) {
             return Err(Error::BadSeedLen { len: seed.len() });
         }
-        let mut mac = HmacSha512::new_from_slice(MASTER_KEY_SALT).expect("HMAC takes any key");
+        let mut mac = HmacSha512::new(MASTER_KEY_SALT);
         mac.update(seed);
-        let i = mac.finalize().into_bytes();
+        let i = mac.finalize();
 
         let mut secret = [0u8; PRIVKEY_LEN];
         secret.copy_from_slice(&i[..32]);
@@ -194,7 +181,7 @@ impl ExtendedPrivKey {
     /// The matching public key.
     pub fn public_key(&self) -> [u8; PUBKEY_LEN] {
         let scalar = scalar_from_bytes(&self.secret).expect("validated at construction");
-        compress(&(ProjectivePoint::GENERATOR * scalar)).expect("scalar is non-zero")
+        compress(&ProjectivePoint::mul_generator(&scalar)).expect("scalar is non-zero")
     }
 
     pub fn identifier(&self) -> [u8; 20] {
@@ -213,7 +200,7 @@ impl ExtendedPrivKey {
         if self.depth == u8::MAX {
             return Err(Error::TooDeep);
         }
-        let mut mac = HmacSha512::new_from_slice(&self.chain_code).expect("HMAC takes any key");
+        let mut mac = HmacSha512::new(&self.chain_code);
         if child.is_hardened() {
             // 0x00 || ser256(k_par) || ser32(i)
             mac.update(&[0u8]);
@@ -223,7 +210,7 @@ impl ExtendedPrivKey {
             mac.update(&self.public_key());
         }
         mac.update(&child.to_bytes());
-        let i = mac.finalize().into_bytes();
+        let i = mac.finalize();
 
         let mut il = [0u8; 32];
         il.copy_from_slice(&i[..32]);
@@ -231,13 +218,13 @@ impl ExtendedPrivKey {
         // k_i = parse256(I_L) + k_par (mod n); invalid if I_L >= n or k_i == 0.
         let tweak = scalar_in_range(&il).ok_or(Error::UnusableChild { index: child.0 })?;
         let parent = scalar_from_bytes(&self.secret).expect("validated at construction");
-        let derived = tweak + parent;
+        let derived = tweak.add(&parent);
         if bool::from(derived.is_zero()) {
             return Err(Error::UnusableChild { index: child.0 });
         }
 
         let mut secret = [0u8; PRIVKEY_LEN];
-        secret.copy_from_slice(&derived.to_bytes());
+        secret.copy_from_slice(&derived.to_bytes_be());
         let mut chain_code = [0u8; CHAIN_CODE_LEN];
         chain_code.copy_from_slice(&i[32..]);
         il.zeroize();
@@ -286,7 +273,7 @@ impl core::fmt::Debug for ExtendedPrivKey {
 
 impl PartialEq for ExtendedPrivKey {
     fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
+        use purecrypto::ct::ConstantTimeEq;
         let secret_eq: bool = self.secret.ct_eq(&other.secret).into();
         let cc_eq: bool = self.chain_code.ct_eq(&other.chain_code).into();
         self.network == other.network
@@ -319,17 +306,19 @@ impl ExtendedPubKey {
             return Err(Error::TooDeep);
         }
 
-        let mut mac = HmacSha512::new_from_slice(&self.chain_code).expect("HMAC takes any key");
+        let mut mac = HmacSha512::new(&self.chain_code);
         mac.update(&self.public_key);
         mac.update(&child.to_bytes());
-        let i = mac.finalize().into_bytes();
+        let i = mac.finalize();
 
         let mut il = [0u8; 32];
         il.copy_from_slice(&i[..32]);
         let tweak = scalar_in_range(&il).ok_or(Error::UnusableChild { index: child.0 })?;
 
-        let parent = PublicKey::from_sec1_bytes(&self.public_key).map_err(|_| Error::InvalidKey)?;
-        let point = ProjectivePoint::from(parent.as_affine()) + ProjectivePoint::GENERATOR * tweak;
+        let parent = AffinePoint::from_sec1(&self.public_key).map_err(|_| Error::InvalidKey)?;
+        let point = parent
+            .to_projective()
+            .add(&ProjectivePoint::mul_generator(&tweak));
         let public_key = compress(&point).ok_or(Error::UnusableChild { index: child.0 })?;
 
         let mut chain_code = [0u8; CHAIN_CODE_LEN];
@@ -533,7 +522,7 @@ mod tests {
     #[test]
     fn hash160_is_ripemd_of_sha256() {
         let data = b"catcard";
-        let expect: [u8; 20] = Ripemd160::digest(Sha256::digest(data)).into();
+        let expect: [u8; 20] = Ripemd160::digest(&Sha256::digest(data));
         assert_eq!(hash160(data), expect);
     }
 }

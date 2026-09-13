@@ -220,14 +220,14 @@ mod tests {
     fn a_realistic_random_stream_passes() {
         // SHA-256 output chained: statistically indistinguishable from a good TRNG,
         // so the tests must not fire on it.
-        use sha2::{Digest, Sha256};
+        use purecrypto::hash::{Digest, Sha256};
         let mut out = Vec::new();
         let mut h = [0u8; 32];
         for i in 0..64u32 {
             let mut d = Sha256::new();
-            d.update(h);
-            d.update(i.to_le_bytes());
-            h = d.finalize().into();
+            d.update(&h);
+            d.update(&i.to_le_bytes());
+            h = d.finalize();
             out.extend_from_slice(&h);
         }
         let mut t = ContinuousTest::new();

@@ -61,11 +61,11 @@ mod tests {
     use super::*;
 
     fn noise(tag: u8, n: usize) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
+        use purecrypto::hash::{Digest, Sha256};
         let mut out = Vec::new();
         let mut h = [tag; 32];
         while out.len() < n {
-            h = Sha256::digest(h).into();
+            h = Sha256::digest(&h);
             out.extend_from_slice(&h);
         }
         out.truncate(n);

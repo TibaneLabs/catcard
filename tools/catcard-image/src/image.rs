@@ -440,12 +440,11 @@ mod tests {
     fn signing_slot_0_with_a_foreign_key_is_refused() {
         // Slot 0 must carry the dev key or the device rejects the image, so catch a
         // mismatch at build time rather than after a slow SD-card round trip.
-        use k256::SecretKey;
-        use k256::pkcs8::LineEnding;
-        let other = SecretKey::from_slice(&[7u8; 32])
+        use purecrypto::ec::CurveId;
+        use purecrypto::ec::boxed::BoxedEcdsaPrivateKey;
+        let other = BoxedEcdsaPrivateKey::from_bytes(CurveId::Secp256k1, &[7u8; 32])
             .unwrap()
-            .to_sec1_pem(LineEnding::LF)
-            .unwrap();
+            .to_sec1_pem();
 
         let mut img = assemble(fake_flash(0x5000), &opts(&MK3)).unwrap();
         let err = sign_image(&mut img, &other, 0)

@@ -26,7 +26,7 @@
 //! never rewinds the pool or lets one output reveal another.
 
 use core::fmt;
-use sha2::{Digest, Sha512};
+use purecrypto::hash::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::health::{ContinuousTest, HealthError};
@@ -246,11 +246,11 @@ impl EntropyPool {
 
     fn absorb(&mut self, source: Source, data: &[u8]) {
         let mut h = Sha512::new();
-        h.update(self.state);
+        h.update(&self.state);
         h.update(source.tag());
         // Length-prefix so `add(X, "ab") ; add(X, "c")` cannot collide with
         // `add(X, "abc")`.
-        h.update((data.len() as u64).to_be_bytes());
+        h.update(&(data.len() as u64).to_be_bytes());
         h.update(data);
         self.state.copy_from_slice(&h.finalize());
     }
@@ -306,9 +306,9 @@ impl EntropyPool {
 
         self.draw_counter += 1;
         let mut h = Sha512::new();
-        h.update(self.state);
+        h.update(&self.state);
         h.update(b"catcard/draw/v1");
-        h.update(self.draw_counter.to_be_bytes());
+        h.update(&self.draw_counter.to_be_bytes());
         let full = h.finalize();
         out.copy_from_slice(&full[..out.len()]);
 
@@ -332,11 +332,11 @@ mod tests {
 
     /// Varied bytes that pass the health tests, distinct per `tag`.
     fn noise(tag: u8, n: usize) -> Vec<u8> {
-        use sha2::Sha256;
+        use purecrypto::hash::{Digest, Sha256};
         let mut out = Vec::new();
         let mut h = [tag; 32];
         while out.len() < n {
-            h = Sha256::digest(h).into();
+            h = Sha256::digest(&h);
             out.extend_from_slice(&h);
         }
         out.truncate(n);

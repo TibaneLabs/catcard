@@ -32,14 +32,10 @@ pub mod wordlist;
 #[cfg(test)]
 mod test_vectors;
 
-use hmac::digest::KeyInit;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256, Sha512};
+use purecrypto::hash::{Digest, HmacSha512, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use wordlist::{BITS_PER_WORD, ENGLISH, MAX_WORD_LEN};
-
-type HmacSha512 = Hmac<Sha512>;
 
 /// Largest entropy BIP-39 allows: 256 bits.
 pub const MAX_ENTROPY_LEN: usize = 32;
@@ -287,7 +283,7 @@ impl Mnemonic {
 
         // Compare in constant time: a timing signal on the checksum would leak which
         // prefix of a mistyped phrase was correct.
-        use subtle::ConstantTimeEq;
+        use purecrypto::ct::ConstantTimeEq;
         if this.checksum().ct_eq(&checksum_actual).into() {
             Ok(this)
         } else {
@@ -314,18 +310,18 @@ impl Mnemonic {
         let len = self.render(&mut phrase);
 
         // U1 = PRF(P, salt || INT_32_BE(1))
-        let mut mac = HmacSha512::new_from_slice(&phrase[..len]).expect("HMAC takes any key");
+        let mut mac = HmacSha512::new(&phrase[..len]);
         mac.update(SALT_PREFIX);
         mac.update(passphrase.as_bytes());
         mac.update(&1u32.to_be_bytes());
-        let mut u: [u8; SEED_LEN] = mac.finalize().into_bytes().into();
+        let mut u: [u8; SEED_LEN] = mac.finalize();
 
         // dkLen == hLen, so there is exactly one block: DK = U1 ^ U2 ^ ... ^ Uc.
         *out = u;
         for _ in 1..PBKDF2_ROUNDS {
-            let mut mac = HmacSha512::new_from_slice(&phrase[..len]).expect("HMAC takes any key");
+            let mut mac = HmacSha512::new(&phrase[..len]);
             mac.update(&u);
-            u = mac.finalize().into_bytes().into();
+            u = mac.finalize();
             for (o, x) in out.iter_mut().zip(u.iter()) {
                 *o ^= x;
             }
@@ -345,7 +341,7 @@ impl Mnemonic {
 /// one (recovery confirmation, duress-wallet checks).
 impl PartialEq for Mnemonic {
     fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
+        use purecrypto::ct::ConstantTimeEq;
         // Length is not secret: it is visible from the word count on screen.
         let same_len = self.entropy_len == other.entropy_len;
         let same_bytes: bool = self.entropy.ct_eq(&other.entropy).into();

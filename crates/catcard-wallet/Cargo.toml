@@ -19,9 +19,5 @@ chain-ethereum = []
 chain-solana = []
 
 [dependencies]
-hmac.workspace = true
-k256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
-ripemd = { version = "0.2.0", default-features = false }
-sha2.workspace = true
-subtle.workspace = true
+purecrypto = { workspace = true, features = ["hash", "ec", "hazmat-secp256k1"] }
 zeroize = { workspace = true, features = ["derive"] }

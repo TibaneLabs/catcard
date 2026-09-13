@@ -13,7 +13,5 @@ default = ["std"]
 std = []
 
 [dependencies]
-hmac.workspace = true
-sha2.workspace = true
-subtle.workspace = true
+purecrypto = { workspace = true, features = ["hash"] }
 zeroize = { workspace = true, features = ["derive"] }

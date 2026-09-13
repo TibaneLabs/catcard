@@ -193,7 +193,7 @@ impl ExtendedPrivKey {
         let mut secret = [0u8; PRIVKEY_LEN];
         secret.copy_from_slice(&c.key[1..]);
         // Reject zero and out-of-range scalars rather than carrying an unusable key.
-        if k256::SecretKey::from_slice(&secret).is_err() {
+        if super::scalar_from_bytes(&secret).is_none() {
             return Err(Error::InvalidKey);
         }
         Ok(Self::from_parts(
@@ -248,7 +248,7 @@ impl ExtendedPubKey {
         }
         // Must be a compressed point on the curve; 0x04 (uncompressed) is not valid
         // here, and neither is an off-curve x coordinate.
-        if k256::PublicKey::from_sec1_bytes(&c.key).is_err() {
+        if purecrypto::ec::secp256k1::AffinePoint::from_sec1(&c.key).is_err() {
             return Err(Error::InvalidKey);
         }
         Ok(Self {

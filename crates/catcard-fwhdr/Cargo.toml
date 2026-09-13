@@ -14,4 +14,4 @@ std = []
 
 [dependencies]
 catcard-board.workspace = true
-sha2.workspace = true
+purecrypto = { workspace = true, features = ["hash"] }

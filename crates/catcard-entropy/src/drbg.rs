@@ -11,12 +11,8 @@
 //! is what tied the seed's state to the number of keypresses and made it enumerable.
 //! A routine UI operation must not be able to move the seed generator.
 
-use hmac::digest::KeyInit;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use purecrypto::hash::HmacSha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-
-type HmacSha256 = Hmac<Sha256>;
 
 const OUTLEN: usize = 32;
 
@@ -46,11 +42,11 @@ pub struct HmacDrbg {
 }
 
 fn hmac(key: &[u8; OUTLEN], parts: &[&[u8]]) -> [u8; OUTLEN] {
-    let mut m = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut m = HmacSha256::new(key);
     for p in parts {
         m.update(p);
     }
-    m.finalize().into_bytes().into()
+    m.finalize()
 }
 
 impl HmacDrbg {

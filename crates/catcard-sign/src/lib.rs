@@ -24,9 +24,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
-use k256::ecdsa::signature::hazmat::PrehashVerifier;
-use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
-use k256::schnorr::signature::hazmat::PrehashSigner as _;
+use purecrypto::ec::secp256k1::ecdsa::{
+    Secp256k1EcdsaPrivateKey, Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature,
+};
+use purecrypto::ec::secp256k1::schnorr;
+use purecrypto::hash::Sha256;
 
 /// Compressed public key.
 pub const PUBKEY_LEN: usize = 33;
@@ -94,17 +96,19 @@ impl SigHashType {
     }
 }
 
-fn signing_key(secret: &[u8; 32]) -> Result<SigningKey, Error> {
-    SigningKey::from_slice(secret).map_err(|_| Error::InvalidKey)
+fn signing_key(secret: &[u8; 32]) -> Result<Secp256k1EcdsaPrivateKey, Error> {
+    Secp256k1EcdsaPrivateKey::from_bytes(secret).map_err(|_| Error::InvalidKey)
 }
 
 /// Sign a 32-byte hash with deterministic ECDSA, returning compact `r || s`, low-S.
 pub fn ecdsa_sign(secret: &[u8; 32], hash: &[u8; 32]) -> Result<[u8; COMPACT_SIG_LEN], Error> {
     let key = signing_key(secret)?;
-    let sig: Signature = key.sign_prehash(hash).map_err(|_| Error::SigningFailed)?;
+    // RFC 6979 nonces, keyed on SHA-256 as the bootloader and Bitcoin expect.
+    let sig = key
+        .sign_prehash::<Sha256>(hash)
+        .map_err(|_| Error::SigningFailed)?;
     // Idempotent: returns the same signature when `s` was already in the lower half.
-    let sig = sig.normalize_s();
-    Ok(sig.to_bytes().into())
+    Ok(sig.to_low_s().to_bytes())
 }
 
 /// Verify a compact ECDSA signature against a compressed public key.
@@ -113,11 +117,10 @@ pub fn ecdsa_verify(
     hash: &[u8; 32],
     sig: &[u8; COMPACT_SIG_LEN],
 ) -> Result<bool, Error> {
-    let vk = VerifyingKey::from_sec1_bytes(pubkey).map_err(|_| Error::InvalidKey)?;
-    let Ok(sig) = Signature::from_slice(sig) else {
-        // A malformed signature is a verification failure, not a caller error.
-        return Ok(false);
-    };
+    let vk = Secp256k1EcdsaPublicKey::from_sec1(pubkey).map_err(|_| Error::InvalidKey)?;
+    // `from_bytes` just splits `r || s`; an out-of-range or all-zero half is caught by
+    // `verify_prehash`, which reports a verification failure rather than a caller error.
+    let sig = Secp256k1EcdsaSignature::from_bytes(sig);
     Ok(vk.verify_prehash(hash, &sig).is_ok())
 }
 
@@ -178,10 +181,9 @@ fn der_int(v: &[u8]) -> (&[u8], usize) {
 /// with the untweaked internal key produces a signature that verifies against the wrong
 /// public key and is rejected by consensus.
 pub fn schnorr_sign(secret: &[u8; 32], hash: &[u8; 32]) -> Result<[u8; SCHNORR_SIG_LEN], Error> {
-    let key =
-        k256::schnorr::SigningKey::from_bytes(secret.into()).map_err(|_| Error::InvalidKey)?;
-    let sig = key.sign_prehash(hash).map_err(|_| Error::SigningFailed)?;
-    Ok(sig.to_bytes())
+    // BIP-340 with all-zero auxiliary randomness: deterministic, and the BIP permits
+    // it when no entropy is available at signing time.
+    schnorr::sign_deterministic(secret, hash).map_err(|_| Error::SigningFailed)
 }
 
 /// Verify a Schnorr signature against an x-only public key.
@@ -190,13 +192,8 @@ pub fn schnorr_verify(
     hash: &[u8; 32],
     sig: &[u8; SCHNORR_SIG_LEN],
 ) -> Result<bool, Error> {
-    use k256::schnorr::signature::hazmat::PrehashVerifier as _;
-    let vk =
-        k256::schnorr::VerifyingKey::from_bytes(xonly.into()).map_err(|_| Error::InvalidKey)?;
-    let Ok(sig) = k256::schnorr::Signature::try_from(&sig[..]) else {
-        return Ok(false);
-    };
-    Ok(vk.verify_prehash(hash, &sig).is_ok())
+    // `verify` treats a bad key or a malformed signature as a verification failure.
+    Ok(schnorr::verify(xonly, hash, sig).is_ok())
 }
 
 #[cfg(test)]
@@ -204,12 +201,10 @@ mod tests {
     use super::*;
 
     fn pubkey_of(secret: &[u8; 32]) -> [u8; PUBKEY_LEN] {
-        let key = SigningKey::from_slice(secret).unwrap();
-        let vk = VerifyingKey::from(&key);
-        let p = vk.to_sec1_point(true);
-        let mut out = [0u8; PUBKEY_LEN];
-        out.copy_from_slice(p.as_ref());
-        out
+        Secp256k1EcdsaPrivateKey::from_bytes(secret)
+            .unwrap()
+            .public_key()
+            .to_sec1_compressed()
     }
 
     const SECRET: [u8; 32] = [0x11; 32];
@@ -339,16 +334,14 @@ mod tests {
 
     #[test]
     fn schnorr_sign_then_verify() {
-        let key = k256::schnorr::SigningKey::from_bytes((&SECRET).into()).unwrap();
-        let xonly: [u8; 32] = key.verifying_key().to_bytes().into();
+        let xonly = schnorr::public_key(&SECRET).unwrap();
         let sig = schnorr_sign(&SECRET, &HASH).unwrap();
         assert!(schnorr_verify(&xonly, &HASH, &sig).unwrap());
     }
 
     #[test]
     fn schnorr_rejects_a_wrong_message() {
-        let key = k256::schnorr::SigningKey::from_bytes((&SECRET).into()).unwrap();
-        let xonly: [u8; 32] = key.verifying_key().to_bytes().into();
+        let xonly = schnorr::public_key(&SECRET).unwrap();
         let sig = schnorr_sign(&SECRET, &HASH).unwrap();
         assert!(!schnorr_verify(&xonly, &[0x43; 32], &sig).unwrap());
     }

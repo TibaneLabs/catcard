@@ -10,7 +10,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
-use sha2::{Digest, Sha256};
+use purecrypto::hash::{Digest, Sha256};
 
 pub use catcard_board::{FW_HEADER_OFFSET, FW_HEADER_SIZE};
 
@@ -384,8 +384,7 @@ pub fn signed_digest(image: &[u8]) -> Result<[u8; 32], Error> {
     let mut inner = Sha256::new();
     inner.update(&image[..SIG_START]);
     inner.update(&image[SIG_END..]);
-    let digest = Sha256::digest(inner.finalize());
-    Ok(digest.into())
+    Ok(Sha256::digest(&inner.finalize()))
 }
 
 /// [`signed_digest`], computed over an image fed in pieces.
@@ -435,7 +434,7 @@ impl DigestStream {
 
     /// The double-SHA256 digest.
     pub fn finish(self) -> [u8; 32] {
-        Sha256::digest(self.inner.finalize()).into()
+        Sha256::digest(&self.inner.finalize())
     }
 }
 
@@ -595,7 +594,7 @@ mod tests {
         let mut inner = Sha256::new();
         inner.update(&img[..SIG_START]);
         inner.update(&img[SIG_END..]);
-        let expect: [u8; 32] = Sha256::digest(inner.finalize()).into();
+        let expect: [u8; 32] = Sha256::digest(&inner.finalize());
         assert_eq!(signed_digest(&img).unwrap(), expect);
     }
 

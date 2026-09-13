@@ -5,9 +5,10 @@
 //! raw `r || s` — not DER. Source: `hw-reference/firmware-signing.md §3` [C].
 
 use anyhow::{Context, Result, bail};
-use k256::SecretKey;
-use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
-use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
+use purecrypto::ec::CurveId;
+use purecrypto::ec::boxed::BoxedEcdsaPrivateKey;
+use purecrypto::ec::secp256k1::ecdsa::{Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature};
+use purecrypto::hash::Sha256;
 
 /// `approved_pubkeys[0]` — the published developer key, re-exported from the crate the
 /// firmware also reads it from, so the host tool and the device cannot disagree about
@@ -19,32 +20,41 @@ pub use catcard_fwhdr::DEV_PUBKEY;
 pub const DEV_PRIVKEY_PEM: &str = include_str!("../../../keys/dev-privkey.pem");
 
 /// Load a secp256k1 signing key from a SEC1 `EC PRIVATE KEY` PEM.
-pub fn load_key(pem: &str) -> Result<SigningKey> {
-    let sk = SecretKey::from_sec1_pem(pem.trim())
-        .map_err(|e| anyhow::anyhow!("{e}"))
+///
+/// The host may allocate, so the runtime-curve `BoxedEcdsaPrivateKey` (which owns the
+/// PEM/DER machinery) is used here; the device signs with the allocation-free
+/// `secp256k1::ecdsa` type instead, and the two produce identical RFC 6979 signatures.
+pub fn load_key(pem: &str) -> Result<BoxedEcdsaPrivateKey> {
+    let key = BoxedEcdsaPrivateKey::from_sec1_pem(pem.trim())
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
         .context("not a valid secp256k1 SEC1 private key PEM")?;
-    Ok(SigningKey::from(sk))
+    if key.curve() != CurveId::Secp256k1 {
+        bail!("key is on {:?}, not secp256k1", key.curve());
+    }
+    Ok(key)
 }
 
-/// Sign a 32-byte digest, returning raw `r || s`.
-pub fn sign_digest(key: &SigningKey, digest: &[u8; 32]) -> Result<[u8; 64]> {
-    let sig: Signature = key
-        .sign_prehash(digest)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("ECDSA signing failed")?;
-    Ok(sig.to_bytes().into())
+/// Sign a 32-byte digest, returning raw `r || s`, low-S.
+pub fn sign_digest(key: &BoxedEcdsaPrivateKey, digest: &[u8; 32]) -> Result<[u8; 64]> {
+    let sig = key
+        .sign_prehash::<Sha256>(digest)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .context("ECDSA signing failed")?
+        .to_low_s(CurveId::Secp256k1);
+    let bytes = sig.to_bytes(CurveId::Secp256k1);
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 /// The public key matching a signing key, as raw `X || Y`.
-pub fn public_key_bytes(key: &SigningKey) -> [u8; 64] {
-    let vk = VerifyingKey::from(key);
-    // `false` = uncompressed SEC1: 0x04 || X || Y.
-    let point = vk.to_sec1_point(false);
-    let bytes = point.as_ref();
-    debug_assert_eq!(bytes.len(), 65);
-    debug_assert_eq!(bytes[0], 0x04);
+pub fn public_key_bytes(key: &BoxedEcdsaPrivateKey) -> [u8; 64] {
+    // Uncompressed SEC1: 0x04 || X || Y.
+    let sec1 = key.public_key().to_sec1();
+    debug_assert_eq!(sec1.len(), 65);
+    debug_assert_eq!(sec1[0], 0x04);
     let mut out = [0u8; 64];
-    out.copy_from_slice(&bytes[1..65]);
+    out.copy_from_slice(&sec1[1..65]);
     out
 }
 
@@ -53,15 +63,11 @@ pub fn verify_digest(pubkey: &[u8; 64], digest: &[u8; 32], signature: &[u8; 64])
     let mut sec1 = [0u8; 65];
     sec1[0] = 0x04;
     sec1[1..].copy_from_slice(pubkey);
-    let vk = VerifyingKey::from_sec1_bytes(&sec1)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    let vk = Secp256k1EcdsaPublicKey::from_sec1(&sec1)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
         .context("public key is not a valid secp256k1 point")?;
-
-    let sig = match Signature::from_slice(signature) {
-        Ok(s) => s,
-        // A malformed signature is a verification failure, not a tool error.
-        Err(_) => return Ok(false),
-    };
+    // `from_bytes` just splits `r || s`; an out-of-range half is caught by verify.
+    let sig = Secp256k1EcdsaSignature::from_bytes(signature);
     Ok(vk.verify_prehash(digest, &sig).is_ok())
 }
 
