@@ -18,7 +18,7 @@
 //! suffix. `dwCRC` is CRC-32 over everything preceding it, left *not* finally
 //! inverted (i.e. `!crc32(data)` in the usual zlib convention).
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// DFU-spec wildcard: the file is accepted by any device.
 ///

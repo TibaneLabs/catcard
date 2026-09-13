@@ -47,11 +47,7 @@ impl<const N: usize> Ring<N> {
 
     /// Bytes currently held: everything once wrapped, otherwise what was written.
     pub fn len(&self) -> usize {
-        if self.wrapped {
-            N
-        } else {
-            self.head
-        }
+        if self.wrapped { N } else { self.head }
     }
 
     pub fn is_empty(&self) -> bool {

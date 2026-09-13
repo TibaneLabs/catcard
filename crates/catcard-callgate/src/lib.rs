@@ -31,10 +31,10 @@ pub mod abi;
 pub mod entry;
 pub mod pin;
 
-use abi::{err, Method, PinOp, RngSource, MAX_BUF_LEN};
+use abi::{MAX_BUF_LEN, Method, PinOp, RngSource, err};
 use catcard_board::BoardSpec;
 use entry::{BootloaderInfo, EntryError};
-use pin::{PinAttempt, PIN_ATTEMPT_SIZE};
+use pin::{PIN_ATTEMPT_SIZE, PinAttempt};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {

@@ -219,14 +219,14 @@ impl EntropyPool {
     pub fn add(&mut self, source: Source, data: &[u8]) {
         // Health-test the real noise sources. Derived and public values are not noise
         // and would fail these tests for legitimate reasons.
-        if source.is_hardware_trng() {
-            if let Err(e) = self.health[source.index()].check(data) {
-                if self.poisoned.is_none() {
-                    self.poisoned = Some((source, e));
-                }
-                self.absorb(source, data);
-                return;
+        if source.is_hardware_trng()
+            && let Err(e) = self.health[source.index()].check(data)
+        {
+            if self.poisoned.is_none() {
+                self.poisoned = Some((source, e));
             }
+            self.absorb(source, data);
+            return;
         }
 
         self.absorb(source, data);

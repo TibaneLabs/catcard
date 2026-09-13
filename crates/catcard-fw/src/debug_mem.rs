@@ -57,7 +57,7 @@ pub fn poke(addr: u32, width: u8, data: &[u8]) -> bool {
         1 | 2 | 4 => width as usize,
         _ => return false,
     };
-    if data.is_empty() || data.len() % stride != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(stride) {
         return false;
     }
     let mut at = addr;

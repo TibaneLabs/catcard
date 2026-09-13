@@ -249,7 +249,7 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         kind::STRING => {
             let text = match index {
                 descriptor::string::LANGID => {
-                    return Action::Data(trim_static(&descriptor::LANGIDS, setup.wLength))
+                    return Action::Data(trim_static(&descriptor::LANGIDS, setup.wLength));
                 }
                 descriptor::string::MANUFACTURER => descriptor::MANUFACTURER,
                 descriptor::string::PRODUCT => descriptor::PRODUCT,

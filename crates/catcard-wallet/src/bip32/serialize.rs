@@ -12,7 +12,7 @@
 use crate::encoding::base58;
 
 use super::{
-    ChildNumber, ExtendedPrivKey, ExtendedPubKey, CHAIN_CODE_LEN, FINGERPRINT_LEN, PRIVKEY_LEN,
+    CHAIN_CODE_LEN, ChildNumber, ExtendedPrivKey, ExtendedPubKey, FINGERPRINT_LEN, PRIVKEY_LEN,
     PUBKEY_LEN,
 };
 

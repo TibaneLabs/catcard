@@ -20,7 +20,7 @@
 use catcard_board::BOARD;
 use catcard_sd::fat;
 use catcard_upgrade::psram::PsramArea;
-use catcard_upgrade::{dfuse, Approval, Staged};
+use catcard_upgrade::{Approval, Staged, dfuse};
 
 /// Bytes per read. A cluster would be fewer round trips; a sector is what the card layer
 /// deals in, and the copy is not what makes this slow.

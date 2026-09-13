@@ -4,7 +4,7 @@
 //! `catcard-hal` owns SPI and GPIO and knows nothing about panels. This is the seam.
 
 use catcard_board::spec::{Display, SpiBus};
-use catcard_board::{Pin, BOARD};
+use catcard_board::{BOARD, Pin};
 use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
 use catcard_hal::spi::{self, Prescaler, Spi};
 use catcard_ui::{DisplayBus, Ssd1306};

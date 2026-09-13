@@ -18,10 +18,10 @@
 //! that guesses the script type from `m/84'` and then encodes P2PKH would produce a
 //! valid-looking address nobody can spend from.
 
-use crate::bip32::{hash160, Network};
+use crate::bip32::{Network, hash160};
 use crate::encoding::{base58, bech32};
-use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::{AffinePoint, ProjectivePoint, PublicKey, Scalar};
 use sha2::{Digest, Sha256};
 
@@ -338,28 +338,40 @@ mod tests {
     #[test]
     fn address_prefixes_are_what_users_recognise() {
         let k = key_at("m/0", Network::Mainnet);
-        assert!(encode_string(AddressKind::P2pkh, Network::Mainnet, &k)
-            .unwrap()
-            .starts_with('1'));
-        assert!(encode_string(AddressKind::P2shP2wpkh, Network::Mainnet, &k)
-            .unwrap()
-            .starts_with('3'));
-        assert!(encode_string(AddressKind::P2wpkh, Network::Mainnet, &k)
-            .unwrap()
-            .starts_with("bc1q"));
-        assert!(encode_string(AddressKind::P2tr, Network::Mainnet, &k)
-            .unwrap()
-            .starts_with("bc1p"));
+        assert!(
+            encode_string(AddressKind::P2pkh, Network::Mainnet, &k)
+                .unwrap()
+                .starts_with('1')
+        );
+        assert!(
+            encode_string(AddressKind::P2shP2wpkh, Network::Mainnet, &k)
+                .unwrap()
+                .starts_with('3')
+        );
+        assert!(
+            encode_string(AddressKind::P2wpkh, Network::Mainnet, &k)
+                .unwrap()
+                .starts_with("bc1q")
+        );
+        assert!(
+            encode_string(AddressKind::P2tr, Network::Mainnet, &k)
+                .unwrap()
+                .starts_with("bc1p")
+        );
 
         let t = key_at("m/0", Network::Testnet);
         let tp = encode_string(AddressKind::P2pkh, Network::Testnet, &t).unwrap();
         assert!(tp.starts_with('m') || tp.starts_with('n'), "{tp}");
-        assert!(encode_string(AddressKind::P2shP2wpkh, Network::Testnet, &t)
-            .unwrap()
-            .starts_with('2'));
-        assert!(encode_string(AddressKind::P2wpkh, Network::Testnet, &t)
-            .unwrap()
-            .starts_with("tb1q"));
+        assert!(
+            encode_string(AddressKind::P2shP2wpkh, Network::Testnet, &t)
+                .unwrap()
+                .starts_with('2')
+        );
+        assert!(
+            encode_string(AddressKind::P2wpkh, Network::Testnet, &t)
+                .unwrap()
+                .starts_with("tb1q")
+        );
     }
 
     #[test]

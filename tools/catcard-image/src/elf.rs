@@ -25,7 +25,7 @@
 //! right place, and it naturally drops the header-only segment, which contains no
 //! sections at all.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 
 const EI_NIDENT: usize = 16;
 const ELFCLASS32: u8 = 1;

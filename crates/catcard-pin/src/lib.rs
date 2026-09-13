@@ -28,9 +28,9 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use catcard_callgate::abi::{err, PinOp};
-use catcard_callgate::pin::{PinAttempt, PinTooLong, MAX_PIN_LEN, SECRET_LEN};
 use catcard_callgate::Error as GateError;
+use catcard_callgate::abi::{PinOp, err};
+use catcard_callgate::pin::{MAX_PIN_LEN, PinAttempt, PinTooLong, SECRET_LEN};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod words;

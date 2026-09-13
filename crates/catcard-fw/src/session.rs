@@ -10,7 +10,7 @@ use catcard_board::BOARD;
 use catcard_callgate::Callgate;
 use catcard_entropy::{domain, spawn_drbg};
 
-use crate::{display, keypad, menu, pinentry, selftest, usbtask, BootReport};
+use crate::{BootReport, display, keypad, menu, pinentry, selftest, usbtask};
 
 /// Run the post-boot sequence. Never returns.
 pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
@@ -162,9 +162,9 @@ fn serial() -> &'static str {
 
 /// Draw up to three lines and return.
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
+    use catcard_ui::Mono128x64;
     use catcard_ui::font::{misc4x6, peep7x14};
     use catcard_ui::text::{centred, draw_text};
-    use catcard_ui::Mono128x64;
 
     let mut fb = Mono128x64::new();
     let t = &peep7x14::FONT;

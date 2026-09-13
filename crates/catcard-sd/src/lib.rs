@@ -359,16 +359,17 @@ impl<T: Transport> fat::SectorDriver for Sectors<T> {
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), Error> {
         // The driver asks for whole multiples of a sector and checks the range first, but
         // this is the boundary to a card, so check again rather than trust a caller.
-        if buf.len() % BLOCK_LEN != 0 {
+        // `as_chunks_mut` both splits into sector-sized arrays and surfaces any leftover
+        // as `rest`, which stands in for the old modulo check.
+        let (chunks, rest) = buf.as_chunks_mut::<BLOCK_LEN>();
+        if !rest.is_empty() {
             return Err(Error::DataError { block: u32::MAX });
         }
-        for (i, chunk) in buf.chunks_exact_mut(BLOCK_LEN).enumerate() {
+        for (i, chunk) in chunks.iter_mut().enumerate() {
             let block = lba
                 .checked_add(i as u64)
                 .and_then(|b| u32::try_from(b).ok())
                 .ok_or(Error::DataError { block: u32::MAX })?;
-            let chunk: &mut [u8; BLOCK_LEN] =
-                chunk.try_into().map_err(|_| Error::DataError { block })?;
             read_block(&mut self.t, &self.card, block, chunk)?;
         }
         Ok(())
@@ -376,17 +377,16 @@ impl<T: Transport> fat::SectorDriver for Sectors<T> {
 
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), Error> {
         // As in `read_sectors`: the driver hands whole sectors, but this is the boundary
-        // to a card, so the multiple is checked here rather than assumed.
-        if buf.len() % BLOCK_LEN != 0 {
+        // to a card, so a leftover past the last whole sector is refused here.
+        let (chunks, rest) = buf.as_chunks::<BLOCK_LEN>();
+        if !rest.is_empty() {
             return Err(Error::DataError { block: u32::MAX });
         }
-        for (i, chunk) in buf.chunks_exact(BLOCK_LEN).enumerate() {
+        for (i, chunk) in chunks.iter().enumerate() {
             let block = lba
                 .checked_add(i as u64)
                 .and_then(|b| u32::try_from(b).ok())
                 .ok_or(Error::DataError { block: u32::MAX })?;
-            let chunk: &[u8; BLOCK_LEN] =
-                chunk.try_into().map_err(|_| Error::DataError { block })?;
             write_block(&mut self.t, &self.card, block, chunk)?;
         }
         Ok(())

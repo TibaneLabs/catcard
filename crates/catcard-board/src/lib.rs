@@ -22,7 +22,7 @@ pub mod pin;
 pub mod spec;
 pub mod usb;
 
-pub use memory::{MemoryMap, FW_HEADER_OFFSET, FW_HEADER_SIZE};
+pub use memory::{FW_HEADER_OFFSET, FW_HEADER_SIZE, MemoryMap};
 pub use pin::{Pin, Port};
 pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Psram, Se2Pins};
 pub use usb::{PRODUCT_ID, VENDOR_ID};

@@ -286,7 +286,7 @@ impl FirmwareHeader {
                 found: self.pubkey_num,
             });
         }
-        if self.firmware_length % LENGTH_ALIGN != 0 {
+        if !self.firmware_length.is_multiple_of(LENGTH_ALIGN) {
             return Err(Error::UnalignedLength {
                 found: self.firmware_length,
             });

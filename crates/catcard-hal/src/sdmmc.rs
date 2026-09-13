@@ -22,7 +22,7 @@
 //! 0x34 STA, 0x38 ICR, 0x3C MASK` at both the L4 and L4+ base addresses. `[I]`
 
 use catcard_board::{BoardSpec, Mcu};
-use catcard_sd::{Error, Response, Transport, BLOCK_LEN};
+use catcard_sd::{BLOCK_LEN, Error, Response, Transport};
 
 use crate::reg;
 
@@ -441,7 +441,7 @@ unsafe fn enable_clock(mcu: Mcu) -> Result<(), Error> {
 /// # Safety
 /// Claims the pins named by `BoardSpec::sdmmc`.
 unsafe fn configure_pins(spec: &BoardSpec) {
-    use crate::gpio::{set_alternate, OutputType, Pull, Speed};
+    use crate::gpio::{OutputType, Pull, Speed, set_alternate};
     const AF_SDMMC: u8 = 12;
     let s = spec.sdmmc;
     // SAFETY: as documented.

@@ -19,9 +19,9 @@
 //! map is the DWC2 core's and identical on both. [C]
 
 use catcard_board::Pin;
+use catcard_usb::REPORT_LEN;
 use catcard_usb::control::{self, Action, Device, Setup};
 use catcard_usb::descriptor::{EP_IN, EP_OUT};
-use catcard_usb::REPORT_LEN;
 
 use crate::gpio::{self, OutputType, Pull, Speed};
 use crate::reg;
@@ -326,10 +326,10 @@ impl Otg {
             if sts & GINTSTS_USBSUSP != 0 {
                 reg::write(GINTSTS, GINTSTS_USBSUSP);
             }
-            if sts & GINTSTS_RXFLVL != 0 {
-                if let Some(e) = self.drain_rx() {
-                    return e;
-                }
+            if sts & GINTSTS_RXFLVL != 0
+                && let Some(e) = self.drain_rx()
+            {
+                return e;
             }
             if sts & GINTSTS_OEPINT != 0 {
                 self.service_out_endpoints();

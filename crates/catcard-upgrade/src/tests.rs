@@ -6,7 +6,7 @@
 
 use super::*;
 use catcard_board::spec::{MK3, MK4};
-use catcard_fwhdr::{install_flags, place_header, signed_digest, MAGIC};
+use catcard_fwhdr::{MAGIC, install_flags, place_header, signed_digest};
 
 /// A staging area with a `Vec` behind it.
 struct Mem {
@@ -110,8 +110,8 @@ fn image_for(board: &BoardSpec, timestamp: [u8; 8], pubkey_num: u32) -> Vec<u8> 
 /// The key is public by design, so a test binary holding it is not a leak; it is the
 /// same key `catcard-image` signs with by default.
 fn sign_with_dev_key(digest: &[u8; 32]) -> [u8; 64] {
-    use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
     use k256::SecretKey;
+    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
     let pem = include_str!("../../../keys/dev-privkey.pem");
     let sk = SecretKey::from_sec1_pem(pem.trim()).unwrap();
     let key = SigningKey::from(sk);

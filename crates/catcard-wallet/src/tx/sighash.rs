@@ -18,7 +18,7 @@
 //! amount must come from the same source the signature commits to — never from a
 //! separate, unsigned field.
 
-use super::{sha256d, Error, Sha256d, Transaction};
+use super::{Error, Sha256d, Transaction, sha256d};
 
 /// The sighash flag byte, as it appears in the preimage (4 bytes, little-endian).
 pub type SigHashFlag = u32;

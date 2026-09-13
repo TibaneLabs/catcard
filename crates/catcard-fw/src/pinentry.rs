@@ -16,12 +16,12 @@ use catcard_callgate::abi::{DfuMode, LogoutMode, PinOp};
 use catcard_callgate::pin::PinAttempt;
 use catcard_callgate::{Callgate, Error as GateError};
 use catcard_entropy::HmacDrbg;
-use catcard_pin::{Failure, Login, PinGate, Step, MAX_ATTEMPTS, MAX_PART_LEN};
+use catcard_pin::{Failure, Login, MAX_ATTEMPTS, MAX_PART_LEN, PinGate, Step};
+use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
+use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
 use catcard_ui::pinentry::PinBuffer;
 use catcard_ui::text::{centred, draw_text};
-use catcard_ui::Mono128x64;
 
 use crate::{display, keypad::GpioMatrix};
 

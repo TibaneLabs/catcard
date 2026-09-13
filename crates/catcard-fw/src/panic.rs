@@ -21,13 +21,13 @@
 //! fallback is strictly worse and is not the expected path.
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use catcard_board::BOARD;
-use catcard_callgate::abi::{LogoutMode, Method};
 use catcard_callgate::Callgate;
+use catcard_callgate::abi::{LogoutMode, Method};
 
-extern "C" {
+unsafe extern "C" {
     // Provided by cortex-m-rt's linker script. `.data` and `.bss` are where a cached
     // secret would live if it were not on the stack.
     static mut __sdata: u32;

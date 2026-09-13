@@ -193,11 +193,7 @@ pub unsafe fn pclk2_hz() -> u32 {
                 let m = ((pll >> 4) & 0x7) + 1;
                 let n = (pll >> 8) & 0x7F;
                 let r = (((pll >> 25) & 0x3) + 1) * 2;
-                if n == 0 {
-                    msi
-                } else {
-                    pll_in / m * n / r
-                }
+                if n == 0 { msi } else { pll_in / m * n / r }
             }
             _ => msi, // MSI (0)
         };
@@ -237,11 +233,7 @@ pub unsafe fn hclk_hz() -> u32 {
                 let m = ((pll >> 4) & 0x7) + 1;
                 let n = (pll >> 8) & 0x7F;
                 let r = (((pll >> 25) & 0x3) + 1) * 2;
-                if n == 0 {
-                    msi
-                } else {
-                    pll_in / m * n / r
-                }
+                if n == 0 { msi } else { pll_in / m * n / r }
             }
             _ => msi,
         };

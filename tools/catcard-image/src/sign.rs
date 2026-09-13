@@ -4,10 +4,10 @@
 //! signature, uECC_secp256k1())` on the double-SHA256 digest, with the signature as
 //! raw `r || s` — not DER. Source: `hw-reference/firmware-signing.md §3` [C].
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use k256::SecretKey;
 use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
-use k256::SecretKey;
 
 /// `approved_pubkeys[0]` — the published developer key, re-exported from the crate the
 /// firmware also reads it from, so the host tool and the device cannot disagree about

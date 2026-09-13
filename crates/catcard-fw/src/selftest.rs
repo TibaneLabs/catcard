@@ -1,18 +1,18 @@
 //! Where boot ends until there is a display to report on.
 
-use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
-use catcard_ui::text::{centred, draw_text, draw_wrapped};
 use catcard_ui::Mono128x64;
+use catcard_ui::font::{misc4x6, peep7x14};
+use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
+use catcard_ui::text::{centred, draw_text, draw_wrapped};
 
-use crate::{display, keypad, BootReport, VERSION};
+use crate::{BootReport, VERSION, display, keypad};
 
 /// Observable state, laid out so a debugger (or, later, the selftest screen) can read
 /// the outcome of bring-up without a protocol.
 ///
 /// `#[used]` and `#[no_mangle]` keep it in the image and findable by name in the map
 /// file even at `opt-level = "s"` with LTO.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static mut CATCARD_BOOT_STATUS: BootStatus = BootStatus {
     magic: BOOT_STATUS_MAGIC,

@@ -5,7 +5,7 @@
 //! entropy pool has finished. On a wallet that matters beyond decoration: a dark screen
 //! and a hung screen look identical, and this makes the difference visible.
 
-use crate::art::{cat::CAT, Bitmap};
+use crate::art::{Bitmap, cat::CAT};
 use crate::font::{misc4x6, peep7x14};
 use crate::framebuffer::Framebuffer;
 use crate::text::{draw_text, width_of};

@@ -5,7 +5,7 @@
 //! collected in `docs/HARDWARE-OPEN-ITEMS.md`.
 
 use crate::memory::MemoryMap;
-use crate::pin::{pa, pb, pc, pd, MaybePin, Pin};
+use crate::pin::{MaybePin, Pin, pa, pb, pc, pd};
 
 /// Which silicon a board carries. Drives register-map differences in `catcard-hal`
 /// (flash controller, RAM banks, and the extra peripherals on the L4+).
@@ -515,7 +515,7 @@ pub const ALL: &[BoardSpec] = &[MK3, MK4, MK5, Q1];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{fixed, FW_HEADER_OFFSET};
+    use crate::memory::{FW_HEADER_OFFSET, fixed};
 
     #[test]
     fn names_are_unique() {

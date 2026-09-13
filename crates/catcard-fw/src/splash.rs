@@ -1,9 +1,9 @@
 //! Drawing the boot splash on this board's panel.
 
-use catcard_ui::splash;
 use catcard_ui::Mono128x64;
+use catcard_ui::splash;
 
-use crate::{display, VERSION};
+use crate::{VERSION, display};
 
 /// Redraw the splash at `progress` percent.
 ///

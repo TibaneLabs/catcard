@@ -25,8 +25,8 @@ mod test_vectors;
 
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
-use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::{AffinePoint, ProjectivePoint, PublicKey, Scalar, SecretKey};
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256, Sha512};

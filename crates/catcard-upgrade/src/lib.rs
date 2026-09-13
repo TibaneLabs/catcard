@@ -31,8 +31,8 @@
 
 use catcard_board::BoardSpec;
 use catcard_fwhdr::{
-    hw_compat, DigestStream, FirmwareHeader, DEV_PUBKEY, DEV_PUBKEY_NUM, HEADER_LEN, HEADER_OFFSET,
-    MIN_FIRMWARE_LENGTH,
+    DEV_PUBKEY, DEV_PUBKEY_NUM, DigestStream, FirmwareHeader, HEADER_LEN, HEADER_OFFSET,
+    MIN_FIRMWARE_LENGTH, hw_compat,
 };
 
 pub mod dfuse;

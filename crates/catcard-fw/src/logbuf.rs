@@ -30,7 +30,7 @@ pub const LOG_MAGIC: u32 = 0xCA7C_106C;
 ///
 /// `#[used]` and `#[no_mangle]` so it survives LTO at `opt-level = "s"` and can be found
 /// by name in a dump.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static mut CATCARD_LOG: LogBuf = LogBuf {
     magic: LOG_MAGIC,

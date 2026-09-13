@@ -20,7 +20,7 @@ mod elf;
 mod image;
 mod sign;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use catcard_board::BoardSpec;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -337,17 +337,15 @@ fn parse_hw_compat(spec: &str) -> Result<u32> {
 /// device already running CatCard, is unaffected and may legitimately carry any version.
 fn warn_if_stock_would_refuse(version: &str) {
     let major: Option<u32> = version.split('.').next().and_then(|m| m.parse().ok());
-    if let Some(m) = major {
-        if m < 3 {
-            eprintln!(
-                "warning:      version {version} is below 3.0.0 — the stock firmware \
-                 refuses to stage it"
-            );
-            eprintln!(
-                "              (only matters when installing through stock; SWD and \
-                 CatCard's own upgrade accept it)"
-            );
-        }
+    if major.is_some_and(|m| m < 3) {
+        eprintln!(
+            "warning:      version {version} is below 3.0.0 — the stock firmware \
+             refuses to stage it"
+        );
+        eprintln!(
+            "              (only matters when installing through stock; SWD and \
+             CatCard's own upgrade accept it)"
+        );
     }
 }
 

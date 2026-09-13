@@ -6,11 +6,11 @@
 //! unusable rather than degrading to something weaker.
 
 use catcard_board::BOARD;
-use catcard_callgate::{abi::RngSource, Callgate};
+use catcard_callgate::{Callgate, abi::RngSource};
 use catcard_entropy::{EntropyPool, Source};
 use catcard_hal::{dwt, uid};
 
-use crate::{display, entropy_policy, splash, BootReport};
+use crate::{BootReport, display, entropy_policy, splash};
 
 /// Bytes to draw from each hardware TRNG.
 ///

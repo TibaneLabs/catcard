@@ -89,7 +89,7 @@ pub fn centred(font: &Font, text: &str, panel_width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::font::{misc4x6, peep10x20, peep7x14};
+    use crate::font::{misc4x6, peep7x14, peep10x20};
     use crate::framebuffer::Mono128x64;
 
     fn ink<const W: usize, const P: usize, const N: usize>(fb: &Framebuffer<W, P, N>) -> u32 {

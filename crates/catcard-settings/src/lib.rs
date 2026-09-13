@@ -121,11 +121,7 @@ fn parse(raw: &[u8; SLOT_LEN], key: &[u8; KEY_LEN]) -> Option<Slot> {
     // Constant time: a timing signal here would let an attacker with the flash in hand
     // search for a MAC byte at a time.
     let ok: bool = expect.ct_eq(&raw[OFF_MAC..OFF_MAC + 32]).into();
-    if ok {
-        Some(Slot { seq, len })
-    } else {
-        None
-    }
+    if ok { Some(Slot { seq, len }) } else { None }
 }
 
 /// The settings store.

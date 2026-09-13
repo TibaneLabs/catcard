@@ -1,9 +1,9 @@
 //! Binding the keypad scanner to this board's GPIO.
 
 use catcard_board::spec::Input;
-use catcard_board::{Pin, BOARD};
+use catcard_board::{BOARD, Pin};
 use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
-use catcard_ui::keypad::{Matrix, COLS, ROWS};
+use catcard_ui::keypad::{COLS, Matrix, ROWS};
 
 /// Settling time between driving a row and sampling the columns.
 ///

@@ -36,8 +36,8 @@
 //! Source: `hw-reference/bootloader-callgate-abi.md §0` [C],
 //! `hw-reference/platform.md §2` [C].
 
-use catcard_board::memory::fixed;
 use catcard_board::BoardSpec;
+use catcard_board::memory::fixed;
 
 /// Address of the `bootloaderInfoTable_t`. Source: platform.md §2 [C]
 pub const INFO_TABLE_ADDR: u32 = 0x0800_0040;

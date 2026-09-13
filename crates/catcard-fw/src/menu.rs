@@ -30,16 +30,16 @@
 
 use core::fmt::Write as _;
 
-use catcard_callgate::abi::{DfuMode, LogoutMode};
 use catcard_callgate::Callgate;
+use catcard_callgate::abi::{DfuMode, LogoutMode};
 use catcard_entropy::HmacDrbg;
+use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, Key, Keypad, KEYS};
+use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
 use catcard_ui::menu::Scroll;
 use catcard_ui::text::{centred, draw_text};
-use catcard_ui::Mono128x64;
 
-use crate::{display, keypad::GpioMatrix, usbtask, BootReport};
+use crate::{BootReport, display, keypad::GpioMatrix, usbtask};
 
 /// A line of debug text. Wide enough for `NAME 0000_0000` and a little more.
 type Line = heapless::String<32>;
@@ -717,7 +717,7 @@ fn install_from_card(
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
 ) {
-    use crate::sdupgrade::{stage_from_card, Outcome};
+    use crate::sdupgrade::{Outcome, stage_from_card};
 
     crate::catlog!("sd: looking for a firmware");
     message(panel, "Reading card", "please wait", "");

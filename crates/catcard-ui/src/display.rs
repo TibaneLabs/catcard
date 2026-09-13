@@ -7,7 +7,7 @@
 //! hardware — the parts most likely to be wrong and least likely to announce it.
 
 use crate::framebuffer::Framebuffer;
-use crate::ssd1306::{cmd, full_window, INIT_128X64};
+use crate::ssd1306::{INIT_128X64, cmd, full_window};
 
 /// What the driver needs from the outside world.
 ///

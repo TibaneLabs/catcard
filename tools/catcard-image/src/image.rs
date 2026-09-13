@@ -1,10 +1,10 @@
 //! Assembling, signing and inspecting a firmware image.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use catcard_board::BoardSpec;
 use catcard_fwhdr::{
-    hw_compat, install_flags, pack_timestamp, place_header, signed_digest, FirmwareHeader,
-    HEADER_LEN, HEADER_OFFSET, LENGTH_ALIGN,
+    FirmwareHeader, HEADER_LEN, HEADER_OFFSET, LENGTH_ALIGN, hw_compat, install_flags,
+    pack_timestamp, place_header, signed_digest,
 };
 
 use crate::sign;
@@ -440,8 +440,8 @@ mod tests {
     fn signing_slot_0_with_a_foreign_key_is_refused() {
         // Slot 0 must carry the dev key or the device rejects the image, so catch a
         // mismatch at build time rather than after a slow SD-card round trip.
-        use k256::pkcs8::LineEnding;
         use k256::SecretKey;
+        use k256::pkcs8::LineEnding;
         let other = SecretKey::from_slice(&[7u8; 32])
             .unwrap()
             .to_sec1_pem(LineEnding::LF)
@@ -537,9 +537,17 @@ mod tests {
     #[test]
     fn source_date_epoch_makes_builds_reproducible() {
         // Two assembles with the same SOURCE_DATE_EPOCH must be byte-identical.
-        std::env::set_var("SOURCE_DATE_EPOCH", "1785628800");
+        // SAFETY: edition 2024 makes env mutation unsafe because it is process-global and
+        // races other threads reading the environment. This is a single-threaded unit
+        // test that sets the variable, reads it, and removes it before returning.
+        unsafe {
+            std::env::set_var("SOURCE_DATE_EPOCH", "1785628800");
+        }
         let ts = default_timestamp().unwrap();
         assert_eq!(ts, pack_timestamp(2026, 8, 2, 0, 0, 0));
-        std::env::remove_var("SOURCE_DATE_EPOCH");
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("SOURCE_DATE_EPOCH");
+        }
     }
 }

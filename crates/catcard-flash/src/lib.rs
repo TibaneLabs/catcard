@@ -276,7 +276,7 @@ impl<B: SpiDevice> NorFlash<B> {
     fn erase(&mut self, op: u8, addr: u32, unit: u32, tries: u32) -> Result<(), Error<B::Error>> {
         // Misalignment is rejected rather than rounded down: rounding erases a
         // neighbouring sector the caller did not name, and NOR erasure is not undoable.
-        if addr % unit != 0 {
+        if !addr.is_multiple_of(unit) {
             return Err(Error::Misaligned { addr, unit });
         }
         self.check_range(addr, unit as usize)?;

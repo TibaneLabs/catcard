@@ -26,11 +26,11 @@ use catcard_board::BOARD;
 use catcard_hal::otg::{Event, Otg};
 use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Reject, Staged};
-use catcard_usb::{FrameError, Opcode, Reassembler, Status, Writer, PROTOCOL_VERSION, REPORT_LEN};
+use catcard_usb::{FrameError, Opcode, PROTOCOL_VERSION, REPORT_LEN, Reassembler, Status, Writer};
 
+use crate::VERSION;
 #[cfg(feature = "usb-debug-mem")]
 use crate::debug_mem;
-use crate::VERSION;
 
 /// What the task is in the middle of.
 enum Stage {
@@ -719,7 +719,7 @@ pub fn decline() {
 ///
 /// `#[used]` and `#[no_mangle]` keep it in the image and findable by name at
 /// `opt-level = "s"` with LTO, the same as the boot status.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static mut CATCARD_USB_STATUS: UsbStatus = UsbStatus {
     magic: USB_STATUS_MAGIC,
