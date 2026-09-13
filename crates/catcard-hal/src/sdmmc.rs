@@ -83,7 +83,10 @@ const STA_DATAEND: u32 = 1 << 8;
 /// a block unread on the L4+ IP, which stalls the data path with the FIFO half-full.
 const STA_RXFIFOE: u32 = 1 << 19;
 const STA_TXUNDERR: u32 = 1 << 4;
-const STA_TXFIFOF: u32 = 1 << 16;
+/// `TXFIFOHE`: the transmit FIFO is at least half empty, i.e. has room for a burst of
+/// eight words. Filling a word at a time against `TXFIFOF` (full) races on the L4+ IP
+/// and drops words -- the write mirror of the receive-drain bug.
+const STA_TXFIFOHE: u32 = 1 << 14;
 
 /// Everything write-one-to-clear, for wiping the slate before each command.
 const ICR_ALL: u32 = 0x1FE0_0FFF;
@@ -281,19 +284,25 @@ impl Transport for Sdmmc {
         unsafe {
             let mut at = 0usize;
             let mut tries = 0u32;
-            // Feed the FIFO until the block is in it, a word at a time while there is
-            // room. `BLOCK_LEN` is a multiple of four, so there is no trailing partial
-            // word to special-case.
+            // Feed the FIFO an eight-word burst at a time, only when `TXFIFOHE` says there
+            // is room for one. `BLOCK_LEN` is a multiple of 32, so the bursts divide it
+            // evenly. Writing per word against `TXFIFOF` instead races on the L4+ IP: the
+            // "full" flag lags a word behind, the extra write is dropped, and the transfer
+            // then stalls with `DCOUNT` short of zero -- exactly what a partial write was.
             while at < BLOCK_LEN {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
                     reg::write(b + ICR, ICR_ALL);
                     return Err(Error::DataError { block: u32::MAX });
                 }
-                while reg::read(b + STA) & STA_TXFIFOF == 0 && at < BLOCK_LEN {
-                    let w = [data[at], data[at + 1], data[at + 2], data[at + 3]];
-                    reg::write(b + FIFO, u32::from_le_bytes(w));
-                    at += 4;
+                if sta & STA_TXFIFOHE != 0 {
+                    let mut n = 0;
+                    while n < 8 && at < BLOCK_LEN {
+                        let w = [data[at], data[at + 1], data[at + 2], data[at + 3]];
+                        reg::write(b + FIFO, u32::from_le_bytes(w));
+                        at += 4;
+                        n += 1;
+                    }
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {

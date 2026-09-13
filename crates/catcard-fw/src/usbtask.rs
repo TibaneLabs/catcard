@@ -793,6 +793,42 @@ fn sd_diag() -> (u8, u32, u32) {
         }
     };
 
+    // Write-path probe. Read a near-end block (almost certainly free space) and write the
+    // SAME bytes straight back, logging the write's STA. Safe: a failed write never
+    // programs the card, and a successful one rewrites identical content.
+    {
+        let tb = card.blocks.saturating_sub(2);
+        let arg = match card.addressing {
+            catcard_sd::Addressing::BlockAddressed => tb,
+            catcard_sd::Addressing::ByteAddressed => {
+                tb.saturating_mul(catcard_sd::BLOCK_LEN as u32)
+            }
+        };
+        let mut wbuf = [0u8; catcard_sd::BLOCK_LEN];
+        dev.arm_block_read();
+        if dev.command(17, arg, Response::Short).is_ok() && dev.read_data(&mut wbuf).is_ok() {
+            dev.arm_block_write();
+            match dev.command(24, arg, Response::Short) {
+                Ok(r) => crate::catlog!(
+                    "sddiag: wtest cmd24 r1={:#010x} sta={:#010x}",
+                    r[0],
+                    dev.status()
+                ),
+                Err(_) => crate::catlog!("sddiag: wtest CMD24 FAIL sta={:#010x}", dev.status()),
+            }
+            match dev.write_data(&wbuf) {
+                Ok(()) => crate::catlog!("sddiag: wtest write OK sta={:#010x}", dev.status()),
+                Err(_) => crate::catlog!(
+                    "sddiag: wtest write FAIL sta={:#010x} dcount={}",
+                    dev.status(),
+                    dev.dcount()
+                ),
+            }
+        } else {
+            crate::catlog!("sddiag: wtest setup read failed, skipped");
+        }
+    }
+
     // Prove the whole read path, not just one block: mount the FAT volume, which reads
     // the boot sector and walks the FAT across many blocks.
     match catcard_sd::fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
