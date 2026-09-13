@@ -75,10 +75,20 @@ enum Screen {
     Keypad,
     Logs,
     SaveLog,
+    Utils,
+    AnalyzeRng,
     ConfirmDfu,
 }
 
-const MAIN_ITEMS: &[&str] = &["Status", "Install from SD", "Debug", "About", "Reboot"];
+const MAIN_ITEMS: &[&str] = &[
+    "Status",
+    "Install from SD",
+    "Debug",
+    "Utils",
+    "About",
+    "Reboot",
+];
+const UTILS_ITEMS: &[&str] = &["Analyze RNG"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -227,6 +237,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Debug;
                 break;
             }
+            if next == Screen::AnalyzeRng {
+                analyze_rng(gate, panel, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Utils;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -260,7 +276,8 @@ fn step(
             (Key::Confirm, 0) => Screen::Main,
             (Key::Confirm, 1) => Screen::SdInstall,
             (Key::Confirm, 2) => Screen::Debug,
-            (Key::Confirm, 3) => Screen::About,
+            (Key::Confirm, 3) => Screen::Utils,
+            (Key::Confirm, 4) => Screen::About,
             (Key::Confirm, _) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -270,6 +287,11 @@ fn step(
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
+        Screen::Utils => match (key, cursor) {
+            (Key::Confirm, 0) => Screen::AnalyzeRng,
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::Utils,
+        },
         Screen::Debug => match (key, cursor) {
             (Key::Confirm, 0) => Screen::Usb,
             (Key::Confirm, 1) => Screen::Clocks,
@@ -345,6 +367,7 @@ fn items_of(screen: Screen) -> Option<&'static [&'static str]> {
     match screen {
         Screen::Main => Some(MAIN_ITEMS),
         Screen::Debug => Some(DEBUG_ITEMS),
+        Screen::Utils => Some(UTILS_ITEMS),
         _ => None,
     }
 }
@@ -357,6 +380,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // would undo the thing this menu exists to fix.
         Screen::Main => menu(panel, v.head, &usb_line(v.note), MAIN_ITEMS, v.sc),
         Screen::About => about_screen(panel),
+        Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
         Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -368,6 +392,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Logs => log_screen(panel, v.log_scroll),
         // Handled in `run`; never drawn.
         Screen::SaveLog => {}
+        // Handled in `run`: it drives the panel itself in a tight loop.
+        Screen::AnalyzeRng => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         Screen::ConfirmDfu => confirm_dfu(panel),
@@ -864,6 +890,200 @@ fn install(
     // only place a dark device can put it.
     crate::catlog!("install: NOT INSTALLED: {}", why);
     message(panel, "Not installed", why, "any key to go back");
+}
+
+// --- Analyze RNG ------------------------------------------------------------------
+//
+// A live look at the secure-element TRNGs -- the RNGs this whole project exists to
+// distrust. SE1 and SE2 are sampled through callgate 26 and their bytes drive one
+// combined stream: the middle panel renders that stream as raw bits (it should look
+// like static; a stuck or biased source stops looking random), and the right column
+// shows the Shannon entropy of everything seen so far, in bits per byte -- 8.00 is
+// ideal, and a number that sits well below it is the failure this screen is for.
+//
+// The bit view refreshes every frame (as fast as the elements deliver); the entropy
+// figure is recomputed on a ~5 Hz timer so the digits are readable rather than a blur.
+
+/// Left edge of the bit panel; the SE readouts sit to its left.
+const RNG_MIDX: usize = 28;
+/// Bit-panel width and height in pixels.
+const RNG_MIDW: usize = 64;
+const RNG_MIDY: usize = 9;
+const RNG_MIDH: usize = 42;
+/// Bytes backing the bit panel: one bit per pixel, rounded up.
+const RNG_RING: usize = (RNG_MIDW * RNG_MIDH).div_ceil(8);
+
+/// `log2` for `f32`, no libm: split `x = m * 2^e` from the IEEE bits, then `log2(m)`
+/// via the `atanh` series for `ln`. Good to a few thousandths over `m in [1, 2)`, which
+/// is far finer than a 2-decimal entropy readout needs. `x` must be > 0.
+fn flog2(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let e = ((bits >> 23) & 0xff) as i32 - 127;
+    // Force the exponent to 0 so the mantissa reads back as m in [1, 2).
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
+    let t = (m - 1.0) / (m + 1.0);
+    let t2 = t * t;
+    // ln(m) = 2*(t + t^3/3 + t^5/5 + t^7/7 + ...)
+    let ln_m = 2.0 * t * (1.0 + t2 / 3.0 + (t2 * t2) / 5.0 + (t2 * t2 * t2) / 7.0);
+    e as f32 + ln_m * core::f32::consts::LOG2_E
+}
+
+/// Shannon entropy of a byte histogram, in bits per byte (0..=8).
+///
+/// `H = log2(n) - (1/n) * sum(c_i * log2(c_i))` over the non-empty bins -- the same as
+/// `-sum(p_i log2 p_i)`, rearranged so it divides once instead of per bin.
+fn shannon_bits(hist: &[u32; 256], total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let n = total as f32;
+    let mut acc = 0.0f32;
+    for &c in hist.iter() {
+        if c > 0 {
+            let cf = c as f32;
+            acc += cf * flog2(cf);
+        }
+    }
+    (flog2(n) - acc / n).clamp(0.0, 8.0)
+}
+
+/// A large count in a couple of characters, for the narrow left column.
+fn compact(n: u64) -> Line {
+    let mut s = Line::new();
+    let _ = if n < 1000 {
+        write!(s, "{n}")
+    } else if n < 1_000_000 {
+        write!(s, "{}k", n / 1000)
+    } else {
+        write!(s, "{}M", n / 1_000_000)
+    };
+    s
+}
+
+/// One SE readout: last byte in hex and whether the last call produced anything.
+fn draw_se(panel_fb: &mut Mono128x64, y: usize, label: &str, last: u8, ok: bool) {
+    let f = &misc4x6::FONT;
+    draw_text(panel_fb, f, 0, y, label);
+    let mut l = Line::new();
+    let _ = write!(l, "{:02x} {}", last, if ok { "ok" } else { "--" });
+    draw_text(panel_fb, f, 0, y + 7, &l);
+}
+
+/// Live RNG analyzer. Blocks, driving the panel itself; `x` (or the left arrow) exits.
+fn analyze_rng(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    use catcard_callgate::abi::RngSource;
+
+    if !catcard_board::BOARD.has_callgate_se_rng {
+        crate::catlog!("rng: no SE RNG on this board");
+        message(panel, "Analyze RNG", "no SE RNG here", "any key to go back");
+        wait_for_any_key(matrix, drbg);
+        return;
+    }
+
+    let mut hist = [0u32; 256];
+    let mut total: u64 = 0;
+    let mut ring = [0u8; RNG_RING];
+    let mut ring_at = 0usize;
+    // Per source: (last byte seen, last call produced bytes, running count).
+    let mut se = [(0u8, false, 0u64); 2];
+    let sources = [RngSource::Se1, RngSource::Se2];
+
+    // Recompute the entropy figure at ~5 Hz so the digits are readable.
+    // SAFETY: reads the RCC config only.
+    let hz = unsafe { catcard_hal::clock::hclk_hz() };
+    let period = (hz / 5).max(1);
+    let mut last_h = catcard_hal::dwt::cycles();
+    let mut h_text = Line::new();
+    let _ = h_text.push_str("--");
+
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+
+    loop {
+        // One call per source per frame: at most 32 bytes each, and the bit panel is
+        // sized so a few frames turn it over completely.
+        for (i, src) in sources.iter().enumerate() {
+            let mut buf = [0u8; 33];
+            // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
+            match unsafe { gate.se_rng(*src, &mut buf) } {
+                Ok(n) if n > 0 => {
+                    se[i].1 = true;
+                    for &b in &buf[1..1 + n] {
+                        se[i].0 = b;
+                        se[i].2 += 1;
+                        hist[b as usize] += 1;
+                        total += 1;
+                        ring[ring_at] = b;
+                        ring_at = (ring_at + 1) % RNG_RING;
+                    }
+                }
+                _ => se[i].1 = false,
+            }
+        }
+
+        // Keep the counts (and so the f32 sums) bounded, and let the measure stay
+        // adaptive: halving every bin preserves the ratios that entropy depends on.
+        if total >= (1 << 20) {
+            total = 0;
+            for c in hist.iter_mut() {
+                *c >>= 1;
+                total += *c as u64;
+            }
+        }
+
+        let now = catcard_hal::dwt::cycles();
+        if now.wrapping_sub(last_h) >= period {
+            last_h = now;
+            h_text.clear();
+            let _ = write!(h_text, "{:.2}", shannon_bits(&hist, total));
+        }
+
+        let mut fb = Mono128x64::new();
+        let f = &misc4x6::FONT;
+        // Left: the two sources.
+        draw_se(&mut fb, 1, "SE1", se[0].0, se[0].1);
+        draw_se(&mut fb, 20, "SE2", se[1].0, se[1].1);
+        let mut nline = Line::new();
+        let _ = write!(nline, "n {}", compact(se[0].2 + se[1].2));
+        draw_text(&mut fb, f, 0, 44, &nline);
+
+        // Middle: the raw bits, with a thin frame.
+        fb.rect(
+            RNG_MIDX - 2,
+            RNG_MIDY - 2,
+            RNG_MIDX + RNG_MIDW + 2,
+            RNG_MIDY + RNG_MIDH + 2,
+            true,
+        );
+        for row in 0..RNG_MIDH {
+            for col in 0..RNG_MIDW {
+                let bit = row * RNG_MIDW + col;
+                let on = (ring[bit / 8] >> (bit % 8)) & 1 == 1;
+                fb.set(RNG_MIDX + col, RNG_MIDY + row, on);
+            }
+        }
+
+        // Right: entropy of the stream so far.
+        draw_text(&mut fb, f, 97, 1, "H b/B");
+        draw_text(&mut fb, f, 97, 12, &h_text);
+
+        draw_text(&mut fb, f, 1, 57, "press x to exit");
+        let _ = panel.flush(&fb);
+
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if keys
+            .iter()
+            .any(|k| matches!(k, Key::Cancel | Key::Digit(7)))
+        {
+            return;
+        }
+    }
 }
 
 /// Block until something is pressed. Used only by screens that have already said so.
