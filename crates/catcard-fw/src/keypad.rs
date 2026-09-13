@@ -69,14 +69,17 @@ impl Matrix for GpioMatrix {
         }
     }
 
-    fn read_columns(&mut self) -> u8 {
+    fn read_columns(&mut self, order: &[u8; COLS]) -> u8 {
         let mut bits = 0u8;
-        for (i, c) in self.cols.iter().enumerate() {
+        for &c in order {
+            let ci = c as usize;
+            // Read in the caller's randomised order, and accumulate branchlessly: a
+            // pressed key (column low) sets its bit, a released one sets nothing, via
+            // identical code with no data-dependent branch. So neither which lane is
+            // pressed nor which row leaks through the read timing or the EM ordering.
             // Pulled up, so a pressed key pulls the column to the driven row's low.
             // SAFETY: configured as inputs in `init`.
-            if !unsafe { gpio::read(*c) } {
-                bits |= 1 << i;
-            }
+            bits |= u8::from(!unsafe { gpio::read(self.cols[ci]) }) << ci;
         }
         bits
     }

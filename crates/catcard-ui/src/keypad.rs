@@ -105,10 +105,16 @@ pub trait Matrix {
     /// pressed key, which reads as phantom presses on other rows.
     fn select_row(&mut self, row: usize);
 
-    /// Read the three columns. Bit `n` set means column `n` reads **low**, i.e. a key
-    /// on the selected row is pressed. Columns are pulled up, so idle reads as zero
-    /// here after inversion.
-    fn read_columns(&mut self) -> u8;
+    /// Read the columns, in the given order. Bit `n` set means column `n` reads **low**,
+    /// i.e. a key on the selected row is pressed. Columns are pulled up, so idle reads as
+    /// zero here after inversion.
+    ///
+    /// `order` is a permutation of the column indices, so the three lanes are sampled in
+    /// a randomised sequence and an implementation must not fold it back to a fixed one.
+    /// Together with a branchless accumulation this keeps which key was pressed out of the
+    /// read timing and the EM ordering, the same reason [`scan`](Keypad::scan) randomises
+    /// the row order.
+    fn read_columns(&mut self, order: &[u8; COLS]) -> u8;
 
     /// Release every row, leaving the matrix idle.
     fn release_rows(&mut self);
@@ -155,12 +161,20 @@ impl Keypad {
         // the safe fallback, since a leaky scan order is better than an unusable keypad.
         let _ = drbg.shuffle(&mut order);
 
+        // The three column lanes get their own shuffled order, so a press does not leak
+        // through a fixed read sequence within an otherwise-randomised row scan.
+        let mut col_order = [0u8; COLS];
+        for (i, c) in col_order.iter_mut().enumerate() {
+            *c = i as u8;
+        }
+        let _ = drbg.shuffle(&mut col_order);
+
         let mut raw = [false; KEYS];
         for &row in &order {
             let row = row as usize;
             matrix.select_row(row);
             matrix.settle();
-            let cols = matrix.read_columns();
+            let cols = matrix.read_columns(&col_order);
             for col in 0..COLS {
                 raw[row * COLS + col] = cols & (1 << col) != 0;
             }
@@ -216,6 +230,7 @@ mod tests {
         /// Whether `settle` has been called since the row was driven.
         settled: bool,
         order_seen: Vec<usize>,
+        col_order_seen: [u8; COLS],
         settles: usize,
         releases: usize,
         /// Every call in order, so an ordering bug is visible.
@@ -229,6 +244,7 @@ mod tests {
                 selected: None,
                 settled: false,
                 order_seen: Vec::new(),
+                col_order_seen: [0; COLS],
                 settles: 0,
                 releases: 0,
                 log: Vec::new(),
@@ -254,8 +270,17 @@ mod tests {
             self.order_seen.push(row);
             self.log.push("select");
         }
-        fn read_columns(&mut self) -> u8 {
+        fn read_columns(&mut self, order: &[u8; COLS]) -> u8 {
             self.log.push("read");
+            // A permutation, so the scanner is not quietly reading a fixed order.
+            let mut seen = *order;
+            seen.sort_unstable();
+            assert_eq!(
+                seen,
+                [0, 1, 2],
+                "column order must be a permutation of the lanes"
+            );
+            self.col_order_seen = *order;
             let row = self.selected.expect("read without selecting a row");
             // Settling is not optional, so the double does not treat it as optional.
             //
@@ -410,6 +435,26 @@ mod tests {
                 "select", "settle", "read", "release",
             ],
             "scan sequence is wrong"
+        );
+    }
+
+    #[test]
+    fn the_column_read_order_is_randomised_across_scans() {
+        // The three lanes must not be sampled in a fixed sequence -- a press would leak
+        // through it. Over enough scans, more than one permutation must appear (the mock
+        // already asserts each is a valid permutation on every read).
+        let (mut k, mut m, mut d) = (Keypad::new(), MockMatrix::new(), drbg());
+        let mut buf = [Event::Pressed(Key::Cancel); KEYS];
+        let mut seen: Vec<[u8; COLS]> = Vec::new();
+        for _ in 0..40 {
+            k.scan(&mut m, &mut d, &mut buf);
+            if !seen.contains(&m.col_order_seen) {
+                seen.push(m.col_order_seen);
+            }
+        }
+        assert!(
+            seen.len() > 1,
+            "column order never varied over 40 scans: {seen:?}"
         );
     }
 
