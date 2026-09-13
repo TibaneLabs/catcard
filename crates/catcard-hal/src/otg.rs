@@ -191,6 +191,11 @@ pub struct Otg {
     /// runs" from "it runs and the core rejects it", which look the same in a register
     /// dump taken after the fact.
     pub rearms: u32,
+    /// Bus resets seen, and full core re-inits performed. Both are on the debug screen:
+    /// a rising reset count with no enumeration says the host keeps trying and we keep
+    /// dropping it, and the reinit count says the self-heal is firing.
+    pub resets: u32,
+    pub reinits: u32,
 }
 
 impl Otg {
@@ -218,7 +223,38 @@ impl Otg {
                     Speed::VeryHigh,
                 );
             }
+        }
 
+        let mut this = Self {
+            dev: Device::new(serial),
+            rx: [0; REPORT_LEN],
+            rx_len: 0,
+            setup: [0; Setup::LEN],
+            scratch: [0; 64],
+            rearms: 0,
+            resets: 0,
+            reinits: 0,
+        };
+        // SAFETY: the clock is enabled and the data pins are configured just above.
+        unsafe { this.configure()? };
+        Ok(this)
+    }
+
+    /// Reset the core and apply the full device configuration, then attach to the bus.
+    ///
+    /// Split out of [`init`](Self::init) so [`reinit`](Self::reinit) can re-run exactly
+    /// the same sequence to recover a wedged core. Everything here is idempotent, and it
+    /// re-asserts the supply and clock gates too so a recovery does not depend on them
+    /// having survived whatever wedged us. It does not re-touch the GPIO alternate
+    /// function, which is a one-time pin setup.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS, with the 48 MHz clock running and the data pins
+    /// configured (both established once in [`init`](Self::init)).
+    unsafe fn configure(&mut self) -> Result<(), Error> {
+        // SAFETY: as documented.
+        unsafe {
+            enable_clock()?;
             core_reset()?;
 
             // Power the internal transceiver. VBUS sensing stays off -- see GCCFG_VBDEN.
@@ -254,15 +290,26 @@ impl Otg {
             // Attach.
             reg::clear_bits(DCTL, DCTL_SDIS);
         }
+        Ok(())
+    }
 
-        Ok(Self {
-            dev: Device::new(serial),
-            rx: [0; REPORT_LEN],
-            rx_len: 0,
-            setup: [0; Setup::LEN],
-            scratch: [0; 64],
-            rearms: 0,
-        })
+    /// Recover a wedged core by re-running the full configuration in place.
+    ///
+    /// The failure this exists for: the core is attached at boot, but the first bus reset
+    /// arrives much later -- a host plugged in after power-up, or a secure-element
+    /// callgate that ran between attach and that reset -- and the core will not enumerate
+    /// it. No amount of polling recovers the core from that state; only a fresh core
+    /// reset does. The brief detach inside [`core_reset`] also re-presents the device, so
+    /// a host that had given up starts a clean enumeration against a fresh core.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn reinit(&mut self) {
+        self.dev.reset();
+        // SAFETY: as documented. A failed re-configure leaves us detached and is retried
+        // on the next tick -- no worse than the wedged state it is recovering from.
+        let _ = unsafe { self.configure() };
+        self.reinits = self.reinits.saturating_add(1);
     }
 
     /// The endpoint registers, for a RAM-dump diagnostic.
@@ -290,6 +337,12 @@ impl Otg {
     /// Whether the host has configured us, so reports may be exchanged.
     pub fn is_configured(&self) -> bool {
         self.dev.is_configured()
+    }
+
+    /// `(resets, reinits, rearms)` — for the debug screen, to see whether the host is
+    /// resetting us, whether the self-heal is firing, and whether the OUT endpoint arms.
+    pub fn recovery_counts(&self) -> (u32, u32, u32) {
+        (self.resets, self.reinits, self.rearms)
     }
 
     /// Bytes of the most recent report.
@@ -404,6 +457,7 @@ impl Otg {
     /// # Safety
     /// Exclusive access to OTG_FS.
     unsafe fn on_reset(&mut self) {
+        self.resets = self.resets.saturating_add(1);
         self.dev.reset();
         // SAFETY: as documented.
         unsafe {

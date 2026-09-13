@@ -24,14 +24,14 @@
 //! moves some other way is simply wrong about the thing it is running on.
 //!
 //! The list scrolls rather than being capped at what fits. An earlier version drew a
-//! fixed number of rows and silently dropped the rest, which hid `Enter DFU` — the one
-//! item that exists to rescue a device nothing else can reach. A menu that cannot
-//! outgrow the panel is the property worth having here, not a shorter menu.
+//! fixed number of rows and silently dropped the rest, which hid the last item entirely.
+//! A menu that cannot outgrow the panel is the property worth having here, not a shorter
+//! menu.
 
 use core::fmt::Write as _;
 
 use catcard_callgate::Callgate;
-use catcard_callgate::abi::{DfuMode, LogoutMode};
+use catcard_callgate::abi::LogoutMode;
 use catcard_entropy::HmacDrbg;
 use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
@@ -78,7 +78,6 @@ enum Screen {
     SaveLog,
     Utils,
     AnalyzeRng,
-    ConfirmDfu,
 }
 
 const MAIN_ITEMS: &[&str] = &[
@@ -100,7 +99,6 @@ const DEBUG_ITEMS: &[&str] = &[
     "microSD",
     "Logs",
     "Save log to SD",
-    "Enter DFU",
 ];
 
 /// Run the menu. Never returns.
@@ -303,8 +301,7 @@ fn step(
             (Key::Confirm, 5) => Screen::Keypad,
             (Key::Confirm, 6) => Screen::Sd,
             (Key::Confirm, 7) => Screen::Logs,
-            (Key::Confirm, 8) => Screen::SaveLog,
-            (Key::Confirm, _) => Screen::ConfirmDfu,
+            (Key::Confirm, _) => Screen::SaveLog,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
@@ -313,16 +310,6 @@ fn step(
         // the risk is worth taking deliberately and not by navigation.
         Screen::Psram => match key {
             Key::Confirm => Screen::PsramProbe,
-            _ => Screen::Debug,
-        },
-        Screen::ConfirmDfu => match key {
-            Key::Confirm => {
-                message(panel, "Entering DFU", "hangs if locked", "");
-                // SAFETY: nothing after this runs. On an RDP=2 unit the bootloader
-                // calls LOCKUP_FOREVER instead, so the device hangs until it is
-                // power-cycled -- which the screen says before the key is pressed.
-                unsafe { gate.enter_dfu(DfuMode::Normal) }
-            }
             _ => Screen::Debug,
         },
         // Every info screen leaves on any key.
@@ -400,7 +387,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::AnalyzeRng => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
-        Screen::ConfirmDfu => confirm_dfu(panel),
     }
 }
 
@@ -523,6 +509,15 @@ fn usb_screen(panel: &mut display::Panel) {
             let _ = lines.push(l);
         }
     }
+
+    // Resets seen / self-heal re-inits / OUT-endpoint arms. `rst` climbing with `state
+    // down` means the host keeps resetting and we keep dropping it; `re` climbing means
+    // the self-heal is firing.
+    let (resets, reinits, rearms) = usbtask::recovery_counts();
+    let mut l = Line::new();
+    let _ = write!(l, "rst {resets} re {reinits} arm {rearms}");
+    let _ = lines.push(l);
+
     info(panel, "USB", &lines);
 }
 
@@ -707,28 +702,6 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
     let _ = write!(l, "x twice  back");
     let _ = lines.push(l);
     info(panel, "Keypad", &lines);
-}
-
-/// Ask before DFU, with the two keys drawn as they are printed on the caps.
-fn confirm_dfu(panel: &mut display::Panel) {
-    use catcard_ui::icons;
-    let mut fb = Mono128x64::new();
-    let t = &peep7x14::FONT;
-    let f = &misc4x6::FONT;
-    draw_text(&mut fb, t, centred(t, "Enter DFU?", 128), 6, "Enter DFU?");
-
-    let gap = 4 * f.width as usize;
-    let total = icons::hint_width(f, "yes") + gap + icons::hint_width(f, "no");
-    let mut x = (128usize).saturating_sub(total) / 2;
-    x = icons::draw_hint(&mut fb, &icons::CHECK, f, x, 30, "yes") + gap;
-    icons::draw_hint(&mut fb, &icons::CROSS, f, x, 30, "no");
-
-    // Not "refused": at RDP=2 the bootloader calls LOCKUP_FOREVER, so the device hangs
-    // until it is power-cycled. Flash is untouched and it boots normally afterwards, but
-    // saying "refused" would suggest it simply returns here.
-    let warn = "locked unit: hangs, repower";
-    draw_text(&mut fb, f, centred(f, warn, 128), 44, warn);
-    let _ = panel.flush(&fb);
 }
 
 /// Read a firmware off the card, ask, and install it.

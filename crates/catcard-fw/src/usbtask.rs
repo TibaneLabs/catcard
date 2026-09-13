@@ -66,6 +66,13 @@ pub struct UsbTask {
     tx_count: u32,
     frame_errors: u32,
     last_status: u16,
+    /// Consecutive polls seen while not configured. When it crosses
+    /// [`USB_STUCK_POLLS`] the core is re-initialised: enumeration that never completes
+    /// -- a host that attached before we were ready, a core wedged by a callgate landing
+    /// mid-enumeration -- only recovers from a fresh core reset, not from more polling.
+    /// Reset to zero the moment the host configures us, so a working link never triggers
+    /// it and it costs a healthy device nothing.
+    stuck: u32,
     /// Whether the PIN has been entered. Gates the upgrade opcodes only.
     unlocked: bool,
     /// Whether the device has no PIN set at all.
@@ -132,6 +139,7 @@ impl UsbTask {
             last_status: 0,
             unlocked: false,
             blank: false,
+            stuck: 0,
             frames: Reassembler::new(),
             stage: Stage::Idle,
             outbox: [0; REPORT_LEN],
@@ -218,6 +226,25 @@ impl UsbTask {
                 }
                 _ => {}
             }
+
+            // Self-heal a core that will not enumerate. Enumeration only ever completes
+            // during a foreground poll loop; if it has not after `USB_STUCK_POLLS`
+            // consecutive not-configured polls, the core is wedged (attached but not
+            // enumerating a late reset) and a fresh core reset is the only thing that
+            // recovers it. A configured link resets the counter, so this is free for a
+            // healthy device and only ever fires when USB is genuinely down.
+            if self.otg.is_configured() {
+                self.stuck = 0;
+            } else {
+                self.stuck = self.stuck.saturating_add(1);
+                if self.stuck >= USB_STUCK_POLLS {
+                    self.stuck = 0;
+                    // SAFETY: the task owns OTG_FS for the life of the firmware; already
+                    // inside this function's `unsafe` block.
+                    self.otg.reinit();
+                }
+            }
+
             event != Event::Idle || self.outbox_len > 0
         }
     }
@@ -651,6 +678,12 @@ pub unsafe fn init(serial: &'static str) {
 /// revisited on hardware.
 pub const IDLE_PAUSE_CYCLES: u32 = 66_000;
 
+/// Consecutive not-configured polls before the USB core is re-initialised. At roughly
+/// one poll per [`IDLE_PAUSE_CYCLES`] in the foreground loops this is on the order of a
+/// second -- long enough that a real enumeration (tens of ms) always finishes first, so
+/// the re-init only fires when the link is genuinely stuck.
+const USB_STUCK_POLLS: u32 = 1_500;
+
 /// Service USB. Safe to call from anywhere in the foreground.
 ///
 /// Returns whether anything happened, so a caller can decide how hard to spin.
@@ -670,6 +703,11 @@ pub fn pump() -> bool {
 pub fn otg_regs() -> Option<[u32; 6]> {
     // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
     task().map(|t| unsafe { t.otg.debug_regs() })
+}
+
+/// `(resets, reinits, rearms)` for the debug screen, or zeros before USB is up.
+pub fn recovery_counts() -> (u32, u32, u32) {
+    task().map_or((0, 0, 0), |t| t.otg.recovery_counts())
 }
 
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.
