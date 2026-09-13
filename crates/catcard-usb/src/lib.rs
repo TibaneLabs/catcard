@@ -109,6 +109,11 @@ pub enum Opcode {
     /// Call an address as `fn(u32) -> u32`, interrupts masked. Payload `[u32 addr][u32
     /// arg]`; reply `[u32 ret]`. **Bring-up only**: runs whatever the host sends.
     DebugJsr = 0x0032,
+    /// Run the microSD bring-up read: init the card and read block 0, logging each step
+    /// (`sddiag:` lines, fetched with [`Opcode::ReadLog`]). No payload; the reply is a
+    /// terse `[u8 phase][u32 sta][u32 dcount]`. **Bring-up only** (`usb-debug-mem`) --
+    /// it is a diagnostic for the SD data path, reachable when the panel is not.
+    DebugSd = 0x0033,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -146,6 +151,7 @@ impl Opcode {
             0x0030 => Opcode::DebugPeek,
             0x0031 => Opcode::DebugPoke,
             0x0032 => Opcode::DebugJsr,
+            0x0033 => Opcode::DebugSd,
             _ => return None,
         })
     }

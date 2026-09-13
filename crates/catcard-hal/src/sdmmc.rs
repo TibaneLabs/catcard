@@ -49,6 +49,7 @@ const RESP1: u32 = 0x14;
 const DTIMER: u32 = 0x24;
 const DLEN: u32 = 0x28;
 const DCTRL: u32 = 0x2C;
+const DCOUNT: u32 = 0x30;
 const STA: u32 = 0x34;
 const ICR: u32 = 0x38;
 /// Receive FIFO. Outside the range the emulator names, so this offset rests on the
@@ -77,8 +78,10 @@ const STA_RXOVERR: u32 = 1 << 5;
 const STA_CMDREND: u32 = 1 << 6;
 const STA_CMDSENT: u32 = 1 << 7;
 const STA_DATAEND: u32 = 1 << 8;
-const STA_RXFIFOHF: u32 = 1 << 15;
-const STA_RXDAVL: u32 = 1 << 21;
+/// `RXFIFOE`: the receive FIFO is empty. Its complement is the reliable "a word is
+/// waiting" test on both controllers -- `RXDAVL`/`RXFIFOHF` leave the last few words of
+/// a block unread on the L4+ IP, which stalls the data path with the FIFO half-full.
+const STA_RXFIFOE: u32 = 1 << 19;
 const STA_TXUNDERR: u32 = 1 << 4;
 const STA_TXFIFOF: u32 = 1 << 16;
 
@@ -120,6 +123,10 @@ pub struct Sdmmc {
     /// Whether the slot reports a card. Latched at init; `card_present` reports it.
     present: bool,
     wide: bool,
+    /// The L4+ "new" SDMMC IP starts the data path from the command's `CMDTRANS` bit, so
+    /// `DCTRL.DTEN` must stay clear or the DPSM starts early (before the command) and the
+    /// read never happens. The older controller has no `CMDTRANS` and needs `DTEN`.
+    new_ip: bool,
 }
 
 impl Sdmmc {
@@ -150,6 +157,7 @@ impl Sdmmc {
             base: b,
             present: card_detect(spec),
             wide: false,
+            new_ip: matches!(spec.mcu, Mcu::Stm32L4S5),
         })
     }
 
@@ -157,6 +165,13 @@ impl Sdmmc {
     pub fn status(&self) -> u32 {
         // SAFETY: a read of a peripheral this type owns.
         unsafe { reg::read(self.base + STA) }
+    }
+
+    /// `DCOUNT` -- bytes still to transfer in the current data block. 512 (a full block)
+    /// means nothing has moved; a falling value means data is arriving. For diagnostics.
+    pub fn dcount(&self) -> u32 {
+        // SAFETY: a read of a peripheral this type owns.
+        unsafe { reg::read(self.base + DCOUNT) }
     }
 }
 
@@ -232,17 +247,15 @@ impl Transport for Sdmmc {
                     reg::write(b + ICR, ICR_ALL);
                     return Err(Error::DataError { block: u32::MAX });
                 }
-                // Drain whatever is there, a word at a time. `RXDAVL` rather than only
-                // the half-full flag, or the tail of a block is left behind when fewer
-                // than eight words remain.
-                while (sta & STA_RXDAVL != 0 || sta & STA_RXFIFOHF != 0) && at < BLOCK_LEN {
+                // Drain while the FIFO is not empty. `RXFIFOE` (empty) is the reliable
+                // flag on the L4+ IP: `RXDAVL`/`RXFIFOHF` leave a block's last few words
+                // unread there, and the undrained FIFO then wedges the data path with
+                // `DCOUNT` stuck short of zero -- which is what a partial read looked like.
+                while reg::read(b + STA) & STA_RXFIFOE == 0 && at < BLOCK_LEN {
                     let w = reg::read(b + FIFO).to_le_bytes();
                     let n = w.len().min(BLOCK_LEN - at);
                     out[at..at + n].copy_from_slice(&w[..n]);
                     at += n;
-                    if reg::read(b + STA) & STA_RXDAVL == 0 {
-                        break;
-                    }
                 }
                 if at >= BLOCK_LEN {
                     break;
@@ -336,13 +349,15 @@ impl Transport for Sdmmc {
     }
 
     fn arm_block_read(&mut self) {
-        // SAFETY: this type owns SDMMC1.
-        unsafe { arm_block_read(self.base) }
+        // SAFETY: this type owns SDMMC1. `DTEN` only on the old IP -- the new one starts
+        // the data path from the command's `CMDTRANS`, so setting `DTEN` there would run
+        // the DPSM before the command and the read would never happen.
+        unsafe { arm_block_read(self.base, !self.new_ip) }
     }
 
     fn arm_block_write(&mut self) {
-        // SAFETY: this type owns SDMMC1.
-        unsafe { arm_block_write(self.base) }
+        // SAFETY: as in `arm_block_read`.
+        unsafe { arm_block_write(self.base, !self.new_ip) }
     }
 }
 
@@ -353,14 +368,12 @@ impl Transport for Sdmmc {
 ///
 /// # Safety
 /// Caller owns SDMMC1.
-pub unsafe fn arm_block_read(b: u32) {
+pub unsafe fn arm_block_read(b: u32, dten: bool) {
     // SAFETY: as documented.
     unsafe {
         reg::write(b + DLEN, BLOCK_LEN as u32);
-        reg::write(
-            b + DCTRL,
-            DCTRL_DTEN | DCTRL_DTDIR_CARD_TO_HOST | DCTRL_BLOCK_512,
-        );
+        let en = if dten { DCTRL_DTEN } else { 0 };
+        reg::write(b + DCTRL, en | DCTRL_DTDIR_CARD_TO_HOST | DCTRL_BLOCK_512);
     }
 }
 
@@ -372,11 +385,12 @@ pub unsafe fn arm_block_read(b: u32) {
 ///
 /// # Safety
 /// Caller owns SDMMC1.
-pub unsafe fn arm_block_write(b: u32) {
+pub unsafe fn arm_block_write(b: u32, dten: bool) {
     // SAFETY: as documented.
     unsafe {
         reg::write(b + DLEN, BLOCK_LEN as u32);
-        reg::write(b + DCTRL, DCTRL_DTEN | DCTRL_BLOCK_512);
+        let en = if dten { DCTRL_DTEN } else { 0 };
+        reg::write(b + DCTRL, en | DCTRL_BLOCK_512);
     }
 }
 

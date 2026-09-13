@@ -415,8 +415,17 @@ impl UsbTask {
                     self.begin_reply(Status::Ok, &ret.to_le_bytes());
                 }
             }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugSd) => {
+                let (phase, sta, dcount) = sd_diag();
+                let mut body = [0u8; 9];
+                body[0] = phase;
+                body[1..5].copy_from_slice(&sta.to_le_bytes());
+                body[5..9].copy_from_slice(&dcount.to_le_bytes());
+                self.begin_reply(Status::Ok, &body);
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
-            Some(Opcode::DebugPeek | Opcode::DebugPoke | Opcode::DebugJsr) => {
+            Some(Opcode::DebugPeek | Opcode::DebugPoke | Opcode::DebugJsr | Opcode::DebugSd) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);
             }
             Some(Opcode::Ping) => {
@@ -708,6 +717,89 @@ pub fn attach() {
         // foreground, nothing runs in interrupt context.
         unsafe { t.otg.attach() }
     }
+}
+
+/// Bring-up SD read probe: init the card and read block 0, logging every step so the SD
+/// data path can be debugged over USB (`sddiag:` lines via [`Opcode::ReadLog`]) rather
+/// than only on the panel. Returns `(phase, sta, dcount)`: phase 0 controller-init
+/// failed, 1 card-init failed, 2 CMD17 failed, 3 read failed, 4 read ok.
+#[cfg(feature = "usb-debug-mem")]
+fn sd_diag() -> (u8, u32, u32) {
+    use catcard_board::BOARD;
+    use catcard_sd::{Response, Transport};
+
+    // SAFETY: on a device under test nothing else touches SDMMC1 or the slot; this
+    // bring-up probe is the only user for the length of the call.
+    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) } {
+        Ok(d) => d,
+        Err(_) => {
+            crate::catlog!("sddiag: controller init FAIL");
+            return (0, 0, 0);
+        }
+    };
+    crate::catlog!("sddiag: ctrl up present={}", Transport::card_present(&dev));
+    let card = match catcard_sd::init(&mut dev) {
+        Ok(c) => c,
+        Err(_) => {
+            crate::catlog!("sddiag: card init FAIL sta={:#010x}", dev.status());
+            return (1, dev.status(), dev.dcount());
+        }
+    };
+    crate::catlog!(
+        "sddiag: blocks={} wide={} block_addr={}",
+        card.blocks,
+        card.wide,
+        matches!(card.addressing, catcard_sd::Addressing::BlockAddressed)
+    );
+
+    // Read block 0 by hand so CMD17's response and the data path are each visible.
+    dev.arm_block_read();
+    crate::catlog!(
+        "sddiag: armed sta={:#010x} dcount={}",
+        dev.status(),
+        dev.dcount()
+    );
+    let r1 = match dev.command(17, 0, Response::Short) {
+        Ok(r) => r[0],
+        Err(_) => {
+            crate::catlog!("sddiag: CMD17 FAIL sta={:#010x}", dev.status());
+            return (2, dev.status(), dev.dcount());
+        }
+    };
+    crate::catlog!(
+        "sddiag: cmd17 r1={:#010x} sta={:#010x} dcount={}",
+        r1,
+        dev.status(),
+        dev.dcount()
+    );
+
+    let mut blk = [0u8; catcard_sd::BLOCK_LEN];
+    let (phase, sta, dcount) = match dev.read_data(&mut blk) {
+        Ok(()) => {
+            crate::catlog!(
+                "sddiag: read OK 55aa={} sta={:#010x}",
+                blk[510] == 0x55 && blk[511] == 0xAA,
+                dev.status()
+            );
+            (4, dev.status(), dev.dcount())
+        }
+        Err(_) => {
+            crate::catlog!(
+                "sddiag: read FAIL sta={:#010x} dcount={}",
+                dev.status(),
+                dev.dcount()
+            );
+            return (3, dev.status(), dev.dcount());
+        }
+    };
+
+    // Prove the whole read path, not just one block: mount the FAT volume, which reads
+    // the boot sector and walks the FAT across many blocks.
+    match catcard_sd::fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
+        Ok(_) => crate::catlog!("sddiag: FAT mount OK"),
+        Err(_) => crate::catlog!("sddiag: FAT mount FAIL (block read works, fs did not)"),
+    }
+    (phase, sta, dcount)
 }
 
 /// The OTG endpoint registers, for the debug screen.
