@@ -27,6 +27,7 @@ START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
 
 PING, IDENTIFY, UPGRADE_OFFER, UPGRADE_COMMIT = 0x0001, 0x0002, 0x0010, 0x0011
 INJECT_KEY = 0x0020
+UNLOCK_PIN = 0x0021
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
 
 
@@ -37,6 +38,29 @@ def key_byte(k):
     if k == "y":
         return KEY_CONFIRM
     return int(k)
+
+
+def unlock_with_pin(sock, pin):
+    """Submit the whole PIN and wait for the device to report itself unlocked.
+
+    The device applies the PIN asynchronously in its login loop -- the `Ok` to the
+    command means only that it was accepted -- so this polls Identify for the UNLOCKED
+    state bit rather than trusting the command's own reply. Identify may time out while
+    the device is inside a secure-element call, so a timeout is just another poll.
+    """
+    st, _ = request(sock, UNLOCK_PIN, pin.encode())
+    if st != 0:
+        raise RuntimeError(f"unlock refused: {STATUS.get(st, st)}")
+    for _ in range(40):
+        time.sleep(0.25)
+        try:
+            _st, body = request(sock, IDENTIFY)
+        except (TimeoutError, OSError, EOFError):
+            continue
+        info = identify(body)
+        if info and info[1]:
+            return True
+    return False
 
 
 def press(sock, keys, settle=0.35, expect_reply=True):
@@ -86,6 +110,7 @@ REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
 # Capability bits, matching `catcard_usb::caps`.
 CAP_KEY_INJECTION = 1 << 0
 CAP_UPGRADE = 1 << 1
+CAP_UNLOCK_PIN = 1 << 3
 
 
 def frames(opcode, payload):
@@ -607,6 +632,28 @@ def main(path, image=None):
         print_log(s)
         return 0
 
+    if "--unlock" in sys.argv:
+        # Hand the device the whole PIN instead of driving the keypad blindly. The one
+        # key sent here is only to leave the selftest screen -- not the PIN.
+        st, body = request(s, IDENTIFY)
+        caps = capabilities(body)
+        info = identify(body)
+        if info and info[1]:
+            print("unlock    already unlocked")
+            return 0
+        if not caps & CAP_UNLOCK_PIN:
+            print("unlock    this build does not accept a whole-PIN unlock "
+                  "(needs usb-key-injection)")
+            return 1
+        pin = next((a[len("--pin="):] for a in sys.argv if a.startswith("--pin=")), None)
+        if not pin:
+            print("unlock    pass --pin=PREFIX-SUFFIX, e.g. --pin=1111-1111")
+            return 1
+        press(s, "y")  # leave the selftest screen; the PIN itself goes over the wire
+        done = unlock_with_pin(s, pin)
+        print(f"unlock    {'unlocked' if done else 'still locked (wrong PIN?)'}")
+        return 0 if done else 1
+
     if "--drive" in sys.argv:
         # The whole device over USB, with nothing touching the keypad: past the selftest
         # screen, through a PIN, and -- if an image was given -- through an upgrade and
@@ -645,7 +692,12 @@ def main(path, image=None):
             st, body = request(s, IDENTIFY)
             info = identify(body)
         if info and not info[1]:
-            enter_pin()
+            # Prefer the whole-PIN unlock over blind key injection when the build has
+            # it -- fewer round trips, and no dependence on the keypad map.
+            if caps & CAP_UNLOCK_PIN:
+                unlock_with_pin(s, prefix + "-" + suffix)
+            else:
+                enter_pin()
         st, body = request(s, IDENTIFY)
         info = identify(body)
         if info is None:

@@ -87,6 +87,19 @@ pub enum Opcode {
     /// It is behind the `usb-key-injection` feature, reported by [`Opcode::Identify`],
     /// and shown on the device's own screen. See `docs/USB.md`.
     InjectKey = 0x0020,
+    /// Unlock the device by submitting the PIN whole, instead of typing it key by key.
+    ///
+    /// Payload is the PIN as ASCII, prefix and suffix joined by `-`, e.g.
+    /// `b"1234-5678"`. The device runs it through the same login state machine the
+    /// keypad drives -- prefix, anti-phishing words, suffix -- and the reply's `Ok`
+    /// means only that the request was *accepted*; the host polls [`Opcode::Identify`]
+    /// for the `UNLOCKED` state bit to learn whether the PIN was right.
+    ///
+    /// Same trust boundary and same `usb-key-injection` feature as [`Opcode::InjectKey`]:
+    /// a host that can type a PIN blindly can send one whole. It **auto-confirms the
+    /// anti-phishing words**, so it is a bring-up convenience for driving upgrades, not
+    /// a path that preserves the substituted-device check a person performs.
+    UnlockPin = 0x0021,
     /// Read raw memory. Payload `[u32 addr][u8 width][u8 count]`; reply is the bytes.
     /// **Bring-up only** (`usb-debug-mem`): reads anything, including secrets.
     DebugPeek = 0x0030,
@@ -129,6 +142,7 @@ impl Opcode {
             0x0011 => Opcode::UpgradeCommit,
             0x0012 => Opcode::ReadLog,
             0x0020 => Opcode::InjectKey,
+            0x0021 => Opcode::UnlockPin,
             0x0030 => Opcode::DebugPeek,
             0x0031 => Opcode::DebugPoke,
             0x0032 => Opcode::DebugJsr,
@@ -175,6 +189,9 @@ pub mod caps {
     /// never be set on anything but a bench device -- a host seeing this bit is talking
     /// to a build that will read its own RAM out to anyone.
     pub const DEBUG_MEM: u8 = 1 << 2;
+    /// This build accepts [`Opcode::UnlockPin`](super::Opcode::UnlockPin). Set exactly
+    /// when `KEY_INJECTION` is: the two share the `usb-key-injection` feature.
+    pub const UNLOCK_PIN: u8 = 1 << 3;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.

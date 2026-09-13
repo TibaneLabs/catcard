@@ -277,6 +277,7 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
         Opcode::UpgradeOffer,
         Opcode::UpgradeCommit,
         Opcode::InjectKey,
+        Opcode::UnlockPin,
     ] {
         assert_eq!(Opcode::from_u16(op as u16), Some(op));
     }

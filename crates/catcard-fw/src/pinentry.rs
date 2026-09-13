@@ -318,6 +318,21 @@ fn wait_for_confirm(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
     }
 }
 
+/// Split a `prefix-suffix` PIN payload into its two parts.
+///
+/// Returns `None` unless both parts are non-empty, all ASCII digits, and within
+/// [`MAX_PART_LEN`] -- the same shape [`PinBuffer`] would have produced from the keypad,
+/// so the gate hashes exactly what a typed PIN would.
+fn split_pin(pin: &[u8]) -> Option<(&[u8], &[u8])> {
+    let sep = pin.iter().position(|&b| b == catcard_pin::SEPARATOR)?;
+    let (prefix, rest) = pin.split_at(sep);
+    let suffix = &rest[1..];
+    let ok = |part: &[u8]| {
+        !part.is_empty() && part.len() <= MAX_PART_LEN && part.iter().all(u8::is_ascii_digit)
+    };
+    (ok(prefix) && ok(suffix)).then_some((prefix, suffix))
+}
+
 /// Where the unlock ended.
 pub enum Unlocked {
     /// Logged in. `zero_secret` means there is no seed stored yet.
@@ -424,6 +439,33 @@ pub fn unlock(
         }
 
         let _ = crate::usbtask::pump();
+
+        // A host may submit the whole PIN over USB instead of typing it key by key
+        // (bring-up only; see `Opcode::UnlockPin`). Drive it through the same state
+        // machine a person does, auto-confirming the anti-phishing words -- the host
+        // has chosen to trust the device it is talking to. A blank device needs setup,
+        // not this, and one already in is left alone.
+        if let Some(pin) = crate::usbtask::take_unlock_pin()
+            && !matches!(login.step(), Step::Blank | Step::In { .. })
+        {
+            // From a wrong-PIN screen, reset to a fresh prefix before applying.
+            if !matches!(login.step(), Step::Prefix) {
+                login = Login::new(&g);
+            }
+            if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
+                working(panel, "USB unlock");
+                let _ = login.prefix_entered(&g, prefix);
+                if matches!(login.step(), Step::ConfirmWords(_)) {
+                    login.words_confirmed();
+                }
+                if matches!(login.step(), Step::Suffix) {
+                    let _ = login.attempt(&g, suffix);
+                }
+                field.clear();
+            }
+            redraw = true;
+            continue;
+        }
 
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         for key in keys.iter() {

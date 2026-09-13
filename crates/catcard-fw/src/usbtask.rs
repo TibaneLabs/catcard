@@ -55,6 +55,10 @@ pub struct UsbTask {
     /// answering, which is how a confirmation gets pressed before it is read.
     #[cfg(feature = "usb-key-injection")]
     injected: Option<u8>,
+    /// A whole PIN a host has submitted with [`Opcode::UnlockPin`], waiting for the
+    /// login loop to drive it through the gate. `prefix-suffix` ASCII, unparsed.
+    #[cfg(feature = "usb-key-injection")]
+    unlock_pin: Option<heapless::Vec<u8, 33>>,
     /// Reports taken from the host, and replies handed back. Shown on the idle screen
     /// because the emulator decodes that screen to text, which makes it the only
     /// diagnostic channel this firmware has that needs no debugger.
@@ -120,6 +124,8 @@ impl UsbTask {
             otg,
             #[cfg(feature = "usb-key-injection")]
             injected: None,
+            #[cfg(feature = "usb-key-injection")]
+            unlock_pin: None,
             rx_count: 0,
             tx_count: 0,
             frame_errors: 0,
@@ -405,6 +411,22 @@ impl UsbTask {
             },
             #[cfg(not(feature = "usb-key-injection"))]
             Some(Opcode::InjectKey) => self.begin_reply(Status::UnknownOpcode, &[]),
+            #[cfg(feature = "usb-key-injection")]
+            Some(Opcode::UnlockPin) => {
+                // Stash it; the login loop consumes it and answers with the UNLOCKED
+                // state bit on the next Identify. Ok here means only "accepted".
+                let p = progress.payload;
+                if p.is_empty() || p.len() > 33 {
+                    self.begin_reply(Status::BadRequest, &[]);
+                } else {
+                    let mut v = heapless::Vec::new();
+                    let _ = v.extend_from_slice(p);
+                    self.unlock_pin = Some(v);
+                    self.begin_reply(Status::Ok, &[]);
+                }
+            }
+            #[cfg(not(feature = "usb-key-injection"))]
+            Some(Opcode::UnlockPin) => self.begin_reply(Status::UnknownOpcode, &[]),
             Some(Opcode::UpgradeCommit) => {
                 // A host can ask, but only the device can answer. Approval happens at
                 // the screen; until then this is simply not the time.
@@ -464,7 +486,7 @@ impl UsbTask {
         // What this build will accept, so a host does not have to discover it by being
         // refused -- and so an operator can see whether key injection is compiled in.
         body[at] = if cfg!(feature = "usb-key-injection") {
-            catcard_usb::caps::KEY_INJECTION
+            catcard_usb::caps::KEY_INJECTION | catcard_usb::caps::UNLOCK_PIN
         } else {
             0
         } | if BOARD.psram.is_some() {
@@ -814,6 +836,20 @@ pub fn take_injected_key() -> Option<catcard_ui::keypad::Key> {
             catcard_usb::KEY_CONFIRM => Key::Confirm,
             d => Key::Digit(d),
         })
+    }
+}
+
+/// A whole PIN a host has submitted over USB, if any. Consumes it.
+///
+/// `None` without `usb-key-injection`, so the login loop calls it unconditionally.
+pub fn take_unlock_pin() -> Option<heapless::Vec<u8, 33>> {
+    #[cfg(not(feature = "usb-key-injection"))]
+    {
+        None
+    }
+    #[cfg(feature = "usb-key-injection")]
+    {
+        task()?.unlock_pin.take()
     }
 }
 
