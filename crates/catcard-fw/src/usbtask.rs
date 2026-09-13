@@ -696,6 +696,20 @@ pub fn pump() -> bool {
     busy
 }
 
+/// Attach USB to the bus.
+///
+/// [`init`] brings the core up soft-disconnected; this presents it to the host. Call it
+/// only from a loop that then services USB by calling [`pump`] -- so the host's first
+/// enumeration is answered immediately rather than lost to a blocking callgate. Safe to
+/// call more than once. No-op if USB never came up.
+pub fn attach() {
+    if let Some(t) = task() {
+        // SAFETY: the task owns OTG_FS for the life of the firmware; single-threaded
+        // foreground, nothing runs in interrupt context.
+        unsafe { t.otg.attach() }
+    }
+}
+
 /// The OTG endpoint registers, for the debug screen.
 ///
 /// `[GINTSTS, DAINT, DOEPCTL, DOEPTSIZ, DIEPCTL, DCTL]`. On hardware there is no RAM

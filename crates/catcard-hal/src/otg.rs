@@ -199,7 +199,10 @@ pub struct Otg {
 }
 
 impl Otg {
-    /// Bring the core up in device mode and attach to the bus.
+    /// Bring the core up in device mode, soft-disconnected.
+    ///
+    /// Does not appear on the bus until [`attach`](Self::attach) is called -- see there
+    /// for why the two are separate.
     ///
     /// The data pins are passed in rather than read from the board table, so this crate
     /// stays buildable without a board selected and the pin choice remains the caller's.
@@ -287,20 +290,35 @@ impl Otg {
             reg::write(DOEPMSK, EPINT_XFRC | DOEPINT_STUP);
             reg::write(DAINTMSK, u32::MAX);
 
-            // Attach.
-            reg::clear_bits(DCTL, DCTL_SDIS);
+            // Deliberately do NOT attach here. The core is left soft-disconnected; the
+            // caller attaches with `attach()` only once it is in a loop that services
+            // USB. Attaching earlier let the host begin enumerating while a blocking
+            // secure-element callgate (`Login::new`) held the CPU, and the core wedged in
+            // a state only a full reset clears -- the bug the self-heal exists to catch.
         }
         Ok(())
     }
 
-    /// Recover a wedged core by re-running the full configuration in place.
+    /// Attach to the bus by clearing soft-disconnect, presenting the device to the host.
     ///
-    /// The failure this exists for: the core is attached at boot, but the first bus reset
-    /// arrives much later -- a host plugged in after power-up, or a secure-element
-    /// callgate that ran between attach and that reset -- and the core will not enumerate
-    /// it. No amount of polling recovers the core from that state; only a fresh core
-    /// reset does. The brief detach inside [`core_reset`] also re-presents the device, so
-    /// a host that had given up starts a clean enumeration against a fresh core.
+    /// Separate from [`configure`](Self::configure) so the device appears only once the
+    /// firmware is polling and can answer the host's first enumeration immediately rather
+    /// than losing it to a callgate. Idempotent: clearing an already-clear bit is a no-op.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS; the core must have been configured.
+    pub unsafe fn attach(&mut self) {
+        // SAFETY: as documented.
+        unsafe { reg::clear_bits(DCTL, DCTL_SDIS) }
+    }
+
+    /// Recover a wedged core by re-running the full configuration in place, then attach.
+    ///
+    /// A safety net behind the deferred [`attach`](Self::attach): if the core still ends
+    /// up wedged -- attached but not enumerating a reset that arrived at a bad moment --
+    /// no amount of polling recovers it; only a fresh core reset does. The brief detach
+    /// inside [`core_reset`] plus the re-attach re-presents the device, so a host that
+    /// had given up starts a clean enumeration against a fresh core.
     ///
     /// # Safety
     /// Exclusive access to OTG_FS.
@@ -308,7 +326,10 @@ impl Otg {
         self.dev.reset();
         // SAFETY: as documented. A failed re-configure leaves us detached and is retried
         // on the next tick -- no worse than the wedged state it is recovering from.
-        let _ = unsafe { self.configure() };
+        unsafe {
+            let _ = self.configure();
+            self.attach();
+        }
         self.reinits = self.reinits.saturating_add(1);
     }
 

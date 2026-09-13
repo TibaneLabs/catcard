@@ -352,6 +352,11 @@ pub fn unlock(
 ) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);
+    // Attach USB only now, after `Login::new`'s callgate has returned and we are about to
+    // enter the polling loop below. Presenting the device to the host any earlier -- while
+    // that callgate held the CPU -- let the host start enumerating into a core nothing was
+    // servicing, which wedged it. From here every enumeration packet is answered promptly.
+    crate::usbtask::attach();
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];

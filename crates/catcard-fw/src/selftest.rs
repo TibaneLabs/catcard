@@ -210,6 +210,10 @@ pub fn park(report: BootReport, panel: Option<display::Panel>) -> ! {
     if let Some(p) = panel.as_mut() {
         render(&report, None, false, p);
     }
+    // Attach USB now, immediately before the serving loop: a parked device is reachable
+    // over USB, but only once something is polling it. (The core is left detached by
+    // `usbtask::init` until a pump loop like this one is ready -- see `Otg::attach`.)
+    crate::usbtask::attach();
     loop {
         // Serve USB rather than sleeping. This is the device that cannot show or read
         // anything, so a host is the only thing left that can ask it what went wrong --
