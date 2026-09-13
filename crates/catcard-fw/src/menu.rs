@@ -61,6 +61,7 @@ const _: () = assert!(MAX_LINES >= 2, "the panel must fit at least two menu rows
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Screen {
     Main,
+    About,
     SdInstall,
     Debug,
     Usb,
@@ -73,7 +74,7 @@ enum Screen {
     ConfirmDfu,
 }
 
-const MAIN_ITEMS: &[&str] = &["Status", "Install from SD", "Debug", "Reboot"];
+const MAIN_ITEMS: &[&str] = &["Status", "Install from SD", "Debug", "About", "Reboot"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -226,6 +227,7 @@ fn step(
             (Key::Confirm, 0) => Screen::Main,
             (Key::Confirm, 1) => Screen::SdInstall,
             (Key::Confirm, 2) => Screen::Debug,
+            (Key::Confirm, 3) => Screen::About,
             (Key::Confirm, _) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -233,6 +235,8 @@ fn step(
             }
             _ => Screen::Main,
         },
+        // The splash, dismissed by any key.
+        Screen::About => Screen::Main,
         Screen::Debug => match (key, cursor) {
             (Key::Confirm, 0) => Screen::Usb,
             (Key::Confirm, 1) => Screen::Clocks,
@@ -315,13 +319,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // number worth seeing without navigating anywhere, and losing it to a submenu
         // would undo the thing this menu exists to fix.
         Screen::Main => menu(panel, v.head, &usb_line(v.note), MAIN_ITEMS, v.sc),
-        Screen::Debug => menu(
-            panel,
-            "Debug",
-            "5/8 move  9 pick  7 back",
-            DEBUG_ITEMS,
-            v.sc,
-        ),
+        Screen::About => about_screen(panel),
+        Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
@@ -774,6 +773,13 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
+}
+
+/// The splash as an "about" page: cat logo, wordmark, and version, held until a key.
+fn about_screen(panel: &mut display::Panel) {
+    let mut fb = Mono128x64::new();
+    catcard_ui::splash::draw(&mut fb, crate::VERSION, 100);
+    let _ = panel.flush(&fb);
 }
 
 /// microSD: does a card come up, and what does the controller say if not.
