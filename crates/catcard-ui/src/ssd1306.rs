@@ -74,6 +74,42 @@ pub const INIT_128X64: &[u8] = &[
     cmd::DISPLAY_ON,
 ];
 
+/// mk5's init: the same panel as mk4 but fed from the external +12 V rail (V12EN), so
+/// the internal charge pump is **disabled** (`0x10`), and the panel is mounted the other
+/// way up, so the segment/COM scan are unflipped. Contrast, precharge and VCOM are the
+/// mk5 values. No `DISPLAY_OFF` at the front and no reset: the bootloader already lit
+/// this panel, and the point is to reconfigure addressing without cutting it dark.
+///
+/// Source: `hw-reference/gpio-peripherals.md §Mk4/Mk5 OLED power/init` [C].
+#[allow(clippy::identity_op)]
+pub const INIT_128X64_MK5: &[u8] = &[
+    cmd::DISPLAY_OFF,
+    cmd::SET_DISPLAY_CLOCK_DIV,
+    0xF0, // mk5 panel's spec clock divide
+    cmd::SET_MULTIPLEX,
+    63,
+    cmd::SET_DISPLAY_OFFSET,
+    0x00,
+    cmd::SET_START_LINE | 0x00,
+    cmd::CHARGE_PUMP,
+    0x10, // internal pump OFF -- panel voltage comes from V12EN's +12 V rail
+    cmd::MEMORY_MODE,
+    MEMORY_MODE_HORIZONTAL,
+    cmd::SEG_REMAP | 0x00, // not flipped, unlike mk4
+    cmd::COM_SCAN_INC,     // not flipped, unlike mk4
+    cmd::SET_COM_PINS,
+    0x12,
+    cmd::SET_CONTRAST,
+    0x85,
+    cmd::SET_PRECHARGE,
+    0x22,
+    cmd::SET_VCOM_DETECT,
+    0x40,
+    cmd::DISPLAY_ALL_ON_RESUME,
+    cmd::NORMAL_DISPLAY,
+    cmd::DISPLAY_ON,
+];
+
 /// Commands that set the column/page window to the whole panel, ahead of a full flush.
 pub fn full_window(width: u8, pages: u8) -> [u8; 6] {
     [cmd::COLUMN_ADDR, 0, width - 1, cmd::PAGE_ADDR, 0, pages - 1]

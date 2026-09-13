@@ -13,20 +13,9 @@ use catcard_ui::{DisplayBus, Ssd1306};
 /// Source: STM32L496 datasheet, Table 15 (alternate function mapping).
 const AF_SPI: u8 = 5;
 
-/// Reset pulse width. The SSD1306 datasheet asks for at least 3 microseconds; this is
-/// several orders of magnitude more, which costs nothing at boot.
-const RESET_CYCLES: u32 = 10_000;
-
 /// SPI clock ceiling for the panel. The SSD1306 is specified to 10 MHz; staying under
 /// it matters because an overclocked panel corrupts intermittently rather than failing.
 const DISPLAY_MAX_HZ: u32 = 8_000_000;
-
-/// Core clock assumed when choosing the prescaler.
-///
-/// The PLL is not programmed yet, so the part runs on the reset-default MSI. Using the
-/// real (slower) figure means the prescaler picks a *lower* SPI clock than necessary —
-/// safe. Revisit when `clock::init_pll` lands; see `docs/HARDWARE-OPEN-ITEMS.md`.
-const ASSUMED_PCLK_HZ: u32 = 4_000_000;
 
 /// The panel wired up on this board.
 pub struct PanelBus {
@@ -83,7 +72,10 @@ impl PanelBus {
             Spi::init(
                 bus.instance,
                 spi::Mode::Mode0,
-                Prescaler::for_max_hz(ASSUMED_PCLK_HZ, DISPLAY_MAX_HZ),
+                // The real APB2 clock, read from RCC -- the bootloader left the PLL
+                // running at 80 MHz, and assuming the 4 MHz MSI reset default clocked
+                // the panel 5x past its limit, garbling every write. SAFETY: reads RCC.
+                Prescaler::for_max_hz(catcard_hal::clock::pclk2_hz(), DISPLAY_MAX_HZ),
             )?
         };
 
@@ -124,12 +116,19 @@ impl DisplayBus for PanelBus {
     }
 
     fn reset(&mut self) -> Result<(), Self::Error> {
-        // SAFETY: configured as an output in `init`.
+        // The controller discards commands sent before this pulse, and the pulse must be
+        // real milliseconds -- `RES=1, 1 ms; RES=0, 10 ms; RES=1, 10 ms` -- not a cycle
+        // count, which at the inherited 80 MHz clock came out ~80x too short and left the
+        // panel un-reset, so the init was thrown away. Source: gpio-peripherals.md
+        // §Display "Hardware reset" [C].
+        // SAFETY: `reset` is an output; `delay_ms` reads RCC.
         unsafe {
-            gpio::write(self.reset, false);
-            catcard_hal::dwt::delay_cycles(RESET_CYCLES);
             gpio::write(self.reset, true);
-            catcard_hal::dwt::delay_cycles(RESET_CYCLES);
+            catcard_hal::dwt::delay_ms(1);
+            gpio::write(self.reset, false);
+            catcard_hal::dwt::delay_ms(10);
+            gpio::write(self.reset, true);
+            catcard_hal::dwt::delay_ms(10);
         }
         Ok(())
     }
@@ -163,7 +162,15 @@ pub unsafe fn init() -> Option<Panel> {
     // SAFETY: forwarding the caller's once-only guarantee.
     let bus = unsafe { PanelBus::init() }.ok()?;
     let mut panel = Ssd1306::new_128x64(bus);
-    panel.init().ok()?;
+    // SAFETY: reads the mk5 strap. On mk5, inherit the bootloader's working panel rather
+    // than resetting and re-initialising it -- see `Ssd1306::init_inherit`.
+    // SAFETY: reads the mk5 strap. mk5 uses its own init -- externally-powered panel,
+    // charge pump off, unflipped orientation.
+    if unsafe { catcard_hal::strap::is_mk5() } {
+        panel.init_mk5().ok()?;
+    } else {
+        panel.init().ok()?;
+    }
     Some(panel)
 }
 
@@ -204,9 +211,10 @@ unsafe fn enable_panel_rail() {
             Speed::Low,
         );
         gpio::write(pin, true);
+        // Let the external +12 V rail come up before the panel is reset and initialised.
+        // Real milliseconds: a boost converter needs a few, and the early board revs that
+        // actually depend on this pin are the ones that most need the settle.
+        catcard_hal::dwt::delay_ms(50);
         crate::catlog!("display: V12EN (PC1) driven high, mk5 strap low");
-        // Let the rail come up before the panel is spoken to. 40 ms at the MSI reset
-        // default; a boost converter needs milliseconds, not microseconds.
-        catcard_hal::dwt::delay_cycles(160_000);
     }
 }

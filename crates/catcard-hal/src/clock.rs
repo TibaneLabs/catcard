@@ -12,6 +12,12 @@ use crate::reg;
 // against the reference-manual register table without mental arithmetic.
 #[allow(clippy::identity_op)]
 const RCC_CR: u32 = fixed::RCC + 0x00;
+
+/// The external crystal feeding the PLL on mk4/mk5/Q1: **8 MHz**.
+///
+/// Not in any register -- a fact about the board -- so named here. The bootloader's PLL
+/// runs off it (`M=2, N=40 or 60, R=2` -> 80 or 120 MHz). Source: platform.md §Clocks [C].
+const HSE_HZ: u32 = 8_000_000;
 /// Clock Recovery RC register — HSI48 control. Source: RM0351 §6.4.29 / RM0432.
 const RCC_CRRCR: u32 = fixed::RCC + 0x98;
 /// Peripherals Independent Clock Configuration. Source: RM0351 §6.4.28.
@@ -145,6 +151,126 @@ pub fn msi_range_khz(rcc_cr: u32) -> u32 {
         9 => 24_000,
         10 => 32_000,
         11 => 48_000,
+        _ => 0,
+    }
+}
+
+/// The APB2 peripheral clock (PCLK2) in Hz, computed from the live RCC configuration.
+///
+/// SPI1 -- the display bus -- is on APB2, and its prescaler must be derived from the
+/// clock that actually feeds it. The Coldcard bootloader programs the PLL (80 MHz on
+/// these parts) and hands off with it running; this firmware never reprograms it, so the
+/// real clock is whatever the bootloader left, **not** the 4 MHz MSI reset default an
+/// earlier version assumed. Assuming 4 MHz clocked the SSD1306 at ~40 MHz -- 5x past its
+/// limit -- and every display write was garbled.
+///
+/// Reads the source, PLL divisors and both prescalers rather than trusting a constant,
+/// so it is right whatever the bootloader configured. Source: RM0432 §RCC [C].
+///
+/// # Safety
+/// Reads RCC.
+pub unsafe fn pclk2_hz() -> u32 {
+    const RCC_CFGR: u32 = fixed::RCC + 0x08;
+    const RCC_PLLCFGR: u32 = fixed::RCC + 0x0C;
+    // SAFETY: reads RCC.
+    unsafe {
+        let cr = reg::read(RCC_CR);
+        let cfgr = reg::read(RCC_CFGR);
+        let pll = reg::read(RCC_PLLCFGR);
+        let msi = msi_range_khz(cr).saturating_mul(1000);
+
+        // PLL input, then SYSCLK from whichever source SWS selects.
+        let pll_in = match pll & 0x3 {
+            2 => 16_000_000, // HSI16
+            3 => HSE_HZ,     // external crystal -- the Coldcard's PLL source
+            _ => msi,        // MSI (1), or none
+        };
+        let sysclk = match (cfgr >> 2) & 0x3 {
+            1 => 16_000_000, // HSI16
+            2 => HSE_HZ,     // HSE direct
+            3 => {
+                // PLL: SYSCLK = pll_in / M * N / R.
+                let m = ((pll >> 4) & 0x7) + 1;
+                let n = (pll >> 8) & 0x7F;
+                let r = (((pll >> 25) & 0x3) + 1) * 2;
+                if n == 0 {
+                    msi
+                } else {
+                    pll_in / m * n / r
+                }
+            }
+            _ => msi, // MSI (0)
+        };
+
+        // AHB then APB2 dividers, each a right-shift.
+        let hclk = sysclk >> ahb_shift((cfgr >> 4) & 0xF);
+        hclk >> apb2_shift((cfgr >> 11) & 0x7)
+    }
+}
+
+/// The core/AHB clock (HCLK) in Hz, which is what the DWT cycle counter runs at.
+///
+/// The bootloader leaves this at 80 MHz on these parts; a cycle count meant as a wall-
+/// clock delay must be scaled against it, not the 4 MHz MSI reset default. See
+/// [`pclk2_hz`] for why. Source: RM0432 §RCC [C].
+///
+/// # Safety
+/// Reads RCC.
+pub unsafe fn hclk_hz() -> u32 {
+    const RCC_CFGR: u32 = fixed::RCC + 0x08;
+    const RCC_PLLCFGR: u32 = fixed::RCC + 0x0C;
+    // SAFETY: reads RCC.
+    unsafe {
+        let cr = reg::read(RCC_CR);
+        let cfgr = reg::read(RCC_CFGR);
+        let pll = reg::read(RCC_PLLCFGR);
+        let msi = msi_range_khz(cr).saturating_mul(1000);
+        let pll_in = match pll & 0x3 {
+            2 => 16_000_000,
+            3 => HSE_HZ,
+            _ => msi,
+        };
+        let sysclk = match (cfgr >> 2) & 0x3 {
+            1 => 16_000_000,
+            2 => HSE_HZ,
+            3 => {
+                let m = ((pll >> 4) & 0x7) + 1;
+                let n = (pll >> 8) & 0x7F;
+                let r = (((pll >> 25) & 0x3) + 1) * 2;
+                if n == 0 {
+                    msi
+                } else {
+                    pll_in / m * n / r
+                }
+            }
+            _ => msi,
+        };
+        sysclk >> ahb_shift((cfgr >> 4) & 0xF)
+    }
+}
+
+/// `HPRE` field to a right-shift. 0-7 divide by 1; 8..15 by 2,4,8,16,64,128,256,512.
+const fn ahb_shift(hpre: u32) -> u32 {
+    match hpre {
+        8 => 1,
+        9 => 2,
+        10 => 3,
+        11 => 4,
+        12 => 6,
+        13 => 7,
+        14 => 8,
+        15 => 9,
+        _ => 0,
+    }
+}
+
+/// `PPRE2` field to a right-shift. 0-3 divide by 1; 4..7 by 2,4,8,16.
+const fn apb2_shift(ppre: u32) -> u32 {
+    match ppre {
+        4 => 1,
+        5 => 2,
+        6 => 3,
+        7 => 4,
         _ => 0,
     }
 }

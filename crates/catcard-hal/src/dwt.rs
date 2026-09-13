@@ -56,3 +56,17 @@ pub fn delay_cycles(n: u32) {
         core::hint::spin_loop();
     }
 }
+
+/// Busy-wait roughly `ms` milliseconds, scaled to the live core clock.
+///
+/// Unlike a bare cycle count, this is a wall-clock delay whatever the bootloader set the
+/// clock to -- the OLED reset needs real milliseconds, and a count calibrated for 4 MHz
+/// is 20x too short at the 80 MHz the part actually runs at.
+///
+/// # Safety
+/// Reads RCC to find the clock.
+pub unsafe fn delay_ms(ms: u32) {
+    // SAFETY: reads RCC.
+    let per_ms = unsafe { crate::clock::hclk_hz() } / 1000;
+    delay_cycles(ms.saturating_mul(per_ms));
+}

@@ -30,7 +30,11 @@ const TRNG_BYTES: usize = 64;
 /// The core runs on the MSI reset default of 4 MHz (RM0351 §6.2.2 [C]), which makes this
 /// about 1.5 seconds. It is a cycle count, so programming the PLL changes what it means
 /// -- see `docs/HARDWARE-OPEN-ITEMS.md`.
-const SPLASH_MIN_CYCLES: u32 = 6_000_000;
+/// How long the finished splash stays up, in milliseconds.
+///
+/// A wall-clock time, not a cycle count: the part runs at the bootloader's 80 MHz, so a
+/// count calibrated for 4 MHz held the splash ~20x too briefly to see.
+const SPLASH_MIN_MS: u32 = 500;
 
 /// Bring the machine up, showing the splash as it goes.
 ///
@@ -90,8 +94,10 @@ pub fn bring_up(
     // nothing. Skipped when there is no panel to look at, or no cycle counter to
     // measure with.
     if panel.is_some() && dwt_running {
+        // SAFETY: reads RCC to scale the delay to the live clock.
+        let min_cycles = unsafe { catcard_hal::clock::hclk_hz() } / 1000 * SPLASH_MIN_MS;
         let elapsed = dwt::cycles().wrapping_sub(splash_started);
-        if let Some(remaining) = SPLASH_MIN_CYCLES.checked_sub(elapsed) {
+        if let Some(remaining) = min_cycles.checked_sub(elapsed) {
             dwt::delay_cycles(remaining);
         }
     }

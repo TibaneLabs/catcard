@@ -50,6 +50,17 @@ impl<B: DisplayBus> Ssd1306<B> {
         self.bus.command(INIT_128X64)
     }
 
+    /// Bring up the mk5 panel: same reset, but the mk5 init sequence.
+    ///
+    /// The panel is fed from the external +12 V rail (V12EN), so the SSD1306's internal
+    /// charge pump is left **disabled** and the segment/COM scan is unflipped -- the mk4
+    /// sequence, which enables the pump and flips orientation, would leave an mk5 panel
+    /// dark or upside down. See [`INIT_128X64_MK5`](crate::ssd1306::INIT_128X64_MK5).
+    pub fn init_mk5(&mut self) -> Result<(), B::Error> {
+        self.bus.reset()?;
+        self.bus.command(crate::ssd1306::INIT_128X64_MK5)
+    }
+
     /// Push a whole framebuffer.
     ///
     /// Sets the column and page window first. Without that the controller keeps

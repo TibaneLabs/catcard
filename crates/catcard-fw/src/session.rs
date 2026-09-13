@@ -33,6 +33,12 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         "boot: panel {}",
         if panel.is_some() { "up" } else { "ABSENT" }
     );
+    // SAFETY: reads RCC. Logged so a wrong prescaler assumption is visible, not guessed.
+    crate::catlog!(
+        "clk: hclk {} MHz pclk2 {} MHz",
+        unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000,
+        unsafe { catcard_hal::clock::pclk2_hz() } / 1_000_000
+    );
     #[cfg(feature = "usb-debug-mem")]
     crate::catlog!("boot: WARNING debug memory monitor is enabled (peek/poke/jsr)");
 
