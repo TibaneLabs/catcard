@@ -465,4 +465,128 @@ mod fat_round_trip {
         assert!(after.reads > 0, "nothing was read at all");
         assert!(after.image == before, "the card changed during a read");
     }
+
+    /// A card whose blocks are an image that reads *and writes* back.
+    ///
+    /// The read-only `ImageCard` cannot exercise `write_sectors`, and the whole "save log
+    /// to SD" path hangs off it. This is the write mirror: a `write_data` that lands in
+    /// the image, so a file written through our `Sectors` adapter and the heapless driver
+    /// can be read back out of the resulting bytes.
+    struct RwImageCard {
+        image: Vec<u8>,
+        at: u32,
+    }
+
+    impl Transport for RwImageCard {
+        fn command(&mut self, cmd: u8, arg: u32, _: Response) -> Result<[u32; 4], Error> {
+            if cmd == CMD_READ_SINGLE || cmd == CMD_WRITE_SINGLE {
+                self.at = arg; // block-addressed, so the argument is a block number
+            }
+            Ok([0; 4])
+        }
+        fn read_data(&mut self, out: &mut [u8; BLOCK_LEN]) -> Result<(), Error> {
+            let a = self.at as usize * BLOCK_LEN;
+            out.copy_from_slice(&self.image[a..a + BLOCK_LEN]);
+            Ok(())
+        }
+        fn write_data(&mut self, data: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+            let a = self.at as usize * BLOCK_LEN;
+            self.image[a..a + BLOCK_LEN].copy_from_slice(data);
+            Ok(())
+        }
+        fn set_bus_width_4(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn set_fast_clock(&mut self) {}
+        fn card_present(&self) -> bool {
+            true
+        }
+    }
+
+    fn blank_fat32() -> Vec<u8> {
+        let mut mem = MemoryBackend::new(SECTORS as u64 * 512);
+        let opts = FatFormatOpts {
+            kind: FatKind::Fat32,
+            total_sectors: SECTORS,
+            ..Default::default()
+        };
+        Fat32::format(&mut mem, &opts).expect("format");
+        let mut image = vec![0u8; SECTORS as usize * 512];
+        mem.read_at(0, &mut image).expect("read image back");
+        image
+    }
+
+    fn rw_card(image: Vec<u8>) -> Sectors<RwImageCard> {
+        Sectors::new(
+            RwImageCard { image, at: 0 },
+            Card {
+                rca: 1,
+                addressing: Addressing::BlockAddressed,
+                blocks: SECTORS,
+                wide: true,
+            },
+        )
+    }
+
+    /// The point of the write path: a file written through `write_sectors` and the
+    /// heapless driver reads back byte for byte after a fresh mount. This is what "save
+    /// log to SD" does, minus the silicon the emulator does not model.
+    #[test]
+    fn a_file_written_through_the_card_layer_reads_back() {
+        // A log-sized, every-byte-distinct payload, so a dropped or duplicated sector
+        // cannot pass.
+        let data: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 11) as u8)
+            .collect();
+
+        let image = {
+            let mut vol = fat::Volume::<_, 512>::mount(rw_card(blank_fat32())).expect("mount");
+            let mut f = vol.create_file("/CATCARD.LOG").expect("create");
+            f.write_all(&mut vol, &data).expect("write");
+            f.set_len(&mut vol, data.len() as u32).expect("set_len");
+            f.flush(&mut vol).expect("flush file");
+            vol.flush().expect("flush volume");
+            vol.unmount().expect("unmount").into_inner().image
+        };
+
+        let mut vol = fat::Volume::<_, 512>::mount(rw_card(image)).expect("remount");
+        let mut f = vol.open_file("/CATCARD.LOG").expect("open");
+        assert_eq!(f.len() as usize, data.len(), "size wrong after write");
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 700];
+        loop {
+            let n = f.read(&mut vol, &mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            got == data,
+            "file written through the card layer differs on read-back"
+        );
+    }
+
+    /// A read-only transport (the default `write_data`) turns a write into `ReadOnly`
+    /// rather than a silent success, so a mount that needs to write fails loudly.
+    #[test]
+    fn a_read_only_transport_refuses_writes() {
+        use fat::SectorDriver as _;
+        let mut dev = Sectors::new(
+            ImageCard {
+                image: vec![0u8; SECTORS as usize * 512],
+                next: 0,
+                reads: 0,
+            },
+            Card {
+                rca: 1,
+                addressing: Addressing::BlockAddressed,
+                blocks: SECTORS,
+                wide: true,
+            },
+        );
+        let block = [0u8; BLOCK_LEN];
+        assert!(matches!(dev.write_sectors(0, &block), Err(Error::ReadOnly)));
+    }
 }

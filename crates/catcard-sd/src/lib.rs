@@ -67,6 +67,16 @@ pub trait Transport {
     /// Read one 512-byte block, having already issued the command that starts it.
     fn read_data(&mut self, out: &mut [u8; BLOCK_LEN]) -> Result<(), Error>;
 
+    /// Write one 512-byte block, having already issued the command that starts it.
+    ///
+    /// Defaults to refusing: a transport that models only reads -- the tests' fake cards,
+    /// a future read-only medium -- is read-only by saying nothing, and the card layer
+    /// turns that into [`Error::ReadOnly`] rather than a silent success.
+    fn write_data(&mut self, data: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+        let _ = data;
+        Err(Error::ReadOnly)
+    }
+
     /// Switch the bus to four data lines. A card that refuses stays on one.
     fn set_bus_width_4(&mut self) -> Result<(), Error>;
 
@@ -82,6 +92,13 @@ pub trait Transport {
     /// been asked for it drops the first words on the floor. Split out so the sequence
     /// lives here, where it is tested, rather than in the driver.
     fn arm_block_read(&mut self) {}
+
+    /// Arm the data path for one outgoing block, before the write command is sent.
+    ///
+    /// The same ordering point as [`Transport::arm_block_read`], the other direction: a
+    /// controller told to expect an outgoing transfer only after the command has gone out
+    /// misses the window the card opens for it.
+    fn arm_block_write(&mut self) {}
 }
 
 /// How a card is addressed, which is the one thing that changes how blocks are read.
@@ -122,6 +139,7 @@ const CMD_SELECT: u8 = 7;
 const CMD_SEND_IF_COND: u8 = 8;
 const CMD_SEND_CSD: u8 = 9;
 const CMD_READ_SINGLE: u8 = 17;
+const CMD_WRITE_SINGLE: u8 = 24;
 const CMD_APP: u8 = 55;
 const ACMD_OP_COND: u8 = 41;
 
@@ -229,6 +247,30 @@ pub fn read_block<T: Transport>(
     t.read_data(out)
 }
 
+/// Write one block.
+///
+/// The mirror of [`read_block`], and it shares the addressing trap: the argument is a
+/// block number on an SDHC card and a byte offset on an SDSC one, and getting it wrong
+/// writes the right bytes to the wrong place -- which on a write is not recoverable by
+/// reading again.
+pub fn write_block<T: Transport>(
+    t: &mut T,
+    card: &Card,
+    lba: u32,
+    data: &[u8; BLOCK_LEN],
+) -> Result<(), Error> {
+    if lba >= card.blocks {
+        return Err(Error::DataError { block: lba });
+    }
+    let arg = match card.addressing {
+        Addressing::BlockAddressed => lba,
+        Addressing::ByteAddressed => lba.saturating_mul(BLOCK_LEN as u32),
+    };
+    t.arm_block_write();
+    t.command(CMD_WRITE_SINGLE, arg, Response::Short)?;
+    t.write_data(data)
+}
+
 /// Capacity in 512-byte blocks, from a 136-bit CSD.
 ///
 /// The two CSD versions compute this completely differently, and version 1's formula is
@@ -332,8 +374,22 @@ impl<T: Transport> fat::SectorDriver for Sectors<T> {
         Ok(())
     }
 
-    fn write_sectors(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), Error> {
+        // As in `read_sectors`: the driver hands whole sectors, but this is the boundary
+        // to a card, so the multiple is checked here rather than assumed.
+        if buf.len() % BLOCK_LEN != 0 {
+            return Err(Error::DataError { block: u32::MAX });
+        }
+        for (i, chunk) in buf.chunks_exact(BLOCK_LEN).enumerate() {
+            let block = lba
+                .checked_add(i as u64)
+                .and_then(|b| u32::try_from(b).ok())
+                .ok_or(Error::DataError { block: u32::MAX })?;
+            let chunk: &[u8; BLOCK_LEN] =
+                chunk.try_into().map_err(|_| Error::DataError { block })?;
+            write_block(&mut self.t, &self.card, block, chunk)?;
+        }
+        Ok(())
     }
 }
 

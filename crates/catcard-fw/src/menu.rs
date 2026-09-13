@@ -50,6 +50,8 @@ const LINE0: usize = 21;
 const LINE_H: usize = 7;
 /// Rows that fit between [`LINE0`] and the bottom of the panel.
 const MAX_LINES: usize = (64 - LINE0) / LINE_H;
+/// Characters that fit on a log line: the 4x6 font at `x = 2`, same as [`info`] draws.
+const LOG_COLS: usize = (128 - 2) / 4;
 
 // Scrolling is what keeps a long menu honest, so the old "must fit on the panel"
 // assertions are gone. This one stays: every scroll calculation below assumes there is
@@ -71,6 +73,8 @@ enum Screen {
     Sd,
     Boot,
     Keypad,
+    Logs,
+    SaveLog,
     ConfirmDfu,
 }
 
@@ -82,6 +86,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Boot report",
     "Keypad",
     "microSD",
+    "Logs",
+    "Save log to SD",
     "Enter DFU",
 ];
 
@@ -113,6 +119,7 @@ pub fn run(session: Session<'_>) -> ! {
         last_key: None,
         keys_seen: 0,
         sc: Scroll::new(),
+        log_scroll: 0,
     };
 
     let mut pad = Keypad::new();
@@ -187,11 +194,37 @@ pub fn run(session: Session<'_>) -> ! {
                 }
             }
 
+            // The log viewer scrolls its text window rather than a cursor, so it is
+            // paged here instead of through `items_of`. Any other key leaves, falling
+            // through to `step`, whose default sends an info screen back to Debug.
+            if screen == Screen::Logs {
+                match key {
+                    Key::Digit(5) => {
+                        v.log_scroll = v.log_scroll.saturating_sub(1);
+                        continue;
+                    }
+                    Key::Digit(8) => {
+                        let max = log_total().saturating_sub(MAX_LINES);
+                        if v.log_scroll < max {
+                            v.log_scroll = v.log_scroll.saturating_add(1);
+                        }
+                        continue;
+                    }
+                    _ => v.log_scroll = 0,
+                }
+            }
+
             let next = step(gate, panel, screen, *key, v.sc.cursor);
             if next == Screen::SdInstall {
                 install_from_card(gate, login, panel, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Main;
+                break;
+            }
+            if next == Screen::SaveLog {
+                save_log_to_card(panel, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Debug;
                 break;
             }
             if next != screen {
@@ -244,6 +277,8 @@ fn step(
             (Key::Confirm, 3) => Screen::Boot,
             (Key::Confirm, 4) => Screen::Keypad,
             (Key::Confirm, 5) => Screen::Sd,
+            (Key::Confirm, 6) => Screen::Logs,
+            (Key::Confirm, 7) => Screen::SaveLog,
             (Key::Confirm, _) => Screen::ConfirmDfu,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
@@ -301,6 +336,8 @@ struct View<'a> {
     last_key: Option<Key>,
     keys_seen: u32,
     sc: Scroll,
+    /// First line shown by the log viewer.
+    log_scroll: usize,
 }
 
 /// The list on this screen, if it is a menu.
@@ -328,6 +365,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
         Screen::Sd => sd_screen(panel),
+        Screen::Logs => log_screen(panel, v.log_scroll),
+        // Handled in `run`; never drawn.
+        Screen::SaveLog => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         Screen::ConfirmDfu => confirm_dfu(panel),
@@ -721,6 +761,71 @@ fn install_from_card(
     }
 }
 
+/// Write the current log to the card as `/CATCARD.LOG`.
+///
+/// The other half of the log story: `Debug -> Logs` shows it on the glass and USB pages
+/// it out, and this drops it somewhere it can be read on another machine -- which is the
+/// channel that survives a device that will not enumerate and a panel that will not draw.
+///
+/// Blocking, and it says which step it stopped at rather than "failed": the SD write path
+/// has never run on hardware, so a failure here is as likely to be the first exercise of
+/// `write_sectors` as a bad card, and the step is the difference. Nothing here is
+/// irreversible -- at worst it leaves a short file behind.
+fn save_log_to_card(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    crate::catlog!("sd: saving log");
+    message(panel, "Saving log", "please wait", "");
+
+    // Snapshot the log before touching anything else, so what lands on the card is the
+    // state at the moment it was asked for, not a log with this function's own steps in
+    // it.
+    let mut buf = [0u8; crate::logbuf::LOG_LEN];
+    let n = crate::logbuf::read(0, &mut buf);
+
+    match write_log_file(&buf[..n]) {
+        Ok(()) => {
+            crate::catlog!("sd: wrote {} bytes to /CATCARD.LOG", n);
+            message(panel, "Log saved", "/CATCARD.LOG", "any key to go back");
+        }
+        Err(why) => {
+            crate::catlog!("sd: log save failed: {}", why);
+            message(panel, "Save failed", why, "any key to go back");
+        }
+    }
+    wait_for_any_key(matrix, drbg);
+}
+
+/// Bring the card up, mount it, and write `bytes` to `/CATCARD.LOG`.
+///
+/// Split from the screen so each step is one `?`, and the reason it stopped rides out on
+/// the `Err` for the caller to show and log. The step matters here specifically because
+/// the SD *write* path has never run on hardware -- a failure is as likely to be the
+/// first exercise of `write_sectors` as a bad card, and only the step tells them apart.
+fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
+    use catcard_sd::fat;
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
+    // to return before it can be chosen again.
+    let mut dev = unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) }
+        .map_err(|_| "controller failed")?;
+    let card = catcard_sd::init(&mut dev).map_err(|e| match e {
+        catcard_sd::Error::NoCard => "no card in slot",
+        _ => "card would not start",
+    })?;
+    let mut vol = fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card))
+        .map_err(|_| "not a FAT card")?;
+    let mut file = vol
+        .open_or_create_file("/CATCARD.LOG")
+        .map_err(|_| "could not open file")?;
+    file.write_all(&mut vol, bytes)
+        .map_err(|_| "write failed")?;
+    // Trim any tail from a longer earlier save, so the file is exactly this log.
+    file.set_len(&mut vol, bytes.len() as u32)
+        .map_err(|_| "truncate failed")?;
+    file.flush(&mut vol).map_err(|_| "flush failed")?;
+    vol.flush().map_err(|_| "flush failed")?;
+    Ok(())
+}
+
 /// Authorise a staged image, which is what actually installs it.
 ///
 /// **Staging and rebooting is not an upgrade on mk4 or later.** That bootrom installs
@@ -780,6 +885,69 @@ fn about_screen(panel: &mut display::Panel) {
     let mut fb = Mono128x64::new();
     catcard_ui::splash::draw(&mut fb, crate::VERSION, 100);
     let _ = panel.flush(&fb);
+}
+
+/// Break the log into display lines and hand the window at `scroll` to `out`.
+///
+/// Returns the total number of lines, which is what bounds the scroll. The log is walked
+/// once into a fixed stack buffer -- no allocation, and no per-line copy of the whole
+/// buffer -- pushing only the lines the window shows, so the cost does not grow with how
+/// far down the log the reader is.
+fn collect_log(scroll: usize, out: &mut heapless::Vec<Line, MAX_LINES>) -> usize {
+    let mut buf = [0u8; crate::logbuf::LOG_LEN];
+    let n = crate::logbuf::read(0, &mut buf);
+    let mut total = 0usize;
+    let mut line = Line::new();
+    let mut push = |line: &mut Line, total: &mut usize| {
+        if *total >= scroll && out.len() < MAX_LINES {
+            let _ = out.push(line.clone());
+        }
+        line.clear();
+        *total += 1;
+    };
+    for &b in &buf[..n] {
+        if b == b'\n' {
+            push(&mut line, &mut total);
+        } else {
+            // The buffer is our own text, but a stray byte would derail `push_str`, so
+            // anything outside printable ASCII shows as a dot rather than a gap.
+            let c = if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            };
+            let _ = line.push(c);
+            if line.len() == LOG_COLS {
+                push(&mut line, &mut total);
+            }
+        }
+    }
+    if !line.is_empty() {
+        push(&mut line, &mut total);
+    }
+    total
+}
+
+/// How many display lines the log currently makes -- used to clamp the scroll.
+fn log_total() -> usize {
+    let mut sink: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+    collect_log(usize::MAX, &mut sink)
+}
+
+/// The log, on the glass. `5`/`8` scroll; any other key returns to Debug.
+///
+/// This is the on-device twin of the USB `ReadLog`: the same ring, shown to whoever is
+/// holding the device rather than paged to a host. It draws through [`info`] so it reads
+/// exactly like the other debug screens.
+fn log_screen(panel: &mut display::Panel, scroll: usize) {
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+    let total = collect_log(scroll, &mut lines);
+    if lines.is_empty() {
+        let mut l = Line::new();
+        let _ = l.push_str(if total == 0 { "(log empty)" } else { "(end)" });
+        let _ = lines.push(l);
+    }
+    info(panel, "Logs", &lines);
 }
 
 /// microSD: does a card come up, and what does the controller say if not.

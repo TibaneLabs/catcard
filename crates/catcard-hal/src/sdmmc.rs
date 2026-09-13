@@ -79,6 +79,8 @@ const STA_CMDSENT: u32 = 1 << 7;
 const STA_DATAEND: u32 = 1 << 8;
 const STA_RXFIFOHF: u32 = 1 << 15;
 const STA_RXDAVL: u32 = 1 << 21;
+const STA_TXUNDERR: u32 = 1 << 4;
+const STA_TXFIFOF: u32 = 1 << 16;
 
 /// Everything write-one-to-clear, for wiping the slate before each command.
 const ICR_ALL: u32 = 0x1FE0_0FFF;
@@ -171,9 +173,13 @@ impl Transport for Sdmmc {
                 Response::Short => CMD_WAITRESP_SHORT,
                 Response::Long => CMD_WAITRESP_LONG,
             };
-            // CMD17 is the only command here that is followed by data, and its data path
-            // is armed before this call.
-            let trans = if cmd == 17 { CMD_CMDTRANS } else { 0 };
+            // CMD17 and CMD24 are the commands here followed by a data phase, and their
+            // data path is armed before this call.
+            let trans = if cmd == 17 || cmd == 24 {
+                CMD_CMDTRANS
+            } else {
+                0
+            };
             reg::write(b + CMD, u32::from(cmd) | wait | trans | CMD_CPSMEN);
 
             // Done is either "response arrived" or, for a command with no response,
@@ -256,6 +262,55 @@ impl Transport for Sdmmc {
         Ok(())
     }
 
+    fn write_data(&mut self, data: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+        let b = self.base;
+        // SAFETY: this type owns SDMMC1 for its lifetime.
+        unsafe {
+            let mut at = 0usize;
+            let mut tries = 0u32;
+            // Feed the FIFO until the block is in it, a word at a time while there is
+            // room. `BLOCK_LEN` is a multiple of four, so there is no trailing partial
+            // word to special-case.
+            while at < BLOCK_LEN {
+                let sta = reg::read(b + STA);
+                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    reg::write(b + ICR, ICR_ALL);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+                while reg::read(b + STA) & STA_TXFIFOF == 0 && at < BLOCK_LEN {
+                    let w = [data[at], data[at + 1], data[at + 2], data[at + 3]];
+                    reg::write(b + FIFO, u32::from_le_bytes(w));
+                    at += 4;
+                }
+                tries += 1;
+                if tries >= DATA_TRIES {
+                    reg::write(b + ICR, ICR_ALL);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+            }
+            // The block is queued; the card still has to program it. `DATAEND` is that,
+            // and a CRC or underrun in the meantime is the card rejecting what it got.
+            let mut tries = 0u32;
+            loop {
+                let sta = reg::read(b + STA);
+                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    reg::write(b + ICR, ICR_ALL);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+                if sta & STA_DATAEND != 0 {
+                    break;
+                }
+                tries += 1;
+                if tries >= DATA_TRIES {
+                    reg::write(b + ICR, ICR_ALL);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+            }
+            reg::write(b + ICR, ICR_ALL);
+        }
+        Ok(())
+    }
+
     fn set_bus_width_4(&mut self) -> Result<(), Error> {
         // ACMD6 tells the card; CLKCR tells the controller. Both, in that order, or the
         // two disagree about how many lines carry the next block.
@@ -284,6 +339,11 @@ impl Transport for Sdmmc {
         // SAFETY: this type owns SDMMC1.
         unsafe { arm_block_read(self.base) }
     }
+
+    fn arm_block_write(&mut self) {
+        // SAFETY: this type owns SDMMC1.
+        unsafe { arm_block_write(self.base) }
+    }
 }
 
 /// Arm the data path for one block, before the read command goes out.
@@ -301,6 +361,22 @@ pub unsafe fn arm_block_read(b: u32) {
             b + DCTRL,
             DCTRL_DTEN | DCTRL_DTDIR_CARD_TO_HOST | DCTRL_BLOCK_512,
         );
+    }
+}
+
+/// Arm the data path for one outgoing block, before the write command goes out.
+///
+/// The mirror of [`arm_block_read`], with the direction bit clear: `DTDIR = 0` is
+/// host-to-card. Same ordering reason -- the controller has to be waiting before the
+/// card is told to expect the block.
+///
+/// # Safety
+/// Caller owns SDMMC1.
+pub unsafe fn arm_block_write(b: u32) {
+    // SAFETY: as documented.
+    unsafe {
+        reg::write(b + DLEN, BLOCK_LEN as u32);
+        reg::write(b + DCTRL, DCTRL_DTEN | DCTRL_BLOCK_512);
     }
 }
 
