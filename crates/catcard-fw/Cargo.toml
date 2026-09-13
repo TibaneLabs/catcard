@@ -19,12 +19,6 @@ authors.workspace = true
 # `fw-*-bringup` aliases instead, so the crutch is always a visible choice.
 default = []
 usb-key-injection = []
-# `show-pin` draws the PIN digits instead of asterisks. For bring-up only: during a
-# first run the question is whether the keypad decodes to the digit printed on the cap,
-# and a row of asterisks cannot answer it. Separate from `usb-key-injection` because
-# they are different risks -- one lets a host press keys, this one puts a secret on a
-# screen someone may be pointing a camera at. See docs/FLASHING.md.
-show-pin = []
 # `usb-debug-mem` exposes peek / poke / jsr over USB: a host can read any address, write
 # any address, and call any address. It is a raw memory monitor -- the most dangerous
 # thing in this firmware. On a provisioned device it reads the seed and PIN out of RAM

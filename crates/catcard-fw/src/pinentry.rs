@@ -152,17 +152,7 @@ fn screen_field(
     let mut fb = Mono128x64::new();
     title(&mut fb, 2, heading);
     let mut mask = [0u8; MAX_PART_LEN];
-    // A bring-up build shows what was typed, so a mirrored keypad is visible as soon as
-    // the first digit lands rather than after a spent attempt.
-    title(
-        &mut fb,
-        24,
-        if cfg!(feature = "show-pin") {
-            buf.visible(&mut mask)
-        } else {
-            buf.masked(&mut mask)
-        },
-    );
+    title(&mut fb, 24, buf.masked(&mut mask));
     if buf.is_empty() {
         small(&mut fb, 46, "0-9 to enter");
     } else {

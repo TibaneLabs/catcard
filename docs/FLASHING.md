@@ -306,7 +306,7 @@ the map once the firmware is on the device tells you that you are stuck; it does
 you out. The only thing that gets you out has to already be in the image:
 
 ```sh
-cargo fw-mk4-bringup          # the bring-up build: keys, PIN shown, memory monitor
+cargo fw-mk4-bringup          # the bring-up build: key injection + memory monitor
 ```
 
 That build lets a host press keys over USB, so a mirrored map or a dead panel costs you

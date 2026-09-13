@@ -140,23 +140,19 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
     // press: a device that has stopped taking input must not show a prompt for it.
     if waiting {
         use catcard_ui::icons;
-        // Every bring-up hazard the build carries, on the screen that is always looked
-        // at first. A bring-up build turns these on together, so the screen names each
-        // one rather than hiding the others behind the loudest -- `MEM` means a host can
-        // read this RAM, but `KEYS` and `PIN` are hazards too and should not vanish.
+        // The bring-up hazards this build carries, on the screen looked at first.
         let label = match (
             crate::usbtask::KEY_INJECTION,
-            cfg!(feature = "show-pin"),
             cfg!(feature = "usb-debug-mem"),
         ) {
-            (false, false, false) => "continue",
-            (k, p, m) => {
-                // Assemble "continue  [KEYS PIN MEM]" from whichever are on.
+            (false, false) => "continue",
+            (k, m) => {
+                // Assemble "continue  [KEYS MEM]" from whichever are on.
                 use catcard_ui::text::draw_text;
                 let f = &misc4x6::FONT;
                 draw_text(&mut fb, f, 0, 52, "continue  [");
                 let mut x = 11 * f.width as usize;
-                for (on, tag) in [(k, "KEYS "), (p, "PIN "), (m, "MEM")] {
+                for (on, tag) in [(k, "KEYS "), (m, "MEM")] {
                     if on {
                         draw_text(&mut fb, f, x, 52, tag);
                         x += tag.len() * f.width as usize;
