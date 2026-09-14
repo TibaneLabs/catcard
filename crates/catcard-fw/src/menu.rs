@@ -157,7 +157,6 @@ pub fn run(session: Session<'_>) -> ! {
         last_key: None,
         keys_seen: 0,
         sc: Scroll::new(),
-        log_scroll: 0,
         no_seed,
     };
 
@@ -236,26 +235,6 @@ pub fn run(session: Session<'_>) -> ! {
                 }
             }
 
-            // The log viewer scrolls its text window rather than a cursor, so it is
-            // paged here instead of through `items_of`. Any other key leaves, falling
-            // through to `step`, whose default sends an info screen back to Debug.
-            if screen == Screen::Logs {
-                match key {
-                    Key::Digit(5) => {
-                        v.log_scroll = v.log_scroll.saturating_sub(1);
-                        continue;
-                    }
-                    Key::Digit(8) => {
-                        let max = log_total().saturating_sub(MAX_LINES);
-                        if v.log_scroll < max {
-                            v.log_scroll = v.log_scroll.saturating_add(1);
-                        }
-                        continue;
-                    }
-                    _ => v.log_scroll = 0,
-                }
-            }
-
             let next = step(gate, panel, screen, *key, v.sc.cursor, v.no_seed);
             if next == Screen::SdInstall {
                 install_from_card(gate, login, panel, &mut pad, matrix, drbg);
@@ -265,6 +244,12 @@ pub fn run(session: Session<'_>) -> ! {
             }
             if next == Screen::SaveLog {
                 save_log_to_card(panel, &mut pad, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Debug;
+                break;
+            }
+            if next == Screen::Logs {
+                page_through(panel, &mut pad, matrix, drbg, "Logs", &LogLines, false);
                 v.sc = Scroll::new();
                 screen = Screen::Debug;
                 break;
@@ -424,8 +409,6 @@ struct View<'a> {
     last_key: Option<Key>,
     keys_seen: u32,
     sc: Scroll,
-    /// First line shown by the log viewer.
-    log_scroll: usize,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
 }
@@ -465,7 +448,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
-        Screen::Logs => log_screen(panel, v.log_scroll),
+        // Handled in `run`: it pages itself, and owns the keypad while it does.
+        Screen::Logs => {}
         // Handled in `run`; never drawn.
         Screen::SaveLog => {}
         // Handled in `run`: it drives the panel itself in a tight loop.
@@ -1728,7 +1712,11 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
     }
 }
 
-/// Show the words a screenful at a time. The only time they are ever displayed.
+/// Show the words. The only time they are ever displayed.
+///
+/// Paged rather than flashed past: ENTER moves forward and only means "done" once the
+/// last word has been on screen. The previous version advanced on *any* key, which is
+/// how a held key walked through a page of someone's backup before they could read it.
 fn show_words(
     panel: &mut display::Panel,
     pad: &mut Keypad,
@@ -1736,25 +1724,15 @@ fn show_words(
     drbg: &mut HmacDrbg,
     m: &catcard_wallet::bip39::Mnemonic,
 ) {
-    let total = m.word_count();
-    // One row is spent on the footer, so the words get the rest.
-    let per = MAX_LINES.saturating_sub(1).max(1);
-    let mut shown = 0;
-    while shown < total {
-        let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-        for (i, w) in m.words().enumerate().skip(shown).take(per) {
-            let mut l = Line::new();
-            let _ = write!(l, "{:2} {}", i + 1, w);
-            let _ = lines.push(l);
-        }
-        let mut foot = Line::new();
-        let last = (shown + per).min(total);
-        let _ = write!(foot, "{}-{last} of {total}, any key", shown + 1);
-        let _ = lines.push(foot);
-        info(panel, "Write these down", &lines);
-        wait_for_any_key(pad, matrix, drbg);
-        shown += per;
-    }
+    page_through(
+        panel,
+        pad,
+        matrix,
+        drbg,
+        "Write these down",
+        &WordLines(m),
+        true,
+    );
 }
 
 /// The splash as an "about" page: cat logo, wordmark, and version, held until a key.
@@ -1770,67 +1748,144 @@ fn about_screen(panel: &mut display::Panel) {
     display::draw(panel, |c| catcard_ui::splash::draw(c, crate::VERSION, 100));
 }
 
-/// Break the log into display lines and hand the window at `scroll` to `out`.
+/// The log, as lines for the pager.
 ///
-/// Returns the total number of lines, which is what bounds the scroll. The log is walked
-/// once into a fixed stack buffer -- no allocation, and no per-line copy of the whole
-/// buffer -- pushing only the lines the window shows, so the cost does not grow with how
-/// far down the log the reader is.
-fn collect_log(scroll: usize, out: &mut heapless::Vec<Line, MAX_LINES>) -> usize {
-    let mut buf = [0u8; crate::logbuf::LOG_LEN];
-    let n = crate::logbuf::read(0, &mut buf);
-    let mut total = 0usize;
-    let mut line = Line::new();
-    let mut push = |line: &mut Line, total: &mut usize| {
-        if *total >= scroll && out.len() < MAX_LINES {
-            let _ = out.push(line.clone());
-        }
-        line.clear();
-        *total += 1;
-    };
-    for &b in &buf[..n] {
-        if b == b'\n' {
-            push(&mut line, &mut total);
-        } else {
-            // The buffer is our own text, but a stray byte would derail `push_str`, so
-            // anything outside printable ASCII shows as a dot rather than a gap.
-            let c = if (0x20..0x7f).contains(&b) {
-                b as char
-            } else {
-                '.'
-            };
-            let _ = line.push(c);
-            if line.len() == LOG_COLS {
+/// The on-device twin of the USB `ReadLog`: the same ring, shown to whoever is holding
+/// the device rather than paged to a host.
+///
+/// Long entries are **wrapped** at the panel's column count rather than clipped, which
+/// does make the line count depend on the board -- a Q1 fits 44 columns, a mono panel
+/// 31. That is fine for a log, where the reader wants the whole line and there is no
+/// scroll position to carry between panels; the sink clips instead, for the reasons in
+/// `catcard_ui::pager`.
+///
+/// The buffer is walked once per window and only the visible lines are rendered, so the
+/// cost does not grow with how far down the reader has scrolled. Counting continues
+/// after the sink is full, because the pager needs the total to know there is more.
+struct LogLines;
+
+impl catcard_ui::pager::LineSource for LogLines {
+    fn fill(&self, from: usize, sink: &mut catcard_ui::pager::LineSink) -> usize {
+        let mut buf = [0u8; crate::logbuf::LOG_LEN];
+        let n = crate::logbuf::read(0, &mut buf);
+        let mut total = 0usize;
+        let mut line = Line::new();
+        let mut push = |line: &mut Line, total: &mut usize| {
+            if *total >= from {
+                let _ = sink.push(line.as_str());
+            }
+            line.clear();
+            *total += 1;
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' {
                 push(&mut line, &mut total);
+            } else {
+                // Our own text, but a stray byte would derail `push`, so anything
+                // outside printable ASCII shows as a dot rather than a gap.
+                let c = if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                };
+                let _ = line.push(c);
+                if line.len() == LOG_COLS {
+                    push(&mut line, &mut total);
+                }
             }
         }
+        if !line.is_empty() {
+            push(&mut line, &mut total);
+        }
+        total
     }
-    if !line.is_empty() {
-        push(&mut line, &mut total);
-    }
-    total
 }
 
-/// How many display lines the log currently makes -- used to clamp the scroll.
-fn log_total() -> usize {
-    let mut sink: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    collect_log(usize::MAX, &mut sink)
+/// The seed words, numbered, as lines for the pager.
+struct WordLines<'a>(&'a catcard_wallet::bip39::Mnemonic);
+
+impl catcard_ui::pager::LineSource for WordLines<'_> {
+    fn fill(&self, from: usize, sink: &mut catcard_ui::pager::LineSink) -> usize {
+        for (i, w) in self.0.words().enumerate().skip(from) {
+            let mut l = Line::new();
+            let _ = write!(l, "{:2}  {w}", i + 1);
+            if !sink.push(l.as_str()) {
+                break;
+            }
+        }
+        self.0.word_count()
+    }
 }
 
-/// The log, on the glass. `5`/`8` scroll; any other key returns to Debug.
+/// Show something longer than the screen, and let it be read.
 ///
-/// This is the on-device twin of the USB `ReadLog`: the same ring, shown to whoever is
-/// holding the device rather than paged to a host. It draws through [`info`] so it reads
-/// exactly like the other debug screens.
-fn log_screen(panel: &mut display::Panel, scroll: usize) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    let total = collect_log(scroll, &mut lines);
-    if lines.is_empty() {
-        let mut l = Line::new();
-        let _ = l.push_str(if total == 0 { "(log empty)" } else { "(end)" });
-        let _ = lines.push(l);
+/// `5` and `8` are the arrow keys; CANCEL leaves and returns false.
+///
+/// `require_end` is for the seed backup. Until the last line has been on screen, ENTER
+/// pages forward instead of finishing — so the familiar "press to continue" still works
+/// and still cannot skip a word. Once the end is showing, ENTER means done.
+fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    title: &str,
+    src: &S,
+    require_end: bool,
+) -> bool {
+    use catcard_ui::pager::{LineSink, Pager, paged};
+
+    let rows = MAX_LINES;
+    let mut p = Pager::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+
+    loop {
+        let mut sink = LineSink::new(rows);
+        let total = src.fill(p.top, &mut sink);
+        // The log grows while it is being read, so the window can end up past the end.
+        // Re-fill rather than draw a window that does not match where we think we are.
+        let clamped = p.clamped(total, rows);
+        if clamped != p {
+            p = clamped;
+            continue;
+        }
+        display::draw(panel, |c| {
+            paged(c, &display::LAYOUT, title, &sink, p, total)
+        });
+
+        wait_for_release(pad, matrix, drbg);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            let mut moved = false;
+            for k in keys.iter() {
+                match k {
+                    Key::Cancel | Key::Digit(7) => return false,
+                    Key::Confirm | Key::Digit(9) => {
+                        if !require_end || p.at_end(total, rows) {
+                            return true;
+                        }
+                        p = p.page(total, rows, true);
+                        moved = true;
+                    }
+                    Key::Digit(5) => {
+                        p = p.step(total, rows, false);
+                        moved = true;
+                    }
+                    Key::Digit(8) => {
+                        p = p.step(total, rows, true);
+                        moved = true;
+                    }
+                    Key::Digit(_) => {}
+                }
+            }
+            if moved {
+                break;
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
     }
-    info(panel, "Logs", &lines);
 }
 
 /// microSD: does a card come up, and what does the controller say if not.
