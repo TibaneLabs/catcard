@@ -54,16 +54,28 @@ pub fn draw_bitmap_scaled<C: Canvas + ?Sized>(
     }
 }
 
-/// Fill the bottom row from the left in proportion to `progress` (0..=100).
+/// How tall the progress bar is on a canvas this size.
 ///
-/// One row, deliberately: it reads as a progress indicator without taking space from
-/// the content, and there is nothing to get wrong about its geometry.
+/// A single row is most of a millimetre on a 128x64 OLED and almost nothing on the
+/// Q1's 320x240, where it is barely visible at all. Stock reserves the bottom **5 px**
+/// of that panel for the bar, so the tall panels match it; the mono panels keep one
+/// row, since five out of sixty-four would be a twelfth of the screen.
+///
+/// Source: hw-reference/display.md §"Q1 — colour palette & screen layout" [C]
+pub const fn progress_h(height: usize) -> usize {
+    if height > 96 { 5 } else { 1 }
+}
+
+/// Fill the bottom [`progress_h`] rows from the left, in proportion to `progress`
+/// (0..=100).
+///
+/// Callers that draw content must leave these rows clear — [`draw`] and [`draw_colour`]
+/// both subtract the same height, so the bar cannot land on the version line.
 pub fn draw_progress<C: Canvas + ?Sized>(fb: &mut C, progress: u8) {
     let filled = (fb.width() * progress.min(100) as usize) / 100;
-    let y = fb.height().saturating_sub(1);
-    for x in 0..filled {
-        fb.put(x, y, INK);
-    }
+    let h = progress_h(fb.height());
+    let top = fb.height().saturating_sub(h);
+    fb.fill_rect(0, top, filled, h, INK);
 }
 
 /// Render the whole splash into a cleared framebuffer.
@@ -71,8 +83,8 @@ pub fn draw<C: Canvas + ?Sized>(fb: &mut C, version: &str, progress: u8) {
     fb.clear();
 
     let height = fb.height();
-    // Everything above the progress row.
-    let content = height.saturating_sub(1);
+    // Everything above the progress bar, whatever height it is on this panel.
+    let content = height.saturating_sub(progress_h(height));
 
     let cat_y = (content.saturating_sub(CAT.height as usize)) / 2;
     draw_bitmap(fb, &CAT, CAT_X, cat_y);
@@ -115,8 +127,8 @@ pub fn draw_colour<C: Canvas + ?Sized>(
 ) {
     fb.clear();
     let (w, h) = (fb.width(), fb.height());
-    // Everything above the progress row.
-    let content = h.saturating_sub(1);
+    // Everything above the progress bar, whatever height it is on this panel.
+    let content = h.saturating_sub(progress_h(h));
 
     let art_h = art.height as usize;
     let block = art_h + l.gap * 2 + l.title.line_height() + l.gap + l.body.line_height();
@@ -339,5 +351,50 @@ mod tests {
         draw(&mut fb, "99.99.99-rc1+build", 0);
         // No panic, and the bottom row is still the bar's alone.
         assert_eq!(row_ink(&fb, 63), 0);
+    }
+
+    #[test]
+    fn the_bar_is_thick_enough_to_see_on_a_tall_panel() {
+        // One row out of 240 is barely visible on the glass, which is how this was
+        // noticed. Five is what stock reserves.
+        let mut c = Gray320x240::new();
+        draw_progress(&mut c, 100);
+        let rows = (0..240).filter(|&y| c.get(0, y) != PAPER).count();
+        assert_eq!(rows, 5);
+        assert!(rows >= 4, "too thin to see");
+        // And it does not creep further up than that.
+        assert_eq!(c.get(0, 240 - 6), PAPER);
+    }
+
+    #[test]
+    fn the_mono_panels_keep_their_single_row() {
+        // Five rows of sixty-four would be a twelfth of the screen.
+        assert_eq!(progress_h(64), 1);
+        assert_eq!(progress_h(240), 5);
+    }
+
+    #[test]
+    fn a_partial_bar_is_as_tall_as_a_full_one() {
+        // Height is the panel's; only the width tracks progress.
+        let mut c = Gray320x240::new();
+        draw_progress(&mut c, 25);
+        assert_eq!((0..240).filter(|&y| c.get(0, y) != PAPER).count(), 5);
+        assert_eq!((0..320).filter(|&x| c.get(x, 239) != PAPER).count(), 80);
+    }
+
+    #[test]
+    fn the_colour_splash_leaves_the_bar_rows_to_the_bar() {
+        // With no progress to show, those rows must be empty -- if content reached into
+        // them, a full bar would look like a rendering fault.
+        use crate::art::tibane::LOGO;
+        let l = Layout::roomy();
+        let mut c = Gray320x240::new();
+        draw_colour(&mut c, &LOGO, "7.0.0", 0, &l);
+        for y in 240 - progress_h(240)..240 {
+            assert!(
+                (0..320).all(|x| c.get(x, y) == PAPER),
+                "content is using the bar's rows at y={y}"
+            );
+        }
     }
 }
