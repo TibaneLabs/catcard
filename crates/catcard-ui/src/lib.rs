@@ -18,6 +18,7 @@ pub mod framebuffer;
 pub mod icons;
 pub mod keypad;
 pub mod menu;
+pub mod pager;
 pub mod pinentry;
 pub mod qwerty;
 pub mod splash;
