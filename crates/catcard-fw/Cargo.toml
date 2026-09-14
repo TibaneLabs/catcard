@@ -9,22 +9,20 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-# `usb-key-injection` lets a host press keys, which removes the physical-presence
-# confirmation the rest of the design rests on -- with it compiled in, a host can
-# approve its own firmware upgrade. See docs/USB.md.
+# The USB bench crutches, ON by default through this development period: every image
+# flashed to a dev device (dev key, no real secret) carries them, which is how the host
+# drives the UI and reads diagnostics while the firmware is being built out. A real
+# release must strip them -- build through the `fw-*-ship` aliases, or `make ... SHIP=1`,
+# which pass `--no-default-features` and leave only the board.
 #
-# It is deliberately NOT in `default`. Every firmware build goes through the `fw-*`
-# aliases, which pass `--no-default-features`, so a default here would be inert and
-# misleading -- it read as "on at this stage" while shipping nothing. Opt in with the
-# `fw-*-bringup` aliases instead, so the crutch is always a visible choice.
-default = []
+# `usb-key-injection` lets a host press keys, which removes the physical-presence
+# confirmation the rest of the design rests on -- a host can approve its own firmware
+# upgrade. `usb-debug-mem` exposes peek / poke / jsr over USB: read any address, write any
+# address, call any address -- the most dangerous thing in this firmware. On a provisioned
+# device it would read the seed and PIN out of RAM and run arbitrary code, so it must
+# never ship. Each is its own feature so a release drops them cleanly. See docs/USB.md.
+default = ["usb-key-injection", "usb-debug-mem"]
 usb-key-injection = []
-# `usb-debug-mem` exposes peek / poke / jsr over USB: a host can read any address, write
-# any address, and call any address. It is a raw memory monitor -- the most dangerous
-# thing in this firmware. On a provisioned device it reads the seed and PIN out of RAM
-# and runs arbitrary code; it exists for bring-up on a device with no secret, and it must
-# never ship. Its own feature so it is impossible to enable by accident, and the
-# `fw-*-bringup` aliases leave it OFF -- turn it on only with `fw-*-debug`. See docs/USB.md.
 usb-debug-mem = []
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]

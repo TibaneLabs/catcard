@@ -4,33 +4,33 @@
 # (the justfile stays the fuller CI/emulator surface). Each board has exactly one image
 # name in out/ -- no per-attempt or per-variant filenames.
 #
-#   make                 # release images for every board
+#   make                 # dev images for every board
 #   make mk4-mk5         # just the mk4/mk5 image  -> out/catcard-mk4-mk5.{bin,dfu}
-#   make mk4-mk5 BRINGUP=1   # same file, built with the on-bench debug crutches
+#   make mk4-mk5 SHIP=1  # same file, stripped of the debug crutches for a real release
 #   make test lint       # host tests / firmware clippy
 #   make clean
 #
 # mk5 is electrically an mk4 (an added strap and its own hw_compat bit), so a single
-# build serves both and its header claims both boards -- the image Coinkite ship.
+# build serves both and its header claims both boards.
 #
-# BRINGUP=1 folds in usb-key-injection + usb-debug-mem (host can press keys and read/write
-# any memory). Never ship it -- it writes the *same* filename, so a debug build does not
-# linger under a different name; rebuild without BRINGUP to get a clean image back.
+# The USB bench crutches (host key injection + the peek/poke/jsr memory monitor) are
+# default features, so a dev build carries them -- that is how the device is driven and
+# inspected during this development period. SHIP=1 passes --no-default-features to strip
+# them for a real, signed release; never ship a build without it (usb-debug-mem exposes
+# the seed/PIN and arbitrary code execution). See docs/USB.md.
 #
 # The image tool stamps the workspace version into the header by default; pass
-# VERSION=x.y.z to override (rather than hardcoding one here, which is how the justfile's
-# has drifted).
+# VERSION=x.y.z to override.
 
 ELF     := target/thumbv7em-none-eabihf/release/catcard-fw
 OUT     := out
 PACKAGE := cargo run --release -q -p catcard-image -- build $(ELF)
-FW      := cargo build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features
+FW      := cargo build --release -p catcard-fw --target thumbv7em-none-eabihf
 
-comma   := ,
 VERSION ?=
 VER      = $(if $(VERSION),--version $(VERSION),)
-BRINGUP ?=
-DBG      = $(if $(BRINGUP),$(comma)usb-key-injection$(comma)usb-debug-mem,)
+SHIP    ?=
+NODEF    = $(if $(SHIP),--no-default-features,)
 
 # The firmware ELF has one path, so a build must be packaged before the next overwrites it.
 .NOTPARALLEL:
@@ -39,27 +39,28 @@ DBG      = $(if $(BRINGUP),$(comma)usb-key-injection$(comma)usb-debug-mem,)
 all: mk3 mk4-mk5 q1
 
 mk3:
-	$(FW) --features board-mk3$(DBG)
+	$(FW) $(NODEF) --features board-mk3
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk3 $(VER) --bin $(OUT)/catcard-mk3.bin --dfu $(OUT)/catcard-mk3.dfu
 
 mk4-mk5:
-	$(FW) --features board-mk5$(DBG)
+	$(FW) $(NODEF) --features board-mk5
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk5 $(VER) --hw-compat mk4,mk5 \
 	  --bin $(OUT)/catcard-mk4-mk5.bin --dfu $(OUT)/catcard-mk4-mk5.dfu
 
 q1:
-	$(FW) --features board-q1$(DBG)
+	$(FW) $(NODEF) --features board-q1
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board q1 $(VER) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 
 test:
 	cargo test --workspace --exclude catcard-fw
 
+# Lint both the dev build (default features on) and the stripped ship build.
 lint:
+	cargo clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5
 	cargo clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5
-	cargo clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5,usb-key-injection,usb-debug-mem
 
 clean:
 	rm -f $(OUT)/catcard-*.bin $(OUT)/catcard-*.dfu

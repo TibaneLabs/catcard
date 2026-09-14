@@ -19,21 +19,21 @@
 # Anything added here in future must be inert with respect to the output bytes.
 
 [alias]
-# Firmware builds. A board feature is required -- there is no default board.
-fw-mk3   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3"
-fw-mk4   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4"
-fw-mk5   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5"
-fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1"
+# Firmware builds. A board feature is required -- there is no default board. The USB
+# bench crutches (key injection + the peek/poke/jsr memory monitor) are default features,
+# so these dev builds carry them; that is how we work on the device during this period.
+fw-mk3   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --features board-mk3"
+fw-mk4   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --features board-mk4"
+fw-mk5   = "build --release -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5"
+fw-q1    = "build --release -p catcard-fw --target thumbv7em-none-eabihf --features board-q1"
 
-# The bring-up build: the firmware with every diagnostic turned on -- host key
-# injection, the PIN shown as digits, and the peek/poke/jsr memory monitor. This is the
-# build for a device under test, where you want every way of seeing what went wrong
-# available on the one image you flash. A shipping build is `fw-<board>` with no
-# features. Never ship a bring-up build -- see docs/USB.md.
-fw-mk3-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3,usb-key-injection,usb-debug-mem"
-fw-mk4-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4,usb-key-injection,usb-debug-mem"
-fw-mk5-bringup = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5,usb-key-injection,usb-debug-mem"
-fw-q1-bringup  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,usb-key-injection,usb-debug-mem"
+# The shipping build: strip every default feature, leaving just the board. No host key
+# injection, no memory monitor. This is what a real, signed release is built from; never
+# ship a plain `fw-<board>` dev build -- see docs/USB.md.
+fw-mk3-ship = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk3"
+fw-mk4-ship = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk4"
+fw-mk5-ship = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5"
+fw-q1-ship  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1"
 
 # Host-side: unit tests for the portable crates and the image tool.
 t        = "test --workspace --exclude catcard-fw"
