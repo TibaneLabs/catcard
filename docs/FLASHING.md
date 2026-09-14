@@ -243,9 +243,9 @@ What the Q1 build does now:
 
 - **The LCD is inherited, never reset.** The bootloader initialises the ST7789 and the
   firmware must keep that (`hw-reference/display.md §Q1`). `catcard_ui::st7789` takes SPI1
-  from the GPU co-processor, leaves `RESET` alone, clears, turns the backlight on and shows
-  the 128×64 UI at 2× centred. Every wait on that path is bounded; any failure means no
-  panel, never a hung boot.
+  from the GPU co-processor, leaves `RESET` alone, clears and turns the backlight on. Screens
+  draw a 16-level 320×240 canvas laid out for this panel, and only the rows that changed are
+  sent. Every wait on that path is bounded; any failure means no panel, never a hung boot.
 - **The keyboard works.** `catcard_ui::qwerty` scans the 10×6 matrix and maps the number
   row, ENTER, CANCEL, DELETE and the arrows onto the numpad's keys, so every existing screen
   runs unchanged. A column that reads low with no row driven refuses the matrix.
@@ -271,7 +271,8 @@ reprogrammed. Prove panel and keyboard on the exact hardware with a dev build fi
 | step | emulator, real Q1 bootloader v1.1.0 | hardware |
 |---|---|---|
 | boots, headless loop when there is no panel or keypad, USB answers | ✓ | ✓ on Linux and macOS (macOS after a power cycle, see below) |
-| ST7789 inherited, not reset: 2× UI centred, white on black, not mirrored | ✓ screenshot | ✓ by eye |
+| ST7789 inherited, not reset: white on black, not mirrored | ✓ screenshot | ✓ by eye |
+| full-screen canvas UI, laid out for 320×240, changed rows only | ✓ splash screenshot | not yet |
 | keyboard: number row, ENTER, DELETE, PIN entry at the device | ✓ ENTER tapped | ✓ |
 | log and memory monitor answer while locked | ✓ | ✓ |
 | `UnlockPin` on a blank unit (sets then logs in) | ✓ | not yet |

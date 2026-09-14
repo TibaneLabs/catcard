@@ -237,8 +237,8 @@ pulse it, send an OLED init — which on a Q1 blanks a working LCD.
 
 `catcard_ui::st7789` now draws on the inherited setup: it takes SPI1 from the GPU
 co-processor (`G_CTRL=PE5` high, wait `G_BUSY=PE2` low, bounded), leaves `RESET` alone,
-clears, turns on `BL_ENABLE=PE3`, and shows the 128×64 UI at 2× centred using only
-`CASET`/`RASET`/`RAMWR`. The 10×6 keyboard (`catcard_ui::qwerty`) maps the number row,
+clears, turns on `BL_ENABLE=PE3`, and draws with only `CASET`/`RASET`/`RAMWR`: screens render
+a 16-level 320×240 canvas, and only the rows that changed are sent. The 10×6 keyboard (`catcard_ui::qwerty`) maps the number row,
 ENTER, CANCEL, DELETE and the arrows onto the numpad's keys. Any failure bringing either up
 leaves the session on the headless recovery path (`recovery.rs`).
 

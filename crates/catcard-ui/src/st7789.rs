@@ -6,9 +6,10 @@
 //! reset" [C]). So unlike [`crate::display::Ssd1306`] there is no init and no reset here.
 //! The driver only opens a window and writes pixels.
 //!
-//! Every screen the firmware has draws into a 128x64 mono framebuffer. Until there is a
-//! native Q1 UI the panel shows that framebuffer at [`SCALE`]x, centred, which makes the
-//! whole firmware usable on a Q1 with one driver rather than a second set of screens.
+//! Screens draw into a 16-level [`Gray4`] canvas the size of the panel, which
+//! [`St7789::flush_gray_changed`] sends through a palette, only the rows that changed.
+//! [`St7789::flush`] still shows a 128x64 mono framebuffer at [`SCALE`]x, for anything
+//! drawn that way.
 
 use crate::canvas::{Canvas, Gray4};
 use crate::display::DisplayBus;
@@ -221,8 +222,8 @@ impl<B: DisplayBus> St7789<B> {
     ///
     /// The ramps are the point: a step that does not show is a bit that is not reaching
     /// the glass, and a band that comes out the wrong colour is a byte-order or colour-order
-    /// mistake. This paints outside the centred UI window, so the caller wipes the panel
-    /// before the mono UI draws again.
+    /// mistake. This paints the panel directly, behind any canvas, so the caller wipes the
+    /// panel and invalidates its row cache before the next frame.
     pub fn draw_colour_chart(&mut self) -> Result<(), B::Error> {
         let bar = WIDTH / BARS.len();
         for (i, &c) in BARS.iter().enumerate() {

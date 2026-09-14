@@ -259,8 +259,8 @@ pub fn run(session: Session<'_>) -> ! {
                 // different lengths is how you land on an item nobody chose.
                 v.sc = Scroll::new();
             }
-            // The colour chart paints outside the centred window the mono UI redraws,
-            // so its edges would stay behind under whatever comes next.
+            // The colour chart painted the panel directly, behind the canvas and its row
+            // cache, so the next frame has to go out whole or the chart stays under it.
             if screen == Screen::Colours && next != Screen::Colours {
                 display::wipe(panel);
             }

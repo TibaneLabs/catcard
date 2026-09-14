@@ -195,8 +195,9 @@ pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
 
 /// Clear the whole panel, borders included.
 ///
-/// The mono UI only ever redraws its centred 2x window, so a screen that painted outside
-/// it -- the colour chart -- calls this on the way out, or its edges stay behind.
+/// For a screen that painted the panel directly, behind the canvas -- the colour chart. The
+/// canvas and its row cache no longer describe what the panel shows, so the panel is
+/// cleared and the next frame is sent whole.
 #[cfg(feature = "board-q1")]
 pub fn wipe(panel: &mut Panel) {
     let _ = panel.clear(catcard_ui::st7789::BLACK);
