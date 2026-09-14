@@ -167,9 +167,41 @@ impl PinGate for Model {
                 }
             }
             PinOp::Change => {
+                let flags = a.change_flags;
+                // Writing the secret slot. The bootloader takes this only from a caller
+                // that has logged in, so a firmware which forgets that must fail here
+                // rather than on a device holding someone's wallet.
+                if flags == catcard_callgate::abi::change::SECRET {
+                    if a.state_flags & state::SUCCESSFUL == 0 {
+                        return Err(GateError::Pin(err::PIN_REQUIRED));
+                    }
+                    // §6 lists old_pin among what a change carries. If one is supplied it
+                    // has to be the right one; the model will not accept nonsense there.
+                    let old = &a.old_pin[..a.old_pin_len.max(0) as usize];
+                    let old_ok = {
+                        let expected: &[u8] = if inner.set_pin.is_empty() {
+                            self.correct
+                        } else {
+                            &inner.set_pin
+                        };
+                        old.is_empty() || old == expected
+                    };
+                    if !old_ok {
+                        return Err(GateError::Pin(err::AUTH_FAIL));
+                    }
+                    inner.secret = a.secret;
+                    inner.zero_secret = a.secret.iter().all(|&b| b == 0);
+                    a.state_flags = state::SUCCESSFUL
+                        | if inner.zero_secret {
+                            state::ZERO_SECRET
+                        } else {
+                            0
+                        };
+                    self.sign(&mut inner, a);
+                    return Ok(0);
+                }
                 // The only change a blank device takes: set the wallet PIN with an
                 // empty old_pin. Anything else needs a login the model has not seen.
-                let flags = a.change_flags;
                 if flags != catcard_callgate::abi::change::WALLET_PIN {
                     return Err(GateError::Pin(err::BAD_REQUEST));
                 }
@@ -672,5 +704,79 @@ fn authorising_without_a_login_is_refused_before_the_call() {
         g.inner.borrow().authorized,
         None,
         "the gate was called without a login"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// gate 18 / 3 — writing the wallet secret
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_generated_secret_can_be_stored_and_read_back() {
+    // The whole point of the milestone: a device that had no seed has one afterwards,
+    // and the bytes that come back are the bytes that went in.
+    let m = Model::new(b"12-3456");
+    m.inner.borrow_mut().zero_secret = true;
+    let (mut l, step) = login_with(&m, b"12", b"3456");
+    assert_eq!(
+        step,
+        Step::In { zero_secret: true },
+        "model should start with no seed"
+    );
+
+    let secret = catcard_callgate::pin::encode_bip39(&[0x5A; 32]).unwrap();
+    assert_eq!(
+        l.set_secret(&m, &secret).unwrap(),
+        Step::In { zero_secret: false },
+        "the device should no longer report an empty secret slot"
+    );
+    assert!(
+        l.verify_secret(&m, &secret).unwrap(),
+        "what came back is not what was written"
+    );
+    assert_eq!(l.fetch_secret(&m).unwrap(), secret);
+}
+
+#[test]
+fn storing_a_secret_without_a_login_is_refused_before_the_gate() {
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    let secret = catcard_callgate::pin::encode_bip39(&[1; 16]).unwrap();
+    assert!(l.set_secret(&m, &secret).is_err());
+    assert_eq!(
+        m.inner.borrow().secret,
+        [7; SECRET_LEN],
+        "the slot was written without a login"
+    );
+}
+
+#[test]
+fn a_stored_secret_is_not_left_behind_in_the_attempt_struct() {
+    // The struct is handed back to the gate on every later call. A plaintext seed parked
+    // in it only has to be read once.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+    let secret = catcard_callgate::pin::encode_bip39(&[0x42; 24]).unwrap();
+    l.set_secret(&m, &secret).unwrap();
+    assert!(
+        l.attempt.secret.iter().all(|&b| b == 0),
+        "the seed is still sitting in the attempt struct"
+    );
+}
+
+#[test]
+fn a_slot_that_did_not_keep_what_we_wrote_is_reported() {
+    // The failure `verify_secret` exists for: the gate accepted the write, the element
+    // did not keep it. Discovering that now beats discovering it at the next unlock,
+    // after the words have been shown and written down.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+    let secret = catcard_callgate::pin::encode_bip39(&[9; 32]).unwrap();
+    l.set_secret(&m, &secret).unwrap();
+
+    m.inner.borrow_mut().secret = [3; SECRET_LEN];
+    assert!(
+        !l.verify_secret(&m, &secret).unwrap(),
+        "a slot holding something else was reported as matching"
     );
 }

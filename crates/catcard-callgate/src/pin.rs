@@ -229,6 +229,76 @@ pub fn classify_secret(secret: &[u8; SECRET_LEN]) -> SecretKind {
     }
 }
 
+/// Entropy lengths the BIP-39 marker can carry, in bytes.
+///
+/// The marker is `0x80 | ((L / 8) - 2)`, so only 16, 24 and 32 have a spelling — 12, 18
+/// and 24 words. BIP-39 also defines 20- and 28-byte entropy (15 and 21 words), which
+/// this format cannot hold at all.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub const BIP39_ENTROPY_LENS: [usize; 3] = [16, 24, 32];
+
+/// An entropy length the stash format has no way to name.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct UnsupportedEntropyLen {
+    pub len: usize,
+}
+
+/// The marker byte for `len` bytes of BIP-39 entropy, if the format can express it.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub const fn bip39_marker(len: usize) -> Option<u8> {
+    match len {
+        16 | 24 | 32 => Some(0x80 | ((len / 8) as u8 - 2)),
+        _ => None,
+    }
+}
+
+/// The entropy length a BIP-39 marker describes.
+///
+/// `L = ((marker & 3) + 2) * 8`, so low bits of `3` claim 40 bytes — longer than BIP-39
+/// defines. That returns `None` rather than being clamped to 32: a secret whose length
+/// we cannot name is not one to guess at, and guessing short would hand back a prefix of
+/// someone's seed as though it were the whole thing.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub const fn bip39_len(marker: u8) -> Option<usize> {
+    if marker < 0x80 {
+        return None;
+    }
+    match ((marker & 3) as usize + 2) * 8 {
+        len @ (16 | 24 | 32) => Some(len),
+        _ => None,
+    }
+}
+
+/// Pack BIP-39 entropy into the 72-byte secret slot.
+///
+/// This layout is a **firmware convention, not part of the callgate ABI** — the
+/// bootloader returns these 72 bytes without interpreting them. We write what stock
+/// writes so that a device reflashed in either direction still finds its wallet.
+///
+/// The entropy is stored, not the words and not the checksum; the mnemonic is re-derived
+/// from it. The returned array is key material — zeroize it once the gate has taken it.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub fn encode_bip39(entropy: &[u8]) -> Result<[u8; SECRET_LEN], UnsupportedEntropyLen> {
+    let marker =
+        bip39_marker(entropy.len()).ok_or(UnsupportedEntropyLen { len: entropy.len() })?;
+    let mut out = [0u8; SECRET_LEN];
+    out[0] = marker;
+    out[1..1 + entropy.len()].copy_from_slice(entropy);
+    Ok(out)
+}
+
+/// The entropy inside a BIP-39 secret, or `None` if this is not one.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub fn bip39_entropy(secret: &[u8; SECRET_LEN]) -> Option<&[u8]> {
+    let len = bip39_len(secret[0])?;
+    Some(&secret[1..1 + len])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +396,60 @@ mod tests {
         let mut s = [0u8; SECRET_LEN];
         s[10] = 1;
         assert_eq!(classify_secret(&s), SecretKind::Unknown { marker: 0 });
+    }
+
+    #[test]
+    fn the_marker_encodes_the_three_lengths_the_format_can_hold() {
+        assert_eq!(bip39_marker(16), Some(0x80));
+        assert_eq!(bip39_marker(24), Some(0x81));
+        assert_eq!(bip39_marker(32), Some(0x82));
+        // 15- and 21-word mnemonics are valid BIP-39 with no spelling here.
+        assert_eq!(bip39_marker(20), None);
+        assert_eq!(bip39_marker(28), None);
+        assert_eq!(bip39_marker(0), None);
+    }
+
+    #[test]
+    fn a_secret_round_trips_through_the_stash_encoding() {
+        let material = [0xA5u8; 32];
+        for len in BIP39_ENTROPY_LENS {
+            let e = &material[..len];
+            let s = encode_bip39(e).expect("a supported length");
+            assert_eq!(classify_secret(&s), SecretKind::Bip39 { marker: s[0] });
+            assert_eq!(bip39_len(s[0]), Some(len));
+            assert_eq!(bip39_entropy(&s), Some(e));
+            assert!(
+                s[1 + len..].iter().all(|&b| b == 0),
+                "{len}: tail left dirty"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entropy_length_the_marker_cannot_name_is_refused() {
+        // Rounding a 20-byte seed down to 16 would store a *different* wallet behind a
+        // marker that reads back as perfectly valid. Refusing is the only safe answer.
+        let material = [1u8; 32];
+        assert_eq!(
+            encode_bip39(&material[..20]),
+            Err(UnsupportedEntropyLen { len: 20 })
+        );
+        assert_eq!(
+            encode_bip39(&material[..28]),
+            Err(UnsupportedEntropyLen { len: 28 })
+        );
+    }
+
+    #[test]
+    fn a_marker_claiming_forty_bytes_is_not_decoded() {
+        // ((0x83 & 3) + 2) * 8 = 40, which BIP-39 does not define. Still recognisably in
+        // the BIP-39 marker range, so `classify_secret` keeps reporting it as such --
+        // "we know what this claims to be and cannot read it" is the useful answer.
+        let mut s = [0u8; SECRET_LEN];
+        s[0] = 0x83;
+        assert_eq!(bip39_len(0x83), None);
+        assert_eq!(bip39_entropy(&s), None);
+        assert_eq!(classify_secret(&s), SecretKind::Bip39 { marker: 0x83 });
     }
 
     #[test]

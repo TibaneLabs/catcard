@@ -413,6 +413,96 @@ impl Login {
         }
     }
 
+    /// Store a wallet secret, replacing whatever the slot holds.
+    ///
+    /// `gate 18/3` with [`change::SECRET`](catcard_callgate::abi::change::SECRET). The
+    /// bootloader honours it only for a caller that has logged in, so it is offered from
+    /// [`Step::In`] and nowhere else.
+    ///
+    /// **This is how a wallet is created and how one is destroyed.** Writing over a
+    /// secret that is in use loses whatever it controls unless the words were written
+    /// down. Nothing here can tell those two cases apart — the caller must.
+    ///
+    /// Two details are `[?]`, unconfirmed against hardware, and written the cautious way:
+    ///
+    /// - `old_pin` carries the PIN this session logged in with, because §6 lists that
+    ///   field among what a change sends. A bootloader that ignores it for a
+    ///   secret-only change is no worse off for our having sent it.
+    /// - Whether a change leaves the session logged in is not documented, so the
+    ///   resulting step is re-read from the struct the gate signs on the way out rather
+    ///   than assumed to still be [`Step::In`].
+    ///
+    /// Source: gate18-pin-state-machine.md §2 method 3, §4, §6 [C]
+    pub fn set_secret<G: PinGate>(
+        &mut self,
+        gate: &G,
+        secret: &[u8; SECRET_LEN],
+    ) -> Result<Step, Failure> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Err(Failure::Code(err::PIN_REQUIRED));
+        }
+
+        let n = self.attempt.pin_len.max(0) as usize;
+        let mut current = [0u8; MAX_PIN_LEN];
+        current[..n].copy_from_slice(&self.attempt.pin[..n]);
+        let set = self.attempt.set_old_pin(&current[..n]);
+        current.zeroize();
+        if set.is_err() {
+            return Err(Failure::Code(err::RANGE_ERR));
+        }
+
+        self.attempt.change_flags = catcard_callgate::abi::change::SECRET;
+        self.attempt.secret = *secret;
+        let r = gate.pin_attempt(PinOp::Change, &mut self.attempt);
+        // The plaintext seed does not outlive the call. The struct is handed back to the
+        // gate repeatedly afterwards, and a buffer holding the wallet only has to be read
+        // once.
+        self.attempt.secret.zeroize();
+        self.attempt.change_flags = 0;
+
+        match r {
+            Ok(_) => {
+                self.step = if self.attempt.logged_in() {
+                    Step::In {
+                        zero_secret: self.attempt.has_zero_secret(),
+                    }
+                } else {
+                    match gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
+                        Ok(_) if self.attempt.is_blank() => Step::Blank,
+                        Ok(_) => Step::Prefix,
+                        Err(e) => classify(e),
+                    }
+                };
+                Ok(self.step)
+            }
+            Err(e) => {
+                let s = classify(e);
+                self.step = s;
+                Err(match s {
+                    Step::Failed(f) => f,
+                    Step::Bricked => Failure::Code(err::I_AM_BRICK),
+                    _ => Failure::Code(0),
+                })
+            }
+        }
+    }
+
+    /// Read the stored secret back and compare it against what we meant to store.
+    ///
+    /// Belongs immediately after [`Self::set_secret`]. A write the gate accepted but the
+    /// secure element did not keep would otherwise surface at the *next* unlock — by
+    /// which point the words have been shown, written down, and trusted.
+    pub fn verify_secret<G: PinGate>(
+        &mut self,
+        gate: &G,
+        expected: &[u8; SECRET_LEN],
+    ) -> Result<bool, Failure> {
+        let mut got = self.fetch_secret(gate)?;
+        let same = got == *expected;
+        got.zeroize();
+        Ok(same)
+    }
+
     /// `prefix` `-` `suffix` into `out`, returning the length written.
     fn join(&self, suffix: &[u8], out: &mut [u8; MAX_PIN_LEN]) -> usize {
         let p = self.prefix_len as usize;

@@ -305,16 +305,22 @@ missing and an empty Q1 slot as full.
 
 ---
 
-## Secret encoding within the `0x80+` BIP-39 marker range
+## Secret encoding within the `0x80+` BIP-39 marker range — RESOLVED `[C]`
 
-`hw-reference` says the secret blob's marker is `0x01` for xprv and `0x80`+ for BIP-39
-words, but not how word count is encoded in the low bits.
+`hw-reference/secret-stash-format.md §Layout` gives it: the marker is
+`0x80 | ((L / 8) - 2)`, where `L` is the length of the stored **entropy** — so `0x80`,
+`0x81` and `0x82` mean 16, 24 and 32 bytes, i.e. 12, 18 and 24 words. The entropy is
+stored rather than the words or the checksum, and the mnemonic is re-derived from it.
 
-**Blocks: decoding a seed created by stock firmware.** Not needed to create our own,
-since CatCard chooses its own encoding for secrets it writes — but needed for any
-migration path.
+Only those three lengths exist in this format. BIP-39's 20- and 28-byte entropy (15 and
+21 words) has no marker, so `encode_bip39` refuses it: truncating a 20-byte seed to 16
+would store a *different* wallet behind a marker that reads back as perfectly valid.
 
-`catcard_callgate::pin::classify_secret` returns the raw marker rather than guessing.
+`catcard_callgate::pin` now encodes and decodes this — `bip39_marker`, `bip39_len`,
+`encode_bip39`, `bip39_entropy` — and `classify_secret` still returns the raw marker, so
+a value outside the three known lengths (`0x83` claims 40 bytes) is reported as
+unreadable rather than guessed at. CatCard writes the stock layout deliberately; see
+`docs/SECRETS-AND-SETTINGS.md`.
 
 ---
 
