@@ -10,7 +10,9 @@
 #![deny(unsafe_code)]
 
 pub mod art;
+pub mod canvas;
 pub mod display;
+pub mod face;
 pub mod font;
 pub mod framebuffer;
 pub mod icons;
@@ -22,6 +24,7 @@ pub mod splash;
 pub mod ssd1306;
 pub mod st7789;
 pub mod text;
+pub mod widgets;
 
 pub use art::Bitmap;
 pub use display::{DisplayBus, Ssd1306};

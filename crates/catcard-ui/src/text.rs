@@ -1,96 +1,130 @@
-//! Text rendering onto a framebuffer.
+//! Text rendering onto any [`Canvas`], in any [`Face`].
 //!
-//! Every entry point takes the [`Font`] explicitly. The previous version hardcoded an
-//! 8x8 cell, which quietly ruled out the faces the device actually wants — a title face
-//! and a dense status face are different sizes, and a renderer that assumes one of them
-//! cannot draw the other.
+//! Every entry point takes the face explicitly. An earlier version hardcoded an 8x8 cell,
+//! which quietly ruled out the faces the device actually wants — a title face and a dense
+//! status face are different sizes. The same reasoning now extends to the canvas: nothing
+//! here knows how big the panel is except by asking it.
 
-use crate::font::Font;
-use crate::framebuffer::Framebuffer;
+use crate::canvas::{Canvas, INK, Level};
+use crate::face::Face;
 
-/// Draw one character with its top-left at `(x, y)`. Clipped, never panics.
-pub fn draw_char<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
-    font: &Font,
+/// Draw one character in full ink with its top-left at `(x, y)`. Clipped, never panics.
+/// Returns the face's advance for it.
+pub fn draw_char<C: Canvas + ?Sized, F: Face + ?Sized>(
+    canvas: &mut C,
+    font: &F,
     x: usize,
     y: usize,
     c: u8,
-) {
-    let g = font.glyph(c);
-    for gy in 0..font.height as usize {
-        for gx in 0..font.width as usize {
-            if font.pixel(g, gx, gy) {
-                fb.set(x + gx, y + gy, true);
+) -> usize {
+    draw_char_in(canvas, font, x, y, c, INK)
+}
+
+/// Draw one character at `ink`, blending each pixel by the face's coverage.
+pub fn draw_char_in<C: Canvas + ?Sized, F: Face + ?Sized>(
+    canvas: &mut C,
+    font: &F,
+    x: usize,
+    y: usize,
+    c: u8,
+    ink: Level,
+) -> usize {
+    for gy in 0..font.line_height() {
+        for gx in 0..font.cell_width(c) {
+            let cov = font.coverage(c, gx, gy);
+            if cov != 0 {
+                canvas.blend(x.saturating_add(gx), y.saturating_add(gy), ink, cov);
             }
         }
     }
+    font.advance(c)
 }
 
-/// Draw a string. Returns the x coordinate just past the last glyph.
+/// Draw a string in full ink. Returns the x coordinate just past the last glyph.
 ///
 /// Stops at the right edge rather than wrapping: a truncated address is obviously
 /// truncated, whereas a wrapped one can look like a different, complete address.
-pub fn draw_text<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
-    font: &Font,
+pub fn draw_text<C: Canvas + ?Sized, F: Face + ?Sized>(
+    canvas: &mut C,
+    font: &F,
     x: usize,
     y: usize,
     text: &str,
 ) -> usize {
+    draw_text_in(canvas, font, x, y, text, INK)
+}
+
+/// [`draw_text`] at a chosen ink level.
+pub fn draw_text_in<C: Canvas + ?Sized, F: Face + ?Sized>(
+    canvas: &mut C,
+    font: &F,
+    x: usize,
+    y: usize,
+    text: &str,
+    ink: Level,
+) -> usize {
     let mut at = x;
     for &c in text.as_bytes() {
-        if at + font.width as usize > W {
+        let adv = font.advance(c);
+        if at + adv > canvas.width() {
             break;
         }
-        draw_char(fb, font, at, y, c);
-        at += font.width as usize;
+        draw_char_in(canvas, font, at, y, c, ink);
+        at += adv;
     }
     at
 }
 
-/// Draw text wrapped across lines, breaking at the panel edge.
+/// Draw text wrapped across lines, breaking at the canvas edge.
 ///
 /// Returns the number of lines drawn. For strings that must be shown in full — a
-/// mnemonic, an address — where truncating would be worse than wrapping.
-pub fn draw_wrapped<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
-    font: &Font,
+/// mnemonic, an address — where truncating would be worse than wrapping. A character too
+/// wide for a line on its own still gets a line of its own, clipped, rather than stalling.
+pub fn draw_wrapped<C: Canvas + ?Sized, F: Face + ?Sized>(
+    canvas: &mut C,
+    font: &F,
     x: usize,
     y: usize,
     text: &str,
 ) -> usize {
-    let per_line = font.columns(W - x).max(1);
-    let mut lines = 0;
-    for (i, chunk) in text.as_bytes().chunks(per_line).enumerate() {
-        let row = y + i * font.height as usize;
-        if row + font.height as usize > P * 8 {
+    let lh = font.line_height();
+    let (mut at, mut row, mut lines, mut started) = (x, y, 0, false);
+    for &c in text.as_bytes() {
+        let adv = font.advance(c);
+        if started && at + adv > canvas.width() {
+            row += lh;
+            at = x;
+            started = false;
+        }
+        if row + lh > canvas.height() {
             break;
         }
-        let mut at = x;
-        for &c in chunk {
-            draw_char(fb, font, at, row, c);
-            at += font.width as usize;
+        if !started {
+            lines += 1;
+            started = true;
         }
-        lines += 1;
+        draw_char_in(canvas, font, at, row, c, INK);
+        at += adv;
     }
     lines
 }
 
 /// Width in pixels a string would occupy, ignoring clipping.
-pub fn width_of(font: &Font, text: &str) -> usize {
-    text.len() * font.width as usize
+pub fn width_of<F: Face + ?Sized>(font: &F, text: &str) -> usize {
+    text.as_bytes().iter().map(|&c| font.advance(c)).sum()
 }
 
-/// The x coordinate that centres `text` on a `W`-pixel panel, clamped to 0.
-pub fn centred(font: &Font, text: &str, panel_width: usize) -> usize {
+/// The x coordinate that centres `text` across `panel_width` pixels, clamped to 0.
+pub fn centred<F: Face + ?Sized>(font: &F, text: &str, panel_width: usize) -> usize {
     panel_width.saturating_sub(width_of(font, text)) / 2
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{Gray320x240, PAPER};
     use crate::font::{misc4x6, peep7x14, peep10x20};
-    use crate::framebuffer::Mono128x64;
+    use crate::framebuffer::{Framebuffer, Mono128x64};
 
     fn ink<const W: usize, const P: usize, const N: usize>(fb: &Framebuffer<W, P, N>) -> u32 {
         fb.as_bytes().iter().map(|b| b.count_ones()).sum()
@@ -138,6 +172,7 @@ mod tests {
         let mut fb = Mono128x64::new();
         draw_char(&mut fb, &peep10x20::FONT, 1000, 1000, b'X');
         draw_char(&mut fb, &peep10x20::FONT, 124, 60, b'X');
+        draw_char(&mut fb, &peep10x20::FONT, usize::MAX, usize::MAX, b'X');
         draw_text(&mut fb, &peep7x14::FONT, 120, 0, "long string here");
         assert!(ink(&fb) > 0);
     }
@@ -181,5 +216,28 @@ mod tests {
         assert_eq!(centred(f, "CatCard", 128), 39);
         // Longer than the panel clamps rather than wrapping around.
         assert_eq!(centred(f, &"x".repeat(40), 128), 0);
+    }
+
+    #[test]
+    fn the_same_calls_fill_a_320x240_canvas_to_its_own_edges() {
+        let f = &peep7x14::FONT;
+        let mut c = Gray320x240::new();
+        let cols = f.columns(320);
+        assert_eq!(draw_text(&mut c, f, 0, 0, &"x".repeat(cols + 5)), cols * 7);
+        let lines = draw_wrapped(&mut c, f, 0, 0, &"a".repeat(cols * 100));
+        assert_eq!(lines, f.rows(240));
+    }
+
+    #[test]
+    fn ink_level_is_what_lands_on_a_gray_canvas() {
+        let f = &peep10x20::FONT;
+        let mut c = Gray320x240::new();
+        draw_text_in(&mut c, f, 0, 0, "#", 6);
+        let levels: Vec<Level> = (0..20)
+            .flat_map(|y| (0..10).map(move |x| (x, y)))
+            .map(|(x, y)| c.get(x, y))
+            .collect();
+        assert!(levels.contains(&6));
+        assert!(levels.iter().all(|&l| l == 6 || l == PAPER));
     }
 }

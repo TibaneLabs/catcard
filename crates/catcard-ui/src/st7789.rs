@@ -10,6 +10,7 @@
 //! native Q1 UI the panel shows that framebuffer at [`SCALE`]x, centred, which makes the
 //! whole firmware usable on a Q1 with one driver rather than a second set of screens.
 
+use crate::canvas::{Canvas, Gray4};
 use crate::display::DisplayBus;
 use crate::framebuffer::Framebuffer;
 
@@ -58,6 +59,19 @@ pub const BARS: [u16; 8] = [
     rgb565(0, 0, 31),  // blue
     BLACK,
 ];
+
+/// Sixteen greys, black to white: how a [`Gray4`] canvas's levels look when nothing asks
+/// for colour. Green gets the sixth bit so every step is a distinct, rising RGB565 value.
+pub const GREYS: [u16; 16] = {
+    let mut p = [0u16; 16];
+    let mut i = 0;
+    while i < 16 {
+        let v = (i * 31 / 15) as u8;
+        p[i] = rgb565(v, (v << 1) | (v >> 4), v);
+        i += 1;
+    }
+    p
+};
 
 /// Height of one colour-chart band: six of them fill the panel.
 const BAND: usize = HEIGHT / 6;
@@ -211,6 +225,32 @@ impl<B: DisplayBus> St7789<B> {
             for _ in 0..SCALE {
                 self.bus.data(&line[..w * 2])?;
             }
+        }
+        Ok(())
+    }
+
+    /// Push a 16-level canvas at its own size -- no scaling -- mapping each level through
+    /// `palette`. A canvas smaller than the panel is centred; a larger one is clipped.
+    ///
+    /// This is the full-screen path: a 320x240 [`Gray4`] covers the whole panel pixel for
+    /// pixel, which is what lets screens use all of it rather than a doubled 128x64.
+    pub fn flush_gray<const W: usize, const H: usize, const N: usize>(
+        &mut self,
+        fb: &Gray4<W, H, N>,
+        palette: &[u16; 16],
+    ) -> Result<(), B::Error> {
+        let (w, h) = (W.min(WIDTH), H.min(HEIGHT));
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
+        self.window(x0, y0, x0 + w - 1, y0 + h - 1)?;
+        let mut line = [0u8; WIDTH * 2];
+        for y in 0..h {
+            for (x, px) in line[..w * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                *px = palette[fb.get(x, y) as usize & 0x0F].to_be_bytes();
+            }
+            self.bus.data(&line[..w * 2])?;
         }
         Ok(())
     }
@@ -412,6 +452,31 @@ mod tests {
         // The hue sweep starts and ends at red.
         assert_eq!(at(2, 220), 0xF800);
         assert_eq!(at(317, 220) >> 11, 31, "sweep should end back at red");
+    }
+
+    #[test]
+    fn a_full_screen_gray_canvas_is_sent_one_to_one_through_the_palette() {
+        let mut g = crate::canvas::Gray320x240::new();
+        g.put(0, 0, 15);
+        g.put(1, 0, 7);
+        g.put(319, 239, 3);
+        let mut p = St7789::new(MockBus::default());
+        p.flush_gray(&g, &GREYS).unwrap();
+        assert_eq!(p.bus_mut().log[1], (true, vec![0, 0, 0x01, 0x3F]));
+        assert_eq!(p.bus_mut().log[3], (true, vec![0, 0, 0x00, 0xEF]));
+        assert_eq!(p.bus_mut().pixels().len(), WIDTH * HEIGHT * 2, "not 1:1");
+        let f = replay(&p.bus_mut().log);
+        assert_eq!(f[0], GREYS[15]);
+        assert_eq!(f[1], GREYS[7], "the right pixel of a byte is its low nibble");
+        assert_eq!(f[2], GREYS[0]);
+        assert_eq!(f[239 * WIDTH + 319], GREYS[3]);
+    }
+
+    #[test]
+    fn the_grey_palette_runs_from_black_to_white_rising_every_step() {
+        assert_eq!(GREYS[0], BLACK);
+        assert_eq!(GREYS[15], WHITE);
+        assert!(GREYS.windows(2).all(|w| w[1] > w[0]));
     }
 
     #[test]
