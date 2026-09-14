@@ -500,7 +500,10 @@ class LibUsbPort:
             except Exception as e:
                 # pyusb raises USBTimeoutError (a subclass of USBError); treat any read
                 # failure the framing layer should retry on as a socket timeout.
-                if "timeout" in str(e).lower():
+                # libusb words it "Operation timed out", so match the type as well as
+                # the text -- "timeout" alone let a plain timeout escape as a crash.
+                msg = str(e).lower()
+                if type(e).__name__ == "USBTimeoutError" or "timeout" in msg or "timed out" in msg:
                     raise TimeoutError("timed out") from None
                 raise
             self._buf = bytes(r)

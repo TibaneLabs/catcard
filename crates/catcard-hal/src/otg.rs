@@ -703,7 +703,13 @@ impl Otg {
                 }
             }
 
-            if self.dev.is_configured() && !was_configured {
+            // Every SET_CONFIGURATION, not only the first. The spec has a repeated one
+            // (even to the same value) reset the data toggles on both sides; the host
+            // does, so a device that skipped this answered with the wrong toggle and had
+            // every report after it dropped as a duplicate -- a silent timeout, seen on a
+            // Q1 when a second libusb client configured the already-configured device.
+            let reconfigured = setup.bRequest == control::request::SET_CONFIGURATION;
+            if self.dev.is_configured() && (!was_configured || reconfigured) {
                 open_data_endpoints(self.dev.mode == control::DeviceMode::Msc);
                 self.receive_next();
             }
