@@ -524,29 +524,35 @@ mk4/Q `[?]`. SE2's I2C pins are confirmed on Q1 only; see the mk4 item above.
 
 ---
 
-## SE2 stops answering under sustained polling `[?]`
+## SE2 produces about four times slower than SE1 `[?]`
 
-Seed generation reads callgate 26 sixteen times from each secure element, 32 bytes a
-call. On a real Q1 the first run gave **SE1 512 bytes (16 of 16 calls) and SE2 128 bytes
-(4 of 16)**: `seed: SE1 512 B, SE2 128 B, 3392 bits from 3 chips, policy ok`.
+On Utils → Analyze RNG, which reads both elements once per frame, **SE1 completes four
+rounds in the time SE2 takes for one** (observed on a real Q1).
 
-SE2 is not dead. At boot it delivers its full 64 bytes like SE1 — the boot line reads
-`entropy 832`, which is exactly 256 (STM32) + 256 (SE1) + 256 (SE2) + 64 (DWT timing),
-and 576 is what a missing element would produce. It answers, then stops answering when
-polled repeatedly.
+That rate difference explains the first seed generation, which took sixteen turns each
+and logged `SE1 512 B, SE2 128 B` — the same 4:1. An earlier revision of this entry
+called it "SE2 stops answering under sustained polling", which was **wrong**: a chip
+that stopped would give a sharp cutoff after four calls, not a steady quarter rate, and
+nothing here ever stopped. That misreading came from taking our own lockstep loop's
+output as a fact about the hardware.
 
-Candidate causes, none confirmed: the DS28C36B rate-limiting its RNG, a per-boot or
-per-interval budget in the part, or the bootloader's SE2 path failing after a number of
-calls for a reason of its own. `boot.rs` would not have noticed either way — it breaks
-out of its read loop on the first error, so a short answer there looks the same as a
-full one.
+SE2 is healthy. At boot it delivers its full 64 bytes like SE1 — `entropy 832` is
+exactly 256 (STM32) + 256 (SE1) + 256 (SE2) + 64 (DWT timing), where a missing element
+would give 576.
 
-**Consequence.** Fresh-entropy collection cannot assume both elements contribute
-equally. Today that is harmless: the pool credits what actually arrived, the policy is
-checked against the real total, and the screen shows each element separately so a short
-column is visible rather than hidden. It matters if anything later *requires* a fixed
-number of bytes from SE2.
+**Still unmeasured: how it declines.** `se_rng` can return `Ok(0)` (asked too soon,
+nothing ready) or `Err` (refused), and every caller so far has treated them alike, so we
+cannot yet say which one a too-early SE2 read produces. Seed generation now counts them
+separately and logs `SE1 <bytes>B/<turns>t <empty>e <failed>f, SE2 …`, which settles it
+on the next run. If they are `Ok(0)`, the element simply needs time and the fix is
+pacing; if they are `Err`, something in the bootloader's SE2 path is refusing and that
+is a different question.
 
-Worth measuring before designing around it: how many calls SE2 sustains, whether a pause
-between calls restores it, and whether the limit resets across a reboot. Utils → Analyze
-RNG already reads each element live and is the place to look.
+**What already accounts for it.** Generation asks each element for a byte *target*
+rather than a fixed number of turns, so a slower element takes longer instead of
+contributing less, bounded so a dead one cannot hang a wallet. The pool credits what
+actually arrived, the policy is checked against the real total, and the screen counts
+each element separately — a column that lags is visible rather than hidden.
+
+Worth knowing before designing around it: whether the rate is constant or a burst
+followed by a slower refill, and whether it resets across a reboot.

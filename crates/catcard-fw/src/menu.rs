@@ -1475,48 +1475,84 @@ fn new_seed(
     };
 
     if catcard_board::BOARD.has_callgate_se_rng {
-        // 16 rounds of 32 bytes from each element: a kilobyte of fresh noise, and
-        // thirty-two visible steps rather than a bar that jumps.
-        const ROUNDS: usize = 16;
-        const READS: usize = ROUNDS * 2;
-        let mut done = 0usize;
-        gathering(panel, &g, 0);
+        // Ask each element for the same number of *bytes*, not the same number of
+        // turns. SE2 produces about a quarter as fast as SE1 -- plain to see on
+        // Utils -> Analyze RNG, where SE1 completes four rounds in the time SE2 takes
+        // for one -- so taking turns in lockstep collects roughly a quarter as much
+        // from it. The first generation on hardware did exactly that and logged
+        // `SE1 512 B, SE2 128 B`, which reads like a broken element and is really a
+        // slower one.
+        const TARGET: usize = 512;
+        // Bounded, because an element that never answers must not hang a wallet.
+        // At SE2's observed rate 512 bytes wants roughly 64 turns; this leaves room
+        // and still ends.
+        const MAX_PASSES: usize = 160;
 
-        for _ in 0..ROUNDS {
-            for (src, tag) in [
-                (
-                    catcard_callgate::abi::RngSource::Se1,
-                    catcard_entropy::Source::Se1Trng,
-                ),
-                (
-                    catcard_callgate::abi::RngSource::Se2,
-                    catcard_entropy::Source::Se2Trng,
-                ),
-            ] {
+        let srcs = [
+            (
+                catcard_callgate::abi::RngSource::Se1,
+                catcard_entropy::Source::Se1Trng,
+            ),
+            (
+                catcard_callgate::abi::RngSource::Se2,
+                catcard_entropy::Source::Se2Trng,
+            ),
+        ];
+        let mut bytes = [0usize; 2];
+        let mut tries = [0usize; 2];
+        // An element can decline two ways and we have never distinguished them:
+        // `Ok(0)` is "asked too soon, nothing ready", `Err` is a refusal. Counting
+        // them apart is what turns the next generation into a measurement instead of
+        // another inference -- guessing at this is what produced a wrong write-up the
+        // first time.
+        let mut empty = [0usize; 2];
+        let mut failed = [0usize; 2];
+
+        gathering(panel, &g, 0);
+        for _ in 0..MAX_PASSES {
+            if bytes[0] >= TARGET && bytes[1] >= TARGET {
+                break;
+            }
+            for (i, (src, tag)) in srcs.iter().enumerate() {
+                if bytes[i] >= TARGET {
+                    continue;
+                }
                 let mut buf = [0u8; 33];
+                tries[i] += 1;
                 // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
                 // `buf` is on our stack, which the linker places in SRAM1, and `call`
                 // range-checks it regardless.
-                if let Ok(n) = unsafe { gate.se_rng(src, &mut buf) }
-                    && n > 0
-                {
-                    pool.add(tag, &buf[1..1 + n]);
-                    // Counted only when bytes actually arrived, so a column that stops
-                    // moving is an element that stopped answering.
-                    if matches!(tag, catcard_entropy::Source::Se1Trng) {
-                        g.se1 += n;
-                    } else {
-                        g.se2 += n;
+                match unsafe { gate.se_rng(*src, &mut buf) } {
+                    Ok(n) if n > 0 => {
+                        pool.add(*tag, &buf[1..1 + n]);
+                        bytes[i] += n;
                     }
+                    Ok(_) => empty[i] += 1,
+                    Err(_) => failed[i] += 1,
                 }
                 buf.zeroize();
-                done += 1;
-                g.bits = pool.credited_bits();
-                g.chips = pool.hardware_sources();
-                gathering(panel, &g, (done * 100 / READS) as u8);
-                catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
             }
+
+            g.se1 = bytes[0];
+            g.se2 = bytes[1];
+            g.bits = pool.credited_bits();
+            g.chips = pool.hardware_sources();
+            let got = bytes[0] + bytes[1];
+            gathering(panel, &g, (got * 100 / (TARGET * 2)).min(100) as u8);
+            catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
         }
+
+        crate::catlog!(
+            "seed: SE1 {}B/{}t {}e {}f, SE2 {}B/{}t {}e {}f",
+            bytes[0],
+            tries[0],
+            empty[0],
+            failed[0],
+            bytes[1],
+            tries[1],
+            empty[1],
+            failed[1]
+        );
     }
 
     // The pool's own verdict, not ours. If a source failed its health test the pool is
