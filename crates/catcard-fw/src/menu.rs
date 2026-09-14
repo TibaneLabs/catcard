@@ -80,8 +80,14 @@ enum Screen {
     AnalyzeRng,
     UsbDrive,
     NewSeed,
+    WipeSeed,
 }
 
+/// The main menu of a device that holds a wallet.
+///
+/// "Destroy seed" appears only here, never in the blank ordering: a device with no seed
+/// has nothing to destroy, and offering the option anyway invites someone to find out
+/// what it does on the one device where the answer is harmless.
 const MAIN_ITEMS: &[&str] = &[
     "Status",
     "Install from SD",
@@ -89,6 +95,7 @@ const MAIN_ITEMS: &[&str] = &[
     "Utils",
     "About",
     "New wallet",
+    "Destroy seed",
     "Reboot",
 ];
 /// The same list with the only useful action first, for a device holding no wallet.
@@ -284,6 +291,15 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Main;
                 break;
             }
+            if next == Screen::WipeSeed {
+                wipe_seed(gate, login, panel, &mut pad, matrix, drbg);
+                // Same reason as above, in the other direction: a wallet that no longer
+                // exists puts "New wallet" back at the top.
+                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
+                v.sc = Scroll::new();
+                screen = Screen::Main;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -330,6 +346,7 @@ fn step(
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("New wallet")) => Screen::NewSeed,
+            (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -461,6 +478,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed => {}
+        // Handled in `run`: it asks twice and drives the panel itself.
+        Screen::WipeSeed => {}
     }
 }
 
@@ -1699,6 +1718,84 @@ fn read_choice(
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
+}
+
+/// Destroy the stored seed.
+///
+/// `gate 18/3` with `change::SECRET` and seventy-two zero bytes: the same call that
+/// stores a wallet, pointed at nothing. Stock uses the bootloader's `fast_wipe`
+/// (gate 23), which is not in our ABI and which also resets the device — so nothing
+/// could confirm the result. This path can be *checked*, and is: the slot is read back
+/// before anyone is told their seed is gone, because that is the one claim this screen
+/// must never make wrongly.
+///
+/// The PIN survives. This erases the wallet, not the device.
+///
+/// Returns whether the slot is empty afterwards.
+fn wipe_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) -> bool {
+    use zeroize::Zeroize;
+
+    // Nothing to destroy is worth saying, rather than going through the motions and
+    // reporting success for a wallet that never existed.
+    if matches!(login.step(), catcard_pin::Step::In { zero_secret: true }) {
+        message(panel, "No wallet", "there is no seed", "to destroy");
+        wait_for_any_key(pad, matrix, drbg);
+        return true;
+    }
+
+    // Twice, because one question is what people press through. The first says what is
+    // lost; the second says it does not come back.
+    ask(
+        panel,
+        "Destroy wallet?",
+        "the seed is ERASED",
+        "from this device",
+    );
+    if !confirmed(pad, matrix, drbg) {
+        return false;
+    }
+    ask(
+        panel,
+        "Really destroy?",
+        "only your words can",
+        "ever bring it back",
+    );
+    if !confirmed(pad, matrix, drbg) {
+        return false;
+    }
+
+    message(panel, "Erasing", "do not disconnect", "");
+    let mut empty = [0u8; catcard_callgate::pin::SECRET_LEN];
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    if let Err(f) = login.set_secret(&pin_gate, &empty) {
+        crate::catlog!("wipe: store failed");
+        message(panel, "Not erased", why_failed(f), "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+        return false;
+    }
+
+    let gone = login.verify_secret(&pin_gate, &empty).unwrap_or(false);
+    empty.zeroize();
+    crate::catlog!(
+        "wipe: {}",
+        if gone { "seed erased" } else { "NOT CONFIRMED" }
+    );
+    if gone {
+        message(panel, "Wallet erased", "no seed is stored", "");
+    } else {
+        // The write was accepted and the slot did not read back empty. Saying "erased"
+        // here would be worse than saying nothing.
+        message(panel, "Uncertain", "the slot did not", "read back empty");
+    }
+    wait_for_any_key(pad, matrix, drbg);
+    gone
 }
 
 /// Why a gate operation refused, in words that fit a line.
