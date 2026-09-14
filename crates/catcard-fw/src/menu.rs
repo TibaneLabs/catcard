@@ -1014,15 +1014,18 @@ fn install(
 // The bit fields refresh every frame (as fast as the elements deliver); the entropy
 // figures are recomputed on a ~5 Hz timer so the digits are readable rather than a blur.
 
-/// Split-view geometry: one framed bit field per secure element, stacked, SE1 over SE2.
-/// The field is `RNG_FW` x `RNG_FH` pixels with its inner top-left at (`RNG_FX`, y); a
-/// header line sits just above each. SE1's field starts at [`RNG_SE1_Y`], SE2's at
-/// [`RNG_SE2_Y`], splitting the 64-pixel height into two halves.
+/// Split-view geometry: one framed bit field per source, stacked -- SE1, SE2, then the
+/// STM32's own TRNG. Each field is `RNG_FW` x `RNG_FH` pixels with its inner top-left at
+/// (`RNG_FX`, `RNG_FIELD_Y[i]`), a header line eight pixels above it, and the three share
+/// the 64-pixel height in equal bands.
 const RNG_FX: usize = 2;
 const RNG_FW: usize = 122;
-const RNG_FH: usize = 20;
-const RNG_SE1_Y: usize = 9;
-const RNG_SE2_Y: usize = 41;
+const RNG_FH: usize = 11;
+/// Inner top of each source's field. Bands of 20 px: header at `y-8`, frame `y-1`, field
+/// `y..y+RNG_FH`, bottom border `y+RNG_FH`. The last ends at 59, inside 64.
+const RNG_FIELD_Y: [usize; 3] = [8, 28, 48];
+/// Sources shown, in band order.
+const RNG_SOURCES: usize = 3;
 /// Bytes backing one field: one bit per pixel, rounded up. Each source has its own.
 const RNG_RING: usize = (RNG_FW * RNG_FH).div_ceil(8);
 
@@ -1183,25 +1186,30 @@ fn analyze_rng(
     }
 
     let sources = [RngSource::Se1, RngSource::Se2];
-    // Everything below is kept per source, so a fault in one element is never masked by
-    // the other: its own histogram (for entropy), its own bounded total, its own
-    // lifetime count (for the readout), and its own ring of recent bytes (for the bits).
-    let mut hist = [[0u32; 256]; 2];
-    let mut total = [0u64; 2];
-    let mut seen = [0u64; 2];
-    let mut ring = [[0u8; RNG_RING]; 2];
-    let mut ring_at = [0usize; 2];
+    // The STM32's own hardware TRNG -- the third source. Independent of the callgate: if
+    // it will not start we still show the two elements, and its own empty field says so.
+    // SAFETY: the RNG peripheral's clock was set up at boot; nothing else touches it here.
+    let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
+
+    // Everything below is kept per source, so a fault in one is never masked by another:
+    // its own histogram (for entropy), its own bounded total, its own lifetime count (for
+    // the readout), and its own ring of recent bytes (for the bits).
+    let mut hist = [[0u32; 256]; RNG_SOURCES];
+    let mut total = [0u64; RNG_SOURCES];
+    let mut seen = [0u64; RNG_SOURCES];
+    let mut ring = [[0u8; RNG_RING]; RNG_SOURCES];
+    let mut ring_at = [0usize; RNG_SOURCES];
 
     // Recompute the entropy figures at ~5 Hz so the digits are readable.
     // SAFETY: reads the RCC config only.
     let hz = unsafe { catcard_hal::clock::hclk_hz() };
     let period = (hz / 5).max(1);
     let mut last_h = catcard_hal::dwt::cycles();
-    let mut h_text: [Line; 2] = [Line::new(), Line::new()];
+    let mut h_text: [Line; RNG_SOURCES] = core::array::from_fn(|_| Line::new());
     for h in h_text.iter_mut() {
         let _ = h.push_str("--");
     }
-    let mut chi2 = [0.0f32; 2];
+    let mut chi2 = [0.0f32; RNG_SOURCES];
 
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -1228,9 +1236,25 @@ fn analyze_rng(
             }
         }
 
+        // The chip TRNG (source 2). It is far faster than the elements, so a small read
+        // keeps it from swamping the frame while still turning its field over quickly.
+        let _ = usbtask::pump();
+        if let Some(rng) = &chip {
+            let mut buf = [0u8; 32];
+            if rng.fill(&mut buf).is_ok() {
+                for &b in &buf {
+                    seen[2] += 1;
+                    hist[2][b as usize] += 1;
+                    total[2] += 1;
+                    ring[2][ring_at[2]] = b;
+                    ring_at[2] = (ring_at[2] + 1) % RNG_RING;
+                }
+            }
+        }
+
         // Keep each source's counts (and so its f32 sums) bounded, and let the measure
         // stay adaptive: halving every bin preserves the ratios that entropy depends on.
-        for i in 0..2 {
+        for i in 0..RNG_SOURCES {
             if total[i] >= (1 << 20) {
                 total[i] = 0;
                 for c in hist[i].iter_mut() {
@@ -1243,7 +1267,7 @@ fn analyze_rng(
         let now = catcard_hal::dwt::cycles();
         if now.wrapping_sub(last_h) >= period {
             last_h = now;
-            for i in 0..2 {
+            for i in 0..RNG_SOURCES {
                 h_text[i].clear();
                 let _ = write!(h_text[i], "{:.2}", shannon_bits(&hist[i], total[i]));
                 chi2[i] = chi2_uniform(&hist[i], total[i]);
@@ -1251,12 +1275,19 @@ fn analyze_rng(
         }
 
         let mut fb = Mono128x64::new();
-        draw_se_view(
-            &mut fb, RNG_SE1_Y, "SE1", &h_text[0], chi2[0], seen[0], &ring[0], true,
-        );
-        draw_se_view(
-            &mut fb, RNG_SE2_Y, "SE2", &h_text[1], chi2[1], seen[1], &ring[1], false,
-        );
+        let labels = ["SE1", "SE2", "S32"];
+        for i in 0..RNG_SOURCES {
+            draw_se_view(
+                &mut fb,
+                RNG_FIELD_Y[i],
+                labels[i],
+                &h_text[i],
+                chi2[i],
+                seen[i],
+                &ring[i],
+                i == 0, // the exit hint sits on the first band only
+            );
+        }
         display::show_mono(panel, &fb);
         let _ = usbtask::pump();
 
