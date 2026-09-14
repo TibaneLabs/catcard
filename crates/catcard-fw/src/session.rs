@@ -109,9 +109,9 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // `unlock` only returns once the PIN is in -- a blank device is offered setup
     // rather than being turned away, so there is no longer a state where the front
     // panel has nothing to offer.
-    let (head, note) = match unlocked {
-        pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet"),
-        pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet"),
+    let (head, note, no_seed) = match unlocked {
+        pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet", true),
+        pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet", false),
     };
     // Move the pool out of the report rather than borrowing it from inside: the menu
     // holds `&report` for as long as it runs, so a `&mut` into the same struct could
@@ -126,6 +126,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         matrix: &mut matrix,
         drbg: &mut drbg,
         report: &report,
+        no_seed,
         pool: pool.as_mut(),
         head,
         note,

@@ -91,6 +91,24 @@ const MAIN_ITEMS: &[&str] = &[
     "New wallet",
     "Reboot",
 ];
+/// The same list with the only useful action first, for a device holding no wallet.
+///
+/// A device with no seed has exactly one thing worth doing. Making someone scroll past
+/// Debug and Utils to find it is backwards.
+const MAIN_ITEMS_BLANK: &[&str] = &[
+    "New wallet",
+    "Status",
+    "Install from SD",
+    "Debug",
+    "Utils",
+    "About",
+    "Reboot",
+];
+
+/// The main menu, ordered for the device in front of you.
+fn main_items(no_seed: bool) -> &'static [&'static str] {
+    if no_seed { MAIN_ITEMS_BLANK } else { MAIN_ITEMS }
+}
 const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
@@ -118,6 +136,7 @@ pub fn run(session: Session<'_>) -> ! {
         matrix,
         drbg,
         report,
+        no_seed,
         mut pool,
         head,
         note,
@@ -135,6 +154,7 @@ pub fn run(session: Session<'_>) -> ! {
         keys_seen: 0,
         sc: Scroll::new(),
         log_scroll: 0,
+        no_seed,
     };
 
     let mut pad = Keypad::new();
@@ -197,7 +217,7 @@ pub fn run(session: Session<'_>) -> ! {
 
             // Cursor movement first: it stays on this screen, so it never reaches the
             // transition table below.
-            if let Some(items) = items_of(screen) {
+            if let Some(items) = items_of(screen, v.no_seed) {
                 match key {
                     // The up and down arrows on the keys.
                     Key::Digit(5) => {
@@ -232,7 +252,7 @@ pub fn run(session: Session<'_>) -> ! {
                 }
             }
 
-            let next = step(gate, panel, screen, *key, v.sc.cursor);
+            let next = step(gate, panel, screen, *key, v.sc.cursor, v.no_seed);
             if next == Screen::SdInstall {
                 install_from_card(gate, login, panel, matrix, drbg);
                 v.sc = Scroll::new();
@@ -259,6 +279,10 @@ pub fn run(session: Session<'_>) -> ! {
             }
             if next == Screen::NewSeed {
                 new_seed(gate, login, panel, matrix, drbg, pool.as_deref_mut());
+                // A wallet that now exists reorders the menu, so re-read the slot state
+                // from the login rather than assuming the flow got as far as storing
+                // one -- it can be declined or refused at several points.
+                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
                 v.sc = Scroll::new();
                 screen = Screen::Main;
                 break;
@@ -285,6 +309,7 @@ fn step(
     screen: Screen,
     key: Key,
     cursor: usize,
+    no_seed: bool,
 ) -> Screen {
     // The right arrow goes in and the left arrow comes out, the same as `y` and `x`.
     // Normalising here keeps every screen below written in terms of two actions rather
@@ -295,18 +320,20 @@ fn step(
         k => k,
     };
     match screen {
-        Screen::Main => match (key, cursor) {
+        // Dispatched by name rather than by cursor index, because this list reorders:
+        // a device with no seed puts "New wallet" first. An index table silently points
+        // at the wrong entry the moment the order changes, and the entry it used to
+        // reach by falling through was Reboot.
+        Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
             // "Status" is the screen behind the menu, so choosing it just redraws --
             // there is no separate page.
-            (Key::Confirm, 0) => Screen::Main,
-            (Key::Confirm, 1) => Screen::SdInstall,
-            (Key::Confirm, 2) => Screen::Debug,
-            (Key::Confirm, 3) => Screen::Utils,
-            (Key::Confirm, 4) => Screen::About,
-            (Key::Confirm, 5) => Screen::NewSeed,
-            // Anything past the named items reboots, so a new entry needs its own arm
-            // above this one or choosing it restarts the device.
-            (Key::Confirm, _) => {
+            (Key::Confirm, Some("Status")) => Screen::Main,
+            (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            (Key::Confirm, Some("Debug")) => Screen::Debug,
+            (Key::Confirm, Some("Utils")) => Screen::Utils,
+            (Key::Confirm, Some("About")) => Screen::About,
+            (Key::Confirm, Some("New wallet")) => Screen::NewSeed,
+            (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
                 unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
@@ -360,6 +387,8 @@ pub struct Session<'a> {
     pub matrix: &'a mut GpioMatrix,
     pub drbg: &'a mut HmacDrbg,
     pub report: &'a BootReport,
+    /// Whether the secret slot is still empty, as the bootloader reported it at login.
+    pub no_seed: bool,
     /// The boot entropy pool, moved out of the report so it can be drawn from.
     ///
     /// `None` on a device whose pool never met its policy — which is a refusal to
@@ -385,12 +414,14 @@ struct View<'a> {
     sc: Scroll,
     /// First line shown by the log viewer.
     log_scroll: usize,
+    /// No wallet stored yet, so the main menu leads with creating one.
+    no_seed: bool,
 }
 
 /// The list on this screen, if it is a menu.
-fn items_of(screen: Screen) -> Option<&'static [&'static str]> {
+fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
     match screen {
-        Screen::Main => Some(MAIN_ITEMS),
+        Screen::Main => Some(main_items(no_seed)),
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         _ => None,
@@ -403,7 +434,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // The note line is the USB state rather than a fixed string: it was the one
         // number worth seeing without navigating anywhere, and losing it to a submenu
         // would undo the thing this menu exists to fix.
-        Screen::Main => menu(panel, v.head, &usb_line(v.note), MAIN_ITEMS, v.sc),
+        Screen::Main => menu(panel, v.head, &usb_line(v.note), main_items(v.no_seed), v.sc),
         Screen::About => about_screen(panel),
         Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
         Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
