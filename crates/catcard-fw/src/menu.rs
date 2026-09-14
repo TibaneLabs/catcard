@@ -107,7 +107,11 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
 
 /// The main menu, ordered for the device in front of you.
 fn main_items(no_seed: bool) -> &'static [&'static str] {
-    if no_seed { MAIN_ITEMS_BLANK } else { MAIN_ITEMS }
+    if no_seed {
+        MAIN_ITEMS_BLANK
+    } else {
+        MAIN_ITEMS
+    }
 }
 const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
 const DEBUG_ITEMS: &[&str] = &[
@@ -434,7 +438,13 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // The note line is the USB state rather than a fixed string: it was the one
         // number worth seeing without navigating anywhere, and losing it to a submenu
         // would undo the thing this menu exists to fix.
-        Screen::Main => menu(panel, v.head, &usb_line(v.note), main_items(v.no_seed), v.sc),
+        Screen::Main => menu(
+            panel,
+            v.head,
+            &usb_line(v.note),
+            main_items(v.no_seed),
+            v.sc,
+        ),
         Screen::About => about_screen(panel),
         Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
         Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
@@ -762,7 +772,11 @@ fn colours_screen(panel: &mut display::Panel) {
 #[cfg(not(feature = "board-q1"))]
 fn colours_screen(panel: &mut display::Panel) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    for text in ["mono OLED: black and white", "only -- nothing to chart", "any key  back"] {
+    for text in [
+        "mono OLED: black and white",
+        "only -- nothing to chart",
+        "any key  back",
+    ] {
         let mut l = Line::new();
         let _ = l.push_str(text);
         let _ = lines.push(l);
@@ -1084,7 +1098,13 @@ fn draw_se_view(
     // A thin frame, then this source's bytes one bit per pixel. Laid out column by
     // column with the newest bits entering at the right, so the write head sweeps
     // right-to-left down the field rather than top-to-bottom across it.
-    fb.rect(RNG_FX - 1, field_y - 1, RNG_FX + RNG_FW + 1, field_y + RNG_FH + 1, true);
+    fb.rect(
+        RNG_FX - 1,
+        field_y - 1,
+        RNG_FX + RNG_FW + 1,
+        field_y + RNG_FH + 1,
+        true,
+    );
     for col in 0..RNG_FW {
         for row in 0..RNG_FH {
             let bit = (RNG_FW - 1 - col) * RNG_FH + row;
@@ -1180,8 +1200,12 @@ fn analyze_rng(
         }
 
         let mut fb = Mono128x64::new();
-        draw_se_view(&mut fb, RNG_SE1_Y, "SE1", &h_text[0], chi2[0], seen[0], &ring[0], true);
-        draw_se_view(&mut fb, RNG_SE2_Y, "SE2", &h_text[1], chi2[1], seen[1], &ring[1], false);
+        draw_se_view(
+            &mut fb, RNG_SE1_Y, "SE1", &h_text[0], chi2[0], seen[0], &ring[0], true,
+        );
+        draw_se_view(
+            &mut fb, RNG_SE2_Y, "SE2", &h_text[1], chi2[1], seen[1], &ring[1], false,
+        );
         display::show_mono(panel, &fb);
         let _ = usbtask::pump();
 
@@ -1252,6 +1276,82 @@ fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     });
 }
 
+/// What the entropy screens report.
+///
+/// A struct because seven numbers passed positionally is one transposed pair away from
+/// telling someone their wallet has more entropy behind it than it does.
+struct Gathered {
+    /// Credited bits the pool already held from boot: the chip TRNG, both elements and
+    /// startup timing, collected before this screen existed.
+    boot_bits: u32,
+    /// Bytes each secure element has answered with during *this* generation.
+    se1: usize,
+    se2: usize,
+    /// Credited bits and distinct hardware TRNGs the pool counts right now.
+    bits: u32,
+    chips: u32,
+    /// What this board's policy demands before a seed may be drawn at all.
+    need_bits: u32,
+    need_chips: u32,
+}
+
+impl Gathered {
+    fn lines(&self, out: &mut heapless::Vec<Line, 5>) {
+        let mut l = Line::new();
+        let _ = write!(l, "boot pool {:5} bits", self.boot_bits);
+        let _ = out.push(l);
+        for (name, n) in [("SE1", self.se1), ("SE2", self.se2)] {
+            let mut l = Line::new();
+            let _ = write!(l, "{name}  read {n:5} bytes");
+            let _ = out.push(l);
+        }
+        let mut l = Line::new();
+        let _ = write!(l, "chips  {} of {} needed", self.chips, self.need_chips);
+        let _ = out.push(l);
+        let mut l = Line::new();
+        let _ = write!(l, "total {:5} / {} bits", self.bits, self.need_bits);
+        let _ = out.push(l);
+    }
+}
+
+/// The count, climbing, with a bar along the bottom row.
+///
+/// Reading a kilobyte out of two secure elements takes long enough to look like a hang,
+/// and a wallet being created is the worst moment for a device to look stuck. Counting
+/// each element separately also shows *which* one is answering: a column that stops
+/// moving is a dead element, which a single bar would hide.
+///
+/// The bits shown are what the pool *credits*, not what was read — hardware noise is
+/// credited at half its nominal rate, so the two differ by design and showing the
+/// larger number would overstate what the device actually has.
+fn gathering(panel: &mut display::Panel, g: &Gathered, pct: u8) {
+    let mut lines: heapless::Vec<Line, 5> = heapless::Vec::new();
+    g.lines(&mut lines);
+    display::draw(panel, |c| {
+        catcard_ui::widgets::info(c, &display::LAYOUT, "Collecting entropy", &lines);
+        catcard_ui::splash::draw_progress(c, pct);
+    });
+}
+
+/// What was collected, and whether the policy is actually satisfied.
+///
+/// Shown before the seed is drawn and acknowledged with a key, so the numbers behind a
+/// wallet are seen once by the person who will own it. `passed` is the pool's own
+/// verdict from `check()`, not an assumption that the loop above did its job.
+fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
+    let mut lines: heapless::Vec<Line, 5> = heapless::Vec::new();
+    g.lines(&mut lines);
+    info(
+        panel,
+        if passed {
+            "Entropy OK, any key"
+        } else {
+            "NOT ENOUGH ENTROPY"
+        },
+        &lines,
+    );
+}
+
 /// Create a wallet: draw entropy, store it, verify it, and show the words once.
 ///
 /// The order is the point. The secret is written **and read back before any word reaches
@@ -1284,15 +1384,111 @@ fn new_seed(
     // only warning anyone gets. `zero_secret` is the bootloader's own answer about the
     // slot, not a guess of ours.
     if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
-        ask(panel, "Wallet exists", "a new seed DESTROYS", "the one stored now");
+        ask(
+            panel,
+            "Wallet exists",
+            "a new seed DESTROYS",
+            "the one stored now",
+        );
         if !confirmed(matrix, drbg) {
             return;
         }
     }
-    ask(panel, "Create wallet?", "24 words, from this", "device's own TRNGs");
+    ask(
+        panel,
+        "Create wallet?",
+        "24 words, from this",
+        "device's own TRNGs",
+    );
     if !confirmed(matrix, drbg) {
         return;
     }
+
+    // Fresh noise from both secure elements, on top of what the boot pool already
+    // holds. The boot pool has met its policy or we would not be here; this is added
+    // material, not a substitute for it.
+    //
+    // It goes through `EntropyPool` rather than into a hash of its own, because the
+    // pool is what runs the health tests, keeps the sources domain-separated and
+    // credits them. A side digest would mix the same bytes twice while skipping all
+    // three. If an element answers with something that fails its health test the pool
+    // is poisoned and `draw_seed` below refuses -- which is the intended outcome, not a
+    // reason to fall back to the boot material alone.
+    // How long to hold each step on screen. Legibility only: thirty-two counts that
+    // flash past in a blink show nothing, and nobody can check a number they cannot
+    // read. It contributes no entropy and must never be mistaken for doing so.
+    const STEP_PAUSE_CYCLES: u32 = 4_000_000;
+
+    let policy = crate::entropy_policy();
+    let boot_bits = pool.credited_bits();
+    let mut g = Gathered {
+        boot_bits,
+        se1: 0,
+        se2: 0,
+        bits: boot_bits,
+        chips: pool.hardware_sources(),
+        need_bits: policy.min_bits,
+        need_chips: policy.min_hw_sources,
+    };
+
+    if catcard_board::BOARD.has_callgate_se_rng {
+        // 16 rounds of 32 bytes from each element: a kilobyte of fresh noise, and
+        // thirty-two visible steps rather than a bar that jumps.
+        const ROUNDS: usize = 16;
+        const READS: usize = ROUNDS * 2;
+        let mut done = 0usize;
+        gathering(panel, &g, 0);
+
+        for _ in 0..ROUNDS {
+            for (src, tag) in [
+                (
+                    catcard_callgate::abi::RngSource::Se1,
+                    catcard_entropy::Source::Se1Trng,
+                ),
+                (
+                    catcard_callgate::abi::RngSource::Se2,
+                    catcard_entropy::Source::Se2Trng,
+                ),
+            ] {
+                let mut buf = [0u8; 33];
+                // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
+                // `buf` is on our stack, which the linker places in SRAM1, and `call`
+                // range-checks it regardless.
+                if let Ok(n) = unsafe { gate.se_rng(src, &mut buf) }
+                    && n > 0
+                {
+                    pool.add(tag, &buf[1..1 + n]);
+                    // Counted only when bytes actually arrived, so a column that stops
+                    // moving is an element that stopped answering.
+                    if matches!(tag, catcard_entropy::Source::Se1Trng) {
+                        g.se1 += n;
+                    } else {
+                        g.se2 += n;
+                    }
+                }
+                buf.zeroize();
+                done += 1;
+                g.bits = pool.credited_bits();
+                g.chips = pool.hardware_sources();
+                gathering(panel, &g, (done * 100 / READS) as u8);
+                catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
+            }
+        }
+    }
+
+    // The pool's own verdict, not ours. If a source failed its health test the pool is
+    // poisoned and this is where that becomes visible, before any word is shown.
+    let passed = pool.check().is_ok();
+    crate::catlog!(
+        "seed: SE1 {} B, SE2 {} B, {} bits from {} chips, policy {}",
+        g.se1,
+        g.se2,
+        g.bits,
+        g.chips,
+        if passed { "ok" } else { "FAILED" }
+    );
+    entropy_report(panel, &g, passed);
+    wait_for_any_key(matrix, drbg);
 
     let mut entropy = match pool.draw_seed() {
         Ok(e) => e,
@@ -1339,7 +1535,12 @@ fn new_seed(
     secret.zeroize();
     if !kept {
         crate::catlog!("seed: read-back mismatch");
-        message(panel, "Not stored", "the slot did not keep", "what was written");
+        message(
+            panel,
+            "Not stored",
+            "the slot did not keep",
+            "what was written",
+        );
         wait_for_any_key(matrix, drbg);
         return;
     }
