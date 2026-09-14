@@ -74,6 +74,28 @@ pub const GREYS: [u16; 16] = {
     p
 };
 
+/// Black to the Coldcard amber: the hue the bootloader and the stock UI paint in.
+///
+/// The top of the ramp is `COL_TEXT` = `0xFD60` = (31, 43, 0), and blue stays at zero the
+/// whole way up, which is what makes it one hue rather than a wash toward white. Because
+/// the levels are a ramp and not a single colour, anti-aliased glyph edges land on dimmer
+/// *amber* instead of fringing grey.
+///
+/// These are the reference's own sixteen values rather than a ramp recomputed here. A
+/// linear one is close but not identical — index 11 would come out (22, 31, 0) against
+/// the real (21, 30, 0) — and "the same amber as the bootloader" is a parity claim, so it
+/// is copied rather than approximated.
+///
+/// The values are true RGB565; [`St7789::send_gray_rows`] emits them big-endian. The
+/// stock firmware stores its own copies byte-swapped to suit `swab16`, which is a fact
+/// about its storage and not about these numbers.
+///
+/// Source: hw-reference/display.md §"Q1 — colour palette & screen layout" [C]
+pub const AMBER: [u16; 16] = [
+    0x0000, 0x0840, 0x18A0, 0x2900, 0x3940, 0x49A0, 0x5A00, 0x6A60, 0x7AA0, 0x8B00, 0x9B60, 0xABC0,
+    0xBC00, 0xDCC0, 0xED00, 0xFD60,
+];
+
 /// Height of one colour-chart band: six of them fill the panel.
 const BAND: usize = HEIGHT / 6;
 
@@ -636,6 +658,26 @@ mod tests {
         assert_eq!(GREYS[0], BLACK);
         assert_eq!(GREYS[15], WHITE);
         assert!(GREYS.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    /// The amber ramp has to stay the bootloader's amber, and stay one hue.
+    ///
+    /// Blue at zero is the property that makes it a hue rather than a wash toward white:
+    /// let blue climb and the top of the ramp drifts to cream, which is what a
+    /// "simplified" linear ramp reintroduces.
+    #[test]
+    fn the_amber_palette_is_the_reference_ramp_and_never_leaves_its_hue() {
+        assert_eq!(AMBER[0], BLACK);
+        // COL_TEXT from display.md: (31, 43, 0).
+        assert_eq!(AMBER[15], 0xFD60);
+        assert_eq!(AMBER[15], rgb565(31, 43, 0));
+        assert!(AMBER.windows(2).all(|w| w[1] > w[0]), "not rising");
+        assert!(AMBER.iter().all(|v| v & 0x1F == 0), "blue is not zero");
+        assert_ne!(AMBER[15], WHITE, "amber should not reach white");
+        // Copied from the reference, not recomputed: a rounded linear ramp puts
+        // (22, 31, 0) at index 11 where the real one has (21, 30, 0).
+        assert_eq!(AMBER[11], 0xABC0);
+        assert_ne!(AMBER, GREYS);
     }
 
     #[test]

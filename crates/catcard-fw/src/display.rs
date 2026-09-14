@@ -274,8 +274,14 @@ static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// The widgets clear the canvas themselves, so every frame replaces the whole of the last
 /// one. A flush that fails is not worth stopping for -- the device is still reachable over
 /// USB, and the next draw tries again.
+///
+/// Every ordinary screen paints in [`AMBER`](catcard_ui::st7789::AMBER), the hue the
+/// bootloader hands over in, so the device does not change colour between the loader and
+/// the firmware. The splash and About screens are the exception: they draw through the
+/// artwork's own palette, where text is white so "CatCard" and the version stand off the
+/// cat rather than disappearing into it.
 pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
-    draw_with_palette(panel, &catcard_ui::st7789::GREYS, f);
+    draw_with_palette(panel, &catcard_ui::st7789::AMBER, f);
 }
 
 /// Draw a screen whose canvas means colours rather than greys.
