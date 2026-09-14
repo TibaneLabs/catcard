@@ -258,31 +258,39 @@ pub fn run(session: Session<'_>) -> ! {
 
             let next = step(gate, panel, screen, *key, v.sc.cursor, v.no_seed);
             if next == Screen::SdInstall {
-                install_from_card(gate, login, panel, matrix, drbg);
+                install_from_card(gate, login, panel, &mut pad, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Main;
                 break;
             }
             if next == Screen::SaveLog {
-                save_log_to_card(panel, matrix, drbg);
+                save_log_to_card(panel, &mut pad, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Debug;
                 break;
             }
             if next == Screen::AnalyzeRng {
-                analyze_rng(gate, panel, matrix, drbg);
+                analyze_rng(gate, panel, &mut pad, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Utils;
                 break;
             }
             if next == Screen::UsbDrive {
-                usb_drive(panel, matrix, drbg);
+                usb_drive(panel, &mut pad, matrix, drbg);
                 v.sc = Scroll::new();
                 screen = Screen::Utils;
                 break;
             }
             if next == Screen::NewSeed {
-                new_seed(gate, login, panel, matrix, drbg, pool.as_deref_mut());
+                new_seed(
+                    gate,
+                    login,
+                    panel,
+                    &mut pad,
+                    matrix,
+                    drbg,
+                    pool.as_deref_mut(),
+                );
                 // A wallet that now exists reorders the menu, so re-read the slot state
                 // from the login rather than assuming the flow got as far as storing
                 // one -- it can be declined or refused at several points.
@@ -797,6 +805,7 @@ fn install_from_card(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
+    pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
 ) {
@@ -809,18 +818,17 @@ fn install_from_card(
         Outcome::Failed(why) => {
             crate::catlog!("sd: {}", why);
             message(panel, "No upgrade", why, "any key to go back");
-            wait_for_any_key(matrix, drbg);
+            wait_for_any_key(pad, matrix, drbg);
             return;
         }
     };
 
     crate::session::show_offer(panel, &approval);
 
-    let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         for k in keys.iter() {
             match k {
                 Key::Confirm => {
@@ -833,7 +841,7 @@ fn install_from_card(
                             message(panel, "Failed", "could not stage", "any key to go back");
                         }
                     }
-                    wait_for_any_key(matrix, drbg);
+                    wait_for_any_key(pad, matrix, drbg);
                     return;
                 }
                 Key::Cancel => return,
@@ -854,7 +862,12 @@ fn install_from_card(
 /// has never run on hardware, so a failure here is as likely to be the first exercise of
 /// `write_sectors` as a bad card, and the step is the difference. Nothing here is
 /// irreversible -- at worst it leaves a short file behind.
-fn save_log_to_card(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+fn save_log_to_card(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
     crate::catlog!("sd: saving log");
     message(panel, "Saving log", "please wait", "");
 
@@ -874,7 +887,7 @@ fn save_log_to_card(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &
             message(panel, "Save failed", why, "any key to go back");
         }
     }
-    wait_for_any_key(matrix, drbg);
+    wait_for_any_key(pad, matrix, drbg);
 }
 
 /// Bring the card up, mount it, and write `bytes` to `/CATCARD.LOG`.
@@ -1118,6 +1131,7 @@ fn draw_se_view(
 fn analyze_rng(
     gate: &Callgate,
     panel: &mut display::Panel,
+    pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
 ) {
@@ -1126,7 +1140,7 @@ fn analyze_rng(
     if !catcard_board::BOARD.has_callgate_se_rng {
         crate::catlog!("rng: no SE RNG on this board");
         message(panel, "Analyze RNG", "no SE RNG here", "any key to go back");
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         return;
     }
 
@@ -1151,7 +1165,6 @@ fn analyze_rng(
     }
     let mut chi2 = [0.0f32; 2];
 
-    let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
@@ -1209,7 +1222,7 @@ fn analyze_rng(
         display::show_mono(panel, &fb);
         let _ = usbtask::pump();
 
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         if keys
             .iter()
             .any(|k| matches!(k, Key::Cancel | Key::Digit(7)))
@@ -1219,16 +1232,40 @@ fn analyze_rng(
     }
 }
 
+/// Block until no key is held.
+///
+/// Every screen that waits for a press calls this first, and it is not a nicety. A key
+/// still down from the *previous* screen is reported the moment the next screen starts
+/// waiting, so one long press walks through several screens in a row -- which is how a
+/// page of seed words went past before it could be read, and why the fix belongs here
+/// rather than in the screens.
+///
+/// `held_count` is the debounced state of the pad, so this asks what is physically down
+/// instead of inferring it from events. Scanning still has to run while its events are
+/// thrown away: the scan is what updates that state.
+fn wait_for_release(pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+        if pad.held_count() == 0 {
+            return;
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
+}
+
 /// Block until something is pressed. Used only by screens that have already said so.
-fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
-    let mut pad = Keypad::new();
+fn wait_for_any_key(pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    wait_for_release(pad, matrix, drbg);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         // Service USB while this message is up, for the same reason as the main loop:
         // a polled bus that no one pumps is a device the host cannot reach.
         let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             return;
         }
@@ -1240,13 +1277,15 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
 ///
 /// Any other key keeps waiting. This is asked before something irreversible, and "a key
 /// was pressed" is not consent — [`wait_for_any_key`] is the one that takes anything.
-fn confirmed(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
-    let mut pad = Keypad::new();
+fn confirmed(pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
+    // The key that brought us to this question must not also answer it. That matters
+    // most here: one of the questions this asks destroys a stored wallet.
+    wait_for_release(pad, matrix, drbg);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         for k in keys.iter() {
             match k {
                 Key::Confirm => return true,
@@ -1366,6 +1405,7 @@ fn new_seed(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
+    pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     pool: Option<&mut catcard_entropy::EntropyPool>,
@@ -1376,7 +1416,7 @@ fn new_seed(
     // No pool means it never met its policy at boot. That is a refusal.
     let Some(pool) = pool else {
         message(panel, "No entropy", "the pool missed its", "policy at boot");
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         return;
     };
 
@@ -1390,7 +1430,7 @@ fn new_seed(
             "a new seed DESTROYS",
             "the one stored now",
         );
-        if !confirmed(matrix, drbg) {
+        if !confirmed(pad, matrix, drbg) {
             return;
         }
     }
@@ -1400,7 +1440,7 @@ fn new_seed(
         "24 words, from this",
         "device's own TRNGs",
     );
-    if !confirmed(matrix, drbg) {
+    if !confirmed(pad, matrix, drbg) {
         return;
     }
 
@@ -1488,7 +1528,7 @@ fn new_seed(
         if passed { "ok" } else { "FAILED" }
     );
     entropy_report(panel, &g, passed);
-    wait_for_any_key(matrix, drbg);
+    wait_for_any_key(pad, matrix, drbg);
 
     let mut entropy = match pool.draw_seed() {
         Ok(e) => e,
@@ -1499,7 +1539,7 @@ fn new_seed(
             let mut l = Line::new();
             let _ = write!(l, "{e}");
             info(panel, "Refused", &[l]);
-            wait_for_any_key(matrix, drbg);
+            wait_for_any_key(pad, matrix, drbg);
             return;
         }
     };
@@ -1513,25 +1553,52 @@ fn new_seed(
         // written out rather than unwrapped because this is the one function that holds
         // a wallet, and a panic here would take the seed to the panic screen with it.
         message(panel, "Failed", "could not encode", "that seed length");
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         return;
     };
 
-    message(panel, "Storing", "do not disconnect", "");
+    // Words first, the quiz second, the secure element last.
+    //
+    // That order is the safe one, and it is worth being explicit about why, because the
+    // obvious ordering is the wrong way round. Commit first and a power loss between
+    // the write and the words leaves a wallet in the element that nobody has a backup
+    // of. Commit last and the same power loss leaves nothing at all: the user starts
+    // again and draws fresh words, having lost only their time.
+    //
+    // A failed quiz is therefore free. No wallet exists yet, so it costs nothing to
+    // send them back to the list rather than discarding twenty-four hand-written words
+    // over one mistaken key.
+    loop {
+        show_words(panel, pad, matrix, drbg, &mnemonic);
+        if quiz(panel, pad, matrix, drbg, &mnemonic) {
+            break;
+        }
+        ask(panel, "Not confirmed", "read them again", "and retry?");
+        if !confirmed(pad, matrix, drbg) {
+            secret.zeroize();
+            crate::catlog!("seed: words not confirmed, nothing stored");
+            message(panel, "Nothing stored", "no wallet was", "created");
+            wait_for_any_key(pad, matrix, drbg);
+            return;
+        }
+    }
+
+    message(panel, "Applying", "do not disconnect", "");
     // `Login` is driven through the `PinGate` seam, so that the same sequencing runs
     // against a model on the host and the callgate here.
-    let g = crate::pinentry::BootloaderGate::new(gate);
-    let outcome = login.set_secret(&g, &secret);
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let outcome = login.set_secret(&pin_gate, &secret);
     if let Err(f) = outcome {
         secret.zeroize();
         crate::catlog!("seed: store failed");
         message(panel, "Not stored", why_failed(f), "any key to go back");
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         return;
     }
 
-    // Read it back before anyone writes anything down.
-    let kept = login.verify_secret(&g, &secret).unwrap_or(false);
+    // Read it back. The words are already written down by this point, so a slot that
+    // did not keep them has to be reported rather than assumed good.
+    let kept = login.verify_secret(&pin_gate, &secret).unwrap_or(false);
     secret.zeroize();
     if !kept {
         crate::catlog!("seed: read-back mismatch");
@@ -1541,12 +1608,113 @@ fn new_seed(
             "the slot did not keep",
             "what was written",
         );
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         return;
     }
 
     crate::catlog!("seed: stored, {} words", mnemonic.word_count());
-    show_words(panel, matrix, drbg, &mnemonic);
+    message(
+        panel,
+        "Wallet created",
+        "keep those words",
+        "somewhere safe",
+    );
+    wait_for_any_key(pad, matrix, drbg);
+}
+
+/// Ask for some of the words back, before anything is committed.
+///
+/// The only evidence the device ever gets that the words were written down rather than
+/// paged past. It runs before the secret reaches the element, so failing it costs
+/// nothing: no wallet exists yet and the caller offers the list again.
+///
+/// Decoys come from the same wordlist as the answer, so nothing about the shape or
+/// rarity of an option narrows it down, and the three are shuffled by the DRBG rather
+/// than placed — the correct one must not sit in a predictable slot.
+///
+/// Returns false on a wrong answer or a cancel; the caller stores nothing either way.
+fn quiz(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    m: &catcard_wallet::bip39::Mnemonic,
+) -> bool {
+    use catcard_wallet::bip39::wordlist::{ENGLISH, WORD_COUNT};
+    const ASKS: usize = 3;
+    const CHOICES: usize = 3;
+
+    let total = m.word_count();
+    for _ in 0..ASKS {
+        // A DRBG failure means it wants reseeding. Refusing is the only safe answer: a
+        // quiz whose questions are predictable proves nothing.
+        let Ok(pos) = drbg.below(total as u32) else {
+            return false;
+        };
+        let pos = pos as usize;
+        let Some(correct) = m.words().nth(pos) else {
+            return false;
+        };
+
+        let mut choices = [correct; CHOICES];
+        for i in 1..CHOICES {
+            loop {
+                let Ok(pick) = drbg.below(WORD_COUNT as u32) else {
+                    return false;
+                };
+                let w = ENGLISH[pick as usize];
+                // Distinct from the answer and from the other decoys, or the question
+                // has two right answers or fewer than three options.
+                if w != correct && !choices[..i].contains(&w) {
+                    choices[i] = w;
+                    break;
+                }
+            }
+        }
+        let _ = drbg.shuffle(&mut choices);
+
+        let mut lines: heapless::Vec<Line, CHOICES> = heapless::Vec::new();
+        for (i, w) in choices.iter().enumerate() {
+            let mut l = Line::new();
+            let _ = write!(l, "{}  {w}", i + 1);
+            let _ = lines.push(l);
+        }
+        let mut title = Line::new();
+        let _ = write!(title, "Which is word {}?", pos + 1);
+        info(panel, &title, &lines);
+
+        match read_choice(pad, matrix, drbg, CHOICES) {
+            Some(i) if choices[i] == correct => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Wait for one of `n` numbered choices, or a cancel.
+fn read_choice(
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    n: usize,
+) -> Option<usize> {
+    wait_for_release(pad, matrix, drbg);
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Cancel => return None,
+                Key::Digit(d) if *d >= 1 && (*d as usize) <= n => {
+                    return Some(*d as usize - 1);
+                }
+                _ => {}
+            }
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
 }
 
 /// Why a gate operation refused, in words that fit a line.
@@ -1563,6 +1731,7 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
 /// Show the words a screenful at a time. The only time they are ever displayed.
 fn show_words(
     panel: &mut display::Panel,
+    pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     m: &catcard_wallet::bip39::Mnemonic,
@@ -1583,7 +1752,7 @@ fn show_words(
         let _ = write!(foot, "{}-{last} of {total}, any key", shown + 1);
         let _ = lines.push(foot);
         info(panel, "Write these down", &lines);
-        wait_for_any_key(matrix, drbg);
+        wait_for_any_key(pad, matrix, drbg);
         shown += per;
     }
 }
@@ -1768,12 +1937,12 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
 /// Draw up to three lines and return.
 /// Block until any key is pressed. For the error notices below, which would otherwise be
 /// overwritten by the menu redraw the instant this returns.
-fn wait_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
-    let mut pad = Keypad::new();
+fn wait_any_key(pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    wait_for_release(pad, matrix, drbg);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             return;
         }
@@ -1787,7 +1956,12 @@ fn wait_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
 /// is gone until it leaves -- and serves Bulk-Only Transport against the card. On `x` it
 /// switches its identity back and returns. Reached only from `Utils`, which is behind the
 /// PIN, so the card is never exposed on a locked device.
-fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+fn usb_drive(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
     use catcard_hal::sdmmc::Sdmmc;
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
@@ -1796,7 +1970,7 @@ fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut Hma
         Ok(d) => d,
         Err(_) => {
             message(panel, "USB Drive", "no SD controller", "press a key");
-            wait_any_key(matrix, drbg);
+            wait_any_key(pad, matrix, drbg);
             return;
         }
     };
@@ -1804,12 +1978,12 @@ fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut Hma
         Ok(c) => c,
         Err(catcard_sd::Error::NoCard) => {
             message(panel, "USB Drive", "no card in slot", "press a key");
-            wait_any_key(matrix, drbg);
+            wait_any_key(pad, matrix, drbg);
             return;
         }
         Err(_) => {
             message(panel, "USB Drive", "card would not start", "press a key");
-            wait_any_key(matrix, drbg);
+            wait_any_key(pad, matrix, drbg);
             return;
         }
     };
@@ -1819,7 +1993,6 @@ fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut Hma
     // Re-enumerate as a disk, serve it, and switch the identity back on the way out.
     crate::usbtask::msc_enter();
 
-    let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     let mut spins: u32 = 0;
@@ -1830,7 +2003,7 @@ fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut Hma
         if !spins.is_multiple_of(16384) {
             return false;
         }
-        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         keys.contains(&Key::Cancel)
     });
 
