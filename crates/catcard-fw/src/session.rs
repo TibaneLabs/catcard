@@ -113,6 +113,12 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet"),
         pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet"),
     };
+    // Move the pool out of the report rather than borrowing it from inside: the menu
+    // holds `&report` for as long as it runs, so a `&mut` into the same struct could
+    // never coexist with it. Nothing reads `report.pool` after this point -- the UI DRBG
+    // was spawned above, and the selftest screen reports `entropy`, not the pool.
+    let mut pool = report.pool.take();
+
     menu::run(menu::Session {
         gate: &gate,
         login: &mut login,
@@ -120,6 +126,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         matrix: &mut matrix,
         drbg: &mut drbg,
         report: &report,
+        pool: pool.as_mut(),
         head,
         note,
     })

@@ -79,6 +79,7 @@ enum Screen {
     Utils,
     AnalyzeRng,
     UsbDrive,
+    NewSeed,
 }
 
 const MAIN_ITEMS: &[&str] = &[
@@ -87,6 +88,7 @@ const MAIN_ITEMS: &[&str] = &[
     "Debug",
     "Utils",
     "About",
+    "New wallet",
     "Reboot",
 ];
 const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
@@ -116,6 +118,7 @@ pub fn run(session: Session<'_>) -> ! {
         matrix,
         drbg,
         report,
+        mut pool,
         head,
         note,
     } = session;
@@ -254,6 +257,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::NewSeed {
+                new_seed(gate, login, panel, matrix, drbg, pool.as_deref_mut());
+                v.sc = Scroll::new();
+                screen = Screen::Main;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -294,6 +303,9 @@ fn step(
             (Key::Confirm, 2) => Screen::Debug,
             (Key::Confirm, 3) => Screen::Utils,
             (Key::Confirm, 4) => Screen::About,
+            (Key::Confirm, 5) => Screen::NewSeed,
+            // Anything past the named items reboots, so a new entry needs its own arm
+            // above this one or choosing it restarts the device.
             (Key::Confirm, _) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -348,6 +360,11 @@ pub struct Session<'a> {
     pub matrix: &'a mut GpioMatrix,
     pub drbg: &'a mut HmacDrbg,
     pub report: &'a BootReport,
+    /// The boot entropy pool, moved out of the report so it can be drawn from.
+    ///
+    /// `None` on a device whose pool never met its policy — which is a refusal to
+    /// generate a seed, not a reason to look for entropy somewhere weaker.
+    pub pool: Option<&'a mut catcard_entropy::EntropyPool>,
     pub head: &'a str,
     pub note: &'a str,
 }
@@ -408,6 +425,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::UsbDrive => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        // Handled in `run`: it asks questions and shows words, so it drives the panel
+        // and the keypad itself.
+        Screen::NewSeed => {}
     }
 }
 
@@ -1158,6 +1178,181 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
             return;
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
+}
+
+/// Wait for a yes or a no.
+///
+/// Any other key keeps waiting. This is asked before something irreversible, and "a key
+/// was pressed" is not consent — [`wait_for_any_key`] is the one that takes anything.
+fn confirmed(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Confirm => return true,
+                Key::Cancel => return false,
+                Key::Digit(_) => {}
+            }
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
+}
+
+/// A yes/no question, with the keys named the way this board labels them.
+fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
+    use catcard_ui::canvas::Canvas;
+    use catcard_ui::icons;
+    display::draw(panel, |c| {
+        catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
+        let f = display::LAYOUT.body;
+        let gap = 3 * f.advance(b' ');
+        let total = icons::key_hint_width(f, display::CONFIRM, "yes")
+            + gap
+            + icons::key_hint_width(f, display::CANCEL, "no");
+        let mut x = c.width().saturating_sub(total) / 2;
+        let y = c.height().saturating_sub(f.line_height() + 2);
+        x = icons::draw_key_hint(c, f, x, y, display::CONFIRM, "yes") + gap;
+        icons::draw_key_hint(c, f, x, y, display::CANCEL, "no");
+    });
+}
+
+/// Create a wallet: draw entropy, store it, verify it, and show the words once.
+///
+/// The order is the point. The secret is written **and read back before any word reaches
+/// the screen**, because words shown for a seed the secure element did not keep are
+/// worse than no words at all — someone copies them down and believes they have a
+/// backup of a wallet that does not exist.
+///
+/// User-supplied entropy (dice, coins, key-mash) is deliberately *not* required. The
+/// pool has already met its policy or it refuses outright, and a handful of dice rolls
+/// cannot rescue a device whose TRNGs are unhealthy. See `docs/SECRETS-AND-SETTINGS.md`.
+fn new_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    pool: Option<&mut catcard_entropy::EntropyPool>,
+) {
+    use catcard_wallet::bip39::Mnemonic;
+    use zeroize::Zeroize;
+
+    // No pool means it never met its policy at boot. That is a refusal.
+    let Some(pool) = pool else {
+        message(panel, "No entropy", "the pool missed its", "policy at boot");
+        wait_for_any_key(matrix, drbg);
+        return;
+    };
+
+    // Overwriting a wallet that already exists is the destructive case, and this is the
+    // only warning anyone gets. `zero_secret` is the bootloader's own answer about the
+    // slot, not a guess of ours.
+    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+        ask(panel, "Wallet exists", "a new seed DESTROYS", "the one stored now");
+        if !confirmed(matrix, drbg) {
+            return;
+        }
+    }
+    ask(panel, "Create wallet?", "24 words, from this", "device's own TRNGs");
+    if !confirmed(matrix, drbg) {
+        return;
+    }
+
+    let mut entropy = match pool.draw_seed() {
+        Ok(e) => e,
+        // The pool refusing is the entropy design working as intended, so report which
+        // way it refused rather than a generic failure.
+        Err(e) => {
+            crate::catlog!("seed: pool refused");
+            let mut l = Line::new();
+            let _ = write!(l, "{e}");
+            info(panel, "Refused", &[l]);
+            wait_for_any_key(matrix, drbg);
+            return;
+        }
+    };
+
+    let encoded = catcard_callgate::pin::encode_bip39(&entropy);
+    let mnemonic = Mnemonic::from_entropy(&entropy);
+    entropy.zeroize();
+
+    let (Ok(mut secret), Ok(mnemonic)) = (encoded, mnemonic) else {
+        // 32 bytes is a length both of them accept, so this is unreachable today. It is
+        // written out rather than unwrapped because this is the one function that holds
+        // a wallet, and a panic here would take the seed to the panic screen with it.
+        message(panel, "Failed", "could not encode", "that seed length");
+        wait_for_any_key(matrix, drbg);
+        return;
+    };
+
+    message(panel, "Storing", "do not disconnect", "");
+    // `Login` is driven through the `PinGate` seam, so that the same sequencing runs
+    // against a model on the host and the callgate here.
+    let g = crate::pinentry::BootloaderGate::new(gate);
+    let outcome = login.set_secret(&g, &secret);
+    if let Err(f) = outcome {
+        secret.zeroize();
+        crate::catlog!("seed: store failed");
+        message(panel, "Not stored", why_failed(f), "any key to go back");
+        wait_for_any_key(matrix, drbg);
+        return;
+    }
+
+    // Read it back before anyone writes anything down.
+    let kept = login.verify_secret(&g, &secret).unwrap_or(false);
+    secret.zeroize();
+    if !kept {
+        crate::catlog!("seed: read-back mismatch");
+        message(panel, "Not stored", "the slot did not keep", "what was written");
+        wait_for_any_key(matrix, drbg);
+        return;
+    }
+
+    crate::catlog!("seed: stored, {} words", mnemonic.word_count());
+    show_words(panel, matrix, drbg, &mnemonic);
+}
+
+/// Why a gate operation refused, in words that fit a line.
+fn why_failed(f: catcard_pin::Failure) -> &'static str {
+    match f {
+        catcard_pin::Failure::NeedsSetup => "login went stale",
+        catcard_pin::Failure::MustWait => "the gate wants a wait",
+        catcard_pin::Failure::ImageRefused => "the gate refused it",
+        catcard_pin::Failure::Gate(_) => "the callgate failed",
+        catcard_pin::Failure::Code(_) => "the bootloader refused",
+    }
+}
+
+/// Show the words a screenful at a time. The only time they are ever displayed.
+fn show_words(
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    m: &catcard_wallet::bip39::Mnemonic,
+) {
+    let total = m.word_count();
+    // One row is spent on the footer, so the words get the rest.
+    let per = MAX_LINES.saturating_sub(1).max(1);
+    let mut shown = 0;
+    while shown < total {
+        let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+        for (i, w) in m.words().enumerate().skip(shown).take(per) {
+            let mut l = Line::new();
+            let _ = write!(l, "{:2} {}", i + 1, w);
+            let _ = lines.push(l);
+        }
+        let mut foot = Line::new();
+        let last = (shown + per).min(total);
+        let _ = write!(foot, "{}-{last} of {total}, any key", shown + 1);
+        let _ = lines.push(foot);
+        info(panel, "Write these down", &lines);
+        wait_for_any_key(matrix, drbg);
+        shown += per;
     }
 }
 
