@@ -513,7 +513,10 @@ mod tests {
         let mut p = St7789::new(MockBus::default());
         p.fill_rect(WIDTH, 0, 10, 10, WHITE).unwrap();
         p.fill_rect(0, 0, 0, 10, WHITE).unwrap();
-        assert!(p.bus_mut().log.is_empty(), "drew something that is not on the panel");
+        assert!(
+            p.bus_mut().log.is_empty(),
+            "drew something that is not on the panel"
+        );
     }
 
     #[test]
@@ -568,7 +571,10 @@ mod tests {
         assert_eq!(p.bus_mut().pixels().len(), WIDTH * HEIGHT * 2, "not 1:1");
         let f = replay(&p.bus_mut().log);
         assert_eq!(f[0], GREYS[15]);
-        assert_eq!(f[1], GREYS[7], "the right pixel of a byte is its low nibble");
+        assert_eq!(
+            f[1], GREYS[7],
+            "the right pixel of a byte is its low nibble"
+        );
         assert_eq!(f[2], GREYS[0]);
         assert_eq!(f[239 * WIDTH + 319], GREYS[3]);
     }
@@ -579,7 +585,10 @@ mod tests {
             .filter(|w| w[0] == (false, vec![cmd::RASET]))
             .map(|w| {
                 let b = &w[1].1;
-                (u16::from_be_bytes([b[0], b[1]]), u16::from_be_bytes([b[2], b[3]]))
+                (
+                    u16::from_be_bytes([b[0], b[1]]),
+                    u16::from_be_bytes([b[2], b[3]]),
+                )
             })
             .collect()
     }
@@ -589,12 +598,19 @@ mod tests {
         let mut g = crate::canvas::Gray320x240::new();
         let mut cache = RowCache::<240>::new();
         let mut p = St7789::new(MockBus::default());
-        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 240, "first flush");
+        assert_eq!(
+            p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(),
+            240,
+            "first flush"
+        );
         assert_eq!(row_windows(&p.bus_mut().log), vec![(0, 239)]);
 
         p.bus_mut().log.clear();
         assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 0);
-        assert!(p.bus_mut().log.is_empty(), "an unchanged frame touched the bus");
+        assert!(
+            p.bus_mut().log.is_empty(),
+            "an unchanged frame touched the bus"
+        );
 
         g.put(5, 100, 15);
         g.put(6, 101, 15);
@@ -608,7 +624,11 @@ mod tests {
 
         p.bus_mut().log.clear();
         cache.invalidate();
-        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 240, "after invalidate");
+        assert_eq!(
+            p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(),
+            240,
+            "after invalidate"
+        );
     }
 
     #[test]

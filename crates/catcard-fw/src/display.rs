@@ -397,7 +397,13 @@ pub unsafe fn init() -> Option<Panel> {
         // SAFETY: single-threaded bring-up; `BL_ENABLE` belongs to the panel alone.
         unsafe {
             gpio::enable_port(bl.port);
-            gpio::configure(bl, Mode::Output, OutputType::PushPull, Pull::None, Speed::Low);
+            gpio::configure(
+                bl,
+                Mode::Output,
+                OutputType::PushPull,
+                Pull::None,
+                Speed::Low,
+            );
             gpio::write(bl, true);
         }
     }
@@ -418,10 +424,22 @@ unsafe fn take_bus(request: Pin, busy: Pin) -> bool {
     // SAFETY: as documented.
     unsafe {
         gpio::enable_port(request.port);
-        gpio::configure(request, Mode::Output, OutputType::OpenDrain, Pull::Up, Speed::Low);
+        gpio::configure(
+            request,
+            Mode::Output,
+            OutputType::OpenDrain,
+            Pull::Up,
+            Speed::Low,
+        );
         gpio::write(request, true);
         gpio::enable_port(busy.port);
-        gpio::configure(busy, Mode::Input, OutputType::PushPull, Pull::Down, Speed::Low);
+        gpio::configure(
+            busy,
+            Mode::Input,
+            OutputType::PushPull,
+            Pull::Down,
+            Speed::Low,
+        );
         for _ in 0..BUS_GRANT_MS {
             if !gpio::read(busy) {
                 return true;

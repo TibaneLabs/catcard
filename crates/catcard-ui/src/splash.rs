@@ -6,8 +6,8 @@
 //! and a hung screen look identical, and this makes the difference visible.
 
 use crate::art::{Bitmap, Indexed, cat::CAT, draw_indexed};
-use crate::font::{misc4x6, peep7x14};
 use crate::canvas::{Canvas, INK};
+use crate::font::{misc4x6, peep7x14};
 use crate::text::{centred, draw_text, width_of};
 use crate::widgets::Layout;
 
@@ -17,12 +17,7 @@ const CAT_X: usize = 3;
 const GUTTER: usize = 6;
 
 /// Draw a bitmap with its top-left at `(x, y)`. Clipped, never panics.
-pub fn draw_bitmap<C: Canvas + ?Sized>(
-    fb: &mut C,
-    bmp: &Bitmap,
-    x: usize,
-    y: usize,
-) {
+pub fn draw_bitmap<C: Canvas + ?Sized>(fb: &mut C, bmp: &Bitmap, x: usize, y: usize) {
     for by in 0..bmp.height as usize {
         for bx in 0..bmp.width as usize {
             if bmp.pixel(bx, by) {
@@ -63,10 +58,7 @@ pub fn draw_bitmap_scaled<C: Canvas + ?Sized>(
 ///
 /// One row, deliberately: it reads as a progress indicator without taking space from
 /// the content, and there is nothing to get wrong about its geometry.
-pub fn draw_progress<C: Canvas + ?Sized>(
-    fb: &mut C,
-    progress: u8,
-) {
+pub fn draw_progress<C: Canvas + ?Sized>(fb: &mut C, progress: u8) {
     let filled = (fb.width() * progress.min(100) as usize) / 100;
     let y = fb.height().saturating_sub(1);
     for x in 0..filled {
@@ -75,11 +67,7 @@ pub fn draw_progress<C: Canvas + ?Sized>(
 }
 
 /// Render the whole splash into a cleared framebuffer.
-pub fn draw<C: Canvas + ?Sized>(
-    fb: &mut C,
-    version: &str,
-    progress: u8,
-) {
+pub fn draw<C: Canvas + ?Sized>(fb: &mut C, version: &str, progress: u8) {
     fb.clear();
 
     let height = fb.height();
@@ -173,8 +161,8 @@ mod tests {
         // The art sits centred above the text, and the bottom row is the bar's.
         let art_x = (320 - LOGO.width as usize) / 2;
         assert!(
-            (0..LOGO.height as usize).any(|dy| (0..LOGO.width as usize)
-                .any(|dx| c.get(art_x + dx, 20 + dy) != PAPER)),
+            (0..LOGO.height as usize)
+                .any(|dy| (0..LOGO.width as usize).any(|dx| c.get(art_x + dx, 20 + dy) != PAPER)),
             "no art where the logo should be"
         );
         assert_eq!((0..320).filter(|&x| c.get(x, 239) != PAPER).count(), 160);

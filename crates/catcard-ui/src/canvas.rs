@@ -113,7 +113,10 @@ impl<const W: usize, const H: usize, const N: usize> Gray4<W, H, N> {
     }
 
     const fn at(x: usize, y: usize) -> (usize, u32) {
-        (y * W.div_ceil(2) + x / 2, if x.is_multiple_of(2) { 4 } else { 0 })
+        (
+            y * W.div_ceil(2) + x / 2,
+            if x.is_multiple_of(2) { 4 } else { 0 },
+        )
     }
 }
 
@@ -189,7 +192,11 @@ mod tests {
         c.put(10, 5, 9);
         c.put(11, 5, 3);
         assert_eq!((c.get(10, 5), c.get(11, 5)), (9, 3));
-        assert_eq!(c.as_bytes()[5 * 160 + 5], 0x93, "left pixel is the high nibble");
+        assert_eq!(
+            c.as_bytes()[5 * 160 + 5],
+            0x93,
+            "left pixel is the high nibble"
+        );
     }
 
     #[test]
@@ -241,7 +248,14 @@ mod tests {
         c.fill_rect(0, 0, 10, 10, 9); // outside the blit: left alone
         blit_scaled(&mut c, &fb, 2);
         // 256x128 centred on 320x240 starts at (32, 56).
-        for (x, y) in [(32, 56), (33, 56), (32, 57), (33, 57), (286, 182), (287, 183)] {
+        for (x, y) in [
+            (32, 56),
+            (33, 56),
+            (32, 57),
+            (33, 57),
+            (286, 182),
+            (287, 183),
+        ] {
             assert_eq!(c.get(x, y), INK, "({x},{y})");
         }
         assert_eq!(c.get(34, 56), PAPER);
@@ -257,6 +271,10 @@ mod tests {
         fb.put(3, 3, 8);
         assert_eq!(Canvas::get(&fb, 3, 3), INK);
         fb.blend(4, 4, INK, 5);
-        assert_eq!(Canvas::get(&fb, 4, 4), PAPER, "a faint edge does not light an OLED pixel");
+        assert_eq!(
+            Canvas::get(&fb, 4, 4),
+            PAPER,
+            "a faint edge does not light an OLED pixel"
+        );
     }
 }

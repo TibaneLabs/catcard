@@ -65,7 +65,10 @@ mod tests {
                 .flat_map(|y| (0..f.width as usize).map(move |x| face.coverage(b'#', x, y)))
                 .collect();
             assert!(levels.contains(&INK), "'#' has no ink");
-            assert!(levels.iter().all(|&l| l == INK || l == PAPER), "a bitmap has no greys");
+            assert!(
+                levels.iter().all(|&l| l == INK || l == PAPER),
+                "a bitmap has no greys"
+            );
             assert_eq!(face.coverage(b'#', 100, 100), PAPER, "outside the cell");
         }
     }

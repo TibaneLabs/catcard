@@ -114,7 +114,13 @@ pub fn menu<C: Canvas + ?Sized>(
         draw_text(canvas, l.body, arrow_x, l.body_top(), "^");
     }
     if end < items.len() && rows > 0 {
-        draw_text(canvas, l.body, arrow_x, l.body_top() + (rows - 1) * l.pitch(), "v");
+        draw_text(
+            canvas,
+            l.body,
+            arrow_x,
+            l.body_top() + (rows - 1) * l.pitch(),
+            "v",
+        );
     }
 }
 
@@ -206,7 +212,10 @@ mod tests {
         assert!(!marker(0) && marker(1) && !marker(2) && !marker(3));
         for row in 0..items.len() {
             let y = l.body_top() + row * l.pitch();
-            assert!(inked(&c, l.indent(), y, 320, y + 14), "item {row} not drawn");
+            assert!(
+                inked(&c, l.indent(), y, 320, y + 14),
+                "item {row} not drawn"
+            );
         }
     }
 
@@ -224,21 +233,38 @@ mod tests {
         let arrow_x = 320 - 7 - l.margin;
         let first = l.body_top();
         let last = l.body_top() + (l.rows(240) - 1) * l.pitch();
-        assert!(inked(&c, arrow_x, first, 320, first + 14), "no ^ with more above");
-        assert!(inked(&c, arrow_x, last, 320, last + 14), "no v with more below");
+        assert!(
+            inked(&c, arrow_x, first, 320, first + 14),
+            "no ^ with more above"
+        );
+        assert!(
+            inked(&c, arrow_x, last, 320, last + 14),
+            "no v with more below"
+        );
     }
 
     #[test]
     fn the_same_menu_draws_on_the_mono_panel_inside_its_128x64() {
         let l = Layout::compact();
-        let items = ["USB", "Clocks", "PSRAM", "Boot report", "Selftest", "Keypad", "microSD"];
+        let items = [
+            "USB",
+            "Clocks",
+            "PSRAM",
+            "Boot report",
+            "Selftest",
+            "Keypad",
+            "microSD",
+        ];
         let mut fb = Mono128x64::new();
         menu(&mut fb, &l, "Debug", "note", &items, Scroll::new());
         // Title, note, the six rows that fit, and the "more below" arrow.
         assert!(inked(&fb, 0, 0, 128, 14), "no title");
         assert!(inked(&fb, 0, 15, 128, 21), "no note");
         assert!(inked(&fb, 2, 21, 10, 27), "no marker on the first row");
-        assert!(inked(&fb, 122, 21 + 5 * 7, 128, 64), "no v for the seventh item");
+        assert!(
+            inked(&fb, 122, 21 + 5 * 7, 128, 64),
+            "no v for the seventh item"
+        );
     }
 
     #[test]
@@ -249,7 +275,11 @@ mod tests {
         info(&mut a, &l, "Info", &many);
         let mut b = Mono128x64::new();
         info(&mut b, &l, "Info", &many[..l.rows(64)]);
-        assert_eq!(snapshot(&a), snapshot(&b), "lines past the panel changed the picture");
+        assert_eq!(
+            snapshot(&a),
+            snapshot(&b),
+            "lines past the panel changed the picture"
+        );
     }
 
     #[test]
@@ -258,11 +288,20 @@ mod tests {
         let mut c = Gray320x240::new();
         c.fill_rect(0, 0, 320, 240, INK);
         message(&mut c, &l, "Installing", "do not disconnect", "");
-        assert!(!inked(&c, 0, 0, 320, 60), "old ink above the message survived");
-        assert!(!inked(&c, 0, 180, 320, 240), "old ink below the message survived");
+        assert!(
+            !inked(&c, 0, 0, 320, 60),
+            "old ink above the message survived"
+        );
+        assert!(
+            !inked(&c, 0, 180, 320, 240),
+            "old ink below the message survived"
+        );
         let rows_with_ink: Vec<usize> = (0..240).filter(|&y| inked(&c, 0, y, 320, y + 1)).collect();
         let (top, bottom) = (rows_with_ink[0], *rows_with_ink.last().unwrap());
         let (above, below) = (top, 239 - bottom);
-        assert!(above.abs_diff(below) <= l.pitch() + 4, "block not centred: {above} vs {below}");
+        assert!(
+            above.abs_diff(below) <= l.pitch() + 4,
+            "block not centred: {above} vs {below}"
+        );
     }
 }

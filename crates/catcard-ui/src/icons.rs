@@ -138,8 +138,15 @@ mod tests {
         let mut c = Gray320x240::new();
         let end = draw_key_hint(&mut c, f, 0, 0, mark, "accept");
         assert_eq!(end, ("ENTER".len() + 1 + "accept".len()) * 7);
-        assert_eq!(key_hint_width(f, mark, "accept"), end, "width disagrees with the draw");
-        assert!((0..14).any(|y| (0..35).any(|x| c.get(x, y) != PAPER)), "no word drawn");
+        assert_eq!(
+            key_hint_width(f, mark, "accept"),
+            end,
+            "width disagrees with the draw"
+        );
+        assert!(
+            (0..14).any(|y| (0..35).any(|x| c.get(x, y) != PAPER)),
+            "no word drawn"
+        );
     }
 
     #[test]
@@ -168,7 +175,10 @@ mod tests {
         let ink_rows = (0..20)
             .filter(|&y| (0..ICON_ADVANCE * 2).any(|x| c.get(x, y) != PAPER))
             .count();
-        assert!(ink_rows >= 9, "the tick did not grow: {ink_rows} rows of ink");
+        assert!(
+            ink_rows >= 9,
+            "the tick did not grow: {ink_rows} rows of ink"
+        );
     }
 
     /// Both symbols must actually have pixels in them, and be square.

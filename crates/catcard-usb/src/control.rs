@@ -628,16 +628,28 @@ mod tests {
         let mut d = dev();
         let mut s = [0u8; 64];
         assert_eq!(
-            handle(&mut d, &setup(0x02, request::CLEAR_FEATURE, 0, 0x81, 0), &mut s),
+            handle(
+                &mut d,
+                &setup(0x02, request::CLEAR_FEATURE, 0, 0x81, 0),
+                &mut s
+            ),
             Action::AckThenClearHalt(0x81)
         );
         assert_eq!(
-            handle(&mut d, &setup(0x02, request::CLEAR_FEATURE, 0, 0x01, 0), &mut s),
+            handle(
+                &mut d,
+                &setup(0x02, request::CLEAR_FEATURE, 0, 0x01, 0),
+                &mut s
+            ),
             Action::AckThenClearHalt(0x01)
         );
         // Setting halt, and any non-halt feature, is still just acknowledged.
         assert_eq!(
-            handle(&mut d, &setup(0x02, request::SET_FEATURE, 0, 0x81, 0), &mut s),
+            handle(
+                &mut d,
+                &setup(0x02, request::SET_FEATURE, 0, 0x81, 0),
+                &mut s
+            ),
             Action::Ack
         );
     }
@@ -654,7 +666,11 @@ mod tests {
             Action::AckThenResetMsc
         );
         // Get Max LUN reports a single logical unit.
-        let a = handle(&mut d, &setup(0xA1, msc_request::GET_MAX_LUN, 0, 0, 1), &mut s);
+        let a = handle(
+            &mut d,
+            &setup(0xA1, msc_request::GET_MAX_LUN, 0, 0, 1),
+            &mut s,
+        );
         let Action::Data(b) = a else { panic!("{a:?}") };
         assert_eq!(b, &[0]);
     }

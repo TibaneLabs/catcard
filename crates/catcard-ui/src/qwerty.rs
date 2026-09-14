@@ -236,7 +236,11 @@ mod tests {
         assert_eq!(LAYOUT[54], Some(Key::Cancel), "kn54 is DELETE");
         assert_eq!(LAYOUT[10], Some(Key::Digit(1)));
         assert_eq!(LAYOUT[18], Some(Key::Digit(9)));
-        assert_eq!(LAYOUT[19], Some(Key::Digit(0)), "the row ends in 0, not starts");
+        assert_eq!(
+            LAYOUT[19],
+            Some(Key::Digit(0)),
+            "the row ends in 0, not starts"
+        );
         assert_eq!(
             [LAYOUT[3], LAYOUT[4], LAYOUT[5], LAYOUT[6]],
             [

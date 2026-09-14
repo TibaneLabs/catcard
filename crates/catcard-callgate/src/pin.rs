@@ -283,8 +283,7 @@ pub const fn bip39_len(marker: u8) -> Option<usize> {
 ///
 /// Source: hw-reference/secret-stash-format.md §Layout [C]
 pub fn encode_bip39(entropy: &[u8]) -> Result<[u8; SECRET_LEN], UnsupportedEntropyLen> {
-    let marker =
-        bip39_marker(entropy.len()).ok_or(UnsupportedEntropyLen { len: entropy.len() })?;
+    let marker = bip39_marker(entropy.len()).ok_or(UnsupportedEntropyLen { len: entropy.len() })?;
     let mut out = [0u8; SECRET_LEN];
     out[0] = marker;
     out[1..1 + entropy.len()].copy_from_slice(entropy);

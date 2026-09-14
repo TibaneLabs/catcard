@@ -128,6 +128,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "heapless",
+ "zeroize",
 ]
 
 [[package]]

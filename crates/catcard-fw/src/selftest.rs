@@ -115,7 +115,13 @@ fn draw_report(c: &mut display::Screen, report: &BootReport, last_key: Option<Ke
             Key::Cancel => *b"x",
             Key::Confirm => *b"y",
         };
-        draw_text(c, body, col(12), y(56), core::str::from_utf8(&label).unwrap_or("?"));
+        draw_text(
+            c,
+            body,
+            col(12),
+            y(56),
+            core::str::from_utf8(&label).unwrap_or("?"),
+        );
     }
 
     // Whether this screen is live. A parked device and one waiting for a key were
