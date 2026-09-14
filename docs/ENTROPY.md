@@ -113,8 +113,10 @@ rebuilt. Poisoning is sticky — adding good entropy afterwards does not clear i
 1. Unique ID → `NonSecret`, zero credit, domain separation only.
 2. STM32 TRNG → 64 bytes, health-tested.
 3. SE1 and SE2 TRNGs via callgate 26, where available — 64 bytes each, 32 per call.
-   Currently a no-op: the callgate entry address is unknown (see
-   `HARDWARE-OPEN-ITEMS.md`).
+   The entry address is read from the table the bootloader publishes at `0x0800_0040`
+   and validated before it is branched to. A board whose bootloader publishes no usable
+   entry contributes nothing here rather than falling back to something weaker, and the
+   policy check in step 5 then decides whether boot continues.
 4. 16 DWT cycle-counter samples → `UserTiming`, 1 bit/byte.
 5. Policy check.
 
