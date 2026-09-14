@@ -1,7 +1,5 @@
 //! Where boot ends until there is a display to report on.
 
-use catcard_ui::Mono128x64;
-use catcard_ui::font::{misc4x6, peep7x14};
 use catcard_ui::keypad::Key;
 use catcard_ui::text::{centred, draw_text, draw_wrapped};
 
@@ -40,31 +38,44 @@ pub struct BootStatus {
 /// entropy pool meet its policy. A wallet that cannot answer both must not proceed to
 /// generating a seed.
 fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut display::Panel) {
-    let mut fb = Mono128x64::new();
+    display::draw(panel, |c| draw_report(c, report, last_key, waiting));
+}
 
-    // Title in the 7x14 face, status in the dense 4x6 — the same split a Coldcard
-    // uses, and what makes six status lines fit under a legible heading.
-    let title = &peep7x14::FONT;
-    let body = &misc4x6::FONT;
-    draw_text(&mut fb, title, centred(title, "CatCard", 128), 0, "CatCard");
-    draw_text(&mut fb, body, 0, 16, crate::running_board());
-    draw_text(&mut fb, body, 20, 16, VERSION);
+/// The selftest on the board's canvas.
+///
+/// Rows are positions on the 64-row panel this screen was designed on, spread in
+/// proportion over the real canvas, and columns count in body-face characters -- so the
+/// mk OLED keeps its exact placement and the Q1 fills its 320x240 in larger faces.
+fn draw_report(c: &mut display::Screen, report: &BootReport, last_key: Option<Key>, waiting: bool) {
+    use catcard_ui::canvas::Canvas;
+    c.clear();
 
+    // Title in the layout's title face, status in its body face -- the same split a
+    // Coldcard uses, and what makes the status lines fit under a legible heading.
+    let title = display::LAYOUT.title;
+    let body = display::LAYOUT.body;
+    let (w, h) = (c.width(), c.height());
+    let y = |row: usize| row * h / 64;
+    let col = |n: usize| n * body.advance(b' ');
+
+    draw_text(c, title, centred(title, "CatCard", w), 0, "CatCard");
+    draw_text(c, body, 0, y(16), crate::running_board());
+    draw_text(c, body, col(5), y(16), VERSION);
     draw_text(
-        &mut fb,
+        c,
         body,
         0,
-        22,
+        y(22),
         match report.hal {
             Ok(()) => "HAL   ok",
             Err(_) => "HAL   FAIL",
         },
     );
     draw_text(
-        &mut fb,
+        c,
         body,
         0,
-        28,
+        y(28),
         if report.dwt_running {
             "DWT   ok"
         } else {
@@ -74,7 +85,7 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
 
     match report.entropy {
         Ok(bits) => {
-            draw_text(&mut fb, body, 0, 34, "RNG   ok");
+            draw_text(c, body, 0, y(34), "RNG   ok");
             // Rendered without a formatter: core::fmt pulls in a large amount of code
             // for what is three digits.
             let mut buf = [b' '; 4];
@@ -86,46 +97,35 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
                     break;
                 }
             }
-            draw_text(
-                &mut fb,
-                body,
-                36,
-                34,
-                core::str::from_utf8(&buf).unwrap_or("????"),
-            );
-            draw_text(&mut fb, body, 56, 34, "bit");
+            let digits = core::str::from_utf8(&buf).unwrap_or("????");
+            draw_text(c, body, col(9), y(34), digits);
+            draw_text(c, body, col(14), y(34), "bit");
         }
         Err(_) => {
-            draw_text(&mut fb, body, 0, 34, "RNG   FAIL");
-            draw_wrapped(&mut fb, body, 0, 40, "entropy policy not met");
+            draw_text(c, body, 0, y(34), "RNG   FAIL");
+            draw_wrapped(c, body, 0, y(40), "entropy policy not met");
         }
     }
 
     // Last key pressed, so the keypad can be validated without a debugger.
     if let Some(k) = last_key {
-        draw_text(&mut fb, body, 0, 46, "KEY");
+        draw_text(c, body, 0, y(46), "KEY");
         let label: [u8; 1] = match k {
             Key::Digit(d) => [b'0' + d],
             Key::Cancel => *b"x",
             Key::Confirm => *b"y",
         };
-        draw_text(
-            &mut fb,
-            body,
-            48,
-            56,
-            core::str::from_utf8(&label).unwrap_or("?"),
-        );
+        draw_text(c, body, col(12), y(56), core::str::from_utf8(&label).unwrap_or("?"));
     }
 
     // Whether this screen is live. A parked device and one waiting for a key were
     // pixel-identical before this line, so "nothing happens when I press y" had two
     // very different causes and no way to tell them apart without a debugger.
     draw_text(
-        &mut fb,
+        c,
         body,
         0,
-        52,
+        y(52),
         match (waiting, crate::usbtask::KEY_INJECTION) {
             // Stated on the device itself: a build that accepts keys from a host is not
             // a build to hand to anyone, and this is the screen that always gets looked
@@ -148,25 +148,18 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
             (false, false) => "continue",
             (k, m) => {
                 // Assemble "continue  [KEYS MEM]" from whichever are on.
-                use catcard_ui::text::draw_text;
-                let f = &misc4x6::FONT;
-                draw_text(&mut fb, f, 0, 52, "continue  [");
-                let mut x = 11 * f.width as usize;
+                let mut x = draw_text(c, body, 0, y(52), "continue  [");
                 for (on, tag) in [(k, "KEYS "), (m, "MEM")] {
                     if on {
-                        draw_text(&mut fb, f, x, 52, tag);
-                        x += tag.len() * f.width as usize;
+                        x = draw_text(c, body, x, y(52), tag);
                     }
                 }
-                draw_text(&mut fb, f, x, 52, "]");
-                display::show_mono(panel, &fb);
+                draw_text(c, body, x, y(52), "]");
                 return;
             }
         };
-        icons::draw_hint(&mut fb, &icons::CHECK, body, 0, 52, label);
+        icons::draw_hint(c, &icons::CHECK, body, 0, y(52), label);
     }
-
-    display::show_mono(panel, &fb);
 }
 
 /// Write the boot result where a debugger can find it.

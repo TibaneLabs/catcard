@@ -104,6 +104,49 @@ fn hue(s: usize) -> u16 {
     rgb565(r >> 1, g, b >> 1)
 }
 
+/// Hashes of the rows last sent, so a redraw sends only the rows that changed.
+///
+/// A full frame is 153,600 bytes of SPI, polled a byte at a time; a menu step or a progress
+/// tick changes a handful of rows of it. A hash per row costs 1 KB, where remembering the
+/// frame itself would cost another 38 KB. Two different rows hashing alike would leave one
+/// stale until something else redraws it -- a 1-in-2^32 cosmetic fault, not a data one.
+pub struct RowCache<const H: usize> {
+    hashes: [u32; H],
+    valid: bool,
+}
+
+impl<const H: usize> Default for RowCache<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const H: usize> RowCache<H> {
+    /// Knows nothing yet: the first flush through it sends every row.
+    pub const fn new() -> Self {
+        Self {
+            hashes: [0; H],
+            valid: false,
+        }
+    }
+
+    /// Forget what the panel shows, so the next flush sends every row. For anything that
+    /// drew on the panel without going through the cache.
+    pub fn invalidate(&mut self) {
+        self.valid = false;
+    }
+}
+
+/// FNV-1a over one packed row.
+fn row_hash(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811C_9DC5;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 /// A panel whose controller the bootloader already set up.
 pub struct St7789<B: DisplayBus> {
     bus: B,
@@ -245,8 +288,65 @@ impl<B: DisplayBus> St7789<B> {
         }
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
         self.window(x0, y0, x0 + w - 1, y0 + h - 1)?;
+        self.send_gray_rows(fb, palette, w, 0, h)
+    }
+
+    /// [`flush_gray`](Self::flush_gray), sending only the rows that changed since the last
+    /// flush through `cache` -- in runs, one window per run. Returns the rows sent.
+    ///
+    /// The cache is marked valid only once every run has gone out, so a transfer that fails
+    /// part-way makes the next flush send the whole frame rather than trust a half-sent one.
+    pub fn flush_gray_changed<const W: usize, const H: usize, const N: usize>(
+        &mut self,
+        fb: &Gray4<W, H, N>,
+        palette: &[u16; 16],
+        cache: &mut RowCache<H>,
+    ) -> Result<usize, B::Error> {
+        let (w, h) = (W.min(WIDTH), H.min(HEIGHT));
+        if w == 0 || h == 0 {
+            return Ok(0);
+        }
+        let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
+        let bytes = fb.as_bytes();
+        let row_len = W.div_ceil(2);
+        let trusted = core::mem::replace(&mut cache.valid, false);
+        let changed = |cache: &mut RowCache<H>, y: usize| {
+            let hash = row_hash(&bytes[y * row_len..(y + 1) * row_len]);
+            let differs = !trusted || cache.hashes[y] != hash;
+            cache.hashes[y] = hash;
+            differs
+        };
+
+        let (mut y, mut sent) = (0, 0);
+        while y < h {
+            if !changed(cache, y) {
+                y += 1;
+                continue;
+            }
+            let start = y;
+            y += 1;
+            while y < h && changed(cache, y) {
+                y += 1;
+            }
+            self.window(x0, y0 + start, x0 + w - 1, y0 + y - 1)?;
+            self.send_gray_rows(fb, palette, w, start, y)?;
+            sent += y - start;
+        }
+        cache.valid = true;
+        Ok(sent)
+    }
+
+    /// Rows `start..end` of `fb`, `w` pixels each, into the window already open.
+    fn send_gray_rows<const W: usize, const H: usize, const N: usize>(
+        &mut self,
+        fb: &Gray4<W, H, N>,
+        palette: &[u16; 16],
+        w: usize,
+        start: usize,
+        end: usize,
+    ) -> Result<(), B::Error> {
         let mut line = [0u8; WIDTH * 2];
-        for y in 0..h {
+        for y in start..end {
             for (x, px) in line[..w * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
                 *px = palette[fb.get(x, y) as usize & 0x0F].to_be_bytes();
             }
@@ -470,6 +570,44 @@ mod tests {
         assert_eq!(f[1], GREYS[7], "the right pixel of a byte is its low nibble");
         assert_eq!(f[2], GREYS[0]);
         assert_eq!(f[239 * WIDTH + 319], GREYS[3]);
+    }
+
+    /// The row ranges each RASET in the log opened, in order.
+    fn row_windows(log: &[(bool, Vec<u8>)]) -> Vec<(u16, u16)> {
+        log.windows(2)
+            .filter(|w| w[0] == (false, vec![cmd::RASET]))
+            .map(|w| {
+                let b = &w[1].1;
+                (u16::from_be_bytes([b[0], b[1]]), u16::from_be_bytes([b[2], b[3]]))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unchanged_frame_sends_nothing_and_changed_rows_send_only_themselves() {
+        let mut g = crate::canvas::Gray320x240::new();
+        let mut cache = RowCache::<240>::new();
+        let mut p = St7789::new(MockBus::default());
+        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 240, "first flush");
+        assert_eq!(row_windows(&p.bus_mut().log), vec![(0, 239)]);
+
+        p.bus_mut().log.clear();
+        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 0);
+        assert!(p.bus_mut().log.is_empty(), "an unchanged frame touched the bus");
+
+        g.put(5, 100, 15);
+        g.put(6, 101, 15);
+        g.put(7, 200, 9);
+        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 3);
+        assert_eq!(row_windows(&p.bus_mut().log), vec![(100, 101), (200, 200)]);
+        let f = replay(&p.bus_mut().log);
+        assert_eq!(f[100 * WIDTH + 5], GREYS[15]);
+        assert_eq!(f[101 * WIDTH + 6], GREYS[15]);
+        assert_eq!(f[200 * WIDTH + 7], GREYS[9]);
+
+        p.bus_mut().log.clear();
+        cache.invalidate();
+        assert_eq!(p.flush_gray_changed(&g, &GREYS, &mut cache).unwrap(), 240, "after invalidate");
     }
 
     #[test]

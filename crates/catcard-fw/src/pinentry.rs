@@ -17,8 +17,7 @@ use catcard_callgate::pin::PinAttempt;
 use catcard_callgate::{Callgate, Error as GateError};
 use catcard_entropy::HmacDrbg;
 use catcard_pin::{Failure, Login, MAX_ATTEMPTS, MAX_PART_LEN, PinGate, Step};
-use catcard_ui::Mono128x64;
-use catcard_ui::font::{misc4x6, peep7x14};
+use catcard_ui::canvas::Canvas;
 use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::keypad::Keypad;
@@ -94,16 +93,30 @@ fn anti_phishing_words(w: catcard_pin::words::Words) -> [&'static str; 2] {
     [ENGLISH[w.index[0] as usize], ENGLISH[w.index[1] as usize]]
 }
 
-/// One line of 7x14, centred.
-fn title(fb: &mut Mono128x64, y: usize, s: &str) {
-    let f = &peep7x14::FONT;
-    draw_text(fb, f, centred(f, s, 128), y, s);
+/// Rows the PIN screens were first laid out on.
+///
+/// Every `y` below is a position on that 64-row design, spread in proportion over the real
+/// canvas: the mk OLED keeps its exact placement, and the Q1's 240 rows are filled in the
+/// layout's larger faces instead of holding a small picture in the middle.
+const DESIGN_ROWS: usize = 64;
+
+/// Design row `y`, on this canvas.
+fn at(c: &display::Screen, y: usize) -> usize {
+    y * c.height() / DESIGN_ROWS
 }
 
-/// One line of 4x6, centred.
-fn small(fb: &mut Mono128x64, y: usize, s: &str) {
-    let f = &misc4x6::FONT;
-    draw_text(fb, f, centred(f, s, 128), y, s);
+/// One line of the layout's title face, centred, at design row `y`.
+fn title(c: &mut display::Screen, y: usize, s: &str) {
+    let f = display::LAYOUT.title;
+    let (x, y) = (centred(f, s, c.width()), at(c, y));
+    draw_text(c, f, x, y, s);
+}
+
+/// One line of the layout's body face, centred, at design row `y`.
+fn small(c: &mut display::Screen, y: usize, s: &str) {
+    let f = display::LAYOUT.body;
+    let (x, y) = (centred(f, s, c.width()), at(c, y));
+    draw_text(c, f, x, y, s);
 }
 
 /// Render a small unsigned number into `buf`, returning it as a `str`.
@@ -130,18 +143,17 @@ fn num(buf: &mut [u8; 3], mut v: u32) -> &str {
 ///
 /// Hidden at full count deliberately: a permanent attempt counter reads as a threat on
 /// a device that is working normally. It appears the moment one is spent.
-fn tries_left(fb: &mut Mono128x64, left: u32) {
+fn tries_left(c: &mut display::Screen, left: u32) {
     if left >= MAX_ATTEMPTS {
         return;
     }
-    let f = &misc4x6::FONT;
+    let f = display::LAYOUT.body;
     let mut n = [0u8; 3];
     let s = num(&mut n, left);
     // "<n> of 13 tries left", assembled without a formatter.
-    let mut x = centred(f, "00 of 13 tries left", 128);
+    let (mut x, y) = (centred(f, "00 of 13 tries left", c.width()), at(c, 56));
     for part in [s, " of 13 tries left"] {
-        draw_text(fb, f, x, 56, part);
-        x += part.len() * f.width as usize;
+        x = draw_text(c, f, x, y, part);
     }
 }
 
@@ -151,17 +163,18 @@ fn screen_field(
     buf: &PinBuffer<MAX_PART_LEN>,
     left: u32,
 ) {
-    let mut fb = Mono128x64::new();
-    title(&mut fb, 2, heading);
-    let mut mask = [0u8; MAX_PART_LEN];
-    title(&mut fb, 24, buf.masked(&mut mask));
-    if buf.is_empty() {
-        small(&mut fb, 46, "0-9 to enter");
-    } else {
-        two_key_hint(&mut fb, 46, "accept", "delete");
-    }
-    tries_left(&mut fb, left);
-    display::show_mono(panel, &fb);
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 2, heading);
+        let mut mask = [0u8; MAX_PART_LEN];
+        title(c, 24, buf.masked(&mut mask));
+        if buf.is_empty() {
+            small(c, 46, "0-9 to enter");
+        } else {
+            two_key_hint(c, 46, "accept", "delete");
+        }
+        tries_left(c, left);
+    });
 }
 
 /// `✓ <yes>   ✗ <no>`, centred, using the symbols moulded into the keys.
@@ -169,32 +182,47 @@ fn screen_field(
 /// The pad is labelled with a tick and a cross. Writing "y" and "x" asked the reader to
 /// translate our wiring names into what is under their thumb, which is one more thing to
 /// get wrong on a device where the key map is the thing in doubt.
-fn two_key_hint(fb: &mut Mono128x64, y: usize, yes: &str, no: &str) {
+fn two_key_hint(c: &mut display::Screen, y: usize, yes: &str, no: &str) {
     use catcard_ui::icons;
-    let f = &misc4x6::FONT;
-    let gap = 3 * f.width as usize;
+    let f = display::LAYOUT.body;
+    let gap = 3 * f.advance(b' ');
     let total = icons::hint_width(f, yes) + gap + icons::hint_width(f, no);
-    let mut x = (128usize).saturating_sub(total) / 2;
-    x = icons::draw_hint(fb, &icons::CHECK, f, x, y, yes) + gap;
-    icons::draw_hint(fb, &icons::CROSS, f, x, y, no);
+    let (mut x, y) = (c.width().saturating_sub(total) / 2, at(c, y));
+    x = icons::draw_hint(c, &icons::CHECK, f, x, y, yes) + gap;
+    icons::draw_hint(c, &icons::CROSS, f, x, y, no);
 }
 
 fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
-    let mut fb = Mono128x64::new();
-    small(&mut fb, 1, "these two words must be");
-    small(&mut fb, 8, "the ones you know");
-    title(&mut fb, 18, w[0]);
-    title(&mut fb, 34, w[1]);
-    two_key_hint(&mut fb, 52, "yes", "no, stop");
-    display::show_mono(panel, &fb);
+    display::draw(panel, |c| {
+        c.clear();
+        small(c, 1, "these two words must be");
+        small(c, 8, "the ones you know");
+        title(c, 18, w[0]);
+        title(c, 34, w[1]);
+        two_key_hint(c, 52, "yes", "no, stop");
+    });
 }
 
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
-    let mut fb = Mono128x64::new();
-    title(&mut fb, 6, head);
-    small(&mut fb, 28, a);
-    small(&mut fb, 36, b);
-    display::show_mono(panel, &fb);
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 6, head);
+        small(c, 28, a);
+        small(c, 36, b);
+    });
+}
+
+/// "Wrong PIN", with the tries left and how long the submitted PIN was.
+fn screen_wrong(panel: &mut display::Panel, left: &str, sent: &str) {
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 6, "Wrong PIN");
+        let f = display::LAYOUT.body;
+        let (mut x, y) = (8, at(c, 30));
+        for part in [left, " tries left, sent ", sent] {
+            x = draw_text(c, f, x, y, part);
+        }
+    });
 }
 
 /// Choose the first PIN on a blank device.
@@ -240,13 +268,14 @@ fn setup_first_pin(
 /// "No PIN set", with the tick drawn rather than named.
 fn screen_blank(panel: &mut display::Panel) {
     use catcard_ui::icons;
-    let mut fb = Mono128x64::new();
-    title(&mut fb, 10, "No PIN set");
-    let f = &misc4x6::FONT;
-    let label = "choose a PIN";
-    let x = (128usize).saturating_sub(icons::hint_width(f, label)) / 2;
-    icons::draw_hint(&mut fb, &icons::CHECK, f, x, 34, label);
-    display::show_mono(panel, &fb);
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 10, "No PIN set");
+        let f = display::LAYOUT.body;
+        let label = "choose a PIN";
+        let (x, y) = (c.width().saturating_sub(icons::hint_width(f, label)) / 2, at(c, 34));
+        icons::draw_hint(c, &icons::CHECK, f, x, y, label);
+    });
 }
 
 /// "Working on it" — drawn before anything that blocks on the secure element.
@@ -396,16 +425,7 @@ pub fn unlock(
                     // same from a wrong-PIN answer.
                     let left = num(&mut n, attempts_left);
                     let sent = num(&mut m, login.last_pin_len() as u32);
-                    let mut fb = Mono128x64::new();
-                    let t = &peep7x14::FONT;
-                    let f = &misc4x6::FONT;
-                    draw_text(&mut fb, t, centred(t, "Wrong PIN", 128), 6, "Wrong PIN");
-                    let mut x = 8;
-                    for part in [left, " tries left, sent ", sent] {
-                        draw_text(&mut fb, f, x, 30, part);
-                        x += part.len() * f.width as usize;
-                    }
-                    display::show_mono(panel, &fb);
+                    screen_wrong(panel, left, sent);
                 }
                 Step::Blank => screen_blank(panel),
                 Step::In { .. } => screen_message(panel, "Unlocked", "", ""),

@@ -200,6 +200,9 @@ pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
 #[cfg(feature = "board-q1")]
 pub fn wipe(panel: &mut Panel) {
     let _ = panel.clear(catcard_ui::st7789::BLACK);
+    // Painted behind the row cache's back, so the next frame must be sent whole.
+    // SAFETY: foreground only, single core, and not while `draw` holds the cache.
+    unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
 }
 
 /// Nothing to do: on the OLED every redraw covers the whole panel.
@@ -270,9 +273,18 @@ fn show(panel: &mut Panel, screen: &Screen) {
     let _ = panel.flush(screen);
 }
 
+/// Which rows of the Q1 panel already show what the canvas holds.
+#[cfg(feature = "board-q1")]
+static mut ROWS_SENT: catcard_ui::st7789::RowCache<240> = catcard_ui::st7789::RowCache::new();
+
+/// Send the rows of the canvas that changed. A cursor step or a progress tick is a few
+/// rows, not the 153,600 bytes of a full frame.
 #[cfg(feature = "board-q1")]
 fn show(panel: &mut Panel, screen: &Screen) {
-    let _ = panel.flush_gray(screen, &catcard_ui::st7789::GREYS);
+    // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
+    // never inside a draw. Single core, nothing in interrupt context.
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
+    let _ = panel.flush_gray_changed(screen, &catcard_ui::st7789::GREYS, cache);
 }
 
 /// Show a screen that is still drawn for the 128x64 mono panel.
