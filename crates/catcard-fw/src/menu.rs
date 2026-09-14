@@ -1389,13 +1389,13 @@ fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
 /// A struct because seven numbers passed positionally is one transposed pair away from
 /// telling someone their wallet has more entropy behind it than it does.
 struct Gathered {
-    /// Credited bits the pool already held from boot: the chip TRNG, both elements and
-    /// startup timing, collected before this screen existed.
-    boot_bits: u32,
-    /// Bytes each secure element has answered with during *this* generation.
+    /// Bytes each source has answered with during *this* generation: the two secure
+    /// elements and the STM32's own TRNG.
     se1: usize,
     se2: usize,
-    /// Credited bits and distinct hardware TRNGs the pool counts right now.
+    chip: usize,
+    /// Credited bits and distinct hardware TRNGs the pool counts right now (this includes
+    /// what boot already collected -- the chip, the elements and startup timing).
     bits: u32,
     chips: u32,
     /// What this board's policy demands before a seed may be drawn at all.
@@ -1405,10 +1405,7 @@ struct Gathered {
 
 impl Gathered {
     fn lines(&self, out: &mut heapless::Vec<Line, 5>) {
-        let mut l = Line::new();
-        let _ = write!(l, "boot pool {:5} bits", self.boot_bits);
-        let _ = out.push(l);
-        for (name, n) in [("SE1", self.se1), ("SE2", self.se2)] {
+        for (name, n) in [("SE1", self.se1), ("SE2", self.se2), ("S32", self.chip)] {
             let mut l = Line::new();
             let _ = write!(l, "{name}  read {n:5} bytes");
             let _ = out.push(l);
@@ -1463,6 +1460,51 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
     );
 }
 
+/// Optional keypad top-up: mix the cycle counter at each keypress into the pool.
+///
+/// Real, if small, entropy -- credited one bit a byte as [`Source::UserTiming`], the same
+/// path startup timing uses. It runs after the automatic collection and is skippable:
+/// confirm or cancel finishes, and on a pool that already met its policy adding nothing
+/// changes nothing. Waiting for release between presses means a held key adds one sample
+/// per press, not a stream of correlated ones.
+///
+/// [`Source::UserTiming`]: catcard_entropy::Source::UserTiming
+fn key_mash(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    pool: &mut catcard_entropy::EntropyPool,
+) {
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut added = 0u32;
+    loop {
+        let mut n = Line::new();
+        let _ = write!(n, "mashed {added}");
+        message(panel, "Add entropy", &n, "any key adds, y=ok");
+
+        wait_for_release(pad, matrix, drbg);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            if !keys.is_empty() {
+                break;
+            }
+        }
+        for k in keys.iter() {
+            match k {
+                // A deliberate key ends it; every digit adds the moment it landed.
+                Key::Confirm | Key::Cancel => return,
+                Key::Digit(_) => {
+                    pool.add_timing(catcard_hal::dwt::cycles());
+                    added = added.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
 /// Create a wallet: draw entropy, store it, verify it, and show the words once.
 ///
 /// The order is the point. The secret is written **and read back before any word reaches
@@ -1470,9 +1512,10 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
 /// worse than no words at all — someone copies them down and believes they have a
 /// backup of a wallet that does not exist.
 ///
-/// User-supplied entropy (dice, coins, key-mash) is deliberately *not* required. The
-/// pool has already met its policy or it refuses outright, and a handful of dice rolls
-/// cannot rescue a device whose TRNGs are unhealthy. See `docs/SECRETS-AND-SETTINGS.md`.
+/// User-supplied entropy is *offered* -- a keypad mash after the hardware collection, see
+/// [`key_mash`] -- but never *required*. The pool has already met its policy or it refuses
+/// outright, and a handful of key taps cannot rescue a device whose TRNGs are unhealthy;
+/// the mash only ever tops up. See `docs/SECRETS-AND-SETTINGS.md`.
 // Eight arguments, and clippy is right to say so. Four of them -- panel, pad, matrix,
 // drbg -- are the same cluster every action screen drags around, and the remedy is the
 // one this file already uses for `Session` and `View`: give them a struct. That is a
@@ -1545,9 +1588,9 @@ fn new_seed(
     let policy = crate::entropy_policy();
     let boot_bits = pool.credited_bits();
     let mut g = Gathered {
-        boot_bits,
         se1: 0,
         se2: 0,
+        chip: 0,
         bits: boot_bits,
         chips: pool.hardware_sources(),
         need_bits: policy.min_bits,
@@ -1567,6 +1610,14 @@ fn new_seed(
         // At SE2's observed rate 512 bytes wants roughly 64 turns; this leaves room
         // and still ends.
         const MAX_PASSES: usize = 160;
+
+        // The STM32's own TRNG, mixed in during this generation alongside the elements.
+        // Independent of the callgate and far faster, so a small read each pass keeps its
+        // progress visible next to the slow elements without running away with the loop.
+        // SAFETY: the RNG clock was set up at boot; nothing else touches the peripheral.
+        let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
+        const CHIP_TARGET: usize = 512;
+        let mut chip_bytes = 0usize;
 
         let srcs = [
             (
@@ -1613,8 +1664,21 @@ fn new_seed(
                 buf.zeroize();
             }
 
+            // One small chip read per pass, capped so the fast source does not run away.
+            if let Some(rng) = &chip
+                && chip_bytes < CHIP_TARGET
+            {
+                let mut cbuf = [0u8; 64];
+                if rng.fill(&mut cbuf).is_ok() {
+                    pool.add(catcard_entropy::Source::Stm32Trng, &cbuf);
+                    chip_bytes += cbuf.len();
+                }
+                cbuf.zeroize();
+            }
+
             g.se1 = bytes[0];
             g.se2 = bytes[1];
+            g.chip = chip_bytes;
             g.bits = pool.credited_bits();
             g.chips = pool.hardware_sources();
             let got = bytes[0] + bytes[1];
@@ -1634,6 +1698,12 @@ fn new_seed(
             failed[1]
         );
     }
+
+    // With the hardware collected, offer the user a turn: mashing keys mixes the cycle
+    // counter at each press into the pool. It is optional -- the pool has already met its
+    // policy from the TRNGs -- and only ever tops up, but it costs nothing and lets a
+    // distrustful owner add material of their own.
+    key_mash(panel, pad, matrix, drbg, pool);
 
     // The pool's own verdict, not ours. If a source failed its health test the pool is
     // poisoned and this is where that becomes visible, before any word is shown.
