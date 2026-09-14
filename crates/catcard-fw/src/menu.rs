@@ -1460,14 +1460,23 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
     );
 }
 
-/// Optional keypad top-up: mix the cycle counter at each keypress into the pool.
+/// Optional keypad top-up: the user mashes digits and both the value and its timing feed
+/// the pool.
 ///
-/// Real, if small, entropy -- credited one bit a byte as [`Source::UserTiming`], the same
-/// path startup timing uses. It runs after the automatic collection and is skippable:
-/// confirm or cancel finishes, and on a pool that already met its policy adding nothing
-/// changes nothing. Waiting for release between presses means a held key adds one sample
-/// per press, not a stream of correlated ones.
+/// Each press contributes two independent things. The **digit** is credited like a die's
+/// face -- one of about ten symbols, [`Source::UserKeypad`] at 3 bits a byte -- so a
+/// hundred taps is a few hundred credited bits, enough to clear the 256-bit bar on its
+/// own (the ≥2-hardware-TRNG bar is separate and this does not touch it). The **cycle
+/// counter** at the instant of the press goes in through [`Source::UserTiming`]: a human
+/// press makes its low bits unpredictable, which is real if smaller entropy and also the
+/// point at which a fast counter becomes a usable source.
 ///
+/// There is no cap -- it all folds into the one SHA-512 sponge -- and the screen shows
+/// the running total of credited bits from these presses. It is skippable: confirm or
+/// cancel finishes, and the pool has already met its policy from the TRNGs. Waiting for
+/// release between presses keeps a held key to one sample per press.
+///
+/// [`Source::UserKeypad`]: catcard_entropy::Source::UserKeypad
 /// [`Source::UserTiming`]: catcard_entropy::Source::UserTiming
 fn key_mash(
     panel: &mut display::Panel,
@@ -1476,13 +1485,13 @@ fn key_mash(
     drbg: &mut HmacDrbg,
     pool: &mut catcard_entropy::EntropyPool,
 ) {
+    let start_bits = pool.credited_bits();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    let mut added = 0u32;
     loop {
         let mut n = Line::new();
-        let _ = write!(n, "mashed {added}");
-        message(panel, "Add entropy", &n, "any key adds, y=ok");
+        let _ = write!(n, "{} bits added", pool.credited_bits().saturating_sub(start_bits));
+        message(panel, "Add entropy", &n, "digits add, y=done");
 
         wait_for_release(pad, matrix, drbg);
         loop {
@@ -1496,9 +1505,9 @@ fn key_mash(
             match k {
                 // A deliberate key ends it; every digit adds the moment it landed.
                 Key::Confirm | Key::Cancel => return,
-                Key::Digit(_) => {
+                Key::Digit(d) => {
+                    pool.add(catcard_entropy::Source::UserKeypad, &[*d]);
                     pool.add_timing(catcard_hal::dwt::cycles());
-                    added = added.saturating_add(1);
                 }
             }
         }

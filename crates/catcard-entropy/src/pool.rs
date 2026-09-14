@@ -45,6 +45,12 @@ pub enum Source {
     /// Timing jitter from user interaction (DWT cycle counts at keypress edges).
     /// Real but low-rate entropy; credited conservatively.
     UserTiming,
+    /// The digit a user chose while key-mashing -- the value, as a die's face is, not the
+    /// timing. A keypad digit is one of about ten symbols, so it is credited 3 bits per
+    /// byte (one digit), a conservative log2(10). Runs no health test -- it is not a
+    /// noise source, and a human legitimately repeats keys -- and counts toward the bit
+    /// total but never as a hardware source, so it stays additive, never a precondition.
+    UserKeypad,
     /// Anything else worth mixing but not worth trusting: uptime, SD card serial,
     /// uninitialised RAM patterns. Credited **zero**.
     Auxiliary,
@@ -73,6 +79,7 @@ impl Source {
             Source::Stm32Trng | Source::BootloaderTrng | Source::Se1Trng | Source::Se2Trng => 4,
             // A keypress timestamp is a handful of unpredictable low bits at best.
             Source::UserTiming => 1,
+            Source::UserKeypad => 3,
             Source::Auxiliary | Source::NonSecret => 0,
         }
     }
@@ -85,6 +92,7 @@ impl Source {
             Source::Se1Trng => b"catcard/src/se1-trng",
             Source::Se2Trng => b"catcard/src/se2-trng",
             Source::UserTiming => b"catcard/src/user-timing",
+            Source::UserKeypad => b"catcard/src/user-keypad",
             Source::Auxiliary => b"catcard/src/aux",
             Source::NonSecret => b"catcard/src/non-secret",
         }
@@ -97,13 +105,14 @@ impl Source {
             Source::Se1Trng => 2,
             Source::Se2Trng => 3,
             Source::UserTiming => 4,
+            Source::UserKeypad => 7,
             Source::Auxiliary => 5,
             Source::NonSecret => 6,
         }
     }
 }
 
-const NUM_SOURCES: usize = 7;
+const NUM_SOURCES: usize = 8;
 
 /// The bar a pool must clear before it may produce wallet-seed material.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -551,5 +560,25 @@ mod tests {
         let mut p = full_pool();
         let mut out = [0u8; 65];
         let _ = p.draw(&mut out);
+    }
+
+    #[test]
+    fn keypad_credits_the_value_never_poisons_and_is_not_hardware() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        // A human mashing, repeating one key -- which a real user does.
+        for _ in 0..100 {
+            p.add(Source::UserKeypad, &[5]);
+        }
+        // Three bits a digit, like a die's face: a hundred taps is a few hundred bits,
+        // past the 256-bit bar's worth.
+        assert_eq!(p.credited_bits(), 300);
+        // But it is not a hardware source, so it cannot satisfy the two-TRNG bar on its
+        // own -- and the repeats never poisoned it (that would be `Unhealthy`, not
+        // `HardwareSources`), because a keypad value runs no health test.
+        assert_eq!(p.hardware_sources(), 0);
+        assert!(matches!(
+            p.check(),
+            Err(Insufficient::HardwareSources { .. })
+        ));
     }
 }
