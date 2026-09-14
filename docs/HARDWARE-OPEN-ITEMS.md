@@ -521,3 +521,32 @@ Would only matter for direct non-secret SE access (config zone reads, `Random`).
 `0x7d`/`0x7f` bit encoding, the Microchip CRC-16, frame layout and per-opcode delays —
 so a direct driver is writable. The UART instance is UART4 on mk3 `[C]`, unconfirmed on
 mk4/Q `[?]`. SE2's I2C pins are confirmed on Q1 only; see the mk4 item above.
+
+---
+
+## SE2 stops answering under sustained polling `[?]`
+
+Seed generation reads callgate 26 sixteen times from each secure element, 32 bytes a
+call. On a real Q1 the first run gave **SE1 512 bytes (16 of 16 calls) and SE2 128 bytes
+(4 of 16)**: `seed: SE1 512 B, SE2 128 B, 3392 bits from 3 chips, policy ok`.
+
+SE2 is not dead. At boot it delivers its full 64 bytes like SE1 — the boot line reads
+`entropy 832`, which is exactly 256 (STM32) + 256 (SE1) + 256 (SE2) + 64 (DWT timing),
+and 576 is what a missing element would produce. It answers, then stops answering when
+polled repeatedly.
+
+Candidate causes, none confirmed: the DS28C36B rate-limiting its RNG, a per-boot or
+per-interval budget in the part, or the bootloader's SE2 path failing after a number of
+calls for a reason of its own. `boot.rs` would not have noticed either way — it breaks
+out of its read loop on the first error, so a short answer there looks the same as a
+full one.
+
+**Consequence.** Fresh-entropy collection cannot assume both elements contribute
+equally. Today that is harmless: the pool credits what actually arrived, the policy is
+checked against the real total, and the screen shows each element separately so a short
+column is visible rather than hidden. It matters if anything later *requires* a fixed
+number of bytes from SE2.
+
+Worth measuring before designing around it: how many calls SE2 sustains, whether a pause
+between calls restores it, and whether the limit resets across a reboot. Utils → Analyze
+RNG already reads each element live and is the place to look.
