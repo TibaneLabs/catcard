@@ -37,8 +37,17 @@ pub const CROSS: Bitmap = Bitmap {
     pixels: &[0x88, 0x50, 0x20, 0x50, 0x88],
 };
 
-/// Width of an icon plus the gap before the word after it.
+/// Width of an icon plus the gap before the word after it, at 1x.
 pub const ICON_ADVANCE: usize = 7;
+
+/// How much to grow a 5x5 icon so it reads beside `font`.
+///
+/// The icons are drawn as pixels, not as glyphs, so they do not grow with the face on
+/// their own: beside the 4x6 status face they are the size they were drawn, and beside a
+/// 7x14 one they need doubling. One step per seven pixels of line height, never below 1.
+pub fn icon_scale<F: crate::face::Face + ?Sized>(font: &F) -> usize {
+    (font.line_height() / 7).max(1)
+}
 
 /// Draw `✓ label` or `✗ label`, returning where the text ended.
 ///
@@ -52,19 +61,42 @@ pub fn draw_hint<C: crate::canvas::Canvas + ?Sized, F: crate::face::Face + ?Size
     y: usize,
     label: &str,
 ) -> usize {
-    let drop = font.line_height().saturating_sub(icon.height as usize) / 2;
-    crate::splash::draw_bitmap(fb, icon, x, y + drop);
-    crate::text::draw_text(fb, font, x + ICON_ADVANCE, y, label)
+    let scale = icon_scale(font);
+    let drop = font
+        .line_height()
+        .saturating_sub(icon.height as usize * scale)
+        / 2;
+    crate::splash::draw_bitmap_scaled(fb, icon, x, y + drop, scale);
+    crate::text::draw_text(fb, font, x + ICON_ADVANCE * scale, y, label)
 }
 
 /// Width `draw_hint` will occupy, for centring a line before drawing it.
 pub fn hint_width<F: crate::face::Face + ?Sized>(font: &F, label: &str) -> usize {
-    ICON_ADVANCE + crate::text::width_of(font, label)
+    ICON_ADVANCE * icon_scale(font) + crate::text::width_of(font, label)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{Canvas, Gray320x240, PAPER};
+    use crate::font::{misc4x6, peep7x14};
+
+    #[test]
+    fn an_icon_grows_with_the_face_beside_it_and_the_label_follows() {
+        assert_eq!(icon_scale(&misc4x6::FONT), 1, "4x6 keeps the drawn size");
+        assert_eq!(icon_scale(&peep7x14::FONT), 2, "7x14 doubles it");
+
+        // The label starts past the scaled icon, and the reported width covers both.
+        let mut c = Gray320x240::new();
+        let end = draw_hint(&mut c, &CHECK, &peep7x14::FONT, 0, 0, "yes");
+        assert_eq!(end, ICON_ADVANCE * 2 + 3 * 7);
+        assert_eq!(hint_width(&peep7x14::FONT, "yes"), end);
+        // A 5x5 tick at 2x covers ten rows; at 1x it would stop at five.
+        let ink_rows = (0..20)
+            .filter(|&y| (0..ICON_ADVANCE * 2).any(|x| c.get(x, y) != PAPER))
+            .count();
+        assert!(ink_rows >= 9, "the tick did not grow: {ink_rows} rows of ink");
+    }
 
     /// Both symbols must actually have pixels in them, and be square.
     ///

@@ -32,6 +32,33 @@ pub fn draw_bitmap<C: Canvas + ?Sized>(
     }
 }
 
+/// Draw a bitmap at `scale`x with its top-left at `(x, y)`. Clipped, never panics.
+///
+/// For art sized in pixels rather than in points: a 5x5 key icon beside a 4x6 face is the
+/// size it was drawn, and beside a 7x14 one it has to grow or it reads as a speck.
+pub fn draw_bitmap_scaled<C: Canvas + ?Sized>(
+    fb: &mut C,
+    bmp: &Bitmap,
+    x: usize,
+    y: usize,
+    scale: usize,
+) {
+    let scale = scale.max(1);
+    for by in 0..bmp.height as usize {
+        for bx in 0..bmp.width as usize {
+            if bmp.pixel(bx, by) {
+                fb.fill_rect(
+                    x.saturating_add(bx * scale),
+                    y.saturating_add(by * scale),
+                    scale,
+                    scale,
+                    INK,
+                );
+            }
+        }
+    }
+}
+
 /// Fill the bottom row from the left in proportion to `progress` (0..=100).
 ///
 /// One row, deliberately: it reads as a progress indicator without taking space from
