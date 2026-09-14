@@ -6,7 +6,8 @@
 # run on hardware whose keypad map and display are both still unconfirmed, so it is worth
 # knowing it works before that run rather than during it.
 #
-# Needs a bring-up build: `cargo fw-mk4-bringup` compiles in `usb-key-injection`.
+# Needs `usb-key-injection`, which every plain `cargo fw-<board>` dev build carries by
+# default (only the `fw-<board>-ship` release builds strip it).
 #
 # Under the emulator the final install cannot be verified -- it refills PSRAM at reset,
 # so a correctly staged image is gone before the bootloader looks. The run says so and
@@ -23,7 +24,7 @@ case "$BOARD" in mk3|mk4|mk5|q1) ;; *) echo "unknown board: $BOARD" >&2; exit 2 
 EMU=${CCEMU:-../coldcard-emu/target/release/ccemu}
 cd "$(dirname "$0")/../.."
 
-cargo "fw-$BOARD-bringup" || exit 1
+cargo "fw-$BOARD" || exit 1
 FW=target/thumbv7em-none-eabihf/release/catcard-fw
 
 # mk4 and mk5 are the same board to within a strap, so they get one image carrying both

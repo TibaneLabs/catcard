@@ -25,7 +25,7 @@ doing the work, so this route stops being available the moment CatCard is instal
 *Recovering* below for what replaces it).
 
 ```sh
-cargo fw-mk4-bringup        # the bring-up build (every diagnostic on)
+cargo fw-mk4                # the dev build (key injection + memory monitor, default)
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
     --board mk4 --version 7.0.0 \
@@ -232,6 +232,65 @@ above for the two things that must be true first.
 
 ---
 
+## Q1: headless recovery, and why it exists
+
+CatCard has **no ST7789 driver and no 10×6 keyboard scanner yet**. Before this section
+existed that made a Q1 unrecoverable: the session parked a device with no panel or keypad,
+a parked device never unlocks, and a locked device answers `UpgradeOffer` with `NotNow` —
+reproduced in the emulator against the real Q1 bootloader. That is the mk5 trap again: a
+validly-signed image that boots and that nothing can replace.
+
+What the Q1 build does now:
+
+- **The LCD is left alone.** The bootloader initialises the ST7789 and the firmware must
+  inherit it (`hw-reference/display.md §Q1`). CatCard used to hold `RESET` low and send an
+  SSD1306 init at it; `display::init` now returns no panel on Q1 without touching a pin.
+- **No panel or no keypad → `recovery.rs`, not a park** — on a dev build, which is every
+  plain `fw-q1`. Everything a person would do at the glass arrives over USB, and every step
+  is written to the log (`ReadLog`):
+  1. `UnlockPin` with `PREFIX-SUFFIX`. On a **blank** unit that PIN is set first (not
+     reversible — the device is PIN-gated from then on), then logged in with.
+  2. `UpgradeOffer` with the image, then `InjectKey y` to install (`x` declines).
+  3. Or `InjectKey 1` / `2` to stage `catcard.dfu` from SD **slot A (top)** / **slot B
+     (bottom)**, then `InjectKey y`.
+- **Both SD slots.** Card detect is active-low on Q1 (high on mk3/mk4), and the one
+  controller is steered by `SD_MUX=PC13` (0 = A, 1 = B), both now in the board table.
+
+**A `fw-q1-ship` build parks instead**, by design — it has no key injection, so nothing
+can approve an install. Until the Q1 panel and keyboard drivers exist, **never put a ship
+build on a Q1**: it would be the unreplaceable image this section is about.
+
+### What has been proven, and where
+
+| step | emulator, real Q1 bootloader v1.1.0 | hardware |
+|---|---|---|
+| boots, LCD untouched, headless loop, USB answers | ✓ | ✓ on Linux and macOS (macOS after a power cycle, see below) |
+| log and memory monitor answer while locked | ✓ | ✓ |
+| `UnlockPin` on a blank unit (sets then logs in) | ✓ | not yet |
+| `UnlockPin` with the unit's existing PIN | — | ✓ |
+| USB offer → `y` → `gate 18/7` → reboot into the **new** image | ✓ proven by the running header's timestamp changing to the offered image's | ✓ proven the same way |
+| SD slot A: detect, FAT, DfuSe, stage, signature check | ✓ | not yet |
+| SD slot A → `y` → reboot into the new image | ✓ proven the same way | not yet |
+| SD slot B | not exercised — the emulator's CLI fits one card | not yet |
+
+**If a Mac will not configure it, power-cycle the Q.** On the boot straight after the
+install from stock, a Mac enumerated the Q (descriptors read, address set) but its
+composite driver never completed `SET_CONFIGURATION`, so no HID interface appeared — with
+Chrome closed, and after a bus reset. Linux configured that same boot, and after a full
+power cycle the Mac configured it normally too. Why only that first boot is still
+unexplained; a USB analyzer on the Mac link is the way to find out if it recurs. From
+Linux, the `usb` (libusb) transport needs only membership of the `usb` group.
+
+**A repeated `SET_CONFIGURATION` used to wedge the data pipe.** The firmware reset its
+endpoint toggles only on the first configuration, so a second libusb client configuring
+an already-configured device left host and device on different toggles and every report
+was dropped. Fixed in `otg.rs` (every `SET_CONFIGURATION` re-opens the endpoints); a unit
+running an older build should be bus-reset before a fresh client connects.
+
+Before trusting a real Q with this: install the dev build from stock, then run the three
+checks in *Prove the escape hatches* above over USB — log, monitor peek, and an install of
+a differently-timestamped image that must come back running that timestamp.
+
 ## mk3: there is no way back yet
 
 **Read this before flashing an mk3.** mk3 stages a firmware upgrade in SPI-NOR flash,
@@ -306,7 +365,7 @@ the map once the firmware is on the device tells you that you are stuck; it does
 you out. The only thing that gets you out has to already be in the image:
 
 ```sh
-cargo fw-mk4-bringup          # the bring-up build: key injection + memory monitor
+cargo fw-mk4                  # the dev build: key injection + memory monitor (default)
 ```
 
 That build lets a host press keys over USB, so a mirrored map or a dead panel costs you

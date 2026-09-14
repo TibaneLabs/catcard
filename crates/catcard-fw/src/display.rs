@@ -159,14 +159,24 @@ pub type Panel = Ssd1306<PanelBus>;
 /// # Safety
 /// Call once, after `catcard_hal::init_core`.
 pub unsafe fn init() -> Option<Panel> {
+    // Q1: the ST7789 is set up by the bootloader and the firmware must inherit it -- no
+    // reset pulse, no controller init. Everything below this is SSD1306: it holds
+    // `RESET=PA6` low and then sends an OLED init, which on the Q1 blanks an LCD that was
+    // working and gains nothing, because there is no ST7789 driver to draw with yet. So
+    // touch none of its pins and report no panel; the session then takes the headless
+    // path, which is what keeps the device reprogrammable.
+    // Source: display.md §Q1 "At firmware start -- inherit, do not reset" [C]
+    if matches!(BOARD.display, Display::St77xx { .. }) {
+        crate::catlog!("display: ST7789 left as the bootloader set it up (no driver)");
+        return None;
+    }
     // SAFETY: forwarding the caller's once-only guarantee.
     let bus = unsafe { PanelBus::init() }.ok()?;
     let mut panel = Ssd1306::new_128x64(bus);
-    // SAFETY: reads the mk5 strap. On mk5, inherit the bootloader's working panel rather
-    // than resetting and re-initialising it -- see `Ssd1306::init_inherit`.
-    // SAFETY: reads the mk5 strap. mk5 uses its own init -- externally-powered panel,
-    // charge pump off, unflipped orientation.
-    if unsafe { catcard_hal::strap::is_mk5() } {
+    // mk5 uses its own init -- externally-powered panel, charge pump off, unflipped
+    // orientation. `running_board` reads the strap only on an mk4/mk5 build: on any other
+    // board `PE0` is something else (`QR_RESET` on Q1) and must not be sampled as a strap.
+    if crate::running_board() == "mk5" {
         panel.init_mk5().ok()?;
     } else {
         panel.init().ok()?;
@@ -185,9 +195,13 @@ pub unsafe fn init() -> Option<Panel> {
 /// module that has one. A board that supplies panel voltage itself, through a boost
 /// enabled here, fits the name and fits the symptom.
 ///
-/// Driven only when the mk5 strap is low, so an mk4 is untouched. A settle delay follows,
-/// because a rail that is still rising when the panel is initialised gives exactly the
-/// symptom being chased.
+/// Driven only on an mk4/mk5 build whose strap says mk5, so an mk4 is untouched. A settle
+/// delay follows, because a rail that is still rising when the panel is initialised gives
+/// exactly the symptom being chased.
+///
+/// Never on any other board, whatever `PE0` reads: on Q1 `PE0` is `QR_RESET` and `PC1` is
+/// `NOT_BATTERY_OLD`, an input from the power circuit on early revisions, so driving it
+/// would fight the part that owns it. Source: gpio-peripherals.md §Q/Q1 Power [C]
 ///
 /// **Unconfirmed.** If an mk5 lights up with this and not without it, that is the
 /// confirmation; see `docs/HARDWARE-OPEN-ITEMS.md`.
@@ -195,8 +209,7 @@ pub unsafe fn init() -> Option<Panel> {
 /// # Safety
 /// Claims PC1. Nothing else in this firmware drives it.
 unsafe fn enable_panel_rail() {
-    // SAFETY: as documented.
-    if !unsafe { catcard_hal::strap::is_mk5() } {
+    if crate::running_board() != "mk5" {
         return;
     }
     let pin = catcard_board::Pin::new(catcard_board::Port::C, 1);

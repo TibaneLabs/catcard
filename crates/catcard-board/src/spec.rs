@@ -38,9 +38,10 @@ pub enum Display {
         dc: Pin,
         cs: Pin,
     },
-    /// ST77xx-class colour LCD on SPI1 (Q / Q1).
-    /// Source: gpio-peripherals.md §Q [C] for the pins; controller part and
-    /// resolution are `[?]`.
+    /// Sitronix ST7789 colour LCD on SPI1 (Q / Q1), 320x240 RGB565. The bootloader
+    /// initialises it; the firmware must inherit that state and never reset the panel.
+    /// Source: gpio-peripherals.md §Q/Q1 [C] for the pins; display.md §Q1 [C] for the
+    /// controller, the resolution and the inherit rule
     St77xx {
         width: u16,
         height: u16,
@@ -137,10 +138,30 @@ pub struct SdmmcPins {
     pub d3: Pin,
     pub cmd: Pin,
     pub ck: Pin,
-    /// Card-detect switch. `[?]`
+    /// Card-detect switch for the first (or only) slot, read with a pull-up.
     pub card_detect: MaybePin,
+    /// The level `card_detect` reads when a card **is** present.
+    ///
+    /// Not the same on every board -- high on mk3 and mk4, low on Q1 -- so it is a fact
+    /// recorded per board rather than a convention the driver assumes. Getting it
+    /// backwards reports an empty slot as full and a full one as empty.
+    /// Source: gpio-peripherals.md §SDMMC1 "Card-detect -- polarity differs" [C]
+    pub card_present_high: bool,
     /// Activity LED / power-enable line.
     pub active: MaybePin,
+    /// Analog multiplexer steering the one controller between two slots, on boards that
+    /// have two: low selects slot A, high slot B. `None` on single-slot boards.
+    pub mux: MaybePin,
+    /// The second slot's own detect and activity lines, where there is one.
+    pub slot_b: Option<SdSlot>,
+}
+
+/// A second microSD slot sharing the controller through [`SdmmcPins::mux`].
+#[derive(Copy, Clone, Debug)]
+pub struct SdSlot {
+    /// Read with a pull-up, at the same polarity as [`SdmmcPins::card_present_high`].
+    pub card_detect: Pin,
+    pub active: Pin,
 }
 
 /// SPI-NOR flash: PSBT scratch, settings, and the staging area a pending firmware
@@ -287,7 +308,10 @@ pub const MK3: BoardSpec = BoardSpec {
         // `SD_SW`, pulled up: **card present = pin high**.
         // Source: gpio-peripherals.md §Mk3 [C]
         card_detect: Some(pa(9)),
+        card_present_high: true,
         active: Some(pc(7)),
+        mux: None,
+        slot_b: None,
     },
     // The only board with one. Source: gpio-peripherals.md §Mk3 [C]; CS/SCK still [?]
     sflash: Some(SflashPins {
@@ -364,7 +388,12 @@ pub const MK4: BoardSpec = BoardSpec {
         // inherited value named a line that does something else entirely.
         // Source: gpio-peripherals.md §Mk4 [C]
         card_detect: Some(pc(13)),
+        // `SD_DETECT` pulled up, **card present = reads 1** -- the same sense as mk3.
+        // Source: gpio-peripherals.md §SDMMC1 "Card-detect" [C]
+        card_present_high: true,
         active: Some(pc(7)),
+        mux: None,
+        slot_b: None,
     },
     // No SPI-NOR: SPI2 is commented out of the board file as "removed in Mk4 rev B".
     // Settings live in internal flash and upgrade staging is in PSRAM.
@@ -448,7 +477,7 @@ pub const Q1: BoardSpec = BoardSpec {
     // Source: firmware-signing.md §1 [C]
     hw_compat_bit: 0x10,
     display: Display::St77xx {
-        // ~320x240 [?] — confirm the controller and resolution on a board.
+        // ST7789, 320x240. Source: display.md §Q1 [C]
         width: 320,
         height: 240,
         spi: Q1_DISPLAY_SPI,
@@ -473,16 +502,23 @@ pub const Q1: BoardSpec = BoardSpec {
             pd(15),
         ],
     },
-    // Not `MK4.sdmmc`: Q1 has two slots, and PC13 -- mk4's card-detect -- is `SD_MUX`
-    // here, the line that selects between them. Inheriting mk4 wholesale pointed
-    // card-detect at the multiplexer.
-    //
-    // The second slot (`SD_DETECT2=PD4`, `SD_ACTIVE2=PD0`) and the mux itself are not
-    // modelled: `SdmmcPins` describes one slot, and a second one needs a decision about
-    // how the mux is driven rather than two more pins.
-    // Source: gpio-peripherals.md §Q1 Power/battery [C]
+    // Not `MK4.sdmmc` wholesale: Q1 has two slots on one controller, and PC13 -- mk4's
+    // card-detect -- is `SD_MUX` here, the line that selects between them. The bus pins
+    // and the first activity LED are mk4's.
+    // Source: gpio-peripherals.md §SDMMC1 [C] (bus pins identical to mk4; Q1 detect,
+    // polarity and mux), §Q/Q1 Power/battery [C] (pin names)
     sdmmc: SdmmcPins {
+        // `SD_DETECT`, slot A (top), pulled up.
         card_detect: Some(pd(3)),
+        // **Card present = reads 0** on Q1 -- the opposite of mk3 and mk4.
+        card_present_high: false,
+        // `SD_MUX`: 0 = slot A (top), 1 = slot B (bottom).
+        mux: Some(pc(13)),
+        // `SD_DETECT2` / `SD_ACTIVE2`.
+        slot_b: Some(SdSlot {
+            card_detect: pd(4),
+            active: pd(0),
+        }),
         ..MK4.sdmmc
     },
     sflash: MK4.sflash, // none, as mk4
@@ -649,6 +685,21 @@ mod tests {
             ] {
                 claim(p, what, b.name);
             }
+            // The detect, activity and mux lines too: PC13 is mk4's card-detect and Q1's
+            // slot mux, which is exactly the kind of reuse this test exists to catch.
+            if let Some(p) = b.sdmmc.card_detect {
+                claim(p, "SD detect", b.name);
+            }
+            if let Some(p) = b.sdmmc.active {
+                claim(p, "SD active", b.name);
+            }
+            if let Some(p) = b.sdmmc.mux {
+                claim(p, "SD mux", b.name);
+            }
+            if let Some(s) = b.sdmmc.slot_b {
+                claim(s.card_detect, "SD slot B detect", b.name);
+                claim(s.active, "SD slot B active", b.name);
+            }
             if let Some(sf) = b.sflash {
                 claim(sf.spi.sck, "SPI-NOR SCK", b.name);
                 claim(sf.spi.mosi, "SPI-NOR MOSI", b.name);
@@ -656,6 +707,35 @@ mod tests {
                     claim(p, "SPI-NOR MISO", b.name);
                 }
             }
+        }
+    }
+
+    fn at(p: Pin) -> (char, u8) {
+        (p.port.letter(), p.num)
+    }
+
+    /// Q1's detect lines read **low** for a card, and PC13 selects a slot rather than
+    /// detecting one. Assuming mk3's sense reports a Q1 card missing and an empty slot full.
+    /// Source: gpio-peripherals.md §SDMMC1 "Card-detect -- polarity differs" [C]
+    #[test]
+    fn q1_card_detect_is_active_low_behind_a_two_slot_mux() {
+        let s = Q1.sdmmc;
+        assert!(!s.card_present_high);
+        assert_eq!(s.card_detect.map(at), Some(('D', 3)));
+        assert_eq!(s.mux.map(at), Some(('C', 13)));
+        let b = s.slot_b.expect("Q1 has a second slot");
+        assert_eq!(at(b.card_detect), ('D', 4));
+        assert_eq!(at(b.active), ('D', 0));
+        assert_eq!(s.active.map(at), Some(('C', 7)));
+    }
+
+    /// Source: gpio-peripherals.md §Mk3 (`SD_SW`) and §SDMMC1 (mk4 `SD_DETECT`) [C]
+    #[test]
+    fn single_slot_boards_read_high_for_a_card_and_have_no_mux() {
+        for b in [MK3, MK4, MK5] {
+            assert!(b.sdmmc.card_present_high, "{}", b.name);
+            assert!(b.sdmmc.mux.is_none(), "{}", b.name);
+            assert!(b.sdmmc.slot_b.is_none(), "{}", b.name);
         }
     }
 }

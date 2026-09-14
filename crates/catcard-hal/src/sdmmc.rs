@@ -132,15 +132,40 @@ pub struct Sdmmc {
     new_ip: bool,
 }
 
+/// Which microSD slot to talk to, on a board with more than one.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Slot {
+    /// The first slot -- the only one on mk3/mk4/mk5, the top one on Q1.
+    A,
+    /// Q1's bottom slot.
+    B,
+}
+
 impl Sdmmc {
-    /// Bring the controller up. Does not talk to the card — `catcard_sd::init` does.
+    /// Bring the controller up on the board's first (or only) slot. Does not talk to the
+    /// card — `catcard_sd::init` does.
     ///
     /// # Safety
     /// Claims SDMMC1 and its pins. Call once.
     pub unsafe fn init(spec: &BoardSpec) -> Result<Self, Error> {
+        // SAFETY: forwarding the caller's guarantee.
+        unsafe { Self::init_slot(spec, Slot::A) }
+    }
+
+    /// Bring the controller up on `slot`, steering the board's slot multiplexer to it
+    /// first where there is one. A slot the board does not have is [`Error::NoCard`].
+    ///
+    /// # Safety
+    /// Claims SDMMC1, its pins, and the slot's multiplexer and detect lines. Call once.
+    pub unsafe fn init_slot(spec: &BoardSpec, slot: Slot) -> Result<Self, Error> {
+        if slot == Slot::B && spec.sdmmc.slot_b.is_none() {
+            return Err(Error::NoCard);
+        }
         let b = base(spec.mcu);
         // SAFETY: as documented.
         unsafe {
+            // Before the bus comes up, so the card that answers CMD0 is the one asked for.
+            select_slot(spec, slot);
             enable_clock(spec.mcu)?;
             configure_pins(spec);
 
@@ -158,7 +183,7 @@ impl Sdmmc {
 
         Ok(Self {
             base: b,
-            present: card_detect(spec),
+            present: card_detect(spec, slot),
             wide: false,
             new_ip: matches!(spec.mcu, Mcu::Stm32L4S5),
         })
@@ -403,9 +428,39 @@ pub unsafe fn arm_block_write(b: u32, dten: bool) {
     }
 }
 
-/// Whether the slot reports a card, where the board has a pin for it.
-fn card_detect(spec: &BoardSpec) -> bool {
-    let Some(pin) = spec.sdmmc.card_detect else {
+/// Steer the board's slot multiplexer to `slot`. Nothing to do on a single-slot board.
+///
+/// # Safety
+/// Claims the multiplexer line.
+unsafe fn select_slot(spec: &BoardSpec, slot: Slot) {
+    let Some(mux) = spec.sdmmc.mux else {
+        return;
+    };
+    // SAFETY: as documented; `enable_port` is idempotent.
+    unsafe {
+        crate::gpio::enable_port(mux.port);
+        crate::gpio::configure(
+            mux,
+            crate::gpio::Mode::Output,
+            crate::gpio::OutputType::PushPull,
+            crate::gpio::Pull::None,
+            crate::gpio::Speed::Low,
+        );
+        // Low is slot A, high slot B. Source: gpio-peripherals.md §SDMMC1 [C]
+        crate::gpio::write(mux, slot == Slot::B);
+        // An analog switch settles in well under this; the pause is so the detect read
+        // that follows does not race it.
+        crate::dwt::delay_cycles(1_000);
+    }
+}
+
+/// Whether `slot` reports a card, where the board has a pin for it.
+fn card_detect(spec: &BoardSpec, slot: Slot) -> bool {
+    let pin = match slot {
+        Slot::A => spec.sdmmc.card_detect,
+        Slot::B => spec.sdmmc.slot_b.map(|b| b.card_detect),
+    };
+    let Some(pin) = pin else {
         // No pin: assume a card and let the conversation fail if there is none. Better
         // than refusing to look on a board whose detect line we never confirmed.
         return true;
@@ -421,10 +476,9 @@ fn card_detect(spec: &BoardSpec) -> bool {
             crate::gpio::Speed::Low,
         );
         crate::dwt::delay_cycles(1_000);
-        // mk3's `SD_SW` reads **high** when a card is present. The mk4/Q1 lines are not
-        // documented either way, so their polarity is assumed to match rather than
-        // guessed at separately -- see docs/HARDWARE-OPEN-ITEMS.md.
-        crate::gpio::read(pin)
+        // The sense differs by board -- high on mk3/mk4, low on Q1 -- so it comes from the
+        // board table rather than being assumed here.
+        crate::gpio::read(pin) == spec.sdmmc.card_present_high
     }
 }
 

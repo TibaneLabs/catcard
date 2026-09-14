@@ -225,19 +225,34 @@ flag is irreversible on the device and is off by default.
 
 ---
 
-## Q1 display controller and resolution
+## Q1 display controller and resolution — RESOLVED, driver not written
 
-**Blocks: any Q1 UI.** `hw-reference` gives the pins (CS=PA4, SCLK=PA5, RESET=PA6,
-MOSI=PA7, D/C=PA8, TEAR=PB11) and guesses an ST77xx-class controller at ~320×240. The
-board spec records 320×240 as a placeholder.
+**`[C]`.** A Sitronix **ST7789**, **320×240 RGB565**, pixels written byte-swapped;
+backlight `BL_ENABLE=PE3`; pins CS=PA4, SCLK=PA5, RESET=PA6, MOSI=PA7, D/C=PA8,
+TEAR=PB11 (`hw-reference/display.md §Q1`, `gpio-peripherals.md §Q/Q1`).
 
-**How to resolve.** Read the controller ID command response, or read the part marking.
+The part that bites: **the firmware inherits the bootloader's LCD and must not reset or
+re-initialise it.** CatCard used to treat the panel like the SSD1306 — hold `RESET` low,
+pulse it, send an OLED init — which on a Q1 blanks a working LCD. `display::init` now
+returns no panel on Q1 without touching a pin, and the session's headless recovery path
+(`recovery.rs`) keeps the device reprogrammable over USB until a real ST7789 driver and
+the 10×6 keyboard scanner exist.
+
+The GPU co-MCU shares SPI1: the bootloader leaves it held in reset (`G_RESET=PE6` low)
+with `G_CTRL=PE5` high, i.e. the main MCU owns the bus. Nothing in CatCard touches either
+pin, which is what keeps that true.
 
 ---
 
-## Q1 QR camera bus
+## Q1 QR scanner bus — RESOLVED, driver not written
 
-**Blocks: QR scanning.** The camera interface (SPI / DCMI / UART) is not identified.
+**`[C]`.** Not a camera: a decoded-barcode module on **USART2** (`QR_TX=PA2`,
+`QR_RX=PA3`), with `QR_RESET=PE0` (open-drain, active low) and `QR_TRIG=PE1`. It speaks a
+framed binary protocol (`5A | fid | len | body | BCC | A5`) at 9600, negotiated up to
+57600 (`hw-reference/gpio-peripherals.md §QR scanner`). Blocks QR scanning only.
+
+`PE0` is also the mk5 strap on mk4-class boards. CatCard samples it as a strap only on an
+mk4/mk5 build (`running_board`), so a Q1 never reconfigures the scanner's reset line.
 
 The keyboard is resolved: a 10x6 matrix, rows PD8–PD12 + PD7, cols PB0/PB1/PB2/PB5/
 PB8/PB9/PB10/PD13/PD14/PD15 `[C]`. The scan *detail* — settling time, debounce, ghosting
@@ -260,10 +275,15 @@ mk4's card-detect -- is `SD_MUX`, the line selecting between them. Q1's detect i
 `SD_DETECT=PD3`, with `SD_DETECT2=PD4` and `SD_ACTIVE2=PD0` for the second slot. Q1 now
 carries its own entry.
 
-Still open: the polarity on mk4/Q1, which is not stated, and how the Q1 mux is driven.
-`SdmmcPins` describes a single slot, so the second one needs a design decision rather
-than two more pins. Nothing reads card-detect yet (storage is M3), so both are latent
-rather than blocking.
+**Polarity and mux — RESOLVED `[C]`** (`hw-reference/gpio-peripherals.md §SDMMC1`). Card
+present reads **high** on mk3 (`SD_SW=PA9`) and mk4 (`SD_DETECT=PC13`), and **low** on Q1
+(`SD_DETECT=PD3` / `SD_DETECT2=PD4`, pulled up). Q1's two slots share SDMMC1 through the
+analog mux `SD_MUX=PC13`: **0 selects slot A (top), 1 slot B (bottom)**; activity LEDs
+`SD_ACTIVE=PC7` / `SD_ACTIVE2=PD0`. `SdmmcPins` now records `card_present_high`, `mux`
+and `slot_b` per board, and `Sdmmc::init_slot` steers the mux before the bus comes up.
+
+Assuming mk3's polarity everywhere, as the driver did, would have reported a Q1 card as
+missing and an empty Q1 slot as full.
 
 ---
 

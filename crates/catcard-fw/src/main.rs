@@ -34,6 +34,7 @@ mod menu;
 mod msc_drive;
 mod panic;
 mod pinentry;
+mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;

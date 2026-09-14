@@ -734,7 +734,7 @@ fn install_from_card(
 
     crate::catlog!("sd: looking for a firmware");
     message(panel, "Reading card", "please wait", "");
-    let (staged, approval) = match stage_from_card() {
+    let (staged, approval) = match stage_from_card(catcard_hal::sdmmc::Slot::A) {
         Outcome::Offered(s, a) => (s, a),
         Outcome::Failed(why) => {
             crate::catlog!("sd: {}", why);

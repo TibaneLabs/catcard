@@ -77,14 +77,22 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         }
     );
 
-    // Taken one at a time so a device with a working panel but no keypad still parks on
-    // a rendered screen -- which is exactly the device most likely to have one of these
-    // missing, and the one where a blank display would be least diagnosable.
-    let Some(mut panel) = panel else {
-        selftest::park(report, None)
+    // Without the callgate nothing can log in or install, so there is nothing to offer
+    // beyond answering USB.
+    let Some(gate) = gate else {
+        selftest::park(report, panel)
     };
-    let (Some(mut matrix), Some(mut drbg), Some(gate)) = (matrix, drbg, gate) else {
-        selftest::park(report, Some(panel))
+    // A device that cannot run the front panel -- no panel, no keypad, or no UI DRBG to
+    // shuffle the scan with -- must still be reprogrammable, or a board whose drivers are
+    // missing (Q1 today) runs a validly-signed image that nothing can replace. On a bench
+    // build `recovery` runs the unlock and the install over USB; on any other build it is
+    // the park this used to be. Taken one at a time so a device with a working panel but
+    // no keypad keeps what is on its screen.
+    let Some(mut panel) = panel else {
+        crate::recovery::run(report, None, gate)
+    };
+    let (Some(mut matrix), Some(mut drbg)) = (matrix, drbg) else {
+        crate::recovery::run(report, Some(panel), gate)
     };
 
     // No boot selftest screen: boot goes straight to the PIN prompt, so a host can drive

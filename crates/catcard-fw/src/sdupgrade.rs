@@ -47,16 +47,19 @@ pub enum Outcome {
     Failed(&'static str),
 }
 
-/// Find a firmware on the card and stage it.
-pub fn stage_from_card() -> Outcome {
+/// Find a firmware on the card in `slot` and stage it.
+pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot) -> Outcome {
     let Some(psram) = BOARD.psram else {
         // mk3 stages in SPI-NOR, which this firmware cannot write.
         return Outcome::Failed("no staging area");
     };
+    if slot == catcard_hal::sdmmc::Slot::B && BOARD.sdmmc.slot_b.is_none() {
+        return Outcome::Failed("no slot B on this board");
+    }
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins, and this is not re-entrant:
     // the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) } {
+    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, slot) } {
         Ok(d) => d,
         Err(_) => return Outcome::Failed("controller failed"),
     };

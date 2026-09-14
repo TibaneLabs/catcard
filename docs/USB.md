@@ -207,9 +207,9 @@ access control and there cannot be: a monitor that refused to read an address wo
 be a monitor. On a provisioned device it reads the seed and the PIN out of RAM and runs
 whatever a host sends. It exists for bring-up on a device with no secret.
 
-It is in the **bring-up build** — the one with every diagnostic on, which is the build
-you flash to a device under test. There is one such build per board (`fw-<board>-bringup`)
-and one shipping build (`fw-<board>`, no features and none of this). The point of a
+It is in the **dev build** — the one with every diagnostic on, which is the build you
+flash to a device under test. That is now the default: `fw-<board>` carries it, and the
+shipping build is `fw-<board>-ship` (`--no-default-features`, none of this). The point of a
 bring-up build is that everything you might need to see what went wrong is on the single
 image you flash; splitting the monitor into its own image would just mean flashing the
 one without it and then wishing you hadn't.
@@ -326,9 +326,9 @@ The capability is advertised in `Identify` (`caps::KEY_INJECTION`) and shown on 
 selftest screen as `[USB KEYS]`, because a device that can be driven by its host should
 say so where its owner can read it.
 
-**It must not ship enabled.** The ordinary `fw-mk3` / `fw-mk4` / `fw-q1` aliases build
-without it; the `fw-*-bringup` aliases are the only way to turn it on, so enabling it is
-always a visible choice rather than an inherited default. The feature is the whole
+**It must not ship enabled.** Every dev build carries it by default (`fw-mk3` / `fw-mk4`
+/ `fw-q1`); a release is built with the `fw-*-ship` aliases, which strip it, so leaving it
+out is an explicit release step rather than something to remember. The feature is the whole
 removal: without it the opcode, the queue, and the merge in every key loop compile out,
 and `Identify` stops advertising the capability. Once the key map is confirmed on
 hardware, stop building the bring-up image.
