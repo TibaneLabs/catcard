@@ -20,6 +20,31 @@ healthy must not be made unusable by a UI requirement, and a device whose TRNGs 
 healthy must not be rescued by a handful of dice rolls — `EntropyPool` already refuses in
 that case, which is the property that matters.
 
+## The key is the seed — what that forces
+
+The main blob is encrypted under `hash_key(raw 72-byte stash)`, and that stash comes only
+from `gate 18/4` after a successful login. **The secret is a precondition for the settings
+store, not a peer of it.** What follows is not a preference about ordering:
+
+- **A device with no seed has no main blob at all.** Nothing to read and nothing to
+  migrate; the store becomes meaningful only once E has run.
+- **Generating a new seed orphans the old blob.** The key moves with the secret, so the
+  previous settings become undecryptable — not corrupt, just unreadable. Changing the
+  secret must therefore *either* decrypt-and-re-encrypt the settings under the new key as
+  part of the same operation, *or* deliberately start from defaults. Doing neither loses
+  the user's configuration silently, which is the failure this note exists to prevent.
+- **Transposing settings needs both keys in one window.** Decrypt under the old secret,
+  re-encrypt under the new one — possible only while the old stash is still fetchable.
+- **Migration from stock needs the seed intact and the PIN known.** A firmware swap alone
+  is safe (the seed lives in the SE and survives it); it is a *seed change*, not a
+  reflash, that breaks settings.
+- **The pre-login slots are the sole exception.** `nick`, `rngk`, `lgto`, `kbtn`,
+  `terms_ok`, `_skip_pin` sit under a key of 32 zero bytes, readable with no wallet and no
+  login. That is why validation targets them, and why that slice of D is the only part
+  that can be built before E lands.
+
+So E gates D. The re-key step above belongs to E's exit criteria, not to a later cleanup.
+
 ## What already exists
 
 | piece | state |
@@ -79,9 +104,20 @@ secret exists. E needs no flash driver at all.
    (`secret-stash-format.md`).
 5. Write it, then re-read via `gate 18/4` and compare before telling the user the wallet
    exists.
+6. **Settle the settings key in the same operation.** Changing the secret changes
+   `hash_key(stash)`, so any existing blob stops being readable the moment step 5 lands.
+   Either carry the settings across — decrypt under the old key while it is still
+   fetchable, re-encrypt under the new one — or write fresh defaults under the new key and
+   say so on screen. What is not allowed is leaving a blob keyed to a secret that no
+   longer exists, because that is indistinguishable to the user from having lost their
+   configuration to a bug.
 
-**Exit:** the device generates a seed from its own TRNGs, stores it, and shows the words;
-stock firmware reflashed over the top finds the same wallet.
+Note that steps 1-5 need no flash driver and no filesystem; step 6 is where E meets D, and
+on a device with no prior blob it reduces to "write defaults".
+
+**Exit:** the device generates a seed from its own TRNGs, stores it, shows the words, and
+leaves the settings blob keyed to the secret that is actually installed; stock firmware
+reflashed over the top finds the same wallet and can still read its settings.
 
 ### A. Internal flash driver
 
