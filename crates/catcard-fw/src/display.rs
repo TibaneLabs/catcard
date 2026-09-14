@@ -188,7 +188,8 @@ unsafe fn configure_spi_pins(bus: &SpiBus) {
 /// The panel, ready to draw on.
 #[cfg(not(feature = "board-q1"))]
 pub type Panel = Ssd1306<PanelBus>;
-/// The panel, ready to draw on: the Q1's ST7789, showing the 128x64 UI at 2x.
+/// The panel, ready to draw on: the Q1's ST7789, flushed full-screen from a 16-level
+/// [`Screen`] -- see [`draw`].
 #[cfg(feature = "board-q1")]
 pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
 
@@ -204,6 +205,93 @@ pub fn wipe(panel: &mut Panel) {
 /// Nothing to do: on the OLED every redraw covers the whole panel.
 #[cfg(not(feature = "board-q1"))]
 pub fn wipe(_panel: &mut Panel) {}
+
+/// The canvas every screen on this board draws into: the OLED's own 128x64 framebuffer, or
+/// the Q1's whole 320x240 at 16 levels.
+#[cfg(not(feature = "board-q1"))]
+pub type Screen = catcard_ui::Mono128x64;
+/// The canvas every screen on this board draws into: the OLED's own 128x64 framebuffer, or
+/// the Q1's whole 320x240 at 16 levels.
+#[cfg(feature = "board-q1")]
+pub type Screen = catcard_ui::canvas::Gray320x240;
+
+/// Which faces and spacing this board's screens use.
+#[cfg(not(feature = "board-q1"))]
+pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::compact();
+/// Which faces and spacing this board's screens use.
+#[cfg(feature = "board-q1")]
+pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::roomy();
+
+/// Body rows a list or info screen shows: `LAYOUT.rows(Screen height)` as a constant, for
+/// sizing line buffers. Pinned to the layouts by catcard-ui's widget tests (6 and 12).
+#[cfg(not(feature = "board-q1"))]
+pub const ROWS: usize = 6;
+/// Body rows a list or info screen shows: `LAYOUT.rows(Screen height)` as a constant, for
+/// sizing line buffers. Pinned to the layouts by catcard-ui's widget tests (6 and 12).
+#[cfg(feature = "board-q1")]
+pub const ROWS: usize = 12;
+
+/// Body characters across the screen after the left margin: 4x6 on 128, 7x14 on 320.
+#[cfg(not(feature = "board-q1"))]
+pub const LOG_COLS: usize = (128 - 2) / 4;
+/// Body characters across the screen after the left margin: 4x6 on 128, 7x14 on 320.
+#[cfg(feature = "board-q1")]
+pub const LOG_COLS: usize = (320 - 6) / 7;
+
+/// The one canvas. Static, not on the stack: the Q1's is 38.4 KB and screens are drawn
+/// from deep call chains.
+static mut SCREEN: Screen = Screen::new();
+
+/// Set while a screen is being drawn. A drawing closure that called [`draw`] again would
+/// alias the canvas; that call is refused instead.
+static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Draw a screen: hand `f` the canvas, then put the canvas on the panel.
+///
+/// The widgets clear the canvas themselves, so every frame replaces the whole of the last
+/// one. A flush that fails is not worth stopping for -- the device is still reachable over
+/// USB, and the next draw tries again.
+pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
+    use core::sync::atomic::Ordering;
+    if DRAWING.swap(true, Ordering::SeqCst) {
+        crate::catlog!("display: nested draw refused");
+        return;
+    }
+    // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
+    // single-threaded and nothing draws from interrupt context.
+    let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    f(screen);
+    show(panel, screen);
+    DRAWING.store(false, Ordering::SeqCst);
+}
+
+#[cfg(not(feature = "board-q1"))]
+fn show(panel: &mut Panel, screen: &Screen) {
+    let _ = panel.flush(screen);
+}
+
+#[cfg(feature = "board-q1")]
+fn show(panel: &mut Panel, screen: &Screen) {
+    let _ = panel.flush_gray(screen, &catcard_ui::st7789::GREYS);
+}
+
+/// Show a screen that is still drawn for the 128x64 mono panel.
+///
+/// On the OLED that framebuffer is the panel's own. On the Q1 it is copied at 2x into the
+/// full canvas and flushed with it, so it replaces a full-screen frame completely instead
+/// of leaving that frame's edges around a scaled window.
+pub fn show_mono(panel: &mut Panel, fb: &catcard_ui::Mono128x64) {
+    #[cfg(not(feature = "board-q1"))]
+    {
+        let _ = panel.flush(fb);
+    }
+    #[cfg(feature = "board-q1")]
+    draw(panel, |c| {
+        use catcard_ui::canvas::Canvas as _;
+        c.clear();
+        catcard_ui::canvas::blit_scaled(c, fb, 2);
+    });
+}
 
 /// How long to wait for the display co-processor to finish a frame and free SPI1.
 ///

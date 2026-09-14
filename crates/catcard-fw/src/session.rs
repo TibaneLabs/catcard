@@ -171,15 +171,7 @@ fn serial() -> &'static str {
 
 /// Draw up to three lines and return.
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
-    use catcard_ui::Mono128x64;
-    use catcard_ui::font::{misc4x6, peep7x14};
-    use catcard_ui::text::{centred, draw_text};
-
-    let mut fb = Mono128x64::new();
-    let t = &peep7x14::FONT;
-    let s = &misc4x6::FONT;
-    draw_text(&mut fb, t, centred(t, head, 128), 8, head);
-    draw_text(&mut fb, s, centred(s, a, 128), 30, a);
-    draw_text(&mut fb, s, centred(s, b, 128), 40, b);
-    let _ = panel.flush(&fb);
+    display::draw(panel, |c| {
+        catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
+    });
 }

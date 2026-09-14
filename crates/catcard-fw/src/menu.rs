@@ -34,26 +34,23 @@ use catcard_callgate::Callgate;
 use catcard_callgate::abi::LogoutMode;
 use catcard_entropy::HmacDrbg;
 use catcard_ui::Mono128x64;
-use catcard_ui::font::{misc4x6, peep7x14};
+use catcard_ui::font::misc4x6;
 use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::keypad::Keypad;
 use catcard_ui::menu::Scroll;
-use catcard_ui::text::{centred, draw_text};
+use catcard_ui::text::draw_text;
 
 use crate::{BootReport, display, keypad::GpioMatrix, usbtask};
 
-/// A line of debug text. Wide enough for `NAME 0000_0000` and a little more.
-type Line = heapless::String<32>;
+/// A line of debug text: a full body line on the widest panel (44 columns of 7x14 across
+/// the Q1), which also covers `NAME 0000_0000`.
+type Line = heapless::String<48>;
 
-/// First text row, below the title.
-const LINE0: usize = 21;
-/// Row pitch: the 4x6 font plus a pixel of air.
-const LINE_H: usize = 7;
-/// Rows that fit between [`LINE0`] and the bottom of the panel.
-const MAX_LINES: usize = (64 - LINE0) / LINE_H;
-/// Characters that fit on a log line: the 4x6 font at `x = 2`, same as [`info`] draws.
-const LOG_COLS: usize = (128 - 2) / 4;
+/// Body rows a list or info screen shows on this board's panel and layout.
+const MAX_LINES: usize = display::ROWS;
+/// Characters of body text that fit on a log line, as [`info`] draws them.
+const LOG_COLS: usize = display::LOG_COLS;
 
 // Scrolling is what keeps a long menu honest, so the old "must fit on the panel"
 // assertions are gone. This one stays: every scroll calculation below assumes there is
@@ -436,44 +433,16 @@ fn usb_line(note: &str) -> Line {
 
 /// A numbered menu. `note` is the second line, for a hint or a status.
 fn menu(panel: &mut display::Panel, title: &str, note: &str, items: &[&str], sc: Scroll) {
-    let mut fb = Mono128x64::new();
-    let t = &peep7x14::FONT;
-    let f = &misc4x6::FONT;
-    draw_text(&mut fb, t, centred(t, title, 128), 0, title);
-    draw_text(&mut fb, f, centred(f, note, 128), 15, note);
-
-    let (top, end) = sc.window(items.len(), MAX_LINES);
-    for (row, item) in items[top..end].iter().enumerate() {
-        let y = LINE0 + row * LINE_H;
-        // A marker rather than inverted pixels: the 4x6 font has no room for a
-        // highlight that stays legible, and this reads at arm's length.
-        if top + row == sc.cursor {
-            draw_text(&mut fb, f, 2, y, ">");
-        }
-        draw_text(&mut fb, f, 10, y, item);
-    }
-
-    // Say that there is more, in the only place there is room for it. Without this a
-    // list that scrolls looks exactly like one that has ended.
-    if top > 0 {
-        draw_text(&mut fb, f, 122, LINE0, "^");
-    }
-    if end < items.len() {
-        draw_text(&mut fb, f, 122, LINE0 + (MAX_LINES - 1) * LINE_H, "v");
-    }
-    let _ = panel.flush(&fb);
+    display::draw(panel, |c| {
+        catcard_ui::widgets::menu(c, &display::LAYOUT, title, note, items, sc);
+    });
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.
 fn info(panel: &mut display::Panel, title: &str, lines: &[Line]) {
-    let mut fb = Mono128x64::new();
-    let t = &peep7x14::FONT;
-    let f = &misc4x6::FONT;
-    draw_text(&mut fb, t, centred(t, title, 128), 0, title);
-    for (i, line) in lines.iter().take(MAX_LINES).enumerate() {
-        draw_text(&mut fb, f, 2, LINE0 + i * LINE_H, line);
-    }
-    let _ = panel.flush(&fb);
+    display::draw(panel, |c| {
+        catcard_ui::widgets::info(c, &display::LAYOUT, title, lines);
+    });
 }
 
 /// `NAME 0000_0000`, grouped like the reference manual prints registers.
@@ -1162,7 +1131,7 @@ fn analyze_rng(
         let mut fb = Mono128x64::new();
         draw_se_view(&mut fb, RNG_SE1_Y, "SE1", &h_text[0], chi2[0], seen[0], &ring[0], true);
         draw_se_view(&mut fb, RNG_SE2_Y, "SE2", &h_text[1], chi2[1], seen[1], &ring[1], false);
-        let _ = panel.flush(&fb);
+        display::show_mono(panel, &fb);
         let _ = usbtask::pump();
 
         crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
@@ -1194,9 +1163,7 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
 
 /// The splash as an "about" page: cat logo, wordmark, and version, held until a key.
 fn about_screen(panel: &mut display::Panel) {
-    let mut fb = Mono128x64::new();
-    catcard_ui::splash::draw(&mut fb, crate::VERSION, 100);
-    let _ = panel.flush(&fb);
+    display::draw(panel, |c| catcard_ui::splash::draw(c, crate::VERSION, 100));
 }
 
 /// Break the log into display lines and hand the window at `scroll` to `out`.
@@ -1436,11 +1403,7 @@ fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut Hma
 }
 
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
-    let mut fb = Mono128x64::new();
-    let t = &peep7x14::FONT;
-    let s = &misc4x6::FONT;
-    draw_text(&mut fb, t, centred(t, head, 128), 8, head);
-    draw_text(&mut fb, s, centred(s, a, 128), 30, a);
-    draw_text(&mut fb, s, centred(s, b, 128), 40, b);
-    let _ = panel.flush(&fb);
+    display::draw(panel, |c| {
+        catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
+    });
 }

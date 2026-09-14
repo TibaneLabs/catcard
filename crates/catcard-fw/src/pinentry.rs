@@ -161,7 +161,7 @@ fn screen_field(
         two_key_hint(&mut fb, 46, "accept", "delete");
     }
     tries_left(&mut fb, left);
-    let _ = panel.flush(&fb);
+    display::show_mono(panel, &fb);
 }
 
 /// `✓ <yes>   ✗ <no>`, centred, using the symbols moulded into the keys.
@@ -186,7 +186,7 @@ fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
     title(&mut fb, 18, w[0]);
     title(&mut fb, 34, w[1]);
     two_key_hint(&mut fb, 52, "yes", "no, stop");
-    let _ = panel.flush(&fb);
+    display::show_mono(panel, &fb);
 }
 
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
@@ -194,7 +194,7 @@ fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     title(&mut fb, 6, head);
     small(&mut fb, 28, a);
     small(&mut fb, 36, b);
-    let _ = panel.flush(&fb);
+    display::show_mono(panel, &fb);
 }
 
 /// Choose the first PIN on a blank device.
@@ -246,7 +246,7 @@ fn screen_blank(panel: &mut display::Panel) {
     let label = "choose a PIN";
     let x = (128usize).saturating_sub(icons::hint_width(f, label)) / 2;
     icons::draw_hint(&mut fb, &icons::CHECK, f, x, 34, label);
-    let _ = panel.flush(&fb);
+    display::show_mono(panel, &fb);
 }
 
 /// "Working on it" — drawn before anything that blocks on the secure element.
@@ -405,7 +405,7 @@ pub fn unlock(
                         draw_text(&mut fb, f, x, 30, part);
                         x += part.len() * f.width as usize;
                     }
-                    let _ = panel.flush(&fb);
+                    display::show_mono(panel, &fb);
                 }
                 Step::Blank => screen_blank(panel),
                 Step::In { .. } => screen_message(panel, "Unlocked", "", ""),

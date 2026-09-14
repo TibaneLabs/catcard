@@ -143,6 +143,26 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
     }
 }
 
+/// Copy `src` into `dst` at `scale`x, centred and clipped, over whatever `dst` holds.
+///
+/// How a screen still drawn for a 128x64 panel is shown on a bigger one: copied into the
+/// big canvas and flushed with it, so it replaces the whole of the last frame rather than
+/// leaving that frame's edges around a scaled window.
+pub fn blit_scaled<D: Canvas + ?Sized, S: Canvas + ?Sized>(dst: &mut D, src: &S, scale: usize) {
+    let scale = scale.max(1);
+    let (w, h) = (src.width() * scale, src.height() * scale);
+    let x0 = dst.width().saturating_sub(w) / 2;
+    let y0 = dst.height().saturating_sub(h) / 2;
+    for sy in 0..src.height() {
+        for sx in 0..src.width() {
+            let level = src.get(sx, sy);
+            if level != PAPER {
+                dst.fill_rect(x0 + sx * scale, y0 + sy * scale, scale, scale, level);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +230,22 @@ mod tests {
         c.put(2, 0, INK);
         c.blend(2, 0, PAPER, INK);
         assert_eq!(c.get(2, 0), PAPER, "blending towards paper works too");
+    }
+
+    #[test]
+    fn a_mono_screen_blits_centred_at_twice_its_size() {
+        let mut fb = Mono128x64::new();
+        fb.set(0, 0, true);
+        fb.set(127, 63, true);
+        let mut c = Gray320x240::new();
+        c.fill_rect(0, 0, 10, 10, 9); // outside the blit: left alone
+        blit_scaled(&mut c, &fb, 2);
+        // 256x128 centred on 320x240 starts at (32, 56).
+        for (x, y) in [(32, 56), (33, 56), (32, 57), (33, 57), (286, 182), (287, 183)] {
+            assert_eq!(c.get(x, y), INK, "({x},{y})");
+        }
+        assert_eq!(c.get(34, 56), PAPER);
+        assert_eq!(c.get(0, 0), 9, "blit painted outside its window");
     }
 
     #[test]

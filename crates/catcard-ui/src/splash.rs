@@ -7,7 +7,7 @@
 
 use crate::art::{Bitmap, cat::CAT};
 use crate::font::{misc4x6, peep7x14};
-use crate::framebuffer::Framebuffer;
+use crate::canvas::{Canvas, INK};
 use crate::text::{draw_text, width_of};
 
 /// Left margin before the cat.
@@ -16,8 +16,8 @@ const CAT_X: usize = 3;
 const GUTTER: usize = 6;
 
 /// Draw a bitmap with its top-left at `(x, y)`. Clipped, never panics.
-pub fn draw_bitmap<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
+pub fn draw_bitmap<C: Canvas + ?Sized>(
+    fb: &mut C,
     bmp: &Bitmap,
     x: usize,
     y: usize,
@@ -25,7 +25,7 @@ pub fn draw_bitmap<const W: usize, const P: usize, const N: usize>(
     for by in 0..bmp.height as usize {
         for bx in 0..bmp.width as usize {
             if bmp.pixel(bx, by) {
-                fb.set(x + bx, y + by, true);
+                fb.put(x.saturating_add(bx), y.saturating_add(by), INK);
             }
         }
     }
@@ -35,35 +35,35 @@ pub fn draw_bitmap<const W: usize, const P: usize, const N: usize>(
 ///
 /// One row, deliberately: it reads as a progress indicator without taking space from
 /// the content, and there is nothing to get wrong about its geometry.
-pub fn draw_progress<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
+pub fn draw_progress<C: Canvas + ?Sized>(
+    fb: &mut C,
     progress: u8,
 ) {
-    let filled = (W * progress.min(100) as usize) / 100;
-    let y = P * 8 - 1;
+    let filled = (fb.width() * progress.min(100) as usize) / 100;
+    let y = fb.height().saturating_sub(1);
     for x in 0..filled {
-        fb.set(x, y, true);
+        fb.put(x, y, INK);
     }
 }
 
 /// Render the whole splash into a cleared framebuffer.
-pub fn draw<const W: usize, const P: usize, const N: usize>(
-    fb: &mut Framebuffer<W, P, N>,
+pub fn draw<C: Canvas + ?Sized>(
+    fb: &mut C,
     version: &str,
     progress: u8,
 ) {
     fb.clear();
 
-    let height = P * 8;
+    let height = fb.height();
     // Everything above the progress row.
-    let content = height - 1;
+    let content = height.saturating_sub(1);
 
     let cat_y = (content.saturating_sub(CAT.height as usize)) / 2;
     draw_bitmap(fb, &CAT, CAT_X, cat_y);
 
     // The text column is whatever is left to the right of the art.
     let col_x = CAT_X + CAT.width as usize + GUTTER;
-    let col_w = W.saturating_sub(col_x);
+    let col_w = fb.width().saturating_sub(col_x);
 
     let title = &peep7x14::FONT;
     let name = "CatCard";
@@ -85,7 +85,7 @@ pub fn draw<const W: usize, const P: usize, const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framebuffer::Mono128x64;
+    use crate::framebuffer::{Framebuffer, Mono128x64};
 
     fn row_ink<const W: usize, const P: usize, const N: usize>(
         fb: &Framebuffer<W, P, N>,

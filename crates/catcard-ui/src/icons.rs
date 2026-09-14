@@ -44,22 +44,22 @@ pub const ICON_ADVANCE: usize = 7;
 ///
 /// The icon is centred against the font's cell rather than sharing its baseline, because
 /// a 5-pixel square hung off a 14-pixel face's baseline sits visibly low.
-pub fn draw_hint<const W: usize, const P: usize, const N: usize>(
-    fb: &mut crate::framebuffer::Framebuffer<W, P, N>,
+pub fn draw_hint<C: crate::canvas::Canvas + ?Sized, F: crate::face::Face + ?Sized>(
+    fb: &mut C,
     icon: &Bitmap,
-    font: &crate::font::Font,
+    font: &F,
     x: usize,
     y: usize,
     label: &str,
 ) -> usize {
-    let drop = (font.height as usize).saturating_sub(icon.height as usize) / 2;
+    let drop = font.line_height().saturating_sub(icon.height as usize) / 2;
     crate::splash::draw_bitmap(fb, icon, x, y + drop);
     crate::text::draw_text(fb, font, x + ICON_ADVANCE, y, label)
 }
 
 /// Width `draw_hint` will occupy, for centring a line before drawing it.
-pub fn hint_width(font: &crate::font::Font, label: &str) -> usize {
-    ICON_ADVANCE + label.len() * font.width as usize
+pub fn hint_width<F: crate::face::Face + ?Sized>(font: &F, label: &str) -> usize {
+    ICON_ADVANCE + crate::text::width_of(font, label)
 }
 
 #[cfg(test)]

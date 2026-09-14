@@ -159,14 +159,14 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
                     }
                 }
                 draw_text(&mut fb, f, x, 52, "]");
-                let _ = panel.flush(&fb);
+                display::show_mono(panel, &fb);
                 return;
             }
         };
         icons::draw_hint(&mut fb, &icons::CHECK, body, 0, 52, label);
     }
 
-    let _ = panel.flush(&fb);
+    display::show_mono(panel, &fb);
 }
 
 /// Write the boot result where a debugger can find it.
