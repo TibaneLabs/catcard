@@ -269,7 +269,17 @@ pub fn run(session: Session<'_>) -> ! {
                 break;
             }
             if next == Screen::Logs {
-                page_through(panel, &mut pad, matrix, drbg, "Logs", &LogLines, false);
+                page_through(
+                    panel,
+                    &mut pad,
+                    matrix,
+                    drbg,
+                    "Logs",
+                    &LogLines,
+                    false,
+                    &display::LAYOUT,
+                    false,
+                );
                 v.sc = Scroll::new();
                 screen = Screen::Debug;
                 break;
@@ -1929,6 +1939,9 @@ fn show_words(
         "Write these down",
         &WordLines(m),
         true,
+        &display::WORDS_LAYOUT,
+        // Scramble the display's RF emissions while the seed words are on screen.
+        true,
     );
 }
 
@@ -2021,6 +2034,7 @@ impl catcard_ui::pager::LineSource for WordLines<'_> {
 /// `require_end` is for the seed backup. Until the last line has been on screen, ENTER
 /// pages forward instead of finishing — so the familiar "press to continue" still works
 /// and still cannot skip a word. Once the end is showing, ENTER means done.
+#[allow(clippy::too_many_arguments)]
 fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
     panel: &mut display::Panel,
     pad: &mut Keypad,
@@ -2029,10 +2043,21 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
     title: &str,
     src: &S,
     require_end: bool,
+    layout: &catcard_ui::widgets::Layout<'_>,
+    scramble: bool,
 ) -> bool {
     use catcard_ui::pager::{LineSink, Pager, paged};
 
-    let rows = MAX_LINES;
+    // Rows depend on the body face, which the words layout enlarges, so compute them
+    // from the layout rather than the fixed default.
+    let rows = layout.rows(display::SCREEN_H);
+    // One random seed for the whole viewing, so the emissions scramble is stable per
+    // line (it scrolls with the text) yet different each time the page is opened.
+    let scr = scramble.then(|| {
+        let mut b = [0u8; 4];
+        let _ = drbg.generate(&mut b);
+        catcard_ui::pager::Scramble::new(u32::from_le_bytes(b))
+    });
     let mut p = Pager::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -2047,9 +2072,7 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
             p = clamped;
             continue;
         }
-        display::draw(panel, |c| {
-            paged(c, &display::LAYOUT, title, &sink, p, total)
-        });
+        display::draw(panel, |c| paged(c, layout, title, &sink, p, total, scr));
 
         wait_for_release(pad, matrix, drbg);
         loop {

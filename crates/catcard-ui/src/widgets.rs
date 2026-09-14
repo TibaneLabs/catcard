@@ -47,6 +47,29 @@ impl Layout<'static> {
             margin: 6,
         }
     }
+
+    /// [`compact`](Self::compact) with the body one size larger, for reading seed words:
+    /// bigger text at the cost of fewer rows -- three or four words on a 128x64 panel
+    /// rather than six cramped ones.
+    pub const fn compact_words() -> Self {
+        Self {
+            title: &peep7x14::FONT,
+            body: &peep7x14::FONT,
+            gap: 1,
+            margin: 2,
+        }
+    }
+
+    /// [`roomy`](Self::roomy) with the body one size larger, the Q1 counterpart of
+    /// [`compact_words`](Self::compact_words).
+    pub const fn roomy_words() -> Self {
+        Self {
+            title: &peep10x20::FONT,
+            body: &peep10x20::FONT,
+            gap: 2,
+            margin: 6,
+        }
+    }
 }
 
 impl Layout<'_> {

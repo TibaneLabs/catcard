@@ -226,6 +226,24 @@ pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::La
 #[cfg(feature = "board-q1")]
 pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::roomy();
 
+/// The larger layout used to show seed words: bigger text, fewer rows. See
+/// [`Layout::compact_words`](catcard_ui::widgets::Layout::compact_words).
+#[cfg(not(feature = "board-q1"))]
+pub const WORDS_LAYOUT: catcard_ui::widgets::Layout<'static> =
+    catcard_ui::widgets::Layout::compact_words();
+/// As above, for the Q1.
+#[cfg(feature = "board-q1")]
+pub const WORDS_LAYOUT: catcard_ui::widgets::Layout<'static> =
+    catcard_ui::widgets::Layout::roomy_words();
+
+/// Panel height in pixels, for sizing a pager window against a layout at runtime (the
+/// number of rows depends on the body face, which the words layout changes).
+#[cfg(not(feature = "board-q1"))]
+pub const SCREEN_H: usize = 64;
+/// As above, for the Q1.
+#[cfg(feature = "board-q1")]
+pub const SCREEN_H: usize = 240;
+
 /// What this board's confirm key is labelled with. The mk pads carry a tick moulded into
 /// the cap; the Q1's key is printed ENTER.
 /// Source: gpio-peripherals.md §Q/Q1 "Key decode" [C] for the Q1 legend.

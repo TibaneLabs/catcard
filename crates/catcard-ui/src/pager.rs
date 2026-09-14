@@ -179,10 +179,49 @@ impl Pager {
     }
 }
 
+/// An emissions scramble for a page of secret text (see [`paged`]).
+///
+/// After each line's text it lays a bar of ink of a **random width**, which changes the
+/// number of lit pixels a line drives into the panel and so scrambles what a passive RF
+/// pickup could reconstruct from the display's emissions. The width is derived from a
+/// per-viewing seed and the line's own index, so it is stable for a given line and
+/// therefore **scrolls with the text** rather than flickering; a fresh seed each time the
+/// screen opens means the pattern does not repeat across viewings. It is decoration, not
+/// a keystream -- a cheap mix is enough to make the per-line width unpredictable.
+#[derive(Copy, Clone)]
+pub struct Scramble {
+    seed: u32,
+}
+
+impl Scramble {
+    /// Seed from a fresh random word, drawn once when the page opens.
+    pub const fn new(seed: u32) -> Self {
+        Self { seed }
+    }
+
+    /// A stable width in `0..=max` for the content line at `idx`.
+    fn width(self, idx: usize, max: usize) -> usize {
+        if max == 0 {
+            return 0;
+        }
+        // A splitmix-style mix of the seed and the line index: stable per line, and with
+        // no visible structure from one line to the next.
+        let mut x = self.seed ^ (idx as u32).wrapping_mul(0x9E37_79B9);
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^= x >> 16;
+        (x as usize) % (max + 1)
+    }
+}
+
 /// Draw one window, with arrows saying whether there is more either way.
 ///
 /// `total` is what the source reported, which is how the arrows can be right even
-/// though only the visible lines were rendered.
+/// though only the visible lines were rendered. `scramble`, when set, lays random-width
+/// ink after each line to scramble the display's RF emissions -- for pages of secret
+/// text such as the seed backup.
 pub fn paged<C: Canvas + ?Sized>(
     canvas: &mut C,
     l: &Layout<'_>,
@@ -190,6 +229,7 @@ pub fn paged<C: Canvas + ?Sized>(
     sink: &LineSink,
     p: Pager,
     total: usize,
+    scramble: Option<Scramble>,
 ) {
     canvas.clear();
     let w = canvas.width();
@@ -201,20 +241,33 @@ pub fn paged<C: Canvas + ?Sized>(
         title,
     );
 
+    // Kept clear of this column so the scramble never buries the scroll arrows.
+    let arrow_x = w.saturating_sub(l.body.advance(b'^') + l.margin);
+    let gap = l.body.advance(b' ');
+
     let rows = l.rows(canvas.height());
     for (row, line) in sink.lines().take(rows).enumerate() {
-        crate::text::draw_text(
-            canvas,
-            l.body,
-            l.margin,
-            l.body_top() + row * l.pitch(),
-            line,
-        );
+        let y = l.body_top() + row * l.pitch();
+        crate::text::draw_text(canvas, l.body, l.margin, y, line);
+
+        // Emissions scramble: a random-width ink bar in the space after the text. Anchored
+        // just past this line's own text so it never overwrites a word, and stopping short
+        // of the arrow column.
+        if let Some(sc) = scramble {
+            let text_w: usize = line.bytes().map(|b| l.body.advance(b)).sum();
+            let start = l.margin + text_w + gap;
+            let right = arrow_x.saturating_sub(gap);
+            if right > start {
+                let wdt = sc.width(p.top + row, right - start);
+                if wdt > 0 {
+                    canvas.fill_rect(start, y, wdt, l.body.line_height(), crate::canvas::INK);
+                }
+            }
+        }
     }
 
     // The same affordance the menus use, so "there is more below" looks the same
     // wherever it appears.
-    let arrow_x = w.saturating_sub(l.body.advance(b'^') + l.margin);
     if p.top > 0 {
         crate::text::draw_text(canvas, l.body, arrow_x, l.body_top(), "^");
     }
@@ -355,7 +408,7 @@ mod tests {
         let mut sink = LineSink::new(rows);
         let total = src.fill(0, &mut sink);
         let mut c = Gray320x240::new();
-        paged(&mut c, &l, "Log", &sink, Pager::new(), total);
+        paged(&mut c, &l, "Log", &sink, Pager::new(), total, None);
         let arrow_x = 320 - (l.body.advance(b'^') + l.margin);
         let top_row = l.body_top();
         let bottom_row = l.body_top() + (rows - 1) * l.pitch();
@@ -373,7 +426,7 @@ mod tests {
         let mut sink = LineSink::new(rows);
         let total = src.fill(p.top, &mut sink);
         let mut c = Gray320x240::new();
-        paged(&mut c, &l, "Log", &sink, p, total);
+        paged(&mut c, &l, "Log", &sink, p, total, None);
         assert!(
             inked(&c, arrow_x, top_row, top_row + 14),
             "no ^ with more above"
@@ -382,5 +435,49 @@ mod tests {
 
     fn inked(c: &Gray320x240, x0: usize, y0: usize, y1: usize) -> bool {
         (y0..y1.min(240)).any(|y| (x0..320).any(|x| c.get(x, y) != PAPER))
+    }
+
+    fn total_ink(c: &Gray320x240) -> usize {
+        let mut n = 0;
+        for y in 0..240 {
+            for x in 0..320 {
+                if c.get(x, y) != PAPER {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn identical(a: &Gray320x240, b: &Gray320x240) -> bool {
+        (0..240).all(|y| (0..320).all(|x| a.get(x, y) == b.get(x, y)))
+    }
+
+    #[test]
+    fn scramble_adds_stable_ink_that_scrolls() {
+        let src = Counted(50);
+        let l = Layout::roomy();
+        let rows = l.rows(240);
+        let mut sink = LineSink::new(rows);
+        let total = src.fill(0, &mut sink);
+
+        let mut plain = Gray320x240::new();
+        paged(&mut plain, &l, "Seed", &sink, Pager::new(), total, None);
+        let mut a = Gray320x240::new();
+        paged(&mut a, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x00C0_FFEE)));
+
+        // The scramble only ever adds ink, and for this seed it adds some.
+        assert!(total_ink(&a) > total_ink(&plain), "scramble laid no ink");
+
+        // Deterministic for a given seed -- which is what lets the noise scroll with the
+        // text (a given content line keeps its width) instead of flickering per frame.
+        let mut b = Gray320x240::new();
+        paged(&mut b, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x00C0_FFEE)));
+        assert!(identical(&a, &b), "same seed produced a different scramble");
+
+        // A different seed gives a different pattern, so it is not a fixed decoration.
+        let mut c = Gray320x240::new();
+        paged(&mut c, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x0000_1234)));
+        assert!(!identical(&a, &c), "different seeds produced the same scramble");
     }
 }
