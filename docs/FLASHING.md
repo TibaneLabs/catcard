@@ -272,7 +272,8 @@ reprogrammed. Prove panel and keyboard on the exact hardware with a dev build fi
 |---|---|---|
 | boots, headless loop when there is no panel or keypad, USB answers | ✓ | ✓ on Linux and macOS (macOS after a power cycle, see below) |
 | ST7789 inherited, not reset: white on black, not mirrored | ✓ screenshot | ✓ by eye |
-| full-screen canvas UI, laid out for 320×240, changed rows only | ✓ splash screenshot | not yet |
+| full-screen canvas UI, laid out for 320×240, changed rows only | ✓ splash screenshot | ✓ by eye |
+| indexed colour art: the logo on the splash and About | ✓ (greyscale screenshot) | ✓ by eye, colours right |
 | keyboard: number row, ENTER, DELETE, PIN entry at the device | ✓ ENTER tapped | ✓ |
 | log and memory monitor answer while locked | ✓ | ✓ |
 | `UnlockPin` on a blank unit (sets then logs in) | ✓ | not yet |

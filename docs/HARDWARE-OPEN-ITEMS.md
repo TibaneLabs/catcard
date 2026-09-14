@@ -248,7 +248,8 @@ model:
 
 - **Colour sense.** `0x0000` shows black. The bootloader sends `INVON` and the glass is
   natively inverted, so inversion restores the normal sense — the UI comes up white on
-  black.
+  black. Colour is right too: the logo's orange-to-yellow gradient renders as drawn, so
+  RGB565 byte order and the palette path are confirmed on the unit.
 - **Orientation.** Address column 0 is the left edge as seen: `MADCTL = 0x60` sets `MX`
   and the glass is mirrored to match, so text reads left to right with no column reversal.
 
