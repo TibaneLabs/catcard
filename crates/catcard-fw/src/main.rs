@@ -29,6 +29,7 @@ mod keypad;
 mod logbuf;
 #[cfg(feature = "usb-debug-mem")]
 mod debug_mem;
+mod interrupts;
 mod menu;
 mod msc_drive;
 mod panic;

@@ -84,7 +84,74 @@ pub struct UsbTask {
     outbox: [u8; REPORT_LEN],
     outbox_len: usize,
     reply: Option<ReplyState>,
+    /// Bulk-OUT packets the OTG interrupt has received in mass-storage mode, waiting for
+    /// the transport loop to consume them. Empty and idle in polled HID mode.
+    msc_rx: MscRx,
 }
+
+/// A single-producer/single-consumer ring of received bulk-OUT packets: the OTG interrupt
+/// fills it, the [`msc_poll`] foreground drains it. Sized to hold more than a 512-byte
+/// block's eight packets so a burst arriving while the foreground is mid-SD-write is
+/// absorbed; when it does fill, the interrupt stops re-arming the endpoint (the host is
+/// NAKed) until the foreground drains a slot -- back-pressure, not loss.
+struct MscRx {
+    buf: [[u8; REPORT_LEN]; MSC_RXQ],
+    len: [u8; MSC_RXQ],
+    head: usize,
+    tail: usize,
+}
+
+/// Slots in the mass-storage receive ring.
+const MSC_RXQ: usize = 20;
+
+impl MscRx {
+    const fn new() -> Self {
+        Self {
+            buf: [[0; REPORT_LEN]; MSC_RXQ],
+            len: [0; MSC_RXQ],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+
+    fn is_full(&self) -> bool {
+        (self.head + 1) % MSC_RXQ == self.tail
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+    }
+
+    /// Producer (interrupt). The caller has checked the ring is not full.
+    fn push(&mut self, data: &[u8]) {
+        let n = data.len().min(REPORT_LEN);
+        self.buf[self.head][..n].copy_from_slice(&data[..n]);
+        self.len[self.head] = n as u8;
+        self.head = (self.head + 1) % MSC_RXQ;
+    }
+
+    /// Consumer (foreground). Copies the oldest packet into `out`, or `None` if empty.
+    fn pop(&mut self, out: &mut [u8]) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let n = (self.len[self.tail] as usize).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.tail][..n]);
+        self.tail = (self.tail + 1) % MSC_RXQ;
+        Some(n)
+    }
+}
+
+/// Whether the USB Drive screen drives mass storage from the OTG interrupt (true) or the
+/// old foreground poll (false). A compile-time toggle: if the interrupt path ever
+/// misbehaves, flipping this to `false` restores the known-good polled transport without
+/// touching anything else. HID is polled either way.
+const MSC_INTERRUPTS: bool = true;
 
 /// A response being sent out, frame by frame.
 /// A reply in flight, possibly spanning several frames.
@@ -145,6 +212,7 @@ impl UsbTask {
             outbox: [0; REPORT_LEN],
             outbox_len: 0,
             reply: None,
+            msc_rx: MscRx::new(),
         })
     }
 
@@ -246,6 +314,53 @@ impl UsbTask {
             }
 
             event != Event::Idle || self.outbox_len > 0
+        }
+    }
+
+    /// Service the OTG core from interrupt context -- mass-storage mode only.
+    ///
+    /// Drains every pending event in one entry: the interrupt is level-triggered on the
+    /// OR of the unmasked sources, so leaving one pending re-fires at once. A received
+    /// bulk-OUT / CBW packet is queued for the transport loop and the OUT endpoint
+    /// re-armed only while the ring has room (back-pressure otherwise); enumeration and
+    /// resets are answered in place by [`poll`](Self::poll). The SD card is never touched
+    /// here -- that is the foreground's work and far too long for an interrupt.
+    ///
+    /// # Safety
+    /// Runs as the OTG interrupt handler; the foreground touches the core only inside
+    /// `interrupt::free`, so the handler and the foreground never alias the task.
+    unsafe fn service_irq(&mut self) {
+        // SAFETY: as documented.
+        unsafe {
+            loop {
+                match self.otg.poll() {
+                    Event::Report => {
+                        // The endpoint is armed only while the ring has room, so a Report
+                        // should always fit. Guard anyway: never overwrite an unread slot.
+                        // If it is somehow full, drop the packet and leave the endpoint
+                        // un-armed -- the host recovers via reset -- rather than corrupt
+                        // the ring. Copy out first: `report` borrows the core.
+                        if !self.msc_rx.is_full() {
+                            let mut pkt = [0u8; REPORT_LEN];
+                            let n = {
+                                let rx = self.otg.report();
+                                let n = rx.len().min(REPORT_LEN);
+                                pkt[..n].copy_from_slice(&rx[..n]);
+                                n
+                            };
+                            self.msc_rx.push(&pkt[..n]);
+                            // Re-arm only while there is still room for the next packet.
+                            if !self.msc_rx.is_full() {
+                                self.otg.receive_next();
+                            }
+                        }
+                    }
+                    // A bus reset voids anything queued: a fresh CBW must not be read as
+                    // the tail of an abandoned transfer.
+                    Event::Reset => self.msc_rx.clear(),
+                    Event::Idle => break,
+                }
+            }
         }
     }
 
@@ -727,66 +842,119 @@ pub fn attach() {
 // HID protocol is unavailable for the duration -- the device is a drive, not a wallet.
 // ---------------------------------------------------------------------------
 
-/// Re-enumerate as a USB mass-storage device.
+/// The OTG_FS interrupt, dispatched from [`crate::interrupts`]. Services the core in
+/// mass-storage mode; it is enabled only while the USB Drive screen is open.
+pub fn on_otg_interrupt() {
+    if let Some(t) = task() {
+        // SAFETY: interrupt context. The foreground touches the core only inside
+        // `interrupt::free`, so this handler is the sole accessor while it runs.
+        unsafe { t.service_irq() };
+    }
+}
+
+/// Re-enumerate as a USB mass-storage device, and (in interrupt mode) hand the transport
+/// to the OTG interrupt.
 pub fn msc_enter() {
     if let Some(t) = task() {
-        // SAFETY: the task owns OTG_FS; single-threaded foreground.
+        // SAFETY: the task owns OTG_FS; single-threaded foreground, interrupt still off.
         unsafe {
+            t.msc_rx.clear();
             t.otg.set_mode(catcard_usb::control::DeviceMode::Msc);
             t.otg.reinit();
+            if MSC_INTERRUPTS {
+                // Open the core's gate, then the NVIC line. From here the handler drives
+                // the transport and the foreground reaches the core only through the
+                // `msc_*` functions below, each inside `interrupt::free`.
+                t.otg.enable_interrupts();
+                crate::interrupts::enable_otg();
+            }
         }
     }
 }
 
-/// Re-enumerate back as the HID wallet device.
+/// Re-enumerate back as the HID wallet device, returning to fully polled operation.
 pub fn msc_exit() {
     if let Some(t) = task() {
         // SAFETY: as in `msc_enter`.
         unsafe {
+            if MSC_INTERRUPTS {
+                // Shut the line first, so no handler runs during the switch; HID never
+                // re-opens it.
+                crate::interrupts::disable_otg();
+                t.otg.disable_interrupts();
+            }
             t.otg.set_mode(catcard_usb::control::DeviceMode::Hid);
             t.otg.reinit();
         }
     }
 }
 
-/// Service USB once in mass-storage mode. Answers enumeration and the two class requests
-/// on EP0, and if a bulk-OUT packet arrived copies it into `out` and returns its length,
-/// re-arming the endpoint. `None` if nothing was received this poll.
+/// Take the next bulk-OUT packet in mass-storage mode. In interrupt mode this drains the
+/// ring the handler fills, re-opening the endpoint if the ring had backed up; in polled
+/// mode it services the core inline. `None` if nothing is waiting.
 pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
-    let t = task()?;
-    // SAFETY: the task owns OTG_FS; single-threaded foreground, no interrupt context.
-    unsafe {
-        if matches!(t.otg.poll(), Event::Report) {
-            let n = {
-                let rx = t.otg.report();
-                let n = rx.len().min(out.len());
-                out[..n].copy_from_slice(&rx[..n]);
-                n
-            };
-            t.otg.receive_next();
-            return Some(n);
+    if MSC_INTERRUPTS {
+        // Keep the handler out while we touch the shared ring and the core.
+        cortex_m::interrupt::free(|_| {
+            let t = task()?;
+            let was_full = t.msc_rx.is_full();
+            let got = t.msc_rx.pop(out);
+            if got.is_some() && was_full {
+                // A slot opened after back-pressure; let the host send the next packet.
+                // SAFETY: interrupts masked here, so the handler cannot also re-arm; the
+                // task owns OTG_FS.
+                unsafe { t.otg.receive_next() };
+            }
+            got
+        })
+    } else {
+        let t = task()?;
+        // SAFETY: polled mode -- no interrupt context; the task owns OTG_FS.
+        unsafe {
+            if matches!(t.otg.poll(), Event::Report) {
+                let n = {
+                    let rx = t.otg.report();
+                    let n = rx.len().min(out.len());
+                    out[..n].copy_from_slice(&rx[..n]);
+                    n
+                };
+                t.otg.receive_next();
+                return Some(n);
+            }
         }
+        None
     }
-    None
 }
 
-/// Send one bulk-IN packet (up to 64 bytes). Returns false if the endpoint is busy or
-/// the FIFO is full; retry after another [`msc_poll`].
+/// Send one bulk-IN packet (up to 64 bytes). Returns false if the endpoint is busy or the
+/// FIFO is full; retry after another [`msc_poll`]. Wrapped so it never races the handler.
 pub fn msc_send(data: &[u8]) -> bool {
-    // SAFETY: the task owns OTG_FS; single-threaded foreground.
-    task().is_some_and(|t| unsafe { t.otg.bulk_send(data) })
+    let send = |t: &mut UsbTask| unsafe { t.otg.bulk_send(data) };
+    if MSC_INTERRUPTS {
+        cortex_m::interrupt::free(|_| task().is_some_and(send))
+    } else {
+        task().is_some_and(send)
+    }
 }
 
 /// Whether the host issued a Bulk-Only Mass Storage Reset that the transport loop has
 /// not yet acted on. Peeks without clearing, so a data phase can bail early.
 pub fn msc_reset_pending() -> bool {
-    task().is_some_and(|t| t.otg.msc_reset_pending())
+    if MSC_INTERRUPTS {
+        cortex_m::interrupt::free(|_| task().is_some_and(|t| t.otg.msc_reset_pending()))
+    } else {
+        task().is_some_and(|t| t.otg.msc_reset_pending())
+    }
 }
 
 /// Read and clear the mass-storage reset flag, once the transport loop has abandoned
 /// whatever it was doing and is ready for the next CBW.
 pub fn msc_take_reset() -> bool {
-    task().is_some_and(|t| t.otg.take_msc_reset())
+    if MSC_INTERRUPTS {
+        cortex_m::interrupt::free(|_| task().is_some_and(|t| t.otg.take_msc_reset()))
+    } else {
+        task().is_some_and(|t| t.otg.take_msc_reset())
+    }
 }
 
 /// Bring-up SD read probe: init the card and read block 0, logging every step so the SD
@@ -942,9 +1110,11 @@ pub fn init_fault() -> &'static str {
 /// # Panics
 /// Never. Returns `None` on a board without USB or where the core would not start.
 fn task() -> Option<&'static mut UsbTask> {
-    // SAFETY: the boot path is single-threaded, nothing here runs in interrupt context,
-    // and no two of these references are live at once -- every caller uses it and drops
-    // it within one statement.
+    // SAFETY: the boot path is single-threaded, and the one interrupt that touches the
+    // task -- OTG_FS in mass-storage mode -- is disabled except while the USB Drive screen
+    // is open, where every foreground caller wraps its use in `interrupt::free`. So the
+    // handler and the foreground never hold one of these references at the same time, and
+    // every caller drops it within one statement.
     unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }
 }
 

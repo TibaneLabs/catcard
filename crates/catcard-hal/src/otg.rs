@@ -36,6 +36,10 @@ const AF_OTG_FS: u8 = 10;
 // --- global registers. Source: RM0432 §USB_OTG global register map [C] ---
 const GOTGCTL: u32 = OTG;
 const GAHBCFG: u32 = OTG + 0x008;
+/// `GINTMSK` in `GAHBCFG`: the global gate every unmasked `GINTSTS` source passes through
+/// on its way to the CPU. Shut (0) for the polled HID path; opened for interrupt-driven
+/// mass storage. Source: RM0432 §OTG_GAHBCFG [C]
+const GAHBCFG_GINTMSK: u32 = 1 << 0;
 const GUSBCFG: u32 = OTG + 0x00C;
 const GRSTCTL: u32 = OTG + 0x010;
 const GINTSTS: u32 = OTG + 0x014;
@@ -318,6 +322,28 @@ impl Otg {
     pub unsafe fn attach(&mut self) {
         // SAFETY: as documented.
         unsafe { reg::clear_bits(DCTL, DCTL_SDIS) }
+    }
+
+    /// Let the OTG core raise its interrupt to the CPU. `configure` already unmasks the
+    /// sources in `GINTMSK`; this opens the `GAHBCFG` gate they pass through. The NVIC
+    /// line is the caller's to enable. Used only for mass storage, where an interrupt-
+    /// driven transport replaces the foreground poll; HID leaves this gate shut and stays
+    /// polled.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS, and an OTG interrupt handler must be installed.
+    pub unsafe fn enable_interrupts(&self) {
+        // SAFETY: as documented.
+        unsafe { reg::set_bits(GAHBCFG, GAHBCFG_GINTMSK) };
+    }
+
+    /// Shut the `GAHBCFG` gate so the core stops interrupting the CPU, back to polled.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn disable_interrupts(&self) {
+        // SAFETY: as documented.
+        unsafe { reg::write(GAHBCFG, 0) };
     }
 
     /// Recover a wedged core by re-running the full configuration in place, then attach.
