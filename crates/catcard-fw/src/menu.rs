@@ -1411,7 +1411,10 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
     info(
         panel,
         if passed {
-            "Entropy OK, any key"
+            // Just the verdict, like the failure title: "Entropy OK, any key" is 19
+            // characters and the 7px title font clips the last one on a 128px panel
+            // ("...any ke"). The screen waits for a key regardless.
+            "Entropy OK"
         } else {
             "NOT ENOUGH ENTROPY"
         },
