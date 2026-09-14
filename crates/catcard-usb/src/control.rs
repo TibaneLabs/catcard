@@ -109,6 +109,15 @@ pub enum Action<'a> {
     AckThenAddress(u8),
     /// Refuse. The host will either recover or give up on the request.
     Stall,
+    /// Acknowledge, then reset the data toggle of the endpoint whose address is given
+    /// (the low byte of `wIndex`). `CLEAR_FEATURE(ENDPOINT_HALT)` must leave the toggle
+    /// at DATA0 (USB 2.0 §9.4.5); a host clears halt to recover a stalled or desynced
+    /// pipe, so skipping the reset leaves it desynced for good.
+    AckThenClearHalt(u8),
+    /// Acknowledge, then reset both bulk endpoints for a Bulk-Only Mass Storage Reset:
+    /// toggles back to DATA0, the transmit FIFO flushed, the OUT endpoint re-armed for
+    /// the next CBW. This is the host's "start over" after a transport error.
+    AckThenResetMsc,
 }
 
 /// Where enumeration has got to.
@@ -124,6 +133,19 @@ pub enum Phase {
 }
 
 /// Device state that control transfers read and write.
+/// Which identity the device is enumerating as.
+///
+/// The device is one class at a time and re-enumerates to switch (see `Otg::set_mode`),
+/// so this only picks which descriptor set `GET_DESCRIPTOR` answers with. `Hid` is the
+/// wallet's own protocol; `Msc` exposes the SD card as a USB drive while that screen is
+/// up.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum DeviceMode {
+    #[default]
+    Hid,
+    Msc,
+}
+
 pub struct Device {
     pub phase: Phase,
     pub address: u8,
@@ -133,6 +155,8 @@ pub struct Device {
     pub idle: u8,
     /// Serial number string, from the MCU's unique ID.
     pub serial: &'static str,
+    /// The identity to answer enumeration with.
+    pub mode: DeviceMode,
 }
 
 impl Device {
@@ -143,14 +167,23 @@ impl Device {
             configuration: 0,
             idle: 0,
             serial,
+            mode: DeviceMode::Hid,
         }
     }
 
-    /// Back to the unconfigured state, as a bus reset requires.
+    /// Back to the unconfigured state, as a bus reset requires. The mode is a
+    /// configuration, not transfer state, so it survives a reset -- a re-enumeration in
+    /// MSC mode must come back up as MSC.
     pub fn reset(&mut self) {
         self.phase = Phase::Default;
         self.address = 0;
         self.configuration = 0;
+    }
+
+    /// Choose which identity to enumerate as. Takes effect on the next enumeration, so
+    /// the caller re-attaches the bus after setting it.
+    pub fn set_mode(&mut self, mode: DeviceMode) {
+        self.mode = mode;
     }
 
     pub fn is_configured(&self) -> bool {
@@ -228,8 +261,14 @@ fn standard<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Actio
         }
         (request::SET_INTERFACE, recipient::INTERFACE) if setup.wValue == 0 => Action::Ack,
 
-        // Halt is the only endpoint feature, and nothing here needs to hold one halted:
-        // the transport recovers by abandoning the message, not by halting a pipe.
+        // Halt is the only endpoint feature (selector 0), and nothing here holds a pipe
+        // halted. Clearing it still has to reset the endpoint's data toggle to DATA0 --
+        // that is how a host recovers a desynced pipe, and a bare ack leaves the toggle
+        // wrong so every packet after mismatches. Setting halt is acknowledged and
+        // ignored: this device never wants a pipe held halted.
+        (request::CLEAR_FEATURE, recipient::ENDPOINT) if setup.wValue == 0 => {
+            Action::AckThenClearHalt(setup.wIndex as u8)
+        }
         (request::CLEAR_FEATURE | request::SET_FEATURE, recipient::ENDPOINT) => Action::Ack,
 
         _ => Action::Stall,
@@ -240,7 +279,14 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
     let what = (setup.wValue >> 8) as u8;
     let index = setup.wValue as u8;
 
+    let msc = dev.mode == DeviceMode::Msc;
     match what {
+        kind::DEVICE if msc => Action::Data(trim_static(&crate::msc::DEVICE, setup.wLength)),
+        kind::CONFIGURATION if msc => {
+            Action::Data(trim_static(&crate::msc::CONFIGURATION, setup.wLength))
+        }
+        // In MSC mode there is no HID interface to describe.
+        kind::HID_REPORT | kind::HID if msc => Action::Stall,
         kind::DEVICE => Action::Data(trim_static(&descriptor::DEVICE, setup.wLength)),
         kind::CONFIGURATION => Action::Data(trim_static(&descriptor::CONFIGURATION, setup.wLength)),
         kind::HID_REPORT => {
@@ -275,7 +321,27 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
     }
 }
 
+/// Mass Storage Class (Bulk-Only Transport) interface requests.
+pub mod msc_request {
+    /// Bulk-Only Mass Storage Reset: host-to-device, resets the BOT state.
+    pub const RESET: u8 = 0xFF;
+    /// Get Max LUN: device-to-host, one byte, the highest logical unit number.
+    pub const GET_MAX_LUN: u8 = 0xFE;
+}
+
 fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'a> {
+    // Mass storage has its own two interface requests; the HID ones below do not apply.
+    if dev.mode == DeviceMode::Msc {
+        return match setup.bRequest {
+            // One logical unit (LUN 0), so the maximum LUN is 0.
+            msc_request::GET_MAX_LUN => {
+                scratch[0] = 0;
+                Action::Data(trim(&scratch[..1], setup.wLength))
+            }
+            msc_request::RESET => Action::AckThenResetMsc,
+            _ => Action::Stall,
+        };
+    }
     match setup.bRequest {
         // Windows sends SET_IDLE during enumeration and will not proceed if it stalls.
         hid_request::SET_IDLE => {
@@ -552,6 +618,45 @@ mod tests {
             handle(&mut d, &setup(0x80, 0x7F, 0, 0, 8), &mut s),
             Action::Stall
         );
+    }
+
+    #[test]
+    fn clearing_an_endpoint_halt_resets_its_toggle() {
+        // The host clears halt to recover a desynced pipe; a bare ack would leave the
+        // toggle wrong and every packet after it would mismatch. `wIndex` is the bulk-IN
+        // endpoint address, `wValue` 0 the ENDPOINT_HALT selector.
+        let mut d = dev();
+        let mut s = [0u8; 64];
+        assert_eq!(
+            handle(&mut d, &setup(0x02, request::CLEAR_FEATURE, 0, 0x81, 0), &mut s),
+            Action::AckThenClearHalt(0x81)
+        );
+        assert_eq!(
+            handle(&mut d, &setup(0x02, request::CLEAR_FEATURE, 0, 0x01, 0), &mut s),
+            Action::AckThenClearHalt(0x01)
+        );
+        // Setting halt, and any non-halt feature, is still just acknowledged.
+        assert_eq!(
+            handle(&mut d, &setup(0x02, request::SET_FEATURE, 0, 0x81, 0), &mut s),
+            Action::Ack
+        );
+    }
+
+    #[test]
+    fn bulk_only_mass_storage_reset_restarts_the_transport() {
+        // In MSC mode the class-specific reset (0xFF) starts the transport over; the HAL
+        // reads this as "reset both bulk endpoints and re-arm for the next CBW".
+        let mut d = dev();
+        d.set_mode(DeviceMode::Msc);
+        let mut s = [0u8; 64];
+        assert_eq!(
+            handle(&mut d, &setup(0x21, msc_request::RESET, 0, 0, 0), &mut s),
+            Action::AckThenResetMsc
+        );
+        // Get Max LUN reports a single logical unit.
+        let a = handle(&mut d, &setup(0xA1, msc_request::GET_MAX_LUN, 0, 0, 1), &mut s);
+        let Action::Data(b) = a else { panic!("{a:?}") };
+        assert_eq!(b, &[0]);
     }
 
     #[test]

@@ -78,6 +78,7 @@ enum Screen {
     SaveLog,
     Utils,
     AnalyzeRng,
+    UsbDrive,
 }
 
 const MAIN_ITEMS: &[&str] = &[
@@ -88,7 +89,7 @@ const MAIN_ITEMS: &[&str] = &[
     "About",
     "Reboot",
 ];
-const UTILS_ITEMS: &[&str] = &["Analyze RNG"];
+const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -243,6 +244,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::UsbDrive {
+                usb_drive(panel, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Utils;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -289,6 +296,7 @@ fn step(
         Screen::About => Screen::Main,
         Screen::Utils => match (key, cursor) {
             (Key::Confirm, 0) => Screen::AnalyzeRng,
+            (Key::Confirm, 1) => Screen::UsbDrive,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -385,6 +393,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SaveLog => {}
         // Handled in `run`: it drives the panel itself in a tight loop.
         Screen::AnalyzeRng => {}
+        // Handled in `run`: it takes over USB and needs the keypad to leave.
+        Screen::UsbDrive => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
     }
@@ -1249,6 +1259,77 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
 }
 
 /// Draw up to three lines and return.
+/// Block until any key is pressed. For the error notices below, which would otherwise be
+/// overwritten by the menu redraw the instant this returns.
+fn wait_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if !keys.is_empty() {
+            return;
+        }
+        catcard_hal::dwt::delay_cycles(66_000);
+    }
+}
+
+/// Expose the SD card to the host as a USB mass-storage drive, until `x` is pressed.
+///
+/// While this screen is up the device re-enumerates as a disk -- its HID wallet protocol
+/// is gone until it leaves -- and serves Bulk-Only Transport against the card. On `x` it
+/// switches its identity back and returns. Reached only from `Utils`, which is behind the
+/// PIN, so the card is never exposed on a locked device.
+fn usb_drive(panel: &mut display::Panel, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
+    use catcard_hal::sdmmc::Sdmmc;
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
+    // and the menu waits for it to return before it can be chosen again.
+    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+        Ok(d) => d,
+        Err(_) => {
+            message(panel, "USB Drive", "no SD controller", "press a key");
+            wait_any_key(matrix, drbg);
+            return;
+        }
+    };
+    let card = match catcard_sd::init(&mut dev) {
+        Ok(c) => c,
+        Err(catcard_sd::Error::NoCard) => {
+            message(panel, "USB Drive", "no card in slot", "press a key");
+            wait_any_key(matrix, drbg);
+            return;
+        }
+        Err(_) => {
+            message(panel, "USB Drive", "card would not start", "press a key");
+            wait_any_key(matrix, drbg);
+            return;
+        }
+    };
+
+    message(panel, "USB Drive", "SD is on USB", "press x to eject");
+
+    // Re-enumerate as a disk, serve it, and switch the identity back on the way out.
+    crate::usbtask::msc_enter();
+
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut spins: u32 = 0;
+    crate::msc_drive::run(&mut dev, &card, || {
+        // Scanning the pad every spin would swamp the transport; once every 16384 spins
+        // is a few milliseconds and plenty responsive to a key.
+        spins = spins.wrapping_add(1);
+        if !spins.is_multiple_of(16384) {
+            return false;
+        }
+        crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        keys.contains(&Key::Cancel)
+    });
+
+    crate::usbtask::msc_exit();
+}
+
 fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     let mut fb = Mono128x64::new();
     let t = &peep7x14::FONT;

@@ -30,6 +30,7 @@ mod logbuf;
 #[cfg(feature = "usb-debug-mem")]
 mod debug_mem;
 mod menu;
+mod msc_drive;
 mod panic;
 mod pinentry;
 mod sdupgrade;

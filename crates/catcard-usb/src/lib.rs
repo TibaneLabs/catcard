@@ -42,6 +42,7 @@
 
 pub mod control;
 pub mod descriptor;
+pub mod msc;
 
 /// Every report is exactly this long, in both directions.
 pub const REPORT_LEN: usize = 64;

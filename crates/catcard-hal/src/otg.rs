@@ -119,6 +119,8 @@ const EPCTL_SNAK: u32 = 1 << 27;
 const EPCTL_SD0PID: u32 = 1 << 28;
 const EPCTL_EPENA: u32 = 1 << 31;
 const EPCTL_EPTYP_INTR: u32 = 0b11 << 18;
+/// `EPTYP = 10`: a bulk endpoint, for the mass-storage identity.
+const EPCTL_EPTYP_BULK: u32 = 0b10 << 18;
 const EPCTL_TXFNUM_SHIFT: u32 = 22;
 
 /// The self-clearing command bits in an endpoint control register.
@@ -196,6 +198,11 @@ pub struct Otg {
     /// dropping it, and the reinit count says the self-heal is firing.
     pub resets: u32,
     pub reinits: u32,
+    /// Set when a Bulk-Only Mass Storage Reset was handled and not yet observed by the
+    /// transport loop. It tells [`msc_drive`](../../catcard_fw/msc_drive) to abandon a
+    /// data phase it may be in the middle of, rather than finish sending stale data and
+    /// a CSW the host is no longer waiting for.
+    msc_reset: bool,
 }
 
 impl Otg {
@@ -237,6 +244,7 @@ impl Otg {
             rearms: 0,
             resets: 0,
             reinits: 0,
+            msc_reset: false,
         };
         // SAFETY: the clock is enabled and the data pins are configured just above.
         unsafe { this.configure()? };
@@ -454,6 +462,59 @@ impl Otg {
         }
     }
 
+    /// Send one bulk packet of up to [`REPORT_LEN`] bytes on the IN endpoint.
+    ///
+    /// Variable length, unlike [`send`](Self::send): a short packet is how Bulk-Only
+    /// Transport ends a data phase or delivers a 13-byte CSW. Returns false if the
+    /// endpoint is still sending or the FIFO has no room, in which case retry after a
+    /// poll. Never blocks.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn bulk_send(&mut self, data: &[u8]) -> bool {
+        // SAFETY: as documented.
+        unsafe {
+            if !self.dev.is_configured() {
+                return false;
+            }
+            let ctl = DIEPCTL + EP_IN_NUM * EP_STRIDE;
+            if reg::read(ctl) & EPCTL_EPENA != 0 {
+                return false;
+            }
+            let len = data.len().min(REPORT_LEN);
+            let words = (len as u32).div_ceil(4).max(1);
+            if reg::read(DTXFSTS + EP_IN_NUM * EP_STRIDE) & 0xFFFF < words {
+                return false;
+            }
+            reg::write(DIEPTSIZ + EP_IN_NUM * EP_STRIDE, (1 << 19) | len as u32);
+            reg::modify(ctl, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+            write_fifo_bytes(EP_IN_NUM, &data[..len]);
+            true
+        }
+    }
+
+    /// Choose the identity to enumerate as. Takes effect on the next enumeration, so the
+    /// caller follows it with [`reinit`](Self::reinit) to detach and re-present the device.
+    pub fn set_mode(&mut self, mode: control::DeviceMode) {
+        self.dev.set_mode(mode);
+    }
+
+    /// The identity currently enumerating.
+    pub fn mode(&self) -> control::DeviceMode {
+        self.dev.mode
+    }
+
+    /// Whether a Bulk-Only Mass Storage Reset arrived since this was last cleared. The
+    /// transport loop peeks it to bail out of a data phase and clears it once it has.
+    pub fn msc_reset_pending(&self) -> bool {
+        self.msc_reset
+    }
+
+    /// Read and clear the mass-storage reset flag.
+    pub fn take_msc_reset(&mut self) -> bool {
+        core::mem::take(&mut self.msc_reset)
+    }
+
     /// Re-arm the OUT endpoint for the next report.
     ///
     /// # Safety
@@ -592,10 +653,32 @@ impl Otg {
                     reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
                     arm_ep0_out();
                 }
+                Action::AckThenClearHalt(ep) => {
+                    // Status stage first, then put the named endpoint's toggle back to
+                    // DATA0. Only the bulk data endpoints are ours to touch; the address
+                    // the host names is one of them in either direction.
+                    reg::write(DIEPTSIZ, 1 << 19);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+                    arm_ep0_out();
+                    clear_halt(ep);
+                }
+                Action::AckThenResetMsc => {
+                    // Bulk-Only Mass Storage Reset: ack, then start the transport over --
+                    // both toggles to DATA0, the transmit FIFO emptied of any half-sent
+                    // data phase, and the OUT endpoint re-armed for the next CBW.
+                    reg::write(DIEPTSIZ, 1 << 19);
+                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+                    arm_ep0_out();
+                    clear_halt(EP_IN);
+                    clear_halt(EP_OUT);
+                    flush_tx(EP_IN_NUM);
+                    self.receive_next();
+                    self.msc_reset = true;
+                }
             }
 
             if self.dev.is_configured() && !was_configured {
-                open_data_endpoints();
+                open_data_endpoints(self.dev.mode == control::DeviceMode::Msc);
                 self.receive_next();
             }
         }
@@ -748,13 +831,38 @@ unsafe fn arm_ep0_out() {
 ///
 /// # Safety
 /// Exclusive access to OTG_FS.
-unsafe fn open_data_endpoints() {
+/// Reset the data toggle of the data endpoint at address `ep` back to DATA0.
+///
+/// The address carries the direction in its top bit, as `wIndex` of a
+/// `CLEAR_FEATURE(ENDPOINT_HALT)` does: `0x81` is the bulk-IN endpoint, `0x01` the
+/// bulk-OUT. `SD0PID` is a write-one command bit the core acts on immediately; the
+/// endpoint stays active and enabled, only its next packet is forced to DATA0.
+///
+/// # Safety
+/// Exclusive access to OTG_FS.
+unsafe fn clear_halt(ep: u8) {
+    let ctl = if ep & 0x80 != 0 { DIEPCTL } else { DOEPCTL };
+    let num = (ep & 0x0F) as u32;
+    // SAFETY: as documented.
+    unsafe { reg::modify(ctl + num * EP_STRIDE, EPCTL_COMMANDS, EPCTL_SD0PID) };
+}
+
+/// # Safety
+/// Exclusive access to OTG_FS.
+unsafe fn open_data_endpoints(bulk: bool) {
+    // Interrupt for the HID identity, bulk for mass storage; the endpoint numbers and
+    // max packet size (64) are the same either way.
+    let eptyp = if bulk {
+        EPCTL_EPTYP_BULK
+    } else {
+        EPCTL_EPTYP_INTR
+    };
     // SAFETY: as documented.
     unsafe {
         reg::write(
             DIEPCTL + EP_IN_NUM * EP_STRIDE,
             EPCTL_USBAEP
-                | EPCTL_EPTYP_INTR
+                | eptyp
                 | EPCTL_SD0PID
                 | EPCTL_SNAK
                 | (EP_IN_NUM << EPCTL_TXFNUM_SHIFT)
@@ -762,7 +870,7 @@ unsafe fn open_data_endpoints() {
         );
         reg::write(
             DOEPCTL + EP_OUT_NUM * EP_STRIDE,
-            EPCTL_USBAEP | EPCTL_EPTYP_INTR | EPCTL_SD0PID | EPCTL_SNAK | REPORT_LEN as u32,
+            EPCTL_USBAEP | eptyp | EPCTL_SD0PID | EPCTL_SNAK | REPORT_LEN as u32,
         );
     }
 }

@@ -719,6 +719,76 @@ pub fn attach() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mass-storage mode
+//
+// Used only by the USB Drive screen: it switches the device's identity to a USB disk,
+// runs the Bulk-Only Transport loop against the SD card, and switches back on exit. The
+// HID protocol is unavailable for the duration -- the device is a drive, not a wallet.
+// ---------------------------------------------------------------------------
+
+/// Re-enumerate as a USB mass-storage device.
+pub fn msc_enter() {
+    if let Some(t) = task() {
+        // SAFETY: the task owns OTG_FS; single-threaded foreground.
+        unsafe {
+            t.otg.set_mode(catcard_usb::control::DeviceMode::Msc);
+            t.otg.reinit();
+        }
+    }
+}
+
+/// Re-enumerate back as the HID wallet device.
+pub fn msc_exit() {
+    if let Some(t) = task() {
+        // SAFETY: as in `msc_enter`.
+        unsafe {
+            t.otg.set_mode(catcard_usb::control::DeviceMode::Hid);
+            t.otg.reinit();
+        }
+    }
+}
+
+/// Service USB once in mass-storage mode. Answers enumeration and the two class requests
+/// on EP0, and if a bulk-OUT packet arrived copies it into `out` and returns its length,
+/// re-arming the endpoint. `None` if nothing was received this poll.
+pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
+    let t = task()?;
+    // SAFETY: the task owns OTG_FS; single-threaded foreground, no interrupt context.
+    unsafe {
+        if matches!(t.otg.poll(), Event::Report) {
+            let n = {
+                let rx = t.otg.report();
+                let n = rx.len().min(out.len());
+                out[..n].copy_from_slice(&rx[..n]);
+                n
+            };
+            t.otg.receive_next();
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Send one bulk-IN packet (up to 64 bytes). Returns false if the endpoint is busy or
+/// the FIFO is full; retry after another [`msc_poll`].
+pub fn msc_send(data: &[u8]) -> bool {
+    // SAFETY: the task owns OTG_FS; single-threaded foreground.
+    task().is_some_and(|t| unsafe { t.otg.bulk_send(data) })
+}
+
+/// Whether the host issued a Bulk-Only Mass Storage Reset that the transport loop has
+/// not yet acted on. Peeks without clearing, so a data phase can bail early.
+pub fn msc_reset_pending() -> bool {
+    task().is_some_and(|t| t.otg.msc_reset_pending())
+}
+
+/// Read and clear the mass-storage reset flag, once the transport loop has abandoned
+/// whatever it was doing and is ready for the next CBW.
+pub fn msc_take_reset() -> bool {
+    task().is_some_and(|t| t.otg.take_msc_reset())
+}
+
 /// Bring-up SD read probe: init the card and read block 0, logging every step so the SD
 /// data path can be debugged over USB (`sddiag:` lines via [`Opcode::ReadLog`]) rather
 /// than only on the panel. Returns `(phase, sta, dcount)`: phase 0 controller-init
