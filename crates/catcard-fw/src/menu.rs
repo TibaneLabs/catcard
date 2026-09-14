@@ -1163,6 +1163,14 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
 
 /// The splash as an "about" page: cat logo, wordmark, and version, held until a key.
 fn about_screen(panel: &mut display::Panel) {
+    #[cfg(feature = "board-q1")]
+    {
+        use catcard_ui::art::tibane::LOGO;
+        display::draw_with_palette(panel, &LOGO.palette, |c| {
+            catcard_ui::splash::draw_colour(c, &LOGO, crate::VERSION, 100, &display::LAYOUT)
+        });
+    }
+    #[cfg(not(feature = "board-q1"))]
     display::draw(panel, |c| catcard_ui::splash::draw(c, crate::VERSION, 100));
 }
 

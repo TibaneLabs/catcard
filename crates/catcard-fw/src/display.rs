@@ -256,6 +256,15 @@ static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// one. A flush that fails is not worth stopping for -- the device is still reachable over
 /// USB, and the next draw tries again.
 pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
+    draw_with_palette(panel, &catcard_ui::st7789::GREYS, f);
+}
+
+/// Draw a screen whose canvas means colours rather than greys.
+///
+/// The canvas holds an index per pixel; `palette` says what those indices look like. Art
+/// baked by `tools/artgen/svg2rs.py` carries its own palette, with 0 the background and 15
+/// white, so text and the progress bar keep drawing in white over it.
+pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(&mut Screen)) {
     use core::sync::atomic::Ordering;
     if DRAWING.swap(true, Ordering::SeqCst) {
         crate::catlog!("display: nested draw refused");
@@ -265,12 +274,13 @@ pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
     f(screen);
-    show(panel, screen);
+    show(panel, screen, palette);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
 #[cfg(not(feature = "board-q1"))]
-fn show(panel: &mut Panel, screen: &Screen) {
+fn show(panel: &mut Panel, screen: &Screen, _palette: &[u16; 16]) {
+    // Two colours, so a palette says nothing here.
     let _ = panel.flush(screen);
 }
 
@@ -281,12 +291,23 @@ static mut ROWS_SENT: catcard_ui::st7789::RowCache<240> = catcard_ui::st7789::Ro
 /// Send the rows of the canvas that changed. A cursor step or a progress tick is a few
 /// rows, not the 153,600 bytes of a full frame.
 #[cfg(feature = "board-q1")]
-fn show(panel: &mut Panel, screen: &Screen) {
+fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16]) {
     // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
     // never inside a draw. Single core, nothing in interrupt context.
     let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
-    let _ = panel.flush_gray_changed(screen, &catcard_ui::st7789::GREYS, cache);
+    let last = unsafe { &mut *core::ptr::addr_of_mut!(LAST_PALETTE) };
+    // Same indices mean different colours under a new palette, so what the panel already
+    // shows is no longer what the cache says it shows.
+    if *last != *palette {
+        *last = *palette;
+        cache.invalidate();
+    }
+    let _ = panel.flush_gray_changed(screen, palette, cache);
 }
+
+/// The palette the panel was last flushed through.
+#[cfg(feature = "board-q1")]
+static mut LAST_PALETTE: [u16; 16] = catcard_ui::st7789::GREYS;
 
 /// Show a screen that is still drawn for the 128x64 mono panel.
 ///

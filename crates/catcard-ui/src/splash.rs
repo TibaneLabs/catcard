@@ -5,10 +5,11 @@
 //! entropy pool has finished. On a wallet that matters beyond decoration: a dark screen
 //! and a hung screen look identical, and this makes the difference visible.
 
-use crate::art::{Bitmap, cat::CAT};
+use crate::art::{Bitmap, Indexed, cat::CAT, draw_indexed};
 use crate::font::{misc4x6, peep7x14};
 use crate::canvas::{Canvas, INK};
-use crate::text::{draw_text, width_of};
+use crate::text::{centred, draw_text, width_of};
+use crate::widgets::Layout;
 
 /// Left margin before the cat.
 const CAT_X: usize = 3;
@@ -82,10 +83,75 @@ pub fn draw<C: Canvas + ?Sized>(
     draw_progress(fb, progress);
 }
 
+/// The splash with baked colour art: logo, wordmark, version, progress row.
+///
+/// For a panel with room and a palette -- the art carries its own, and the canvas must be
+/// flushed through it (see the firmware's `display::draw_with_palette`). Text draws in
+/// white, which that palette keeps at index 15, so it reads over the art's colours.
+///
+/// The block is centred as a whole: art, then the wordmark in the layout's title face,
+/// then the version in its body face, with the progress row left clear at the bottom.
+pub fn draw_colour<C: Canvas + ?Sized>(
+    fb: &mut C,
+    art: &Indexed,
+    version: &str,
+    progress: u8,
+    l: &Layout<'_>,
+) {
+    fb.clear();
+    let (w, h) = (fb.width(), fb.height());
+    // Everything above the progress row.
+    let content = h.saturating_sub(1);
+
+    let art_h = art.height as usize;
+    let block = art_h + l.gap * 2 + l.title.line_height() + l.gap + l.body.line_height();
+    let top = content.saturating_sub(block) / 2;
+
+    draw_indexed(fb, art, w.saturating_sub(art.width as usize) / 2, top);
+
+    let name = "CatCard";
+    let name_y = top + art_h + l.gap * 2;
+    draw_text(fb, l.title, centred(l.title, name, w), name_y, name);
+
+    let ver_y = name_y + l.title.line_height() + l.gap;
+    draw_text(fb, l.body, centred(l.body, version, w), ver_y, version);
+
+    draw_progress(fb, progress);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{Gray320x240, INK, PAPER};
     use crate::framebuffer::{Framebuffer, Mono128x64};
+
+    #[test]
+    fn the_colour_splash_shows_the_art_in_its_own_colours_under_white_text() {
+        use crate::art::tibane::LOGO;
+        let l = Layout::roomy();
+        let mut c = Gray320x240::new();
+        draw_colour(&mut c, &LOGO, "7.0.0", 50, &l);
+
+        let levels: Vec<u8> = (0..240)
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .map(|(x, y)| c.get(x, y))
+            .collect();
+        assert!(
+            levels.iter().any(|&v| (1..INK).contains(&v)),
+            "no art colours on the canvas"
+        );
+        assert!(levels.contains(&INK), "no white text or bar");
+        assert!(levels.contains(&PAPER), "the whole canvas is painted");
+
+        // The art sits centred above the text, and the bottom row is the bar's.
+        let art_x = (320 - LOGO.width as usize) / 2;
+        assert!(
+            (0..LOGO.height as usize).any(|dy| (0..LOGO.width as usize)
+                .any(|dx| c.get(art_x + dx, 20 + dy) != PAPER)),
+            "no art where the logo should be"
+        );
+        assert_eq!((0..320).filter(|&x| c.get(x, 239) != PAPER).count(), 160);
+    }
 
     fn row_ink<const W: usize, const P: usize, const N: usize>(
         fb: &Framebuffer<W, P, N>,

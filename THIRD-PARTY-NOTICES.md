@@ -57,6 +57,14 @@ misc-fixed set — contributed by Janne V. Kujala, maintained by Markus Kuhn.
 `crates/catcard-ui/src/art/cat-60x60.png`, a Karpeles Lab asset drawn at that size for
 this panel. Not third-party; listed so the provenance of every asset is in one place.
 
+## Tibane cat logo
+
+`crates/catcard-ui/src/art/tibane.rs` is `crates/catcard-ui/src/art/tibane-cat.svg`
+rasterised on black at 120x120 and baked to indexed-colour pixels by
+`tools/artgen/svg2rs.py`. The SVG is a Tibane asset, copied here from the `tibanenet`
+project so the picture on the Q1 can be rebuilt from this repository alone. Not
+third-party; listed for provenance.
+
 ---
 
 ## Coldcard developer signing key

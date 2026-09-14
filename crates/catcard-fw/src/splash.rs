@@ -12,5 +12,15 @@ use crate::{VERSION, display};
 pub fn show(panel: &mut display::Panel, progress: u8) {
     // A failed flush is not worth stopping the boot for -- the device is still usable
     // through SWD and USB, and the next screen tries again.
+    #[cfg(feature = "board-q1")]
+    {
+        use catcard_ui::art::tibane::LOGO;
+        display::draw_with_palette(panel, &LOGO.palette, |c| {
+            splash::draw_colour(c, &LOGO, VERSION, progress, &display::LAYOUT)
+        });
+    }
+    // The 60x60 cat is drawn as pixels for this panel and reads better there than any
+    // rasterisation of the logo would.
+    #[cfg(not(feature = "board-q1"))]
     display::draw(panel, |c| splash::draw(c, VERSION, progress));
 }

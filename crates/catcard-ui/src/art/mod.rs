@@ -1,6 +1,10 @@
 //! Bitmap artwork.
 
 pub mod cat;
+pub mod indexed;
+pub mod tibane;
+
+pub use indexed::{Indexed, draw_indexed};
 
 /// A 1-bit image, row-major with the most significant bit leftmost.
 ///

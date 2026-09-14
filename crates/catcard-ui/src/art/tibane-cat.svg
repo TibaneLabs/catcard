@@ -1,0 +1,57 @@
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="catGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff6b2c"/>
+      <stop offset="50%" stop-color="#ffa845"/>
+      <stop offset="100%" stop-color="#ffcc00"/>
+    </linearGradient>
+    <linearGradient id="earGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff6b2c"/>
+      <stop offset="100%" stop-color="#ffa845"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Left ear -->
+  <path d="M12 28 L8 8 L24 20 Z" fill="url(#earGradient)" filter="url(#glow)"/>
+  <!-- Right ear -->
+  <path d="M52 28 L56 8 L40 20 Z" fill="url(#earGradient)" filter="url(#glow)"/>
+
+  <!-- Face -->
+  <circle cx="32" cy="36" r="22" fill="url(#catGradient)" filter="url(#glow)"/>
+
+  <!-- Inner ear left -->
+  <path d="M14 24 L12 12 L22 20 Z" fill="#ff8f5c" opacity="0.7"/>
+  <!-- Inner ear right -->
+  <path d="M50 24 L52 12 L42 20 Z" fill="#ff8f5c" opacity="0.7"/>
+
+  <!-- Eyes -->
+  <ellipse cx="24" cy="34" rx="5" ry="6" fill="#050508"/>
+  <ellipse cx="40" cy="34" rx="5" ry="6" fill="#050508"/>
+
+  <!-- Eye shine -->
+  <circle cx="22" cy="32" r="2" fill="white" opacity="0.9"/>
+  <circle cx="38" cy="32" r="2" fill="white" opacity="0.9"/>
+
+  <!-- Nose -->
+  <path d="M32 40 L29 44 L35 44 Z" fill="#050508"/>
+
+  <!-- Mouth -->
+  <path d="M27 46 Q32 50 37 46" stroke="#050508" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <!-- Whiskers left -->
+  <line x1="10" y1="36" x2="20" y2="38" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+  <line x1="10" y1="42" x2="20" y2="42" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+  <line x1="10" y1="48" x2="20" y2="46" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- Whiskers right -->
+  <line x1="54" y1="36" x2="44" y2="38" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+  <line x1="54" y1="42" x2="44" y2="42" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+  <line x1="54" y1="48" x2="44" y2="46" stroke="#050508" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+</svg>
