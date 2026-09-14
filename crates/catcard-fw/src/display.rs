@@ -226,6 +226,25 @@ pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::La
 #[cfg(feature = "board-q1")]
 pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::roomy();
 
+/// What this board's confirm key is labelled with. The mk pads carry a tick moulded into
+/// the cap; the Q1's key is printed ENTER.
+/// Source: gpio-peripherals.md §Q/Q1 "Key decode" [C] for the Q1 legend.
+#[cfg(not(feature = "board-q1"))]
+pub const CONFIRM: catcard_ui::icons::KeyMark =
+    catcard_ui::icons::KeyMark::Icon(&catcard_ui::icons::CHECK);
+/// What this board's cancel key is labelled with: a cross moulded into the cap.
+#[cfg(not(feature = "board-q1"))]
+pub const CANCEL: catcard_ui::icons::KeyMark =
+    catcard_ui::icons::KeyMark::Icon(&catcard_ui::icons::CROSS);
+/// The Q1 has no tick or cross: its keys are printed ENTER and CANCEL, so the screens
+/// name them that way. Source: gpio-peripherals.md §Q/Q1 "Key decode" [C]
+#[cfg(feature = "board-q1")]
+pub const CONFIRM: catcard_ui::icons::KeyMark = catcard_ui::icons::KeyMark::Word("ENTER");
+/// The Q1 has no tick or cross: its keys are printed ENTER and CANCEL, so the screens
+/// name them that way. Source: gpio-peripherals.md §Q/Q1 "Key decode" [C]
+#[cfg(feature = "board-q1")]
+pub const CANCEL: catcard_ui::icons::KeyMark = catcard_ui::icons::KeyMark::Word("CANCEL");
+
 /// Body rows a list or info screen shows: `LAYOUT.rows(Screen height)` as a constant, for
 /// sizing line buffers. Pinned to the layouts by catcard-ui's widget tests (6 and 12).
 #[cfg(not(feature = "board-q1"))]

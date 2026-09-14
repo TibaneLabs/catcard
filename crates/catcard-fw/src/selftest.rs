@@ -158,7 +158,7 @@ fn draw_report(c: &mut display::Screen, report: &BootReport, last_key: Option<Ke
                 return;
             }
         };
-        icons::draw_hint(c, &icons::CHECK, body, 0, y(52), label);
+        icons::draw_key_hint(c, body, 0, y(52), display::CONFIRM, label);
     }
 }
 

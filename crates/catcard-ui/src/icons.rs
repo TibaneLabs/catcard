@@ -1,12 +1,14 @@
-//! The two symbols printed on the keypad.
+//! How a screen names the confirm and cancel keys.
 //!
 //! The `y` and `x` this code calls them are names from a wiring diagram, not from the
-//! device. What a person is looking at is a **✓** and a **✗** moulded into the caps, so
-//! a screen that says "y continue" is asking them to translate — and the translation is
-//! exactly the thing that is unreliable on a board whose key map is still in question.
+//! device. What a person is looking at differs by board: the mk pads carry a **✓** and a
+//! **✗** moulded into the caps, and the Q1's keys are printed ENTER and CANCEL. Either
+//! way a screen should show what is under their thumb -- a hint that says something else
+//! asks them to translate, which is the thing these marks exist to avoid.
 //!
-//! These are bitmaps rather than font glyphs because both faces here are ASCII bitmaps
-//! generated from BDF, and `✓` is U+2713. Adding codepoints to a generated face to spell
+//! So a board picks its [`KeyMark`]s and every hint line draws whichever it has. The
+//! symbols are bitmaps rather than font glyphs because both bitmap faces here are ASCII,
+//! generated from BDF, and `✓` is U+2713: adding codepoints to a generated face to spell
 //! two symbols would be a worse trade than five bytes of pixels each.
 
 use crate::art::Bitmap;
@@ -36,6 +38,52 @@ pub const CROSS: Bitmap = Bitmap {
     // #...#
     pixels: &[0x88, 0x50, 0x20, 0x50, 0x88],
 };
+
+/// What a board's confirm or cancel key is labelled with.
+///
+/// A fact about the hardware, like the key map: the board layer picks these, not the
+/// layout, because it is about the caps rather than the panel.
+#[derive(Copy, Clone)]
+pub enum KeyMark {
+    /// A symbol moulded into the cap, drawn as pixels beside the label.
+    Icon(&'static Bitmap),
+    /// A word printed on the cap, drawn in the same face as the label.
+    Word(&'static str),
+}
+
+/// Draw `<mark> label`, returning where the text ended.
+pub fn draw_key_hint<C: crate::canvas::Canvas + ?Sized, F: crate::face::Face + ?Sized>(
+    fb: &mut C,
+    font: &F,
+    x: usize,
+    y: usize,
+    mark: KeyMark,
+    label: &str,
+) -> usize {
+    match mark {
+        KeyMark::Icon(icon) => draw_hint(fb, icon, font, x, y, label),
+        KeyMark::Word(word) => {
+            let at = crate::text::draw_text(fb, font, x, y, word);
+            crate::text::draw_text(fb, font, at + font.advance(b' '), y, label)
+        }
+    }
+}
+
+/// Width [`draw_key_hint`] will occupy, for centring a line before drawing it.
+pub fn key_hint_width<F: crate::face::Face + ?Sized>(
+    font: &F,
+    mark: KeyMark,
+    label: &str,
+) -> usize {
+    match mark {
+        KeyMark::Icon(_) => hint_width(font, label),
+        KeyMark::Word(word) => {
+            crate::text::width_of(font, word)
+                + font.advance(b' ')
+                + crate::text::width_of(font, label)
+        }
+    }
+}
 
 /// Width of an icon plus the gap before the word after it, at 1x.
 pub const ICON_ADVANCE: usize = 7;
@@ -80,6 +128,31 @@ mod tests {
     use super::*;
     use crate::canvas::{Canvas, Gray320x240, PAPER};
     use crate::font::{misc4x6, peep7x14};
+
+    #[test]
+    fn a_word_mark_reads_as_the_cap_does_and_measures_the_same() {
+        // The Q1's keys say ENTER and CANCEL; drawing a tick there would name a key the
+        // board does not have.
+        let f = &peep7x14::FONT;
+        let mark = KeyMark::Word("ENTER");
+        let mut c = Gray320x240::new();
+        let end = draw_key_hint(&mut c, f, 0, 0, mark, "accept");
+        assert_eq!(end, ("ENTER".len() + 1 + "accept".len()) * 7);
+        assert_eq!(key_hint_width(f, mark, "accept"), end, "width disagrees with the draw");
+        assert!((0..14).any(|y| (0..35).any(|x| c.get(x, y) != PAPER)), "no word drawn");
+    }
+
+    #[test]
+    fn an_icon_mark_measures_the_same_as_the_icon_hint() {
+        let f = &peep7x14::FONT;
+        let mark = KeyMark::Icon(&CHECK);
+        assert_eq!(key_hint_width(f, mark, "yes"), hint_width(f, "yes"));
+        let mut a = Gray320x240::new();
+        let mut b = Gray320x240::new();
+        let ea = draw_key_hint(&mut a, f, 0, 0, mark, "yes");
+        let eb = draw_hint(&mut b, &CHECK, f, 0, 0, "yes");
+        assert_eq!(ea, eb);
+    }
 
     #[test]
     fn an_icon_grows_with_the_face_beside_it_and_the_label_follows() {

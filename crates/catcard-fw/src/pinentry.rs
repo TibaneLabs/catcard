@@ -177,19 +177,22 @@ fn screen_field(
     });
 }
 
-/// `✓ <yes>   ✗ <no>`, centred, using the symbols moulded into the keys.
+/// The two keys and what they do here, centred: `✓ <yes>   ✗ <no>` where those symbols are
+/// moulded into the caps, `ENTER <yes>   CANCEL <no>` where the keys are printed with words.
 ///
-/// The pad is labelled with a tick and a cross. Writing "y" and "x" asked the reader to
-/// translate our wiring names into what is under their thumb, which is one more thing to
-/// get wrong on a device where the key map is the thing in doubt.
+/// Writing "y" and "x" asked the reader to translate our wiring names into what is under
+/// their thumb, which is one more thing to get wrong on a device where the key map is the
+/// thing in doubt. Naming a mark the board does not carry would be the same mistake.
 fn two_key_hint(c: &mut display::Screen, y: usize, yes: &str, no: &str) {
     use catcard_ui::icons;
     let f = display::LAYOUT.body;
     let gap = 3 * f.advance(b' ');
-    let total = icons::hint_width(f, yes) + gap + icons::hint_width(f, no);
+    let total = icons::key_hint_width(f, display::CONFIRM, yes)
+        + gap
+        + icons::key_hint_width(f, display::CANCEL, no);
     let (mut x, y) = (c.width().saturating_sub(total) / 2, at(c, y));
-    x = icons::draw_hint(c, &icons::CHECK, f, x, y, yes) + gap;
-    icons::draw_hint(c, &icons::CROSS, f, x, y, no);
+    x = icons::draw_key_hint(c, f, x, y, display::CONFIRM, yes) + gap;
+    icons::draw_key_hint(c, f, x, y, display::CANCEL, no);
 }
 
 fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
@@ -273,8 +276,9 @@ fn screen_blank(panel: &mut display::Panel) {
         title(c, 10, "No PIN set");
         let f = display::LAYOUT.body;
         let label = "choose a PIN";
-        let (x, y) = (c.width().saturating_sub(icons::hint_width(f, label)) / 2, at(c, 34));
-        icons::draw_hint(c, &icons::CHECK, f, x, y, label);
+        let width = icons::key_hint_width(f, display::CONFIRM, label);
+        let (x, y) = (c.width().saturating_sub(width) / 2, at(c, 34));
+        icons::draw_key_hint(c, f, x, y, display::CONFIRM, label);
     });
 }
 
