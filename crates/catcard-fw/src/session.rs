@@ -113,6 +113,16 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet", true),
         pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet", false),
     };
+    // The bootloader's own verdict on the secret slot, written down.
+    //
+    // It is not exposed over USB -- Identify's BLANK bit means "no PIN", a different
+    // thing -- so until this line the only way to know whether a wallet existed was to
+    // look at the menu and see whether "Destroy seed" was on it. That is no way to
+    // diagnose a wipe that did not take.
+    crate::catlog!(
+        "pin: secret slot {}",
+        if no_seed { "EMPTY" } else { "IN USE" }
+    );
     // Move the pool out of the report rather than borrowing it from inside: the menu
     // holds `&report` for as long as it runs, so a `&mut` into the same struct could
     // never coexist with it. Nothing reads `report.pool` after this point -- the UI DRBG

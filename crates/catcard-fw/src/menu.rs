@@ -1817,21 +1817,43 @@ fn wipe_seed(
         return false;
     }
 
-    let gone = login.verify_secret(&pin_gate, &empty).unwrap_or(false);
+    let bytes_zeroed = login.verify_secret(&pin_gate, &empty).unwrap_or(false);
     empty.zeroize();
+
+    // Two different questions, and only the second is the device's own opinion.
+    //
+    // `verify_secret` compares what `gate 18/4` hands back, and the bootloader
+    // XOR-masks the slot with `otp_key` going in and coming out
+    // (`hw-reference/secure-elements.md` §"PIN → secret flow"). Writing zeros and
+    // reading zeros therefore round-trips through the same mask: it proves the write
+    // landed, and says nothing about whether the element now counts as empty. What the
+    // menu and the next boot actually consult is ZERO_SECRET, so that is what decides
+    // the wording here.
+    //
+    // This distinction is not theoretical. An earlier version checked only the bytes,
+    // reported "Wallet erased", and the entry was back after a reboot -- the one wrong
+    // answer this screen must never give.
+    let flag_empty = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
     crate::catlog!(
-        "wipe: {}",
-        if gone { "seed erased" } else { "NOT CONFIRMED" }
+        "wipe: bytes {} flag {}",
+        if bytes_zeroed { "zeroed" } else { "MISMATCH" },
+        if flag_empty { "EMPTY" } else { "IN USE" }
     );
-    if gone {
-        message(panel, "Wallet erased", "no seed is stored", "");
-    } else {
-        // The write was accepted and the slot did not read back empty. Saying "erased"
-        // here would be worse than saying nothing.
-        message(panel, "Uncertain", "the slot did not", "read back empty");
+
+    match (bytes_zeroed, flag_empty) {
+        (true, true) => message(panel, "Wallet erased", "no seed is stored", ""),
+        // The write was taken and the device still counts the slot as holding a
+        // secret. Whatever that means, it is not "erased".
+        (true, false) => message(
+            panel,
+            "Not confirmed",
+            "zeros were written",
+            "slot still reads used",
+        ),
+        _ => message(panel, "Not erased", "the slot did not", "take the write"),
     }
     wait_for_any_key(pad, matrix, drbg);
-    gone
+    flag_empty
 }
 
 /// Why a gate operation refused, in words that fit a line.
