@@ -882,23 +882,28 @@ fn install(
 // --- Analyze RNG ------------------------------------------------------------------
 //
 // A live look at the secure-element TRNGs -- the RNGs this whole project exists to
-// distrust. SE1 and SE2 are sampled through callgate 26 and their bytes drive one
-// combined stream: the middle panel renders that stream as raw bits (it should look
-// like static; a stuck or biased source stops looking random), and the right column
-// shows the Shannon entropy of everything seen so far, in bits per byte -- 8.00 is
-// ideal, and a number that sits well below it is the failure this screen is for.
+// distrust. SE1 and SE2 are sampled separately through callgate 26 and each gets its
+// own half of the screen: a header with its Shannon entropy (bits per byte -- 8.00 is
+// ideal, a number well below it is the failure this screen is for) and running byte
+// count, over a framed field that renders that element's own recent bytes as raw bits.
+// It should look like static; a source that is stuck or biased stops looking random,
+// and keeping the two streams apart is the point -- a fault in one element must not be
+// hidden by the other's good bytes.
 //
-// The bit view refreshes every frame (as fast as the elements deliver); the entropy
-// figure is recomputed on a ~5 Hz timer so the digits are readable rather than a blur.
+// The bit fields refresh every frame (as fast as the elements deliver); the entropy
+// figures are recomputed on a ~5 Hz timer so the digits are readable rather than a blur.
 
-/// Left edge of the bit panel; the SE readouts sit to its left.
-const RNG_MIDX: usize = 28;
-/// Bit-panel width and height in pixels.
-const RNG_MIDW: usize = 64;
-const RNG_MIDY: usize = 9;
-const RNG_MIDH: usize = 42;
-/// Bytes backing the bit panel: one bit per pixel, rounded up.
-const RNG_RING: usize = (RNG_MIDW * RNG_MIDH).div_ceil(8);
+/// Split-view geometry: one framed bit field per secure element, stacked, SE1 over SE2.
+/// The field is `RNG_FW` x `RNG_FH` pixels with its inner top-left at (`RNG_FX`, y); a
+/// header line sits just above each. SE1's field starts at [`RNG_SE1_Y`], SE2's at
+/// [`RNG_SE2_Y`], splitting the 64-pixel height into two halves.
+const RNG_FX: usize = 2;
+const RNG_FW: usize = 122;
+const RNG_FH: usize = 20;
+const RNG_SE1_Y: usize = 9;
+const RNG_SE2_Y: usize = 41;
+/// Bytes backing one field: one bit per pixel, rounded up. Each source has its own.
+const RNG_RING: usize = (RNG_FW * RNG_FH).div_ceil(8);
 
 /// `log2` for `f32`, no libm: split `x = m * 2^e` from the IEEE bits, then `log2(m)`
 /// via the `atanh` series for `ln`. Good to a few thousandths over `m in [1, 2)`, which
@@ -934,6 +939,48 @@ fn shannon_bits(hist: &[u32; 256], total: u64) -> f32 {
     (flog2(n) - acc / n).clamp(0.0, 8.0)
 }
 
+/// Degrees of freedom for a 256-bin byte histogram, and the standard deviation of the
+/// chi-squared distribution at that df (`sqrt(2*df)`), for reading a statistic as a
+/// rough number of sigmas.
+const CHI2_DF: f32 = 255.0;
+const CHI2_SD: f32 = 22.5832; // sqrt(510)
+
+/// Pearson chi-squared goodness-of-fit statistic for a byte histogram against a uniform
+/// distribution, over 255 degrees of freedom.
+///
+/// `X^2 = sum((c_i - e)^2 / e)` with `e = n/256`, rearranged to `256 * sum(c_i^2)/n - n`
+/// so it needs one pass and one divide. Its expected value for a uniform source is the
+/// degrees of freedom (255) and does not depend on `n`, so it stays comparable as the
+/// histogram is rescaled. A value far above 255 means the bytes are not uniform -- the
+/// failure this screen exists to catch; one far below is its own kind of wrong (too even
+/// to be random). `flog2`/`shannon_bits` measure disorder; this measures the shape.
+fn chi2_uniform(hist: &[u32; 256], total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let mut sum_sq = 0u64;
+    for &c in hist.iter() {
+        sum_sq += (c as u64) * (c as u64);
+    }
+    let n = total as f32;
+    256.0 * (sum_sq as f32) / n - n
+}
+
+/// A short verdict for a chi-squared value: how many standard deviations it sits from the
+/// mean a uniform source would give. Deliberately generous -- a healthy source wanders a
+/// little frame to frame, a broken one misses by hundreds of sigma, so a wide "ok" band
+/// avoids crying wolf without hiding a real failure.
+fn chi2_verdict(chi2: f32) -> &'static str {
+    let z = ((chi2 - CHI2_DF) / CHI2_SD).abs();
+    if z < 4.0 {
+        "ok"
+    } else if z < 8.0 {
+        "chk"
+    } else {
+        "BAD"
+    }
+}
+
 /// A large count in a couple of characters, for the narrow left column.
 fn compact(n: u64) -> Line {
     let mut s = Line::new();
@@ -947,13 +994,48 @@ fn compact(n: u64) -> Line {
     s
 }
 
-/// One SE readout: last byte in hex and whether the last call produced anything.
-fn draw_se(panel_fb: &mut Mono128x64, y: usize, label: &str, last: u8, ok: bool) {
+/// Draw one secure element's own view: a header (label, entropy, running count) above a
+/// framed field of that element's recent bytes as raw bits. `field_y` is the field's
+/// inner top; the header sits two rows above it. `exit_hint` adds the "x=exit" note to
+/// the right of this header (shown once, on the top view).
+#[allow(clippy::too_many_arguments)]
+fn draw_se_view(
+    fb: &mut Mono128x64,
+    field_y: usize,
+    label: &str,
+    h_text: &str,
+    chi2: f32,
+    count: u64,
+    ring: &[u8; RNG_RING],
+    exit_hint: bool,
+) {
     let f = &misc4x6::FONT;
-    draw_text(panel_fb, f, 0, y, label);
-    let mut l = Line::new();
-    let _ = write!(l, "{:02x} {}", last, if ok { "ok" } else { "--" });
-    draw_text(panel_fb, f, 0, y + 7, &l);
+    let hy = field_y - 8;
+    draw_text(fb, f, 1, hy, label);
+    // Shannon entropy (bits/byte), chi-squared value with its verdict, and byte count.
+    let mut stat = Line::new();
+    let _ = write!(
+        stat,
+        "H{h_text} X{} {} n{}",
+        compact(chi2 as u64),
+        chi2_verdict(chi2),
+        compact(count)
+    );
+    draw_text(fb, f, 16, hy, &stat);
+    if exit_hint {
+        draw_text(fb, f, 104, hy, "x=exit");
+    }
+    // A thin frame, then this source's bytes one bit per pixel. Laid out column by
+    // column with the newest bits entering at the right, so the write head sweeps
+    // right-to-left down the field rather than top-to-bottom across it.
+    fb.rect(RNG_FX - 1, field_y - 1, RNG_FX + RNG_FW + 1, field_y + RNG_FH + 1, true);
+    for col in 0..RNG_FW {
+        for row in 0..RNG_FH {
+            let bit = (RNG_FW - 1 - col) * RNG_FH + row;
+            let on = (ring[bit / 8] >> (bit % 8)) & 1 == 1;
+            fb.set(RNG_FX + col, field_y + row, on);
+        }
+    }
 }
 
 /// Live RNG analyzer. Blocks, driving the panel itself; `x` (or the left arrow) exits.
@@ -972,96 +1054,80 @@ fn analyze_rng(
         return;
     }
 
-    let mut hist = [0u32; 256];
-    let mut total: u64 = 0;
-    let mut ring = [0u8; RNG_RING];
-    let mut ring_at = 0usize;
-    // Per source: (last byte seen, last call produced bytes, running count).
-    let mut se = [(0u8, false, 0u64); 2];
     let sources = [RngSource::Se1, RngSource::Se2];
+    // Everything below is kept per source, so a fault in one element is never masked by
+    // the other: its own histogram (for entropy), its own bounded total, its own
+    // lifetime count (for the readout), and its own ring of recent bytes (for the bits).
+    let mut hist = [[0u32; 256]; 2];
+    let mut total = [0u64; 2];
+    let mut seen = [0u64; 2];
+    let mut ring = [[0u8; RNG_RING]; 2];
+    let mut ring_at = [0usize; 2];
 
-    // Recompute the entropy figure at ~5 Hz so the digits are readable.
+    // Recompute the entropy figures at ~5 Hz so the digits are readable.
     // SAFETY: reads the RCC config only.
     let hz = unsafe { catcard_hal::clock::hclk_hz() };
     let period = (hz / 5).max(1);
     let mut last_h = catcard_hal::dwt::cycles();
-    let mut h_text = Line::new();
-    let _ = h_text.push_str("--");
+    let mut h_text: [Line; 2] = [Line::new(), Line::new()];
+    for h in h_text.iter_mut() {
+        let _ = h.push_str("--");
+    }
+    let mut chi2 = [0.0f32; 2];
 
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
     loop {
-        // One call per source per frame: at most 32 bytes each, and the bit panel is
-        // sized so a few frames turn it over completely.
+        // One call per source per frame: at most 32 bytes each, and each field is sized
+        // so a few frames turn it over completely. USB is polled here, not interrupt-
+        // driven, and the frame is dominated by waiting on the elements, so it is pumped
+        // before every blocking read (the read runs in the bootloader and cannot itself
+        // be interrupted) and once more after the flush below. Pumping only once a frame
+        // would leave the bus deaf through the slow parts -- which is most of the frame.
         for (i, src) in sources.iter().enumerate() {
+            let _ = usbtask::pump();
             let mut buf = [0u8; 33];
             // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
-            match unsafe { gate.se_rng(*src, &mut buf) } {
-                Ok(n) if n > 0 => {
-                    se[i].1 = true;
-                    for &b in &buf[1..1 + n] {
-                        se[i].0 = b;
-                        se[i].2 += 1;
-                        hist[b as usize] += 1;
-                        total += 1;
-                        ring[ring_at] = b;
-                        ring_at = (ring_at + 1) % RNG_RING;
-                    }
+            if let Ok(n) = unsafe { gate.se_rng(*src, &mut buf) } {
+                for &b in &buf[1..1 + n] {
+                    seen[i] += 1;
+                    hist[i][b as usize] += 1;
+                    total[i] += 1;
+                    ring[i][ring_at[i]] = b;
+                    ring_at[i] = (ring_at[i] + 1) % RNG_RING;
                 }
-                _ => se[i].1 = false,
             }
         }
 
-        // Keep the counts (and so the f32 sums) bounded, and let the measure stay
-        // adaptive: halving every bin preserves the ratios that entropy depends on.
-        if total >= (1 << 20) {
-            total = 0;
-            for c in hist.iter_mut() {
-                *c >>= 1;
-                total += *c as u64;
+        // Keep each source's counts (and so its f32 sums) bounded, and let the measure
+        // stay adaptive: halving every bin preserves the ratios that entropy depends on.
+        for i in 0..2 {
+            if total[i] >= (1 << 20) {
+                total[i] = 0;
+                for c in hist[i].iter_mut() {
+                    *c >>= 1;
+                    total[i] += *c as u64;
+                }
             }
         }
 
         let now = catcard_hal::dwt::cycles();
         if now.wrapping_sub(last_h) >= period {
             last_h = now;
-            h_text.clear();
-            let _ = write!(h_text, "{:.2}", shannon_bits(&hist, total));
-        }
-
-        let mut fb = Mono128x64::new();
-        let f = &misc4x6::FONT;
-        // Left: the two sources.
-        draw_se(&mut fb, 1, "SE1", se[0].0, se[0].1);
-        draw_se(&mut fb, 20, "SE2", se[1].0, se[1].1);
-        let mut nline = Line::new();
-        let _ = write!(nline, "n {}", compact(se[0].2 + se[1].2));
-        draw_text(&mut fb, f, 0, 44, &nline);
-
-        // Middle: the raw bits, with a thin frame.
-        fb.rect(
-            RNG_MIDX - 2,
-            RNG_MIDY - 2,
-            RNG_MIDX + RNG_MIDW + 2,
-            RNG_MIDY + RNG_MIDH + 2,
-            true,
-        );
-        for row in 0..RNG_MIDH {
-            for col in 0..RNG_MIDW {
-                let bit = row * RNG_MIDW + col;
-                let on = (ring[bit / 8] >> (bit % 8)) & 1 == 1;
-                fb.set(RNG_MIDX + col, RNG_MIDY + row, on);
+            for i in 0..2 {
+                h_text[i].clear();
+                let _ = write!(h_text[i], "{:.2}", shannon_bits(&hist[i], total[i]));
+                chi2[i] = chi2_uniform(&hist[i], total[i]);
             }
         }
 
-        // Right: entropy of the stream so far.
-        draw_text(&mut fb, f, 97, 1, "H b/B");
-        draw_text(&mut fb, f, 97, 12, &h_text);
-
-        draw_text(&mut fb, f, 1, 57, "press x to exit");
+        let mut fb = Mono128x64::new();
+        draw_se_view(&mut fb, RNG_SE1_Y, "SE1", &h_text[0], chi2[0], seen[0], &ring[0], true);
+        draw_se_view(&mut fb, RNG_SE2_Y, "SE2", &h_text[1], chi2[1], seen[1], &ring[1], false);
         let _ = panel.flush(&fb);
+        let _ = usbtask::pump();
 
         crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if keys
@@ -1079,6 +1145,9 @@ fn wait_for_any_key(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
+        // Service USB while this message is up, for the same reason as the main loop:
+        // a polled bus that no one pumps is a device the host cannot reach.
+        let _ = usbtask::pump();
         crate::pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             return;
