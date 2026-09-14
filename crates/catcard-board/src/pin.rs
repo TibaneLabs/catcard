@@ -79,6 +79,9 @@ pub const fn pc(n: u8) -> Pin {
 pub const fn pd(n: u8) -> Pin {
     Pin::new(Port::D, n)
 }
+pub const fn pe(n: u8) -> Pin {
+    Pin::new(Port::E, n)
+}
 
 #[cfg(test)]
 mod tests {

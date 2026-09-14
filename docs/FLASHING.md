@@ -234,17 +234,21 @@ above for the two things that must be true first.
 
 ## Q1: headless recovery, and why it exists
 
-CatCard has **no ST7789 driver and no 10×6 keyboard scanner yet**. Before this section
-existed that made a Q1 unrecoverable: the session parked a device with no panel or keypad,
-a parked device never unlocks, and a locked device answers `UpgradeOffer` with `NotNow` —
-reproduced in the emulator against the real Q1 bootloader. That is the mk5 trap again: a
-validly-signed image that boots and that nothing can replace.
+A Q1 used to be unrecoverable under CatCard. With no ST7789 driver and no 10×6 keyboard
+scanner, the session parked it; a parked device never unlocks, and a locked device answers
+`UpgradeOffer` with `NotNow` — reproduced in the emulator against the real Q1 bootloader.
+That is the mk5 trap again: a validly-signed image that boots and that nothing can replace.
 
 What the Q1 build does now:
 
-- **The LCD is left alone.** The bootloader initialises the ST7789 and the firmware must
-  inherit it (`hw-reference/display.md §Q1`). CatCard used to hold `RESET` low and send an
-  SSD1306 init at it; `display::init` now returns no panel on Q1 without touching a pin.
+- **The LCD is inherited, never reset.** The bootloader initialises the ST7789 and the
+  firmware must keep that (`hw-reference/display.md §Q1`). `catcard_ui::st7789` takes SPI1
+  from the GPU co-processor, leaves `RESET` alone, clears, turns the backlight on and shows
+  the 128×64 UI at 2× centred. Every wait on that path is bounded; any failure means no
+  panel, never a hung boot.
+- **The keyboard works.** `catcard_ui::qwerty` scans the 10×6 matrix and maps the number
+  row, ENTER, CANCEL, DELETE and the arrows onto the numpad's keys, so every existing screen
+  runs unchanged. A column that reads low with no row driven refuses the matrix.
 - **No panel or no keypad → `recovery.rs`, not a park** — on a dev build, which is every
   plain `fw-q1`. Everything a person would do at the glass arrives over USB, and every step
   is written to the log (`ReadLog`):
@@ -256,15 +260,19 @@ What the Q1 build does now:
 - **Both SD slots.** Card detect is active-low on Q1 (high on mk3/mk4), and the one
   controller is steered by `SD_MUX=PC13` (0 = A, 1 = B), both now in the board table.
 
-**A `fw-q1-ship` build parks instead**, by design — it has no key injection, so nothing
-can approve an install. Until the Q1 panel and keyboard drivers exist, **never put a ship
-build on a Q1**: it would be the unreplaceable image this section is about.
+**A `fw-q1-ship` build has no headless fallback**, by design — it has no key injection, so
+nothing over USB can approve an install. With the panel and keyboard working that is the
+normal state of a release: installs are approved at the device. But if a ship build ever
+fails to bring up the panel or keyboard it parks, and that unit can no longer be
+reprogrammed. Prove panel and keyboard on the exact hardware with a dev build first.
 
 ### What has been proven, and where
 
 | step | emulator, real Q1 bootloader v1.1.0 | hardware |
 |---|---|---|
-| boots, LCD untouched, headless loop, USB answers | ✓ | ✓ on Linux and macOS (macOS after a power cycle, see below) |
+| boots, headless loop when there is no panel or keypad, USB answers | ✓ | ✓ on Linux and macOS (macOS after a power cycle, see below) |
+| ST7789 inherited, not reset: 2× UI centred, white on black, not mirrored | ✓ screenshot | ✓ by eye |
+| keyboard: number row, ENTER, DELETE, PIN entry at the device | ✓ ENTER tapped | ✓ |
 | log and memory monitor answer while locked | ✓ | ✓ |
 | `UnlockPin` on a blank unit (sets then logs in) | ✓ | not yet |
 | `UnlockPin` with the unit's existing PIN | — | ✓ |

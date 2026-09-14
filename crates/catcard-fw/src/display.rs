@@ -7,7 +7,9 @@ use catcard_board::spec::{Display, SpiBus};
 use catcard_board::{BOARD, Pin};
 use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
 use catcard_hal::spi::{self, Prescaler, Spi};
-use catcard_ui::{DisplayBus, Ssd1306};
+use catcard_ui::DisplayBus;
+#[cfg(not(feature = "board-q1"))]
+use catcard_ui::Ssd1306;
 
 /// Alternate function for SPI1 and SPI2 on the pins this board uses.
 /// Source: STM32L496 datasheet, Table 15 (alternate function mapping).
@@ -17,12 +19,21 @@ const AF_SPI: u8 = 5;
 /// it matters because an overclocked panel corrupts intermittently rather than failing.
 const DISPLAY_MAX_HZ: u32 = 8_000_000;
 
+/// SPI clock ceiling for the Q1's ST7789.
+///
+/// The reference has the bootloader and stock firmware at 60 MHz (SPI1 at its APB
+/// ceiling). Half that is plenty for a 256x128 image and leaves margin on a trace length
+/// nobody has measured. Source: display.md §Q1 "At firmware start" [C] for the 60 MHz
+const Q1_DISPLAY_MAX_HZ: u32 = 30_000_000;
+
 /// The panel wired up on this board.
 pub struct PanelBus {
     spi: Spi,
     dc: Pin,
     cs: Pin,
     reset: Pin,
+    /// The bootloader set this panel up and the firmware must not reset it (Q1).
+    inherited: bool,
 }
 
 impl PanelBus {
@@ -30,26 +41,36 @@ impl PanelBus {
     ///
     /// # Safety
     ///
-    /// Call once. Takes exclusive ownership of the SPI instance and the four GPIOs in
-    /// the board's display description.
+    /// Call once. Takes exclusive ownership of the SPI instance and the GPIOs in the
+    /// board's display description.
     pub unsafe fn init() -> Result<Self, spi::Error> {
-        let (bus, reset, dc, cs) = match BOARD.display {
+        let (bus, reset, dc, cs, inherited, max_hz) = match BOARD.display {
             Display::Ssd1306 {
                 spi, reset, dc, cs, ..
-            }
-            | Display::St77xx {
+            } => (spi, reset, dc, cs, false, DISPLAY_MAX_HZ),
+            Display::St77xx {
                 spi, reset, dc, cs, ..
-            } => (spi, reset, dc, cs),
+            } => (spi, reset, dc, cs, true, Q1_DISPLAY_MAX_HZ),
         };
 
         // SAFETY: single-threaded bring-up; PC1 is unused on every board that is not an
         // mk5, and on an mk5 the reference lists it as `V12EN` with nothing else on it.
         unsafe { enable_panel_rail() };
 
+        // An inherited panel keeps RESET exactly as the bootloader left it: configuring it
+        // as an output that idles low -- what the OLED wants -- resets a working LCD.
+        // Source: display.md §Q1 "leaves LCD_RESET ... exactly as the bootloader
+        // configured" [C]
+        let owned: &[Pin] = if inherited {
+            &[dc, cs]
+        } else {
+            &[reset, dc, cs]
+        };
+
         // SAFETY: single-threaded bring-up; these pins belong to the panel alone, which
         // the board table's pin-conflict test enforces.
         unsafe {
-            for p in [reset, dc, cs] {
+            for &p in owned {
                 gpio::enable_port(p.port);
                 gpio::configure(
                     p,
@@ -59,10 +80,12 @@ impl PanelBus {
                     Speed::High,
                 );
             }
-            // Idle states before anything is driven: chip deselected, panel held in
+            // Idle states before anything is driven: chip deselected, and an OLED held in
             // reset until `reset()` releases it.
             gpio::write(cs, true);
-            gpio::write(reset, false);
+            if !inherited {
+                gpio::write(reset, false);
+            }
 
             configure_spi_pins(&bus);
         }
@@ -75,11 +98,17 @@ impl PanelBus {
                 // The real APB2 clock, read from RCC -- the bootloader left the PLL
                 // running at 80 MHz, and assuming the 4 MHz MSI reset default clocked
                 // the panel 5x past its limit, garbling every write. SAFETY: reads RCC.
-                Prescaler::for_max_hz(catcard_hal::clock::pclk2_hz(), DISPLAY_MAX_HZ),
+                Prescaler::for_max_hz(catcard_hal::clock::pclk2_hz(), max_hz),
             )?
         };
 
-        Ok(Self { spi, dc, cs, reset })
+        Ok(Self {
+            spi,
+            dc,
+            cs,
+            reset,
+            inherited,
+        })
     }
 
     /// Drive a transfer with D/C at `dc_high`, framed by chip-select.
@@ -116,6 +145,11 @@ impl DisplayBus for PanelBus {
     }
 
     fn reset(&mut self) -> Result<(), Self::Error> {
+        // An inherited panel is never reset: the bootloader's init is the only init it gets,
+        // and a pulse here would blank it with nothing to set it up again.
+        if self.inherited {
+            return Ok(());
+        }
         // The controller discards commands sent before this pulse, and the pulse must be
         // real milliseconds -- `RES=1, 1 ms; RES=0, 10 ms; RES=1, 10 ms` -- not a cycle
         // count, which at the inherited 80 MHz clock came out ~80x too short and left the
@@ -152,24 +186,117 @@ unsafe fn configure_spi_pins(bus: &SpiBus) {
 }
 
 /// The panel, ready to draw on.
+#[cfg(not(feature = "board-q1"))]
 pub type Panel = Ssd1306<PanelBus>;
+/// The panel, ready to draw on: the Q1's ST7789, showing the 128x64 UI at 2x.
+#[cfg(feature = "board-q1")]
+pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
+
+/// Clear the whole panel, borders included.
+///
+/// The mono UI only ever redraws its centred 2x window, so a screen that painted outside
+/// it -- the colour chart -- calls this on the way out, or its edges stay behind.
+#[cfg(feature = "board-q1")]
+pub fn wipe(panel: &mut Panel) {
+    let _ = panel.clear(catcard_ui::st7789::BLACK);
+}
+
+/// Nothing to do: on the OLED every redraw covers the whole panel.
+#[cfg(not(feature = "board-q1"))]
+pub fn wipe(_panel: &mut Panel) {}
+
+/// How long to wait for the display co-processor to finish a frame and free SPI1.
+///
+/// It draws only between tear pulses (~61 Hz) and only once released from reset, which
+/// the bootloader has not done, so the bus should be free at once; a second is far past
+/// any frame. Bounded, because a dead co-processor must cost the panel, not the boot.
+#[cfg(feature = "board-q1")]
+const BUS_GRANT_MS: u32 = 1_000;
+
+/// Bring up the Q1 panel on the bootloader's setup: take SPI1 from the co-processor, open
+/// the bus without touching RESET, clear it, and switch the backlight on.
+///
+/// `None` on any failure, which sends the session down the headless path -- a panel that
+/// half works must never cost the USB recovery.
+///
+/// # Safety
+/// Call once, after `catcard_hal::init_core`.
+#[cfg(feature = "board-q1")]
+pub unsafe fn init() -> Option<Panel> {
+    let Display::St77xx {
+        backlight,
+        bus_grant,
+        ..
+    } = BOARD.display
+    else {
+        return None;
+    };
+
+    if let Some((request, busy)) = bus_grant {
+        // SAFETY: single-threaded bring-up; the grant pins belong to the panel alone.
+        if !unsafe { take_bus(request, busy) } {
+            crate::catlog!("display: co-processor never freed SPI1; no panel");
+            return None;
+        }
+    }
+
+    // SAFETY: forwarding the caller's once-only guarantee.
+    let Ok(bus) = (unsafe { PanelBus::init() }) else {
+        crate::catlog!("display: SPI1 would not start; no panel");
+        return None;
+    };
+    let mut panel = catcard_ui::st7789::St7789::new(bus);
+    // Clear before the backlight comes on, so nothing half-drawn is ever lit.
+    if panel.clear(catcard_ui::st7789::BLACK).is_err() {
+        crate::catlog!("display: ST7789 write failed; no panel");
+        return None;
+    }
+
+    if let Some(bl) = backlight {
+        // SAFETY: single-threaded bring-up; `BL_ENABLE` belongs to the panel alone.
+        unsafe {
+            gpio::enable_port(bl.port);
+            gpio::configure(bl, Mode::Output, OutputType::PushPull, Pull::None, Speed::Low);
+            gpio::write(bl, true);
+        }
+    }
+    crate::catlog!("display: ST7789 inherited, backlight on");
+    Some(panel)
+}
+
+/// Take SPI1 from the display co-processor: raise `request`, then wait for `busy` low.
+///
+/// `request` is open-drain with a pull-up and `busy` has a pull-down, as the reference
+/// has them. True once the bus is ours, false if `busy` never cleared.
+/// Source: gpio-peripherals.md §GPU co-processor "LCD-bus arbitration" [C]
+///
+/// # Safety
+/// Claims both pins.
+#[cfg(feature = "board-q1")]
+unsafe fn take_bus(request: Pin, busy: Pin) -> bool {
+    // SAFETY: as documented.
+    unsafe {
+        gpio::enable_port(request.port);
+        gpio::configure(request, Mode::Output, OutputType::OpenDrain, Pull::Up, Speed::Low);
+        gpio::write(request, true);
+        gpio::enable_port(busy.port);
+        gpio::configure(busy, Mode::Input, OutputType::PushPull, Pull::Down, Speed::Low);
+        for _ in 0..BUS_GRANT_MS {
+            if !gpio::read(busy) {
+                return true;
+            }
+            catcard_hal::dwt::delay_ms(1);
+        }
+    }
+    false
+}
 
 /// Bring up the panel. Returns `None` if SPI would not initialise.
 ///
 /// # Safety
 /// Call once, after `catcard_hal::init_core`.
+#[cfg(not(feature = "board-q1"))]
 pub unsafe fn init() -> Option<Panel> {
-    // Q1: the ST7789 is set up by the bootloader and the firmware must inherit it -- no
-    // reset pulse, no controller init. Everything below this is SSD1306: it holds
-    // `RESET=PA6` low and then sends an OLED init, which on the Q1 blanks an LCD that was
-    // working and gains nothing, because there is no ST7789 driver to draw with yet. So
-    // touch none of its pins and report no panel; the session then takes the headless
-    // path, which is what keeps the device reprogrammable.
-    // Source: display.md §Q1 "At firmware start -- inherit, do not reset" [C]
-    if matches!(BOARD.display, Display::St77xx { .. }) {
-        crate::catlog!("display: ST7789 left as the bootloader set it up (no driver)");
-        return None;
-    }
     // SAFETY: forwarding the caller's once-only guarantee.
     let bus = unsafe { PanelBus::init() }.ok()?;
     let mut panel = Ssd1306::new_128x64(bus);

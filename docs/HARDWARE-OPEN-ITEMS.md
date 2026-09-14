@@ -233,10 +233,27 @@ TEAR=PB11 (`hw-reference/display.md §Q1`, `gpio-peripherals.md §Q/Q1`).
 
 The part that bites: **the firmware inherits the bootloader's LCD and must not reset or
 re-initialise it.** CatCard used to treat the panel like the SSD1306 — hold `RESET` low,
-pulse it, send an OLED init — which on a Q1 blanks a working LCD. `display::init` now
-returns no panel on Q1 without touching a pin, and the session's headless recovery path
-(`recovery.rs`) keeps the device reprogrammable over USB until a real ST7789 driver and
-the 10×6 keyboard scanner exist.
+pulse it, send an OLED init — which on a Q1 blanks a working LCD.
+
+`catcard_ui::st7789` now draws on the inherited setup: it takes SPI1 from the GPU
+co-processor (`G_CTRL=PE5` high, wait `G_BUSY=PE2` low, bounded), leaves `RESET` alone,
+clears, turns on `BL_ENABLE=PE3`, and shows the 128×64 UI at 2× centred using only
+`CASET`/`RASET`/`RAMWR`. The 10×6 keyboard (`catcard_ui::qwerty`) maps the number row,
+ENTER, CANCEL, DELETE and the arrows onto the numpad's keys. Any failure bringing either up
+leaves the session on the headless recovery path (`recovery.rs`).
+
+**Colour sense and orientation — confirmed by eye on a real Q1 `[C]`** (2026-09-14, the
+display/keyboard build installed over USB). Both had been `[I]`, taken from the emulator's
+model:
+
+- **Colour sense.** `0x0000` shows black. The bootloader sends `INVON` and the glass is
+  natively inverted, so inversion restores the normal sense — the UI comes up white on
+  black.
+- **Orientation.** Address column 0 is the left edge as seen: `MADCTL = 0x60` sets `MX`
+  and the glass is mirrored to match, so text reads left to right with no column reversal.
+
+The keyboard mapping was exercised on the same unit: the number row, ENTER, DELETE and the
+PIN flow behave as the decode table in `gpio-peripherals.md §Q/Q1` says.
 
 The GPU co-MCU shares SPI1: the bootloader leaves it held in reset (`G_RESET=PE6` low)
 with `G_CTRL=PE5` high, i.e. the main MCU owns the bus. Nothing in CatCard touches either

@@ -5,7 +5,7 @@
 //! collected in `docs/HARDWARE-OPEN-ITEMS.md`.
 
 use crate::memory::MemoryMap;
-use crate::pin::{MaybePin, Pin, pa, pb, pc, pd};
+use crate::pin::{MaybePin, Pin, pa, pb, pc, pd, pe};
 
 /// Which silicon a board carries. Drives register-map differences in `catcard-hal`
 /// (flash controller, RAM banks, and the extra peripherals on the L4+).
@@ -51,6 +51,12 @@ pub enum Display {
         cs: Pin,
         /// Tearing-effect input from the panel.
         tear: MaybePin,
+        /// Backlight enable. The bootloader's picture is invisible until the firmware
+        /// drives this high.
+        backlight: MaybePin,
+        /// Hand-off with a display co-processor sharing SPI1, as `(request, busy)`: drive
+        /// `request` high to take the bus, then wait for `busy` to read low.
+        bus_grant: Option<(Pin, Pin)>,
     },
 }
 
@@ -485,6 +491,13 @@ pub const Q1: BoardSpec = BoardSpec {
         dc: pa(8),
         cs: pa(4),
         tear: Some(pb(11)),
+        // `BL_ENABLE`. Source: gpio-peripherals.md §Q/Q1 LCD [C]
+        backlight: Some(pe(3)),
+        // `G_CTRL` (open-drain, pull-up) and `G_BUSY` (input, pull-down): the GPU
+        // co-processor shares SPI1, and the bootloader leaves it in reset with `G_CTRL`
+        // high, so taking the bus should find it already free.
+        // Source: gpio-peripherals.md §GPU co-processor [C]
+        bus_grant: Some((pe(5), pe(2))),
     },
     // Source: generations-mk2-q-mk5.md §Q [C]
     input: Input::Qwerty {
@@ -645,6 +658,20 @@ mod tests {
                     claim(reset, "display RESET", b.name);
                     claim(dc, "display DC", b.name);
                     claim(cs, "display CS", b.name);
+                }
+            }
+            if let Display::St77xx {
+                backlight,
+                bus_grant,
+                ..
+            } = b.display
+            {
+                if let Some(p) = backlight {
+                    claim(p, "display backlight", b.name);
+                }
+                if let Some((request, busy)) = bus_grant {
+                    claim(request, "display bus request", b.name);
+                    claim(busy, "display bus busy", b.name);
                 }
             }
             match b.input {

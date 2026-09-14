@@ -19,7 +19,9 @@ use catcard_entropy::HmacDrbg;
 use catcard_pin::{Failure, Login, MAX_ATTEMPTS, MAX_PART_LEN, PinGate, Step};
 use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
+use catcard_ui::keypad::{Event, KEYS, Key};
+
+use crate::keypad::Keypad;
 use catcard_ui::pinentry::PinBuffer;
 use catcard_ui::text::{centred, draw_text};
 

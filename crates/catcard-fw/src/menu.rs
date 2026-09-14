@@ -35,7 +35,9 @@ use catcard_callgate::abi::LogoutMode;
 use catcard_entropy::HmacDrbg;
 use catcard_ui::Mono128x64;
 use catcard_ui::font::{misc4x6, peep7x14};
-use catcard_ui::keypad::{Event, KEYS, Key, Keypad};
+use catcard_ui::keypad::{Event, KEYS, Key};
+
+use crate::keypad::Keypad;
 use catcard_ui::menu::Scroll;
 use catcard_ui::text::{centred, draw_text};
 
@@ -74,6 +76,7 @@ enum Screen {
     Boot,
     Selftest,
     Keypad,
+    Colours,
     Logs,
     SaveLog,
     Utils,
@@ -100,6 +103,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "microSD",
     "Logs",
     "Save log to SD",
+    "Colours",
 ];
 
 /// Run the menu. Never returns.
@@ -149,6 +153,9 @@ pub fn run(session: Session<'_>) -> ! {
         // An upgrade that passed inspection is waiting on a person, wherever they are.
         if let Some(a) = usbtask::pending() {
             if !showing_offer {
+                if screen == Screen::Colours {
+                    display::wipe(panel);
+                }
                 crate::session::show_offer(panel, &a);
                 showing_offer = true;
             }
@@ -255,6 +262,11 @@ pub fn run(session: Session<'_>) -> ! {
                 // different lengths is how you land on an item nobody chose.
                 v.sc = Scroll::new();
             }
+            // The colour chart paints outside the centred window the mono UI redraws,
+            // so its edges would stay behind under whatever comes next.
+            if screen == Screen::Colours && next != Screen::Colours {
+                display::wipe(panel);
+            }
             screen = next;
         }
     }
@@ -309,7 +321,8 @@ fn step(
             (Key::Confirm, 5) => Screen::Keypad,
             (Key::Confirm, 6) => Screen::Sd,
             (Key::Confirm, 7) => Screen::Logs,
-            (Key::Confirm, _) => Screen::SaveLog,
+            (Key::Confirm, 8) => Screen::SaveLog,
+            (Key::Confirm, _) => Screen::Colours,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
@@ -387,6 +400,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
+        Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         Screen::Logs => log_screen(panel, v.log_scroll),
         // Handled in `run`; never drawn.
@@ -712,6 +726,28 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
     let _ = write!(l, "x twice  back");
     let _ = lines.push(l);
     info(panel, "Keypad", &lines);
+}
+
+/// Colours: a chart of what the panel can show -- bars, the full ramp of each channel,
+/// and a hue sweep. It fills the whole LCD, not the UI's window; any key leaves, and the
+/// menu wipes the panel on the way out.
+#[cfg(feature = "board-q1")]
+fn colours_screen(panel: &mut display::Panel) {
+    if panel.draw_colour_chart().is_err() {
+        crate::catlog!("colours: chart write failed");
+    }
+}
+
+/// Colours, on a panel that has two of them.
+#[cfg(not(feature = "board-q1"))]
+fn colours_screen(panel: &mut display::Panel) {
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+    for text in ["mono OLED: black and white", "only -- nothing to chart", "any key  back"] {
+        let mut l = Line::new();
+        let _ = l.push_str(text);
+        let _ = lines.push(l);
+    }
+    info(panel, "Colours", &lines);
 }
 
 /// Read a firmware off the card, ask, and install it.
