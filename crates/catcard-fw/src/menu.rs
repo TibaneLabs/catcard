@@ -79,7 +79,10 @@ enum Screen {
     Utils,
     AnalyzeRng,
     UsbDrive,
-    NewSeed,
+    /// Choosing how long a new seed should be.
+    NewSeedMenu,
+    /// Generating one, of this many words.
+    NewSeed(u8),
     WipeSeed,
 }
 
@@ -120,6 +123,16 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
         MAIN_ITEMS
     }
 }
+/// How long a new seed should be.
+///
+/// Twenty-four first, and under the cursor when the menu opens. Twelve is a sound
+/// 128-bit seed and stock offers both, but on a device whose whole argument is the
+/// quality of its entropy, the stronger option should be the default one.
+///
+/// The word count travels in [`Screen::NewSeed`], so adding another length here needs
+/// only a matching arm in [`step`].
+const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
+
 const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
@@ -273,7 +286,7 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
-            if next == Screen::NewSeed {
+            if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
                     login,
@@ -282,6 +295,7 @@ pub fn run(session: Session<'_>) -> ! {
                     matrix,
                     drbg,
                     pool.as_deref_mut(),
+                    words,
                 );
                 // A wallet that now exists reorders the menu, so re-read the slot state
                 // from the login rather than assuming the flow got as far as storing
@@ -345,7 +359,7 @@ fn step(
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
-            (Key::Confirm, Some("New wallet")) => Screen::NewSeed,
+            (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
@@ -353,6 +367,15 @@ fn step(
                 unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
             }
             _ => Screen::Main,
+        },
+        // By name again, for the same reason as Main: the list is short today and the
+        // count is what the next screen acts on, so an index table would be one
+        // reordering away from generating the wrong length of seed.
+        Screen::NewSeedMenu => match (key, NEW_SEED_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("24 words")) => Screen::NewSeed(24),
+            (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::NewSeedMenu,
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
@@ -436,6 +459,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Main => Some(main_items(no_seed)),
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
+        Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         _ => None,
     }
 }
@@ -455,6 +479,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         ),
         Screen::About => about_screen(panel),
         Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
+        Screen::NewSeedMenu => menu(panel, "New wallet", "how many words?", NEW_SEED_ITEMS, v.sc),
         Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -477,7 +502,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
-        Screen::NewSeed => {}
+        Screen::NewSeed(_) => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }
@@ -1404,6 +1429,12 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
 /// User-supplied entropy (dice, coins, key-mash) is deliberately *not* required. The
 /// pool has already met its policy or it refuses outright, and a handful of dice rolls
 /// cannot rescue a device whose TRNGs are unhealthy. See `docs/SECRETS-AND-SETTINGS.md`.
+// Eight arguments, and clippy is right to say so. Four of them -- panel, pad, matrix,
+// drbg -- are the same cluster every action screen drags around, and the remedy is the
+// one this file already uses for `Session` and `View`: give them a struct. That is a
+// refactor across every screen here rather than a change to this function, so it is
+// deferred deliberately and not because the lint is wrong.
+#[allow(clippy::too_many_arguments)]
 fn new_seed(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -1412,9 +1443,17 @@ fn new_seed(
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     pool: Option<&mut catcard_entropy::EntropyPool>,
+    words: u8,
 ) {
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
+
+    // How much entropy those words carry: 32 bytes for 24, 16 for 12. Anything else is
+    // a caller bug rather than a user one, and 24 is the safe way to be wrong.
+    let entropy_len = match words {
+        12 => 16,
+        _ => 32,
+    };
 
     // No pool means it never met its policy at boot. That is a refusal.
     let Some(pool) = pool else {
@@ -1437,12 +1476,9 @@ fn new_seed(
             return;
         }
     }
-    ask(
-        panel,
-        "Create wallet?",
-        "24 words, from this",
-        "device's own TRNGs",
-    );
+    let mut what = Line::new();
+    let _ = write!(what, "{words} words, from this");
+    ask(panel, "Create wallet?", &what, "device's own TRNGs");
     if !confirmed(pad, matrix, drbg) {
         return;
     }
@@ -1569,28 +1605,31 @@ fn new_seed(
     entropy_report(panel, &g, passed);
     wait_for_any_key(pad, matrix, drbg);
 
-    let mut entropy = match pool.draw_seed() {
-        Ok(e) => e,
+    // Exactly as much as those words carry, rather than 256 bits with half thrown away.
+    // Stock draws a full seed and truncates for twelve words; the pool can be asked for
+    // the length actually wanted, and a draw that is all used is easier to reason about
+    // than one that is half discarded.
+    let mut entropy = [0u8; 32];
+    if let Err(e) = pool.draw(&mut entropy[..entropy_len]) {
         // The pool refusing is the entropy design working as intended, so report which
         // way it refused rather than a generic failure.
-        Err(e) => {
-            crate::catlog!("seed: pool refused");
-            let mut l = Line::new();
-            let _ = write!(l, "{e}");
-            info(panel, "Refused", &[l]);
-            wait_for_any_key(pad, matrix, drbg);
-            return;
-        }
-    };
+        crate::catlog!("seed: pool refused");
+        let mut l = Line::new();
+        let _ = write!(l, "{e}");
+        info(panel, "Refused", &[l]);
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    }
 
-    let encoded = catcard_callgate::pin::encode_bip39(&entropy);
-    let mnemonic = Mnemonic::from_entropy(&entropy);
+    let encoded = catcard_callgate::pin::encode_bip39(&entropy[..entropy_len]);
+    let mnemonic = Mnemonic::from_entropy(&entropy[..entropy_len]);
     entropy.zeroize();
 
     let (Ok(mut secret), Ok(mnemonic)) = (encoded, mnemonic) else {
-        // 32 bytes is a length both of them accept, so this is unreachable today. It is
-        // written out rather than unwrapped because this is the one function that holds
-        // a wallet, and a panic here would take the seed to the panic screen with it.
+        // Both accept 16 and 32 bytes, which is all `entropy_len` can be, so this is
+        // unreachable today. It is written out rather than unwrapped because this is
+        // the one function that holds a wallet, and a panic here would carry the seed
+        // to the panic screen with it.
         message(panel, "Failed", "could not encode", "that seed length");
         wait_for_any_key(pad, matrix, drbg);
         return;
