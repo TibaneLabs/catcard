@@ -244,30 +244,30 @@ impl BoardSpec {
 // Mk3 — STM32L496RG
 // ---------------------------------------------------------------------------
 
-/// SPI1 carries the OLED. RESET/DC/CS are confirmed; SCK/MOSI are not stated in the
-/// reference, but the Q1 board (same MCU family, same display-control pins PA4/PA6/PA8)
-/// routes SCLK=PA5 and MOSI=PA7 — the SPI1 default AF5 pins. Taking those as [I].
-/// Source: gpio-peripherals.md §Mk3 [C] (control pins), §Q [C] (SPI1 data pins)
+/// SPI1 carries the OLED, write-only: SCK=PA5, MOSI=PA7, no MISO; control pins RESET=PA6,
+/// DC=PA8, CS=PA4. Mode 0. PA6 doubles as SPI1_MISO's AF pin but is driven as the reset
+/// GPIO (the panel is write-only), which is why MISO is unrouted rather than a conflict.
+/// Source: hw-reference/display.md §OLED [C].
 const MK3_DISPLAY_SPI: SpiBus = SpiBus {
     instance: 1,
     sck: pa(5),
     mosi: pa(7),
     miso: None,
-    pins_confirmed: false,
+    pins_confirmed: true,
 };
 
-/// SPI2 carries the SPI-NOR flash. MISO=PC2 / MOSI=PC3 are confirmed (AF5). SCK and
-/// CS are not stated. Note PB12/PB13 — the usual SPI2 NSS/SCK pins — are taken by the
-/// numpad rows on this board, which leaves PB10 or PD1 for SCK and PB9 or PD0 for CS.
-/// PD1 is recorded as the working candidate so the driver has something to compile
-/// against; `pins_confirmed: false` and `cs: None` are what actually gate bring-up.
-/// Source: gpio-peripherals.md §Mk3 [C] (MISO/MOSI), [?] (SCK/CS)
+/// SPI2 carries the SPI-NOR flash (Macronix MX25L8006E, 1 MB): SCK=PB10, MOSI=PC3,
+/// MISO=PC2, at 8 MHz in mode 0. The chip-select is PB9 driven as a plain GPIO output
+/// (low around each opcode) -- it is *not* the SPI2 hardware NSS, even though PB9 is that
+/// pin's AF. A firmware that leaves CS unset cannot write SPI-NOR, and on mk3 that is the
+/// only staging area, so it cannot self-upgrade. Source: hw-reference/storage.md §SPI-NOR
+/// and gpio.md [C].
 const MK3_SFLASH_SPI: SpiBus = SpiBus {
     instance: 2,
-    sck: pd(1),
+    sck: pb(10),
     mosi: pc(3),
     miso: Some(pc(2)),
-    pins_confirmed: false,
+    pins_confirmed: true,
 };
 
 pub const MK3: BoardSpec = BoardSpec {
@@ -319,10 +319,10 @@ pub const MK3: BoardSpec = BoardSpec {
         mux: None,
         slot_b: None,
     },
-    // The only board with one. Source: gpio-peripherals.md §Mk3 [C]; CS/SCK still [?]
+    // The only board with one. Source: hw-reference/storage.md §SPI-NOR [C].
     sflash: Some(SflashPins {
         spi: MK3_SFLASH_SPI,
-        cs: None, // [?] -- see docs/HARDWARE-OPEN-ITEMS.md
+        cs: Some(pb(9)), // software-driven GPIO CS, not SPI2 NSS -- storage.md [C]
         max_hz: 8_000_000,
         sector_len: 4096,
     }),
@@ -732,6 +732,11 @@ mod tests {
                 claim(sf.spi.mosi, "SPI-NOR MOSI", b.name);
                 if let Some(p) = sf.spi.miso {
                     claim(p, "SPI-NOR MISO", b.name);
+                }
+                // The software CS too: PB9 is SPI2's NSS pin driven as a plain GPIO, so a
+                // future reuse of it would be exactly the collision this test catches.
+                if let Some(p) = sf.cs {
+                    claim(p, "SPI-NOR CS", b.name);
                 }
             }
         }

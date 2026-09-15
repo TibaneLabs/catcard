@@ -112,30 +112,24 @@ writing and reading back the top of each bank on hardware.
 
 ---
 
-## SPI-NOR chip select and SCK
+## SPI-NOR chip select and SCK — RESOLVED
 
-**Blocks: settings storage and PSBT scratch — on mk3 only.**
+**Was blocking: settings storage and PSBT scratch — on mk3 only.**
 
-Narrower than it was. `gpio-peripherals.md §Mk4` confirms there is **no SPI-NOR from mk4
-onward**: SPI2 is commented out of the board file as "removed in Mk4 rev B", settings
-moved to internal flash and upgrade staging moved to PSRAM. So this blocks nothing on
-mk4 or Q1, and `MK4.sflash` / `Q1.sflash` are `None` rather than an inherited guess.
+`gpio-peripherals.md §Mk4` confirms there is **no SPI-NOR from mk4 onward**: SPI2 is
+commented out of the board file as "removed in Mk4 rev B", settings moved to internal
+flash and upgrade staging moved to PSRAM. So this blocks nothing on mk4 or Q1, and
+`MK4.sflash` / `Q1.sflash` are `None` rather than an inherited guess.
 
-`hw-reference/gpio-peripherals.md` confirms SPI2 MISO=PC2 and MOSI=PC3 but not SCK or
-CS. PB12/PB13, the usual SPI2 NSS/SCK pins, are taken by numpad rows on this board,
-which leaves:
+On mk3 the full SPI2 pinout is now confirmed in `hw-reference/storage.md §SPI-NOR` and
+`gpio.md`: **SCK=PB10, MOSI=PC3, MISO=PC2, CS=PB9** at 8 MHz in mode 0. The chip-select
+is PB9 driven as a plain GPIO output — *not* the SPI2 hardware NSS, even though PB9 is
+that pin's AF — pulled low around each opcode. The part is a Macronix **MX25L8006E,
+1 MB, 4 KB sectors**. `MK3_SFLASH_SPI` now carries these with `pins_confirmed: true` and
+`sflash.cs: Some(PB9)`. (The earlier `PD1` SCK candidate was wrong.)
 
-- SCK: PB10 or PD1 (PD1 is recorded as the working candidate)
-- CS: PB9 or PD0
-
-Also unconfirmed: the NOR part number and total size. The reference says ≥1 MB usable
-with settings occupying 896 KB–1 MB, and guesses 2 MB+.
-
-**How to resolve.** Probe the board, or read the JEDEC ID (`RDID`, opcode `0x9F`) once
-any candidate SCK/CS pairing produces a response.
-
-**Where it goes:** `SflashPins` in `crates/catcard-board/src/spec.rs`;
-`SpiBus::pins_confirmed` flips to `true`.
+Still open (tracked below): the mk3 **firmware staging base/header** inside SPI-NOR, which
+is what self-upgrade needs on top of the write path.
 
 ---
 
