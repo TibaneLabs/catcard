@@ -925,9 +925,16 @@ fn install_from_card(
 ) {
     use crate::sdupgrade::{Outcome, stage_from_card};
 
-    crate::catlog!("sd: looking for a firmware");
+    // Pick the firmware from the card by browsing for a .dfu, rather than guessing at a
+    // fixed name. Cancelling the browser cancels the install.
+    let chosen = browse_sd(panel, pad, matrix, drbg, "Pick a .dfu", Some("dfu"), true);
+    let Some(chosen) = chosen else {
+        return;
+    };
+
+    crate::catlog!("sd: staging the chosen firmware");
     message(panel, "Reading card", "please wait", "");
-    let (staged, approval) = match stage_from_card(catcard_hal::sdmmc::Slot::A) {
+    let (staged, approval) = match stage_from_card(catcard_hal::sdmmc::Slot::A, Some(&chosen)) {
         Outcome::Offered(s, a) => (s, a),
         Outcome::Failed(why) => {
             crate::catlog!("sd: {}", why);

@@ -48,7 +48,10 @@ pub enum Outcome {
 }
 
 /// Find a firmware on the card in `slot` and stage it.
-pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot) -> Outcome {
+///
+/// `chosen` names a specific file (a full path the browser returned); `None` falls back to
+/// the fixed [`CANDIDATES`] search, so the option still works without navigating.
+pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> Outcome {
     let Some(psram) = BOARD.psram else {
         // mk3 stages in SPI-NOR, which this firmware cannot write.
         return Outcome::Failed("no staging area");
@@ -74,11 +77,16 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot) -> Outcome {
         Err(_) => return Outcome::Failed("not a FAT card"),
     };
 
-    let Some(name) = CANDIDATES.iter().find(|n| vol.open_file(n).is_ok()) else {
-        return Outcome::Failed("no catcard.dfu");
+    // A file the browser picked, or the first of the fixed names that opens.
+    let name: &str = match chosen {
+        Some(p) => p,
+        None => match CANDIDATES.iter().find(|n| vol.open_file(n).is_ok()) {
+            Some(n) => n,
+            None => return Outcome::Failed("no catcard.dfu"),
+        },
     };
     let Ok(mut file) = vol.open_file(name) else {
-        return Outcome::Failed("no catcard.dfu");
+        return Outcome::Failed("could not open file");
     };
     let file_len = file.len();
 
