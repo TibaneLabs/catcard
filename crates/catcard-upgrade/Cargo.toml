@@ -15,5 +15,6 @@ std = ["catcard-fwhdr/std", "catcard-sign/std"]
 [dependencies]
 catcard-board.workspace = true
 catcard-fwhdr = { workspace = true, default-features = false }
+catcard-flash = { workspace = true, default-features = false }
 catcard-sign = { workspace = true, default-features = false }
 

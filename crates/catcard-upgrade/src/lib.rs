@@ -36,6 +36,7 @@ use catcard_fwhdr::{
 };
 
 pub mod dfuse;
+pub mod nor;
 pub mod psram;
 
 /// Why an image was refused.

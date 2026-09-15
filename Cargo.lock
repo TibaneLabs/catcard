@@ -212,6 +212,7 @@ name = "catcard-upgrade"
 version = "7.0.0"
 dependencies = [
  "catcard-board",
+ "catcard-flash",
  "catcard-fwhdr",
  "catcard-sign",
 ]
