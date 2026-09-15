@@ -79,6 +79,7 @@ enum Screen {
     Utils,
     AnalyzeRng,
     UsbDrive,
+    ViewTrngWords,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -133,7 +134,7 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
-const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive"];
+const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive", "View TRNG Words"];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -296,6 +297,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::ViewTrngWords {
+                view_trng_words(gate, panel, &mut pad, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Utils;
+                break;
+            }
             if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
@@ -392,6 +399,7 @@ fn step(
         Screen::Utils => match (key, cursor) {
             (Key::Confirm, 0) => Screen::AnalyzeRng,
             (Key::Confirm, 1) => Screen::UsbDrive,
+            (Key::Confirm, 2) => Screen::ViewTrngWords,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -508,6 +516,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::AnalyzeRng => {}
         // Handled in `run`: it takes over USB and needs the keypad to leave.
         Screen::UsbDrive => {}
+        Screen::ViewTrngWords => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -1299,6 +1308,104 @@ fn analyze_rng(
             return;
         }
     }
+}
+
+/// Draw a seed from the hardware TRNGs and show its words -- a verification tool, not a
+/// wallet. Nothing is stored; it lets the owner see the elements and the chip TRNG
+/// produce fresh, varied words, which is the whole point of this project. Shown through
+/// the same large-font, emissions-scrambled pager the real backup uses.
+fn view_trng_words(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    use catcard_callgate::abi::RngSource;
+    use catcard_entropy::{EntropyPool, Source};
+    use catcard_wallet::bip39::Mnemonic;
+    use zeroize::Zeroize;
+
+    if !catcard_board::BOARD.has_callgate_se_rng {
+        message(panel, "TRNG words", "no SE RNG here", "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    }
+
+    // A fresh pool, filled only from the hardware sources -- no boot material, no user
+    // entropy -- so the words are exactly what the TRNGs produce right now.
+    let mut pool = EntropyPool::new(crate::entropy_policy());
+
+    // The chip TRNG. SAFETY: RNG clock set up at boot; nothing else uses it here.
+    if let Some(rng) = unsafe { catcard_hal::rng::Rng::init() }.ok().as_ref() {
+        let mut b = [0u8; 64];
+        if rng.fill(&mut b).is_ok() {
+            pool.add(Source::Stm32Trng, &b);
+        }
+        b.zeroize();
+    }
+
+    // Both elements, to a byte target each, bounded so a mute element cannot hang it.
+    const TARGET: usize = 64;
+    const MAX_PASSES: usize = 200;
+    let srcs = [
+        (RngSource::Se1, Source::Se1Trng),
+        (RngSource::Se2, Source::Se2Trng),
+    ];
+    let mut bytes = [0usize; 2];
+    for _ in 0..MAX_PASSES {
+        if bytes[0] >= TARGET && bytes[1] >= TARGET {
+            break;
+        }
+        for (i, (src, tag)) in srcs.iter().enumerate() {
+            if bytes[i] >= TARGET {
+                continue;
+            }
+            let _ = usbtask::pump();
+            let mut buf = [0u8; 33];
+            // SAFETY: the documented 33-byte output buffer for callgate 26.
+            if let Ok(n) = unsafe { gate.se_rng(*src, &mut buf) }
+                && n > 0
+            {
+                pool.add(*tag, &buf[1..1 + n]);
+                bytes[i] += n;
+            }
+            buf.zeroize();
+        }
+        let mut l = Line::new();
+        let _ = write!(l, "SE1 {} SE2 {} bytes", bytes[0], bytes[1]);
+        message(panel, "Reading TRNGs", &l, "");
+    }
+
+    if pool.check().is_err() {
+        message(panel, "TRNG words", "TRNG check failed", "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    }
+
+    let mut entropy = [0u8; 32];
+    let drawn = pool.draw(&mut entropy);
+    let mnemonic = drawn.ok().and_then(|()| Mnemonic::from_entropy(&entropy).ok());
+    entropy.zeroize();
+    let Some(mnemonic) = mnemonic else {
+        message(panel, "TRNG words", "could not draw", "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    };
+
+    // Verification only -- never stored -- but scramble the emissions all the same, since
+    // these are valid seed words on screen.
+    page_through(
+        panel,
+        pad,
+        matrix,
+        drbg,
+        "TRNG words: not saved",
+        &WordLines(&mnemonic),
+        false,
+        &display::WORDS_LAYOUT,
+        true,
+    );
 }
 
 /// Block until no key is held.
