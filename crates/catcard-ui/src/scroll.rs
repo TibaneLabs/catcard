@@ -459,11 +459,16 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
         // never reaching the text. Same geometry and per-row lengths as the pager's.
         if let (true, Some(sc)) = (vl.sensitive, view.scramble) {
             let text_right = fonts.margin + width_of(face, vl.text);
-            let gap = face.advance(b' ');
-            let right_end = arrow_x.saturating_sub(gap);
-            let room = right_end.saturating_sub(text_right + gap).min(31);
+            let space = face.advance(b' ');
+            let right_end = arrow_x.saturating_sub(space);
+            let room = right_end.saturating_sub(text_right + space).min(31);
+            // Carry the strip through the inter-line gap when the next line is also
+            // secret, so the ragged bar is continuous down a block of words rather than
+            // broken by a blank row between each.
+            let next_secret = view.lines.get(i + 1).is_some_and(|n| n.sensitive);
+            let bleed = if next_secret { fonts.gap } else { 0 };
             if room >= 2 {
-                for r in 0..lh {
+                for r in 0..lh + bleed {
                     let y = top + r as isize;
                     if y < 0 || y >= h as isize {
                         continue;
@@ -700,6 +705,23 @@ mod tests {
         render(&mut c, &v);
         // Its top five rows are gone, but the rest still drew something.
         assert!(ink_count(&c) > 0, "a partially-scrolled line vanished entirely");
+    }
+
+    #[test]
+    fn the_marker_bridges_the_gap_between_two_sensitive_lines() {
+        use crate::framebuffer::Mono128x64;
+        let src = [Line::body("aa").secret(), Line::body("bb").secret()];
+        let v = ScrollView::build(&src, 128, 64, compact_fonts()).with_scramble(Scramble::new(1));
+        let mut c = Mono128x64::new();
+        render(&mut c, &v);
+        // The blank row between the two lines (y = body line height, the inter-line gap)
+        // now carries marker ink on the right, so the ragged strip is unbroken.
+        let gap_y = peep7x14::FONT.height as usize;
+        // The mono framebuffer's inherent `get` returns whether the pixel is lit.
+        assert!(
+            (80..128).any(|x| c.get(x, gap_y)),
+            "the gap row between two sensitive lines had no marker"
+        );
     }
 
     #[test]
