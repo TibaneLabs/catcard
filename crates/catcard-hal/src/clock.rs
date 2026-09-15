@@ -204,6 +204,23 @@ pub unsafe fn pclk2_hz() -> u32 {
     }
 }
 
+/// The APB1 peripheral clock (PCLK1) in Hz — what SPI2 (the mk3 SPI-NOR bus) is fed from.
+///
+/// Same story as [`pclk2_hz`], but for APB1: the prescaler must come from the clock the
+/// bootloader actually left running. `PPRE1` (`RCC_CFGR` bits 8..10) uses the same encoding
+/// as `PPRE2`, so it goes through the same shift table. Source: RM0432 §RCC [C].
+///
+/// # Safety
+/// Reads RCC.
+pub unsafe fn pclk1_hz() -> u32 {
+    const RCC_CFGR: u32 = fixed::RCC + 0x08;
+    // SAFETY: reads RCC; `hclk_hz` reads it too.
+    unsafe {
+        let cfgr = reg::read(RCC_CFGR);
+        hclk_hz() >> apb2_shift((cfgr >> 8) & 0x7)
+    }
+}
+
 /// The core/AHB clock (HCLK) in Hz, which is what the DWT cycle counter runs at.
 ///
 /// The bootloader leaves this at 80 MHz on these parts; a cycle count meant as a wall-

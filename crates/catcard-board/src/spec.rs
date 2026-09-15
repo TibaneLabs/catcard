@@ -176,7 +176,8 @@ pub struct SdSlot {
 #[derive(Copy, Clone, Debug)]
 pub struct SflashPins {
     pub spi: SpiBus,
-    /// Chip select. `[?]` on every board — see HARDWARE-OPEN-ITEMS.
+    /// Chip select, a software-driven GPIO output (not the SPI hardware NSS). Confirmed
+    /// PB9 on mk3; the only board with SPI-NOR at all.
     pub cs: MaybePin,
     /// Bus clock the stock firmware ran at; a safe starting point.
     pub max_hz: u32,

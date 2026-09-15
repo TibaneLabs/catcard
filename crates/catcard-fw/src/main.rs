@@ -34,6 +34,7 @@ mod debug_mem;
 mod interrupts;
 mod menu;
 mod msc_drive;
+mod nor;
 mod panic;
 mod pinentry;
 mod recovery;

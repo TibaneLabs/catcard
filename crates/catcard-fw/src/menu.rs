@@ -69,6 +69,8 @@ enum Screen {
     Clocks,
     Psram,
     PsramProbe,
+    /// SPI-NOR flash probe (mk3): show the JEDEC id and size.
+    Sflash,
     Sd,
     Boot,
     Selftest,
@@ -207,6 +209,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
     "PSRAM",
+    "SPI-NOR",
     "Boot report",
     "Selftest",
     "Keypad",
@@ -667,6 +670,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
+            (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
             (Key::Confirm, Some("Selftest")) => Screen::Selftest,
             (Key::Confirm, Some("Keypad")) => Screen::Keypad,
@@ -777,6 +781,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
+        Screen::Sflash => sflash_screen(panel),
         Screen::PsramProbe => psram_probe(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
@@ -1068,6 +1073,52 @@ fn psram_probe(panel: &mut display::Panel) {
     );
     let _ = lines.push(l);
     info(panel, "PSRAM probe", &lines);
+}
+
+/// SPI-NOR probe: bring up the flash and show its JEDEC id and size.
+///
+/// This is the first thing to check on an mk3 -- a plausible id (Macronix `C2 20 14`, a
+/// 1 MB MX25L8006E) proves the SPI2 pins, the PB9 chip-select and the clock are all right.
+/// Boards with no SPI-NOR (mk4/mk5/Q1) say so.
+fn sflash_screen(panel: &mut display::Panel) {
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+    if catcard_board::BOARD.sflash.is_none() {
+        let mut l = Line::new();
+        let _ = write!(l, "none on this board");
+        let _ = lines.push(l);
+        info(panel, "SPI-NOR", &lines);
+        return;
+    }
+
+    // SAFETY: this screen is the only SPI-NOR user; SPI2 and its pins belong to the
+    // sflash alone, and the menu waits for this to return before it can be chosen again.
+    match unsafe { crate::nor::init() } {
+        Some(mut nor) => match nor.jedec_id() {
+            Ok(id) => {
+                let mut l = Line::new();
+                let _ = write!(
+                    l,
+                    "id {:02x} {:02x} {:02x}",
+                    id.manufacturer, id.memory_type, id.capacity
+                );
+                let _ = lines.push(l);
+                let mut l = Line::new();
+                let _ = write!(l, "size {} KB", nor.size() / 1024);
+                let _ = lines.push(l);
+            }
+            Err(_) => {
+                let mut l = Line::new();
+                let _ = write!(l, "no response");
+                let _ = lines.push(l);
+            }
+        },
+        None => {
+            let mut l = Line::new();
+            let _ = write!(l, "probe failed");
+            let _ = lines.push(l);
+        }
+    }
+    info(panel, "SPI-NOR", &lines);
 }
 
 /// What bring-up found, in the same words the selftest screen used.
