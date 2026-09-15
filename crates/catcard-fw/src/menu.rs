@@ -371,200 +371,32 @@ pub fn run(session: Session<'_>) -> ! {
             }
 
             let next = step(screen, *key, v.sc.cursor, v.no_seed);
-            if next == Screen::SdInstall {
-                install_from_card(gate, login, &mut ui);
-                v.reset_menu();
-                screen = Screen::Main;
-                break;
-            }
-            if next == Screen::SaveLog {
-                save_log_to_card(&mut ui);
-                v.reset_menu();
-                screen = Screen::Debug;
-                break;
-            }
-            if next == Screen::Logs {
-                page_through(
-                    &mut ui,
-                    "Logs",
-                    &LogLines,
-                    false,
-                    &display::LAYOUT,
-                    false,
-                );
-                v.reset_menu();
-                screen = Screen::Debug;
-                break;
-            }
-            if next == Screen::AnalyzeRng {
-                analyze_rng(gate, &mut ui);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::UsbDrive {
-                usb_drive(&mut ui);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::ViewTrngWords {
-                view_trng_words(gate, &mut ui);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::AddressExplorer {
-                address_explorer(gate, login, &mut ui);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::BrowseSd {
-                browse_sd(&mut ui, "SD card", None, false);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::FormatSd {
-                format_sd(&mut ui);
-                v.reset_menu();
-                screen = Screen::Utils;
-                break;
-            }
-            if next == Screen::SignPsbt {
-                sign_psbt(&mut ui);
-                v.reset_menu();
-                screen = Screen::Main;
-                break;
-            }
-            if next == Screen::SecureLogout {
-                use zeroize::Zeroize;
-                // Secure logout. On this hardware the secret lives only in MCU SRAM: the
-                // secure element re-runs the full PIN key-stretch on every secret read, so
-                // there is no persistent SE session to end -- clearing the MCU's copy is
-                // what de-authorises. Zeroize the login struct (its cached PIN and any
-                // secret material) here, then callgate 3 wipes *all* SRAM and reboots to
-                // the PIN prompt, so nothing survives to the next boot.
-                login.zeroize();
-                message(ui.panel, "Secure Logout", "wiping memory", "");
-                // SAFETY: nothing after this runs; the bootloader clears SRAM.
-                unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-            }
-            #[cfg(feature = "games")]
-            if next == Screen::BlockMine {
-                crate::game::block_mine(&mut ui);
-                v.reset_menu();
-                screen = Screen::Games;
-                break;
-            }
-            #[cfg(feature = "games")]
-            if next == Screen::BlockCutter {
-                crate::game::block_cutter(&mut ui);
-                v.reset_menu();
-                screen = Screen::Games;
-                break;
-            }
-            if let Screen::NewSeed(words) = next {
-                new_seed(
-                    gate,
-                    login,
-                    &mut ui,
-                    pool.as_deref_mut(),
-                    words,
-                );
-                // A wallet that now exists reorders the menu, so re-read the slot state
-                // from the login rather than assuming the flow got as far as storing
-                // one -- it can be declined or refused at several points.
-                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.reset_menu();
-                screen = Screen::Main;
-                break;
-            }
-            if next == Screen::ImportSeed {
-                import_seed(gate, login, &mut ui);
-                // A restored wallet reorders the menu, exactly as a generated one does.
-                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.reset_menu();
-                screen = Screen::Main;
-                break;
-            }
-            if next == Screen::WipeSeed {
-                wipe_seed(gate, login, &mut ui);
-                // Same reason as above, in the other direction: a wallet that no longer
-                // exists puts "New wallet" back at the top.
-                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.reset_menu();
-                screen = Screen::Main;
-                break;
-            }
-            if next == Screen::ChangePin {
-                use crate::pinentry::ChangePin;
-                match crate::pinentry::change_pin(gate, ui.panel, ui.matrix, ui.drbg, login) {
-                    ChangePin::Changed => {
-                        crate::catlog!("pin: changed");
-                        message(ui.panel, "PIN changed", "logged in with", "the new PIN");
-                        wait_for_any_key(&mut ui);
-                    }
-                    // Nothing was written; the session is untouched.
-                    ChangePin::Cancelled => {}
-                    ChangePin::Mismatch => {
-                        message(ui.panel, "Not changed", "the two entries", "did not match");
-                        wait_for_any_key(&mut ui);
-                    }
-                    // The change was refused (usually a wrong current PIN); the session is
-                    // no longer valid, so reboot to a fresh login with the unchanged PIN.
-                    ChangePin::Refused => {
-                        crate::catlog!("pin: change refused, rebooting");
-                        message(ui.panel, "Not changed", "rebooting", "");
-                        // SAFETY: nothing after this runs.
-                        unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-                    }
+            // Anything that takes over the panel is a row in the action table rather than
+            // a branch here: which routine runs, where the menu lands afterwards, and
+            // whether the secret slot has to be re-read. This was seventeen
+            // `if next == Screen::X` blocks, each spelling out `reset_menu` / `screen =` /
+            // `break` again -- three chances per action to name the wrong screen, and no
+            // way to see the whole set at once.
+            let words = if let Screen::NewSeed(w) = next { w } else { 0 };
+            if let Some(action) = action_for(next) {
+                {
+                    let mut act = Act {
+                        gate,
+                        login,
+                        ui: &mut ui,
+                        pool: pool.as_deref_mut(),
+                        words,
+                    };
+                    (action.run)(&mut act);
+                }
+                // A wallet that now exists -- or no longer does -- reorders the main menu.
+                // Re-read the slot from the login rather than assuming the flow ran to
+                // completion: it can be declined or refused at several points.
+                if action.seed_may_change {
+                    v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
                 }
                 v.reset_menu();
-                screen = Screen::Login;
-                break;
-            }
-            if next == Screen::FactoryReset {
-                use crate::pinentry::FactoryReset;
-                // Destructive and irreversible: it clears the PIN back to blank. Ask twice,
-                // the same as destroying a wallet, before even collecting the PIN.
-                let go = {
-                    ask(
-                        ui.panel,
-                        "Factory reset?",
-                        "the PIN is CLEARED",
-                        "device back to blank",
-                    );
-                    confirmed(&mut ui)
-                        && {
-                            ask(ui.panel, "Really reset?", "this cannot be", "undone");
-                            confirmed(&mut ui)
-                        }
-                };
-                if go {
-                    match crate::pinentry::factory_reset(gate, ui.panel, ui.matrix, ui.drbg, login) {
-                        // The device is blank now; reboot straight into the first-run flow.
-                        FactoryReset::Wiped => {
-                            crate::catlog!("pin: factory reset, rebooting blank");
-                            message(ui.panel, "Reset done", "rebooting", "");
-                            // SAFETY: nothing after this runs.
-                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-                        }
-                        // A wrong current PIN (or another failure) leaves the session
-                        // invalid, so reboot to a fresh login with the unchanged PIN.
-                        FactoryReset::Refused => {
-                            crate::catlog!("pin: factory reset refused, rebooting");
-                            message(ui.panel, "Not reset", "rebooting", "");
-                            // SAFETY: nothing after this runs.
-                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-                        }
-                        // Backed out during PIN entry; nothing changed.
-                        FactoryReset::Cancelled => {}
-                    }
-                }
-                v.reset_menu();
-                screen = Screen::Debug;
+                screen = action.back;
                 break;
             }
             if next != screen {
@@ -586,6 +418,177 @@ pub fn run(session: Session<'_>) -> ! {
             }
             screen = next;
         }
+    }
+}
+
+/// What a full-screen action is handed.
+///
+/// The actions have four different argument lists between them -- some want the gate,
+/// some the login too, one the entropy pool, one a word count -- and a table can hold
+/// only one signature. Bundling them lets each row be the call itself instead of an
+/// adapter function, and a fifth thing added later does not touch every row.
+struct Act<'a, 'u> {
+    gate: &'a Callgate,
+    login: &'a mut catcard_pin::Login,
+    ui: &'a mut Ui<'u>,
+    /// The boot entropy pool. `None` on a device whose pool never met its policy, which
+    /// is a refusal to generate a seed rather than a reason to use something weaker.
+    pool: Option<&'a mut catcard_entropy::EntropyPool>,
+    /// The word count carried by `Screen::NewSeed(n)`; zero for every other action.
+    words: u8,
+}
+
+/// A screen that takes over the panel, runs to completion, and hands back to a menu.
+#[derive(Copy, Clone)]
+struct Action {
+    /// Runs it.
+    run: fn(&mut Act<'_, '_>),
+    /// Where the menu lands when it returns.
+    back: Screen,
+    /// Re-read the secret slot afterwards: this action can create or destroy a wallet,
+    /// and that reorders the main menu.
+    seed_may_change: bool,
+}
+
+/// The action table: every screen that is a routine rather than a list.
+///
+/// `None` means the screen is a menu or an info page, which the run loop draws and
+/// leaves on a key -- no routine to call.
+fn action_for(screen: Screen) -> Option<Action> {
+    fn to(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
+        Action { run, back, seed_may_change: false }
+    }
+    /// For the three that can leave the device holding a different wallet than before.
+    fn reseeds(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
+        Action { run, back, seed_may_change: true }
+    }
+
+    Some(match screen {
+        Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
+        Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
+        Screen::Logs => to(
+            |a| {
+                page_through(a.ui, "Logs", &LogLines, false, &display::LAYOUT, false);
+            },
+            Screen::Debug,
+        ),
+        Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
+        Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
+        Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
+        Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::BrowseSd => to(
+            |a| {
+                browse_sd(a.ui, "SD card", None, false);
+            },
+            Screen::Utils,
+        ),
+        Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
+        Screen::SignPsbt => to(|a| sign_psbt(a.ui), Screen::Main),
+        // Never returns, so `back` is unreachable; the bootloader reboots the device.
+        Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
+        #[cfg(feature = "games")]
+        Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
+        #[cfg(feature = "games")]
+        Screen::BlockCutter => to(|a| crate::game::block_cutter(a.ui), Screen::Games),
+        Screen::NewSeed(_) => reseeds(
+            |a| new_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut(), a.words),
+            Screen::Main,
+        ),
+        Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui), Screen::Main),
+        Screen::WipeSeed => reseeds(
+            |a| {
+                wipe_seed(a.gate, a.login, a.ui);
+            },
+            Screen::Main,
+        ),
+        Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
+        Screen::FactoryReset => to(|a| factory_reset_screen(a.gate, a.login, a.ui), Screen::Debug),
+        _ => return None,
+    })
+}
+
+/// Secure logout: drop the MCU's copy of the secret, then hand over to the bootloader.
+///
+/// On this hardware the secret lives only in MCU SRAM -- the secure element re-runs the
+/// full PIN key-stretch on every secret read, so there is no persistent SE session to
+/// end, and clearing the MCU's copy is what de-authorises. Zeroize the login struct (its
+/// cached PIN and any secret material) first, then callgate 3 wipes *all* SRAM and
+/// reboots to the PIN prompt, so nothing survives to the next boot.
+fn secure_logout(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -> ! {
+    use zeroize::Zeroize;
+
+    login.zeroize();
+    message(ui.panel, "Secure Logout", "wiping memory", "");
+    // SAFETY: nothing after this runs; the bootloader clears SRAM.
+    unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+}
+
+/// Change the main PIN, and say what happened.
+fn change_pin_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use crate::pinentry::ChangePin;
+
+    match crate::pinentry::change_pin(gate, ui.panel, ui.matrix, ui.drbg, login) {
+        ChangePin::Changed => {
+            crate::catlog!("pin: changed");
+            message(ui.panel, "PIN changed", "logged in with", "the new PIN");
+            wait_for_any_key(ui);
+        }
+        // Nothing was written; the session is untouched.
+        ChangePin::Cancelled => {}
+        ChangePin::Mismatch => {
+            message(ui.panel, "Not changed", "the two entries", "did not match");
+            wait_for_any_key(ui);
+        }
+        // The change was refused (usually a wrong current PIN); the session is no longer
+        // valid, so reboot to a fresh login with the unchanged PIN.
+        ChangePin::Refused => {
+            crate::catlog!("pin: change refused, rebooting");
+            message(ui.panel, "Not changed", "rebooting", "");
+            // SAFETY: nothing after this runs.
+            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+        }
+    }
+}
+
+/// Factory reset: clear the PIN back to blank, behind two confirmations.
+fn factory_reset_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use crate::pinentry::FactoryReset;
+
+    // Destructive and irreversible: it clears the PIN back to blank. Ask twice, the same
+    // as destroying a wallet, before even collecting the PIN.
+    let go = {
+        ask(
+            ui.panel,
+            "Factory reset?",
+            "the PIN is CLEARED",
+            "device back to blank",
+        );
+        confirmed(ui) && {
+            ask(ui.panel, "Really reset?", "this cannot be", "undone");
+            confirmed(ui)
+        }
+    };
+    if !go {
+        return;
+    }
+    match crate::pinentry::factory_reset(gate, ui.panel, ui.matrix, ui.drbg, login) {
+        // The device is blank now; reboot straight into the first-run flow.
+        FactoryReset::Wiped => {
+            crate::catlog!("pin: factory reset, rebooting blank");
+            message(ui.panel, "Reset done", "rebooting", "");
+            // SAFETY: nothing after this runs.
+            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+        }
+        // A wrong current PIN (or another failure) leaves the session invalid, so reboot
+        // to a fresh login with the unchanged PIN.
+        FactoryReset::Refused => {
+            crate::catlog!("pin: factory reset refused, rebooting");
+            message(ui.panel, "Not reset", "rebooting", "");
+            // SAFETY: nothing after this runs.
+            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+        }
+        // Backed out during PIN entry; nothing changed.
+        FactoryReset::Cancelled => {}
     }
 }
 
