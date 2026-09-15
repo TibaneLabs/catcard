@@ -224,6 +224,7 @@ pub fn run(session: Session<'_>) -> ! {
         last_key: None,
         keys_seen: 0,
         drbg_stats: drbg.stats(),
+        drbg_sample: None,
         sc: Scroll::new(),
         menu_off: 0,
         no_seed,
@@ -235,6 +236,13 @@ pub fn run(session: Session<'_>) -> ! {
 
     loop {
         if redraw && !showing_offer {
+            // On the PRNG-status screen, draw a fresh 32-bit sample first so the counters
+            // snapshotted just below include that generate call. Done only here, so no
+            // other screen advances the DRBG just by being shown.
+            if screen == Screen::PrngStatus {
+                let mut b = [0u8; 4];
+                v.drbg_sample = drbg.generate(&mut b).ok().map(|()| u32::from_be_bytes(b));
+            }
             // Snapshot the DRBG's counters so the PRNG-status screen shows the current
             // numbers; cheap and side-effect-free on any other screen.
             v.drbg_stats = drbg.stats();
@@ -636,6 +644,10 @@ struct View<'a> {
     /// A snapshot of the UI DRBG's diagnostic counters, refreshed before each draw so the
     /// PRNG-status screen shows current numbers.
     drbg_stats: catcard_entropy::DrbgStats,
+    /// A fresh 32-bit draw from the UI DRBG, taken only when the PRNG-status screen is
+    /// about to be drawn. `None` if the draw errored (only possible past the reseed
+    /// interval). Advancing the DRBG to show a sample is exactly what it is for.
+    drbg_sample: Option<u32>,
     sc: Scroll,
     /// The menu's pixel scroll offset, persisted across redraws so the highlight pushes
     /// the view at the edges rather than the view snapping to the cursor each frame.
@@ -688,7 +700,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
-        Screen::PrngStatus => prng_screen(panel, v.drbg_stats),
+        Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
@@ -1044,11 +1056,28 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
 /// with the edge-timed cycle counter and RTC, so `seeded`/`reseeds` climb as keys are
 /// pressed. It is never the wallet-seed generator -- that is `EntropyPool`, which has no
 /// draw API at all. Counters only; no generator state is shown.
-fn prng_screen(panel: &mut display::Panel, s: catcard_entropy::DrbgStats) {
+fn prng_screen(
+    panel: &mut display::Panel,
+    s: catcard_entropy::DrbgStats,
+    sample: Option<u32>,
+) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
 
     let mut l = Line::new();
     let _ = write!(l, "UI HMAC-SHA256");
+    let _ = lines.push(l);
+
+    // A fresh 32-bit draw, redrawn on every key. Shown at the top so it is the first thing
+    // that changes when you press a key -- alongside the reseed count climbing.
+    let mut l = Line::new();
+    match sample {
+        Some(x) => {
+            let _ = write!(l, "out  {x:08x}");
+        }
+        None => {
+            let _ = write!(l, "out  --------");
+        }
+    }
     let _ = lines.push(l);
 
     // Total seedings counts the boot instantiation plus every reseed.
