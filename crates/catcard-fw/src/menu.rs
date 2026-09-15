@@ -1462,17 +1462,14 @@ fn view_trng_words(
 
     // Verification only -- never stored -- but scramble the emissions all the same, since
     // these are valid seed words on screen.
-    page_through(
-        panel,
-        pad,
-        matrix,
-        drbg,
-        "TRNG words: not saved",
-        &WordLines(&mnemonic),
-        false,
-        &display::WORDS_LAYOUT,
-        true,
-    );
+    let texts = word_texts(&mnemonic);
+    let mut lines: heapless::Vec<catcard_ui::scroll::Line, 27> = heapless::Vec::new();
+    let _ = lines.push(catcard_ui::scroll::Line::title("TRNG words"));
+    let _ = lines.push(catcard_ui::scroll::Line::body("not saved").small().centered());
+    for s in &texts {
+        let _ = lines.push(catcard_ui::scroll::Line::body(s).secret());
+    }
+    show_doc(panel, pad, matrix, drbg, &lines, true, false);
 }
 
 /// Write `s` into `out`, eliding the middle to `...` when it is wider than `cols`.
@@ -2498,37 +2495,17 @@ fn read_word(
             continue;
         }
 
-        // --- Pick screen ---
-        let mut items: heapless::Vec<&'static str, CAND_MAX> = heapless::Vec::new();
-        for &ci in &cands {
-            let _ = items.push(ENGLISH[ci as usize]);
+        // --- Pick screen --- a scrollable menu of the candidate words, each carrying its
+        // index into `cands` as the id.
+        let mut lines: heapless::Vec<catcard_ui::scroll::Line, CAND_MAX> = heapless::Vec::new();
+        let _ = lines.push(catcard_ui::scroll::Line::title("Pick the word"));
+        for (pos, &ci) in cands.iter().enumerate() {
+            let _ = lines.push(catcard_ui::scroll::Line::item(ENGLISH[ci as usize], pos as u32));
         }
-        let mut sc = Scroll::new();
-        'pick: loop {
-            menu(panel, "Pick the word", "5/8 move, y pick", &items, sc);
-            wait_for_release(pad, matrix, drbg);
-            loop {
-                let _ = usbtask::pump();
-                crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
-                for k in keys.iter() {
-                    match k {
-                        Key::Digit(5) => {
-                            sc = sc.step(items.len(), MAX_LINES, false);
-                            continue 'pick;
-                        }
-                        Key::Digit(8) => {
-                            sc = sc.step(items.len(), MAX_LINES, true);
-                            continue 'pick;
-                        }
-                        Key::Confirm => return WordPick::Word(cands[sc.cursor]),
-                        // Back to typing, keeping what was entered so a letter can be
-                        // added or removed.
-                        Key::Cancel => break 'pick,
-                        Key::Digit(_) => {}
-                    }
-                }
-                catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
-            }
+        match show_doc(panel, pad, matrix, drbg, &lines, false, false) {
+            DocExit::Selected(pos) => return WordPick::Word(cands[pos as usize]),
+            // Back to typing, keeping what was entered so a letter can be added or removed.
+            DocExit::Cancelled | DocExit::Confirmed => continue,
         }
     }
 }
@@ -2877,18 +2854,26 @@ fn show_words(
     drbg: &mut HmacDrbg,
     m: &catcard_wallet::bip39::Mnemonic,
 ) {
-    page_through(
-        panel,
-        pad,
-        matrix,
-        drbg,
-        "Write these down",
-        &WordLines(m),
-        true,
-        &display::WORDS_LAYOUT,
-        // Scramble the display's RF emissions while the seed words are on screen.
-        true,
-    );
+    let texts = word_texts(m);
+    let mut lines: heapless::Vec<catcard_ui::scroll::Line, 26> = heapless::Vec::new();
+    let _ = lines.push(catcard_ui::scroll::Line::title("Write these down"));
+    for s in &texts {
+        // Secret, so each word carries the ragged sensitive-line marker.
+        let _ = lines.push(catcard_ui::scroll::Line::body(s).secret());
+    }
+    // `require_end`: Confirm will not finish until every word has been on screen.
+    show_doc(panel, pad, matrix, drbg, &lines, true, true);
+}
+
+/// The numbered words of a mnemonic as `"NN  word"` strings, for a document.
+fn word_texts(m: &catcard_wallet::bip39::Mnemonic) -> heapless::Vec<Line, 24> {
+    let mut out = heapless::Vec::new();
+    for (i, w) in m.words().enumerate() {
+        let mut s = Line::new();
+        let _ = write!(s, "{:2}  {w}", i + 1);
+        let _ = out.push(s);
+    }
+    out
 }
 
 /// The splash as an "about" page: cat logo, wordmark, and version, held until a key.
@@ -2957,19 +2942,91 @@ impl catcard_ui::pager::LineSource for LogLines {
     }
 }
 
-/// The seed words, numbered, as lines for the pager.
-struct WordLines<'a>(&'a catcard_wallet::bip39::Mnemonic);
+/// How a scrollable document screen ([`show_doc`]) ended.
+enum DocExit {
+    /// A menu row was chosen; carries its `menu_item` id.
+    Selected(u32),
+    /// A reading screen was confirmed (Confirm on a document with no selectable lines).
+    Confirmed,
+    /// The user backed out.
+    Cancelled,
+}
 
-impl catcard_ui::pager::LineSource for WordLines<'_> {
-    fn fill(&self, from: usize, sink: &mut catcard_ui::pager::LineSink) -> usize {
-        for (i, w) in self.0.words().enumerate().skip(from) {
-            let mut l = Line::new();
-            let _ = write!(l, "{:2}  {w}", i + 1);
-            if !sink.push(l.as_str()) {
-                break;
+/// Show a scrollable document ([`catcard_ui::scroll`]) and drive it from the keypad.
+///
+/// A reading screen (no selectable lines) scrolls with `5`/`8` and leaves on Confirm or
+/// Cancel. A menu (some line carries a `menu_item`) moves a cursor with `5`/`8` and returns
+/// the chosen id on Confirm. `require_end`, for the seed backup, refuses Confirm on a
+/// reading screen until the bottom has been on screen -- the "read every word" gate the old
+/// pager enforced. `scramble` turns on the ragged sensitive-line marker.
+fn show_doc(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    lines: &[catcard_ui::scroll::Line<'_>],
+    scramble: bool,
+    require_end: bool,
+) -> DocExit {
+    use catcard_ui::scroll::{ScrollView, render};
+
+    let mut view =
+        ScrollView::build(lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    if scramble {
+        let mut b = [0u8; 4];
+        let _ = drbg.generate(&mut b);
+        view = view.with_scramble(catcard_ui::pager::Scramble::new(u32::from_le_bytes(b)));
+    }
+    let is_menu = view.is_menu();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        display::draw(panel, |c| render(c, &view));
+        wait_for_release(pad, matrix, drbg);
+        'wait: loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            if keys.is_empty() {
+                catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+                continue;
+            }
+            for k in keys.iter() {
+                match k {
+                    // The up/down arrows: move a menu cursor, or scroll a reading screen.
+                    Key::Digit(5) => {
+                        if is_menu {
+                            view.move_cursor(false);
+                        } else {
+                            view.scroll(false, view.line_step());
+                        }
+                        break 'wait;
+                    }
+                    Key::Digit(8) => {
+                        if is_menu {
+                            view.move_cursor(true);
+                        } else {
+                            view.scroll(true, view.line_step());
+                        }
+                        break 'wait;
+                    }
+                    Key::Confirm => {
+                        if is_menu {
+                            if let Some(id) = view.selected() {
+                                return DocExit::Selected(id);
+                            }
+                        } else if require_end && !view.at_end() {
+                            // Not read to the end yet: page down instead of finishing.
+                            view.scroll(true, view.line_step());
+                            break 'wait;
+                        } else {
+                            return DocExit::Confirmed;
+                        }
+                    }
+                    Key::Cancel => return DocExit::Cancelled,
+                    Key::Digit(_) => {}
+                }
             }
         }
-        self.0.word_count()
     }
 }
 

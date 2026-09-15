@@ -226,15 +226,27 @@ pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::La
 #[cfg(feature = "board-q1")]
 pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::roomy();
 
-/// The larger layout used to show seed words: bigger text, fewer rows. See
-/// [`Layout::compact_words`](catcard_ui::widgets::Layout::compact_words).
+/// The faces and spacing the scrollable document view ([`catcard_ui::scroll`]) uses on
+/// this board: a title, a readable body, and a small face for notes and dense values.
+/// On the mono panel the title and body are the same 7x14 face -- bigger than the old
+/// 4x6 body, so menus and words read at arm's length.
 #[cfg(not(feature = "board-q1"))]
-pub const WORDS_LAYOUT: catcard_ui::widgets::Layout<'static> =
-    catcard_ui::widgets::Layout::compact_words();
-/// As above, for the Q1.
+pub const FONTS: catcard_ui::scroll::Fonts<'static> = catcard_ui::scroll::Fonts {
+    title: &catcard_ui::font::peep7x14::FONT,
+    body: &catcard_ui::font::peep7x14::FONT,
+    small: &catcard_ui::font::misc4x6::FONT,
+    gap: 1,
+    margin: 2,
+};
+/// As above, for the Q1's colour panel: a 10x20 title and body over a 7x14 small face.
 #[cfg(feature = "board-q1")]
-pub const WORDS_LAYOUT: catcard_ui::widgets::Layout<'static> =
-    catcard_ui::widgets::Layout::roomy_words();
+pub const FONTS: catcard_ui::scroll::Fonts<'static> = catcard_ui::scroll::Fonts {
+    title: &catcard_ui::font::peep10x20::FONT,
+    body: &catcard_ui::font::peep10x20::FONT,
+    small: &catcard_ui::font::peep7x14::FONT,
+    gap: 2,
+    margin: 6,
+};
 
 /// Panel height in pixels, for sizing a pager window against a layout at runtime (the
 /// number of rows depends on the body face, which the words layout changes).
@@ -243,6 +255,13 @@ pub const SCREEN_H: usize = 64;
 /// As above, for the Q1.
 #[cfg(feature = "board-q1")]
 pub const SCREEN_H: usize = 240;
+
+/// Panel width in pixels, for wrapping a document to the panel.
+#[cfg(not(feature = "board-q1"))]
+pub const SCREEN_W: usize = 128;
+/// As above, for the Q1.
+#[cfg(feature = "board-q1")]
+pub const SCREEN_W: usize = 320;
 
 /// What this board's confirm key is labelled with. The mk pads carry a tick moulded into
 /// the cap; the Q1's key is printed ENTER.
