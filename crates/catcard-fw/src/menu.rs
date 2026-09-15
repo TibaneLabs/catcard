@@ -3062,6 +3062,10 @@ enum DocExit {
 /// move settles in a blink, long enough that the motion reads as motion.
 const GLIDE_FRAME_CYCLES: u32 = 700_000;
 
+/// Idle beats between marquee steps for an over-long selected name -- how fast it scrolls
+/// sideways. One `IDLE_PAUSE_CYCLES` beat is the loop's natural tick.
+const MARQUEE_BEATS: u32 = 8;
+
 /// Animate a scroll view's offset from `from` to `to` on boards that animate, rendering the
 /// intermediate frames. The final frame at exactly `to` is left to the caller's next draw,
 /// so this only ever paints the in-between steps. On boards that don't animate it just
@@ -3117,10 +3121,20 @@ fn show_doc(
     loop {
         display::draw(panel, |c| render(c, &view));
         wait_for_release(pad, matrix, drbg);
+        // A tick counter so a selected, over-long name marquees while nothing is pressed.
+        let mut beat = 0u32;
         'wait: loop {
             let _ = usbtask::pump();
             crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
             if keys.is_empty() {
+                // Advance the marquee every few idle beats when the selection overflows,
+                // redrawing only then so a static screen still never re-flushes.
+                if view.needs_marquee() {
+                    beat = beat.wrapping_add(1);
+                    if beat.is_multiple_of(MARQUEE_BEATS) && view.tick_marquee() {
+                        display::draw(panel, |c| render(c, &view));
+                    }
+                }
                 catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
                 continue;
             }

@@ -39,6 +39,51 @@ pub const CROSS: Bitmap = Bitmap {
     pixels: &[0x88, 0x50, 0x20, 0x50, 0x88],
 };
 
+/// A folder, for a directory row in the file browser. 7x7.
+pub const FOLDER: Bitmap = Bitmap {
+    width: 7,
+    height: 7,
+    bytes_per_row: 1,
+    // ##.....
+    // ######.
+    // #.....#
+    // #.....#
+    // #.....#
+    // #######
+    // .......
+    pixels: &[0xC0, 0xFC, 0x82, 0x82, 0x82, 0xFE, 0x00],
+};
+
+/// A document, for a file row in the file browser. 7x7.
+pub const FILE: Bitmap = Bitmap {
+    width: 7,
+    height: 7,
+    bytes_per_row: 1,
+    // #####..
+    // #...##.
+    // #....#.
+    // #....#.
+    // #....#.
+    // #....#.
+    // ######.
+    pixels: &[0xF8, 0x8C, 0x84, 0x84, 0x84, 0x84, 0xFC],
+};
+
+/// A left arrow, for the "parent directory" row. 7x7.
+pub const BACK: Bitmap = Bitmap {
+    width: 7,
+    height: 7,
+    bytes_per_row: 1,
+    // ...#...
+    // ..##...
+    // .######
+    // #######
+    // .######
+    // ..##...
+    // ...#...
+    pixels: &[0x10, 0x30, 0x7E, 0xFE, 0x7E, 0x30, 0x10],
+};
+
 /// What a board's confirm or cancel key is labelled with.
 ///
 /// A fact about the hardware, like the key map: the board layer picks these, not the

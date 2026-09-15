@@ -14,6 +14,7 @@
 //! boundaries into a head line and continuation lines, and the continuation lines carry no
 //! `menu_item`, so a wrapped menu label still selects as one item.
 
+use crate::art::Bitmap;
 use crate::canvas::{Canvas, INK, Level, PAPER};
 use crate::face::Face;
 use crate::pager::Scramble;
@@ -71,6 +72,10 @@ pub struct Line<'a> {
     pub menu_item: Option<u32>,
     /// Whether [`wrap`] may split this line to fit the panel.
     pub wrap: bool,
+    /// A small icon drawn at the left, ahead of the text. The text is indented past it and
+    /// the icon stays put when a selected, un-wrapped line marquees. Used by the file
+    /// browser for folder/file/parent glyphs.
+    pub icon: Option<&'a Bitmap>,
 }
 
 impl<'a> Line<'a> {
@@ -83,6 +88,7 @@ impl<'a> Line<'a> {
             sensitive: false,
             menu_item: None,
             wrap: false,
+            icon: None,
         }
     }
 
@@ -95,6 +101,7 @@ impl<'a> Line<'a> {
             sensitive: false,
             menu_item: None,
             wrap: false,
+            icon: None,
         }
     }
 
@@ -107,6 +114,7 @@ impl<'a> Line<'a> {
             sensitive: false,
             menu_item: Some(id),
             wrap: false,
+            icon: None,
         }
     }
 
@@ -133,6 +141,12 @@ impl<'a> Line<'a> {
         self.sensitive = true;
         self
     }
+
+    /// Draw `icon` at the left of this line, ahead of the text.
+    pub const fn with_icon(mut self, icon: &'a Bitmap) -> Self {
+        self.icon = Some(icon);
+        self
+    }
 }
 
 /// A line after wrapping: exactly what one row on screen draws.
@@ -143,6 +157,7 @@ pub struct VisualLine<'a> {
     pub align: Align,
     pub sensitive: bool,
     pub menu_item: Option<u32>,
+    pub icon: Option<&'a Bitmap>,
 }
 
 /// Most visual lines a document holds after wrapping. Enough for a 24-word seed with a
@@ -196,6 +211,7 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 align: line.align,
                 sensitive: line.sensitive,
                 menu_item: line.menu_item,
+                icon: line.icon,
             });
             if out.is_full() {
                 break;
@@ -212,8 +228,10 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 size: line.size,
                 align: line.align,
                 sensitive: line.sensitive,
-                // Only the head keeps the id: continuation lines are not selectable.
+                // Only the head keeps the id and icon: continuation lines are neither
+                // selectable nor re-iconed.
                 menu_item: if first { line.menu_item } else { None },
+                icon: if first { line.icon } else { None },
             });
             first = false;
             rest = tail.trim_start_matches(' ');
@@ -229,6 +247,8 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
 pub struct ScrollView<'a> {
     lines: Lines<'a>,
     fonts: Fonts<'a>,
+    /// Panel width and height in pixels.
+    width: usize,
     height: usize,
     /// Top of the window in document pixels.
     off: usize,
@@ -236,20 +256,24 @@ pub struct ScrollView<'a> {
     cursor: Option<usize>,
     /// The sensitive-line marker source, when this document shows secrets.
     scramble: Option<Scramble>,
+    /// Horizontal marquee phase for the selected line, advanced by [`Self::tick_marquee`].
+    marquee: usize,
 }
 
 impl<'a> ScrollView<'a> {
     /// Build a view over already-wrapped `lines`. The cursor starts on the first selectable
     /// line and is scrolled into view.
-    pub fn new(lines: Lines<'a>, fonts: Fonts<'a>, height: usize) -> Self {
+    pub fn new(lines: Lines<'a>, fonts: Fonts<'a>, width: usize, height: usize) -> Self {
         let cursor = lines.iter().position(|l| l.menu_item.is_some());
         let mut v = Self {
             lines,
             fonts,
+            width,
             height,
             off: 0,
             cursor,
             scramble: None,
+            marquee: 0,
         };
         v.ensure_cursor_visible();
         v
@@ -257,7 +281,7 @@ impl<'a> ScrollView<'a> {
 
     /// Wrap `src` to `width` and build a view -- the usual entry point.
     pub fn build(src: &[Line<'a>], width: usize, height: usize, fonts: Fonts<'a>) -> Self {
-        Self::new(wrap(src, width, &fonts), fonts, height)
+        Self::new(wrap(src, width, &fonts), fonts, width, height)
     }
 
     /// Turn on the sensitive-line marker with a per-viewing seed.
@@ -330,9 +354,81 @@ impl<'a> ScrollView<'a> {
     /// each frame. No-op if no line carries that id.
     pub fn select(&mut self, id: u32) {
         if let Some(i) = self.lines.iter().position(|l| l.menu_item == Some(id)) {
+            if self.cursor != Some(i) {
+                self.marquee = 0;
+            }
             self.cursor = Some(i);
             self.ensure_cursor_visible();
         }
+    }
+
+    /// The icon's horizontal footprint on line `i` -- its scaled width plus a small gap --
+    /// or zero when it has no icon. The icon is scaled to about the line height, matching
+    /// [`crate::icons`].
+    fn icon_advance(&self, i: usize) -> usize {
+        match self.lines[i].icon {
+            Some(bmp) => {
+                let lh = self.fonts.face(self.lines[i].size).line_height();
+                bmp.width as usize * (lh / 7).max(1) + 2
+            }
+            None => 0,
+        }
+    }
+
+    /// Where line `i`'s text starts: past the left margin and any icon.
+    fn text_left(&self, i: usize) -> usize {
+        self.fonts.margin + self.icon_advance(i)
+    }
+
+    /// The right edge text stops at, kept clear of the arrow gutter.
+    fn text_right(&self) -> usize {
+        let gutter = self.fonts.body.advance(b'^') + self.fonts.margin;
+        self.width.saturating_sub(gutter)
+    }
+
+    /// How many pixels line `i`'s text runs past the space it has.
+    fn overflow(&self, i: usize) -> usize {
+        let text_w = width_of(self.fonts.face(self.lines[i].size), self.lines[i].text);
+        let avail = self.text_right().saturating_sub(self.text_left(i));
+        text_w.saturating_sub(avail)
+    }
+
+    /// The marquee only runs on a selected, left-aligned line whose text overflows; this is
+    /// how far it can travel. Wrapped lines fit by construction, so this is zero for them.
+    fn marquee_span(&self) -> usize {
+        match self.cursor {
+            Some(i) if self.lines[i].align == Align::Left => self.overflow(i),
+            _ => 0,
+        }
+    }
+
+    /// Whether the selected line's name is too long to show at once, so it wants a marquee.
+    pub fn needs_marquee(&self) -> bool {
+        self.marquee_span() > 0
+    }
+
+    /// The current horizontal shift of the selected line's text.
+    fn marquee_shift(&self) -> usize {
+        self.marquee.min(self.marquee_span())
+    }
+
+    /// Advance the marquee one step; returns whether anything changed (so the caller knows
+    /// to redraw). It ramps to the end, dwells, then snaps back to the start.
+    pub fn tick_marquee(&mut self) -> bool {
+        let span = self.marquee_span();
+        if span == 0 {
+            // Nothing to scroll; clear any leftover shift from a previous selection.
+            let dirty = self.marquee != 0;
+            self.marquee = 0;
+            return dirty;
+        }
+        // Pause at the fully-scrolled end before jumping back, so the tail can be read.
+        const DWELL: usize = 12;
+        self.marquee += 1;
+        if self.marquee > span + DWELL {
+            self.marquee = 0;
+        }
+        true
     }
 
     /// Move the selection one step.
@@ -355,6 +451,8 @@ impl<'a> ScrollView<'a> {
         };
         match next {
             Some(j) => {
+                // A new selection starts its name from the left again.
+                self.marquee = 0;
                 self.cursor = Some(j);
                 self.ensure_cursor_visible();
             }
@@ -377,38 +475,78 @@ impl<'a> ScrollView<'a> {
     }
 }
 
-/// Draw a string at a signed top, clipping the rows that fall outside `[0, height)` so a
-/// line can be partly above or below the viewport. `ink` is the glyph colour -- [`PAPER`]
-/// knocks the text out of an inverted bar.
+/// Draw a string at a signed origin, clipped to the box `[xmin, xmax) x [0, height)`.
+///
+/// A signed `x` lets the text start left of `xmin` (how the marquee scrolls a long name
+/// under a fixed left edge); the vertical clip lets a line be partly above or below the
+/// viewport. `ink` is the glyph colour -- [`PAPER`] knocks the text out of an inverted bar.
+#[allow(clippy::too_many_arguments)]
 fn draw_clipped<C: Canvas + ?Sized>(
     canvas: &mut C,
     face: &dyn Face,
-    x: usize,
+    x: isize,
     top: isize,
     text: &str,
     ink: Level,
     height: usize,
+    xmin: usize,
+    xmax: usize,
 ) {
-    let (w, lh) = (canvas.width(), face.line_height());
+    let lh = face.line_height();
     let mut at = x;
     for &c in text.as_bytes() {
-        let adv = face.advance(c);
-        if at + adv > w {
-            break;
+        let adv = face.advance(c) as isize;
+        if at >= xmax as isize {
+            break; // this glyph and the rest are past the right edge
         }
-        for gy in 0..lh {
-            let y = top + gy as isize;
-            if y < 0 || y >= height as isize {
-                continue;
-            }
-            for gx in 0..face.cell_width(c) {
-                let cov = face.coverage(c, gx, gy);
-                if cov != 0 {
-                    canvas.blend(at + gx, y as usize, ink, cov);
+        if at + adv > xmin as isize {
+            for gy in 0..lh {
+                let y = top + gy as isize;
+                if y < 0 || y >= height as isize {
+                    continue;
+                }
+                for gx in 0..face.cell_width(c) {
+                    let px = at + gx as isize;
+                    if px < xmin as isize || px >= xmax as isize {
+                        continue;
+                    }
+                    let cov = face.coverage(c, gx, gy);
+                    if cov != 0 {
+                        canvas.blend(px as usize, y as usize, ink, cov);
+                    }
                 }
             }
         }
         at += adv;
+    }
+}
+
+/// Draw a 1-bpp icon at `(x, top)`, each pixel a `scale`x`scale` block, in `ink`, clipped
+/// to the viewport rows.
+fn draw_icon<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    bmp: &Bitmap,
+    x: usize,
+    top: isize,
+    scale: usize,
+    ink: Level,
+    height: usize,
+) {
+    for gy in 0..bmp.height as usize {
+        for gx in 0..bmp.width as usize {
+            if !bmp.pixel(gx, gy) {
+                continue;
+            }
+            for sy in 0..scale {
+                let y = top + (gy * scale + sy) as isize;
+                if y < 0 || y >= height as isize {
+                    continue;
+                }
+                for sx in 0..scale {
+                    canvas.put(x + gx * scale + sx, y as usize, ink);
+                }
+            }
+        }
     }
 }
 
@@ -442,17 +580,33 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
             continue; // fully above the top
         }
 
-        let tx = match vl.align {
-            Align::Left => fonts.margin,
-            Align::Center => centred(face, vl.text, w),
-        };
-
-        if view.cursor == Some(i) {
-            // The selected row: an inverted bar with the text knocked out of it.
+        let selected = view.cursor == Some(i);
+        let ink = if selected { PAPER } else { INK };
+        if selected {
+            // The selected row is an inverted bar with everything knocked out of it.
             fill_band(canvas, top, lh, h);
-            draw_clipped(canvas, face, tx, top, vl.text, PAPER, h);
-        } else {
-            draw_clipped(canvas, face, tx, top, vl.text, INK, h);
+        }
+
+        // The icon sits at the left margin and stays put while the text marquees.
+        let mut tx = fonts.margin;
+        if let (Some(bmp), Align::Left) = (vl.icon, vl.align) {
+            let scale = (lh / 7).max(1);
+            draw_icon(canvas, bmp, fonts.margin, top, scale, ink, h);
+            tx = fonts.margin + bmp.width as usize * scale + 2;
+        }
+
+        match vl.align {
+            Align::Left => {
+                // A selected, overflowing name scrolls sideways: the icon and the left edge
+                // stay put and the text is clipped to the room right of the icon.
+                let shift = if selected { view.marquee_shift() } else { 0 };
+                let x = tx as isize - shift as isize;
+                draw_clipped(canvas, face, x, top, vl.text, ink, h, tx, arrow_x);
+            }
+            Align::Center => {
+                let x = centred(face, vl.text, w) as isize;
+                draw_clipped(canvas, face, x, top, vl.text, ink, h, 0, w);
+            }
         }
 
         // Sensitive-line marker: a ragged strip in the right gutter over the line's height,
@@ -705,6 +859,39 @@ mod tests {
         render(&mut c, &v);
         // Its top five rows are gone, but the rest still drew something.
         assert!(ink_count(&c) > 0, "a partially-scrolled line vanished entirely");
+    }
+
+    #[test]
+    fn an_icon_indents_the_text_and_a_long_name_wants_a_marquee() {
+        use crate::icons::{FILE, FOLDER};
+        // A long file name on a narrow panel: icon at the left, name overflows.
+        let long = "a-really-long-file-name-that-will-not-fit.psbt";
+        let src = [
+            Line::item("dir", 0).with_icon(&FOLDER),
+            Line::item(long, 1).with_icon(&FILE),
+        ];
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        // Cursor starts on the folder (fits): no marquee.
+        assert_eq!(v.selected(), Some(0));
+        assert!(!v.needs_marquee());
+        // Move to the long file: now it wants to scroll.
+        v.move_cursor(true);
+        assert_eq!(v.selected(), Some(1));
+        assert!(v.needs_marquee(), "a name wider than the panel did not marquee");
+        // Ticking advances the shift and eventually snaps back to the start.
+        assert!(v.tick_marquee());
+        let mut saw_reset = false;
+        for _ in 0..400 {
+            v.tick_marquee();
+            if v.marquee == 0 {
+                saw_reset = true;
+                break;
+            }
+        }
+        assert!(saw_reset, "the marquee never cycled back to the start");
+        // A short selection clears the marquee.
+        v.move_cursor(false);
+        assert!(!v.needs_marquee());
     }
 
     #[test]
