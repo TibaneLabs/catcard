@@ -80,6 +80,7 @@ enum Screen {
     AnalyzeRng,
     UsbDrive,
     ViewTrngWords,
+    AddressExplorer,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -134,7 +135,12 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
-const UTILS_ITEMS: &[&str] = &["Analyze RNG", "USB Drive", "View TRNG Words"];
+const UTILS_ITEMS: &[&str] = &[
+    "Analyze RNG",
+    "USB Drive",
+    "View TRNG Words",
+    "Address Explorer",
+];
 const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
@@ -303,6 +309,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::AddressExplorer {
+                address_explorer(gate, login, panel, &mut pad, matrix, drbg);
+                v.sc = Scroll::new();
+                screen = Screen::Utils;
+                break;
+            }
             if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
@@ -400,6 +412,7 @@ fn step(
             (Key::Confirm, 0) => Screen::AnalyzeRng,
             (Key::Confirm, 1) => Screen::UsbDrive,
             (Key::Confirm, 2) => Screen::ViewTrngWords,
+            (Key::Confirm, 3) => Screen::AddressExplorer,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -517,6 +530,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it takes over USB and needs the keypad to leave.
         Screen::UsbDrive => {}
         Screen::ViewTrngWords => {}
+        // Handled in `run`: it fetches the secret and drives its own paging loop.
+        Screen::AddressExplorer => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -1406,6 +1421,167 @@ fn view_trng_words(
         &display::WORDS_LAYOUT,
         true,
     );
+}
+
+/// Walk the receive addresses of the stored wallet.
+///
+/// BIP-84 native segwit (`m/84'/0'/0'/0/i`) on mainnet -- the modern default -- one
+/// address at a time, `8` forward and `5` back to mirror the pager's arrow keys. The
+/// point of showing them here is verification: an owner can check that an address the
+/// device displays matches what a watch-only wallet derives from the same account, before
+/// trusting it with funds.
+///
+/// The secret is fetched, turned into a master key, and reduced to the external-chain key
+/// once; only the final `/i` step runs per address. The seed and the secret are wiped as
+/// soon as that key exists -- nothing secret outlives the setup, and the chain key kept
+/// here is a public-derivation parent, not the seed.
+fn address_explorer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    use catcard_callgate::pin::bip39_entropy;
+    use catcard_wallet::address::{self, AddressKind};
+    use catcard_wallet::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, Network};
+    use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
+    use zeroize::Zeroize;
+
+    let fail = |panel: &mut display::Panel, why: &str| {
+        message(panel, "Addresses", why, "any key to go back");
+    };
+
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let mut secret = match login.fetch_secret(&pin_gate) {
+        Ok(s) => s,
+        Err(_) => {
+            fail(panel, "could not read seed");
+            wait_for_any_key(pad, matrix, drbg);
+            return;
+        }
+    };
+
+    // Copy the entropy out into an owned buffer so the secret can be wiped immediately;
+    // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
+    // something this screen can enumerate.
+    let mut ent = [0u8; 32];
+    let ent_len = match bip39_entropy(&secret) {
+        Some(e) if e.len() <= ent.len() => {
+            ent[..e.len()].copy_from_slice(e);
+            e.len()
+        }
+        _ => {
+            secret.zeroize();
+            fail(panel, "no BIP39 seed here");
+            wait_for_any_key(pad, matrix, drbg);
+            return;
+        }
+    };
+    secret.zeroize();
+
+    // Seed -> master -> the external receive chain m/84'/0'/0'/0. Empty passphrase: the
+    // plain wallet; passphrase wallets are a separate feature. Done once, then the seed
+    // material is gone and only the chain key (a derivation parent) remains.
+    let Ok(mnemonic) = Mnemonic::from_entropy(&ent[..ent_len]) else {
+        ent.zeroize();
+        fail(panel, "seed did not decode");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    };
+    ent.zeroize();
+    let mut seed = [0u8; SEED_LEN];
+    let chain = mnemonic
+        .to_seed("", &mut seed)
+        .ok()
+        .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet).ok())
+        .and_then(|master| {
+            DerivationPath::from_slice(&[
+                ChildNumber::hardened(84).ok()?,
+                ChildNumber::hardened(0).ok()?,
+                ChildNumber::hardened(0).ok()?,
+                ChildNumber::normal(0).ok()?,
+            ])
+            .ok()
+            .and_then(|p| master.derive_path(&p).ok())
+        });
+    seed.zeroize();
+    let Some(chain) = chain else {
+        fail(panel, "key derivation failed");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    };
+
+    // How many characters of an address fit on a body line; a bech32 P2WPKH is 42, so it
+    // wraps to a second line on the 128px panel and fits on one on the Q1.
+    let cols = display::LOG_COLS;
+    let mut index: u32 = 0;
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
+        let mut path = Line::new();
+        let _ = write!(path, "#{index}  m/84h/0h/0h/0/{index}");
+        let _ = lines.push(path);
+
+        let mut buf = [0u8; address::MAX_ADDRESS_LEN];
+        let addr = ChildNumber::normal(index)
+            .ok()
+            .and_then(|c| chain.derive_child(c).ok())
+            .and_then(|k| {
+                address::encode(AddressKind::P2wpkh, Network::Mainnet, &k.public_key(), &mut buf)
+                    .ok()
+            });
+        match addr {
+            Some(n) => {
+                let mut rest = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                while !rest.is_empty() {
+                    let take = rest.len().min(cols);
+                    let mut l = Line::new();
+                    let _ = l.push_str(&rest[..take]);
+                    if lines.push(l).is_err() {
+                        break;
+                    }
+                    rest = &rest[take..];
+                }
+            }
+            // A child index that lands on an invalid scalar is vanishingly rare, but the
+            // screen must not lie about it: show a gap rather than a wrong address.
+            None => {
+                let mut l = Line::new();
+                let _ = l.push_str("(no address)");
+                let _ = lines.push(l);
+            }
+        }
+        let _ = lines.push(Line::new());
+        let mut hint = Line::new();
+        let _ = hint.push_str("8 next  5 prev  x exit");
+        let _ = lines.push(hint);
+
+        info(panel, "Receive address", &lines);
+
+        wait_for_release(pad, matrix, drbg);
+        'wait: loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    Key::Cancel => return,
+                    Key::Digit(8) => {
+                        index = index.saturating_add(1);
+                        break 'wait;
+                    }
+                    Key::Digit(5) => {
+                        index = index.saturating_sub(1);
+                        break 'wait;
+                    }
+                    _ => {}
+                }
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
+    }
 }
 
 /// Block until no key is held.
