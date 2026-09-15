@@ -1873,6 +1873,10 @@ fn address_explorer(
         return;
     };
     ent.zeroize();
+    // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
+    // of hashing by design -- and the key derivation below adds elliptic-curve work on top.
+    // Say so, or the panel holds its last frame and the device looks hung.
+    message(panel, "Addresses", "deriving keys...", "");
     let mut seed = [0u8; SEED_LEN];
     let chain = mnemonic
         .to_seed("", &mut seed)
