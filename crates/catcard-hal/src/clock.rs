@@ -158,11 +158,11 @@ pub fn msi_range_khz(rcc_cr: u32) -> u32 {
 /// The APB2 peripheral clock (PCLK2) in Hz, computed from the live RCC configuration.
 ///
 /// SPI1 -- the display bus -- is on APB2, and its prescaler must be derived from the
-/// clock that actually feeds it. The Coldcard bootloader programs the PLL (80 MHz on
-/// these parts) and hands off with it running; this firmware never reprograms it, so the
-/// real clock is whatever the bootloader left, **not** the 4 MHz MSI reset default an
-/// earlier version assumed. Assuming 4 MHz clocked the SSD1306 at ~40 MHz -- 5x past its
-/// limit -- and every display write was garbled.
+/// clock that actually feeds it. The Coldcard bootloader programs the PLL off HSE 8 MHz
+/// (120 MHz on the L4S5 boards, 80 MHz on mk3) and hands off with it running; this
+/// firmware never reprograms it, so the real clock is whatever the bootloader left,
+/// **not** the 4 MHz MSI reset default an earlier version assumed. Assuming 4 MHz clocked
+/// the SSD1306 past its limit and every display write was garbled.
 ///
 /// Reads the source, PLL divisors and both prescalers rather than trusting a constant,
 /// so it is right whatever the bootloader configured. Source: RM0432 §RCC [C].

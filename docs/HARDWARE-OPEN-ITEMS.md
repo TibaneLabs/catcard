@@ -134,40 +134,29 @@ hardware unknown.
 
 ---
 
-## MSI range, and therefore the PLL configuration — narrowed to 8 MHz `[I]`
+## SYSCLK / PLL configuration — RESOLVED
 
-**Blocks: running faster than the reset default.** The core currently runs on the
-reset-default MSI clock. Everything works; it is just slow.
+The clock tree is now confirmed in `hw-reference/platform.md §1` [C], and the earlier
+premise here (that the device idles at the 4 MHz MSI reset default and we would program
+the PLL ourselves) was **wrong**:
 
-`hw-reference/platform.md §1` records the divisors `N=40, M=2, R=2, P=7, Q=4` sourced
-from MSI, but not the MSI range. `SYSCLK = MSI / M * N / R` gives **40 MHz at MSI=4 MHz**
-and **80 MHz at MSI=8 MHz**. Programming the PLL on the wrong assumption either
-underclocks the device or overclocks it past its voltage-scaling limit.
+- **The bootloader owns the clock tree and the firmware inherits it** — it must **not**
+  reset RCC. At the firmware's first instruction SYSCLK is already running off the PLL,
+  not the MSI reset default.
+- **mk3 (L496): SYSCLK 80 MHz** off HSE 8 MHz (`M=2, N=40, R=2`).
+- **mk4 / mk5 / Q1 (L4S5): SYSCLK 120 MHz** off HSE 8 MHz (`M=2, N=60, R=2`), AHB/APB ÷1,
+  flash latency 5. (Not 80 MHz — that was an earlier assumption; 120 is L4S5-only.)
 
-Two data points now pick the second: `platform.md §1` describes the mk3 part as
-"Cortex-M4F @ **~80 MHz**", and `gpio-peripherals.md` records `FLASH_LATENCY_4`, which
-on these parts at VOS range 1 is the setting for the top frequency band rather than for
-40 MHz. Both are consistent with **MSI = 8 MHz** (`RCC_CR.MSIRANGE = 0b0111`) and
-inconsistent with 4 MHz.
+Nothing needs programming: `catcard-hal::clock` reads the live source, PLL divisors and
+bus prescalers from RCC (`hclk_hz`, `pclk1_hz`, `pclk2_hz`), so every derived value —
+the display and SPI-NOR SPI prescalers, logged clocks — is right whatever the bootloader
+left, on every generation. The RNG's 48 MHz comes from the independent HSI48 via
+`enable_hsi48`, unaffected either way.
 
-That is an inference from two stated facts, not a stated fact, so it stays `[I]` and
-nothing is programmed on it yet. It does mean the PLL work is no longer blocked on an
-unknown — it is blocked on confirming one candidate.
-
-**Note on the USB idle pause.** `usbtask::IDLE_PAUSE_CYCLES` is a cycle count, and the
-device runs at the MSI reset default (4 MHz) rather than the PLL, so it is unaffected by
-the above. It becomes wrong the moment the PLL is programmed, and that is the change
-that has to revisit it.
-
-Note the RNG does **not** depend on this: `catcard-hal::clock::enable_hsi48` routes the
-independent HSI48 oscillator to the 48 MHz peripheral clock, which is correct on every
-generation.
-
-**How to resolve.** Read `RCC_CR.MSIRANGE` on a running device, or measure SYSCLK on the
-MCO pin.
-
-**Where it goes:** `crates/catcard-hal/src/clock.rs`, `PLL_DIVISORS` and a new
-`init_pll`.
+**Stale assumption to sweep:** `usbtask::IDLE_PAUSE_CYCLES` and any comment saying the
+device runs at "4 MHz MSI" or a flat "80 MHz" — the real inherited SYSCLK is 80 MHz on
+mk3 and 120 MHz on the L4S5 boards. `IDLE_PAUSE_CYCLES = 66_000` was tuned empirically on
+hardware and still works; it is just described against the wrong clock.
 
 ---
 

@@ -95,9 +95,10 @@ impl PanelBus {
             Spi::init(
                 bus.instance,
                 spi::Mode::Mode0,
-                // The real APB2 clock, read from RCC -- the bootloader left the PLL
-                // running at 80 MHz, and assuming the 4 MHz MSI reset default clocked
-                // the panel 5x past its limit, garbling every write. SAFETY: reads RCC.
+                // The real APB2 clock, read from RCC -- the bootloader hands off with the
+                // PLL running (120 MHz on the L4S5 boards, 80 MHz on mk3), and assuming
+                // the 4 MHz MSI reset default clocked the panel past its limit, garbling
+                // every write. SAFETY: reads RCC.
                 Prescaler::for_max_hz(catcard_hal::clock::pclk2_hz(), max_hz),
             )?
         };
