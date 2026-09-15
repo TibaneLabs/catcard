@@ -308,12 +308,14 @@ pub const MK3: BoardSpec = BoardSpec {
         cs: pa(4),
     },
     // 4x3 membrane numpad. Rows are open-drain outputs, columns pulled-up inputs.
-    // cols M2_COL0..2 = PB0, PB1, PB2; rows M2_ROW0..3 = PD8, PD9, PD10, PD11 -- in that
-    // order, so the scanner's `row * 3 + col` index matches the DECODER 'y0x987654321'.
-    // Source: hw-reference/gpio.md §Mk3 pin map [C], input.md §Membrane numpad [C].
+    // mk3 pins: rows M2_ROW0..3 = PB12, PB13, PB14, PC6; cols M2_COL0..2 = PA1, PA3, PA2 --
+    // in that order, so the scanner's `row * 3 + col` index matches the DECODER
+    // 'y0x987654321'. NOTE: these are the *mk3* pins. Mk4/Mk5 use different numpad pins
+    // (cols PB0/1/2, rows PD8-11) -- do not cross them. Confirmed working on hardware.
+    // Source: hw-reference/input.md §Membrane numpad, "Mk3 pins" table [C].
     input: Input::Numpad4x3 {
-        rows: [pd(8), pd(9), pd(10), pd(11)],
-        cols: [pb(0), pb(1), pb(2)],
+        rows: [pb(12), pb(13), pb(14), pc(6)],
+        cols: [pa(1), pa(3), pa(2)],
     },
     sdmmc: SdmmcPins {
         d0: pc(8),
