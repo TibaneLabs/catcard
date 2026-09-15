@@ -85,10 +85,8 @@ enum Screen {
     NewSeedMenu,
     /// Generating one, of this many words.
     NewSeed(u8),
-    /// Choosing how long a restored seed is.
-    ImportSeedMenu,
-    /// Restoring one, of this many words.
-    ImportSeed(u8),
+    /// Restoring a seed: word count is not asked, the owner types until done.
+    ImportSeed,
     WipeSeed,
 }
 
@@ -140,11 +138,6 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 /// The word count travels in [`Screen::NewSeed`], so adding another length here needs
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
-
-/// Lengths a seed can be restored at. Eighteen belongs here where twenty-four and twelve
-/// are the only ones generated: an imported phrase is whatever someone else's device
-/// produced, and 18-word (192-bit) backups exist in the wild.
-const IMPORT_SEED_ITEMS: &[&str] = &["24 words", "18 words", "12 words"];
 
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
@@ -351,8 +344,8 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Main;
                 break;
             }
-            if let Screen::ImportSeed(words) = next {
-                import_seed(gate, login, panel, &mut pad, matrix, drbg, words);
+            if next == Screen::ImportSeed {
+                import_seed(gate, login, panel, &mut pad, matrix, drbg);
                 // A restored wallet reorders the menu, exactly as a generated one does.
                 v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
                 v.reset_menu();
@@ -414,7 +407,7 @@ fn step(
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
-            (Key::Confirm, Some("Import seed")) => Screen::ImportSeedMenu,
+            (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
@@ -431,13 +424,6 @@ fn step(
             (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::NewSeedMenu,
-        },
-        Screen::ImportSeedMenu => match (key, IMPORT_SEED_ITEMS.get(cursor).copied()) {
-            (Key::Confirm, Some("24 words")) => Screen::ImportSeed(24),
-            (Key::Confirm, Some("18 words")) => Screen::ImportSeed(18),
-            (Key::Confirm, Some("12 words")) => Screen::ImportSeed(12),
-            (Key::Cancel, _) => Screen::Main,
-            _ => Screen::ImportSeedMenu,
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
@@ -535,7 +521,6 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
-        Screen::ImportSeedMenu => Some(IMPORT_SEED_ITEMS),
         _ => None,
     }
 }
@@ -545,11 +530,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     match screen {
         // Every list screen renders the same way; the title and note come from
         // `menu_head`, the single place they are defined.
-        Screen::Main
-        | Screen::Utils
-        | Screen::NewSeedMenu
-        | Screen::ImportSeedMenu
-        | Screen::Debug => draw_menu(panel, screen, v),
+        Screen::Main | Screen::Utils | Screen::NewSeedMenu | Screen::Debug => {
+            draw_menu(panel, screen, v)
+        }
         Screen::About => about_screen(panel),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -577,7 +560,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // and the keypad itself.
         Screen::NewSeed(_) => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
-        Screen::ImportSeed(_) => {}
+        Screen::ImportSeed => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }
@@ -618,10 +601,6 @@ fn menu_head<'a>(screen: Screen, v: &View<'a>) -> (&'a str, Line) {
         Screen::NewSeedMenu => {
             let _ = note.push_str("how many words?");
             "New wallet"
-        }
-        Screen::ImportSeedMenu => {
-            let _ = note.push_str("how many words?");
-            "Import seed"
         }
         Screen::Debug => "Debug",
         _ => "",
@@ -2427,6 +2406,8 @@ enum WordPick {
     Word(u16),
     /// Back up to the previous word (or, at the first word, abandon the restore).
     Back,
+    /// Finished entering words (OK pressed twice on an empty word).
+    Finish,
 }
 
 /// The phone-keypad digit a BIP-39 letter sits on, or 0 for a non-letter.
@@ -2467,13 +2448,15 @@ fn word_matches(word: &str, typed: &str) -> bool {
 ///
 /// The word is never guessed for the user: even a single match is confirmed from the list
 /// so what lands in the seed is what they saw and chose.
+///
+/// On an empty word, pressing `y` twice returns [`WordPick::Finish`] -- the "I have entered
+/// all my words" signal, since the count is not asked up front.
 fn read_word(
     panel: &mut display::Panel,
     pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     num: usize,
-    total: usize,
 ) -> WordPick {
     use catcard_wallet::bip39::wordlist::ENGLISH;
     // Enough to hold the candidates once a couple of letters have narrowed the list; the
@@ -2481,6 +2464,9 @@ fn read_word(
     const CAND_MAX: usize = 64;
 
     let mut typed: heapless::String<8> = heapless::String::new();
+    // One `y` on an empty word arms the finish; a second confirms it. Any other key clears
+    // it, so a stray press cannot end the seed early.
+    let mut armed = false;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
@@ -2500,7 +2486,7 @@ fn read_word(
 
         // --- Type screen ---
         let mut title = Line::new();
-        let _ = write!(title, "Word {num}/{total}");
+        let _ = write!(title, "Word {num}");
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
         let mut l = Line::new();
         let _ = l.push_str("2abc 3def 4ghi 5jkl");
@@ -2513,8 +2499,10 @@ fn read_word(
         let _ = write!(l, "keys: {typed}");
         let _ = lines.push(l);
         let mut l = Line::new();
-        if typed.is_empty() {
-            let _ = l.push_str("type your word");
+        if armed {
+            let _ = l.push_str("y again: finish");
+        } else if typed.is_empty() {
+            let _ = l.push_str("type, or y y = done");
         } else if count == 0 {
             let _ = l.push_str("no match, x=del");
         } else {
@@ -2532,20 +2520,30 @@ fn read_word(
                 match k {
                     // A letter key.
                     Key::Digit(d @ 2..=9) => {
+                        armed = false;
                         let _ = typed.push((b'0' + d) as char);
                         break 'type_wait;
                     }
                     // 0 and 1 carry no letters; ignore them rather than mis-spell.
                     Key::Digit(_) => {}
                     Key::Cancel => {
+                        armed = false;
                         if typed.pop().is_none() {
                             return WordPick::Back;
                         }
                         break 'type_wait;
                     }
                     Key::Confirm => {
-                        if count > 0 && count <= CAND_MAX {
-                            open_list = true;
+                        if !typed.is_empty() {
+                            if count > 0 && count <= CAND_MAX {
+                                open_list = true;
+                                break 'type_wait;
+                            }
+                        } else if armed {
+                            // Second `y` on an empty word: that is the end of the seed.
+                            return WordPick::Finish;
+                        } else {
+                            armed = true;
                             break 'type_wait;
                         }
                     }
@@ -2572,17 +2570,76 @@ fn read_word(
     }
 }
 
+/// A short reason for a phrase that would not parse, for the error screen.
+fn parse_error(e: catcard_wallet::bip39::Error) -> &'static str {
+    use catcard_wallet::bip39::Error;
+    match e {
+        Error::BadChecksum => "checksum is wrong",
+        Error::BadWordCount { .. } => "wrong number of words",
+        Error::UnknownWord { .. } => "a word is not valid",
+        _ => "could not read the seed",
+    }
+}
+
+/// What the owner chose in the fix-the-seed editor.
+enum EditChoice {
+    /// Re-enter the word at this position.
+    Edit(usize),
+    /// Append another word.
+    Add,
+    /// Discard the whole entry.
+    Cancel,
+}
+
+/// The ids the editor's non-word rows carry; word rows carry their position, always small.
+const EDIT_ADD: u32 = u32::MAX;
+const EDIT_CANCEL: u32 = u32::MAX - 1;
+
+/// Show the entered words as a menu so the owner can fix one, add another, or discard.
+fn edit_menu(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    idx: &[u16],
+) -> EditChoice {
+    use catcard_ui::scroll::Line as DLine;
+    use catcard_wallet::bip39::wordlist::ENGLISH;
+
+    let mut texts: heapless::Vec<Line, 24> = heapless::Vec::new();
+    for (pos, &i) in idx.iter().enumerate() {
+        let mut s = Line::new();
+        let _ = write!(s, "{:2}  {}", pos + 1, ENGLISH[i as usize]);
+        let _ = texts.push(s);
+    }
+    let mut lines: heapless::Vec<DLine, 28> = heapless::Vec::new();
+    let _ = lines.push(DLine::title("Fix the seed"));
+    for (pos, s) in texts.iter().enumerate() {
+        let _ = lines.push(DLine::item(s, pos as u32));
+    }
+    let _ = lines.push(DLine::item("+ add a word", EDIT_ADD));
+    let _ = lines.push(DLine::item("x discard all", EDIT_CANCEL));
+
+    match show_doc(panel, pad, matrix, drbg, &lines, false, false) {
+        DocExit::Selected(EDIT_ADD) => EditChoice::Add,
+        DocExit::Selected(EDIT_CANCEL) => EditChoice::Cancel,
+        DocExit::Selected(pos) => EditChoice::Edit(pos as usize),
+        // Backing out of the editor discards, same as the explicit row.
+        DocExit::Cancelled | DocExit::Confirmed => EditChoice::Cancel,
+    }
+}
+
 /// Restore a wallet from a written-down BIP-39 phrase, typed on the keypad.
 ///
-/// The checksum is the whole safety story here. A restore stores whatever it is given, so
-/// the only thing standing between a mistyped word and a wallet that quietly controls
-/// nothing recoverable is [`Mnemonic::parse`], which rebuilds the entropy and verifies the
-/// checksum before this stores anything. A failure sends the owner back to fix the last
-/// word rather than committing a phrase that does not check out.
+/// The count is not asked: the owner types each word and presses `y` twice to end. The
+/// checksum is the whole safety story -- a restore stores whatever it is given, so nothing
+/// is committed until [`Mnemonic::parse`] rebuilds the entropy and verifies the checksum.
+/// A phrase that does not check out drops the owner into [`edit_menu`]: the words shown as
+/// a list to fix in place, add to, or discard, and the checksum is re-tested after each
+/// change. Only once it checks out is the import offered and stored.
 ///
 /// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
 /// reason: a slot that did not keep the words must be reported, not assumed.
-#[allow(clippy::too_many_arguments)]
 fn import_seed(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -2590,7 +2647,6 @@ fn import_seed(
     pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
-    words: u8,
 ) {
     use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
     use zeroize::Zeroize;
@@ -2607,35 +2663,33 @@ fn import_seed(
             return;
         }
     }
-    let mut what = Line::new();
-    let _ = write!(what, "type {words} words from");
-    ask(panel, "Restore seed?", &what, "your backup");
-    if !confirmed(pad, matrix, drbg) {
-        return;
-    }
+    message(panel, "Import seed", "enter each word,", "then y y to finish");
+    wait_for_any_key(pad, matrix, drbg);
 
-    let total = words as usize;
     let mut idx: heapless::Vec<u16, 24> = heapless::Vec::new();
 
-    let mnemonic = loop {
-        // Collect until the phrase is complete. `Back` steps to the previous word, and
-        // backing off the first word abandons the restore.
-        while idx.len() < total {
-            match read_word(panel, pad, matrix, drbg, idx.len() + 1, total) {
-                WordPick::Word(i) => {
-                    let _ = idx.push(i);
-                }
-                WordPick::Back => {
-                    if idx.pop().is_none() {
-                        cancelled(panel, pad, matrix, drbg);
-                        return;
-                    }
+    // Enter words until the owner signals the end. `Back` steps to the previous word;
+    // backing off the first word abandons the restore.
+    loop {
+        match read_word(panel, pad, matrix, drbg, idx.len() + 1) {
+            WordPick::Word(i) => {
+                if idx.push(i).is_err() {
+                    // 24 words is the most a phrase can be; stop taking more and verify.
+                    break;
                 }
             }
+            WordPick::Back => {
+                if idx.pop().is_none() {
+                    cancelled(panel, pad, matrix, drbg);
+                    return;
+                }
+            }
+            WordPick::Finish => break,
         }
+    }
 
-        // Assemble the phrase and let `parse` verify the checksum. The phrase is secret
-        // material, so its buffer is wiped whichever way this goes.
+    // Verify, and until it checks out let the owner fix it. Each pass reparses the phrase.
+    let mnemonic = loop {
         let mut phrase: heapless::String<256> = heapless::String::new();
         for (n, &i) in idx.iter().enumerate() {
             if n > 0 {
@@ -2652,17 +2706,40 @@ fn import_seed(
 
         match parsed {
             Ok(m) => break m,
-            Err(_) => {
-                ask(panel, "Checksum failed", "re-enter the last", "word?");
-                if confirmed(pad, matrix, drbg) {
-                    let _ = idx.pop();
-                } else {
-                    cancelled(panel, pad, matrix, drbg);
-                    return;
+            Err(e) => {
+                message(panel, "Bad seed", parse_error(e), "any key to fix");
+                wait_for_any_key(pad, matrix, drbg);
+                match edit_menu(panel, pad, matrix, drbg, &idx) {
+                    EditChoice::Edit(pos) => {
+                        if let WordPick::Word(i) = read_word(panel, pad, matrix, drbg, pos + 1) {
+                            idx[pos] = i;
+                        }
+                    }
+                    EditChoice::Add => {
+                        if idx.len() < 24
+                            && let WordPick::Word(i) =
+                                read_word(panel, pad, matrix, drbg, idx.len() + 1)
+                        {
+                            let _ = idx.push(i);
+                        }
+                    }
+                    EditChoice::Cancel => {
+                        cancelled(panel, pad, matrix, drbg);
+                        return;
+                    }
                 }
             }
         }
     };
+
+    // It checks out: offer to complete, then store.
+    let mut what = Line::new();
+    let _ = write!(what, "{} words, checksum ok", mnemonic.word_count());
+    ask(panel, "Restore this?", &what, "y to store it");
+    if !confirmed(pad, matrix, drbg) {
+        cancelled(panel, pad, matrix, drbg);
+        return;
+    }
 
     let Ok(mut secret) = catcard_callgate::pin::encode_bip39(mnemonic.entropy()) else {
         message(panel, "Failed", "could not encode", "that seed");
