@@ -88,6 +88,9 @@ enum Screen {
     /// The Block Mine game.
     #[cfg(feature = "games")]
     BlockMine,
+    /// The Block Cutter game.
+    #[cfg(feature = "games")]
+    BlockCutter,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -176,7 +179,7 @@ const UTILS_ITEMS: &[&str] = &[
 
 /// The games in the Games submenu.
 #[cfg(feature = "games")]
-const GAMES_ITEMS: &[&str] = &["Block Mine"];
+const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
     "USB",
@@ -367,6 +370,13 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Games;
                 break;
             }
+            #[cfg(feature = "games")]
+            if next == Screen::BlockCutter {
+                crate::game::block_cutter(panel, &mut pad, matrix, drbg);
+                v.reset_menu();
+                screen = Screen::Games;
+                break;
+            }
             if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
@@ -521,6 +531,7 @@ fn step(
         #[cfg(feature = "games")]
         Screen::Games => match (key, GAMES_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Block Mine")) => Screen::BlockMine,
+            (Key::Confirm, Some("Block Cutter")) => Screen::BlockCutter,
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::Games,
         },
@@ -663,6 +674,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: the game drives the panel in its own loop.
         #[cfg(feature = "games")]
         Screen::BlockMine => {}
+        #[cfg(feature = "games")]
+        Screen::BlockCutter => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }

@@ -468,3 +468,413 @@ pub(crate) fn block_mine(
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
 }
+
+// ============================ Block Cutter ============================
+//
+// A Qix/Xonix-style claim game. You move along the claimed edge (safe), and when you push
+// into the black interior you draw a line; getting back to claimed ground closes it and
+// captures territory. Bouncing pixels roam the black. If one touches your line while you
+// are drawing it, you lose a life. A cut that splits the black in two keeps the side with
+// more creatures black and captures the other, whose creatures vanish. Each level starts
+// with one more creature; a level clears once the black is down to a sliver.
+
+/// Cutter grid: 2x2-pixel cells over the 128x64 panel.
+const CW: usize = 64;
+const CH: usize = 32;
+const CN: usize = CW * CH;
+/// Most black components one cut can leave; extra ones (never seen in practice) stay black.
+const MAX_COMP: usize = 48;
+/// Clear the level once the black is below this fraction of the interior.
+const CLEAR_BLACK_PCT: usize = 25;
+
+// Cell states.
+const CB_BLACK: u8 = 0;
+const CB_FILLED: u8 = 1;
+const CB_TRAIL: u8 = 2;
+
+const CUT_MOVE_CYCLES: u32 = 2_400_000;
+const CUT_ENEMY_CYCLES: u32 = 4_000_000;
+
+#[derive(Copy, Clone)]
+struct Mover {
+    x: u8,
+    y: u8,
+    vx: i8,
+    vy: i8,
+}
+
+struct Cutter {
+    grid: [u8; CN],
+    px: usize,
+    py: usize,
+    dx: i8,
+    dy: i8,
+    trailing: bool,
+    enemies: heapless::Vec<Mover, 16>,
+    level: u32,
+    lives: u32,
+    dead: bool,
+    won_level: bool,
+}
+
+impl Cutter {
+    fn cell(&self, x: isize, y: isize) -> u8 {
+        if x < 0 || y < 0 || x >= CW as isize || y >= CH as isize {
+            CB_FILLED // off-grid reads as a wall
+        } else {
+            self.grid[y as usize * CW + x as usize]
+        }
+    }
+
+    fn new_level(&mut self, drbg: &mut HmacDrbg) {
+        self.grid = [CB_BLACK; CN];
+        for x in 0..CW {
+            self.grid[x] = CB_FILLED;
+            self.grid[(CH - 1) * CW + x] = CB_FILLED;
+        }
+        for y in 0..CH {
+            self.grid[y * CW] = CB_FILLED;
+            self.grid[y * CW + CW - 1] = CB_FILLED;
+        }
+        self.px = CW / 2;
+        self.py = 0;
+        self.dx = 0;
+        self.dy = 0;
+        self.trailing = false;
+        self.enemies.clear();
+        let n = self.level.min(self.enemies.capacity() as u32);
+        for _ in 0..n {
+            let x = 1 + drbg.below((CW - 2) as u32).unwrap_or(0) as u8;
+            let y = 1 + drbg.below((CH - 2) as u32).unwrap_or(0) as u8;
+            let vx = if drbg.below(2).unwrap_or(0) == 0 { -1 } else { 1 };
+            let vy = if drbg.below(2).unwrap_or(0) == 0 { -1 } else { 1 };
+            let _ = self.enemies.push(Mover { x, y, vx, vy });
+        }
+    }
+
+    fn black_count(&self) -> usize {
+        self.grid.iter().filter(|&&c| c == CB_BLACK).count()
+    }
+
+    fn respawn(&mut self) {
+        for c in self.grid.iter_mut() {
+            if *c == CB_TRAIL {
+                *c = CB_BLACK;
+            }
+        }
+        self.px = CW / 2;
+        self.py = 0;
+        self.dx = 0;
+        self.dy = 0;
+        self.trailing = false;
+    }
+
+    /// One movement step in the current direction. Lays or closes the trail as it goes.
+    fn step_player(&mut self) {
+        if self.dx == 0 && self.dy == 0 {
+            return;
+        }
+        let nx = self.px as isize + self.dx as isize;
+        let ny = self.py as isize + self.dy as isize;
+        if nx < 0 || ny < 0 || nx >= CW as isize || ny >= CH as isize {
+            self.dx = 0;
+            self.dy = 0;
+            return;
+        }
+        let (nx, ny) = (nx as usize, ny as usize);
+        // Walking into a creature is fatal too, not only being caught by one.
+        if self.enemies.iter().any(|e| e.x as usize == nx && e.y as usize == ny) {
+            self.dead = true;
+            return;
+        }
+        let target = self.grid[ny * CW + nx];
+        if self.trailing {
+            match target {
+                CB_TRAIL => {
+                    // Crossing your own line is fatal.
+                    self.dead = true;
+                }
+                CB_FILLED => {
+                    self.px = nx;
+                    self.py = ny;
+                    self.trailing = false;
+                    self.close_cut();
+                }
+                _ => {
+                    self.grid[ny * CW + nx] = CB_TRAIL;
+                    self.px = nx;
+                    self.py = ny;
+                }
+            }
+        } else {
+            match target {
+                CB_FILLED => {
+                    self.px = nx;
+                    self.py = ny;
+                }
+                CB_BLACK => {
+                    self.grid[ny * CW + nx] = CB_TRAIL;
+                    self.px = nx;
+                    self.py = ny;
+                    self.trailing = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Close a finished trail: the line becomes claimed, then the black is partitioned and
+    /// every side but the one with the most creatures is captured.
+    fn close_cut(&mut self) {
+        for c in self.grid.iter_mut() {
+            if *c == CB_TRAIL {
+                *c = CB_FILLED;
+            }
+        }
+        let mut label = [0u16; CN];
+        let mut queue = [0u16; CN];
+        let mut comp_cells = [0u32; MAX_COMP];
+        let mut comp_enemy = [0u32; MAX_COMP];
+        let mut ncomp: u16 = 0;
+
+        for start in 0..CN {
+            if self.grid[start] != CB_BLACK || label[start] != 0 {
+                continue;
+            }
+            if ncomp as usize >= MAX_COMP {
+                break; // overflow: leave the rest labelled 0, i.e. stay black
+            }
+            ncomp += 1;
+            let id = ncomp;
+            let (mut head, mut tail) = (0usize, 0usize);
+            queue[tail] = start as u16;
+            tail += 1;
+            label[start] = id;
+            while head < tail {
+                let ci = queue[head] as usize;
+                head += 1;
+                comp_cells[id as usize - 1] += 1;
+                let (cx, cy) = (ci % CW, ci / CW);
+                let visit = |nx: usize, ny: usize, g: &[u8; CN], lb: &mut [u16; CN], q: &mut [u16; CN], t: &mut usize| {
+                    let ni = ny * CW + nx;
+                    if g[ni] == CB_BLACK && lb[ni] == 0 {
+                        lb[ni] = id;
+                        q[*t] = ni as u16;
+                        *t += 1;
+                    }
+                };
+                if cx > 0 {
+                    visit(cx - 1, cy, &self.grid, &mut label, &mut queue, &mut tail);
+                }
+                if cx + 1 < CW {
+                    visit(cx + 1, cy, &self.grid, &mut label, &mut queue, &mut tail);
+                }
+                if cy > 0 {
+                    visit(cx, cy - 1, &self.grid, &mut label, &mut queue, &mut tail);
+                }
+                if cy + 1 < CH {
+                    visit(cx, cy + 1, &self.grid, &mut label, &mut queue, &mut tail);
+                }
+            }
+        }
+
+        for e in self.enemies.iter() {
+            let l = label[e.y as usize * CW + e.x as usize];
+            if l != 0 && (l as usize) <= MAX_COMP {
+                comp_enemy[l as usize - 1] += 1;
+            }
+        }
+
+        // Keep the component with the most creatures (ties: the larger one).
+        let mut winner = 0u16;
+        let mut best = (0u32, 0u32);
+        for id in 1..=ncomp {
+            let key = (comp_enemy[id as usize - 1], comp_cells[id as usize - 1]);
+            if key > best {
+                best = key;
+                winner = id;
+            }
+        }
+
+        for (cell, &l) in self.grid.iter_mut().zip(label.iter()) {
+            if *cell == CB_BLACK && l != 0 && l != winner {
+                *cell = CB_FILLED;
+            }
+        }
+        // Creatures on captured ground are gone.
+        self.enemies
+            .retain(|e| label[e.y as usize * CW + e.x as usize] == winner);
+    }
+
+    /// One creature step: bounce diagonally through the black, and end the run if one
+    /// reaches the trail or the drawing player.
+    fn step_enemies(&mut self) {
+        for i in 0..self.enemies.len() {
+            let e = self.enemies[i];
+            let (x, y) = (e.x as isize, e.y as isize);
+            let (mut vx, mut vy) = (e.vx as isize, e.vy as isize);
+
+            // Touching the line -- next to it in any of the three move cells -- is a breach.
+            if self.cell(x + vx, y) == CB_TRAIL
+                || self.cell(x, y + vy) == CB_TRAIL
+                || self.cell(x + vx, y + vy) == CB_TRAIL
+            {
+                self.dead = true;
+                return;
+            }
+            if self.cell(x + vx, y) != CB_BLACK {
+                vx = -vx;
+            }
+            if self.cell(x, y + vy) != CB_BLACK {
+                vy = -vy;
+            }
+            let (tx, ty) = (x + vx, y + vy);
+            if self.cell(tx, ty) == CB_BLACK {
+                self.enemies[i] = Mover {
+                    x: tx as u8,
+                    y: ty as u8,
+                    vx: vx as i8,
+                    vy: vy as i8,
+                };
+            } else {
+                // Cornered: keep the reflected velocity, stay put this tick.
+                self.enemies[i].vx = vx as i8;
+                self.enemies[i].vy = vy as i8;
+            }
+            if self.trailing
+                && self.enemies[i].x as usize == self.px
+                && self.enemies[i].y as usize == self.py
+            {
+                self.dead = true;
+                return;
+            }
+        }
+    }
+}
+
+fn cutter_render<C: Canvas + ?Sized>(c: &mut C, g: &Cutter) {
+    use catcard_ui::canvas::PAPER;
+    c.clear();
+    for cy in 0..CH {
+        for cx in 0..CW {
+            let s = g.grid[cy * CW + cx];
+            if s == CB_FILLED || s == CB_TRAIL {
+                c.fill_rect(cx * 2, cy * 2, 2, 2, INK);
+            }
+        }
+    }
+    for e in g.enemies.iter() {
+        c.put(e.x as usize * 2, e.y as usize * 2, INK);
+    }
+    // Player: invert its 2x2 cell so it shows on black ground and on claimed white alike.
+    for dy in 0..2 {
+        for dx in 0..2 {
+            let (x, y) = (g.px * 2 + dx, g.py * 2 + dy);
+            let v = if c.get(x, y) >= 8 { PAPER } else { INK };
+            c.put(x, y, v);
+        }
+    }
+    // Lives as black pips on the white top border.
+    for i in 0..g.lives as usize {
+        c.put(2 + i * 3, 0, PAPER);
+    }
+}
+
+/// Play Block Cutter until the player runs out of lives or presses `x`.
+pub(crate) fn block_cutter(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    let interior = (CW - 2) * (CH - 2);
+    let clear_below = interior * CLEAR_BLACK_PCT / 100;
+
+    let mut g = Cutter {
+        grid: [CB_BLACK; CN],
+        px: 0,
+        py: 0,
+        dx: 0,
+        dy: 0,
+        trailing: false,
+        enemies: heapless::Vec::new(),
+        level: 1,
+        lives: 3,
+        dead: false,
+        won_level: false,
+    };
+    g.new_level(drbg);
+
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut last_move = catcard_hal::dwt::cycles();
+    let mut last_enemy = last_move;
+    let mut redraw = true;
+
+    loop {
+        if redraw {
+            display::draw(panel, |c| cutter_render(c, &g));
+            redraw = false;
+        }
+
+        if g.dead {
+            g.dead = false;
+            g.lives = g.lives.saturating_sub(1);
+            if g.lives == 0 {
+                end_screen(panel, pad, matrix, drbg, "Game over", "line was cut");
+                return;
+            }
+            g.respawn();
+            redraw = true;
+            continue;
+        }
+        if g.won_level {
+            g.won_level = false;
+            g.level += 1;
+            g.new_level(drbg);
+            redraw = true;
+            continue;
+        }
+
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Cancel => return,
+                Key::Digit(5) => {
+                    g.dx = 0;
+                    g.dy = -1;
+                }
+                Key::Digit(8) => {
+                    g.dx = 0;
+                    g.dy = 1;
+                }
+                Key::Digit(7) => {
+                    g.dx = -1;
+                    g.dy = 0;
+                }
+                Key::Digit(9) => {
+                    g.dx = 1;
+                    g.dy = 0;
+                }
+                _ => {}
+            }
+        }
+
+        let now = catcard_hal::dwt::cycles();
+        if now.wrapping_sub(last_move) >= CUT_MOVE_CYCLES {
+            g.step_player();
+            last_move = now;
+            redraw = true;
+            if g.black_count() < clear_below {
+                g.won_level = true;
+            }
+        }
+        if now.wrapping_sub(last_enemy) >= CUT_ENEMY_CYCLES {
+            g.step_enemies();
+            last_enemy = now;
+            redraw = true;
+        }
+        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    }
+}
