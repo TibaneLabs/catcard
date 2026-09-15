@@ -103,8 +103,10 @@ Everything below now needs hardware rather than more specification.
 - [ ] NFKD normalisation, so non-ASCII passphrases work. `Mnemonic::to_seed` currently
       **refuses** them rather than deriving a seed that diverges from every other
       wallet. Needs a normalisation table, or a decision to restrict passphrases.
-- [ ] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
-- [ ] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR
+- [x] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
+- [x] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR all encode in
+      `catcard-wallet`; the on-device Address Explorer (Utils) walks the BIP-84 receive
+      chain, and seed import/restore reconstructs a wallet from a typed phrase
 - [x] Transaction parsing (borrowed, allocation-free) and BIP-143 segwit v0 sighash
 - [ ] BIP-341 taproot sighash
 - [ ] PSBT (BIP-174) parse, validate, sign, serialise
