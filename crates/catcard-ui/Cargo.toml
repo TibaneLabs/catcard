@@ -11,4 +11,5 @@ authors.workspace = true
 [dependencies]
 catcard-board.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
+heapless.workspace = true
 zeroize.workspace = true

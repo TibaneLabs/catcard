@@ -208,7 +208,7 @@ impl Scramble {
     /// A random mark length in `2..=max` for pixel-row `row` of content line `idx`, or 0
     /// when there is no room. Keyed to the line so the bar scrolls with its word, and to
     /// the row so each row of the bar has its own length -- the jaggedness.
-    fn length(self, idx: usize, row: usize, max: usize) -> usize {
+    pub(crate) fn length(self, idx: usize, row: usize, max: usize) -> usize {
         if max < 2 {
             return 0;
         }
