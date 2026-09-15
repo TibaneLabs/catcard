@@ -73,6 +73,15 @@ pub struct UsbTask {
     /// Reset to zero the moment the host configures us, so a working link never triggers
     /// it and it costs a healthy device nothing.
     stuck: u32,
+    /// Whether the host has *ever* configured us. The self-heal below is only for the
+    /// boot-time enumeration wedge -- a core that never reaches "configured" the first
+    /// time -- so once it has, the self-heal is switched off for good. Leaving it armed
+    /// meant a device whose bus later goes idle/suspended (and, on the mk3 L496 OTG,
+    /// appears to signal a bus reset when it does) would keep re-`reinit`-ing, and each
+    /// `reinit` runs a blocking `core_reset` that stalls the foreground -- which on mk3
+    /// starved the keypad scan enough to look dead. A once-enumerated core does not need
+    /// re-healing; a real later disconnect is the host's to re-drive.
+    ever_configured: bool,
     /// Whether the PIN has been entered. Gates the upgrade opcodes only.
     unlocked: bool,
     /// Whether the device has no PIN set at all.
@@ -218,6 +227,7 @@ impl UsbTask {
             unlocked: false,
             blank: false,
             stuck: 0,
+            ever_configured: false,
             frames: Reassembler::new(),
             stage: Stage::Idle,
             outbox: [0; REPORT_LEN],
@@ -315,7 +325,11 @@ impl UsbTask {
             // healthy device and only ever fires when USB is genuinely down.
             if self.otg.is_configured() {
                 self.stuck = 0;
-            } else {
+                self.ever_configured = true;
+            } else if !self.ever_configured {
+                // Only heal the *first* enumeration. After the host has configured us once,
+                // a later un-configured stretch is idle/suspend or a real unplug, not a
+                // wedge -- re-`reinit`-ing there only churns and blocks the foreground.
                 self.stuck = self.stuck.saturating_add(1);
                 if self.stuck >= USB_STUCK_POLLS {
                     self.stuck = 0;
