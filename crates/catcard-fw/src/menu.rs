@@ -82,6 +82,12 @@ enum Screen {
     ViewTrngWords,
     AddressExplorer,
     BrowseSd,
+    /// The Games submenu.
+    #[cfg(feature = "games")]
+    Games,
+    /// The Block Mine game.
+    #[cfg(feature = "games")]
+    BlockMine,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -150,6 +156,16 @@ const LOGIN_ITEMS: &[&str] = &["Change PIN"];
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
+#[cfg(feature = "games")]
+const UTILS_ITEMS: &[&str] = &[
+    "Analyze RNG",
+    "USB Drive",
+    "View TRNG Words",
+    "Address Explorer",
+    "Browse SD card",
+    "Games",
+];
+#[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
@@ -157,6 +173,10 @@ const UTILS_ITEMS: &[&str] = &[
     "Address Explorer",
     "Browse SD card",
 ];
+
+/// The games in the Games submenu.
+#[cfg(feature = "games")]
+const GAMES_ITEMS: &[&str] = &["Block Mine"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
     "USB",
@@ -340,6 +360,13 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            #[cfg(feature = "games")]
+            if next == Screen::BlockMine {
+                crate::game::block_mine(panel, &mut pad, matrix, drbg);
+                v.reset_menu();
+                screen = Screen::Games;
+                break;
+            }
             if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
@@ -480,14 +507,22 @@ fn step(
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
-        Screen::Utils => match (key, cursor) {
-            (Key::Confirm, 0) => Screen::AnalyzeRng,
-            (Key::Confirm, 1) => Screen::UsbDrive,
-            (Key::Confirm, 2) => Screen::ViewTrngWords,
-            (Key::Confirm, 3) => Screen::AddressExplorer,
-            (Key::Confirm, 4) => Screen::BrowseSd,
+        Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
+            (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
+            (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
+            (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
+            (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
+            #[cfg(feature = "games")]
+            (Key::Confirm, Some("Games")) => Screen::Games,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
+        },
+        #[cfg(feature = "games")]
+        Screen::Games => match (key, GAMES_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Block Mine")) => Screen::BlockMine,
+            (Key::Cancel, _) => Screen::Utils,
+            _ => Screen::Games,
         },
         // By name, like Main: the list reorders (Install from SD was just added at the
         // top), and an index table would silently point at the wrong entry.
@@ -574,6 +609,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
+        #[cfg(feature = "games")]
+        Screen::Games => Some(GAMES_ITEMS),
         _ => None,
     }
 }
@@ -589,6 +626,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Debug
         | Screen::Settings
         | Screen::Login => draw_menu(panel, screen, v),
+        #[cfg(feature = "games")]
+        Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -621,6 +660,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ImportSeed => {}
         // Handled in `run`: it drives the PIN-entry screens itself.
         Screen::ChangePin => {}
+        // Handled in `run`: the game drives the panel in its own loop.
+        #[cfg(feature = "games")]
+        Screen::BlockMine => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }
@@ -641,6 +683,8 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::Debug => "Debug",
         Screen::Settings => "Settings",
         Screen::Login => "Login",
+        #[cfg(feature = "games")]
+        Screen::Games => "Games",
         _ => "",
     };
     (title, note)

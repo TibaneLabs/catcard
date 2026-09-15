@@ -24,6 +24,8 @@ use cortex_m_rt::entry;
 
 mod boot;
 mod display;
+#[cfg(feature = "games")]
+mod game;
 mod keypad;
 #[macro_use]
 mod logbuf;
