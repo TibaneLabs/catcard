@@ -203,18 +203,32 @@ fn transfer_write(
     (csw_status::PASSED, got)
 }
 
-/// Send `data` on bulk-IN in 64-byte packets, servicing the bus between packets. Returns
-/// how many bytes went out -- short of `data.len()` only if the host stopped reading.
+/// Send `data` on bulk-IN in 64-byte packets. Returns how many bytes went out -- short of
+/// `data.len()` only if the host stopped reading.
+///
+/// The wait for the endpoint to free is spun on the cheap [`msc_send`](usbtask::msc_send),
+/// which checks the IN FIFO and `EPENA` directly, so the next packet goes in the instant
+/// the last one drains. The full core service ([`msc_poll`](usbtask::msc_poll)) -- which is
+/// what notices a mass-storage reset -- runs only once every [`POLL_EVERY`] spins: doing it
+/// after every packet was pure overhead on the fast path and kept the pipe from filling.
 fn send_bytes(data: &[u8]) -> usize {
+    /// Cheap endpoint-free spins between one full core service.
+    const POLL_EVERY: u32 = 64;
+
     let mut off = 0;
     let mut idle = 0u32;
+    let mut spins = 0u32;
     let mut scratch = [0u8; 64];
     while off < data.len() {
         let end = (off + 64).min(data.len());
         if usbtask::msc_send(&data[off..end]) {
             off = end;
             idle = 0;
-        } else {
+            spins = 0;
+            continue;
+        }
+        spins += 1;
+        if spins.is_multiple_of(POLL_EVERY) {
             usbtask::msc_poll(&mut scratch);
             // A mass-storage reset during the wait means the host has torn this transfer
             // down; stop pushing data it will never read. `run` sees the same flag and
@@ -222,6 +236,7 @@ fn send_bytes(data: &[u8]) -> usize {
             if usbtask::msc_reset_pending() {
                 break;
             }
+            // `idle` counts services without progress, so the timeout is unchanged.
             idle += 1;
             if idle > IDLE_LIMIT {
                 break;
