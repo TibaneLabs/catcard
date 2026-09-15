@@ -3731,20 +3731,11 @@ fn show_doc(
     scramble: bool,
     require_end: bool,
 ) -> DocExit {
-    use catcard_ui::scroll::{ScrollView, render};
-
-    let mut view =
-        ScrollView::build(lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    if scramble {
-        let mut b = [0u8; 4];
-        let _ = ui.drbg.generate(&mut b);
-        view = view.with_scramble(catcard_ui::pager::Scramble::new(u32::from_le_bytes(b)));
-    }
-    let is_menu = view.is_menu();
+    let mut screen = DocScreen::new(ui, lines, scramble, require_end);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
-        display::draw(ui.panel, |c| render(c, &view));
+        screen.draw(ui);
         wait_for_release(ui);
         // A tick counter so a selected, over-long name marquees while nothing is pressed.
         let mut beat = 0u32;
@@ -3754,69 +3745,155 @@ fn show_doc(
             if keys.is_empty() {
                 // Advance the marquee every few idle beats when the selection overflows,
                 // redrawing only then so a static screen still never re-flushes.
-                if view.needs_marquee() {
+                if screen.needs_marquee() {
                     beat = beat.wrapping_add(1);
-                    if beat.is_multiple_of(MARQUEE_BEATS) && view.tick_marquee() {
-                        display::draw(ui.panel, |c| render(c, &view));
+                    if beat.is_multiple_of(MARQUEE_BEATS) && screen.tick_marquee() {
+                        screen.draw(ui);
                     }
                 }
                 catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
                 continue;
             }
             for k in keys.iter() {
-                match k {
-                    // The up/down arrows: move a menu cursor, or scroll a reading screen.
-                    // Either way the offset change is animated, then the loop redraws the
+                match screen.key(ui, *k) {
+                    DocFlow::Done(exit) => return exit,
+                    // The view moved: leave the wait so the outer loop repaints the
                     // settled frame.
-                    Key::Digit(0) => {
-                        let old = view.off();
-                        view.to_top();
-                        let new = view.off();
-                        glide_view(ui.panel, &mut view, old, new);
-                        break 'wait;
-                    }
-                    Key::Digit(5) => {
-                        let old = view.off();
-                        if is_menu {
-                            view.move_cursor(false);
-                        } else {
-                            view.scroll(false, view.line_step());
-                        }
-                        let new = view.off();
-                        glide_view(ui.panel, &mut view, old, new);
-                        break 'wait;
-                    }
-                    Key::Digit(8) => {
-                        let old = view.off();
-                        if is_menu {
-                            view.move_cursor(true);
-                        } else {
-                            view.scroll(true, view.line_step());
-                        }
-                        let new = view.off();
-                        glide_view(ui.panel, &mut view, old, new);
-                        break 'wait;
-                    }
-                    Key::Confirm => {
-                        if is_menu {
-                            if let Some(id) = view.selected() {
-                                return DocExit::Selected(id);
-                            }
-                        } else if require_end && !view.at_end() {
-                            // Not read to the end yet: page down instead of finishing.
-                            let old = view.off();
-                            view.scroll(true, view.line_step());
-                            let new = view.off();
-                            glide_view(ui.panel, &mut view, old, new);
-                            break 'wait;
-                        } else {
-                            return DocExit::Confirmed;
-                        }
-                    }
-                    Key::Cancel => return DocExit::Cancelled,
-                    Key::Digit(_) => {}
+                    DocFlow::Redraw => break 'wait,
+                    // Nothing happened -- an unused digit, or Confirm on a menu row that
+                    // is not selectable. Keep waiting rather than repainting, which would
+                    // also re-run `wait_for_release` and swallow the next press.
+                    DocFlow::Ignored => {}
                 }
             }
+        }
+    }
+}
+
+/// A scrollable document as a screen: it owns its view and takes one key at a time.
+///
+/// Split out of [`show_doc`] so the same screen can be driven two ways. Today every
+/// caller drives it blocking, through `show_doc`. What this makes possible is the other
+/// way: a run loop that hands it one key at a time and keeps pumping USB -- and noticing
+/// staged upgrade offers -- in between. That matters most for the seed backup, which
+/// blocks on a person copying down 24 words while `usbtask::pending()` goes unread.
+///
+/// Everything that has to survive a keypress is here; `show_doc` keeps only the keypad
+/// plumbing.
+struct DocScreen<'a> {
+    view: catcard_ui::scroll::ScrollView<'a>,
+    /// Some line is selectable, so `5`/`8` move a cursor instead of scrolling.
+    is_menu: bool,
+    /// Refuse Confirm until the last line has been on screen: the seed backup's gate.
+    require_end: bool,
+}
+
+/// What one key did to a [`DocScreen`].
+///
+/// Three outcomes, not two: an ignored key must not repaint, because a repaint also
+/// re-runs `wait_for_release` and would eat the press that follows.
+enum DocFlow {
+    /// Nothing changed; keep waiting.
+    Ignored,
+    /// The view moved; repaint the settled frame.
+    Redraw,
+    /// The screen is finished.
+    Done(DocExit),
+}
+
+impl<'a> DocScreen<'a> {
+    fn new(
+        ui: &mut Ui<'_>,
+        lines: &'a [catcard_ui::scroll::Line<'a>],
+        scramble: bool,
+        require_end: bool,
+    ) -> Self {
+        let mut view = catcard_ui::scroll::ScrollView::build(
+            lines,
+            display::SCREEN_W,
+            display::SCREEN_H,
+            display::FONTS,
+        );
+        if scramble {
+            let mut b = [0u8; 4];
+            let _ = ui.drbg.generate(&mut b);
+            view = view.with_scramble(catcard_ui::pager::Scramble::new(u32::from_le_bytes(b)));
+        }
+        let is_menu = view.is_menu();
+        Self {
+            view,
+            is_menu,
+            require_end,
+        }
+    }
+
+    fn draw(&self, ui: &mut Ui<'_>) {
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
+    }
+
+    fn needs_marquee(&self) -> bool {
+        self.view.needs_marquee()
+    }
+
+    fn tick_marquee(&mut self) -> bool {
+        self.view.tick_marquee()
+    }
+
+    /// Move the view and animate from where it was to where it lands.
+    fn glide(&mut self, ui: &mut Ui<'_>, f: impl FnOnce(&mut catcard_ui::scroll::ScrollView<'a>)) {
+        let old = self.view.off();
+        f(&mut self.view);
+        let new = self.view.off();
+        glide_view(ui.panel, &mut self.view, old, new);
+    }
+
+    /// Take one key.
+    fn key(&mut self, ui: &mut Ui<'_>, k: Key) -> DocFlow {
+        match k {
+            // The up/down arrows: move a menu cursor, or scroll a reading screen.
+            Key::Digit(0) => {
+                self.glide(ui, |v| v.to_top());
+                DocFlow::Redraw
+            }
+            Key::Digit(5) => {
+                let menu = self.is_menu;
+                self.glide(ui, move |v| {
+                    if menu {
+                        v.move_cursor(false);
+                    } else {
+                        v.scroll(false, v.line_step());
+                    }
+                });
+                DocFlow::Redraw
+            }
+            Key::Digit(8) => {
+                let menu = self.is_menu;
+                self.glide(ui, move |v| {
+                    if menu {
+                        v.move_cursor(true);
+                    } else {
+                        v.scroll(true, v.line_step());
+                    }
+                });
+                DocFlow::Redraw
+            }
+            Key::Confirm => {
+                if self.is_menu {
+                    match self.view.selected() {
+                        Some(id) => DocFlow::Done(DocExit::Selected(id)),
+                        // A menu with nothing selectable under the cursor: not an exit.
+                        None => DocFlow::Ignored,
+                    }
+                } else if self.require_end && !self.view.at_end() {
+                    // Not read to the end yet: page down instead of finishing.
+                    self.glide(ui, |v| v.scroll(true, v.line_step()));
+                    DocFlow::Redraw
+                } else {
+                    DocFlow::Done(DocExit::Confirmed)
+                }
+            }
+            Key::Cancel => DocFlow::Done(DocExit::Cancelled),
+            Key::Digit(_) => DocFlow::Ignored,
         }
     }
 }
