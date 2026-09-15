@@ -94,6 +94,14 @@ impl Layout<'_> {
         height.saturating_sub(self.body_top()) / self.pitch().max(1)
     }
 
+    /// Rows the pager fits. Unlike a menu or info screen it has a title but **no note
+    /// line**, so its text starts one line higher -- at [`note_y`](Self::note_y) rather
+    /// than [`body_top`](Self::body_top) -- and one more row fits. This is what lets the
+    /// mono seed backup show three words instead of two.
+    pub fn pager_rows(&self, height: usize) -> usize {
+        height.saturating_sub(self.note_y()) / self.pitch().max(1)
+    }
+
     /// Where menu item text starts, leaving room for the cursor marker before it.
     pub fn indent(&self) -> usize {
         self.margin + 2 * self.body.advance(b'>')
@@ -207,6 +215,18 @@ mod tests {
         assert_eq!(l.pitch(), 7);
         assert_eq!(l.rows(64), 6);
         assert_eq!(l.indent(), 10);
+    }
+
+    #[test]
+    fn the_seed_words_layout_fits_three_words_on_the_mono_panel() {
+        // The pager has a title but no note line, so it fits one more row than a menu --
+        // three seed words on the 64px panel rather than two. Regressing this back to two
+        // is the kind of change that looks fine until someone is reading a backup.
+        let l = Layout::compact_words();
+        assert_eq!(l.rows(64), 2, "a note-bearing screen fits two");
+        assert_eq!(l.pager_rows(64), 3, "the pager fits three");
+        // The third row's text still sits inside the panel.
+        assert!(l.note_y() + 3 * l.pitch() <= 64 + l.gap);
     }
 
     #[test]

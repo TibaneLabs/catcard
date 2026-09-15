@@ -2996,7 +2996,7 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
 
     // Rows depend on the body face, which the words layout enlarges, so compute them
     // from the layout rather than the fixed default.
-    let rows = layout.rows(display::SCREEN_H);
+    let rows = layout.pager_rows(display::SCREEN_H);
     // One random seed for the whole viewing, so the emissions scramble is stable per
     // line (it scrolls with the text) yet different each time the page is opened.
     let scr = scramble.then(|| {

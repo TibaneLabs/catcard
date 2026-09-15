@@ -255,9 +255,12 @@ pub fn paged<C: Canvas + ?Sized>(
     let arrow_x = w.saturating_sub(l.body.advance(b'^') + l.margin);
     let gap = l.body.advance(b' ');
 
-    let rows = l.rows(canvas.height());
+    // The pager has no note line, so its text starts under the title (one row higher
+    // than a menu's body) and fits one more row -- three seed words on the mono panel.
+    let body_top = l.note_y();
+    let rows = l.pager_rows(canvas.height());
     for (row, line) in sink.lines().take(rows).enumerate() {
-        let y = l.body_top() + row * l.pitch();
+        let y = body_top + row * l.pitch();
         crate::text::draw_text(canvas, l.body, l.margin, y, line);
 
         // Sensitive-line marker: a ragged strip of 1-px horizontal segments hugging the
@@ -285,14 +288,14 @@ pub fn paged<C: Canvas + ?Sized>(
     // The same affordance the menus use, so "there is more below" looks the same
     // wherever it appears.
     if p.top > 0 {
-        crate::text::draw_text(canvas, l.body, arrow_x, l.body_top(), "^");
+        crate::text::draw_text(canvas, l.body, arrow_x, body_top, "^");
     }
     if p.top + sink.len() < total && rows > 0 {
         crate::text::draw_text(
             canvas,
             l.body,
             arrow_x,
-            l.body_top() + (rows - 1) * l.pitch(),
+            body_top + (rows - 1) * l.pitch(),
             "v",
         );
     }
@@ -418,7 +421,7 @@ mod tests {
     fn the_arrows_say_which_way_there_is_more() {
         let l = Layout::roomy();
         let src = Counted(100);
-        let rows = l.rows(240);
+        let rows = l.pager_rows(240);
 
         // At the top: something below, nothing above.
         let mut sink = LineSink::new(rows);
@@ -426,8 +429,8 @@ mod tests {
         let mut c = Gray320x240::new();
         paged(&mut c, &l, "Log", &sink, Pager::new(), total, None);
         let arrow_x = 320 - (l.body.advance(b'^') + l.margin);
-        let top_row = l.body_top();
-        let bottom_row = l.body_top() + (rows - 1) * l.pitch();
+        let top_row = l.note_y();
+        let bottom_row = l.note_y() + (rows - 1) * l.pitch();
         assert!(
             !inked(&c, arrow_x, top_row, top_row + 14),
             "^ drawn at the top of the log"
@@ -473,7 +476,7 @@ mod tests {
     fn scramble_adds_stable_ink_that_scrolls() {
         let src = Counted(50);
         let l = Layout::roomy();
-        let rows = l.rows(240);
+        let rows = l.pager_rows(240);
         let mut sink = LineSink::new(rows);
         let total = src.fill(0, &mut sink);
 
@@ -511,7 +514,7 @@ mod tests {
             }
         }
         let l = Layout::roomy();
-        let rows = l.rows(240);
+        let rows = l.pager_rows(240);
         let mut sink = LineSink::new(rows);
         let total = One.fill(0, &mut sink);
 
