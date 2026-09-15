@@ -179,16 +179,21 @@ impl Pager {
     }
 }
 
-/// An emissions scramble for a page of secret text (see [`paged`]).
+/// The sensitive-line marking for a page of secret text (see [`paged`]).
 ///
-/// Over each line of text it sprinkles single lit pixels -- one pixel high, scattered
-/// across the width the words occupy -- which changes the lit-pixel pattern a line drives
-/// into the panel and so scrambles what a passive RF pickup could reconstruct from the
-/// display's emissions. Whether a given pixel lights is derived from a per-viewing seed
-/// and the line's own index, so the pattern is stable for a given line and **scrolls with
-/// the text** rather than flickering; a fresh seed each time the screen opens means it
-/// does not repeat across viewings. It is decoration, not a keystream -- a cheap mix is
-/// enough to make the per-pixel choice unpredictable.
+/// Next to each secret line it draws a ragged strip in the right margin: for **every
+/// pixel-row** of the line, one 1-px horizontal segment that ends at the right edge and
+/// runs left by a **random length** (about 2..31 px). Stacked over the line's height the
+/// varying lengths form a jagged bar, like a strip of static hugging the right side --
+/// the unmistakable "this line is a secret, shield it" cue the Coldcard OLED uses. It is
+/// a UX marker, not a cryptographic control. Source: `hw-reference/
+/// sensitive-display-marking.md` [C].
+///
+/// The lengths come from a per-viewing seed mixed with the content-line index and the
+/// pixel-row, so a word keeps its own bar and it **scrolls with the text** rather than
+/// flickering; a fresh seed each time the screen opens means the pattern never repeats
+/// across viewings. The seed is a UI DRBG draw, never the entropy pool -- a scribble must
+/// not draw down real entropy.
 #[derive(Copy, Clone)]
 pub struct Scramble {
     seed: u32,
@@ -200,33 +205,33 @@ impl Scramble {
         Self { seed }
     }
 
-    /// Whether the scramble lights the pixel at column `x` on content line `idx`.
-    ///
-    /// Keyed to the line index so a word keeps its own pattern and it scrolls with the
-    /// text, and to `x` so the result is a scatter of dots across the line rather than a
-    /// single block. Roughly one column in three lights, which reads as sparse noise
-    /// without burying the word under it.
-    fn lit(self, idx: usize, x: usize) -> bool {
-        // A splitmix-style mix of the seed with the line and column indices.
+    /// A random mark length in `2..=max` for pixel-row `row` of content line `idx`, or 0
+    /// when there is no room. Keyed to the line so the bar scrolls with its word, and to
+    /// the row so each row of the bar has its own length -- the jaggedness.
+    fn length(self, idx: usize, row: usize, max: usize) -> usize {
+        if max < 2 {
+            return 0;
+        }
+        // A splitmix-style mix of the seed with the line and row indices.
         let mut h = self.seed
             ^ (idx as u32).wrapping_mul(0x9E37_79B9)
-            ^ (x as u32).wrapping_mul(0x85EB_CA6B);
+            ^ (row as u32).wrapping_mul(0x85EB_CA6B);
         h ^= h >> 16;
         h = h.wrapping_mul(0x7feb_352d);
         h ^= h >> 15;
         h = h.wrapping_mul(0x846c_a68b);
         h ^= h >> 16;
-        h.is_multiple_of(3)
+        // `max - 1` values spanning 2..=max.
+        2 + (h as usize) % (max - 1)
     }
 }
 
 /// Draw one window, with arrows saying whether there is more either way.
 ///
 /// `total` is what the source reported, which is how the arrows can be right even
-/// though only the visible lines were rendered. `scramble`, when set, sprinkles a
-/// one-pixel-high scatter of ink across each line -- overlaid on the words, scrolling
-/// with them -- to scramble the display's RF emissions, for pages of secret text such as
-/// the seed backup.
+/// though only the visible lines were rendered. `scramble`, when set, draws a ragged
+/// sensitive-line marker in the right margin next to each line -- see [`Scramble`] -- for
+/// pages of secret text such as the seed backup.
 pub fn paged<C: Canvas + ?Sized>(
     canvas: &mut C,
     l: &Layout<'_>,
@@ -255,16 +260,23 @@ pub fn paged<C: Canvas + ?Sized>(
         let y = l.body_top() + row * l.pitch();
         crate::text::draw_text(canvas, l.body, l.margin, y, line);
 
-        // Emissions scramble: a one-pixel-high row of scattered ink laid over the words
-        // themselves, from the left margin to short of the arrow column. Keyed to the
-        // content line (`p.top + row`) so a word keeps its own pattern and the noise
-        // scrolls with the text instead of flickering per frame.
+        // Sensitive-line marker: a ragged strip of 1-px horizontal segments hugging the
+        // right margin over the whole height of the line, each pixel-row its own random
+        // length. Anchored just left of the arrow column so it never buries the scroll
+        // bar, and capped so it never reaches the word to its left. Keyed to the content
+        // line (`p.top + row`) so a word keeps its own bar and it scrolls with the text.
         if let Some(sc) = scramble {
-            let yy = y + l.body.line_height() / 2;
-            let right = arrow_x.saturating_sub(gap);
-            for x in l.margin..right {
-                if sc.lit(p.top + row, x) {
-                    canvas.put(x, yy, crate::canvas::INK);
+            let text_w: usize = line.bytes().map(|b| l.body.advance(b)).sum();
+            let text_right = l.margin + text_w;
+            let right_end = arrow_x.saturating_sub(gap);
+            // The longest a segment may run left without touching the word.
+            let room = right_end.saturating_sub(text_right + gap).min(31);
+            if room >= 2 {
+                for r in 0..l.body.line_height() {
+                    let ln = sc.length(p.top + row, r, room);
+                    if ln >= 2 {
+                        canvas.fill_rect(right_end - ln, y + r, ln, 1, crate::canvas::INK);
+                    }
                 }
             }
         }
@@ -483,5 +495,62 @@ mod tests {
         let mut c = Gray320x240::new();
         paged(&mut c, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x0000_1234)));
         assert!(!identical(&a, &c), "different seeds produced the same scramble");
+    }
+
+    /// The mark is a right-margin cue: it must hug the right edge and never reach the
+    /// word to its left, matching `hw-reference/sensitive-display-marking.md`.
+    #[test]
+    fn scramble_hugs_the_right_margin_and_spares_the_word() {
+        // One long line, so the word's ink extends well to the right and the "never
+        // touch the word" bound is actually exercised.
+        struct One;
+        impl LineSource for One {
+            fn fill(&self, _from: usize, sink: &mut LineSink) -> usize {
+                sink.push("24  mountain");
+                1
+            }
+        }
+        let l = Layout::roomy();
+        let rows = l.rows(240);
+        let mut sink = LineSink::new(rows);
+        let total = One.fill(0, &mut sink);
+
+        let mut plain = Gray320x240::new();
+        paged(&mut plain, &l, "Seed", &sink, Pager::new(), total, None);
+        let mut marked = Gray320x240::new();
+        paged(&mut marked, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0xBEEF)));
+
+        // Where the word's own ink ends, on the plain render.
+        let word_right = (0..320)
+            .rev()
+            .find(|&x| (0..240).any(|y| plain.get(x, y) != PAPER))
+            .expect("the word drew nothing");
+
+        // Every pixel the mark added is strictly to the right of the word, and left of
+        // the panel edge. Pixels shared with the plain render (the word, the arrows) are
+        // not the mark's doing, so only the *added* ones are checked.
+        let mut added = 0;
+        let mut rightmost = 0;
+        for y in 0..240 {
+            for x in 0..320 {
+                if marked.get(x, y) != PAPER && plain.get(x, y) == PAPER {
+                    added += 1;
+                    rightmost = rightmost.max(x);
+                    assert!(x > word_right, "mark pixel at x={x} touches the word");
+                }
+            }
+        }
+        assert!(added > 0, "no mark was drawn");
+        // Every segment ends at the same right anchor (just clear of the arrow column),
+        // so the rightmost mark pixel is exactly one left of it -- the bar hugs the right
+        // margin rather than floating in the middle of it.
+        let gap = l.body.advance(b' ');
+        let arrow_x = 320 - (l.body.advance(b'^') + l.margin);
+        let right_end = arrow_x - gap;
+        assert_eq!(
+            rightmost,
+            right_end - 1,
+            "mark did not hug the right margin (anchor {right_end})"
+        );
     }
 }
