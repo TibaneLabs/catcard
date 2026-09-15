@@ -147,12 +147,15 @@ standard rather than against the standard itself — importing the NIST CAVP
 - **Entropy accounting is a policy, not a measurement.** The credit rates are chosen
   conservatively; they are not derived from an SP 800-90B entropy estimate of these
   specific sources. Doing that properly needs long raw captures from real hardware.
-- **User-supplied entropy.** A keypad mash is a first-class source now: `UserKeypad`
-  credits the digit value at 3 bits/byte (a conservative log2 of the ~ten keys), fed
-  during seed generation together with the cycle counter at each press (`UserTiming`).
-  It is additive and never a precondition -- it can carry the 256-bit bar but not the
-  two-hardware-TRNG one. Dice and coin input, with their smaller keyspaces, would be
-  further sources on the same footing.
+- **User-supplied entropy.** User input is a first-class source now, offered after the
+  hardware collection during seed generation and never a precondition -- it can carry the
+  256-bit bar but not the two-hardware-TRNG one. Three forms, credited by keyspace:
+  `UserKeypad` at 3 bits/byte (a conservative log2 of the ~ten keys), `UserDice` at 2
+  (one of six faces), `UserCoin` at 1 (one of two sides). The cycle counter is mixed at
+  every press (`UserTiming`) regardless. Dice and coin runs are credited their values
+  only when the run is long enough (>=50 rolls, >=128 flips) and no one symbol dominates
+  (30% dice, 65% coin); a short or lopsided run contributes only its timing. None of
+  these are hardware sources, so a repeated value cannot poison the pool.
 - **Startup health test.** SP 800-90B also specifies an on-demand test at boot, over a
   larger sample than the continuous tests see.
 - **Reseed on wake.** No sleep support yet, so nothing to reseed after.
