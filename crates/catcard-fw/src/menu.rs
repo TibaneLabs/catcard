@@ -89,6 +89,8 @@ enum Screen {
     FormatSd,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
     SignPsbt,
+    /// Wipe the cached PIN/secret and reboot to the PIN prompt.
+    SecureLogout,
     /// The Games submenu.
     #[cfg(feature = "games")]
     Games,
@@ -124,11 +126,11 @@ enum Screen {
 /// is signing a transaction the host has staged to the SD card.
 const MAIN_ITEMS: &[&str] = &[
     "Ready to Sign",
-    "Debug",
     "Utils",
     "About",
     "Settings",
-    "Reboot",
+    "Debug",
+    "Secure Logout",
 ];
 /// The blank device's ordering: the two ways to get a wallet come first, since that is the
 /// only thing worth doing here. New/Import appear only in this list.
@@ -136,11 +138,11 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     "New wallet",
     "Import seed",
     "Status",
-    "Debug",
     "Utils",
     "About",
     "Settings",
-    "Reboot",
+    "Debug",
+    "Secure Logout",
 ];
 
 /// The main menu, ordered for the device in front of you.
@@ -360,7 +362,7 @@ pub fn run(session: Session<'_>) -> ! {
                 continue;
             }
 
-            let next = step(gate, panel, screen, *key, v.sc.cursor, v.no_seed);
+            let next = step(screen, *key, v.sc.cursor, v.no_seed);
             if next == Screen::SdInstall {
                 install_from_card(gate, login, panel, &mut pad, matrix, drbg);
                 v.reset_menu();
@@ -430,6 +432,19 @@ pub fn run(session: Session<'_>) -> ! {
                 v.reset_menu();
                 screen = Screen::Main;
                 break;
+            }
+            if next == Screen::SecureLogout {
+                use zeroize::Zeroize;
+                // Secure logout. On this hardware the secret lives only in MCU SRAM: the
+                // secure element re-runs the full PIN key-stretch on every secret read, so
+                // there is no persistent SE session to end -- clearing the MCU's copy is
+                // what de-authorises. Zeroize the login struct (its cached PIN and any
+                // secret material) here, then callgate 3 wipes *all* SRAM and reboots to
+                // the PIN prompt, so nothing survives to the next boot.
+                login.zeroize();
+                message(panel, "Secure Logout", "wiping memory", "");
+                // SAFETY: nothing after this runs; the bootloader clears SRAM.
+                unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
             }
             #[cfg(feature = "games")]
             if next == Screen::BlockMine {
@@ -573,14 +588,7 @@ pub fn run(session: Session<'_>) -> ! {
 }
 
 /// Where a key takes us. Returns the next screen.
-fn step(
-    gate: &Callgate,
-    panel: &mut display::Panel,
-    screen: Screen,
-    key: Key,
-    cursor: usize,
-    no_seed: bool,
-) -> Screen {
+fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
     // The right arrow goes in and the left arrow comes out, the same as `y` and `x`.
     // Normalising here keeps every screen below written in terms of two actions rather
     // than four keys, so a screen cannot accidentally honour one and forget the other.
@@ -607,11 +615,8 @@ fn step(
             (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
             (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
-            (Key::Confirm, Some("Reboot")) => {
-                message(panel, "Rebooting", "", "");
-                // SAFETY: nothing after this runs.
-                unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-            }
+            // Handled in `run`, where the login struct is in scope to be zeroized first.
+            (Key::Confirm, Some("Secure Logout")) => Screen::SecureLogout,
             _ => Screen::Main,
         },
         // By name again, for the same reason as Main: the list is short today and the
@@ -796,6 +801,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt => {}
+        // Handled in `run`: it zeroizes the login and calls the bootloader; never drawn.
+        Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
