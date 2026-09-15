@@ -40,11 +40,31 @@ pub(crate) fn pressed_keys(
 ) {
     out.clear();
     let n = pad.scan(matrix, drbg, events);
+    let mut physical = false;
     for e in &events[..n] {
         if let Event::Pressed(k) = e {
             let _ = out.push(*k);
+            physical = true;
         }
     }
+
+    // Every physical keypress carries timing no polling schedule can predict -- the cycle
+    // counter and the RTC sub-second at the moment it was detected -- so mix them into the
+    // UI DRBG as extra entropy. This only tops up a generator already seeded from the
+    // entropy pool; it is never a precondition, and a stopped RTC contributing a constant
+    // is harmless. (Injected keys carry no such timing and are skipped.)
+    if physical {
+        let cycles = catcard_hal::dwt::cycles();
+        // SAFETY: single-threaded UI context; `snapshot` only opens an APB gate and reads.
+        let rtc = unsafe { catcard_hal::rtc::snapshot() };
+        let mut sample = [0u8; 16];
+        sample[0..4].copy_from_slice(&cycles.to_le_bytes());
+        sample[4..8].copy_from_slice(&rtc[0].to_le_bytes());
+        sample[8..12].copy_from_slice(&rtc[1].to_le_bytes());
+        sample[12..16].copy_from_slice(&rtc[2].to_le_bytes());
+        drbg.reseed(&sample, &[]);
+    }
+
     if let Some(k) = crate::usbtask::take_injected_key() {
         let _ = out.push(k);
     }
