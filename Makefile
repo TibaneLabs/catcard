@@ -71,12 +71,12 @@ q1:
 	$(PACKAGE) --board q1 $(VER) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 
 test:
-	cargo test --workspace --exclude catcard-fw
+	$(CARGO) test --workspace --exclude catcard-fw
 
 # Lint both the dev build (default features on) and the stripped ship build.
 lint:
-	cargo clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5
-	cargo clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5
+	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5
+	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5
 
 clean:
 	rm -f $(OUT)/catcard-*.bin $(OUT)/catcard-*.dfu
