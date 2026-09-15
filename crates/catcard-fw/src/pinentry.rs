@@ -262,13 +262,15 @@ fn screen_wrong(panel: &mut display::Panel, left: &str, sent: &str) {
 /// Choose the first PIN on a blank device.
 ///
 /// The prefix is taken, its anti-phishing words are shown — which is where a user learns
-/// the words they will be checking on every later unlock — and then the suffix. Returns
-/// true when a PIN was set.
+/// the words they will be checking on every later unlock — then the suffix, then the whole
+/// PIN once more so a typo cannot slip through. Only when the two entries match is the PIN
+/// set. Returns true when a PIN was set.
 ///
 /// **Not reversible.** After this the device is PIN-gated, and there is no path back to
-/// blank that does not go through knowing the PIN. So the words screen is not a
-/// formality here: it is the only time the user sees them without already being the
-/// person who set them.
+/// blank that does not go through knowing the PIN. That is exactly why the PIN is entered
+/// twice here: a mistyped first PIN would lock the device out of both login and Factory
+/// Reset. The words screen matters for the same reason — it is the only time the user sees
+/// them without already being the person who set them.
 fn setup_first_pin(
     g: &BootloaderGate<'_>,
     panel: &mut display::Panel,
@@ -291,6 +293,23 @@ fn setup_first_pin(
     let Some(suffix) = collect(panel, matrix, drbg, "New PIN suffix") else {
         return false;
     };
+
+    // Entered again and compared, exactly as a PIN change is, so a typo cannot set a first
+    // PIN the owner does not know -- which on a blank device would be unrecoverable, since
+    // both login and Factory Reset need the PIN nobody typed on purpose.
+    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix") else {
+        return false;
+    };
+    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix") else {
+        return false;
+    };
+    if again_prefix.as_bytes() != prefix.as_bytes() || again_suffix.as_bytes() != suffix.as_bytes()
+    {
+        screen_message(panel, "PIN not set", "the two entries", "did not match");
+        // Acknowledge, then fall back to the blank screen so the owner can start over.
+        let _ = wait_for_confirm(matrix, drbg);
+        return false;
+    }
 
     screen_message(panel, "Setting PIN", "do not disconnect", "");
     matches!(
