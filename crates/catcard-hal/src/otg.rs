@@ -289,6 +289,14 @@ impl Otg {
             reg::write(DCFG, DCFG_DSPD_FS | DCFG_NZLSOHSK);
 
             configure_fifos();
+            // Flush the TX and RX FIFOs after sizing them. A core soft-reset resets the
+            // state machine but does not clear FIFO *contents*, so on a part whose
+            // bootloader left USB running (the mk3 L496 -- unlike the L4S5, which is why
+            // this only showed there) the RX FIFO can carry stale data that wedges the
+            // OUT endpoint: the host cannot send until the first bus reset, whose
+            // `on_reset` flushes them. Doing it here, at bring-up, is the standard DWC2
+            // init step this was missing.
+            flush_fifos();
 
             // Poll GINTSTS rather than taking interrupts: leave the AHB interrupt gate
             // shut and clear anything latched from before the reset.
