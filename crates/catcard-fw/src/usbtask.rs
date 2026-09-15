@@ -1252,6 +1252,15 @@ pub fn pending() -> Option<Approval> {
     task().and_then(|t| t.pending().cloned())
 }
 
+/// Whether an upgrade is staged and waiting, without copying it.
+///
+/// [`pending`] clones a whole `FirmwareHeader` and its signature -- fine for the run
+/// loop, which wants the thing itself once per frame, but wasteful for a caller that
+/// only asks whether something is there.
+pub fn has_pending() -> bool {
+    task().is_some_and(|t| t.pending().is_some())
+}
+
 /// Approve the staged upgrade, publishing the bootloader's marker.
 pub fn approve() -> Result<catcard_upgrade::Region, Reject> {
     match task() {

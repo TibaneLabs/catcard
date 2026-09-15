@@ -904,7 +904,11 @@ fn reg_line(name: &str, v: u32) -> Line {
 
 /// USB: did the peripheral come up, is the host talking, and what does the core think.
 fn usb_screen(panel: &mut display::Panel) {
-    let (configured, rx, tx, pending) = usbtask::stats();
+    // The fourth field is an outbox that has not drained -- a reply we owe the host --
+    // not a staged image. It used to be labelled "staged" here, which said the device
+    // was holding firmware when it was holding a reply. The staged image is a separate
+    // question, asked below.
+    let (configured, rx, tx, queued) = usbtask::stats();
     let fault = usbtask::init_fault();
 
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
@@ -920,11 +924,7 @@ fn usb_screen(panel: &mut display::Panel) {
     let _ = lines.push(l);
 
     let mut l = Line::new();
-    let _ = write!(
-        l,
-        "in {rx}  out {tx}{}",
-        if pending { "  staged" } else { "" }
-    );
+    let _ = write!(l, "in {rx}  out {tx}{}", if queued { "  txq" } else { "" });
     let _ = lines.push(l);
 
     // The supply and its clock gate, which is where the first hardware failure lived.
@@ -956,9 +956,17 @@ fn usb_screen(panel: &mut display::Panel) {
     // Resets seen / self-heal re-inits / OUT-endpoint arms. `rst` climbing with `state
     // down` means the host keeps resetting and we keep dropping it; `re` climbing means
     // the self-heal is firing.
+    //
+    // "staged" rides on this line rather than its own: the mono panel fits exactly six
+    // rows and this screen already uses all six, so a seventh would be dropped by the
+    // ignored `push` and the board with the least room would lose it silently.
     let (resets, reinits, rearms) = usbtask::recovery_counts();
     let mut l = Line::new();
-    let _ = write!(l, "rst {resets} re {reinits} arm {rearms}");
+    let _ = write!(
+        l,
+        "rst {resets} re {reinits} arm {rearms}{}",
+        if usbtask::has_pending() { "  staged" } else { "" }
+    );
     let _ = lines.push(l);
 
     info(panel, "USB", &lines);
