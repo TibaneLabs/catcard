@@ -43,6 +43,7 @@ mod selftest;
 mod session;
 mod staging;
 mod splash;
+mod ui;
 mod usbtask;
 
 /// Board this image was built for, from `build.rs`.
