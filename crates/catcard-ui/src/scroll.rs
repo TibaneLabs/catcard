@@ -315,6 +315,16 @@ impl<'a> ScrollView<'a> {
         self.cursor.and_then(|i| self.lines[i].menu_item)
     }
 
+    /// Put the cursor on the line whose `menu_item` is `id`, scrolling it into view. Used
+    /// by a caller that tracks the selection itself (the run loop) and rebuilds the view
+    /// each frame. No-op if no line carries that id.
+    pub fn select(&mut self, id: u32) {
+        if let Some(i) = self.lines.iter().position(|l| l.menu_item == Some(id)) {
+            self.cursor = Some(i);
+            self.ensure_cursor_visible();
+        }
+    }
+
     /// Move the cursor to the next/previous selectable line, clamping at the ends, and
     /// scroll it into view.
     pub fn move_cursor(&mut self, down: bool) {

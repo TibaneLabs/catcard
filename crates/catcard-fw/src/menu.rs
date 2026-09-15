@@ -595,11 +595,27 @@ fn usb_line(note: &str) -> Line {
     l
 }
 
-/// A numbered menu. `note` is the second line, for a hint or a status.
+/// A numbered menu, drawn as a scrollable document in the larger font with the selected
+/// row shown as an inverted bar. `note` is a small line under the title, or `""` for none.
+/// The caller still owns the cursor in `sc`; each item carries its index as its id and the
+/// view is positioned on `sc.cursor`, so the run loop's existing `step`/transition table is
+/// unchanged.
 fn menu(panel: &mut display::Panel, title: &str, note: &str, items: &[&str], sc: Scroll) {
-    display::draw(panel, |c| {
-        catcard_ui::widgets::menu(c, &display::LAYOUT, title, note, items, sc);
-    });
+    use catcard_ui::scroll::{Line as DLine, ScrollView, render};
+
+    let mut lines: heapless::Vec<DLine, 40> = heapless::Vec::new();
+    let _ = lines.push(DLine::title(title));
+    if !note.is_empty() {
+        let _ = lines.push(DLine::body(note).small().centered());
+    }
+    for (i, item) in items.iter().enumerate() {
+        // Long labels wrap; only the head line stays selectable, carrying the index.
+        let _ = lines.push(DLine::item(item, i as u32).wrapped());
+    }
+    let mut view =
+        ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    view.select(sc.cursor as u32);
+    display::draw(panel, |c| render(c, &view));
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.
