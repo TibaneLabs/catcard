@@ -465,6 +465,62 @@ impl Login {
         Ok(self.step)
     }
 
+    /// Clear the wallet PIN, returning the device to blank — a factory reset of the login.
+    ///
+    /// `CHANGE_WALLET_PIN` with the current PIN as `old_pin` and an **empty** `new_pin`,
+    /// the inverse of [`set_first_pin`](Self::set_first_pin). Only from [`Step::In`], and
+    /// the current PIN is still required (as `old_pin`) — the bootloader takes the change
+    /// only from a caller who proves they hold the PIN, so this cannot wipe a device the
+    /// operator has not unlocked.
+    ///
+    /// **Irreversible, and it clears everything the PIN gates.** After it succeeds the
+    /// device is blank: no PIN, and on hardware a blank device holds no wallet. On success
+    /// the struct is re-run through Setup, which now reports [`Step::Blank`]; the caller
+    /// should reboot into the first-run flow rather than try to carry the session on.
+    pub fn clear_pin<G: PinGate>(
+        &mut self,
+        gate: &G,
+        old_prefix: &[u8],
+        old_suffix: &[u8],
+    ) -> Result<Step, TooLong> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Ok(self.step);
+        }
+        if [old_prefix, old_suffix].iter().any(|p| p.len() > MAX_PART_LEN) {
+            return Err(TooLong);
+        }
+
+        let mut old_joined = [0u8; MAX_PIN_LEN];
+        let old_n = join_pin(&mut old_joined, old_prefix, old_suffix);
+
+        self.attempt.change_flags = catcard_callgate::abi::change::WALLET_PIN;
+        // The zero-length new PIN is the whole point: an empty `new_pin` is what returns
+        // the device to blank, exactly as an empty `old_pin` is what sets the first one.
+        let set = self
+            .attempt
+            .set_old_pin(&old_joined[..old_n])
+            .and_then(|()| self.attempt.set_new_pin(&[]));
+        old_joined.zeroize();
+        set?;
+
+        self.step = match gate.pin_attempt(PinOp::Change, &mut self.attempt) {
+            Ok(_) => {
+                // The device is blank now; re-run Setup so the struct reflects that rather
+                // than a change struct, and expect Blank back.
+                self.attempt.change_flags = 0;
+                match gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
+                    Ok(_) if self.attempt.is_blank() => Step::Blank,
+                    Ok(_) => Step::Prefix,
+                    Err(e) => classify(e),
+                }
+            }
+            Err(e) => classify(e),
+        };
+        self.attempt.change_flags = 0;
+        self.words_shown = false;
+        Ok(self.step)
+    }
+
     /// Fetch the wallet secret. Only valid after [`Step::In`].
     pub fn fetch_secret<G: PinGate>(&mut self, gate: &G) -> Result<[u8; SECRET_LEN], Failure> {
         if !matches!(self.step, Step::In { .. }) {

@@ -228,7 +228,16 @@ impl PinGate for Model {
                 inner
                     .set_pin
                     .extend_from_slice(&a.new_pin[..a.new_pin_len as usize]);
-                inner.blank = false;
+                // An empty new PIN clears the PIN: the device returns to blank, and a blank
+                // device holds no wallet (PA_IS_BLANK = "no wallet yet"). A non-empty new
+                // PIN is an ordinary set/change and leaves the device provisioned.
+                if a.new_pin_len == 0 {
+                    inner.blank = true;
+                    inner.secret = [0; SECRET_LEN];
+                    inner.zero_secret = true;
+                } else {
+                    inner.blank = false;
+                }
                 // A change logs the session out, as on hardware: the caller re-logs in.
                 a.state_flags = 0;
                 self.sign(&mut inner, a);
@@ -840,4 +849,49 @@ fn a_change_pin_before_login_does_nothing() {
     let mut l = Login::new(&m);
     let step = l.change_pin(&m, b"12", b"3456", b"99", b"8888").unwrap();
     assert_eq!(step, Step::Prefix, "change_pin acted outside a login");
+}
+
+#[test]
+fn clearing_the_pin_returns_the_device_to_blank() {
+    // Factory reset: CHANGE_WALLET_PIN with the current PIN as old and an empty new. The
+    // device ends blank -- no PIN, no wallet -- and the struct reports it.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+    let secret = catcard_callgate::pin::encode_bip39(&[9; 32]).unwrap();
+    l.set_secret(&m, &secret).unwrap();
+
+    assert_eq!(l.clear_pin(&m, b"12", b"3456").unwrap(), Step::Blank);
+
+    // A fresh login now finds a blank device that needs setup, not a PIN prompt, and the
+    // wallet is gone with the PIN.
+    let l2 = Login::new(&m);
+    assert_eq!(l2.step(), Step::Blank, "the device still asked for a PIN");
+    assert!(m.inner.borrow().zero_secret, "the wallet survived the reset");
+}
+
+#[test]
+fn clearing_the_pin_with_the_wrong_current_pin_is_refused() {
+    // The current PIN is still required, so a factory reset cannot wipe a device the
+    // operator has not actually unlocked with the right PIN.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+
+    let step = l.clear_pin(&m, b"00", b"0000").unwrap();
+    assert!(
+        matches!(step, Step::Wrong { .. } | Step::Failed(_)),
+        "a wrong current PIN cleared the PIN anyway"
+    );
+    // Untouched: the real PIN still logs in, and the device is not blank.
+    let (_l2, s2) = login_with(&m, b"12", b"3456");
+    assert_eq!(s2, Step::In { zero_secret: false });
+    assert!(!m.inner.borrow().blank, "the device was wiped on a wrong PIN");
+}
+
+#[test]
+fn a_clear_pin_before_login_does_nothing() {
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    let step = l.clear_pin(&m, b"12", b"3456").unwrap();
+    assert_eq!(step, Step::Prefix, "clear_pin acted outside a login");
+    assert!(!m.inner.borrow().blank, "clear_pin wiped without a login");
 }

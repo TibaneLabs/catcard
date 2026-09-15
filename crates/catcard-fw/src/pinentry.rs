@@ -507,6 +507,56 @@ pub(crate) fn change_pin(
     }
 }
 
+/// How a factory reset ended.
+pub enum FactoryReset {
+    /// The PIN was cleared: the device is blank now, and the caller must reboot into the
+    /// first-run flow rather than carry on with an invalid session.
+    Wiped,
+    /// The owner backed out before the PIN was cleared; nothing changed.
+    Cancelled,
+    /// The bootloader refused — a wrong current PIN, or another failure. Either way the
+    /// session is no longer valid, so the caller reboots.
+    Refused,
+}
+
+/// Factory reset: clear the wallet PIN to a zero-length value, returning the device to
+/// blank. The current PIN is collected first and passed as `old_pin` — the bootloader
+/// takes the change only from someone who proves they hold the PIN, so this cannot wipe a
+/// device that was not actually unlocked with the right PIN (and a wrong entry counts
+/// toward the brick limit, exactly as a wrong login does). The caller has already
+/// confirmed the intent; on any terminal outcome here the device must reboot.
+pub(crate) fn factory_reset(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    login: &mut Login,
+) -> FactoryReset {
+    let g = BootloaderGate::new(gate);
+
+    // The current PIN, with its anti-phishing words, exactly as a login or a PIN change
+    // shows them -- this is a PIN change (to nothing), so it needs the current PIN.
+    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix") else {
+        return FactoryReset::Cancelled;
+    };
+    working(panel, "Checking");
+    if let Some(w) = login.words_for(&g, old_prefix.as_bytes()) {
+        screen_words(panel, anti_phishing_words(w));
+        if !wait_for_confirm(matrix, drbg) {
+            return FactoryReset::Cancelled;
+        }
+    }
+    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix") else {
+        return FactoryReset::Cancelled;
+    };
+
+    working(panel, "Resetting");
+    match login.clear_pin(&g, old_prefix.as_bytes(), old_suffix.as_bytes()) {
+        Ok(Step::Blank) => FactoryReset::Wiped,
+        _ => FactoryReset::Refused,
+    }
+}
+
 /// Where the unlock ended.
 pub enum Unlocked {
     /// Logged in. `zero_secret` means there is no seed stored yet.

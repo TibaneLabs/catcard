@@ -107,6 +107,8 @@ enum Screen {
     /// Changing the main PIN.
     ChangePin,
     WipeSeed,
+    /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
+    FactoryReset,
 }
 
 /// The main menu of a device that holds a wallet.
@@ -196,6 +198,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "Logs",
     "Save log to SD",
     "Colours",
+    "Factory Reset",
 ];
 
 /// Run the menu. Never returns.
@@ -478,6 +481,48 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Login;
                 break;
             }
+            if next == Screen::FactoryReset {
+                use crate::pinentry::FactoryReset;
+                // Destructive and irreversible: it clears the PIN back to blank. Ask twice,
+                // the same as destroying a wallet, before even collecting the PIN.
+                let go = {
+                    ask(
+                        panel,
+                        "Factory reset?",
+                        "the PIN is CLEARED",
+                        "device back to blank",
+                    );
+                    confirmed(&mut pad, matrix, drbg)
+                        && {
+                            ask(panel, "Really reset?", "this cannot be", "undone");
+                            confirmed(&mut pad, matrix, drbg)
+                        }
+                };
+                if go {
+                    match crate::pinentry::factory_reset(gate, panel, matrix, drbg, login) {
+                        // The device is blank now; reboot straight into the first-run flow.
+                        FactoryReset::Wiped => {
+                            crate::catlog!("pin: factory reset, rebooting blank");
+                            message(panel, "Reset done", "rebooting", "");
+                            // SAFETY: nothing after this runs.
+                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                        }
+                        // A wrong current PIN (or another failure) leaves the session
+                        // invalid, so reboot to a fresh login with the unchanged PIN.
+                        FactoryReset::Refused => {
+                            crate::catlog!("pin: factory reset refused, rebooting");
+                            message(panel, "Not reset", "rebooting", "");
+                            // SAFETY: nothing after this runs.
+                            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                        }
+                        // Backed out during PIN entry; nothing changed.
+                        FactoryReset::Cancelled => {}
+                    }
+                }
+                v.reset_menu();
+                screen = Screen::Debug;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -595,6 +640,7 @@ fn step(
             (Key::Confirm, Some("Logs")) => Screen::Logs,
             (Key::Confirm, Some("Save log to SD")) => Screen::SaveLog,
             (Key::Confirm, Some("Colours")) => Screen::Colours,
+            (Key::Confirm, Some("Factory Reset")) => Screen::FactoryReset,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
@@ -732,6 +778,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BlockCutter => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
+        // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
+        Screen::FactoryReset => {}
     }
 }
 
