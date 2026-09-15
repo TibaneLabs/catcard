@@ -462,6 +462,14 @@ impl<'a> ScrollView<'a> {
         }
     }
 
+    /// Jump straight back to the top: the first selectable line (if any) and the top of
+    /// the document. This is what the `0` key does.
+    pub fn to_top(&mut self) {
+        self.cursor = self.lines.iter().position(|l| l.menu_item.is_some());
+        self.off = 0;
+        self.marquee = 0;
+    }
+
     /// Nudge the window so the whole selected line is on screen.
     fn ensure_cursor_visible(&mut self) {
         if let Some(i) = self.cursor {
@@ -713,6 +721,19 @@ mod tests {
         // Pressing up again has no earlier item, so it keeps scrolling to show the title.
         v.move_cursor(false);
         assert_eq!(v.off(), 0, "did not scroll up to reveal the title");
+    }
+
+    #[test]
+    fn to_top_returns_to_the_first_item_and_the_top() {
+        let src = a_menu();
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        for _ in 0..5 {
+            v.move_cursor(true);
+        }
+        assert!(v.off() > 0, "never scrolled away from the top");
+        v.to_top();
+        assert_eq!(v.off(), 0);
+        assert_eq!(v.selected(), Some(1), "cursor did not return to the first item");
     }
 
     #[test]

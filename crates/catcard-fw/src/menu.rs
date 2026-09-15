@@ -288,12 +288,17 @@ pub fn run(session: Session<'_>) -> ! {
             // and so pressing past the first/last item keeps scrolling to reveal the
             // title. The resulting cursor and offset are persisted back into the view.
             if let Some(items) = items_of(screen, v.no_seed)
-                && matches!(key, Key::Digit(5) | Key::Digit(8))
+                && matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0))
             {
                 let (title, note) = menu_head(screen);
                 let mut view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
                 let old = view.off();
-                view.move_cursor(matches!(key, Key::Digit(8)));
+                match key {
+                    // `0` jumps back to the top, the arrows move one row.
+                    Key::Digit(0) => view.to_top(),
+                    Key::Digit(8) => view.move_cursor(true),
+                    _ => view.move_cursor(false),
+                }
                 if let Some(id) = view.selected() {
                     v.sc.cursor = id as usize;
                 }
@@ -3536,6 +3541,13 @@ fn show_doc(
                     // The up/down arrows: move a menu cursor, or scroll a reading screen.
                     // Either way the offset change is animated, then the loop redraws the
                     // settled frame.
+                    Key::Digit(0) => {
+                        let old = view.off();
+                        view.to_top();
+                        let new = view.off();
+                        glide_view(panel, &mut view, old, new);
+                        break 'wait;
+                    }
                     Key::Digit(5) => {
                         let old = view.off();
                         if is_menu {
