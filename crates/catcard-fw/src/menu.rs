@@ -492,7 +492,7 @@ pub fn run(session: Session<'_>) -> ! {
             if next == Screen::WipeSeed {
                 wipe_seed(gate, login, &mut ui);
                 // Same reason as above, in the other direction: a wallet that no longer
-                // exists puts  14  back at the top.
+                // exists puts "New wallet" back at the top.
                 v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
                 v.reset_menu();
                 screen = Screen::Main;
@@ -572,7 +572,7 @@ pub fn run(session: Session<'_>) -> ! {
                 // different lengths is how you land on an item nobody chose.
                 v.reset_menu();
                 // Entering a live debug screen: clear the key trail so the keypad tester
-                // opens on  40  rather than the `y` that selected it, and its
+                // opens on "press any key" rather than the `y` that selected it, and its
                 // count starts at zero.
                 if matches!(next, Screen::Keypad | Screen::PrngStatus) {
                     v.last_key = None;
@@ -1940,7 +1940,7 @@ fn view_trng_words(
 
     // The same collection effort as generating a real seed: a full byte target from each
     // source, the chip mixed in every pass, and a pause so the counts are legible. A
-    //  3  screen that finished in a blink would be reading a
+    // "watch the generator work" screen that finished in a blink would be reading a
     // handful of bytes and calling it done -- which is exactly the shortcut this project
     // exists to replace, so it is not one this screen is allowed to take either.
     const TARGET: usize = 512;
@@ -2714,7 +2714,7 @@ fn new_seed(
         let mut bytes = [0usize; 2];
         let mut tries = [0usize; 2];
         // An element can decline two ways and we have never distinguished them:
-        // `Ok(0)` is  9 , `Err` is a refusal. Counting
+        // `Ok(0)` is "asked too soon, nothing ready", `Err` is a refusal. Counting
         // them apart is what turns the next generation into a measurement instead of
         // another inference -- guessing at this is what produced a wrong write-up the
         // first time.
@@ -3533,14 +3533,14 @@ fn wipe_seed(
     //
     // `verify_secret` compares what `gate 18/4` hands back, and the bootloader
     // XOR-masks the slot with `otp_key` going in and coming out
-    // (`hw-reference/secure-elements.md` § 15 ). Writing zeros and
+    // (`hw-reference/secure-elements.md` §"PIN → secret flow"). Writing zeros and
     // reading zeros therefore round-trips through the same mask: it proves the write
     // landed, and says nothing about whether the element now counts as empty. What the
     // menu and the next boot actually consult is ZERO_SECRET, so that is what decides
     // the wording here.
     //
     // This distinction is not theoretical. An earlier version checked only the bytes,
-    // reported  16 , and the entry was back after a reboot -- the one wrong
+    // reported "Wallet erased", and the entry was back after a reboot -- the one wrong
     // answer this screen must never give.
     let flag_empty = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
     crate::catlog!(
@@ -3552,7 +3552,7 @@ fn wipe_seed(
     match (bytes_zeroed, flag_empty) {
         (true, true) => message(ui.panel, "Wallet erased", "no seed is stored", ""),
         // The write was taken and the device still counts the slot as holding a
-        // secret. Whatever that means, it is not  25 .
+        // secret. Whatever that means, it is not "erased".
         (true, false) => message(
             ui.panel,
             "Not confirmed",
