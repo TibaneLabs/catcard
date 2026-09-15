@@ -51,6 +51,14 @@ pub enum Source {
     /// noise source, and a human legitimately repeats keys -- and counts toward the bit
     /// total but never as a hardware source, so it stays additive, never a precondition.
     UserKeypad,
+    /// A die face (1..6) a user rolled and entered. Six symbols is log2(6) ≈ 2.585 bits;
+    /// credited 2 a byte (one roll), the conservative floor. Like [`Source::UserKeypad`]
+    /// it is additive, never a hardware source, and runs no health test -- the caller
+    /// enforces a minimum count and a maximum face frequency before crediting it.
+    UserDice,
+    /// A coin flip (0/1) a user entered. Two symbols is one bit; credited 1 a byte. Same
+    /// footing as [`Source::UserDice`], with the caller's frequency gate.
+    UserCoin,
     /// Anything else worth mixing but not worth trusting: uptime, SD card serial,
     /// uninitialised RAM patterns. Credited **zero**.
     Auxiliary,
@@ -80,6 +88,8 @@ impl Source {
             // A keypress timestamp is a handful of unpredictable low bits at best.
             Source::UserTiming => 1,
             Source::UserKeypad => 3,
+            Source::UserDice => 2,
+            Source::UserCoin => 1,
             Source::Auxiliary | Source::NonSecret => 0,
         }
     }
@@ -93,6 +103,8 @@ impl Source {
             Source::Se2Trng => b"catcard/src/se2-trng",
             Source::UserTiming => b"catcard/src/user-timing",
             Source::UserKeypad => b"catcard/src/user-keypad",
+            Source::UserDice => b"catcard/src/user-dice",
+            Source::UserCoin => b"catcard/src/user-coin",
             Source::Auxiliary => b"catcard/src/aux",
             Source::NonSecret => b"catcard/src/non-secret",
         }
@@ -106,13 +118,15 @@ impl Source {
             Source::Se2Trng => 3,
             Source::UserTiming => 4,
             Source::UserKeypad => 7,
+            Source::UserDice => 8,
+            Source::UserCoin => 9,
             Source::Auxiliary => 5,
             Source::NonSecret => 6,
         }
     }
 }
 
-const NUM_SOURCES: usize = 8;
+const NUM_SOURCES: usize = 10;
 
 /// The bar a pool must clear before it may produce wallet-seed material.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

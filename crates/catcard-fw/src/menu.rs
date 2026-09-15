@@ -1621,6 +1621,195 @@ fn key_mash(
     }
 }
 
+/// True while no single symbol dominates the run: the catalogue's frequency gate.
+///
+/// A die stuck on one face or a coin that always reads heads is a pattern, not entropy,
+/// and crediting it would be exactly the mistake the pool exists to prevent. `counts` is
+/// indexed by digit value; `total` is the run length; `max_freq_pct` is the ceiling any
+/// one symbol may occupy (30 for dice, 65 for coin, per `firmware-features.md §2`).
+fn unbiased(counts: &[u32; 10], total: usize, max_freq_pct: u32) -> bool {
+    if total == 0 {
+        return false;
+    }
+    // Round the cap up: with 50 rolls at 30% a face is allowed 15, and 16 is the reject.
+    let cap = (total as u32 * max_freq_pct).div_ceil(100);
+    counts.iter().all(|&c| c <= cap)
+}
+
+/// Collect a run of user symbols from a fixed alphabet -- dice faces or coin sides -- and
+/// credit their *values* to the pool, alongside the cycle counter at each press.
+///
+/// Two things are credited on different footings, and the distinction is the point. The
+/// press *timing* (`add_timing`) goes in the instant a key lands and is always kept: a
+/// human's intervals are unpredictable even when the values are not. The symbol *values*
+/// (`source`) are credited only when the run clears the catalogue's gate -- long enough
+/// (`min`) and unbiased ([`unbiased`]) -- because a short or lopsided run of values is a
+/// pattern the pool must not count. Neither is ever a precondition for a seed; like the
+/// keypad mash this only tops up a pool that has already met its policy from hardware.
+#[allow(clippy::too_many_arguments)]
+fn collect_rolls(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    pool: &mut catcard_entropy::EntropyPool,
+    title: &str,
+    prompt: &str,
+    alphabet: &[u8],
+    source: catcard_entropy::Source,
+    min: usize,
+    max_freq_pct: u32,
+) {
+    use zeroize::Zeroize;
+
+    // 512 symbols is well past either minimum (50 dice, 128 coin) and there is no reason
+    // to cap the volume lower -- the pool absorbs it all into one hash. A run that fills
+    // the buffer stops taking values but keeps mixing timing.
+    let mut buf: heapless::Vec<u8, 512> = heapless::Vec::new();
+    let mut counts = [0u32; 10];
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut warn: Option<&str> = None;
+    loop {
+        let ready = buf.len() >= min && unbiased(&counts, buf.len(), max_freq_pct);
+        let mut a = Line::new();
+        let _ = write!(a, "{} of {}", buf.len(), min);
+        let hint = if let Some(w) = warn {
+            w
+        } else if buf.is_empty() {
+            prompt
+        } else if ready {
+            "y=use these"
+        } else {
+            "more, then y"
+        };
+        message(panel, title, &a, hint);
+
+        wait_for_release(pad, matrix, drbg);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            if !keys.is_empty() {
+                break;
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
+        warn = None;
+        for k in keys.iter() {
+            match k {
+                Key::Confirm => {
+                    if buf.len() < min {
+                        // Too short to trust: keep collecting rather than credit it.
+                        warn = Some("too few, keep going");
+                    } else if !unbiased(&counts, buf.len(), max_freq_pct) {
+                        // One symbol dominates: a pattern, not entropy. Credit nothing.
+                        warn = Some("too lopsided");
+                    } else {
+                        pool.add(source, &buf);
+                        buf.zeroize();
+                        return;
+                    }
+                }
+                // Cancel abandons this mode; the timing already mixed stays, the values
+                // do not (they were never credited).
+                Key::Cancel => {
+                    buf.zeroize();
+                    return;
+                }
+                Key::Digit(d) => {
+                    if alphabet.contains(d) {
+                        // Values only while there is room; timing every single press.
+                        if buf.push(*d).is_ok() {
+                            counts[*d as usize] += 1;
+                        }
+                        pool.add_timing(catcard_hal::dwt::cycles());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Offer the owner a turn adding entropy of their own, in whatever form they trust: a
+/// free keypad mash, dice rolls, or coin flips. Each is optional and additive -- the pool
+/// has already met its policy from the hardware TRNGs (or refused outright), so none of
+/// these can rescue a bad device. They only ever top up, and let a distrustful owner mix
+/// in material the firmware could not have predicted.
+fn add_user_entropy(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    pool: &mut catcard_entropy::EntropyPool,
+) {
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        message(panel, "Add entropy?", "1=mash 2=dice 3=coin", "y=done");
+        wait_for_release(pad, matrix, drbg);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            if !keys.is_empty() {
+                break;
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
+        // Take the first meaningful key of the batch, then redraw the menu.
+        let mut done = false;
+        for k in keys.iter() {
+            match k {
+                Key::Confirm | Key::Cancel => {
+                    done = true;
+                    break;
+                }
+                Key::Digit(1) => {
+                    key_mash(panel, pad, matrix, drbg, pool);
+                    break;
+                }
+                Key::Digit(2) => {
+                    // Dice: faces 1-6, at least 50 rolls, no face over 30%.
+                    collect_rolls(
+                        panel,
+                        pad,
+                        matrix,
+                        drbg,
+                        pool,
+                        "Roll dice",
+                        "keys 1-6 = roll",
+                        &[1, 2, 3, 4, 5, 6],
+                        catcard_entropy::Source::UserDice,
+                        50,
+                        30,
+                    );
+                    break;
+                }
+                Key::Digit(3) => {
+                    // Coin: sides 0/1, at least 128 flips, neither side over 65%.
+                    collect_rolls(
+                        panel,
+                        pad,
+                        matrix,
+                        drbg,
+                        pool,
+                        "Flip a coin",
+                        "0=tails 1=heads",
+                        &[0, 1],
+                        catcard_entropy::Source::UserCoin,
+                        128,
+                        65,
+                    );
+                    break;
+                }
+                Key::Digit(_) => {}
+            }
+        }
+        if done {
+            return;
+        }
+    }
+}
+
 /// Create a wallet: draw entropy, store it, verify it, and show the words once.
 ///
 /// The order is the point. The secret is written **and read back before any word reaches
@@ -1815,11 +2004,11 @@ fn new_seed(
         );
     }
 
-    // With the hardware collected, offer the user a turn: mashing keys mixes the cycle
-    // counter at each press into the pool. It is optional -- the pool has already met its
-    // policy from the TRNGs -- and only ever tops up, but it costs nothing and lets a
-    // distrustful owner add material of their own.
-    key_mash(panel, pad, matrix, drbg, pool);
+    // With the hardware collected, offer the user a turn of their own: a keypad mash,
+    // dice, or coin flips. It is optional -- the pool has already met its policy from the
+    // TRNGs -- and only ever tops up, but it costs nothing and lets a distrustful owner
+    // add material the firmware could not have predicted.
+    add_user_entropy(panel, pad, matrix, drbg, pool);
 
     // The pool's own verdict, not ours. If a source failed its health test the pool is
     // poisoned and this is where that becomes visible, before any word is shown.
