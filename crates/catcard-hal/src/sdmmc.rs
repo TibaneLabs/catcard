@@ -4,14 +4,15 @@
 //! CMD0, CMD8, ACMD41, CID, RCA, CSD — lives in `catcard-sd` and runs on a host against
 //! a fake; what is here is the peripheral underneath it.
 //!
-//! **None of this has been exercised.** The emulator models SDMMC's command registers
-//! and stops there: a probe of every offset from `0x00` to `0xFC` came back named only
-//! through `MASK` at `0x3C`, with no FIFO and no data path. So unlike the USB driver,
-//! which was wrong in four ways that register read-backs caught, this one meets its
-//! first real card on hardware.
+//! **It was written blind, then proven on hardware.** The emulator models SDMMC's command
+//! registers and stops there: a probe of every offset from `0x00` to `0xFC` came back
+//! named only through `MASK` at `0x3C`, with no FIFO and no data path. So this driver was
+//! first written against a fake that could not exercise the data path at all — but it has
+//! since read and written real cards on hardware.
 //!
-//! That shapes it. Every enable is written **and read back**, every wait is bounded, and
-//! a failure returns a reason rather than hanging — because the alternative, learned
+//! That origin still shapes it, and the discipline earns its keep against a bad card
+//! rather than a bug: every enable is written **and read back**, every wait is bounded,
+//! and a failure returns a reason rather than hanging — because the alternative, learned
 //! from `PWR_CR2.USV`, is a peripheral that looks initialised and is connected to
 //! nothing. `Debug → microSD` puts `STA` on the screen for the same reason.
 //!

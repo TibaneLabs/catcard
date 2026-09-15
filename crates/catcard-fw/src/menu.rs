@@ -979,9 +979,8 @@ fn install_from_card(
 /// it out, and this drops it somewhere it can be read on another machine -- which is the
 /// channel that survives a device that will not enumerate and a panel that will not draw.
 ///
-/// Blocking, and it says which step it stopped at rather than "failed": the SD write path
-/// has never run on hardware, so a failure here is as likely to be the first exercise of
-/// `write_sectors` as a bad card, and the step is the difference. Nothing here is
+/// Blocking, and it says which step it stopped at rather than "failed", so a bad card, a
+/// full card and a filesystem it cannot mount tell themselves apart. Nothing here is
 /// irreversible -- at worst it leaves a short file behind.
 fn save_log_to_card(
     panel: &mut display::Panel,
@@ -1014,9 +1013,8 @@ fn save_log_to_card(
 /// Bring the card up, mount it, and write `bytes` to `/CATCARD.LOG`.
 ///
 /// Split from the screen so each step is one `?`, and the reason it stopped rides out on
-/// the `Err` for the caller to show and log. The step matters here specifically because
-/// the SD *write* path has never run on hardware -- a failure is as likely to be the
-/// first exercise of `write_sectors` as a bad card, and only the step tells them apart.
+/// the `Err` for the caller to show and log -- the step is what tells a bad card apart
+/// from a full one or a filesystem it cannot mount.
 fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
     use catcard_sd::fat;
 
@@ -1113,8 +1111,8 @@ fn file_info(
 /// is a viewer and returns `None`. `filter`, when set, hides files without that extension
 /// (folders always show), which is how the caller narrows to `.dfu`, `.psbt`, and so on.
 ///
-/// **The SD data path has never run on hardware** (the emulator models none), so a failure
-/// is reported with the step it stopped at.
+/// A mount or read failure is reported with the step it stopped at, so a missing card, a
+/// filesystem it cannot mount (exFAT, today) and a read error tell themselves apart.
 fn browse_sd(
     panel: &mut display::Panel,
     pad: &mut Keypad,

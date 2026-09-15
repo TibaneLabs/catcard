@@ -13,9 +13,8 @@
 //! holding one is a reasonable thing to meet and telling them apart costs one signature
 //! check.
 //!
-//! **Nothing here has run on hardware.** The SDMMC driver underneath has never moved a
-//! byte — the emulator models no SD data path — so every failure is reported with the
-//! step it stopped at rather than as "no".
+//! Every failure is reported with the step it stopped at rather than as a flat "no", so a
+//! bad card, a missing file and a broken container tell themselves apart on screen.
 
 use catcard_board::BOARD;
 use catcard_sd::fat;
