@@ -200,22 +200,36 @@ impl PinGate for Model {
                     self.sign(&mut inner, a);
                     return Ok(0);
                 }
-                // The only change a blank device takes: set the wallet PIN with an
-                // empty old_pin. Anything else needs a login the model has not seen.
+                // Setting the wallet PIN. A blank device takes it with an empty old_pin;
+                // a device that already has one takes it from a logged-in caller who
+                // supplies the current PIN as old_pin (that is a PIN change).
                 if flags != catcard_callgate::abi::change::WALLET_PIN {
                     return Err(GateError::Pin(err::BAD_REQUEST));
                 }
-                if !inner.blank {
-                    return Err(GateError::Pin(err::AUTH_FAIL));
-                }
-                if a.old_pin_len != 0 {
-                    return Err(GateError::Pin(err::AUTH_FAIL));
+                let old = &a.old_pin[..a.old_pin_len.max(0) as usize];
+                if inner.blank {
+                    if !old.is_empty() {
+                        return Err(GateError::Pin(err::AUTH_FAIL));
+                    }
+                } else {
+                    if a.state_flags & state::SUCCESSFUL == 0 {
+                        return Err(GateError::Pin(err::PIN_REQUIRED));
+                    }
+                    let expected: &[u8] = if inner.set_pin.is_empty() {
+                        self.correct
+                    } else {
+                        &inner.set_pin
+                    };
+                    if old != expected {
+                        return Err(GateError::Pin(err::AUTH_FAIL));
+                    }
                 }
                 inner.set_pin.clear();
                 inner
                     .set_pin
                     .extend_from_slice(&a.new_pin[..a.new_pin_len as usize]);
                 inner.blank = false;
+                // A change logs the session out, as on hardware: the caller re-logs in.
                 a.state_flags = 0;
                 self.sign(&mut inner, a);
                 Ok(0)
@@ -779,4 +793,51 @@ fn a_slot_that_did_not_keep_what_we_wrote_is_reported() {
         !l.verify_secret(&m, &secret).unwrap(),
         "a slot holding something else was reported as matching"
     );
+}
+
+#[test]
+fn changing_the_pin_takes_the_new_one_and_retires_the_old() {
+    let m = Model::new(b"12-3456");
+    let (mut l, step) = login_with(&m, b"12", b"3456");
+    assert_eq!(step, Step::In { zero_secret: false });
+
+    // Change to a new PIN: the struct is re-run through Setup, landing at Prefix.
+    assert_eq!(
+        l.change_pin(&m, b"12", b"3456", b"99", b"8888").unwrap(),
+        Step::Prefix
+    );
+
+    // The new PIN logs in; the old one is now wrong.
+    let (_l2, s2) = login_with(&m, b"99", b"8888");
+    assert_eq!(s2, Step::In { zero_secret: false });
+    let (_l3, s3) = login_with(&m, b"12", b"3456");
+    assert!(matches!(s3, Step::Wrong { .. }), "the old PIN still worked");
+}
+
+#[test]
+fn changing_the_pin_with_the_wrong_current_pin_is_refused_and_changes_nothing() {
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+
+    // A wrong current PIN is refused, as a wrong login would be.
+    let step = l.change_pin(&m, b"00", b"0000", b"99", b"8888").unwrap();
+    assert!(
+        matches!(step, Step::Wrong { .. } | Step::Failed(_)),
+        "a wrong current PIN was accepted"
+    );
+
+    // And the PIN is untouched: the original still logs in, the attempted new one does not.
+    let (_l2, s2) = login_with(&m, b"12", b"3456");
+    assert_eq!(s2, Step::In { zero_secret: false });
+    let (_l3, s3) = login_with(&m, b"99", b"8888");
+    assert!(matches!(s3, Step::Wrong { .. }));
+}
+
+#[test]
+fn a_change_pin_before_login_does_nothing() {
+    // Only a logged-in session may change the PIN; a fresh struct is at Prefix.
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    let step = l.change_pin(&m, b"12", b"3456", b"99", b"8888").unwrap();
+    assert_eq!(step, Step::Prefix, "change_pin acted outside a login");
 }

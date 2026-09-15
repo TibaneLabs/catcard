@@ -382,6 +382,100 @@ pub(crate) fn login_with(g: &BootloaderGate<'_>, login: &mut Login, prefix: &[u8
     }
 }
 
+/// How a Change-PIN attempt ended.
+pub enum ChangePin {
+    /// The PIN was changed and the new one logged back in; the session continues.
+    Changed,
+    /// The owner backed out before anything was written.
+    Cancelled,
+    /// The two entries of the new PIN did not match; nothing was written.
+    Mismatch,
+    /// The bootloader refused -- a wrong current PIN, or another failure. The session is no
+    /// longer valid and the caller should reboot to a fresh login.
+    Refused,
+}
+
+/// Change the wallet PIN from a logged-in session.
+///
+/// Collects the current PIN, then the new one twice, then writes it and logs back in with
+/// the new PIN so the menu keeps a valid session -- "Saving" while the change is written,
+/// "Verifying" while it logs in again, the words the stock firmware uses. The new PIN is
+/// entered twice because a typo here would set a PIN the owner does not know; a mismatch
+/// writes nothing. A refusal (usually a wrong current PIN) leaves the session invalid, so
+/// the caller reboots.
+pub(crate) fn change_pin(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    login: &mut Login,
+) -> ChangePin {
+    let g = BootloaderGate::new(gate);
+
+    // The current PIN, with its anti-phishing words, as a login would show them.
+    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix") else {
+        return ChangePin::Cancelled;
+    };
+    working(panel, "Checking");
+    if let Some(w) = login.words_for(&g, old_prefix.as_bytes()) {
+        screen_words(panel, anti_phishing_words(w));
+        if !wait_for_confirm(matrix, drbg) {
+            return ChangePin::Cancelled;
+        }
+    }
+    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix") else {
+        return ChangePin::Cancelled;
+    };
+
+    // The new PIN, its words shown once so the owner can learn them.
+    let Some(new_prefix) = collect(panel, matrix, drbg, "New prefix") else {
+        return ChangePin::Cancelled;
+    };
+    working(panel, "Checking");
+    if let Some(w) = login.words_for(&g, new_prefix.as_bytes()) {
+        screen_words(panel, anti_phishing_words(w));
+        if !wait_for_confirm(matrix, drbg) {
+            return ChangePin::Cancelled;
+        }
+    }
+    let Some(new_suffix) = collect(panel, matrix, drbg, "New suffix") else {
+        return ChangePin::Cancelled;
+    };
+
+    // Entered again, and compared, so a typo cannot set an unknown PIN.
+    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix") else {
+        return ChangePin::Cancelled;
+    };
+    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix") else {
+        return ChangePin::Cancelled;
+    };
+    if again_prefix.as_bytes() != new_prefix.as_bytes()
+        || again_suffix.as_bytes() != new_suffix.as_bytes()
+    {
+        return ChangePin::Mismatch;
+    }
+
+    working(panel, "Saving");
+    let step = login.change_pin(
+        &g,
+        old_prefix.as_bytes(),
+        old_suffix.as_bytes(),
+        new_prefix.as_bytes(),
+        new_suffix.as_bytes(),
+    );
+    if !matches!(step, Ok(Step::Prefix)) {
+        return ChangePin::Refused;
+    }
+
+    working(panel, "Verifying");
+    login_with(&g, login, new_prefix.as_bytes(), new_suffix.as_bytes());
+    if matches!(login.step(), Step::In { .. }) {
+        ChangePin::Changed
+    } else {
+        ChangePin::Refused
+    }
+}
+
 /// Where the unlock ended.
 pub enum Unlocked {
     /// Logged in. `zero_secret` means there is no seed stored yet.

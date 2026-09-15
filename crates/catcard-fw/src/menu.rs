@@ -88,28 +88,23 @@ enum Screen {
     NewSeed(u8),
     /// Restoring a seed: word count is not asked, the owner types until done.
     ImportSeed,
+    /// Device settings: the login submenu and, when a seed exists, destroying it.
+    Settings,
+    /// Login settings, currently just changing the main PIN.
+    Login,
+    /// Changing the main PIN.
+    ChangePin,
     WipeSeed,
 }
 
 /// The main menu of a device that holds a wallet.
 ///
-/// "Destroy seed" appears only here, never in the blank ordering: a device with no seed
-/// has nothing to destroy, and offering the option anyway invites someone to find out
-/// what it does on the one device where the answer is harmless.
-const MAIN_ITEMS: &[&str] = &[
-    "Status",
-    "Debug",
-    "Utils",
-    "About",
-    "New wallet",
-    "Import seed",
-    "Destroy seed",
-    "Reboot",
-];
-/// The same list with the only useful action first, for a device holding no wallet.
-///
-/// A device with no seed has exactly one thing worth doing. Making someone scroll past
-/// Debug and Utils to find it is backwards.
+/// A device with a seed has no "New wallet" or "Import seed": both would destroy the
+/// wallet it already holds, so they live only in the blank ordering. "Destroy seed" is not
+/// here either -- it moved into Settings, behind its warnings.
+const MAIN_ITEMS: &[&str] = &["Status", "Debug", "Utils", "About", "Settings", "Reboot"];
+/// The blank device's ordering: the two ways to get a wallet come first, since that is the
+/// only thing worth doing here. New/Import appear only in this list.
 const MAIN_ITEMS_BLANK: &[&str] = &[
     "New wallet",
     "Import seed",
@@ -117,6 +112,7 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     "Debug",
     "Utils",
     "About",
+    "Settings",
     "Reboot",
 ];
 
@@ -128,6 +124,22 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
         MAIN_ITEMS
     }
 }
+
+/// Settings, with "Destroy seed" only where there is a seed to destroy.
+const SETTINGS_ITEMS: &[&str] = &["Login", "Destroy seed"];
+const SETTINGS_ITEMS_BLANK: &[&str] = &["Login"];
+
+/// The settings menu for the device in front of you.
+fn settings_items(no_seed: bool) -> &'static [&'static str] {
+    if no_seed {
+        SETTINGS_ITEMS_BLANK
+    } else {
+        SETTINGS_ITEMS
+    }
+}
+
+/// Login settings. Just the PIN today; a place for login-related settings to grow.
+const LOGIN_ITEMS: &[&str] = &["Change PIN"];
 /// How long a new seed should be.
 ///
 /// Twenty-four first, and under the cursor when the menu opens. Twelve is a sound
@@ -364,6 +376,33 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Main;
                 break;
             }
+            if next == Screen::ChangePin {
+                use crate::pinentry::ChangePin;
+                match crate::pinentry::change_pin(gate, panel, matrix, drbg, login) {
+                    ChangePin::Changed => {
+                        crate::catlog!("pin: changed");
+                        message(panel, "PIN changed", "logged in with", "the new PIN");
+                        wait_for_any_key(&mut pad, matrix, drbg);
+                    }
+                    // Nothing was written; the session is untouched.
+                    ChangePin::Cancelled => {}
+                    ChangePin::Mismatch => {
+                        message(panel, "Not changed", "the two entries", "did not match");
+                        wait_for_any_key(&mut pad, matrix, drbg);
+                    }
+                    // The change was refused (usually a wrong current PIN); the session is
+                    // no longer valid, so reboot to a fresh login with the unchanged PIN.
+                    ChangePin::Refused => {
+                        crate::catlog!("pin: change refused, rebooting");
+                        message(panel, "Not changed", "rebooting", "");
+                        // SAFETY: nothing after this runs.
+                        unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+                    }
+                }
+                v.reset_menu();
+                screen = Screen::Login;
+                break;
+            }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
@@ -408,9 +447,10 @@ fn step(
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
+            // New/Import appear only on a blank device, but the arms are harmless anywhere.
             (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
             (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
-            (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
+            (Key::Confirm, Some("Settings")) => Screen::Settings,
             (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
                 // SAFETY: nothing after this runs.
@@ -426,6 +466,17 @@ fn step(
             (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::NewSeedMenu,
+        },
+        Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
+            (Key::Confirm, Some("Login")) => Screen::Login,
+            (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::Settings,
+        },
+        Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
+            (Key::Cancel, _) => Screen::Settings,
+            _ => Screen::Login,
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
@@ -521,6 +572,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
+        Screen::Settings => Some(settings_items(no_seed)),
+        Screen::Login => Some(LOGIN_ITEMS),
         _ => None,
     }
 }
@@ -530,9 +583,12 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     match screen {
         // Every list screen renders the same way; the title and note come from
         // `menu_head`, the single place they are defined.
-        Screen::Main | Screen::Utils | Screen::NewSeedMenu | Screen::Debug => {
-            draw_menu(panel, screen, v)
-        }
+        Screen::Main
+        | Screen::Utils
+        | Screen::NewSeedMenu
+        | Screen::Debug
+        | Screen::Settings
+        | Screen::Login => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -563,6 +619,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::NewSeed(_) => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
         Screen::ImportSeed => {}
+        // Handled in `run`: it drives the PIN-entry screens itself.
+        Screen::ChangePin => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }
@@ -581,6 +639,8 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
             "New wallet"
         }
         Screen::Debug => "Debug",
+        Screen::Settings => "Settings",
+        Screen::Login => "Login",
         _ => "",
     };
     (title, note)

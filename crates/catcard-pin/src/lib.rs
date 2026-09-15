@@ -50,6 +50,17 @@ pub const MAX_PART_LEN: usize = (MAX_PIN_LEN - 1) / 2;
 /// "3 of 13" without inventing the denominator. Source: gate18-pin-state-machine.md §8.
 pub const MAX_ATTEMPTS: u32 = 13;
 
+/// Join a `prefix` and `suffix` into the `prefix-suffix` payload the gate hashes, writing
+/// it into `out` and returning its length. Callers keep parts separate for entry (the
+/// anti-phishing words hang off the prefix); the gate wants the whole PIN.
+fn join_pin(out: &mut [u8; MAX_PIN_LEN], prefix: &[u8], suffix: &[u8]) -> usize {
+    let p = prefix.len();
+    out[..p].copy_from_slice(prefix);
+    out[p] = SEPARATOR;
+    out[p + 1..p + 1 + suffix.len()].copy_from_slice(suffix);
+    p + 1 + suffix.len()
+}
+
 /// What the caller should do next.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Step {
@@ -380,6 +391,66 @@ impl Login {
                 // same one forward and every login failed with a gate error rather than
                 // a wrong PIN — which is a confusing thing to show someone who has just
                 // chosen their PIN.
+                self.attempt.change_flags = 0;
+                match gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
+                    Ok(_) if self.attempt.is_blank() => Step::Blank,
+                    Ok(_) => Step::Prefix,
+                    Err(e) => classify(e),
+                }
+            }
+            Err(e) => classify(e),
+        };
+        self.attempt.change_flags = 0;
+        self.words_shown = false;
+        Ok(self.step)
+    }
+
+    /// Change the wallet PIN, from `old` to `new` (each supplied as `prefix` then `suffix`).
+    ///
+    /// Only from [`Step::In`]: the bootloader takes a wallet-PIN change (method 3,
+    /// [`change::WALLET_PIN`](catcard_callgate::abi::change::WALLET_PIN)) from a logged-in
+    /// caller, given the current PIN as `old_pin` and the new one as `new_pin`. A wrong
+    /// current PIN is a failed attempt on the secure element, exactly as a wrong login is,
+    /// so callers must treat it with the same care (it counts toward the brick limit).
+    ///
+    /// On success the struct is re-run through Setup -- as [`set_first_pin`](Self::set_first_pin)
+    /// does -- leaving it at [`Step::Prefix`] so the caller logs in again with the new PIN.
+    pub fn change_pin<G: PinGate>(
+        &mut self,
+        gate: &G,
+        old_prefix: &[u8],
+        old_suffix: &[u8],
+        new_prefix: &[u8],
+        new_suffix: &[u8],
+    ) -> Result<Step, TooLong> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Ok(self.step);
+        }
+        if [old_prefix, old_suffix, new_prefix, new_suffix]
+            .iter()
+            .any(|p| p.len() > MAX_PART_LEN)
+        {
+            return Err(TooLong);
+        }
+
+        let mut old_joined = [0u8; MAX_PIN_LEN];
+        let old_n = join_pin(&mut old_joined, old_prefix, old_suffix);
+        let mut new_joined = [0u8; MAX_PIN_LEN];
+        let new_n = join_pin(&mut new_joined, new_prefix, new_suffix);
+
+        self.attempt.change_flags = catcard_callgate::abi::change::WALLET_PIN;
+        let set = self
+            .attempt
+            .set_old_pin(&old_joined[..old_n])
+            .and_then(|()| self.attempt.set_new_pin(&new_joined[..new_n]));
+        old_joined.zeroize();
+        new_joined.zeroize();
+        set?;
+
+        self.step = match gate.pin_attempt(PinOp::Change, &mut self.attempt) {
+            Ok(_) => {
+                // As in `set_first_pin`: the struct that just performed a change is not a
+                // struct that can log in, so re-run Setup to make it one again.
                 self.attempt.change_flags = 0;
                 match gate.pin_attempt(PinOp::Setup, &mut self.attempt) {
                     Ok(_) if self.attempt.is_blank() => Step::Blank,
