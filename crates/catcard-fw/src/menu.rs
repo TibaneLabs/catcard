@@ -85,6 +85,10 @@ enum Screen {
     NewSeedMenu,
     /// Generating one, of this many words.
     NewSeed(u8),
+    /// Choosing how long a restored seed is.
+    ImportSeedMenu,
+    /// Restoring one, of this many words.
+    ImportSeed(u8),
     WipeSeed,
 }
 
@@ -100,6 +104,7 @@ const MAIN_ITEMS: &[&str] = &[
     "Utils",
     "About",
     "New wallet",
+    "Import seed",
     "Destroy seed",
     "Reboot",
 ];
@@ -109,6 +114,7 @@ const MAIN_ITEMS: &[&str] = &[
 /// Debug and Utils to find it is backwards.
 const MAIN_ITEMS_BLANK: &[&str] = &[
     "New wallet",
+    "Import seed",
     "Status",
     "Install from SD",
     "Debug",
@@ -134,6 +140,11 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 /// The word count travels in [`Screen::NewSeed`], so adding another length here needs
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
+
+/// Lengths a seed can be restored at. Eighteen belongs here where twenty-four and twelve
+/// are the only ones generated: an imported phrase is whatever someone else's device
+/// produced, and 18-word (192-bit) backups exist in the wild.
+const IMPORT_SEED_ITEMS: &[&str] = &["24 words", "18 words", "12 words"];
 
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
@@ -334,6 +345,14 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Main;
                 break;
             }
+            if let Screen::ImportSeed(words) = next {
+                import_seed(gate, login, panel, &mut pad, matrix, drbg, words);
+                // A restored wallet reorders the menu, exactly as a generated one does.
+                v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
+                v.sc = Scroll::new();
+                screen = Screen::Main;
+                break;
+            }
             if next == Screen::WipeSeed {
                 wipe_seed(gate, login, panel, &mut pad, matrix, drbg);
                 // Same reason as above, in the other direction: a wallet that no longer
@@ -389,6 +408,7 @@ fn step(
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
+            (Key::Confirm, Some("Import seed")) => Screen::ImportSeedMenu,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Reboot")) => {
                 message(panel, "Rebooting", "", "");
@@ -405,6 +425,13 @@ fn step(
             (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::NewSeedMenu,
+        },
+        Screen::ImportSeedMenu => match (key, IMPORT_SEED_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("24 words")) => Screen::ImportSeed(24),
+            (Key::Confirm, Some("18 words")) => Screen::ImportSeed(18),
+            (Key::Confirm, Some("12 words")) => Screen::ImportSeed(12),
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::ImportSeedMenu,
         },
         // The splash, dismissed by any key.
         Screen::About => Screen::Main,
@@ -491,6 +518,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
+        Screen::ImportSeedMenu => Some(IMPORT_SEED_ITEMS),
         _ => None,
     }
 }
@@ -511,6 +539,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::About => about_screen(panel),
         Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
         Screen::NewSeedMenu => menu(panel, "New wallet", "how many words?", NEW_SEED_ITEMS, v.sc),
+        Screen::ImportSeedMenu => {
+            menu(panel, "Import seed", "how many words?", IMPORT_SEED_ITEMS, v.sc)
+        }
         Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
@@ -537,6 +568,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) => {}
+        // Handled in `run`: it reads words from the keypad and drives the panel itself.
+        Screen::ImportSeed(_) => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
     }
@@ -2292,6 +2325,303 @@ fn new_seed(
         "keep those words",
         "somewhere safe",
     );
+    wait_for_any_key(pad, matrix, drbg);
+}
+
+/// The outcome of entering one word during a restore.
+enum WordPick {
+    /// The chosen word, as its BIP-39 wordlist index.
+    Word(u16),
+    /// Back up to the previous word (or, at the first word, abandon the restore).
+    Back,
+}
+
+/// The phone-keypad digit a BIP-39 letter sits on, or 0 for a non-letter.
+///
+/// Standard T9: 2 abc, 3 def, 4 ghi, 5 jkl, 6 mno, 7 pqrs, 8 tuv, 9 wxyz. The wordlist is
+/// built so a four-letter prefix identifies a word, which is what makes typing letters on
+/// a numeric pad workable -- a few digits narrow 2048 words to a short list.
+fn letter_key(b: u8) -> u8 {
+    match b {
+        b'a'..=b'c' => b'2',
+        b'd'..=b'f' => b'3',
+        b'g'..=b'i' => b'4',
+        b'j'..=b'l' => b'5',
+        b'm'..=b'o' => b'6',
+        b'p'..=b's' => b'7',
+        b't'..=b'v' => b'8',
+        b'w'..=b'z' => b'9',
+        _ => 0,
+    }
+}
+
+/// True if `word`'s leading letters map, under T9, onto the typed digit prefix.
+fn word_matches(word: &str, typed: &str) -> bool {
+    let wb = word.as_bytes();
+    let tb = typed.as_bytes();
+    wb.len() >= tb.len() && wb.iter().zip(tb).all(|(&w, &t)| letter_key(w) == t)
+}
+
+/// Read one BIP-39 word on the numeric keypad, T9 style.
+///
+/// Two modes, kept separate because the digit keys mean different things in each and a
+/// screen that used them for both at once could not tell a letter from a cursor move:
+///
+/// - **Type**: keys 2-9 spell the word's letters; `x` deletes the last, or backs out of
+///   the word when nothing is typed; `y` opens the candidate list once there is one.
+/// - **Pick**: the arrow keys (5/8) move a cursor over the matching words; `y` chooses,
+///   `x` returns to typing to add or remove a letter.
+///
+/// The word is never guessed for the user: even a single match is confirmed from the list
+/// so what lands in the seed is what they saw and chose.
+fn read_word(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    num: usize,
+    total: usize,
+) -> WordPick {
+    use catcard_wallet::bip39::wordlist::ENGLISH;
+    // Enough to hold the candidates once a couple of letters have narrowed the list; the
+    // pick screen is only offered when the true count is within this.
+    const CAND_MAX: usize = 64;
+
+    let mut typed: heapless::String<8> = heapless::String::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+
+    loop {
+        // Candidates for the current digit prefix. `count` is the true total; `cands`
+        // stops filling at its capacity, so the pick screen is gated on `count`.
+        let mut cands: heapless::Vec<u16, CAND_MAX> = heapless::Vec::new();
+        let mut count = 0usize;
+        if !typed.is_empty() {
+            for (i, w) in ENGLISH.iter().enumerate() {
+                if word_matches(w, &typed) {
+                    count += 1;
+                    let _ = cands.push(i as u16);
+                }
+            }
+        }
+
+        // --- Type screen ---
+        let mut title = Line::new();
+        let _ = write!(title, "Word {num}/{total}");
+        let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
+        let mut l = Line::new();
+        let _ = l.push_str("2abc 3def 4ghi 5jkl");
+        let _ = lines.push(l);
+        let mut l = Line::new();
+        let _ = l.push_str("6mno 7pqrs 8tuv 9wxyz");
+        let _ = lines.push(l);
+        let _ = lines.push(Line::new());
+        let mut l = Line::new();
+        let _ = write!(l, "keys: {typed}");
+        let _ = lines.push(l);
+        let mut l = Line::new();
+        if typed.is_empty() {
+            let _ = l.push_str("type your word");
+        } else if count == 0 {
+            let _ = l.push_str("no match, x=del");
+        } else {
+            let _ = write!(l, "{count} match, y=list");
+        }
+        let _ = lines.push(l);
+        info(panel, &title, &lines);
+
+        wait_for_release(pad, matrix, drbg);
+        let mut open_list = false;
+        'type_wait: loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    // A letter key.
+                    Key::Digit(d @ 2..=9) => {
+                        let _ = typed.push((b'0' + d) as char);
+                        break 'type_wait;
+                    }
+                    // 0 and 1 carry no letters; ignore them rather than mis-spell.
+                    Key::Digit(_) => {}
+                    Key::Cancel => {
+                        if typed.pop().is_none() {
+                            return WordPick::Back;
+                        }
+                        break 'type_wait;
+                    }
+                    Key::Confirm => {
+                        if count > 0 && count <= CAND_MAX {
+                            open_list = true;
+                            break 'type_wait;
+                        }
+                    }
+                }
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
+        if !open_list {
+            continue;
+        }
+
+        // --- Pick screen ---
+        let mut items: heapless::Vec<&'static str, CAND_MAX> = heapless::Vec::new();
+        for &ci in &cands {
+            let _ = items.push(ENGLISH[ci as usize]);
+        }
+        let mut sc = Scroll::new();
+        'pick: loop {
+            menu(panel, "Pick the word", "5/8 move, y pick", &items, sc);
+            wait_for_release(pad, matrix, drbg);
+            loop {
+                let _ = usbtask::pump();
+                crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
+                for k in keys.iter() {
+                    match k {
+                        Key::Digit(5) => {
+                            sc = sc.step(items.len(), MAX_LINES, false);
+                            continue 'pick;
+                        }
+                        Key::Digit(8) => {
+                            sc = sc.step(items.len(), MAX_LINES, true);
+                            continue 'pick;
+                        }
+                        Key::Confirm => return WordPick::Word(cands[sc.cursor]),
+                        // Back to typing, keeping what was entered so a letter can be
+                        // added or removed.
+                        Key::Cancel => break 'pick,
+                        Key::Digit(_) => {}
+                    }
+                }
+                catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            }
+        }
+    }
+}
+
+/// Restore a wallet from a written-down BIP-39 phrase, typed on the keypad.
+///
+/// The checksum is the whole safety story here. A restore stores whatever it is given, so
+/// the only thing standing between a mistyped word and a wallet that quietly controls
+/// nothing recoverable is [`Mnemonic::parse`], which rebuilds the entropy and verifies the
+/// checksum before this stores anything. A failure sends the owner back to fix the last
+/// word rather than committing a phrase that does not check out.
+///
+/// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
+/// reason: a slot that did not keep the words must be reported, not assumed.
+#[allow(clippy::too_many_arguments)]
+fn import_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    words: u8,
+) {
+    use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
+    use zeroize::Zeroize;
+
+    let cancelled = |panel: &mut display::Panel, pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg| {
+        message(panel, "Import cancelled", "nothing was", "stored");
+        wait_for_any_key(pad, matrix, drbg);
+    };
+
+    // Overwriting an in-use wallet is the destructive case; this is the only warning.
+    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+        ask(panel, "Wallet exists", "a restore DESTROYS", "the one stored now");
+        if !confirmed(pad, matrix, drbg) {
+            return;
+        }
+    }
+    let mut what = Line::new();
+    let _ = write!(what, "type {words} words from");
+    ask(panel, "Restore seed?", &what, "your backup");
+    if !confirmed(pad, matrix, drbg) {
+        return;
+    }
+
+    let total = words as usize;
+    let mut idx: heapless::Vec<u16, 24> = heapless::Vec::new();
+
+    let mnemonic = loop {
+        // Collect until the phrase is complete. `Back` steps to the previous word, and
+        // backing off the first word abandons the restore.
+        while idx.len() < total {
+            match read_word(panel, pad, matrix, drbg, idx.len() + 1, total) {
+                WordPick::Word(i) => {
+                    let _ = idx.push(i);
+                }
+                WordPick::Back => {
+                    if idx.pop().is_none() {
+                        cancelled(panel, pad, matrix, drbg);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Assemble the phrase and let `parse` verify the checksum. The phrase is secret
+        // material, so its buffer is wiped whichever way this goes.
+        let mut phrase: heapless::String<256> = heapless::String::new();
+        for (n, &i) in idx.iter().enumerate() {
+            if n > 0 {
+                let _ = phrase.push(' ');
+            }
+            let _ = phrase.push_str(ENGLISH[i as usize]);
+        }
+        let parsed = Mnemonic::parse(&phrase);
+        // SAFETY: zeroing then clearing the phrase's own bytes; the empty buffer that
+        // remains is trivially valid UTF-8.
+        let raw = unsafe { phrase.as_mut_vec() };
+        raw.iter_mut().for_each(|b| *b = 0);
+        raw.clear();
+
+        match parsed {
+            Ok(m) => break m,
+            Err(_) => {
+                ask(panel, "Checksum failed", "re-enter the last", "word?");
+                if confirmed(pad, matrix, drbg) {
+                    let _ = idx.pop();
+                } else {
+                    cancelled(panel, pad, matrix, drbg);
+                    return;
+                }
+            }
+        }
+    };
+
+    let Ok(mut secret) = catcard_callgate::pin::encode_bip39(mnemonic.entropy()) else {
+        message(panel, "Failed", "could not encode", "that seed");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    };
+
+    message(panel, "Applying", "do not disconnect", "");
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    if let Err(f) = login.set_secret(&pin_gate, &secret) {
+        secret.zeroize();
+        crate::catlog!("seed: restore store failed");
+        message(panel, "Not stored", why_failed(f), "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    }
+    let kept = login.verify_secret(&pin_gate, &secret).unwrap_or(false);
+    secret.zeroize();
+    if !kept {
+        crate::catlog!("seed: restore read-back mismatch");
+        message(
+            panel,
+            "Not stored",
+            "the slot did not keep",
+            "what was written",
+        );
+        wait_for_any_key(pad, matrix, drbg);
+        return;
+    }
+
+    crate::catlog!("seed: restored, {} words", mnemonic.word_count());
+    message(panel, "Wallet restored", "your seed is", "now stored");
     wait_for_any_key(pad, matrix, drbg);
 }
 
