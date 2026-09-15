@@ -324,6 +324,21 @@ impl Otg {
         unsafe { reg::clear_bits(DCTL, DCTL_SDIS) }
     }
 
+    /// Soft-disconnect: assert `DCTL.SDIS`, removing the D+ pull-up so the host sees the
+    /// device leave the bus. Used to force a re-enumeration when the device changes its
+    /// identity (HID <-> mass storage): the host must see it disappear and reappear, or it
+    /// keeps the descriptors it already cached and never notices the new interface. A core
+    /// reset alone does not do this -- it leaves the pull-up as it was -- so the caller
+    /// detaches, waits long enough for the host to debounce the disconnect, then
+    /// reconfigures and [`attach`](Self::attach)es.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS; the core must have been configured.
+    pub unsafe fn detach(&mut self) {
+        // SAFETY: as documented.
+        unsafe { reg::set_bits(DCTL, DCTL_SDIS) }
+    }
+
     /// Let the OTG core raise its interrupt to the CPU. `configure` already unmasks the
     /// sources in `GINTMSK`; this opens the `GAHBCFG` gate they pass through. The NVIC
     /// line is the caller's to enable. Used only for mass storage, where an interrupt-

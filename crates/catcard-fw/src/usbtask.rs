@@ -153,6 +153,11 @@ impl MscRx {
 /// touching anything else. HID is polled either way.
 const MSC_INTERRUPTS: bool = true;
 
+/// How long to hold the soft-disconnect when switching USB identity (HID <-> mass storage),
+/// so the host debounces the disconnect and re-enumerates. A few milliseconds is enough by
+/// the USB spec; 20 ms leaves margin across host controllers.
+const REENUM_DETACH_MS: u32 = 20;
+
 /// A response being sent out, frame by frame.
 /// A reply in flight, possibly spanning several frames.
 ///
@@ -860,6 +865,12 @@ pub fn msc_enter() {
         unsafe {
             t.msc_rx.clear();
             t.otg.set_mode(catcard_usb::control::DeviceMode::Msc);
+            // Force the host to re-enumerate: drop off the bus, hold long enough for it to
+            // register the disconnect, then reconfigure and re-attach so it reads the new
+            // mass-storage descriptors. Without the detach it keeps the cached HID device
+            // and never sees the drive appear.
+            t.otg.detach();
+            catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
             t.otg.reinit();
             if MSC_INTERRUPTS {
                 // Open the core's gate, then the NVIC line. From here the handler drives
@@ -884,6 +895,10 @@ pub fn msc_exit() {
                 t.otg.disable_interrupts();
             }
             t.otg.set_mode(catcard_usb::control::DeviceMode::Hid);
+            // Re-enumerate back to the HID wallet the same way: a visible disconnect, a
+            // pause, then re-attach with the HID descriptors.
+            t.otg.detach();
+            catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
             t.otg.reinit();
         }
     }
