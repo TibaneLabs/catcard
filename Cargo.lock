@@ -326,9 +326,9 @@ dependencies = [
 
 [[package]]
 name = "fstool"
-version = "0.4.31"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bdfa1f8582e5c84235fd3352b9399b088e71d3fe2e1023536a49d7319bcad49"
+checksum = "8a889c45f7be7d8a5f4c9c3f5d5f2dd10d5e641c4906115b304970d1011ec1fe"
 dependencies = [
  "uuid",
 ]

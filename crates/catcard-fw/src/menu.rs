@@ -85,6 +85,8 @@ enum Screen {
     ViewTrngWords,
     AddressExplorer,
     BrowseSd,
+    /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
+    FormatSd,
     /// The Games submenu.
     #[cfg(feature = "games")]
     Games,
@@ -171,6 +173,7 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Address Explorer",
     "Browse SD card",
+    "Format SD card",
     "Games",
 ];
 #[cfg(not(feature = "games"))]
@@ -180,6 +183,7 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Address Explorer",
     "Browse SD card",
+    "Format SD card",
 ];
 
 /// The games in the Games submenu.
@@ -404,6 +408,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::FormatSd {
+                format_sd(panel, &mut pad, matrix, drbg);
+                v.reset_menu();
+                screen = Screen::Utils;
+                break;
+            }
             #[cfg(feature = "games")]
             if next == Screen::BlockMine {
                 crate::game::block_mine(panel, &mut pad, matrix, drbg);
@@ -613,6 +623,7 @@ fn step(
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
+            (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
             (Key::Cancel, _) => Screen::Main,
@@ -762,6 +773,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::AddressExplorer => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
+        // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
+        Screen::FormatSd => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -3379,6 +3392,81 @@ fn read_choice(
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
+}
+
+/// Format the SD card to the SD standard: one MBR partition filling the card, holding the
+/// filesystem its capacity tier calls for -- FAT16 up to 2 GB, FAT32 up to 32 GB, exFAT
+/// above. This erases everything on the card, so it asks twice, and shows what it is about
+/// to write first.
+fn format_sd(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    use catcard_hal::sdmmc::Sdmmc;
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user and
+    // the menu waits for it to return before it can be chosen again.
+    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+        Ok(d) => d,
+        Err(_) => {
+            message(panel, "Format SD", "no SD controller", "press a key");
+            wait_any_key(pad, matrix, drbg);
+            return;
+        }
+    };
+    let card = match catcard_sd::init(&mut dev) {
+        Ok(c) => c,
+        Err(catcard_sd::Error::NoCard) => {
+            message(panel, "Format SD", "no card in slot", "press a key");
+            wait_any_key(pad, matrix, drbg);
+            return;
+        }
+        Err(_) => {
+            message(panel, "Format SD", "card would not start", "press a key");
+            wait_any_key(pad, matrix, drbg);
+            return;
+        }
+    };
+
+    // Which filesystem the card's size calls for, shown before anyone commits.
+    let fs = catcard_sd::format::standard_fs(card.blocks as u64);
+    let mut summary = Line::new();
+    let _ = write!(summary, "{} MiB  {}", card.mib(), fs.name());
+    ask(panel, "Format SD card?", summary.as_str(), "ERASES everything");
+    if !confirmed(pad, matrix, drbg) {
+        return;
+    }
+    ask(panel, "Really format?", "all data is lost", "cannot be undone");
+    if !confirmed(pad, matrix, drbg) {
+        return;
+    }
+
+    // A volume serial from the UI DRBG, so two cards do not come out sharing one.
+    let mut id = [0u8; 4];
+    let _ = drbg.generate(&mut id);
+    let volume_id = u32::from_le_bytes(id);
+
+    message(panel, "Formatting", "do not remove card", "");
+    let sectors = catcard_sd::Sectors::new(dev, card);
+    match catcard_sd::format::format(sectors, volume_id, "CATCARD") {
+        Ok(fs) => {
+            let mut done = Line::new();
+            let _ = write!(done, "{} ready", fs.name());
+            message(panel, "Formatted", done.as_str(), "press a key");
+        }
+        Err(catcard_sd::format::FormatError::TooSmall) => {
+            message(panel, "Not formatted", "card too small", "press a key")
+        }
+        Err(catcard_sd::format::FormatError::Io(_)) => {
+            message(panel, "Not formatted", "card write failed", "press a key")
+        }
+        Err(catcard_sd::format::FormatError::Layout(_)) => {
+            message(panel, "Not formatted", "size not supported", "press a key")
+        }
+    }
+    wait_any_key(pad, matrix, drbg);
 }
 
 /// Destroy the stored seed.

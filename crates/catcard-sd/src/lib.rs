@@ -325,6 +325,8 @@ pub use fstool::fs::fat;
 /// [`Sectors`] drives it unchanged.
 pub use fstool::fs::exfat;
 
+pub mod format;
+
 /// An initialised card, presented as the sectors a FAT volume is built from.
 ///
 /// Owns its transport because a mounted [`fat::Volume`] owns its device for as long as
@@ -400,6 +402,7 @@ impl<T: Transport> fat::SectorDriver for Sectors<T> {
 }
 
 /// Why [`AnyVolume::mount_with`] gave up.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum MountError {
     /// The card itself could not be brought up (the `make` closure failed).
     Device,
