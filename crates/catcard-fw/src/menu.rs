@@ -1456,6 +1456,26 @@ fn view_trng_words(
     );
 }
 
+/// Write `s` into `out`, eliding the middle to `...` when it is wider than `cols`.
+///
+/// The start and end survive because those are the parts an eye actually checks against a
+/// watch-only wallet; the dropped middle is the part nobody reads character by character.
+/// The strings this is used on -- bech32 and base58 addresses -- are ASCII, so byte
+/// offsets are character offsets and the slicing is on boundaries.
+fn ellipsize_middle(s: &str, cols: usize, out: &mut Line) {
+    // Fits as-is, or too narrow for an elision to leave anything useful: show the head.
+    if s.len() <= cols || cols < 7 {
+        let _ = out.push_str(&s[..s.len().min(cols.max(1))]);
+        return;
+    }
+    let keep = cols - 3; // three columns go to the "..."
+    let head = keep.div_ceil(2); // the front gets the odd character
+    let tail = keep - head;
+    let _ = out.push_str(&s[..head]);
+    let _ = out.push_str("...");
+    let _ = out.push_str(&s[s.len() - tail..]);
+}
+
 /// Walk the receive addresses of the stored wallet.
 ///
 /// BIP-84 native segwit (`m/84'/0'/0'/0/i`) on mainnet -- the modern default -- one
@@ -1546,8 +1566,9 @@ fn address_explorer(
         return;
     };
 
-    // How many characters of an address fit on a body line; a bech32 P2WPKH is 42, so it
-    // wraps to a second line on the 128px panel and fits on one on the Q1.
+    // How many characters fit on a body line. A bech32 address is longer than that on the
+    // 128px panel, so it is shown start...end (see `ellipsize_middle`) -- the two ends are
+    // what an eye compares against a watch-only wallet, and one clean line beats a wrap.
     let cols = display::LOG_COLS;
     let mut index: u32 = 0;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -1568,16 +1589,10 @@ fn address_explorer(
             });
         match addr {
             Some(n) => {
-                let mut rest = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                while !rest.is_empty() {
-                    let take = rest.len().min(cols);
-                    let mut l = Line::new();
-                    let _ = l.push_str(&rest[..take]);
-                    if lines.push(l).is_err() {
-                        break;
-                    }
-                    rest = &rest[take..];
-                }
+                let s = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                let mut l = Line::new();
+                ellipsize_middle(s, cols, &mut l);
+                let _ = lines.push(l);
             }
             // A child index that lands on an invalid scalar is vanishingly rare, but the
             // screen must not lie about it: show a gap rather than a wrong address.
