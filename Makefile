@@ -22,10 +22,26 @@
 # The image tool stamps the workspace version into the header by default; pass
 # VERSION=x.y.z to override.
 
+# A `cargo` earlier in PATH than rustup's (Homebrew's, a distro's) ships no
+# thumbv7em-none-eabihf std, and the failure reads "the target may not be installed" --
+# which sends you to `rustup target add`, where the target is already installed. Ask
+# rustup which toolchain rust-toolchain.toml pins instead of trusting PATH.
+#
+# Prepending the directory is what fixes it, not just calling the absolute path:
+# rustup's cargo invoked by absolute path still resolves *rustc* from PATH, so the
+# wrong rustc would be picked up anyway.
+CARGO_PATH := $(shell rustup which cargo 2>/dev/null)
+ifneq ($(CARGO_PATH),)
+  export PATH := $(dir $(CARGO_PATH)):$(PATH)
+  CARGO := $(CARGO_PATH)
+else
+  CARGO := cargo
+endif
+
 ELF     := target/thumbv7em-none-eabihf/release/catcard-fw
 OUT     := out
-PACKAGE := cargo run --release -q -p catcard-image -- build $(ELF)
-FW      := cargo build --release -p catcard-fw --target thumbv7em-none-eabihf
+PACKAGE := $(CARGO) run --release -q -p catcard-image -- build $(ELF)
+FW      := $(CARGO) build --release -p catcard-fw --target thumbv7em-none-eabihf
 
 VERSION ?=
 VER      = $(if $(VERSION),--version $(VERSION),)
