@@ -39,7 +39,6 @@ use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::ui::Ui;
 use crate::keypad::Keypad;
-use catcard_ui::menu::Scroll;
 use catcard_ui::text::draw_text;
 
 use crate::{BootReport, display, keypad::GpioMatrix, usbtask};
@@ -241,16 +240,13 @@ pub fn run(session: Session<'_>) -> ! {
     let mut screen = Screen::Main;
     let mut showing_offer = false;
     let mut redraw = true;
-    // `sc` is tested in `catcard_ui::menu` -- the arithmetic deciding which rows are on
-    // screen is the part of a menu that can be wrong without looking wrong.
     let mut v = View {
         report,
         last_key: None,
         keys_seen: 0,
         drbg_stats: drbg.stats(),
         drbg_sample: None,
-        sc: Scroll::new(),
-        menu_off: 0,
+        menu: MenuScreen::new(),
         no_seed,
     };
 
@@ -344,33 +340,15 @@ pub fn run(session: Session<'_>) -> ! {
             }
 
             // Cursor movement first: it stays on this screen, so it never reaches the
-            // transition table below. The move runs through the scroll view so the
-            // highlight travels within the panel and only pushes the view at an edge,
-            // and so pressing past the first/last item keeps scrolling to reveal the
-            // title. The resulting cursor and offset are persisted back into the view.
+            // transition table below. The menu owns what moving means.
             if let Some(items) = items_of(screen, v.no_seed)
                 && matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0))
             {
-                let (title, note) = menu_head(screen);
-                let mut view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
-                let old = view.off();
-                match key {
-                    // `0` jumps back to the top, the arrows move one row.
-                    Key::Digit(0) => view.to_top(),
-                    Key::Digit(8) => view.move_cursor(true),
-                    _ => view.move_cursor(false),
-                }
-                if let Some(id) = view.selected() {
-                    v.sc.cursor = id as usize;
-                }
-                let new_off = view.off();
-                // Animate the move, then let the loop's redraw paint the settled frame.
-                glide_view(ui.panel, &mut view, old, new_off);
-                v.menu_off = new_off;
+                v.menu.key(&mut ui, screen, items, *key);
                 continue;
             }
 
-            let next = step(screen, *key, v.sc.cursor, v.no_seed);
+            let next = step(screen, *key, v.menu.cursor, v.no_seed);
             // Anything that takes over the panel is a row in the action table rather than
             // a branch here: which routine runs, where the menu lands afterwards, and
             // whether the secret slot has to be re-read. This was seventeen
@@ -735,10 +713,8 @@ struct View<'a> {
     /// about to be drawn. `None` if the draw errored (only possible past the reseed
     /// interval). Advancing the DRBG to show a sample is exactly what it is for.
     drbg_sample: Option<u32>,
-    sc: Scroll,
-    /// The menu's pixel scroll offset, persisted across redraws so the highlight pushes
-    /// the view at the edges rather than the view snapping to the cursor each frame.
-    menu_off: usize,
+    /// The list screen's own state: where the cursor is and how far the view is scrolled.
+    menu: MenuScreen,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
 }
@@ -746,8 +722,71 @@ struct View<'a> {
 impl View<'_> {
     /// A fresh scroll position for a new list: cursor at the top, view unscrolled.
     fn reset_menu(&mut self) {
-        self.sc = Scroll::new();
-        self.menu_off = 0;
+        self.menu.reset();
+    }
+}
+
+/// A list screen: the cursor and scroll offset that survive a keypress.
+///
+/// These lived on [`View`] as two loose fields that one block of the run loop moved
+/// inline, so the only thing able to drive a menu was that block. Owned by the screen,
+/// a menu answers a key the way [`DocScreen`] does -- the shape a run loop can hand
+/// events to rather than reach into.
+///
+/// The `ScrollView` is rebuilt per draw and per key rather than stored. It borrows both
+/// the item slice and the note, and the note is a [`Line`] built on the caller's stack by
+/// [`menu_head`] -- so a stored view would borrow a local. Rebuilding is what `draw_menu`
+/// always did.
+#[derive(Copy, Clone)]
+struct MenuScreen {
+    /// Index of the item under the cursor, in the id space `build_menu_view` gives its
+    /// rows -- the item's position, with title and note rows carrying no id.
+    cursor: usize,
+    /// Pixel scroll offset, kept across redraws so the highlight pushes the view at the
+    /// edges rather than the view snapping to the cursor each frame.
+    off: usize,
+}
+
+impl MenuScreen {
+    const fn new() -> Self {
+        Self { cursor: 0, off: 0 }
+    }
+
+    /// Start a new list at the top. Carrying a cursor between menus of different lengths
+    /// is how you land on an item nobody chose.
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn draw(&self, panel: &mut display::Panel, screen: Screen, no_seed: bool) {
+        let (title, note) = menu_head(screen);
+        let items = items_of(screen, no_seed).unwrap_or(&[]);
+        let view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
+        display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
+    }
+
+    /// Take a movement key (`0`, `5` or `8`) and animate where it lands.
+    ///
+    /// The move runs through the scroll view so the highlight travels within the panel
+    /// and only pushes the view at an edge, and so pressing past the first or last item
+    /// keeps scrolling to reveal the title.
+    fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
+        let (title, note) = menu_head(screen);
+        let mut view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
+        let old = view.off();
+        match k {
+            // `0` jumps back to the top, the arrows move one row.
+            Key::Digit(0) => view.to_top(),
+            Key::Digit(8) => view.move_cursor(true),
+            _ => view.move_cursor(false),
+        }
+        if let Some(id) = view.selected() {
+            self.cursor = id as usize;
+        }
+        let new_off = view.off();
+        // Animate the move, then let the loop's redraw paint the settled frame.
+        glide_view(ui.panel, &mut view, old, new_off);
+        self.off = new_off;
     }
 }
 
@@ -882,10 +921,7 @@ fn build_menu_view<'a>(
 /// Draw a menu screen: the larger font, the selected row an inverted bar, scrolled to the
 /// view's persisted offset.
 fn draw_menu(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
-    let (title, note) = menu_head(screen);
-    let items = items_of(screen, v.no_seed).unwrap_or(&[]);
-    let view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
-    display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
+    v.menu.draw(panel, screen, v.no_seed);
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.
