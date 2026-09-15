@@ -25,6 +25,19 @@ pub type Area = catcard_upgrade::psram::PsramArea;
 #[cfg(feature = "board-mk3")]
 pub type Area = catcard_upgrade::nor::NorArea<crate::nor::NorBus>;
 
+/// Whether this board has a firmware-staging medium at all -- a cheap const check (no
+/// hardware brought up), for reporting the upgrade capability and refusing an offer early.
+pub fn has_staging() -> bool {
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        catcard_board::BOARD.psram.is_some()
+    }
+    #[cfg(feature = "board-mk3")]
+    {
+        catcard_board::BOARD.sflash.is_some()
+    }
+}
+
 /// Claim the board's firmware-staging area, if it has one and it is reachable.
 ///
 /// `None` when the medium is absent (a board with neither PSRAM nor SPI-NOR) or, on mk3,

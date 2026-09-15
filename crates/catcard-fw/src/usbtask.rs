@@ -24,8 +24,9 @@
 
 use catcard_board::BOARD;
 use catcard_hal::otg::{Event, Otg};
-use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Reject, Staged};
+
+use crate::staging;
 use catcard_usb::{FrameError, Opcode, PROTOCOL_VERSION, REPORT_LEN, Reassembler, Status, Writer};
 
 use crate::VERSION;
@@ -36,10 +37,10 @@ use crate::debug_mem;
 enum Stage {
     Idle,
     /// An image is arriving.
-    Receiving(Staged<'static, PsramArea>),
+    Receiving(Staged<'static, staging::Area>),
     /// An image arrived and passed inspection; the user has not yet been asked.
     Offered {
-        staged: Staged<'static, PsramArea>,
+        staged: Staged<'static, staging::Area>,
         approval: Approval,
     },
     /// The user approved. The session loop will reboot into the bootloader.
@@ -433,15 +434,16 @@ impl UsbTask {
                     self.begin_reply(Status::NotNow, &[]);
                     return;
                 }
-                Some(Opcode::UpgradeOffer) if BOARD.psram.is_none() => {
-                    // Say so on the first frame rather than after 256 KB have crossed
-                    // the wire, and say which of the several reasons it is.
-                    self.frames.reset();
-                    self.refuse(Reject::NoStagingArea);
-                    return;
-                }
                 Some(Opcode::UpgradeOffer) => {
-                    match Staged::begin(psram_area(), &BOARD, msg.total) {
+                    // Claim the board's staging area (PSRAM on mk4/mk5/Q1, SPI-NOR on mk3).
+                    // `None` -- no medium, or the SPI-NOR did not answer -- is refused on
+                    // this first frame rather than after 256 KB have crossed the wire.
+                    let Some(area) = staging::area() else {
+                        self.frames.reset();
+                        self.refuse(Reject::NoStagingArea);
+                        return;
+                    };
+                    match Staged::begin(area, &BOARD, msg.total) {
                         Ok(s) => self.stage = Stage::Receiving(s),
                         Err(r) => {
                             self.frames.reset();
@@ -667,7 +669,7 @@ impl UsbTask {
             catcard_usb::caps::KEY_INJECTION | catcard_usb::caps::UNLOCK_PIN
         } else {
             0
-        } | if BOARD.psram.is_some() {
+        } | if staging::has_staging() {
             catcard_usb::caps::UPGRADE
         } else {
             0
@@ -729,15 +731,6 @@ impl UsbTask {
             self.reply = None;
         }
     }
-}
-
-/// Claim the PSRAM staging region.
-fn psram_area() -> PsramArea {
-    // SAFETY: mk4 and Q1 have PSRAM memory-mapped and nothing else in this firmware uses
-    // its upper half. On a board without PSRAM this is never reached -- `UsbTask` is only
-    // constructed where `BOARD.psram` is `Some`.
-    let psram = BOARD.psram.expect("no PSRAM on this board");
-    unsafe { PsramArea::claim(&psram) }
 }
 
 /// Summarise an approval for the host, without a formatter.
