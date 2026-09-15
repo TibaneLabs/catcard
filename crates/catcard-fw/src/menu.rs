@@ -87,6 +87,8 @@ enum Screen {
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
+    /// Sign a partially-signed transaction (PSBT) picked from the SD card.
+    SignPsbt,
     /// The Games submenu.
     #[cfg(feature = "games")]
     Games,
@@ -117,8 +119,17 @@ enum Screen {
 ///
 /// A device with a seed has no "New wallet" or "Import seed": both would destroy the
 /// wallet it already holds, so they live only in the blank ordering. "Destroy seed" is not
-/// here either -- it moved into Settings, behind its warnings.
-const MAIN_ITEMS: &[&str] = &["Status", "Debug", "Utils", "About", "Settings", "Reboot"];
+/// here either -- it moved into Settings, behind its warnings. The first item is "Ready to
+/// Sign" rather than the blank device's "Status": a wallet exists, so the thing worth doing
+/// is signing a transaction the host has staged to the SD card.
+const MAIN_ITEMS: &[&str] = &[
+    "Ready to Sign",
+    "Debug",
+    "Utils",
+    "About",
+    "Settings",
+    "Reboot",
+];
 /// The blank device's ordering: the two ways to get a wallet come first, since that is the
 /// only thing worth doing here. New/Import appear only in this list.
 const MAIN_ITEMS_BLANK: &[&str] = &[
@@ -414,6 +425,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::SignPsbt {
+                sign_psbt(panel, &mut pad, matrix, drbg);
+                v.reset_menu();
+                screen = Screen::Main;
+                break;
+            }
             #[cfg(feature = "games")]
             if next == Screen::BlockMine {
                 crate::game::block_mine(panel, &mut pad, matrix, drbg);
@@ -578,8 +595,10 @@ fn step(
         // at the wrong entry the moment the order changes, and the entry it used to
         // reach by falling through was Reboot.
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
-            // "Status" is the screen behind the menu, so choosing it just redraws --
-            // there is no separate page.
+            // A wallet is present: the first item signs a transaction from the SD card.
+            (Key::Confirm, Some("Ready to Sign")) => Screen::SignPsbt,
+            // "Status" is the blank device's first item -- there is no separate page, so
+            // choosing it just redraws.
             (Key::Confirm, Some("Status")) => Screen::Main,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
@@ -775,6 +794,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
+        // Handled in `run`: it runs the file picker and drives the panel itself.
+        Screen::SignPsbt => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -3392,6 +3413,26 @@ fn read_choice(
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
+}
+
+/// Sign a partially-signed transaction (PSBT) staged on the SD card.
+///
+/// Chosen from the main menu's "Ready to Sign" when a wallet exists. For now this runs the
+/// `.psbt` file picker and acknowledges the choice; loading, parsing, verifying, showing
+/// the transaction, confirming and signing land as the PSBT support is wired in.
+fn sign_psbt(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) {
+    let Some(path) = browse_sd(panel, pad, matrix, drbg, "Pick a .psbt", Some("psbt"), true) else {
+        return;
+    };
+    // TODO: load the file into scratch, parse the PSBT, check it is ours and not already
+    // signed, show the transaction, confirm, sign each input, and write it back.
+    message(panel, "PSBT selected", path.as_str(), "signing coming soon");
+    wait_any_key(pad, matrix, drbg);
 }
 
 /// Format the SD card to the SD standard: one MBR partition filling the card, holding the
