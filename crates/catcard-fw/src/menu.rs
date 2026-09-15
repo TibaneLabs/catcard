@@ -267,11 +267,15 @@ pub fn run(session: Session<'_>) -> ! {
             {
                 let (title, note) = menu_head(screen, &v);
                 let mut view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
+                let old = view.off();
                 view.move_cursor(matches!(key, Key::Digit(8)));
                 if let Some(id) = view.selected() {
                     v.sc.cursor = id as usize;
                 }
-                v.menu_off = view.off();
+                let new_off = view.off();
+                // Animate the move, then let the loop's redraw paint the settled frame.
+                glide_view(panel, &mut view, old, new_off);
+                v.menu_off = new_off;
                 continue;
             }
 
@@ -3010,6 +3014,34 @@ enum DocExit {
     Cancelled,
 }
 
+/// Cycles held between animation frames of a scroll glide. Short enough that a one-line
+/// move settles in a blink, long enough that the motion reads as motion.
+const GLIDE_FRAME_CYCLES: u32 = 700_000;
+
+/// Animate a scroll view's offset from `from` to `to` on boards that animate, rendering the
+/// intermediate frames. The final frame at exactly `to` is left to the caller's next draw,
+/// so this only ever paints the in-between steps. On boards that don't animate it just
+/// leaves the view at `to`.
+fn glide_view(
+    panel: &mut display::Panel,
+    view: &mut catcard_ui::scroll::ScrollView<'_>,
+    from: usize,
+    to: usize,
+) {
+    if display::SMOOTH_SCROLL && from != to {
+        const FRAMES: isize = 6;
+        let (a, b) = (from as isize, to as isize);
+        for f in 1..FRAMES {
+            let off = (a + (b - a) * f / FRAMES).max(0) as usize;
+            view.set_off(off);
+            display::draw(panel, |c| catcard_ui::scroll::render(c, view));
+            let _ = usbtask::pump();
+            catcard_hal::dwt::delay_cycles(GLIDE_FRAME_CYCLES);
+        }
+    }
+    view.set_off(to);
+}
+
 /// Show a scrollable document ([`catcard_ui::scroll`]) and drive it from the keypad.
 ///
 /// A reading screen (no selectable lines) scrolls with `5`/`8` and leaves on Confirm or
@@ -3051,20 +3083,28 @@ fn show_doc(
             for k in keys.iter() {
                 match k {
                     // The up/down arrows: move a menu cursor, or scroll a reading screen.
+                    // Either way the offset change is animated, then the loop redraws the
+                    // settled frame.
                     Key::Digit(5) => {
+                        let old = view.off();
                         if is_menu {
                             view.move_cursor(false);
                         } else {
                             view.scroll(false, view.line_step());
                         }
+                        let new = view.off();
+                        glide_view(panel, &mut view, old, new);
                         break 'wait;
                     }
                     Key::Digit(8) => {
+                        let old = view.off();
                         if is_menu {
                             view.move_cursor(true);
                         } else {
                             view.scroll(true, view.line_step());
                         }
+                        let new = view.off();
+                        glide_view(panel, &mut view, old, new);
                         break 'wait;
                     }
                     Key::Confirm => {
@@ -3074,7 +3114,10 @@ fn show_doc(
                             }
                         } else if require_end && !view.at_end() {
                             // Not read to the end yet: page down instead of finishing.
+                            let old = view.off();
                             view.scroll(true, view.line_step());
+                            let new = view.off();
+                            glide_view(panel, &mut view, old, new);
                             break 'wait;
                         } else {
                             return DocExit::Confirmed;

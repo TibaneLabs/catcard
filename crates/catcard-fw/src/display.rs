@@ -263,6 +263,15 @@ pub const SCREEN_W: usize = 128;
 #[cfg(feature = "board-q1")]
 pub const SCREEN_W: usize = 320;
 
+/// Whether scrolling is animated. The mono panel is a single ~1 KB SPI blit per frame, so
+/// a short glide is cheap and reads well. The Q1's frame is ~154 KB polled a byte at a
+/// time and a vertical scroll dirties every row, defeating the row-cache -- so it jumps.
+#[cfg(not(feature = "board-q1"))]
+pub const SMOOTH_SCROLL: bool = true;
+/// As above, for the Q1: no animation.
+#[cfg(feature = "board-q1")]
+pub const SMOOTH_SCROLL: bool = false;
+
 /// What this board's confirm key is labelled with. The mk pads carry a tick moulded into
 /// the cap; the Q1's key is printed ENTER.
 /// Source: gpio-peripherals.md §Q/Q1 "Key decode" [C] for the Q1 legend.
