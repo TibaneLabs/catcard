@@ -81,6 +81,7 @@ enum Screen {
     UsbDrive,
     ViewTrngWords,
     AddressExplorer,
+    BrowseSd,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -142,6 +143,7 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "View TRNG Words",
     "Address Explorer",
+    "Browse SD card",
 ];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
@@ -320,6 +322,12 @@ pub fn run(session: Session<'_>) -> ! {
                 screen = Screen::Utils;
                 break;
             }
+            if next == Screen::BrowseSd {
+                browse_sd(panel, &mut pad, matrix, drbg, "SD card", None, false);
+                v.reset_menu();
+                screen = Screen::Utils;
+                break;
+            }
             if let Screen::NewSeed(words) = next {
                 new_seed(
                     gate,
@@ -426,6 +434,7 @@ fn step(
             (Key::Confirm, 1) => Screen::UsbDrive,
             (Key::Confirm, 2) => Screen::ViewTrngWords,
             (Key::Confirm, 3) => Screen::AddressExplorer,
+            (Key::Confirm, 4) => Screen::BrowseSd,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -545,6 +554,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ViewTrngWords => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         Screen::AddressExplorer => {}
+        // Handled in `run`: it lists the SD card and drives its own loop.
+        Screen::BrowseSd => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -1023,6 +1034,229 @@ fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
     file.flush(&mut vol).map_err(|_| "flush failed")?;
     vol.flush().map_err(|_| "flush failed")?;
     Ok(())
+}
+
+/// Longest file name a browser row keeps; longer names are truncated for display (the
+/// marquee still scrolls what is kept).
+const BROWSE_NAME_MAX: usize = 64;
+/// Most entries one directory shows; beyond this the listing stops (rare on a wallet card).
+const BROWSE_ENTRIES: usize = 48;
+/// Longest path the browser tracks as it descends.
+const BROWSE_PATH_MAX: usize = 160;
+/// The id the "Parent" row carries; real entries carry their (small) index.
+const BROWSE_PARENT: u32 = u32::MAX;
+
+/// One directory entry as the browser holds it, copied out of the lending `DirEntry`.
+struct BrowseEntry {
+    name: heapless::String<BROWSE_NAME_MAX>,
+    is_dir: bool,
+    len: u32,
+}
+
+/// Whether `name`'s extension equals `ext`, case-insensitively.
+fn ext_matches(name: &str, ext: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((_, e)) => e.eq_ignore_ascii_case(ext),
+        None => false,
+    }
+}
+
+/// Drop the last `/segment` of a path, leaving the parent (or root, the empty string).
+fn pop_segment(path: &mut heapless::String<BROWSE_PATH_MAX>) {
+    match path.rfind('/') {
+        Some(i) => path.truncate(i),
+        None => path.clear(),
+    }
+}
+
+/// Show a file's details, and -- when picking -- offer to choose it. Returns whether the
+/// owner confirmed (chose it).
+fn file_info(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    name: &str,
+    len: u32,
+    pick: bool,
+) -> bool {
+    use catcard_ui::scroll::Line as DLine;
+    let mut sz = Line::new();
+    let _ = write!(sz, "{len} bytes");
+    let mut lines: heapless::Vec<DLine, 6> = heapless::Vec::new();
+    let _ = lines.push(DLine::title("File"));
+    let _ = lines.push(DLine::body(name).wrapped());
+    let _ = lines.push(DLine::body(&sz).small());
+    if pick {
+        let _ = lines.push(DLine::body("y = select this").centered());
+    }
+    matches!(
+        show_doc(panel, pad, matrix, drbg, &lines, false, false),
+        DocExit::Confirmed
+    )
+}
+
+/// A generic microSD file browser.
+///
+/// Lists a directory as icon + name rows (folders, files, and a "Parent" row when not at
+/// the root), each selectable; a name too wide for the panel marquees while selected.
+/// Descending into a folder re-lists it; Cancel or "Parent" goes up, and Cancel at the
+/// root leaves. Selecting a file shows its details. When `pick` is set, that detail screen
+/// offers to choose the file and the chosen full path is returned; otherwise the browser
+/// is a viewer and returns `None`. `filter`, when set, hides files without that extension
+/// (folders always show), which is how the caller narrows to `.dfu`, `.psbt`, and so on.
+///
+/// **The SD data path has never run on hardware** (the emulator models none), so a failure
+/// is reported with the step it stopped at.
+fn browse_sd(
+    panel: &mut display::Panel,
+    pad: &mut Keypad,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    title: &str,
+    filter: Option<&str>,
+    pick: bool,
+) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    use catcard_sd::fat;
+
+    let fail = |panel: &mut display::Panel, pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg, why: &str| {
+        message(panel, "SD card", why, "any key to go back");
+        wait_for_any_key(pad, matrix, drbg);
+    };
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this to
+    // return before it can be chosen again.
+    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+        Ok(d) => d,
+        Err(_) => {
+            fail(panel, pad, matrix, drbg, "controller failed");
+            return None;
+        }
+    };
+    let card = match catcard_sd::init(&mut dev) {
+        Ok(c) => c,
+        Err(catcard_sd::Error::NoCard) => {
+            fail(panel, pad, matrix, drbg, "no card in slot");
+            return None;
+        }
+        Err(_) => {
+            fail(panel, pad, matrix, drbg, "card would not start");
+            return None;
+        }
+    };
+    let mut vol = match fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
+        Ok(v) => v,
+        Err(_) => {
+            fail(panel, pad, matrix, drbg, "not a FAT card");
+            return None;
+        }
+    };
+
+    let mut path: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
+    let mut entries: heapless::Vec<BrowseEntry, BROWSE_ENTRIES> = heapless::Vec::new();
+
+    loop {
+        // List the current directory, copying each entry out of the lending iterator.
+        entries.clear();
+        let dir = if path.is_empty() {
+            Ok(vol.root())
+        } else {
+            vol.open_dir(&path)
+        };
+        let listing_ok = match dir {
+            Ok(d) => {
+                let mut it = vol.iter_dir(d);
+                loop {
+                    match it.next() {
+                        Ok(Some(e)) => {
+                            if e.is_dot() {
+                                continue;
+                            }
+                            let is_dir = e.is_dir();
+                            if let Some(ext) = filter
+                                && !is_dir
+                                && !ext_matches(e.name(), ext)
+                            {
+                                continue;
+                            }
+                            let mut nm = heapless::String::new();
+                            for c in e.name().chars() {
+                                if nm.push(c).is_err() {
+                                    break;
+                                }
+                            }
+                            let entry = BrowseEntry {
+                                name: nm,
+                                is_dir,
+                                len: e.len(),
+                            };
+                            if entries.push(entry).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+                true
+            }
+            Err(_) => false,
+        };
+
+        // Build the listing as a menu document and run it. Scoped so `lines` -- which
+        // borrows `path` (the title) and `entries` (the names) -- is dropped before the
+        // navigation below mutates `path`.
+        let exit = {
+            use catcard_ui::scroll::Line as DLine;
+            let header: &str = if path.is_empty() { title } else { &path };
+            let mut lines: heapless::Vec<DLine, { BROWSE_ENTRIES + 3 }> = heapless::Vec::new();
+            let _ = lines.push(DLine::title(header));
+            if !path.is_empty() {
+                let _ = lines
+                    .push(DLine::item("Parent", BROWSE_PARENT).with_icon(&catcard_ui::icons::BACK));
+            }
+            if !listing_ok {
+                let _ = lines.push(DLine::body("(could not read)").centered());
+            } else if entries.is_empty() {
+                let _ = lines.push(DLine::body("(empty)").centered());
+            }
+            for (i, e) in entries.iter().enumerate() {
+                let icon = if e.is_dir {
+                    &catcard_ui::icons::FOLDER
+                } else {
+                    &catcard_ui::icons::FILE
+                };
+                let _ = lines.push(DLine::item(&e.name, i as u32).with_icon(icon));
+            }
+            show_doc(panel, pad, matrix, drbg, &lines, false, false)
+        };
+
+        match exit {
+            // Back out one level, or leave the browser at the root.
+            DocExit::Cancelled | DocExit::Confirmed => {
+                if path.is_empty() {
+                    return None;
+                }
+                pop_segment(&mut path);
+            }
+            DocExit::Selected(BROWSE_PARENT) => pop_segment(&mut path),
+            DocExit::Selected(idx) => {
+                let e = &entries[idx as usize];
+                if e.is_dir {
+                    let _ = path.push('/');
+                    let _ = path.push_str(&e.name);
+                } else {
+                    let mut full: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
+                    let _ = full.push_str(&path);
+                    let _ = full.push('/');
+                    let _ = full.push_str(&e.name);
+                    if file_info(panel, pad, matrix, drbg, &e.name, e.len, pick) && pick {
+                        return Some(full);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Authorise a staged image, which is what actually installs it.
