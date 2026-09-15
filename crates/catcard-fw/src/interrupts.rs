@@ -1,11 +1,15 @@
 //! Interrupt wiring.
 //!
 //! The wallet runs **polled** -- the main loop and each screen call [`usbtask::pump`],
-//! and nothing depends on an interrupt firing. The one exception is the USB Drive screen,
-//! which drives mass storage from the OTG_FS interrupt so the transport keeps moving
-//! while the foreground is busy with the SD card. That interrupt is enabled only while
-//! that screen is open (see [`usbtask::msc_enter`]/[`msc_exit`](usbtask::msc_exit)) and
-//! disabled on the way out, so the rest of the firmware is unaffected by it.
+//! and nothing depends on an interrupt firing. Two things are the exception:
+//!
+//! - the USB Drive screen drives mass storage from the OTG_FS interrupt so the transport
+//!   keeps moving while the foreground is busy with the SD card. That one is enabled only
+//!   while that screen is open (see [`usbtask::msc_enter`]/[`msc_exit`](usbtask::msc_exit)).
+//! - the keypad columns carry falling-edge EXTI interrupts the whole time, so a keypress
+//!   is timestamped at the electrical edge for entropy rather than at the next 60 Hz scan
+//!   (see [`keypad::on_key_edge`](crate::keypad::on_key_edge)). Their handler only samples
+//!   two timers and masks itself, so the firmware stays polled in every other respect.
 //!
 //! There is no device PAC in this tree, so the vector is not claimed by name. cortex-m-rt
 //! routes every device interrupt through `DefaultHandler`, handing it the active IRQ
@@ -49,6 +53,34 @@ pub fn disable_otg() {
     NVIC::unpend(OtgFs);
 }
 
+/// A dynamically-numbered NVIC line, for the several EXTI IRQs whose numbers are computed
+/// from which pins the board's keypad columns sit on.
+#[derive(Clone, Copy)]
+struct DynIrq(u16);
+
+// SAFETY: every number passed here comes from `exti::irq_of_line`, which only yields valid
+// EXTI positions in the L4 vector table, and those handlers are installed in this module.
+unsafe impl InterruptNumber for DynIrq {
+    fn number(self) -> u16 {
+        self.0
+    }
+}
+
+/// Unmask, in the NVIC, every distinct EXTI IRQ the given column lines can raise. Called
+/// once from keypad bring-up; the lines' own arming is done in the EXTI controller.
+pub fn enable_exti(line_mask: u16) {
+    for line in 0..16u8 {
+        if line_mask & (1 << line) == 0 {
+            continue;
+        }
+        let irqn = catcard_hal::exti::irq_of_line(line);
+        let irq = DynIrq(irqn);
+        NVIC::unpend(irq);
+        // SAFETY: `irqn` is a real EXTI position and `DefaultHandler` services it.
+        unsafe { NVIC::unmask(irq) };
+    }
+}
+
 /// Every device interrupt lands here (no PAC to name them). Service OTG_FS; trap anything
 /// else, which can only be a bug since nothing else is ever unmasked.
 // cortex-m-rt requires `DefaultHandler` be `unsafe`; the body itself does nothing unsafe.
@@ -56,6 +88,12 @@ pub fn disable_otg() {
 unsafe fn DefaultHandler(irqn: i16) {
     if irqn == OTG_FS_IRQN as i16 {
         crate::usbtask::on_otg_interrupt();
+        return;
+    }
+    if irqn >= 0 && catcard_hal::exti::is_exti_irq(irqn as u16) {
+        // A keypad column fell: latch the timing sample. The handler clears and masks its
+        // own EXTI lines, so this returns cleanly to the foreground.
+        crate::keypad::on_key_edge();
         return;
     }
     // An interrupt we never enabled fired: park rather than return to a corrupt state.

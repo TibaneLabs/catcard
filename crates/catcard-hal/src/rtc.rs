@@ -7,7 +7,11 @@
 //! UI DRBG it is extra entropy, never a precondition. If the RTC is not running the
 //! registers read a constant, and mixing a constant is harmless.
 //!
-//! Sources: RTC register map RM0432 §RTC [C]; `RTCAPBEN` is `RCC_APB1ENR1` bit 10 [C].
+//! Sources: base `0x4000_2800`, `RTC_TR`=+0x00, `RTC_SSR`=+0x28 — hw-reference/platform.md
+//! §2 [C]; `RTC_DR`=+0x04 and the shadow-register read order (SSR, TR, DR unlocks the
+//! shadow) from RM0432 §RTC [C]; `RTCAPBEN` is `RCC_APB1ENR1` bit 10 [C]. No VBAT, so the
+//! RTC counts elapsed-since-boot, never wall-clock time (platform.md §3) — which is exactly
+//! why it is used only as timing jitter, credited nothing on its own.
 
 use crate::reg;
 use catcard_board::memory::fixed;
@@ -26,16 +30,35 @@ const RTC_SSR: u32 = RTC + 0x28;
 const RCC_APB1ENR1: u32 = fixed::RCC + 0x58;
 const RTCAPBEN: u32 = 1 << 10;
 
-/// A snapshot of the RTC's sub-second, time and date registers, for entropy only.
+/// Open the RTC's APB read gate, once, so [`snapshot`] can read the registers.
+///
+/// Separate from [`snapshot`] on purpose: this is the only part that writes RCC, via a
+/// read-modify-write shared with the SPI and PWR clock gates on the same register. So it
+/// runs once from the foreground during bring-up, never from the interrupt handler that
+/// samples the RTC per keypress -- which would otherwise race a concurrent foreground
+/// gate change and lose it. After this, `snapshot` is pure reads and interrupt-safe.
 ///
 /// # Safety
-/// Opens the RTC's APB clock gate (idempotent, read-only in effect) and reads three RTC
-/// registers. Single-threaded callers.
-pub unsafe fn snapshot() -> [u32; 3] {
-    // SAFETY: as documented. A read with the gate closed could fault, so open it first;
-    // the gate is otherwise unused by this firmware.
+/// Writes `RCC_APB1ENR1`. Call from a single-threaded context before any interrupt can
+/// call [`snapshot`], and not concurrently with another read-modify-write of that register.
+pub unsafe fn enable() {
+    // SAFETY: idempotent gate enable; the caller guarantees no concurrent RMW of this reg.
     unsafe {
         reg::set_bits(RCC_APB1ENR1, RTCAPBEN);
-        [reg::read(RTC_SSR), reg::read(RTC_TR), reg::read(RTC_DR)]
+        let _ = reg::read(RCC_APB1ENR1); // let the gate settle before first access
     }
+}
+
+/// A snapshot of the RTC's sub-second, time and date registers, for entropy only.
+///
+/// Pure reads, so it is safe to call from an interrupt handler. The shadow registers
+/// unlock when `RTC_DR` is read, so the order (SSR, TR, DR) matters; entropy does not care
+/// about the values, but reading DR last keeps a caller that did care unblocked.
+///
+/// # Safety
+/// Reads three RTC registers; [`enable`] must have opened the APB gate first, or the read
+/// can fault. No side effects otherwise.
+pub unsafe fn snapshot() -> [u32; 3] {
+    // SAFETY: reads only; the gate was opened by `enable` during bring-up.
+    unsafe { [reg::read(RTC_SSR), reg::read(RTC_TR), reg::read(RTC_DR)] }
 }

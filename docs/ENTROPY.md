@@ -87,6 +87,18 @@ The keypad shuffle draws from `domain::UI`. It cannot move the seed generator, b
 exactly this — 500 shuffles, then the pool produces the same seed it would have
 produced untouched.
 
+**The UI DRBG is topped up from keypress timing.** Every physical keypress reseeds the
+`domain::UI` generator with the DWT cycle counter and the three RTC registers sampled at
+the moment of the press. To make "the moment of the press" mean the electrical edge
+rather than the next 60 Hz scan, the keypad columns carry falling-edge EXTI interrupts
+while the matrix idles (all rows driven low): a press raises an interrupt at once and the
+handler latches the timers there, at CPU-cycle resolution, independent of the poll
+schedule — the same "hard IRQ per press" the stock firmware arms for its seed mash. This
+is a top-up of a generator already seeded from the pool, never a precondition; a stopped
+RTC (no VBAT — it counts elapsed-since-boot) contributes a constant, which is harmless.
+It never touches `EntropyPool`, so it cannot influence a wallet seed. See
+`catcard-fw/src/keypad.rs` and `catcard-hal/src/exti.rs`.
+
 `below(n)` uses rejection sampling, never modulo. `shuffle` is Fisher-Yates over it.
 
 ### Health testing

@@ -39,6 +39,9 @@ pub(crate) fn pressed_keys(
     out: &mut heapless::Vec<Key, { KEYS + 1 }>,
 ) {
     out.clear();
+    // Mask the column EXTI lines while the scan toggles rows, or a scan would raise the
+    // very interrupt this uses to time a real press. Re-armed at the end for the idle gap.
+    matrix.disarm_edge_detect();
     let n = pad.scan(matrix, drbg, events);
     let mut physical = false;
     for e in &events[..n] {
@@ -48,22 +51,30 @@ pub(crate) fn pressed_keys(
         }
     }
 
-    // Every physical keypress carries timing no polling schedule can predict -- the cycle
-    // counter and the RTC sub-second at the moment it was detected -- so mix them into the
-    // UI DRBG as extra entropy. This only tops up a generator already seeded from the
-    // entropy pool; it is never a precondition, and a stopped RTC contributing a constant
-    // is harmless. (Injected keys carry no such timing and are skipped.)
+    // Every physical keypress carries timing no polling schedule can predict, so mix it
+    // into the UI DRBG as extra entropy. The best sample is the one the column-edge
+    // interrupt latched at the instant of contact -- CPU-cycle resolution, independent of
+    // the 60 Hz scan. If none was caught (a key that went down exactly at scan time), fall
+    // back to sampling the timers now. This only tops up a generator already seeded from
+    // the entropy pool; it is never a precondition, and a stopped RTC contributing a
+    // constant is harmless. (Injected keys carry no such timing and are skipped.)
     if physical {
-        let cycles = catcard_hal::dwt::cycles();
-        // SAFETY: single-threaded UI context; `snapshot` only opens an APB gate and reads.
-        let rtc = unsafe { catcard_hal::rtc::snapshot() };
-        let mut sample = [0u8; 16];
-        sample[0..4].copy_from_slice(&cycles.to_le_bytes());
-        sample[4..8].copy_from_slice(&rtc[0].to_le_bytes());
-        sample[8..12].copy_from_slice(&rtc[1].to_le_bytes());
-        sample[12..16].copy_from_slice(&rtc[2].to_le_bytes());
+        let sample = crate::keypad::take_edge_sample().unwrap_or_else(|| {
+            let cycles = catcard_hal::dwt::cycles();
+            // SAFETY: single-threaded UI context; `snapshot` only opens an APB gate and reads.
+            let rtc = unsafe { catcard_hal::rtc::snapshot() };
+            let mut s = [0u8; 16];
+            s[0..4].copy_from_slice(&cycles.to_le_bytes());
+            s[4..8].copy_from_slice(&rtc[0].to_le_bytes());
+            s[8..12].copy_from_slice(&rtc[1].to_le_bytes());
+            s[12..16].copy_from_slice(&rtc[2].to_le_bytes());
+            s
+        });
         drbg.reseed(&sample, &[]);
     }
+
+    // Idle the matrix for edge detection during the caller's wait before the next scan.
+    matrix.arm_edge_detect();
 
     if let Some(k) = crate::usbtask::take_injected_key() {
         let _ = out.push(k);

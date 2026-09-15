@@ -21,6 +21,7 @@
 
 pub mod clock;
 pub mod dwt;
+pub mod exti;
 pub mod gpio;
 pub mod otg;
 pub mod reg;
