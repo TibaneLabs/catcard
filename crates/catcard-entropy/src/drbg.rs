@@ -37,8 +37,31 @@ pub const MAX_BYTES_PER_REQUEST: usize = 1 << 13; // 2^16 bits
 pub struct HmacDrbg {
     key: [u8; OUTLEN],
     v: [u8; OUTLEN],
+    /// SP 800-90A's reseed counter: generate calls since the last (re)seed. Reset to 1 by
+    /// `new` and every `reseed`; the interval check in `generate_with` rests on it.
     #[zeroize(skip)]
     reseed_counter: u64,
+    /// Lifetime count of `reseed` calls -- diagnostic only, not part of the DRBG state.
+    /// The instantiation counts as the first seeding, so total seedings is `1 + reseeds`.
+    #[zeroize(skip)]
+    reseeds: u64,
+    /// Lifetime count of `generate` calls -- diagnostic only.
+    #[zeroize(skip)]
+    generates: u64,
+}
+
+/// A read-only snapshot of a [`HmacDrbg`]'s diagnostic counters, for a status display.
+/// None of these fields are secret; they count events, not generator state.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct DrbgStats {
+    /// Times `reseed` has been called since instantiation.
+    pub reseeds: u64,
+    /// Total seedings, counting the initial instantiation: `1 + reseeds`.
+    pub seedings: u64,
+    /// Total `generate` calls over the generator's life.
+    pub generates: u64,
+    /// `generate` calls since the last (re)seed.
+    pub since_reseed: u64,
 }
 
 fn hmac(key: &[u8; OUTLEN], parts: &[&[u8]]) -> [u8; OUTLEN] {
@@ -60,9 +83,22 @@ impl HmacDrbg {
             key: [0x00; OUTLEN],
             v: [0x01; OUTLEN],
             reseed_counter: 1,
+            reseeds: 0,
+            generates: 0,
         };
         this.update(&[entropy, nonce, personalization]);
         this
+    }
+
+    /// A snapshot of the diagnostic counters, for a status screen. Cheap and side-effect
+    /// free; none of it is secret.
+    pub fn stats(&self) -> DrbgStats {
+        DrbgStats {
+            reseeds: self.reseeds,
+            seedings: 1 + self.reseeds,
+            generates: self.generates,
+            since_reseed: self.reseed_counter.saturating_sub(1),
+        }
     }
 
     /// SP 800-90A §10.1.2.2 — the DRBG update function.
@@ -96,6 +132,7 @@ impl HmacDrbg {
     pub fn reseed(&mut self, entropy: &[u8], additional: &[u8]) {
         self.update(&[entropy, additional]);
         self.reseed_counter = 1;
+        self.reseeds = self.reseeds.saturating_add(1);
     }
 
     /// SP 800-90A §10.1.2.5 — generate pseudorandom bytes.
@@ -125,6 +162,7 @@ impl HmacDrbg {
             self.update(&[additional]);
         }
         self.reseed_counter += 1;
+        self.generates = self.generates.saturating_add(1);
         Ok(())
     }
 
@@ -394,5 +432,35 @@ mod tests {
         assert_eq!(d.generate(&mut out), Err(Error::ReseedRequired));
         d.reseed(&[1; 32], &[]);
         assert!(d.generate(&mut out).is_ok());
+    }
+
+    #[test]
+    fn stats_count_seedings_generates_and_the_reseed_window() {
+        let mut d = drbg();
+        // Instantiation is the first seeding; nothing generated or reseeded yet.
+        let s = d.stats();
+        assert_eq!(s.reseeds, 0);
+        assert_eq!(s.seedings, 1);
+        assert_eq!(s.generates, 0);
+        assert_eq!(s.since_reseed, 0);
+
+        let mut out = [0u8; 8];
+        d.generate(&mut out).unwrap();
+        d.generate(&mut out).unwrap();
+        let s = d.stats();
+        assert_eq!(s.generates, 2);
+        assert_eq!(s.since_reseed, 2);
+
+        d.reseed(&[7; 32], &[]);
+        let s = d.stats();
+        assert_eq!(s.reseeds, 1);
+        assert_eq!(s.seedings, 2, "seedings counts the instantiation plus reseeds");
+        assert_eq!(s.since_reseed, 0, "reseed resets the window");
+        assert_eq!(s.generates, 2, "reseeding does not touch the lifetime generate count");
+
+        d.generate(&mut out).unwrap();
+        let s = d.stats();
+        assert_eq!(s.generates, 3);
+        assert_eq!(s.since_reseed, 1);
     }
 }

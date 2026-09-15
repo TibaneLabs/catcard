@@ -21,7 +21,7 @@ pub mod drbg;
 pub mod health;
 pub mod pool;
 
-pub use drbg::HmacDrbg;
+pub use drbg::{DrbgStats, HmacDrbg};
 pub use health::{ContinuousTest, HealthError};
 pub use pool::{EntropyPool, Insufficient, Policy, Source};
 

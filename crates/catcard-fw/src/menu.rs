@@ -73,6 +73,9 @@ enum Screen {
     Boot,
     Selftest,
     Keypad,
+    /// The UI DRBG's diagnostic counters: how many times it has been (re)seeded, and how
+    /// much it has generated.
+    PrngStatus,
     Colours,
     Logs,
     SaveLog,
@@ -188,6 +191,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "Boot report",
     "Selftest",
     "Keypad",
+    "PRNG status",
     "microSD",
     "Logs",
     "Save log to SD",
@@ -219,6 +223,7 @@ pub fn run(session: Session<'_>) -> ! {
         report,
         last_key: None,
         keys_seen: 0,
+        drbg_stats: drbg.stats(),
         sc: Scroll::new(),
         menu_off: 0,
         no_seed,
@@ -230,6 +235,9 @@ pub fn run(session: Session<'_>) -> ! {
 
     loop {
         if redraw && !showing_offer {
+            // Snapshot the DRBG's counters so the PRNG-status screen shows the current
+            // numbers; cheap and side-effect-free on any other screen.
+            v.drbg_stats = drbg.stats();
             draw(panel, screen, &v);
             redraw = false;
         }
@@ -278,9 +286,26 @@ pub fn run(session: Session<'_>) -> ! {
                 continue;
             }
 
+            let prev_key = v.last_key;
             v.last_key = Some(*key);
             v.keys_seen = v.keys_seen.saturating_add(1);
             redraw = true;
+
+            // The live debug screens (keypad tester, PRNG status) stay open and repaint on
+            // each key instead of leaving on the first. `x` returns to Debug -- and on the
+            // keypad tester it takes two `x` in a row, so a single `x` still registers as a
+            // key to test. Every other key just refreshes the numbers above.
+            if matches!(screen, Screen::Keypad | Screen::PrngStatus) {
+                let leave = match screen {
+                    Screen::Keypad => *key == Key::Cancel && prev_key == Some(Key::Cancel),
+                    _ => *key == Key::Cancel,
+                };
+                if leave {
+                    v.reset_menu();
+                    screen = Screen::Debug;
+                }
+                continue;
+            }
 
             // Cursor movement first: it stays on this screen, so it never reaches the
             // transition table below. The move runs through the scroll view so the
@@ -449,6 +474,13 @@ pub fn run(session: Session<'_>) -> ! {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
                 v.reset_menu();
+                // Entering a live debug screen: clear the key trail so the keypad tester
+                // opens on "press any key" rather than the `y` that selected it, and its
+                // count starts at zero.
+                if matches!(next, Screen::Keypad | Screen::PrngStatus) {
+                    v.last_key = None;
+                    v.keys_seen = 0;
+                }
             }
             // The colour chart painted the panel directly, behind the canvas and its row
             // cache, so the next frame has to go out whole or the chart stays under it.
@@ -550,6 +582,7 @@ fn step(
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
             (Key::Confirm, Some("Selftest")) => Screen::Selftest,
             (Key::Confirm, Some("Keypad")) => Screen::Keypad,
+            (Key::Confirm, Some("PRNG status")) => Screen::PrngStatus,
             (Key::Confirm, Some("microSD")) => Screen::Sd,
             (Key::Confirm, Some("Logs")) => Screen::Logs,
             (Key::Confirm, Some("Save log to SD")) => Screen::SaveLog,
@@ -600,6 +633,9 @@ struct View<'a> {
     report: &'a BootReport,
     last_key: Option<Key>,
     keys_seen: u32,
+    /// A snapshot of the UI DRBG's diagnostic counters, refreshed before each draw so the
+    /// PRNG-status screen shows current numbers.
+    drbg_stats: catcard_entropy::DrbgStats,
     sc: Scroll,
     /// The menu's pixel scroll offset, persisted across redraws so the highlight pushes
     /// the view at the edges rather than the view snapping to the cursor each frame.
@@ -652,6 +688,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
+        Screen::PrngStatus => prng_screen(panel, v.drbg_stats),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
@@ -1000,6 +1037,38 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
     let _ = write!(l, "x twice  back");
     let _ = lines.push(l);
     info(panel, "Keypad", &lines);
+}
+
+/// The UI DRBG's diagnostic counters. This is the generator behind the keypad scan
+/// shuffle and every UI random draw; it is topped up (reseeded) on each physical keypress
+/// with the edge-timed cycle counter and RTC, so `seeded`/`reseeds` climb as keys are
+/// pressed. It is never the wallet-seed generator -- that is `EntropyPool`, which has no
+/// draw API at all. Counters only; no generator state is shown.
+fn prng_screen(panel: &mut display::Panel, s: catcard_entropy::DrbgStats) {
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+
+    let mut l = Line::new();
+    let _ = write!(l, "UI HMAC-SHA256");
+    let _ = lines.push(l);
+
+    // Total seedings counts the boot instantiation plus every reseed.
+    let mut l = Line::new();
+    let _ = write!(l, "seeded  {}", s.seedings);
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = write!(l, "reseeds {}", s.reseeds);
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = write!(l, "gen     {}", s.generates);
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = write!(l, "since rs {}", s.since_reseed);
+    let _ = lines.push(l);
+
+    info(panel, "PRNG status", &lines);
 }
 
 /// Colours: a chart of what the panel can show -- bars, the full ramp of each channel,
