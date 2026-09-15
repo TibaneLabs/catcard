@@ -336,8 +336,8 @@ The whole path, twice, against the real mk4 bootloader:
 ```
 ping      status=Ok
 identify  status=Ok protocol=1 board=mk4 version=0.0.1
-offer     status=Ok verified=True  len=262144 version=0.0.1 key_slot=0 older=False
-offer     status=Ok verified=False len=987136 version=5.4.5 key_slot=1 older=True
+offer     status=Ok verified=True len=262144 version=0.0.1 key_slot=0 older=False
+offer     status=Ok verified=True len=987136 version=5.4.5 key_slot=1 older=True
 stopped: guest requested a system reset (AIRCR.SYSRESETREQ)
 ```
 
@@ -345,9 +345,13 @@ The second line is the one worth having: **Coldcard 5.4.5, 987 KB, signed with a
 production key** — CatCard installing stock firmware back onto the device. It exercises
 what the dev-signed case cannot:
 
-- `verified=False`, `key_slot=1`. The five factory keys are not published, so the
-  signature **cannot** be checked here. The device says so rather than implying an
-  absence of evidence is evidence of absence.
+- `verified=True`, `key_slot=1`. The firmware now embeds all six of the bootloader's
+  approved public keys (`hw-reference/firmware-keys/`), so a production-signed image is
+  checked against the exact key its `pubkey_num` names, over the exact double-SHA256 the
+  bootloader signs. A stock image verifies and is named as **Coinkite signed** rather than
+  dismissed as uncheckable; an image whose signature does not match the key it claims is
+  refused before anything is staged. What we cannot do is *produce* a production signature
+  — those private keys are secret — only recognise one.
 - `older=True`. Every build of this firmware is newer than any released stock firmware,
   so an earlier version of `inspect` refused all of them — making a return to stock
   impossible. That is now a warning, with the bootloader's OTP high-water left as the
@@ -356,8 +360,8 @@ what the dev-signed case cannot:
 Both facts reach the approval screen, and a person decides:
 
 ```
-signature checked            checked, but OLDER
-SIGNATURE NOT CHECKED        NOT CHECKED, and OLDER
+Coinkite signed              Coinkite signed, but OLDER
+dev key (not genuine)        dev key, and OLDER
 ```
 
 ### The install never happened because we never asked for it

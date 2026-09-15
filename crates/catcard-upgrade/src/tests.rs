@@ -5,7 +5,7 @@
 //! produces — not that two copies of our own arithmetic agree.
 
 use super::*;
-use catcard_board::spec::{MK3, MK4};
+use catcard_board::spec::{MK3, MK4, MK5, Q1};
 use catcard_fwhdr::{MAGIC, install_flags, place_header, signed_digest};
 
 /// A staging area with a `Vec` behind it.
@@ -166,15 +166,52 @@ fn a_dev_signed_image_verifies_on_device() {
 }
 
 #[test]
-fn a_factory_signed_image_is_reported_as_uncheckable_not_as_good() {
-    // The five factory keys are not published. Saying "verified" here, or refusing
-    // outright, would both be wrong: the first is a lie and the second makes official
-    // firmware uninstallable. It has to reach a human as what it is.
+fn a_dev_signature_wearing_a_factory_slot_label_is_rejected() {
+    // Now that the firmware holds all six approved keys, every signature is actually
+    // checked. This image is dev-signed but its header claims pubkey_num=3, so the
+    // signature is verified against production key 3 -- which it does not match. That is a
+    // forgery attempt (or corruption), and is refused before anything is staged, rather
+    // than waved through as "uncheckable".
     let image = image_for(&MK4, NEWER, 3);
     let mut s = staged_with(&image);
-    let a = s.inspect(Some(&running(OLDER))).unwrap();
-    assert_eq!(a.signature, Signature::FactoryKeyUnverifiable { slot: 3 });
-    assert!(!a.is_verified());
+    assert_eq!(s.inspect(Some(&running(OLDER))), Err(Reject::BadSignature));
+}
+
+#[test]
+fn a_verified_signature_is_classified_by_its_key_and_the_board() {
+    // The classification of an already-verified signature. Split out because no test can
+    // forge a production signature (the private keys are secret), so the happy factory
+    // paths are exercised here rather than through a full `inspect`.
+    assert_eq!(classify(&MK4, 0), Signature::DeveloperKey);
+    // Production slots the board enables -> a named, attributable Coinkite signature.
+    assert_eq!(classify(&MK4, 1), Signature::FactoryKey { slot: 1 });
+    assert_eq!(classify(&MK4, 5), Signature::FactoryKey { slot: 5 });
+    assert_eq!(classify(&MK5, 5), Signature::FactoryKey { slot: 5 });
+    assert_eq!(classify(&Q1, 5), Signature::FactoryKey { slot: 5 });
+    // Slot 5 is #if 0-disabled on mk3: a real signature the local bootloader will refuse.
+    assert_eq!(classify(&MK3, 5), Signature::UntrustedSlot { slot: 5 });
+    // mk3 still trusts slots 0..=4.
+    assert_eq!(classify(&MK3, 1), Signature::FactoryKey { slot: 1 });
+}
+
+#[test]
+fn is_verified_tracks_whether_this_board_accepts_the_key() {
+    let approval = |sig| Approval {
+        header: running(NEWER),
+        signature: sig,
+        length: MIN_FIRMWARE_LENGTH,
+        older_than_running: false,
+    };
+    // Verifies and the board accepts the key.
+    assert!(approval(Signature::DeveloperKey).is_verified());
+    assert!(approval(Signature::FactoryKey { slot: 1 }).is_verified());
+    // Verifies cryptographically, but this board's bootloader will not boot it, so
+    // "checked" would mislead.
+    assert!(!approval(Signature::UntrustedSlot { slot: 5 }).is_verified());
+    // Only a production key is attributable.
+    assert!(!approval(Signature::DeveloperKey).is_factory_signed());
+    assert!(approval(Signature::FactoryKey { slot: 1 }).is_factory_signed());
+    assert!(approval(Signature::UntrustedSlot { slot: 5 }).is_factory_signed());
 }
 
 #[test]

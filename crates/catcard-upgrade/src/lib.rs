@@ -31,8 +31,8 @@
 
 use catcard_board::BoardSpec;
 use catcard_fwhdr::{
-    DEV_PUBKEY, DEV_PUBKEY_NUM, DigestStream, FirmwareHeader, HEADER_LEN, HEADER_OFFSET,
-    MIN_FIRMWARE_LENGTH, hw_compat,
+    APPROVED_PUBKEYS, DigestStream, FirmwareHeader, HEADER_LEN, HEADER_OFFSET, MIN_FIRMWARE_LENGTH,
+    hw_compat, is_factory_key,
 };
 
 pub mod dfuse;
@@ -77,20 +77,30 @@ impl From<catcard_fwhdr::Error> for Reject {
 }
 
 /// What is known about an image's signature.
+///
+/// Every variant here means the signature *verified* against the approved public key its
+/// `pubkey_num` selects -- the firmware holds all six now, so a bad signature does not
+/// reach here at all: it is [`Reject::BadSignature`]. What the variants distinguish is
+/// *whose* key signed it and whether this board's bootloader will accept that key.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Signature {
-    /// Signed with the published developer key, and it verifies.
+    /// Signed with the published developer key (slot 0), and it verifies.
     ///
     /// This says the image is intact and is what the host meant to send. It says
     /// **nothing** about who made it: the matching private key is published, so anyone
     /// can produce this signature. On hardware such an image boots with a warning and no
     /// green light.
     DeveloperKey,
-    /// Signed with one of the five factory keys, which are not published.
-    ///
-    /// Cannot be checked here. The bootloader will check it after installing — and if it
-    /// is wrong, after having already overwritten the running firmware.
-    FactoryKeyUnverifiable { slot: u32 },
+    /// Signed with one of the five Coinkite production keys (slots 1..=5), and it verifies
+    /// against that key -- so this is a genuine Coinkite image (e.g. stock firmware). The
+    /// private key is secret, so the signature *is* attributable, unlike the dev key. This
+    /// board's bootloader enables `slot`, so it will boot clean with the green light.
+    FactoryKey { slot: u32 },
+    /// The signature verifies against a production key the *bootloader on this board* does
+    /// not enable -- slot 5 on mk3. The signature is real, but the local bootloader will
+    /// refuse the image. Reported, not refused: the person decides, and the bootloader has
+    /// the final say regardless.
+    UntrustedSlot { slot: u32 },
 }
 
 /// What a user is being asked to approve.
@@ -116,9 +126,26 @@ pub struct Approval {
 }
 
 impl Approval {
-    /// Whether the image was actually verified, as opposed to merely well-formed.
+    /// Whether the signature verified against a key this board's bootloader will accept.
+    ///
+    /// True for the dev key and for a production key this board enables. False only for a
+    /// production key the local bootloader does not enable (slot 5 on mk3) -- the
+    /// signature is valid, but calling it "checked" here would imply the device will boot
+    /// it, which it will not.
     pub fn is_verified(&self) -> bool {
-        matches!(self.signature, Signature::DeveloperKey)
+        matches!(
+            self.signature,
+            Signature::DeveloperKey | Signature::FactoryKey { .. }
+        )
+    }
+
+    /// Whether a Coinkite production key signed this image (as opposed to the published
+    /// developer key). A production signature is attributable; a dev one is not.
+    pub fn is_factory_signed(&self) -> bool {
+        matches!(
+            self.signature,
+            Signature::FactoryKey { .. } | Signature::UntrustedSlot { .. }
+        )
     }
 }
 
@@ -278,20 +305,26 @@ impl<'a, A: StagingArea> Staged<'a, A> {
 
         let older_than_running = running.is_some_and(|cur| header.timestamp < cur.timestamp);
 
+        // `validate` already rejected `pubkey_num >= NUM_PUBKEYS`, so the slot indexes the
+        // table. We hold all six approved keys now, so every signature is actually checked
+        // -- dev or production alike -- against the exact key the bootloader would use, over
+        // the exact double-SHA256 digest it signs (hw-reference/firmware-signing.md §2 [C]).
+        let slot = header.pubkey_num;
         let digest = self.stored_digest()?;
-        let signature = match header.pubkey_num {
-            DEV_PUBKEY_NUM => {
-                match catcard_sign::ecdsa_verify(
-                    &compressed(&DEV_PUBKEY),
-                    &digest,
-                    &header.signature,
-                ) {
-                    Ok(true) => Signature::DeveloperKey,
-                    _ => return Err(Reject::BadSignature),
-                }
-            }
-            slot => Signature::FactoryKeyUnverifiable { slot },
-        };
+        let verified = matches!(
+            catcard_sign::ecdsa_verify(
+                &compressed(&APPROVED_PUBKEYS[slot as usize]),
+                &digest,
+                &header.signature,
+            ),
+            Ok(true)
+        );
+        if !verified {
+            // We hold the key and it does not verify: corrupt or tampered. Refuse before
+            // staging rather than let the bootloader find out after overwriting firmware.
+            return Err(Reject::BadSignature);
+        }
+        let signature = classify(self.board, slot);
 
         Ok(Approval {
             header,
@@ -361,6 +394,29 @@ where
 {
     fn from(_: E) -> Self {
         StorageError
+    }
+}
+
+/// Whether this board's bootloader has the given signing slot enabled. Only slot 5 varies:
+/// it is `#if 0`-disabled on mk3 and compiled in on every mk4-class board (mk4/mk5/Q1).
+/// Source: hw-reference/firmware-keys/README.md [C].
+fn slot_enabled(board: &BoardSpec, slot: u32) -> bool {
+    !(slot == 5 && board.hw_compat_bit == hw_compat::MK_3)
+}
+
+/// Classify a signature that has already *verified* against `APPROVED_PUBKEYS[slot]`, by
+/// which key signed it and whether this board enables that slot. Pulled out of `inspect`
+/// so the slot logic is testable without a factory private key (which is secret, so no
+/// test can produce a real production signature).
+fn classify(board: &BoardSpec, slot: u32) -> Signature {
+    if !is_factory_key(slot) {
+        Signature::DeveloperKey
+    } else if slot_enabled(board, slot) {
+        Signature::FactoryKey { slot }
+    } else {
+        // A valid production signature on a slot this board's bootloader has disabled
+        // (slot 5 on mk3): real, but this device will not boot it.
+        Signature::UntrustedSlot { slot }
     }
 }
 

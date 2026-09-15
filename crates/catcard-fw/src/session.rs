@@ -146,22 +146,34 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 /// behind and one we cannot, and the person about to overwrite their firmware is the one
 /// who should weigh it.
 pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
-    // The one fact worth stating: whether we could check the signature. An image signed
-    // by one of the five unpublished factory keys cannot be verified here at all (only the
-    // bootloader can, after install), which is different from one that failed -- a failure
-    // is refused outright before this screen. We deliberately do not warn about a
+    // State whose key signed the image. Every image that reaches this screen has a
+    // signature that *verified* -- a bad one is refused outright before here -- so the
+    // question is which key, and what that key means. We deliberately do not warn about a
     // downgrade: going back to older or stock firmware is a legitimate thing to want, and
-    // the bootloader still holds the final say through its OTP high-water mark.
+    // the bootloader holds the final say through its OTP high-water mark.
     message(
         panel,
         "Install firmware?",
         a.header.version_str().unwrap_or("unknown version"),
-        if a.is_verified() {
-            "signature checked"
-        } else {
-            "SIGNATURE NOT CHECKED"
-        },
+        signature_status(a),
     );
+}
+
+/// A short line naming which key signed an image, for the offer screen and the log.
+///
+/// The firmware now holds all six approved public keys, so a Coinkite-signed image (e.g.
+/// stock firmware) can be named as such rather than dismissed as "not checked". A dev-key
+/// signature is intact but attests nothing -- its private half is public, so anyone can
+/// produce it. `UntrustedSlot` is a valid production signature this board's bootloader
+/// will not boot (slot 5 on mk3).
+pub(crate) fn signature_status(a: &catcard_upgrade::Approval) -> &'static str {
+    use catcard_upgrade::Signature;
+    match a.signature {
+        Signature::FactoryKey { slot: 1 } => "Coinkite signed",
+        Signature::FactoryKey { .. } => "Coinkite signed (key 2+)",
+        Signature::DeveloperKey => "dev key (not genuine)",
+        Signature::UntrustedSlot { .. } => "signed, not valid here",
+    }
 }
 
 /// The device's USB serial number: its unique ID, in hex.

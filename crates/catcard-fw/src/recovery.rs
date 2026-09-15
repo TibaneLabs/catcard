@@ -146,11 +146,7 @@ fn headless(gate: Callgate) -> ! {
                                 crate::catlog!(
                                     "sd: staged {}, {} -- key y installs, x declines",
                                     approval.header.version_str().unwrap_or("unknown version"),
-                                    if approval.is_verified() {
-                                        "signature checked"
-                                    } else {
-                                        "SIGNATURE NOT CHECKED"
-                                    }
+                                    crate::session::signature_status(&approval)
                                 );
                                 from_card = Some((staged, approval));
                             }
