@@ -65,7 +65,7 @@ fn headless(gate: Callgate) -> ! {
     let mut said_bricked = false;
     // An image staged from a card, waiting for `y`. USB offers are held by `usbtask`.
     let mut from_card: Option<(
-        catcard_upgrade::Staged<'static, catcard_upgrade::psram::PsramArea>,
+        catcard_upgrade::Staged<'static, crate::staging::Area>,
         catcard_upgrade::Approval,
     )> = None;
 
@@ -114,7 +114,14 @@ fn headless(gate: Callgate) -> ! {
             if let Some(key) = usbtask::take_injected_key() {
                 match (key, usbtask::pending().is_some(), from_card.is_some()) {
                     (Key::Confirm, true, _) => match usbtask::approve() {
+                        #[cfg(not(feature = "board-mk3"))]
                         Ok(region) => install(&g, &mut login, region),
+                        // Unreachable on mk3 (USB staging is PSRAM-only, refused there), but
+                        // the arm must compile. SAFETY: nothing after this runs.
+                        #[cfg(feature = "board-mk3")]
+                        Ok(_region) => unsafe {
+                            gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot)
+                        },
                         Err(_) => crate::catlog!("upgrade: could not stage the offered image"),
                     },
                     (Key::Cancel, true, _) => {
@@ -124,7 +131,16 @@ fn headless(gate: Callgate) -> ! {
                     (Key::Confirm, false, true) => {
                         if let Some((staged, approval)) = from_card.take() {
                             match staged.commit(approval) {
+                                #[cfg(not(feature = "board-mk3"))]
                                 Ok(region) => install(&g, &mut login, region),
+                                // mk3 has no gate 18/7: `commit` wrote the SPI-NOR "done"
+                                // header, so installing is rebooting -- the bootloader
+                                // finds it. SAFETY: nothing after this runs.
+                                #[cfg(feature = "board-mk3")]
+                                Ok(_region) => unsafe {
+                                    crate::catlog!("sd: mk3 SPI-NOR staged, rebooting");
+                                    gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot)
+                                },
                                 Err(_) => crate::catlog!("sd: could not stage the image"),
                             }
                         }
@@ -194,7 +210,10 @@ fn usb_login(g: &crate::pinentry::BootloaderGate<'_>, login: &mut Login, pin: &[
 }
 
 /// Ask the bootloader to install a staged region. Only returns if it refused.
-#[cfg(feature = "usb-key-injection")]
+///
+/// mk4/mk5/Q1 only: `gate 18/7` authorises a PSRAM region. mk3 installs by rebooting after
+/// `commit` (see the call site), so this is not built there.
+#[cfg(all(feature = "usb-key-injection", not(feature = "board-mk3")))]
 fn install(
     g: &crate::pinentry::BootloaderGate<'_>,
     login: &mut Login,

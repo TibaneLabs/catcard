@@ -297,7 +297,7 @@ pub fn run(session: Session<'_>) -> ! {
                     Key::Confirm => match usbtask::approve() {
                         Ok(region) => {
                             message(panel, "Installing", "do not disconnect", "");
-                            install(gate, login, panel, region);
+                            crate::staging::install(gate, login, panel, region);
                             showing_offer = false;
                             redraw = true;
                         }
@@ -1316,7 +1316,7 @@ fn install_from_card(
                     match staged.commit(approval) {
                         Ok(region) => {
                             message(panel, "Installing", "do not disconnect", "");
-                            install(gate, login, panel, region);
+                            crate::staging::install(gate, login, panel, region);
                         }
                         Err(_) => {
                             message(panel, "Failed", "could not stage", "any key to go back");
@@ -1628,46 +1628,6 @@ fn browse_sd(
             }
         }
     }
-}
-
-/// Authorise a staged image, which is what actually installs it.
-///
-/// **Staging and rebooting is not an upgrade on mk4 or later.** That bootrom installs
-/// what a logged-in `gate 18/7` pointed it at and nothing else, so a device that stages
-/// an image and resets comes back running exactly what it was running, reporting nothing
-/// wrong — which is what this firmware did until the mechanism was documented.
-///
-/// Does not return when it works: the bootloader reboots inside the call. Everything
-/// below the call is the failure path.
-fn install(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    panel: &mut display::Panel,
-    region: catcard_upgrade::Region,
-) {
-    let g = crate::pinentry::BootloaderGate::new(gate);
-    crate::catlog!(
-        "install: authorizing {:#010x} len {}",
-        region.start,
-        region.len
-    );
-    let why = match login.authorize_firmware(&g, region.start, region.len) {
-        Ok(never) => match never {},
-        // The bootloader ran its own verification and refused. That is a better answer
-        // than ours: it is the check that actually gates the install.
-        Err(catcard_pin::Failure::ImageRefused) => "bootloader refused it (gate 18/7 -112)",
-        Err(catcard_pin::Failure::NeedsSetup) => "login went stale",
-        Err(catcard_pin::Failure::MustWait) => "rate limited",
-        Err(catcard_pin::Failure::Gate(_)) => "callgate unreachable",
-        Err(catcard_pin::Failure::Code(c)) => {
-            crate::catlog!("install: refused, gate code {}", c);
-            "refused"
-        }
-    };
-    // The panel may be the broken thing, so this goes in the log too -- which is the
-    // only place a dark device can put it.
-    crate::catlog!("install: NOT INSTALLED: {}", why);
-    message(panel, "Not installed", why, "any key to go back");
 }
 
 // --- Analyze RNG ------------------------------------------------------------------
@@ -4185,7 +4145,7 @@ fn usb_drive(
     crate::usbtask::msc_exit();
 }
 
-fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
+pub(crate) fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     display::draw(panel, |c| {
         catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
     });

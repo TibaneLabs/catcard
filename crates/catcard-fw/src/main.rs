@@ -41,6 +41,7 @@ mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;
+mod staging;
 mod splash;
 mod usbtask;
 

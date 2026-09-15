@@ -17,8 +17,9 @@
 //! bad card, a missing file and a broken container tell themselves apart on screen.
 
 use catcard_board::BOARD;
-use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Staged, dfuse};
+
+use crate::staging;
 
 /// Bytes per read. A cluster would be fewer round trips; a sector is what the card layer
 /// deals in, and the copy is not what makes this slow.
@@ -40,7 +41,7 @@ const CANDIDATES: &[&str] = &[
 pub enum Outcome {
     /// An image is staged and inspected. Nothing is installed: the caller shows the
     /// approval and waits for a person, exactly as the USB path does.
-    Offered(Staged<'static, PsramArea>, Approval),
+    Offered(Staged<'static, staging::Area>, Approval),
     /// Stopped, with a reason short enough for the screen.
     Failed(&'static str),
 }
@@ -50,10 +51,6 @@ pub enum Outcome {
 /// `chosen` names a specific file (a full path the browser returned); `None` falls back to
 /// the fixed [`CANDIDATES`] search, so the option still works without navigating.
 pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> Outcome {
-    let Some(psram) = BOARD.psram else {
-        // mk3 stages in SPI-NOR, which this firmware cannot write.
-        return Outcome::Failed("no staging area");
-    };
     if slot == catcard_hal::sdmmc::Slot::B && BOARD.sdmmc.slot_b.is_none() {
         return Outcome::Failed("no slot B on this board");
     }
@@ -126,11 +123,12 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         Err(dfuse::NotDfuSe::Truncated { .. }) => return Outcome::Failed("dfu is truncated"),
     };
 
-    // SAFETY: `BOARD.psram` describes a memory-mapped region, and nothing else in this
-    // firmware writes it. Whether it is *actually* mapped is the open question that
-    // `Debug → PSRAM` answers; a region that is not backed shows up below as a staging
-    // area that does not read back what was written.
-    let area = unsafe { PsramArea::claim(&psram) };
+    // The board's staging area: PSRAM on mk4/mk5/Q1, the SPI-NOR on mk3 (brought up here).
+    // `None` means there is nowhere to put an image -- no PSRAM/SPI-NOR, or the SPI-NOR did
+    // not answer -- which is a clearer stop than failing partway through the write.
+    let Some(area) = staging::area() else {
+        return Outcome::Failed("no staging area");
+    };
     let mut staged = match Staged::begin(area, &BOARD, len) {
         Ok(s) => s,
         Err(_) => return Outcome::Failed("image size refused"),
