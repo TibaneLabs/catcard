@@ -2496,9 +2496,9 @@ fn new_seed(
     // It goes through `EntropyPool` rather than into a hash of its own, because the
     // pool is what runs the health tests, keeps the sources domain-separated and
     // credits them. A side digest would mix the same bytes twice while skipping all
-    // three. If an element answers with something that fails its health test the pool
-    // is poisoned and `draw_seed` below refuses -- which is the intended outcome, not a
-    // reason to fall back to the boot material alone.
+    // three. An element that fails its health test is mixed in but credited nothing and
+    // not counted -- so if too few healthy sources remain, `draw` below refuses, which is
+    // the intended outcome; a single bad element cannot by itself block a healthy pool.
     // How long to hold each step on screen. Legibility only: thirty-two counts that
     // flash past in a blink show nothing, and nobody can check a number they cannot
     // read. It contributes no entropy and must never be mistaken for doing so.
@@ -2624,8 +2624,9 @@ fn new_seed(
     // add material the firmware could not have predicted.
     add_user_entropy(panel, pad, matrix, drbg, pool);
 
-    // The pool's own verdict, not ours. If a source failed its health test the pool is
-    // poisoned and this is where that becomes visible, before any word is shown.
+    // The pool's own verdict, not ours: enough credited bits from enough healthy hardware
+    // TRNGs. A failed source counted for neither, so this is where too few healthy sources
+    // becomes visible, before any word is shown.
     let passed = pool.check().is_ok();
     crate::catlog!(
         "seed: SE1 {} B, SE2 {} B, {} bits from {} chips, policy {}",

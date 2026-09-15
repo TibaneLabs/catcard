@@ -29,7 +29,7 @@ use core::fmt;
 use purecrypto::hash::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::health::{ContinuousTest, HealthError};
+use crate::health::ContinuousTest;
 
 /// Where a contribution came from. The variant decides how much entropy is credited.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -172,8 +172,6 @@ pub enum Insufficient {
     Bits { have: u32, need: u32 },
     /// Not enough independent hardware noise sources.
     HardwareSources { have: u32, need: u32 },
-    /// A source failed its health test; the pool is poisoned until it is rebuilt.
-    Unhealthy { source: Source, error: HealthError },
 }
 
 impl fmt::Display for Insufficient {
@@ -184,12 +182,6 @@ impl fmt::Display for Insufficient {
             }
             Insufficient::HardwareSources { have, need } => {
                 write!(f, "{have} hardware TRNG(s) contributed, need {need}")
-            }
-            Insufficient::Unhealthy { source, error } => {
-                write!(
-                    f,
-                    "noise source {source:?} failed its health test: {error:?}"
-                )
             }
         }
     }
@@ -209,8 +201,6 @@ pub struct EntropyPool {
     #[zeroize(skip)]
     health: [ContinuousTest; NUM_SOURCES],
     #[zeroize(skip)]
-    poisoned: Option<(Source, HealthError)>,
-    #[zeroize(skip)]
     draw_counter: u64,
     #[zeroize(skip)]
     policy: Policy,
@@ -228,7 +218,6 @@ impl EntropyPool {
             credited_bits: 0,
             bytes_from: [0; NUM_SOURCES],
             health: core::array::from_fn(|_| ContinuousTest::new()),
-            poisoned: None,
             draw_counter: 0,
             policy,
         }
@@ -236,18 +225,18 @@ impl EntropyPool {
 
     /// Absorb a contribution.
     ///
-    /// Health-tested sources that fail poison the pool: [`draw`](Self::draw) will
-    /// refuse until the pool is rebuilt. The data is absorbed either way — a failing
-    /// source may still hold *some* unpredictability, it just cannot be credited.
+    /// A health-tested source that fails is still absorbed -- it may hold *some*
+    /// unpredictability, and mixing it cannot reduce what the good sources contributed --
+    /// but it is credited **nothing** and does not count toward the hardware-source
+    /// requirement. It does **not** poison the pool: the point of combining several
+    /// sources is that any healthy one keeps the whole draw safe, so one failing source
+    /// must never be able to block a draw the healthy ones have already earned.
     pub fn add(&mut self, source: Source, data: &[u8]) {
         // Health-test the real noise sources. Derived and public values are not noise
         // and would fail these tests for legitimate reasons.
-        if source.is_hardware_trng()
-            && let Err(e) = self.health[source.index()].check(data)
-        {
-            if self.poisoned.is_none() {
-                self.poisoned = Some((source, e));
-            }
+        if source.is_hardware_trng() && self.health[source.index()].check(data).is_err() {
+            // Absorb it for whatever unpredictability it holds, but credit nothing and do
+            // not count it as a healthy source.
             self.absorb(source, data);
             return;
         }
@@ -297,10 +286,12 @@ impl EntropyPool {
     }
 
     /// Whether a draw would succeed right now.
+    ///
+    /// The verdict rests only on what healthy sources contributed: enough credited bits
+    /// from enough distinct hardware TRNGs. A source that failed its health test simply
+    /// contributed nothing to either count; it cannot make an otherwise-sufficient pool
+    /// refuse.
     pub fn check(&self) -> Result<(), Insufficient> {
-        if let Some((source, error)) = self.poisoned {
-            return Err(Insufficient::Unhealthy { source, error });
-        }
         let hw = self.hardware_sources();
         if hw < self.policy.min_hw_sources {
             return Err(Insufficient::HardwareSources {
@@ -446,21 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_trng_poisons_the_pool() {
-        let mut p = EntropyPool::new(Policy::STRICT);
-        p.add(Source::Stm32Trng, &noise(1, 64));
-        // A secure element that has stopped working returns zeroes.
-        p.add(Source::Se1Trng, &[0u8; 32]);
-        assert!(matches!(
-            p.draw_seed(),
-            Err(Insufficient::Unhealthy {
-                source: Source::Se1Trng,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn a_dead_trng_is_not_credited() {
         let mut p = EntropyPool::new(Policy::STRICT);
         p.add(Source::Se1Trng, &[0u8; 32]);
@@ -469,13 +445,34 @@ mod tests {
     }
 
     #[test]
-    fn poisoning_is_sticky() {
+    fn a_dead_trng_does_not_count_toward_the_hardware_requirement() {
         let mut p = EntropyPool::new(Policy::STRICT);
-        p.add(Source::Se2Trng, &[0xffu8; 32]);
-        // Adding good entropy afterwards must not clear the fault.
+        p.add(Source::Stm32Trng, &noise(1, 64));
+        // A secure element that has stopped working returns zeroes: credited nothing and
+        // not counted, so only one healthy hardware source remains -- short of STRICT's
+        // two. It refuses for lack of a second source, not because the pool is "poisoned".
+        p.add(Source::Se1Trng, &[0u8; 32]);
+        assert_eq!(p.hardware_sources(), 1);
+        assert!(matches!(
+            p.draw_seed(),
+            Err(Insufficient::HardwareSources { have: 1, need: 2 })
+        ));
+    }
+
+    #[test]
+    fn a_dead_source_does_not_block_a_healthy_pool() {
+        // The property that matters: one failing source must never veto a draw the
+        // healthy sources have already earned. Mixing it in cannot reduce their entropy,
+        // so there is nothing to protect against by refusing.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::Se2Trng, &[0xffu8; 32]); // dead element, stuck high
         p.add(Source::Stm32Trng, &noise(1, 64));
         p.add(Source::Se1Trng, &noise(2, 64));
-        assert!(matches!(p.draw_seed(), Err(Insufficient::Unhealthy { .. })));
+        assert_eq!(p.hardware_sources(), 2, "the two healthy TRNGs still count");
+        assert!(
+            p.draw_seed().is_ok(),
+            "a dead source blocked an otherwise-sufficient pool"
+        );
     }
 
     #[test]
@@ -577,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn keypad_credits_the_value_never_poisons_and_is_not_hardware() {
+    fn keypad_credits_the_value_and_is_not_hardware() {
         let mut p = EntropyPool::new(Policy::STRICT);
         // A human mashing, repeating one key -- which a real user does.
         for _ in 0..100 {
@@ -587,8 +584,7 @@ mod tests {
         // past the 256-bit bar's worth.
         assert_eq!(p.credited_bits(), 300);
         // But it is not a hardware source, so it cannot satisfy the two-TRNG bar on its
-        // own -- and the repeats never poisoned it (that would be `Unhealthy`, not
-        // `HardwareSources`), because a keypad value runs no health test.
+        // own -- and a keypad value runs no health test, so repeats are never a problem.
         assert_eq!(p.hardware_sources(), 0);
         assert!(matches!(
             p.check(),

@@ -102,9 +102,15 @@ Raw TRNG output is checked before absorption, per SP 800-90B §4.4:
 
 State is kept per source across draws, so a run straddling two reads is still caught.
 
-A failing source **poisons the pool**: it is still absorbed (it may hold some
-unpredictability) but it is credited nothing, and `draw` refuses until the pool is
-rebuilt. Poisoning is sticky — adding good entropy afterwards does not clear it.
+A failing source is **credited nothing and does not count** toward the hardware-source
+requirement — but it does **not** poison the pool. It is still absorbed (it may hold some
+unpredictability, and mixing it cannot reduce what the healthy sources contributed), and a
+draw is refused only if what the *healthy* sources supplied falls short of the policy. This
+is the whole point of combining several sources: any healthy one keeps the draw safe, so a
+single failing source must never be able to veto a draw the good ones have already earned.
+A pool with two healthy TRNGs and one dead element still draws; a pool left with only one
+healthy TRNG under `STRICT` refuses — for lack of a second source, not because it is
+"poisoned".
 
 ## Boot sequence
 
@@ -129,7 +135,8 @@ rather than as coverage:
 - `one_trng_read_is_not_enough_under_the_strict_policy`
 - `public_and_auxiliary_values_are_credited_nothing`
 - `user_timing_alone_cannot_unlock_a_seed`
-- `a_dead_trng_poisons_the_pool` / `a_dead_trng_is_not_credited` / `poisoning_is_sticky`
+- `a_dead_trng_is_not_credited` / `a_dead_trng_does_not_count_toward_the_hardware_requirement`
+  / `a_dead_source_does_not_block_a_healthy_pool`
 - `a_predictable_source_cannot_cancel_a_good_one`
 - `sources_are_domain_separated`, `concatenation_is_unambiguous`
 - `ui_randomness_does_not_disturb_the_seed_pool`
@@ -155,7 +162,7 @@ standard rather than against the standard itself — importing the NIST CAVP
   every press (`UserTiming`) regardless. Dice and coin runs are credited their values
   only when the run is long enough (>=50 rolls, >=128 flips) and no one symbol dominates
   (30% dice, 65% coin); a short or lopsided run contributes only its timing. None of
-  these are hardware sources, so a repeated value cannot poison the pool.
+  these are hardware sources, so they run no health test and only ever add.
 - **Startup health test.** SP 800-90B also specifies an on-demand test at boot, over a
   larger sample than the continuous tests see.
 - **Reseed on wake.** No sleep support yet, so nothing to reseed after.
