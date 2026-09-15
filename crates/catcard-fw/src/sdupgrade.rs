@@ -17,7 +17,6 @@
 //! bad card, a missing file and a broken container tell themselves apart on screen.
 
 use catcard_board::BOARD;
-use catcard_sd::fat;
 use catcard_upgrade::psram::PsramArea;
 use catcard_upgrade::{Approval, Staged, dfuse};
 
@@ -59,21 +58,35 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         return Outcome::Failed("no slot B on this board");
     }
 
-    // SAFETY: nothing else has claimed SDMMC1 or its pins, and this is not re-entrant:
-    // the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, slot) } {
-        Ok(d) => d,
-        Err(_) => return Outcome::Failed("controller failed"),
-    };
-    let card = match catcard_sd::init(&mut dev) {
-        Ok(c) => c,
-        Err(catcard_sd::Error::NoCard) => return Outcome::Failed("no card in slot"),
-        Err(_) => return Outcome::Failed("card would not start"),
-    };
-
-    let mut vol = match fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
+    // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
+    let mut why = "card error";
+    let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
+        // SAFETY: nothing else has claimed SDMMC1 or its pins, and this is not re-entrant:
+        // the menu waits for it to return before it can be chosen again.
+        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, slot) } {
+            Ok(d) => d,
+            Err(_) => {
+                why = "controller failed";
+                return Err(());
+            }
+        };
+        let card = match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(catcard_sd::Error::NoCard) => {
+                why = "no card in slot";
+                return Err(());
+            }
+            Err(_) => {
+                why = "card would not start";
+                return Err(());
+            }
+        };
+        Ok(catcard_sd::Sectors::new(dev, card))
+    });
+    let mut vol = match mount {
         Ok(v) => v,
-        Err(_) => return Outcome::Failed("not a FAT card"),
+        Err(catcard_sd::MountError::Device) => return Outcome::Failed(why),
+        Err(catcard_sd::MountError::NoFilesystem) => return Outcome::Failed("not FAT or exFAT"),
     };
 
     // A file the browser picked, or the first of the fixed names that opens.
@@ -87,7 +100,8 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
     let Ok(mut file) = vol.open_file(name) else {
         return Outcome::Failed("could not open file");
     };
-    let file_len = file.len();
+    // Firmware images are well under 4 GiB, so a u32 length is enough downstream.
+    let file_len = file.len() as u32;
 
     // The header decides whether this is a container or a raw image. Read it first,
     // because the answer changes where the image starts and how long it is.
@@ -122,7 +136,7 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         Err(_) => return Outcome::Failed("image size refused"),
     };
 
-    if file.seek(&mut vol, start).is_err() {
+    if file.seek(&mut vol, start as u64).is_err() {
         return Outcome::Failed("seek failed");
     }
     let mut at = 0u32;

@@ -319,6 +319,12 @@ fn capacity_blocks(csd: &[u32; 4]) -> Result<u32, Error> {
 /// table resident.
 pub use fstool::fs::fat;
 
+/// The heapless exFAT driver, re-exported alongside [`fat`]. Modern high-capacity SDXC
+/// cards ship exFAT out of the box, so a browser that only read FAT would turn many cards
+/// away. It shares FAT's [`fat::SectorDriver`] (both are `fstool`'s one device trait), so
+/// [`Sectors`] drives it unchanged.
+pub use fstool::fs::exfat;
+
 /// An initialised card, presented as the sectors a FAT volume is built from.
 ///
 /// Owns its transport because a mounted [`fat::Volume`] owns its device for as long as
@@ -390,6 +396,202 @@ impl<T: Transport> fat::SectorDriver for Sectors<T> {
             write_block(&mut self.t, &self.card, block, chunk)?;
         }
         Ok(())
+    }
+}
+
+/// Why [`AnyVolume::mount_with`] gave up.
+pub enum MountError {
+    /// The card itself could not be brought up (the `make` closure failed).
+    Device,
+    /// The card came up but held neither a FAT nor an exFAT filesystem.
+    NoFilesystem,
+}
+
+/// A mounted volume, FAT or exFAT, behind one small API.
+///
+/// The two `fstool` backends have parallel but distinct types and no shared no-alloc trait
+/// spans them, so this enum forwards the handful of operations the firmware needs to
+/// whichever mounted. exFAT counts bytes in `u64`; FAT's `u32` sizes are widened to match.
+///
+/// The two variants differ in size (each holds its driver's resident state); on a device
+/// with no allocator there is nowhere to box the larger one, and one lives on the stack for
+/// a browse, which is fine. The forwarding methods return `Result<_, ()>`: the underlying
+/// error is rich, but the caller only ever turns it into a short on-screen string.
+#[allow(clippy::large_enum_variant, clippy::result_unit_err)]
+pub enum AnyVolume<D: fat::SectorDriver, const S: usize = 512> {
+    Fat(fat::Volume<D, S>),
+    Exfat(exfat::Volume<D, S>),
+}
+
+#[allow(clippy::result_unit_err)]
+impl<D: fat::SectorDriver, const S: usize> AnyVolume<D, S> {
+    /// Mount the card, trying FAT then exFAT.
+    ///
+    /// `make` produces a fresh device for each attempt because a failed `mount_auto`
+    /// consumes the device it was given and does not hand it back; the exFAT attempt
+    /// therefore re-initialises the card. FAT is tried first as the common case, so a FAT
+    /// card mounts on the first device with no second bring-up.
+    pub fn mount_with<F>(mut make: F) -> Result<Self, MountError>
+    where
+        F: FnMut() -> Result<D, ()>,
+    {
+        let dev = make().map_err(|()| MountError::Device)?;
+        if let Ok(v) = fat::Volume::<D, S>::mount_auto(dev) {
+            return Ok(AnyVolume::Fat(v));
+        }
+        let dev = make().map_err(|()| MountError::Device)?;
+        match exfat::Volume::<D, S>::mount_auto(dev) {
+            Ok(v) => Ok(AnyVolume::Exfat(v)),
+            Err(_) => Err(MountError::NoFilesystem),
+        }
+    }
+
+    /// Call `f(name, is_dir, len)` for each entry of `path` ("" is the root). FAT's `.`
+    /// and `..` are skipped; exFAT has none.
+    pub fn enumerate<F>(&mut self, path: &str, mut f: F) -> Result<(), ()>
+    where
+        F: FnMut(&str, bool, u64),
+    {
+        match self {
+            AnyVolume::Fat(v) => {
+                let dir = if path.is_empty() {
+                    v.root()
+                } else {
+                    v.open_dir(path).map_err(|_| ())?
+                };
+                let mut it = v.iter_dir(dir);
+                while let Some(e) = it.next().map_err(|_| ())? {
+                    if e.is_dot() {
+                        continue;
+                    }
+                    f(e.name(), e.is_dir(), e.len() as u64);
+                }
+                Ok(())
+            }
+            AnyVolume::Exfat(v) => {
+                let dir = if path.is_empty() {
+                    v.root()
+                } else {
+                    v.open_dir(path).map_err(|_| ())?
+                };
+                let mut it = v.iter_dir(dir);
+                while let Some(e) = it.next().map_err(|_| ())? {
+                    f(e.name(), e.is_dir(), e.len());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Open an existing file for reading.
+    pub fn open_file(&mut self, path: &str) -> Result<AnyFile, ()> {
+        match self {
+            AnyVolume::Fat(v) => v.open_file(path).map(AnyFile::Fat).map_err(|_| ()),
+            AnyVolume::Exfat(v) => v.open_file(path).map(AnyFile::Exfat).map_err(|_| ()),
+        }
+    }
+
+    /// Open a file, creating it if it does not exist.
+    pub fn open_or_create_file(&mut self, path: &str) -> Result<AnyFile, ()> {
+        match self {
+            AnyVolume::Fat(v) => v.open_or_create_file(path).map(AnyFile::Fat).map_err(|_| ()),
+            AnyVolume::Exfat(v) => v.open_or_create_file(path).map(AnyFile::Exfat).map_err(|_| ()),
+        }
+    }
+
+    /// Flush the volume's own metadata.
+    pub fn flush(&mut self) -> Result<(), ()> {
+        match self {
+            AnyVolume::Fat(v) => v.flush().map_err(|_| ()),
+            AnyVolume::Exfat(v) => v.flush().map_err(|_| ()),
+        }
+    }
+}
+
+/// An open file on either kind of volume. Its operations take the matching [`AnyVolume`];
+/// a file and volume of different kinds is a caller bug and returns `Err`.
+#[allow(clippy::large_enum_variant)]
+pub enum AnyFile {
+    Fat(fat::File),
+    Exfat(exfat::File),
+}
+
+#[allow(clippy::len_without_is_empty, clippy::result_unit_err)]
+impl AnyFile {
+    /// The file's length in bytes.
+    pub fn len(&self) -> u64 {
+        match self {
+            AnyFile::Fat(f) => f.len() as u64,
+            AnyFile::Exfat(f) => f.len(),
+        }
+    }
+
+    /// Read into `buf`, returning how many bytes were read (0 at end of file).
+    pub fn read<D: fat::SectorDriver, const S: usize>(
+        &mut self,
+        vol: &mut AnyVolume<D, S>,
+        buf: &mut [u8],
+    ) -> Result<usize, ()> {
+        match (self, vol) {
+            (AnyFile::Fat(f), AnyVolume::Fat(v)) => f.read(v, buf).map_err(|_| ()),
+            (AnyFile::Exfat(f), AnyVolume::Exfat(v)) => f.read(v, buf).map_err(|_| ()),
+            _ => Err(()),
+        }
+    }
+
+    /// Move the read/write cursor to `pos`.
+    pub fn seek<D: fat::SectorDriver, const S: usize>(
+        &mut self,
+        vol: &mut AnyVolume<D, S>,
+        pos: u64,
+    ) -> Result<(), ()> {
+        match (self, vol) {
+            (AnyFile::Fat(f), AnyVolume::Fat(v)) => f.seek(v, pos as u32).map_err(|_| ()),
+            // exFAT's seek is infallible and needs no volume.
+            (AnyFile::Exfat(f), AnyVolume::Exfat(_)) => {
+                f.seek(pos);
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
+
+    /// Write all of `buf`.
+    pub fn write_all<D: fat::SectorDriver, const S: usize>(
+        &mut self,
+        vol: &mut AnyVolume<D, S>,
+        buf: &[u8],
+    ) -> Result<(), ()> {
+        match (self, vol) {
+            (AnyFile::Fat(f), AnyVolume::Fat(v)) => f.write_all(v, buf).map_err(|_| ()),
+            (AnyFile::Exfat(f), AnyVolume::Exfat(v)) => f.write_all(v, buf).map_err(|_| ()),
+            _ => Err(()),
+        }
+    }
+
+    /// Truncate or extend the file to `len` bytes.
+    pub fn set_len<D: fat::SectorDriver, const S: usize>(
+        &mut self,
+        vol: &mut AnyVolume<D, S>,
+        len: u64,
+    ) -> Result<(), ()> {
+        match (self, vol) {
+            (AnyFile::Fat(f), AnyVolume::Fat(v)) => f.set_len(v, len as u32).map_err(|_| ()),
+            (AnyFile::Exfat(f), AnyVolume::Exfat(v)) => f.set_len(v, len).map_err(|_| ()),
+            _ => Err(()),
+        }
+    }
+
+    /// Flush the file's own metadata and data.
+    pub fn flush<D: fat::SectorDriver, const S: usize>(
+        &mut self,
+        vol: &mut AnyVolume<D, S>,
+    ) -> Result<(), ()> {
+        match (self, vol) {
+            (AnyFile::Fat(f), AnyVolume::Fat(v)) => f.flush(v).map_err(|_| ()),
+            (AnyFile::Exfat(f), AnyVolume::Exfat(v)) => f.flush(v).map_err(|_| ()),
+            _ => Err(()),
+        }
     }
 }
 

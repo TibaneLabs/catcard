@@ -1016,25 +1016,42 @@ fn save_log_to_card(
 /// the `Err` for the caller to show and log -- the step is what tells a bad card apart
 /// from a full one or a filesystem it cannot mount.
 fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
-    use catcard_sd::fat;
-
-    // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
-    // to return before it can be chosen again.
-    let mut dev = unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) }
-        .map_err(|_| "controller failed")?;
-    let card = catcard_sd::init(&mut dev).map_err(|e| match e {
-        catcard_sd::Error::NoCard => "no card in slot",
-        _ => "card would not start",
+    // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
+    let mut why: &'static str = "card error";
+    let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
+        // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
+        // to return before it can be chosen again.
+        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+            Ok(d) => d,
+            Err(_) => {
+                why = "controller failed";
+                return Err(());
+            }
+        };
+        let card = match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(catcard_sd::Error::NoCard) => {
+                why = "no card in slot";
+                return Err(());
+            }
+            Err(_) => {
+                why = "card would not start";
+                return Err(());
+            }
+        };
+        Ok(catcard_sd::Sectors::new(dev, card))
+    })
+    .map_err(|e| match e {
+        catcard_sd::MountError::Device => why,
+        catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
     })?;
-    let mut vol = fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card))
-        .map_err(|_| "not a FAT card")?;
     let mut file = vol
         .open_or_create_file("/CATCARD.LOG")
         .map_err(|_| "could not open file")?;
     file.write_all(&mut vol, bytes)
         .map_err(|_| "write failed")?;
     // Trim any tail from a longer earlier save, so the file is exactly this log.
-    file.set_len(&mut vol, bytes.len() as u32)
+    file.set_len(&mut vol, bytes.len() as u64)
         .map_err(|_| "truncate failed")?;
     file.flush(&mut vol).map_err(|_| "flush failed")?;
     vol.flush().map_err(|_| "flush failed")?;
@@ -1055,7 +1072,7 @@ const BROWSE_PARENT: u32 = u32::MAX;
 struct BrowseEntry {
     name: heapless::String<BROWSE_NAME_MAX>,
     is_dir: bool,
-    len: u32,
+    len: u64,
 }
 
 /// Whether `name`'s extension equals `ext`, case-insensitively.
@@ -1082,7 +1099,7 @@ fn file_info(
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     name: &str,
-    len: u32,
+    len: u64,
     pick: bool,
 ) -> bool {
     use catcard_ui::scroll::Line as DLine;
@@ -1122,37 +1139,45 @@ fn browse_sd(
     filter: Option<&str>,
     pick: bool,
 ) -> Option<heapless::String<BROWSE_PATH_MAX>> {
-    use catcard_sd::fat;
-
     let fail = |panel: &mut display::Panel, pad: &mut Keypad, matrix: &mut GpioMatrix, drbg: &mut HmacDrbg, why: &str| {
         message(panel, "SD card", why, "any key to go back");
         wait_for_any_key(pad, matrix, drbg);
     };
 
-    // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this to
-    // return before it can be chosen again.
-    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
-        Ok(d) => d,
-        Err(_) => {
-            fail(panel, pad, matrix, drbg, "controller failed");
-            return None;
-        }
-    };
-    let card = match catcard_sd::init(&mut dev) {
-        Ok(c) => c,
-        Err(catcard_sd::Error::NoCard) => {
-            fail(panel, pad, matrix, drbg, "no card in slot");
-            return None;
-        }
-        Err(_) => {
-            fail(panel, pad, matrix, drbg, "card would not start");
-            return None;
-        }
-    };
-    let mut vol = match fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
+    // Mount the card, FAT or exFAT, re-initialising it for the exFAT attempt. `why` carries
+    // the specific bring-up failure out of the closure for the message.
+    let mut why = "card error";
+    let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
+        // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
+        // to return before it can be chosen again.
+        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+            Ok(d) => d,
+            Err(_) => {
+                why = "controller failed";
+                return Err(());
+            }
+        };
+        let card = match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(catcard_sd::Error::NoCard) => {
+                why = "no card in slot";
+                return Err(());
+            }
+            Err(_) => {
+                why = "card would not start";
+                return Err(());
+            }
+        };
+        Ok(catcard_sd::Sectors::new(dev, card))
+    });
+    let mut vol = match mount {
         Ok(v) => v,
-        Err(_) => {
-            fail(panel, pad, matrix, drbg, "not a FAT card");
+        Err(catcard_sd::MountError::Device) => {
+            fail(panel, pad, matrix, drbg, why);
+            return None;
+        }
+        Err(catcard_sd::MountError::NoFilesystem) => {
+            fail(panel, pad, matrix, drbg, "not FAT or exFAT");
             return None;
         }
     };
@@ -1161,52 +1186,33 @@ fn browse_sd(
     let mut entries: heapless::Vec<BrowseEntry, BROWSE_ENTRIES> = heapless::Vec::new();
 
     loop {
-        // List the current directory, copying each entry out of the lending iterator.
+        // List the current directory, copying each entry the callback is handed (its name
+        // is borrowed from the lending iterator, so it must be copied out here).
         entries.clear();
-        let dir = if path.is_empty() {
-            Ok(vol.root())
-        } else {
-            vol.open_dir(&path)
-        };
-        let listing_ok = match dir {
-            Ok(d) => {
-                let mut it = vol.iter_dir(d);
-                loop {
-                    match it.next() {
-                        Ok(Some(e)) => {
-                            if e.is_dot() {
-                                continue;
-                            }
-                            let is_dir = e.is_dir();
-                            if let Some(ext) = filter
-                                && !is_dir
-                                && !ext_matches(e.name(), ext)
-                            {
-                                continue;
-                            }
-                            let mut nm = heapless::String::new();
-                            for c in e.name().chars() {
-                                if nm.push(c).is_err() {
-                                    break;
-                                }
-                            }
-                            let entry = BrowseEntry {
-                                name: nm,
-                                is_dir,
-                                len: e.len(),
-                            };
-                            if entries.push(entry).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(_) => break,
+        let listing_ok = vol
+            .enumerate(&path, |name, is_dir, len| {
+                if let Some(ext) = filter
+                    && !is_dir
+                    && !ext_matches(name, ext)
+                {
+                    return;
+                }
+                if entries.is_full() {
+                    return;
+                }
+                let mut nm = heapless::String::new();
+                for c in name.chars() {
+                    if nm.push(c).is_err() {
+                        break;
                     }
                 }
-                true
-            }
-            Err(_) => false,
-        };
+                let _ = entries.push(BrowseEntry {
+                    name: nm,
+                    is_dir,
+                    len,
+                });
+            })
+            .is_ok();
 
         // Build the listing as a menu document and run it. Scoped so `lines` -- which
         // borrows `path` (the title) and `entries` (the names) -- is dropped before the
