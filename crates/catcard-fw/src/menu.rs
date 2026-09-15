@@ -3038,31 +3038,56 @@ fn quiz(
         }
         let _ = drbg.shuffle(&mut choices);
 
-        let mut lines: heapless::Vec<Line, CHOICES> = heapless::Vec::new();
+        let mut lines: heapless::Vec<Line, { CHOICES + 1 }> = heapless::Vec::new();
         for (i, w) in choices.iter().enumerate() {
             let mut l = Line::new();
             let _ = write!(l, "{}  {w}", i + 1);
             let _ = lines.push(l);
         }
+        let mut hint = Line::new();
+        let _ = hint.push_str("y = skip");
+        let _ = lines.push(hint);
         let mut title = Line::new();
         let _ = write!(title, "Which is word {}?", pos + 1);
-        info(panel, &title, &lines);
 
-        match read_choice(pad, matrix, drbg, CHOICES) {
-            Some(i) if choices[i] == correct => {}
-            _ => return false,
+        // Loop this one question so a declined skip re-asks it rather than failing.
+        loop {
+            info(panel, &title, &lines);
+            match read_choice(pad, matrix, drbg, CHOICES) {
+                Choice::Pick(i) if choices[i] == correct => break,
+                // A wrong pick or a cancel fails the quiz -- the caller offers the list
+                // again, and nothing is stored yet, so it costs only time.
+                Choice::Pick(_) | Choice::Cancel => return false,
+                Choice::Skip => {
+                    ask(panel, "Skip the check?", "store without", "confirming words?");
+                    if confirmed(pad, matrix, drbg) {
+                        return true;
+                    }
+                    // Declined: ask this question again.
+                }
+            }
         }
     }
     true
 }
 
-/// Wait for one of `n` numbered choices, or a cancel.
+/// What a person did at a quiz question.
+enum Choice {
+    /// Picked numbered option `0..n`.
+    Pick(usize),
+    /// Pressed `y` -- asking to skip the check.
+    Skip,
+    /// Backed out.
+    Cancel,
+}
+
+/// Wait for one of `n` numbered choices, a skip (`y`), or a cancel (`x`).
 fn read_choice(
     pad: &mut Keypad,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     n: usize,
-) -> Option<usize> {
+) -> Choice {
     wait_for_release(pad, matrix, drbg);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -3071,9 +3096,10 @@ fn read_choice(
         crate::pinentry::pressed_keys(pad, matrix, drbg, &mut events, &mut keys);
         for k in keys.iter() {
             match k {
-                Key::Cancel => return None,
+                Key::Cancel => return Choice::Cancel,
+                Key::Confirm => return Choice::Skip,
                 Key::Digit(d) if *d >= 1 && (*d as usize) <= n => {
-                    return Some(*d as usize - 1);
+                    return Choice::Pick(*d as usize - 1);
                 }
                 _ => {}
             }
