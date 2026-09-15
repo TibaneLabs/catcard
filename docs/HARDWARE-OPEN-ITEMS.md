@@ -128,8 +128,9 @@ that pin's AF — pulled low around each opcode. The part is a Macronix **MX25L8
 1 MB, 4 KB sectors**. `MK3_SFLASH_SPI` now carries these with `pins_confirmed: true` and
 `sflash.cs: Some(PB9)`. (The earlier `PD1` SCK candidate was wrong.)
 
-Still open (tracked below): the mk3 **firmware staging base/header** inside SPI-NOR, which
-is what self-upgrade needs on top of the write path.
+The mk3 **firmware staging base/header** inside SPI-NOR is now confirmed too (tracked
+below) — so what remains for self-upgrade is the firmware write/receive path, not a
+hardware unknown.
 
 ---
 
@@ -185,7 +186,7 @@ upgrade path, which erases on our behalf).
 
 ---
 
-## Firmware staging base — RESOLVED on mk4 and Q1, still open on mk3
+## Firmware staging base — RESOLVED on mk4, Q1 and mk3
 
 **mk4 / Q1 `[C]`.** PSRAM is an 8 MB part on OCTOSPI1, memory-mapped at `0x9000_0000`,
 and the bootloader reads a firmware-staging recovery header at `0x907F_F800` — magics
@@ -194,18 +195,28 @@ entirely. That "both magics or nothing" rule is what makes the mechanism safe to
 an unwritten or half-written header stages nothing rather than staging garbage. Recorded
 as [`Psram`](../crates/catcard-board/src/spec.rs) in the board table.
 
-**mk3 `[?]`, and still blocking self-upgrade there.**
-`install-and-usb-transport.md §2` says the pending image is staged at SPI-NOR **offset
-0**, sourced from a comment that the entire flash "starting at zero may be used" — which
-is weaker than a confirmation that the bootloader reads from exactly 0, and it says any
-header or marker expected there is unconfirmed. mk3 also still lacks its SPI-NOR CS/SCK
-pins, so nothing can be staged on it regardless.
+**mk3 `[C]`** — now documented in `hw-reference/storage.md §"mk3 firmware staging & recovery"`:
 
-Getting this wrong means a reboot into a bootloader that installs garbage.
+- **Staging base = SPI-NOR address `0x00000000`.** The full image is written from offset 0,
+  byte-identical to how it lands in main flash (`FIRMWARE_START = 0x0800_8000`). The
+  bootloader reads the header at an *absolute* SPI-NOR offset, not `base+offset`.
+- **Primary header @ `0x3F80`** (`0x4000 − 0x80`), 128 B, magic `0xCC00_1234`, signature the
+  last 64 B (`0x3FC0:0x4000`) — the same `catcard-fwhdr` header this firmware already builds.
+- **Trailing duplicate header @ offset = `firmware_length`**, written **last** by the
+  uploader. Its valid presence is the "upload complete" marker: an interrupted upload leaves
+  no trailing header, so a torn transfer stages nothing rather than garbage (the same safety
+  the mk4 "both magics" rule gives). The bootloader zeroes it after a successful install.
+- **Sizes:** `FW_MIN_LENGTH = 256 KB`, `FW_MAX_LENGTH = 0xF8000` (992 KB).
+- **Settings coexistence — a real constraint.** nvstore is the last 128 KB, `0xE0000–0x100000`.
+  The staged image *plus* its trailing header must end **below `0xE0000`** (image ≤ ~896 KB) or
+  it overwrites settings, tighter than the nominal `FW_MAX_LENGTH`.
 
-**How to resolve.** Confirm on mk3 hardware before the first self-upgrade attempt, by
-staging an image and observing what the bootloader installs. Test on a unit you are
-willing to recover over DFU.
+**Still needed to use it** (a from-scratch firmware, not a hardware fact): the SPI-NOR write
+path wired to the mk3 bus (now that the pins are confirmed — see above), a firmware-receive
+path over USB/SD, and writing the two headers in the crash-safe order (image + primary header
+first, trailing header last). Until that exists, a broken image on a locked (RDP=2) mk3 is a
+one-way brick recoverable only with an external SPI-NOR programmer, since mk3 has no PSRAM
+fallback — get the write and receive paths working before installing any image on a locked unit.
 
 ---
 
