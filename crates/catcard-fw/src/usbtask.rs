@@ -291,6 +291,7 @@ impl UsbTask {
                 }
                 Event::Report => {
                     self.rx_count = self.rx_count.saturating_add(1);
+                    led::saw_traffic();
                     let mut report = [0u8; REPORT_LEN];
                     report.copy_from_slice(&self.otg.rx);
                     self.otg.receive_next();
@@ -382,6 +383,7 @@ impl UsbTask {
         unsafe {
             if self.outbox_len > 0 && self.otg.send(&self.outbox) {
                 self.tx_count = self.tx_count.saturating_add(1);
+                led::saw_traffic();
                 self.outbox_len = 0;
                 self.next_reply_frame();
             }
@@ -776,6 +778,11 @@ pub unsafe fn init(serial: &'static str) {
         let task = UsbTask::init(serial);
         core::ptr::addr_of_mut!(TASK).write(task);
     }
+    // The activity light, on the boards that have one. Set up here rather than in
+    // bring-up because it is USB's, and because a light that blinks before USB exists
+    // would be reporting something it cannot know.
+    // SAFETY: single-threaded bring-up; the pin belongs to the LED alone.
+    unsafe { led::init() };
 }
 
 /// Service USB. Safe to call from anywhere in the foreground.
@@ -828,7 +835,94 @@ pub fn pump() -> bool {
     // interrupt context.
     let busy = unsafe { t.poll() };
     publish_status(t);
+    led::tick();
     busy
+}
+
+/// The USB activity light.
+///
+/// `USB_ACTIVE` is a plain GPIO with no hardware activity detection behind it, so the
+/// firmware has to blink it or it stays dark — which is exactly what ours did. Three
+/// pieces are needed and the reference is explicit that missing any one leaves the
+/// light off: configure the pin, raise a flag on real traffic, and tick.
+///
+/// Stock runs the tick off a 150 ms soft timer. Ours is polled instead, because our USB
+/// is: [`tick`] is called from [`pump`], and every screen that waits pumps. The cost of
+/// that choice is that a screen which stopped pumping would freeze the light mid-blink,
+/// so the idle branch drives the pin **low** rather than leaving it wherever it landed.
+///
+/// Source: usb.md §"USB activity LED" [C]
+mod led {
+    use catcard_board::BOARD;
+    use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    /// Traffic happened since the last tick. Set at the RX and TX counters, so it
+    /// tracks packets that actually moved rather than polls that found nothing.
+    static SAW: AtomicBool = AtomicBool::new(false);
+    /// Cycle count at the last tick, and the period in cycles. Zero period means the
+    /// board has no LED, or it has not been set up.
+    static LAST: AtomicU32 = AtomicU32::new(0);
+    static PERIOD: AtomicU32 = AtomicU32::new(0);
+    /// What the pin is currently driven to, so a toggle does not need to read it back.
+    static LIT: AtomicBool = AtomicBool::new(false);
+
+    /// Note that a packet moved. Cheap enough to call on every one.
+    pub fn saw_traffic() {
+        SAW.store(true, Ordering::Relaxed);
+    }
+
+    /// Configure the pin and start the timer.
+    ///
+    /// # Safety
+    /// Single-threaded bring-up; the pin belongs to the LED alone, which the board
+    /// table's pin-conflict test enforces.
+    pub unsafe fn init() {
+        let Some(pin) = BOARD.usb_active else { return };
+        // SAFETY: as documented; forwarding the board's own pin assignment.
+        unsafe {
+            gpio::enable_port(pin.port);
+            gpio::configure(
+                pin,
+                Mode::Output,
+                OutputType::PushPull,
+                Pull::None,
+                Speed::Low,
+            );
+            gpio::write(pin, false);
+        }
+        // 150 ms in cycles, from the clock the bootloader actually left running rather
+        // than an assumed one. SAFETY: reads RCC.
+        let hz = unsafe { catcard_hal::clock::hclk_hz() };
+        PERIOD.store((hz / 1000).saturating_mul(150).max(1), Ordering::Relaxed);
+        LAST.store(catcard_hal::dwt::cycles(), Ordering::Relaxed);
+        LIT.store(false, Ordering::Relaxed);
+    }
+
+    /// Toggle if traffic happened in this window, otherwise go dark.
+    pub fn tick() {
+        let period = PERIOD.load(Ordering::Relaxed);
+        if period == 0 {
+            return;
+        }
+        let Some(pin) = BOARD.usb_active else { return };
+        let now = catcard_hal::dwt::cycles();
+        if now.wrapping_sub(LAST.load(Ordering::Relaxed)) < period {
+            return;
+        }
+        LAST.store(now, Ordering::Relaxed);
+
+        // Read *and clear*: the light reports the window just gone, not everything since
+        // boot, which is what makes it go out when the host stops talking.
+        let lit = if SAW.swap(false, Ordering::Relaxed) {
+            !LIT.load(Ordering::Relaxed)
+        } else {
+            false
+        };
+        LIT.store(lit, Ordering::Relaxed);
+        // SAFETY: `init` configured this pin as an output and nothing else drives it.
+        unsafe { gpio::write(pin, lit) };
+    }
 }
 
 /// Attach USB to the bus.

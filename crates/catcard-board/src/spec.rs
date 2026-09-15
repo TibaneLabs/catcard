@@ -214,6 +214,12 @@ pub struct BoardSpec {
     /// Source: gpio-peripherals.md §Mk4 [C]
     pub sflash: Option<SflashPins>,
     pub usb: UsbPins,
+    /// USB activity LED, on the boards that have one.
+    ///
+    /// A plain firmware-driven output: there is no hardware activity-detect circuit, so
+    /// nothing blinks unless the firmware blinks it. `None` on mk3, which has no such
+    /// line at all. Source: usb.md §"USB activity LED" [C]
+    pub usb_active: MaybePin,
 
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
     pub has_se2: bool,
@@ -331,6 +337,8 @@ pub const MK3: BoardSpec = BoardSpec {
         dm: pa(11),
         dp: pa(12),
     },
+    // mk3 has no USB activity line. Source: usb.md §"USB activity LED" [C]
+    usb_active: None,
     has_se2: false,
     se2: None,
     nfc: None,
@@ -410,6 +418,8 @@ pub const MK4: BoardSpec = BoardSpec {
         dm: pa(11),
         dp: pa(12),
     },
+    // `USB_ACTIVE=PC6`, mk4 rev B and later. Source: usb.md §"USB activity LED" [C]
+    usb_active: Some(pc(6)),
     has_se2: true,
     // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
     // inherited mk3 numpad claiming the same pins -- resolved in SE2's favour: the
@@ -537,6 +547,8 @@ pub const Q1: BoardSpec = BoardSpec {
     },
     sflash: MK4.sflash, // none, as mk4
     usb: MK4.usb,
+    // The same `PC6` as mk4. Source: usb.md §"USB activity LED" [C]
+    usb_active: MK4.usb_active,
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]
     se2: Some(Se2Pins {
@@ -723,6 +735,12 @@ mod tests {
             }
             if let Some(p) = b.sdmmc.mux {
                 claim(p, "SD mux", b.name);
+            }
+            // PC6 sits next to the SD activity LED on PC7, so a transposed digit here
+            // would drive the card light on every USB packet -- which is exactly the
+            // kind of quiet wrong-pin mistake this test exists to catch.
+            if let Some(p) = b.usb_active {
+                claim(p, "USB active LED", b.name);
             }
             if let Some(s) = b.sdmmc.slot_b {
                 claim(s.card_detect, "SD slot B detect", b.name);
