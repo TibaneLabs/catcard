@@ -146,21 +146,20 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 /// behind and one we cannot, and the person about to overwrite their firmware is the one
 /// who should weigh it.
 pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
-    // Two facts, in the order they matter. Whether we could check the signature comes
-    // first: an image signed by one of the five unpublished factory keys cannot be
-    // verified here at all, and that is different from one that failed. Whether it is
-    // older than what is running comes second -- going back to stock firmware is a
-    // legitimate thing to want, and the bootloader still holds the final say through its
-    // high-water mark, so this is a warning and not a refusal.
+    // The one fact worth stating: whether we could check the signature. An image signed
+    // by one of the five unpublished factory keys cannot be verified here at all (only the
+    // bootloader can, after install), which is different from one that failed -- a failure
+    // is refused outright before this screen. We deliberately do not warn about a
+    // downgrade: going back to older or stock firmware is a legitimate thing to want, and
+    // the bootloader still holds the final say through its OTP high-water mark.
     message(
         panel,
         "Install firmware?",
         a.header.version_str().unwrap_or("unknown version"),
-        match (a.is_verified(), a.older_than_running) {
-            (true, false) => "signature checked",
-            (true, true) => "checked, but OLDER",
-            (false, false) => "SIGNATURE NOT CHECKED",
-            (false, true) => "NOT CHECKED, and OLDER",
+        if a.is_verified() {
+            "signature checked"
+        } else {
+            "SIGNATURE NOT CHECKED"
         },
     );
 }
