@@ -109,10 +109,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // `unlock` only returns once the PIN is in -- a blank device is offered setup
     // rather than being turned away, so there is no longer a state where the front
     // panel has nothing to offer.
-    let (head, note, no_seed) = match unlocked {
-        pinentry::Unlocked::In { zero_secret: true } => ("Unlocked", "no seed stored yet", true),
-        pinentry::Unlocked::In { .. } => ("Unlocked", "wallet is not built yet", false),
-    };
+    let no_seed = matches!(unlocked, pinentry::Unlocked::In { zero_secret: true });
     // The bootloader's own verdict on the secret slot, written down.
     //
     // It is not exposed over USB -- Identify's BLANK bit means "no PIN", a different
@@ -138,8 +135,6 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         report: &report,
         no_seed,
         pool: pool.as_mut(),
-        head,
-        note,
     })
 }
 

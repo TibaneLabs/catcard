@@ -97,7 +97,6 @@ enum Screen {
 /// what it does on the one device where the answer is harmless.
 const MAIN_ITEMS: &[&str] = &[
     "Status",
-    "Install from SD",
     "Debug",
     "Utils",
     "About",
@@ -114,7 +113,6 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     "New wallet",
     "Import seed",
     "Status",
-    "Install from SD",
     "Debug",
     "Utils",
     "About",
@@ -146,6 +144,7 @@ const UTILS_ITEMS: &[&str] = &[
     "Address Explorer",
 ];
 const DEBUG_ITEMS: &[&str] = &[
+    "Install from SD",
     "USB",
     "Clocks",
     "PSRAM",
@@ -173,8 +172,6 @@ pub fn run(session: Session<'_>) -> ! {
         report,
         no_seed,
         mut pool,
-        head,
-        note,
     } = session;
     let mut screen = Screen::Main;
     let mut showing_offer = false;
@@ -183,8 +180,6 @@ pub fn run(session: Session<'_>) -> ! {
     // screen is the part of a menu that can be wrong without looking wrong.
     let mut v = View {
         report,
-        head,
-        note,
         last_key: None,
         keys_seen: 0,
         sc: Scroll::new(),
@@ -258,7 +253,7 @@ pub fn run(session: Session<'_>) -> ! {
             if let Some(items) = items_of(screen, v.no_seed)
                 && matches!(key, Key::Digit(5) | Key::Digit(8))
             {
-                let (title, note) = menu_head(screen, &v);
+                let (title, note) = menu_head(screen);
                 let mut view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
                 let old = view.off();
                 view.move_cursor(matches!(key, Key::Digit(8)));
@@ -402,7 +397,6 @@ fn step(
             // "Status" is the screen behind the menu, so choosing it just redraws --
             // there is no separate page.
             (Key::Confirm, Some("Status")) => Screen::Main,
-            (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
@@ -435,17 +429,20 @@ fn step(
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
-        Screen::Debug => match (key, cursor) {
-            (Key::Confirm, 0) => Screen::Usb,
-            (Key::Confirm, 1) => Screen::Clocks,
-            (Key::Confirm, 2) => Screen::Psram,
-            (Key::Confirm, 3) => Screen::Boot,
-            (Key::Confirm, 4) => Screen::Selftest,
-            (Key::Confirm, 5) => Screen::Keypad,
-            (Key::Confirm, 6) => Screen::Sd,
-            (Key::Confirm, 7) => Screen::Logs,
-            (Key::Confirm, 8) => Screen::SaveLog,
-            (Key::Confirm, _) => Screen::Colours,
+        // By name, like Main: the list reorders (Install from SD was just added at the
+        // top), and an index table would silently point at the wrong entry.
+        Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            (Key::Confirm, Some("USB")) => Screen::Usb,
+            (Key::Confirm, Some("Clocks")) => Screen::Clocks,
+            (Key::Confirm, Some("PSRAM")) => Screen::Psram,
+            (Key::Confirm, Some("Boot report")) => Screen::Boot,
+            (Key::Confirm, Some("Selftest")) => Screen::Selftest,
+            (Key::Confirm, Some("Keypad")) => Screen::Keypad,
+            (Key::Confirm, Some("microSD")) => Screen::Sd,
+            (Key::Confirm, Some("Logs")) => Screen::Logs,
+            (Key::Confirm, Some("Save log to SD")) => Screen::SaveLog,
+            (Key::Confirm, Some("Colours")) => Screen::Colours,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
@@ -481,8 +478,6 @@ pub struct Session<'a> {
     /// `None` on a device whose pool never met its policy — which is a refusal to
     /// generate a seed, not a reason to look for entropy somewhere weaker.
     pub pool: Option<&'a mut catcard_entropy::EntropyPool>,
-    pub head: &'a str,
-    pub note: &'a str,
 }
 
 /// Everything a screen needs to draw itself.
@@ -492,10 +487,6 @@ pub struct Session<'a> {
 /// wrong thing without the compiler noticing.
 struct View<'a> {
     report: &'a BootReport,
-    /// Title of the top-level screen: what the unlock resolved to.
-    head: &'a str,
-    /// Its second line, until USB has something to say.
-    note: &'a str,
     last_key: Option<Key>,
     keys_seen: u32,
     sc: Scroll,
@@ -566,37 +557,13 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     }
 }
 
-/// `usb up in 3 out 3`, or the reason it is not, falling back to `note` before init.
-fn usb_line(note: &str) -> Line {
-    let (configured, rx, tx, _) = usbtask::stats();
-    let fault = usbtask::init_fault();
-    let mut l = Line::new();
-    if !configured && rx == 0 && tx == 0 && fault.is_empty() {
-        // Nothing has happened yet and nothing has failed: say what the device is
-        // rather than reporting a zero that looks like a fault.
-        let _ = l.push_str(note);
-        return l;
-    }
-    let _ = write!(
-        l,
-        "usb {}{} in {rx} out {tx}",
-        if configured { "up" } else { "down" },
-        fault
-    );
-    l
-}
-
 /// The title and note line for a menu screen -- the single place each is defined, used by
-/// both the draw path and the arrow handler so the two never diverge. The note is owned
-/// because the main menu's is the live USB state.
-fn menu_head<'a>(screen: Screen, v: &View<'a>) -> (&'a str, Line) {
+/// both the draw path and the arrow handler so the two never diverge. The note is owned so
+/// a screen that wants a dynamic one can build it here.
+fn menu_head(screen: Screen) -> (&'static str, Line) {
     let mut note = Line::new();
     let title = match screen {
-        // The USB state, the one number worth seeing without navigating anywhere.
-        Screen::Main => {
-            note = usb_line(v.note);
-            v.head
-        }
+        Screen::Main => "CatCard",
         Screen::Utils => "Utils",
         Screen::NewSeedMenu => {
             let _ = note.push_str("how many words?");
@@ -637,7 +604,7 @@ fn build_menu_view<'a>(
 /// Draw a menu screen: the larger font, the selected row an inverted bar, scrolled to the
 /// view's persisted offset.
 fn draw_menu(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
-    let (title, note) = menu_head(screen, v);
+    let (title, note) = menu_head(screen);
     let items = items_of(screen, v.no_seed).unwrap_or(&[]);
     let view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
     display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
