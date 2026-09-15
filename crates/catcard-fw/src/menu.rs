@@ -195,6 +195,7 @@ pub fn run(session: Session<'_>) -> ! {
         last_key: None,
         keys_seen: 0,
         sc: Scroll::new(),
+        menu_off: 0,
         no_seed,
     };
 
@@ -257,32 +258,33 @@ pub fn run(session: Session<'_>) -> ! {
             redraw = true;
 
             // Cursor movement first: it stays on this screen, so it never reaches the
-            // transition table below.
-            if let Some(items) = items_of(screen, v.no_seed) {
-                match key {
-                    // The up and down arrows on the keys.
-                    Key::Digit(5) => {
-                        v.sc = v.sc.step(items.len(), MAX_LINES, false);
-                        continue;
-                    }
-                    Key::Digit(8) => {
-                        v.sc = v.sc.step(items.len(), MAX_LINES, true);
-                        continue;
-                    }
-                    _ => {}
+            // transition table below. The move runs through the scroll view so the
+            // highlight travels within the panel and only pushes the view at an edge,
+            // and so pressing past the first/last item keeps scrolling to reveal the
+            // title. The resulting cursor and offset are persisted back into the view.
+            if let Some(items) = items_of(screen, v.no_seed)
+                && matches!(key, Key::Digit(5) | Key::Digit(8))
+            {
+                let (title, note) = menu_head(screen, &v);
+                let mut view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
+                view.move_cursor(matches!(key, Key::Digit(8)));
+                if let Some(id) = view.selected() {
+                    v.sc.cursor = id as usize;
                 }
+                v.menu_off = view.off();
+                continue;
             }
 
             let next = step(gate, panel, screen, *key, v.sc.cursor, v.no_seed);
             if next == Screen::SdInstall {
                 install_from_card(gate, login, panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Main;
                 break;
             }
             if next == Screen::SaveLog {
                 save_log_to_card(panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Debug;
                 break;
             }
@@ -298,31 +300,31 @@ pub fn run(session: Session<'_>) -> ! {
                     &display::LAYOUT,
                     false,
                 );
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Debug;
                 break;
             }
             if next == Screen::AnalyzeRng {
                 analyze_rng(gate, panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Utils;
                 break;
             }
             if next == Screen::UsbDrive {
                 usb_drive(panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Utils;
                 break;
             }
             if next == Screen::ViewTrngWords {
                 view_trng_words(gate, panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Utils;
                 break;
             }
             if next == Screen::AddressExplorer {
                 address_explorer(gate, login, panel, &mut pad, matrix, drbg);
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Utils;
                 break;
             }
@@ -341,7 +343,7 @@ pub fn run(session: Session<'_>) -> ! {
                 // from the login rather than assuming the flow got as far as storing
                 // one -- it can be declined or refused at several points.
                 v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Main;
                 break;
             }
@@ -349,7 +351,7 @@ pub fn run(session: Session<'_>) -> ! {
                 import_seed(gate, login, panel, &mut pad, matrix, drbg, words);
                 // A restored wallet reorders the menu, exactly as a generated one does.
                 v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Main;
                 break;
             }
@@ -358,14 +360,14 @@ pub fn run(session: Session<'_>) -> ! {
                 // Same reason as above, in the other direction: a wallet that no longer
                 // exists puts "New wallet" back at the top.
                 v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
-                v.sc = Scroll::new();
+                v.reset_menu();
                 screen = Screen::Main;
                 break;
             }
             if next != screen {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
-                v.sc = Scroll::new();
+                v.reset_menu();
             }
             // The colour chart painted the panel directly, behind the canvas and its row
             // cache, so the next frame has to go out whole or the chart stays under it.
@@ -507,8 +509,19 @@ struct View<'a> {
     last_key: Option<Key>,
     keys_seen: u32,
     sc: Scroll,
+    /// The menu's pixel scroll offset, persisted across redraws so the highlight pushes
+    /// the view at the edges rather than the view snapping to the cursor each frame.
+    menu_off: usize,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
+}
+
+impl View<'_> {
+    /// A fresh scroll position for a new list: cursor at the top, view unscrolled.
+    fn reset_menu(&mut self) {
+        self.sc = Scroll::new();
+        self.menu_off = 0;
+    }
 }
 
 /// The list on this screen, if it is a menu.
@@ -526,23 +539,14 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
 /// Draw whichever screen we are on.
 fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     match screen {
-        // The note line is the USB state rather than a fixed string: it was the one
-        // number worth seeing without navigating anywhere, and losing it to a submenu
-        // would undo the thing this menu exists to fix.
-        Screen::Main => menu(
-            panel,
-            v.head,
-            &usb_line(v.note),
-            main_items(v.no_seed),
-            v.sc,
-        ),
+        // Every list screen renders the same way; the title and note come from
+        // `menu_head`, the single place they are defined.
+        Screen::Main
+        | Screen::Utils
+        | Screen::NewSeedMenu
+        | Screen::ImportSeedMenu
+        | Screen::Debug => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
-        Screen::Utils => menu(panel, "Utils", "", UTILS_ITEMS, v.sc),
-        Screen::NewSeedMenu => menu(panel, "New wallet", "how many words?", NEW_SEED_ITEMS, v.sc),
-        Screen::ImportSeedMenu => {
-            menu(panel, "Import seed", "how many words?", IMPORT_SEED_ITEMS, v.sc)
-        }
-        Screen::Debug => menu(panel, "Debug", "", DEBUG_ITEMS, v.sc),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
@@ -595,13 +599,43 @@ fn usb_line(note: &str) -> Line {
     l
 }
 
-/// A numbered menu, drawn as a scrollable document in the larger font with the selected
-/// row shown as an inverted bar. `note` is a small line under the title, or `""` for none.
-/// The caller still owns the cursor in `sc`; each item carries its index as its id and the
-/// view is positioned on `sc.cursor`, so the run loop's existing `step`/transition table is
-/// unchanged.
-fn menu(panel: &mut display::Panel, title: &str, note: &str, items: &[&str], sc: Scroll) {
-    use catcard_ui::scroll::{Line as DLine, ScrollView, render};
+/// The title and note line for a menu screen -- the single place each is defined, used by
+/// both the draw path and the arrow handler so the two never diverge. The note is owned
+/// because the main menu's is the live USB state.
+fn menu_head<'a>(screen: Screen, v: &View<'a>) -> (&'a str, Line) {
+    let mut note = Line::new();
+    let title = match screen {
+        // The USB state, the one number worth seeing without navigating anywhere.
+        Screen::Main => {
+            note = usb_line(v.note);
+            v.head
+        }
+        Screen::Utils => "Utils",
+        Screen::NewSeedMenu => {
+            let _ = note.push_str("how many words?");
+            "New wallet"
+        }
+        Screen::ImportSeedMenu => {
+            let _ = note.push_str("how many words?");
+            "Import seed"
+        }
+        Screen::Debug => "Debug",
+        _ => "",
+    };
+    (title, note)
+}
+
+/// Build the scroll view for a menu: a title, an optional small note, then the items --
+/// each carrying its index as its `menu_item` id, wrapped, so a long label stays one
+/// selectable row. Positioned on `cursor` at the persisted scroll `off`.
+fn build_menu_view<'a>(
+    title: &'a str,
+    note: &'a str,
+    items: &'a [&'a str],
+    off: usize,
+    cursor: usize,
+) -> catcard_ui::scroll::ScrollView<'a> {
+    use catcard_ui::scroll::{Line as DLine, ScrollView};
 
     let mut lines: heapless::Vec<DLine, 40> = heapless::Vec::new();
     let _ = lines.push(DLine::title(title));
@@ -609,13 +643,21 @@ fn menu(panel: &mut display::Panel, title: &str, note: &str, items: &[&str], sc:
         let _ = lines.push(DLine::body(note).small().centered());
     }
     for (i, item) in items.iter().enumerate() {
-        // Long labels wrap; only the head line stays selectable, carrying the index.
         let _ = lines.push(DLine::item(item, i as u32).wrapped());
     }
-    let mut view =
-        ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    view.select(sc.cursor as u32);
-    display::draw(panel, |c| render(c, &view));
+    let mut view = ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    view.set_off(off);
+    view.select(cursor as u32);
+    view
+}
+
+/// Draw a menu screen: the larger font, the selected row an inverted bar, scrolled to the
+/// view's persisted offset.
+fn draw_menu(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
+    let (title, note) = menu_head(screen, v);
+    let items = items_of(screen, v.no_seed).unwrap_or(&[]);
+    let view = build_menu_view(title, note.as_str(), items, v.menu_off, v.sc.cursor);
+    display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.

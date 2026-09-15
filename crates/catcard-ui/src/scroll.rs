@@ -305,6 +305,16 @@ impl<'a> ScrollView<'a> {
         };
     }
 
+    /// The current pixel scroll offset, for a caller that persists it across redraws.
+    pub fn off(&self) -> usize {
+        self.off
+    }
+
+    /// Restore a scroll offset, clamped to the document.
+    pub fn set_off(&mut self, off: usize) {
+        self.off = off.min(self.max_off());
+    }
+
     /// Whether this document has any selectable line (i.e. is a menu).
     pub fn is_menu(&self) -> bool {
         self.cursor.is_some()
@@ -325,10 +335,17 @@ impl<'a> ScrollView<'a> {
         }
     }
 
-    /// Move the cursor to the next/previous selectable line, clamping at the ends, and
-    /// scroll it into view.
+    /// Move the selection one step.
+    ///
+    /// If there is another selectable line that way, the cursor moves to it and the view
+    /// scrolls the *minimum* needed to keep it on screen -- so the highlight travels within
+    /// the panel and only pushes the view once it reaches an edge. If there is no further
+    /// selectable line (already the first or last item), the view keeps scrolling that way
+    /// while it can, so pressing up past the first item reveals the title and any text
+    /// above it, and pressing down past the last reveals trailing content.
     pub fn move_cursor(&mut self, down: bool) {
         let Some(cur) = self.cursor else {
+            self.scroll(down, self.line_step());
             return;
         };
         let next = if down {
@@ -336,9 +353,14 @@ impl<'a> ScrollView<'a> {
         } else {
             (0..cur).rev().find(|&j| self.lines[j].menu_item.is_some())
         };
-        if let Some(j) = next {
-            self.cursor = Some(j);
-            self.ensure_cursor_visible();
+        match next {
+            Some(j) => {
+                self.cursor = Some(j);
+                self.ensure_cursor_visible();
+            }
+            // Past the last selectable line either way: scroll the view to show whatever
+            // sits beyond it (a title, a note) rather than doing nothing.
+            None => self.scroll(down, self.line_step()),
         }
     }
 
@@ -479,6 +501,81 @@ mod tests {
             gap: 2,
             margin: 6,
         }
+    }
+
+    /// Mono-panel-shaped fonts (14px title and body), for the scroll-behaviour tests.
+    fn compact_fonts() -> Fonts<'static> {
+        Fonts {
+            title: &peep7x14::FONT,
+            body: &peep7x14::FONT,
+            small: &misc4x6::FONT,
+            gap: 1,
+            margin: 2,
+        }
+    }
+
+    fn a_menu() -> [Line<'static>; 6] {
+        [
+            Line::title("Menu"),
+            Line::item("one", 1),
+            Line::item("two", 2),
+            Line::item("three", 3),
+            Line::item("four", 4),
+            Line::item("five", 5),
+        ]
+    }
+
+    #[test]
+    fn the_highlight_moves_within_the_screen_before_the_view_scrolls() {
+        let src = a_menu();
+        // 64px fits the title and three 15px item slots, so an early move stays on screen.
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        assert_eq!(v.off(), 0);
+        v.move_cursor(true);
+        assert_eq!(v.off(), 0, "the view scrolled before the highlight reached an edge");
+    }
+
+    #[test]
+    fn pressing_up_on_the_first_item_reveals_the_title() {
+        let src = a_menu();
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        // Walk to the bottom so the title has left the screen.
+        for _ in 0..5 {
+            v.move_cursor(true);
+        }
+        assert!(v.off() > 0, "never scrolled");
+        // Back up to the first item; its row ends up against the top with the title still
+        // hidden above it.
+        for _ in 0..4 {
+            v.move_cursor(false);
+        }
+        assert_eq!(v.selected(), Some(1));
+        assert!(v.off() > 0, "first item did not sit against the top");
+        // Pressing up again has no earlier item, so it keeps scrolling to show the title.
+        v.move_cursor(false);
+        assert_eq!(v.off(), 0, "did not scroll up to reveal the title");
+    }
+
+    #[test]
+    fn pressing_down_on_the_last_item_reveals_trailing_content() {
+        // A menu with a note after the last item.
+        let src = [
+            Line::title("Menu"),
+            Line::item("one", 1),
+            Line::item("two", 2),
+            Line::item("three", 3),
+            Line::body("a footnote below the last item"),
+        ];
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        for _ in 0..5 {
+            v.move_cursor(true);
+        }
+        assert_eq!(v.selected(), Some(3), "cursor left the last item");
+        // At the end already? push once more to be sure it clamps rather than looping.
+        let end = v.off();
+        v.move_cursor(true);
+        assert_eq!(v.off(), end.max(v.off()), "scrolling past the end went backwards");
+        assert!(v.at_end());
     }
 
     #[test]
