@@ -148,10 +148,16 @@ impl MscRx {
 }
 
 /// Whether the USB Drive screen drives mass storage from the OTG interrupt (true) or the
-/// old foreground poll (false). A compile-time toggle: if the interrupt path ever
-/// misbehaves, flipping this to `false` restores the known-good polled transport without
-/// touching anything else. HID is polled either way.
-const MSC_INTERRUPTS: bool = true;
+/// foreground poll (false). HID is polled either way.
+///
+/// **Polled for now.** In interrupt mode the EP0 control transfers -- including the whole
+/// enumeration -- are serviced only by the OTG ISR, and on hardware that path never
+/// answered them: the host re-enumerated the drive but timed out reading its device
+/// descriptor. The polled path drives `otg.poll()` (control *and* bulk) from the
+/// foreground loop, exactly like the HID path that enumerates reliably, so it is the
+/// working transport. The interrupt path stays behind this toggle until its EP0 servicing
+/// is sorted out.
+const MSC_INTERRUPTS: bool = false;
 
 /// How long to hold the soft-disconnect when switching USB identity (HID <-> mass storage),
 /// so the host debounces the disconnect and re-enumerates. A few milliseconds is enough by
