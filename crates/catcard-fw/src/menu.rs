@@ -1384,25 +1384,27 @@ fn view_trng_words(
     // entropy -- so the words are exactly what the TRNGs produce right now.
     let mut pool = EntropyPool::new(crate::entropy_policy());
 
-    // The chip TRNG. SAFETY: RNG clock set up at boot; nothing else uses it here.
-    if let Some(rng) = unsafe { catcard_hal::rng::Rng::init() }.ok().as_ref() {
-        let mut b = [0u8; 64];
-        if rng.fill(&mut b).is_ok() {
-            pool.add(Source::Stm32Trng, &b);
-        }
-        b.zeroize();
-    }
+    // The same collection effort as generating a real seed: a full byte target from each
+    // source, the chip mixed in every pass, and a pause so the counts are legible. A
+    // "watch the generator work" screen that finished in a blink would be reading a
+    // handful of bytes and calling it done -- which is exactly the shortcut this project
+    // exists to replace, so it is not one this screen is allowed to take either.
+    const TARGET: usize = 512;
+    const CHIP_TARGET: usize = 512;
+    const MAX_PASSES: usize = 160;
+    const STEP_PAUSE_CYCLES: u32 = 4_000_000;
 
-    // Both elements, to a byte target each, bounded so a mute element cannot hang it.
-    const TARGET: usize = 64;
-    const MAX_PASSES: usize = 200;
+    // The chip TRNG. SAFETY: RNG clock set up at boot; nothing else uses it here.
+    let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
+    let mut chip_bytes = 0usize;
+
     let srcs = [
         (RngSource::Se1, Source::Se1Trng),
         (RngSource::Se2, Source::Se2Trng),
     ];
     let mut bytes = [0usize; 2];
     for _ in 0..MAX_PASSES {
-        if bytes[0] >= TARGET && bytes[1] >= TARGET {
+        if bytes[0] >= TARGET && bytes[1] >= TARGET && chip_bytes >= CHIP_TARGET {
             break;
         }
         for (i, (src, tag)) in srcs.iter().enumerate() {
@@ -1420,9 +1422,26 @@ fn view_trng_words(
             }
             buf.zeroize();
         }
-        let mut l = Line::new();
-        let _ = write!(l, "SE1 {} SE2 {} bytes", bytes[0], bytes[1]);
-        message(panel, "Reading TRNGs", &l, "");
+
+        // One chip read per pass, capped so the fast source does not run away from the
+        // slow elements on screen.
+        if let Some(rng) = &chip
+            && chip_bytes < CHIP_TARGET
+        {
+            let mut b = [0u8; 64];
+            if rng.fill(&mut b).is_ok() {
+                pool.add(Source::Stm32Trng, &b);
+                chip_bytes += b.len();
+            }
+            b.zeroize();
+        }
+
+        let mut counts = Line::new();
+        let _ = write!(counts, "SE1 {} SE2 {} S32 {}", bytes[0], bytes[1], chip_bytes);
+        let mut bits = Line::new();
+        let _ = write!(bits, "{} bits", pool.credited_bits());
+        message(panel, "Reading TRNGs", &counts, &bits);
+        catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
     }
 
     if pool.check().is_err() {

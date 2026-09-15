@@ -181,13 +181,14 @@ impl Pager {
 
 /// An emissions scramble for a page of secret text (see [`paged`]).
 ///
-/// After each line's text it lays a bar of ink of a **random width**, which changes the
-/// number of lit pixels a line drives into the panel and so scrambles what a passive RF
-/// pickup could reconstruct from the display's emissions. The width is derived from a
-/// per-viewing seed and the line's own index, so it is stable for a given line and
-/// therefore **scrolls with the text** rather than flickering; a fresh seed each time the
-/// screen opens means the pattern does not repeat across viewings. It is decoration, not
-/// a keystream -- a cheap mix is enough to make the per-line width unpredictable.
+/// Over each line of text it sprinkles single lit pixels -- one pixel high, scattered
+/// across the width the words occupy -- which changes the lit-pixel pattern a line drives
+/// into the panel and so scrambles what a passive RF pickup could reconstruct from the
+/// display's emissions. Whether a given pixel lights is derived from a per-viewing seed
+/// and the line's own index, so the pattern is stable for a given line and **scrolls with
+/// the text** rather than flickering; a fresh seed each time the screen opens means it
+/// does not repeat across viewings. It is decoration, not a keystream -- a cheap mix is
+/// enough to make the per-pixel choice unpredictable.
 #[derive(Copy, Clone)]
 pub struct Scramble {
     seed: u32,
@@ -199,29 +200,33 @@ impl Scramble {
         Self { seed }
     }
 
-    /// A stable width in `0..=max` for the content line at `idx`.
-    fn width(self, idx: usize, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        // A splitmix-style mix of the seed and the line index: stable per line, and with
-        // no visible structure from one line to the next.
-        let mut x = self.seed ^ (idx as u32).wrapping_mul(0x9E37_79B9);
-        x ^= x >> 16;
-        x = x.wrapping_mul(0x7feb_352d);
-        x ^= x >> 15;
-        x = x.wrapping_mul(0x846c_a68b);
-        x ^= x >> 16;
-        (x as usize) % (max + 1)
+    /// Whether the scramble lights the pixel at column `x` on content line `idx`.
+    ///
+    /// Keyed to the line index so a word keeps its own pattern and it scrolls with the
+    /// text, and to `x` so the result is a scatter of dots across the line rather than a
+    /// single block. Roughly one column in three lights, which reads as sparse noise
+    /// without burying the word under it.
+    fn lit(self, idx: usize, x: usize) -> bool {
+        // A splitmix-style mix of the seed with the line and column indices.
+        let mut h = self.seed
+            ^ (idx as u32).wrapping_mul(0x9E37_79B9)
+            ^ (x as u32).wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7feb_352d);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846c_a68b);
+        h ^= h >> 16;
+        h.is_multiple_of(3)
     }
 }
 
 /// Draw one window, with arrows saying whether there is more either way.
 ///
 /// `total` is what the source reported, which is how the arrows can be right even
-/// though only the visible lines were rendered. `scramble`, when set, lays random-width
-/// ink after each line to scramble the display's RF emissions -- for pages of secret
-/// text such as the seed backup.
+/// though only the visible lines were rendered. `scramble`, when set, sprinkles a
+/// one-pixel-high scatter of ink across each line -- overlaid on the words, scrolling
+/// with them -- to scramble the display's RF emissions, for pages of secret text such as
+/// the seed backup.
 pub fn paged<C: Canvas + ?Sized>(
     canvas: &mut C,
     l: &Layout<'_>,
@@ -250,17 +255,16 @@ pub fn paged<C: Canvas + ?Sized>(
         let y = l.body_top() + row * l.pitch();
         crate::text::draw_text(canvas, l.body, l.margin, y, line);
 
-        // Emissions scramble: a random-width ink bar in the space after the text. Anchored
-        // just past this line's own text so it never overwrites a word, and stopping short
-        // of the arrow column.
+        // Emissions scramble: a one-pixel-high row of scattered ink laid over the words
+        // themselves, from the left margin to short of the arrow column. Keyed to the
+        // content line (`p.top + row`) so a word keeps its own pattern and the noise
+        // scrolls with the text instead of flickering per frame.
         if let Some(sc) = scramble {
-            let text_w: usize = line.bytes().map(|b| l.body.advance(b)).sum();
-            let start = l.margin + text_w + gap;
+            let yy = y + l.body.line_height() / 2;
             let right = arrow_x.saturating_sub(gap);
-            if right > start {
-                let wdt = sc.width(p.top + row, right - start);
-                if wdt > 0 {
-                    canvas.fill_rect(start, y, wdt, l.body.line_height(), crate::canvas::INK);
+            for x in l.margin..right {
+                if sc.lit(p.top + row, x) {
+                    canvas.put(x, yy, crate::canvas::INK);
                 }
             }
         }
