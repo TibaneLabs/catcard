@@ -299,19 +299,6 @@ pub fn run(session: Session<'_>) -> ! {
         let _ = usbtask::pump();
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
 
-        // An upgrade that passed inspection is waiting on a person, wherever they are.
-        if let Some(a) = usbtask::pending() {
-            if !showing_offer {
-                if screen == Screen::Colours {
-                    display::wipe(ui.panel);
-                }
-                crate::session::show_offer(ui.panel, &a);
-                showing_offer = true;
-            }
-        } else if showing_offer {
-            showing_offer = false;
-            redraw = true;
-        }
 
         // The RTC screen redraws on a clock rather than on input: it is showing something
         // that changes on its own, and the whole question it answers is whether it does.
@@ -334,6 +321,33 @@ pub fn run(session: Session<'_>) -> ! {
         }
 
         crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+
+        // An upgrade that passed inspection is waiting on a person, wherever they are.
+        //
+        // **Checked after the keys are read, not before.** With USB serviced by its own
+        // task, the offer can become pending between a check made earlier in this loop
+        // and the key read -- and a host approving over USB injects its Confirm the moment
+        // the offer's reply arrives. That Confirm was then read with no offer showing and
+        // dispatched to whichever menu item was selected, while the install waited forever.
+        //
+        // Ordering closes it without a lock: the offer is marked pending before its reply
+        // goes out, and the host injects only after the reply. So by the time an injected
+        // key has been read, the offer is already pending, and this check routes the key
+        // to it. Single-threaded it is equally correct, since pump, read and check still
+        // happen in order.
+        if let Some(a) = usbtask::pending() {
+            if !showing_offer {
+                if screen == Screen::Colours {
+                    display::wipe(ui.panel);
+                }
+                crate::session::show_offer(ui.panel, &a);
+                showing_offer = true;
+            }
+        } else if showing_offer {
+            showing_offer = false;
+            redraw = true;
+        }
+
         for key in keys.iter() {
             if showing_offer {
                 match key {
