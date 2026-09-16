@@ -114,6 +114,7 @@ fn draw_report(c: &mut display::Screen, report: &BootReport, last_key: Option<Ke
             Key::Digit(d) => [b'0' + d],
             Key::Cancel => *b"x",
             Key::Confirm => *b"y",
+            Key::Char(c) => [c],
         };
         draw_text(
             c,

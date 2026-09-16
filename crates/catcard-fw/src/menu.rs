@@ -314,6 +314,7 @@ pub fn run(session: Session<'_>) -> ! {
                         redraw = true;
                     }
                     Key::Digit(_) => {}
+                    Key::Char(_) => {}
                 }
                 continue;
             }
@@ -1220,6 +1221,9 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
         None => {
             let _ = write!(l, "press any key");
         }
+        Some(Key::Char(c)) => {
+            let _ = write!(l, "last  {}", c as char);
+        }
     }
     let _ = lines.push(l);
 
@@ -1370,6 +1374,7 @@ fn install_from_card(
                 }
                 Key::Cancel => return,
                 Key::Digit(_) => {}
+                Key::Char(_) => {}
             }
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
@@ -2309,6 +2314,7 @@ fn confirmed(ui: &mut Ui<'_>) -> bool {
                 Key::Confirm => return true,
                 Key::Cancel => return false,
                 Key::Digit(_) => {}
+                Key::Char(_) => {}
             }
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
@@ -2455,6 +2461,7 @@ fn key_mash(
                     pool.add(catcard_entropy::Source::UserKeypad, &[*d]);
                     pool.add_timing(catcard_hal::dwt::cycles());
                 }
+                Key::Char(_) => {}
             }
         }
     }
@@ -2561,6 +2568,7 @@ fn collect_rolls(
                         pool.add_timing(catcard_hal::dwt::cycles());
                     }
                 }
+                Key::Char(_) => {}
             }
         }
     }
@@ -2629,6 +2637,7 @@ fn add_user_entropy(
                     break;
                 }
                 Key::Digit(_) => {}
+                Key::Char(_) => {}
             }
         }
         if done {
@@ -2977,7 +2986,18 @@ fn letter_key(b: u8) -> u8 {
 fn word_matches(word: &str, typed: &str) -> bool {
     let wb = word.as_bytes();
     let tb = typed.as_bytes();
-    wb.len() >= tb.len() && wb.iter().zip(tb).all(|(&w, &t)| letter_key(w) == t)
+    wb.len() >= tb.len()
+        && wb.iter().zip(tb).all(|(&w, &t)| {
+            // A letter typed on a keyboard stands for itself. A digit is the numpad's
+            // way of naming the group of letters that share a key, which is still how
+            // the mono boards reach them -- and both may appear in one prefix, since
+            // nothing stops a Q1 owner typing a digit.
+            if t.is_ascii_lowercase() {
+                w == t
+            } else {
+                letter_key(w) == t
+            }
+        })
 }
 
 /// Read one BIP-39 word on the numeric keypad, T9 style.
@@ -3029,12 +3049,23 @@ fn read_word(
         let mut title = Line::new();
         let _ = write!(title, "Word {num}");
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
-        let mut l = Line::new();
-        let _ = l.push_str("2abc 3def 4ghi 5jkl");
-        let _ = lines.push(l);
-        let mut l = Line::new();
-        let _ = l.push_str("6mno 7pqrs 8tuv 9wxyz");
-        let _ = lines.push(l);
+        // Two lines either way, so the screen below is laid out the same on both.
+        #[cfg(feature = "board-q1")]
+        {
+            let mut l = Line::new();
+            let _ = l.push_str("type the word");
+            let _ = lines.push(l);
+            let _ = lines.push(Line::new());
+        }
+        #[cfg(not(feature = "board-q1"))]
+        {
+            let mut l = Line::new();
+            let _ = l.push_str("2abc 3def 4ghi 5jkl");
+            let _ = lines.push(l);
+            let mut l = Line::new();
+            let _ = l.push_str("6mno 7pqrs 8tuv 9wxyz");
+            let _ = lines.push(l);
+        }
         let _ = lines.push(Line::new());
         let mut l = Line::new();
         let _ = write!(l, "keys: {typed}");
@@ -3088,6 +3119,15 @@ fn read_word(
                             break 'type_wait;
                         }
                     }
+                    // A letter, on a board with a keyboard. Typed straight in: the digit
+                    // legend below is the numpad's way of reaching the same letters.
+                    Key::Char(c @ b'a'..=b'z') => {
+                        armed = false;
+                        let _ = typed.push(*c as char);
+                        break 'type_wait;
+                    }
+                    // Upper case, punctuation and space are not in any BIP-39 word.
+                    Key::Char(_) => {}
                 }
             }
             catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
@@ -3938,6 +3978,7 @@ impl<'a> DocScreen<'a> {
             }
             Key::Cancel => DocFlow::Done(DocExit::Cancelled),
             Key::Digit(_) => DocFlow::Ignored,
+            Key::Char(_) => DocFlow::Ignored,
         }
     }
 }
@@ -4009,6 +4050,7 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
                         moved = true;
                     }
                     Key::Digit(_) => {}
+                    Key::Char(_) => {}
                 }
             }
             if moved {

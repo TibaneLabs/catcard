@@ -56,6 +56,88 @@ pub const LAYOUT: [Option<Key>; KEYS] = {
     l
 };
 
+/// Matrix positions that are modifiers or driver-only: they never become an event.
+///
+/// LAMP is the torch key. The reference is explicit that it is handled in the driver and
+/// "never delivered as a char" -- and we cannot drive it anyway, because no lamp pin is
+/// documented for this board. See `docs/HARDWARE-OPEN-ITEMS.md`.
+pub const KN_LAMP: usize = 50;
+/// SHIFT. Held, not latched, and never delivered.
+pub const KN_SHIFT: usize = 51;
+/// SYMBOL. Held, never delivered, and its tables are not implemented -- see [`decode`].
+pub const KN_SYMBOL: usize = 53;
+
+/// What each position types with nothing held. `0` means "produces no character".
+///
+/// The rows are the reference's positional groups: `kn0..9` specials (only TAB types),
+/// `kn10..19` the number row, `kn20..49` the three letter rows, `kn50..59` the modifiers
+/// with SPACE among them. Source: input.md §"Key decode" [C]
+const BASE_CHARS: [u8; KEYS] = *b"\x00\t\x00\x00\x00\x00\x00\x00\x00\x00\
+1234567890\
+qwertyuiop\
+asdfghjkl'\
+zxcvbnm,./\
+\x00\x00 \x00\x00\x00\x00\x00\x00\x00";
+
+/// With SHIFT held. Row 0 is dead, the number row gives symbols, letters upper-case.
+/// Source: input.md §"Key decode" [C]
+const SHIFT_CHARS: [u8; KEYS] = *b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+!@#$%^&*()\
+QWERTYUIOP\
+ASDFGHJKL\"\
+ZXCVBNM<>?\
+\x00\x00 \x00\x00\x00\x00\x00\x00\x00";
+
+/// With CAPS latched: the base table with its letters upper-cased, which is what the
+/// reference says CAPS is -- not the SHIFT table, whose number row is symbols.
+const CAPS_CHARS: [u8; KEYS] = {
+    let mut t = BASE_CHARS;
+    let mut i = 0;
+    while i < KEYS {
+        if t[i] >= b'a' && t[i] <= b'z' {
+            t[i] -= b'a' - b'A';
+        }
+        i += 1;
+    }
+    t
+};
+
+/// What a position means with the modifiers currently held.
+///
+/// Three groups never become characters, whatever is held:
+///
+/// - the arrows, CANCEL and ENTER (`kn3..8`) and DELETE (`kn54`), which stay the [`Key`]s
+///   every screen already navigates with;
+/// - the unmodified number row, which stays [`Key::Digit`] -- a PIN field and a menu
+///   both need digits, and typing `1` must not become a character there;
+/// - the modifiers and the lamp themselves.
+///
+/// SYMBOL is scanned and tracked but types nothing yet: the reference's symbol rows do
+/// not line up unambiguously with ten positions each, and a keyboard that types the wrong
+/// punctuation into a passphrase is worse than one that types none.
+pub fn decode(kn: usize, shift: bool, caps: bool) -> Option<Key> {
+    if kn >= KEYS {
+        return None;
+    }
+    match kn {
+        // Navigation and the two answer keys, unchanged under every modifier.
+        3..=8 | 54 => LAYOUT[kn],
+        KN_LAMP | KN_SHIFT | KN_SYMBOL => None,
+        // Digits, unless SHIFT turns the row into symbols.
+        10..=19 if !shift => LAYOUT[kn],
+        _ => {
+            let c = if caps {
+                CAPS_CHARS[kn]
+            } else if shift {
+                SHIFT_CHARS[kn]
+            } else {
+                BASE_CHARS[kn]
+            };
+            if c == 0 { None } else { Some(Key::Char(c)) }
+        }
+    }
+}
+
 /// The electrical half of the keyboard, supplied by the firmware.
 pub trait Matrix {
     /// Drive exactly one row low and leave the others released.
@@ -80,6 +162,12 @@ pub trait Matrix {
 pub struct Keypad {
     counters: [u8; KEYS],
     down: [bool; KEYS],
+    /// CAPS, which latches rather than being held: the reference says it toggles when
+    /// SHIFT and SYMBOL are pressed together.
+    caps: bool,
+    /// Whether SHIFT+SYMBOL were already down together, so holding them toggles CAPS
+    /// once rather than on every scan.
+    caps_combo: bool,
 }
 
 impl Default for Keypad {
@@ -93,6 +181,8 @@ impl Keypad {
         Self {
             counters: [0; KEYS],
             down: [false; KEYS],
+            caps: false,
+            caps_combo: false,
         }
     }
 
@@ -132,9 +222,22 @@ impl Keypad {
         }
         matrix.release_rows();
 
+        // Modifiers are read from the raw scan, not from debounced events: they are held
+        // while another key is struck, so they must be current for that key's decode.
+        let shift = raw[KN_SHIFT];
+        let symbol = raw[KN_SYMBOL];
+        if shift && symbol {
+            if !self.caps_combo {
+                self.caps = !self.caps;
+                self.caps_combo = true;
+            }
+        } else {
+            self.caps_combo = false;
+        }
+
         let mut n = 0;
-        for i in 0..KEYS {
-            if raw[i] == self.down[i] {
+        for (i, &now) in raw.iter().enumerate() {
+            if now == self.down[i] {
                 self.counters[i] = 0;
                 continue;
             }
@@ -143,11 +246,13 @@ impl Keypad {
                 continue;
             }
             self.counters[i] = 0;
-            self.down[i] = raw[i];
-            if let Some(key) = LAYOUT[i]
+            self.down[i] = now;
+            // Decoded with the modifiers as they are now. A key released after its
+            // modifier was let go reports the unmodified key; screens act on presses.
+            if let Some(key) = decode(i, shift, self.caps)
                 && n < events.len()
             {
-                events[n] = if raw[i] {
+                events[n] = if now {
                     Event::Pressed(key)
                 } else {
                     Event::Released(key)
@@ -272,9 +377,58 @@ mod tests {
     #[test]
     fn an_unmapped_key_is_debounced_but_says_nothing() {
         let (mut pad, mut m, mut d) = (Keypad::new(), MockMatrix::new(), drbg());
-        m.hold(25, true); // a letter
+        // kn9 is unused in the reference's decode table. It used to be a letter here,
+        // which stopped being unmapped the moment the keyboard learned to type.
+        m.hold(9, true);
         assert!(scan_n(&mut pad, &mut m, &mut d, 10).is_empty());
         assert_eq!(pad.held_count(), 1);
+    }
+
+    #[test]
+    fn the_letter_rows_type_what_the_reference_prints() {
+        // The three letter rows, their ends, and the two whitespace keys.
+        // Source: input.md §"Key decode" [C]
+        assert_eq!(decode(20, false, false), Some(Key::Char(b'q')));
+        assert_eq!(decode(29, false, false), Some(Key::Char(b'p')));
+        assert_eq!(decode(30, false, false), Some(Key::Char(b'a')));
+        assert_eq!(decode(38, false, false), Some(Key::Char(b'l')));
+        assert_eq!(decode(40, false, false), Some(Key::Char(b'z')));
+        assert_eq!(decode(46, false, false), Some(Key::Char(b'm')));
+        assert_eq!(decode(52, false, false), Some(Key::Char(b' ')), "kn52 is SPACE");
+        assert_eq!(decode(1, false, false), Some(Key::Char(b'\t')), "kn1 is TAB");
+    }
+
+    #[test]
+    fn navigation_never_becomes_a_character() {
+        // Whatever is held, the keys the screens steer with stay themselves -- otherwise
+        // a menu would stop answering the moment someone rested a thumb on SHIFT.
+        for (shift, caps) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(decode(7, shift, caps), Some(Key::Cancel), "kn7 CANCEL");
+            assert_eq!(decode(8, shift, caps), Some(Key::Confirm), "kn8 ENTER");
+            assert_eq!(decode(54, shift, caps), Some(Key::Cancel), "kn54 DELETE");
+            assert_eq!(decode(4, shift, caps), Some(Key::Digit(5)), "kn4 up");
+        }
+    }
+
+    #[test]
+    fn caps_leaves_the_number_row_alone_but_shift_does_not() {
+        // A latched CAPS that turned `1` into a character would break PIN entry, which
+        // is the one screen with no way to say what went wrong.
+        assert_eq!(decode(10, false, true), Some(Key::Digit(1)));
+        assert_eq!(decode(19, false, true), Some(Key::Digit(0)));
+        // SHIFT is the documented symbol row.
+        assert_eq!(decode(10, true, false), Some(Key::Char(b'!')));
+        assert_eq!(decode(20, true, false), Some(Key::Char(b'Q')));
+        // CAPS upper-cases letters, which is what the reference says it is.
+        assert_eq!(decode(20, false, true), Some(Key::Char(b'Q')));
+    }
+
+    #[test]
+    fn the_modifiers_and_the_lamp_deliver_nothing() {
+        // The lamp is torch-only in the reference, and we have no pin for it either way.
+        for kn in [KN_LAMP, KN_SHIFT, KN_SYMBOL, 9, 55, 59] {
+            assert_eq!(decode(kn, false, false), None, "kn{kn} produced a key");
+        }
     }
 
     #[test]

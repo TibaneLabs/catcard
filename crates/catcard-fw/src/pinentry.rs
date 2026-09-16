@@ -375,6 +375,7 @@ fn collect(
                         return Some(field);
                     }
                 }
+                Key::Char(_) => {}
             }
         }
         if changed {

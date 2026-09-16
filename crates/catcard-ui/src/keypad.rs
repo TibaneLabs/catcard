@@ -40,6 +40,13 @@ pub enum Key {
     Cancel,
     /// The `y` / OK key.
     Confirm,
+    /// A printable character, from a board that has a keyboard rather than a numpad.
+    ///
+    /// ASCII only: every key the Q1 can produce is ASCII, and a `char` would make this
+    /// four bytes in an array that is held per matrix position. Screens written for the
+    /// numpad ignore it, which is why the Q1's letters did nothing for so long -- they
+    /// were scanned and debounced, but had nowhere to go.
+    Char(u8),
 }
 
 /// Which key sits at which matrix position, indexed `row * COLS + col`.
