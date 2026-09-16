@@ -31,6 +31,9 @@ pub const COLS: usize = 10;
 /// Matrix positions, `kn = row * COLS + col`.
 pub const KEYS: usize = ROWS * COLS;
 
+// `held_mask` reports one bit per position.
+const _: () = assert!(KEYS <= 64, "more positions than a mask can hold");
+
 /// What each matrix position means to the current screens, indexed `row * COLS + col`.
 ///
 /// Positions from the reference's decode table [C]: `kn3..6` are the arrows (left, up,
@@ -162,6 +165,8 @@ pub trait Matrix {
 pub struct Keypad {
     counters: [u8; KEYS],
     down: [bool; KEYS],
+    /// Most recent position to go down, for the keypad tester.
+    last_kn: Option<u8>,
     /// CAPS, which latches rather than being held: the reference says it toggles when
     /// SHIFT and SYMBOL are pressed together.
     caps: bool,
@@ -181,6 +186,7 @@ impl Keypad {
         Self {
             counters: [0; KEYS],
             down: [false; KEYS],
+            last_kn: None,
             caps: false,
             caps_combo: false,
         }
@@ -247,6 +253,9 @@ impl Keypad {
             }
             self.counters[i] = 0;
             self.down[i] = now;
+            if now {
+                self.last_kn = Some(i as u8);
+            }
             // Decoded with the modifiers as they are now. A key released after its
             // modifier was let go reports the unmodified key; screens act on presses.
             if let Some(key) = decode(i, shift, self.caps)
@@ -264,6 +273,27 @@ impl Keypad {
     }
 
     /// How many positions are held after debounce, mapped or not.
+    /// The matrix position most recently pressed, mapped or not.
+    ///
+    /// For the keypad tester. A test screen that only reacted to keys the UI understands
+    /// could not prove the matrix works, which is the one thing it exists for -- the
+    /// modifiers, the lamp and the two hardware keys decode to nothing and would look
+    /// dead on the very screen meant to tell a dead key from an unmapped one.
+    pub fn last_pressed(&self) -> Option<usize> {
+        self.last_kn.map(usize::from)
+    }
+
+    /// Which positions are held, one bit per matrix position.
+    pub fn held_mask(&self) -> u64 {
+        let mut m = 0u64;
+        for (i, &d) in self.down.iter().enumerate() {
+            if d {
+                m |= 1 << i;
+            }
+        }
+        m
+    }
+
     pub fn held_count(&self) -> usize {
         self.down.iter().filter(|d| **d).count()
     }

@@ -247,6 +247,8 @@ pub fn run(session: Session<'_>) -> ! {
         drbg_stats: drbg.stats(),
         drbg_sample: None,
         menu: MenuScreen::new(),
+        raw_kn: None,
+        raw_held: 0,
         no_seed,
     };
 
@@ -289,6 +291,17 @@ pub fn run(session: Session<'_>) -> ! {
         } else if showing_offer {
             showing_offer = false;
             redraw = true;
+        }
+
+        // The tester repaints on raw matrix state, not on events: the keys that produce
+        // no event are exactly the ones it is needed for.
+        if screen == Screen::Keypad {
+            let (kn, held) = (ui.pad.last_pressed(), ui.pad.held_mask());
+            if kn != v.raw_kn || held != v.raw_held {
+                v.raw_kn = kn;
+                v.raw_held = held;
+                redraw = true;
+            }
         }
 
         crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
@@ -716,6 +729,12 @@ struct View<'a> {
     drbg_sample: Option<u32>,
     /// The list screen's own state: where the cursor is and how far the view is scrolled.
     menu: MenuScreen,
+    /// The last raw matrix position pressed, and which positions are held, for the
+    /// keypad tester. Raw rather than decoded: the modifiers, the lamp and the two
+    /// hardware keys decode to nothing, and a tester that showed only decoded keys made
+    /// them look dead on the one screen meant to tell dead from unmapped.
+    raw_kn: Option<usize>,
+    raw_held: u64,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
 }
@@ -827,7 +846,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PsramProbe => psram_probe(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
-        Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen),
+        Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen, v.raw_kn, v.raw_held),
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
@@ -1204,7 +1223,13 @@ fn boot_screen(panel: &mut display::Panel, report: &BootReport) {
 }
 
 /// Which key the firmware decoded, which is the question a mirrored pad raises.
-fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
+fn keypad_screen(
+    panel: &mut display::Panel,
+    last: Option<Key>,
+    seen: u32,
+    raw_kn: Option<usize>,
+    held: u64,
+) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
 
     let mut l = Line::new();
@@ -1223,6 +1248,20 @@ fn keypad_screen(panel: &mut display::Panel, last: Option<Key>, seen: u32) {
         }
         Some(Key::Char(c)) => {
             let _ = write!(l, "last  {}", c as char);
+        }
+    }
+    let _ = lines.push(l);
+
+    // The raw matrix position, which every physical key produces -- including the ones
+    // that decode to nothing (SYM, LAMP, NFC, QR). This is what makes the tester able to
+    // tell a key that is wired but unmapped from a key that is not wired at all.
+    let mut l = Line::new();
+    match raw_kn {
+        Some(kn) => {
+            let _ = write!(l, "kn {kn}  held {}", held.count_ones());
+        }
+        None => {
+            let _ = write!(l, "kn -");
         }
     }
     let _ = lines.push(l);

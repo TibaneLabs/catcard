@@ -26,6 +26,9 @@ pub const COLS: usize = 3;
 /// Keys on the pad.
 pub const KEYS: usize = ROWS * COLS;
 
+// `held_mask` reports one bit per position.
+const _: () = assert!(KEYS <= 64, "more positions than a mask can hold");
+
 /// Consecutive agreeing samples before a key's state changes.
 ///
 /// Three at the scan rate below gives roughly 50 ms of settling, comfortably past
@@ -136,6 +139,8 @@ pub struct Keypad {
     counters: [u8; KEYS],
     /// Debounced state.
     down: [bool; KEYS],
+    /// Most recent position to go down, for the keypad tester.
+    last_kn: Option<u8>,
 }
 
 impl Default for Keypad {
@@ -149,6 +154,7 @@ impl Keypad {
         Self {
             counters: [0; KEYS],
             down: [false; KEYS],
+            last_kn: None,
         }
     }
 
@@ -199,6 +205,9 @@ impl Keypad {
             if self.counters[i] >= DEBOUNCE_SAMPLES {
                 self.counters[i] = 0;
                 self.down[i] = raw[i];
+                if raw[i] {
+                    self.last_kn = Some(i as u8);
+                }
                 events[n] = if raw[i] {
                     Event::Pressed(LAYOUT[i])
                 } else {
@@ -220,6 +229,25 @@ impl Keypad {
 
     /// How many keys are held. Used to reject multi-key input during PIN entry, where
     /// an ambiguous read must not be guessed at.
+    /// The matrix position most recently pressed, mapped or not.
+    ///
+    /// For the keypad tester. A test screen that only reacted to keys the UI understands
+    /// could not prove the matrix works, which is the one thing it exists for.
+    pub fn last_pressed(&self) -> Option<usize> {
+        self.last_kn.map(usize::from)
+    }
+
+    /// Which positions are held, one bit per matrix position.
+    pub fn held_mask(&self) -> u64 {
+        let mut m = 0u64;
+        for (i, &d) in self.down.iter().enumerate() {
+            if d {
+                m |= 1 << i;
+            }
+        }
+        m
+    }
+
     pub fn held_count(&self) -> usize {
         self.down.iter().filter(|d| **d).count()
     }
