@@ -111,3 +111,46 @@ both climbing means two tasks share the CPU, and `hw`/`ok` cover the stacks.
 
 The same reasoning applies to any later step that puts the kernel on the boot path: it
 wants an unlocked unit, an emulator run, or a proven `gate 18/7` SD-upgrade path first.
+
+## Measured on the RDP=2 Q1
+
+Two runs of *Debug → Kernel test*, read over USB.
+
+**Run 1 — preemption.** Three tasks, one of which never yields. After ~4.9 minutes:
+`t=294000 sw=882003 a=294001 b=294001`, all stack guards intact. Exactly one round-robin
+per tick, and the two yielding tasks ran every tick even though the third never gave up
+the CPU — which only SysTick preemption can cause.
+
+**Run 2 — FPU, callgate, device interrupt.**
+
+```
+kt t=4501 ms=13398 sw=17648 fp=8824 edge=0xcbf0aca2
+kf a=275/0 b=275/0
+kg ok=89 err=0  hw fa=78 fb=78 g=67 r=437 ok
+```
+
+- **FPU context holds.** Each round carries all of `s16-s31` through sixteen switches —
+  confirmed from the disassembly, which saves `d8-d15` and compares after the switch — in
+  two disjoint value ranges. 275 rounds per task, zero mismatches, 8 824 FP-state saves.
+  An earlier version switched once after building the values and objdump showed the
+  optimiser had hoisted the comparisons ahead of the call; that version would have passed
+  while testing nothing.
+- **Callgate calls work under the scheduler**: 89 SE1 TRNG reads, no errors.
+- **A device interrupt preempts a running task**: the keypad edge latch changed mid-run.
+
+### The callgate blackout
+
+`t=4501` ticks against `ms=13398` real milliseconds: kernel time ran about **3× slow**.
+Each 500-tick reporting interval took ~1 487 ms and contained 10 gate calls, so each
+**SE1 TRNG read held interrupts masked for ~99 ms**.
+
+During that window nothing runs — no other task, no USB, no tick — and a keypress is
+pended until the call returns. Consequences:
+
+- `ticks()` is a scheduling clock only. Use the DWT cycle counter or the RTC for elapsed
+  time. PIN key-stretching goes through the same masked call and is much longer.
+- **Masking only SysTick and PendSV (BASEPRI) is not an option.** An interrupt taken inside
+  firewall code closes the firewall. With the keypad's EXTI now live, a keypress during a
+  BASEPRI-only gate call would do exactly that. PRIMASK — everything — is required.
+- The host's USB timeouts must cover the longest gate call, since the device cannot answer
+  during one.
