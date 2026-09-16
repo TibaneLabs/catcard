@@ -129,6 +129,14 @@ pub(crate) fn switch(sp: u32) -> u32 {
         && let Some(t) = tasks[cur].as_mut()
     {
         t.sp = sp;
+        // The switch pushed r4-r11 then EXC_RETURN, so EXC_RETURN sits eight words above
+        // `sp` whether or not FP registers were stacked beneath it. Bit 4 clear means
+        // this task had an extended frame and `s16-s31` were just saved.
+        // SAFETY: `sp` is the frame the switch has just written.
+        let exc_return = unsafe { ((sp + 32) as *const u32).read() };
+        if exc_return & 0x10 == 0 {
+            crate::count_fp_save();
+        }
     }
 
     // Round robin. Every spawned task is runnable: sleeping and blocking come with the

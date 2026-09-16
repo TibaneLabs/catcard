@@ -503,7 +503,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         // Never returns, so `back` is unreachable; the bootloader reboots the device.
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Also never returns: the scheduler takes the CPU for good.
-        Screen::KernelTest => to(|a| crate::ktest::run(a.ui), Screen::Debug),
+        Screen::KernelTest => to(|a| crate::ktest::run(a.gate, a.ui), Screen::Debug),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]

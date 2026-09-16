@@ -86,6 +86,14 @@ pub fn on_key_edge() {
     unsafe { exti::clear_and_mask(mask) };
 }
 
+/// The DWT cycle count latched by the most recent keypad edge, or 0 if none ever fired.
+///
+/// Read-only and non-consuming, for diagnostics: the kernel test logs it so a keypress
+/// during the test shows the edge interrupt preempting whatever task was running.
+pub fn edge_latch() -> u32 {
+    EDGE_CYCLES.load(Ordering::Relaxed)
+}
+
 /// Take the most recent latched edge sample, if a press was caught since the last call.
 ///
 /// Sixteen bytes: the cycle counter and the three RTC registers, little-endian. `None`

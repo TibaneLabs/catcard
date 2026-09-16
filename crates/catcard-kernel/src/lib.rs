@@ -62,6 +62,12 @@ static TICKS: AtomicU32 = AtomicU32::new(0);
 /// counter that never moves is the first symptom of a switch that is not happening.
 static SWITCHES: AtomicU32 = AtomicU32::new(0);
 
+/// Switches whose outgoing task had floating-point state to save.
+///
+/// The FPU path in the switch only runs for a task that has touched the FPU, so a test
+/// that never sees this move has not exercised it -- however many switches it counted.
+static FP_SAVES: AtomicU32 = AtomicU32::new(0);
+
 /// Milliseconds per tick.
 pub const TICK_MS: u32 = 1;
 
@@ -73,6 +79,15 @@ pub fn ticks() -> u32 {
 /// Context switches since [`start`].
 pub fn switches() -> u32 {
     SWITCHES.load(Ordering::Relaxed)
+}
+
+/// Switches that saved floating-point state, since [`start`].
+pub fn fp_saves() -> u32 {
+    FP_SAVES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn count_fp_save() {
+    FP_SAVES.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn count_tick() {
