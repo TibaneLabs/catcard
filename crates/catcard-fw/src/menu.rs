@@ -1319,9 +1319,9 @@ fn keypad_screen(
 struct RtcWatch {
     /// `[SSR, TR, DR]`, in the order the shadow registers require.
     snap: [u32; 3],
-    /// Frames drawn since the screen opened, so a frozen RTC still looks different from a
-    /// frozen screen.
-    frames: u32,
+    /// Whether the first sample has been taken. The first is immediate so the screen is
+    /// never blank; the rest are paced.
+    started: bool,
     /// DWT cycle count at the last sample.
     last: u32,
 }
@@ -1331,7 +1331,7 @@ impl RtcWatch {
     fn sample(&mut self, period: u32) -> bool {
         let now = catcard_hal::dwt::cycles();
         // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles, far longer than a frame.
-        if self.frames != 0 && now.wrapping_sub(self.last) < period {
+        if self.started && now.wrapping_sub(self.last) < period {
             return false;
         }
         self.last = now;
@@ -1339,7 +1339,7 @@ impl RtcWatch {
         // TR, DR -- reading DR unlocks the shadow). The APB read gate was opened during
         // bring-up; nothing here writes.
         self.snap = unsafe { catcard_hal::rtc::snapshot() };
-        self.frames = self.frames.wrapping_add(1);
+        self.started = true;
         true
     }
 }
@@ -1385,15 +1385,6 @@ fn rtc_screen(panel: &mut display::Panel, w: &RtcWatch) {
         bcd2((dr >> 8) & 0x1f),
         bcd2(dr & 0x3f)
     );
-    let _ = lines.push(l);
-
-    // Ours, not the RTC's: it separates "the clock is stopped" from "the screen is stuck".
-    let mut l = Line::new();
-    let _ = write!(l, "frames {}", w.frames);
-    let _ = lines.push(l);
-
-    let mut l = Line::new();
-    let _ = write!(l, "x  back");
     let _ = lines.push(l);
 
     info(panel, "RTC", &lines);
