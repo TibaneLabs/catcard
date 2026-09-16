@@ -467,6 +467,13 @@ impl UsbTask {
         if let Stage::Receiving(staged) = &mut self.stage {
             let at = staged.received();
             if let Err(r) = staged.write(at, progress.payload) {
+                // `at` is the stage's own count and the payload is what just arrived, so a
+                // storage fault here means the region itself was not what `begin` checked.
+                crate::catlog!(
+                    "upgrade: write failed at {} len {}",
+                    at,
+                    progress.payload.len()
+                );
                 self.frames.reset();
                 self.refuse(r);
                 return;
@@ -692,6 +699,10 @@ impl UsbTask {
     }
 
     fn refuse(&mut self, reason: Reject) {
+        // The host gets a one-byte code; the details -- an offset, a length, which key --
+        // were thrown away. They are exactly what a refused install needs to be diagnosed,
+        // and the log is where a host can read them back.
+        crate::catlog!("upgrade: refused {:?}", reason);
         let mut body = [0u8; 64];
         let n = describe_reject(&reason, &mut body);
         self.begin_reply(Status::Refused, &body[..n]);
