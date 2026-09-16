@@ -36,6 +36,7 @@ mod menu;
 mod msc_drive;
 mod nor;
 mod panic;
+mod ktest;
 mod pinentry;
 mod power;
 mod recovery;
@@ -79,6 +80,20 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[entry]
 fn main() -> ! {
+    // The bootloader hands off by a plain jump, not a reset, so the vector table in use
+    // is whatever it left behind. Point it at ours explicitly rather than inferring it
+    // from the fact that interrupts happen to work: every exception this image handles --
+    // the keypad's edge timestamp, the USB transport, and anything the kernel installs --
+    // lives in this image's table, not the loader's.
+    //
+    // Source: hw-reference/platform.md §"Concrete handoff value" [C]
+    //
+    // SAFETY: the reset path, writing SCB->VTOR to this image's own vector table.
+    unsafe {
+        let cp = cortex_m::Peripherals::steal();
+        cp.SCB.vtor.write(BOARD.memory.firmware_base);
+    }
+
     // SAFETY: this is the reset path; nothing else has touched these peripherals. The
     // core comes up first because the panel's reset pulse is timed with the cycle
     // counter.
@@ -89,90 +104,14 @@ fn main() -> ! {
 
     let report = boot::bring_up(hal, panel.as_mut());
 
-    // Everything above ran on the main stack. From here the firmware is a task: the
-    // session becomes the UI task, and the kernel takes the CPU.
+    // Selftest screen, then the PIN prompt. A device missing anything that needs --
+    // panel, keypad, UI DRBG or callgate -- stops at the selftest screen instead.
     //
-    // SAFETY: the boot path is single-threaded and nothing is scheduling yet; the UI
-    // task is the only reader of these, and the stacks are not shared.
-    unsafe {
-        *(core::ptr::addr_of_mut!(BOOT_ARGS)) = Some((report, panel));
-        // Built straight from the raw pointers: taking a reference to the array first
-        // would be an aliasing claim over a static this task is about to run on.
-        let ui = core::slice::from_raw_parts_mut((core::ptr::addr_of_mut!(UI_STACK)).cast::<u32>(), UI_WORDS);
-        let beat =
-            core::slice::from_raw_parts_mut((core::ptr::addr_of_mut!(BEAT_STACK)).cast::<u32>(), BEAT_WORDS);
-        // A full table is a build-time mistake, not a runtime condition worth reporting
-        // to a screen that does not exist yet.
-        let _ = catcard_kernel::spawn("ui", ui, ui_task);
-        let _ = catcard_kernel::spawn("beat", beat, beat_task);
-    }
-
-    // SAFETY: reads RCC; the tick must match the clock the core actually runs at.
-    let hclk = unsafe { catcard_hal::clock::hclk_hz() };
-    // SAFETY: stealing the core peripherals on the boot path, where nothing else holds
-    // them, purely to arm SysTick.
-    let mut cp = unsafe { cortex_m::Peripherals::steal() };
-    // SAFETY: both tasks are spawned and their entries never return.
-    unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
-}
-
-/// The UI task's stack.
-///
-/// Generous on purpose. The deepest screens put kilobytes on it -- the log viewer reads
-/// 2 KB of buffer, the seed-word list builds about 1.1 KB of lines, the SD browser holds
-/// 48 entries -- and an overflow does not stop politely: it walks into whatever RAM sits
-/// below, which on this device can be seed material. The kernel paints and guards every
-/// stack so that is detectable, but the first defence is having enough.
-const UI_WORDS: usize = 8192;
-static mut UI_STACK: [u32; UI_WORDS] = [0; UI_WORDS];
-
-/// The heartbeat's stack. It counts and yields; it needs almost nothing.
-const BEAT_WORDS: usize = 256;
-static mut BEAT_STACK: [u32; BEAT_WORDS] = [0; BEAT_WORDS];
-
-/// What the session needs, handed across the boundary where the main stack ends and the
-/// UI task's begins.
-static mut BOOT_ARGS: Option<(BootReport, Option<display::Panel>)> = None;
-
-/// Ticks the heartbeat task has observed.
-///
-/// The point of it: if this keeps climbing while a blocking screen is up, preemption is
-/// real. If it stops, the scheduler stopped -- and that is worth seeing on a screen
-/// rather than inferring.
-static BEATS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-/// Ticks the heartbeat has counted, for the kernel debug screen.
-pub fn beats() -> u32 {
-    BEATS.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-/// The firmware as it was, now with a stack of its own.
-extern "C" fn ui_task() -> ! {
-    // SAFETY: written once in `main` before the kernel started; this is the only reader.
-    let Some((report, panel)) = (unsafe { (*(core::ptr::addr_of_mut!(BOOT_ARGS))).take() }) else {
-        // Cannot happen -- `main` fills this before spawning. Park rather than invent a
-        // session out of nothing.
-        loop {
-            cortex_m::asm::wfi();
-        }
-    };
+    // The kernel is deliberately *not* started here. On an RDP=2 unit a validly-signed
+    // image that boots and then hangs has no bootrom recovery, and a wrong context switch
+    // is exactly that image. The scheduler starts only when someone chooses it from
+    // Debug, so a failed test is cured by a power cycle.
     session::run(report, panel)
-}
-
-/// Counts kernel ticks and gives the CPU straight back.
-///
-/// Deliberately not a busy loop: it yields as soon as it has looked, so the UI keeps
-/// essentially all of the CPU and the number still tells the truth.
-extern "C" fn beat_task() -> ! {
-    let mut last = catcard_kernel::ticks();
-    loop {
-        let now = catcard_kernel::ticks();
-        if now != last {
-            last = now;
-            BEATS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
-        catcard_kernel::yield_now();
-    }
 }
 
 /// Where our own signed header sits in flash, for self-inspection.
