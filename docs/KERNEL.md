@@ -159,3 +159,13 @@ pended until the call returns. Consequences:
   BASEPRI-only gate call would do exactly that. PRIMASK — everything — is required.
 - The host's USB timeouts must cover the longest gate call, since the device cannot answer
   during one.
+
+### The menu as a task (Debug → Kernel UI)
+
+The real menu loop, restarted in a task beside a logging heartbeat, used by hand for
+~65 s: `sw` exactly 2 per tick, USB served by the menu task, all guards intact.
+
+**Menu stack high-water: 4 412 of 8 192 words (~54%)**, reached when a heavier screen
+opened (it was 2 679 before). That is well above early estimates, and it did not yet
+include the seed flow or key derivation, which are the likeliest deep paths. The stack
+size is not settled until those have been measured under the kernel.
