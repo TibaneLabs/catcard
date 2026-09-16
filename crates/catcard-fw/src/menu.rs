@@ -80,6 +80,8 @@ enum Screen {
     PrngStatus,
     /// The RTC registers, resampled about thirty times a second.
     Rtc,
+    /// The scheduler: ticks, switches, and per-task stack depth.
+    Kernel,
     Colours,
     Logs,
     SaveLog,
@@ -211,6 +213,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "USB",
     "Clocks",
     "RTC",
+    "Kernel",
     "PSRAM",
     "SPI-NOR",
     "Boot report",
@@ -253,6 +256,7 @@ pub fn run(session: Session<'_>) -> ! {
         raw_kn: None,
         raw_held: 0,
         rtc: RtcWatch::default(),
+        kernel_pace: Pace::default(),
         no_seed,
     };
 
@@ -307,6 +311,9 @@ pub fn run(session: Session<'_>) -> ! {
         if screen == Screen::Rtc && v.rtc.sample(frame_cycles) {
             redraw = true;
         }
+        if screen == Screen::Kernel && v.kernel_pace.due(frame_cycles) {
+            redraw = true;
+        }
 
         // The tester repaints on raw matrix state, not on events: the keys that produce
         // no event are exactly the ones it is needed for.
@@ -356,7 +363,10 @@ pub fn run(session: Session<'_>) -> ! {
             // each key instead of leaving on the first. `x` returns to Debug -- and on the
             // keypad tester it takes two `x` in a row, so a single `x` still registers as a
             // key to test. Every other key just refreshes the numbers above.
-            if matches!(screen, Screen::Keypad | Screen::PrngStatus | Screen::Rtc) {
+            if matches!(
+                screen,
+                Screen::Keypad | Screen::PrngStatus | Screen::Rtc | Screen::Kernel
+            ) {
                 let leave = match screen {
                     Screen::Keypad => *key == Key::Cancel && prev_key == Some(Key::Cancel),
                     _ => *key == Key::Cancel,
@@ -684,6 +694,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
+            (Key::Confirm, Some("Kernel")) => Screen::Kernel,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
             (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
@@ -758,6 +769,8 @@ struct View<'a> {
     raw_held: u64,
     /// The RTC debug screen's sampler.
     rtc: RtcWatch,
+    /// The kernel screen's repaint pacer.
+    kernel_pace: Pace,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
 }
@@ -872,6 +885,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen, v.raw_kn, v.raw_held),
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
         Screen::Rtc => rtc_screen(panel, &v.rtc),
+        Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
@@ -1309,6 +1323,30 @@ fn keypad_screen(
 /// with the edge-timed cycle counter and RTC, so `seeded`/`reseeds` climb as keys are
 /// pressed. It is never the wallet-seed generator -- that is `EntropyPool`, which has no
 /// draw API at all. Counters only; no generator state is shown.
+/// A repaint pacer: says yes once per `period` cycles, and immediately the first time.
+///
+/// One of these instead of each self-refreshing screen carrying its own copy of the same
+/// three lines. The first frame is never delayed, so a screen is painted the moment it
+/// opens rather than a frame later.
+#[derive(Copy, Clone, Default)]
+struct Pace {
+    last: u32,
+    started: bool,
+}
+
+impl Pace {
+    fn due(&mut self, period: u32) -> bool {
+        let now = catcard_hal::dwt::cycles();
+        // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles, far longer than a frame.
+        if self.started && now.wrapping_sub(self.last) < period {
+            return false;
+        }
+        self.last = now;
+        self.started = true;
+        true
+    }
+}
+
 /// What the RTC debug screen shows: the three registers, resampled on a clock.
 ///
 /// **Nothing here initialises or writes the RTC.** The point of the screen is to show how
@@ -1319,29 +1357,65 @@ fn keypad_screen(
 struct RtcWatch {
     /// `[SSR, TR, DR]`, in the order the shadow registers require.
     snap: [u32; 3],
-    /// Whether the first sample has been taken. The first is immediate so the screen is
-    /// never blank; the rest are paced.
-    started: bool,
-    /// DWT cycle count at the last sample.
-    last: u32,
+    pace: Pace,
 }
 
 impl RtcWatch {
     /// Resample if `period` cycles have passed. Returns whether it did.
     fn sample(&mut self, period: u32) -> bool {
-        let now = catcard_hal::dwt::cycles();
-        // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles, far longer than a frame.
-        if self.started && now.wrapping_sub(self.last) < period {
+        if !self.pace.due(period) {
             return false;
         }
-        self.last = now;
         // SAFETY: three register reads, in the order the shadow registers require (SSR,
         // TR, DR -- reading DR unlocks the shadow). The APB read gate was opened during
         // bring-up; nothing here writes.
         self.snap = unsafe { catcard_hal::rtc::snapshot() };
-        self.started = true;
         true
     }
+}
+
+/// What the scheduler is doing: ticks, switches, and how deep each task's stack has been.
+///
+/// The numbers that matter are the ones that move. `beats` is counted by a task that does
+/// nothing else, so if it climbs while a blocking screen is up, preemption is real; if it
+/// stops, the scheduler stopped. `hw` is the high-water mark in words -- the deepest that
+/// stack has ever been -- and `guard` is the word planted beneath it. A guard that reads
+/// anything else means a task ran off the bottom of its stack, which on this device can
+/// land in seed material, so it is reported rather than assumed.
+fn kernel_screen(panel: &mut display::Panel) {
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+
+    let mut l = Line::new();
+    let _ = write!(
+        l,
+        "tick {}  sw {}",
+        catcard_kernel::ticks(),
+        catcard_kernel::switches()
+    );
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = write!(l, "beats {}", crate::beats());
+    let _ = lines.push(l);
+
+    for i in 0..catcard_kernel::count().min(MAX_LINES - 2) {
+        let id = catcard_kernel::TaskId(i);
+        let mut l = Line::new();
+        let _ = write!(
+            l,
+            "{} hw {} {}",
+            catcard_kernel::name(id),
+            catcard_kernel::high_water(id),
+            if catcard_kernel::stack_ok(id) {
+                "ok"
+            } else {
+                "OVERFLOW"
+            }
+        );
+        let _ = lines.push(l);
+    }
+
+    info(panel, "Kernel", &lines);
 }
 
 /// Two BCD digits as a number. The RTC stores its time and date this way.

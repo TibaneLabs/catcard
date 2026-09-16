@@ -39,6 +39,7 @@ catcard-callgate.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
 catcard-fwhdr = { workspace = true, default-features = false }
 catcard-hal.workspace = true
+catcard-kernel.workspace = true
 catcard-pin = { workspace = true, default-features = false }
 catcard-upgrade = { workspace = true, default-features = false }
 catcard-usb = { workspace = true, default-features = false }

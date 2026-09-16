@@ -70,8 +70,11 @@ q1:
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board q1 $(VER) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 
+# `catcard-kernel` is excluded for the same reason as `catcard-fw`: it is ARM-only --
+# the context switch is Cortex-M assembly and cortex-m's register access does not exist
+# on the host.
 test:
-	$(CARGO) test --workspace --exclude catcard-fw
+	$(CARGO) test --workspace --exclude catcard-fw --exclude catcard-kernel
 
 # Lint both the dev build (default features on) and the stripped ship build.
 lint:

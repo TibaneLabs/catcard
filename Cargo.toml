@@ -9,6 +9,7 @@ members = [
     "crates/catcard-entropy",
     "crates/catcard-pin",
     "crates/catcard-hal",
+    "crates/catcard-kernel",
     "crates/catcard-ui",
     "crates/catcard-fw",
     "crates/catcard-settings",
@@ -61,6 +62,7 @@ catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
 catcard-hal = { path = "crates/catcard-hal" }
+catcard-kernel = { path = "crates/catcard-kernel" }
 catcard-ui = { path = "crates/catcard-ui" }
 
 # --- embedded ---

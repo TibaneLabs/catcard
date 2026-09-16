@@ -1,0 +1,9 @@
+[package]
+name = "catcard-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+cortex-m.workspace = true
