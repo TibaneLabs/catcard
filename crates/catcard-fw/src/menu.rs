@@ -78,6 +78,8 @@ enum Screen {
     /// The UI DRBG's diagnostic counters: how many times it has been (re)seeded, and how
     /// much it has generated.
     PrngStatus,
+    /// The RTC registers, resampled about thirty times a second.
+    Rtc,
     Colours,
     Logs,
     SaveLog,
@@ -208,6 +210,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
     "USB",
     "Clocks",
+    "RTC",
     "PSRAM",
     "SPI-NOR",
     "Boot report",
@@ -249,8 +252,14 @@ pub fn run(session: Session<'_>) -> ! {
         menu: MenuScreen::new(),
         raw_kn: None,
         raw_held: 0,
+        rtc: RtcWatch::default(),
         no_seed,
     };
+
+    // About thirty frames a second. Taken from the running clock rather than assumed, so
+    // a board on a different HCLK still redraws at the same rate.
+    // SAFETY: reads RCC.
+    let frame_cycles = unsafe { catcard_hal::clock::hclk_hz() } / 30;
 
     let mut pad = Keypad::new();
     // One bundle for the session. Every screen takes this instead of four
@@ -290,6 +299,12 @@ pub fn run(session: Session<'_>) -> ! {
             }
         } else if showing_offer {
             showing_offer = false;
+            redraw = true;
+        }
+
+        // The RTC screen redraws on a clock rather than on input: it is showing something
+        // that changes on its own, and the whole question it answers is whether it does.
+        if screen == Screen::Rtc && v.rtc.sample(frame_cycles) {
             redraw = true;
         }
 
@@ -341,7 +356,7 @@ pub fn run(session: Session<'_>) -> ! {
             // each key instead of leaving on the first. `x` returns to Debug -- and on the
             // keypad tester it takes two `x` in a row, so a single `x` still registers as a
             // key to test. Every other key just refreshes the numbers above.
-            if matches!(screen, Screen::Keypad | Screen::PrngStatus) {
+            if matches!(screen, Screen::Keypad | Screen::PrngStatus | Screen::Rtc) {
                 let leave = match screen {
                     Screen::Keypad => *key == Key::Cancel && prev_key == Some(Key::Cancel),
                     _ => *key == Key::Cancel,
@@ -401,6 +416,11 @@ pub fn run(session: Session<'_>) -> ! {
                 if matches!(next, Screen::Keypad | Screen::PrngStatus) {
                     v.last_key = None;
                     v.keys_seen = 0;
+                }
+                // A fresh watch, so "seconds seen" counts from opening the screen
+                // rather than from boot.
+                if next == Screen::Rtc {
+                    v.rtc = RtcWatch::default();
                 }
             }
             // The colour chart painted the panel directly, behind the canvas and its row
@@ -663,6 +683,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
+            (Key::Confirm, Some("RTC")) => Screen::Rtc,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
             (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
@@ -735,6 +756,8 @@ struct View<'a> {
     /// them look dead on the one screen meant to tell dead from unmapped.
     raw_kn: Option<usize>,
     raw_held: u64,
+    /// The RTC debug screen's sampler.
+    rtc: RtcWatch,
     /// No wallet stored yet, so the main menu leads with creating one.
     no_seed: bool,
 }
@@ -848,6 +871,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Selftest => crate::selftest::screen(v.report, panel),
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen, v.raw_kn, v.raw_held),
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
+        Screen::Rtc => rtc_screen(panel, &v.rtc),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
@@ -1285,6 +1309,96 @@ fn keypad_screen(
 /// with the edge-timed cycle counter and RTC, so `seeded`/`reseeds` climb as keys are
 /// pressed. It is never the wallet-seed generator -- that is `EntropyPool`, which has no
 /// draw API at all. Counters only; no generator state is shown.
+/// What the RTC debug screen shows: the three registers, resampled on a clock.
+///
+/// **Nothing here initialises or writes the RTC.** The point of the screen is to show how
+/// the *bootloader* left it, so every value is read exactly as found -- `snapshot` is pure
+/// reads, and the only RCC write anywhere near the RTC is the APB read gate that bring-up
+/// already opened, which lets the CPU see the registers without configuring the peripheral.
+#[derive(Copy, Clone, Default)]
+struct RtcWatch {
+    /// `[SSR, TR, DR]`, in the order the shadow registers require.
+    snap: [u32; 3],
+    /// Frames drawn since the screen opened, so a frozen RTC still looks different from a
+    /// frozen screen.
+    frames: u32,
+    /// DWT cycle count at the last sample.
+    last: u32,
+}
+
+impl RtcWatch {
+    /// Resample if `period` cycles have passed. Returns whether it did.
+    fn sample(&mut self, period: u32) -> bool {
+        let now = catcard_hal::dwt::cycles();
+        // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles, far longer than a frame.
+        if self.frames != 0 && now.wrapping_sub(self.last) < period {
+            return false;
+        }
+        self.last = now;
+        // SAFETY: three register reads, in the order the shadow registers require (SSR,
+        // TR, DR -- reading DR unlocks the shadow). The APB read gate was opened during
+        // bring-up; nothing here writes.
+        self.snap = unsafe { catcard_hal::rtc::snapshot() };
+        self.frames = self.frames.wrapping_add(1);
+        true
+    }
+}
+
+/// Two BCD digits as a number. The RTC stores its time and date this way.
+/// Source: RM0432 §RTC, `RTC_TR`/`RTC_DR` field layout [C]
+fn bcd2(v: u32) -> u32 {
+    ((v >> 4) & 0xf) * 10 + (v & 0xf)
+}
+
+/// The RTC as the bootloader left it: the raw registers, and what they decode to.
+///
+/// Read-only, and deliberately so -- see [`RtcWatch`]. A device that has never had its
+/// clock set still shows something here, because the RTC counts from whenever it started,
+/// not from a wall-clock epoch.
+fn rtc_screen(panel: &mut display::Panel, w: &RtcWatch) {
+    let [ssr, tr, dr] = w.snap;
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+
+    // The sub-second down-counter, reloaded from the synchronous prescaler each second.
+    // The one that moves fastest, so it is the one that shows the RTC is running at all.
+    let mut l = Line::new();
+    let _ = write!(l, "SSR  {ssr:#010x}  {ssr}");
+    let _ = lines.push(l);
+
+    // Source: RM0432 §RTC -- TR is seconds[6:0], minutes[14:8], hours[21:16], all BCD.
+    let mut l = Line::new();
+    let _ = write!(
+        l,
+        "TR   {tr:#010x}  {:02}:{:02}:{:02}",
+        bcd2((tr >> 16) & 0x3f),
+        bcd2((tr >> 8) & 0x7f),
+        bcd2(tr & 0x7f)
+    );
+    let _ = lines.push(l);
+
+    // Source: RM0432 §RTC -- DR is day[5:0], month[12:8], year[23:16], all BCD.
+    let mut l = Line::new();
+    let _ = write!(
+        l,
+        "DR   {dr:#010x}  {:02}-{:02}-{:02}",
+        bcd2((dr >> 16) & 0xff),
+        bcd2((dr >> 8) & 0x1f),
+        bcd2(dr & 0x3f)
+    );
+    let _ = lines.push(l);
+
+    // Ours, not the RTC's: it separates "the clock is stopped" from "the screen is stuck".
+    let mut l = Line::new();
+    let _ = write!(l, "frames {}", w.frames);
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = write!(l, "x  back");
+    let _ = lines.push(l);
+
+    info(panel, "RTC", &lines);
+}
+
 fn prng_screen(
     panel: &mut display::Panel,
     s: catcard_entropy::DrbgStats,
