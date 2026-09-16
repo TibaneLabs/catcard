@@ -169,3 +169,27 @@ The real menu loop, restarted in a task beside a logging heartbeat, used by hand
 opened (it was 2 679 before). That is well above early estimates, and it did not yet
 include the seed flow or key derivation, which are the likeliest deep paths. The stack
 size is not settled until those have been measured under the kernel.
+
+### USB as its own task (step 3)
+
+Under *Debug → Kernel UI* a third task services USB, the activity light and the power
+button every scheduling round. Task-side access to the USB state goes through
+`usbtask::with_task`, under the kernel's `without_preemption` scheduler lock; the OTG
+interrupt keeps its own accessor. `pump()` becomes a no-op once the service starts.
+
+Verified on the RDP=2 Q1, all under the kernel:
+
+- **Staging**: 266 240 bytes received, written to PSRAM and signature-verified by the USB
+  task. The menu-only arrangement of step 2 had refused the same offer twice with
+  `StorageFault`; with USB in its own task behind the lock it did not recur.
+- **Install approved at the device**, via gate 18/7, while the scheduler ran.
+- **Install approved from the host alone** — offer, injected Confirm, reset, running on the
+  new image — with no key touched.
+- USB task stack peaked at 1 604 of 4 096 words.
+
+**One race this exposed, and fixed by ordering.** The run loop used to check for a pending
+offer *before* reading keys. With USB on another task, the offer could become pending in
+between, and the host's injected Confirm — sent the moment the offer's reply arrives — was
+read with no offer showing and dispatched to the selected menu item, while the install
+waited for an OK already spent. Reading keys first closes it: the offer is marked pending
+before its reply is sent, and the host injects only after the reply.
