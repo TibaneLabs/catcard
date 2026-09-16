@@ -61,13 +61,15 @@ pub const LAYOUT: [Option<Key>; KEYS] = {
 
 /// Matrix positions that are modifiers or driver-only: they never become an event.
 ///
-/// LAMP is the torch key. The reference is explicit that it is handled in the driver and
-/// "never delivered as a char" -- and we cannot drive it anyway, because no lamp pin is
-/// documented for this board. See `docs/HARDWARE-OPEN-ITEMS.md`.
+/// LAMP is the torch key, and it is **not an MCU pin**: it toggles the QR-scanner
+/// module's own illumination LED over the scanner's UART (`S_CMD_03L1` on, `03L2` auto,
+/// `03L0` off). So it is never delivered as a character, and it will start working when
+/// there is a scanner driver to send that command -- not before, and not via a GPIO.
+/// Source: input.md §"Illumination torch / LAMP key" [C], gpio.md §"Indicator LEDs" [C]
 pub const KN_LAMP: usize = 50;
 /// SHIFT. Held, not latched, and never delivered.
 pub const KN_SHIFT: usize = 51;
-/// SYMBOL. Held, never delivered, and its tables are not implemented -- see [`decode`].
+/// SYMBOL. Held, never delivered.
 pub const KN_SYMBOL: usize = 53;
 
 /// What each position types with nothing held. `0` means "produces no character".
@@ -89,7 +91,22 @@ const SHIFT_CHARS: [u8; KEYS] = *b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
 QWERTYUIOP\
 ASDFGHJKL\"\
 ZXCVBNM<>?\
-\x00\x00 \x00\x00\x00\x00\x00\x00\x00";
+\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
+/// With SYMBOL held. The number row matches SHIFT ("number+symbol = number+shift"); the
+/// letter rows carry the punctuation that is otherwise unreachable, with gaps where the
+/// reference marks a key dead. F1-F6 (kn40..45) are context soft keys that do nothing
+/// outside one stock screen, so they are left unmapped rather than delivered as controls.
+/// Row 0 keeps its arrows here rather than becoming HOME/PGUP/PGDN/END: those have no
+/// `Key`, and navigation that stopped working while SYMBOL was held would be worse than
+/// four keys that do what their caps say.
+/// Source: input.md §"What each key emits, per layer" [C]
+const SYMBOL_CHARS: [u8; KEYS] = *b"\x00\t\x00\x00\x00\x00\x00\x00\x00\x00\
+!@#$%^&*()\
+-_`\x00\x00\x00[]{}\
++\x00\x00=:;~|\\\"\
+\x00\x00\x00\x00\x00\x00\x00<>?\
+\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
 /// With CAPS latched: the base table with its letters upper-cased, which is what the
 /// reference says CAPS is -- not the SHIFT table, whose number row is symbols.
@@ -118,7 +135,7 @@ const CAPS_CHARS: [u8; KEYS] = {
 /// SYMBOL is scanned and tracked but types nothing yet: the reference's symbol rows do
 /// not line up unambiguously with ten positions each, and a keyboard that types the wrong
 /// punctuation into a passphrase is worse than one that types none.
-pub fn decode(kn: usize, shift: bool, caps: bool) -> Option<Key> {
+pub fn decode(kn: usize, shift: bool, symbol: bool, caps: bool) -> Option<Key> {
     if kn >= KEYS {
         return None;
     }
@@ -126,11 +143,15 @@ pub fn decode(kn: usize, shift: bool, caps: bool) -> Option<Key> {
         // Navigation and the two answer keys, unchanged under every modifier.
         3..=8 | 54 => LAYOUT[kn],
         KN_LAMP | KN_SHIFT | KN_SYMBOL => None,
-        // Digits, unless SHIFT turns the row into symbols.
-        10..=19 if !shift => LAYOUT[kn],
+        // Digits, unless a modifier turns the row into symbols. CAPS is not one of them:
+        // it upper-cases letters and leaves digits alone, so a PIN still types.
+        10..=19 if !shift && !symbol => LAYOUT[kn],
         _ => {
+            // Priority CAPS > SYMBOL > SHIFT > base, as the reference states it.
             let c = if caps {
                 CAPS_CHARS[kn]
+            } else if symbol {
+                SYMBOL_CHARS[kn]
             } else if shift {
                 SHIFT_CHARS[kn]
             } else {
@@ -258,7 +279,7 @@ impl Keypad {
             }
             // Decoded with the modifiers as they are now. A key released after its
             // modifier was let go reports the unmodified key; screens act on presses.
-            if let Some(key) = decode(i, shift, self.caps)
+            if let Some(key) = decode(i, shift, symbol, self.caps)
                 && n < events.len()
             {
                 events[n] = if now {
@@ -418,14 +439,14 @@ mod tests {
     fn the_letter_rows_type_what_the_reference_prints() {
         // The three letter rows, their ends, and the two whitespace keys.
         // Source: input.md §"Key decode" [C]
-        assert_eq!(decode(20, false, false), Some(Key::Char(b'q')));
-        assert_eq!(decode(29, false, false), Some(Key::Char(b'p')));
-        assert_eq!(decode(30, false, false), Some(Key::Char(b'a')));
-        assert_eq!(decode(38, false, false), Some(Key::Char(b'l')));
-        assert_eq!(decode(40, false, false), Some(Key::Char(b'z')));
-        assert_eq!(decode(46, false, false), Some(Key::Char(b'm')));
-        assert_eq!(decode(52, false, false), Some(Key::Char(b' ')), "kn52 is SPACE");
-        assert_eq!(decode(1, false, false), Some(Key::Char(b'\t')), "kn1 is TAB");
+        assert_eq!(decode(20, false, false, false), Some(Key::Char(b'q')));
+        assert_eq!(decode(29, false, false, false), Some(Key::Char(b'p')));
+        assert_eq!(decode(30, false, false, false), Some(Key::Char(b'a')));
+        assert_eq!(decode(38, false, false, false), Some(Key::Char(b'l')));
+        assert_eq!(decode(40, false, false, false), Some(Key::Char(b'z')));
+        assert_eq!(decode(46, false, false, false), Some(Key::Char(b'm')));
+        assert_eq!(decode(52, false, false, false), Some(Key::Char(b' ')), "kn52 is SPACE");
+        assert_eq!(decode(1, false, false, false), Some(Key::Char(b'\t')), "kn1 is TAB");
     }
 
     #[test]
@@ -433,10 +454,10 @@ mod tests {
         // Whatever is held, the keys the screens steer with stay themselves -- otherwise
         // a menu would stop answering the moment someone rested a thumb on SHIFT.
         for (shift, caps) in [(false, false), (true, false), (false, true), (true, true)] {
-            assert_eq!(decode(7, shift, caps), Some(Key::Cancel), "kn7 CANCEL");
-            assert_eq!(decode(8, shift, caps), Some(Key::Confirm), "kn8 ENTER");
-            assert_eq!(decode(54, shift, caps), Some(Key::Cancel), "kn54 DELETE");
-            assert_eq!(decode(4, shift, caps), Some(Key::Digit(5)), "kn4 up");
+            assert_eq!(decode(7, shift, false, caps), Some(Key::Cancel), "kn7 CANCEL");
+            assert_eq!(decode(8, shift, false, caps), Some(Key::Confirm), "kn8 ENTER");
+            assert_eq!(decode(54, shift, false, caps), Some(Key::Cancel), "kn54 DELETE");
+            assert_eq!(decode(4, shift, false, caps), Some(Key::Digit(5)), "kn4 up");
         }
     }
 
@@ -444,20 +465,48 @@ mod tests {
     fn caps_leaves_the_number_row_alone_but_shift_does_not() {
         // A latched CAPS that turned `1` into a character would break PIN entry, which
         // is the one screen with no way to say what went wrong.
-        assert_eq!(decode(10, false, true), Some(Key::Digit(1)));
-        assert_eq!(decode(19, false, true), Some(Key::Digit(0)));
+        assert_eq!(decode(10, false, false, true), Some(Key::Digit(1)));
+        assert_eq!(decode(19, false, false, true), Some(Key::Digit(0)));
         // SHIFT is the documented symbol row.
-        assert_eq!(decode(10, true, false), Some(Key::Char(b'!')));
-        assert_eq!(decode(20, true, false), Some(Key::Char(b'Q')));
+        assert_eq!(decode(10, true, false, false), Some(Key::Char(b'!')));
+        assert_eq!(decode(20, true, false, false), Some(Key::Char(b'Q')));
         // CAPS upper-cases letters, which is what the reference says it is.
-        assert_eq!(decode(20, false, true), Some(Key::Char(b'Q')));
+        assert_eq!(decode(20, false, false, true), Some(Key::Char(b'Q')));
+    }
+
+    #[test]
+    fn symbol_types_the_punctuation_the_reference_lists() {
+        // Source: input.md §"What each key emits, per layer" [C]
+        let sym = |kn| decode(kn, false, true, false);
+        assert_eq!(sym(20), Some(Key::Char(b'-')), "q");
+        assert_eq!(sym(21), Some(Key::Char(b'_')), "w");
+        assert_eq!(sym(22), Some(Key::Char(b'`')), "e");
+        assert_eq!(sym(26), Some(Key::Char(b'[')), "u");
+        assert_eq!(sym(29), Some(Key::Char(b'}')), "p");
+        assert_eq!(sym(30), Some(Key::Char(b'+')), "a");
+        assert_eq!(sym(33), Some(Key::Char(b'=')), "f");
+        assert_eq!(sym(38), Some(Key::Char(b'\\')), "l");
+        assert_eq!(sym(39), Some(Key::Char(b'"')), "'");
+        assert_eq!(sym(47), Some(Key::Char(b'<')), ",");
+        // The number row is the same as SHIFT: "number+symbol = number+shift".
+        assert_eq!(sym(10), Some(Key::Char(b'!')));
+        // Dead keys in this layer, and the F-keys we deliberately do not deliver.
+        for kn in [23, 24, 25, 31, 32, 40, 45, 46, 52] {
+            assert_eq!(sym(kn), None, "kn{kn} should be dead under SYMBOL");
+        }
+    }
+
+    #[test]
+    fn caps_outranks_symbol_as_the_reference_orders_them() {
+        // Priority is CAPS > SYMBOL > SHIFT > base, so a latched CAPS wins.
+        assert_eq!(decode(20, false, true, true), Some(Key::Char(b'Q')));
     }
 
     #[test]
     fn the_modifiers_and_the_lamp_deliver_nothing() {
         // The lamp is torch-only in the reference, and we have no pin for it either way.
         for kn in [KN_LAMP, KN_SHIFT, KN_SYMBOL, 9, 55, 59] {
-            assert_eq!(decode(kn, false, false), None, "kn{kn} produced a key");
+            assert_eq!(decode(kn, false, false, false), None, "kn{kn} produced a key");
         }
     }
 
