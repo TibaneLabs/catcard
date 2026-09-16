@@ -37,7 +37,7 @@ mod task;
 
 pub use task::{Full, TaskId, count, high_water, name, spawn, stack_ok};
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Most tasks the kernel will hold. Small on purpose: a wallet has a handful of jobs, and
 /// a fixed table means the scheduler never allocates and never fails late.
@@ -52,11 +52,33 @@ pub const PENDSV_PRIORITY: u8 = 0xFF;
 /// SysTick sits below the device handlers but above the switch it triggers.
 pub const SYSTICK_PRIORITY: u8 = 0x80;
 
-/// Ticks since the kernel started.
+/// Ticks since the kernel started, kept in step with real time.
 ///
 /// 32 bits, not 64: this core has no 64-bit atomic, and a `u32` of milliseconds wraps
 /// after about seven weeks of continuous power -- longer than this device is ever up.
+///
+/// **Not simply a count of SysTick interrupts.** Every callgate call masks interrupts for
+/// its whole duration -- it must, or the firewall closes -- and while they are masked the
+/// SysTick interrupts that fall due collapse into a single pending one. Counting
+/// interrupts, the clock ran about three times slow in the kernel test: an SE1 TRNG read
+/// holds interrupts for ~99 ms, and those ticks were simply gone. So [`advance_ticks`]
+/// measures how many CPU cycles really passed since the last tick, from the DWT cycle
+/// counter, which keeps counting while interrupts are masked.
 static TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Ticks added beyond one per interrupt: the time recovered after masked windows.
+static RECOVERED: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the DWT cycle counter is running, decided once in [`start`]. If it is not,
+/// the clock falls back to one tick per interrupt rather than freezing at zero.
+static DWT_CLOCK: AtomicBool = AtomicBool::new(false);
+/// CPU cycles per tick, from the clock the core actually runs at.
+static CYCLES_PER_TICK: AtomicU32 = AtomicU32::new(1);
+/// The cycle count at the previous tick.
+static LAST_CYCLES: AtomicU32 = AtomicU32::new(0);
+/// Cycles left over from the previous tick that did not make up a whole tick, so the
+/// clock does not drift by rounding down on every interrupt.
+static CYCLE_REM: AtomicU32 = AtomicU32::new(0);
 
 /// How many times the scheduler has actually changed task, for the debug screen. A
 /// counter that never moves is the first symptom of a switch that is not happening.
@@ -71,9 +93,21 @@ static FP_SAVES: AtomicU32 = AtomicU32::new(0);
 /// Milliseconds per tick.
 pub const TICK_MS: u32 = 1;
 
-/// Ticks since [`start`].
+/// Milliseconds since [`start`], kept in step with real time across masked windows.
+///
+/// **One limit.** The DWT counter is 32 bits and wraps every 2^32 cycles -- about 35.8 s
+/// at 120 MHz, 53.7 s at 80 MHz. Catch-up measures the gap between two ticks, so a single
+/// window with interrupts masked for longer than that undercounts by whole wraps. No
+/// callgate call measured so far comes close (an SE1 TRNG read is ~99 ms), but a clock
+/// that has to be right across a longer blackout needs the RTC, not this.
 pub fn ticks() -> u32 {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// Ticks recovered after masked windows since [`start`] -- how much time the clock would
+/// have lost counting interrupts alone.
+pub fn recovered() -> u32 {
+    RECOVERED.load(Ordering::Relaxed)
 }
 
 /// Context switches since [`start`].
@@ -90,8 +124,35 @@ pub(crate) fn count_fp_save() {
     FP_SAVES.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn count_tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+/// The DWT cycle counter. A core register, read directly so the kernel does not depend on
+/// the board HAL.
+fn dwt_cycles() -> u32 {
+    // SAFETY: CYCCNT is a read-only view of a free-running counter; reading it has no
+    // side effects.
+    unsafe { (*cortex_m::peripheral::DWT::PTR).cyccnt.read() }
+}
+
+/// Advance the clock, from SysTick.
+///
+/// Runs only in the SysTick handler, so there is one writer and the plain load/store
+/// pairs below cannot interleave with each other.
+pub(crate) fn advance_ticks() {
+    if !DWT_CLOCK.load(Ordering::Relaxed) {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let now = dwt_cycles();
+    let last = LAST_CYCLES.swap(now, Ordering::Relaxed);
+    let per = CYCLES_PER_TICK.load(Ordering::Relaxed).max(1) as u64;
+    // `wrapping_sub` because CYCCNT wraps; correct as long as a tick is serviced at least
+    // once per wrap -- the limit documented on `ticks`.
+    let total = CYCLE_REM.load(Ordering::Relaxed) as u64 + now.wrapping_sub(last) as u64;
+    let add = (total / per) as u32;
+    CYCLE_REM.store((total % per) as u32, Ordering::Relaxed);
+    TICKS.fetch_add(add, Ordering::Relaxed);
+    if add > 1 {
+        RECOVERED.fetch_add(add - 1, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn count_switch() {
@@ -126,8 +187,22 @@ pub unsafe fn start(syst: &mut cortex_m::peripheral::SYST, hclk_hz: u32) -> ! {
         scb.set_priority(cortex_m::peripheral::scb::SystemHandler::SysTick, SYSTICK_PRIORITY);
     }
 
+    let per_tick = hclk_hz / 1000 * TICK_MS;
+    CYCLES_PER_TICK.store(per_tick, Ordering::Relaxed);
+
+    // Is the DWT counter running? A stopped counter reads the same value twice, and a
+    // clock driven by it would never advance -- so it is checked here, once, rather than
+    // trusted.
+    let first = dwt_cycles();
+    for _ in 0..10_000 {
+        core::hint::spin_loop();
+    }
+    let second = dwt_cycles();
+    DWT_CLOCK.store(first != second, Ordering::Relaxed);
+    LAST_CYCLES.store(second, Ordering::Relaxed);
+
     syst.set_clock_source(SystClkSource::Core);
-    syst.set_reload(hclk_hz / 1000 * TICK_MS - 1);
+    syst.set_reload(per_tick - 1);
     syst.clear_current();
     syst.enable_counter();
     syst.enable_interrupt();

@@ -18,21 +18,22 @@
 //!   ranges, and check them every round; `fp_saves` proves the switch's FPU path actually
 //!   ran rather than being skipped because nobody touched the FPU.
 //! - **A callgate call under the scheduler.** A task reads SE1's TRNG through the gate,
-//!   which masks interrupts for the duration -- so ticks are lost, and the log compares
-//!   kernel ticks against real elapsed time from the cycle counter to show how many.
+//!   which masks interrupts for the duration. The kernel recovers the ticks that fall
+//!   inside from the DWT cycle counter, so `t` should track `ms` (real time, measured
+//!   independently here) and `rec` shows how much was recovered.
 //! - **A device interrupt preempting a task.** `edge` is the keypad's edge latch; press a
 //!   key during the test and it changes, which only the EXTI handler can do.
 //!
 //! # Reading the log
 //!
 //! ```text
-//! kt t=<ticks> ms=<real> sw=<switches> fp=<fp saves> edge=<latch>
+//! kt t=<ticks> ms=<real> rec=<ticks recovered> sw=<switches> fp=<fp saves> edge=<latch>
 //! kf a=<rounds>/<bad> b=<rounds>/<bad>
 //! kg ok=<gate calls> err=<gate errors>  hw fa=.. fb=.. g=.. r=.. <ok|OVERFLOW>
 //! ```
 //!
-//! Pass: `fp` climbing, both `bad` counts zero, `ok` climbing with `err` zero, and every
-//! stack under its size. A log that stops updating means a switch broke the reporting task.
+//! Pass: `fp` climbing, both `bad` counts zero, `ok` climbing with `err` zero, `t` within
+//! a few ticks of `ms` with `rec` climbing, and every stack under its size. A log that stops updating means a switch broke the reporting task.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -150,8 +151,9 @@ extern "C" fn task_fb() -> ! {
 /// Calls the bootloader every 50 ticks while the scheduler runs.
 ///
 /// The gate masks interrupts for the whole call, so SysTick cannot preempt it -- which is
-/// the rule, since an interrupt inside firewall code resets the CPU -- and the ticks that
-/// fall inside the call are lost. That loss is what `ms` versus `t` in the log shows.
+/// the rule, since an interrupt inside firewall code resets the CPU. The ticks that fall
+/// due inside are recovered afterwards from the cycle counter; `t` against `ms` in the log
+/// is the check that they were.
 extern "C" fn task_gate() -> ! {
     // SAFETY: written once in `run` before the scheduler started; this task only reads.
     let gate = unsafe { *core::ptr::addr_of!(GATE) };
@@ -196,9 +198,10 @@ extern "C" fn task_report() -> ! {
             last_cycles = cycles;
 
             crate::catlog!(
-                "kt t={} ms={} sw={} fp={} edge={:#x}",
+                "kt t={} ms={} rec={} sw={} fp={} edge={:#x}",
                 now,
                 real_ms,
+                catcard_kernel::recovered(),
                 catcard_kernel::switches(),
                 catcard_kernel::fp_saves(),
                 crate::keypad::edge_latch()

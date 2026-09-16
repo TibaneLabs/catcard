@@ -48,13 +48,13 @@ extern "C" fn sched_entry(sp: u32) -> u32 {
     crate::task::switch(sp)
 }
 
-/// SysTick: count the tick, then ask for a switch.
+/// SysTick: advance the clock, then ask for a switch.
 ///
 /// The switch is *requested*, not performed here: PendSV is the lowest priority in the
 /// system, so the swap happens only once every device handler has finished.
 #[unsafe(no_mangle)]
 pub extern "C" fn SysTick() {
-    crate::count_tick();
+    crate::advance_ticks();
     cortex_m::peripheral::SCB::set_pendsv();
 }
 

@@ -29,10 +29,14 @@ So a context switch must **never** preempt `ckcc.gate()`. This is already handle
 the gate is hand-written assembly regardless (it is not an AAPCS call — `r2` is the buffer
 length), so the masking lives in the same stub.
 
-**Consequence for timekeeping:** SysTick is masked for the duration, and a pending tick
-collapses into one. Kernel time is therefore a *scheduling* clock, not a wall clock — it
-loses time across a long gate call such as a PIN key-stretch. Anything needing real
-elapsed time uses the DWT cycle counter or the RTC, not `ticks()`.
+**Consequence for timekeeping:** SysTick is masked for the duration, and the ticks that
+fall due collapse into one pending interrupt. Counting interrupts, kernel time ran about
+3× slow in the test below. So the SysTick handler does not count interrupts: it measures
+the CPU cycles that really passed since the previous tick, from the DWT cycle counter
+(which keeps running while interrupts are masked), and adds that many ticks. `ticks()`
+therefore tracks real elapsed time, with one limit: CYCCNT wraps every ~35.8 s at 120 MHz
+(53.7 s at 80 MHz), so a *single* masked window longer than that undercounts by whole
+wraps. Anything that must be right across a longer blackout uses the RTC.
 
 ### 2. VTOR is ours to set
 
@@ -147,8 +151,9 @@ Each 500-tick reporting interval took ~1 487 ms and contained 10 gate calls, so 
 During that window nothing runs — no other task, no USB, no tick — and a keypress is
 pended until the call returns. Consequences:
 
-- `ticks()` is a scheduling clock only. Use the DWT cycle counter or the RTC for elapsed
-  time. PIN key-stretching goes through the same masked call and is much longer.
+- The blackout itself cannot be removed, but its effect on the clock can: the tick
+  handler catches up from the DWT counter (see §1). PIN key-stretching goes through the
+  same masked call and is much longer, so it is the case to check against the 35.8 s wrap.
 - **Masking only SysTick and PendSV (BASEPRI) is not an option.** An interrupt taken inside
   firewall code closes the firewall. With the keypad's EXTI now live, a keypress during a
   BASEPRI-only gate call would do exactly that. PRIMASK — everything — is required.
