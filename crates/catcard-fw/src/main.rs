@@ -109,10 +109,43 @@ fn main() -> ! {
     // zero across a boot and many keypresses); opening a single `cpsie i` window made it
     // fire immediately from the pending line.
     //
-    // SAFETY: the reset path. Every NVIC line is still masked at this point -- the keypad
-    // arms its own during bring-up and USB arms OTG only for mass storage -- so this
-    // enables the core's global mask, not any particular source.
+    // Before opening the global mask, close every NVIC line, whatever the bootloader left
+    // enabled or pending. Our own code enables exactly the lines it services later -- the
+    // keypad's column EXTIs during bring-up, OTG only for mass storage -- and
+    // `DefaultHandler` parks the CPU on any IRQ it does not recognise. So a line the loader
+    // left enabled would fire the moment the mask opened and hang the boot, which on an
+    // RDP=2 unit is a brick. On the Q1 the loader turned out to leave none; that was
+    // learned by booting, which is not a method to repeat on a board with a seed on it.
+    // Clearing them makes the question irrelevant on every board.
+    //
+    // What the loader left is recorded first, so each board reports it instead of it being
+    // inferred from whether the boot survived.
+    //
+    // SAFETY: the reset path, before any line is enabled by this firmware. NVIC_ICER and
+    // NVIC_ICPR are write-one-to-clear; writing all ones disables and un-pends every
+    // implemented line and is ignored for unimplemented ones.
+    let loader_iser = unsafe {
+        let nvic = &*cortex_m::peripheral::NVIC::PTR;
+        let mut left = [0u32; 3];
+        for (i, slot) in left.iter_mut().enumerate() {
+            *slot = nvic.iser[i].read();
+        }
+        for i in 0..nvic.icer.len() {
+            nvic.icer[i].write(u32::MAX);
+            nvic.icpr[i].write(u32::MAX);
+        }
+        left
+    };
+
+    // SAFETY: the reset path, with every NVIC line now disabled and un-pended, so this opens
+    // the core's global mask without enabling any source.
     unsafe { cortex_m::interrupt::enable() };
+    crate::catlog!(
+        "boot: loader left NVIC {:#010x} {:#010x} {:#010x}; cleared, interrupts on",
+        loader_iser[0],
+        loader_iser[1],
+        loader_iser[2]
+    );
 
     // SAFETY: this is the reset path; nothing else has touched these peripherals. The
     // core comes up first because the panel's reset pulse is timed with the cycle
