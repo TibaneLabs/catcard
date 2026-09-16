@@ -164,7 +164,6 @@ extern "C" fn task_gate() -> ! {
             && catcard_board::BOARD.has_callgate_se_rng
             && now.wrapping_sub(last) >= 50
         {
-            last = now;
             // On this task's stack, which is a static inside SRAM1 -- where the gate
             // requires its buffer to be.
             let mut buf = [0u8; 33];
@@ -173,6 +172,15 @@ extern "C" fn task_gate() -> ! {
                 Ok(_) => GATE_OK.fetch_add(1, Ordering::Relaxed),
                 Err(_) => GATE_ERR.fetch_add(1, Ordering::Relaxed),
             };
+            // The period runs from when the call *ended*, not when it began. Each call
+            // holds interrupts for ~99 ms, longer than the 50-tick period, and once the
+            // kernel clock learned to count through masked windows a period measured
+            // from the start was already over when the call returned. The task then
+            // called back to back and kept interrupts masked ~97% of the time -- only
+            // ~600 of 20 000 ticks arrived as interrupts, and the float tasks were
+            // starved to a tenth of their rounds. Measuring from the end guarantees the
+            // rest of the system 50 ticks between calls, however long a call takes.
+            last = catcard_kernel::ticks();
         }
         catcard_kernel::yield_now();
     }
