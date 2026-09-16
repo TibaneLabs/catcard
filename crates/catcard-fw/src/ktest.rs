@@ -243,7 +243,10 @@ extern "C" fn task_report() -> ! {
 ///
 /// Nothing here stops the kernel, deliberately: a "stop" path would be more code to get
 /// wrong than the thing being tested, and a power cycle is already a complete answer.
-pub fn run(gate: &Callgate, ui: &mut crate::ui::Ui<'_>) -> ! {
+pub fn run(gate: &Callgate, ui: &mut crate::ui::Ui<'_>) {
+    if refuse_second_start(ui) {
+        return;
+    }
     display::draw(ui.panel, |c| {
         catcard_ui::widgets::message(
             c,
@@ -291,4 +294,182 @@ pub fn run(gate: &Callgate, ui: &mut crate::ui::Ui<'_>) -> ! {
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
     // SAFETY: every task is spawned and none of their entries returns.
     unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
+}
+
+/// Say no if the scheduler is already running, and report whether it did.
+///
+/// Only reachable from the menu running *as* a kernel task: choosing a kernel action from
+/// there would re-arm SysTick and run the bootstrap again underneath live tasks.
+fn refuse_second_start(ui: &mut crate::ui::Ui<'_>) -> bool {
+    if !catcard_kernel::running() {
+        return false;
+    }
+    display::draw(ui.panel, |c| {
+        catcard_ui::widgets::message(
+            c,
+            &display::LAYOUT,
+            "Kernel",
+            "already running",
+            "any key to go back",
+        );
+    });
+    crate::menu::wait_for_any_key(ui);
+    true
+}
+
+// ---------------------------------------------------------------------------------------
+// The menu as a kernel task
+// ---------------------------------------------------------------------------------------
+
+/// The menu task's stack. The deepest screens put kilobytes on it -- the log viewer's 2 KB
+/// buffer, ~1.1 KB of seed-word lines, 48 SD browser entries -- so it is sized well past
+/// that, and Debug -> Kernel shows how deep it has really been.
+const UI_WORDS: usize = 8192;
+/// The heartbeat formats a log line on its stack every few seconds.
+const BEAT_WORDS: usize = 512;
+
+static mut UI_STACK: [u32; UI_WORDS] = [0; UI_WORDS];
+static mut BEAT_STACK: [u32; BEAT_WORDS] = [0; BEAT_WORDS];
+
+/// The gate, held by value so the menu task can borrow it for the rest of the program.
+static mut UI_GATE: Option<Callgate> = None;
+
+/// What the running menu hands to its replacement.
+///
+/// Raw pointers because these objects live in stack frames of the session that is about
+/// to stop running -- see [`run_ui`] for why they stay valid.
+struct UiHandles {
+    login: *mut catcard_pin::Login,
+    panel: *mut display::Panel,
+    matrix: *mut crate::keypad::GpioMatrix,
+    drbg: *mut catcard_entropy::HmacDrbg,
+    report: *const crate::BootReport,
+    pool: Option<*mut catcard_entropy::EntropyPool>,
+}
+
+static mut UI_HANDLES: Option<UiHandles> = None;
+
+/// Run the menu as a kernel task, beside a heartbeat. Does not return once it starts.
+///
+/// The menu is restarted, not migrated: a fresh `menu::run` in its own task, on the same
+/// peripherals and login the current one holds. The old loop simply never runs again.
+///
+/// **Why the handed-over pointers stay valid.** The login, panel, matrix, DRBG, boot report
+/// and pool live in `session::run`'s frame on the main stack. Once the kernel starts, tasks
+/// run on their own stacks and only exception handlers use the main stack -- and they grow
+/// it downward from where `start` left it, which is *below* those frames. Nothing unwinds
+/// the main stack either, because `start` never returns. So those frames are abandoned but
+/// intact for the life of the program.
+pub fn run_ui(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    report: &crate::BootReport,
+    pool: Option<&mut catcard_entropy::EntropyPool>,
+) {
+    if refuse_second_start(ui) {
+        return;
+    }
+    display::draw(ui.panel, |c| {
+        catcard_ui::widgets::message(
+            c,
+            &display::LAYOUT,
+            "Kernel UI",
+            "menu as a kernel task",
+            "power-cycle to exit",
+        );
+    });
+    // The restarted menu gets a fresh keypad scanner, which would read the key still held
+    // from choosing this item as a brand-new press on the main menu.
+    crate::menu::wait_for_release(ui);
+    crate::catlog!("ktest: the menu as a kernel task");
+
+    // SAFETY: reads RCC.
+    let hclk = unsafe { catcard_hal::clock::hclk_hz() };
+
+    // SAFETY: nothing is scheduling yet; each stack belongs to one task and no entry
+    // returns. The handles outlive the program for the reason given above.
+    unsafe {
+        *core::ptr::addr_of_mut!(UI_GATE) = Some(*gate);
+        *core::ptr::addr_of_mut!(UI_HANDLES) = Some(UiHandles {
+            login: core::ptr::from_mut(login),
+            panel: core::ptr::from_mut(&mut *ui.panel),
+            matrix: core::ptr::from_mut(&mut *ui.matrix),
+            drbg: core::ptr::from_mut(&mut *ui.drbg),
+            report: core::ptr::from_ref(report),
+            pool: pool.map(core::ptr::from_mut),
+        });
+        let u = core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(UI_STACK).cast::<u32>(),
+            UI_WORDS,
+        );
+        let b = core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(BEAT_STACK).cast::<u32>(),
+            BEAT_WORDS,
+        );
+        let _ = catcard_kernel::spawn("ui", u, ui_task);
+        let _ = catcard_kernel::spawn("beat", b, beat_task);
+    }
+
+    // SAFETY: stealing the core peripherals to arm SysTick.
+    let mut cp = unsafe { cortex_m::Peripherals::steal() };
+    // SAFETY: both tasks are spawned and neither entry returns.
+    unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
+}
+
+/// The ordinary menu, on a stack of its own.
+extern "C" fn ui_task() -> ! {
+    // SAFETY: written once in `run_ui` before the scheduler started; this is the only
+    // reader, and the pointers are valid for the reason given on `run_ui`.
+    unsafe {
+        let gate = (*core::ptr::addr_of!(UI_GATE)).as_ref();
+        let handles = (*core::ptr::addr_of_mut!(UI_HANDLES)).take();
+        let (Some(gate), Some(h)) = (gate, handles) else {
+            // Cannot happen: `run_ui` fills both before spawning.
+            loop {
+                cortex_m::asm::wfi();
+            }
+        };
+        let login = &mut *h.login;
+        let no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
+        crate::menu::run(crate::menu::Session {
+            gate,
+            login,
+            panel: &mut *h.panel,
+            matrix: &mut *h.matrix,
+            drbg: &mut *h.drbg,
+            report: &*h.report,
+            no_seed,
+            pool: h.pool.map(|p| &mut *p),
+        })
+    }
+}
+
+/// Logs the scheduler's health every five seconds and otherwise gives the CPU straight back.
+///
+/// A second task that logs is also the test of the log itself: the menu logs constantly, and
+/// before `write_fmt` masked its copy into the ring, two tasks logging could interleave.
+extern "C" fn beat_task() -> ! {
+    let mut last = 0u32;
+    loop {
+        let now = catcard_kernel::ticks();
+        if now.wrapping_sub(last) >= 5000 {
+            last = now;
+            let id = catcard_kernel::TaskId;
+            let all_ok =
+                (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
+            crate::catlog!(
+                "kui t={} sw={} rec={} ui_hw={}/{} beat_hw={}/{} {}",
+                now,
+                catcard_kernel::switches(),
+                catcard_kernel::recovered(),
+                catcard_kernel::high_water(id(0)),
+                catcard_kernel::stack_len(id(0)),
+                catcard_kernel::high_water(id(1)),
+                catcard_kernel::stack_len(id(1)),
+                if all_ok { "ok" } else { "OVERFLOW" }
+            );
+        }
+        catcard_kernel::yield_now();
+    }
 }

@@ -50,41 +50,102 @@ pub struct LogBuf {
 ///
 /// Never fails and never blocks: a log that can refuse is one more thing to check on a
 /// path that is already going wrong.
+///
+/// **Safe to call from any task.** With the kernel running, a task can be preempted in
+/// the middle of a write and another task can log in between, which would interleave two
+/// lines inside the ring or corrupt its indices. So the line is formatted first, into a
+/// buffer on the caller's own stack with interrupts on, and only the copy into the ring
+/// happens with them masked. Formatting inside the critical section would have made every
+/// log call a blackout of its own.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
-    // SAFETY: the boot path is single-threaded and nothing here runs in interrupt
-    // context, so no two references are live at once.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CATCARD_LOG) };
-    let mut w = Sink(&mut buf.ring);
-    let _ = w.write_fmt(args);
-    let _ = w.write_str("\n");
+    let mut line = Line::new();
+    let _ = line.write_fmt(args);
+    line.finish();
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: the only mutable reference, taken with interrupts masked, so no other
+        // task or handler can hold one while this is live.
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(CATCARD_LOG) };
+        buf.ring.write(line.as_bytes());
+    });
 }
 
 /// Copy out from `offset`, counting from the oldest byte.
+///
+/// Masked for the same reason as [`write_fmt`]: a read preempted by a write would copy
+/// half of one line and half of the next.
 pub fn read(offset: usize, out: &mut [u8]) -> usize {
-    // SAFETY: as above; this only reads.
-    let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
-    buf.ring.read(offset, out)
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: interrupts are masked, so no write can be in progress.
+        let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
+        buf.ring.read(offset, out)
+    })
 }
 
 /// How many bytes the log currently holds.
 pub fn len() -> usize {
-    // SAFETY: as above.
-    let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
-    buf.ring.len()
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: as in `read`.
+        let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
+        buf.ring.len()
+    })
 }
 
 /// Whether anything has been dropped off the back.
 pub fn wrapped() -> bool {
-    // SAFETY: as above.
-    let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
-    buf.ring.wrapped()
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: as in `read`.
+        let buf = unsafe { &*core::ptr::addr_of!(CATCARD_LOG) };
+        buf.ring.wrapped()
+    })
 }
 
-struct Sink<'a>(&'a mut Ring<LOG_LEN>);
+/// Longest line kept whole. Longer ones are cut and marked, never silently shortened.
+const LINE_MAX: usize = 192;
 
-impl Write for Sink<'_> {
+/// One formatted line, built on the caller's stack before it touches the shared ring.
+struct Line {
+    bytes: [u8; LINE_MAX],
+    len: usize,
+    cut: bool,
+}
+
+impl Line {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; LINE_MAX],
+            len: 0,
+            cut: false,
+        }
+    }
+
+    /// End the line, marking it if the text did not fit.
+    fn finish(&mut self) {
+        // Always room for the newline, and for `~` before it when the line was cut.
+        let room = LINE_MAX - 1 - usize::from(self.cut);
+        self.len = self.len.min(room);
+        if self.cut {
+            self.bytes[self.len] = b'~';
+            self.len += 1;
+        }
+        self.bytes[self.len] = b'\n';
+        self.len += 1;
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl Write for Line {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.write(s.as_bytes());
+        // Leave two bytes for `finish`'s marker and newline.
+        let room = (LINE_MAX - 2).saturating_sub(self.len);
+        let take = s.len().min(room);
+        self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.len += take;
+        if take < s.len() {
+            self.cut = true;
+        }
         Ok(())
     }
 }

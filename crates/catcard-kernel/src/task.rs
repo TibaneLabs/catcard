@@ -177,6 +177,15 @@ pub fn high_water(id: TaskId) -> usize {
     }
 }
 
+/// A task's stack size in words, so a high-water mark can be read against it.
+pub fn stack_len(id: TaskId) -> usize {
+    // SAFETY: read-only.
+    unsafe {
+        let tasks = &*core::ptr::addr_of!(TASKS);
+        tasks.get(id.0).and_then(|t| t.as_ref()).map_or(0, |t| t.len)
+    }
+}
+
 /// Whether the task's stack guard is intact. False means it overflowed.
 pub fn stack_ok(id: TaskId) -> bool {
     // SAFETY: one read of the guard word.

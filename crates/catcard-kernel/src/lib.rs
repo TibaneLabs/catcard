@@ -35,7 +35,7 @@
 mod switch;
 mod task;
 
-pub use task::{Full, TaskId, count, high_water, name, spawn, stack_ok};
+pub use task::{Full, TaskId, count, high_water, name, spawn, stack_len, stack_ok};
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -89,6 +89,16 @@ static SWITCHES: AtomicU32 = AtomicU32::new(0);
 /// The FPU path in the switch only runs for a task that has touched the FPU, so a test
 /// that never sees this move has not exercised it -- however many switches it counted.
 static FP_SAVES: AtomicU32 = AtomicU32::new(0);
+
+/// Set once [`start`] has armed the scheduler. There is no way to stop it, so this never
+/// clears -- which is what makes it safe to refuse a second start on.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the scheduler is running. Starting it twice would re-arm SysTick and run the
+/// bootstrap again underneath live tasks.
+pub fn running() -> bool {
+    RUNNING.load(Ordering::Relaxed)
+}
 
 /// Milliseconds per tick.
 pub const TICK_MS: u32 = 1;
@@ -207,6 +217,7 @@ pub unsafe fn start(syst: &mut cortex_m::peripheral::SYST, hclk_hz: u32) -> ! {
     syst.enable_counter();
     syst.enable_interrupt();
 
+    RUNNING.store(true, Ordering::Relaxed);
     // SAFETY: the scheduler has tasks and the exceptions are armed.
     unsafe { switch::bootstrap() }
 }
