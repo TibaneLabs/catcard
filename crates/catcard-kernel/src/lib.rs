@@ -169,6 +169,46 @@ pub(crate) fn count_switch() {
     SWITCHES.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Nesting depth of [`without_preemption`]. Global rather than per task: while any task
+/// holds it no other task runs, so no other task can be the one to change it.
+static PREEMPT_LOCK: AtomicU32 = AtomicU32::new(0);
+/// A switch fell due while the lock was held, and is owed at release.
+static SWITCH_DEFERRED: AtomicBool = AtomicBool::new(false);
+
+/// Run `f` without being switched out.
+///
+/// For state shared between **tasks** -- the USB service state, for one -- where two tasks
+/// holding `&mut` to it at once would be the bug. Interrupts stay enabled, deliberately:
+/// the contention is task against task, and masking would turn every hold into a blackout
+/// that stalls the keypad edge timestamp and the clock for nothing. It does **not** exclude
+/// interrupt handlers; state an ISR also touches still needs a critical section.
+///
+/// A switch that falls due while this is held is deferred, not dropped: it is pended again
+/// on release. Nests. Without a running scheduler it is just a call to `f`, so code that
+/// uses it works the same on the normal boot path.
+pub fn without_preemption<R>(f: impl FnOnce() -> R) -> R {
+    PREEMPT_LOCK.fetch_add(1, Ordering::Relaxed);
+    let r = f();
+    // If PendSV runs between these two lines it sees the lock free and switches normally;
+    // the deferred flag then only causes one harmless extra switch.
+    if PREEMPT_LOCK.fetch_sub(1, Ordering::Relaxed) == 1
+        && SWITCH_DEFERRED.swap(false, Ordering::Relaxed)
+    {
+        cortex_m::peripheral::SCB::set_pendsv();
+    }
+    r
+}
+
+/// Whether a task currently holds [`without_preemption`].
+pub(crate) fn preemption_locked() -> bool {
+    PREEMPT_LOCK.load(Ordering::Relaxed) != 0
+}
+
+/// Record that a switch was refused, so release can make it happen.
+pub(crate) fn defer_switch() {
+    SWITCH_DEFERRED.store(true, Ordering::Relaxed);
+}
+
 /// Hand the CPU to another ready task, now, without waiting for the tick.
 pub fn yield_now() {
     cortex_m::peripheral::SCB::set_pendsv();

@@ -327,9 +327,14 @@ fn refuse_second_start(ui: &mut crate::ui::Ui<'_>) -> bool {
 const UI_WORDS: usize = 8192;
 /// The heartbeat formats a log line on its stack every few seconds.
 const BEAT_WORDS: usize = 512;
+/// The USB service task handles every host request, including a staged upgrade's
+/// signature check at the end -- elliptic-curve arithmetic, the likeliest deep path here.
+/// Sized generously and reported in the heartbeat until it has been measured.
+const USB_WORDS: usize = 4096;
 
 static mut UI_STACK: [u32; UI_WORDS] = [0; UI_WORDS];
 static mut BEAT_STACK: [u32; BEAT_WORDS] = [0; BEAT_WORDS];
+static mut USB_STACK: [u32; USB_WORDS] = [0; USB_WORDS];
 
 /// The gate, held by value so the menu task can borrow it for the rest of the program.
 static mut UI_GATE: Option<Callgate> = None;
@@ -407,14 +412,37 @@ pub fn run_ui(
             core::ptr::addr_of_mut!(BEAT_STACK).cast::<u32>(),
             BEAT_WORDS,
         );
+        let usb = core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(USB_STACK).cast::<u32>(),
+            USB_WORDS,
+        );
+        // Order matters: the heartbeat names stacks by these indices.
         let _ = catcard_kernel::spawn("ui", u, ui_task);
         let _ = catcard_kernel::spawn("beat", b, beat_task);
+        let _ = catcard_kernel::spawn("usb", usb, usb_task);
     }
+
+    // From here every `usbtask::pump()` in the menu's waiting loops is a no-op, and only
+    // the USB task polls. Set before `start` so there is no moment where both do.
+    crate::usbtask::start_service();
 
     // SAFETY: stealing the core peripherals to arm SysTick.
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
-    // SAFETY: both tasks are spawned and neither entry returns.
+    // SAFETY: every task is spawned and no entry returns.
     unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
+}
+
+/// Services USB -- and with it the activity light and the power button -- every
+/// scheduling round, whatever the menu is doing.
+///
+/// Polls once and yields. The menu's busy loops run for a whole tick before being
+/// preempted, so this is reached about once a millisecond, which is as often as the
+/// menu's own waiting loops used to poll.
+extern "C" fn usb_task() -> ! {
+    loop {
+        let _ = crate::usbtask::service();
+        catcard_kernel::yield_now();
+    }
 }
 
 /// The ordinary menu, on a stack of its own.
@@ -459,7 +487,7 @@ extern "C" fn beat_task() -> ! {
             let all_ok =
                 (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
             crate::catlog!(
-                "kui t={} sw={} rec={} ui_hw={}/{} beat_hw={}/{} {}",
+                "kui t={} sw={} rec={} ui={}/{} beat={}/{} usb={}/{} {}",
                 now,
                 catcard_kernel::switches(),
                 catcard_kernel::recovered(),
@@ -467,6 +495,8 @@ extern "C" fn beat_task() -> ! {
                 catcard_kernel::stack_len(id(0)),
                 catcard_kernel::high_water(id(1)),
                 catcard_kernel::stack_len(id(1)),
+                catcard_kernel::high_water(id(2)),
+                catcard_kernel::stack_len(id(2)),
                 if all_ok { "ok" } else { "OVERFLOW" }
             );
         }

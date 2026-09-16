@@ -22,6 +22,8 @@
 //! has to be able to service it without the task being threaded through each of them.
 //! The boot path is single-threaded and nothing here runs in interrupt context.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use catcard_board::BOARD;
 use catcard_hal::otg::{Event, Otg};
 use catcard_upgrade::{Approval, Reject, Staged};
@@ -836,16 +838,59 @@ const USB_STUCK_POLLS: u32 = 1_500;
 /// Service USB. Safe to call from anywhere in the foreground.
 ///
 /// Returns whether anything happened, so a caller can decide how hard to spin.
+///
+/// **Once a USB service task exists, this does nothing.** Every waiting loop in the menu
+/// calls it, and under the kernel those loops would otherwise poll the core concurrently
+/// with the task that now owns it. So [`start_service`] turns every one of those call
+/// sites into a no-op at once, and only [`service`] polls.
 pub fn pump() -> bool {
-    let Some(t) = task() else { return false };
-    // SAFETY: the task owns OTG_FS for the life of the firmware, and nothing runs in
-    // interrupt context.
-    let busy = unsafe { t.poll() };
-    publish_status(t);
+    if SERVICE.load(Ordering::Relaxed) {
+        return false;
+    }
+    poll_once()
+}
+
+/// Whether a dedicated task services USB, making [`pump`] a no-op everywhere else.
+static SERVICE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the USB Drive screen has the core in mass-storage mode. It drives the transport
+/// itself through the `msc_*` functions, and a HID poll from the service task in the
+/// meantime would take its packets.
+static MSC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Hand USB to a dedicated task. Irreversible, like the kernel it runs under.
+pub fn start_service() {
+    SERVICE.store(true, Ordering::Relaxed);
+}
+
+/// The USB service task's loop body: poll the core, then tick the activity light and the
+/// power button.
+///
+/// This is the payoff of a dedicated task. Under [`pump`], the light and -- more to the
+/// point -- the power button only responded while whatever screen was up happened to be
+/// waiting; a screen busy computing silenced both. Here they run every scheduling round,
+/// whatever the menu is doing.
+pub fn service() -> bool {
+    poll_once()
+}
+
+fn poll_once() -> bool {
+    let busy = if MSC_ACTIVE.load(Ordering::Relaxed) {
+        false
+    } else {
+        with_task(|t| {
+            // SAFETY: the task owns OTG_FS for the life of the firmware, and the scheduler
+            // lock `with_task` holds keeps every other task out.
+            let busy = unsafe { t.poll() };
+            publish_status(t);
+            busy
+        })
+        .unwrap_or(false)
+    };
     led::tick();
-    // The power button rides here for the same reason the activity light does: every
-    // screen that waits calls this, so this is the one place that covers all of them --
-    // the PIN prompt and the seed backup included.
+    // The power button rides here for the same reason the activity light does: this is
+    // the one place that runs no matter which screen is up -- the PIN prompt and the seed
+    // backup included.
     crate::power::tick();
     busy
 }
@@ -943,11 +988,9 @@ mod led {
 /// enumeration is answered immediately rather than lost to a blocking callgate. Safe to
 /// call more than once. No-op if USB never came up.
 pub fn attach() {
-    if let Some(t) = task() {
-        // SAFETY: the task owns OTG_FS for the life of the firmware; single-threaded
-        // foreground, nothing runs in interrupt context.
-        unsafe { t.otg.attach() }
-    }
+    // SAFETY: the task owns OTG_FS for the life of the firmware; the lock excludes other
+    // tasks and nothing runs in interrupt context.
+    with_task(|t| unsafe { t.otg.attach() });
 }
 
 // ---------------------------------------------------------------------------
@@ -961,7 +1004,9 @@ pub fn attach() {
 /// The OTG_FS interrupt, dispatched from [`crate::interrupts`]. Services the core in
 /// mass-storage mode; it is enabled only while the USB Drive screen is open.
 pub fn on_otg_interrupt() {
-    if let Some(t) = task() {
+    // Not `with_task`: an interrupt cannot take the scheduler lock, and the lock would not
+    // exclude it anyway. Its own guarantee is the one below.
+    if let Some(t) = task_from_isr() {
         // SAFETY: interrupt context. The foreground touches the core only inside
         // `interrupt::free`, so this handler is the sole accessor while it runs.
         unsafe { t.service_irq() };
@@ -971,8 +1016,10 @@ pub fn on_otg_interrupt() {
 /// Re-enumerate as a USB mass-storage device, and (in interrupt mode) hand the transport
 /// to the OTG interrupt.
 pub fn msc_enter() {
-    if let Some(t) = task() {
-        // SAFETY: the task owns OTG_FS; single-threaded foreground, interrupt still off.
+    // Stand the service task down before the core changes identity under it.
+    MSC_ACTIVE.store(true, Ordering::Relaxed);
+    with_task(|t| {
+        // SAFETY: the task owns OTG_FS; the lock excludes other tasks, interrupt still off.
         unsafe {
             t.msc_rx.clear();
             t.otg.set_mode(catcard_usb::control::DeviceMode::Msc);
@@ -991,12 +1038,12 @@ pub fn msc_enter() {
                 crate::interrupts::enable_otg();
             }
         }
-    }
+    });
 }
 
 /// Re-enumerate back as the HID wallet device, returning to fully polled operation.
 pub fn msc_exit() {
-    if let Some(t) = task() {
+    with_task(|t| {
         // SAFETY: as in `msc_enter`.
         unsafe {
             if MSC_INTERRUPTS {
@@ -1012,7 +1059,9 @@ pub fn msc_exit() {
             catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
             t.otg.reinit();
         }
-    }
+    });
+    // Only once the core is back to HID may the service task poll it again.
+    MSC_ACTIVE.store(false, Ordering::Relaxed);
 }
 
 /// Take the next bulk-OUT packet in mass-storage mode. In interrupt mode this drains the
@@ -1022,33 +1071,37 @@ pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
     if MSC_INTERRUPTS {
         // Keep the handler out while we touch the shared ring and the core.
         cortex_m::interrupt::free(|_| {
-            let t = task()?;
-            let was_full = t.msc_rx.is_full();
-            let got = t.msc_rx.pop(out);
-            if got.is_some() && was_full {
-                // A slot opened after back-pressure; let the host send the next packet.
-                // SAFETY: interrupts masked here, so the handler cannot also re-arm; the
-                // task owns OTG_FS.
-                unsafe { t.otg.receive_next() };
-            }
-            got
+            with_task(|t| {
+                let was_full = t.msc_rx.is_full();
+                let got = t.msc_rx.pop(out);
+                if got.is_some() && was_full {
+                    // A slot opened after back-pressure; let the host send the next packet.
+                    // SAFETY: interrupts masked here, so the handler cannot also re-arm; the
+                    // task owns OTG_FS.
+                    unsafe { t.otg.receive_next() };
+                }
+                got
+            })
+            .flatten()
         })
     } else {
-        let t = task()?;
-        // SAFETY: polled mode -- no interrupt context; the task owns OTG_FS.
-        unsafe {
-            if matches!(t.otg.poll(), Event::Report) {
-                let n = {
-                    let rx = t.otg.report();
-                    let n = rx.len().min(out.len());
-                    out[..n].copy_from_slice(&rx[..n]);
-                    n
-                };
-                t.otg.receive_next();
-                return Some(n);
+        with_task(|t| {
+            // SAFETY: polled mode -- no interrupt context; the task owns OTG_FS.
+            unsafe {
+                if matches!(t.otg.poll(), Event::Report) {
+                    let n = {
+                        let rx = t.otg.report();
+                        let n = rx.len().min(out.len());
+                        out[..n].copy_from_slice(&rx[..n]);
+                        n
+                    };
+                    t.otg.receive_next();
+                    return Some(n);
+                }
             }
-        }
-        None
+            None
+        })
+        .flatten()
     }
 }
 
@@ -1057,9 +1110,9 @@ pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
 pub fn msc_send(data: &[u8]) -> bool {
     let send = |t: &mut UsbTask| unsafe { t.otg.bulk_send(data) };
     if MSC_INTERRUPTS {
-        cortex_m::interrupt::free(|_| task().is_some_and(send))
+        cortex_m::interrupt::free(|_| with_task(send).unwrap_or(false))
     } else {
-        task().is_some_and(send)
+        with_task(send).unwrap_or(false)
     }
 }
 
@@ -1067,9 +1120,9 @@ pub fn msc_send(data: &[u8]) -> bool {
 /// not yet acted on. Peeks without clearing, so a data phase can bail early.
 pub fn msc_reset_pending() -> bool {
     if MSC_INTERRUPTS {
-        cortex_m::interrupt::free(|_| task().is_some_and(|t| t.otg.msc_reset_pending()))
+        cortex_m::interrupt::free(|_| with_task(|t| t.otg.msc_reset_pending()).unwrap_or(false))
     } else {
-        task().is_some_and(|t| t.otg.msc_reset_pending())
+        with_task(|t| t.otg.msc_reset_pending()).unwrap_or(false)
     }
 }
 
@@ -1077,9 +1130,9 @@ pub fn msc_reset_pending() -> bool {
 /// whatever it was doing and is ready for the next CBW.
 pub fn msc_take_reset() -> bool {
     if MSC_INTERRUPTS {
-        cortex_m::interrupt::free(|_| task().is_some_and(|t| t.otg.take_msc_reset()))
+        cortex_m::interrupt::free(|_| with_task(|t| t.otg.take_msc_reset()).unwrap_or(false))
     } else {
-        task().is_some_and(|t| t.otg.take_msc_reset())
+        with_task(|t| t.otg.take_msc_reset()).unwrap_or(false)
     }
 }
 
@@ -1208,12 +1261,12 @@ fn sd_diag() -> (u8, u32, u32) {
 /// dump to read these out of, so the screen is the only place they can be seen.
 pub fn otg_regs() -> Option<[u32; 6]> {
     // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
-    task().map(|t| unsafe { t.otg.debug_regs() })
+    with_task(|t| unsafe { t.otg.debug_regs() })
 }
 
 /// `(resets, reinits, rearms)` for the debug screen, or zeros before USB is up.
 pub fn recovery_counts() -> (u32, u32, u32) {
-    task().map_or((0, 0, 0), |t| t.otg.recovery_counts())
+    with_task(|t| t.otg.recovery_counts()).unwrap_or((0, 0, 0))
 }
 
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.
@@ -1235,32 +1288,49 @@ pub fn init_fault() -> &'static str {
 ///
 /// # Panics
 /// Never. Returns `None` on a board without USB or where the core would not start.
-fn task() -> Option<&'static mut UsbTask> {
-    // SAFETY: the boot path is single-threaded, and the one interrupt that touches the
-    // task -- OTG_FS in mass-storage mode -- is disabled except while the USB Drive screen
-    // is open, where every foreground caller wraps its use in `interrupt::free`. So the
-    // handler and the foreground never hold one of these references at the same time, and
-    // every caller drops it within one statement.
+/// Run `f` with the USB task, or `None` if USB never came up.
+///
+/// **The only way the task is reached from a task.** It used to be a function returning
+/// `&'static mut`, which was sound only while the firmware was single-threaded. Under the
+/// kernel the menu and the USB service task are both live, and two `&mut` to the same
+/// struct across a preemption is exactly the bug. Here the reference cannot escape the
+/// closure, and the closure runs under [`catcard_kernel::without_preemption`], so no other
+/// task can be inside at the same time -- by construction, not by care.
+///
+/// The OTG interrupt is the one accessor the lock does not exclude; see [`task_from_isr`].
+fn with_task<R>(f: impl FnOnce(&mut UsbTask) -> R) -> Option<R> {
+    catcard_kernel::without_preemption(|| {
+        // SAFETY: the scheduler lock excludes every other task, and the only other accessor
+        // -- the OTG interrupt -- runs only in mass-storage interrupt mode, where every
+        // foreground caller additionally holds `interrupt::free`.
+        unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }.map(f)
+    })
+}
+
+/// The task, for the OTG interrupt handler alone.
+///
+/// An interrupt cannot take the scheduler lock, and it would not exclude one anyway. The
+/// handler is safe for the reason it always was: OTG_FS is disabled except while the USB
+/// Drive screen is open, and there every task-side caller wraps its access in
+/// `interrupt::free`, so the handler and a task never hold the reference at once.
+fn task_from_isr() -> Option<&'static mut UsbTask> {
+    // SAFETY: as above.
     unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }
 }
 
 /// Tell a host whether the device has a PIN at all.
 pub fn set_blank(blank: bool) {
-    if let Some(t) = task() {
-        t.set_blank(blank);
-    }
+    with_task(|t| t.set_blank(blank));
 }
 
 /// Let the host offer upgrades, now that the PIN has been entered.
 pub fn unlocked() {
-    if let Some(t) = task() {
-        t.set_unlocked();
-    }
+    with_task(|t| t.set_unlocked());
 }
 
 /// An upgrade waiting to be approved at the screen.
 pub fn pending() -> Option<Approval> {
-    task().and_then(|t| t.pending().cloned())
+    with_task(|t| t.pending().cloned()).flatten()
 }
 
 /// Whether an upgrade is staged and waiting, without copying it.
@@ -1269,22 +1339,17 @@ pub fn pending() -> Option<Approval> {
 /// loop, which wants the thing itself once per frame, but wasteful for a caller that
 /// only asks whether something is there.
 pub fn has_pending() -> bool {
-    task().is_some_and(|t| t.pending().is_some())
+    with_task(|t| t.pending().is_some()).unwrap_or(false)
 }
 
 /// Approve the staged upgrade, publishing the bootloader's marker.
 pub fn approve() -> Result<catcard_upgrade::Region, Reject> {
-    match task() {
-        Some(t) => t.approve(),
-        None => Err(Reject::NotAnImage),
-    }
+    with_task(|t| t.approve()).unwrap_or(Err(Reject::NotAnImage))
 }
 
 /// Decline it, leaving nothing staged.
 pub fn decline() {
-    if let Some(t) = task() {
-        t.decline();
-    }
+    with_task(|t| t.decline());
 }
 
 /// Counters mirrored into RAM, where a dump can read them.
@@ -1360,15 +1425,15 @@ fn publish_status(t: &UsbTask) {
 /// and it did not go out", which are three very different bugs that look identical from
 /// the outside.
 pub fn stats() -> (bool, u32, u32, bool) {
-    match task() {
-        Some(t) => (
+    with_task(|t| {
+        (
             t.otg.is_configured(),
             t.rx_count,
             t.tx_count,
             t.outbox_len > 0,
-        ),
-        None => (false, 0, 0, false),
-    }
+        )
+    })
+    .unwrap_or((false, 0, 0, false))
 }
 
 /// A key a host has pressed, if any. Consumes it.
@@ -1384,8 +1449,7 @@ pub fn take_injected_key() -> Option<catcard_ui::keypad::Key> {
     #[cfg(feature = "usb-key-injection")]
     {
         use catcard_ui::keypad::Key;
-        let t = task()?;
-        let k = t.injected.take()?;
+        let k = with_task(|t| t.injected.take()).flatten()?;
         Some(match k {
             catcard_usb::KEY_CANCEL => Key::Cancel,
             catcard_usb::KEY_CONFIRM => Key::Confirm,
@@ -1404,7 +1468,7 @@ pub fn take_unlock_pin() -> Option<heapless::Vec<u8, 33>> {
     }
     #[cfg(feature = "usb-key-injection")]
     {
-        task()?.unlock_pin.take()
+        with_task(|t| t.unlock_pin.take()).flatten()
     }
 }
 

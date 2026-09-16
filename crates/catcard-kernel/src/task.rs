@@ -125,6 +125,14 @@ pub(crate) fn switch(sp: u32) -> u32 {
     let count = unsafe { *(core::ptr::addr_of!(COUNT)) };
     let cur = unsafe { *(core::ptr::addr_of!(CURRENT)) };
 
+    // A task holding `without_preemption` keeps the CPU. Handing back the pointer it just
+    // saved makes the switch restore that same task; the switch is owed at release. Never
+    // during the bootstrap, whose context is a throwaway and must be left.
+    if cur != usize::MAX && crate::preemption_locked() {
+        crate::defer_switch();
+        return sp;
+    }
+
     if cur != usize::MAX
         && let Some(t) = tasks[cur].as_mut()
     {
