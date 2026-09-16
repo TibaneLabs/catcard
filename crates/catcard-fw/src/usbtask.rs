@@ -843,6 +843,10 @@ pub fn pump() -> bool {
     let busy = unsafe { t.poll() };
     publish_status(t);
     led::tick();
+    // The power button rides here for the same reason the activity light does: every
+    // screen that waits calls this, so this is the one place that covers all of them --
+    // the PIN prompt and the seed backup included.
+    crate::power::tick();
     busy
 }
 

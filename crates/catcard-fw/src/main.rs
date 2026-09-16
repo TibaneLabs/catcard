@@ -37,6 +37,7 @@ mod msc_drive;
 mod nor;
 mod panic;
 mod pinentry;
+mod power;
 mod recovery;
 mod sdupgrade;
 mod selftest;

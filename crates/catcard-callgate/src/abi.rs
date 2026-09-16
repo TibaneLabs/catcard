@@ -64,6 +64,15 @@ pub enum LogoutMode {
     KeepScreen = 1,
     /// Logout screen, then reboot.
     LogoutAndReboot = 2,
+    /// Wipe SRAM and cut power.
+    ///
+    /// Only a battery-capable board can honour this: the bootloader drives `TURN_OFF`
+    /// into the board's power-management IC. On a USB-powered board (mk3/mk4/mk5) there
+    /// is nothing to switch off, which is why stock treats "power off" there as a plain
+    /// logout -- pulling the cable is the only real power cut.
+    ///
+    /// Source: hw-reference/power.md §"Power-off / shutdown (Q1)" [C]
+    PowerDown = 3,
 }
 
 /// `arg2` for [`Method::GenuineLight`].

@@ -10,7 +10,7 @@ use catcard_board::BOARD;
 use catcard_callgate::Callgate;
 use catcard_entropy::{domain, spawn_drbg};
 
-use crate::{BootReport, display, keypad, menu, pinentry, selftest, usbtask};
+use crate::{BootReport, display, keypad, menu, pinentry, power, selftest, usbtask};
 
 /// Run the post-boot sequence. Never returns.
 pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
@@ -82,6 +82,13 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     let Some(gate) = gate else {
         selftest::park(report, panel)
     };
+    // Needs the gate: powering off is `show_logout(3)`, which only the bootloader can do.
+    // Armed before the PIN prompt, because that is exactly where someone reaches for the
+    // button on a device they did not mean to wake.
+    //
+    // SAFETY: nothing else claims the power-button pin, and this runs once, in the boot
+    // path, before any screen.
+    unsafe { power::init(&gate) };
     // A device that cannot run the front panel -- no panel, no keypad, or no UI DRBG to
     // shuffle the scan with -- must still be reprogrammable, or a board whose drivers are
     // missing (Q1 today) runs a validly-signed image that nothing can replace. On a bench

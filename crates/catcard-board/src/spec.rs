@@ -221,6 +221,13 @@ pub struct BoardSpec {
     /// line at all. Source: usb.md §"USB activity LED" [C]
     pub usb_active: MaybePin,
 
+    /// The power button, on a board that can actually power itself off.
+    ///
+    /// Active-low with a pull-up, so a press reads 0. `None` on the USB-powered boards:
+    /// they have no button and nothing to switch off. Source: power.md §"Battery & power
+    /// pins" [C]
+    pub pwr_btn: MaybePin,
+
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
     pub has_se2: bool,
     /// SE2's bus pins, where they are confirmed. `None` means the chip is present but
@@ -345,6 +352,7 @@ pub const MK3: BoardSpec = BoardSpec {
     },
     // mk3 has no USB activity line. Source: usb.md §"USB activity LED" [C]
     usb_active: None,
+    pwr_btn: None,
     has_se2: false,
     se2: None,
     nfc: None,
@@ -426,6 +434,7 @@ pub const MK4: BoardSpec = BoardSpec {
     },
     // `USB_ACTIVE=PC6`, mk4 rev B and later. Source: usb.md §"USB activity LED" [C]
     usb_active: Some(pc(6)),
+    pwr_btn: None,
     has_se2: true,
     // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
     // inherited mk3 numpad claiming the same pins -- resolved in SE2's favour: the
@@ -555,6 +564,8 @@ pub const Q1: BoardSpec = BoardSpec {
     usb: MK4.usb,
     // The same `PC6` as mk4. Source: usb.md §"USB activity LED" [C]
     usb_active: MK4.usb_active,
+    // `PWR_BTN`: the only board that truly powers off. Source: power.md [C]
+    pwr_btn: Some(pb(12)),
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]
     se2: Some(Se2Pins {
@@ -747,6 +758,13 @@ mod tests {
             // kind of quiet wrong-pin mistake this test exists to catch.
             if let Some(p) = b.usb_active {
                 claim(p, "USB active LED", b.name);
+            }
+            // PB12 sits beside SE2's PB13/PB14, and this board already recorded one
+            // wrong-half contradiction between the numpad map and the SE2 bus -- both of
+            // which are claimed above, so this line is what checks the button against
+            // them.
+            if let Some(p) = b.pwr_btn {
+                claim(p, "power button", b.name);
             }
             if let Some(s) = b.sdmmc.slot_b {
                 claim(s.card_detect, "SD slot B detect", b.name);
