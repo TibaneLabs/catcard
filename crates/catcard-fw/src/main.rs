@@ -94,6 +94,26 @@ fn main() -> ! {
         cp.SCB.vtor.write(BOARD.memory.firmware_base);
     }
 
+    // The bootloader hands off with interrupts **masked**, and nothing on the way in
+    // turns them back on: cortex-m-rt's reset path does not, `#[entry]` does not, and the
+    // callgate's `with_interrupts_masked` deliberately preserves whatever it found ("set
+    // on entry means leave them so"). So until this line the firmware ran with PRIMASK
+    // set and *no interrupt had ever fired on this device*.
+    //
+    // Everything polled worked, which is why it went unnoticed: USB, the keypad scan, the
+    // display. The two things that need an interrupt did not -- the keypad's EXTI edge
+    // timestamp, which is the fine-grained entropy a keypress contributes, and
+    // interrupt-mode mass storage, whose failure was recorded as an EP0 problem.
+    //
+    // Proven on hardware: with PRIMASK set the edge handler never ran (its latch stayed
+    // zero across a boot and many keypresses); opening a single `cpsie i` window made it
+    // fire immediately from the pending line.
+    //
+    // SAFETY: the reset path. Every NVIC line is still masked at this point -- the keypad
+    // arms its own during bring-up and USB arms OTG only for mass storage -- so this
+    // enables the core's global mask, not any particular source.
+    unsafe { cortex_m::interrupt::enable() };
+
     // SAFETY: this is the reset path; nothing else has touched these peripherals. The
     // core comes up first because the panel's reset pulse is timed with the cycle
     // counter.

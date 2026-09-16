@@ -15,7 +15,7 @@ ABI-focused and these are CPU-core and interrupt-model facts.
   visible where the task is created rather than buried in the kernel.
 - No allocator anywhere.
 
-## The four things that must be right
+## The five things that must be right
 
 ### 1. The callgate is a hard critical section
 
@@ -51,7 +51,30 @@ the USB transport runs from OTG_FS. Both sit at NVIC priority 0. PendSV is pinne
 **lowest** priority in the system, so a task swap can never add jitter to an entropy
 sample or stall a bulk transfer.
 
-### 4. A stack overflow must not be silent
+### 4. Interrupts arrive masked
+
+The bootloader hands off with **PRIMASK set**, and nothing on the way in clears it:
+`cortex-m-rt`'s reset path does not, `#[entry]` does not, and the callgate's
+`with_interrupts_masked` deliberately preserves whatever it found. So until `main` began
+calling `cortex_m::interrupt::enable()`, **no interrupt had ever fired on this firmware**.
+
+It went unnoticed because nearly everything is polled — USB, the keypad scan, the display.
+The two things that needed an interrupt quietly never worked: the keypad's EXTI edge
+timestamp (the fine-grained entropy a keypress contributes, which silently fell back to a
+foreground sample every time) and interrupt-mode USB mass storage, whose failure was
+recorded as an EP0 servicing problem.
+
+Diagnosed over the debug monitor on the RDP=2 Q1: every EXTI, SYSCFG and NVIC register was
+correct and `IMR1` still carried the hardware's own reset bits, yet the edge latch stayed
+zero across a boot and many keypresses. Poking a four-instruction `cpsie i; nop…; cpsid i`
+routine into RAM and `jsr`-ing it made the pending line fire at once. Enabling interrupts
+at boot was checked against every `NVIC_ISER` first — only the keypad's own EXTI lines were
+enabled, so there was no stray source to park the CPU in `DefaultHandler`.
+
+For the kernel this is a precondition, not a side issue: SysTick and PendSV are
+configurable-priority exceptions and PRIMASK masks both.
+
+### 5. A stack overflow must not be silent
 
 Each stack is painted, with a guard word beneath it, and the high-water mark and guard are
 both reportable. This is not tidiness: what lies below a task stack on this device can be
