@@ -119,6 +119,7 @@ dependencies = [
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-hal",
+ "catcard-kernel",
  "catcard-log",
  "catcard-pin",
  "catcard-sd",
@@ -160,6 +161,13 @@ dependencies = [
  "clap",
  "hex",
  "purecrypto",
+]
+
+[[package]]
+name = "catcard-kernel"
+version = "7.0.0"
+dependencies = [
+ "cortex-m",
 ]
 
 [[package]]
