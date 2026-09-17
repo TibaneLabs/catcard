@@ -2152,16 +2152,14 @@ fn draw_se_view(
 fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
     use catcard_callgate::abi::RngSource;
 
-    if !catcard_board::BOARD.has_callgate_se_rng {
-        crate::catlog!("rng: no SE RNG on this board");
-        message(
-            ui.panel,
-            "Analyze RNG",
-            "no SE RNG here",
-            "any key to go back",
-        );
-        wait_for_any_key(ui);
-        return;
+    // The secure elements' TRNGs are only reachable through callgate 26, which the mk3
+    // bootloader does not have. That used to end this screen before it began -- and took
+    // the STM32's own TRNG down with it, although that one needs no callgate at all and is
+    // the source the mk3's entropy pool actually runs on. So a board without the gate still
+    // gets the analyzer; its two element bands just say why they are empty.
+    let has_se = catcard_board::BOARD.has_callgate_se_rng;
+    if !has_se {
+        crate::catlog!("rng: SE TRNGs not readable on this board; chip TRNG only");
     }
 
     let sources = [RngSource::Se1, RngSource::Se2];
@@ -2201,6 +2199,9 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
         // be interrupted) and once more after the flush below. Pumping only once a frame
         // would leave the bus deaf through the slow parts -- which is most of the frame.
         for (i, src) in sources.iter().enumerate() {
+            if !has_se {
+                break;
+            }
             let _ = usbtask::pump();
             let mut buf = [0u8; 33];
             // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
@@ -2256,6 +2257,23 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
         let mut fb = Mono128x64::new();
         let labels = ["SE1", "SE2", "S32"];
         for i in 0..RNG_SOURCES {
+            // An element band with nothing to read says why, instead of an empty field
+            // that looks like a dead generator.
+            if !has_se && i < 2 {
+                let f = &misc4x6::FONT;
+                let y = RNG_FIELD_Y[i] - 8;
+                draw_text(&mut fb, f, 1, y, labels[i]);
+                let why = if i == 1 && !catcard_board::BOARD.has_se2 {
+                    "none on this board"
+                } else {
+                    "no gate to read it"
+                };
+                draw_text(&mut fb, f, 16, y, why);
+                if i == 0 {
+                    draw_text(&mut fb, f, 104, y, "x=exit");
+                }
+                continue;
+            }
             draw_se_view(
                 &mut fb,
                 RNG_FIELD_Y[i],
@@ -2290,16 +2308,9 @@ fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
 
-    if !catcard_board::BOARD.has_callgate_se_rng {
-        message(
-            ui.panel,
-            "TRNG words",
-            "no SE RNG here",
-            "any key to go back",
-        );
-        wait_for_any_key(ui);
-        return;
-    }
+    // Without callgate 26 the elements cannot be read, and the words come from the chip
+    // TRNG alone -- the same single-generator policy the mk3's boot pool is held to.
+    let has_se = catcard_board::BOARD.has_callgate_se_rng;
 
     // A fresh pool, filled only from the hardware sources -- no boot material, no user
     // entropy -- so the words are exactly what the TRNGs produce right now.
@@ -2324,12 +2335,14 @@ fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
         (RngSource::Se2, Source::Se2Trng),
     ];
     let mut bytes = [0usize; 2];
+    // A source that cannot be read is not waited for.
+    let se_done = |bytes: &[usize; 2]| !has_se || (bytes[0] >= TARGET && bytes[1] >= TARGET);
     for _ in 0..MAX_PASSES {
-        if bytes[0] >= TARGET && bytes[1] >= TARGET && chip_bytes >= CHIP_TARGET {
+        if se_done(&bytes) && chip_bytes >= CHIP_TARGET {
             break;
         }
         for (i, (src, tag)) in srcs.iter().enumerate() {
-            if bytes[i] >= TARGET {
+            if !has_se || bytes[i] >= TARGET {
                 continue;
             }
             let _ = usbtask::pump();
@@ -2358,11 +2371,15 @@ fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
         }
 
         let mut counts = Line::new();
-        let _ = write!(
-            counts,
-            "SE1 {} SE2 {} S32 {}",
-            bytes[0], bytes[1], chip_bytes
-        );
+        if has_se {
+            let _ = write!(
+                counts,
+                "SE1 {} SE2 {} S32 {}",
+                bytes[0], bytes[1], chip_bytes
+            );
+        } else {
+            let _ = write!(counts, "S32 {chip_bytes}");
+        }
         let mut bits = Line::new();
         let _ = write!(bits, "{} bits", pool.credited_bits());
         message(ui.panel, "Reading TRNGs", &counts, &bits);
