@@ -60,15 +60,66 @@ const FIFO: u32 = 0x80;
 /// `PWRCTRL[1:0] = 11`: the card is powered and the clock may run.
 const POWER_ON: u32 = 0b11;
 
-/// `CPSMEN`, start the command state machine.
-const CMD_CPSMEN: u32 = 1 << 12;
-/// `WAITRESP[1:0]` at bits 9:8.
-const CMD_WAITRESP_SHORT: u32 = 0b01 << 8;
-const CMD_WAITRESP_LONG: u32 = 0b11 << 8;
-/// `CMDTRANS`, set when the command is followed by a data transfer. Present on the L4+
-/// controller and ignored by the older one, which starts the data path from `DCTRL`
-/// alone — so setting it on both is right for one and harmless for the other. `[I]`
-const CMD_CMDTRANS: u32 = 1 << 6;
+/// The bits that sit in different places on the two SDMMC controllers.
+///
+/// The register *offsets* are the same on the L4 (mk3) and the L4+ (mk4/mk5/Q1), which is
+/// what made it easy to believe the *bits* were too. They are not, and on the mk3 that was
+/// a card slot that never worked: `CPSMEN` written at the L4+ position never started the
+/// command state machine, and without `CLKEN` the card never saw a clock, so CMD0 timed
+/// out before anything reached the card. Confirmed on a live mk3 by poking the L4 layout
+/// in by hand -- CMD0 then reports `CMDSENT`, and CMD8 comes back with `CMDREND` and the
+/// `0x1AA` check pattern echoed.
+///
+/// Source: RM0351 §SDMMC register descriptions (L4) [C], verified on hardware as above;
+/// RM0432 §SDMMC (L4+) [C].
+#[derive(Copy, Clone)]
+struct Bits {
+    /// `CMD.CPSMEN`: start the command state machine.
+    cpsmen: u32,
+    /// `CMD.WAITRESP[1:0]`'s low bit.
+    waitresp_shift: u32,
+    /// `CMD.CMDTRANS`, on the controller that has it. On the L4 bit 6 is `WAITRESP`, so
+    /// setting this there would ask for a response instead of starting a transfer.
+    cmdtrans: u32,
+    /// `CLKCR.CLKEN`: the L4 gates `SDMMC_CK` with it; the L4+ has no such bit.
+    clken: u32,
+    clkdiv_mask: u32,
+    /// `CLKCR.WIDBUS = 01`, four-bit.
+    widbus_4: u32,
+    /// Every static flag `ICR` can clear.
+    icr_all: u32,
+    /// Identification clock, 400 kHz from 48 MHz: `48 / (DIV + 2)` on the L4, `48 / (2 *
+    /// DIV)` on the L4+.
+    div_slow: u32,
+    /// Transfer clock, 12 MHz by either formula.
+    div_fast: u32,
+}
+
+/// The L4's controller (mk3).
+const BITS_L4: Bits = Bits {
+    cpsmen: 1 << 10,
+    waitresp_shift: 6,
+    cmdtrans: 0,
+    clken: 1 << 8,
+    clkdiv_mask: 0xFF,
+    widbus_4: 0b01 << 11,
+    icr_all: 0x5FF,
+    div_slow: 118,
+    div_fast: 2,
+};
+
+/// The L4+'s controller (mk4, mk5, Q1).
+const BITS_L4PLUS: Bits = Bits {
+    cpsmen: 1 << 12,
+    waitresp_shift: 8,
+    cmdtrans: 1 << 6,
+    clken: 0,
+    clkdiv_mask: 0x3FF,
+    widbus_4: 0b01 << 14,
+    icr_all: 0x1FE0_0FFF,
+    div_slow: 60,
+    div_fast: 2,
+};
 
 /// `STA` bits, in the order the reference lists them.
 const STA_CCRCFAIL: u32 = 1 << 0;
@@ -89,9 +140,6 @@ const STA_TXUNDERR: u32 = 1 << 4;
 /// and drops words -- the write mirror of the receive-drain bug.
 const STA_TXFIFOHE: u32 = 1 << 14;
 
-/// Everything write-one-to-clear, for wiping the slate before each command.
-const ICR_ALL: u32 = 0x1FE0_0FFF;
-
 /// `DCTRL`: enable, card-to-host direction, and a block size of 2^9 = 512.
 const DCTRL_DTEN: u32 = 1 << 0;
 const DCTRL_DTDIR_CARD_TO_HOST: u32 = 1 << 1;
@@ -105,22 +153,6 @@ const CMD_TRIES: u32 = 200_000;
 /// Polls waiting for data. Larger: a whole block has to arrive.
 const DATA_TRIES: u32 = 2_000_000;
 
-/// Identification-mode clock: 400 kHz or under, from the 48 MHz kernel clock.
-///
-/// `SDMMC_CK = kernel / (2 * CLKDIV)` on the older controller and `kernel / (2 *
-/// CLKDIV)` on the L4+ one as well, so 48 MHz / (2 * 60) = 400 kHz. Cards are required
-/// to accept 400 kHz or less until they are out of identification mode. `[I]`
-const CLKDIV_SLOW: u32 = 60;
-/// Transfer clock once the card is addressed: 48 / (2 * 2) = 12 MHz, well inside the
-/// 25 MHz every card must accept, and slow enough not to depend on board trace lengths
-/// that have never been measured.
-const CLKDIV_FAST: u32 = 2;
-/// `WIDBUS[1:0]` at 15:14 — `01` is four-bit.
-const CLKCR_WIDBUS_4: u32 = 0b01 << 14;
-/// Keep the clock running; the power-saving mode stops it between transfers and a card
-/// that loses its clock mid-conversation has to be brought up again.
-const CLKCR_CLKDIV_MASK: u32 = 0x3FF;
-
 /// The SDMMC controller, as `catcard-sd`'s [`Transport`].
 pub struct Sdmmc {
     base: u32,
@@ -131,6 +163,7 @@ pub struct Sdmmc {
     /// `DCTRL.DTEN` must stay clear or the DPSM starts early (before the command) and the
     /// read never happens. The older controller has no `CMDTRANS` and needs `DTEN`.
     new_ip: bool,
+    bits: Bits,
 }
 
 /// Which microSD slot to talk to, on a board with more than one.
@@ -163,6 +196,11 @@ impl Sdmmc {
             return Err(Error::NoCard);
         }
         let b = base(spec.mcu);
+        let bits = if matches!(spec.mcu, Mcu::Stm32L4S5) {
+            BITS_L4PLUS
+        } else {
+            BITS_L4
+        };
         // SAFETY: as documented.
         unsafe {
             // Before the bus comes up, so the card that answers CMD0 is the one asked for.
@@ -177,9 +215,9 @@ impl Sdmmc {
                 return Err(Error::Peripheral);
             }
 
-            reg::write(b + CLKCR, CLKDIV_SLOW & CLKCR_CLKDIV_MASK);
+            reg::write(b + CLKCR, bits.clken | (bits.div_slow & bits.clkdiv_mask));
             reg::write(b + DTIMER, u32::MAX);
-            reg::write(b + ICR, ICR_ALL);
+            reg::write(b + ICR, bits.icr_all);
         }
 
         Ok(Self {
@@ -187,6 +225,7 @@ impl Sdmmc {
             present: card_detect(spec, slot),
             wide: false,
             new_ip: matches!(spec.mcu, Mcu::Stm32L4S5),
+            bits,
         })
     }
 
@@ -209,22 +248,24 @@ impl Transport for Sdmmc {
         let b = self.base;
         // SAFETY: this type owns SDMMC1 for its lifetime.
         unsafe {
-            reg::write(b + ICR, ICR_ALL);
+            reg::write(b + ICR, self.bits.icr_all);
             reg::write(b + ARG, arg);
 
+            let bits = self.bits;
             let wait = match resp {
                 Response::None => 0,
-                Response::Short => CMD_WAITRESP_SHORT,
-                Response::Long => CMD_WAITRESP_LONG,
+                Response::Short => 0b01 << bits.waitresp_shift,
+                Response::Long => 0b11 << bits.waitresp_shift,
             };
             // CMD17 and CMD24 are the commands here followed by a data phase, and their
-            // data path is armed before this call.
+            // data path is armed before this call. `cmdtrans` is 0 on the L4, which starts
+            // the data path from `DCTRL.DTEN` instead.
             let trans = if cmd == 17 || cmd == 24 {
-                CMD_CMDTRANS
+                bits.cmdtrans
             } else {
                 0
             };
-            reg::write(b + CMD, u32::from(cmd) | wait | trans | CMD_CPSMEN);
+            reg::write(b + CMD, u32::from(cmd) | wait | trans | bits.cpsmen);
 
             // Done is either "response arrived" or, for a command with no response,
             // "command went out". Waiting for the wrong one hangs on every CMD0.
@@ -239,7 +280,7 @@ impl Transport for Sdmmc {
                     break;
                 }
                 if sta & STA_CTIMEOUT != 0 {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::Timeout { cmd });
                 }
                 // A CRC failure on a response is still a response: some commands answer
@@ -259,7 +300,7 @@ impl Transport for Sdmmc {
                     *word = reg::read(b + RESP1 + 4 * i as u32);
                 }
             }
-            reg::write(b + ICR, ICR_ALL);
+            reg::write(b + ICR, self.bits.icr_all);
             Ok(out)
         }
     }
@@ -273,7 +314,7 @@ impl Transport for Sdmmc {
             loop {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR) != 0 {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
                 // Drain while the FIFO is not empty. `RXFIFOE` (empty) is the reliable
@@ -290,16 +331,16 @@ impl Transport for Sdmmc {
                     break;
                 }
                 if sta & STA_DATAEND != 0 && at == 0 {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
             }
-            reg::write(b + ICR, ICR_ALL);
+            reg::write(b + ICR, self.bits.icr_all);
         }
         Ok(())
     }
@@ -318,7 +359,7 @@ impl Transport for Sdmmc {
             while at < BLOCK_LEN {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
                 if sta & STA_TXFIFOHE != 0 {
@@ -332,7 +373,7 @@ impl Transport for Sdmmc {
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
             }
@@ -342,7 +383,7 @@ impl Transport for Sdmmc {
             loop {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
                 if sta & STA_DATAEND != 0 {
@@ -350,11 +391,11 @@ impl Transport for Sdmmc {
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
-                    reg::write(b + ICR, ICR_ALL);
+                    reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
             }
-            reg::write(b + ICR, ICR_ALL);
+            reg::write(b + ICR, self.bits.icr_all);
         }
         Ok(())
     }
@@ -366,7 +407,7 @@ impl Transport for Sdmmc {
         self.command(6, 2, Response::Short)?;
         // SAFETY: this type owns SDMMC1.
         unsafe {
-            reg::modify(self.base + CLKCR, 0, CLKCR_WIDBUS_4);
+            reg::modify(self.base + CLKCR, 0, self.bits.widbus_4);
         }
         self.wide = true;
         Ok(())
@@ -375,7 +416,11 @@ impl Transport for Sdmmc {
     fn set_fast_clock(&mut self) {
         // SAFETY: as above.
         unsafe {
-            reg::modify(self.base + CLKCR, CLKCR_CLKDIV_MASK, CLKDIV_FAST);
+            reg::modify(
+                self.base + CLKCR,
+                self.bits.clkdiv_mask,
+                self.bits.div_fast & self.bits.clkdiv_mask,
+            );
         }
     }
 
