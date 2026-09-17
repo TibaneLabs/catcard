@@ -241,6 +241,8 @@ pub struct BoardSpec {
     /// Measured on hardware (mk3 bootloader 2.0.0, `git=mark3@d841cc5`) by calling gate 0
     /// `get_bl_version` at descending addresses: it fills a buffer ending at exactly
     /// `0x2001_8000` and refuses one that starts there.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md §0.1 [C] (measured on hardware)
     pub gate_buf_len: u32,
 
     /// Whether the keypad's falling-edge EXTI path is armed from the boot path.
