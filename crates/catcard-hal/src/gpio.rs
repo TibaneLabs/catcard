@@ -118,6 +118,67 @@ pub unsafe fn set_alternate(pin: Pin, af: u8, otype: OutputType, pull: Pull, spe
     }
 }
 
+/// Everything [`configure`] and [`set_alternate`] can change about one pin, as it stood.
+///
+/// For borrowing a pin that someone else configured -- the bootloader, for SE1's bus --
+/// and handing it back exactly as found, so their next use of it sees no difference.
+#[derive(Copy, Clone, Debug)]
+pub struct PinState {
+    mode: u32,
+    otype: u32,
+    speed: u32,
+    pull: u32,
+    af: u32,
+}
+
+/// Record a pin's configuration.
+///
+/// # Safety
+/// Reads the port's registers; the port clock must be enabled.
+pub unsafe fn snapshot(pin: Pin) -> PinState {
+    let base = port_base(pin.port);
+    let n = pin.num as u32;
+    let (afr, shift) = if n < 8 {
+        (base + AFRL, n * 4)
+    } else {
+        (base + AFRL + 4, (n - 8) * 4)
+    };
+    // SAFETY: reads only.
+    unsafe {
+        PinState {
+            mode: (reg::read(base + MODER) >> (n * 2)) & 0b11,
+            otype: (reg::read(base + OTYPER) >> n) & 1,
+            speed: (reg::read(base + OSPEEDR) >> (n * 2)) & 0b11,
+            pull: (reg::read(base + PUPDR) >> (n * 2)) & 0b11,
+            af: (reg::read(afr) >> shift) & 0b1111,
+        }
+    }
+}
+
+/// Put a pin back as [`snapshot`] found it.
+///
+/// # Safety
+/// As [`configure`].
+pub unsafe fn restore(pin: Pin, st: PinState) {
+    let base = port_base(pin.port);
+    let n = pin.num as u32;
+    let two_bit = 0b11 << (n * 2);
+    let (afr, shift) = if n < 8 {
+        (base + AFRL, n * 4)
+    } else {
+        (base + AFRL + 4, (n - 8) * 4)
+    };
+    // SAFETY: the caller owns the pin for the duration, as for `configure`.
+    unsafe {
+        reg::modify(afr, 0b1111 << shift, st.af << shift);
+        reg::modify(base + PUPDR, two_bit, st.pull << (n * 2));
+        reg::modify(base + OSPEEDR, two_bit, st.speed << (n * 2));
+        reg::modify(base + OTYPER, 1 << n, st.otype << n);
+        // MODER last, for the same reason `configure` does it last.
+        reg::modify(base + MODER, two_bit, st.mode << (n * 2));
+    }
+}
+
 /// Drive a pin high or low via `BSRR`, which is atomic and needs no read-modify-write.
 ///
 /// # Safety

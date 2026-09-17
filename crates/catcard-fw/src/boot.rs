@@ -126,7 +126,11 @@ fn feed_secure_elements(pool: &mut EntropyPool) {
     };
     let mut trngs = crate::trng::Trngs::new(Some(&gate));
     for kind in crate::trng::kinds() {
-        if kind == Kind::Chip {
+        // The chip was read above. SE1's raw bus is left out of boot for now: it borrows
+        // the bus the bootloader's PIN checks run over, and a mistake there on the boot
+        // path would leave a locked board unable to log in. It is used after login, and
+        // earns its place here once that has been watched working.
+        if kind == Kind::Chip || kind == Kind::Se1Wire {
             continue;
         }
         // The elements return at most 32 bytes a call, so draw repeatedly.

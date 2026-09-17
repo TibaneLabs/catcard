@@ -24,6 +24,9 @@ pub enum Kind {
     Se1,
     /// SE2 through callgate 26 (mk4+).
     Se2,
+    /// SE1's `Random` over its raw single-wire bus (mk3, which has no callgate for it).
+    /// Unauthenticated, so mixed and credited zero.
+    Se1Wire,
     /// The bootloader's read of the MCU TRNG, callgate 17. Every board.
     Bootloader,
     /// The STM32's own TRNG, read directly. Every board.
@@ -36,6 +39,7 @@ impl Kind {
         match self {
             Kind::Se1 => Source::Se1Trng,
             Kind::Se2 => Source::Se2Trng,
+            Kind::Se1Wire => Source::Se1TrngUnauthenticated,
             Kind::Bootloader => Source::BootloaderTrng,
             Kind::Chip => Source::Stm32Trng,
         }
@@ -44,7 +48,7 @@ impl Kind {
     /// Three characters for a screen.
     pub const fn label(self) -> &'static str {
         match self {
-            Kind::Se1 => "SE1",
+            Kind::Se1 | Kind::Se1Wire => "SE1",
             Kind::Se2 => "SE2",
             Kind::Bootloader => "BL",
             Kind::Chip => "S32",
@@ -65,6 +69,8 @@ pub fn kinds() -> heapless::Vec<Kind, 4> {
     if catcard_board::BOARD.has_callgate_se_rng {
         let _ = v.push(Kind::Se1);
         let _ = v.push(Kind::Se2);
+    } else if catcard_board::BOARD.se1_swi.is_some() {
+        let _ = v.push(Kind::Se1Wire);
     }
     let _ = v.push(Kind::Bootloader);
     let _ = v.push(Kind::Chip);
@@ -123,6 +129,32 @@ impl<'a> Trngs<'a> {
                 }
                 buf.zeroize();
                 n
+            }
+            Kind::Se1Wire => {
+                let pin = catcard_board::BOARD.se1_swi?;
+                // Opened and closed around every read, so the bootloader's bus is only ever
+                // borrowed for one exchange and is back as it left it before anything else
+                // -- a callgate call above all -- can run.
+                // SAFETY: `pin` is this board's SE1 bus, and nothing else runs until the
+                // driver is dropped at the end of this arm.
+                let got = match unsafe { catcard_hal::se1swi::Se1Swi::open(pin) } {
+                    Ok(mut bus) => bus.random(),
+                    Err(e) => Err(e),
+                };
+                // The first few failures go to the log with their reason: this is a bus
+                // the firmware drives by hand, and "no bytes" alone says nothing about why.
+                if let Err(e) = got {
+                    use core::sync::atomic::{AtomicU32, Ordering};
+                    static LOGGED: AtomicU32 = AtomicU32::new(0);
+                    if LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+                        crate::catlog!("trng: SE1 wire read failed: {:?}", e);
+                    }
+                }
+                let mut bytes = got.ok()?;
+                let n = bytes.len().min(out.len());
+                out[..n].copy_from_slice(&bytes[..n]);
+                bytes.zeroize();
+                Some(n)
             }
             Kind::Chip => {
                 let rng = self.chip.as_ref()?;

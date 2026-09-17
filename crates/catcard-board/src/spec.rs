@@ -259,6 +259,18 @@ pub struct BoardSpec {
     /// does not work here" want the same safe behaviour.
     pub keypad_edge_at_boot: bool,
 
+    /// SE1's single-wire bus pin, on a board where the firmware reads SE1 directly.
+    ///
+    /// SE1 sits on UART4 in half-duplex mode, one pin for both directions, on every
+    /// generation. mk4+ reach its TRNG through callgate 26, which authenticates the element,
+    /// so they leave this `None` and never touch the bus. The mk3 bootloader has no such
+    /// callgate, so there the firmware issues SE1's unprivileged `Random` itself -- mixed
+    /// into the pool and credited zero, because nothing authenticates this wire.
+    ///
+    /// Source: hw-reference/gpio.md "UART4 `TX=RX=PA0`, half-duplex, SE1, all generations"
+    /// [C]; platform.md §3 "Reading the SE1 RNG on mk3" [C]
+    pub se1_swi: MaybePin,
+
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
     pub has_se2: bool,
     /// SE2's bus pins, where they are confirmed. `None` means the chip is present but
@@ -393,6 +405,8 @@ pub const MK3: BoardSpec = BoardSpec {
     // use, but nothing the callgate is handed may live up there.
     gate_buf_len: 96 * 1024,
     keypad_edge_at_boot: false,
+    // No SE-randomness callgate on mk3, so the firmware reads SE1 over this pin itself.
+    se1_swi: Some(pa(0)),
     has_se2: false,
     se2: None,
     nfc: None,
@@ -479,6 +493,8 @@ pub const MK4: BoardSpec = BoardSpec {
     // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
+    se1_swi: None,
     has_se2: true,
     // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
     // inherited mk3 numpad claiming the same pins -- resolved in SE2's favour: the
@@ -616,6 +632,8 @@ pub const Q1: BoardSpec = BoardSpec {
     // stack, at the top of SRAM1, and is answered.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
+    se1_swi: None,
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]
     se2: Some(Se2Pins {
@@ -815,6 +833,9 @@ mod tests {
             // them.
             if let Some(p) = b.pwr_btn {
                 claim(p, "power button", b.name);
+            }
+            if let Some(p) = b.se1_swi {
+                claim(p, "SE1 single-wire bus", b.name);
             }
             if let Some(s) = b.sdmmc.slot_b {
                 claim(s.card_detect, "SD slot B detect", b.name);
