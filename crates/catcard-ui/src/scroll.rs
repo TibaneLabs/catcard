@@ -58,6 +58,20 @@ impl<'a> Fonts<'a> {
     }
 }
 
+/// Characters of `size` that fit on one left-aligned line without being clipped.
+///
+/// [`render`] keeps a gutter on the right for the scroll arrows and clips left-aligned text
+/// at it, so a caller that has to shorten a string to fit -- eliding an address, say -- must
+/// measure against the same width the renderer will honour. Measuring against the panel
+/// instead leaves the last glyph chopped down its middle, and half a character at the end of
+/// an address is indistinguishable from a different character.
+///
+/// Assumes the fixed-pitch faces this firmware draws with.
+pub fn text_cols(fonts: &Fonts<'_>, size: Size, width: usize) -> usize {
+    let gutter = fonts.body.advance(b'^') + fonts.margin;
+    width.saturating_sub(fonts.margin + gutter) / fonts.face(size).advance(b'0').max(1)
+}
+
 /// One line of a document, before wrapping.
 #[derive(Copy, Clone)]
 pub struct Line<'a> {
@@ -679,6 +693,49 @@ mod tests {
             gap: 1,
             margin: 2,
         }
+    }
+
+    #[test]
+    fn a_line_of_text_cols_characters_is_drawn_whole() {
+        // The bug this pins: a caller that elides to `(width - margin) / advance` overruns
+        // the arrow gutter, and `render` clips the last glyph down its middle. On an
+        // address that is a character the owner cannot read and cannot check.
+        use crate::canvas::Canvas;
+        use crate::framebuffer::Mono128x64;
+
+        let fonts = compact_fonts();
+        let cols = text_cols(&fonts, Size::Body, 128);
+        assert!(cols > 0);
+        let text: String = core::iter::repeat_n('M', cols).collect();
+        let doc = [Line::body(&text)];
+        let view = ScrollView::build(&doc, 128, 64, fonts);
+        let mut c = Mono128x64::new();
+        render(&mut c, &view);
+
+        // Same text, drawn with nothing in the way.
+        let mut plain = Mono128x64::new();
+        crate::text::draw_text(&mut plain, fonts.body, fonts.margin, 0, &text);
+        for y in 0..fonts.body.line_height() {
+            for x in 0..128 {
+                assert_eq!(
+                    Canvas::get(&c, x, y),
+                    Canvas::get(&plain, x, y),
+                    "clipped at {x},{y} with {cols} columns"
+                );
+            }
+        }
+
+        // And one more character would not have fitted: the check is tight, not generous.
+        let over: String = core::iter::repeat_n('M', cols + 1).collect();
+        let doc = [Line::body(&over)];
+        let view = ScrollView::build(&doc, 128, 64, fonts);
+        let mut c = Mono128x64::new();
+        render(&mut c, &view);
+        let mut plain = Mono128x64::new();
+        crate::text::draw_text(&mut plain, fonts.body, fonts.margin, 0, &over);
+        let same = (0..fonts.body.line_height())
+            .all(|y| (0..128).all(|x| Canvas::get(&c, x, y) == Canvas::get(&plain, x, y)));
+        assert!(!same, "{} columns should have been clipped", cols + 1);
     }
 
     fn a_menu() -> [Line<'static>; 6] {

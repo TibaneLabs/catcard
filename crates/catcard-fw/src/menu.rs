@@ -2749,12 +2749,18 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let mut chains: [Option<catcard_wallet::bip32::ExtendedPubKey>; PROTOCOLS.len()] =
         [None; PROTOCOLS.len()];
 
-    // How many characters of the address fit on one line **in the large face**: 17 on the
-    // 128px panel, 30 on the Q1. It is longer than that, so it is shown start...end (see
-    // `ellipsize_middle`) -- the two ends are what an eye compares against a watch-only
-    // wallet, and one clean line beats a wrap.
-    let cols =
-        (display::SCREEN_W - 2 * display::FONTS.margin) / display::FONTS.body.advance(b'0').max(1);
+    // How many characters of the address fit on one line **in the large face**, asked of the
+    // renderer rather than worked out from the panel width: it keeps a gutter for the scroll
+    // arrows and clips text at it, so one column too many leaves the last glyph sliced down
+    // the middle -- and half a character at the end of an address is indistinguishable from
+    // a different one. The address is longer than the line either way, so it is shown
+    // start...end (see `ellipsize_middle`): the two ends are what an eye compares against a
+    // watch-only wallet, and one clean line beats a wrap.
+    let cols = catcard_ui::scroll::text_cols(
+        &display::FONTS,
+        catcard_ui::scroll::Size::Body,
+        display::SCREEN_W,
+    );
     let mut index: u32 = 0;
     let mut proto = 0usize;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
