@@ -113,16 +113,21 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         }
     }
 
-    let (start, len) = match dfuse::locate(&head[..got], file_len as u64) {
-        Ok(e) => (e.offset, e.len),
-        // A raw image is a legitimate thing to find, and is its own case rather than a
-        // broken container.
-        Err(dfuse::NotDfuSe::NoSignature) => (0, file_len),
-        Err(dfuse::NotDfuSe::TooShort) => return Outcome::Failed("file too short"),
-        Err(dfuse::NotDfuSe::Version(_)) => return Outcome::Failed("unknown dfu version"),
-        Err(dfuse::NotDfuSe::NotSingle { .. }) => return Outcome::Failed("multi-part dfu"),
-        Err(dfuse::NotDfuSe::Truncated { .. }) => return Outcome::Failed("dfu is truncated"),
-    };
+    let (start, len) =
+        match dfuse::locate(&head[..got], file_len as u64, BOARD.memory.firmware_base) {
+            Ok(e) => (e.offset, e.len),
+            // A raw image is a legitimate thing to find, and is its own case rather than a
+            // broken container.
+            Err(dfuse::NotDfuSe::NoSignature) => (0, file_len),
+            Err(dfuse::NotDfuSe::TooShort) => return Outcome::Failed("file too short"),
+            Err(dfuse::NotDfuSe::Version(_)) => return Outcome::Failed("unknown dfu version"),
+            Err(dfuse::NotDfuSe::NotSingle { .. }) => return Outcome::Failed("multi-part dfu"),
+            Err(dfuse::NotDfuSe::WrongAddress { address }) => {
+                crate::catlog!("sd: dfu element 0 at {:#010x}, not this board's", address);
+                return Outcome::Failed("dfu not for this board");
+            }
+            Err(dfuse::NotDfuSe::Truncated { .. }) => return Outcome::Failed("dfu is truncated"),
+        };
 
     // The board's staging area: PSRAM on mk4/mk5/Q1, the SPI-NOR on mk3 (brought up here).
     // `None` means there is nowhere to put an image -- no PSRAM/SPI-NOR, or the SPI-NOR did

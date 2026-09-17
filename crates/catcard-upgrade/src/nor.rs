@@ -18,7 +18,7 @@
 //! [`NVSTORE_BASE`] or it overwrites settings — tighter than the bootloader's nominal
 //! `FW_MAX_LENGTH`. Source: `hw-reference/storage.md §"mk3 firmware staging & recovery"` [C].
 
-use catcard_flash::{Error as FlashError, NorFlash, SpiDevice, SECTOR_SIZE};
+use catcard_flash::{Error as FlashError, NorFlash, SECTOR_SIZE, SpiDevice};
 use catcard_fwhdr::{HEADER_LEN, HEADER_OFFSET};
 
 use crate::StagingArea;
@@ -227,7 +227,10 @@ mod tests {
         for (i, b) in img.iter_mut().enumerate() {
             *b = (i % 251) as u8;
         }
-        for (i, b) in img[HEADER_OFFSET..HEADER_OFFSET + HEADER_LEN].iter_mut().enumerate() {
+        for (i, b) in img[HEADER_OFFSET..HEADER_OFFSET + HEADER_LEN]
+            .iter_mut()
+            .enumerate()
+        {
             *b = 0xA0 ^ (i as u8);
         }
         img
@@ -255,7 +258,10 @@ mod tests {
         a.read(HEADER_OFFSET as u32, &mut primary).unwrap();
         let mut trailing = [0u8; HEADER_LEN];
         a.read(len as u32, &mut trailing).unwrap();
-        assert_eq!(trailing, primary, "trailing header is not a copy of the primary");
+        assert_eq!(
+            trailing, primary,
+            "trailing header is not a copy of the primary"
+        );
     }
 
     #[test]
