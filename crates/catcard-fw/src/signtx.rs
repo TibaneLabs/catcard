@@ -102,8 +102,15 @@ fn btc(sats: u64, out: &mut heapless::String<24>) {
     let _ = write!(out, "{}.{:08}", sats / 100_000_000, sats % 100_000_000);
 }
 
-/// Read the picked file into `buf`. Returns its length, or why not.
-fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+/// Mount the card and hand the volume to `f`.
+///
+/// Every entry point here needs the same bring-up, and the specific failure has to reach
+/// the screen rather than a generic "card error".
+fn with_card<T>(
+    f: impl FnOnce(
+        &mut catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>,
+    ) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
     let mut why: &'static str = "card error";
     let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins while this screen is open.
@@ -131,23 +138,70 @@ fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
         catcard_sd::MountError::Device => why,
         catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
     })?;
-    let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
-    let len = file.len();
-    if len as usize > buf.len() {
-        return Err("too big for this board");
-    }
-    let mut got = 0usize;
-    while got < len as usize {
-        match file.read(&mut vol, &mut buf[got..len as usize]) {
-            Ok(0) => break,
-            Ok(n) => got += n,
-            Err(_) => return Err("read failed"),
+    f(&mut vol)
+}
+
+/// The one `.psbt` in the card's root directory, if there is exactly one.
+///
+/// What "Ready to Sign" means: a card carrying a single transaction needs no file picker.
+/// Two or more, and the owner picks -- signing the wrong one of two transactions is not a
+/// choice to make on their behalf. Anything already written by a previous signing
+/// (`SIGNED.PSB`) is skipped, so a finished transaction does not present itself again.
+fn lone_psbt() -> Option<heapless::String<{ PATH_MAX }>> {
+    with_card(|vol| {
+        let mut found: Option<heapless::String<PATH_MAX>> = None;
+        let mut several = false;
+        let _ = vol.enumerate("", |name, is_dir, _| {
+            if is_dir || several {
+                return;
+            }
+            let lower = name.trim();
+            let is_psbt = lower.len() > 5
+                && lower[lower.len() - 5..].eq_ignore_ascii_case(".psbt")
+                && !lower.eq_ignore_ascii_case(&SIGNED_NAME[1..]);
+            if !is_psbt {
+                return;
+            }
+            if found.is_some() {
+                several = true;
+                found = None;
+                return;
+            }
+            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+            if path.push('/').is_ok() && path.push_str(name).is_ok() {
+                found = Some(path);
+            }
+        });
+        Ok(found)
+    })
+    .ok()
+    .flatten()
+}
+
+/// Longest path this screen carries.
+const PATH_MAX: usize = 160;
+
+/// Read the picked file into `buf`. Returns its length, or why not.
+fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+    with_card(|vol| {
+        let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
+        let len = file.len() as usize;
+        if len > buf.len() {
+            return Err("too big for this board");
         }
-    }
-    if got != len as usize {
-        return Err("short read");
-    }
-    Ok(got)
+        let mut got = 0usize;
+        while got < len {
+            match file.read(vol, &mut buf[got..len]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => return Err("read failed"),
+            }
+        }
+        if got != len {
+            return Err("short read");
+        }
+        Ok(got)
+    })
 }
 
 /// Decode `bytes` in place if they are base64 (as a `.psbt` written as text is), and return
@@ -185,8 +239,22 @@ fn refusal_text(r: Refusal) -> &'static str {
 pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign";
 
-    let Some(path) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
-        return;
+    // A card with one transaction on it needs no picker; two or more, and the owner says
+    // which.
+    let path = match lone_psbt() {
+        Some(p) => p,
+        None => {
+            let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
+                return;
+            };
+            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+            if path.push_str(p.as_str()).is_err() {
+                menu::message(ui.panel, HEAD, "path too long", "any key to go back");
+                menu::wait_for_any_key(ui);
+                return;
+            }
+            path
+        }
     };
     // SAFETY: the menu waits for this screen to return, so nothing else holds the buffers.
     let Some((buf, spare)) = (unsafe { buffers() }) else {
