@@ -87,6 +87,7 @@ enum Screen {
     Kernel,
     /// Restart this menu as a kernel task, beside a heartbeat.
     KernelUi,
+    ScrollTest,
     Colours,
     Logs,
     SaveLog,
@@ -220,6 +221,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "Kernel",
     "Kernel test",
     "Kernel UI",
+    "Scroll test",
     "PSRAM",
     "SPI-NOR",
     "Boot report",
@@ -576,6 +578,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::ktest::run_ui(a.gate, a.login, a.ui, a.report, a.pool.take()),
             Screen::Debug,
         ),
+        Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -765,6 +768,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Kernel")) => Screen::Kernel,
             (Key::Confirm, Some("Kernel test")) => Screen::KernelTest,
             (Key::Confirm, Some("Kernel UI")) => Screen::KernelUi,
+            (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
             (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
@@ -956,7 +960,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
         Screen::Rtc => rtc_screen(panel, &v.rtc),
         // Handled in `run`: it takes the CPU and never returns.
-        Screen::KernelTest | Screen::KernelUi => {}
+        Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
@@ -2478,6 +2482,69 @@ fn receive_chain(
     }
     busy.tick(panel);
     Some(crate::keywork::run(|kw| here.to_extended_pub(kw)))
+}
+
+/// Which way of asking the panel to scroll by itself actually moves the bar.
+///
+/// The busy bar crosses a secure-element call only if the panel controller scrolls it
+/// unaided, and that has not been seen working on every board. Three labelled phases, two
+/// seconds each, with the CPU doing nothing that could draw:
+///
+/// 1. the SSD1306 scroll setup this firmware sends today (six parameters);
+/// 2. the longer form some SSD1306-family controllers take, with start and end columns;
+/// 3. the CPU-ticked bar, as a control that must always move.
+///
+/// Whichever moves decides what `scroll_busy_bar` sends. A full redraw between phases puts
+/// the panel back in a known state whatever the previous command did.
+fn scroll_test(ui: &mut Ui<'_>) {
+    #[cfg(not(feature = "board-q1"))]
+    {
+        use catcard_ui::DisplayBus;
+        // SAFETY: reads RCC only.
+        let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+        let hold = |ms: u32| catcard_hal::dwt::delay_cycles(ms * per_ms);
+
+        let phases: [(&str, &[u8]); 2] = [
+            (
+                "1 of 3: short form",
+                &[0x2E, 0x26, 0x00, 7, 0x07, 7, 0x00, 0xFF, 0x2F],
+            ),
+            (
+                "2 of 3: long form",
+                &[0x2E, 0x26, 0x00, 7, 0x07, 7, 0x00, 0x00, 0x7F, 0x2F],
+            ),
+        ];
+        for (label, bytes) in phases {
+            display::draw(ui.panel, |c| {
+                catcard_ui::widgets::working(c, &display::LAYOUT, "Scroll test", label, 0);
+            });
+            let _ = ui.panel.bus_mut().command(bytes);
+            crate::catlog!("scroll test: {}", label);
+            hold(2000);
+        }
+        let mut busy = Working::new(ui.panel, "Scroll test", "3 of 3: CPU ticks");
+        for _ in 0..40 {
+            hold(50);
+            busy.tick(ui.panel);
+        }
+        message(
+            ui.panel,
+            "Scroll test",
+            "which moved?",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+    }
+    #[cfg(feature = "board-q1")]
+    {
+        message(
+            ui.panel,
+            "Scroll test",
+            "not on this panel",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+    }
 }
 
 /// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are
