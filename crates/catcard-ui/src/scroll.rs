@@ -699,7 +699,11 @@ mod tests {
         let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
         assert_eq!(v.off(), 0);
         v.move_cursor(true);
-        assert_eq!(v.off(), 0, "the view scrolled before the highlight reached an edge");
+        assert_eq!(
+            v.off(),
+            0,
+            "the view scrolled before the highlight reached an edge"
+        );
     }
 
     #[test]
@@ -733,7 +737,11 @@ mod tests {
         assert!(v.off() > 0, "never scrolled away from the top");
         v.to_top();
         assert_eq!(v.off(), 0);
-        assert_eq!(v.selected(), Some(1), "cursor did not return to the first item");
+        assert_eq!(
+            v.selected(),
+            Some(1),
+            "cursor did not return to the first item"
+        );
     }
 
     #[test]
@@ -754,7 +762,11 @@ mod tests {
         // At the end already? push once more to be sure it clamps rather than looping.
         let end = v.off();
         v.move_cursor(true);
-        assert_eq!(v.off(), end.max(v.off()), "scrolling past the end went backwards");
+        assert_eq!(
+            v.off(),
+            end.max(v.off()),
+            "scrolling past the end went backwards"
+        );
         assert!(v.at_end());
     }
 
@@ -819,9 +831,17 @@ mod tests {
         let mut v = ScrollView::build(&src, 320, 240, fonts());
         assert_eq!(v.selected(), Some(1));
         v.move_cursor(true);
-        assert_eq!(v.selected(), Some(2), "cursor did not skip the title and note");
+        assert_eq!(
+            v.selected(),
+            Some(2),
+            "cursor did not skip the title and note"
+        );
         v.move_cursor(true);
-        assert_eq!(v.selected(), Some(2), "cursor ran off the end instead of clamping");
+        assert_eq!(
+            v.selected(),
+            Some(2),
+            "cursor ran off the end instead of clamping"
+        );
         v.move_cursor(false);
         assert_eq!(v.selected(), Some(1));
     }
@@ -879,7 +899,10 @@ mod tests {
         let mut c = Gray320x240::new();
         render(&mut c, &v);
         // Its top five rows are gone, but the rest still drew something.
-        assert!(ink_count(&c) > 0, "a partially-scrolled line vanished entirely");
+        assert!(
+            ink_count(&c) > 0,
+            "a partially-scrolled line vanished entirely"
+        );
     }
 
     #[test]
@@ -898,7 +921,10 @@ mod tests {
         // Move to the long file: now it wants to scroll.
         v.move_cursor(true);
         assert_eq!(v.selected(), Some(1));
-        assert!(v.needs_marquee(), "a name wider than the panel did not marquee");
+        assert!(
+            v.needs_marquee(),
+            "a name wider than the panel did not marquee"
+        );
         // Ticking advances the shift and eventually snaps back to the start.
         assert!(v.tick_marquee());
         let mut saw_reset = false;

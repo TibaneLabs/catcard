@@ -445,8 +445,16 @@ mod tests {
         assert_eq!(decode(38, false, false, false), Some(Key::Char(b'l')));
         assert_eq!(decode(40, false, false, false), Some(Key::Char(b'z')));
         assert_eq!(decode(46, false, false, false), Some(Key::Char(b'm')));
-        assert_eq!(decode(52, false, false, false), Some(Key::Char(b' ')), "kn52 is SPACE");
-        assert_eq!(decode(1, false, false, false), Some(Key::Char(b'\t')), "kn1 is TAB");
+        assert_eq!(
+            decode(52, false, false, false),
+            Some(Key::Char(b' ')),
+            "kn52 is SPACE"
+        );
+        assert_eq!(
+            decode(1, false, false, false),
+            Some(Key::Char(b'\t')),
+            "kn1 is TAB"
+        );
     }
 
     #[test]
@@ -454,9 +462,21 @@ mod tests {
         // Whatever is held, the keys the screens steer with stay themselves -- otherwise
         // a menu would stop answering the moment someone rested a thumb on SHIFT.
         for (shift, caps) in [(false, false), (true, false), (false, true), (true, true)] {
-            assert_eq!(decode(7, shift, false, caps), Some(Key::Cancel), "kn7 CANCEL");
-            assert_eq!(decode(8, shift, false, caps), Some(Key::Confirm), "kn8 ENTER");
-            assert_eq!(decode(54, shift, false, caps), Some(Key::Cancel), "kn54 DELETE");
+            assert_eq!(
+                decode(7, shift, false, caps),
+                Some(Key::Cancel),
+                "kn7 CANCEL"
+            );
+            assert_eq!(
+                decode(8, shift, false, caps),
+                Some(Key::Confirm),
+                "kn8 ENTER"
+            );
+            assert_eq!(
+                decode(54, shift, false, caps),
+                Some(Key::Cancel),
+                "kn54 DELETE"
+            );
             assert_eq!(decode(4, shift, false, caps), Some(Key::Digit(5)), "kn4 up");
         }
     }
@@ -506,7 +526,11 @@ mod tests {
     fn the_modifiers_and_the_lamp_deliver_nothing() {
         // The lamp is torch-only in the reference, and we have no pin for it either way.
         for kn in [KN_LAMP, KN_SHIFT, KN_SYMBOL, 9, 55, 59] {
-            assert_eq!(decode(kn, false, false, false), None, "kn{kn} produced a key");
+            assert_eq!(
+                decode(kn, false, false, false),
+                None,
+                "kn{kn} produced a key"
+            );
         }
     }
 

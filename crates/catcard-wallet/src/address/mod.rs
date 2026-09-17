@@ -248,7 +248,10 @@ mod tests {
         m.to_seed("", &mut seed, &crate::KeyWork::host()).unwrap();
         let master = ExtendedPrivKey::from_seed(&seed, network, &crate::KeyWork::host()).unwrap();
         let p: DerivationPath = path.parse().unwrap();
-        master.derive_path(&p, &crate::KeyWork::host()).unwrap().public_key(&crate::KeyWork::host())
+        master
+            .derive_path(&p, &crate::KeyWork::host())
+            .unwrap()
+            .public_key(&crate::KeyWork::host())
     }
 
     fn addr(kind: AddressKind, network: Network, path: &str) -> String {

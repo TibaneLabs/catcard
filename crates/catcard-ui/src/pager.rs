@@ -483,7 +483,15 @@ mod tests {
         let mut plain = Gray320x240::new();
         paged(&mut plain, &l, "Seed", &sink, Pager::new(), total, None);
         let mut a = Gray320x240::new();
-        paged(&mut a, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x00C0_FFEE)));
+        paged(
+            &mut a,
+            &l,
+            "Seed",
+            &sink,
+            Pager::new(),
+            total,
+            Some(Scramble::new(0x00C0_FFEE)),
+        );
 
         // The scramble only ever adds ink, and for this seed it adds some.
         assert!(total_ink(&a) > total_ink(&plain), "scramble laid no ink");
@@ -491,13 +499,32 @@ mod tests {
         // Deterministic for a given seed -- which is what lets the noise scroll with the
         // text (a given content line keeps its width) instead of flickering per frame.
         let mut b = Gray320x240::new();
-        paged(&mut b, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x00C0_FFEE)));
+        paged(
+            &mut b,
+            &l,
+            "Seed",
+            &sink,
+            Pager::new(),
+            total,
+            Some(Scramble::new(0x00C0_FFEE)),
+        );
         assert!(identical(&a, &b), "same seed produced a different scramble");
 
         // A different seed gives a different pattern, so it is not a fixed decoration.
         let mut c = Gray320x240::new();
-        paged(&mut c, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0x0000_1234)));
-        assert!(!identical(&a, &c), "different seeds produced the same scramble");
+        paged(
+            &mut c,
+            &l,
+            "Seed",
+            &sink,
+            Pager::new(),
+            total,
+            Some(Scramble::new(0x0000_1234)),
+        );
+        assert!(
+            !identical(&a, &c),
+            "different seeds produced the same scramble"
+        );
     }
 
     /// The mark is a right-margin cue: it must hug the right edge and never reach the
@@ -521,7 +548,15 @@ mod tests {
         let mut plain = Gray320x240::new();
         paged(&mut plain, &l, "Seed", &sink, Pager::new(), total, None);
         let mut marked = Gray320x240::new();
-        paged(&mut marked, &l, "Seed", &sink, Pager::new(), total, Some(Scramble::new(0xBEEF)));
+        paged(
+            &mut marked,
+            &l,
+            "Seed",
+            &sink,
+            Pager::new(),
+            total,
+            Some(Scramble::new(0xBEEF)),
+        );
 
         // Where the word's own ink ends, on the plain render.
         let word_right = (0..320)
