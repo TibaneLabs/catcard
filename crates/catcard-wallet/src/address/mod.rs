@@ -218,6 +218,38 @@ pub fn encode(
     }
 }
 
+/// The form of `address` to put in a QR code.
+///
+/// Bech32 and bech32m are case-insensitive, and BIP-173 says to use **upper case** in QR
+/// codes for exactly one reason: upper case is in the QR alphanumeric character set, lower
+/// case is not. A lower-case `bc1...` has to go in byte mode at 8 bits a character; upper
+/// case goes in alphanumeric mode at 5.5, which is typically a whole version smaller and a
+/// symbol a phone can read from further away on a small panel.
+///
+/// Base58 addresses are **not** touched: there the case carries the checksum, and an
+/// upper-cased legacy address is not the same address, it is an invalid one.
+///
+/// `None` if `address` does not fit in `out` or is not ASCII. Refusing beats truncating:
+/// a shortened address rendered as a QR is a payment nobody receives.
+pub fn qr_form<'a>(address: &str, out: &'a mut [u8; MAX_ADDRESS_LEN]) -> Option<&'a str> {
+    let bytes = address.as_bytes();
+    if bytes.is_empty() || bytes.len() > out.len() || !address.is_ascii() {
+        return None;
+    }
+    let n = bytes.len();
+    out[..n].copy_from_slice(bytes);
+    // Bech32 by shape, not by prefix: lower-case letters and digits only. Anything with an
+    // upper-case letter in it is either already upper-case bech32 or base58, and both are
+    // left exactly as they are.
+    if bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        out[..n].make_ascii_uppercase();
+    }
+    core::str::from_utf8(&out[..n]).ok()
+}
+
 #[cfg(feature = "std")]
 /// Render an address as a `String`.
 pub fn encode_string(
@@ -230,6 +262,48 @@ pub fn encode_string(
     Ok(core::str::from_utf8(&buf[..n])
         .expect("addresses are ASCII")
         .into())
+}
+
+#[cfg(test)]
+mod qr_form_tests {
+    use super::*;
+
+    #[test]
+    fn bech32_is_upper_cased_for_the_qr_alphanumeric_set() {
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        assert_eq!(
+            qr_form("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &mut out),
+            Some("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
+        );
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        assert_eq!(
+            qr_form(
+                "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
+                &mut out
+            ),
+            Some("BC1P0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQZK5JJ0")
+        );
+    }
+
+    #[test]
+    fn base58_keeps_its_case_because_the_case_is_the_address() {
+        // Upper-casing a base58 address does not produce a different rendering of the same
+        // address, it produces a string that fails its own checksum -- and a QR of it is a
+        // receive address nobody can pay.
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        let legacy = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
+        assert_eq!(qr_form(legacy, &mut out), Some(legacy));
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        let nested = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy";
+        assert_eq!(qr_form(nested, &mut out), Some(nested));
+    }
+
+    #[test]
+    fn an_already_upper_cased_bech32_is_left_alone() {
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        let upper = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4";
+        assert_eq!(qr_form(upper, &mut out), Some(upper));
+    }
 }
 
 #[cfg(test)]

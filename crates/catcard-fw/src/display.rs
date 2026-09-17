@@ -322,6 +322,19 @@ pub const CONFIRM: catcard_ui::icons::KeyMark = catcard_ui::icons::KeyMark::Word
 #[cfg(feature = "board-q1")]
 pub const CANCEL: catcard_ui::icons::KeyMark = catcard_ui::icons::KeyMark::Word("CANCEL");
 
+/// What to call the confirm key in a line of running text, as it is marked on this board.
+#[cfg(not(feature = "board-q1"))]
+pub const CONFIRM_KEY: &str = "y";
+/// What to call the confirm key in a line of running text, as it is marked on this board.
+#[cfg(feature = "board-q1")]
+pub const CONFIRM_KEY: &str = "ENTER";
+/// What to call the cancel key in a line of running text, as it is marked on this board.
+#[cfg(not(feature = "board-q1"))]
+pub const CANCEL_KEY: &str = "x";
+/// What to call the cancel key in a line of running text, as it is marked on this board.
+#[cfg(feature = "board-q1")]
+pub const CANCEL_KEY: &str = "CANCEL";
+
 /// Body rows a list or info screen shows: `LAYOUT.rows(Screen height)` as a constant, for
 /// sizing line buffers. Pinned to the layouts by catcard-ui's widget tests (6 and 12).
 #[cfg(not(feature = "board-q1"))]

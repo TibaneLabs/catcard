@@ -83,6 +83,13 @@ zeroize = { version = "1.9.0", default-features = false }
 # --- shared ---
 bitflags = { version = "2.13.1", default-features = false }
 
+# --- barcodes: QR for showing an address to a watch-only wallet ---
+# `#![no_std]`, `forbid(unsafe_code)`, MIT. Only the heap-free half is taken: the
+# `encode_into` encoders write a module grid into buffers the caller owns, so the
+# firmware needs no allocator. `alloc`, `decode` and `scan` stay off, which also
+# leaves out every symbology but QR.
+anyd = { version = "0.1.4", default-features = false, features = ["encode", "qr"] }
+
 # --- host tooling ---
 anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive"] }

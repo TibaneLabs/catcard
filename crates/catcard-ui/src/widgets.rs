@@ -247,6 +247,83 @@ pub fn working<C: Canvas + ?Sized>(
     busy_bar(canvas, phase);
 }
 
+/// Light modules a symbol wants around it. Four is what the QR spec asks for, and two is
+/// what a decoder in practice needs; the fit picks the largest it can afford.
+pub const QUIET_ZONE: usize = 4;
+/// Narrowest light margin worth drawing. Below this, decoders start to miss the finder
+/// patterns against a dark surround.
+pub const QUIET_ZONE_MIN: usize = 2;
+
+/// How to place a `modules`-square symbol on a `w` by `h` canvas: (quiet zone, pixels per
+/// module). A scale of zero means it does not fit at all.
+///
+/// Pixels per module is what decides whether a phone can read the thing, so on a panel
+/// where the full quiet zone would cost a whole pixel per module, the margin gives way
+/// first: a 25-module symbol on a 64-pixel panel is 2 px a module with a 3-module margin,
+/// where insisting on 4 would have left 1 px a module. Ties keep the wider margin.
+pub const fn qr_fit(modules: usize, w: usize, h: usize) -> (usize, usize) {
+    let short = if w < h { w } else { h };
+    // The span always includes the margin, so it is never zero and the division is safe.
+    let full = short / (modules + 2 * QUIET_ZONE);
+    // With room to spare, keep the margin the spec asks for.
+    if full > 1 {
+        return (QUIET_ZONE, full);
+    }
+    // Otherwise the panel is the constraint, and one pixel per module is the thing worth
+    // fixing: give the margin away a module at a time for a bigger module.
+    let mut quiet = QUIET_ZONE;
+    let mut best = (QUIET_ZONE, full);
+    while quiet > QUIET_ZONE_MIN {
+        quiet -= 1;
+        let scale = short / (modules + 2 * quiet);
+        if scale > best.1 {
+            best = (quiet, scale);
+        }
+    }
+    best
+}
+
+/// Draw a `modules`-square symbol as large as the canvas allows, centred.
+///
+/// `get(x, y)` is true for a **dark** module. The polarity matters: the symbol is drawn
+/// light-background, dark-modules, which on an OLED means the background is the lit
+/// pixels. A scanner reads dark-on-light; inverted symbols are a coin toss, and this is a
+/// receive address.
+///
+/// The quiet zone is part of the light field, not of the panel's dark surround, so it is
+/// drawn rather than assumed. Returns false without drawing anything if even one pixel per
+/// module does not fit -- the caller then says so instead of showing an unreadable square.
+pub fn qr<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    modules: usize,
+    get: impl Fn(usize, usize) -> bool,
+) -> bool {
+    use crate::canvas::{INK, PAPER};
+    canvas.clear();
+    let (w, h) = (canvas.width(), canvas.height());
+    let (quiet, scale) = qr_fit(modules, w, h);
+    if modules == 0 || scale == 0 {
+        return false;
+    }
+    let side = (modules + 2 * quiet) * scale;
+    let (x0, y0) = ((w - side) / 2, (h - side) / 2);
+    canvas.fill_rect(x0, y0, side, side, INK);
+    for my in 0..modules {
+        for mx in 0..modules {
+            if get(mx, my) {
+                canvas.fill_rect(
+                    x0 + (quiet + mx) * scale,
+                    y0 + (quiet + my) * scale,
+                    scale,
+                    scale,
+                    PAPER,
+                );
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +536,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A checkerboard stands in for a symbol: every module differs from its neighbours,
+    /// so a scale or offset mistake shows up as a wrong pixel somewhere.
+    fn checker(x: usize, y: usize) -> bool {
+        (x + y) % 2 == 0
+    }
+
+    #[test]
+    fn a_qr_is_drawn_dark_on_light_with_its_quiet_zone() {
+        // Polarity is the whole point: a scanner wants dark modules on a light field, and
+        // on an OLED the light field is the lit pixels. Inverted, this is a receive address
+        // that some phones refuse to read.
+        let mut c = Mono128x64::new();
+        assert!(qr(&mut c, 25, checker));
+        let (quiet, scale) = qr_fit(25, 128, 64);
+        let side = (25 + 2 * quiet) * scale;
+        let (x0, y0) = ((128 - side) / 2, (64 - side) / 2);
+        // The mono framebuffer has its own `get` returning a bool, so ask the canvas.
+        let at = |x: usize, y: usize| Canvas::get(&c, x, y);
+        // The quiet zone is lit all the way round.
+        assert_eq!(at(x0, y0), INK);
+        assert_eq!(at(x0 + side - 1, y0 + side - 1), INK);
+        // Module (0,0) is dark, its neighbour is not.
+        let m = |mx: usize, my: usize| at(x0 + (quiet + mx) * scale, y0 + (quiet + my) * scale);
+        assert_eq!(m(0, 0), PAPER);
+        assert_eq!(m(1, 0), INK);
+        assert_eq!(m(24, 24), PAPER);
+    }
+
+    #[test]
+    fn a_qr_uses_the_biggest_whole_scale_that_fits() {
+        // Whole pixels per module, or the sampling grid a scanner reconstructs lands
+        // between modules. On the Q1 a 25-module symbol gets 7 pixels each.
+        let mut c = Gray320x240::new();
+        assert!(qr(&mut c, 25, checker));
+        let (quiet, scale) = qr_fit(25, 320, 240);
+        assert_eq!(
+            (quiet, scale),
+            (4, 7),
+            "a panel with room keeps the full margin"
+        );
+        let side = (25 + 2 * quiet) * scale;
+        let (x0, y0) = ((320 - side) / 2, (240 - side) / 2);
+        // A whole module is one colour, edge to edge.
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let (x, y) = (x0 + quiet * scale + dx, y0 + quiet * scale + dy);
+                assert_eq!(c.get(x, y), PAPER, "module pixel {dx},{dy}");
+            }
+        }
+        // And nothing was drawn outside the symbol.
+        assert!(!inked(&c, 0, 0, 320, y0));
+    }
+
+    #[test]
+    fn a_cramped_panel_spends_its_margin_on_bigger_modules() {
+        // A 25-module symbol on 64 rows: the full 4-module margin leaves one pixel per
+        // module, which no phone reads off an OLED. Three modules of margin leaves two.
+        assert_eq!(qr_fit(25, 128, 64), (3, 2));
+        // But the margin is never spent when it buys nothing: 29 modules is one pixel
+        // either way, so the wider margin stays.
+        assert_eq!(qr_fit(29, 128, 64), (4, 1));
+    }
+
+    #[test]
+    fn a_qr_that_cannot_fit_is_refused_rather_than_shrunk() {
+        // Half a pixel per module is not a smaller QR, it is a picture of one.
+        let mut c = Mono128x64::new();
+        assert!(!qr(&mut c, 177, checker));
+        assert!(!inked(&c, 0, 0, 128, 64), "something was drawn anyway");
     }
 
     #[test]

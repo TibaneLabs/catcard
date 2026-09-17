@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyd"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e941e3eac47d919f16b30a09e3c6006283c8e56139e3da5469999387e3a2e488"
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -113,6 +119,7 @@ version = "7.0.0"
 name = "catcard-fw"
 version = "7.0.0"
 dependencies = [
+ "anyd",
  "catcard-board",
  "catcard-callgate",
  "catcard-entropy",

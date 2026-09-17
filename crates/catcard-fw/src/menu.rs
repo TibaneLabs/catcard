@@ -2533,6 +2533,83 @@ impl<'a> Working<'a> {
     }
 }
 
+/// Show an address as a QR code, until a key is pressed.
+///
+/// The point of the screen is a watch-only wallet reading the address off the panel instead
+/// of a human copying 42 characters by eye, so everything here is chosen for whether a
+/// phone camera can actually decode it:
+///
+/// - the payload is [`address::qr_form`], which upper-cases bech32 so it encodes in QR's
+///   alphanumeric mode -- typically a whole version smaller than the lower-case original;
+/// - error correction is M, except where M would only fit at one pixel per module on this
+///   panel and L fits at two. On a 64-row OLED that is the difference between a symbol a
+///   phone reads and a grey square.
+///
+/// Version 8 is the largest symbol either buffer can hold: 49 modules, which is already
+/// more than a 64-row panel can draw at one pixel each, and far more than any address
+/// needs. Anything bigger is refused rather than drawn unreadably small.
+fn address_qr(ui: &mut Ui<'_>, address: &str) {
+    use anyd::codes::qr::{EcLevel, QrEncoder, Version};
+    use catcard_wallet::address;
+
+    const MAX_VERSION: Version = match Version::new(8) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+    const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
+
+    let mut text = [0u8; address::MAX_ADDRESS_LEN];
+    let Some(payload) = address::qr_form(address, &mut text) else {
+        message(ui.panel, "QR", "address not encodable", "");
+        wait_for_any_key(ui);
+        return;
+    };
+
+    // Encode once to see what the panel can do with it, and take the lower error-correction
+    // level only where it actually buys bigger modules. The probes are scoped so the two
+    // buffers are reused rather than held four at a time on the stack.
+    let mut scratch = [0u8; BUF];
+    let mut storage = [0u8; BUF];
+    let encoder = QrEncoder::new();
+    let encode = |level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
+        encoder
+            .encode_text_into(payload.as_bytes(), level, scratch, storage)
+            .ok()
+            .map(|(grid, _)| grid.width())
+    };
+    let pixels = |modules: Option<usize>| {
+        modules.map_or(0, |m| {
+            catcard_ui::widgets::qr_fit(m, display::SCREEN_W, display::SCREEN_H).1
+        })
+    };
+
+    let medium = pixels(encode(EcLevel::M, &mut scratch, &mut storage));
+    let level = if medium > 1 {
+        EcLevel::M
+    } else if pixels(encode(EcLevel::L, &mut scratch, &mut storage)) > medium {
+        EcLevel::L
+    } else {
+        EcLevel::M
+    };
+
+    let Ok((grid, _meta)) =
+        encoder.encode_text_into(payload.as_bytes(), level, &mut scratch, &mut storage)
+    else {
+        message(ui.panel, "QR", "address too long", "");
+        wait_for_any_key(ui);
+        return;
+    };
+
+    let mut drawn = false;
+    display::draw(ui.panel, |c| {
+        drawn = catcard_ui::widgets::qr(c, grid.width(), |x, y| grid.get(x, y));
+    });
+    if !drawn {
+        message(ui.panel, "QR", "too big for this panel", "");
+    }
+    wait_for_any_key(ui);
+}
+
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_callgate::pin::bip39_entropy;
     use catcard_wallet::address;
@@ -2686,7 +2763,15 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         let _ = hint.push_str("up/down address");
         let _ = lines.push(hint);
         let mut hint = Line::new();
-        let _ = hint.push_str("left/right type   x back");
+        let _ = hint.push_str("left/right type");
+        let _ = lines.push(hint);
+        let mut hint = Line::new();
+        let _ = write!(
+            hint,
+            "{} QR   {} back",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
         let _ = lines.push(hint);
 
         info(ui.panel, kind_name(kind), &lines);
@@ -2698,6 +2783,14 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             for k in keys.iter() {
                 match k {
                     Key::Cancel => return,
+                    // The address as a QR: what the owner came here to compare against a
+                    // watch-only wallet, without reading out 42 characters.
+                    Key::Confirm => {
+                        if let Some(n) = addr {
+                            address_qr(ui, core::str::from_utf8(&buf[..n]).unwrap_or(""));
+                        }
+                        break 'wait;
+                    }
                     Key::Digit(8) => {
                         index = index.saturating_add(1);
                         break 'wait;
