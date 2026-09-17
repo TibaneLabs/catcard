@@ -2372,7 +2372,7 @@ fn ellipsize_middle(s: &str, cols: usize, out: &mut Line) {
 /// Walk the receive addresses of the stored wallet.
 ///
 /// BIP-84 native segwit (`m/84'/0'/0'/0/i`) on mainnet -- the modern default -- one
-/// address at a time, `8` forward and `5` back to mirror the pager's arrow keys. The
+/// address at a time, the down arrow forward and the up arrow back, as the pager does. The
 /// point of showing them here is verification: an owner can check that an address the
 /// device displays matches what a watch-only wallet derives from the same account, before
 /// trusting it with funds.
@@ -2567,9 +2567,14 @@ fn address_explorer(
                 let _ = lines.push(l);
             }
         }
-        let _ = lines.push(Line::new());
+        // Name the keys the way the owner sees them. `5`/`8`/`7`/`9` is what the firmware
+        // reads, but the keypad prints arrows on those keys and the Q1 has real arrow keys,
+        // so digits here would send someone hunting for a number that is not the point.
         let mut hint = Line::new();
-        let _ = hint.push_str("8/5 addr  7/9 type  x");
+        let _ = hint.push_str("up/down address");
+        let _ = lines.push(hint);
+        let mut hint = Line::new();
+        let _ = hint.push_str("left/right type   x back");
         let _ = lines.push(hint);
 
         info(ui.panel, kind_name(kind), &lines);
