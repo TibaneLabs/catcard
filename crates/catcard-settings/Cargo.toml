@@ -13,5 +13,6 @@ default = ["std"]
 std = []
 
 [dependencies]
-purecrypto = { workspace = true, features = ["hash"] }
+purecrypto = { workspace = true, features = ["hash", "cipher"] }
+heapless = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }

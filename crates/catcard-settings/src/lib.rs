@@ -22,6 +22,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
+pub mod json;
+pub mod nvstore;
+
 use purecrypto::ct::ConstantTimeEq;
 use purecrypto::hash::HmacSha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
