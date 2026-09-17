@@ -1758,7 +1758,8 @@ fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
                 why = "no card in slot";
                 return Err(());
             }
-            Err(_) => {
+            Err(e) => {
+                crate::catlog!("sd: card would not start: {:?}", e);
                 why = "card would not start";
                 return Err(());
             }
@@ -1873,7 +1874,8 @@ fn browse_sd(
                 why = "no card in slot";
                 return Err(());
             }
-            Err(_) => {
+            Err(e) => {
+                crate::catlog!("sd: card would not start: {:?}", e);
                 why = "card would not start";
                 return Err(());
             }
@@ -4077,7 +4079,8 @@ fn format_sd(ui: &mut Ui<'_>) {
             wait_any_key(ui);
             return;
         }
-        Err(_) => {
+        Err(e) => {
+            crate::catlog!("sd: card would not start: {:?}", e);
             message(ui.panel, "Format SD", "card would not start", "press a key");
             wait_any_key(ui);
             return;
@@ -4777,7 +4780,8 @@ fn usb_drive(ui: &mut Ui<'_>) {
             wait_any_key(ui);
             return;
         }
-        Err(_) => {
+        Err(e) => {
+            crate::catlog!("sd: card would not start: {:?}", e);
             message(ui.panel, "USB Drive", "card would not start", "press a key");
             wait_any_key(ui);
             return;

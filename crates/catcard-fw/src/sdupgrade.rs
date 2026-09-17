@@ -73,7 +73,8 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
                 why = "no card in slot";
                 return Err(());
             }
-            Err(_) => {
+            Err(e) => {
+                crate::catlog!("sd: card would not start: {:?}", e);
                 why = "card would not start";
                 return Err(());
             }
