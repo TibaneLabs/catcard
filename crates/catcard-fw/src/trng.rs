@@ -131,6 +131,15 @@ impl<'a> Trngs<'a> {
                 n
             }
             Kind::Se1Wire => {
+                // A bus that has failed several reads in a row is left alone for the rest of
+                // the session: each failure costs retries during which the screen cannot
+                // move and USB is not served, and it is an extra source, not a needed one.
+                use core::sync::atomic::{AtomicU32, Ordering};
+                static FAILED_IN_A_ROW: AtomicU32 = AtomicU32::new(0);
+                const GIVE_UP_AFTER: u32 = 3;
+                if FAILED_IN_A_ROW.load(Ordering::Relaxed) >= GIVE_UP_AFTER {
+                    return None;
+                }
                 let pin = catcard_board::BOARD.se1_swi?;
                 // Opened and closed around every read, so the bootloader's bus is only ever
                 // borrowed for one exchange and is back as it left it before anything else
@@ -143,11 +152,14 @@ impl<'a> Trngs<'a> {
                 };
                 // The first few failures go to the log with their reason: this is a bus
                 // the firmware drives by hand, and "no bytes" alone says nothing about why.
-                if let Err(e) = got {
-                    use core::sync::atomic::{AtomicU32, Ordering};
-                    static LOGGED: AtomicU32 = AtomicU32::new(0);
-                    if LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+                match got {
+                    Ok(_) => FAILED_IN_A_ROW.store(0, Ordering::Relaxed),
+                    Err(e) => {
+                        let n = FAILED_IN_A_ROW.fetch_add(1, Ordering::Relaxed) + 1;
                         crate::catlog!("trng: SE1 wire read failed: {:?}", e);
+                        if n == GIVE_UP_AFTER {
+                            crate::catlog!("trng: SE1 wire not answering; skipped from now on");
+                        }
                     }
                 }
                 let mut bytes = got.ok()?;

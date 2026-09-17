@@ -104,8 +104,10 @@ pub enum Error {
     /// The element answered with a status code instead of data: `0x11` is "just woke,
     /// resend", `0xFF` a CRC error on its side, `0x0F` an execution error.
     Status(u8),
-    /// Nothing that parses as a frame came back: no reply, or a corrupted one.
-    Garbled,
+    /// Nothing that parses as a frame came back: no reply, or a corrupted one. Carries
+    /// what did come back -- how many UART bytes, and the first decoded bytes -- because
+    /// "garbled" alone cannot tell a silent element from a misaligned one.
+    Garbled { uart: u16, head: [u8; 4] },
     /// The peripheral did not become ready in time.
     Timeout,
     /// UART4's clock source is one this driver cannot compute a baud rate for.
@@ -135,7 +137,10 @@ pub fn parse_random(resp: &[u8]) -> Result<[u8; 32], Error> {
             _ => {}
         }
     }
-    Err(status.map_or(Error::Garbled, Error::Status))
+    let mut head = [0u8; 4];
+    let n = resp.len().min(4);
+    head[..n].copy_from_slice(&resp[..n]);
+    Err(status.map_or(Error::Garbled { uart: 0, head }, Error::Status))
 }
 
 // --- the hardware: target only ----------------------------------------------------------
@@ -182,17 +187,24 @@ const AF_UART4: u8 = 8;
 
 /// 230400 bps. Source: se1-driver-spec.md §1 [C]
 const BAUD: u32 = 230_400;
+/// Data rate for the wake byte only: slow enough that a `0x00` holds the line low past
+/// the element's minimum wake time. See [`Se1Swi::wake`].
+const WAKE_BAUD: u32 = 57_600;
 /// Receive timeout, in bit periods. Source: se1-driver-spec.md §1 [C]
 const RTOR_BITS: u32 = 24;
 
 /// Polls for a UART flag before calling the peripheral dead.
 const FLAG_TRIES: u32 = 200_000;
-/// Attempts at a whole wake-command-read exchange. Source: se1-driver-spec.md §5 "up to
-/// ~7" [C]
-const TRIES: usize = 7;
+/// Attempts at a whole wake-command-read exchange. The stock driver allows up to ~7
+/// (se1-driver-spec.md §5 [C]); this reads an *extra* source for mixing, and a caller's
+/// screen is frozen while it retries, so a bus that is not answering gives up sooner.
+const TRIES: usize = 3;
 /// Times to ask for the response while `Random` executes (~23 ms nominally), a few ms
 /// apart. Polled rather than timed: se1-driver-spec.md §6 [C]
-const POLLS: usize = 12;
+const POLLS: usize = 6;
+/// How long one ask listens for a reply. A whole `Random` response is 280 UART bytes, about
+/// 12 ms at 230400 bps.
+const LISTEN_MS: u32 = 20;
 
 /// UART4 and SE1's pin, borrowed from the bootloader and handed back on drop.
 pub struct Se1Swi {
@@ -262,7 +274,10 @@ impl Se1Swi {
 
     /// 32 bytes from SE1's TRNG.
     pub fn random(&mut self) -> Result<[u8; 32], Error> {
-        let mut last = Error::Garbled;
+        let mut last = Error::Garbled {
+            uart: 0,
+            head: [0; 4],
+        };
         for _ in 0..TRIES {
             match self.exchange() {
                 Ok(bytes) => {
@@ -283,7 +298,10 @@ impl Se1Swi {
         for b in random_command() {
             self.send_token(b)?;
         }
-        let mut last = Error::Garbled;
+        let mut last = Error::Garbled {
+            uart: 0,
+            head: [0; 4],
+        };
         for poll in 0..POLLS {
             // The first ask waits most of `Random`'s nominal execution time; later asks are
             // a few milliseconds apart.
@@ -298,6 +316,12 @@ impl Se1Swi {
             match parse_random(&bytes[..n]) {
                 Ok(r) => return Ok(r),
                 // Still executing, or just woken: ask again.
+                Err(Error::Garbled { head, .. }) => {
+                    last = Error::Garbled {
+                        uart: got as u16,
+                        head,
+                    }
+                }
                 Err(e) => last = e,
             }
         }
@@ -305,20 +329,51 @@ impl Se1Swi {
     }
 
     /// Hold the line low long enough to wake the element, then let it settle.
-    /// Source: se1-driver-spec.md §3 "Wake" [C]
+    ///
+    /// The wake is a raw `0x00` byte (se1-driver-spec.md §3 [C]), but at 230400 bps that
+    /// is nine bit periods, about 39 µs low -- under the ATECC608's 60 µs minimum wake low
+    /// time (tWLO, ATECC608 datasheet). So the byte goes out at 57600 bps instead, about
+    /// 156 µs low. A low that long can only mean "wake" to the element, so the margin costs
+    /// nothing. The data rate is restored before anything else is sent.
     fn wake(&mut self) -> Result<(), Error> {
-        self.send_raw(0x00)?;
+        // SAFETY: UART4 is ours for the life of `self`; BRR is written with UE clear.
+        let fck = unsafe { crate::clock::pclk1_hz() };
+        unsafe {
+            reg::write(CR1, 0);
+            reg::write(BRR, (fck + WAKE_BAUD / 2) / WAKE_BAUD);
+            reg::write(CR1, CR1_UE | CR1_TE);
+        }
+        let sent = self.send_raw(0x00);
+        // SAFETY: as above.
+        unsafe {
+            reg::write(CR1, 0);
+            reg::write(BRR, (fck + BAUD / 2) / BAUD);
+            reg::write(CR1, CR1_UE | CR1_TE | CR1_RE);
+        }
+        sent?;
         // SAFETY: reads RCC only.
         unsafe { dwt::delay_ms(3) };
         self.flush_rx();
         Ok(())
     }
 
+    /// Send one encoded byte with the receiver switched off.
+    ///
+    /// In half duplex the receiver hears its own transmitter. An echo byte left unread in
+    /// `RDR` blocks every byte after it until it is read -- so the element's reply, which
+    /// starts right after our token, would lose its leading bits and come back misaligned.
+    /// With `RE` clear during transmission there is no echo, and the receiver is re-enabled
+    /// the moment the last bit has left. Source: RM0351 §38.5.13, §38.8.1 (`RE`) [C]
     fn send_token(&mut self, byte: u8) -> Result<(), Error> {
-        for u in encode(byte) {
-            self.send_raw(u)?;
+        // SAFETY: UART4 is ours for the life of `self`; RE may change while UE is set.
+        unsafe { reg::clear_bits(CR1, CR1_RE) };
+        let sent = encode(byte).into_iter().try_for_each(|u| self.send_raw(u));
+        // SAFETY: as above.
+        unsafe {
+            reg::write(ICR, ICR_ORECF | ICR_FECF | ICR_RTOCF);
+            reg::set_bits(CR1, CR1_RE);
         }
-        Ok(())
+        sent
     }
 
     fn send_raw(&mut self, byte: u8) -> Result<(), Error> {
@@ -368,11 +423,11 @@ impl Se1Swi {
             if isr & ISR_RTOF != 0 {
                 // SAFETY: as above.
                 unsafe { reg::write(ICR, ICR_RTOCF | ICR_ORECF | ICR_FECF) };
-                if n > 16 {
+                if n >= 8 {
                     break;
                 }
             }
-            if n == out.len() || dwt::cycles().wrapping_sub(start) > 40 * per_ms {
+            if n == out.len() || dwt::cycles().wrapping_sub(start) > LISTEN_MS * per_ms {
                 break;
             }
         }
@@ -473,7 +528,7 @@ mod tests {
             r[i] ^= 0x10;
             assert!(parse_random(&r).is_err(), "flip at {i} was accepted");
         }
-        assert_eq!(parse_random(&[]), Err(Error::Garbled));
+        assert!(matches!(parse_random(&[]), Err(Error::Garbled { .. })));
     }
 
     #[test]
