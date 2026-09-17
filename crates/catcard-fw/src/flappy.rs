@@ -1,8 +1,8 @@
-//! Flappy, on the Q1: the panel scrolls, the firmware only draws what changed.
+//! Flappy Cat, on the Q1: the panel scrolls, the firmware only draws what changed.
 //!
 //! The game itself is [`catcard_ui::flappy`]. This is the part that talks to the panel: the
 //! whole panel scrolls, the scene is painted once, and from then on each frame is the column
-//! coming in on the right, the bird's few hundred pixels, the score a column over from where
+//! coming in on the right, the cat's few hundred pixels, the score a column over from where
 //! it was, and one scroll command, all sent after a tear pulse. A full frame is 153 KB; a
 //! game frame is about 2.
 //!
@@ -21,7 +21,7 @@ use crate::ui::Ui;
 /// The best score since power-up. Foreground only.
 static mut BEST: u32 = 0;
 
-/// Frames after a game ends before a key counts, so the flap that crashed the bird does not
+/// Frames after a game ends before a key counts, so the flap that crashed the cat does not
 /// also skip the game-over screen.
 const GAME_OVER_HOLD: u32 = 40;
 
@@ -69,8 +69,8 @@ fn poll_key(ui: &mut Ui<'_>) -> Option<Key> {
 }
 
 /// Play until cancel: a game, its game-over screen, and another game on any other key.
-pub(crate) fn flappy(ui: &mut Ui<'_>) {
-    crate::menu::message(ui.panel, "Flappy", "any key flaps", "cancel quits");
+pub(crate) fn flappy_cat(ui: &mut Ui<'_>) {
+    crate::menu::message(ui.panel, "Flappy Cat", "any key flaps", "cancel quits");
     crate::menu::wait_for_any_key(ui);
 
     let _ = ui.panel.set_scroll_area(0, 0);
@@ -111,7 +111,7 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
             None => {}
         }
 
-        let (old_scroll, old_x, old_y) = (g.scroll, g.bird_x(), g.bird_y());
+        let (old_scroll, old_x, old_y) = (g.scroll, g.cat_x(), g.cat_y());
         let old_score = g.score();
         if started {
             g.step();
@@ -127,10 +127,10 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
             let x = old_scroll + fl::PLAY_W as u32;
             paint_world(ui.panel, x, incoming, 0, fl::HEIGHT, |x, y| g.shown(x, y));
         }
-        // The bird: where it was and where it is, as one patch.
-        let top = old_y.min(g.bird_y());
-        let bottom = (old_y.max(g.bird_y()) + fl::BIRD_H).min(fl::HEIGHT);
-        let width = (g.bird_x() - old_x) as usize + fl::BIRD_W;
+        // The cat: where it was and where it is, as one patch.
+        let top = old_y.min(g.cat_y());
+        let bottom = (old_y.max(g.cat_y()) + fl::CAT_H).min(fl::HEIGHT);
+        let width = (g.cat_x() - old_x) as usize + fl::CAT_W;
         paint_world(ui.panel, old_x, width, top, bottom - top, |x, y| {
             g.shown(x, y)
         });

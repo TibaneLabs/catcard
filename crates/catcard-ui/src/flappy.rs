@@ -1,10 +1,10 @@
-//! Flappy: the game, with no hardware in it.
+//! Flappy Cat: the game, with no hardware in it.
 //!
 //! Built for the Q1's panel scrolling itself (see
 //! [`St7789::set_scroll_area`](crate::st7789::St7789::set_scroll_area)): the world is drawn
 //! into the controller's frame memory **in world coordinates**, and moving the scroll start
 //! is what moves it across the glass. So nothing here thinks in screen positions except the
-//! bird, which stays at one place on the glass while the world slides under it.
+//! cat, which stays at one place on the glass while the world slides under it.
 //!
 //! The whole panel scrolls as one ring of [`PLAY_W`] lines. World column `x` lives in
 //! frame-memory column [`memory_column`]`(x)` forever, and with the view at `scroll` the
@@ -12,19 +12,24 @@
 //!
 //! The score is the one thing that stays put on the glass while the world moves under it,
 //! so it is redrawn every frame, a column over from where it was: [`Game::shown`] layers
-//! it over the bird over the world, and any patch painted through that comes out right
-//! wherever the score, the bird and the pipes overlap.
+//! it over the cat over the world, and any patch painted through that comes out right
+//! wherever the score, the cat and the pipes overlap.
 //!
-//! The art is the game's own, at its native 144x256 scale ([`crate::art::flappy`]), and so
-//! are the proportions: a 200-row playfield over the ground, 26-wide pipes 72 apart with a
-//! 50-row gap. The physics is the common 30 fps rendition's, halved for the scale and
-//! re-timed for the panel's ~61 Hz: gravity 1/8 px per frame², a flap of -2.25 px per
-//! frame, a fall capped at 2.5, and the world moving a pixel a frame.
+//! The scenery is Flappy Bird's own art at its native 144x256 scale
+//! ([`crate::art::flappy`]), and so are the proportions: a 200-row playfield over the
+//! ground and 26-wide pipes. The flying cat is drawn at 31x21 where the bird was 17x12, so
+//! the bird's 50-row gap grows by the 9 rows the cat is taller and its 72-column pipe
+//! spacing by the 14 columns it is wider: the room to spare in a gap, and the time between
+//! two pipes to change height, stay the original's.
+//!
+//! The physics is the common 30 fps rendition's, halved for the scale and re-timed for the
+//! panel's ~61 Hz: gravity 1/8 px per frame², a flap of -2.25 px per frame, a fall capped at
+//! 2.5, and the world moving a pixel a frame.
 //!
 //! Everything is integer arithmetic, and the pipes come from a seed, so a world column can
 //! be redrawn at any time and come out the same.
 
-use crate::art::flappy::{BACKGROUND, BASE, BIRD_DOWN, BIRD_MID, BIRD_UP, DIGITS, PIPE, Sprite};
+use crate::art::flappy::{BACKGROUND, BASE, CAT_DOWN, CAT_MID, CAT_UP, DIGITS, PIPE, Sprite};
 
 /// The scrolling area: the whole width of the panel.
 pub const PLAY_W: usize = 320;
@@ -36,14 +41,14 @@ pub const GROUND_Y: usize = 200;
 /// World pixels the view moves per frame.
 pub const SPEED: u32 = 1;
 
-/// Where the bird sits on the glass, from the left edge of the scrolling area.
-pub const BIRD_X: u32 = 50;
-pub const BIRD_W: usize = BIRD_MID.width as usize;
-pub const BIRD_H: usize = BIRD_MID.height as usize;
+/// Where the cat sits on the glass, from the left edge of the scrolling area.
+pub const CAT_X: u32 = 50;
+pub const CAT_W: usize = CAT_MID.width as usize;
+pub const CAT_H: usize = CAT_MID.height as usize;
 
 pub const PIPE_W: u32 = PIPE.width as u32;
-pub const PIPE_SPACING: u32 = 72;
-pub const GAP: i32 = 50;
+pub const PIPE_SPACING: u32 = 72 + (CAT_W as u32 - 17);
+pub const GAP: i32 = 50 + (CAT_H as i32 - 12);
 /// The gap's top edge: from 40 to 110, a fifth of the playfield down and 70 rows of play.
 const GAP_TOP_MIN: i32 = 40;
 const GAP_TOP_SPAN: u32 = 71;
@@ -119,7 +124,7 @@ impl World {
         (into < PIPE_W).then_some((rel / PIPE_SPACING, into))
     }
 
-    /// The colour of world pixel `(x, y)`, the bird not included.
+    /// The colour of world pixel `(x, y)`, the cat not included.
     ///
     /// The pipe sprite has its lip at the top, so the lower pipe draws it as it is from the
     /// gap down, and the upper pipe draws it flipped from the gap up. A pipe longer than the
@@ -152,7 +157,7 @@ pub struct Game {
     pub world: World,
     /// World column at the left of the scrolling area.
     pub scroll: u32,
-    /// The bird's top edge, in sixteenths of a pixel.
+    /// The cat's top edge, in sixteenths of a pixel.
     y: i32,
     vy: i32,
     frame: u32,
@@ -164,21 +169,21 @@ impl Game {
         Self {
             world: World::new(seed),
             scroll: 0,
-            y: ((GROUND_Y - BIRD_H) as i32 / 2) * FP,
+            y: ((GROUND_Y - CAT_H) as i32 / 2) * FP,
             vy: 0,
             frame: 0,
             over: false,
         }
     }
 
-    /// The bird's top edge, in pixels.
-    pub fn bird_y(&self) -> usize {
+    /// The cat's top edge, in pixels.
+    pub fn cat_y(&self) -> usize {
         (self.y / FP).max(0) as usize
     }
 
-    /// The world column under the bird's left edge.
-    pub fn bird_x(&self) -> u32 {
-        self.scroll + BIRD_X
+    /// The world column under the cat's left edge.
+    pub fn cat_x(&self) -> u32 {
+        self.scroll + CAT_X
     }
 
     pub fn flap(&mut self) {
@@ -187,23 +192,23 @@ impl Game {
         }
     }
 
-    /// Before the first flap: the bird hovers, bobbing, and the world does not move.
+    /// Before the first flap: the cat hovers, bobbing, and the world does not move.
     pub fn idle(&mut self) {
         self.frame += 1;
         let phase = (self.frame / 4) % 16;
         let bob = if phase < 8 { phase } else { 16 - phase } as i32;
-        self.y = ((GROUND_Y - BIRD_H) as i32 / 2 - 4 + bob) * FP;
+        self.y = ((GROUND_Y - CAT_H) as i32 / 2 - 4 + bob) * FP;
     }
 
-    /// Pipes the bird is past.
+    /// Pipes the cat is past.
     pub fn score(&self) -> u32 {
-        match self.bird_x().checked_sub(FIRST_PIPE + PIPE_W) {
+        match self.cat_x().checked_sub(FIRST_PIPE + PIPE_W) {
             Some(d) => d / PIPE_SPACING + 1,
             None => 0,
         }
     }
 
-    /// One frame: fall, move on, and see what the bird hit.
+    /// One frame: fall, move on, and see what the cat hit.
     pub fn step(&mut self) {
         if self.over {
             return;
@@ -220,19 +225,19 @@ impl Game {
         self.over = self.hit();
     }
 
-    /// Whether the bird's opaque pixels touch the ground or a pipe.
+    /// Whether the cat's opaque pixels touch the ground or a pipe.
     fn hit(&self) -> bool {
-        let (bx, by) = (self.bird_x(), self.bird_y());
-        if by + BIRD_H > GROUND_Y {
+        let (bx, by) = (self.cat_x(), self.cat_y());
+        if by + CAT_H > GROUND_Y {
             return true;
         }
-        let sprite = self.bird();
-        (0..BIRD_W).any(|dx| {
+        let sprite = self.cat();
+        (0..CAT_W).any(|dx| {
             let Some((i, _)) = self.world.pipe_at(bx + dx as u32) else {
                 return false;
             };
             let top = self.world.gap_top(i);
-            (0..BIRD_H).any(|dy| {
+            (0..CAT_H).any(|dy| {
                 let y = (by + dy) as i32;
                 (y < top || y >= top + GAP) && sprite.at(dx, dy).is_some()
             })
@@ -240,20 +245,20 @@ impl Game {
     }
 
     /// The wing position this frame. Held still once the game is over.
-    pub fn bird(&self) -> &'static Sprite {
+    pub fn cat(&self) -> &'static Sprite {
         match (self.frame / WING_FRAMES) % 4 {
-            0 => &BIRD_UP,
-            2 => &BIRD_DOWN,
-            _ => &BIRD_MID,
+            0 => &CAT_UP,
+            2 => &CAT_DOWN,
+            _ => &CAT_MID,
         }
     }
 
-    /// What world pixel `(x, y)` looks like with the bird drawn in.
+    /// What world pixel `(x, y)` looks like with the cat drawn in.
     pub fn pixel(&self, x: u32, y: usize) -> u16 {
-        let (bx, by) = (self.bird_x(), self.bird_y());
+        let (bx, by) = (self.cat_x(), self.cat_y());
         if x >= bx
             && y >= by
-            && let Some(c) = self.bird().at((x - bx) as usize, y - by)
+            && let Some(c) = self.cat().at((x - bx) as usize, y - by)
         {
             return c;
         }
@@ -311,7 +316,7 @@ pub fn score_colour(score: u32, sx: usize, y: usize) -> Option<u16> {
 }
 
 impl Game {
-    /// World pixel `(x, y)` as the glass shows it: the score over the bird over the world.
+    /// World pixel `(x, y)` as the glass shows it: the score over the cat over the world.
     ///
     /// The score only covers glass columns, so a world column behind the view -- one the
     /// scroll has not reached, or has left -- never carries it.
@@ -336,9 +341,10 @@ mod tests {
         assert_eq!((BACKGROUND.width, BACKGROUND.height), (144, 200));
         assert_eq!(BASE.height as usize, HEIGHT - GROUND_Y);
         assert_eq!((PIPE.width, PIPE.height), (26, 160));
-        assert_eq!((BIRD_W, BIRD_H), (17, 12));
-        for b in [&BIRD_UP, &BIRD_DOWN] {
-            assert_eq!((b.width as usize, b.height as usize), (BIRD_W, BIRD_H));
+        assert_eq!((CAT_W, CAT_H), (31, 21));
+        assert_eq!((GAP, PIPE_SPACING), (59, 86));
+        for b in [&CAT_UP, &CAT_DOWN] {
+            assert_eq!((b.width as usize, b.height as usize), (CAT_W, CAT_H));
         }
         assert!(GAME_OVER.width as usize <= PLAY_W);
         assert!((GAP_TOP_MIN + GAP_TOP_SPAN as i32 - 1 + GAP) < GROUND_Y as i32);
@@ -382,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bird_left_alone_falls_to_the_ground_and_the_game_ends() {
+    fn a_cat_left_alone_falls_to_the_ground_and_the_game_ends() {
         let mut g = Game::new(7);
         let mut frames = 0;
         while !g.over {
@@ -390,7 +396,7 @@ mod tests {
             frames += 1;
             assert!(frames < 300, "never landed");
         }
-        assert!(g.bird_y() + BIRD_H > GROUND_Y);
+        assert!(g.cat_y() + CAT_H > GROUND_Y);
         assert_eq!(g.score(), 0);
     }
 
@@ -402,8 +408,8 @@ mod tests {
         for seed in [1, 42, 0xC0FFEE] {
             let mut g = Game::new(seed);
             for _ in 0..20_000 {
-                let bx = g.bird_x();
-                // The first pipe whose right edge is not yet behind the bird, and the one
+                let bx = g.cat_x();
+                // The first pipe whose right edge is not yet behind the cat, and the one
                 // after it.
                 let next = match bx.checked_sub(FIRST_PIPE + PIPE_W) {
                     None => 0,
@@ -412,27 +418,32 @@ mod tests {
                 let this_top = g.world.gap_top(next);
                 let after = g.world.gap_top(next + 1) + GAP / 2;
                 // Flapping when below the target keeps the centre between 20 rows above it
-                // and a few below, so the target is kept where that whole swing clears this
-                // gap -- and within that, as close to the next gap as it can get.
-                let target = after.clamp(this_top + 27, this_top + 40);
-                let centre = g.bird_y() as i32 + BIRD_H as i32 / 2;
+                // and a few below, so the target is kept where that whole swing, with half
+                // the cat either side, clears this gap -- and within that, as close to the
+                // next gap as it can get.
+                let target = after.clamp(
+                    this_top + 20 + CAT_H as i32 / 2 + 1,
+                    this_top + GAP - CAT_H as i32 / 2 - 4,
+                );
+                let centre = g.cat_y() as i32 + CAT_H as i32 / 2;
                 if centre > target && g.vy >= 0 {
                     g.flap();
                 }
                 g.step();
                 assert!(!g.over, "seed {seed}: hit something at score {}", g.score());
             }
-            assert!(g.score() >= 250, "score {}", g.score());
+            // Every pipe the world scrolled past, less the open sky before the first.
+            assert!(g.score() >= 20_000 / PIPE_SPACING - 10, "score {}", g.score());
         }
     }
 
     #[test]
-    fn the_bird_is_drawn_over_the_world_and_nowhere_else() {
+    fn the_cat_is_drawn_over_the_world_and_nowhere_else() {
         let g = Game::new(3);
-        let (bx, by) = (g.bird_x(), g.bird_y());
-        let sprite = g.bird();
-        let (dx, dy) = (0..BIRD_W)
-            .flat_map(|x| (0..BIRD_H).map(move |y| (x, y)))
+        let (bx, by) = (g.cat_x(), g.cat_y());
+        let sprite = g.cat();
+        let (dx, dy) = (0..CAT_W)
+            .flat_map(|x| (0..CAT_H).map(move |y| (x, y)))
             .find(|&(x, y)| sprite.at(x, y).is_some())
             .unwrap();
         assert_eq!(g.pixel(bx + dx as u32, by + dy), sprite.at(dx, dy).unwrap());

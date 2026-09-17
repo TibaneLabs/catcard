@@ -69,10 +69,12 @@ third-party; listed for provenance.
 
 ## Flappy Bird sprites
 
-`crates/catcard-ui/src/art/flappy.rs` is the background, ground, pipe, yellow bird, game
-over and digit sprites from <https://github.com/samuelcust/flappy-bird-assets> (commit
-`48937b0dfe094da66e38fa3bcffcbf5ad1cd5454`), reduced to their native half size and an
-RGB565 palette by `tools/artgen/flappy2rs.py`. Used by the Q1's Flappy game.
+`crates/catcard-ui/src/art/flappy-bird-assets/` holds the sprites Flappy Cat uses from
+<https://github.com/samuelcust/flappy-bird-assets> (commit
+`48937b0dfe094da66e38fa3bcffcbf5ad1cd5454`, recorded in its `UPSTREAM`): the background,
+ground, pipe, game-over banner and digits, with the licence below as `LICENSE`.
+`tools/artgen/flappy2rs.py` bakes them into `crates/catcard-ui/src/art/flappy.rs`, halved
+to their native size and an RGB565 palette.
 
 ```
 MIT License
@@ -97,6 +99,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Flappy Cat's flying cat
+
+`crates/catcard-ui/src/art/flappy-cat/flying-orange-cat-{up,mid,down}-34x24.png`, baked
+into the same table at full size. Supplied by the maintainer for this game; listed for
+provenance.
 
 ---
 
