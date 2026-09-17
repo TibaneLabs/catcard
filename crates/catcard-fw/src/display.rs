@@ -312,13 +312,15 @@ pub const SMOOTH_SCROLL: bool = true;
 ///
 /// The mono panel's frame is a ~1 KB blit, so the pause is what sets the pace: six frames
 /// ~6 ms apart. On the Q1 the frame itself takes ~38 ms, which is already a pace, so the
-/// glide there is shorter and does not wait: three in-between frames, about 115 ms a row.
+/// glide there is shorter and does not wait: two in-between frames, about 76 ms a row.
+/// Smaller steps would read smoother but cost a whole frame each -- 2 px at a time is
+/// eleven frames for a 22 px row, over 400 ms.
 #[cfg(not(feature = "board-q1"))]
 pub const GLIDE_FRAMES: usize = 6;
 #[cfg(not(feature = "board-q1"))]
 pub const GLIDE_PAUSE_CYCLES: u32 = 700_000;
 #[cfg(feature = "board-q1")]
-pub const GLIDE_FRAMES: usize = 4;
+pub const GLIDE_FRAMES: usize = 3;
 #[cfg(feature = "board-q1")]
 pub const GLIDE_PAUSE_CYCLES: u32 = 0;
 
