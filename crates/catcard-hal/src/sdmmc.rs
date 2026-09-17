@@ -153,6 +153,69 @@ const CMD_TRIES: u32 = 200_000;
 /// Polls waiting for data. Larger: a whole block has to arrive.
 const DATA_TRIES: u32 = 2_000_000;
 
+/// Where the last data-path or command failure happened, what `STA` read at that moment
+/// (before `ICR` cleared it) and what `DCOUNT` still expected -- or, for a command, which
+/// command. The error types above say only "timeout" or "data error"; this is what tells an
+/// underrun from a CRC rejection from a card that never answered.
+///
+/// Statics, not fields: the transport is buried inside a mounted volume by the time a write
+/// fails, and the firmware reads this afterwards to log it. Single-threaded use only.
+pub mod last_failure {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static PHASE: AtomicU32 = AtomicU32::new(0);
+    static STA: AtomicU32 = AtomicU32::new(0);
+    static DETAIL: AtomicU32 = AtomicU32::new(0);
+
+    /// Command timed out (`CTIMEOUT`); detail is the command index.
+    pub const CMD_TIMEOUT: u32 = 1;
+    /// No response flag within the poll budget; detail is the command index.
+    pub const CMD_NO_ANSWER: u32 = 2;
+    /// Error flag while receiving; detail is `DCOUNT`.
+    pub const READ_ERROR: u32 = 3;
+    /// Receive never completed; detail is `DCOUNT`.
+    pub const READ_STALLED: u32 = 4;
+    /// Error flag while filling the transmit FIFO; detail is `DCOUNT`.
+    pub const WRITE_FILL_ERROR: u32 = 5;
+    /// The FIFO never had room within the poll budget; detail is `DCOUNT`.
+    pub const WRITE_FILL_STALLED: u32 = 6;
+    /// Error flag while waiting for the card to finish the block; detail is `DCOUNT`.
+    pub const WRITE_END_ERROR: u32 = 7;
+    /// `DATAEND` never came; detail is `DCOUNT`.
+    pub const WRITE_END_STALLED: u32 = 8;
+
+    pub(super) fn record(phase: u32, sta: u32, detail: u32) {
+        PHASE.store(phase, Ordering::Relaxed);
+        STA.store(sta, Ordering::Relaxed);
+        DETAIL.store(detail, Ordering::Relaxed);
+    }
+
+    /// `(phase, sta, detail)` of the most recent failure, phase 0 if none since power-up.
+    pub fn get() -> (u32, u32, u32) {
+        (
+            PHASE.load(Ordering::Relaxed),
+            STA.load(Ordering::Relaxed),
+            DETAIL.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A short name for a phase.
+    pub fn name(phase: u32) -> &'static str {
+        match phase {
+            0 => "none",
+            CMD_TIMEOUT => "cmd timeout",
+            CMD_NO_ANSWER => "cmd no answer",
+            READ_ERROR => "read error",
+            READ_STALLED => "read stalled",
+            WRITE_FILL_ERROR => "write fill error",
+            WRITE_FILL_STALLED => "write fill stalled",
+            WRITE_END_ERROR => "write end error",
+            WRITE_END_STALLED => "write end stalled",
+            _ => "?",
+        }
+    }
+}
+
 /// The SDMMC controller, as `catcard-sd`'s [`Transport`].
 pub struct Sdmmc {
     base: u32,
@@ -280,6 +343,7 @@ impl Transport for Sdmmc {
                     break;
                 }
                 if sta & STA_CTIMEOUT != 0 {
+                    last_failure::record(last_failure::CMD_TIMEOUT, sta, u32::from(cmd));
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::Timeout { cmd });
                 }
@@ -290,6 +354,7 @@ impl Transport for Sdmmc {
                 }
                 tries += 1;
                 if tries >= CMD_TRIES {
+                    last_failure::record(last_failure::CMD_NO_ANSWER, sta, u32::from(cmd));
                     return Err(Error::Timeout { cmd });
                 }
             }
@@ -314,6 +379,7 @@ impl Transport for Sdmmc {
             loop {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_RXOVERR) != 0 {
+                    last_failure::record(last_failure::READ_ERROR, sta, reg::read(b + DCOUNT));
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
@@ -331,11 +397,13 @@ impl Transport for Sdmmc {
                     break;
                 }
                 if sta & STA_DATAEND != 0 && at == 0 {
+                    last_failure::record(last_failure::READ_ERROR, sta, reg::read(b + DCOUNT));
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
+                    last_failure::record(last_failure::READ_STALLED, sta, reg::read(b + DCOUNT));
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
@@ -359,6 +427,11 @@ impl Transport for Sdmmc {
             while at < BLOCK_LEN {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    last_failure::record(
+                        last_failure::WRITE_FILL_ERROR,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
@@ -373,6 +446,11 @@ impl Transport for Sdmmc {
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
+                    last_failure::record(
+                        last_failure::WRITE_FILL_STALLED,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
@@ -383,6 +461,7 @@ impl Transport for Sdmmc {
             loop {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    last_failure::record(last_failure::WRITE_END_ERROR, sta, reg::read(b + DCOUNT));
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }
@@ -391,6 +470,11 @@ impl Transport for Sdmmc {
                 }
                 tries += 1;
                 if tries >= DATA_TRIES {
+                    last_failure::record(
+                        last_failure::WRITE_END_STALLED,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
                     reg::write(b + ICR, self.bits.icr_all);
                     return Err(Error::DataError { block: u32::MAX });
                 }

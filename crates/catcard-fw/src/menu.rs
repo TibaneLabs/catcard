@@ -2906,7 +2906,14 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
             message(ui.panel, "Exported", &path[1..], "any key to go back");
         }
         Err(why) => {
-            crate::catlog!("export: failed: {}", why);
+            let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
+            crate::catlog!(
+                "export: failed: {}; sd last {} sta {:08x} detail {}",
+                why,
+                catcard_hal::sdmmc::last_failure::name(phase),
+                sta,
+                detail
+            );
             message(ui.panel, "Export failed", why, "any key to go back");
         }
     }
@@ -5054,6 +5061,40 @@ fn sd_screen(panel: &mut display::Panel) {
                 }
                 Err(e) => {
                     let _ = write!(l, "read: {}", describe_sd(&e));
+                }
+            }
+            let _ = lines.push(l);
+
+            // The write path, without changing the card: block 1 read, then written back
+            // as it was. On a partitioned card it sits in the gap before the first
+            // partition, which nothing uses; either way its contents do not change.
+            let mut l = Line::new();
+            match catcard_sd::read_block(&mut dev, &card, 1, &mut block)
+                .and_then(|()| catcard_sd::write_block(&mut dev, &card, 1, &block))
+            {
+                Ok(()) => {
+                    let _ = write!(l, "block 1 rewrite ok");
+                }
+                Err(e) => {
+                    let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
+                    let _ = write!(l, "rewrite: {}", describe_sd(&e));
+                    crate::catlog!(
+                        "sd: block 1 rewrite failed: {} sta {:08x} detail {}",
+                        catcard_hal::sdmmc::last_failure::name(phase),
+                        sta,
+                        detail
+                    );
+                    let _ = lines.push(l);
+                    l = Line::new();
+                    let _ = write!(
+                        l,
+                        "{} {:x}",
+                        catcard_hal::sdmmc::last_failure::name(phase),
+                        detail
+                    );
+                    let _ = lines.push(l);
+                    l = Line::new();
+                    let _ = write!(l, "at STA {:08x}", sta);
                 }
             }
             let _ = lines.push(l);
