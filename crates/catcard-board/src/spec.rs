@@ -228,6 +228,21 @@ pub struct BoardSpec {
     /// pins" [C]
     pub pwr_btn: MaybePin,
 
+    /// How much of SRAM1, from its base, the bootloader will accept a callgate buffer in.
+    ///
+    /// Not the same as [`MemoryMap::sram1_len`], and finding that out cost a day: the mk3
+    /// bootloader takes a `buf_io` only in the **first 96 KB** of SRAM1 and answers `1` --
+    /// a generic error, not a range error -- for anything above it, writing nothing into
+    /// the buffer. Gate 18 setup then "succeeded" with an all-zero struct, so the firmware
+    /// read `state_flags = 0`, concluded the device had a PIN, and offered a login that
+    /// could never work: every later call failed its HMAC check against a signature that
+    /// was never written.
+    ///
+    /// Measured on hardware (mk3 bootloader 2.0.0, `git=mark3@d841cc5`) by calling gate 0
+    /// `get_bl_version` at descending addresses: it fills a buffer ending at exactly
+    /// `0x2001_8000` and refuses one that starts there.
+    pub gate_buf_len: u32,
+
     /// Whether the keypad's falling-edge EXTI path is armed from the boot path.
     ///
     /// The columns carry a hard interrupt so a keypress can be timestamped at the
@@ -372,6 +387,9 @@ pub const MK3: BoardSpec = BoardSpec {
     // not work right -- a unit that could no longer be re-flashed. Whatever the mk3 columns
     // do here has never been watched, so the keypad stays polled until it is: Debug ->
     // Keypad arms it, and a power cycle undoes that.
+    // 96 KB, measured -- see the field's documentation. The rest of SRAM1 is ours to
+    // use, but nothing the callgate is handed may live up there.
+    gate_buf_len: 96 * 1024,
     keypad_edge_at_boot: false,
     has_se2: false,
     se2: None,
@@ -456,6 +474,8 @@ pub const MK4: BoardSpec = BoardSpec {
     usb_active: Some(pc(6)),
     pwr_btn: None,
     // Armed at boot: watched working on this board (and on the mk5, which inherits this).
+    // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
+    gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
     has_se2: true,
     // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
@@ -590,6 +610,9 @@ pub const Q1: BoardSpec = BoardSpec {
     pwr_btn: Some(pb(12)),
     // Armed at boot: watched working on this board -- the latch fills on every press
     // and the boot survives with every line otherwise closed.
+    // Proven by use: every gate call this firmware makes on a Q1 passes a buffer on the
+    // stack, at the top of SRAM1, and is answered.
+    gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]

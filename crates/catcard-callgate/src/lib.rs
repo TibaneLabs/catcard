@@ -61,18 +61,37 @@ impl From<EntryError> for Error {
 /// Verify a `buf_io` against the bootloader's own range check, before we make the call
 /// rather than after it rejects us.
 ///
-/// Source: bootloader-callgate-abi.md [C] — "must be in SRAM1, `len <= 1024`".
-pub fn check_buffer(sram1_base: u32, sram1_len: u32, addr: u32, len: usize) -> Result<(), Error> {
+/// `window` is how much of SRAM1, from its base, *this board's bootloader* accepts — which
+/// is not always all of it. The mk3's takes only the first 96 KB and answers a buffer above
+/// that with `1`: a generic error, indistinguishable from success to a caller that only
+/// looks for a negative return, and with nothing written into the buffer. See
+/// [`BoardSpec::gate_buf_len`](catcard_board::spec::BoardSpec::gate_buf_len).
+///
+/// Source: bootloader-callgate-abi.md [C] — "must be in SRAM1, `len <= 1024`"; the window
+/// itself measured on hardware.
+pub fn check_buffer(sram1_base: u32, window: u32, addr: u32, len: usize) -> Result<(), Error> {
     if len > MAX_BUF_LEN {
         return Err(Error::BufferTooLong { len });
     }
     let end = addr as u64 + len as u64;
-    let sram_end = sram1_base as u64 + sram1_len as u64;
-    if (addr as u64) < sram1_base as u64 || end > sram_end {
+    let window_end = sram1_base as u64 + window as u64;
+    if (addr as u64) < sram1_base as u64 || end > window_end {
         return Err(Error::BufferNotInSram1 { addr, len });
     }
     Ok(())
 }
+
+/// The buffer every call actually hands the bootloader.
+///
+/// A caller's `pinAttempt_t` or output buffer is wherever the caller put it, and on a stack
+/// that is the *top* of SRAM1 — which the mk3's bootloader refuses. A static lands in
+/// `.bss`, at the bottom of RAM, inside every window we know of; the caller's bytes are
+/// copied in and the answer copied back. One memcpy of at most a kilobyte per call, against
+/// a failure mode whose symptom was a device that could not be logged into at all.
+///
+/// Only ever touched between masking and unmasking interrupts, inside [`Callgate::call`],
+/// so there is no second reference to alias.
+static mut GATE_BUF: [u8; MAX_BUF_LEN] = [0; MAX_BUF_LEN];
 
 /// A bound callgate: a validated entry address, the bootloader's protocol version, and
 /// the SRAM1 window to validate buffers against.
@@ -80,7 +99,8 @@ pub fn check_buffer(sram1_base: u32, sram1_len: u32, addr: u32, len: usize) -> R
 pub struct Callgate {
     info: BootloaderInfo,
     sram1_base: u32,
-    sram1_len: u32,
+    /// How much of SRAM1 this bootloader accepts a buffer in; see [`check_buffer`].
+    gate_buf_len: u32,
 }
 
 impl Callgate {
@@ -109,7 +129,7 @@ impl Callgate {
         Self {
             info,
             sram1_base: board.memory.sram1_base,
-            sram1_len: board.memory.sram1_len,
+            gate_buf_len: board.gate_buf_len,
         }
     }
 
@@ -129,14 +149,35 @@ impl Callgate {
     /// `buf` must satisfy the selected method's documented contract — the bootloader
     /// writes into it using the length the *method* implies.
     pub unsafe fn call(&self, method: Method, buf: &mut [u8], arg2: u32) -> Result<i32, Error> {
-        check_buffer(
-            self.sram1_base,
-            self.sram1_len,
-            buf.as_ptr() as u32,
-            buf.len(),
-        )?;
-        // SAFETY: buffer range-checked above; entry validated at construction.
-        let rv = unsafe { self.raw(method as i32, buf.as_mut_ptr(), buf.len() as u32, arg2) };
+        if buf.len() > MAX_BUF_LEN {
+            return Err(Error::BufferTooLong { len: buf.len() });
+        }
+        // The caller's buffer is wherever the caller put it -- on the stack, at the top of
+        // SRAM1 -- so hand the bootloader the static instead and copy both ways around the
+        // call. `GATE_BUF` is checked against this board's window rather than assumed to be
+        // inside it: a future `.bss` that grew past 96 KB would otherwise reintroduce
+        // exactly the silent failure this exists to prevent.
+        let len = buf.len();
+        let staging = core::ptr::addr_of_mut!(GATE_BUF) as *mut u8;
+        check_buffer(self.sram1_base, self.gate_buf_len, staging as u32, len)?;
+
+        // SAFETY: interrupts are masked for the whole of this, so nothing else can reach
+        // `GATE_BUF`; `staging` is a static of `MAX_BUF_LEN` bytes and `len` is bounded by
+        // it; the entry was validated at construction.
+        let rv = unsafe {
+            entry::with_interrupts_masked(|| {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), staging, len);
+                let rv = entry::invoke(
+                    self.info.callgate_entry,
+                    method as i32,
+                    staging,
+                    len as u32,
+                    arg2,
+                );
+                core::ptr::copy_nonoverlapping(staging, buf.as_mut_ptr(), len);
+                rv
+            })
+        };
         Self::decode(rv)
     }
 
@@ -311,7 +352,15 @@ impl Callgate {
             core::slice::from_raw_parts_mut(attempt as *mut PinAttempt as *mut u8, PIN_ATTEMPT_SIZE)
         };
         // SAFETY: buffer matches the documented `pinAttempt_t` contract.
-        unsafe { self.call(Method::PinAttempt, buf, op as u32) }
+        let rv = unsafe { self.call(Method::PinAttempt, buf, op as u32) }?;
+        // Gate 18 answers 0 on success; everything else is a refusal, including the small
+        // positives that `decode` lets through for the methods that return a length. A
+        // bootloader that declines to touch the struct and returns `1` must not read as a
+        // successful login -- that is exactly how an unusable PIN prompt was reached.
+        if rv != 0 {
+            return Err(Error::Failed(rv));
+        }
+        Ok(rv)
     }
 }
 
@@ -350,6 +399,30 @@ mod tests {
         assert!(matches!(
             check_buffer(BASE, LEN, BASE, MAX_BUF_LEN + 1),
             Err(Error::BufferTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_buffer_past_this_bootloaders_window_is_refused_here_rather_than_by_the_gate() {
+        // The mk3 takes a buffer only in the first 96 KB of SRAM1 and answers anything
+        // above it with `1` -- a generic error that writes nothing and, to a caller
+        // watching for a negative return, looks like success. The check has to use the
+        // board's window, not the size of SRAM1, or that failure comes back.
+        const WINDOW: u32 = 96 * 1024;
+        assert!(check_buffer(BASE, WINDOW, BASE + WINDOW - 280, 280).is_ok());
+        assert!(matches!(
+            check_buffer(BASE, WINDOW, BASE + WINDOW, 280),
+            Err(Error::BufferNotInSram1 { .. })
+        ));
+        // One byte over the end is over the end.
+        assert!(matches!(
+            check_buffer(BASE, WINDOW, BASE + WINDOW - 279, 280),
+            Err(Error::BufferNotInSram1 { .. })
+        ));
+        // And the rest of SRAM1 is still refused even though it is real memory.
+        assert!(matches!(
+            check_buffer(BASE, WINDOW, BASE + 200 * 1024, 280),
+            Err(Error::BufferNotInSram1 { .. })
         ));
     }
 
