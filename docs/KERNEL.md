@@ -254,3 +254,24 @@ are separate defences and neither replaces the other.
 The cost is longer blackouts, which the clock already recovers. Address Explorer's
 PBKDF2-and-derivation is now masked for about a second, on top of the ~1.6 s secret fetch
 through the gate.
+
+### Measured: what masking the key work costs (mk4, Kernel UI)
+
+Entering Address Explorer on a seeded mk4 running the masked build produced two
+consecutive masked stretches, each confirmed by switches falling short by exactly three
+per recovered tick:
+
+| stretch | masked | what |
+|---|---|---|
+| 1 | ~1 640 ms | secret fetch through gate 18 (the same ~1.6 s seen on the mk5) |
+| 2 | ~2 843 ms | PBKDF2 + master key + `m/84'/0'/0'/0` derivation, then address #0 |
+
+Each further address costs ~369 ms masked. Taking that out of stretch 2 leaves **~2.5 s for
+seed stretching and path derivation** — now the longest single blackout in normal use, and
+roughly 4.5 s of USB silence in total on entering the screen. Before key work was masked,
+those 2.5 s ran with USB answering. Both are far inside CYCCNT's ~35.8 s wrap.
+
+Part of that time is avoidable: every BIP-32 derivation step computes its parent's public
+key for the fingerprint, on top of the one the HMAC input needs for a non-hardened child —
+each address runs three scalar multiplications where two would do. Worth its own commit,
+against the test vectors, since shortening it shortens every blackout above.
