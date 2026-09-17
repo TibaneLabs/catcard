@@ -16,6 +16,16 @@ pub mod fixed {
     pub const UNIQUE_ID: u32 = 0x1FFF_7590;
     pub const UNIQUE_ID_LEN: usize = 12;
 
+    /// Flash size data register: a `u16`, the part's flash in KB. System memory beside the
+    /// UID, readable at RDP=2. Source: RM0351 / RM0432 "Flash size data register" [C]; read
+    /// on a locked Q1 as `0x0800` = 2048 KB [C]
+    pub const FLASH_SIZE: u32 = 0x1FFF_75E0;
+
+    /// `DBGMCU_IDCODE`: `DEV_ID` in bits 11:0, `REV_ID` in bits 31:16. Readable by firmware
+    /// without a debugger. Source: platform.md §1 (`get_cpu_id()`) [C]; RM0351 / RM0432
+    /// "DBGMCU_IDCODE" [C]; read on a locked Q1 as `0x101F_6470` [C]
+    pub const DBGMCU_IDCODE: u32 = 0xE004_2000;
+
     /// One-time-programmable area (1 KB). The bootloader keeps the anti-downgrade
     /// high-water mark here. Source: platform.md §2 [C]
     pub const OTP_BASE: u32 = 0x1FFF_7000;

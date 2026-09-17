@@ -63,6 +63,8 @@ const _: () = assert!(MAX_LINES >= 2, "the panel must fit at least two menu rows
 enum Screen {
     Main,
     About,
+    /// About's second page: the STM32 itself.
+    AboutChip,
     SdInstall,
     Debug,
     Usb,
@@ -737,8 +739,16 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Login,
         },
-        // The splash, dismissed by any key.
-        Screen::About => Screen::Main,
+        // The splash: any key but cancel turns to the chip page, which any key but cancel
+        // leaves. Cancel steps back a page.
+        Screen::About => match key {
+            Key::Cancel => Screen::Main,
+            _ => Screen::AboutChip,
+        },
+        Screen::AboutChip => match key {
+            Key::Cancel => Screen::About,
+            _ => Screen::Main,
+        },
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
@@ -949,6 +959,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
+        Screen::AboutChip => chip_screen(panel),
         Screen::Usb => usb_screen(panel),
         Screen::Clocks => clock_screen(panel),
         Screen::Psram => psram_screen(panel),
@@ -4367,6 +4378,47 @@ fn about_screen(panel: &mut display::Panel) {
     }
     #[cfg(not(feature = "board-q1"))]
     display::draw(panel, |c| catcard_ui::splash::draw(c, crate::VERSION, 100));
+}
+
+/// The STM32 in this device: part, silicon revision, flash, and where on which wafer the
+/// die was cut, from the factory unique ID.
+fn chip_screen(panel: &mut display::Panel) {
+    let mut lines: heapless::Vec<Line, 6> = heapless::Vec::new();
+    // SAFETY: reads of always-mapped ID registers, each checked on a locked unit first.
+    let (uid, (dev, rev), kb) = unsafe {
+        (
+            catcard_hal::uid::read(),
+            catcard_hal::uid::idcode(),
+            catcard_hal::uid::flash_size_kb(),
+        )
+    };
+    let die = catcard_hal::uid::Die::from_uid(&uid);
+    // Part numbers from the boards' BOMs. Source: platform.md §1 [C]
+    let part = match catcard_board::BOARD.mcu {
+        catcard_board::spec::Mcu::Stm32L496 => "STM32L496RGT6",
+        catcard_board::spec::Mcu::Stm32L4S5 => "STM32L4S5VIT6",
+    };
+    let _ = lines.push(Line::try_from(part).unwrap_or_default());
+    let mut l = Line::new();
+    let _ = write!(l, "ID {:03X} rev {:04X}, {} KB", dev, rev, kb);
+    let _ = lines.push(l);
+    let mut l = Line::new();
+    let _ = l.push_str("Lot ");
+    for c in die.lot() {
+        let _ = l.push(c);
+    }
+    let _ = write!(l, ", wafer {}", die.wafer);
+    let _ = lines.push(l);
+    let mut l = Line::new();
+    let _ = write!(l, "Die X {}, Y {}", die.x, die.y);
+    let _ = lines.push(l);
+    let mut l = Line::new();
+    let _ = l.push_str("UID ");
+    for b in uid {
+        let _ = write!(l, "{:02X}", b);
+    }
+    let _ = lines.push(l);
+    info(panel, "STM32", &lines);
 }
 
 /// The log, as lines for the pager.
