@@ -2480,8 +2480,8 @@ fn address_explorer(
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. It all
     // runs masked, so the progress line is drawn first: nothing can repaint inside it, and
     // without it the panel would hold its last frame and the device would look hung.
-    message(ui.panel, "Addresses", "deriving keys...", "four address types");
-    let chains = crate::keywork::run(|kw| {
+    message(ui.panel, "Addresses", "stretching seed...", "");
+    let master = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
         let Ok(mnemonic) = mnemonic else {
@@ -2493,32 +2493,24 @@ fn address_explorer(
             .ok()
             .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok());
         seed.zeroize();
-        let Some(master) = master else {
-            return Err("key derivation failed");
-        };
-        // All four chains now, while the seed is here, rather than going back for the
-        // private keys each time the arrows change type -- which would mean holding key
-        // material across the browsing loop.
-        let mut chains = [None; PROTOCOLS.len()];
-        for (slot, kind) in chains.iter_mut().zip(PROTOCOLS) {
-            *slot = receive_chain(&master, kind, kw);
-        }
-        // Every private key -- master and the four chain keys -- is dropped here, inside
-        // the masked region. Only public keys come out.
-        if chains.iter().all(Option::is_none) {
-            Err("key derivation failed")
-        } else {
-            Ok(chains)
-        }
+        master.ok_or("key derivation failed")
     });
-    let chains = match chains {
-        Ok(chains) => chains,
+    // The master key is kept for as long as this screen is open, so a type can be derived
+    // when it is first asked for instead of paying for all four up front. That is a
+    // deliberate trade: a private key is resident while the screen waits for keypresses.
+    // It is the master alone -- each chain key is derived inside a masked region and
+    // dropped there, leaving only its public half -- and it is zeroized on the way out,
+    // which `ExtendedPrivKey`'s `ZeroizeOnDrop` does at every return below.
+    let master = match master {
+        Ok(master) => master,
         Err(why) => {
             fail(ui, why);
             wait_for_any_key(ui);
             return;
         }
     };
+    let mut chains: [Option<catcard_wallet::bip32::ExtendedPubKey>; PROTOCOLS.len()] =
+        [None; PROTOCOLS.len()];
 
     // How many characters fit on a body line. A bech32 address is longer than that on the
     // 128px panel, so it is shown start...end (see `ellipsize_middle`) -- the two ends are
@@ -2530,6 +2522,17 @@ fn address_explorer(
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         let kind = PROTOCOLS[proto];
+        // First time this type is asked for: derive its receive chain, masked, and keep
+        // only the public half. Announced first -- it is about half a second during which
+        // nothing can repaint, and an unexplained pause is what made the old entry feel
+        // broken.
+        if chains[proto].is_none() {
+            let mut note = Line::new();
+            let _ = write!(note, "{}...", kind_name(kind));
+            message(ui.panel, "Deriving", note.as_str(), "");
+            chains[proto] = crate::keywork::run(|kw| receive_chain(&master, kind, kw));
+        }
+
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
         let mut path = Line::new();
         let _ = write!(
