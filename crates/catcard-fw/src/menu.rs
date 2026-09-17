@@ -2381,14 +2381,57 @@ fn ellipsize_middle(s: &str, cols: usize, out: &mut Line) {
 /// once; only the final `/i` step runs per address. The seed and the secret are wiped as
 /// soon as that key exists -- nothing secret outlives the setup, and the chain key kept
 /// here is a public-derivation parent, not the seed.
+/// The address types the explorer walks, in the order the left/right arrows move through
+/// them. Native segwit leads because it is what this wallet derives by default.
+const PROTOCOLS: [catcard_wallet::address::AddressKind; 4] = [
+    catcard_wallet::address::AddressKind::P2wpkh,
+    catcard_wallet::address::AddressKind::P2tr,
+    catcard_wallet::address::AddressKind::P2shP2wpkh,
+    catcard_wallet::address::AddressKind::P2pkh,
+];
+
+/// What to call each on screen.
+fn kind_name(kind: catcard_wallet::address::AddressKind) -> &'static str {
+    use catcard_wallet::address::AddressKind;
+    match kind {
+        AddressKind::P2wpkh => "Native segwit",
+        AddressKind::P2tr => "Taproot",
+        AddressKind::P2shP2wpkh => "Nested segwit",
+        AddressKind::P2pkh => "Legacy",
+    }
+}
+
+/// `m/purpose'/0'/0'/0` as an extended **public** key: the receive chain every address of
+/// that type hangs off.
+///
+/// Public on purpose. Receive addresses are non-hardened children of this level, so they
+/// derive from the public key alone -- which means the private keys can all be dropped
+/// before the masked region closes, and the browsing loop afterwards holds no key material
+/// and needs no masking at all.
+fn receive_chain(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    kind: catcard_wallet::address::AddressKind,
+    kw: &catcard_wallet::KeyWork,
+) -> Option<catcard_wallet::bip32::ExtendedPubKey> {
+    use catcard_wallet::bip32::{ChildNumber, DerivationPath};
+    let path = DerivationPath::from_slice(&[
+        ChildNumber::hardened(kind.bip44_purpose()).ok()?,
+        ChildNumber::hardened(0).ok()?,
+        ChildNumber::hardened(0).ok()?,
+        ChildNumber::normal(0).ok()?,
+    ])
+    .ok()?;
+    Some(master.derive_path(&path, kw).ok()?.to_extended_pub(kw))
+}
+
 fn address_explorer(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) {
     use catcard_callgate::pin::bip39_entropy;
-    use catcard_wallet::address::{self, AddressKind};
-    use catcard_wallet::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, Network};
+    use catcard_wallet::address;
+    use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
     use zeroize::Zeroize;
 
@@ -2433,32 +2476,38 @@ fn address_explorer(
     // runs masked, so the progress line is drawn first: nothing can repaint inside it, and
     // without it the panel would hold its last frame and the device would look hung.
     message(ui.panel, "Addresses", "deriving keys...", "");
-    let chain = crate::keywork::run(|kw| {
+    let chains = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
         let Ok(mnemonic) = mnemonic else {
             return Err("seed did not decode");
         };
         let mut seed = [0u8; SEED_LEN];
-        let chain = mnemonic
+        let master = mnemonic
             .to_seed("", &mut seed, kw)
             .ok()
-            .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok())
-            .and_then(|master| {
-                DerivationPath::from_slice(&[
-                    ChildNumber::hardened(84).ok()?,
-                    ChildNumber::hardened(0).ok()?,
-                    ChildNumber::hardened(0).ok()?,
-                    ChildNumber::normal(0).ok()?,
-                ])
-                .ok()
-                .and_then(|p| master.derive_path(&p, kw).ok())
-            });
+            .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok());
         seed.zeroize();
-        chain.ok_or("key derivation failed")
+        let Some(master) = master else {
+            return Err("key derivation failed");
+        };
+        // All four chains now, while the seed is here, rather than going back for the
+        // private keys each time the arrows change type -- which would mean holding key
+        // material across the browsing loop.
+        let mut chains = [None; PROTOCOLS.len()];
+        for (slot, kind) in chains.iter_mut().zip(PROTOCOLS) {
+            *slot = receive_chain(&master, kind, kw);
+        }
+        // Every private key -- master and the four chain keys -- is dropped here, inside
+        // the masked region. Only public keys come out.
+        if chains.iter().all(Option::is_none) {
+            Err("key derivation failed")
+        } else {
+            Ok(chains)
+        }
     });
-    let chain = match chain {
-        Ok(chain) => chain,
+    let chains = match chains {
+        Ok(chains) => chains,
         Err(why) => {
             fail(ui, why);
             wait_for_any_key(ui);
@@ -2471,26 +2520,29 @@ fn address_explorer(
     // what an eye compares against a watch-only wallet, and one clean line beats a wrap.
     let cols = display::LOG_COLS;
     let mut index: u32 = 0;
+    let mut proto = 0usize;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
+        let kind = PROTOCOLS[proto];
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
         let mut path = Line::new();
-        let _ = write!(path, "#{index}  m/84h/0h/0h/0/{index}");
+        let _ = write!(
+            path,
+            "#{index}  m/{}h/0h/0h/0/{index}",
+            kind.bip44_purpose()
+        );
         let _ = lines.push(path);
 
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        // The child private key and its public key are derived masked. Only the public key
-        // leaves the region -- the child key is dropped inside it -- and encoding an address
-        // from a public key is public work, so that stays outside.
-        let pubkey = crate::keywork::run(|kw| {
+        // Public derivation from the chain's extended public key: no private key is
+        // involved, so this needs no masked region and costs the host nothing to watch.
+        // The index moves with the type, so the same position can be compared across them.
+        let addr = chains[proto].and_then(|chain| {
             ChildNumber::normal(index)
                 .ok()
-                .and_then(|c| chain.derive_child(c, kw).ok())
-                .map(|k| k.public_key(kw))
-        });
-        let addr = pubkey.and_then(|pk| {
-            address::encode(AddressKind::P2wpkh, Network::Mainnet, &pk, &mut buf).ok()
+                .and_then(|c| chain.derive_child(c).ok())
+                .and_then(|k| address::encode(kind, Network::Mainnet, &k.public_key, &mut buf).ok())
         });
         match addr {
             Some(n) => {
@@ -2509,10 +2561,10 @@ fn address_explorer(
         }
         let _ = lines.push(Line::new());
         let mut hint = Line::new();
-        let _ = hint.push_str("8 next  5 prev  x exit");
+        let _ = hint.push_str("8/5 addr  7/9 type  x");
         let _ = lines.push(hint);
 
-        info(ui.panel, "Receive address", &lines);
+        info(ui.panel, kind_name(kind), &lines);
 
         wait_for_release(ui);
         'wait: loop {
@@ -2527,6 +2579,15 @@ fn address_explorer(
                     }
                     Key::Digit(5) => {
                         index = index.saturating_sub(1);
+                        break 'wait;
+                    }
+                    // Left and right walk the address types, wrapping both ways.
+                    Key::Digit(9) => {
+                        proto = (proto + 1) % PROTOCOLS.len();
+                        break 'wait;
+                    }
+                    Key::Digit(7) => {
+                        proto = (proto + PROTOCOLS.len() - 1) % PROTOCOLS.len();
                         break 'wait;
                     }
                     _ => {}

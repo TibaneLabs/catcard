@@ -85,6 +85,19 @@ pub struct ExtendedPrivKey {
     pub child_number: ChildNumber,
     pub chain_code: [u8; CHAIN_CODE_LEN],
     secret: [u8; PRIVKEY_LEN],
+    /// The public key, computed at most once.
+    ///
+    /// A scalar multiplication costs about 120 ms on the device, and every derivation step
+    /// wanted this one: once for a non-hardened child's HMAC input, again through
+    /// `fingerprint` for the child's parent-fingerprint, and again for `to_extended_pub`.
+    /// Measured on an mk4, three multiplications ran per displayed address where one of
+    /// them was a repeat -- and all of it runs with interrupts masked, so every repeat was
+    /// USB silence the host could see.
+    ///
+    /// Public data, so it is neither zeroized nor compared: equality is the secret and the
+    /// chain code, and a key whose cache happens to be filled is still the same key.
+    #[zeroize(skip)]
+    public_key_cache: core::cell::OnceCell<[u8; PUBKEY_LEN]>,
 }
 
 /// An extended public key.
@@ -151,6 +164,7 @@ impl ExtendedPrivKey {
             child_number: ChildNumber::ZERO,
             chain_code,
             secret,
+            public_key_cache: core::cell::OnceCell::new(),
         })
     }
 
@@ -170,6 +184,7 @@ impl ExtendedPrivKey {
             child_number,
             chain_code,
             secret,
+            public_key_cache: core::cell::OnceCell::new(),
         }
     }
 
@@ -179,9 +194,13 @@ impl ExtendedPrivKey {
     }
 
     /// The matching public key.
+    ///
+    /// Computed on first use and kept; see `public_key_cache`.
     pub fn public_key(&self, _kw: &crate::KeyWork) -> [u8; PUBKEY_LEN] {
-        let scalar = scalar_from_bytes(&self.secret).expect("validated at construction");
-        compress(&ProjectivePoint::mul_generator(&scalar)).expect("scalar is non-zero")
+        *self.public_key_cache.get_or_init(|| {
+            let scalar = scalar_from_bytes(&self.secret).expect("validated at construction");
+            compress(&ProjectivePoint::mul_generator(&scalar)).expect("scalar is non-zero")
+        })
     }
 
     pub fn identifier(&self, kw: &crate::KeyWork) -> [u8; 20] {
@@ -236,6 +255,7 @@ impl ExtendedPrivKey {
             child_number: child,
             chain_code,
             secret,
+            public_key_cache: core::cell::OnceCell::new(),
         })
     }
 
@@ -350,6 +370,33 @@ impl core::fmt::Debug for ExtendedPubKey {
             "ExtendedPubKey(depth {}, child {})",
             self.depth, self.child_number.0
         )
+    }
+}
+
+#[cfg(test)]
+mod public_key_cache_tests {
+    use super::*;
+
+    /// The cache must be invisible: the key it returns is the key a fresh computation
+    /// returns, for the parent that fed a derivation and for the child it produced.
+    #[test]
+    fn a_cached_public_key_is_the_computed_one() {
+        let kw = crate::KeyWork::host();
+        let seed = [0x42u8; 32];
+        let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, &kw).unwrap();
+        // Deriving a non-hardened child fills the parent's cache along the way.
+        let child = master.derive_child(ChildNumber::normal(7).unwrap(), &kw).unwrap();
+
+        // Rebuild both from their serialised parts: same keys, empty caches.
+        let fresh_master = ExtendedPrivKey::from_raw(&master.to_raw()).unwrap();
+        let fresh_child = ExtendedPrivKey::from_raw(&child.to_raw()).unwrap();
+        assert_eq!(master.public_key(&kw), fresh_master.public_key(&kw));
+        assert_eq!(child.public_key(&kw), fresh_child.public_key(&kw));
+
+        // A clone carries the filled cache and still answers correctly.
+        assert_eq!(master.clone().public_key(&kw), fresh_master.public_key(&kw));
+        // And the cache takes no part in equality.
+        assert!(master == fresh_master);
     }
 }
 
