@@ -660,7 +660,7 @@ mod tests {
     /// A checkerboard stands in for a symbol: every module differs from its neighbours,
     /// so a scale or offset mistake shows up as a wrong pixel somewhere.
     fn checker(x: usize, y: usize) -> bool {
-        (x + y) % 2 == 0
+        (x + y).is_multiple_of(2)
     }
 
     #[test]

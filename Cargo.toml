@@ -76,7 +76,7 @@ heapless = "0.9.3"
 # RIPEMD-160. `unsafe_code = "deny"` upstream, edition 2024 / Rust 1.89 like us.
 # Firmware crates take only no-alloc features (`hash`, `ec`, `hazmat-secp256k1`,
 # `bip340`); the host tool adds the alloc/`std` pieces (PEM key loading).
-purecrypto = { version = "0.8.4", default-features = false }
+purecrypto = { version = "0.9.0", default-features = false }
 # Memory hygiene, not a primitive: kept.
 zeroize = { version = "1.9.0", default-features = false }
 
