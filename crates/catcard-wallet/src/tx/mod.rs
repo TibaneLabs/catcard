@@ -286,7 +286,25 @@ fn read_output<'a>(r: &mut Reader<'a>) -> Result<TxOut<'a>, Error> {
 
 impl<'a> Transaction<'a> {
     /// Parse a transaction, with or without a witness section.
+    ///
+    /// A transaction with no inputs or no outputs is refused: no such transaction is valid
+    /// on the network, and accepting one here would put an unspendable thing in front of a
+    /// user as though it were a payment. The exception is a PSBT's unsigned transaction,
+    /// which the standard's own test vectors allow to be empty -- see
+    /// [`parse_possibly_empty`](Self::parse_possibly_empty).
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_with(data, false)
+    }
+
+    /// [`parse`](Self::parse), allowing a transaction with no inputs or no outputs.
+    ///
+    /// Only for a PSBT's `PSBT_GLOBAL_UNSIGNED_TX`: BIP-174 has valid vectors with zero
+    /// inputs, and refusing them would make this reader stricter than the standard.
+    pub fn parse_possibly_empty(data: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_with(data, true)
+    }
+
+    fn parse_with(data: &'a [u8], allow_empty: bool) -> Result<Self, Error> {
         let mut r = Reader::new(data);
         let version = r.u32()? as i32;
 
@@ -303,7 +321,7 @@ impl<'a> Transaction<'a> {
 
         let inputs_start = r.position();
         let n_in = r.varint()?;
-        if n_in == 0 {
+        if n_in == 0 && !allow_empty {
             return Err(Error::Empty);
         }
         let in_body_start = r.position();
@@ -316,7 +334,7 @@ impl<'a> Transaction<'a> {
         };
 
         let n_out = r.varint()?;
-        if n_out == 0 {
+        if n_out == 0 && !allow_empty {
             return Err(Error::Empty);
         }
         let out_body_start = r.position();
