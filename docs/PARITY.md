@@ -32,9 +32,10 @@ Dependency first, then what a user needs to hold funds safely:
    message, armoured to SIGNED.TXT. BIP-322 still to do.
 6. ~~**BIP-85**~~ -- written, untested on hardware: Utils → Derive child, with 12/24 words,
    XPRV, WIF, a base64 password and 32 bytes of hex, all against the BIP's own vectors.
-7. **Settings store** -- internal flash driver, LittleFS2, AES-256-CTR, stock-compatible
-   (`docs/SECRETS-AND-SETTINGS.md`). Everything with persistent configuration waits on it:
-   multisig wallets, preferences, trick PINs, Seed Vault.
+7. **Settings store** -- in progress: the slot format, the dictionary, the internal-flash
+   driver and the LittleFS medium are written and host-tested, and Debug → Settings store
+   exercises them under the pre-login key. What is left is the mk3's SPI-NOR medium, using
+   the settings for anything, and the re-key when the seed changes.
 8. **Multisig and descriptor import**.
 9. **Encrypted backup and restore**.
 10. **Import paths** beyond words: xprv, raw master secret, Seed XOR, backup file.

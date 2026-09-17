@@ -115,6 +115,9 @@ enum Screen {
     SignPsbt,
     /// Type a BIP-39 passphrase, opening a second wallet from the same words.
     Passphrase,
+    /// Debug: exercise the settings store on internal flash.
+    #[cfg(not(feature = "board-mk3"))]
+    SettingsStore,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
     /// The Games submenu.
@@ -272,6 +275,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Save log to SD",
     "Colours",
     "Factory Reset",
+    #[cfg(not(feature = "board-mk3"))]
+    "Settings store",
 ];
 
 /// The BIP-85 child a [`DERIVE_ITEMS`] row selects.
@@ -661,6 +666,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Debug,
         ),
         Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsStore => to(|a| crate::settings::probe(a.ui), Screen::Debug),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -873,6 +880,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Kernel test")) => Screen::KernelTest,
             (Key::Confirm, Some("Kernel UI")) => Screen::KernelUi,
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
             (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
@@ -1068,6 +1077,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Rtc => rtc_screen(panel, &v.rtc),
         // Handled in `run`: it takes the CPU and never returns.
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsStore => {}
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
@@ -1185,7 +1196,7 @@ fn draw_menu(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.
-fn info(panel: &mut display::Panel, title: &str, lines: &[Line]) {
+pub(crate) fn info(panel: &mut display::Panel, title: &str, lines: &[Line]) {
     display::draw(panel, |c| {
         catcard_ui::widgets::info(c, &display::LAYOUT, title, lines);
     });

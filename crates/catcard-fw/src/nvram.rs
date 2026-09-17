@@ -19,7 +19,7 @@
 //! removed, and the newest valid slot wins -- so a lost page costs the last change, not the
 //! settings.
 
-use catcard_board::{BOARD, Mcu};
+use catcard_board::BOARD;
 use catcard_hal::iflash::{self, Internal};
 use fstool::device::FlashDriver;
 
@@ -148,25 +148,4 @@ impl FlashDriver for Blocks {
         }
         Ok(())
     }
-}
-
-/// Whether this board keeps its settings in internal flash.
-pub fn here() -> bool {
-    matches!(
-        BOARD.settings,
-        catcard_board::spec::SettingsArea::InternalFlash { .. }
-    )
-}
-
-/// The mk3 keeps its settings in SPI-NOR instead; this says so in one place.
-pub fn describe() -> &'static str {
-    match BOARD.settings {
-        catcard_board::spec::SettingsArea::InternalFlash { .. } => "internal flash",
-        catcard_board::spec::SettingsArea::SpiNor { .. } => "SPI-NOR",
-    }
-}
-
-/// The MCU this was built for, for a screen that reports the configuration.
-pub fn mcu() -> Mcu {
-    BOARD.mcu
 }

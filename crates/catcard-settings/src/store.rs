@@ -25,6 +25,12 @@ pub const SLOTS_FLASH: u32 = 100;
 /// Bytes a scratch buffer needs: one whole slot.
 pub const SCRATCH: usize = SLOT_LEN;
 
+/// A medium failed. What went wrong belongs in the firmware's log, not in a type the
+/// rules here would have to match on: from up here every medium failure is the same -- the
+/// settings could not be read or written.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct MediumError;
+
 /// Where slots live, so the store does not care which board it is on.
 pub trait Slots {
     /// How many slots to scan.
@@ -36,13 +42,13 @@ pub trait Slots {
     fn pos(&self, index: u32) -> u32;
 
     /// Read slot `index` into `buf`. `Ok(None)` if the slot is empty.
-    fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, ()>;
+    fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, MediumError>;
 
     /// Replace slot `index` with `bytes`.
-    fn write(&mut self, index: u32, bytes: &[u8]) -> Result<(), ()>;
+    fn write(&mut self, index: u32, bytes: &[u8]) -> Result<(), MediumError>;
 
     /// Empty slot `index`.
-    fn clear(&mut self, index: u32) -> Result<(), ()>;
+    fn clear(&mut self, index: u32) -> Result<(), MediumError>;
 }
 
 /// Why the settings could not be read or written.
@@ -98,7 +104,7 @@ pub fn read<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Result<usize,
     let pos = slots.pos(best.index);
     let len = slots
         .read(best.index, buf)
-        .map_err(|()| Error::Medium)?
+        .map_err(|_| Error::Medium)?
         .ok_or(Error::Absent)?;
     let range = nvstore::open(&mut buf[..len], key, pos).map_err(|_| Error::Malformed)?;
     // Move the JSON to the front, so the caller has one slice and no offset to carry.
@@ -138,11 +144,10 @@ pub fn write<S: Slots>(
     }
     let target = target.ok_or(Error::Full)?;
 
-    let len =
-        nvstore::seal(json, key, slots.pos(target), scratch).map_err(|_| Error::Malformed)?;
+    let len = nvstore::seal(json, key, slots.pos(target), scratch).map_err(|_| Error::Malformed)?;
     slots
         .write(target, &scratch[..len])
-        .map_err(|()| Error::Medium)?;
+        .map_err(|_| Error::Medium)?;
     // Only now is the old copy removed: until this point both were readable, and after it
     // the new one is.
     if let Some(old) = live {
@@ -181,7 +186,7 @@ mod tests {
         fn pos(&self, index: u32) -> u32 {
             index
         }
-        fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, ()> {
+        fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, MediumError> {
             match &self.slots[index as usize] {
                 None => Ok(None),
                 Some((len, bytes)) => {
@@ -190,13 +195,13 @@ mod tests {
                 }
             }
         }
-        fn write(&mut self, index: u32, bytes: &[u8]) -> Result<(), ()> {
+        fn write(&mut self, index: u32, bytes: &[u8]) -> Result<(), MediumError> {
             let mut slot = [0u8; SLOT_LEN];
             slot[..bytes.len()].copy_from_slice(bytes);
             self.slots[index as usize] = Some((bytes.len(), slot));
             Ok(())
         }
-        fn clear(&mut self, index: u32) -> Result<(), ()> {
+        fn clear(&mut self, index: u32) -> Result<(), MediumError> {
             self.slots[index as usize] = None;
             Ok(())
         }
@@ -277,7 +282,14 @@ mod tests {
         let mut ram = Ram::new();
         let mine = key();
         let theirs = nvstore::prelogin_key();
-        write(&mut ram, &theirs, br#"{"_age":9,"nick":"cat"}"#, 2, &mut scratch()).unwrap();
+        write(
+            &mut ram,
+            &theirs,
+            br#"{"_age":9,"nick":"cat"}"#,
+            2,
+            &mut scratch(),
+        )
+        .unwrap();
         let mut buf = [0u8; SLOT_LEN];
         assert_eq!(read(&mut ram, &mine, &mut buf), Err(Error::Absent));
         // And mine can live beside it.
