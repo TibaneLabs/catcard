@@ -14,16 +14,22 @@ art at its own native resolution -- which on the Q1's 240-row panel is a 200-row
 playfield over 40 rows of ground, the original's proportions.
 
 The flying cat is different: `flying-orange-cat-{up,mid,down}-34x24.png` are drawn at 1x,
-so they are kept at full size, cropped to the box every frame's opaque pixels fit in.
+so they are kept at full size, cropped to the box every frame's opaque pixels fit in. They
+were made from a photo of the real cat and read washed out against the game's scenery, so
+their colours are made livelier on the way in: saturation x1.5 and brightness x1.12, hue
+kept (CAT_SATURATION, CAT_BRIGHTNESS).
 
 Every sprite shares one RGB565 palette (the set has under 256 colours after RGB565
 rounding) and stores one byte per pixel; 0xFF is transparent.
 """
-import argparse, pathlib, sys
+import argparse, colorsys, pathlib, sys
 
 from PIL import Image
 
 TRANSPARENT = 0xFF
+
+CAT_SATURATION = 1.5
+CAT_BRIGHTNESS = 1.12
 
 # (Rust name, file, rows to keep at half scale or None for all)
 SPRITES = [
@@ -39,6 +45,12 @@ CATS = [
     ("CAT_MID", "flying-orange-cat-mid-34x24.png"),
     ("CAT_DOWN", "flying-orange-cat-down-34x24.png"),
 ]
+
+
+def livelier(r, g, b):
+    h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    r, g, b = colorsys.hsv_to_rgb(h, min(1.0, s * CAT_SATURATION), min(1.0, v * CAT_BRIGHTNESS))
+    return round(r * 255), round(g * 255), round(b * 255)
 
 
 def rgb565(r, g, b):
@@ -58,7 +70,7 @@ def main():
     index = {}
     baked = []
 
-    def bake(name, where, file, p, x0, y0, w, h, step):
+    def bake(name, where, file, p, x0, y0, w, h, step, tint=None):
         px = []
         for y in range(h):
             for x in range(w):
@@ -66,6 +78,8 @@ def main():
                 if al < 128:
                     px.append(TRANSPARENT)
                     continue
+                if tint:
+                    r, g, b = tint(r, g, b)
                 c = rgb565(r, g, b)
                 if c not in index:
                     index[c] = len(palette)
@@ -85,7 +99,7 @@ def main():
     x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
     x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
     for name, file, im in cats:
-        bake(name, "flappy-cat/", file, im.load(), x0, y0, x1 - x0, y1 - y0, 1)
+        bake(name, "flappy-cat/", file, im.load(), x0, y0, x1 - x0, y1 - y0, 1, livelier)
     if len(palette) >= TRANSPARENT:
         sys.exit(f"{len(palette)} colours: too many for one byte with a transparent index")
 

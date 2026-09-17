@@ -74,13 +74,72 @@ pub const fn scroll_start(scroll: u32) -> usize {
     memory_column(scroll)
 }
 
-/// Background and ground at world `(x, y)`: the parts that tile.
-fn scenery(x: u32, y: usize) -> u16 {
-    let tile = |s: &Sprite, y: usize| s.at((x % s.width as u32) as usize, y).unwrap_or(0);
-    if y >= GROUND_Y {
-        tile(&BASE, y - GROUND_Y)
-    } else {
-        tile(&BACKGROUND, y)
+/// Everything about one world column that does not change down its rows, worked out once.
+///
+/// Painting asks for hundreds of pixels a frame, and most of what decides a pixel's colour
+/// is the same all the way down its column: where the tiles are, whether a pipe is there
+/// and where its gap is, whether the cat or the score covers it and which part. Hashing a
+/// pipe's gap, or counting the score's digits, once per pixel was enough to drop frames
+/// while the cat was over a pipe; once per column it is not.
+#[derive(Copy, Clone)]
+pub struct Column {
+    background_x: u16,
+    base_x: u16,
+    /// The column into the pipe sprite, and the gap's top row.
+    pipe: Option<(u16, i32)>,
+    /// The cat sprite this frame, the column into it, and its top row.
+    cat: Option<(&'static Sprite, u16, usize)>,
+    /// The digit sprite covering this column, and the column into it.
+    score: Option<(&'static Sprite, u16)>,
+}
+
+impl Column {
+    pub const EMPTY: Self = Self {
+        background_x: 0,
+        base_x: 0,
+        pipe: None,
+        cat: None,
+        score: None,
+    };
+
+    /// The colour at row `y`: the score over the cat over the pipe over the scenery.
+    ///
+    /// The pipe sprite has its lip at the top, so the lower pipe draws it as it is from the
+    /// gap down, and the upper pipe draws it flipped from the gap up. A pipe longer than the
+    /// sprite repeats its last row, which is plain body.
+    pub fn colour(&self, y: usize) -> u16 {
+        if let Some((digit, dx)) = self.score
+            && (SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y)
+            && let Some(c) = digit.at(dx as usize, y - SCORE_TOP)
+        {
+            return c;
+        }
+        if let Some((cat, dx, top)) = self.cat
+            && y >= top
+            && let Some(c) = cat.at(dx as usize, y - top)
+        {
+            return c;
+        }
+        if y >= GROUND_Y {
+            return BASE.at(self.base_x as usize, y - GROUND_Y).unwrap_or(0);
+        }
+        if let Some((into, top)) = self.pipe {
+            let yi = y as i32;
+            let row = if yi < top {
+                Some(top - 1 - yi)
+            } else if yi >= top + GAP {
+                Some(yi - top - GAP)
+            } else {
+                None
+            };
+            if let Some(r) = row {
+                let r = (r as usize).min(PIPE.height as usize - 1);
+                if let Some(c) = PIPE.at(into as usize, r) {
+                    return c;
+                }
+            }
+        }
+        BACKGROUND.at(self.background_x as usize, y).unwrap_or(0)
     }
 }
 
@@ -124,31 +183,21 @@ impl World {
         (into < PIPE_W).then_some((rel / PIPE_SPACING, into))
     }
 
-    /// The colour of world pixel `(x, y)`, the cat not included.
-    ///
-    /// The pipe sprite has its lip at the top, so the lower pipe draws it as it is from the
-    /// gap down, and the upper pipe draws it flipped from the gap up. A pipe longer than the
-    /// sprite repeats its last row, which is plain body.
-    pub fn colour(&self, x: u32, y: usize) -> u16 {
-        if y < GROUND_Y
-            && let Some((i, into)) = self.pipe_at(x)
-        {
-            let (top, yi) = (self.gap_top(i), y as i32);
-            let row = if yi < top {
-                Some(top - 1 - yi)
-            } else if yi >= top + GAP {
-                Some(yi - top - GAP)
-            } else {
-                None
-            };
-            if let Some(r) = row {
-                let r = (r as usize).min(PIPE.height as usize - 1);
-                if let Some(c) = PIPE.at(into as usize, r) {
-                    return c;
-                }
-            }
+    /// World column `x` with nothing on it but scenery and pipe.
+    pub fn column(&self, x: u32) -> Column {
+        Column {
+            background_x: (x % BACKGROUND.width as u32) as u16,
+            base_x: (x % BASE.width as u32) as u16,
+            pipe: self
+                .pipe_at(x)
+                .map(|(i, into)| (into as u16, self.gap_top(i))),
+            ..Column::EMPTY
         }
-        scenery(x, y)
+    }
+
+    /// The colour of world pixel `(x, y)`, the cat not included.
+    pub fn colour(&self, x: u32, y: usize) -> u16 {
+        self.column(x).colour(y)
     }
 }
 
@@ -253,16 +302,20 @@ impl Game {
         }
     }
 
+    /// World column `x` with the cat on it, where the cat covers it.
+    fn column_with_cat(&self, x: u32) -> Column {
+        let mut c = self.world.column(x);
+        if let Some(dx) = x.checked_sub(self.cat_x())
+            && (dx as usize) < CAT_W
+        {
+            c.cat = Some((self.cat(), dx as u16, self.cat_y()));
+        }
+        c
+    }
+
     /// What world pixel `(x, y)` looks like with the cat drawn in.
     pub fn pixel(&self, x: u32, y: usize) -> u16 {
-        let (bx, by) = (self.cat_x(), self.cat_y());
-        if x >= bx
-            && y >= by
-            && let Some(c) = self.cat().at((x - bx) as usize, y - by)
-        {
-            return c;
-        }
-        self.world.colour(x, y)
+        self.column_with_cat(x).colour(y)
     }
 }
 
@@ -298,36 +351,50 @@ pub fn score_span(score: u32) -> (usize, usize) {
     ((PLAY_W - width) / 2, width)
 }
 
-/// The score's colour at glass column `sx`, row `y`, or `None` where it does not cover.
-pub fn score_colour(score: u32, sx: usize, y: usize) -> Option<u16> {
+/// The digit covering glass column `sx`, and the column into it, if the score covers it.
+fn score_digit(score: u32, sx: usize) -> Option<(&'static Sprite, u16)> {
     let (mut left, width) = score_span(score);
-    if !(SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y) || !(left..left + width).contains(&sx) {
+    if !(left..left + width).contains(&sx) {
         return None;
     }
     let (d, count) = digits(score);
     for &digit in &d[MAX_DIGITS - count..] {
         let s = &DIGITS[digit];
         if sx < left + s.width as usize {
-            return s.at(sx - left, y - SCORE_TOP);
+            return Some((s, (sx - left) as u16));
         }
         left += s.width as usize;
     }
     None
 }
 
+/// The score's colour at glass column `sx`, row `y`, or `None` where it does not cover.
+pub fn score_colour(score: u32, sx: usize, y: usize) -> Option<u16> {
+    if !(SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y) {
+        return None;
+    }
+    let (digit, dx) = score_digit(score, sx)?;
+    digit.at(dx as usize, y - SCORE_TOP)
+}
+
 impl Game {
-    /// World pixel `(x, y)` as the glass shows it: the score over the cat over the world.
+    /// World column `x` as the glass shows it: the score over the cat over the world.
     ///
     /// The score only covers glass columns, so a world column behind the view -- one the
     /// scroll has not reached, or has left -- never carries it.
-    pub fn shown(&self, x: u32, y: usize) -> u16 {
+    pub fn shown_column(&self, x: u32) -> Column {
+        let mut c = self.column_with_cat(x);
         if let Some(sx) = x.checked_sub(self.scroll)
             && (sx as usize) < PLAY_W
-            && let Some(c) = score_colour(self.score(), sx as usize, y)
         {
-            return c;
+            c.score = score_digit(self.score(), sx as usize);
         }
-        self.pixel(x, y)
+        c
+    }
+
+    /// World pixel `(x, y)` as the glass shows it. See [`shown_column`](Self::shown_column).
+    pub fn shown(&self, x: u32, y: usize) -> u16 {
+        self.shown_column(x).colour(y)
     }
 }
 
@@ -335,6 +402,13 @@ impl Game {
 mod tests {
     use super::*;
     use crate::art::flappy::GAME_OVER;
+
+    /// Background and ground alone at `(x, y)`.
+    fn scenery(x: u32, y: usize) -> u16 {
+        let mut c = World::new(0).column(x);
+        c.pipe = None;
+        c.colour(y)
+    }
 
     #[test]
     fn the_art_is_the_size_the_layout_assumes() {
@@ -433,7 +507,11 @@ mod tests {
                 assert!(!g.over, "seed {seed}: hit something at score {}", g.score());
             }
             // Every pipe the world scrolled past, less the open sky before the first.
-            assert!(g.score() >= 20_000 / PIPE_SPACING - 10, "score {}", g.score());
+            assert!(
+                g.score() >= 20_000 / PIPE_SPACING - 10,
+                "score {}",
+                g.score()
+            );
         }
     }
 
