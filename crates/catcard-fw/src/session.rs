@@ -133,16 +133,59 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // was spawned above, and the selftest screen reports `entropy`, not the pool.
     let mut pool = report.pool.take();
 
-    menu::run(menu::Session {
-        gate: &gate,
-        login: &mut login,
-        panel: &mut panel,
-        matrix: &mut matrix,
-        drbg: &mut drbg,
-        report: &report,
-        no_seed,
-        pool: pool.as_mut(),
-    })
+    // The menu runs as a kernel task from here on, with USB and a heartbeat beside it --
+    // proven on mk3, mk4, mk5 and Q1 under Debug -> Kernel UI before being made the
+    // default. It starts only after the PIN is in, so the prompt a locked unit depends on
+    // is exactly the polled one it always was.
+    //
+    // Holding cancel while the PIN is checked skips it for this session and runs the menu
+    // polled, as before. The check happens before the kernel exists, so it still works if
+    // the kernel is what went wrong -- on a locked board that is the difference between a
+    // power cycle and a brick.
+    if cancel_held(&mut matrix, &mut drbg) {
+        crate::catlog!("boot: cancel held, menu polled without the kernel");
+        menu::run(menu::Session {
+            gate: &gate,
+            login: &mut login,
+            panel: &mut panel,
+            matrix: &mut matrix,
+            drbg: &mut drbg,
+            report: &report,
+            no_seed,
+            pool: pool.as_mut(),
+        })
+    }
+    crate::catlog!("boot: menu as a kernel task");
+    crate::ktest::start_menu(
+        &gate,
+        &mut login,
+        &mut panel,
+        &mut matrix,
+        &mut drbg,
+        &report,
+        pool.as_mut(),
+    )
+}
+
+/// Whether cancel is down right now, sampled for long enough for the keypad's debounce to
+/// settle on a key that was already held when sampling began.
+fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::HmacDrbg) -> bool {
+    use catcard_ui::keypad::{Event, KEYS, Key};
+    // A fresh scanner reads a key that is already down as a new press, which is exactly the
+    // question here.
+    let mut pad = keypad::Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    // SAFETY: reads RCC only.
+    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+    for _ in 0..20 {
+        pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if keys.contains(&Key::Cancel) {
+            return true;
+        }
+        catcard_hal::dwt::delay_cycles(10 * per_ms);
+    }
+    false
 }
 
 /// Ask about a staged firmware image.

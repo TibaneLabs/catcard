@@ -388,19 +388,35 @@ pub fn run_ui(
     // from choosing this item as a brand-new press on the main menu.
     crate::menu::wait_for_release(ui);
     crate::catlog!("ktest: the menu as a kernel task");
+    start_menu(gate, login, ui.panel, ui.matrix, ui.drbg, report, pool)
+}
 
+/// Start the kernel with the menu, USB and a heartbeat as its tasks. Never returns.
+///
+/// Boot calls this once the PIN is in; Debug -> Kernel UI calls it from a running menu.
+/// Either way the caller's frame is abandoned, not unwound -- see [`run_ui`] for why the
+/// handed-over objects stay valid.
+pub fn start_menu(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    matrix: &mut crate::keypad::GpioMatrix,
+    drbg: &mut catcard_entropy::HmacDrbg,
+    report: &crate::BootReport,
+    pool: Option<&mut catcard_entropy::EntropyPool>,
+) -> ! {
     // SAFETY: reads RCC.
     let hclk = unsafe { catcard_hal::clock::hclk_hz() };
 
     // SAFETY: nothing is scheduling yet; each stack belongs to one task and no entry
-    // returns. The handles outlive the program for the reason given above.
+    // returns. The handles outlive the program for the reason given on `run_ui`.
     unsafe {
         *core::ptr::addr_of_mut!(UI_GATE) = Some(*gate);
         *core::ptr::addr_of_mut!(UI_HANDLES) = Some(UiHandles {
             login: core::ptr::from_mut(login),
-            panel: core::ptr::from_mut(&mut *ui.panel),
-            matrix: core::ptr::from_mut(&mut *ui.matrix),
-            drbg: core::ptr::from_mut(&mut *ui.drbg),
+            panel: core::ptr::from_mut(panel),
+            matrix: core::ptr::from_mut(matrix),
+            drbg: core::ptr::from_mut(drbg),
             report: core::ptr::from_ref(report),
             pool: pool.map(core::ptr::from_mut),
         });
@@ -478,13 +494,23 @@ extern "C" fn ui_task() -> ! {
 /// A second task that logs is also the test of the log itself: the menu logs constantly, and
 /// before `write_fmt` masked its copy into the ring, two tasks logging could interleave.
 extern "C" fn beat_task() -> ! {
+    // Once five seconds in, then every five minutes -- and at once if a stack overflows.
+    // Every five seconds was right for proving the kernel under Debug, but with the kernel
+    // running from boot it filled the 2 KB log ring in a few minutes and pushed out the
+    // lines anyone reading the log was after.
+    const FIRST_MS: u32 = 5_000;
+    const EVERY_MS: u32 = 300_000;
     let mut last = 0u32;
+    let mut due = FIRST_MS;
+    let mut overflow_logged = false;
     loop {
         let now = catcard_kernel::ticks();
-        if now.wrapping_sub(last) >= 5000 {
+        let id = catcard_kernel::TaskId;
+        let all_ok = (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
+        if now.wrapping_sub(last) >= due || (!all_ok && !overflow_logged) {
             last = now;
-            let id = catcard_kernel::TaskId;
-            let all_ok = (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
+            due = EVERY_MS;
+            overflow_logged = !all_ok;
             crate::catlog!(
                 "kui t={} sw={} rec={} ui={}/{} beat={}/{} usb={}/{} {}",
                 now,
