@@ -2543,24 +2543,20 @@ fn qr_faces() -> (
 
 /// Show an address as a QR code beside the address itself, until a key is pressed.
 ///
-/// The QR is for a wallet to scan; the text beside it, in blocks of four, is for a person
-/// to compare against what their wallet shows. Both carry the same characters: the text is
-/// the QR's payload minus the scheme, upper-cased bech32 included, so what is read out loud
-/// is what was encoded.
+/// The QR is for a wallet to scan; the text beside it, in blocks of four, is for a person to
+/// compare against what their wallet shows. Both carry the same characters: the text is the
+/// payload minus the BIP-21 scheme, upper-cased bech32 included, so what is read out loud is
+/// what was encoded. [`address::qr_payload`] decides the payload's shape -- upper-case and
+/// bare for bech32, `bitcoin:` and untouched for base58.
 ///
-/// Encoding is `anyd`'s heap-free path, so nothing here allocates. What it encodes is
-/// chosen by measuring rather than by rule, because every choice trades against how large
-/// each module can be drawn on this panel:
-///
-/// - **the BIP-21 `BITCOIN:` scheme**, which lets a phone's camera offer to open a wallet,
-///   is included unless it costs a version -- on a 64-row panel that is the difference
-///   between two pixels a module and one;
-/// - **error correction M**, dropping to L only where M would leave one pixel a module and
-///   L would not.
+/// Encoding is `anyd`'s heap-free path, so nothing here allocates. The one choice left is
+/// error correction: M, dropping to L only where M would leave one pixel a module on this
+/// panel and L would not. On a 64-row OLED that is the difference between a symbol a phone
+/// reads and a grey square.
 ///
 /// Version 8 is the largest symbol the buffers hold: 49 modules, already more than a 64-row
 /// panel can draw at one pixel each and far more than any address needs.
-fn address_qr(ui: &mut Ui<'_>, address: &str) {
+fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::AddressKind) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_wallet::address;
 
@@ -2570,24 +2566,20 @@ fn address_qr(ui: &mut Ui<'_>, address: &str) {
     };
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
-    // The text beside the symbol: the address as the QR spells it, without the scheme.
-    let mut shown = [0u8; address::MAX_QR_PAYLOAD];
-    let Some(shown) = address::qr_payload(address, false, &mut shown) else {
+    let mut payload = [0u8; address::MAX_QR_PAYLOAD];
+    let Some(payload) = address::qr_payload(address, kind, &mut payload) else {
         message(ui.panel, "QR", "address not encodable", "");
         wait_for_any_key(ui);
         return;
     };
+    let shown = address::qr_address(payload);
 
     let mut scratch = [0u8; BUF];
     let mut storage = [0u8; BUF];
     let encoder = QrEncoder::new();
-    // What this arrangement would give: pixels per module, or 0 if it does not encode or
-    // does not fit. Scoped so the two buffers are reused rather than held all at once.
-    let pixels = |scheme: bool, level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
-        let mut buf = [0u8; address::MAX_QR_PAYLOAD];
-        let Some(payload) = address::qr_payload(address, scheme, &mut buf) else {
-            return 0;
-        };
+    // Pixels per module this level would get, or 0 if it does not encode or does not fit.
+    // Scoped so the two buffers are reused rather than held twice over.
+    let pixels = |level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
         encoder
             .encode_text_into(payload.as_bytes(), level, scratch, storage)
             .ok()
@@ -2604,29 +2596,13 @@ fn address_qr(ui: &mut Ui<'_>, address: &str) {
             .map_or(0, |fit| fit.scale)
     };
 
-    // Preference order: the scheme, then error correction, then nothing else. A later
-    // candidate only wins by drawing a bigger module than everything before it.
-    let mut best = (true, EcLevel::M, 0usize);
-    for (scheme, level) in [
-        (true, EcLevel::M),
-        (false, EcLevel::M),
-        (true, EcLevel::L),
-        (false, EcLevel::L),
-    ] {
-        let scale = pixels(scheme, level, &mut scratch, &mut storage);
-        if scale > best.2 {
-            best = (scheme, level, scale);
-        }
-        // Two pixels a module is as much as the cramped panel ever offers, and the first
-        // candidate to reach it is the most preferred one that does.
-        if best.2 > 1 && best.1 == EcLevel::M {
-            break;
-        }
-    }
-    let (scheme, level, _) = best;
+    let medium = pixels(EcLevel::M, &mut scratch, &mut storage);
+    let level = if medium > 1 || pixels(EcLevel::L, &mut scratch, &mut storage) <= medium {
+        EcLevel::M
+    } else {
+        EcLevel::L
+    };
 
-    let mut buf = [0u8; address::MAX_QR_PAYLOAD];
-    let payload = address::qr_payload(address, scheme, &mut buf).unwrap_or(shown);
     let Ok((grid, _meta)) =
         encoder.encode_text_into(payload.as_bytes(), level, &mut scratch, &mut storage)
     else {
@@ -2845,7 +2821,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     // watch-only wallet, without reading out 42 characters.
                     Key::Confirm => {
                         if let Some(n) = addr {
-                            address_qr(ui, core::str::from_utf8(&buf[..n]).unwrap_or(""));
+                            address_qr(ui, core::str::from_utf8(&buf[..n]).unwrap_or(""), kind);
                         }
                         break 'wait;
                     }

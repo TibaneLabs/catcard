@@ -48,6 +48,15 @@ impl AddressKind {
     ///
     /// Advisory only: nothing here infers the script type from a path, because that
     /// inference is exactly how a wallet ends up showing an unspendable address.
+    /// Whether this type renders as bech32/bech32m rather than Base58Check.
+    ///
+    /// The QR payload turns on this and not on the look of the string: base58 is a
+    /// mixed-case alphabet, so "does it contain an upper-case letter" is a guess that is
+    /// almost always right and catastrophic when it is not.
+    pub const fn is_bech32(self) -> bool {
+        matches!(self, AddressKind::P2wpkh | AddressKind::P2tr)
+    }
+
     pub const fn bip44_purpose(self) -> u32 {
         match self {
             AddressKind::P2pkh => 44,
@@ -218,50 +227,56 @@ pub fn encode(
     }
 }
 
-/// The BIP-21 scheme, upper-cased.
-///
-/// URI schemes are case-insensitive (RFC 3986 §3.1), and upper case is what keeps the whole
-/// payload inside QR's alphanumeric character set -- `:` is in it, lower-case letters are
-/// not. A lower-case `bitcoin:` would push the symbol into byte mode and cost a version.
-pub const QR_SCHEME: &str = "BITCOIN:";
+/// The BIP-21 scheme, as it is written in the standard.
+pub const QR_SCHEME: &str = "bitcoin:";
 
 /// Longest QR payload: the scheme plus the longest address.
 pub const MAX_QR_PAYLOAD: usize = QR_SCHEME.len() + MAX_ADDRESS_LEN;
 
-/// The form of `address` to put in a QR code, with or without the BIP-21 scheme.
+/// The form of `address` to put in a QR code.
 ///
-/// Bech32 and bech32m are upper-cased, which is what BIP-173 asks for in QR codes and for
-/// the same reason as the scheme: upper case is in QR's alphanumeric set, so `BC1...`
-/// encodes at 5.5 bits a character instead of 8, typically a whole version smaller.
+/// Two shapes, because the two address encodings have opposite constraints:
 ///
-/// Base58 addresses are **not** touched: there the case carries the checksum, and an
-/// upper-cased legacy address is not the same address, it is an invalid one.
+/// - **Bech32 and bech32m** (`bc1...`) are upper-cased and carry **no scheme**. Upper case
+///   is what BIP-173 asks for in QR codes: it is in QR's alphanumeric character set, so the
+///   address encodes at 5.5 bits a character instead of 8 -- typically a whole version
+///   smaller, which on a 64-row panel is the difference between two pixels a module and one.
+///   A `bitcoin:` prefix would undo exactly that, since lower-case letters are not in the
+///   set and one of them drops the whole payload into byte mode.
+/// - **Base58** (`1...`, `3...`) keeps its case, because there the case carries the
+///   checksum and an upper-cased legacy address is not the same address but an invalid one.
+///   That payload is in byte mode whatever we do, so the `bitcoin:` scheme is free, and it
+///   is what lets a phone's camera recognise the code as a payment rather than as text.
 ///
 /// `None` if the result does not fit in `out` or the address is not ASCII. Refusing beats
 /// truncating: a shortened address rendered as a QR is a payment nobody receives.
 pub fn qr_payload<'a>(
     address: &str,
-    scheme: bool,
+    kind: AddressKind,
     out: &'a mut [u8; MAX_QR_PAYLOAD],
 ) -> Option<&'a str> {
     let bytes = address.as_bytes();
-    let head = if scheme { QR_SCHEME.len() } else { 0 };
-    if bytes.is_empty() || !address.is_ascii() || head + bytes.len() > out.len() {
+    if bytes.is_empty() || !address.is_ascii() {
+        return None;
+    }
+    let bech32 = kind.is_bech32();
+    let head = if bech32 { 0 } else { QR_SCHEME.len() };
+    if head + bytes.len() > out.len() {
         return None;
     }
     out[..head].copy_from_slice(&QR_SCHEME.as_bytes()[..head]);
     let end = head + bytes.len();
     out[head..end].copy_from_slice(bytes);
-    // Bech32 by shape, not by prefix: lower-case letters and digits only. Anything with an
-    // upper-case letter in it is either already upper-case bech32 or base58, and both are
-    // left exactly as they are.
-    if bytes
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-    {
-        out[head..end].make_ascii_uppercase();
+    if bech32 {
+        out[..end].make_ascii_uppercase();
     }
     core::str::from_utf8(&out[..end]).ok()
+}
+
+/// `payload` without the BIP-21 scheme: what a person reads off the screen and compares
+/// against their wallet, which is the address and never the URI around it.
+pub fn qr_address(payload: &str) -> &str {
+    payload.strip_prefix(QR_SCHEME).unwrap_or(payload)
 }
 
 #[cfg(feature = "std")]
@@ -282,21 +297,27 @@ pub fn encode_string(
 mod qr_payload_tests {
     use super::*;
 
-    fn payload(address: &str, scheme: bool) -> Option<std::string::String> {
+    fn payload(address: &str, kind: AddressKind) -> Option<std::string::String> {
         let mut out = [0u8; MAX_QR_PAYLOAD];
-        qr_payload(address, scheme, &mut out).map(std::string::String::from)
+        qr_payload(address, kind, &mut out).map(std::string::String::from)
     }
 
     #[test]
-    fn bech32_is_upper_cased_for_the_qr_alphanumeric_set() {
+    fn bech32_is_upper_cased_and_carries_no_scheme() {
+        // The scheme would cost what the upper-casing just bought: one lower-case letter
+        // drops the whole payload out of QR's alphanumeric set and into byte mode.
         assert_eq!(
-            payload("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", false).as_deref(),
+            payload(
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+                AddressKind::P2wpkh
+            )
+            .as_deref(),
             Some("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
         );
         assert_eq!(
             payload(
                 "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
-                false
+                AddressKind::P2tr
             )
             .as_deref(),
             Some("BC1P0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQZK5JJ0")
@@ -304,34 +325,38 @@ mod qr_payload_tests {
     }
 
     #[test]
-    fn base58_keeps_its_case_because_the_case_is_the_address() {
-        // Upper-casing a base58 address does not produce a different rendering of the same
-        // address, it produces a string that fails its own checksum -- and a QR of it is a
-        // receive address nobody can pay.
-        for legacy in [
-            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
-            "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+    fn base58_keeps_its_case_and_gets_the_scheme() {
+        // Case is the checksum here, so nothing is touched -- and the payload is in byte
+        // mode either way, which is what makes the scheme free.
+        for (legacy, kind) in [
+            ("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", AddressKind::P2pkh),
+            (
+                "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+                AddressKind::P2shP2wpkh,
+            ),
         ] {
-            assert_eq!(payload(legacy, false).as_deref(), Some(legacy));
-            assert_eq!(
-                payload(legacy, true).as_deref(),
-                Some(std::format!("BITCOIN:{legacy}").as_str())
-            );
+            let got = payload(legacy, kind).unwrap();
+            assert_eq!(got, std::format!("bitcoin:{legacy}"));
+            assert_eq!(qr_address(&got), legacy);
         }
-    }
-
-    #[test]
-    fn the_scheme_goes_in_front_without_disturbing_the_address() {
-        assert_eq!(
-            payload("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", true).as_deref(),
-            Some("BITCOIN:BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
-        );
     }
 
     #[test]
     fn an_already_upper_cased_bech32_is_left_alone() {
         let upper = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4";
-        assert_eq!(payload(upper, false).as_deref(), Some(upper));
+        assert_eq!(payload(upper, AddressKind::P2wpkh).as_deref(), Some(upper));
+    }
+
+    #[test]
+    fn what_is_read_out_is_the_address_without_the_uri_around_it() {
+        assert_eq!(
+            qr_address("bitcoin:1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"),
+            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+        );
+        assert_eq!(
+            qr_address("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"),
+            "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"
+        );
     }
 }
 
