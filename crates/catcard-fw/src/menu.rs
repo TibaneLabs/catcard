@@ -37,8 +37,8 @@ use catcard_ui::Mono128x64;
 use catcard_ui::font::misc4x6;
 use catcard_ui::keypad::{Event, KEYS, Key};
 
-use crate::ui::Ui;
 use crate::keypad::Keypad;
+use crate::ui::Ui;
 use catcard_ui::text::draw_text;
 
 use crate::{BootReport, display, keypad::GpioMatrix, usbtask};
@@ -276,7 +276,12 @@ pub fn run(session: Session<'_>) -> ! {
     // One bundle for the session. Every screen takes this instead of four
     // separate borrows, and the keypad inside it is the single scanner whose
     // retained state is what makes a still-held key read as held.
-    let mut ui = Ui { panel, pad: &mut pad, matrix, drbg };
+    let mut ui = Ui {
+        panel,
+        pad: &mut pad,
+        matrix,
+        drbg,
+    };
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
@@ -287,7 +292,11 @@ pub fn run(session: Session<'_>) -> ! {
             // other screen advances the DRBG just by being shown.
             if screen == Screen::PrngStatus {
                 let mut b = [0u8; 4];
-                v.drbg_sample = ui.drbg.generate(&mut b).ok().map(|()| u32::from_be_bytes(b));
+                v.drbg_sample = ui
+                    .drbg
+                    .generate(&mut b)
+                    .ok()
+                    .map(|()| u32::from_be_bytes(b));
             }
             // Snapshot the DRBG's counters so the PRNG-status screen shows the current
             // numbers; cheap and side-effect-free on any other screen.
@@ -298,7 +307,6 @@ pub fn run(session: Session<'_>) -> ! {
 
         let _ = usbtask::pump();
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
-
 
         // The RTC screen redraws on a clock rather than on input: it is showing something
         // that changes on its own, and the whole question it answers is whether it does.
@@ -502,11 +510,19 @@ struct Action {
 /// leaves on a key -- no routine to call.
 fn action_for(screen: Screen) -> Option<Action> {
     fn to(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
-        Action { run, back, seed_may_change: false }
+        Action {
+            run,
+            back,
+            seed_may_change: false,
+        }
     }
     /// For the three that can leave the device holding a different wallet than before.
     fn reseeds(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
-        Action { run, back, seed_may_change: true }
+        Action {
+            run,
+            back,
+            seed_may_change: true,
+        }
     }
 
     Some(match screen {
@@ -555,7 +571,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
-        Screen::FactoryReset => to(|a| factory_reset_screen(a.gate, a.login, a.ui), Screen::Debug),
+        Screen::FactoryReset => to(
+            |a| factory_reset_screen(a.gate, a.login, a.ui),
+            Screen::Debug,
+        ),
         _ => return None,
     })
 }
@@ -1094,7 +1113,11 @@ fn usb_screen(panel: &mut display::Panel) {
     let _ = write!(
         l,
         "rst {resets} re {reinits} arm {rearms}{}",
-        if usbtask::has_pending() { "  staged" } else { "" }
+        if usbtask::has_pending() {
+            "  staged"
+        } else {
+            ""
+        }
     );
     let _ = lines.push(l);
 
@@ -1512,11 +1535,7 @@ fn rtc_screen(panel: &mut display::Panel, w: &RtcWatch) {
     info(panel, "RTC", &lines);
 }
 
-fn prng_screen(
-    panel: &mut display::Panel,
-    s: catcard_entropy::DrbgStats,
-    sample: Option<u32>,
-) {
+fn prng_screen(panel: &mut display::Panel, s: catcard_entropy::DrbgStats, sample: Option<u32>) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
 
     let mut l = Line::new();
@@ -1591,11 +1610,7 @@ fn colours_screen(panel: &mut display::Panel) {
 /// The approval is the same question the USB path asks, in the same words, and the
 /// install is the same two calls: `commit` publishes the recovery header, then the
 /// bootloader does the rest on the next boot.
-fn install_from_card(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) {
+fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use crate::sdupgrade::{Outcome, stage_from_card};
 
     // Pick the firmware from the card by browsing for a .dfu, rather than guessing at a
@@ -1656,9 +1671,7 @@ fn install_from_card(
 /// Blocking, and it says which step it stopped at rather than "failed", so a bad card, a
 /// full card and a filesystem it cannot mount tell themselves apart. Nothing here is
 /// irreversible -- at worst it leaves a short file behind.
-fn save_log_to_card(
-    ui: &mut Ui<'_>,
-) {
+fn save_log_to_card(ui: &mut Ui<'_>) {
     crate::catlog!("sd: saving log");
     message(ui.panel, "Saving log", "please wait", "");
 
@@ -1764,12 +1777,7 @@ fn pop_segment(path: &mut heapless::String<BROWSE_PATH_MAX>) {
 
 /// Show a file's details, and -- when picking -- offer to choose it. Returns whether the
 /// owner confirmed (chose it).
-fn file_info(
-    ui: &mut Ui<'_>,
-    name: &str,
-    len: u64,
-    pick: bool,
-) -> bool {
+fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> bool {
     use catcard_ui::scroll::Line as DLine;
     let mut sz = Line::new();
     let _ = write!(sz, "{len} bytes");
@@ -1780,10 +1788,7 @@ fn file_info(
     if pick {
         let _ = lines.push(DLine::body("y = select this").centered());
     }
-    matches!(
-        show_doc(ui, &lines, false, false),
-        DocExit::Confirmed
-    )
+    matches!(show_doc(ui, &lines, false, false), DocExit::Confirmed)
 }
 
 /// A generic microSD file browser.
@@ -2104,15 +2109,17 @@ fn draw_se_view(
 }
 
 /// Live RNG analyzer. Blocks, driving the panel itself; `x` (or the left arrow) exits.
-fn analyze_rng(
-    gate: &Callgate,
-    ui: &mut Ui<'_>,
-) {
+fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
     use catcard_callgate::abi::RngSource;
 
     if !catcard_board::BOARD.has_callgate_se_rng {
         crate::catlog!("rng: no SE RNG on this board");
-        message(ui.panel, "Analyze RNG", "no SE RNG here", "any key to go back");
+        message(
+            ui.panel,
+            "Analyze RNG",
+            "no SE RNG here",
+            "any key to go back",
+        );
         wait_for_any_key(ui);
         return;
     }
@@ -2237,17 +2244,19 @@ fn analyze_rng(
 /// wallet. Nothing is stored; it lets the owner see the elements and the chip TRNG
 /// produce fresh, varied words, which is the whole point of this project. Shown through
 /// the same large-font, emissions-scrambled pager the real backup uses.
-fn view_trng_words(
-    gate: &Callgate,
-    ui: &mut Ui<'_>,
-) {
+fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
     use catcard_callgate::abi::RngSource;
     use catcard_entropy::{EntropyPool, Source};
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
 
     if !catcard_board::BOARD.has_callgate_se_rng {
-        message(ui.panel, "TRNG words", "no SE RNG here", "any key to go back");
+        message(
+            ui.panel,
+            "TRNG words",
+            "no SE RNG here",
+            "any key to go back",
+        );
         wait_for_any_key(ui);
         return;
     }
@@ -2309,7 +2318,11 @@ fn view_trng_words(
         }
 
         let mut counts = Line::new();
-        let _ = write!(counts, "SE1 {} SE2 {} S32 {}", bytes[0], bytes[1], chip_bytes);
+        let _ = write!(
+            counts,
+            "SE1 {} SE2 {} S32 {}",
+            bytes[0], bytes[1], chip_bytes
+        );
         let mut bits = Line::new();
         let _ = write!(bits, "{} bits", pool.credited_bits());
         message(ui.panel, "Reading TRNGs", &counts, &bits);
@@ -2317,7 +2330,12 @@ fn view_trng_words(
     }
 
     if pool.check().is_err() {
-        message(ui.panel, "TRNG words", "TRNG check failed", "any key to go back");
+        message(
+            ui.panel,
+            "TRNG words",
+            "TRNG check failed",
+            "any key to go back",
+        );
         wait_for_any_key(ui);
         return;
     }
@@ -2327,12 +2345,19 @@ fn view_trng_words(
     // and the same encoding a wallet goes through, and one rule is easier to keep than two.
     let mnemonic = crate::keywork::run(|kw| {
         let drawn = pool.draw(&mut entropy);
-        let m = drawn.ok().and_then(|()| Mnemonic::from_entropy(&entropy, kw).ok());
+        let m = drawn
+            .ok()
+            .and_then(|()| Mnemonic::from_entropy(&entropy, kw).ok());
         entropy.zeroize();
         m
     });
     let Some(mnemonic) = mnemonic else {
-        message(ui.panel, "TRNG words", "could not draw", "any key to go back");
+        message(
+            ui.panel,
+            "TRNG words",
+            "could not draw",
+            "any key to go back",
+        );
         wait_for_any_key(ui);
         return;
     };
@@ -2342,7 +2367,11 @@ fn view_trng_words(
     let texts = word_texts(&mnemonic);
     let mut lines: heapless::Vec<catcard_ui::scroll::Line, 27> = heapless::Vec::new();
     let _ = lines.push(catcard_ui::scroll::Line::title("TRNG words"));
-    let _ = lines.push(catcard_ui::scroll::Line::body("not saved").small().centered());
+    let _ = lines.push(
+        catcard_ui::scroll::Line::body("not saved")
+            .small()
+            .centered(),
+    );
     for s in &texts {
         let _ = lines.push(catcard_ui::scroll::Line::body(s).secret());
     }
@@ -2424,11 +2453,7 @@ fn receive_chain(
     Some(master.derive_path(&path, kw).ok()?.to_extended_pub(kw))
 }
 
-fn address_explorer(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) {
+fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_callgate::pin::bip39_entropy;
     use catcard_wallet::address;
     use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
@@ -2789,16 +2814,17 @@ fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
 ///
 /// [`Source::UserKeypad`]: catcard_entropy::Source::UserKeypad
 /// [`Source::UserTiming`]: catcard_entropy::Source::UserTiming
-fn key_mash(
-    ui: &mut Ui<'_>,
-    pool: &mut catcard_entropy::EntropyPool,
-) {
+fn key_mash(ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
     let start_bits = pool.credited_bits();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         let mut n = Line::new();
-        let _ = write!(n, "{} bits added", pool.credited_bits().saturating_sub(start_bits));
+        let _ = write!(
+            n,
+            "{} bits added",
+            pool.credited_bits().saturating_sub(start_bits)
+        );
         message(ui.panel, "Add entropy", &n, "digits add, y=done");
 
         wait_for_release(ui);
@@ -2935,10 +2961,7 @@ fn collect_rolls(
 /// has already met its policy from the hardware TRNGs (or refused outright), so none of
 /// these can rescue a bad device. They only ever top up, and let a distrustful owner mix
 /// in material the firmware could not have predicted.
-fn add_user_entropy(
-    ui: &mut Ui<'_>,
-    pool: &mut catcard_entropy::EntropyPool,
-) {
+fn add_user_entropy(ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
@@ -3038,7 +3061,12 @@ fn new_seed(
 
     // No pool means it never met its policy at boot. That is a refusal.
     let Some(pool) = pool else {
-        message(ui.panel, "No entropy", "the pool missed its", "policy at boot");
+        message(
+            ui.panel,
+            "No entropy",
+            "the pool missed its",
+            "policy at boot",
+        );
         wait_for_any_key(ui);
         return;
     };
@@ -3384,10 +3412,7 @@ fn word_matches(word: &str, typed: &str) -> bool {
 ///
 /// On an empty word, pressing `y` twice returns [`WordPick::Finish`] -- the "I have entered
 /// all my words" signal, since the count is not asked up front.
-fn read_word(
-    ui: &mut Ui<'_>,
-    num: usize,
-) -> WordPick {
+fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
     use catcard_wallet::bip39::wordlist::ENGLISH;
     // Enough to hold the candidates once a couple of letters have narrowed the list; the
     // pick screen is only offered when the true count is within this.
@@ -3510,7 +3535,10 @@ fn read_word(
         let mut lines: heapless::Vec<catcard_ui::scroll::Line, CAND_MAX> = heapless::Vec::new();
         let _ = lines.push(catcard_ui::scroll::Line::title("Pick the word"));
         for (pos, &ci) in cands.iter().enumerate() {
-            let _ = lines.push(catcard_ui::scroll::Line::item(ENGLISH[ci as usize], pos as u32));
+            let _ = lines.push(catcard_ui::scroll::Line::item(
+                ENGLISH[ci as usize],
+                pos as u32,
+            ));
         }
         match show_doc(ui, &lines, false, false) {
             DocExit::Selected(pos) => return WordPick::Word(cands[pos as usize]),
@@ -3546,10 +3574,7 @@ const EDIT_ADD: u32 = u32::MAX;
 const EDIT_CANCEL: u32 = u32::MAX - 1;
 
 /// Show the entered words as a menu so the owner can fix one, add another, or discard.
-fn edit_menu(
-    ui: &mut Ui<'_>,
-    idx: &[u16],
-) -> EditChoice {
+fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
     use catcard_ui::scroll::Line as DLine;
     use catcard_wallet::bip39::wordlist::ENGLISH;
 
@@ -3587,11 +3612,7 @@ fn edit_menu(
 ///
 /// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
 /// reason: a slot that did not keep the words must be reported, not assumed.
-fn import_seed(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) {
+fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
     use zeroize::Zeroize;
 
@@ -3602,12 +3623,22 @@ fn import_seed(
 
     // Overwriting an in-use wallet is the destructive case; this is the only warning.
     if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
-        ask(ui.panel, "Wallet exists", "a restore DESTROYS", "the one stored now");
+        ask(
+            ui.panel,
+            "Wallet exists",
+            "a restore DESTROYS",
+            "the one stored now",
+        );
         if !confirmed(ui) {
             return;
         }
     }
-    message(ui.panel, "Import seed", "enter each word,", "then y y to finish");
+    message(
+        ui.panel,
+        "Import seed",
+        "enter each word,",
+        "then y y to finish",
+    );
     wait_for_any_key(ui);
 
     let mut idx: heapless::Vec<u16, 24> = heapless::Vec::new();
@@ -3662,8 +3693,7 @@ fn import_seed(
                     }
                     EditChoice::Add => {
                         if idx.len() < 24
-                            && let WordPick::Word(i) =
-                                read_word(ui, idx.len() + 1)
+                            && let WordPick::Word(i) = read_word(ui, idx.len() + 1)
                         {
                             let _ = idx.push(i);
                         }
@@ -3731,10 +3761,7 @@ fn import_seed(
 /// than placed — the correct one must not sit in a predictable slot.
 ///
 /// Returns false on a wrong answer or a cancel; the caller stores nothing either way.
-fn quiz(
-    ui: &mut Ui<'_>,
-    m: &catcard_wallet::bip39::Mnemonic,
-) -> bool {
+fn quiz(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) -> bool {
     use catcard_wallet::bip39::wordlist::{ENGLISH, WORD_COUNT};
     const ASKS: usize = 3;
     const CHOICES: usize = 3;
@@ -3789,7 +3816,12 @@ fn quiz(
                 // again, and nothing is stored yet, so it costs only time.
                 Choice::Pick(_) | Choice::Cancel => return false,
                 Choice::Skip => {
-                    ask(ui.panel, "Skip the check?", "store without", "confirming words?");
+                    ask(
+                        ui.panel,
+                        "Skip the check?",
+                        "store without",
+                        "confirming words?",
+                    );
                     if confirmed(ui) {
                         return true;
                     }
@@ -3812,10 +3844,7 @@ enum Choice {
 }
 
 /// Wait for one of `n` numbered choices, a skip (`y`), or a cancel (`x`).
-fn read_choice(
-    ui: &mut Ui<'_>,
-    n: usize,
-) -> Choice {
+fn read_choice(ui: &mut Ui<'_>, n: usize) -> Choice {
     wait_for_release(ui);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -3841,15 +3870,18 @@ fn read_choice(
 /// Chosen from the main menu's "Ready to Sign" when a wallet exists. For now this runs the
 /// `.psbt` file picker and acknowledges the choice; loading, parsing, verifying, showing
 /// the transaction, confirming and signing land as the PSBT support is wired in.
-fn sign_psbt(
-    ui: &mut Ui<'_>,
-) {
+fn sign_psbt(ui: &mut Ui<'_>) {
     let Some(path) = browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
         return;
     };
     // TODO: load the file into scratch, parse the PSBT, check it is ours and not already
     // signed, show the transaction, confirm, sign each input, and write it back.
-    message(ui.panel, "PSBT selected", path.as_str(), "signing coming soon");
+    message(
+        ui.panel,
+        "PSBT selected",
+        path.as_str(),
+        "signing coming soon",
+    );
     wait_any_key(ui);
 }
 
@@ -3857,9 +3889,7 @@ fn sign_psbt(
 /// filesystem its capacity tier calls for -- FAT16 up to 2 GB, FAT32 up to 32 GB, exFAT
 /// above. This erases everything on the card, so it asks twice, and shows what it is about
 /// to write first.
-fn format_sd(
-    ui: &mut Ui<'_>,
-) {
+fn format_sd(ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Sdmmc;
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user and
@@ -3890,11 +3920,21 @@ fn format_sd(
     let fs = catcard_sd::format::standard_fs(card.blocks as u64);
     let mut summary = Line::new();
     let _ = write!(summary, "{} MiB  {}", card.mib(), fs.name());
-    ask(ui.panel, "Format SD card?", summary.as_str(), "ERASES everything");
+    ask(
+        ui.panel,
+        "Format SD card?",
+        summary.as_str(),
+        "ERASES everything",
+    );
     if !confirmed(ui) {
         return;
     }
-    ask(ui.panel, "Really format?", "all data is lost", "cannot be undone");
+    ask(
+        ui.panel,
+        "Really format?",
+        "all data is lost",
+        "cannot be undone",
+    );
     if !confirmed(ui) {
         return;
     }
@@ -3915,12 +3955,18 @@ fn format_sd(
         Err(catcard_sd::format::FormatError::TooSmall) => {
             message(ui.panel, "Not formatted", "card too small", "press a key")
         }
-        Err(catcard_sd::format::FormatError::Io(_)) => {
-            message(ui.panel, "Not formatted", "card write failed", "press a key")
-        }
-        Err(catcard_sd::format::FormatError::Layout(_)) => {
-            message(ui.panel, "Not formatted", "size not supported", "press a key")
-        }
+        Err(catcard_sd::format::FormatError::Io(_)) => message(
+            ui.panel,
+            "Not formatted",
+            "card write failed",
+            "press a key",
+        ),
+        Err(catcard_sd::format::FormatError::Layout(_)) => message(
+            ui.panel,
+            "Not formatted",
+            "size not supported",
+            "press a key",
+        ),
     }
     wait_any_key(ui);
 }
@@ -3937,11 +3983,7 @@ fn format_sd(
 /// The PIN survives. This erases the wallet, not the device.
 ///
 /// Returns whether the slot is empty afterwards.
-fn wipe_seed(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) -> bool {
+fn wipe_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -> bool {
     use zeroize::Zeroize;
 
     // Nothing to destroy is worth saying, rather than going through the motions and
@@ -4038,10 +4080,7 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
 /// Paged rather than flashed past: ENTER moves forward and only means "done" once the
 /// last word has been on screen. The previous version advanced on *any* key, which is
 /// how a held key walked through a page of someone's backup before they could read it.
-fn show_words(
-    ui: &mut Ui<'_>,
-    m: &catcard_wallet::bip39::Mnemonic,
-) {
+fn show_words(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) {
     let texts = word_texts(m);
     let mut lines: heapless::Vec<catcard_ui::scroll::Line, 26> = heapless::Vec::new();
     let _ = lines.push(catcard_ui::scroll::Line::title("Write these down"));
@@ -4554,9 +4593,7 @@ fn wait_any_key(ui: &mut Ui<'_>) {
 /// is gone until it leaves -- and serves Bulk-Only Transport against the card. On `x` it
 /// switches its identity back and returns. Reached only from `Utils`, which is behind the
 /// PIN, so the card is never exposed on a locked device.
-fn usb_drive(
-    ui: &mut Ui<'_>,
-) {
+fn usb_drive(ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Sdmmc;
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
