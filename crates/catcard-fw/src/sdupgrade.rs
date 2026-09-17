@@ -37,6 +37,22 @@ const CANDIDATES: &[&str] = &[
     "/FIRMWARE.DFU",
 ];
 
+/// The reject, in the few words a screen has. The log carries the whole of it.
+fn describe(why: catcard_upgrade::Reject) -> &'static str {
+    use catcard_upgrade::Reject as R;
+    match why {
+        R::Length { .. } => "wrong size for this board",
+        R::TooBigToStage { .. } => "too big to stage",
+        R::OutOfOrder { .. } | R::PastEnd { .. } | R::Incomplete { .. } => "transfer went wrong",
+        R::NotAnImage => "no firmware header",
+        R::BadHeader(_) => "header is wrong",
+        R::WrongBoard { .. } => "built for another board",
+        R::BadSignature => "signature does not verify",
+        R::StorageFault { .. } => "staging area failed",
+        R::NoStagingArea => "nowhere to stage it",
+    }
+}
+
 /// What an attempt produced.
 pub enum Outcome {
     /// An image is staged and inspected. Nothing is installed: the caller shows the
@@ -163,6 +179,11 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
     let running = crate::own_header();
     match staged.inspect(running.as_ref()) {
         Ok(approval) => Outcome::Offered(staged, approval),
-        Err(_) => Outcome::Failed("image refused"),
+        Err(why) => {
+            // Which check refused matters: "refused" alone has already sent one person
+            // hunting through a log for a reason that was never written down.
+            crate::catlog!("sd: image refused: {:?}", why);
+            Outcome::Failed(describe(why))
+        }
     }
 }
