@@ -119,6 +119,15 @@ fn scalar_from_bytes(b: &[u8; 32]) -> Option<Scalar> {
         .filter(|s| !bool::from(s.is_zero()))
 }
 
+/// Whether 32 bytes are a usable private key: not zero, and below the curve order.
+///
+/// BIP-32 and BIP-85 both say to reject the ones that are not and move to the next index,
+/// rather than reduce them into range -- reducing maps two different derivations onto one
+/// key.
+pub fn is_valid_secret(bytes: &[u8; PRIVKEY_LEN]) -> bool {
+    scalar_from_bytes(bytes).is_some()
+}
+
 /// Interpret 32 bytes as a scalar, rejecting values at or above the curve order.
 ///
 /// BIP-32 requires this check. Reducing modulo n instead — which is what a `Reduce`
@@ -169,6 +178,24 @@ impl ExtendedPrivKey {
     }
 
     /// Assemble from already-validated parts. Used by deserialisation.
+    /// A root key straight from a chain code and a secret, as BIP-85's `XPRV` application
+    /// produces: depth, child number and parent fingerprint are all zero, so what comes out
+    /// is a master key in its own right rather than a child of anything.
+    pub fn root_from_parts(
+        network: Network,
+        chain_code: [u8; CHAIN_CODE_LEN],
+        secret: [u8; PRIVKEY_LEN],
+    ) -> Self {
+        Self::from_parts(
+            network,
+            0,
+            [0; FINGERPRINT_LEN],
+            ChildNumber::ZERO,
+            chain_code,
+            secret,
+        )
+    }
+
     pub(crate) fn from_parts(
         network: Network,
         depth: u8,

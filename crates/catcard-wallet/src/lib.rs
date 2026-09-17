@@ -61,6 +61,7 @@ impl KeyWork {
 pub mod address;
 pub mod bip32;
 pub mod bip39;
+pub mod bip85;
 pub mod chain;
 pub mod descriptor;
 pub mod encoding;

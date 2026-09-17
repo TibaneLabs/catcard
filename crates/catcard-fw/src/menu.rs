@@ -104,6 +104,10 @@ enum Screen {
     VerifyAddress,
     /// Sign a typed message with one of this wallet's keys.
     SignMessage,
+    /// Which kind of BIP-85 child to derive.
+    DeriveMenu,
+    /// Derive and show one BIP-85 child.
+    Derive(u8),
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -211,6 +215,7 @@ const UTILS_ITEMS: &[&str] = &[
     "Address Explorer",
     "Verify address",
     "Sign message",
+    "Derive child",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -224,9 +229,20 @@ const UTILS_ITEMS: &[&str] = &[
     "Address Explorer",
     "Verify address",
     "Sign message",
+    "Derive child",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
+];
+
+/// What BIP-85 can derive. The order matches [`crate::derive::Kind`]'s.
+const DERIVE_ITEMS: &[&str] = &[
+    "24 words",
+    "12 words",
+    "XPRV",
+    "WIF key",
+    "Password",
+    "32 bytes hex",
 ];
 
 /// The games in the Games submenu.
@@ -257,6 +273,20 @@ const DEBUG_ITEMS: &[&str] = &[
     "Colours",
     "Factory Reset",
 ];
+
+/// The BIP-85 child a [`DERIVE_ITEMS`] row selects.
+fn derive_kind(which: u8) -> Option<crate::derive::Kind> {
+    use crate::derive::Kind;
+    Some(match which {
+        0 => Kind::Words24,
+        1 => Kind::Words12,
+        2 => Kind::Xprv,
+        3 => Kind::Wif,
+        4 => Kind::Password,
+        5 => Kind::Hex32,
+        _ => return None,
+    })
+}
 
 /// Run the menu. Never returns.
 ///
@@ -469,7 +499,11 @@ pub fn run(session: Session<'_>) -> ! {
             // `if next == Screen::X` blocks, each spelling out `reset_menu` / `screen =` /
             // `break` again -- three chances per action to name the wrong screen, and no
             // way to see the whole set at once.
-            let words = if let Screen::NewSeed(w) = next { w } else { 0 };
+            let words = match next {
+                Screen::NewSeed(w) => w,
+                Screen::Derive(w) => w,
+                _ => 0,
+            };
             if let Some(action) = action_for(next) {
                 {
                     let mut act = Act {
@@ -532,7 +566,8 @@ struct Act<'a, 'u> {
     /// The boot entropy pool. `None` on a device whose pool never met its policy, which
     /// is a refusal to generate a seed rather than a reason to use something weaker.
     pool: Option<&'a mut catcard_entropy::EntropyPool>,
-    /// The word count carried by `Screen::NewSeed(n)`; zero for every other action.
+    /// The word count carried by `Screen::NewSeed(n)`, or the row carried by
+    /// `Screen::Derive(n)`; zero for every other action.
     words: u8,
     /// The boot report, for an action that has to restart the session around it.
     report: &'a BootReport,
@@ -592,6 +627,14 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::SignMessage => to(
             |a| crate::signmsg::screen(a.gate, a.login, a.ui),
             Screen::Utils,
+        ),
+        Screen::Derive(_) => to(
+            |a| {
+                if let Some(kind) = derive_kind(a.words) {
+                    crate::derive::screen(a.gate, a.login, a.ui, kind);
+                }
+            },
+            Screen::DeriveMenu,
         ),
         Screen::BrowseSd => to(
             |a| {
@@ -774,6 +817,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
+        Screen::DeriveMenu => match key {
+            Key::Confirm => Screen::Derive(cursor as u8),
+            Key::Cancel => Screen::Utils,
+            _ => Screen::DeriveMenu,
+        },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
             (Key::Cancel, _) => Screen::Settings,
@@ -796,6 +844,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
             (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
+            (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
@@ -984,6 +1033,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
+        Screen::DeriveMenu => Some(DERIVE_ITEMS),
         #[cfg(feature = "games")]
         Screen::Games => Some(GAMES_ITEMS),
         _ => None,
@@ -1000,7 +1050,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::NewSeedMenu
         | Screen::Debug
         | Screen::Settings
-        | Screen::Login => draw_menu(panel, screen, v),
+        | Screen::Login
+        | Screen::DeriveMenu => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
@@ -1035,6 +1086,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::VerifyAddress
         | Screen::SignMessage
         | Screen::Passphrase => {}
+        Screen::Derive(_) => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -1087,6 +1139,10 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
             "New wallet"
         }
         Screen::Debug => "Debug",
+        Screen::DeriveMenu => {
+            let _ = note.push_str("children of this seed");
+            "Derive child"
+        }
         Screen::Settings => "Settings",
         Screen::Login => "Login",
         #[cfg(feature = "games")]

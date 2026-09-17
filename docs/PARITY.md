@@ -30,7 +30,8 @@ Dependency first, then what a user needs to hold funds safely:
    searches this wallet's own derivations for it.
 5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Utils → Sign
    message, armoured to SIGNED.TXT. BIP-322 still to do.
-6. **BIP-85** child words, WIF, xprv, hex, passwords.
+6. ~~**BIP-85**~~ -- written, untested on hardware: Utils → Derive child, with 12/24 words,
+   XPRV, WIF, a base64 password and 32 bytes of hex, all against the BIP's own vectors.
 7. **Settings store** -- internal flash driver, LittleFS2, AES-256-CTR, stock-compatible
    (`docs/SECRETS-AND-SETTINGS.md`). Everything with persistent configuration waits on it:
    multisig wallets, preferences, trick PINs, Seed Vault.
@@ -51,7 +52,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-43/44/49/84 | ✅ | ✅ | paths, addresses, accounts and both chains |
 | BIP-45/48 (multisig paths) | ✅ | ❌ | step 8 |
 | BIP-67 sorted multisig | ✅ | ❌ | step 8 |
-| BIP-85 | ✅ | ❌ | step 6 |
+| BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-137 legacy message | ✅ | 🟡 | signed and self-verified; untested on hardware |
 | BIP-141/143/144 | ✅ | ✅ | addresses, BIP-143 sighash, witness serialisation, finalise and extract |
 | BIP-174 PSBT v0 | ✅ | 🟡 | read and signed (`outscript`); untested on hardware |
@@ -76,7 +77,7 @@ Dependency first, then what a user needs to hold funds safely:
 | Import words (12/18/24) | ✅ | ✅ | |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ❌ | steps 9-11 |
 | Seed XOR split and join | ✅ | ❌ | step 10 |
-| BIP-85 | ✅ | ❌ | step 6 |
+| BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
 | Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ❌ | step 12 |
 | View seed words, SeedQR | ✅ | ❌ | words at creation only; needs a guarded view |

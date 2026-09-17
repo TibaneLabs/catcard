@@ -23,6 +23,7 @@ use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
 mod boot;
+mod derive;
 mod display;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;
