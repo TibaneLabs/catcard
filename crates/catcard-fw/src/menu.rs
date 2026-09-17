@@ -133,8 +133,8 @@ enum Screen {
 /// A device with a seed has no "New wallet" or "Import seed": both would destroy the
 /// wallet it already holds, so they live only in the blank ordering. "Destroy seed" is not
 /// here either -- it moved into Settings, behind its warnings. The first item is "Ready to
-/// Sign" rather than the blank device's "Status": a wallet exists, so the thing worth doing
-/// is signing a transaction the host has staged to the SD card.
+/// Sign": a wallet exists, so the thing worth doing is signing a transaction the host has
+/// staged to the SD card.
 const MAIN_ITEMS: &[&str] = &[
     "Ready to Sign",
     "Utils",
@@ -148,7 +148,6 @@ const MAIN_ITEMS: &[&str] = &[
 const MAIN_ITEMS_BLANK: &[&str] = &[
     "New wallet",
     "Import seed",
-    "Status",
     "Utils",
     "About",
     "Settings",
@@ -704,9 +703,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
             // A wallet is present: the first item signs a transaction from the SD card.
             (Key::Confirm, Some("Ready to Sign")) => Screen::SignPsbt,
-            // "Status" is the blank device's first item -- there is no separate page, so
-            // choosing it just redraws.
-            (Key::Confirm, Some("Status")) => Screen::Main,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("About")) => Screen::About,
