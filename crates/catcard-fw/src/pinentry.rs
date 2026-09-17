@@ -332,6 +332,55 @@ fn screen_blank(panel: &mut display::Panel) {
     });
 }
 
+/// Record what the bootloader said, every time the login state machine moves.
+///
+/// Never the PIN, and never its digits: the step, the two counters the gate reports, and
+/// the refusal code if there was one. That is the whole of what a bootloader we cannot see
+/// inside tells us, and without it a device that will not log in says nothing at all to
+/// anyone holding it over USB -- which is exactly the situation where the screen is not the
+/// thing you can read.
+fn log_state(login: &Login, what: &str) {
+    match login.step() {
+        Step::Blank => crate::catlog!("pin: {} -> blank, no PIN set", what),
+        Step::Prefix => crate::catlog!(
+            "pin: {} -> prefix, {} left, {} fails",
+            what,
+            login.attempts_left(),
+            login.num_fails()
+        ),
+        Step::ConfirmWords(_) => crate::catlog!("pin: {} -> words", what),
+        Step::Suffix => crate::catlog!("pin: {} -> suffix", what),
+        Step::In { zero_secret } => crate::catlog!(
+            "pin: {} -> in, secret slot {}",
+            what,
+            if zero_secret { "EMPTY" } else { "in use" }
+        ),
+        Step::Wrong {
+            attempts_left,
+            num_fails,
+        } => crate::catlog!(
+            "pin: {} -> WRONG, {} left, {} fails",
+            what,
+            attempts_left,
+            num_fails
+        ),
+        Step::Bricked => crate::catlog!("pin: {} -> BRICKED", what),
+        Step::Failed(f) => match f {
+            catcard_pin::Failure::Code(c) => {
+                crate::catlog!("pin: {} -> refused, gate code {}", what, c)
+            }
+            catcard_pin::Failure::Gate(_) => {
+                crate::catlog!("pin: {} -> callgate unreachable", what)
+            }
+            catcard_pin::Failure::NeedsSetup => crate::catlog!("pin: {} -> needs setup", what),
+            catcard_pin::Failure::MustWait => crate::catlog!("pin: {} -> must wait", what),
+            catcard_pin::Failure::ImageRefused => {
+                crate::catlog!("pin: {} -> image refused", what)
+            }
+        },
+    }
+}
+
 /// "Working on it" — drawn before anything that blocks on the secure element.
 ///
 /// Every one of these waits is a callgate call: interrupts masked, the CPU inside the
@@ -599,6 +648,7 @@ pub fn unlock(
 ) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);
+    log_state(&login, "setup");
     // Attach USB only now, after `Login::new`'s callgate has returned and we are about to
     // enter the polling loop below. Presenting the device to the host any earlier -- while
     // that callgate held the CPU -- let the host start enumerating into a core nothing was
@@ -753,6 +803,7 @@ pub fn unlock(
                         // on the suffix means spending a second PIN attempt.
                         working(panel, "Checking");
                         let _ = login.prefix_entered(&g, field.as_bytes());
+                        log_state(&login, "prefix");
                         field.clear();
                     }
                 }
@@ -760,6 +811,7 @@ pub fn unlock(
                     if !field.is_empty() {
                         working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());
+                        log_state(&login, "attempt");
                         field.clear();
                     }
                 }
