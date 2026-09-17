@@ -2767,8 +2767,22 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             e.len()
         }
         _ => {
+            use catcard_callgate::pin::{SecretKind, classify_secret};
+            // Say what is there instead: the type only, from the marker byte.
+            let kind = classify_secret(&secret);
             secret.zeroize();
-            fail(ui, "no BIP39 seed here");
+            crate::catlog!("addresses: secret is {:?}, not BIP-39", kind);
+            fail(
+                ui,
+                match kind {
+                    SecretKind::Empty => "no wallet stored",
+                    SecretKind::Xprv => "xprv wallet: not yet",
+                    // 16 to 64 is a raw BIP-32 master secret of that length.
+                    // Source: hw-reference/secret-stash-format.md §Layout [C]
+                    SecretKind::Unknown { marker: 16..=64 } => "raw seed wallet: not yet",
+                    _ => "unknown wallet type",
+                },
+            );
             wait_for_any_key(ui);
             return;
         }
