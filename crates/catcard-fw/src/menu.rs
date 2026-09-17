@@ -2533,21 +2533,33 @@ impl<'a> Working<'a> {
     }
 }
 
-/// Show an address as a QR code, until a key is pressed.
+/// The two faces the QR screen offers its text, largest first.
+fn qr_faces() -> (
+    &'static dyn catcard_ui::face::Face,
+    &'static dyn catcard_ui::face::Face,
+) {
+    (display::FONTS.body, display::FONTS.small)
+}
+
+/// Show an address as a QR code beside the address itself, until a key is pressed.
 ///
-/// The point of the screen is a watch-only wallet reading the address off the panel instead
-/// of a human copying 42 characters by eye, so everything here is chosen for whether a
-/// phone camera can actually decode it:
+/// The QR is for a wallet to scan; the text beside it, in blocks of four, is for a person
+/// to compare against what their wallet shows. Both carry the same characters: the text is
+/// the QR's payload minus the scheme, upper-cased bech32 included, so what is read out loud
+/// is what was encoded.
 ///
-/// - the payload is [`address::qr_form`], which upper-cases bech32 so it encodes in QR's
-///   alphanumeric mode -- typically a whole version smaller than the lower-case original;
-/// - error correction is M, except where M would only fit at one pixel per module on this
-///   panel and L fits at two. On a 64-row OLED that is the difference between a symbol a
-///   phone reads and a grey square.
+/// Encoding is `anyd`'s heap-free path, so nothing here allocates. What it encodes is
+/// chosen by measuring rather than by rule, because every choice trades against how large
+/// each module can be drawn on this panel:
 ///
-/// Version 8 is the largest symbol either buffer can hold: 49 modules, which is already
-/// more than a 64-row panel can draw at one pixel each, and far more than any address
-/// needs. Anything bigger is refused rather than drawn unreadably small.
+/// - **the BIP-21 `BITCOIN:` scheme**, which lets a phone's camera offer to open a wallet,
+///   is included unless it costs a version -- on a 64-row panel that is the difference
+///   between two pixels a module and one;
+/// - **error correction M**, dropping to L only where M would leave one pixel a module and
+///   L would not.
+///
+/// Version 8 is the largest symbol the buffers hold: 49 modules, already more than a 64-row
+/// panel can draw at one pixel each and far more than any address needs.
 fn address_qr(ui: &mut Ui<'_>, address: &str) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_wallet::address;
@@ -2558,40 +2570,63 @@ fn address_qr(ui: &mut Ui<'_>, address: &str) {
     };
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
-    let mut text = [0u8; address::MAX_ADDRESS_LEN];
-    let Some(payload) = address::qr_form(address, &mut text) else {
+    // The text beside the symbol: the address as the QR spells it, without the scheme.
+    let mut shown = [0u8; address::MAX_QR_PAYLOAD];
+    let Some(shown) = address::qr_payload(address, false, &mut shown) else {
         message(ui.panel, "QR", "address not encodable", "");
         wait_for_any_key(ui);
         return;
     };
 
-    // Encode once to see what the panel can do with it, and take the lower error-correction
-    // level only where it actually buys bigger modules. The probes are scoped so the two
-    // buffers are reused rather than held four at a time on the stack.
     let mut scratch = [0u8; BUF];
     let mut storage = [0u8; BUF];
     let encoder = QrEncoder::new();
-    let encode = |level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
+    // What this arrangement would give: pixels per module, or 0 if it does not encode or
+    // does not fit. Scoped so the two buffers are reused rather than held all at once.
+    let pixels = |scheme: bool, level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
+        let mut buf = [0u8; address::MAX_QR_PAYLOAD];
+        let Some(payload) = address::qr_payload(address, scheme, &mut buf) else {
+            return 0;
+        };
         encoder
             .encode_text_into(payload.as_bytes(), level, scratch, storage)
             .ok()
-            .map(|(grid, _)| grid.width())
-    };
-    let pixels = |modules: Option<usize>| {
-        modules.map_or(0, |m| {
-            catcard_ui::widgets::qr_fit(m, display::SCREEN_W, display::SCREEN_H).1
-        })
-    };
-
-    let medium = pixels(encode(EcLevel::M, &mut scratch, &mut storage));
-    let level = if medium > 1 {
-        EcLevel::M
-    } else if pixels(encode(EcLevel::L, &mut scratch, &mut storage)) > medium {
-        EcLevel::L
-    } else {
-        EcLevel::M
+            .and_then(|(grid, _)| {
+                catcard_ui::widgets::qr_text_fit(
+                    qr_faces(),
+                    display::FONTS.gap,
+                    grid.width(),
+                    shown.len(),
+                    display::SCREEN_W,
+                    display::SCREEN_H,
+                )
+            })
+            .map_or(0, |fit| fit.scale)
     };
 
+    // Preference order: the scheme, then error correction, then nothing else. A later
+    // candidate only wins by drawing a bigger module than everything before it.
+    let mut best = (true, EcLevel::M, 0usize);
+    for (scheme, level) in [
+        (true, EcLevel::M),
+        (false, EcLevel::M),
+        (true, EcLevel::L),
+        (false, EcLevel::L),
+    ] {
+        let scale = pixels(scheme, level, &mut scratch, &mut storage);
+        if scale > best.2 {
+            best = (scheme, level, scale);
+        }
+        // Two pixels a module is as much as the cramped panel ever offers, and the first
+        // candidate to reach it is the most preferred one that does.
+        if best.2 > 1 && best.1 == EcLevel::M {
+            break;
+        }
+    }
+    let (scheme, level, _) = best;
+
+    let mut buf = [0u8; address::MAX_QR_PAYLOAD];
+    let payload = address::qr_payload(address, scheme, &mut buf).unwrap_or(shown);
     let Ok((grid, _meta)) =
         encoder.encode_text_into(payload.as_bytes(), level, &mut scratch, &mut storage)
     else {
@@ -2602,7 +2637,18 @@ fn address_qr(ui: &mut Ui<'_>, address: &str) {
 
     let mut drawn = false;
     display::draw(ui.panel, |c| {
-        drawn = catcard_ui::widgets::qr(c, grid.width(), |x, y| grid.get(x, y));
+        drawn = catcard_ui::widgets::qr_with_text(
+            c,
+            qr_faces(),
+            display::FONTS.gap,
+            grid.width(),
+            |x, y| grid.get(x, y),
+            shown,
+        )
+        .is_some()
+            // No arrangement fits the text: the symbol alone still beats nothing, since it
+            // is the half a wallet reads.
+            || catcard_ui::widgets::qr(c, grid.width(), |x, y| grid.get(x, y));
     });
     if !drawn {
         message(ui.panel, "QR", "too big for this panel", "");
@@ -2703,10 +2749,12 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let mut chains: [Option<catcard_wallet::bip32::ExtendedPubKey>; PROTOCOLS.len()] =
         [None; PROTOCOLS.len()];
 
-    // How many characters fit on a body line. A bech32 address is longer than that on the
-    // 128px panel, so it is shown start...end (see `ellipsize_middle`) -- the two ends are
-    // what an eye compares against a watch-only wallet, and one clean line beats a wrap.
-    let cols = display::LOG_COLS;
+    // How many characters of the address fit on one line **in the large face**: 17 on the
+    // 128px panel, 30 on the Q1. It is longer than that, so it is shown start...end (see
+    // `ellipsize_middle`) -- the two ends are what an eye compares against a watch-only
+    // wallet, and one clean line beats a wrap.
+    let cols =
+        (display::SCREEN_W - 2 * display::FONTS.margin) / display::FONTS.body.advance(b'0').max(1);
     let mut index: u32 = 0;
     let mut proto = 0usize;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -2722,14 +2770,12 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             chains[proto] = receive_chain(&master, kind, &mut busy, ui.panel);
         }
 
-        let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
         let mut path = Line::new();
         let _ = write!(
             path,
             "#{index}  m/{}h/0h/0h/0/{index}",
             kind.bip44_purpose()
         );
-        let _ = lines.push(path);
 
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
         // Public derivation from the chain's extended public key: no private key is
@@ -2741,40 +2787,46 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 .and_then(|c| chain.derive_child(c).ok())
                 .and_then(|k| address::encode(kind, Network::Mainnet, &k.public_key, &mut buf).ok())
         });
+        let mut shown = Line::new();
         match addr {
             Some(n) => {
                 let s = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                let mut l = Line::new();
-                ellipsize_middle(s, cols, &mut l);
-                let _ = lines.push(l);
+                ellipsize_middle(s, cols, &mut shown);
             }
             // A child index that lands on an invalid scalar is vanishingly rare, but the
             // screen must not lie about it: show a gap rather than a wrong address.
             None => {
-                let mut l = Line::new();
-                let _ = l.push_str("(no address)");
-                let _ = lines.push(l);
+                let _ = shown.push_str("(no address)");
             }
         }
         // Name the keys the way the owner sees them. `5`/`8`/`7`/`9` is what the firmware
         // reads, but the keypad prints arrows on those keys and the Q1 has real arrow keys,
         // so digits here would send someone hunting for a number that is not the point.
-        let mut hint = Line::new();
-        let _ = hint.push_str("up/down address");
-        let _ = lines.push(hint);
-        let mut hint = Line::new();
-        let _ = hint.push_str("left/right type");
-        let _ = lines.push(hint);
-        let mut hint = Line::new();
+        let mut key_hint = Line::new();
         let _ = write!(
-            hint,
+            key_hint,
             "{} QR   {} back",
             display::CONFIRM_KEY,
             display::CANCEL_KEY
         );
-        let _ = lines.push(hint);
 
-        info(ui.panel, kind_name(kind), &lines);
+        // The address in the large face, everything else in the small one. It is the only
+        // thing on the screen worth reading carefully, and the elision costs less than the
+        // squint did -- the whole of it, in blocks of four, is one keypress away.
+        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 8> = heapless::Vec::new();
+        let _ = doc.push(catcard_ui::scroll::Line::title(kind_name(kind)));
+        let _ = doc.push(catcard_ui::scroll::Line::body(path.as_str()).small());
+        let _ = doc.push(catcard_ui::scroll::Line::body(shown.as_str()));
+        let _ = doc.push(catcard_ui::scroll::Line::body("up/down address").small());
+        let _ = doc.push(catcard_ui::scroll::Line::body("left/right type").small());
+        let _ = doc.push(catcard_ui::scroll::Line::body(key_hint.as_str()).small());
+        let view = catcard_ui::scroll::ScrollView::build(
+            &doc,
+            display::SCREEN_W,
+            display::SCREEN_H,
+            display::FONTS,
+        );
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &view));
 
         wait_for_release(ui);
         'wait: loop {

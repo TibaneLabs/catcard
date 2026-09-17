@@ -324,6 +324,125 @@ pub fn qr<C: Canvas + ?Sized>(
     true
 }
 
+/// Characters per block when a payload is shown for a human to check.
+pub const BLOCK: usize = 4;
+/// Most blocks on one line.
+pub const BLOCKS_PER_LINE: usize = 4;
+
+/// How a QR and its text were placed. Zero `scale` means nothing was drawn.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct QrLayout {
+    /// Pixels per module.
+    pub scale: usize,
+    /// Light modules around the symbol.
+    pub quiet: usize,
+    /// Blocks of [`BLOCK`] characters on each text line.
+    pub blocks: usize,
+    /// Whether the text is in the larger of the two faces offered.
+    pub large: bool,
+}
+
+/// A QR on the left and its payload on the right, in blocks of four characters.
+///
+/// The two halves answer different questions. The QR is for a wallet to scan; the text is
+/// for a person to compare against what their wallet shows, and four-character blocks are
+/// what makes that comparison possible at all -- the eye keeps its place in a group of
+/// four, and loses it in a run of forty.
+///
+/// So the text gets the larger face wherever the panel can hold the whole payload in it,
+/// dropping to the small face rather than truncating: a partly shown address is not
+/// something anybody can check. Within a face, four blocks a line are tried first, then
+/// three, then two -- the QR keeps whatever width is left, and if that leaves less than one
+/// pixel per module nothing is drawn and the caller is told.
+/// Where a QR and `chars` characters of text would go on a `w` by `h` panel, or `None` if
+/// no arrangement fits. [`qr_with_text`] draws exactly this; it is separate so a caller can
+/// compare arrangements -- a shorter payload, a different error-correction level -- before
+/// committing to one.
+pub fn qr_text_fit(
+    faces: (&dyn Face, &dyn Face),
+    gap: usize,
+    modules: usize,
+    chars: usize,
+    w: usize,
+    h: usize,
+) -> Option<QrLayout> {
+    if modules == 0 || chars == 0 {
+        return None;
+    }
+    for (large, face) in [(true, faces.0), (false, faces.1)] {
+        let cw = face.advance(b'0').max(1);
+        let row = face.line_height() + gap;
+        for blocks in (1..=BLOCKS_PER_LINE).rev() {
+            let cols = blocks * BLOCK + (blocks - 1);
+            let text_w = cols * cw;
+            let rows = chars.div_ceil(blocks * BLOCK);
+            if text_w + gap >= w || rows * row > h {
+                continue;
+            }
+            let (quiet, scale) = qr_fit(modules, w - text_w - gap, h);
+            if scale == 0 {
+                continue;
+            }
+            return Some(QrLayout {
+                scale,
+                quiet,
+                blocks,
+                large,
+            });
+        }
+    }
+    None
+}
+
+pub fn qr_with_text<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    faces: (&dyn Face, &dyn Face),
+    gap: usize,
+    modules: usize,
+    get: impl Fn(usize, usize) -> bool,
+    text: &str,
+) -> Option<QrLayout> {
+    use crate::canvas::{INK, PAPER};
+    let (w, h) = (canvas.width(), canvas.height());
+    let layout = qr_text_fit(faces, gap, modules, text.len(), w, h)?;
+    let face = if layout.large { faces.0 } else { faces.1 };
+    let cw = face.advance(b'0').max(1);
+    let row = face.line_height() + gap;
+    let text_w = (layout.blocks * BLOCK + layout.blocks - 1) * cw;
+    let rows = text.len().div_ceil(layout.blocks * BLOCK);
+    canvas.clear();
+    // The symbol sits in the middle of what is left after the text column.
+    let side = (modules + 2 * layout.quiet) * layout.scale;
+    let qr_x = (w - text_w - gap).saturating_sub(side) / 2;
+    let qr_y = (h - side) / 2;
+    canvas.fill_rect(qr_x, qr_y, side, side, INK);
+    for my in 0..modules {
+        for mx in 0..modules {
+            if get(mx, my) {
+                canvas.fill_rect(
+                    qr_x + (layout.quiet + mx) * layout.scale,
+                    qr_y + (layout.quiet + my) * layout.scale,
+                    layout.scale,
+                    layout.scale,
+                    PAPER,
+                );
+            }
+        }
+    }
+
+    let text_x = w - text_w;
+    let text_y = (h - rows * row) / 2;
+    for (i, block) in text.as_bytes().chunks(BLOCK).enumerate() {
+        let (r, c) = (i / layout.blocks, i % layout.blocks);
+        let x = text_x + c * (BLOCK + 1) * cw;
+        let y = text_y + r * row;
+        if let Ok(s) = core::str::from_utf8(block) {
+            draw_text(canvas, face, x, y, s);
+        }
+    }
+    Some(layout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +726,75 @@ mod tests {
         let mut c = Mono128x64::new();
         assert!(!qr(&mut c, 177, checker));
         assert!(!inked(&c, 0, 0, 128, 64), "something was drawn anyway");
+    }
+
+    /// The faces each board offers the QR screen, as the firmware passes them.
+    fn mono_faces() -> (&'static dyn Face, &'static dyn Face) {
+        (&peep7x14::FONT, &misc4x6::FONT)
+    }
+    fn q1_faces() -> (&'static dyn Face, &'static dyn Face) {
+        (&peep10x20::FONT, &peep7x14::FONT)
+    }
+
+    const NATIVE: &str = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4";
+    const TAPROOT: &str = "BC1P0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQZK5JJ0";
+
+    #[test]
+    fn the_roomy_panel_shows_the_address_large_four_blocks_to_a_line() {
+        let mut c = Gray320x240::new();
+        let got = qr_with_text(&mut c, q1_faces(), 2, 29, checker, TAPROOT).unwrap();
+        assert!(got.large, "the Q1 has room for the large face");
+        assert_eq!(got.blocks, 4);
+        assert!(got.scale >= 3, "the symbol still has room: {}", got.scale);
+    }
+
+    #[test]
+    fn the_mono_panel_keeps_the_whole_address_rather_than_the_larger_face() {
+        // 62 characters in 7x14 next to a symbol does not fit on 128x64 at any block count,
+        // and half an address on screen is not something anyone can check against a wallet.
+        let mut c = Mono128x64::new();
+        let got = qr_with_text(&mut c, mono_faces(), 1, 29, checker, TAPROOT).unwrap();
+        assert!(!got.large);
+        assert_eq!(got.blocks, 4);
+        assert!(got.scale >= 1);
+    }
+
+    #[test]
+    fn every_character_of_the_address_is_drawn() {
+        // The failure this guards is the quiet one: a layout that fits the *symbol* and
+        // silently drops the tail of the text.
+        for (name, text) in [("native", NATIVE), ("taproot", TAPROOT)] {
+            let mut c = Mono128x64::new();
+            let got = qr_with_text(&mut c, mono_faces(), 1, 29, checker, text).unwrap();
+            let rows = text.len().div_ceil(got.blocks * BLOCK);
+            let face: &dyn Face = if got.large {
+                mono_faces().0
+            } else {
+                mono_faces().1
+            };
+            assert!(
+                rows * (face.line_height() + 1) <= 64,
+                "{name}: {rows} rows do not fit"
+            );
+            // The last block's own column is inside the panel.
+            let cw = face.advance(b'0');
+            let last = (text.len().div_ceil(BLOCK) - 1) % got.blocks;
+            let text_w = (got.blocks * BLOCK + got.blocks - 1) * cw;
+            assert!(
+                (128 - text_w) + last * (BLOCK + 1) * cw + BLOCK * cw <= 128,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symbol_too_big_for_the_panel_reports_rather_than_drawing() {
+        let mut c = Mono128x64::new();
+        assert_eq!(
+            qr_with_text(&mut c, mono_faces(), 1, 177, checker, NATIVE),
+            None
+        );
+        assert!(!inked(&c, 0, 0, 128, 64));
     }
 
     #[test]

@@ -218,26 +218,40 @@ pub fn encode(
     }
 }
 
-/// The form of `address` to put in a QR code.
+/// The BIP-21 scheme, upper-cased.
 ///
-/// Bech32 and bech32m are case-insensitive, and BIP-173 says to use **upper case** in QR
-/// codes for exactly one reason: upper case is in the QR alphanumeric character set, lower
-/// case is not. A lower-case `bc1...` has to go in byte mode at 8 bits a character; upper
-/// case goes in alphanumeric mode at 5.5, which is typically a whole version smaller and a
-/// symbol a phone can read from further away on a small panel.
+/// URI schemes are case-insensitive (RFC 3986 §3.1), and upper case is what keeps the whole
+/// payload inside QR's alphanumeric character set -- `:` is in it, lower-case letters are
+/// not. A lower-case `bitcoin:` would push the symbol into byte mode and cost a version.
+pub const QR_SCHEME: &str = "BITCOIN:";
+
+/// Longest QR payload: the scheme plus the longest address.
+pub const MAX_QR_PAYLOAD: usize = QR_SCHEME.len() + MAX_ADDRESS_LEN;
+
+/// The form of `address` to put in a QR code, with or without the BIP-21 scheme.
+///
+/// Bech32 and bech32m are upper-cased, which is what BIP-173 asks for in QR codes and for
+/// the same reason as the scheme: upper case is in QR's alphanumeric set, so `BC1...`
+/// encodes at 5.5 bits a character instead of 8, typically a whole version smaller.
 ///
 /// Base58 addresses are **not** touched: there the case carries the checksum, and an
 /// upper-cased legacy address is not the same address, it is an invalid one.
 ///
-/// `None` if `address` does not fit in `out` or is not ASCII. Refusing beats truncating:
-/// a shortened address rendered as a QR is a payment nobody receives.
-pub fn qr_form<'a>(address: &str, out: &'a mut [u8; MAX_ADDRESS_LEN]) -> Option<&'a str> {
+/// `None` if the result does not fit in `out` or the address is not ASCII. Refusing beats
+/// truncating: a shortened address rendered as a QR is a payment nobody receives.
+pub fn qr_payload<'a>(
+    address: &str,
+    scheme: bool,
+    out: &'a mut [u8; MAX_QR_PAYLOAD],
+) -> Option<&'a str> {
     let bytes = address.as_bytes();
-    if bytes.is_empty() || bytes.len() > out.len() || !address.is_ascii() {
+    let head = if scheme { QR_SCHEME.len() } else { 0 };
+    if bytes.is_empty() || !address.is_ascii() || head + bytes.len() > out.len() {
         return None;
     }
-    let n = bytes.len();
-    out[..n].copy_from_slice(bytes);
+    out[..head].copy_from_slice(&QR_SCHEME.as_bytes()[..head]);
+    let end = head + bytes.len();
+    out[head..end].copy_from_slice(bytes);
     // Bech32 by shape, not by prefix: lower-case letters and digits only. Anything with an
     // upper-case letter in it is either already upper-case bech32 or base58, and both are
     // left exactly as they are.
@@ -245,9 +259,9 @@ pub fn qr_form<'a>(address: &str, out: &'a mut [u8; MAX_ADDRESS_LEN]) -> Option<
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
     {
-        out[..n].make_ascii_uppercase();
+        out[head..end].make_ascii_uppercase();
     }
-    core::str::from_utf8(&out[..n]).ok()
+    core::str::from_utf8(&out[..end]).ok()
 }
 
 #[cfg(feature = "std")]
@@ -265,22 +279,26 @@ pub fn encode_string(
 }
 
 #[cfg(test)]
-mod qr_form_tests {
+mod qr_payload_tests {
     use super::*;
+
+    fn payload(address: &str, scheme: bool) -> Option<std::string::String> {
+        let mut out = [0u8; MAX_QR_PAYLOAD];
+        qr_payload(address, scheme, &mut out).map(std::string::String::from)
+    }
 
     #[test]
     fn bech32_is_upper_cased_for_the_qr_alphanumeric_set() {
-        let mut out = [0u8; MAX_ADDRESS_LEN];
         assert_eq!(
-            qr_form("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &mut out),
+            payload("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", false).as_deref(),
             Some("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
         );
-        let mut out = [0u8; MAX_ADDRESS_LEN];
         assert_eq!(
-            qr_form(
+            payload(
                 "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
-                &mut out
-            ),
+                false
+            )
+            .as_deref(),
             Some("BC1P0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQZK5JJ0")
         );
     }
@@ -290,19 +308,30 @@ mod qr_form_tests {
         // Upper-casing a base58 address does not produce a different rendering of the same
         // address, it produces a string that fails its own checksum -- and a QR of it is a
         // receive address nobody can pay.
-        let mut out = [0u8; MAX_ADDRESS_LEN];
-        let legacy = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
-        assert_eq!(qr_form(legacy, &mut out), Some(legacy));
-        let mut out = [0u8; MAX_ADDRESS_LEN];
-        let nested = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy";
-        assert_eq!(qr_form(nested, &mut out), Some(nested));
+        for legacy in [
+            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+            "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+        ] {
+            assert_eq!(payload(legacy, false).as_deref(), Some(legacy));
+            assert_eq!(
+                payload(legacy, true).as_deref(),
+                Some(std::format!("BITCOIN:{legacy}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn the_scheme_goes_in_front_without_disturbing_the_address() {
+        assert_eq!(
+            payload("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", true).as_deref(),
+            Some("BITCOIN:BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
+        );
     }
 
     #[test]
     fn an_already_upper_cased_bech32_is_left_alone() {
-        let mut out = [0u8; MAX_ADDRESS_LEN];
         let upper = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4";
-        assert_eq!(qr_form(upper, &mut out), Some(upper));
+        assert_eq!(payload(upper, false).as_deref(), Some(upper));
     }
 }
 
