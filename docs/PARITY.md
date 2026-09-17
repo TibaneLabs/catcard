@@ -14,8 +14,9 @@ format documents in `hw-reference/`, never from stock's code (`CLEANROOM.md`).
 
 Dependency first, then what a user needs to hold funds safely:
 
-1. **Wallet export as output descriptors** (BIP-380) to SD -- the only way to get a
-   watch-only wallet set up on a computer, which is what creates the PSBTs to sign.
+1. ~~**Wallet export as output descriptors** (BIP-380) to SD~~ -- done: Utils → Export
+   wallet. No `tr()` yet: exporting taproot before this device can sign for it would let a
+   watch-only wallet receive funds the device cannot spend.
 2. **PSBT signing, single-sig** (BIP-174 v0 and BIP-370 v2): P2WPKH, P2SH-P2WPKH, P2PKH;
    Ready to Sign from SD; change re-derived and checked; fee shown and limited; signed
    PSBT or final transaction written back.
@@ -50,7 +51,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-370 PSBT v2 | ✅ | ❌ | step 2 |
 | BIP-322 | ✅ | ❌ | step 5 |
 | BIP-21 URIs | ✅ | 🟡 | address QR carries `bitcoin:` for legacy/nested; no amounts or labels |
-| BIP-380/383 descriptors | ✅ | 🟡 | single-sig export ✅ (Utils → Export wallet, BIP-389 `<0;1>`); import: step 8 |
+| BIP-380/383 descriptors | ✅ | 🟡 | single-sig export ✅ (Utils → Export wallet, BIP-389 `<0;1>`; verified on an mk3 against Address Explorer); import: step 8 |
 | SLIP-132 | ✅ | ❌ | read with step 8; export optional |
 | SLIP-44 | ✅ | ✅ | coin type in paths |
 | BIP-86 taproot | ❌ (EDGE only) | 🟡 | addresses ✅, Schnorr ✅; sighash and signing not planned for parity |
