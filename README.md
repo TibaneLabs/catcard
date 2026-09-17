@@ -26,6 +26,37 @@ The secondary reason is licensing. The original firmware is MIT **plus the Commo
 Clause**, which is not open source. CatCard is MIT-only, which requires that it be
 genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
 
+## What you get over stock
+
+- **Multi-source RNG.** A seed is drawn from a pool fed by every noise source the board
+  has — the STM32 TRNG read directly, the bootloader's own TRNG read, the secure
+  elements' TRNGs, and keypress timing — combined with SHA-512 so a weak source can fail
+  to help but can never cancel a good one. Each hardware source runs continuous SP 800-90B
+  health tests, public values such as the unique ID are credited zero bits, and a pool
+  that has not earned its entropy refuses to produce a seed instead of carrying on.
+  See [`docs/ENTROPY.md`](docs/ENTROPY.md).
+- **No MicroPython.** The whole firmware is Rust, compiled to native code: no
+  interpreter, no garbage collector and no heap. Private-key work runs with interrupts
+  masked, which the wallet crate enforces through its types, so a host cannot time a
+  derivation while it is running.
+- **Better keypad responsiveness.** The pad is scanned by native code on every pass of
+  the loop rather than through an interpreter. Every key is debounced separately, a key
+  held from the previous screen cannot skip the next one, and each press is timestamped
+  at its electrical edge (where the board supports it) so the timing feeds the RNG.
+- **Improved UI.** Slow operations show a bar that keeps moving. On the OLED boards the
+  panel scrolls it by itself, so it moves even while the CPU is shut inside a
+  secure-element call. Addresses are shown in a large face and as a QR code, with the
+  full address beside it in blocks of four for checking against a wallet. Key hints use
+  what is printed on the keys, and one layout engine fits the 128×64 OLED and the Q1's
+  320×240 colour screen alike.
+- **Optional multichain support.** One firmware, no per-coin apps to install. Chains are
+  build options, so a Bitcoin-only image has the other chains' code *absent*, not just
+  hidden — a smaller attack surface, not only a smaller menu. The chain registry and
+  compile-time selection are in place; Ethereum and Solana are the next chains on
+  [`docs/ROADMAP.md`](docs/ROADMAP.md) and are not built yet.
+- **Games and cats.** Block Mine and Block Cutter live under Utils (and can be left out
+  of a build), and the device boots to a cat.
+
 ## What runs on the device today
 
 Reset → cycle counter → 48 MHz clock → hardware TRNG → build an entropy pool from every
