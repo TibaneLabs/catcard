@@ -167,6 +167,7 @@ const CR1_TE: u32 = 1 << 3;
 /// `0x7F` is a start bit and seven ones, a single short low -- and an eighth data bit adds
 /// a low the element reads as garbage. The bootloader's own UART4 has this bit set
 /// (`CR1 = 0x1000_000D`, read from a live mk3), which is also why reads mask with `0x7F`.
+/// Source: hw-reference/se1-driver-spec.md §1.1 [C] (measured on hardware)
 const CR1_M1: u32 = 1 << 28;
 const CR2_RTOEN: u32 = 1 << 23;
 const CR3_HDSEL: u32 = 1 << 3;
