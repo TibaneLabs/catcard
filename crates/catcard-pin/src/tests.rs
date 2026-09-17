@@ -423,12 +423,66 @@ fn an_over_long_part_is_refused_without_spending_an_attempt() {
     let m = Model::new(b"12-3456");
     let mut l = Login::new(&m);
     let long = [b'1'; MAX_PART_LEN + 1];
-    assert_eq!(l.prefix_entered(&m, &long), Err(TooLong));
+    assert_eq!(l.prefix_entered(&m, &long), Err(BadPartLength));
 
     l.prefix_entered(&m, b"12").unwrap();
     l.words_confirmed();
-    assert_eq!(l.attempt(&m, &long), Err(TooLong));
+    assert_eq!(l.attempt(&m, &long), Err(BadPartLength));
     assert_eq!(l.attempts_left(), MAX_ATTEMPTS);
+}
+
+#[test]
+fn a_one_character_part_is_refused_without_spending_an_attempt() {
+    // Stock firmware never lets a part be shorter than two, so a one-digit part cannot be
+    // anyone's PIN -- sending it to the gate would only burn one of thirteen attempts.
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    assert_eq!(l.prefix_entered(&m, b"1"), Err(BadPartLength));
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    assert_eq!(l.attempt(&m, b"3"), Err(BadPartLength));
+    assert_eq!(l.attempts_left(), MAX_ATTEMPTS);
+}
+
+#[test]
+fn no_pin_is_set_that_stock_firmware_could_not_type() {
+    // The PIN lives in the secure element, not in the firmware. A part outside 2..=6 set
+    // here survives a reflash to stock, and stock will not accept it at its prompt: a
+    // device nobody can unlock. So setting one is refused before the gate is touched --
+    // for a first PIN, and for both sides of a change.
+    let m = Model::blank();
+    let mut l = Login::new(&m);
+    for (prefix, suffix) in [
+        (&b"1"[..], &b"3456"[..]),
+        (&b"12"[..], &b"3"[..]),
+        (&b"1234567"[..], &b"3456"[..]),
+        (&b"12"[..], &b"3456789"[..]),
+    ] {
+        assert_eq!(l.set_first_pin(&m, prefix, suffix), Err(BadPartLength));
+        assert_eq!(
+            l.step(),
+            Step::Blank,
+            "a refused first PIN changed the device"
+        );
+    }
+    // The boundaries themselves are allowed.
+    assert!(part_len_ok(b"12") && part_len_ok(b"123456"));
+    assert!(!part_len_ok(b"1") && !part_len_ok(b"1234567"));
+
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    l.prefix_entered(&m, b"12").unwrap();
+    l.words_confirmed();
+    l.attempt(&m, b"3456").unwrap();
+    assert!(matches!(l.step(), Step::In { .. }));
+    assert_eq!(
+        l.change_pin(&m, b"12", b"3456", b"1234567", b"12"),
+        Err(BadPartLength)
+    );
+    assert!(
+        matches!(l.step(), Step::In { .. }),
+        "a refused change left the session"
+    );
 }
 
 #[test]
@@ -866,7 +920,10 @@ fn clearing_the_pin_returns_the_device_to_blank() {
     // wallet is gone with the PIN.
     let l2 = Login::new(&m);
     assert_eq!(l2.step(), Step::Blank, "the device still asked for a PIN");
-    assert!(m.inner.borrow().zero_secret, "the wallet survived the reset");
+    assert!(
+        m.inner.borrow().zero_secret,
+        "the wallet survived the reset"
+    );
 }
 
 #[test]
@@ -884,7 +941,10 @@ fn clearing_the_pin_with_the_wrong_current_pin_is_refused() {
     // Untouched: the real PIN still logs in, and the device is not blank.
     let (_l2, s2) = login_with(&m, b"12", b"3456");
     assert_eq!(s2, Step::In { zero_secret: false });
-    assert!(!m.inner.borrow().blank, "the device was wiped on a wrong PIN");
+    assert!(
+        !m.inner.borrow().blank,
+        "the device was wiped on a wrong PIN"
+    );
 }
 
 #[test]

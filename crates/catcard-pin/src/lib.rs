@@ -38,11 +38,31 @@ pub mod words;
 /// The separator between the prefix and the suffix, as the bootloader hashes it.
 pub const SEPARATOR: u8 = b'-';
 
-/// Longest prefix or suffix we accept.
+/// Shortest prefix or suffix a PIN may have.
 ///
-/// The two, plus the separator, have to fit the gate's 32-byte `pin` field. Splitting
-/// the budget evenly is a UI choice, not an ABI constraint.
-pub const MAX_PART_LEN: usize = (MAX_PIN_LEN - 1) / 2;
+/// See [`MAX_PART_LEN`]: the bound is the stock firmware's, not the gate's.
+pub const MIN_PART_LEN: usize = 2;
+
+/// Longest prefix or suffix a PIN may have.
+///
+/// **This is a compatibility limit, and getting it wrong locks people out.** The gate's
+/// 32-byte `pin` field would take far more, and this crate used to allow 15 a part. But the
+/// stock Coldcard firmware only lets a PIN part be 2 to 6 characters, and the PIN lives in
+/// the secure element, not in the firmware: a device given a 7-character prefix here and
+/// later flashed back to stock could never have that PIN typed into it again. Every path
+/// that sets, changes or submits a PIN is held to the same 2..=6, so no CatCard build can
+/// create a PIN another firmware for the same hardware cannot enter.
+///
+/// Source: the stock firmware's PIN entry rules, as checked by the maintainer.
+pub const MAX_PART_LEN: usize = 6;
+
+// Both parts and the separator still have to fit the gate's field.
+const _: () = assert!(2 * MAX_PART_LEN < MAX_PIN_LEN);
+
+/// Whether `part` is a PIN prefix or suffix of an allowed length.
+pub const fn part_len_ok(part: &[u8]) -> bool {
+    part.len() >= MIN_PART_LEN && part.len() <= MAX_PART_LEN
+}
 
 /// The most failed attempts a device tolerates before it bricks itself.
 ///
@@ -112,13 +132,13 @@ pub enum Failure {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Never {}
 
-/// Entering a PIN part that does not fit.
+/// A PIN part outside [`MIN_PART_LEN`]..=[`MAX_PART_LEN`]. Nothing was sent to the gate.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct TooLong;
+pub struct BadPartLength;
 
-impl From<PinTooLong> for TooLong {
+impl From<PinTooLong> for BadPartLength {
     fn from(_: PinTooLong) -> Self {
-        TooLong
+        BadPartLength
     }
 }
 
@@ -203,9 +223,13 @@ impl Login {
     ///
     /// Moves to [`Step::ConfirmWords`]. Calling it again re-derives the words for a new
     /// prefix, which is what a user backing out of the confirmation screen needs.
-    pub fn prefix_entered<G: PinGate>(&mut self, gate: &G, prefix: &[u8]) -> Result<(), TooLong> {
-        if prefix.len() > MAX_PART_LEN {
-            return Err(TooLong);
+    pub fn prefix_entered<G: PinGate>(
+        &mut self,
+        gate: &G,
+        prefix: &[u8],
+    ) -> Result<(), BadPartLength> {
+        if !part_len_ok(prefix) {
+            return Err(BadPartLength);
         }
         self.prefix.zeroize();
         self.prefix[..prefix.len()].copy_from_slice(prefix);
@@ -295,9 +319,9 @@ impl Login {
     ///
     /// Refuses unless the words have been shown for the current prefix, so a UI cannot
     /// accidentally skip the anti-phishing step.
-    pub fn attempt<G: PinGate>(&mut self, gate: &G, suffix: &[u8]) -> Result<Step, TooLong> {
-        if suffix.len() > MAX_PART_LEN {
-            return Err(TooLong);
+    pub fn attempt<G: PinGate>(&mut self, gate: &G, suffix: &[u8]) -> Result<Step, BadPartLength> {
+        if !part_len_ok(suffix) {
+            return Err(BadPartLength);
         }
         if !self.words_shown {
             self.step = Step::Prefix;
@@ -357,12 +381,12 @@ impl Login {
         gate: &G,
         prefix: &[u8],
         suffix: &[u8],
-    ) -> Result<Step, TooLong> {
+    ) -> Result<Step, BadPartLength> {
         if !matches!(self.step, Step::Blank) {
             return Ok(self.step);
         }
-        if prefix.len() > MAX_PART_LEN || suffix.len() > MAX_PART_LEN {
-            return Err(TooLong);
+        if !part_len_ok(prefix) || !part_len_ok(suffix) {
+            return Err(BadPartLength);
         }
 
         let mut joined = [0u8; MAX_PIN_LEN];
@@ -422,15 +446,15 @@ impl Login {
         old_suffix: &[u8],
         new_prefix: &[u8],
         new_suffix: &[u8],
-    ) -> Result<Step, TooLong> {
+    ) -> Result<Step, BadPartLength> {
         if !matches!(self.step, Step::In { .. }) {
             return Ok(self.step);
         }
-        if [old_prefix, old_suffix, new_prefix, new_suffix]
+        if ![old_prefix, old_suffix, new_prefix, new_suffix]
             .iter()
-            .any(|p| p.len() > MAX_PART_LEN)
+            .all(|p| part_len_ok(p))
         {
-            return Err(TooLong);
+            return Err(BadPartLength);
         }
 
         let mut old_joined = [0u8; MAX_PIN_LEN];
@@ -482,12 +506,12 @@ impl Login {
         gate: &G,
         old_prefix: &[u8],
         old_suffix: &[u8],
-    ) -> Result<Step, TooLong> {
+    ) -> Result<Step, BadPartLength> {
         if !matches!(self.step, Step::In { .. }) {
             return Ok(self.step);
         }
-        if [old_prefix, old_suffix].iter().any(|p| p.len() > MAX_PART_LEN) {
-            return Err(TooLong);
+        if ![old_prefix, old_suffix].iter().all(|p| part_len_ok(p)) {
+            return Err(BadPartLength);
         }
 
         let mut old_joined = [0u8; MAX_PIN_LEN];

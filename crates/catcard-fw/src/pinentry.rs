@@ -16,7 +16,7 @@ use catcard_callgate::abi::{DfuMode, LogoutMode, PinOp};
 use catcard_callgate::pin::PinAttempt;
 use catcard_callgate::{Callgate, Error as GateError};
 use catcard_entropy::HmacDrbg;
-use catcard_pin::{Failure, Login, MAX_ATTEMPTS, MAX_PART_LEN, PinGate, Step};
+use catcard_pin::{Failure, Login, MAX_ATTEMPTS, MAX_PART_LEN, MIN_PART_LEN, PinGate, Step};
 use catcard_ui::canvas::Canvas;
 use catcard_ui::keypad::{Event, KEYS, Key};
 
@@ -197,10 +197,18 @@ fn screen_field(
     display::draw(panel, |c| {
         c.clear();
         title(c, 2, heading);
-        let mut mask = [0u8; MAX_PART_LEN];
-        title(c, 24, buf.masked(&mut mask));
-        if buf.is_empty() {
-            small(c, 46, "0-9 to enter");
+        // A paw print per digit instead of a `*`. The trail is placed for the longest part
+        // a PIN can have and filled from its left, so each digit adds a print ahead of the
+        // last and nothing already drawn moves: a cat walking in, not a row that re-centres
+        // itself on every key. One print per digit, so it gives away exactly what the stars
+        // did -- how many -- and nothing about which.
+        use catcard_ui::icons::{draw_paw_trail, paw_trail_size};
+        let scale = (c.height() / DESIGN_ROWS).max(1);
+        let (trail_w, _) = paw_trail_size(MAX_PART_LEN, scale);
+        let x = c.width().saturating_sub(trail_w) / 2;
+        draw_paw_trail(c, buf.len(), x, at(c, 22), scale);
+        if buf.len() < MIN_PART_LEN {
+            small(c, 46, "2 to 6 digits");
         } else {
             two_key_hint(c, 46, "accept", "delete");
         }
@@ -422,8 +430,10 @@ fn collect(
                     }
                     changed = true;
                 }
+                // Accepting fewer than MIN_PART_LEN digits would set a PIN part that
+                // stock firmware cannot type, so the key simply waits for another digit.
                 Key::Confirm => {
-                    if !field.is_empty() {
+                    if field.len() >= MIN_PART_LEN {
                         return Some(field);
                     }
                 }
@@ -458,16 +468,15 @@ fn wait_for_confirm(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
 
 /// Split a `prefix-suffix` PIN payload into its two parts.
 ///
-/// Returns `None` unless both parts are non-empty, all ASCII digits, and within
-/// [`MAX_PART_LEN`] -- the same shape [`PinBuffer`] would have produced from the keypad,
-/// so the gate hashes exactly what a typed PIN would.
+/// Returns `None` unless both parts are all ASCII digits and [`MIN_PART_LEN`] to
+/// [`MAX_PART_LEN`] long -- the same shape [`PinBuffer`] would have produced from the
+/// keypad, so the gate hashes exactly what a typed PIN would, and no host can hand this
+/// device a PIN part stock firmware could not type.
 pub(crate) fn split_pin(pin: &[u8]) -> Option<(&[u8], &[u8])> {
     let sep = pin.iter().position(|&b| b == catcard_pin::SEPARATOR)?;
     let (prefix, rest) = pin.split_at(sep);
     let suffix = &rest[1..];
-    let ok = |part: &[u8]| {
-        !part.is_empty() && part.len() <= MAX_PART_LEN && part.iter().all(u8::is_ascii_digit)
-    };
+    let ok = |part: &[u8]| catcard_pin::part_len_ok(part) && part.iter().all(u8::is_ascii_digit);
     (ok(prefix) && ok(suffix)).then_some((prefix, suffix))
 }
 
@@ -794,8 +803,10 @@ pub fn unlock(
                         login = Login::new(&g);
                     }
                 }
+                // Not before MIN_PART_LEN digits: no PIN has a shorter part, so a
+                // shorter one could only spend an attempt.
                 (Step::Prefix, Key::Confirm) => {
-                    if !field.is_empty() {
+                    if field.len() >= MIN_PART_LEN {
                         // Both of these block for as long as the secure element takes,
                         // with no display update and no USB polling in between. Without
                         // a screen first, the device looks like it ignored the key --
@@ -808,7 +819,7 @@ pub fn unlock(
                     }
                 }
                 (Step::Suffix, Key::Confirm) => {
-                    if !field.is_empty() {
+                    if field.len() >= MIN_PART_LEN {
                         working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());
                         log_state(&login, "attempt");

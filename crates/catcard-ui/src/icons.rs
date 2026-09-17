@@ -168,6 +168,76 @@ pub fn hint_width<F: crate::face::Face + ?Sized>(font: &F, label: &str) -> usize
     ICON_ADVANCE * icon_scale(font) + crate::text::width_of(font, label)
 }
 
+/// A cat's paw print, facing right: the big pad behind, four toes in an arc ahead. 9x10.
+///
+/// Stands in for the `*` a PIN field used to show, one print per digit. Facing right
+/// because the trail grows to the right as digits go in: the cat walks the way the text
+/// would have.
+pub const PAW: Bitmap = Bitmap {
+    width: 9,
+    height: 10,
+    bytes_per_row: 2,
+    // .....##..
+    // .....##..
+    // ..##...##
+    // .####..##
+    // ######...
+    // ######...
+    // .####..##
+    // ..##...##
+    // .....##..
+    // .....##..
+    pixels: &[
+        0x06, 0x00, 0x06, 0x00, 0x31, 0x80, 0x79, 0x80, 0xFC, 0x00, //
+        0xFC, 0x00, 0x79, 0x80, 0x31, 0x80, 0x06, 0x00, 0x06, 0x00,
+    ],
+};
+
+/// Horizontal distance from one print to the next, in unscaled pixels.
+///
+/// Less than a print's width: consecutive prints sit on opposite halves of the trail, so
+/// they overlap in x without touching, and a trail of alternating left and right feet reads
+/// as a gait rather than as a row of stamps.
+const PAW_STEP: usize = 8;
+
+/// The box a trail of `max` prints occupies at `scale`: (width, height).
+///
+/// The height is a print and a half plus a gap, so the upper and lower prints clear each
+/// other. Sized for the most prints the field can hold, not for how many it holds now, so
+/// the caller can place the trail once and the cat walks across a fixed stretch instead of
+/// the whole trail sliding sideways with every digit.
+pub const fn paw_trail_size(max: usize, scale: usize) -> (usize, usize) {
+    let w = PAW.width as usize;
+    let h = PAW.height as usize;
+    let width = if max == 0 {
+        0
+    } else {
+        (max - 1) * PAW_STEP + w
+    };
+    (width * scale, (h + h / 2 + 2) * scale)
+}
+
+/// Draw `count` paw prints walking right from `(x, y)`, alternating between the top and the
+/// bottom of the trail's box -- the first print high, the next low, like a cat's two
+/// front feet.
+///
+/// `(x, y)` is the box's top-left as [`paw_trail_size`] describes it.
+pub fn draw_paw_trail<C: crate::canvas::Canvas + ?Sized>(
+    fb: &mut C,
+    count: usize,
+    x: usize,
+    y: usize,
+    scale: usize,
+) {
+    let scale = scale.max(1);
+    let (_, box_h) = paw_trail_size(1, scale);
+    let low = box_h - PAW.height as usize * scale;
+    for i in 0..count {
+        let top = if i % 2 == 0 { y } else { y + low };
+        crate::splash::draw_bitmap_scaled(fb, &PAW, x + i * PAW_STEP * scale, top, scale);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +362,91 @@ mod tests {
             CHECK.pixels[0].count_ones() == 1,
             "the top row should be the tip of the long arm"
         );
+    }
+
+    use crate::canvas::INK;
+    use crate::framebuffer::Mono128x64;
+
+    /// The inked cells of a canvas, as (x, y) pairs.
+    fn inked<C: Canvas>(c: &C) -> Vec<(usize, usize)> {
+        let mut v = Vec::new();
+        for y in 0..c.height() {
+            for x in 0..c.width() {
+                if c.get(x, y) == INK {
+                    v.push((x, y));
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn a_paw_print_faces_right() {
+        // Toes ahead, pad behind: the tallest column of ink is on the left (the pad) and
+        // the rightmost ink belongs to toes, which sit apart from the pad.
+        let col = |x: usize| {
+            (0..PAW.height as usize)
+                .filter(|&y| PAW.pixel(x, y))
+                .count()
+        };
+        assert_eq!(col(0), 2, "the pad's back edge");
+        assert!(col(1) > col(0) && col(1) >= 4, "the pad is on the left");
+        let right = (0..PAW.width as usize).rev().find(|&x| col(x) > 0).unwrap();
+        assert!(
+            !PAW.pixel(right, 4) && !PAW.pixel(right, 5),
+            "the middle row ahead is toe-free"
+        );
+    }
+
+    #[test]
+    fn the_longest_pin_part_leaves_a_trail_that_fits_both_panels() {
+        // Six digits is the most a PIN part can have; the trail for it must fit the mono
+        // panel at 1x and the Q1 at 3x without clipping a print.
+        let (w, h) = paw_trail_size(6, 1);
+        assert!(w <= 128 && h <= 22, "mono: {w}x{h}");
+        let (w, h) = paw_trail_size(6, 3);
+        assert!(w <= 320 && h <= 82, "q1: {w}x{h}");
+    }
+
+    #[test]
+    fn prints_alternate_high_and_low_and_never_touch() {
+        let mut c = Mono128x64::new();
+        draw_paw_trail(&mut c, 6, 10, 20, 1);
+        let (_, box_h) = paw_trail_size(6, 1);
+        let lows = box_h - PAW.height as usize;
+        for i in 0..6 {
+            let x0 = 10 + i * PAW_STEP;
+            let top = if i % 2 == 0 { 20 } else { 20 + lows };
+            // The print's pad (rows 4-5, columns 0-5) is where this print says it is...
+            assert_eq!(Canvas::get(&c, x0, top + 4), INK, "print {i} missing");
+            // ...and the other half of the trail is clear at the same column, so a high
+            // and a low foot never land on each other.
+            let other = if i % 2 == 0 { 20 + lows } else { 20 };
+            assert!(
+                (0..PAW.height as usize).all(|dy| Canvas::get(&c, x0, other + dy) != INK
+                    || (i > 0 && x0 < 10 + (i - 1) * PAW_STEP + PAW.width as usize)),
+                "print {i} overlaps the other foot"
+            );
+        }
+        // Six prints, each the paw's own ink count: none merged, none clipped.
+        let per_print = (0..PAW.height as usize)
+            .flat_map(|y| (0..PAW.width as usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| PAW.pixel(x, y))
+            .count();
+        assert_eq!(inked(&c).len(), 6 * per_print);
+    }
+
+    #[test]
+    fn each_digit_adds_one_print_and_nothing_moves() {
+        // The trail is anchored once, so typing adds a print at the end and leaves the
+        // earlier ones exactly where they were -- the cat walks, the path does not slide.
+        let mut before = Gray320x240::new();
+        draw_paw_trail(&mut before, 3, 40, 90, 3);
+        let mut after = Gray320x240::new();
+        draw_paw_trail(&mut after, 4, 40, 90, 3);
+        let b = inked(&before);
+        let a = inked(&after);
+        assert!(b.iter().all(|p| a.contains(p)), "an earlier print moved");
+        assert!(a.len() > b.len());
     }
 }
