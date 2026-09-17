@@ -1,0 +1,421 @@
+//! Signing a transaction from the SD card.
+//!
+//! The file comes off a card, so every byte of it is someone else's. What protects the
+//! owner is not this module's parsing -- that is [`outscript`]'s, and strict -- but the
+//! review in [`catcard_wallet::psbtview`]: the amounts, destinations and fee are worked out
+//! from what the signature will commit to, the fee cap and the sighash policy can refuse
+//! outright, and an output claimed as change has to be rebuildable from our own key.
+//!
+//! This is the part that moves bytes and draws screens: read the file, show what it does,
+//! sign each of our inputs on a keypress, write the result back.
+//!
+//! # Where a PSBT lives while it is worked on
+//!
+//! Every signature rewrites the whole container, so two buffers are needed and the work
+//! alternates between them. On mk4/mk5/Q1 they are windows in the 8 MB PSRAM, well clear of
+//! the firmware-staging area; on mk3, which has none, they are static RAM and therefore
+//! much smaller -- a transaction too big for them is refused with its size on screen rather
+//! than truncated.
+
+use catcard_callgate::Callgate;
+use catcard_wallet::psbtview::{self, Policy, Refusal};
+use catcard_wallet::signer;
+use outscript::psbt::Psbt;
+
+use crate::display;
+use crate::menu;
+use crate::ui::Ui;
+
+/// Where the file is written back, and what the screen says it is called.
+const SIGNED_NAME: &str = "/SIGNED.PSB";
+
+/// Most destinations shown. Beyond this the screen says how many more there are; the
+/// summary's totals still cover every one of them.
+const MAX_SHOWN: usize = 8;
+
+/// Most inputs signed in one pass.
+const MAX_INPUTS: usize = 64;
+
+/// The mk3's buffers, in static RAM. A single-key spend is a few hundred bytes; this holds
+/// a transaction with a few dozen inputs, or a handful that carry whole previous
+/// transactions.
+#[cfg(feature = "board-mk3")]
+const STATIC_BUF: usize = 16 * 1024;
+#[cfg(feature = "board-mk3")]
+static mut BUF_A: [u8; STATIC_BUF] = [0; STATIC_BUF];
+#[cfg(feature = "board-mk3")]
+static mut BUF_B: [u8; STATIC_BUF] = [0; STATIC_BUF];
+
+/// PSRAM windows for the two buffers: 2 MB each, starting 4 MB in.
+///
+/// The low half is where a firmware image stages, and the staging marker sits at the very
+/// top (`psram.staging_header`), so signing a transaction cannot disturb a pending upgrade
+/// and an upgrade cannot land on a PSBT.
+#[cfg(not(feature = "board-mk3"))]
+const PSRAM_OFFSET: usize = 4 * 1024 * 1024;
+#[cfg(not(feature = "board-mk3"))]
+const PSRAM_WINDOW: usize = 2 * 1024 * 1024;
+
+/// The two working buffers.
+///
+/// # Safety
+/// One caller at a time: the menu waits for this screen to return.
+unsafe fn buffers() -> Option<(&'static mut [u8], &'static mut [u8])> {
+    #[cfg(feature = "board-mk3")]
+    {
+        // SAFETY: foreground only, and this screen is the only user of either buffer.
+        unsafe {
+            Some((
+                &mut *core::ptr::addr_of_mut!(BUF_A),
+                &mut *core::ptr::addr_of_mut!(BUF_B),
+            ))
+        }
+    }
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        let psram = catcard_board::BOARD.psram?;
+        let base = psram.base as usize + PSRAM_OFFSET;
+        // The second window must end before the staging marker.
+        if base + 2 * PSRAM_WINDOW > psram.staging_header as usize {
+            return None;
+        }
+        // SAFETY: memory-mapped PSRAM the board table describes, in a region nothing else
+        // uses while this screen is open.
+        unsafe {
+            Some((
+                core::slice::from_raw_parts_mut(base as *mut u8, PSRAM_WINDOW),
+                core::slice::from_raw_parts_mut((base + PSRAM_WINDOW) as *mut u8, PSRAM_WINDOW),
+            ))
+        }
+    }
+}
+
+/// Satoshis as a decimal BTC string, e.g. `0.00012345`.
+fn btc(sats: u64, out: &mut heapless::String<24>) {
+    use core::fmt::Write as _;
+    let _ = write!(out, "{}.{:08}", sats / 100_000_000, sats % 100_000_000);
+}
+
+/// Read the picked file into `buf`. Returns its length, or why not.
+fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+    let mut why: &'static str = "card error";
+    let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
+        // SAFETY: nothing else has claimed SDMMC1 or its pins while this screen is open.
+        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+            Ok(d) => d,
+            Err(_) => {
+                why = "controller failed";
+                return Err(());
+            }
+        };
+        let card = match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(catcard_sd::Error::NoCard) => {
+                why = "no card in slot";
+                return Err(());
+            }
+            Err(_) => {
+                why = "card would not start";
+                return Err(());
+            }
+        };
+        Ok(catcard_sd::Sectors::new(dev, card))
+    })
+    .map_err(|e| match e {
+        catcard_sd::MountError::Device => why,
+        catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
+    })?;
+    let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
+    let len = file.len();
+    if len as usize > buf.len() {
+        return Err("too big for this board");
+    }
+    let mut got = 0usize;
+    while got < len as usize {
+        match file.read(&mut vol, &mut buf[got..len as usize]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(_) => return Err("read failed"),
+        }
+    }
+    if got != len as usize {
+        return Err("short read");
+    }
+    Ok(got)
+}
+
+/// Decode `bytes` in place if they are base64 (as a `.psbt` written as text is), and return
+/// the PSBT's byte range within `buf`.
+///
+/// A binary PSBT starts with the magic; base64 of that magic starts `cHNidP`.
+fn as_psbt_bytes(buf: &mut [u8], len: usize, scratch: &mut [u8]) -> Result<usize, &'static str> {
+    if buf[..len].starts_with(&outscript::psbt::MAGIC) {
+        return Ok(len);
+    }
+    let text = core::str::from_utf8(&buf[..len])
+        .map_err(|_| "not a PSBT")?
+        .trim();
+    let n = outscript::base64::decode_to_slice(text, scratch).map_err(|_| "not a PSBT")?;
+    if !scratch[..n].starts_with(&outscript::psbt::MAGIC) {
+        return Err("not a PSBT");
+    }
+    buf[..n].copy_from_slice(&scratch[..n]);
+    Ok(n)
+}
+
+/// Why the review stopped, in the few words a screen has.
+fn refusal_text(r: Refusal) -> &'static str {
+    match r {
+        Refusal::NothingOfOurs => "no input is ours",
+        Refusal::Sighash { .. } => "unsupported sighash",
+        Refusal::FeeTooHigh { .. } => "fee above the limit",
+        Refusal::UnknownAmount { .. } => "an input has no amount",
+        Refusal::Unbalanced => "outputs exceed inputs",
+        Refusal::AlreadyFinal => "already finalised",
+    }
+}
+
+/// Sign a transaction picked from the card.
+pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Sign";
+
+    let Some(path) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
+        return;
+    };
+    // SAFETY: the menu waits for this screen to return, so nothing else holds the buffers.
+    let Some((buf, spare)) = (unsafe { buffers() }) else {
+        menu::message(ui.panel, HEAD, "no memory for this", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+
+    menu::message(ui.panel, HEAD, "reading the card", "");
+    let len = match read_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+        Ok(len) => len,
+        Err(why) => {
+            crate::catlog!("sign: {}: {}", path.as_str(), why);
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    crate::catlog!("sign: {} bytes from {}", len, path.as_str());
+
+    let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
+
+    // The review. Every judgement here derives a key per input and per claimed change
+    // output, so it runs masked, with the screen saying what it is doing.
+    let mut busy = menu::Working::new(ui.panel, HEAD, "checking the transaction");
+    let psbt = match Psbt::parse(&buf[..len]) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::catlog!("sign: psbt refused: {:?}", e);
+            menu::message(ui.panel, HEAD, "not a valid PSBT", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    let policy = Policy::default();
+    let summary =
+        crate::keywork::run(|kw| psbtview::summarise(&psbt, &master, fingerprint, &policy, kw));
+    busy.tick(ui.panel);
+    let summary = match summary {
+        Ok(s) => s,
+        Err(r) => {
+            crate::catlog!("sign: refused: {:?}", r);
+            menu::message(ui.panel, HEAD, refusal_text(r), "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    let mut shown = [psbtview::Destination {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; catcard_wallet::address::MAX_ADDRESS_LEN],
+        address_len: 0,
+    }; MAX_SHOWN];
+    let count = crate::keywork::run(|kw| {
+        psbtview::destinations(
+            &psbt,
+            &master,
+            fingerprint,
+            catcard_wallet::bip32::Network::Mainnet,
+            &mut shown,
+            kw,
+        )
+    });
+    let mut ours = [0usize; MAX_INPUTS];
+    let signable =
+        crate::keywork::run(|kw| psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw));
+
+    if !review(ui, &summary, &shown[..count], signable) {
+        menu::message(ui.panel, HEAD, "not signed", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+
+    // Sign, one input at a time, alternating buffers: each signature rewrites the whole
+    // container. `at` says which buffer currently holds the PSBT.
+    let mut busy = menu::Working::new(ui.panel, HEAD, "signing");
+    let (mut from, mut into) = (buf, spare);
+    let mut at = len;
+    let mut signed = 0usize;
+    for &index in &ours[..signable] {
+        let psbt = match Psbt::parse(&from[..at]) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        match crate::keywork::run(|kw| {
+            signer::sign_input(&psbt, index, &master, fingerprint, into, kw)
+        }) {
+            Ok(n) => {
+                core::mem::swap(&mut from, &mut into);
+                at = n;
+                signed += 1;
+            }
+            Err(e) => {
+                crate::catlog!("sign: input {} refused: {:?}", index, e);
+            }
+        }
+        busy.tick(ui.panel);
+    }
+    drop(master);
+
+    if signed == 0 {
+        menu::message(
+            ui.panel,
+            HEAD,
+            "nothing could be signed",
+            "any key to go back",
+        );
+        menu::wait_for_any_key(ui);
+        return;
+    }
+
+    menu::message(ui.panel, HEAD, "writing to the card", "");
+    match menu::write_card_file(SIGNED_NAME, &from[..at]) {
+        Ok(()) => {
+            crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at);
+            let mut note: heapless::String<24> = heapless::String::new();
+            use core::fmt::Write as _;
+            let _ = write!(note, "{signed} of {signable} inputs");
+            menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
+        }
+        Err(why) => {
+            crate::catlog!("sign: write failed: {}", why);
+            menu::message(ui.panel, "Write failed", why, "any key to go back");
+        }
+    }
+    menu::wait_for_any_key(ui);
+}
+
+/// Show what signing would authorise, and ask. True if the owner confirmed.
+///
+/// The fee and the destinations are the point of the screen, so they are what it leads
+/// with: how much leaves, to where, and what the miner takes.
+fn review(
+    ui: &mut Ui<'_>,
+    summary: &psbtview::Summary,
+    shown: &[psbtview::Destination],
+    signable: usize,
+) -> bool {
+    use catcard_ui::scroll::{Line, ScrollView};
+    use core::fmt::Write as _;
+
+    /// Lines the review can hold: the totals, two per destination, the overflow note and
+    /// the key hint.
+    const LINES: usize = 4 + 2 * MAX_SHOWN;
+    type Text = heapless::String<72>;
+
+    let mut texts: heapless::Vec<Text, LINES> = heapless::Vec::new();
+    let mut small: heapless::Vec<bool, LINES> = heapless::Vec::new();
+    let mut wrapped: heapless::Vec<bool, LINES> = heapless::Vec::new();
+    let say = |texts: &mut heapless::Vec<Text, LINES>,
+                   small_v: &mut heapless::Vec<bool, LINES>,
+                   wrap_v: &mut heapless::Vec<bool, LINES>,
+                   text: Text,
+                   is_small: bool,
+                   wrap: bool| {
+        if texts.push(text).is_ok() {
+            let _ = small_v.push(is_small);
+            let _ = wrap_v.push(wrap);
+        }
+    };
+
+    let mut amount = heapless::String::<24>::new();
+    btc(summary.sending, &mut amount);
+    let mut line = Text::new();
+    let _ = write!(line, "Sending {amount} BTC");
+    say(&mut texts, &mut small, &mut wrapped, line, false, false);
+
+    let mut amount = heapless::String::<24>::new();
+    btc(summary.fee, &mut amount);
+    let mut line = Text::new();
+    let _ = write!(
+        line,
+        "Fee {amount} ({}%){}",
+        summary.fee_percent,
+        if summary.fee_warn { " HIGH" } else { "" }
+    );
+    say(&mut texts, &mut small, &mut wrapped, line, false, false);
+
+    let mut line = Text::new();
+    let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
+    say(&mut texts, &mut small, &mut wrapped, line, true, false);
+
+    for d in shown {
+        let mut amount = heapless::String::<24>::new();
+        btc(d.amount, &mut amount);
+        let mut line = Text::new();
+        let _ = write!(
+            line,
+            "{}{} BTC{}",
+            if d.change { "change " } else { "to " },
+            amount,
+            if d.address_len == 0 {
+                " (no address)"
+            } else {
+                ""
+            }
+        );
+        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        if d.address_len > 0 {
+            let mut line = Text::new();
+            let _ = write!(line, "{}", d.address());
+            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+        }
+    }
+    if summary.outputs > shown.len() {
+        let mut line = Text::new();
+        let _ = write!(line, "+{} more outputs", summary.outputs - shown.len());
+        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+    }
+    let mut line = Text::new();
+    let _ = write!(
+        line,
+        "{} sign   {} cancel",
+        display::CONFIRM_KEY,
+        display::CANCEL_KEY
+    );
+    say(&mut texts, &mut small, &mut wrapped, line, true, false);
+
+    let mut doc: heapless::Vec<Line, { LINES + 1 }> = heapless::Vec::new();
+    let _ = doc.push(Line::title("Sign transaction"));
+    for (i, text) in texts.iter().enumerate() {
+        let mut l = Line::body(text.as_str());
+        if small[i] {
+            l = l.small();
+        }
+        if wrapped[i] {
+            l = l.wrapped();
+        }
+        let _ = doc.push(l);
+    }
+
+    let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    menu::scroll_choice(ui, &mut view)
+}

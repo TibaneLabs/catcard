@@ -33,6 +33,7 @@ board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]
 board-q1 = ["catcard-board/board-q1", "catcard-hal/board-q1"]
 
 [dependencies]
+outscript = { workspace = true }
 zeroize = { workspace = true, default-features = false }
 catcard-board.workspace = true
 catcard-callgate.workspace = true

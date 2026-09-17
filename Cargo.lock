@@ -137,6 +137,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "heapless",
+ "outscript",
  "zeroize",
 ]
 

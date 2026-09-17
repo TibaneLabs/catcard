@@ -582,7 +582,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
-        Screen::SignPsbt => to(|a| sign_psbt(a.ui), Screen::Main),
+        Screen::SignPsbt => to(
+            |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
         // Never returns, so `back` is unreachable; the bootloader reboots the device.
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Both take the CPU for good once they start; they return only to refuse a
@@ -1773,7 +1776,7 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
 /// Split from the screen so each step is one `?`, and the reason it stopped rides out on
 /// the `Err` for the caller to show and log -- the step is what tells a bad card apart
 /// from a full one or a filesystem it cannot mount.
-fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static str> {
     // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
     let mut why: &'static str = "card error";
     let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
@@ -1878,7 +1881,7 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> bool {
 ///
 /// A mount or read failure is reported with the step it stopped at, so a missing card, a
 /// filesystem it cannot mount (exFAT, today) and a read error tell themselves apart.
-fn browse_sd(
+pub(crate) fn browse_sd(
     ui: &mut Ui<'_>,
     title: &str,
     filter: Option<&str>,
@@ -2928,7 +2931,7 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
 /// `None` once the user has been told why not: the secret could not be read, the slot holds
 /// no BIP-39 wallet (and which kind it does hold), or derivation failed. The returned key
 /// zeroizes itself when dropped; hold it only as long as the screen needs it.
-fn unlock_master(
+pub(crate) fn unlock_master(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
@@ -3195,6 +3198,46 @@ pub(crate) fn wait_for_release(ui: &mut Ui<'_>) {
 }
 
 /// Block until something is pressed. Used only by screens that have already said so.
+/// Show a scrolling document and wait for a decision: true on confirm, false on cancel.
+///
+/// Up and down scroll it, as they do everywhere else. For a screen whose content may not
+/// fit -- a transaction's destinations -- where the answer must not be given before the
+/// whole of it can be read.
+pub(crate) fn scroll_choice(
+    ui: &mut Ui<'_>,
+    view: &mut catcard_ui::scroll::ScrollView<'_>,
+) -> bool {
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, view));
+        wait_for_release(ui);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    Key::Confirm => return true,
+                    Key::Cancel => return false,
+                    Key::Digit(8) => {
+                        view.scroll(true, 1);
+                        break;
+                    }
+                    Key::Digit(5) => {
+                        view.scroll(false, 1);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !keys.is_empty() {
+                break;
+            }
+            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        }
+    }
+}
+
 pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
     wait_for_release(ui);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -3215,7 +3258,7 @@ pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
 ///
 /// Any other key keeps waiting. This is asked before something irreversible, and "a key
 /// was pressed" is not consent — [`wait_for_any_key`] is the one that takes anything.
-fn confirmed(ui: &mut Ui<'_>) -> bool {
+pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
     // The key that brought us to this question must not also answer it. That matters
     // most here: one of the questions this asks destroys a stored wallet.
     wait_for_release(ui);
@@ -4347,26 +4390,6 @@ fn read_choice(ui: &mut Ui<'_>, n: usize) -> Choice {
         }
         catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
     }
-}
-
-/// Sign a partially-signed transaction (PSBT) staged on the SD card.
-///
-/// Chosen from the main menu's "Ready to Sign" when a wallet exists. For now this runs the
-/// `.psbt` file picker and acknowledges the choice; loading, parsing, verifying, showing
-/// the transaction, confirming and signing land as the PSBT support is wired in.
-fn sign_psbt(ui: &mut Ui<'_>) {
-    let Some(path) = browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
-        return;
-    };
-    // TODO: load the file into scratch, parse the PSBT, check it is ours and not already
-    // signed, show the transaction, confirm, sign each input, and write it back.
-    message(
-        ui.panel,
-        "PSBT selected",
-        path.as_str(),
-        "signing coming soon",
-    );
-    wait_any_key(ui);
 }
 
 /// Format the SD card to the SD standard: one MBR partition filling the card, holding the
