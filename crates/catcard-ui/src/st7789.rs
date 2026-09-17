@@ -23,8 +23,17 @@ pub const HEIGHT: usize = 240;
 /// Integer scale for the mono framebuffer: 128x64 at 2x is 256x128.
 pub const SCALE: usize = 2;
 
-/// The three commands drawing needs. MIPI DCS numbering, which the ST7789 uses. [C]
+/// The commands this driver sends. MIPI DCS numbering, which the ST7789 uses. [C]
 pub mod cmd {
+    /// Normal display mode on: leaves partial and scrolling modes.
+    /// Source: Sitronix ST7789V datasheet, command 13h NORON [C]
+    pub const NORON: u8 = 0x13;
+    /// Vertical scrolling definition: top fixed, scrolled, bottom fixed line counts, each
+    /// big-endian, summing to the panel's 320 lines. Source: ST7789V datasheet, command 33h VSCRDEF [C]
+    pub const VSCRDEF: u8 = 0x33;
+    /// Vertical scroll start address: the frame-memory line shown first in the scrolled
+    /// area, big-endian. Source: ST7789V datasheet, command 37h VSCSAD [C]
+    pub const VSCSAD: u8 = 0x37;
     /// Column address set: start and end column, each big-endian.
     pub const CASET: u8 = 0x2A;
     /// Row address set: start and end row, each big-endian.
@@ -233,6 +242,54 @@ impl<B: DisplayBus> St7789<B> {
         Ok(())
     }
 
+    /// Scroll the panel in the controller, with no pixels sent: the frame memory is a ring
+    /// of [`WIDTH`] lines, and `set_scroll_start` picks which of them is shown first.
+    ///
+    /// The ST7789 calls this vertical scrolling. Its lines run along the panel's long side,
+    /// and the Q1 mounts the panel landscape, so on this board it moves the picture
+    /// **sideways**, and the fixed areas are strips at the left and right edges rather than
+    /// bands at the top and bottom. Which edge is "first", and which way a growing start
+    /// moves the picture, depends on `MADCTL` and is measured, not assumed -- see the
+    /// Debug scroll test.
+    ///
+    /// `fixed_first + fixed_last` must leave at least one line to scroll; the scrolled
+    /// area is whatever remains of the 320.
+    ///
+    /// Source: ST7789V datasheet, commands 33h VSCRDEF and 37h VSCSAD [C]
+    pub fn set_scroll_area(
+        &mut self,
+        fixed_first: usize,
+        fixed_last: usize,
+    ) -> Result<(), B::Error> {
+        let fixed_first = fixed_first.min(WIDTH - 1);
+        let fixed_last = fixed_last.min(WIDTH - 1 - fixed_first);
+        let scrolled = WIDTH - fixed_first - fixed_last;
+        let (a, b, c) = (
+            (fixed_first as u16).to_be_bytes(),
+            (scrolled as u16).to_be_bytes(),
+            (fixed_last as u16).to_be_bytes(),
+        );
+        self.bus.command(&[cmd::VSCRDEF])?;
+        self.bus.data(&[a[0], a[1], b[0], b[1], c[0], c[1]])
+    }
+
+    /// Show frame-memory line `line` first in the scrolled area. See
+    /// [`set_scroll_area`](Self::set_scroll_area).
+    pub fn set_scroll_start(&mut self, line: usize) -> Result<(), B::Error> {
+        let v = ((line % WIDTH) as u16).to_be_bytes();
+        self.bus.command(&[cmd::VSCSAD])?;
+        self.bus.data(&v)
+    }
+
+    /// Put scrolling back as the rest of the firmware assumes it: start 0, the whole panel
+    /// one area, normal display mode. Every other drawing path addresses the panel as if
+    /// nothing were shifted, so a scroll left behind garbles every screen after it.
+    pub fn end_scroll(&mut self) -> Result<(), B::Error> {
+        self.set_scroll_start(0)?;
+        self.set_scroll_area(0, 0)?;
+        self.bus.command(&[cmd::NORON])
+    }
+
     /// Paint the whole panel with a chart of what it can show, in six 40-pixel bands:
     ///
     /// 1. [`BARS`]: white, yellow, cyan, green, magenta, red, blue, black
@@ -402,6 +459,36 @@ mod tests {
     use super::*;
     use crate::canvas::Canvas;
     use crate::framebuffer::Mono128x64;
+
+    #[test]
+    fn a_scroll_area_always_covers_the_320_lines() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_scroll_area(40, 0).unwrap();
+        p.set_scroll_area(400, 400).unwrap();
+        let log = &p.bus_mut().log;
+        assert_eq!(log[0], (false, vec![cmd::VSCRDEF]));
+        assert_eq!(log[1], (true, vec![0, 40, 0x01, 0x18, 0, 0]));
+        // Absurd fixed areas are clamped so one line still scrolls, never a sum past 320.
+        let d = &log[3].1;
+        let sum: u16 = d.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).sum();
+        assert_eq!(sum, 320);
+        assert!(u16::from_be_bytes([d[2], d[3]]) >= 1);
+    }
+
+    #[test]
+    fn a_scroll_start_wraps_and_ending_puts_everything_back() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_scroll_start(330).unwrap();
+        assert_eq!(p.bus_mut().log[1], (true, vec![0, 10]));
+        p.bus_mut().log.clear();
+        p.end_scroll().unwrap();
+        let log = &p.bus_mut().log;
+        assert_eq!(log[0], (false, vec![cmd::VSCSAD]));
+        assert_eq!(log[1], (true, vec![0, 0]));
+        assert_eq!(log[2], (false, vec![cmd::VSCRDEF]));
+        assert_eq!(log[3], (true, vec![0, 0, 0x01, 0x40, 0, 0]));
+        assert_eq!(log[4], (false, vec![cmd::NORON]));
+    }
 
     #[derive(Default)]
     struct MockBus {

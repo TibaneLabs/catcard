@@ -2560,10 +2560,71 @@ fn scroll_test(ui: &mut Ui<'_>) {
             ui.panel,
             "Scroll test",
             "did a bar move at the bottom?",
-            "any key to go back",
+            "any key for the LCD scroll",
         );
         wait_for_any_key(ui);
+        lcd_scroll_test(ui);
     }
+}
+
+/// The ST7789's own scrolling, on the Q1: which way it moves the picture, whether it wraps
+/// cleanly, and which edge a fixed area holds still.
+///
+/// Two phases over a striped test card: the whole panel scrolled two lines a frame for two
+/// full turns, then the same with the first 40 lines fixed. Each step waits for the tear
+/// pulse. Then the panel is put back and the next frame sent whole.
+#[cfg(feature = "board-q1")]
+fn lcd_scroll_test(ui: &mut Ui<'_>) {
+    use catcard_ui::st7789::{BARS, WIDTH, rgb565};
+
+    message(ui.panel, "LCD scroll", "watch the stripes", "");
+    // A card that shows direction and wrap: stripes 32 lines wide, a red line on memory
+    // line 0 and a white one on line 319, and a wedge pointing towards higher lines.
+    for i in 0..WIDTH / 32 {
+        let _ = ui
+            .panel
+            .fill_rect(i * 32, 150, 32, 90, BARS[i % BARS.len()]);
+    }
+    let _ = ui.panel.fill_rect(0, 100, 3, 140, rgb565(31, 0, 0));
+    let _ = ui
+        .panel
+        .fill_rect(WIDTH - 3, 100, 3, 140, catcard_ui::st7789::WHITE);
+    for step in 0..20 {
+        let _ = ui.panel.fill_rect(
+            10 + step * 2,
+            110 + step,
+            2,
+            40 - 2 * step,
+            rgb565(0, 63, 0),
+        );
+    }
+
+    let mut missed = 0u32;
+    for (label, fixed_first, steps) in [
+        ("whole panel", 0usize, 320usize),
+        ("first 40 fixed", 40, 140),
+    ] {
+        crate::catlog!("lcd scroll: {}", label);
+        let _ = ui.panel.set_scroll_area(fixed_first, 0);
+        for n in 0..steps {
+            if !display::wait_tear() {
+                missed += 1;
+            }
+            let _ = ui
+                .panel
+                .set_scroll_start(fixed_first + (n * 2) % (WIDTH - fixed_first));
+        }
+        let _ = ui.panel.set_scroll_start(0);
+    }
+    display::end_scroll(ui.panel);
+    crate::catlog!("lcd scroll: done, {} tear pulses missed", missed);
+    message(
+        ui.panel,
+        "LCD scroll",
+        "which way did it move?",
+        "which side stayed still?",
+    );
+    wait_for_any_key(ui);
 }
 
 /// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are

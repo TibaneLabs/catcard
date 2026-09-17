@@ -262,6 +262,52 @@ pub fn scroll_busy_bar(_panel: &mut Panel) {
     }
 }
 
+/// Wait for the start of the panel's next tear pulse, so a change made now lands between
+/// two refreshes rather than across one. False if no pulse came within 50 ms -- three
+/// frames at the ~61 Hz the tear line runs at on this panel (measured: 360 edges in 3 s).
+///
+/// Source: display.md §Q1 init step 7 "TEON ... LCD_TEAR=PB11 (~61 Hz)" [C]
+#[cfg(feature = "board-q1")]
+pub fn wait_tear() -> bool {
+    let Display::St77xx {
+        tear: Some(tear), ..
+    } = BOARD.display
+    else {
+        return false;
+    };
+    // SAFETY: the panel drives the tear line; configuring it as an input takes nothing
+    // from anyone. Reads RCC for the clock.
+    unsafe {
+        gpio::enable_port(tear.port);
+        gpio::configure(
+            tear,
+            Mode::Input,
+            OutputType::PushPull,
+            Pull::None,
+            Speed::Low,
+        );
+        let limit = catcard_hal::clock::hclk_hz() / 20;
+        let start = catcard_hal::dwt::cycles();
+        let mut was_high = gpio::read(tear);
+        while catcard_hal::dwt::cycles().wrapping_sub(start) < limit {
+            let high = gpio::read(tear);
+            if high && !was_high {
+                return true;
+            }
+            was_high = high;
+        }
+    }
+    false
+}
+
+/// Put the panel's scrolling back and have the next frame sent whole. For a screen that
+/// scrolled the panel directly: everything else draws as if nothing were shifted.
+#[cfg(feature = "board-q1")]
+pub fn end_scroll(panel: &mut Panel) {
+    let _ = panel.end_scroll();
+    wipe(panel);
+}
+
 /// Whether the GPU co-processor holds the LCD bus. Foreground only, single core.
 #[cfg(feature = "board-q1")]
 static mut BUS_GIVEN: bool = false;
