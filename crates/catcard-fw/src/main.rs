@@ -55,6 +55,7 @@ mod staging;
 mod trng;
 mod ui;
 mod usbtask;
+mod verify;
 
 /// Board this image was built for, from `build.rs`.
 /// The board this was *built* for, from the selected feature.

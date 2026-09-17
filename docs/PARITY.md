@@ -25,7 +25,9 @@ Dependency first, then what a user needs to hold funds safely:
 3. ~~**BIP-39 passphrase**~~ -- written, untested on hardware: Settings → Passphrase, typed
    on the keypad or keyboard, shown with the fingerprint and first address of the wallet it
    opens, kept in RAM only, and the main menu says when one is in force.
-4. **Address Explorer and Verify Address** across the three single-sig types and accounts.
+4. ~~**Address Explorer and Verify Address**~~ -- written, untested on hardware: all four
+   types, accounts and both chains in the explorer; Verify address types an address and
+   searches this wallet's own derivations for it.
 5. **Message signing** (legacy and BIP-322).
 6. **BIP-85** child words, WIF, xprv, hex, passwords.
 7. **Settings store** -- internal flash driver, LittleFS2, AES-256-CTR, stock-compatible
@@ -45,7 +47,7 @@ Dependency first, then what a user needs to hold funds safely:
 |---|---|---|---|
 | BIP-32 | ✅ | ✅ | `catcard-wallet::bip32`, all official vectors |
 | BIP-39 | ✅ | 🟡 | words ✅, passphrase ✅ (untested on hardware); NFKD still refused for non-ASCII (`ROADMAP.md` M5) |
-| BIP-43/44/49/84 | ✅ | 🟡 | paths and addresses ✅; accounts other than 0 not exposed |
+| BIP-43/44/49/84 | ✅ | ✅ | paths, addresses, accounts and both chains |
 | BIP-45/48 (multisig paths) | ✅ | ❌ | step 8 |
 | BIP-67 sorted multisig | ✅ | ❌ | step 8 |
 | BIP-85 | ✅ | ❌ | step 6 |
@@ -85,9 +87,9 @@ Dependency first, then what a user needs to hold funds safely:
 |---|---|---|---|
 | P2PKH, P2WPKH, P2SH-P2WPKH display | ✅ | ✅ | Address Explorer, with QR |
 | Taproot display | ✅ | ✅ | Address Explorer |
-| Accounts, change chain, start index, custom path | ✅ | ❌ | step 4 |
+| Accounts, change chain, start index | ✅ | 🟡 | account and chain keys in the explorer; no custom-path entry |
 | Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address only |
-| Verify address / ownership | ✅ | ❌ | step 4 |
+| Verify address / ownership | ✅ | 🟡 | Utils → Verify address, 4 types x 3 accounts x 2 chains x 100 |
 | Multisig addresses | ✅ | ❌ | step 8 |
 
 ## 4. Multisig and descriptors

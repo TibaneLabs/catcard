@@ -100,6 +100,8 @@ enum Screen {
     AddressExplorer,
     /// Output descriptors for a watch-only wallet, to the SD card.
     ExportWallet,
+    /// Ask whether a typed address belongs to this wallet.
+    VerifyAddress,
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -205,6 +207,7 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "View TRNG Words",
     "Address Explorer",
+    "Verify address",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -216,6 +219,7 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "View TRNG Words",
     "Address Explorer",
+    "Verify address",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -577,6 +581,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
         Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
         Screen::ExportWallet => to(|a| export_wallet(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::VerifyAddress => to(
+            |a| crate::verify::screen(a.gate, a.login, a.ui),
+            Screen::Utils,
+        ),
         Screen::BrowseSd => to(
             |a| {
                 browse_sd(a.ui, "SD card", None, false);
@@ -778,6 +786,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
+            (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
@@ -1012,7 +1021,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::UsbDrive => {}
         Screen::ViewTrngWords => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
-        Screen::AddressExplorer | Screen::ExportWallet | Screen::Passphrase => {}
+        Screen::AddressExplorer
+        | Screen::ExportWallet
+        | Screen::VerifyAddress
+        | Screen::Passphrase => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -2506,9 +2518,16 @@ fn kind_name(kind: catcard_wallet::address::AddressKind) -> &'static str {
 /// One level at a time, with `busy` ticked between them: each hardened step is an
 /// HMAC-SHA512 and a point multiplication, about a tenth of a second of masked work, so the
 /// four of them are a visible pause and the bar should keep moving across it.
-fn receive_chain(
+/// The account-level chain key for `kind`, account `account`, chain `chain`
+/// (0 receive, 1 change): `m/{purpose}h/0h/{account}h/{chain}`.
+///
+/// Only the public half comes back, so the caller can walk addresses without holding key
+/// material.
+pub(crate) fn chain_key(
     master: &catcard_wallet::bip32::ExtendedPrivKey,
     kind: catcard_wallet::address::AddressKind,
+    account: u32,
+    chain: u32,
     busy: &mut Working<'_>,
     panel: &mut display::Panel,
 ) -> Option<catcard_wallet::bip32::ExtendedPubKey> {
@@ -2516,10 +2535,20 @@ fn receive_chain(
     let steps = [
         ChildNumber::hardened(kind.bip44_purpose()).ok()?,
         ChildNumber::hardened(0).ok()?,
-        ChildNumber::hardened(0).ok()?,
-        ChildNumber::normal(0).ok()?,
+        ChildNumber::hardened(account).ok()?,
+        ChildNumber::normal(chain).ok()?,
     ];
     public_at(master, &steps, busy, panel)
+}
+
+/// The first account's receive chain, `m/{purpose}h/0h/0h/0`.
+fn receive_chain(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    kind: catcard_wallet::address::AddressKind,
+    busy: &mut Working<'_>,
+    panel: &mut display::Panel,
+) -> Option<catcard_wallet::bip32::ExtendedPubKey> {
+    chain_key(master, kind, 0, 0, busy, panel)
 }
 
 /// The extended public key at `steps` below `master`.
@@ -3063,8 +3092,10 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let Some(master) = unlock_master(gate, login, ui, "Addresses") else {
         return;
     };
-    let mut chains: [Option<catcard_wallet::bip32::ExtendedPubKey>; PROTOCOLS.len()] =
-        [None; PROTOCOLS.len()];
+    // One cached chain key at a time, for the type, account and chain on screen. Caching
+    // all of them would be four times the state for a screen that walks one at a time, and
+    // each is half a second to rederive when the owner moves.
+    let mut cached: Option<(usize, u32, u32, catcard_wallet::bip32::ExtendedPubKey)> = None;
 
     // How many characters of the address fit on one line **in the large face**, asked of the
     // renderer rather than worked out from the panel width: it keeps a gutter for the scroll
@@ -3080,23 +3111,27 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     );
     let mut index: u32 = 0;
     let mut proto = 0usize;
+    let mut account: u32 = 0;
+    let mut chain: u32 = 0;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         let kind = PROTOCOLS[proto];
-        // First time this type is asked for: derive its receive chain, masked, and keep
-        // only the public half. Announced first -- it is about half a second during which
-        // nothing can repaint, and an unexplained pause is what made the old entry feel
-        // broken.
-        if chains[proto].is_none() {
+        // First time this type, account and chain are asked for: derive the chain key,
+        // masked, and keep only the public half. Announced first -- it is about half a
+        // second during which nothing can repaint, and an unexplained pause is what made
+        // the old entry feel broken.
+        if !matches!(cached, Some((p, a, c, _)) if (p, a, c) == (proto, account, chain)) {
             let mut busy = Working::new(ui.panel, "Deriving", kind_name(kind));
-            chains[proto] = receive_chain(&master, kind, &mut busy, ui.panel);
+            cached = chain_key(&master, kind, account, chain, &mut busy, ui.panel)
+                .map(|key| (proto, account, chain, key));
         }
+        let chain_pub = cached.as_ref().map(|(_, _, _, k)| *k);
 
         let mut path = Line::new();
         let _ = write!(
             path,
-            "#{index}  m/{}h/0h/0h/0/{index}",
+            "m/{}h/0h/{account}h/{chain}/{index}",
             kind.bip44_purpose()
         );
 
@@ -3104,7 +3139,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // Public derivation from the chain's extended public key: no private key is
         // involved, so this needs no masked region and costs the host nothing to watch.
         // The index moves with the type, so the same position can be compared across them.
-        let addr = chains[proto].and_then(|chain| {
+        let addr = chain_pub.and_then(|chain| {
             ChildNumber::normal(index)
                 .ok()
                 .and_then(|c| chain.derive_child(c).ok())
@@ -3142,6 +3177,14 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         let _ = doc.push(catcard_ui::scroll::Line::body(shown.as_str()));
         let _ = doc.push(catcard_ui::scroll::Line::body("up/down address").small());
         let _ = doc.push(catcard_ui::scroll::Line::body("left/right type").small());
+        let _ = doc.push(
+            catcard_ui::scroll::Line::body(if chain == 0 {
+                "1/3 account  0 change chain"
+            } else {
+                "1/3 account  0 receive chain"
+            })
+            .small(),
+        );
         let _ = doc.push(catcard_ui::scroll::Line::body(key_hint.as_str()).small());
         let view = catcard_ui::scroll::ScrollView::build(
             &doc,
@@ -3181,6 +3224,24 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     }
                     Key::Digit(7) => {
                         proto = (proto + PROTOCOLS.len() - 1) % PROTOCOLS.len();
+                        break 'wait;
+                    }
+                    // Accounts are separate wallets under one seed; the chain is receive or
+                    // change. Both restart the index, because address 5 of one account has
+                    // nothing to do with address 5 of another.
+                    Key::Digit(3) => {
+                        account = account.saturating_add(1);
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(1) => {
+                        account = account.saturating_sub(1);
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(0) => {
+                        chain = 1 - chain;
+                        index = 0;
                         break 'wait;
                     }
                     _ => {}
