@@ -53,7 +53,7 @@ pub const MIN_PART_LEN: usize = 2;
 /// that sets, changes or submits a PIN is held to the same 2..=6, so no CatCard build can
 /// create a PIN another firmware for the same hardware cannot enter.
 ///
-/// Source: the stock firmware's PIN entry rules, as checked by the maintainer.
+/// Source: hw-reference/gate18-pin-state-machine.md §6.1 [C] (checked against stock firmware)
 pub const MAX_PART_LEN: usize = 6;
 
 // Both parts and the separator still have to fit the gate's field.
