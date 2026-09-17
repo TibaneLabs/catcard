@@ -7,11 +7,11 @@
 //! to sign get made.
 //!
 //! Only the single-signature forms are written here: `pkh` (BIP-381), `wpkh` and
-//! `sh(wpkh)` (BIP-382), with the receive and change chains in one key expression as
-//! `/<0;1>/*` (BIP-389).
+//! `sh(wpkh)` (BIP-382) and the key-path-only `tr` (BIP-386), with the receive and change
+//! chains in one key expression as `/<0;1>/*` (BIP-389).
 //!
 //! Sources: BIP-380 (syntax, checksum algorithm and its test vectors), BIP-381, BIP-382,
-//! BIP-389 -- all public standards [C].
+//! BIP-386, BIP-389 -- all public standards [C].
 
 use core::fmt::{self, Write};
 
@@ -110,8 +110,6 @@ pub struct SingleSig {
 /// Why a descriptor could not be written.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
-    /// Taproot is not a single-key script this writes.
-    UnsupportedKind,
     /// The output buffer is too small.
     Overflow,
 }
@@ -145,11 +143,13 @@ impl SingleSig {
     /// For example `wpkh([d34db33f/84h/0h/0h]xpub.../<0;1>/*)#checksum`. Hardened steps are
     /// written `h`, which every descriptor reader accepts and needs no shell quoting.
     pub fn write(&self, xpub: &str, out: &mut [u8]) -> Result<usize, Error> {
+        // `tr` here is key-path only -- no script tree -- which is what BIP-86 single-sig
+        // taproot is. Source: BIP-386 [C]
         let (open, close) = match self.kind {
             AddressKind::P2pkh => ("pkh(", ")"),
             AddressKind::P2wpkh => ("wpkh(", ")"),
             AddressKind::P2shP2wpkh => ("sh(wpkh(", "))"),
-            AddressKind::P2tr => return Err(Error::UnsupportedKind),
+            AddressKind::P2tr => ("tr(", ")"),
         };
         let mut buf = Buf { out, len: 0 };
         let [a, b, c, d] = self.fingerprint;
@@ -286,23 +286,18 @@ mod tests {
         let p = write(AddressKind::P2pkh);
         assert!(p.starts_with(&format!("pkh([d34db33f/44h/0h/0h]{XPUB}/<0;1>/*)#")));
         assert!(verify(&p));
+        let t = write(AddressKind::P2tr);
+        assert!(t.starts_with(&format!("tr([d34db33f/86h/0h/0h]{XPUB}/<0;1>/*)#")));
+        assert!(verify(&t));
     }
 
     #[test]
-    fn taproot_and_a_short_buffer_are_refused_not_truncated() {
+    fn a_short_buffer_is_refused_not_truncated() {
         let a = SingleSig {
-            kind: AddressKind::P2tr,
+            kind: AddressKind::P2wpkh,
             fingerprint: [0; 4],
             coin: 0,
             account: 0,
-        };
-        assert_eq!(
-            a.write(XPUB, &mut [0u8; MAX_LEN]),
-            Err(Error::UnsupportedKind)
-        );
-        let a = SingleSig {
-            kind: AddressKind::P2wpkh,
-            ..a
         };
         assert_eq!(a.write(XPUB, &mut [0u8; 40]), Err(Error::Overflow));
     }

@@ -2841,10 +2841,11 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     use catcard_wallet::descriptor::{self, SingleSig};
 
     const HEAD: &str = "Export wallet";
-    const ACCOUNTS: [(AddressKind, &str); 3] = [
+    const ACCOUNTS: [(AddressKind, &str); 4] = [
         (AddressKind::P2wpkh, "Native segwit"),
         (AddressKind::P2shP2wpkh, "Nested segwit"),
         (AddressKind::P2pkh, "Legacy"),
+        (AddressKind::P2tr, "Taproot"),
     ];
 
     let Some(master) = unlock_master(gate, login, ui, HEAD) else {
@@ -2852,7 +2853,7 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
 
-    let mut text: heapless::String<1536> = heapless::String::new();
+    let mut text: heapless::String<2048> = heapless::String::new();
     let [a, b, c, d] = fingerprint;
     let _ = write!(
         text,
