@@ -4450,10 +4450,6 @@ enum DocExit {
     Cancelled,
 }
 
-/// Cycles held between animation frames of a scroll glide. Short enough that a one-line
-/// move settles in a blink, long enough that the motion reads as motion.
-const GLIDE_FRAME_CYCLES: u32 = 700_000;
-
 /// Idle beats between marquee steps for an over-long selected name -- how fast it scrolls
 /// sideways. One `IDLE_PAUSE_CYCLES` beat is the loop's natural tick.
 const MARQUEE_BEATS: u32 = 8;
@@ -4469,14 +4465,14 @@ fn glide_view(
     to: usize,
 ) {
     if display::SMOOTH_SCROLL && from != to {
-        const FRAMES: isize = 6;
+        let frames = display::GLIDE_FRAMES as isize;
         let (a, b) = (from as isize, to as isize);
-        for f in 1..FRAMES {
-            let off = (a + (b - a) * f / FRAMES).max(0) as usize;
+        for f in 1..frames {
+            let off = (a + (b - a) * f / frames).max(0) as usize;
             view.set_off(off);
             display::draw(panel, |c| catcard_ui::scroll::render(c, view));
             let _ = usbtask::pump();
-            catcard_hal::dwt::delay_cycles(GLIDE_FRAME_CYCLES);
+            catcard_hal::dwt::delay_cycles(display::GLIDE_PAUSE_CYCLES);
         }
     }
     view.set_off(to);

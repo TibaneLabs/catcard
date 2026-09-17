@@ -19,12 +19,16 @@ const AF_SPI: u8 = 5;
 /// it matters because an overclocked panel corrupts intermittently rather than failing.
 const DISPLAY_MAX_HZ: u32 = 8_000_000;
 
-/// SPI clock ceiling for the Q1's ST7789.
+/// SPI clock ceiling for the Q1's ST7789: 60 MHz, SPI1 at its APB ceiling, as the
+/// bootloader and stock firmware drive it.
 ///
-/// The reference has the bootloader and stock firmware at 60 MHz (SPI1 at its APB
-/// ceiling). Half that is plenty for a 256x128 image and leaves margin on a trace length
-/// nobody has measured. Source: display.md §Q1 "At firmware start" [C] for the 60 MHz
-const Q1_DISPLAY_MAX_HZ: u32 = 30_000_000;
+/// This was halved to 30 MHz for margin on an unmeasured trace, which cost nothing while
+/// the write loop was the bottleneck. Once that loop was fixed, a full 320x240 frame
+/// (~140 KB) became wire-limited, and scrolling is where it shows. Stock ships at 60 MHz on
+/// this exact board.
+///
+/// Source: display.md §Q1 "At firmware start" [C]
+const Q1_DISPLAY_MAX_HZ: u32 = 60_000_000;
 
 /// The panel wired up on this board.
 pub struct PanelBus {
@@ -294,14 +298,29 @@ pub const SCREEN_W: usize = 128;
 #[cfg(feature = "board-q1")]
 pub const SCREEN_W: usize = 320;
 
-/// Whether scrolling is animated. The mono panel is a single ~1 KB SPI blit per frame, so
-/// a short glide is cheap and reads well. The Q1's frame is ~154 KB polled a byte at a
-/// time and a vertical scroll dirties every row, defeating the row-cache -- so it jumps.
-#[cfg(not(feature = "board-q1"))]
+/// Whether scrolling is animated.
+///
+/// On for every board. The Q1 used to jump instead, on the reasoning that a scroll dirties
+/// every row of its 320x240 frame and so defeats the row cache. Measured, one scroll frame
+/// there came to ~75 ms, and almost none of it was the SPI clock: 30 and 60 MHz gave the
+/// same number. It was pixel conversion and a per-byte helper call in the SPI write loop.
+/// With both fixed a frame is ~38 ms -- ~15 of it rendering, the rest now genuinely the
+/// wire -- which is cheap enough to animate.
 pub const SMOOTH_SCROLL: bool = true;
-/// As above, for the Q1: no animation.
+
+/// Frames in a scroll glide, the settled one included, and the pause between them.
+///
+/// The mono panel's frame is a ~1 KB blit, so the pause is what sets the pace: six frames
+/// ~6 ms apart. On the Q1 the frame itself takes ~38 ms, which is already a pace, so the
+/// glide there is shorter and does not wait: three in-between frames, about 115 ms a row.
+#[cfg(not(feature = "board-q1"))]
+pub const GLIDE_FRAMES: usize = 6;
+#[cfg(not(feature = "board-q1"))]
+pub const GLIDE_PAUSE_CYCLES: u32 = 700_000;
 #[cfg(feature = "board-q1")]
-pub const SMOOTH_SCROLL: bool = false;
+pub const GLIDE_FRAMES: usize = 4;
+#[cfg(feature = "board-q1")]
+pub const GLIDE_PAUSE_CYCLES: u32 = 0;
 
 /// What this board's confirm key is labelled with. The mk pads carry a tick moulded into
 /// the cap; the Q1's key is printed ENTER.

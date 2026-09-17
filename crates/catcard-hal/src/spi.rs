@@ -265,14 +265,28 @@ impl Spi {
     /// `OVR` will latch, since received bytes are never read. That is harmless here —
     /// it only reports that a byte was discarded, which is the intent — and it is why
     /// this path does not check it.
+    ///
+    /// The loop is written out rather than going through [`Self::wait`] per byte. On the
+    /// Q1 a scrolling frame is ~140 KB, and at `opt-level = "s"` the per-byte helper call
+    /// cost about 46 CPU cycles a byte -- measured, and independent of the SPI clock
+    /// (30 and 60 MHz gave the same frame time), so the wire was never the limit. The
+    /// bound is the same `POLL_LIMIT` per byte.
     pub fn write_only(&mut self, data: &[u8]) -> Result<(), Error> {
+        let sr = (self.base + SR) as *const u32;
+        let dr = (self.base + DR) as *mut u8;
         for &b in data {
-            self.wait(SR_TXE, SR_TXE)?;
+            let mut spins = POLL_LIMIT;
+            // SAFETY: reading this instance's status register.
+            while unsafe { core::ptr::read_volatile(sr) } & SR_TXE == 0 {
+                if spins == 0 {
+                    return Err(Error::Timeout);
+                }
+                spins -= 1;
+                core::hint::spin_loop();
+            }
             // SAFETY: 8-bit store to DR. A wider store would queue two frames — see
             // the module docs.
-            unsafe {
-                core::ptr::write_volatile((self.base + DR) as *mut u8, b);
-            }
+            unsafe { core::ptr::write_volatile(dr, b) };
         }
         // The caller drops chip-select after this, so the shift register has to drain
         // first or the last byte is truncated on the wire.

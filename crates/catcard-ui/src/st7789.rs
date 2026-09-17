@@ -11,7 +11,7 @@
 //! [`St7789::flush`] still shows a 128x64 mono framebuffer at [`SCALE`]x, for anything
 //! drawn that way.
 
-use crate::canvas::{Canvas, Gray4};
+use crate::canvas::Gray4;
 use crate::display::DisplayBus;
 use crate::framebuffer::Framebuffer;
 
@@ -368,10 +368,24 @@ impl<B: DisplayBus> St7789<B> {
         start: usize,
         end: usize,
     ) -> Result<(), B::Error> {
-        let mut line = [0u8; WIDTH * 2];
+        // A packed byte holds two pixels, the even one in its high nibble. Expanding a whole
+        // byte through a 256-entry table built once per flush turns 76 800 bounds-checked
+        // `get`s a frame into one lookup per byte -- on the Q1 this conversion ran for every
+        // row of every scroll frame, and it was a sizeable share of a 75 ms frame.
+        let mut expand = [[0u8; 4]; 256];
+        for (b, out) in expand.iter_mut().enumerate() {
+            let hi = palette[b >> 4].to_be_bytes();
+            let lo = palette[b & 0x0F].to_be_bytes();
+            *out = [hi[0], hi[1], lo[0], lo[1]];
+        }
+
+        let row_len = W.div_ceil(2);
+        let bytes = fb.as_bytes();
+        let mut line = [0u8; WIDTH * 2 + 2];
         for y in start..end {
-            for (x, px) in line[..w * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                *px = palette[fb.get(x, y) as usize & 0x0F].to_be_bytes();
+            let row = &bytes[y * row_len..y * row_len + w.div_ceil(2)];
+            for (packed, out) in row.iter().zip(line.as_chunks_mut::<4>().0.iter_mut()) {
+                *out = expand[*packed as usize];
             }
             self.bus.data(&line[..w * 2])?;
         }
@@ -386,6 +400,7 @@ impl<B: DisplayBus> St7789<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::Canvas;
     use crate::framebuffer::Mono128x64;
 
     #[derive(Default)]
