@@ -218,3 +218,17 @@ One host-side artifact, not a firmware fault: a log line read back with bytes mi
 chunk seam. The log is read in several requests, each at an offset counted from the oldest
 byte, and the ring was wrapping during the read, so the oldest byte moved between requests.
 A snapshot read would avoid it.
+
+### Address Explorer under the kernel (mk5)
+
+With a seed on the device, Address Explorer ran under *Kernel UI*: the menu stack stayed at
+**2 614 of 8 192 words** — BIP-32 derivation and address encoding did not push it deeper.
+The deepest menu use measured on either board remains 4 412 (browsing, on the Q1), so 8 192
+words has ample headroom across every path measured so far: seed generation, the RNG
+screens, key derivation and a firmware upgrade.
+
+The same run recorded the longest masked window yet: `rec` rose by **1 619** in one
+heartbeat interval while switches fell short by the same amount — about **1.6 s** with
+nothing scheduled, consistent with the secret fetch through gate 18 (PIN key-stretching).
+The clock recovered it, and it is well inside CYCCNT's ~35.8 s wrap. It is also the bound
+anything host-facing has to tolerate: the USB task cannot answer during it.
