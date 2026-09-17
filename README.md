@@ -146,6 +146,7 @@ correctness-critical logic lives.
 | [`docs/HARDWARE-OPEN-ITEMS.md`](docs/HARDWARE-OPEN-ITEMS.md) | unknowns blocking further work |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | the hardware bring-up plan, in running order |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | what is next, in order |
+| [`docs/PARITY.md`](docs/PARITY.md) | every stock feature, whether CatCard has it, and the order the gaps close |
 | [`docs/FLASHING.md`](docs/FLASHING.md) | the three dev loops |
 | [`docs/USB.md`](docs/USB.md) | USB identity and transport decisions |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | reproducible builds and release signing |
