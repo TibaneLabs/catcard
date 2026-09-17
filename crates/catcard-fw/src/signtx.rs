@@ -26,8 +26,14 @@ use crate::display;
 use crate::menu;
 use crate::ui::Ui;
 
-/// Where the file is written back, and what the screen says it is called.
+/// Where the signed PSBT is written back, and what the screen says it is called.
 const SIGNED_NAME: &str = "/SIGNED.PSB";
+
+/// Where a transaction that needs nothing further is written, as hex.
+///
+/// Hex rather than raw bytes because that is what a node or a block explorer takes to
+/// broadcast: `bitcoin-cli sendrawtransaction <the file's contents>`.
+const FINAL_NAME: &str = "/FINAL.TXN";
 
 /// Most destinations shown. Beyond this the screen says how many more there are; the
 /// summary's totals still cover every one of them.
@@ -297,20 +303,81 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     }
 
     menu::message(ui.panel, HEAD, "writing to the card", "");
-    match menu::write_card_file(SIGNED_NAME, &from[..at]) {
-        Ok(()) => {
-            crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at);
-            let mut note: heapless::String<24> = heapless::String::new();
-            use core::fmt::Write as _;
-            let _ = write!(note, "{signed} of {signable} inputs");
-            menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
+    if let Err(why) = menu::write_card_file(SIGNED_NAME, &from[..at]) {
+        crate::catlog!("sign: write failed: {}", why);
+        menu::message(ui.panel, "Write failed", why, "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at);
+
+    // If every input is now signed, the transaction can be finished here and the result is
+    // ready to broadcast -- no other software needed. A transaction still waiting on a
+    // cosigner simply does not finalise, which is not a failure.
+    let mut note: heapless::String<24> = heapless::String::new();
+    use core::fmt::Write as _;
+    let _ = write!(note, "{signed} of {signable} inputs");
+    match finalise(&from[..at], into) {
+        Some(len) => {
+            let hex_len = match write_hex_file(FINAL_NAME, &into[..len], from) {
+                Ok(n) => n,
+                Err(why) => {
+                    crate::catlog!("sign: final tx not written: {}", why);
+                    menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
+                    menu::wait_for_any_key(ui);
+                    return;
+                }
+            };
+            crate::catlog!("sign: finalised, {} bytes of hex", hex_len);
+            menu::message(ui.panel, "Signed", &FINAL_NAME[1..], "ready to broadcast");
         }
-        Err(why) => {
-            crate::catlog!("sign: write failed: {}", why);
-            menu::message(ui.panel, "Write failed", why, "any key to go back");
+        None => {
+            menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
         }
     }
     menu::wait_for_any_key(ui);
+}
+
+/// Finish a fully-signed PSBT and write the network transaction into `out`.
+///
+/// `None` when it is not complete -- a multisig input still short of signatures, or a
+/// script this cannot finish -- which is a normal outcome, not an error.
+fn finalise(psbt: &[u8], out: &mut [u8]) -> Option<usize> {
+    let parsed = Psbt::parse(psbt).ok()?;
+    // Finalising rewrites the container again, in the same buffer this then extracts from.
+    let (len, count) = parsed.finalize_to_slice(out).ok()?;
+    if count == 0 {
+        return None;
+    }
+    let done = Psbt::parse(&out[..len]).ok()?;
+    if !done.is_finalized() {
+        return None;
+    }
+    // Extract into the tail of the same buffer, then move it to the front: the caller only
+    // needs the transaction, and this avoids a third buffer.
+    let tx_len = done.extracted_tx_len().ok()?;
+    if len + tx_len > out.len() {
+        return None;
+    }
+    let (head, tail) = out.split_at_mut(len);
+    let n = Psbt::parse(head).ok()?.extract_tx_to_slice(tail).ok()?;
+    out.copy_within(len..len + n, 0);
+    Some(n)
+}
+
+/// Write `bytes` as lower-case hex to `path`, using `scratch` for the text.
+fn write_hex_file(path: &str, bytes: &[u8], scratch: &mut [u8]) -> Result<usize, &'static str> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let need = bytes.len() * 2;
+    if need > scratch.len() {
+        return Err("no room for the hex");
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        scratch[i * 2] = HEX[(b >> 4) as usize];
+        scratch[i * 2 + 1] = HEX[(b & 0xF) as usize];
+    }
+    menu::write_card_file(path, &scratch[..need])?;
+    Ok(need)
 }
 
 /// Show what signing would authorise, and ask. True if the owner confirmed.
@@ -335,11 +402,11 @@ fn review(
     let mut small: heapless::Vec<bool, LINES> = heapless::Vec::new();
     let mut wrapped: heapless::Vec<bool, LINES> = heapless::Vec::new();
     let say = |texts: &mut heapless::Vec<Text, LINES>,
-                   small_v: &mut heapless::Vec<bool, LINES>,
-                   wrap_v: &mut heapless::Vec<bool, LINES>,
-                   text: Text,
-                   is_small: bool,
-                   wrap: bool| {
+               small_v: &mut heapless::Vec<bool, LINES>,
+               wrap_v: &mut heapless::Vec<bool, LINES>,
+               text: Text,
+               is_small: bool,
+               wrap: bool| {
         if texts.push(text).is_ok() {
             let _ = small_v.push(is_small);
             let _ = wrap_v.push(wrap);

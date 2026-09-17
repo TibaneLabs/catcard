@@ -6,9 +6,11 @@
 use outscript::btcraw::{RawTx, RawTxIn, RawTxOut};
 use outscript::crypto::secp256k1::SecpPublicKey;
 use outscript::psbt::{Psbt, input as in_key};
+use outscript::crypto::secp256k1::{bip340_verify, taproot_tweak};
 
 use super::*;
 use crate::bip32::{ChildNumber, ExtendedPrivKey, Network};
+use crate::address::AddressKind;
 use crate::bip39::{Mnemonic, SEED_LEN};
 
 const PHRASE: &str =
@@ -239,4 +241,194 @@ fn taproot_records_are_recognised_as_wanting_a_schnorr_signature() {
     let kw = KeyWork::host();
     let signer = match_key(&master(), &requests[1], &kw).unwrap();
     assert!(signer.is_taproot());
+}
+
+/// A PSBT spending one output of `kind` belonging to `steps`, with whatever extra records
+/// that script type needs: the whole previous transaction for a legacy input, the redeem
+/// script for a nested-segwit one, the internal key and a taproot derivation for P2TR.
+fn psbt_for_kind(kind: AddressKind, steps: &[u32], buf: &mut [u8]) -> usize {
+    let pk = pubkey_at(steps);
+    let mut spk = [0u8; 34];
+    let spk_len = crate::address::script_pubkey(kind, &pk, &mut spk).unwrap();
+    let spk = &spk[..spk_len];
+
+    // The previous transaction, needed in full for a legacy input. One input from nowhere,
+    // one output paying the script we are about to spend.
+    let mut prev = Vec::new();
+    prev.extend_from_slice(&2u32.to_le_bytes());
+    prev.push(1);
+    prev.extend_from_slice(&[0x99; 32]);
+    prev.extend_from_slice(&0u32.to_le_bytes());
+    prev.push(0);
+    prev.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+    prev.push(1);
+    prev.extend_from_slice(&60_000u64.to_le_bytes());
+    prev.push(spk.len() as u8);
+    prev.extend_from_slice(spk);
+    prev.extend_from_slice(&0u32.to_le_bytes());
+    // `outscript` takes a txid in display order, which is the double-SHA256 reversed.
+    let txid = {
+        use purecrypto::hash::{Digest, Sha256};
+        let once = Sha256::digest(&prev);
+        let twice = Sha256::digest(&once);
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&twice);
+        id.reverse();
+        id
+    };
+
+    let input = RawTxIn {
+        txid,
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    };
+    let mut pay = [0u8; 25];
+    pay[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    pay[3..23].copy_from_slice(&[0x33; 20]);
+    pay[23..].copy_from_slice(&[0x88, 0xac]);
+    let tx = RawTx {
+        version: 2,
+        inputs: &[input],
+        outputs: &[RawTxOut {
+            amount: 50_000,
+            script: &pay,
+        }],
+        locktime: 0,
+    };
+
+    let mut a = vec![0u8; 4096];
+    let mut b = vec![0u8; 4096];
+    let mut n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    macro_rules! step {
+        ($f:expr) => {{
+            let psbt = Psbt::parse(&a[..n]).unwrap();
+            let m = $f(&psbt, &mut b).unwrap();
+            a[..m].copy_from_slice(&b[..m]);
+            n = m;
+        }};
+    }
+    match kind {
+        // A legacy spend signs over the whole previous transaction, so that is what the
+        // PSBT has to carry -- and `outscript` checks its txid against the outpoint.
+        AddressKind::P2pkh => {
+            step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_non_witness_utxo(0, &prev, out))
+        }
+        _ => step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(0, 60_000, spk, out)),
+    }
+    if kind == AddressKind::P2shP2wpkh {
+        let redeem = crate::address::p2wpkh_redeem_script(&pk);
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_redeem_script(0, &redeem, out));
+    }
+    if kind == AddressKind::P2tr {
+        let xonly: [u8; 32] = pk[1..].try_into().unwrap();
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_tap_internal_key(0, &xonly, out));
+        let mut key = Vec::new();
+        key.push(in_key::TAP_BIP32_DERIVATION as u8);
+        key.extend_from_slice(&xonly);
+        let mut value = Vec::new();
+        value.push(0x00);
+        value.extend_from_slice(&FINGERPRINT);
+        for s in steps {
+            value.extend_from_slice(&s.to_le_bytes());
+        }
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_input_record(0, &key, &value, out));
+    } else {
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p
+            .add_input_bip32_derivation(0, &pk, FINGERPRINT, steps, out));
+    }
+    buf[..n].copy_from_slice(&a[..n]);
+    n
+}
+
+#[test]
+fn a_legacy_and_a_nested_segwit_input_are_both_signed() {
+    let kw = KeyWork::host();
+    for (kind, steps) in [
+        (AddressKind::P2pkh, [44 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0]),
+        (AddressKind::P2shP2wpkh, [49 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0]),
+    ] {
+        let mut buf = vec![0u8; 4096];
+        let n = psbt_for_kind(kind, &steps, &mut buf);
+        let psbt = Psbt::parse(&buf[..n]).unwrap();
+        let mut out = vec![0u8; 8192];
+        let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw)
+            .unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
+        let signed = Psbt::parse(&out[..len]).unwrap();
+        let pk = pubkey_at(&steps);
+        let sig = signed
+            .input(0)
+            .unwrap()
+            .partial_sig(&pk)
+            .unwrap_or_else(|| panic!("{kind:?}: no signature"));
+        assert_eq!(*sig.last().unwrap(), 0x01, "{kind:?}: SIGHASH_ALL");
+    }
+}
+
+#[test]
+fn a_taproot_input_gets_a_schnorr_signature_that_verifies() {
+    let kw = KeyWork::host();
+    let steps = [86 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
+    let mut buf = vec![0u8; 4096];
+    let n = psbt_for_kind(AddressKind::P2tr, &steps, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let mut out = vec![0u8; 8192];
+    let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let sig = signed.input(0).unwrap().tap_key_sig().expect("key signature");
+    // 64 bytes with no trailing byte means the default sighash, which is SIGHASH_DEFAULT.
+    assert_eq!(sig.len(), 64);
+
+    // It verifies under the *tweaked* output key, which is what the output pays to, over
+    // the BIP-341 sighash of this input.
+    let pk = pubkey_at(&steps);
+    let internal: [u8; 32] = pk[1..].try_into().unwrap();
+    let (output_key, _) = taproot_tweak(&internal).unwrap();
+    let tx = psbt.unsigned_tx();
+    let ins: Vec<RawTxIn<'_>> = tx.inputs().collect();
+    let outs: Vec<RawTxOut<'_>> = tx.outputs().collect();
+    let raw = RawTx {
+        version: tx.version(),
+        inputs: &ins,
+        outputs: &outs,
+        locktime: tx.locktime(),
+    };
+    let prevouts = [psbt.utxo(0).unwrap()];
+    let mid = raw.taproot_midstate(&prevouts).unwrap();
+    let sighash = mid.key_spend_sighash(0).unwrap();
+    let sig64: [u8; 64] = sig.try_into().unwrap();
+    assert!(bip340_verify(&output_key, &sighash, &sig64));
+}
+
+#[test]
+fn a_fully_signed_transaction_finalises_and_extracts() {
+    let kw = KeyWork::host();
+    let mut buf = vec![0u8; 4096];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let mut signed = vec![0u8; 8192];
+    let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut signed, &kw).unwrap();
+    let signed = Psbt::parse(&signed[..len]).unwrap();
+    assert!(!signed.is_finalized());
+
+    let mut done = vec![0u8; 8192];
+    let (n, count) = signed.finalize_to_slice(&mut done).unwrap();
+    assert_eq!(count, 1, "one input finalised");
+    let done = Psbt::parse(&done[..n]).unwrap();
+    assert!(done.is_finalized());
+
+    // The extracted transaction parses as a segwit transaction with a witness, and its txid
+    // is the one the PSBT's unsigned transaction already had -- segwit's whole point.
+    let mut raw = vec![0u8; 8192];
+    let n = done.extract_tx_to_slice(&mut raw).unwrap();
+    let tx = crate::tx::Transaction::parse(&raw[..n]).unwrap();
+    assert!(tx.has_witness);
+    assert_eq!(tx.inputs.count(), 1);
+    assert_eq!(tx.outputs.count(), 1);
+    // Our txid is in internal order, `outscript`'s in display order.
+    let mut theirs = psbt.unsigned_tx().txid();
+    theirs.reverse();
+    assert_eq!(tx.txid(), theirs);
 }
