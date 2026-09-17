@@ -181,8 +181,18 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         Ok(approval) => Outcome::Offered(staged, approval),
         Err(why) => {
             // Which check refused matters: "refused" alone has already sent one person
-            // hunting through a log for a reason that was never written down.
+            // hunting through a log for a reason that was never written down. With the
+            // header's own claims beside it, a refusal can be chased without the card.
             crate::catlog!("sd: image refused: {:?}", why);
+            if let Some(h) = staged.header() {
+                crate::catlog!(
+                    "sd: header key {} len {} hw_compat {:#x} version {}",
+                    h.pubkey_num,
+                    h.firmware_length,
+                    h.hw_compat,
+                    h.version_str().unwrap_or("?")
+                );
+            }
             Outcome::Failed(describe(why))
         }
     }

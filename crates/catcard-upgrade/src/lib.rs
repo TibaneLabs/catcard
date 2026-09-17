@@ -267,6 +267,18 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// downgrade check; pass `None` only where it genuinely cannot be read.
     ///
     /// Nothing here writes anything. It is safe to call, and safe to refuse after.
+    /// The header the staged image carries, whatever it says.
+    ///
+    /// For reporting a refusal: what the image claims about itself -- which key signed it,
+    /// how long it is, which boards it is for -- is what makes a rejection chaseable
+    /// afterwards, and [`inspect`](Self::inspect) only says which check said no.
+    pub fn header(&mut self) -> Option<FirmwareHeader> {
+        let mut raw = [0u8; catcard_fwhdr::FW_HEADER_SIZE as usize];
+        self.area.read(HEADER_OFFSET as u32, &mut raw).ok()?;
+        let header = FirmwareHeader::from_bytes(&raw);
+        (header.magic == catcard_fwhdr::MAGIC).then_some(header)
+    }
+
     pub fn inspect(&mut self, running: Option<&FirmwareHeader>) -> Result<Approval, Reject> {
         if !self.is_complete() {
             return Err(Reject::Incomplete {
