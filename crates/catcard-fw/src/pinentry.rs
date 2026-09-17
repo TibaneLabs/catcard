@@ -334,11 +334,14 @@ fn screen_blank(panel: &mut display::Panel) {
 
 /// "Working on it" — drawn before anything that blocks on the secure element.
 ///
-/// Deliberately says what is happening rather than showing a spinner: there is no timer
-/// driving one, and a frozen spinner is worse than a still screen because it claims
-/// progress that is not being made.
+/// Every one of these waits is a callgate call: interrupts masked, the CPU inside the
+/// bootloader's firewall, nothing the firmware can do until it returns. So the movement is
+/// handed to the panel, which scrolls the bar from its own frame counter and does not care
+/// that the CPU is busy. Where the controller cannot do that, the screen stays a plain
+/// message rather than a bar frozen mid-sweep — see
+/// [`menu::blocking_screen`](crate::menu::blocking_screen).
 fn working(panel: &mut display::Panel, what: &str) {
-    screen_message(panel, what, "please wait", "");
+    crate::menu::blocking_screen(panel, what, "please wait");
 }
 
 /// Collect one PIN part. `None` if the user backs out.

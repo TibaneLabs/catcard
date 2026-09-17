@@ -66,12 +66,33 @@ impl<B: DisplayBus> Ssd1306<B> {
     /// Sets the column and page window first. Without that the controller keeps
     /// whatever window a previous partial write left behind, and the image wraps —
     /// which looks like a corrupted framebuffer rather than a missing command.
+    ///
+    /// Stops any scrolling first, which is both what the datasheet asks for before
+    /// rewriting the ram and the rule that keeps [`scroll_pages`](Self::scroll_pages)
+    /// honest: a bar left scrolling would go on sliding under the next screen's text, so
+    /// scrolling lasts exactly as long as the frame that asked for it.
     pub fn flush<const W: usize, const P: usize, const N: usize>(
         &mut self,
         fb: &Framebuffer<W, P, N>,
     ) -> Result<(), B::Error> {
+        self.bus.command(&crate::ssd1306::SCROLL_OFF)?;
         self.bus.command(&full_window(self.width, self.pages))?;
         self.bus.data(fb.as_bytes())
+    }
+
+    /// Have the controller scroll pages `first..=last` sideways until the next flush.
+    ///
+    /// For the waits the firmware cannot draw through: a callgate call holds the CPU with
+    /// interrupts masked, and this keeps moving anyway because the panel does it itself.
+    /// See [`ssd1306::scroll_right`](crate::ssd1306::scroll_right).
+    pub fn scroll_pages(
+        &mut self,
+        first: u8,
+        last: u8,
+        interval: crate::ssd1306::Interval,
+    ) -> Result<(), B::Error> {
+        self.bus
+            .command(&crate::ssd1306::scroll_right(first, last, interval))
     }
 
     /// Turn the panel on or off without discarding its contents.
@@ -153,12 +174,38 @@ mod tests {
         let fb = Mono128x64::new();
         d.flush(&fb).unwrap();
 
-        assert_eq!(d.bus_mut().log, vec!["cmd", "data"]);
+        assert_eq!(d.bus_mut().log, vec!["cmd", "cmd", "data"]);
+        assert_eq!(d.bus_mut().commands[0], vec![cmd::SCROLL_OFF]);
         assert_eq!(
-            d.bus_mut().commands[0],
+            d.bus_mut().commands[1],
             vec![cmd::COLUMN_ADDR, 0, 127, cmd::PAGE_ADDR, 0, 7]
         );
         assert_eq!(d.bus_mut().data[0].len(), 1024);
+    }
+
+    #[test]
+    fn a_scroll_is_set_up_stopped_and_only_then_started() {
+        // Order matters: the controller ignores scroll setup while a scroll is running,
+        // so a bar asked for twice would keep the first bar's page range.
+        let mut d = Ssd1306::new_128x64(MockBus::default());
+        d.scroll_pages(7, 7, crate::ssd1306::Interval::FASTEST)
+            .unwrap();
+        let c = d.bus_mut().commands[0].clone();
+        assert_eq!(c[0], cmd::SCROLL_OFF);
+        assert_eq!(c[1], cmd::SCROLL_RIGHT);
+        assert_eq!((c[3], c[5]), (7, 7), "page range");
+        assert_eq!(*c.last().unwrap(), cmd::SCROLL_ON);
+    }
+
+    #[test]
+    fn a_flush_stops_whatever_was_scrolling() {
+        // Otherwise the busy bar keeps sliding under the screen that replaced it -- and
+        // the datasheet wants the ram rewritten after a scroll stops anyway.
+        let mut d = Ssd1306::new_128x64(MockBus::default());
+        d.scroll_pages(7, 7, crate::ssd1306::Interval::FASTEST)
+            .unwrap();
+        d.flush(&Mono128x64::new()).unwrap();
+        assert_eq!(d.bus_mut().commands[1], vec![cmd::SCROLL_OFF]);
     }
 
     #[test]

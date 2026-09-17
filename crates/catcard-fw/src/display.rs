@@ -211,6 +211,36 @@ pub fn wipe(panel: &mut Panel) {
 #[cfg(not(feature = "board-q1"))]
 pub fn wipe(_panel: &mut Panel) {}
 
+/// Hand the busy bar to the panel itself, so it keeps moving while the CPU cannot draw.
+///
+/// A callgate call -- a PIN check, a secret fetch -- runs with interrupts masked for a
+/// second or more, and the firewall resets the CPU if one lands inside it. Nothing the
+/// firmware does can repaint across that. The SSD1306 can: told to scroll a page, it steps
+/// it a column at a time from its own frame counter, with no host involvement at all.
+///
+/// The bar occupies the bottom rows, which on a 64-row panel is page 7, so that is the page
+/// handed over. The next [`draw`] stops it -- `flush` always does -- which is why nothing
+/// here has to remember to turn it off.
+/// Whether this panel keeps a busy bar moving without the CPU.
+///
+/// Screens that wait on a callgate call ask this before drawing a bar at all: where the
+/// answer is false, the bar could only sit still, and a still bar is a worse lie than no
+/// bar. Slice-driven bars do not consult it -- there the CPU is doing the moving.
+pub const SELF_SCROLLING_BAR: bool = !cfg!(feature = "board-q1");
+
+#[cfg(not(feature = "board-q1"))]
+pub fn scroll_busy_bar(panel: &mut Panel) {
+    let last_page = (SCREEN_H / 8 - 1) as u8;
+    let _ = panel.scroll_pages(last_page, last_page, catcard_ui::ssd1306::Interval::FASTEST);
+}
+
+/// The Q1's ST7789 has no self-scrolling mode: its vertical scroll needs the host to move
+/// the start address, which is the one thing a masked callgate call rules out. So on this
+/// board a blocking call holds its frame, and the screen says what it is waiting for
+/// instead of pretending to move.
+#[cfg(feature = "board-q1")]
+pub fn scroll_busy_bar(_panel: &mut Panel) {}
+
 /// The canvas every screen on this board draws into: the OLED's own 128x64 framebuffer, or
 /// the Q1's whole 320x240 at 16 levels.
 #[cfg(not(feature = "board-q1"))]

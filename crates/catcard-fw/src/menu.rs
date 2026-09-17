@@ -2474,6 +2474,24 @@ fn receive_chain(
     Some(crate::keywork::run(|kw| here.to_extended_pub(kw)))
 }
 
+/// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are
+/// masked and the firewall resets the CPU if one lands inside.
+///
+/// On a panel that can scroll itself the bar goes up and the controller keeps it moving
+/// (see [`display::scroll_busy_bar`]). On one that cannot, there is no bar: a bar that sits
+/// still for two seconds claims progress that is not being shown, which is worse than a
+/// plain line of text saying what the device is waiting for.
+pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str) {
+    if display::SELF_SCROLLING_BAR {
+        display::draw(panel, |c| {
+            catcard_ui::widgets::working(c, &display::LAYOUT, head, note, 0);
+        });
+        display::scroll_busy_bar(panel);
+    } else {
+        message(panel, head, note, "");
+    }
+}
+
 /// The screen shown while something slow runs: a heading, a note, and a bar that moves.
 ///
 /// The bar is the whole point. Every computation behind one of these screens runs with
@@ -2528,10 +2546,9 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
 
     // Say so before asking for the secret, not after. The fetch is one callgate call: the
     // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
-    // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so this is the
-    // one wait in this screen the busy bar cannot cross. It gets a plain message instead
-    // of a bar that would sit frozen and say the opposite of what it means.
-    message(ui.panel, "Addresses", "reading seed...", "");
+    // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so the firmware
+    // cannot repaint across it. The panel can, where its controller scrolls on its own.
+    blocking_screen(ui.panel, "Addresses", "reading seed");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,

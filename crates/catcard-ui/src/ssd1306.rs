@@ -27,6 +27,12 @@ pub mod cmd {
     pub const COM_SCAN_DEC: u8 = 0xC8;
     pub const SEG_REMAP: u8 = 0xA0;
     pub const CHARGE_PUMP: u8 = 0x8D;
+    /// Continuous horizontal scroll, left to right. Source: datasheet §10.1.19 [C]
+    pub const SCROLL_RIGHT: u8 = 0x26;
+    /// Stop scrolling; the ram must be rewritten afterwards. Source: §10.1.21 [C]
+    pub const SCROLL_OFF: u8 = 0x2E;
+    /// Start scrolling with whatever setup was last sent. Source: §10.1.21 [C]
+    pub const SCROLL_ON: u8 = 0x2F;
 }
 
 /// Horizontal addressing mode: the column pointer auto-advances and wraps to the next
@@ -114,6 +120,60 @@ pub const INIT_128X64_MK5: &[u8] = &[
 pub fn full_window(width: u8, pages: u8) -> [u8; 6] {
     [cmd::COLUMN_ADDR, 0, width - 1, cmd::PAGE_ADDR, 0, pages - 1]
 }
+
+/// Frames between two scroll steps, as the interval field encodes them.
+///
+/// The controller counts display frames, not milliseconds, so this is a rate only in the
+/// loose sense. [`FASTEST`](Interval::FASTEST) at the panel's ~100 Hz frame rate walks a
+/// column every 20 ms: a segment crosses the 128 columns in about two and a half seconds.
+///
+/// Source: SSD1306 datasheet rev 1.1 §10.1.19 (26h/27h), table of interval codes [C]
+#[derive(Copy, Clone)]
+#[repr(u8)]
+pub enum Interval {
+    Frames2 = 0x07,
+    Frames3 = 0x04,
+    Frames4 = 0x05,
+    Frames5 = 0x00,
+    Frames25 = 0x06,
+}
+
+impl Interval {
+    pub const FASTEST: Self = Self::Frames2;
+}
+
+/// Commands that scroll pages `first..=last` sideways, for ever, with no host involvement.
+///
+/// **This is the only thing on a mono panel that can move while the CPU cannot.** A
+/// callgate call runs with interrupts masked and the firewall resets the CPU if one lands
+/// inside it, so the firmware cannot repaint for the second or two a PIN check or a secret
+/// fetch takes. The controller does not care: once activated it steps the selected pages a
+/// column at a time from its own frame counter, and keeps doing it while the CPU is busy
+/// in the secure element.
+///
+/// Pages outside the range are untouched, so a still screen can carry a moving bar.
+///
+/// The datasheet requires the ram be rewritten after [`SCROLL_OFF`], which a full flush
+/// does anyway.
+///
+/// Source: SSD1306 datasheet rev 1.1 §10.1.19 "Continuous Horizontal Scroll Setup" and
+/// §10.1.21 "Activate/Deactivate Scroll" [C]
+pub fn scroll_right(first_page: u8, last_page: u8, interval: Interval) -> [u8; 9] {
+    [
+        cmd::SCROLL_OFF, // setup is only accepted while scrolling is stopped
+        cmd::SCROLL_RIGHT,
+        0x00, // dummy
+        first_page,
+        interval as u8,
+        last_page,
+        0x00, // dummy
+        0xFF, // dummy
+        cmd::SCROLL_ON,
+    ]
+}
+
+/// Stop any scrolling. Harmless when nothing is scrolling.
+pub const SCROLL_OFF: [u8; 1] = [cmd::SCROLL_OFF];
 
 #[cfg(test)]
 mod tests {
