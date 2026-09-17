@@ -125,7 +125,7 @@ impl ExtendedPrivKey {
     ///
     /// `I = HMAC-SHA512("Bitcoin seed", seed)`; the left half is the key, the right the
     /// chain code.
-    pub fn from_seed(seed: &[u8], network: Network) -> Result<Self, Error> {
+    pub fn from_seed(seed: &[u8], network: Network, _kw: &crate::KeyWork) -> Result<Self, Error> {
         if !(MIN_SEED_LEN..=MAX_SEED_LEN).contains(&seed.len()) {
             return Err(Error::BadSeedLen { len: seed.len() });
         }
@@ -179,24 +179,24 @@ impl ExtendedPrivKey {
     }
 
     /// The matching public key.
-    pub fn public_key(&self) -> [u8; PUBKEY_LEN] {
+    pub fn public_key(&self, _kw: &crate::KeyWork) -> [u8; PUBKEY_LEN] {
         let scalar = scalar_from_bytes(&self.secret).expect("validated at construction");
         compress(&ProjectivePoint::mul_generator(&scalar)).expect("scalar is non-zero")
     }
 
-    pub fn identifier(&self) -> [u8; 20] {
-        hash160(&self.public_key())
+    pub fn identifier(&self, kw: &crate::KeyWork) -> [u8; 20] {
+        hash160(&self.public_key(kw))
     }
 
-    pub fn fingerprint(&self) -> [u8; FINGERPRINT_LEN] {
-        let id = self.identifier();
+    pub fn fingerprint(&self, kw: &crate::KeyWork) -> [u8; FINGERPRINT_LEN] {
+        let id = self.identifier(kw);
         let mut out = [0u8; FINGERPRINT_LEN];
         out.copy_from_slice(&id[..FINGERPRINT_LEN]);
         out
     }
 
     /// Derive one child.
-    pub fn derive_child(&self, child: ChildNumber) -> Result<Self, Error> {
+    pub fn derive_child(&self, child: ChildNumber, kw: &crate::KeyWork) -> Result<Self, Error> {
         if self.depth == u8::MAX {
             return Err(Error::TooDeep);
         }
@@ -207,7 +207,7 @@ impl ExtendedPrivKey {
             mac.update(&self.secret);
         } else {
             // serP(point(k_par)) || ser32(i)
-            mac.update(&self.public_key());
+            mac.update(&self.public_key(kw));
         }
         mac.update(&child.to_bytes());
         let i = mac.finalize();
@@ -232,7 +232,7 @@ impl ExtendedPrivKey {
         Ok(Self {
             network: self.network,
             depth: self.depth + 1,
-            parent_fingerprint: self.fingerprint(),
+            parent_fingerprint: self.fingerprint(kw),
             child_number: child,
             chain_code,
             secret,
@@ -240,22 +240,22 @@ impl ExtendedPrivKey {
     }
 
     /// Derive along a whole path.
-    pub fn derive_path(&self, path: &DerivationPath) -> Result<Self, Error> {
+    pub fn derive_path(&self, path: &DerivationPath, kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut key = self.clone();
         for child in path.iter() {
-            key = key.derive_child(child)?;
+            key = key.derive_child(child, kw)?;
         }
         Ok(key)
     }
 
-    pub fn to_extended_pub(&self) -> ExtendedPubKey {
+    pub fn to_extended_pub(&self, kw: &crate::KeyWork) -> ExtendedPubKey {
         ExtendedPubKey {
             network: self.network,
             depth: self.depth,
             parent_fingerprint: self.parent_fingerprint,
             child_number: self.child_number,
             chain_code: self.chain_code,
-            public_key: self.public_key(),
+            public_key: self.public_key(kw),
         }
     }
 }
@@ -368,12 +368,12 @@ mod tests {
     #[test]
     fn official_vectors_private_derivation() {
         for (n, v) in VECTORS.iter().enumerate() {
-            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet).unwrap();
+            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
             for (path_str, _, want_xprv) in v.chains {
                 let path: DerivationPath = path_str.parse().unwrap();
-                let key = master.derive_path(&path).unwrap();
+                let key = master.derive_path(&path, &crate::KeyWork::host()).unwrap();
                 assert_eq!(
-                    key.to_base58(),
+                    key.to_base58(&crate::KeyWork::host()),
                     *want_xprv,
                     "vector {} path {path_str}",
                     n + 1
@@ -385,12 +385,12 @@ mod tests {
     #[test]
     fn official_vectors_public_serialisation() {
         for (n, v) in VECTORS.iter().enumerate() {
-            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet).unwrap();
+            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
             for (path_str, want_xpub, _) in v.chains {
                 let path: DerivationPath = path_str.parse().unwrap();
-                let key = master.derive_path(&path).unwrap();
+                let key = master.derive_path(&path, &crate::KeyWork::host()).unwrap();
                 assert_eq!(
-                    key.to_extended_pub().to_base58(),
+                    key.to_extended_pub(&crate::KeyWork::host()).to_base58(),
                     *want_xpub,
                     "vector {} path {path_str}",
                     n + 1
@@ -405,13 +405,13 @@ mod tests {
     #[test]
     fn public_derivation_agrees_with_private() {
         for v in VECTORS {
-            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet).unwrap();
+            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
             for (path_str, want_xpub, _) in v.chains {
                 let path: DerivationPath = path_str.parse().unwrap();
                 if path.iter().any(|c| c.is_hardened()) {
                     continue;
                 }
-                let via_public = master.to_extended_pub().derive_path(&path).unwrap();
+                let via_public = master.to_extended_pub(&crate::KeyWork::host()).derive_path(&path).unwrap();
                 assert_eq!(via_public.to_base58(), *want_xpub, "path {path_str}");
             }
         }
@@ -419,8 +419,8 @@ mod tests {
 
     #[test]
     fn hardened_derivation_from_a_public_key_is_refused() {
-        let master = ExtendedPrivKey::from_seed(&[0x42; 32], Network::Mainnet).unwrap();
-        let xpub = master.to_extended_pub();
+        let master = ExtendedPrivKey::from_seed(&[0x42; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        let xpub = master.to_extended_pub(&crate::KeyWork::host());
         assert_eq!(
             xpub.derive_child(ChildNumber::hardened(0).unwrap()),
             Err(Error::HardenedFromPublic {
@@ -433,47 +433,47 @@ mod tests {
     fn seed_length_bounds_are_enforced() {
         for len in [0usize, 15, 65, 128] {
             assert_eq!(
-                ExtendedPrivKey::from_seed(&vec![7u8; len], Network::Mainnet),
+                ExtendedPrivKey::from_seed(&vec![7u8; len], Network::Mainnet, &crate::KeyWork::host()),
                 Err(Error::BadSeedLen { len })
             );
         }
-        assert!(ExtendedPrivKey::from_seed(&[7u8; 16], Network::Mainnet).is_ok());
-        assert!(ExtendedPrivKey::from_seed(&[7u8; 64], Network::Mainnet).is_ok());
+        assert!(ExtendedPrivKey::from_seed(&[7u8; 16], Network::Mainnet, &crate::KeyWork::host()).is_ok());
+        assert!(ExtendedPrivKey::from_seed(&[7u8; 64], Network::Mainnet, &crate::KeyWork::host()).is_ok());
     }
 
     #[test]
     fn fingerprints_chain_correctly() {
-        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet).unwrap();
+        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
         assert_eq!(master.parent_fingerprint, [0; 4]);
         assert_eq!(master.depth, 0);
 
         let child = master
-            .derive_child(ChildNumber::hardened(0).unwrap())
+            .derive_child(ChildNumber::hardened(0).unwrap(), &crate::KeyWork::host())
             .unwrap();
         assert_eq!(child.depth, 1);
-        assert_eq!(child.parent_fingerprint, master.fingerprint());
+        assert_eq!(child.parent_fingerprint, master.fingerprint(&crate::KeyWork::host()));
 
-        let grand = child.derive_child(ChildNumber::normal(1).unwrap()).unwrap();
+        let grand = child.derive_child(ChildNumber::normal(1).unwrap(), &crate::KeyWork::host()).unwrap();
         assert_eq!(grand.depth, 2);
-        assert_eq!(grand.parent_fingerprint, child.fingerprint());
+        assert_eq!(grand.parent_fingerprint, child.fingerprint(&crate::KeyWork::host()));
     }
 
     #[test]
     fn xprv_and_xpub_agree_on_identity() {
-        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet).unwrap();
-        let xpub = master.to_extended_pub();
-        assert_eq!(master.identifier(), xpub.identifier());
-        assert_eq!(master.fingerprint(), xpub.fingerprint());
+        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        let xpub = master.to_extended_pub(&crate::KeyWork::host());
+        assert_eq!(master.identifier(&crate::KeyWork::host()), xpub.identifier());
+        assert_eq!(master.fingerprint(&crate::KeyWork::host()), xpub.fingerprint());
     }
 
     #[test]
     fn hardened_and_normal_children_differ() {
-        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet).unwrap();
+        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let h = master
-            .derive_child(ChildNumber::hardened(0).unwrap())
+            .derive_child(ChildNumber::hardened(0).unwrap(), &crate::KeyWork::host())
             .unwrap();
         let n = master
-            .derive_child(ChildNumber::normal(0).unwrap())
+            .derive_child(ChildNumber::normal(0).unwrap(), &crate::KeyWork::host())
             .unwrap();
         assert_ne!(h.secret_bytes(), n.secret_bytes());
         assert_ne!(h.chain_code, n.chain_code);
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_key_material() {
-        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet).unwrap();
+        let master = ExtendedPrivKey::from_seed(&unhex(VECTORS[0].seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let s = format!("{master:?}");
         assert!(s.contains("redacted"));
 

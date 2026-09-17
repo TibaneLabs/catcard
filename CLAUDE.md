@@ -66,6 +66,14 @@ error, not a hang.
 
 **Secrets are `Zeroize` + `ZeroizeOnDrop`.**
 
+**Private-key work runs with interrupts masked.** Anything computed from a private key or
+seed -- BIP-39 entropy, parsing and seed stretching, BIP-32 derivation, a private key's
+public key or fingerprint, `xprv` encoding -- goes inside `keywork::run`, so no USB reply,
+task or interrupt handler runs in the middle of it and a host cannot time its progress.
+`catcard-wallet` enforces this: those functions take a `&KeyWork`, which firmware can only
+get from `keywork::run`. Keep screens and key waits outside the closure, and keep the
+operations themselves constant-time -- masking hides the inside, not the total duration.
+
 **Irreversible operations are labelled at every layer** — RDP lockdown, `HIGH_WATER`,
 brick — and are never a default.
 

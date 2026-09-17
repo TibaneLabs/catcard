@@ -243,12 +243,12 @@ mod tests {
                                  abandon abandon abandon abandon abandon about";
 
     fn key_at(path: &str, network: Network) -> [u8; PUBKEY_LEN] {
-        let m = Mnemonic::parse(TEST_MNEMONIC).unwrap();
+        let m = Mnemonic::parse(TEST_MNEMONIC, &crate::KeyWork::host()).unwrap();
         let mut seed = [0u8; 64];
-        m.to_seed("", &mut seed).unwrap();
-        let master = ExtendedPrivKey::from_seed(&seed, network).unwrap();
+        m.to_seed("", &mut seed, &crate::KeyWork::host()).unwrap();
+        let master = ExtendedPrivKey::from_seed(&seed, network, &crate::KeyWork::host()).unwrap();
         let p: DerivationPath = path.parse().unwrap();
-        master.derive_path(&p).unwrap().public_key()
+        master.derive_path(&p, &crate::KeyWork::host()).unwrap().public_key(&crate::KeyWork::host())
     }
 
     fn addr(kind: AddressKind, network: Network, path: &str) -> String {

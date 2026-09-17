@@ -142,7 +142,7 @@ impl Mnemonic {
     /// The entropy must come from [`catcard_entropy::EntropyPool`], which refuses to
     /// produce anything until it has verifiably collected enough — this function
     /// deliberately has no opinion about the quality of what it is handed.
-    pub fn from_entropy(entropy: &[u8]) -> Result<Self, Error> {
+    pub fn from_entropy(entropy: &[u8], _kw: &crate::KeyWork) -> Result<Self, Error> {
         if words_for_entropy(entropy.len()).is_none() {
             return Err(Error::BadEntropyLen { len: entropy.len() });
         }
@@ -234,7 +234,7 @@ impl Mnemonic {
     /// Words are separated by ASCII whitespace; leading, trailing and repeated
     /// separators are tolerated, since they are transcription noise rather than an
     /// error in the secret.
-    pub fn parse(phrase: &str) -> Result<Self, Error> {
+    pub fn parse(phrase: &str, _kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut indices = [0u16; MAX_WORDS];
         let mut count = 0usize;
 
@@ -299,7 +299,12 @@ impl Mnemonic {
     ///
     /// This runs 2048 HMAC-SHA512 rounds and takes on the order of a second on this
     /// hardware; it is not something to call in a UI loop.
-    pub fn to_seed(&self, passphrase: &str, out: &mut [u8; SEED_LEN]) -> Result<(), Error> {
+    pub fn to_seed(
+        &self,
+        passphrase: &str,
+        out: &mut [u8; SEED_LEN],
+        _kw: &crate::KeyWork,
+    ) -> Result<(), Error> {
         if !passphrase.is_ascii() {
             return Err(Error::PassphraseNotAscii);
         }
@@ -383,7 +388,7 @@ mod tests {
     #[test]
     fn official_vectors_entropy_to_phrase() {
         for (ent, expect_phrase, _) in VECTORS {
-            let m = Mnemonic::from_entropy(&unhex(ent)).unwrap();
+            let m = Mnemonic::from_entropy(&unhex(ent), &crate::KeyWork::host()).unwrap();
             assert_eq!(&phrase_of(&m), expect_phrase, "entropy {ent}");
         }
     }
@@ -391,7 +396,7 @@ mod tests {
     #[test]
     fn official_vectors_phrase_to_entropy() {
         for (expect_ent, phrase, _) in VECTORS {
-            let m = Mnemonic::parse(phrase).unwrap();
+            let m = Mnemonic::parse(phrase, &crate::KeyWork::host()).unwrap();
             assert_eq!(hex(m.entropy()), *expect_ent, "phrase {phrase}");
         }
     }
@@ -399,9 +404,9 @@ mod tests {
     #[test]
     fn official_vectors_seed_derivation() {
         for (ent, _, expect_seed) in VECTORS {
-            let m = Mnemonic::from_entropy(&unhex(ent)).unwrap();
+            let m = Mnemonic::from_entropy(&unhex(ent), &crate::KeyWork::host()).unwrap();
             let mut seed = [0u8; SEED_LEN];
-            m.to_seed(PASSPHRASE, &mut seed).unwrap();
+            m.to_seed(PASSPHRASE, &mut seed, &crate::KeyWork::host()).unwrap();
             assert_eq!(hex(&seed), *expect_seed, "entropy {ent}");
         }
     }
@@ -424,13 +429,13 @@ mod tests {
             let entropy: Vec<u8> = (0..len)
                 .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
                 .collect();
-            let m = Mnemonic::from_entropy(&entropy).unwrap();
+            let m = Mnemonic::from_entropy(&entropy, &crate::KeyWork::host()).unwrap();
             assert_eq!(m.word_count(), words);
 
             let phrase = phrase_of(&m);
             assert_eq!(phrase.split(' ').count(), words);
 
-            let back = Mnemonic::parse(&phrase).unwrap();
+            let back = Mnemonic::parse(&phrase, &crate::KeyWork::host()).unwrap();
             assert_eq!(back.entropy(), &entropy[..]);
         }
     }
@@ -440,8 +445,8 @@ mod tests {
         for fill in [0x00u8, 0xff] {
             for (len, _) in SIZES {
                 let e = vec![fill; len];
-                let m = Mnemonic::from_entropy(&e).unwrap();
-                assert_eq!(Mnemonic::parse(&phrase_of(&m)).unwrap().entropy(), &e[..]);
+                let m = Mnemonic::from_entropy(&e, &crate::KeyWork::host()).unwrap();
+                assert_eq!(Mnemonic::parse(&phrase_of(&m), &crate::KeyWork::host()).unwrap().entropy(), &e[..]);
             }
         }
     }
@@ -452,7 +457,7 @@ mod tests {
     fn bad_entropy_lengths_are_rejected() {
         for len in [0usize, 1, 15, 17, 31, 33, 64] {
             assert_eq!(
-                Mnemonic::from_entropy(&vec![0; len]),
+                Mnemonic::from_entropy(&vec![0; len], &crate::KeyWork::host()),
                 Err(Error::BadEntropyLen { len })
             );
         }
@@ -461,11 +466,11 @@ mod tests {
     #[test]
     fn bad_word_counts_are_rejected() {
         assert!(matches!(
-            Mnemonic::parse("abandon abandon abandon"),
+            Mnemonic::parse("abandon abandon abandon", &crate::KeyWork::host()),
             Err(Error::BadWordCount { count: 3 })
         ));
         assert!(matches!(
-            Mnemonic::parse(""),
+            Mnemonic::parse("", &crate::KeyWork::host()),
             Err(Error::BadWordCount { count: 0 })
         ));
         // 13 words: a legal count plus one.
@@ -473,7 +478,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(matches!(
-            Mnemonic::parse(&long),
+            Mnemonic::parse(&long, &crate::KeyWork::host()),
             Err(Error::BadWordCount { count: 13 })
         ));
         // More than the maximum must not overflow the fixed buffer.
@@ -481,7 +486,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(matches!(
-            Mnemonic::parse(&huge),
+            Mnemonic::parse(&huge, &crate::KeyWork::host()),
             Err(Error::BadWordCount { .. })
         ));
     }
@@ -492,7 +497,7 @@ mod tests {
         let mut w: Vec<&str> = phrase.split(' ').collect();
         w[5] = "notaword";
         assert_eq!(
-            Mnemonic::parse(&w.join(" ")),
+            Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()),
             Err(Error::UnknownWord { position: 5 })
         );
     }
@@ -506,7 +511,7 @@ mod tests {
         // "about" -> "abandon", both in the list, so only the checksum can catch it.
         assert_eq!(w[11], "about");
         w[11] = "abandon";
-        assert_eq!(Mnemonic::parse(&w.join(" ")), Err(Error::BadChecksum));
+        assert_eq!(Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()), Err(Error::BadChecksum));
     }
 
     #[test]
@@ -514,42 +519,42 @@ mod tests {
         let (_, phrase, _) = VECTORS[2];
         let mut w: Vec<&str> = phrase.split(' ').collect();
         w.swap(0, 1);
-        assert_eq!(Mnemonic::parse(&w.join(" ")), Err(Error::BadChecksum));
+        assert_eq!(Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()), Err(Error::BadChecksum));
     }
 
     #[test]
     fn whitespace_is_tolerated() {
         let (ent, phrase, _) = VECTORS[0];
         let messy = format!("  {}  ", phrase.replace(' ', "   "));
-        assert_eq!(hex(Mnemonic::parse(&messy).unwrap().entropy()), *ent);
+        assert_eq!(hex(Mnemonic::parse(&messy, &crate::KeyWork::host()).unwrap().entropy()), *ent);
         // Newlines and tabs too -- phrases get transcribed from paper.
         let across_lines = phrase.replacen(' ', "\n", 3).replacen(' ', "\t", 2);
-        assert_eq!(hex(Mnemonic::parse(&across_lines).unwrap().entropy()), *ent);
+        assert_eq!(hex(Mnemonic::parse(&across_lines, &crate::KeyWork::host()).unwrap().entropy()), *ent);
     }
 
     #[test]
     fn case_is_not_tolerated() {
         // Uppercase would change the PBKDF2 input and so the seed; better to reject.
         let (_, phrase, _) = VECTORS[0];
-        assert!(Mnemonic::parse(&phrase.to_uppercase()).is_err());
+        assert!(Mnemonic::parse(&phrase.to_uppercase(), &crate::KeyWork::host()).is_err());
     }
 
     // -- passphrase --------------------------------------------------------------
 
     #[test]
     fn passphrase_changes_the_seed() {
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0)).unwrap();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
         let (mut a, mut b) = ([0u8; SEED_LEN], [0u8; SEED_LEN]);
-        m.to_seed("", &mut a).unwrap();
-        m.to_seed("TREZOR", &mut b).unwrap();
+        m.to_seed("", &mut a, &crate::KeyWork::host()).unwrap();
+        m.to_seed("TREZOR", &mut b, &crate::KeyWork::host()).unwrap();
         assert_ne!(a, b);
     }
 
     #[test]
     fn empty_passphrase_is_valid() {
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0)).unwrap();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
         let mut seed = [0u8; SEED_LEN];
-        assert!(m.to_seed("", &mut seed).is_ok());
+        assert!(m.to_seed("", &mut seed, &crate::KeyWork::host()).is_ok());
         assert!(seed.iter().any(|&b| b != 0));
     }
 
@@ -557,14 +562,14 @@ mod tests {
     fn non_ascii_passphrase_is_refused_not_mangled() {
         // Deriving an unnormalised seed here would diverge from every other wallet
         // and lose funds silently. Refusing is the safe behaviour until NFKD exists.
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0)).unwrap();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
         let mut seed = [0u8; SEED_LEN];
         assert_eq!(
-            m.to_seed("pässwörd", &mut seed),
+            m.to_seed("pässwörd", &mut seed, &crate::KeyWork::host()),
             Err(Error::PassphraseNotAscii)
         );
         assert_eq!(
-            m.to_seed("日本語", &mut seed),
+            m.to_seed("日本語", &mut seed, &crate::KeyWork::host()),
             Err(Error::PassphraseNotAscii)
         );
         assert_eq!(seed, [0u8; SEED_LEN], "seed written despite refusal");
@@ -575,9 +580,9 @@ mod tests {
     #[test]
     fn distinct_entropy_gives_distinct_phrases() {
         let mut a = [0u8; 32];
-        let m1 = Mnemonic::from_entropy(&a).unwrap();
+        let m1 = Mnemonic::from_entropy(&a, &crate::KeyWork::host()).unwrap();
         a[31] = 1;
-        let m2 = Mnemonic::from_entropy(&a).unwrap();
+        let m2 = Mnemonic::from_entropy(&a, &crate::KeyWork::host()).unwrap();
         assert_ne!(phrase_of(&m1), phrase_of(&m2));
     }
 
@@ -589,8 +594,8 @@ mod tests {
         let mut b = [0u8; 32];
         b[0] = 0x80;
         let (m1, m2) = (
-            Mnemonic::from_entropy(&a).unwrap(),
-            Mnemonic::from_entropy(&b).unwrap(),
+            Mnemonic::from_entropy(&a, &crate::KeyWork::host()).unwrap(),
+            Mnemonic::from_entropy(&b, &crate::KeyWork::host()).unwrap(),
         );
         let w1: Vec<_> = m1.words().collect();
         let w2: Vec<_> = m2.words().collect();
@@ -599,7 +604,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_the_secret() {
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0)).unwrap();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
         let s = format!("{m:?}");
         assert!(!s.contains("abandon"), "Debug leaked words: {s}");
         assert!(!s.contains("00000000"), "Debug leaked entropy: {s}");
@@ -610,7 +615,7 @@ mod tests {
     fn phrase_buffer_bound_holds_for_the_longest_phrase() {
         // MAX_PHRASE_LEN sizes a stack buffer in to_seed; if it were too small the
         // render would panic on some input.
-        let m = Mnemonic::from_entropy(&[0xff; 32]).unwrap();
+        let m = Mnemonic::from_entropy(&[0xff; 32], &crate::KeyWork::host()).unwrap();
         let mut buf = [0u8; MAX_PHRASE_LEN];
         let n = m.render(&mut buf);
         assert!(n <= MAX_PHRASE_LEN);
@@ -621,7 +626,7 @@ mod tests {
 
     #[test]
     fn word_indices_match_the_rendered_words() {
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[2].0)).unwrap();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[2].0), &crate::KeyWork::host()).unwrap();
         let mut idx = [0u16; MAX_WORDS];
         let n = m.word_indices(&mut idx);
         let rendered: Vec<&str> = m.words().collect();

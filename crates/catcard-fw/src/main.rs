@@ -27,6 +27,7 @@ mod display;
 #[cfg(feature = "games")]
 mod game;
 mod keypad;
+mod keywork;
 #[macro_use]
 mod logbuf;
 #[cfg(feature = "usb-debug-mem")]

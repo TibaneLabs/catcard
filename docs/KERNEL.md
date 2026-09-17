@@ -232,3 +232,25 @@ heartbeat interval while switches fell short by the same amount — about **1.6 
 nothing scheduled, consistent with the secret fetch through gate 18 (PIN key-stretching).
 The clock recovered it, and it is well inside CYCCNT's ~35.8 s wrap. It is also the bound
 anything host-facing has to tolerate: the USB task cannot answer during it.
+
+## Private-key work is masked
+
+Preemption made one side channel worse than it was. Before the kernel, a screen deriving
+keys simply stopped USB from being serviced. With USB in its own task, a host could keep
+sending requests *during* a BIP-32 derivation and read the replies' latency as the work
+progressed.
+
+So all private-key computation runs inside `keywork::run`, with interrupts masked: no task,
+no USB reply and no interrupt handler runs inside it, and a host sees only when it starts
+and ends. `catcard-wallet` makes this a compile-time rule — BIP-39 entropy, parsing and
+seed stretching; BIP-32 master and child derivation; a private key's public key and
+fingerprint; and `xprv` encoding all take a `&KeyWork`, which firmware can only obtain
+inside `keywork::run`. Functions on public data (`ExtendedPubKey`, address encoding) do not.
+
+Masking hides the inside of an operation, not its length: the gap in USB service still
+shows the total duration. That is covered by the operations being constant-time; the two
+are separate defences and neither replaces the other.
+
+The cost is longer blackouts, which the clock already recovers. Address Explorer's
+PBKDF2-and-derivation is now masked for about a second, on top of the ~1.6 s secret fetch
+through the gate.

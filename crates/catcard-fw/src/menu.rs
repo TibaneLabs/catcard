@@ -2323,9 +2323,14 @@ fn view_trng_words(
     }
 
     let mut entropy = [0u8; 32];
-    let drawn = pool.draw(&mut entropy);
-    let mnemonic = drawn.ok().and_then(|()| Mnemonic::from_entropy(&entropy).ok());
-    entropy.zeroize();
+    // Masked: these words are only displayed, never a device key, but it is the same draw
+    // and the same encoding a wallet goes through, and one rule is easier to keep than two.
+    let mnemonic = crate::keywork::run(|kw| {
+        let drawn = pool.draw(&mut entropy);
+        let m = drawn.ok().and_then(|()| Mnemonic::from_entropy(&entropy, kw).ok());
+        entropy.zeroize();
+        m
+    });
     let Some(mnemonic) = mnemonic else {
         message(ui.panel, "TRNG words", "could not draw", "any key to go back");
         wait_for_any_key(ui);
@@ -2422,37 +2427,43 @@ fn address_explorer(
     // Seed -> master -> the external receive chain m/84'/0'/0'/0. Empty passphrase: the
     // plain wallet; passphrase wallets are a separate feature. Done once, then the seed
     // material is gone and only the chain key (a derivation parent) remains.
-    let Ok(mnemonic) = Mnemonic::from_entropy(&ent[..ent_len]) else {
-        ent.zeroize();
-        fail(ui, "seed did not decode");
-        wait_for_any_key(ui);
-        return;
-    };
-    ent.zeroize();
+    //
     // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
-    // of hashing by design -- and the key derivation below adds elliptic-curve work on top.
-    // Say so, or the panel holds its last frame and the device looks hung.
+    // of hashing by design -- and the key derivation adds elliptic-curve work on top. It all
+    // runs masked, so the progress line is drawn first: nothing can repaint inside it, and
+    // without it the panel would hold its last frame and the device would look hung.
     message(ui.panel, "Addresses", "deriving keys...", "");
-    let mut seed = [0u8; SEED_LEN];
-    let chain = mnemonic
-        .to_seed("", &mut seed)
-        .ok()
-        .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet).ok())
-        .and_then(|master| {
-            DerivationPath::from_slice(&[
-                ChildNumber::hardened(84).ok()?,
-                ChildNumber::hardened(0).ok()?,
-                ChildNumber::hardened(0).ok()?,
-                ChildNumber::normal(0).ok()?,
-            ])
+    let chain = crate::keywork::run(|kw| {
+        let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
+        ent.zeroize();
+        let Ok(mnemonic) = mnemonic else {
+            return Err("seed did not decode");
+        };
+        let mut seed = [0u8; SEED_LEN];
+        let chain = mnemonic
+            .to_seed("", &mut seed, kw)
             .ok()
-            .and_then(|p| master.derive_path(&p).ok())
-        });
-    seed.zeroize();
-    let Some(chain) = chain else {
-        fail(ui, "key derivation failed");
-        wait_for_any_key(ui);
-        return;
+            .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok())
+            .and_then(|master| {
+                DerivationPath::from_slice(&[
+                    ChildNumber::hardened(84).ok()?,
+                    ChildNumber::hardened(0).ok()?,
+                    ChildNumber::hardened(0).ok()?,
+                    ChildNumber::normal(0).ok()?,
+                ])
+                .ok()
+                .and_then(|p| master.derive_path(&p, kw).ok())
+            });
+        seed.zeroize();
+        chain.ok_or("key derivation failed")
+    });
+    let chain = match chain {
+        Ok(chain) => chain,
+        Err(why) => {
+            fail(ui, why);
+            wait_for_any_key(ui);
+            return;
+        }
     };
 
     // How many characters fit on a body line. A bech32 address is longer than that on the
@@ -2469,13 +2480,18 @@ fn address_explorer(
         let _ = lines.push(path);
 
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        let addr = ChildNumber::normal(index)
-            .ok()
-            .and_then(|c| chain.derive_child(c).ok())
-            .and_then(|k| {
-                address::encode(AddressKind::P2wpkh, Network::Mainnet, &k.public_key(), &mut buf)
-                    .ok()
-            });
+        // The child private key and its public key are derived masked. Only the public key
+        // leaves the region -- the child key is dropped inside it -- and encoding an address
+        // from a public key is public work, so that stays outside.
+        let pubkey = crate::keywork::run(|kw| {
+            ChildNumber::normal(index)
+                .ok()
+                .and_then(|c| chain.derive_child(c, kw).ok())
+                .map(|k| k.public_key(kw))
+        });
+        let addr = pubkey.and_then(|pk| {
+            address::encode(AddressKind::P2wpkh, Network::Mainnet, &pk, &mut buf).ok()
+        });
         match addr {
             Some(n) => {
                 let s = core::str::from_utf8(&buf[..n]).unwrap_or("");
@@ -3129,20 +3145,33 @@ fn new_seed(
     // the length actually wanted, and a draw that is all used is easier to reason about
     // than one that is half discarded.
     let mut entropy = [0u8; 32];
-    if let Err(e) = pool.draw(&mut entropy[..entropy_len]) {
-        // The pool refusing is the entropy design working as intended, so report which
-        // way it refused rather than a generic failure.
-        crate::catlog!("seed: pool refused");
-        let mut l = Line::new();
-        let _ = write!(l, "{e}");
-        info(ui.panel, "Refused", &[l]);
-        wait_for_any_key(ui);
-        return;
-    }
-
-    let encoded = catcard_callgate::pin::encode_bip39(&entropy[..entropy_len]);
-    let mnemonic = Mnemonic::from_entropy(&entropy[..entropy_len]);
-    entropy.zeroize();
+    // The draw is the moment the wallet's key comes into existence, so it runs masked
+    // together with everything computed from it: nothing a host can time happens between
+    // the entropy appearing and its being encoded. A refusal is reported only once the
+    // region has closed.
+    let made = crate::keywork::run(|kw| {
+        let out = pool.draw(&mut entropy[..entropy_len]).map(|()| {
+            (
+                catcard_callgate::pin::encode_bip39(&entropy[..entropy_len]),
+                Mnemonic::from_entropy(&entropy[..entropy_len], kw),
+            )
+        });
+        entropy.zeroize();
+        out
+    });
+    let (encoded, mnemonic) = match made {
+        Ok(pair) => pair,
+        Err(e) => {
+            // The pool refusing is the entropy design working as intended, so report
+            // which way it refused rather than a generic failure.
+            crate::catlog!("seed: pool refused");
+            let mut l = Line::new();
+            let _ = write!(l, "{e}");
+            info(ui.panel, "Refused", &[l]);
+            wait_for_any_key(ui);
+            return;
+        }
+    };
 
     let (Ok(mut secret), Ok(mnemonic)) = (encoded, mnemonic) else {
         // Both accept 16 and 32 bytes, which is all `entropy_len` can be, so this is
@@ -3538,7 +3567,8 @@ fn import_seed(
             }
             let _ = phrase.push_str(ENGLISH[i as usize]);
         }
-        let parsed = Mnemonic::parse(&phrase);
+        // Parsing rebuilds the entropy and checks its checksum: private-key work, masked.
+        let parsed = crate::keywork::run(|kw| Mnemonic::parse(&phrase, kw));
         // SAFETY: zeroing then clearing the phrase's own bytes; the empty buffer that
         // remains is trivially valid UTF-8.
         let raw = unsafe { phrase.as_mut_vec() };

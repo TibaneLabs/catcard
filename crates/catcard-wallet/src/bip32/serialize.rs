@@ -162,21 +162,24 @@ impl ExtendedPrivKey {
 
     /// The `xprv`/`tprv` string.
     #[cfg(feature = "std")]
-    pub fn to_base58(&self) -> alloc_string::String {
+    pub fn to_base58(&self, kw: &crate::KeyWork) -> alloc_string::String {
         let mut buf = [0u8; MAX_BASE58_LEN];
-        let n = self.write_base58(&mut buf).expect("buffer is large enough");
+        let n = self.write_base58(&mut buf, kw).expect("buffer is large enough");
         core::str::from_utf8(&buf[..n])
             .expect("Base58 output is ASCII")
             .into()
     }
 
     /// Write the `xprv` string into `out`; returns the length.
-    pub fn write_base58(&self, out: &mut [u8]) -> Result<usize, Error> {
+    ///
+    /// Base58 is repeated big-integer division, whose running time depends on the digits --
+    /// here, the private key's.
+    pub fn write_base58(&self, out: &mut [u8], _kw: &crate::KeyWork) -> Result<usize, Error> {
         Ok(base58::encode_check(&self.to_raw(), out)?)
     }
 
     /// Parse an `xprv`/`tprv` string.
-    pub fn from_base58(text: &str) -> Result<Self, Error> {
+    pub fn from_base58(text: &str, _kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut raw = [0u8; base58::MAX_DECODED];
         let n = base58::decode_check(text, &mut raw)?;
         Self::from_raw(&raw[..n])
@@ -290,27 +293,27 @@ mod tests {
 
     #[test]
     fn serialised_length_is_78() {
-        let k = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let k = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         assert_eq!(k.to_raw().len(), RAW_LEN);
-        assert_eq!(k.to_extended_pub().to_raw().len(), RAW_LEN);
+        assert_eq!(k.to_extended_pub(&crate::KeyWork::host()).to_raw().len(), RAW_LEN);
     }
 
     #[test]
     fn official_vectors_round_trip_through_base58() {
         for v in VECTORS {
-            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet).unwrap();
+            let master = ExtendedPrivKey::from_seed(&unhex(v.seed), Network::Mainnet, &crate::KeyWork::host()).unwrap();
             for (path, want_xpub, want_xprv) in v.chains {
-                let key = master.derive_path(&path.parse().unwrap()).unwrap();
-                let xprv = key.to_base58();
-                let xpub = key.to_extended_pub().to_base58();
+                let key = master.derive_path(&path.parse().unwrap(), &crate::KeyWork::host()).unwrap();
+                let xprv = key.to_base58(&crate::KeyWork::host());
+                let xpub = key.to_extended_pub(&crate::KeyWork::host()).to_base58();
                 assert_eq!(xprv, *want_xprv);
                 assert_eq!(xpub, *want_xpub);
 
                 // And back again.
-                assert_eq!(ExtendedPrivKey::from_base58(&xprv).unwrap(), key);
+                assert_eq!(ExtendedPrivKey::from_base58(&xprv, &crate::KeyWork::host()).unwrap(), key);
                 assert_eq!(
                     ExtendedPubKey::from_base58(&xpub).unwrap(),
-                    key.to_extended_pub()
+                    key.to_extended_pub(&crate::KeyWork::host())
                 );
             }
         }
@@ -318,29 +321,29 @@ mod tests {
 
     #[test]
     fn prefixes_are_what_users_recognise() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
-        assert!(m.to_base58().starts_with("xprv"));
-        assert!(m.to_extended_pub().to_base58().starts_with("xpub"));
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        assert!(m.to_base58(&crate::KeyWork::host()).starts_with("xprv"));
+        assert!(m.to_extended_pub(&crate::KeyWork::host()).to_base58().starts_with("xpub"));
 
-        let t = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Testnet).unwrap();
-        assert!(t.to_base58().starts_with("tprv"));
-        assert!(t.to_extended_pub().to_base58().starts_with("tpub"));
+        let t = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Testnet, &crate::KeyWork::host()).unwrap();
+        assert!(t.to_base58(&crate::KeyWork::host()).starts_with("tprv"));
+        assert!(t.to_extended_pub(&crate::KeyWork::host()).to_base58().starts_with("tpub"));
     }
 
     #[test]
     fn an_xpub_cannot_be_parsed_as_an_xprv() {
         // Confusing the two would be catastrophic in either direction.
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
-        let xpub = m.to_extended_pub().to_base58();
-        assert_eq!(ExtendedPrivKey::from_base58(&xpub), Err(Error::BadVersion));
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        let xpub = m.to_extended_pub(&crate::KeyWork::host()).to_base58();
+        assert_eq!(ExtendedPrivKey::from_base58(&xpub, &crate::KeyWork::host()), Err(Error::BadVersion));
 
-        let xprv = m.to_base58();
+        let xprv = m.to_base58(&crate::KeyWork::host());
         assert_eq!(ExtendedPubKey::from_base58(&xprv), Err(Error::BadVersion));
     }
 
     #[test]
     fn a_private_key_field_must_be_zero_padded() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let mut raw = m.to_raw();
         raw[45] = 0x01;
         assert_eq!(
@@ -351,7 +354,7 @@ mod tests {
 
     #[test]
     fn unknown_version_bytes_are_rejected() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let mut raw = m.to_raw();
         raw[0..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(ExtendedPrivKey::from_raw(&raw), Err(Error::BadVersion));
@@ -359,7 +362,7 @@ mod tests {
 
     #[test]
     fn wrong_length_is_rejected() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let raw = m.to_raw();
         assert!(matches!(
             ExtendedPrivKey::from_raw(&raw[..77]),
@@ -370,7 +373,7 @@ mod tests {
     #[test]
     fn a_zero_private_key_is_rejected() {
         // Not reachable by derivation, but reachable by a crafted xprv.
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let mut raw = m.to_raw();
         raw[46..78].fill(0);
         assert_eq!(ExtendedPrivKey::from_raw(&raw), Err(Error::InvalidKey));
@@ -378,8 +381,8 @@ mod tests {
 
     #[test]
     fn an_off_curve_public_key_is_rejected() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
-        let mut raw = m.to_extended_pub().to_raw();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        let mut raw = m.to_extended_pub(&crate::KeyWork::host()).to_raw();
         // Valid prefix, x coordinate that is not on the curve.
         raw[45] = 0x02;
         raw[46..78].fill(0xff);
@@ -388,7 +391,7 @@ mod tests {
 
     #[test]
     fn depth_zero_must_have_no_parent() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let mut raw = m.to_raw();
         raw[5..9].copy_from_slice(&[1, 2, 3, 4]);
         assert_eq!(
@@ -406,22 +409,22 @@ mod tests {
 
     #[test]
     fn a_corrupted_base58_string_fails_the_checksum() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
-        let good = m.to_base58();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
+        let good = m.to_base58(&crate::KeyWork::host());
         let mut chars: Vec<char> = good.chars().collect();
         chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
         let bad: String = chars.into_iter().collect();
         assert!(matches!(
-            ExtendedPrivKey::from_base58(&bad),
+            ExtendedPrivKey::from_base58(&bad, &crate::KeyWork::host()),
             Err(Error::Base58(base58::Error::BadChecksum))
         ));
     }
 
     #[test]
     fn write_base58_agrees_with_to_base58() {
-        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet).unwrap();
+        let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host()).unwrap();
         let mut buf = [0u8; MAX_BASE58_LEN];
-        let n = m.write_base58(&mut buf).unwrap();
-        assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), m.to_base58());
+        let n = m.write_base58(&mut buf, &crate::KeyWork::host()).unwrap();
+        assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), m.to_base58(&crate::KeyWork::host()));
     }
 }
