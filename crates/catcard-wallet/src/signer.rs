@@ -237,10 +237,9 @@ pub fn match_key(
 
 /// One of our keys, ready to sign one input.
 ///
-/// Holds the key material for as long as the signature takes and no longer. `outscript`'s
-/// key type keeps its own copy of the secret scalar, which this cannot reach into; the
-/// bytes this module owns are zeroized, and a panic wipes SRAM (see the firmware's panic
-/// handler).
+/// Holds the key material for as long as the signature takes and no longer: the bytes this
+/// module owns are zeroized, and `outscript`'s key wipes its own copy of the scalar when
+/// dropped (`ZeroizeOnDrop`, since 0.2.1).
 pub struct Signer {
     key: SecpPrivateKey,
     taproot: bool,
