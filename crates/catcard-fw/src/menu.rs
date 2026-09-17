@@ -2439,6 +2439,11 @@ fn address_explorer(
         message(ui.panel, "Addresses", why, "any key to go back");
     }
 
+    // Say so before asking for the secret, not after. The fetch runs the PIN key-stretch
+    // inside the secure element with interrupts masked -- about 1.6 s on an mk4 -- and
+    // nothing can repaint during it, so without this line the panel simply holds the menu
+    // frame and the device looks wedged.
+    message(ui.panel, "Addresses", "reading seed...", "");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,
@@ -2475,7 +2480,7 @@ fn address_explorer(
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. It all
     // runs masked, so the progress line is drawn first: nothing can repaint inside it, and
     // without it the panel would hold its last frame and the device would look hung.
-    message(ui.panel, "Addresses", "deriving keys...", "");
+    message(ui.panel, "Addresses", "deriving keys...", "four address types");
     let chains = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
