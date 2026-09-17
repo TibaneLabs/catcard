@@ -243,10 +243,10 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
 
 /// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
 ///
-/// Off until the hand-over has been watched working on the Q1 from Debug -> Scroll test:
-/// a PIN check is on the boot path, and this board has no recovery.
+/// Watched working on the Q1 from Debug -> Scroll test before this was turned on: a PIN
+/// check is on the boot path, and this board has no recovery.
 #[cfg(feature = "board-q1")]
-pub const GPU_BAR_ON_BLOCKING: bool = false;
+pub const GPU_BAR_ON_BLOCKING: bool = true;
 
 /// The Q1's ST7789 cannot scroll by itself, but the GPU co-processor sharing its bus can
 /// draw a moving bar along the bottom while the CPU is stuck. Ask it to, and hand it the
@@ -271,8 +271,16 @@ static mut BUS_GIVEN: bool = false;
 #[cfg(feature = "board-q1")]
 const BUS_RECLAIM_MS: u32 = 100;
 
-/// Let the co-processor draw: SCK and MOSI to high impedance, then `G_CTRL` low.
-/// Source: gpu.md "LCD-bus arbitration" -- `give_spi()` [C]
+/// Let the co-processor draw: SCK, MOSI, CS and D/C to high impedance, then `G_CTRL` low.
+///
+/// The reference's `give_spi()` releases only SCK and MOSI. That is not enough here: with
+/// CS and D/C still driven, the co-processor raised `G_BUSY` for about a third of every
+/// second -- it was drawing -- and nothing reached the panel. With CS and D/C released as
+/// well, the bar moved. It drives the panel's select and command lines itself.
+///
+/// Source: gpu.md "LCD-bus arbitration" [C]; CS/DC measured on the Q1 (Debug -> Scroll
+/// test, busy 969 ms of 3 s with the tear line at ~60 Hz in both cases, visible only with
+/// CS and D/C released) [C]
 ///
 /// # Safety
 /// Foreground only; the panel must not be mid-write.
@@ -280,6 +288,8 @@ const BUS_RECLAIM_MS: u32 = 100;
 unsafe fn give_bus() {
     let Display::St77xx {
         spi,
+        cs,
+        dc,
         bus_grant: Some((request, _)),
         ..
     } = BOARD.display
@@ -288,7 +298,7 @@ unsafe fn give_bus() {
     };
     // SAFETY: the panel's own pins, per the caller.
     unsafe {
-        for p in [spi.sck, spi.mosi] {
+        for p in [spi.sck, spi.mosi, cs, dc] {
             gpio::configure(p, Mode::Input, OutputType::PushPull, Pull::None, Speed::Low);
         }
         gpio::write(request, false);
@@ -297,7 +307,7 @@ unsafe fn give_bus() {
 }
 
 /// Take the bus back if the co-processor has it: `G_CTRL` high, wait (bounded) for
-/// `G_BUSY` low, SCK and MOSI back to SPI. The panel's contents are no longer what the row
+/// `G_BUSY` low, CS (deselected) and D/C back to outputs, SCK and MOSI back to SPI. The panel's contents are no longer what the row
 /// cache says -- the bar is on it -- so the next frame goes whole.
 /// Source: gpu.md "LCD-bus arbitration" -- `take_spi()` [C]
 #[cfg(feature = "board-q1")]
@@ -308,6 +318,8 @@ fn reclaim_bus() {
     }
     let Display::St77xx {
         spi,
+        cs,
+        dc,
         bus_grant: Some((request, busy)),
         ..
     } = BOARD.display
@@ -327,6 +339,16 @@ fn reclaim_bus() {
         }
         if !freed {
             crate::catlog!("display: co-processor still busy; taking the bus anyway");
+        }
+        gpio::write(cs, true);
+        for p in [cs, dc] {
+            gpio::configure(
+                p,
+                Mode::Output,
+                OutputType::PushPull,
+                Pull::None,
+                Speed::High,
+            );
         }
         configure_spi_pins(&spi);
         (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate();
