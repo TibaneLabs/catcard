@@ -29,6 +29,7 @@ pub mod rng;
 pub mod rtc;
 pub mod sdmmc;
 pub mod se1swi;
+pub mod softi2c;
 pub mod spi;
 pub mod strap;
 pub mod uid;

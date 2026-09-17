@@ -2537,10 +2537,18 @@ fn scroll_test(ui: &mut Ui<'_>) {
     }
     #[cfg(feature = "board-q1")]
     {
+        // The GPU co-processor's bar: the screen is drawn, the bus handed over, and the CPU
+        // then does nothing that could draw for three seconds, as in a callgate call.
+        // SAFETY: reads RCC only.
+        let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+        message(ui.panel, "Scroll test", "GPU bar, 3 seconds", "");
+        display::scroll_busy_bar(ui.panel);
+        crate::catlog!("scroll test: gpu bar");
+        catcard_hal::dwt::delay_cycles(3000 * per_ms);
         message(
             ui.panel,
             "Scroll test",
-            "not on this panel",
+            "did a bar move at the bottom?",
             "any key to go back",
         );
         wait_for_any_key(ui);
@@ -2550,18 +2558,25 @@ fn scroll_test(ui: &mut Ui<'_>) {
 /// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are
 /// masked and the firewall resets the CPU if one lands inside.
 ///
-/// On a panel that can scroll itself the bar goes up and the controller keeps it moving
-/// (see [`display::scroll_busy_bar`]). On one that cannot, there is no bar: a bar that sits
-/// still for two seconds claims progress that is not being shown, which is worse than a
-/// plain line of text saying what the device is waiting for.
+/// On an OLED the bar goes up and the controller keeps it moving (see
+/// [`display::scroll_busy_bar`]). On the Q1 the text goes up without a bar of ours, and the
+/// GPU co-processor draws its own moving one along the bottom -- or, where it is not in use,
+/// nothing does: a bar that sits still for two seconds claims progress that is not being
+/// shown, which is worse than a plain line saying what the device is waiting for.
 pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str) {
-    if display::SELF_SCROLLING_BAR {
+    #[cfg(not(feature = "board-q1"))]
+    {
         display::draw(panel, |c| {
             catcard_ui::widgets::working(c, &display::LAYOUT, head, note, 0);
         });
         display::scroll_busy_bar(panel);
-    } else {
+    }
+    #[cfg(feature = "board-q1")]
+    {
         message(panel, head, note, "");
+        if display::GPU_BAR_ON_BLOCKING {
+            display::scroll_busy_bar(panel);
+        }
     }
 }
 

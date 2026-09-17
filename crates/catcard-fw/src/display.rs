@@ -205,6 +205,7 @@ pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
 /// cleared and the next frame is sent whole.
 #[cfg(feature = "board-q1")]
 pub fn wipe(panel: &mut Panel) {
+    reclaim_bus();
     let _ = panel.clear(catcard_ui::st7789::BLACK);
     // Painted behind the row cache's back, so the next frame must be sent whole.
     // SAFETY: foreground only, single core, and not while `draw` holds the cache.
@@ -225,13 +226,6 @@ pub fn wipe(_panel: &mut Panel) {}
 /// The bar occupies the bottom rows, which on a 64-row panel is page 7, so that is the page
 /// handed over. The next [`draw`] stops it -- `flush` always does -- which is why nothing
 /// here has to remember to turn it off.
-/// Whether this panel keeps a busy bar moving without the CPU.
-///
-/// Screens that wait on a callgate call ask this before drawing a bar at all: where the
-/// answer is false, the bar could only sit still, and a still bar is a worse lie than no
-/// bar. Slice-driven bars do not consult it -- there the CPU is doing the moving.
-pub const SELF_SCROLLING_BAR: bool = !cfg!(feature = "board-q1");
-
 ///
 /// The command depends on the panel: the mk5's needs the longer setup with a column range,
 /// and an SSD1306 must never be sent that form. So the choice follows the same strap-based
@@ -247,12 +241,97 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
     };
 }
 
-/// The Q1's ST7789 has no self-scrolling mode: its vertical scroll needs the host to move
-/// the start address, which is the one thing a masked callgate call rules out. So on this
-/// board a blocking call holds its frame, and the screen says what it is waiting for
-/// instead of pretending to move.
+/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
+///
+/// Off until the hand-over has been watched working on the Q1 from Debug -> Scroll test:
+/// a PIN check is on the boot path, and this board has no recovery.
 #[cfg(feature = "board-q1")]
-pub fn scroll_busy_bar(_panel: &mut Panel) {}
+pub const GPU_BAR_ON_BLOCKING: bool = false;
+
+/// The Q1's ST7789 cannot scroll by itself, but the GPU co-processor sharing its bus can
+/// draw a moving bar along the bottom while the CPU is stuck. Ask it to, and hand it the
+/// bus; the next [`draw`] takes the bus back before sending anything.
+///
+/// Without a co-processor that answers, the bus stays with the CPU and the screen simply
+/// has no bar -- as on stock.
+#[cfg(feature = "board-q1")]
+pub fn scroll_busy_bar(_panel: &mut Panel) {
+    if crate::gpu::activity_bar() {
+        // SAFETY: foreground only; not inside a draw, which never calls this.
+        unsafe { give_bus() };
+    }
+}
+
+/// Whether the GPU co-processor holds the LCD bus. Foreground only, single core.
+#[cfg(feature = "board-q1")]
+static mut BUS_GIVEN: bool = false;
+
+/// How long to wait for the co-processor to finish the frame it is drawing when the bus is
+/// taken back. One frame is ~16 ms at the ~61 Hz tear rate.
+#[cfg(feature = "board-q1")]
+const BUS_RECLAIM_MS: u32 = 100;
+
+/// Let the co-processor draw: SCK and MOSI to high impedance, then `G_CTRL` low.
+/// Source: gpu.md "LCD-bus arbitration" -- `give_spi()` [C]
+///
+/// # Safety
+/// Foreground only; the panel must not be mid-write.
+#[cfg(feature = "board-q1")]
+unsafe fn give_bus() {
+    let Display::St77xx {
+        spi,
+        bus_grant: Some((request, _)),
+        ..
+    } = BOARD.display
+    else {
+        return;
+    };
+    // SAFETY: the panel's own pins, per the caller.
+    unsafe {
+        for p in [spi.sck, spi.mosi] {
+            gpio::configure(p, Mode::Input, OutputType::PushPull, Pull::None, Speed::Low);
+        }
+        gpio::write(request, false);
+        *core::ptr::addr_of_mut!(BUS_GIVEN) = true;
+    }
+}
+
+/// Take the bus back if the co-processor has it: `G_CTRL` high, wait (bounded) for
+/// `G_BUSY` low, SCK and MOSI back to SPI. The panel's contents are no longer what the row
+/// cache says -- the bar is on it -- so the next frame goes whole.
+/// Source: gpu.md "LCD-bus arbitration" -- `take_spi()` [C]
+#[cfg(feature = "board-q1")]
+fn reclaim_bus() {
+    // SAFETY: foreground only, single core.
+    if !unsafe { core::ptr::replace(core::ptr::addr_of_mut!(BUS_GIVEN), false) } {
+        return;
+    }
+    let Display::St77xx {
+        spi,
+        bus_grant: Some((request, busy)),
+        ..
+    } = BOARD.display
+    else {
+        return;
+    };
+    // SAFETY: the panel's own pins; nothing is drawing.
+    unsafe {
+        gpio::write(request, true);
+        let mut freed = false;
+        for _ in 0..BUS_RECLAIM_MS {
+            if !gpio::read(busy) {
+                freed = true;
+                break;
+            }
+            catcard_hal::dwt::delay_ms(1);
+        }
+        if !freed {
+            crate::catlog!("display: co-processor still busy; taking the bus anyway");
+        }
+        configure_spi_pins(&spi);
+        (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate();
+    }
+}
 
 /// The canvas every screen on this board draws into: the OLED's own 128x64 framebuffer, or
 /// the Q1's whole 320x240 at 16 levels.
@@ -437,6 +516,7 @@ static mut ROWS_SENT: catcard_ui::st7789::RowCache<240> = catcard_ui::st7789::Ro
 /// rows, not the 153,600 bytes of a full frame.
 #[cfg(feature = "board-q1")]
 fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16]) {
+    reclaim_bus();
     // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
     // never inside a draw. Single core, nothing in interrupt context.
     let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };

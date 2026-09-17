@@ -26,6 +26,8 @@ mod boot;
 mod display;
 #[cfg(feature = "games")]
 mod game;
+#[cfg(feature = "board-q1")]
+mod gpu;
 mod keypad;
 mod keywork;
 #[macro_use]

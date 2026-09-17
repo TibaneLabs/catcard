@@ -259,6 +259,17 @@ pub struct BoardSpec {
     /// does not work here" want the same safe behaviour.
     pub keypad_edge_at_boot: bool,
 
+    /// The Q1's GPU co-processor reset line, `G_RESET`: open-drain, low holds it in reset.
+    ///
+    /// The co-processor draws the activity bar by itself while the main MCU is blocked --
+    /// the only way the Q1's screen can move during a secure-element call. The bootloader
+    /// leaves it held in reset; the firmware releases it. Its bus-grant lines are
+    /// `Display::St77xx::bus_grant`.
+    ///
+    /// Source: hw-reference/gpu.md [C]; gpio.md "GPU co-MCU (STM32C011F4, I²C1,
+    /// `G_RESET=PE6`/`G_CTRL=PE5`/`G_BUSY=PE2`)" [C]
+    pub gpu_reset: MaybePin,
+
     /// SE1's single-wire bus pin, on a board where the firmware reads SE1 directly.
     ///
     /// SE1 sits on UART4 in half-duplex mode, one pin for both directions, on every
@@ -405,6 +416,7 @@ pub const MK3: BoardSpec = BoardSpec {
     // use, but nothing the callgate is handed may live up there.
     gate_buf_len: 96 * 1024,
     keypad_edge_at_boot: false,
+    gpu_reset: None,
     // No SE-randomness callgate on mk3, so the firmware reads SE1 over this pin itself.
     se1_swi: Some(pa(0)),
     has_se2: false,
@@ -493,6 +505,7 @@ pub const MK4: BoardSpec = BoardSpec {
     // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    gpu_reset: None,
     // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
     se1_swi: None,
     has_se2: true,
@@ -632,6 +645,7 @@ pub const Q1: BoardSpec = BoardSpec {
     // stack, at the top of SRAM1, and is answered.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    gpu_reset: Some(pe(6)),
     // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
     se1_swi: None,
     has_se2: true,
@@ -836,6 +850,9 @@ mod tests {
             }
             if let Some(p) = b.se1_swi {
                 claim(p, "SE1 single-wire bus", b.name);
+            }
+            if let Some(p) = b.gpu_reset {
+                claim(p, "GPU reset", b.name);
             }
             if let Some(s) = b.sdmmc.slot_b {
                 claim(s.card_detect, "SD slot B detect", b.name);
