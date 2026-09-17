@@ -10,8 +10,8 @@
 //! device. The chip-select is a plain GPIO output driven low around each transaction, not
 //! the SPI2 hardware NSS. Source: hw-reference/storage.md §SPI-NOR [C].
 
-use catcard_board::pin::Pin;
 use catcard_board::BOARD;
+use catcard_board::pin::Pin;
 use catcard_flash::{NorFlash, SpiDevice};
 use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
 use catcard_hal::spi::{self, Prescaler, Spi};
@@ -64,7 +64,13 @@ pub unsafe fn init() -> Option<Nor> {
     unsafe {
         // Chip-select: a GPIO output, idle high (deselected).
         gpio::enable_port(cs.port);
-        gpio::configure(cs, Mode::Output, OutputType::PushPull, Pull::None, Speed::High);
+        gpio::configure(
+            cs,
+            Mode::Output,
+            OutputType::PushPull,
+            Pull::None,
+            Speed::High,
+        );
         gpio::write(cs, true);
 
         // Bus pins to alternate-function mode.

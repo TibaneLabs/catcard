@@ -6,8 +6,8 @@
 //! unusable rather than degrading to something weaker.
 
 use catcard_board::BOARD;
-use catcard_callgate::{Callgate, abi::RngSource};
-use catcard_entropy::{EntropyPool, Source};
+use catcard_callgate::Callgate;
+use catcard_entropy::EntropyPool;
 use catcard_hal::{dwt, uid};
 
 use crate::{BootReport, display, entropy_policy, splash};
@@ -110,39 +110,36 @@ pub fn bring_up(
     }
 }
 
-/// Draw from SE1 and SE2 through bootloader callgate 26.
+/// Draw from every generator the board has besides the chip, which boot has already read.
 ///
+/// The list is [`crate::trng::kinds`], the same one New wallet and the RNG screens use.
 /// The entry address comes from the table the bootloader publishes at `0x0800_0040`,
-/// validated before use. A board whose bootloader does not publish a usable entry
-/// simply contributes nothing here — the entropy policy then decides whether boot can
-/// continue, rather than this silently falling back to something weaker.
+/// validated before use; a board whose bootloader does not publish a usable entry simply
+/// contributes nothing here -- the entropy policy then decides whether boot can continue,
+/// rather than this silently falling back to something weaker.
 fn feed_secure_elements(pool: &mut EntropyPool) {
-    if !BOARD.has_callgate_se_rng {
-        return;
-    }
+    use crate::trng::Kind;
     // SAFETY: we are running on BOARD; `discover` validates the published address
     // before it can be branched to.
     let Ok(gate) = (unsafe { Callgate::discover(&BOARD) }) else {
         return;
     };
-
-    for (src, tag) in [
-        (RngSource::Se1, Source::Se1Trng),
-        (RngSource::Se2, Source::Se2Trng),
-    ] {
-        // Callgate 26 returns at most 32 bytes per call, so draw repeatedly.
+    let mut trngs = crate::trng::Trngs::new(Some(&gate));
+    for kind in crate::trng::kinds() {
+        if kind == Kind::Chip {
+            continue;
+        }
+        // The elements return at most 32 bytes a call, so draw repeatedly.
         let mut got = 0usize;
         while got < TRNG_BYTES {
-            let mut buf = [0u8; 33];
-            // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
-            // `buf` is on the stack, which is in SRAM1; `call` range-checks it anyway.
-            match unsafe { gate.se_rng(src, &mut buf) } {
-                Ok(n) if n > 0 => {
-                    pool.add(tag, &buf[1..1 + n]);
+            let mut buf = [0u8; 32];
+            match trngs.read(kind, &mut buf) {
+                Some(n) if n > 0 => {
+                    pool.add(kind.source(), &buf[..n]);
                     got += n;
                 }
-                // A secure element that will not produce entropy is not a reason to
-                // fall back to something weaker; the policy check decides what happens.
+                // A source that will not produce is not a reason to fall back to something
+                // weaker; the policy check decides what happens.
                 _ => break,
             }
         }

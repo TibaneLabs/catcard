@@ -1,0 +1,134 @@
+//! Every hardware randomness source this board can read, behind one interface.
+//!
+//! Boot, New wallet, Utils -> Analyze RNG and View TRNG Words each used to decide for
+//! themselves which generators a board had, and they drifted: on mk3 the wallet screen
+//! gated its whole collection -- the STM32's own TRNG included -- on a callgate only mk4+
+//! has, and generated a seed without reading a single fresh byte. This module is the one
+//! answer to "what can be read here", so a source added for one board reaches every place
+//! that draws.
+//!
+//! What each source is *worth* is not decided here. [`Kind::source`] names the pool
+//! [`Source`], and `catcard-entropy` owns the crediting: a source that cannot be trusted
+//! (the bootloader's second read of the MCU TRNG) is still read and mixed, but counts for
+//! nothing.
+
+use catcard_callgate::Callgate;
+use catcard_callgate::abi::RngSource;
+use catcard_entropy::Source;
+use zeroize::Zeroize;
+
+/// One readable generator.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// SE1 through callgate 26 (mk4+): authenticated against the pairing secret.
+    Se1,
+    /// SE2 through callgate 26 (mk4+).
+    Se2,
+    /// The bootloader's read of the MCU TRNG, callgate 17. Every board.
+    Bootloader,
+    /// The STM32's own TRNG, read directly. Every board.
+    Chip,
+}
+
+impl Kind {
+    /// The pool source these bytes go in under, which decides their credit.
+    pub const fn source(self) -> Source {
+        match self {
+            Kind::Se1 => Source::Se1Trng,
+            Kind::Se2 => Source::Se2Trng,
+            Kind::Bootloader => Source::BootloaderTrng,
+            Kind::Chip => Source::Stm32Trng,
+        }
+    }
+
+    /// Three characters for a screen.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Kind::Se1 => "SE1",
+            Kind::Se2 => "SE2",
+            Kind::Bootloader => "BL",
+            Kind::Chip => "S32",
+        }
+    }
+
+    /// Whether the board's policy can count on this source. Screens use it to show which
+    /// lines are mixed for good measure and which carry the seed.
+    pub const fn credited(self) -> bool {
+        self.source().is_hardware_trng()
+    }
+}
+
+/// The sources this board has, in the order screens list them: the secure elements, the
+/// bootloader's read, then the chip.
+pub fn kinds() -> heapless::Vec<Kind, 4> {
+    let mut v = heapless::Vec::new();
+    if catcard_board::BOARD.has_callgate_se_rng {
+        let _ = v.push(Kind::Se1);
+        let _ = v.push(Kind::Se2);
+    }
+    let _ = v.push(Kind::Bootloader);
+    let _ = v.push(Kind::Chip);
+    v
+}
+
+/// The board's generators, ready to read.
+pub struct Trngs<'a> {
+    gate: Option<&'a Callgate>,
+    chip: Option<catcard_hal::rng::Rng>,
+}
+
+impl<'a> Trngs<'a> {
+    /// Bring up what needs bringing up. `gate` is `None` when the callgate could not be
+    /// bound; the sources behind it then simply produce nothing.
+    pub fn new(gate: Option<&'a Callgate>) -> Self {
+        Self {
+            gate,
+            // SAFETY: the RNG peripheral belongs to this firmware; init only enables its
+            // clock and the generator, and is safe to repeat.
+            chip: unsafe { catcard_hal::rng::Rng::init() }.ok(),
+        }
+    }
+
+    /// Read up to `out.len()` bytes from `kind`, returning how many are valid.
+    ///
+    /// `None` is a refusal or a fault; `Some(0)` is a source with nothing ready yet. The
+    /// secure elements answer at most 32 bytes a call, so a caller wanting more calls again.
+    pub fn read(&mut self, kind: Kind, out: &mut [u8]) -> Option<usize> {
+        match kind {
+            Kind::Se1 | Kind::Se2 => {
+                let gate = self.gate?;
+                let src = if kind == Kind::Se1 {
+                    RngSource::Se1
+                } else {
+                    RngSource::Se2
+                };
+                let mut buf = [0u8; 33];
+                // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
+                let got = unsafe { gate.se_rng(src, &mut buf) }.ok();
+                let n = got.map(|n| n.min(out.len()));
+                if let Some(n) = n {
+                    out[..n].copy_from_slice(&buf[1..1 + n]);
+                }
+                buf.zeroize();
+                n
+            }
+            Kind::Bootloader => {
+                let gate = self.gate?;
+                let mut buf = [0u8; 32];
+                // SAFETY: exactly the documented 32-byte output buffer for callgate 17.
+                let ok = unsafe { gate.bootloader_rng(&mut buf) }.is_ok();
+                let n = ok.then(|| buf.len().min(out.len()));
+                if let Some(n) = n {
+                    out[..n].copy_from_slice(&buf[..n]);
+                }
+                buf.zeroize();
+                n
+            }
+            Kind::Chip => {
+                let rng = self.chip.as_ref()?;
+                let n = out.len().min(64);
+                rng.fill(&mut out[..n]).ok().map(|()| n)
+            }
+        }
+    }
+}

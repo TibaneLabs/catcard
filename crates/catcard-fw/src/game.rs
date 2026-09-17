@@ -306,7 +306,11 @@ impl Game {
                 if self.px == nx && self.py == ny {
                     self.dead = true;
                 }
-                self.enemies[i] = Enemy { x: nx, y: ny, dir: nd };
+                self.enemies[i] = Enemy {
+                    x: nx,
+                    y: ny,
+                    dir: nd,
+                };
                 break;
             }
         }
@@ -356,11 +360,21 @@ fn render<C: Canvas + ?Sized>(c: &mut C, g: &Game) {
 
     for e in g.enemies.iter() {
         if e.x >= cam_x && e.x < cam_x + VIEW_W && e.y >= cam_y && e.y < cam_y + VIEW_H {
-            blit(c, (e.x - cam_x) * TILE, HUD_H + (e.y - cam_y) * TILE, &ENEMY_PAT);
+            blit(
+                c,
+                (e.x - cam_x) * TILE,
+                HUD_H + (e.y - cam_y) * TILE,
+                &ENEMY_PAT,
+            );
         }
     }
     if g.px >= cam_x && g.px < cam_x + VIEW_W && g.py >= cam_y && g.py < cam_y + VIEW_H {
-        blit(c, (g.px - cam_x) * TILE, HUD_H + (g.py - cam_y) * TILE, &PLAYER_PAT);
+        blit(
+            c,
+            (g.px - cam_x) * TILE,
+            HUD_H + (g.py - cam_y) * TILE,
+            &PLAYER_PAT,
+        );
     }
 
     let mut hud = heapless::String::<24>::new();
@@ -369,11 +383,7 @@ fn render<C: Canvas + ?Sized>(c: &mut C, g: &Game) {
 }
 
 /// Show a centered end-of-game message and wait for a key.
-fn end_screen(
-    ui: &mut Ui<'_>,
-    head: &str,
-    line: &str,
-) {
+fn end_screen(ui: &mut Ui<'_>, head: &str, line: &str) {
     display::draw(ui.panel, |c| {
         catcard_ui::widgets::message(c, &display::LAYOUT, head, line, "any key");
     });
@@ -399,9 +409,7 @@ fn end_screen(
 }
 
 /// Play one round of Block Mine, returning to the menu when it ends or `x` is pressed.
-pub(crate) fn block_mine(
-    ui: &mut Ui<'_>,
-) {
+pub(crate) fn block_mine(ui: &mut Ui<'_>) {
     let mut g = Game::load();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -540,8 +548,16 @@ impl Cutter {
         for _ in 0..n {
             let x = 1 + drbg.below((CW - 2) as u32).unwrap_or(0) as u8;
             let y = 1 + drbg.below((CH - 2) as u32).unwrap_or(0) as u8;
-            let vx = if drbg.below(2).unwrap_or(0) == 0 { -1 } else { 1 };
-            let vy = if drbg.below(2).unwrap_or(0) == 0 { -1 } else { 1 };
+            let vx = if drbg.below(2).unwrap_or(0) == 0 {
+                -1
+            } else {
+                1
+            };
+            let vy = if drbg.below(2).unwrap_or(0) == 0 {
+                -1
+            } else {
+                1
+            };
             let _ = self.enemies.push(Mover { x, y, vx, vy });
         }
     }
@@ -577,7 +593,11 @@ impl Cutter {
         }
         let (nx, ny) = (nx as usize, ny as usize);
         // Walking into a creature is fatal too, not only being caught by one.
-        if self.enemies.iter().any(|e| e.x as usize == nx && e.y as usize == ny) {
+        if self
+            .enemies
+            .iter()
+            .any(|e| e.x as usize == nx && e.y as usize == ny)
+        {
             self.dead = true;
             return;
         }
@@ -649,7 +669,12 @@ impl Cutter {
                 head += 1;
                 comp_cells[id as usize - 1] += 1;
                 let (cx, cy) = (ci % CW, ci / CW);
-                let visit = |nx: usize, ny: usize, g: &[u8; CN], lb: &mut [u16; CN], q: &mut [u16; CN], t: &mut usize| {
+                let visit = |nx: usize,
+                             ny: usize,
+                             g: &[u8; CN],
+                             lb: &mut [u16; CN],
+                             q: &mut [u16; CN],
+                             t: &mut usize| {
                     let ni = ny * CW + nx;
                     if g[ni] == CB_BLACK && lb[ni] == 0 {
                         lb[ni] = id;
@@ -775,9 +800,7 @@ fn cutter_render<C: Canvas + ?Sized>(c: &mut C, g: &Cutter) {
 }
 
 /// Play Block Cutter until the player runs out of lives or presses `x`.
-pub(crate) fn block_cutter(
-    ui: &mut Ui<'_>,
-) {
+pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
     let interior = (CW - 2) * (CH - 2);
     let clear_below = interior * CLEAR_BLACK_PCT / 100;
 

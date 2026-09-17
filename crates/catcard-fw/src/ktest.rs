@@ -484,8 +484,7 @@ extern "C" fn beat_task() -> ! {
         if now.wrapping_sub(last) >= 5000 {
             last = now;
             let id = catcard_kernel::TaskId;
-            let all_ok =
-                (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
+            let all_ok = (0..catcard_kernel::count()).all(|i| catcard_kernel::stack_ok(id(i)));
             crate::catlog!(
                 "kui t={} sw={} rec={} ui={}/{} beat={}/{} usb={}/{} {}",
                 now,

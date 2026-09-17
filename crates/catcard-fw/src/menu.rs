@@ -2150,23 +2150,22 @@ fn draw_se_view(
 
 /// Live RNG analyzer. Blocks, driving the panel itself; `x` (or the left arrow) exits.
 fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
-    use catcard_callgate::abi::RngSource;
+    use crate::trng::Kind;
 
-    // The secure elements' TRNGs are only reachable through callgate 26, which the mk3
-    // bootloader does not have. That used to end this screen before it began -- and took
-    // the STM32's own TRNG down with it, although that one needs no callgate at all and is
-    // the source the mk3's entropy pool actually runs on. So a board without the gate still
-    // gets the analyzer; its two element bands just say why they are empty.
-    let has_se = catcard_board::BOARD.has_callgate_se_rng;
-    if !has_se {
-        crate::catlog!("rng: SE TRNGs not readable on this board; chip TRNG only");
-    }
-
-    let sources = [RngSource::Se1, RngSource::Se2];
-    // The STM32's own hardware TRNG -- the third source. Independent of the callgate: if
-    // it will not start we still show the two elements, and its own empty field says so.
-    // SAFETY: the RNG peripheral's clock was set up at boot; nothing else touches it here.
-    let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
+    // Three bands: up to two of the board's other generators, then the chip's own TRNG,
+    // which every board has and which is the one the mk3's pool actually runs on. The
+    // bands come from the same source list boot and New wallet draw from, so this screen
+    // shows what a seed is made of rather than its own idea of the board.
+    let others: heapless::Vec<Kind, 4> = crate::trng::kinds()
+        .into_iter()
+        .filter(|&k| k != Kind::Chip)
+        .collect();
+    let bands: [Option<Kind>; RNG_SOURCES] = [
+        others.first().copied(),
+        others.get(1).copied(),
+        Some(Kind::Chip),
+    ];
+    let mut trngs = crate::trng::Trngs::new(Some(gate));
 
     // Everything below is kept per source, so a fault in one is never masked by another:
     // its own histogram (for entropy), its own bounded total, its own lifetime count (for
@@ -2198,36 +2197,19 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
         // before every blocking read (the read runs in the bootloader and cannot itself
         // be interrupted) and once more after the flush below. Pumping only once a frame
         // would leave the bus deaf through the slow parts -- which is most of the frame.
-        for (i, src) in sources.iter().enumerate() {
-            if !has_se {
-                break;
-            }
+        // 32 bytes a band a frame: what a secure element answers per call, and a small
+        // enough read that the far faster chip does not swamp the frame.
+        for (i, kind) in bands.iter().enumerate() {
+            let Some(kind) = kind else { continue };
             let _ = usbtask::pump();
-            let mut buf = [0u8; 33];
-            // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
-            if let Ok(n) = unsafe { gate.se_rng(*src, &mut buf) } {
-                for &b in &buf[1..1 + n] {
+            let mut buf = [0u8; 32];
+            if let Some(n) = trngs.read(*kind, &mut buf) {
+                for &b in &buf[..n] {
                     seen[i] += 1;
                     hist[i][b as usize] += 1;
                     total[i] += 1;
                     ring[i][ring_at[i]] = b;
                     ring_at[i] = (ring_at[i] + 1) % RNG_RING;
-                }
-            }
-        }
-
-        // The chip TRNG (source 2). It is far faster than the elements, so a small read
-        // keeps it from swamping the frame while still turning its field over quickly.
-        let _ = usbtask::pump();
-        if let Some(rng) = &chip {
-            let mut buf = [0u8; 32];
-            if rng.fill(&mut buf).is_ok() {
-                for &b in &buf {
-                    seen[2] += 1;
-                    hist[2][b as usize] += 1;
-                    total[2] += 1;
-                    ring[2][ring_at[2]] = b;
-                    ring_at[2] = (ring_at[2] + 1) % RNG_RING;
                 }
             }
         }
@@ -2255,29 +2237,23 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
         }
 
         let mut fb = Mono128x64::new();
-        let labels = ["SE1", "SE2", "S32"];
-        for i in 0..RNG_SOURCES {
-            // An element band with nothing to read says why, instead of an empty field
-            // that looks like a dead generator.
-            if !has_se && i < 2 {
+        for (i, kind) in bands.iter().enumerate() {
+            let Some(kind) = kind else {
+                // A band this board has nothing for says so, instead of an empty field that
+                // looks like a dead generator.
                 let f = &misc4x6::FONT;
                 let y = RNG_FIELD_Y[i] - 8;
-                draw_text(&mut fb, f, 1, y, labels[i]);
-                let why = if i == 1 && !catcard_board::BOARD.has_se2 {
-                    "none on this board"
-                } else {
-                    "no gate to read it"
-                };
-                draw_text(&mut fb, f, 16, y, why);
+                draw_text(&mut fb, f, 1, y, "--");
+                draw_text(&mut fb, f, 16, y, "no other generator here");
                 if i == 0 {
                     draw_text(&mut fb, f, 104, y, "x=exit");
                 }
                 continue;
-            }
+            };
             draw_se_view(
                 &mut fb,
                 RNG_FIELD_Y[i],
-                labels[i],
+                kind.label(),
                 &h_text[i],
                 chi2[i],
                 seen[i],
@@ -2303,82 +2279,53 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
 /// produce fresh, varied words, which is the whole point of this project. Shown through
 /// the same large-font, emissions-scrambled pager the real backup uses.
 fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
-    use catcard_callgate::abi::RngSource;
-    use catcard_entropy::{EntropyPool, Source};
+    use catcard_entropy::EntropyPool;
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
-
-    // Without callgate 26 the elements cannot be read, and the words come from the chip
-    // TRNG alone -- the same single-generator policy the mk3's boot pool is held to.
-    let has_se = catcard_board::BOARD.has_callgate_se_rng;
 
     // A fresh pool, filled only from the hardware sources -- no boot material, no user
     // entropy -- so the words are exactly what the TRNGs produce right now.
     let mut pool = EntropyPool::new(crate::entropy_policy());
 
-    // The same collection effort as generating a real seed: a full byte target from each
-    // source, the chip mixed in every pass, and a pause so the counts are legible. A
-    // "watch the generator work" screen that finished in a blink would be reading a
-    // handful of bytes and calling it done -- which is exactly the shortcut this project
-    // exists to replace, so it is not one this screen is allowed to take either.
+    // The same collection effort as generating a real seed, from the same sources: a full
+    // byte target from each, and a pause so the counts are legible. A "watch the generator
+    // work" screen that finished in a blink would be reading a handful of bytes and calling
+    // it done -- which is exactly the shortcut this project exists to replace, so it is not
+    // one this screen is allowed to take either.
     const TARGET: usize = 512;
-    const CHIP_TARGET: usize = 512;
     const MAX_PASSES: usize = 160;
     const STEP_PAUSE_CYCLES: u32 = 4_000_000;
 
-    // The chip TRNG. SAFETY: RNG clock set up at boot; nothing else uses it here.
-    let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
-    let mut chip_bytes = 0usize;
-
-    let srcs = [
-        (RngSource::Se1, Source::Se1Trng),
-        (RngSource::Se2, Source::Se2Trng),
-    ];
-    let mut bytes = [0usize; 2];
-    // A source that cannot be read is not waited for.
-    let se_done = |bytes: &[usize; 2]| !has_se || (bytes[0] >= TARGET && bytes[1] >= TARGET);
+    let mut trngs = crate::trng::Trngs::new(Some(gate));
+    let mut read: heapless::Vec<(crate::trng::Kind, usize), 4> =
+        crate::trng::kinds().iter().map(|&k| (k, 0usize)).collect();
     for _ in 0..MAX_PASSES {
-        if se_done(&bytes) && chip_bytes >= CHIP_TARGET {
+        if read.iter().all(|&(_, n)| n >= TARGET) {
             break;
         }
-        for (i, (src, tag)) in srcs.iter().enumerate() {
-            if !has_se || bytes[i] >= TARGET {
+        for entry in read.iter_mut() {
+            if entry.1 >= TARGET {
                 continue;
             }
             let _ = usbtask::pump();
-            let mut buf = [0u8; 33];
-            // SAFETY: the documented 33-byte output buffer for callgate 26.
-            if let Ok(n) = unsafe { gate.se_rng(*src, &mut buf) }
+            let mut buf = [0u8; 64];
+            if let Some(n) = trngs.read(entry.0, &mut buf)
                 && n > 0
             {
-                pool.add(*tag, &buf[1..1 + n]);
-                bytes[i] += n;
+                pool.add(entry.0.source(), &buf[..n]);
+                entry.1 += n;
             }
             buf.zeroize();
         }
 
-        // One chip read per pass, capped so the fast source does not run away from the
-        // slow elements on screen.
-        if let Some(rng) = &chip
-            && chip_bytes < CHIP_TARGET
-        {
-            let mut b = [0u8; 64];
-            if rng.fill(&mut b).is_ok() {
-                pool.add(Source::Stm32Trng, &b);
-                chip_bytes += b.len();
-            }
-            b.zeroize();
-        }
-
         let mut counts = Line::new();
-        if has_se {
+        for (i, &(kind, n)) in read.iter().enumerate() {
             let _ = write!(
                 counts,
-                "SE1 {} SE2 {} S32 {}",
-                bytes[0], bytes[1], chip_bytes
+                "{}{} {n}",
+                if i > 0 { " " } else { "" },
+                kind.label()
             );
-        } else {
-            let _ = write!(counts, "S32 {chip_bytes}");
         }
         let mut bits = Line::new();
         let _ = write!(bits, "{} bits", pool.credited_bits());
@@ -2996,11 +2943,8 @@ fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
 /// A struct because seven numbers passed positionally is one transposed pair away from
 /// telling someone their wallet has more entropy behind it than it does.
 struct Gathered {
-    /// Bytes each source has answered with during *this* generation: the two secure
-    /// elements and the STM32's own TRNG.
-    se1: usize,
-    se2: usize,
-    chip: usize,
+    /// Bytes each of this board's sources has answered with during *this* generation.
+    read: heapless::Vec<(crate::trng::Kind, usize), 4>,
     /// Credited bits and distinct hardware TRNGs the pool counts right now (this includes
     /// what boot already collected -- the chip, the elements and startup timing).
     bits: u32,
@@ -3011,10 +2955,17 @@ struct Gathered {
 }
 
 impl Gathered {
-    fn lines(&self, out: &mut heapless::Vec<Line, 5>) {
-        for (name, n) in [("SE1", self.se1), ("SE2", self.se2), ("S32", self.chip)] {
+    fn lines(&self, out: &mut heapless::Vec<Line, 6>) {
+        for &(kind, n) in &self.read {
             let mut l = Line::new();
-            let _ = write!(l, "{name}  read {n:5} bytes");
+            // A source mixed in but not trusted to count says so, rather than letting its
+            // bytes read as if they carried the seed.
+            let _ = write!(
+                l,
+                "{:<3}  read {n:5} bytes{}",
+                kind.label(),
+                if kind.credited() { "" } else { " mixed" }
+            );
             let _ = out.push(l);
         }
         let mut l = Line::new();
@@ -3026,18 +2977,8 @@ impl Gathered {
     }
 }
 
-/// The count, climbing, with a bar along the bottom row.
-///
-/// Reading a kilobyte out of two secure elements takes long enough to look like a hang,
-/// and a wallet being created is the worst moment for a device to look stuck. Counting
-/// each element separately also shows *which* one is answering: a column that stops
-/// moving is a dead element, which a single bar would hide.
-///
-/// The bits shown are what the pool *credits*, not what was read — hardware noise is
-/// credited at half its nominal rate, so the two differ by design and showing the
-/// larger number would overstate what the device actually has.
 fn gathering(panel: &mut display::Panel, g: &Gathered, pct: u8) {
-    let mut lines: heapless::Vec<Line, 5> = heapless::Vec::new();
+    let mut lines: heapless::Vec<Line, 6> = heapless::Vec::new();
     g.lines(&mut lines);
     display::draw(panel, |c| {
         catcard_ui::widgets::info(c, &display::LAYOUT, "Collecting entropy", &lines);
@@ -3051,7 +2992,7 @@ fn gathering(panel: &mut display::Panel, g: &Gathered, pct: u8) {
 /// wallet are seen once by the person who will own it. `passed` is the pool's own
 /// verdict from `check()`, not an assumption that the loop above did its job.
 fn entropy_report(panel: &mut display::Panel, g: &Gathered, passed: bool) {
-    let mut lines: heapless::Vec<Line, 5> = heapless::Vec::new();
+    let mut lines: heapless::Vec<Line, 6> = heapless::Vec::new();
     g.lines(&mut lines);
     info(
         panel,
@@ -3379,116 +3320,71 @@ fn new_seed(
     const STEP_PAUSE_CYCLES: u32 = 4_000_000;
 
     let policy = crate::entropy_policy();
-    let boot_bits = pool.credited_bits();
+    let kinds = crate::trng::kinds();
     let mut g = Gathered {
-        se1: 0,
-        se2: 0,
-        chip: 0,
-        bits: boot_bits,
+        read: kinds.iter().map(|&k| (k, 0usize)).collect(),
+        bits: pool.credited_bits(),
         chips: pool.hardware_sources(),
         need_bits: policy.min_bits,
         need_chips: policy.min_hw_sources,
     };
 
-    if catcard_board::BOARD.has_callgate_se_rng {
-        // Ask each element for the same number of *bytes*, not the same number of
-        // turns. SE2 produces about a quarter as fast as SE1 -- plain to see on
-        // Utils -> Analyze RNG, where SE1 completes four rounds in the time SE2 takes
-        // for one -- so taking turns in lockstep collects roughly a quarter as much
-        // from it. The first generation on hardware did exactly that and logged
-        // `SE1 512 B, SE2 128 B`, which reads like a broken element and is really a
-        // slower one.
-        const TARGET: usize = 512;
-        // Bounded, because an element that never answers must not hang a wallet.
-        // At SE2's observed rate 512 bytes wants roughly 64 turns; this leaves room
-        // and still ends.
-        const MAX_PASSES: usize = 160;
+    // Every source this board can read, the same number of *bytes* from each -- not the
+    // same number of turns. SE2 produces about a quarter as fast as SE1, so taking turns in
+    // lockstep once collected `SE1 512 B, SE2 128 B`, which reads like a broken element and
+    // is really a slower one. The chip TRNG is part of this on every board: it once sat
+    // inside a check for the mk4+ callgate, and on mk3 a wallet was generated without a
+    // single fresh byte from it.
+    const TARGET: usize = 512;
+    // Bounded, because a source that never answers must not hang a wallet. At SE2's
+    // observed rate 512 bytes wants roughly 64 turns; this leaves room and still ends.
+    const MAX_PASSES: usize = 160;
 
-        // The STM32's own TRNG, mixed in during this generation alongside the elements.
-        // Independent of the callgate and far faster, so a small read each pass keeps its
-        // progress visible next to the slow elements without running away with the loop.
-        // SAFETY: the RNG clock was set up at boot; nothing else touches the peripheral.
-        let chip = unsafe { catcard_hal::rng::Rng::init() }.ok();
-        const CHIP_TARGET: usize = 512;
-        let mut chip_bytes = 0usize;
+    let mut trngs = crate::trng::Trngs::new(Some(gate));
+    // A source can decline two ways: `Some(0)` is "nothing ready", `None` a refusal.
+    // Counted apart so a generation is a measurement rather than an inference.
+    let mut tries = [0usize; 4];
+    let mut empty = [0usize; 4];
+    let mut failed = [0usize; 4];
 
-        let srcs = [
-            (
-                catcard_callgate::abi::RngSource::Se1,
-                catcard_entropy::Source::Se1Trng,
-            ),
-            (
-                catcard_callgate::abi::RngSource::Se2,
-                catcard_entropy::Source::Se2Trng,
-            ),
-        ];
-        let mut bytes = [0usize; 2];
-        let mut tries = [0usize; 2];
-        // An element can decline two ways and we have never distinguished them:
-        // `Ok(0)` is "asked too soon, nothing ready", `Err` is a refusal. Counting
-        // them apart is what turns the next generation into a measurement instead of
-        // another inference -- guessing at this is what produced a wrong write-up the
-        // first time.
-        let mut empty = [0usize; 2];
-        let mut failed = [0usize; 2];
-
-        gathering(ui.panel, &g, 0);
-        for _ in 0..MAX_PASSES {
-            if bytes[0] >= TARGET && bytes[1] >= TARGET {
-                break;
-            }
-            for (i, (src, tag)) in srcs.iter().enumerate() {
-                if bytes[i] >= TARGET {
-                    continue;
-                }
-                let mut buf = [0u8; 33];
-                tries[i] += 1;
-                // SAFETY: exactly the documented 33-byte output buffer for callgate 26.
-                // `buf` is on our stack, which the linker places in SRAM1, and `call`
-                // range-checks it regardless.
-                match unsafe { gate.se_rng(*src, &mut buf) } {
-                    Ok(n) if n > 0 => {
-                        pool.add(*tag, &buf[1..1 + n]);
-                        bytes[i] += n;
-                    }
-                    Ok(_) => empty[i] += 1,
-                    Err(_) => failed[i] += 1,
-                }
-                buf.zeroize();
-            }
-
-            // One small chip read per pass, capped so the fast source does not run away.
-            if let Some(rng) = &chip
-                && chip_bytes < CHIP_TARGET
-            {
-                let mut cbuf = [0u8; 64];
-                if rng.fill(&mut cbuf).is_ok() {
-                    pool.add(catcard_entropy::Source::Stm32Trng, &cbuf);
-                    chip_bytes += cbuf.len();
-                }
-                cbuf.zeroize();
-            }
-
-            g.se1 = bytes[0];
-            g.se2 = bytes[1];
-            g.chip = chip_bytes;
-            g.bits = pool.credited_bits();
-            g.chips = pool.hardware_sources();
-            let got = bytes[0] + bytes[1];
-            gathering(ui.panel, &g, (got * 100 / (TARGET * 2)).min(100) as u8);
-            catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
+    gathering(ui.panel, &g, 0);
+    for _ in 0..MAX_PASSES {
+        if g.read.iter().all(|&(_, n)| n >= TARGET) {
+            break;
         }
-
+        for (i, entry) in g.read.iter_mut().enumerate() {
+            let (kind, n) = (entry.0, &mut entry.1);
+            if *n >= TARGET {
+                continue;
+            }
+            let _ = usbtask::pump();
+            let mut buf = [0u8; 64];
+            tries[i] += 1;
+            match trngs.read(kind, &mut buf) {
+                Some(got) if got > 0 => {
+                    pool.add(kind.source(), &buf[..got]);
+                    *n += got;
+                }
+                Some(_) => empty[i] += 1,
+                None => failed[i] += 1,
+            }
+            buf.zeroize();
+        }
+        g.bits = pool.credited_bits();
+        g.chips = pool.hardware_sources();
+        let got: usize = g.read.iter().map(|&(_, n)| n.min(TARGET)).sum();
+        let pct = got * 100 / (TARGET * g.read.len().max(1));
+        gathering(ui.panel, &g, pct.min(100) as u8);
+        catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
+    }
+    for (i, &(kind, n)) in g.read.iter().enumerate() {
         crate::catlog!(
-            "seed: SE1 {}B/{}t {}e {}f, SE2 {}B/{}t {}e {}f",
-            bytes[0],
-            tries[0],
-            empty[0],
-            failed[0],
-            bytes[1],
-            tries[1],
-            empty[1],
-            failed[1]
+            "seed: {} {}B/{}t {}e {}f",
+            kind.label(),
+            n,
+            tries[i],
+            empty[i],
+            failed[i]
         );
     }
 
@@ -3502,10 +3398,11 @@ fn new_seed(
     // TRNGs. A failed source counted for neither, so this is where too few healthy sources
     // becomes visible, before any word is shown.
     let passed = pool.check().is_ok();
+    // The user's turn may have added bits; the report shows what the draw will rest on.
+    g.bits = pool.credited_bits();
+    g.chips = pool.hardware_sources();
     crate::catlog!(
-        "seed: SE1 {} B, SE2 {} B, {} bits from {} chips, policy {}",
-        g.se1,
-        g.se2,
+        "seed: {} bits from {} chips, policy {}",
         g.bits,
         g.chips,
         if passed { "ok" } else { "FAILED" }

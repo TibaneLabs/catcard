@@ -13,9 +13,9 @@
 //! Everything above this — receiving the image, the header/signature checks, the approval
 //! screen — is board-agnostic and shared, exactly as it should be.
 
+use catcard_callgate::Callgate;
 #[cfg(feature = "board-mk3")]
 use catcard_callgate::abi::LogoutMode;
-use catcard_callgate::Callgate;
 
 use crate::display;
 

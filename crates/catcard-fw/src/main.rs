@@ -33,19 +33,20 @@ mod logbuf;
 #[cfg(feature = "usb-debug-mem")]
 mod debug_mem;
 mod interrupts;
+mod ktest;
 mod menu;
 mod msc_drive;
 mod nor;
 mod panic;
-mod ktest;
 mod pinentry;
 mod power;
 mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;
-mod staging;
 mod splash;
+mod staging;
+mod trng;
 mod ui;
 mod usbtask;
 
