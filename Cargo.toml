@@ -94,7 +94,7 @@ anyd = { version = "0.1.4", default-features = false, features = ["encode", "qr"
 # Bitcoin only, and no `alloc`: that leaves scripts, addresses, `btcraw`'s sighashes and
 # the PSBT roles, all writing into caller buffers. The other chains stay out of the image
 # until there is something to do with them.
-outscript = { version = "0.2.1", default-features = false, features = ["bitcoin"] }
+outscript = { version = "0.2.2", default-features = false, features = ["bitcoin"] }
 
 # --- host tooling ---
 anyhow = "1.0.104"

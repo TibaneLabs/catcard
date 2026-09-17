@@ -470,9 +470,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "outscript"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7d7203a2e813c5a17ac0bc94fb1f907efeb030a6f9eccd8fbcef6eeeffeea7b"
+checksum = "a37763d52e3cc48892e4adc7456fc8b3e2416180716107f36c2ffc6a15558849"
 dependencies = [
  "purecrypto",
 ]
