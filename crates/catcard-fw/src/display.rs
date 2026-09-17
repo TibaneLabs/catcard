@@ -232,10 +232,19 @@ pub fn wipe(_panel: &mut Panel) {}
 /// bar. Slice-driven bars do not consult it -- there the CPU is doing the moving.
 pub const SELF_SCROLLING_BAR: bool = !cfg!(feature = "board-q1");
 
+///
+/// The command depends on the panel: the mk5's needs the longer setup with a column range,
+/// and an SSD1306 must never be sent that form. So the choice follows the same strap-based
+/// board check that picks the mk5's panel init. The mk3 and mk4 keep the SSD1306 form.
 #[cfg(not(feature = "board-q1"))]
 pub fn scroll_busy_bar(panel: &mut Panel) {
     let last_page = (SCREEN_H / 8 - 1) as u8;
-    let _ = panel.scroll_pages(last_page, last_page, catcard_ui::ssd1306::Interval::FASTEST);
+    let interval = catcard_ui::ssd1306::Interval::FASTEST;
+    let _ = if crate::running_board() == "mk5" {
+        panel.scroll_pages_with_columns(last_page, last_page, interval)
+    } else {
+        panel.scroll_pages(last_page, last_page, interval)
+    };
 }
 
 /// The Q1's ST7789 has no self-scrolling mode: its vertical scroll needs the host to move

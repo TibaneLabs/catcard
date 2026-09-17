@@ -95,6 +95,20 @@ impl<B: DisplayBus> Ssd1306<B> {
             .command(&crate::ssd1306::scroll_right(first, last, interval))
     }
 
+    /// [`scroll_pages`](Self::scroll_pages) for a panel that takes the column range too --
+    /// the mk5's. See [`ssd1306::scroll_right_with_columns`](crate::ssd1306::scroll_right_with_columns)
+    /// for why this must never go to an SSD1306.
+    pub fn scroll_pages_with_columns(
+        &mut self,
+        first: u8,
+        last: u8,
+        interval: crate::ssd1306::Interval,
+    ) -> Result<(), B::Error> {
+        self.bus.command(&crate::ssd1306::scroll_right_with_columns(
+            first, last, interval,
+        ))
+    }
+
     /// Turn the panel on or off without discarding its contents.
     pub fn set_on(&mut self, on: bool) -> Result<(), B::Error> {
         self.bus.command(&[if on {

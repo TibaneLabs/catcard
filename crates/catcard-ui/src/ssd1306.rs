@@ -172,6 +172,35 @@ pub fn scroll_right(first_page: u8, last_page: u8, interval: Interval) -> [u8; 9
     ]
 }
 
+/// [`scroll_right`] in the longer form the mk5's panel takes: start and end *columns* after
+/// the page range, where the SSD1306 has two dummy bytes.
+///
+/// The mk5 panel runs from an external +12 V rail with its charge pump off, and ignores the
+/// six-parameter SSD1306 setup entirely -- the busy bar sat still through every
+/// secure-element call. With `00` and `7F` as the column range it scrolls (Debug -> Scroll
+/// test on an mk5: the short form did not move, this one did; stock firmware's bar moves on
+/// the same panel). That is the SSD1309-family layout.
+///
+/// **Never send this to an SSD1306.** It takes six parameters, so the trailing `7F` would
+/// be read as a new command -- `40h`-`7Fh` sets the display start line -- and shift the
+/// whole picture up 63 rows. Which form a board gets is decided from the board, not tried.
+///
+/// Source: measured on hardware (mk5), as above.
+pub fn scroll_right_with_columns(first_page: u8, last_page: u8, interval: Interval) -> [u8; 10] {
+    [
+        cmd::SCROLL_OFF, // setup is only accepted while scrolling is stopped
+        cmd::SCROLL_RIGHT,
+        0x00, // dummy
+        first_page,
+        interval as u8,
+        last_page,
+        0x00, // dummy
+        0x00, // first column
+        0x7F, // last column
+        cmd::SCROLL_ON,
+    ]
+}
+
 /// Stop any scrolling. Harmless when nothing is scrolling.
 pub const SCROLL_OFF: [u8; 1] = [cmd::SCROLL_OFF];
 
@@ -202,6 +231,22 @@ mod tests {
             .position(|&b| b == cmd::SET_MULTIPLEX)
             .unwrap();
         assert_eq!(INIT_128X64[at + 1], 63);
+    }
+
+    #[test]
+    fn the_long_scroll_form_carries_the_whole_column_range_and_starts_last() {
+        let c = scroll_right_with_columns(7, 7, Interval::FASTEST);
+        assert_eq!(c[0], cmd::SCROLL_OFF);
+        assert_eq!(c[1], cmd::SCROLL_RIGHT);
+        assert_eq!((c[3], c[5]), (7, 7), "page range");
+        assert_eq!(
+            (c[7], c[8]),
+            (0x00, 0x7F),
+            "every column of a 128-wide panel"
+        );
+        assert_eq!(*c.last().unwrap(), cmd::SCROLL_ON);
+        // The short form is two bytes shorter: exactly the column range.
+        assert_eq!(c.len(), scroll_right(7, 7, Interval::FASTEST).len() + 1);
     }
 
     #[test]
