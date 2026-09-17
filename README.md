@@ -49,6 +49,10 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   full address beside it in blocks of four for checking against a wallet. Key hints use
   what is printed on the keys, and one layout engine fits the 128×64 OLED and the Q1's
   320×240 colour screen alike.
+- **Large SD cards.** Cards up to 2 TB (the SDXC ceiling) work, where stock stops at
+  32 GB. Reading covers FAT12, FAT16, FAT32 and exFAT, the format most large cards come
+  with, and Format writes FAT16, FAT32 or exFAT to suit the card's size, so a new card
+  needs no reformatting on a computer first.
 - **Optional multichain support.** One firmware, no per-coin apps to install. Chains are
   build options, so a Bitcoin-only image has the other chains' code *absent*, not just
   hidden — a smaller attack surface, not only a smaller menu. The chain registry and
