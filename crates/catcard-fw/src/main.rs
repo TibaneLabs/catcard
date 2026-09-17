@@ -24,6 +24,8 @@ use cortex_m_rt::entry;
 
 mod boot;
 mod display;
+#[cfg(all(feature = "games", feature = "board-q1"))]
+mod flappy;
 #[cfg(feature = "games")]
 mod game;
 #[cfg(feature = "board-q1")]

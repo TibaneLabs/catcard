@@ -242,6 +242,32 @@ impl<B: DisplayBus> St7789<B> {
         Ok(())
     }
 
+    /// Paint `w` x `h` pixels at `(x, y)`, each the colour `f(dx, dy)` gives, clipped to the
+    /// panel. One window and one row buffer, so a sprite is a single short transfer rather
+    /// than a window per pixel.
+    pub fn paint(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        mut f: impl FnMut(usize, usize) -> u16,
+    ) -> Result<(), B::Error> {
+        if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 {
+            return Ok(());
+        }
+        let (w, h) = (w.min(WIDTH - x), h.min(HEIGHT - y));
+        self.window(x, y, x + w - 1, y + h - 1)?;
+        let mut line = [0u8; WIDTH * 2];
+        for dy in 0..h {
+            for (dx, px) in line[..w * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                *px = f(dx, dy).to_be_bytes();
+            }
+            self.bus.data(&line[..w * 2])?;
+        }
+        Ok(())
+    }
+
     /// Scroll the panel in the controller, with no pixels sent: the frame memory is a ring
     /// of [`WIDTH`] lines, and `set_scroll_start` picks which of them is shown first.
     ///
@@ -459,6 +485,20 @@ mod tests {
     use super::*;
     use crate::canvas::Canvas;
     use crate::framebuffer::Mono128x64;
+
+    #[test]
+    fn paint_sends_each_pixel_from_the_closure_in_row_order_and_clips() {
+        let mut p = St7789::new(MockBus::default());
+        p.paint(318, 0, 4, 2, |dx, dy| (dy * 16 + dx) as u16)
+            .unwrap();
+        let log = &p.bus_mut().log;
+        // Clipped to two columns at the right edge.
+        assert_eq!(log[1], (true, vec![0x01, 0x3E, 0x01, 0x3F]));
+        // CASET, its data, RASET, its data, RAMWR, then one transfer per row.
+        assert_eq!(log[5], (true, vec![0, 0, 0, 1]));
+        assert_eq!(log[6], (true, vec![0, 16, 0, 17]));
+        assert_eq!(log.len(), 7);
+    }
 
     #[test]
     fn a_scroll_area_always_covers_the_320_lines() {

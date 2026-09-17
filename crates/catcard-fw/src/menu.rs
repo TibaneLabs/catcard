@@ -114,6 +114,9 @@ enum Screen {
     /// The Block Cutter game.
     #[cfg(feature = "games")]
     BlockCutter,
+    /// Flappy, on the Q1's self-scrolling panel.
+    #[cfg(all(feature = "games", feature = "board-q1"))]
+    Flappy,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -214,7 +217,11 @@ const UTILS_ITEMS: &[&str] = &[
 
 /// The games in the Games submenu.
 #[cfg(feature = "games")]
+#[cfg(not(feature = "board-q1"))]
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
+/// Flappy needs the Q1's panel to scroll itself.
+#[cfg(feature = "board-q1")]
+const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
     "USB",
@@ -585,6 +592,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
         Screen::BlockCutter => to(|a| crate::game::block_cutter(a.ui), Screen::Games),
+        #[cfg(all(feature = "games", feature = "board-q1"))]
+        Screen::Flappy => to(|a| crate::flappy::flappy(a.ui), Screen::Games),
         Screen::NewSeed(_) => reseeds(
             |a| new_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut(), a.words),
             Screen::Main,
@@ -765,6 +774,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Games => match (key, GAMES_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Block Mine")) => Screen::BlockMine,
             (Key::Confirm, Some("Block Cutter")) => Screen::BlockCutter,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Flappy")) => Screen::Flappy,
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::Games,
         },
@@ -1008,6 +1019,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BlockMine => {}
         #[cfg(feature = "games")]
         Screen::BlockCutter => {}
+        #[cfg(all(feature = "games", feature = "board-q1"))]
+        Screen::Flappy => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
