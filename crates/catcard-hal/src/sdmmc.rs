@@ -480,6 +480,10 @@ impl Transport for Sdmmc {
                 }
             }
             reg::write(b + ICR, self.bits.icr_all);
+            // Take the data path out of transmit. After a block the mk3's controller still
+            // reported `TXACT`, and the next command found it that way; `DTEN` is clear on
+            // the L4+ anyway, so this costs that controller nothing.
+            reg::write(b + DCTRL, 0);
         }
         Ok(())
     }

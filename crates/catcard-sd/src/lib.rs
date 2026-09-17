@@ -38,6 +38,8 @@ pub enum Error {
     DataError { block: u32 },
     /// The peripheral itself did not start, which is not the card's fault.
     Peripheral,
+    /// The card was still busy with a written block when the wait for it ran out.
+    Busy,
     /// A write was asked of a card this code only reads. Upgrading from a card needs
     /// nothing written to it, and a firmware that cannot write the card cannot corrupt
     /// someone's files either.
@@ -136,12 +138,24 @@ const CMD_GO_IDLE: u8 = 0;
 const CMD_ALL_SEND_CID: u8 = 2;
 const CMD_SEND_RCA: u8 = 3;
 const CMD_SELECT: u8 = 7;
+const CMD_SEND_STATUS: u8 = 13;
 const CMD_SEND_IF_COND: u8 = 8;
 const CMD_SEND_CSD: u8 = 9;
 const CMD_READ_SINGLE: u8 = 17;
 const CMD_WRITE_SINGLE: u8 = 24;
 const CMD_APP: u8 = 55;
 const ACMD_OP_COND: u8 = 41;
+
+/// Card status (the R1 response to CMD13): `CURRENT_STATE` in bits 12:9, and
+/// `READY_FOR_DATA` in bit 8. Source: SD Physical Layer Specification, "Card Status" [C]
+const STATUS_READY_FOR_DATA: u32 = 1 << 8;
+const STATUS_STATE_SHIFT: u32 = 9;
+const STATE_TRANSFER: u32 = 4;
+
+/// CMD13 polls before a card still programming a block is given up on. Each poll is a
+/// command exchange of well under a millisecond; the specification's write timeout is
+/// 250 ms on standard cards, 500 ms on SDXC, so this is many times what any card takes.
+const BUSY_POLLS: u32 = 20_000;
 
 /// CMD8 check pattern, echoed back by a card that understood the question.
 const IF_COND_PATTERN: u32 = 0x1AA;
@@ -268,7 +282,28 @@ pub fn write_block<T: Transport>(
     };
     t.arm_block_write();
     t.command(CMD_WRITE_SINGLE, arg, Response::Short)?;
-    t.write_data(data)
+    t.write_data(data)?;
+    wait_until_ready(t, card)
+}
+
+/// Wait for a card to finish programming the block it was just sent.
+///
+/// A card acknowledges a written block before it has stored it, and holds the data line
+/// busy while it does. It answers CMD13 during that time but no data command, so the next
+/// read or write sent straight away goes unanswered: on the mk3's controller that was a
+/// CMD17 timing out right after a write, and a file write failing half way. The spec's
+/// answer is to ask the card's state until it is back in *transfer* and ready for data.
+fn wait_until_ready<T: Transport>(t: &mut T, card: &Card) -> Result<(), Error> {
+    let rca = u32::from(card.rca) << 16;
+    for _ in 0..BUSY_POLLS {
+        let [status, ..] = t.command(CMD_SEND_STATUS, rca, Response::Short)?;
+        if status & STATUS_READY_FOR_DATA != 0
+            && (status >> STATUS_STATE_SHIFT) & 0xF == STATE_TRANSFER
+        {
+            return Ok(());
+        }
+    }
+    Err(Error::Busy)
 }
 
 /// Capacity in 512-byte blocks, from a 136-bit CSD.
@@ -497,8 +532,14 @@ impl<D: fat::SectorDriver, const S: usize> AnyVolume<D, S> {
     /// Open a file, creating it if it does not exist.
     pub fn open_or_create_file(&mut self, path: &str) -> Result<AnyFile, ()> {
         match self {
-            AnyVolume::Fat(v) => v.open_or_create_file(path).map(AnyFile::Fat).map_err(|_| ()),
-            AnyVolume::Exfat(v) => v.open_or_create_file(path).map(AnyFile::Exfat).map_err(|_| ()),
+            AnyVolume::Fat(v) => v
+                .open_or_create_file(path)
+                .map(AnyFile::Fat)
+                .map_err(|_| ()),
+            AnyVolume::Exfat(v) => v
+                .open_or_create_file(path)
+                .map(AnyFile::Exfat)
+                .map_err(|_| ()),
         }
     }
 

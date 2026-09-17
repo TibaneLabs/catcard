@@ -466,6 +466,97 @@ mod fat_round_trip {
         assert!(after.image == before, "the card changed during a read");
     }
 
+    /// CMD13's answer from a card that is done: transfer state, ready for data.
+    const READY_IN_TRANSFER: u32 = (STATE_TRANSFER << STATUS_STATE_SHIFT) | STATUS_READY_FOR_DATA;
+
+    /// A card that stays in the programming state for `busy` CMD13 polls after each write,
+    /// and refuses any data command while it does -- which is what a real card does.
+    struct SlowCard {
+        busy: u32,
+        left: u32,
+        polls: u32,
+        refused: u32,
+    }
+
+    impl Transport for SlowCard {
+        fn command(&mut self, cmd: u8, _: u32, _: Response) -> Result<[u32; 4], Error> {
+            match cmd {
+                CMD_SEND_STATUS if self.left > 0 => {
+                    self.left -= 1;
+                    self.polls += 1;
+                    // Programming state (7), not ready.
+                    Ok([7 << STATUS_STATE_SHIFT, 0, 0, 0])
+                }
+                CMD_SEND_STATUS => {
+                    self.polls += 1;
+                    Ok([READY_IN_TRANSFER, 0, 0, 0])
+                }
+                CMD_READ_SINGLE | CMD_WRITE_SINGLE if self.left > 0 => {
+                    self.refused += 1;
+                    Err(Error::Timeout { cmd })
+                }
+                _ => Ok([0; 4]),
+            }
+        }
+        fn read_data(&mut self, out: &mut [u8; BLOCK_LEN]) -> Result<(), Error> {
+            out.fill(0);
+            Ok(())
+        }
+        fn write_data(&mut self, _: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+            self.left = self.busy;
+            Ok(())
+        }
+        fn set_bus_width_4(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn set_fast_clock(&mut self) {}
+        fn card_present(&self) -> bool {
+            true
+        }
+    }
+
+    fn slow_card(busy: u32) -> SlowCard {
+        SlowCard {
+            busy,
+            left: 0,
+            polls: 0,
+            refused: 0,
+        }
+    }
+
+    const SMALL_CARD: Card = Card {
+        rca: 1,
+        addressing: Addressing::BlockAddressed,
+        blocks: 64,
+        wide: true,
+    };
+
+    #[test]
+    fn a_write_waits_for_the_card_to_finish_before_anything_else_goes_out() {
+        let mut t = slow_card(30);
+        let block = [0xA5u8; BLOCK_LEN];
+        write_block(&mut t, &SMALL_CARD, 3, &block).unwrap();
+        write_block(&mut t, &SMALL_CARD, 4, &block).unwrap();
+        let mut out = [0u8; BLOCK_LEN];
+        read_block(&mut t, &SMALL_CARD, 3, &mut out).unwrap();
+        assert_eq!(
+            t.refused, 0,
+            "a data command went out while the card was busy"
+        );
+        assert_eq!(t.polls, 2 * 31);
+    }
+
+    #[test]
+    fn a_card_that_never_finishes_is_busy_not_a_hang() {
+        let mut t = slow_card(u32::MAX);
+        let block = [0u8; BLOCK_LEN];
+        assert_eq!(
+            write_block(&mut t, &SMALL_CARD, 3, &block),
+            Err(Error::Busy)
+        );
+        assert_eq!(t.polls, BUSY_POLLS);
+    }
+
     /// A card whose blocks are an image that reads *and writes* back.
     ///
     /// The read-only `ImageCard` cannot exercise `write_sectors`, and the whole "save log
@@ -481,6 +572,9 @@ mod fat_round_trip {
         fn command(&mut self, cmd: u8, arg: u32, _: Response) -> Result<[u32; 4], Error> {
             if cmd == CMD_READ_SINGLE || cmd == CMD_WRITE_SINGLE {
                 self.at = arg; // block-addressed, so the argument is a block number
+            }
+            if cmd == CMD_SEND_STATUS {
+                return Ok([READY_IN_TRANSFER, 0, 0, 0]);
             }
             Ok([0; 4])
         }

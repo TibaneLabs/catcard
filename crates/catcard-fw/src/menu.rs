@@ -5123,6 +5123,7 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
         E::DataError { .. } => "data error",
         E::Peripheral => "peripheral",
         E::ReadOnly => "read only",
+        E::Busy => "card stayed busy",
     }
 }
 

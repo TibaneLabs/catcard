@@ -264,8 +264,8 @@ mod tests {
     use crate::AnyVolume;
     use std::collections::BTreeMap;
     use std::rc::Rc;
-    use std::vec::Vec;
     use std::vec;
+    use std::vec::Vec;
 
     /// A sparse, shared, in-memory block device: only written sectors take memory, so a
     /// device can claim a large `sector_count` without allocating it. Cloning shares the
@@ -284,7 +284,11 @@ mod tests {
             }
         }
         fn sector(&self, lba: u64) -> [u8; BLOCK_LEN] {
-            self.store.borrow().get(&lba).copied().unwrap_or([0; BLOCK_LEN])
+            self.store
+                .borrow()
+                .get(&lba)
+                .copied()
+                .unwrap_or([0; BLOCK_LEN])
         }
     }
 
@@ -299,7 +303,10 @@ mod tests {
         fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
             let store = self.store.borrow();
             for (i, chunk) in buf.chunks_mut(BLOCK_LEN).enumerate() {
-                let s = store.get(&(lba + i as u64)).copied().unwrap_or([0; BLOCK_LEN]);
+                let s = store
+                    .get(&(lba + i as u64))
+                    .copied()
+                    .unwrap_or([0; BLOCK_LEN]);
                 chunk.copy_from_slice(&s[..chunk.len()]);
             }
             Ok(())
@@ -389,7 +396,11 @@ mod tests {
         // A start inside the CHS range encodes a real tuple.
         let mut small = [0u8; 3];
         chs(2048, &mut small);
-        assert_ne!(small, [0xFE, 0xFF, 0xFF], "small LBA should encode a real CHS");
+        assert_ne!(
+            small,
+            [0xFE, 0xFF, 0xFF],
+            "small LBA should encode a real CHS"
+        );
         // Well past 1023 cylinders (255*63*1024 sectors) clamps to the max marker.
         let mut big = [0u8; 3];
         chs(255 * 63 * 2000, &mut big);
