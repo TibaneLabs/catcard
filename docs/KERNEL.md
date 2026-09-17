@@ -193,3 +193,28 @@ between, and the host's injected Confirm — sent the moment the offer's reply a
 read with no offer showing and dispatched to the selected menu item, while the install
 waited for an OK already spent. Reading keys first closes it: the offer is marked pending
 before its reply is sent, and the host injects only after the reply.
+
+## Repeated on the mk5
+
+The mk5 is also RDP=2 and held a (disposable) seed, so the boot-path changes were made
+safe by construction before it saw them: every NVIC line is now disabled and un-pended
+before the global mask opens, and what the bootloader left is logged. A live read could not
+answer that question — the lines enabled on the running mk5 were its own numpad EXTIs,
+which our firmware had enabled itself.
+
+- **Boot**: `loader left NVIC 0x00000000 0x00000000 0x00000000` — like the Q1's, the mk5
+  bootloader leaves nothing enabled. VTOR had been `0x00000000` and interrupts masked,
+  exactly as on the Q1.
+- **Numpad edge interrupt** fires with interrupts enabled at boot (latch set during PIN
+  entry).
+- **Kernel test**: `t=16637` against `ms=16621`; FPU 353/353 rounds per task with zero
+  mismatches; 110 SE1 TRNG calls, no errors, ~99 ms of masked time each — the same as the
+  Q1, so the blackout looks like a property of the secure element and bootloader rather
+  than the board. Stack high-water marks identical to the Q1's.
+- **Kernel UI**: menu and USB as tasks on the 128×64 panel; a host-approved upgrade staged,
+  verified, installed and came back on the new image with no key pressed.
+
+One host-side artifact, not a firmware fault: a log line read back with bytes missing at a
+chunk seam. The log is read in several requests, each at an offset counted from the oldest
+byte, and the ring was wrapping during the read, so the oldest byte moved between requests.
+A snapshot read would avoid it.
