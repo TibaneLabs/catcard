@@ -28,7 +28,8 @@ Dependency first, then what a user needs to hold funds safely:
 4. ~~**Address Explorer and Verify Address**~~ -- written, untested on hardware: all four
    types, accounts and both chains in the explorer; Verify address types an address and
    searches this wallet's own derivations for it.
-5. **Message signing** (legacy and BIP-322).
+5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Utils → Sign
+   message, armoured to SIGNED.TXT. BIP-322 still to do.
 6. **BIP-85** child words, WIF, xprv, hex, passwords.
 7. **Settings store** -- internal flash driver, LittleFS2, AES-256-CTR, stock-compatible
    (`docs/SECRETS-AND-SETTINGS.md`). Everything with persistent configuration waits on it:
@@ -51,7 +52,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-45/48 (multisig paths) | ✅ | ❌ | step 8 |
 | BIP-67 sorted multisig | ✅ | ❌ | step 8 |
 | BIP-85 | ✅ | ❌ | step 6 |
-| BIP-137 legacy message | ✅ | ❌ | step 5 |
+| BIP-137 legacy message | ✅ | 🟡 | signed and self-verified; untested on hardware |
 | BIP-141/143/144 | ✅ | ✅ | addresses, BIP-143 sighash, witness serialisation, finalise and extract |
 | BIP-174 PSBT v0 | ✅ | 🟡 | read and signed (`outscript`); untested on hardware |
 | BIP-370 PSBT v2 | ✅ | ❌ | refused by name, not misread |
@@ -110,7 +111,11 @@ remember registered wallets.
 
 ## 6. Message signing and Proof of Reserves
 
-All ❌ -- step 5.
+| Feature | Stock | CatCard | Notes |
+|---|---|---|---|
+| Legacy signed message | ✅ | 🟡 | Utils → Sign message, typed on the device, armoured to SIGNED.TXT |
+| Signing a message from a file | ✅ | ❌ | with the other file flows |
+| BIP-322, Proof of Reserves | ✅ | ❌ | step 5's remainder |
 
 ## 7. Backup, stores and transports
 

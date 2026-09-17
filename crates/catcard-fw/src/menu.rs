@@ -102,6 +102,8 @@ enum Screen {
     ExportWallet,
     /// Ask whether a typed address belongs to this wallet.
     VerifyAddress,
+    /// Sign a typed message with one of this wallet's keys.
+    SignMessage,
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -208,6 +210,7 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Address Explorer",
     "Verify address",
+    "Sign message",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -220,6 +223,7 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Address Explorer",
     "Verify address",
+    "Sign message",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -585,6 +589,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::verify::screen(a.gate, a.login, a.ui),
             Screen::Utils,
         ),
+        Screen::SignMessage => to(
+            |a| crate::signmsg::screen(a.gate, a.login, a.ui),
+            Screen::Utils,
+        ),
         Screen::BrowseSd => to(
             |a| {
                 browse_sd(a.ui, "SD card", None, false);
@@ -787,6 +795,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
             (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
+            (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
@@ -1024,6 +1033,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::AddressExplorer
         | Screen::ExportWallet
         | Screen::VerifyAddress
+        | Screen::SignMessage
         | Screen::Passphrase => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}

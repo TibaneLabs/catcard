@@ -5,12 +5,12 @@
 
 use outscript::btcraw::{RawTx, RawTxIn, RawTxOut};
 use outscript::crypto::secp256k1::SecpPublicKey;
-use outscript::psbt::{Psbt, input as in_key};
 use outscript::crypto::secp256k1::{bip340_verify, taproot_tweak};
+use outscript::psbt::{Psbt, input as in_key};
 
 use super::*;
-use crate::bip32::{ChildNumber, ExtendedPrivKey, Network};
 use crate::address::AddressKind;
+use crate::bip32::{ChildNumber, ExtendedPrivKey, Network};
 use crate::bip39::{Mnemonic, SEED_LEN};
 
 const PHRASE: &str =
@@ -335,8 +335,13 @@ fn psbt_for_kind(kind: AddressKind, steps: &[u32], buf: &mut [u8]) -> usize {
         }
         step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_input_record(0, &key, &value, out));
     } else {
-        step!(|p: &Psbt<'_>, out: &mut [u8]| p
-            .add_input_bip32_derivation(0, &pk, FINGERPRINT, steps, out));
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p.add_input_bip32_derivation(
+            0,
+            &pk,
+            FINGERPRINT,
+            steps,
+            out
+        ));
     }
     buf[..n].copy_from_slice(&a[..n]);
     n
@@ -346,8 +351,14 @@ fn psbt_for_kind(kind: AddressKind, steps: &[u32], buf: &mut [u8]) -> usize {
 fn a_legacy_and_a_nested_segwit_input_are_both_signed() {
     let kw = KeyWork::host();
     for (kind, steps) in [
-        (AddressKind::P2pkh, [44 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0]),
-        (AddressKind::P2shP2wpkh, [49 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0]),
+        (
+            AddressKind::P2pkh,
+            [44 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0],
+        ),
+        (
+            AddressKind::P2shP2wpkh,
+            [49 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0],
+        ),
     ] {
         let mut buf = vec![0u8; 4096];
         let n = psbt_for_kind(kind, &steps, &mut buf);
@@ -377,7 +388,11 @@ fn a_taproot_input_gets_a_schnorr_signature_that_verifies() {
     let mut out = vec![0u8; 8192];
     let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw).unwrap();
     let signed = Psbt::parse(&out[..len]).unwrap();
-    let sig = signed.input(0).unwrap().tap_key_sig().expect("key signature");
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .tap_key_sig()
+        .expect("key signature");
     // 64 bytes with no trailing byte means the default sighash, which is SIGHASH_DEFAULT.
     assert_eq!(sig.len(), 64);
 

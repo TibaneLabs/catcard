@@ -49,6 +49,7 @@ mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;
+mod signmsg;
 mod signtx;
 mod splash;
 mod staging;
