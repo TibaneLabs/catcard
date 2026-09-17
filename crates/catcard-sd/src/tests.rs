@@ -684,3 +684,122 @@ mod fat_round_trip {
         assert!(matches!(dev.write_sectors(0, &block), Err(Error::ReadOnly)));
     }
 }
+
+/// A big file on an exFAT card, read the way the firmware upgrade path reads one.
+///
+/// The card that showed this up is a 64 GB exFAT SDXC with **128 KB clusters**, holding a
+/// 1.1 MB firmware image in a subdirectory. The image's header is in the first cluster, so
+/// it parsed; the signature covers the whole image, and it did not verify -- which is what a
+/// read that goes wrong after the first cluster looks like from the outside.
+mod big_exfat {
+    extern crate std;
+    use std::vec;
+    use std::vec::Vec;
+
+    use super::*;
+    use fstool::block::{BlockDevice, MemoryBackend};
+    use fstool::fs::exfat::{Exfat, FormatOpts as ExfatFormatOpts};
+
+    /// 1.1 MB, as the real image is: nine clusters of 128 KB.
+    const FILE_LEN: usize = 1_155_072;
+    /// 64 MB of card, enough for several such clusters.
+    const CARD_SECTORS: u32 = 262_144;
+
+    /// A RAM disk, as the other module has: the card under the driver.
+    struct RamDisk(Vec<u8>);
+
+    impl crate::fat::SectorDriver for RamDisk {
+        type Error = ();
+        fn sector_size(&self) -> u32 {
+            512
+        }
+        fn sector_count(&self) -> u64 {
+            (self.0.len() / 512) as u64
+        }
+        fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+            let at = lba as usize * 512;
+            let end = at + buf.len();
+            if end > self.0.len() {
+                return Err(());
+            }
+            buf.copy_from_slice(&self.0[at..end]);
+            Ok(())
+        }
+        fn write_sectors(&mut self, lba: u64, data: &[u8]) -> Result<(), ()> {
+            let at = lba as usize * 512;
+            let end = at + data.len();
+            if end > self.0.len() {
+                return Err(());
+            }
+            self.0[at..end].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    /// Every byte distinct across the whole file, so a cluster read from the wrong place
+    /// cannot look right.
+    fn payload() -> Vec<u8> {
+        (0..FILE_LEN)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    }
+
+    /// An exFAT card with `data` at `/q1/fw.dfu`, cluster size 2^`shift` sectors.
+    fn card_with(data: &[u8], shift: u8) -> Vec<u8> {
+        let mut mem = MemoryBackend::new(CARD_SECTORS as u64 * 512);
+        let opts = ExfatFormatOpts {
+            bytes_per_sector_shift: 9,
+            sectors_per_cluster_shift: shift,
+            ..Default::default()
+        };
+        let mut fs = Exfat::format(&mut mem, &opts).expect("format exfat");
+        let dir = fs
+            .create_dir(&mut mem, "/q1", 0)
+            .expect("create directory");
+        let _ = dir;
+        let mut reader = fstool::io::Cursor::new(data.to_vec());
+        fs.create_file(&mut mem, "/q1/fw.dfu", &mut reader, data.len() as u64, 0)
+            .expect("create file");
+        // The metadata lives in the handle until it is flushed; without this the image
+        // has the file's data and an empty root.
+        fs.flush(&mut mem).expect("flush");
+        let mut image = vec![0u8; CARD_SECTORS as usize * 512];
+        mem.read_at(0, &mut image).expect("read image back");
+        image
+    }
+
+    #[test]
+    fn a_file_spanning_clusters_reads_back_byte_for_byte() {
+        let data = payload();
+        // 128 KB clusters, as the card has, and 4 KB as a control.
+        for shift in [8u8, 3] {
+            let image = card_with(&data, shift);
+            let mut vol: AnyVolume<_, 512> =
+                AnyVolume::mount_with(|| Ok(RamDisk(image.clone()))).expect("mount");
+            let mut file = vol.open_file("/q1/fw.dfu").expect("open");
+            assert_eq!(file.len() as usize, FILE_LEN, "cluster shift {shift}");
+            // Read in 256-byte blocks, as the upgrade path does.
+            let mut got = vec![0u8; FILE_LEN];
+            let mut at = 0usize;
+            while at < FILE_LEN {
+                let want = (FILE_LEN - at).min(256);
+                let n = file
+                    .read(&mut vol, &mut got[at..at + want])
+                    .expect("read");
+                assert_ne!(n, 0, "read stopped at {at} with cluster shift {shift}");
+                at += n;
+            }
+            // Report the first difference rather than "not equal": which offset it is says
+            // whether a cluster boundary or the chain is at fault.
+            if let Some(i) = (0..FILE_LEN).find(|&i| got[i] != data[i]) {
+                panic!(
+                    "cluster shift {shift}: first wrong byte at {i:#x} \
+                     (cluster {}), got {:#04x} want {:#04x}",
+                    i / (512 << shift),
+                    got[i],
+                    data[i]
+                );
+            }
+        }
+    }
+}

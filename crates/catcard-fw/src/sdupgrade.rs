@@ -184,6 +184,22 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
             // hunting through a log for a reason that was never written down. With the
             // header's own claims beside it, a refusal can be chased without the card.
             crate::catlog!("sd: image refused: {:?}", why);
+            // The staged bytes and their digest: with these in the log, a signature that
+            // will not verify can be chased against the file on a computer, which is the
+            // only way to tell "the wrong bytes arrived" from "the wrong key was used".
+            if let Ok(d) = staged.digest() {
+                crate::catlog!(
+                    "sd: staged digest {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+                );
+            }
+            let mut head = [0u8; 8];
+            if staged.sample(0, &mut head).is_ok() {
+                crate::catlog!(
+                    "sd: staged head {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]
+                );
+            }
             if let Some(h) = staged.header() {
                 crate::catlog!(
                     "sd: header key {} len {} hw_compat {:#x} version {}",

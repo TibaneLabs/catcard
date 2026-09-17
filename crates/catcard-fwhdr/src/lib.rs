@@ -815,3 +815,39 @@ mod tests {
         assert_eq!(h.version_str(), Some("0.1.0"));
     }
 }
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    /// The streamed digest must equal the one-shot digest whatever the chunk size.
+    ///
+    /// The signature window starts at `0x3FC0`, which is **not** a multiple of 256: the USB
+    /// path feeds 64-byte frames and lands on the boundary, the SD path feeds 256-byte
+    /// blocks and straddles it. A stream that only works when the window falls on a chunk
+    /// edge passes over USB and fails on a card, which is exactly the shape of bug worth a
+    /// test that tries several sizes.
+    #[test]
+    fn streaming_matches_the_one_shot_digest_at_every_chunk_size() {
+        let mut image = alloc_image(0x1_2000);
+        let want = signed_digest(&image).unwrap();
+        for chunk in [1usize, 3, 7, 64, 100, 256, 512, 1000, 4096] {
+            let mut stream = DigestStream::new();
+            for part in image.chunks(chunk) {
+                stream.update(part);
+            }
+            assert_eq!(stream.finish(), want, "chunk size {chunk}");
+        }
+        // And the window really is being skipped: changing a byte inside it must not
+        // change the digest, while changing one either side must.
+        image[SIG_START + 5] ^= 0xFF;
+        assert_eq!(signed_digest(&image).unwrap(), want, "inside the window");
+        image[SIG_START - 1] ^= 0xFF;
+        assert_ne!(signed_digest(&image).unwrap(), want, "before the window");
+    }
+
+    fn alloc_image(len: usize) -> Vec<u8> {
+        // Every byte distinct enough that a misplaced one changes the hash.
+        (0..len).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect()
+    }
+}

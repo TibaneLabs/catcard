@@ -347,6 +347,22 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         })
     }
 
+    /// The digest of the image as it sits in the staging area, for reporting a refusal.
+    ///
+    /// The same computation `inspect` judges on, exposed so a caller can say what it got:
+    /// a signature that will not verify is either the wrong bytes or the wrong key, and the
+    /// digest is what tells those apart.
+    pub fn digest(&mut self) -> Result<[u8; 32], Reject> {
+        self.stored_digest()
+    }
+
+    /// Read `buf.len()` bytes of the staged image at `offset`, for the same reason.
+    pub fn sample(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), Reject> {
+        self.area
+            .read(offset, buf)
+            .map_err(|_| Reject::StorageFault { offset })
+    }
+
     /// Digest the image as it now sits in the staging area.
     fn stored_digest(&mut self) -> Result<[u8; 32], Reject> {
         let mut stream = DigestStream::new();
