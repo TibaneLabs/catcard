@@ -182,6 +182,63 @@ pub fn p2wpkh_redeem_script(pubkey: &[u8; PUBKEY_LEN]) -> [u8; 22] {
     script
 }
 
+/// The scriptPubKey an address of `kind` for `pubkey` pays to, written into `out`.
+///
+/// The inverse of [`from_script`], and what change checking needs: an output claimed as
+/// change is ours only if its script is the one our own key produces.
+pub fn script_pubkey(
+    kind: AddressKind,
+    pubkey: &[u8; PUBKEY_LEN],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let write = |out: &mut [u8], parts: &[&[u8]]| -> Result<usize, Error> {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        let have = out.len();
+        let room = out
+            .get_mut(..len)
+            .ok_or(Error::BufferTooSmall { need: len, have })?;
+        let mut at = 0;
+        for p in parts {
+            room[at..at + p.len()].copy_from_slice(p);
+            at += p.len();
+        }
+        Ok(len)
+    };
+    match kind {
+        AddressKind::P2pkh => write(out, &[&[0x76, 0xa9, 0x14], &hash160(pubkey), &[0x88, 0xac]]),
+        AddressKind::P2shP2wpkh => {
+            let redeem = p2wpkh_redeem_script(pubkey);
+            write(out, &[&[0xa9, 0x14], &hash160(&redeem), &[0x87]])
+        }
+        AddressKind::P2wpkh => write(out, &[&[0x00, 0x14], &hash160(pubkey)]),
+        AddressKind::P2tr => write(out, &[&[0x51, 0x20], &taproot_output_key(pubkey)?]),
+    }
+}
+
+/// The address a scriptPubKey pays to, written into `out`; returns the length.
+///
+/// For showing a transaction's destinations: a PSBT gives outputs as scripts, and an
+/// address is what a person can compare against what they meant to pay. A script this does
+/// not recognise -- bare multisig, a data carrier, a future witness version -- has no
+/// address, and gets `None` rather than an invented one.
+///
+/// The encoding itself is `outscript`'s, so only the classification is here.
+pub fn from_script(script: &[u8], network: Network, out: &mut [u8]) -> Option<usize> {
+    let format = match script {
+        [0x76, 0xa9, 0x14, h @ .., 0x88, 0xac] if h.len() == 20 => "p2pkh",
+        [0xa9, 0x14, h @ .., 0x87] if h.len() == 20 => "p2sh",
+        [0x00, 0x14, h @ ..] if h.len() == 20 => "p2wpkh",
+        [0x00, 0x20, h @ ..] if h.len() == 32 => "p2wsh",
+        [0x51, 0x20, h @ ..] if h.len() == 32 => "p2tr",
+        _ => return None,
+    };
+    let net = match network {
+        Network::Mainnet => "bitcoin",
+        Network::Testnet => "bitcoin-testnet",
+    };
+    outscript::address::encode_address_to_slice(format, script, net, out).ok()
+}
+
 /// Render an address into `out`; returns the length written.
 pub fn encode(
     kind: AddressKind,
@@ -362,6 +419,53 @@ mod qr_payload_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Each script form round-trips to the address `encode` produces for the same key, so
+    /// the classification and the encoder agree with our own address code.
+    #[test]
+    fn a_script_renders_the_same_address_as_the_key_it_pays() {
+        use super::*;
+        let pubkey: [u8; PUBKEY_LEN] = [
+            0x02, 0x50, 0x86, 0x3a, 0xd6, 0x4a, 0x87, 0xae, 0x8a, 0x2f, 0xe8, 0x3c, 0x1a, 0xf1,
+            0xa8, 0x40, 0x3c, 0xb5, 0x3f, 0x53, 0xe4, 0x86, 0xd8, 0x51, 0x1d, 0xad, 0x8a, 0x04,
+            0x88, 0x7e, 0x5b, 0x23, 0x52,
+        ];
+        for kind in [
+            AddressKind::P2pkh,
+            AddressKind::P2shP2wpkh,
+            AddressKind::P2wpkh,
+            AddressKind::P2tr,
+        ] {
+            for network in [Network::Mainnet, Network::Testnet] {
+                let mut from_key = [0u8; MAX_ADDRESS_LEN];
+                let n = encode(kind, network, &pubkey, &mut from_key).unwrap();
+                let mut script = [0u8; 34];
+                let sn = script_pubkey(kind, &pubkey, &mut script).unwrap();
+                let mut from_spk = [0u8; MAX_ADDRESS_LEN];
+                let m = from_script(&script[..sn], network, &mut from_spk).unwrap();
+                assert_eq!(
+                    core::str::from_utf8(&from_key[..n]),
+                    core::str::from_utf8(&from_spk[..m]),
+                    "{kind:?} {network:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_script_with_no_address_gets_none_not_a_guess() {
+        use super::*;
+        let mut out = [0u8; MAX_ADDRESS_LEN];
+        // OP_RETURN, bare multisig, and a witness version this does not know.
+        for script in [
+            &[0x6a, 0x04, 1, 2, 3, 4][..],
+            &[0x51, 0x21, 2][..],
+            &[0x60, 0x02, 0xaa, 0xbb][..],
+            &[][..],
+        ] {
+            assert!(from_script(script, Network::Mainnet, &mut out).is_none());
+        }
+    }
+
     use super::*;
     use crate::bip32::{DerivationPath, ExtendedPrivKey};
     use crate::bip39::Mnemonic;

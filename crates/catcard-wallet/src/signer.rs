@@ -116,6 +116,45 @@ fn steps_of(path: &[u8]) -> Option<([u32; MAX_STEPS], usize)> {
 /// of them could be ours in a wallet that holds several of the keys.
 pub const MAX_KEYS_PER_INPUT: usize = 15;
 
+/// One derivation record as a [`KeyRequest`], if it claims `fingerprint` and is the shape
+/// its type requires.
+///
+/// Shared by the input scan here and the change check in [`crate::psbtview`], so both read
+/// a record the same way.
+pub fn request_from_record(
+    rec: outscript::psbt::Record<'_>,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    taproot: bool,
+) -> Option<KeyRequest> {
+    let key = rec.key_data();
+    // 33 bytes compressed for BIP-32 records, 32 x-only for taproot ones. Another length is
+    // a record this does not understand, not one to guess at.
+    if key.len() != if taproot { 32 } else { 33 } {
+        return None;
+    }
+    // A taproot derivation value carries leaf hashes before the origin.
+    let value = if taproot {
+        let (count, rest) = varint_usize(rec.value)?;
+        count.checked_mul(32).and_then(|s| rest.get(s..))?
+    } else {
+        rec.value
+    };
+    let (fp, path) = origin(value)?;
+    if fp != fingerprint {
+        return None;
+    }
+    let (steps, depth) = steps_of(path)?;
+    let mut pubkey = [0u8; 33];
+    pubkey[..key.len()].copy_from_slice(key);
+    Some(KeyRequest {
+        pubkey,
+        pubkey_len: key.len(),
+        steps,
+        depth,
+        taproot,
+    })
+}
+
 /// Collect the keys in input `index` that claim to come from `fingerprint`, into `out`.
 ///
 /// A claim, not a fact: [`match_key`] is what settles it. Returns how many were written;
@@ -141,44 +180,41 @@ pub fn key_requests(
             if n == out.len() {
                 return Ok(n);
             }
-            let key = rec.key_data();
-            // 33 bytes compressed for BIP-32 records, 32 x-only for taproot ones. Another
-            // length is a record this does not understand, not one to guess at.
-            if key.len() != if taproot { 32 } else { 33 } {
-                continue;
+            // A path too deep to follow is refused for the whole input rather than skipped:
+            // a signer that quietly ignores one key in a multisig input produces a PSBT
+            // nobody can finalise, with no reason given.
+            if claims(rec, fingerprint, taproot)
+                && request_from_record(rec, fingerprint, taproot).is_none()
+            {
+                return Err(Error::BadPath);
             }
-            // A taproot derivation value carries leaf hashes before the origin.
-            let value = if taproot {
-                let Some((count, rest)) = varint_usize(rec.value) else {
-                    continue;
-                };
-                let Some(after) = count.checked_mul(32).and_then(|s| rest.get(s..)) else {
-                    continue;
-                };
-                after
-            } else {
-                rec.value
-            };
-            let Some((fp, path)) = origin(value) else {
-                continue;
-            };
-            if fp != fingerprint {
-                continue;
+            if let Some(request) = request_from_record(rec, fingerprint, taproot) {
+                out[n] = request;
+                n += 1;
             }
-            let (steps, depth) = steps_of(path).ok_or(Error::BadPath)?;
-            let mut pubkey = [0u8; 33];
-            pubkey[..key.len()].copy_from_slice(key);
-            out[n] = KeyRequest {
-                pubkey,
-                pubkey_len: key.len(),
-                steps,
-                depth,
-                taproot,
-            };
-            n += 1;
         }
     }
     Ok(n)
+}
+
+/// Whether a record names `fingerprint` at all, ignoring whether the rest of it is
+/// something this can follow.
+fn claims(
+    rec: outscript::psbt::Record<'_>,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    taproot: bool,
+) -> bool {
+    let value = if taproot {
+        match varint_usize(rec.value)
+            .and_then(|(c, rest)| c.checked_mul(32).and_then(|s| rest.get(s..)))
+        {
+            Some(v) => v,
+            None => return false,
+        }
+    } else {
+        rec.value
+    };
+    origin(value).is_some_and(|(fp, _)| fp == fingerprint)
 }
 
 /// A minimal compact-size read, for the leaf-hash count of a taproot record.
@@ -256,6 +292,11 @@ impl Signer {
     /// Whether this key signs the taproot key path.
     pub fn is_taproot(&self) -> bool {
         self.taproot
+    }
+
+    /// The compressed public key, for rebuilding the script an output of ours would pay to.
+    pub fn public_key_bytes(&self) -> [u8; 33] {
+        self.key.public_key().serialize_compressed()
     }
 }
 
