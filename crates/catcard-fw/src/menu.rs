@@ -98,6 +98,8 @@ enum Screen {
     UsbDrive,
     ViewTrngWords,
     AddressExplorer,
+    /// Output descriptors for a watch-only wallet, to the SD card.
+    ExportWallet,
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -201,6 +203,7 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "View TRNG Words",
     "Address Explorer",
+    "Export wallet",
     "Browse SD card",
     "Format SD card",
     "Games",
@@ -211,6 +214,7 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "View TRNG Words",
     "Address Explorer",
+    "Export wallet",
     "Browse SD card",
     "Format SD card",
 ];
@@ -570,6 +574,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
         Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::ExportWallet => to(|a| export_wallet(a.gate, a.login, a.ui), Screen::Utils),
         Screen::BrowseSd => to(
             |a| {
                 browse_sd(a.ui, "SD card", None, false);
@@ -763,6 +768,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
+            (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -996,7 +1002,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::UsbDrive => {}
         Screen::ViewTrngWords => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
-        Screen::AddressExplorer => {}
+        Screen::AddressExplorer | Screen::ExportWallet => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -1749,7 +1755,7 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
     let mut buf = [0u8; crate::logbuf::LOG_LEN];
     let n = crate::logbuf::read(0, &mut buf);
 
-    match write_log_file(&buf[..n]) {
+    match write_card_file("/CATCARD.LOG", &buf[..n]) {
         Ok(()) => {
             crate::catlog!("sd: wrote {} bytes to /CATCARD.LOG", n);
             message(ui.panel, "Log saved", "/CATCARD.LOG", "any key to go back");
@@ -1762,12 +1768,12 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
     wait_for_any_key(ui);
 }
 
-/// Bring the card up, mount it, and write `bytes` to `/CATCARD.LOG`.
+/// Bring the card up, mount it, and write `bytes` to `path`, replacing whatever it held.
 ///
 /// Split from the screen so each step is one `?`, and the reason it stopped rides out on
 /// the `Err` for the caller to show and log -- the step is what tells a bad card apart
 /// from a full one or a filesystem it cannot mount.
-fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
+fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static str> {
     // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
     let mut why: &'static str = "card error";
     let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
@@ -1799,11 +1805,11 @@ fn write_log_file(bytes: &[u8]) -> Result<(), &'static str> {
         catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
     })?;
     let mut file = vol
-        .open_or_create_file("/CATCARD.LOG")
+        .open_or_create_file(path)
         .map_err(|_| "could not open file")?;
     file.write_all(&mut vol, bytes)
         .map_err(|_| "write failed")?;
-    // Trim any tail from a longer earlier save, so the file is exactly this log.
+    // Trim any tail from a longer earlier file, so it holds exactly these bytes.
     file.set_len(&mut vol, bytes.len() as u64)
         .map_err(|_| "truncate failed")?;
     file.flush(&mut vol).map_err(|_| "flush failed")?;
@@ -2495,12 +2501,24 @@ fn receive_chain(
         ChildNumber::hardened(0).ok()?,
         ChildNumber::normal(0).ok()?,
     ];
-    // The intermediate private keys never leave this function; each masked region derives
-    // the next level and drops the previous one, and the last hop keeps only the public
-    // half. Splitting the path this way exposes which level is running -- a fixed,
-    // published shape -- and nothing about the key.
-    let mut here = crate::keywork::run(|kw| master.derive_child(steps[0], kw).ok())?;
-    for step in &steps[1..] {
+    public_at(master, &steps, busy, panel)
+}
+
+/// The extended public key at `steps` below `master`.
+///
+/// The intermediate private keys never leave this function; each masked region derives the
+/// next level and drops the previous one, and the last hop keeps only the public half.
+/// Splitting the path this way exposes which level is running -- a fixed, published shape
+/// -- and nothing about the key.
+fn public_at(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    steps: &[catcard_wallet::bip32::ChildNumber],
+    busy: &mut Working<'_>,
+    panel: &mut display::Panel,
+) -> Option<catcard_wallet::bip32::ExtendedPubKey> {
+    let (first, rest) = steps.split_first()?;
+    let mut here = crate::keywork::run(|kw| master.derive_child(*first, kw).ok())?;
+    for step in rest {
         busy.tick(panel);
         here = crate::keywork::run(|kw| here.derive_child(*step, kw).ok())?;
     }
@@ -2805,29 +2823,128 @@ fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::Add
     wait_for_any_key(ui);
 }
 
-fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+/// Export the wallet for a watch-only wallet on a computer: one output descriptor per
+/// single-signature account type, written to the SD card.
+///
+/// A descriptor carries the account's extended public key with its origin -- master
+/// fingerprint and path -- and a checksum, which is everything a wallet such as Sparrow or
+/// Bitcoin Core needs to show balances and build transactions for this device to sign. No
+/// private key leaves: the account keys are derived masked and only their public halves
+/// are kept, and the master is dropped before the card is touched.
+///
+/// The file is named for the master fingerprint (`73C5DA0A.TXT`), so exports of different
+/// wallets never overwrite each other, and re-exporting the same wallet replaces its file.
+/// Lines starting `#` say which account each descriptor is.
+fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::address::AddressKind;
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::descriptor::{self, SingleSig};
+
+    const HEAD: &str = "Export wallet";
+    const ACCOUNTS: [(AddressKind, &str); 3] = [
+        (AddressKind::P2wpkh, "Native segwit"),
+        (AddressKind::P2shP2wpkh, "Nested segwit"),
+        (AddressKind::P2pkh, "Legacy"),
+    ];
+
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
+
+    let mut text: heapless::String<1536> = heapless::String::new();
+    let [a, b, c, d] = fingerprint;
+    let _ = write!(
+        text,
+        "# CatCard wallet export, master fingerprint {a:02x}{b:02x}{c:02x}{d:02x}\n\
+         # Output descriptors (BIP-380), receive and change chains as <0;1> (BIP-389).\n"
+    );
+    let mut busy = Working::new(ui.panel, HEAD, "deriving accounts");
+    for (kind, name) in ACCOUNTS {
+        let steps = [
+            ChildNumber::hardened(kind.bip44_purpose()),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(0),
+        ];
+        let [Ok(p), Ok(c), Ok(n)] = steps else {
+            continue;
+        };
+        let Some(account) = public_at(&master, &[p, c, n], &mut busy, ui.panel) else {
+            crate::catlog!("export: {} account did not derive", name);
+            continue;
+        };
+        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
+        let Ok(xlen) = account.write_base58(&mut xpub) else {
+            continue;
+        };
+        let xpub = core::str::from_utf8(&xpub[..xlen]).unwrap_or("");
+        let single = SingleSig {
+            kind,
+            fingerprint,
+            coin: 0,
+            account: 0,
+        };
+        let mut line = [0u8; descriptor::MAX_LEN];
+        let Ok(len) = single.write(xpub, &mut line) else {
+            continue;
+        };
+        let _ = write!(
+            text,
+            "# {name}, m/{}h/0h/0h\n{}\n",
+            kind.bip44_purpose(),
+            core::str::from_utf8(&line[..len]).unwrap_or("")
+        );
+    }
+    drop(master);
+
+    let mut path: heapless::String<16> = heapless::String::new();
+    let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}.TXT");
+    message(ui.panel, HEAD, "writing to SD card", "");
+    match write_card_file(&path, text.as_bytes()) {
+        Ok(()) => {
+            crate::catlog!("export: wrote {} bytes to {}", text.len(), path.as_str());
+            message(ui.panel, "Exported", &path[1..], "any key to go back");
+        }
+        Err(why) => {
+            crate::catlog!("export: failed: {}", why);
+            message(ui.panel, "Export failed", why, "any key to go back");
+        }
+    }
+    wait_for_any_key(ui);
+}
+
+/// The stored BIP-39 wallet's master key, for a screen titled `head`: the secret fetched,
+/// the words stretched into a seed, the seed into the master key -- with the screen saying
+/// what is happening at each step.
+///
+/// `None` once the user has been told why not: the secret could not be read, the slot holds
+/// no BIP-39 wallet (and which kind it does hold), or derivation failed. The returned key
+/// zeroizes itself when dropped; hold it only as long as the screen needs it.
+fn unlock_master(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<catcard_wallet::bip32::ExtendedPrivKey> {
     use catcard_callgate::pin::bip39_entropy;
-    use catcard_wallet::address;
-    use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
+    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
-    fn fail(ui: &mut Ui<'_>, why: &str) {
-        message(ui.panel, "Addresses", why, "any key to go back");
-    }
+    let fail = |ui: &mut Ui<'_>, why: &str| message(ui.panel, head, why, "any key to go back");
 
     // Say so before asking for the secret, not after. The fetch is one callgate call: the
     // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
     // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so the firmware
     // cannot repaint across it. The panel can, where its controller scrolls on its own.
-    blocking_screen(ui.panel, "Addresses", "reading seed");
+    blocking_screen(ui.panel, head, "reading seed");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,
         Err(_) => {
             fail(ui, "could not read seed");
             wait_for_any_key(ui);
-            return;
+            return None;
         }
     };
 
@@ -2845,7 +2962,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             // Say what is there instead: the type only, from the marker byte.
             let kind = classify_secret(&secret);
             secret.zeroize();
-            crate::catlog!("addresses: secret is {:?}, not BIP-39", kind);
+            crate::catlog!("wallet: secret is {:?}, not BIP-39", kind);
             fail(
                 ui,
                 match kind {
@@ -2858,20 +2975,19 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 },
             );
             wait_for_any_key(ui);
-            return;
+            return None;
         }
     };
     secret.zeroize();
 
-    // Seed -> master -> the external receive chain m/84'/0'/0'/0. Empty passphrase: the
-    // plain wallet; passphrase wallets are a separate feature. Done once, then the seed
-    // material is gone and only the chain key (a derivation parent) remains.
+    // Seed -> master. Empty passphrase: the plain wallet; passphrase wallets are a separate
+    // feature. Done once, then the seed material is gone and only the master remains.
     //
     // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
     // is far too long to hold one frame, so it runs in slices with the busy bar stepped
     // between them: masked while a slice is in flight, repainting in the gaps.
-    let mut busy = Working::new(ui.panel, "Addresses", "stretching seed");
+    let mut busy = Working::new(ui.panel, head, "stretching seed");
     let stretch = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
@@ -2895,19 +3011,28 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             master.ok_or("key derivation failed")
         })
     });
+    match master {
+        Ok(master) => Some(master),
+        Err(why) => {
+            fail(ui, why);
+            wait_for_any_key(ui);
+            None
+        }
+    }
+}
+
+fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::address;
+    use catcard_wallet::bip32::{ChildNumber, Network};
+
     // The master key is kept for as long as this screen is open, so a type can be derived
     // when it is first asked for instead of paying for all four up front. That is a
     // deliberate trade: a private key is resident while the screen waits for keypresses.
     // It is the master alone -- each chain key is derived inside a masked region and
     // dropped there, leaving only its public half -- and it is zeroized on the way out,
     // which `ExtendedPrivKey`'s `ZeroizeOnDrop` does at every return below.
-    let master = match master {
-        Ok(master) => master,
-        Err(why) => {
-            fail(ui, why);
-            wait_for_any_key(ui);
-            return;
-        }
+    let Some(master) = unlock_master(gate, login, ui, "Addresses") else {
+        return;
     };
     let mut chains: [Option<catcard_wallet::bip32::ExtendedPubKey>; PROTOCOLS.len()] =
         [None; PROTOCOLS.len()];

@@ -62,5 +62,6 @@ pub mod address;
 pub mod bip32;
 pub mod bip39;
 pub mod chain;
+pub mod descriptor;
 pub mod encoding;
 pub mod tx;

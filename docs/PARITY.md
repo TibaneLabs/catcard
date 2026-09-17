@@ -50,7 +50,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-370 PSBT v2 | ✅ | ❌ | step 2 |
 | BIP-322 | ✅ | ❌ | step 5 |
 | BIP-21 URIs | ✅ | 🟡 | address QR carries `bitcoin:` for legacy/nested; no amounts or labels |
-| BIP-380/383 descriptors | ✅ | ❌ | export: step 1; import: step 8 |
+| BIP-380/383 descriptors | ✅ | 🟡 | single-sig export ✅ (Utils → Export wallet, BIP-389 `<0;1>`); import: step 8 |
 | SLIP-132 | ✅ | ❌ | read with step 8; export optional |
 | SLIP-44 | ✅ | ✅ | coin type in paths |
 | BIP-86 taproot | ❌ (EDGE only) | 🟡 | addresses ✅, Schnorr ✅; sighash and signing not planned for parity |
@@ -111,7 +111,7 @@ All ❌ -- step 5.
 | Encrypted backup and restore | ✅ | ❌ | step 9 |
 | Clone Coldcard | ✅ | ❌ | after step 9 |
 | Secure Notes, WIF store | ✅ | ❌ | after step 7 |
-| Wallet export presets | ✅ | ❌ | descriptors first (step 1); presets that are not standards need a public format |
+| Wallet export presets | ✅ | 🟡 | descriptor file for the three single-sig accounts; presets that are not standards need a public format |
 | microSD | ✅ | ✅ | FAT12/16/32 and exFAT, cards to 2 TB, format |
 | Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
