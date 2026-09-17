@@ -6,10 +6,14 @@
 //! is what moves it across the glass. So nothing here thinks in screen positions except the
 //! bird, which stays at one place on the glass while the world slides under it.
 //!
-//! The mapping, measured on a Q1: the first [`STRIP`] lines are a fixed area on the left,
-//! and the remaining [`PLAY_W`] scroll as a ring. World column `x` lives in frame-memory
-//! column [`memory_column`]`(x)` forever, and with the view at `scroll` the glass shows
-//! world columns `scroll .. scroll + PLAY_W`, left to right.
+//! The whole panel scrolls as one ring of [`PLAY_W`] lines. World column `x` lives in
+//! frame-memory column [`memory_column`]`(x)` forever, and with the view at `scroll` the
+//! glass shows world columns `scroll .. scroll + PLAY_W`, left to right (measured on a Q1).
+//!
+//! The score is the one thing that stays put on the glass while the world moves under it,
+//! so it is redrawn every frame, a column over from where it was: [`Game::shown`] layers
+//! it over the bird over the world, and any patch painted through that comes out right
+//! wherever the score, the bird and the pipes overlap.
 //!
 //! The art is the game's own, at its native 144x256 scale ([`crate::art::flappy`]), and so
 //! are the proportions: a 200-row playfield over the ground, 26-wide pipes 72 apart with a
@@ -22,10 +26,8 @@
 
 use crate::art::flappy::{BACKGROUND, BASE, BIRD_DOWN, BIRD_MID, BIRD_UP, DIGITS, PIPE, Sprite};
 
-/// The fixed strip on the left: the score.
-pub const STRIP: usize = 40;
-/// The scrolling area to its right.
-pub const PLAY_W: usize = 320 - STRIP;
+/// The scrolling area: the whole width of the panel.
+pub const PLAY_W: usize = 320;
 pub const HEIGHT: usize = 240;
 
 /// Rows from here down are ground.
@@ -59,7 +61,7 @@ const WING_FRAMES: u32 = 8;
 
 /// The frame-memory column world column `x` is drawn in.
 pub const fn memory_column(x: u32) -> usize {
-    STRIP + (x % PLAY_W as u32) as usize
+    (x % PLAY_W as u32) as usize
 }
 
 /// The scroll start that puts world column `scroll` at the left of the scrolling area.
@@ -259,40 +261,69 @@ impl Game {
     }
 }
 
-/// Where the score's digits start, and the most it shows.
-const SCORE_TOP: usize = 8;
-const SCORE_DIGITS: usize = 3;
+/// The score's top row on the glass.
+pub const SCORE_TOP: usize = 8;
+pub const SCORE_H: usize = DIGITS[0].height as usize;
+/// Digits in the largest `u32`.
+const MAX_DIGITS: usize = 10;
 
-/// The fixed strip's colour at `(x, y)` showing `score`: the scenery's first columns, with
-/// the score centred near the top in the game's own digits. Past 999 it stays at 999.
-pub fn strip_colour(score: u32, x: usize, y: usize) -> u16 {
-    let mut digits = [0usize; SCORE_DIGITS];
-    let mut n = score.min(999);
-    let mut count = 0;
+/// `score`'s digits, most significant first.
+fn digits(score: u32) -> ([usize; MAX_DIGITS], usize) {
+    let mut out = [0usize; MAX_DIGITS];
+    let (mut n, mut count) = (score, 0);
     loop {
-        digits[SCORE_DIGITS - 1 - count] = (n % 10) as usize;
+        out[MAX_DIGITS - 1 - count] = (n % 10) as usize;
         n /= 10;
         count += 1;
         if n == 0 {
             break;
         }
     }
-    let digits = &digits[SCORE_DIGITS - count..];
-    let width: usize = digits.iter().map(|&d| DIGITS[d].width as usize).sum();
-    if y >= SCORE_TOP && x >= STRIP.saturating_sub(width) / 2 {
-        let mut left = STRIP.saturating_sub(width) / 2;
-        for &d in digits {
-            let s = &DIGITS[d];
-            if x < left + s.width as usize {
-                if let Some(c) = s.at(x - left, y - SCORE_TOP) {
-                    return c;
-                }
-                break;
-            }
-            left += s.width as usize;
-        }
+    (out, count)
+}
+
+/// Where `score` sits on the glass: its left column and width, centred. Even the largest
+/// `u32` is 120 wide, well inside the panel.
+pub fn score_span(score: u32) -> (usize, usize) {
+    let (d, count) = digits(score);
+    let width: usize = d[MAX_DIGITS - count..]
+        .iter()
+        .map(|&d| DIGITS[d].width as usize)
+        .sum();
+    ((PLAY_W - width) / 2, width)
+}
+
+/// The score's colour at glass column `sx`, row `y`, or `None` where it does not cover.
+pub fn score_colour(score: u32, sx: usize, y: usize) -> Option<u16> {
+    let (mut left, width) = score_span(score);
+    if !(SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y) || !(left..left + width).contains(&sx) {
+        return None;
     }
-    scenery(x as u32, y)
+    let (d, count) = digits(score);
+    for &digit in &d[MAX_DIGITS - count..] {
+        let s = &DIGITS[digit];
+        if sx < left + s.width as usize {
+            return s.at(sx - left, y - SCORE_TOP);
+        }
+        left += s.width as usize;
+    }
+    None
+}
+
+impl Game {
+    /// World pixel `(x, y)` as the glass shows it: the score over the bird over the world.
+    ///
+    /// The score only covers glass columns, so a world column behind the view -- one the
+    /// scroll has not reached, or has left -- never carries it.
+    pub fn shown(&self, x: u32, y: usize) -> u16 {
+        if let Some(sx) = x.checked_sub(self.scroll)
+            && (sx as usize) < PLAY_W
+            && let Some(c) = score_colour(self.score(), sx as usize, y)
+        {
+            return c;
+        }
+        self.pixel(x, y)
+    }
 }
 
 #[cfg(test)]
@@ -318,9 +349,9 @@ mod tests {
     #[test]
     fn a_world_column_keeps_its_memory_column_as_the_view_moves() {
         // The whole trick: draw once, scroll for free.
-        assert_eq!(memory_column(0), STRIP);
+        assert_eq!(memory_column(0), 0);
         assert_eq!(memory_column(PLAY_W as u32 - 1), 319);
-        assert_eq!(memory_column(PLAY_W as u32), STRIP);
+        assert_eq!(memory_column(PLAY_W as u32), 0);
         assert_eq!(scroll_start(1000), memory_column(1000));
     }
 
@@ -409,17 +440,37 @@ mod tests {
     }
 
     #[test]
-    fn the_score_strip_draws_the_digits_over_the_scenery() {
-        let inked = |score| {
-            (0..STRIP)
-                .flat_map(|x| (0..HEIGHT).map(move |y| (x, y)))
-                .filter(|&(x, y)| strip_colour(score, x, y) != scenery(x as u32, y))
-                .count()
-        };
-        assert!(inked(0) > 0);
-        assert!(inked(88) > inked(8));
-        assert_eq!(inked(5000), inked(999));
-        // Nothing below the digits.
-        assert_eq!(strip_colour(7, 20, 100), scenery(20, 100));
+    fn the_score_is_centred_and_even_the_largest_fits() {
+        let (left, width) = score_span(0);
+        assert_eq!(width, DIGITS[0].width as usize);
+        assert_eq!(left * 2 + width, PLAY_W);
+        let (left, width) = score_span(u32::MAX);
+        assert!(width > 100 && left + width <= PLAY_W);
+        // A 1 is narrower than the others, and the span says so.
+        assert!(score_span(11).1 < score_span(22).1);
+    }
+
+    #[test]
+    fn the_score_stays_on_the_glass_as_the_world_moves_under_it() {
+        let mut g = Game::new(5);
+        let sx = (0..PLAY_W)
+            .find(|&sx| score_colour(0, sx, SCORE_TOP + 4).is_some())
+            .unwrap();
+        let ink = score_colour(0, sx, SCORE_TOP + 4).unwrap();
+        for _ in 0..3 {
+            assert_eq!(g.shown(g.scroll + sx as u32, SCORE_TOP + 4), ink);
+            g.flap();
+            g.step();
+        }
+        // Where the score was, a frame ago, the world shows through again.
+        let x = g.scroll - 1 + sx as u32;
+        if score_colour(0, sx - 1, SCORE_TOP + 4).is_none() {
+            assert_eq!(g.shown(x, SCORE_TOP + 4), g.pixel(x, SCORE_TOP + 4));
+        }
+        // Off the glass, nothing.
+        assert_eq!(
+            g.shown(g.scroll + PLAY_W as u32, SCORE_TOP + 4),
+            g.pixel(g.scroll + PLAY_W as u32, SCORE_TOP + 4)
+        );
     }
 }

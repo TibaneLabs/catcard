@@ -1,16 +1,17 @@
 //! Flappy, on the Q1: the panel scrolls, the firmware only draws what changed.
 //!
 //! The game itself is [`catcard_ui::flappy`]. This is the part that talks to the panel: the
-//! scroll area is set once, the whole scene painted once, and from then on each frame is
-//! the column coming in on the right, the bird's few hundred pixels, and one scroll command,
-//! all sent in the gap after a tear pulse. A full frame is 153 KB; a game frame is about 1.
+//! whole panel scrolls, the scene is painted once, and from then on each frame is the column
+//! coming in on the right, the bird's few hundred pixels, the score a column over from where
+//! it was, and one scroll command, all sent after a tear pulse. A full frame is 153 KB; a
+//! game frame is about 2.
 //!
 //! Every way out puts the panel's scrolling back before anything else draws: the rest of
 //! the firmware addresses the panel as though nothing were shifted.
 //!
 //! Nothing here touches the wallet.
 
-use catcard_ui::art::flappy::{DIGITS, GAME_OVER};
+use catcard_ui::art::flappy::GAME_OVER;
 use catcard_ui::flappy::{self as fl, Game};
 use catcard_ui::keypad::{Event, KEYS, Key};
 
@@ -47,19 +48,10 @@ fn paint_world(
     }
 }
 
-/// The fixed strip's score area, redrawn.
-fn paint_score(panel: &mut display::Panel, score: u32) {
-    let h = DIGITS[0].height as usize + 8;
-    let _ = panel.paint(0, 0, fl::STRIP, h, |x, y| fl::strip_colour(score, x, y));
-}
-
-/// The whole scene: strip, then every visible world column.
+/// The whole scene, every column on the glass.
 fn paint_scene(panel: &mut display::Panel, g: &Game) {
-    let _ = panel.paint(0, 0, fl::STRIP, fl::HEIGHT, |x, y| {
-        fl::strip_colour(0, x, y)
-    });
     paint_world(panel, g.scroll, fl::PLAY_W, 0, fl::HEIGHT, |x, y| {
-        g.pixel(x, y)
+        g.shown(x, y)
     });
 }
 
@@ -81,7 +73,7 @@ pub(crate) fn flappy(ui: &mut Ui<'_>) {
     crate::menu::message(ui.panel, "Flappy", "any key flaps", "cancel quits");
     crate::menu::wait_for_any_key(ui);
 
-    let _ = ui.panel.set_scroll_area(fl::STRIP, 0);
+    let _ = ui.panel.set_scroll_area(0, 0);
     loop {
         let mut seed = [0u8; 4];
         let _ = ui.drbg.generate(&mut seed);
@@ -120,6 +112,7 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         }
 
         let (old_scroll, old_x, old_y) = (g.scroll, g.bird_x(), g.bird_y());
+        let old_score = g.score();
         if started {
             g.step();
         } else {
@@ -132,23 +125,32 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         let incoming = (g.scroll - old_scroll) as usize;
         if incoming > 0 {
             let x = old_scroll + fl::PLAY_W as u32;
-            paint_world(ui.panel, x, incoming, 0, fl::HEIGHT, |x, y| {
-                g.world.colour(x, y)
-            });
+            paint_world(ui.panel, x, incoming, 0, fl::HEIGHT, |x, y| g.shown(x, y));
         }
         // The bird: where it was and where it is, as one patch.
         let top = old_y.min(g.bird_y());
         let bottom = (old_y.max(g.bird_y()) + fl::BIRD_H).min(fl::HEIGHT);
         let width = (g.bird_x() - old_x) as usize + fl::BIRD_W;
         paint_world(ui.panel, old_x, width, top, bottom - top, |x, y| {
-            g.pixel(x, y)
+            g.shown(x, y)
         });
+        // The score: where it was on the world and where it is now, which is a column on
+        // -- or a digit wider when the count gains one.
+        let (old_left, old_w) = fl::score_span(old_score);
+        let (new_left, new_w) = fl::score_span(g.score());
+        let from = (old_scroll + old_left as u32).min(g.scroll + new_left as u32);
+        let to = (old_scroll + (old_left + old_w) as u32).max(g.scroll + (new_left + new_w) as u32);
+        paint_world(
+            ui.panel,
+            from,
+            (to - from) as usize,
+            fl::SCORE_TOP,
+            fl::SCORE_H,
+            |x, y| g.shown(x, y),
+        );
 
         let _ = ui.panel.set_scroll_start(fl::scroll_start(g.scroll));
-        if g.score() != score {
-            score = g.score();
-            paint_score(ui.panel, score);
-        }
+        score = g.score();
     }
 
     // SAFETY: foreground only, single core.
@@ -178,7 +180,7 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         |x, y| {
             GAME_OVER
                 .at((x - banner_x) as usize, y - BANNER_Y)
-                .unwrap_or_else(|| g.pixel(x, y))
+                .unwrap_or_else(|| g.shown(x, y))
         },
     );
 
