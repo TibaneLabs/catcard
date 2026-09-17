@@ -190,6 +190,63 @@ pub fn message<C: Canvas + ?Sized>(canvas: &mut C, l: &Layout<'_>, head: &str, a
     draw_text(canvas, l.body, centred(l.body, b, w), y + l.pitch(), b);
 }
 
+/// How tall the busy bar is: the progress bar's rows, but never a single one.
+///
+/// [`splash::progress_h`](crate::splash::progress_h) gives the mono panels one row, which
+/// is enough for a bar whose *position* carries the meaning. Here the meaning is the
+/// movement itself, and a one-pixel line sliding along the bottom edge of an OLED reads as
+/// a rendering artefact rather than as a device that is working.
+pub const fn busy_h(height: usize) -> usize {
+    let h = crate::splash::progress_h(height);
+    if h < 2 { 2 } else { h }
+}
+
+/// A bar that says work is happening, without claiming to know how far along it is.
+///
+/// A percentage would have to be invented: a key stretch or a derivation has no honest
+/// fraction to report, and a bar that crawls to 90% and sits there is worse than none. So a
+/// lit segment slides across the bottom rows and wraps -- what matters is that it moves, and
+/// that it stops when the work is done.
+///
+/// `phase` is a free-running counter the caller bumps once per redraw; the segment advances
+/// a few pixels each time and re-enters from the left.
+pub fn busy_bar<C: Canvas + ?Sized>(canvas: &mut C, phase: u32) {
+    use crate::canvas::INK;
+    let (w, h) = (canvas.width(), canvas.height());
+    let bar = busy_h(h);
+    let top = h.saturating_sub(bar);
+    let seg = (w / 5).max(4);
+    let step = (w / 32).max(2);
+    // The segment wraps round the bar rather than sliding off the end: what leaves at the
+    // right comes straight back in at the left, so every frame is lit and there is no
+    // moment where the screen looks as dead as the one this bar exists to explain.
+    //
+    // Counting the cycle in *ticks* rather than pixels keeps the multiply small: a phase
+    // that has been running for a day cannot overflow into a jump.
+    let cycle = w.div_ceil(step).max(1);
+    let x = (phase as usize % cycle) * step % w.max(1);
+    canvas.fill_rect(x, top, seg.min(w - x), bar, INK);
+    if x + seg > w {
+        canvas.fill_rect(0, top, x + seg - w, bar, INK);
+    }
+}
+
+/// [`message`] with a [`busy_bar`] under it: the screen shown while something slow runs.
+///
+/// The head and note say what is happening; the bar says it is still happening. The message
+/// block is centred in the canvas and the bar takes the bottom rows, so the two do not
+/// meet on any panel this firmware draws.
+pub fn working<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    l: &Layout<'_>,
+    head: &str,
+    note: &str,
+    phase: u32,
+) {
+    message(canvas, l, head, note, "");
+    busy_bar(canvas, phase);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +403,69 @@ mod tests {
             above.abs_diff(below) <= l.pitch() + 4,
             "block not centred: {above} vs {below}"
         );
+    }
+
+    /// The lit columns of the bar rows, which is the whole state the bar has.
+    fn segment<C: Canvas>(c: &C) -> Vec<usize> {
+        let top = c.height() - busy_h(c.height());
+        (0..c.width())
+            .filter(|&x| inked(c, x, top, x + 1, c.height()))
+            .collect()
+    }
+
+    #[test]
+    fn the_busy_bar_moves_every_tick_and_comes_back_round() {
+        let mut seen: Vec<Vec<usize>> = Vec::new();
+        for phase in 0..80 {
+            let mut c = Mono128x64::new();
+            busy_bar(&mut c, phase);
+            seen.push(segment(&c));
+        }
+        // Something is lit on all but the two ends of a sweep, and it never stands still:
+        // a bar that repeats a frame is a bar the owner reads as a frozen device.
+        assert!(
+            seen.windows(2).all(|w| w[0] != w[1]),
+            "the segment did not move between two consecutive ticks"
+        );
+        assert!(
+            seen.iter().all(|s| !s.is_empty()),
+            "the bar went dark: it wraps round, it never leaves the screen"
+        );
+        // And it wraps rather than running off: a later phase repeats an earlier frame.
+        assert!(
+            seen[40..].contains(&seen[1]),
+            "the segment never came back round"
+        );
+    }
+
+    #[test]
+    fn the_busy_bar_keeps_to_the_bottom_rows_and_off_the_message() {
+        for phase in [0u32, 3, 9, 17] {
+            let mut c = Gray320x240::new();
+            working(&mut c, &Layout::roomy(), "Deriving", "Taproot...", phase);
+            let top = 240 - busy_h(240);
+            assert!(inked(&c, 0, top, 320, 240), "no bar drawn at phase {phase}");
+            let mut plain = Gray320x240::new();
+            message(&mut plain, &Layout::roomy(), "Deriving", "Taproot...", "");
+            // Above the bar rows the busy screen is exactly the message screen: the bar
+            // adds movement, it does not push the text around.
+            for y in 0..top {
+                for x in 0..320 {
+                    assert_eq!(
+                        c.get(x, y),
+                        plain.get(x, y),
+                        "row {y} changed at phase {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_busy_bar_is_visible_on_a_mono_panel() {
+        // One row is what the determinate bar uses on 128x64; for a moving segment that
+        // reads as a glitch on the bottom edge, so this one is thicker by contract.
+        assert!(busy_h(64) >= 2);
+        assert_eq!(busy_h(240), crate::splash::progress_h(240));
     }
 }

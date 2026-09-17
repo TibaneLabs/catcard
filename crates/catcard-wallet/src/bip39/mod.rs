@@ -303,8 +303,50 @@ impl Mnemonic {
         &self,
         passphrase: &str,
         out: &mut [u8; SEED_LEN],
-        _kw: &crate::KeyWork,
+        kw: &crate::KeyWork,
     ) -> Result<(), Error> {
+        let mut stretch = Stretch::begin(self, passphrase, kw)?;
+        while !stretch.step(PBKDF2_ROUNDS, kw) {}
+        stretch.finish(out, kw);
+        Ok(())
+    }
+}
+
+/// The seed stretch, run a few rounds at a time.
+///
+/// [`Mnemonic::to_seed`] is the same computation in one call, and is what most callers
+/// want. This exists for the one that cannot afford to disappear for two seconds: the
+/// firmware runs the rounds masked in slices and redraws a busy indicator between them, so
+/// the panel keeps moving while the key stretch runs.
+///
+/// **Splitting the work does not leak it.** The slices end at round counts the caller picks
+/// in advance — nothing about where a slice stops depends on the phrase, the passphrase or
+/// any intermediate value — so a host that watches the device answer between slices learns
+/// the iteration count BIP-39 already publishes, and nothing else. Each slice itself runs
+/// under a [`KeyWork`](crate::KeyWork), as every round of it did before.
+///
+/// The running state is the secret: `u` is a PBKDF2 intermediate and `phrase` is the
+/// mnemonic itself, so both are wiped when this is dropped.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct Stretch {
+    /// The rendered phrase, the HMAC key for every round.
+    phrase: [u8; MAX_PHRASE_LEN],
+    len: usize,
+    /// U_i, the last round's output.
+    u: [u8; SEED_LEN],
+    /// The running exclusive-or of every U so far.
+    acc: [u8; SEED_LEN],
+    /// Rounds still to run.
+    left: u32,
+}
+
+impl Stretch {
+    /// Run U1 and get ready for the rest.
+    pub fn begin(
+        mnemonic: &Mnemonic,
+        passphrase: &str,
+        _kw: &crate::KeyWork,
+    ) -> Result<Self, Error> {
         if !passphrase.is_ascii() {
             return Err(Error::PassphraseNotAscii);
         }
@@ -312,29 +354,50 @@ impl Mnemonic {
         // HMAC hashes keys longer than its block size, so the phrase has to be
         // contiguous. The salt does not — it is fed with `update`.
         let mut phrase = [0u8; MAX_PHRASE_LEN];
-        let len = self.render(&mut phrase);
+        let len = mnemonic.render(&mut phrase);
 
         // U1 = PRF(P, salt || INT_32_BE(1))
         let mut mac = HmacSha512::new(&phrase[..len]);
         mac.update(SALT_PREFIX);
         mac.update(passphrase.as_bytes());
         mac.update(&1u32.to_be_bytes());
-        let mut u: [u8; SEED_LEN] = mac.finalize();
+        let u: [u8; SEED_LEN] = mac.finalize();
 
         // dkLen == hLen, so there is exactly one block: DK = U1 ^ U2 ^ ... ^ Uc.
-        *out = u;
-        for _ in 1..PBKDF2_ROUNDS {
-            let mut mac = HmacSha512::new(&phrase[..len]);
-            mac.update(&u);
-            u = mac.finalize();
-            for (o, x) in out.iter_mut().zip(u.iter()) {
+        Ok(Self {
+            phrase,
+            len,
+            u,
+            acc: u,
+            left: PBKDF2_ROUNDS - 1,
+        })
+    }
+
+    /// Rounds still to run; zero once the seed is ready.
+    pub fn left(&self) -> u32 {
+        self.left
+    }
+
+    /// Run up to `rounds` more rounds. Returns true when there are none left.
+    pub fn step(&mut self, rounds: u32, _kw: &crate::KeyWork) -> bool {
+        for _ in 0..rounds.min(self.left) {
+            let mut mac = HmacSha512::new(&self.phrase[..self.len]);
+            mac.update(&self.u);
+            self.u = mac.finalize();
+            for (o, x) in self.acc.iter_mut().zip(self.u.iter()) {
                 *o ^= x;
             }
         }
+        self.left -= rounds.min(self.left);
+        self.left == 0
+    }
 
-        phrase.zeroize();
-        u.zeroize();
-        Ok(())
+    /// Take the seed. Whatever has been run so far is what comes out, so callers step
+    /// until [`step`](Self::step) returns true first; the type cannot enforce that without
+    /// making the partial state unreachable for the caller that wants to keep going.
+    pub fn finish(mut self, out: &mut [u8; SEED_LEN], _kw: &crate::KeyWork) {
+        *out = self.acc;
+        self.zeroize();
     }
 }
 
@@ -406,7 +469,8 @@ mod tests {
         for (ent, _, expect_seed) in VECTORS {
             let m = Mnemonic::from_entropy(&unhex(ent), &crate::KeyWork::host()).unwrap();
             let mut seed = [0u8; SEED_LEN];
-            m.to_seed(PASSPHRASE, &mut seed, &crate::KeyWork::host()).unwrap();
+            m.to_seed(PASSPHRASE, &mut seed, &crate::KeyWork::host())
+                .unwrap();
             assert_eq!(hex(&seed), *expect_seed, "entropy {ent}");
         }
     }
@@ -446,7 +510,12 @@ mod tests {
             for (len, _) in SIZES {
                 let e = vec![fill; len];
                 let m = Mnemonic::from_entropy(&e, &crate::KeyWork::host()).unwrap();
-                assert_eq!(Mnemonic::parse(&phrase_of(&m), &crate::KeyWork::host()).unwrap().entropy(), &e[..]);
+                assert_eq!(
+                    Mnemonic::parse(&phrase_of(&m), &crate::KeyWork::host())
+                        .unwrap()
+                        .entropy(),
+                    &e[..]
+                );
             }
         }
     }
@@ -511,7 +580,10 @@ mod tests {
         // "about" -> "abandon", both in the list, so only the checksum can catch it.
         assert_eq!(w[11], "about");
         w[11] = "abandon";
-        assert_eq!(Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()), Err(Error::BadChecksum));
+        assert_eq!(
+            Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()),
+            Err(Error::BadChecksum)
+        );
     }
 
     #[test]
@@ -519,17 +591,30 @@ mod tests {
         let (_, phrase, _) = VECTORS[2];
         let mut w: Vec<&str> = phrase.split(' ').collect();
         w.swap(0, 1);
-        assert_eq!(Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()), Err(Error::BadChecksum));
+        assert_eq!(
+            Mnemonic::parse(&w.join(" "), &crate::KeyWork::host()),
+            Err(Error::BadChecksum)
+        );
     }
 
     #[test]
     fn whitespace_is_tolerated() {
         let (ent, phrase, _) = VECTORS[0];
         let messy = format!("  {}  ", phrase.replace(' ', "   "));
-        assert_eq!(hex(Mnemonic::parse(&messy, &crate::KeyWork::host()).unwrap().entropy()), *ent);
+        assert_eq!(
+            hex(Mnemonic::parse(&messy, &crate::KeyWork::host())
+                .unwrap()
+                .entropy()),
+            *ent
+        );
         // Newlines and tabs too -- phrases get transcribed from paper.
         let across_lines = phrase.replacen(' ', "\n", 3).replacen(' ', "\t", 2);
-        assert_eq!(hex(Mnemonic::parse(&across_lines, &crate::KeyWork::host()).unwrap().entropy()), *ent);
+        assert_eq!(
+            hex(Mnemonic::parse(&across_lines, &crate::KeyWork::host())
+                .unwrap()
+                .entropy()),
+            *ent
+        );
     }
 
     #[test]
@@ -546,7 +631,8 @@ mod tests {
         let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
         let (mut a, mut b) = ([0u8; SEED_LEN], [0u8; SEED_LEN]);
         m.to_seed("", &mut a, &crate::KeyWork::host()).unwrap();
-        m.to_seed("TREZOR", &mut b, &crate::KeyWork::host()).unwrap();
+        m.to_seed("TREZOR", &mut b, &crate::KeyWork::host())
+            .unwrap();
         assert_ne!(a, b);
     }
 
@@ -556,6 +642,37 @@ mod tests {
         let mut seed = [0u8; SEED_LEN];
         assert!(m.to_seed("", &mut seed, &crate::KeyWork::host()).is_ok());
         assert!(seed.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn stretching_in_slices_gives_the_same_seed_as_one_call() {
+        // The firmware runs the stretch in slices so it can redraw between them. A slice
+        // size that changed the answer would be a wallet whose addresses depend on how
+        // busy the screen was -- so check the awkward sizes: one round at a time, a size
+        // that does not divide 2048, and one larger than the whole job.
+        let kw = crate::KeyWork::host();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &kw).unwrap();
+        let mut want = [0u8; SEED_LEN];
+        m.to_seed(PASSPHRASE, &mut want, &kw).unwrap();
+        for rounds in [1u32, 7, 64, 100, PBKDF2_ROUNDS * 2] {
+            let mut s = Stretch::begin(&m, PASSPHRASE, &kw).unwrap();
+            let mut slices = 0;
+            while !s.step(rounds, &kw) {
+                slices += 1;
+                assert!(slices < PBKDF2_ROUNDS, "stepping never finished");
+            }
+            assert_eq!(s.left(), 0);
+            let mut got = [0u8; SEED_LEN];
+            s.finish(&mut got, &kw);
+            assert_eq!(hex(&got), hex(&want), "slices of {rounds} changed the seed");
+        }
+    }
+
+    #[test]
+    fn a_stretch_refuses_the_same_passphrases_to_seed_does() {
+        let kw = crate::KeyWork::host();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &kw).unwrap();
+        assert!(Stretch::begin(&m, "pässwörd", &kw).is_err());
     }
 
     #[test]

@@ -74,6 +74,12 @@ task or interrupt handler runs in the middle of it and a host cannot time its pr
 get from `keywork::run`. Keep screens and key waits outside the closure, and keep the
 operations themselves constant-time -- masking hides the inside, not the total duration.
 
+Long work may be **sliced**, so the screen can move between slices (`bip39::Stretch`, and
+the per-level walk in `receive_chain`). The rule is that every boundary is fixed in advance
+-- a round count, a derivation level -- and never depends on a key, a seed or an
+intermediate value. A host then learns the shape of the computation, which is in the BIP,
+and nothing else. A slice that ended "when a byte was zero" would give away the byte.
+
 **Irreversible operations are labelled at every layer** — RDP lockdown, `HIGH_WATER`,
 brick — and are never a default.
 

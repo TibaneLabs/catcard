@@ -2410,6 +2410,14 @@ fn ellipsize_middle(s: &str, cols: usize, out: &mut Line) {
 /// once; only the final `/i` step runs per address. The seed and the secret are wiped as
 /// soon as that key exists -- nothing secret outlives the setup, and the chain key kept
 /// here is a public-derivation parent, not the seed.
+/// PBKDF2 rounds run between two redraws of the busy bar.
+///
+/// The whole stretch is 2048 rounds and takes about 1.7 s on an mk4, so 64 rounds is
+/// roughly 50 ms of masked work per frame -- fast enough that the bar reads as moving,
+/// long enough that the redraws stay a small fraction of the job. It is a fixed number by
+/// design: a slice length that varied with the seed is exactly what the masking is for.
+const STRETCH_SLICE: u32 = 64;
+
 /// The address types the explorer walks, in the order the left/right arrows move through
 /// them. Native segwit leads because it is what this wallet derives by default.
 const PROTOCOLS: [catcard_wallet::address::AddressKind; 4] = [
@@ -2437,37 +2445,92 @@ fn kind_name(kind: catcard_wallet::address::AddressKind) -> &'static str {
 /// derive from the public key alone -- which means the private keys can all be dropped
 /// before the masked region closes, and the browsing loop afterwards holds no key material
 /// and needs no masking at all.
+/// One level at a time, with `busy` ticked between them: each hardened step is an
+/// HMAC-SHA512 and a point multiplication, about a tenth of a second of masked work, so the
+/// four of them are a visible pause and the bar should keep moving across it.
 fn receive_chain(
     master: &catcard_wallet::bip32::ExtendedPrivKey,
     kind: catcard_wallet::address::AddressKind,
-    kw: &catcard_wallet::KeyWork,
+    busy: &mut Working<'_>,
+    panel: &mut display::Panel,
 ) -> Option<catcard_wallet::bip32::ExtendedPubKey> {
-    use catcard_wallet::bip32::{ChildNumber, DerivationPath};
-    let path = DerivationPath::from_slice(&[
+    use catcard_wallet::bip32::ChildNumber;
+    let steps = [
         ChildNumber::hardened(kind.bip44_purpose()).ok()?,
         ChildNumber::hardened(0).ok()?,
         ChildNumber::hardened(0).ok()?,
         ChildNumber::normal(0).ok()?,
-    ])
-    .ok()?;
-    Some(master.derive_path(&path, kw).ok()?.to_extended_pub(kw))
+    ];
+    // The intermediate private keys never leave this function; each masked region derives
+    // the next level and drops the previous one, and the last hop keeps only the public
+    // half. Splitting the path this way exposes which level is running -- a fixed,
+    // published shape -- and nothing about the key.
+    let mut here = crate::keywork::run(|kw| master.derive_child(steps[0], kw).ok())?;
+    for step in &steps[1..] {
+        busy.tick(panel);
+        here = crate::keywork::run(|kw| here.derive_child(*step, kw).ok())?;
+    }
+    busy.tick(panel);
+    Some(crate::keywork::run(|kw| here.to_extended_pub(kw)))
+}
+
+/// The screen shown while something slow runs: a heading, a note, and a bar that moves.
+///
+/// The bar is the whole point. Every computation behind one of these screens runs with
+/// interrupts masked, so the panel cannot repaint while a slice of it is in flight -- and a
+/// device that holds one frame for two seconds is a device the owner reads as crashed.
+/// Nothing here knows how far along the work is; it only knows that it was asked to tick,
+/// which is exactly what it shows.
+pub(crate) struct Working<'a> {
+    head: &'a str,
+    note: Line,
+    phase: u32,
+}
+
+impl<'a> Working<'a> {
+    /// Draw the first frame. `note` is formatted by the caller, so a screen can say which
+    /// address type it is deriving without this owning that vocabulary.
+    pub(crate) fn new(panel: &mut display::Panel, head: &'a str, note: &str) -> Self {
+        let mut w = Self {
+            head,
+            note: Line::new(),
+            phase: 0,
+        };
+        let _ = w.note.push_str(note);
+        w.draw(panel);
+        w
+    }
+
+    /// Advance the bar one step and redraw.
+    pub(crate) fn tick(&mut self, panel: &mut display::Panel) {
+        self.phase = self.phase.wrapping_add(1);
+        self.draw(panel);
+    }
+
+    fn draw(&self, panel: &mut display::Panel) {
+        let (head, note, phase) = (self.head, self.note.as_str(), self.phase);
+        display::draw(panel, |c| {
+            catcard_ui::widgets::working(c, &display::LAYOUT, head, note, phase);
+        });
+    }
 }
 
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_callgate::pin::bip39_entropy;
     use catcard_wallet::address;
     use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
-    use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
+    use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
     fn fail(ui: &mut Ui<'_>, why: &str) {
         message(ui.panel, "Addresses", why, "any key to go back");
     }
 
-    // Say so before asking for the secret, not after. The fetch runs the PIN key-stretch
-    // inside the secure element with interrupts masked -- about 1.6 s on an mk4 -- and
-    // nothing can repaint during it, so without this line the panel simply holds the menu
-    // frame and the device looks wedged.
+    // Say so before asking for the secret, not after. The fetch is one callgate call: the
+    // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
+    // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so this is the
+    // one wait in this screen the busy bar cannot cross. It gets a plain message instead
+    // of a bar that would sit frozen and say the opposite of what it means.
     message(ui.panel, "Addresses", "reading seed...", "");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
@@ -2502,23 +2565,32 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     // material is gone and only the chain key (a derivation parent) remains.
     //
     // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
-    // of hashing by design -- and the key derivation adds elliptic-curve work on top. It all
-    // runs masked, so the progress line is drawn first: nothing can repaint inside it, and
-    // without it the panel would hold its last frame and the device would look hung.
-    message(ui.panel, "Addresses", "stretching seed...", "");
-    let master = crate::keywork::run(|kw| {
+    // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
+    // is far too long to hold one frame, so it runs in slices with the busy bar stepped
+    // between them: masked while a slice is in flight, repainting in the gaps.
+    let mut busy = Working::new(ui.panel, "Addresses", "stretching seed");
+    let stretch = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
         let Ok(mnemonic) = mnemonic else {
             return Err("seed did not decode");
         };
-        let mut seed = [0u8; SEED_LEN];
-        let master = mnemonic
-            .to_seed("", &mut seed, kw)
-            .ok()
-            .and_then(|()| ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok());
-        seed.zeroize();
-        master.ok_or("key derivation failed")
+        Stretch::begin(&mnemonic, "", kw).map_err(|_| "key derivation failed")
+    });
+    let master = stretch.and_then(|mut stretch| {
+        // The 2048 PBKDF2 rounds run a slice at a time so the bar can move between them.
+        // The slices end at round counts fixed here, never at anything derived from the
+        // seed, so what a watching host can see is the iteration count BIP-39 publishes.
+        while !crate::keywork::run(|kw| stretch.step(STRETCH_SLICE, kw)) {
+            busy.tick(ui.panel);
+        }
+        crate::keywork::run(|kw| {
+            let mut seed = [0u8; SEED_LEN];
+            stretch.finish(&mut seed, kw);
+            let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok();
+            seed.zeroize();
+            master.ok_or("key derivation failed")
+        })
     });
     // The master key is kept for as long as this screen is open, so a type can be derived
     // when it is first asked for instead of paying for all four up front. That is a
@@ -2552,10 +2624,8 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // nothing can repaint, and an unexplained pause is what made the old entry feel
         // broken.
         if chains[proto].is_none() {
-            let mut note = Line::new();
-            let _ = write!(note, "{}...", kind_name(kind));
-            message(ui.panel, "Deriving", note.as_str(), "");
-            chains[proto] = crate::keywork::run(|kw| receive_chain(&master, kind, kw));
+            let mut busy = Working::new(ui.panel, "Deriving", kind_name(kind));
+            chains[proto] = receive_chain(&master, kind, &mut busy, ui.panel);
         }
 
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
