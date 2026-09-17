@@ -454,9 +454,15 @@ mod tests {
         d.reseed(&[7; 32], &[]);
         let s = d.stats();
         assert_eq!(s.reseeds, 1);
-        assert_eq!(s.seedings, 2, "seedings counts the instantiation plus reseeds");
+        assert_eq!(
+            s.seedings, 2,
+            "seedings counts the instantiation plus reseeds"
+        );
         assert_eq!(s.since_reseed, 0, "reseed resets the window");
-        assert_eq!(s.generates, 2, "reseeding does not touch the lifetime generate count");
+        assert_eq!(
+            s.generates, 2,
+            "reseeding does not touch the lifetime generate count"
+        );
 
         d.generate(&mut out).unwrap();
         let s = d.stats();

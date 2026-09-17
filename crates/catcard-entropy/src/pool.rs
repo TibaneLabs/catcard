@@ -37,11 +37,30 @@ pub enum Source {
     /// STM32 hardware TRNG (`RNG_DR`), read directly by us.
     Stm32Trng,
     /// The bootloader's own read of the STM32 TRNG, via callgate 17.
+    ///
+    /// Mixed, **credited zero, and not counted as a hardware source.** It is the same
+    /// generator as [`Source::Stm32Trng`] -- the callgate returns the MCU TRNG
+    /// (`rng_buffer`), not a secure element -- so counting it would let one chip satisfy a
+    /// two-source policy on its own. It is also not known whether that buffer is filled per
+    /// call or once. Mixing it can only help; trusting it could only mislead.
+    /// Source: hw-reference/platform.md §3 "Reading the SE1 RNG on mk3" [C]
     BootloaderTrng,
     /// ATECC608 `Random`, via callgate 26 source 1.
     Se1Trng,
     /// Second secure element TRNG, via callgate 26 source 2 (mk4+).
     Se2Trng,
+    /// SE1's `Random`, read by the firmware itself over the raw single-wire bus -- the only
+    /// way to reach it on mk3, whose bootloader has no callgate for SE randomness.
+    ///
+    /// Mixed, **credited zero, and not counted as a hardware source.** Unlike callgate 26
+    /// on mk4+, which authenticates the element against the pairing secret, this read is
+    /// unauthenticated: anything on that wire can supply the bytes. Mixing an
+    /// attacker-chosen input into the pool cannot remove entropy, so it is always worth
+    /// adding. Crediting it is another matter -- it would let a tampered bus satisfy the
+    /// policy on a board whose real TRNG had failed, and a pool that refuses is the
+    /// property this crate exists to keep.
+    /// Source: hw-reference/platform.md §3 "Reading the SE1 RNG on mk3" [C]
+    Se1TrngUnauthenticated,
     /// Timing jitter from user interaction (DWT cycle counts at keypress edges).
     /// Real but low-rate entropy; credited conservatively.
     UserTiming,
@@ -71,10 +90,7 @@ pub enum Source {
 impl Source {
     /// A dedicated hardware noise source, as opposed to a derived or public value.
     pub const fn is_hardware_trng(self) -> bool {
-        matches!(
-            self,
-            Source::Stm32Trng | Source::BootloaderTrng | Source::Se1Trng | Source::Se2Trng
-        )
+        matches!(self, Source::Stm32Trng | Source::Se1Trng | Source::Se2Trng)
     }
 
     /// Bits of entropy credited per byte absorbed.
@@ -84,7 +100,9 @@ impl Source {
     /// 256-bit policy cannot be satisfied by a single 32-byte read from a single chip.
     const fn bits_per_byte(self) -> u32 {
         match self {
-            Source::Stm32Trng | Source::BootloaderTrng | Source::Se1Trng | Source::Se2Trng => 4,
+            Source::Stm32Trng | Source::Se1Trng | Source::Se2Trng => 4,
+            // Real noise, but not trusted to count: see the variants.
+            Source::BootloaderTrng | Source::Se1TrngUnauthenticated => 0,
             // A keypress timestamp is a handful of unpredictable low bits at best.
             Source::UserTiming => 1,
             Source::UserKeypad => 3,
@@ -101,6 +119,7 @@ impl Source {
             Source::BootloaderTrng => b"catcard/src/bl-trng",
             Source::Se1Trng => b"catcard/src/se1-trng",
             Source::Se2Trng => b"catcard/src/se2-trng",
+            Source::Se1TrngUnauthenticated => b"catcard/src/se1-trng-unauthenticated",
             Source::UserTiming => b"catcard/src/user-timing",
             Source::UserKeypad => b"catcard/src/user-keypad",
             Source::UserDice => b"catcard/src/user-dice",
@@ -120,13 +139,14 @@ impl Source {
             Source::UserKeypad => 7,
             Source::UserDice => 8,
             Source::UserCoin => 9,
+            Source::Se1TrngUnauthenticated => 10,
             Source::Auxiliary => 5,
             Source::NonSecret => 6,
         }
     }
 }
 
-const NUM_SOURCES: usize = 10;
+const NUM_SOURCES: usize = 11;
 
 /// The bar a pool must clear before it may produce wallet-seed material.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -274,15 +294,10 @@ impl EntropyPool {
 
     /// Distinct hardware TRNGs that have contributed at least one byte.
     pub fn hardware_sources(&self) -> u32 {
-        [
-            Source::Stm32Trng,
-            Source::BootloaderTrng,
-            Source::Se1Trng,
-            Source::Se2Trng,
-        ]
-        .iter()
-        .filter(|s| self.bytes_from[s.index()] > 0)
-        .count() as u32
+        [Source::Stm32Trng, Source::Se1Trng, Source::Se2Trng]
+            .iter()
+            .filter(|s| self.bytes_from[s.index()] > 0)
+            .count() as u32
     }
 
     /// Whether a draw would succeed right now.
@@ -538,6 +553,53 @@ mod tests {
         q.add(Source::Auxiliary, &[0u8; 32]);
         assert_ne!(q.draw_seed().unwrap(), base);
         assert_ne!(q.draw_seed().unwrap(), after_zero);
+    }
+
+    #[test]
+    fn one_chip_read_twice_is_still_one_chip() {
+        // Callgate 17 hands back the same MCU TRNG this firmware reads directly. Counted
+        // as its own source, one generator would satisfy a two-source policy by being
+        // asked twice -- so it is mixed and nothing more.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::Stm32Trng, &noise(3, 128));
+        p.add(Source::BootloaderTrng, &noise(4, 128));
+        assert_eq!(p.hardware_sources(), 1);
+        assert!(
+            p.check().is_err(),
+            "a single generator passed a two-source policy"
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_wire_can_add_but_never_vouch() {
+        // SE1 read over the raw single-wire bus on mk3: anything on that wire can supply
+        // the bytes. Whatever it sends must change the pool -- more material never hurts --
+        // but it must not credit a single bit or count as a generator, or a tampered bus
+        // could stand in for a TRNG that has failed.
+        let mut p = EntropyPool::new(Policy::single_trng());
+        p.add(Source::Se1TrngUnauthenticated, &noise(5, 1024));
+        assert_eq!(p.credited_bits(), 0);
+        assert_eq!(p.hardware_sources(), 0);
+        assert!(
+            p.check().is_err(),
+            "an unauthenticated source satisfied the policy alone"
+        );
+
+        // And on top of a real source it still changes the result.
+        let base = full_pool().draw_seed().unwrap();
+        let mut q = full_pool();
+        q.add(Source::Se1TrngUnauthenticated, &noise(6, 32));
+        assert_ne!(q.draw_seed().unwrap(), base);
+    }
+
+    #[test]
+    fn the_authenticated_and_unauthenticated_se1_reads_do_not_alias() {
+        let data = noise(9, 64);
+        let mut a = full_pool();
+        a.add(Source::Se1Trng, &data);
+        let mut b = full_pool();
+        b.add(Source::Se1TrngUnauthenticated, &data);
+        assert_ne!(a.draw_seed().unwrap(), b.draw_seed().unwrap());
     }
 
     #[test]
