@@ -42,6 +42,9 @@ mod ktest;
 mod menu;
 mod msc_drive;
 mod nor;
+/// The settings medium on a board whose settings live in internal flash (mk4/mk5/Q1).
+#[cfg(not(feature = "board-mk3"))]
+mod nvram;
 mod panic;
 mod passphrase;
 mod pinentry;
@@ -50,6 +53,8 @@ mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;
+#[cfg(not(feature = "board-mk3"))]
+mod settings;
 mod signmsg;
 mod signtx;
 mod splash;

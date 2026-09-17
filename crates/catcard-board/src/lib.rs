@@ -24,7 +24,7 @@ pub mod usb;
 
 pub use memory::{FW_HEADER_OFFSET, FW_HEADER_SIZE, MemoryMap};
 pub use pin::{Pin, Port};
-pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Psram, Se2Pins};
+pub use spec::{BoardSpec, Display, Input, Mcu, NfcPins, Psram, Se2Pins, SettingsArea};
 pub use usb::{PRODUCT_ID, VENDOR_ID};
 
 /// How many board features are enabled. At most one may be.

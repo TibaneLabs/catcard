@@ -60,6 +60,20 @@ pub enum Display {
     },
 }
 
+/// Where a board keeps its settings blob.
+///
+/// Not a preference: it is where stock firmware put it, and reading an existing device's
+/// settings after a firmware swap means looking in the same place.
+/// Source: hw-reference/settings-nvstore-format.md §1 [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SettingsArea {
+    /// A LittleFS2 volume on internal flash (mk4 / mk5 / Q1): the 512 KB region above the
+    /// firmware, holding `settings/%03x.aes`.
+    InternalFlash { start: u32, len: u32 },
+    /// Raw slots in SPI-NOR (mk3): 4 KB each, in the last 128 KB of the part.
+    SpiNor { start: u32, len: u32, slot: u32 },
+}
+
 /// User input hardware.
 #[derive(Copy, Clone, Debug)]
 pub enum Input {
@@ -259,6 +273,9 @@ pub struct BoardSpec {
     /// does not work here" want the same safe behaviour.
     pub keypad_edge_at_boot: bool,
 
+    /// Where the settings blob lives on this board.
+    pub settings: SettingsArea,
+
     /// The Q1's GPU co-processor reset line, `G_RESET`: open-drain, low holds it in reset.
     ///
     /// The co-processor draws the activity bar by itself while the main MCU is blocked --
@@ -416,6 +433,13 @@ pub const MK3: BoardSpec = BoardSpec {
     // use, but nothing the callgate is handed may live up there.
     gate_buf_len: 96 * 1024,
     keypad_edge_at_boot: false,
+    // 32 slots of 4 KB in the last 128 KB of the 1 MB SPI-NOR.
+    // Source: settings-nvstore-format.md §1 [C]
+    settings: SettingsArea::SpiNor {
+        start: 0x000E_0000,
+        len: 0x0002_0000,
+        slot: 0x1000,
+    },
     gpu_reset: None,
     // No SE-randomness callgate on mk3, so the firmware reads SE1 over this pin itself.
     se1_swi: Some(pa(0)),
@@ -505,6 +529,11 @@ pub const MK4: BoardSpec = BoardSpec {
     // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    // The LittleFS region above the firmware. Source: platform.md §2 [C]
+    settings: SettingsArea::InternalFlash {
+        start: 0x0818_0000,
+        len: 512 * 1024,
+    },
     gpu_reset: None,
     // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
     se1_swi: None,
@@ -645,6 +674,10 @@ pub const Q1: BoardSpec = BoardSpec {
     // stack, at the top of SRAM1, and is answered.
     gate_buf_len: 192 * 1024,
     keypad_edge_at_boot: true,
+    settings: SettingsArea::InternalFlash {
+        start: 0x0818_0000,
+        len: 512 * 1024,
+    },
     gpu_reset: Some(pe(6)),
     // Callgate 26 reaches SE1 authenticated; the bus is left to the bootloader.
     se1_swi: None,

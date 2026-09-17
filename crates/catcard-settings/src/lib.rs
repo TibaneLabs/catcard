@@ -24,6 +24,7 @@
 
 pub mod json;
 pub mod nvstore;
+pub mod store;
 
 use purecrypto::ct::ConstantTimeEq;
 use purecrypto::hash::HmacSha256;
