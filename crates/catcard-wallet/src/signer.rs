@@ -1,0 +1,302 @@
+//! Signing a PSBT with this wallet's keys.
+//!
+//! The PSBT itself -- parsing, the signer role, the sighashes, finalisation -- is
+//! [`outscript`]. This module is the part that is ours: deciding **which** of a PSBT's keys
+//! this seed controls, deriving those keys, and keeping the derivation and the signature
+//! inside a masked region.
+//!
+//! # What "ours" means
+//!
+//! An input names the keys that can spend it, each with a master fingerprint and a
+//! derivation path. A key is ours when the fingerprint matches this seed's master and the
+//! key derived down that path is the key the record names. The fingerprint alone is a
+//! four-byte claim from the host and proves nothing: [`match_key`] derives and compares.
+//!
+//! # Interrupts
+//!
+//! Every function here that touches a private key takes a [`KeyWork`], so it can only be
+//! called from inside `keywork::run`. The boundary between inputs is a fine place to let
+//! the screen move: which input is being signed is public -- it is in the PSBT -- so
+//! pausing there leaks nothing.
+
+use outscript::crypto::secp256k1::{DerSignature, SecpPrivateKey, SecpPublicKey};
+use outscript::psbt::SignerError;
+use outscript::psbt::{Psbt, PsbtSigner, input as in_key};
+
+use zeroize::Zeroize;
+
+use crate::KeyWork;
+use crate::bip32::{ChildNumber, ExtendedPrivKey, FINGERPRINT_LEN};
+
+/// Longest derivation path this will follow.
+///
+/// Deeper than any standard single-signature or multisig path (`m/84h/0h/0h/0/i` is five),
+/// and bounded so a hostile PSBT cannot ask for an unbounded walk.
+pub const MAX_STEPS: usize = 12;
+
+/// One of our keys, as an input asks for it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct KeyRequest {
+    /// The public key the record names: 33 bytes compressed, or 32 x-only for taproot.
+    pub pubkey: [u8; 33],
+    pub pubkey_len: usize,
+    steps: [u32; MAX_STEPS],
+    depth: usize,
+    /// Whether this came from a taproot record, and so wants a Schnorr signature.
+    pub taproot: bool,
+}
+
+impl KeyRequest {
+    /// A placeholder, for filling an array before [`key_requests`] writes into it.
+    pub const EMPTY: Self = Self {
+        pubkey: [0; 33],
+        pubkey_len: 0,
+        steps: [0; MAX_STEPS],
+        depth: 0,
+        taproot: false,
+    };
+
+    /// The path below the master key.
+    pub fn steps(&self) -> &[u32] {
+        &self.steps[..self.depth]
+    }
+
+    pub fn pubkey(&self) -> &[u8] {
+        &self.pubkey[..self.pubkey_len]
+    }
+}
+
+/// Why an input could not be signed with our keys.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Error {
+    /// No key in this input belongs to this seed.
+    NotOurs,
+    /// A derivation path this will not follow: too deep, or a step that is not a child.
+    BadPath,
+    /// The key derived down the stated path is not the key the record names. The host is
+    /// wrong about what it is asking for, which is never something to sign through.
+    KeyMismatch,
+    /// Deriving the key failed.
+    Derivation,
+    /// `outscript` refused the input: a script it does not sign, a UTXO that does not
+    /// match, a hash that does not check out.
+    Psbt(outscript::Error),
+}
+
+impl From<outscript::Error> for Error {
+    fn from(e: outscript::Error) -> Self {
+        Error::Psbt(e)
+    }
+}
+
+/// Read the `<4 byte fingerprint> <32-bit little endian path element>*` value of a
+/// derivation record.
+fn origin(value: &[u8]) -> Option<([u8; FINGERPRINT_LEN], &[u8])> {
+    if value.len() < FINGERPRINT_LEN || !(value.len() - FINGERPRINT_LEN).is_multiple_of(4) {
+        return None;
+    }
+    let mut fp = [0u8; FINGERPRINT_LEN];
+    fp.copy_from_slice(&value[..FINGERPRINT_LEN]);
+    Some((fp, &value[FINGERPRINT_LEN..]))
+}
+
+fn steps_of(path: &[u8]) -> Option<([u32; MAX_STEPS], usize)> {
+    let depth = path.len() / 4;
+    if depth > MAX_STEPS {
+        return None;
+    }
+    let mut steps = [0u32; MAX_STEPS];
+    for (slot, raw) in steps.iter_mut().zip(path.as_chunks::<4>().0) {
+        *slot = u32::from_le_bytes(*raw);
+    }
+    Some((steps, depth))
+}
+
+/// Most keys one input can name: BIP-67 multisig allows fifteen cosigners, and every one
+/// of them could be ours in a wallet that holds several of the keys.
+pub const MAX_KEYS_PER_INPUT: usize = 15;
+
+/// Collect the keys in input `index` that claim to come from `fingerprint`, into `out`.
+///
+/// A claim, not a fact: [`match_key`] is what settles it. Returns how many were written;
+/// records beyond `out`'s length are ignored, and the ECDSA ones come before the taproot
+/// ones so a caller that signs only ECDSA meets those first.
+pub fn key_requests(
+    psbt: &Psbt<'_>,
+    index: usize,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    out: &mut [KeyRequest],
+) -> Result<usize, Error> {
+    let Some(map) = psbt.input(index).map(|i| i.map()) else {
+        return Ok(0);
+    };
+    let mut n = 0;
+    for taproot in [false, true] {
+        let keytype = if taproot {
+            in_key::TAP_BIP32_DERIVATION
+        } else {
+            in_key::BIP32_DERIVATION
+        };
+        for rec in map.records_of(keytype) {
+            if n == out.len() {
+                return Ok(n);
+            }
+            let key = rec.key_data();
+            // 33 bytes compressed for BIP-32 records, 32 x-only for taproot ones. Another
+            // length is a record this does not understand, not one to guess at.
+            if key.len() != if taproot { 32 } else { 33 } {
+                continue;
+            }
+            // A taproot derivation value carries leaf hashes before the origin.
+            let value = if taproot {
+                let Some((count, rest)) = varint_usize(rec.value) else {
+                    continue;
+                };
+                let Some(after) = count.checked_mul(32).and_then(|s| rest.get(s..)) else {
+                    continue;
+                };
+                after
+            } else {
+                rec.value
+            };
+            let Some((fp, path)) = origin(value) else {
+                continue;
+            };
+            if fp != fingerprint {
+                continue;
+            }
+            let (steps, depth) = steps_of(path).ok_or(Error::BadPath)?;
+            let mut pubkey = [0u8; 33];
+            pubkey[..key.len()].copy_from_slice(key);
+            out[n] = KeyRequest {
+                pubkey,
+                pubkey_len: key.len(),
+                steps,
+                depth,
+                taproot,
+            };
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// A minimal compact-size read, for the leaf-hash count of a taproot record.
+fn varint_usize(value: &[u8]) -> Option<(usize, &[u8])> {
+    let (&first, rest) = value.split_first()?;
+    match first {
+        0..=0xfc => Some((first as usize, rest)),
+        0xfd => {
+            let (n, rest) = rest.split_at_checked(2)?;
+            Some((u16::from_le_bytes(n.try_into().ok()?) as usize, rest))
+        }
+        0xfe => {
+            let (n, rest) = rest.split_at_checked(4)?;
+            Some((u32::from_le_bytes(n.try_into().ok()?) as usize, rest))
+        }
+        // A count that needs eight bytes is not a leaf count; refuse rather than truncate.
+        _ => None,
+    }
+}
+
+/// The private key for `request`, if it really is ours.
+///
+/// Derives down the path and compares the result with the key the record names -- x-only
+/// for a taproot record, compressed otherwise. A mismatch is [`Error::KeyMismatch`]: the
+/// host asked for a signature from a key that is not at the path it gave.
+///
+/// The returned key zeroizes its own copy of the secret on drop.
+pub fn match_key(
+    master: &ExtendedPrivKey,
+    request: &KeyRequest,
+    kw: &KeyWork,
+) -> Result<Signer, Error> {
+    let mut here = master.clone();
+    for &step in request.steps() {
+        let child = ChildNumber(step);
+        here = here
+            .derive_child(child, kw)
+            .map_err(|_| Error::Derivation)?;
+    }
+    let mut secret = *here.secret_bytes();
+    let signer = Signer::new(&secret, request.taproot);
+    secret.zeroize();
+    let signer = signer.ok_or(Error::Derivation)?;
+
+    let ours = signer.key.public_key().serialize_compressed();
+    let matches = if request.taproot {
+        ours[1..] == *request.pubkey()
+    } else {
+        ours[..] == *request.pubkey()
+    };
+    if !matches {
+        return Err(Error::KeyMismatch);
+    }
+    Ok(signer)
+}
+
+/// One of our keys, ready to sign one input.
+///
+/// Holds the key material for as long as the signature takes and no longer. `outscript`'s
+/// key type keeps its own copy of the secret scalar, which this cannot reach into; the
+/// bytes this module owns are zeroized, and a panic wipes SRAM (see the firmware's panic
+/// handler).
+pub struct Signer {
+    key: SecpPrivateKey,
+    taproot: bool,
+}
+
+impl Signer {
+    fn new(secret: &[u8; 32], taproot: bool) -> Option<Self> {
+        Some(Self {
+            key: SecpPrivateKey::from_bytes(secret).ok()?,
+            taproot,
+        })
+    }
+
+    /// Whether this key signs the taproot key path.
+    pub fn is_taproot(&self) -> bool {
+        self.taproot
+    }
+}
+
+impl PsbtSigner for Signer {
+    fn public_key(&self) -> SecpPublicKey {
+        self.key.public_key()
+    }
+
+    fn sign_ecdsa(&self, digest: &[u8; 32]) -> Result<DerSignature, SignerError> {
+        Ok(self.key.sign_der(digest))
+    }
+
+    fn sign_taproot(&self, sighash: &[u8; 32]) -> Result<[u8; 64], SignerError> {
+        SecpPrivateKey::sign_taproot(&self.key, sighash).map_err(|_| SignerError)
+    }
+}
+
+/// Sign input `index` of `psbt` with our key, writing the updated PSBT into `out`.
+///
+/// One input at a time, because each write produces a whole new PSBT: the caller
+/// alternates between two buffers, and can move the screen between inputs.
+pub fn sign_input(
+    psbt: &Psbt<'_>,
+    index: usize,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    out: &mut [u8],
+    kw: &KeyWork,
+) -> Result<usize, Error> {
+    let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    let found = key_requests(psbt, index, fingerprint, &mut keys)?;
+    let mut last = Error::NotOurs;
+    for request in &keys[..found] {
+        match match_key(master, request, kw) {
+            Ok(signer) => return Ok(psbt.sign_input_to_slice(index, &signer, out)?),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+#[cfg(test)]
+mod tests;

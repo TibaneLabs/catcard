@@ -89,6 +89,12 @@ bitflags = { version = "2.13.1", default-features = false }
 # firmware needs no allocator. `alloc`, `decode` and `scan` stay off, which also
 # leaves out every symbology but QR.
 anyd = { version = "0.1.4", default-features = false, features = ["encode", "qr"] }
+# --- outscript: output scripts, addresses and PSBT, our own no_std/no-alloc crate ---
+#
+# Bitcoin only, and no `alloc`: that leaves scripts, addresses, `btcraw`'s sighashes and
+# the PSBT roles, all writing into caller buffers. The other chains stay out of the image
+# until there is something to do with them.
+outscript = { version = "0.2", default-features = false, features = ["bitcoin"] }
 
 # --- host tooling ---
 anyhow = "1.0.104"

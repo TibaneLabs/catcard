@@ -243,6 +243,7 @@ dependencies = [
 name = "catcard-wallet"
 version = "7.0.0"
 dependencies = [
+ "outscript",
  "purecrypto",
  "zeroize",
 ]
@@ -465,6 +466,15 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "outscript"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa961328638199142fcea9a7671784ab9ef809ed34619a1cf5d9d6a33d321a83"
+dependencies = [
+ "purecrypto",
+]
 
 [[package]]
 name = "pin-project-lite"

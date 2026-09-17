@@ -289,9 +289,8 @@ impl<'a> Transaction<'a> {
     ///
     /// A transaction with no inputs or no outputs is refused: no such transaction is valid
     /// on the network, and accepting one here would put an unspendable thing in front of a
-    /// user as though it were a payment. The exception is a PSBT's unsigned transaction,
-    /// which the standard's own test vectors allow to be empty -- see
-    /// [`parse_possibly_empty`](Self::parse_possibly_empty).
+    /// user as though it were a payment. BIP-174 allows a PSBT's unsigned transaction to be
+    /// empty, which is why [`parse_possibly_empty`](Self::parse_possibly_empty) exists.
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
         Self::parse_with(data, false)
     }

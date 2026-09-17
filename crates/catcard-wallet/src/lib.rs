@@ -64,5 +64,5 @@ pub mod bip39;
 pub mod chain;
 pub mod descriptor;
 pub mod encoding;
-pub mod psbt;
+pub mod signer;
 pub mod tx;
