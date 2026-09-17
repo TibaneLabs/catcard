@@ -396,6 +396,28 @@ pub fn run(session: Session<'_>) -> ! {
                 screen,
                 Screen::Keypad | Screen::PrngStatus | Screen::Rtc | Screen::Kernel
             ) {
+                // `0` arms the keypad edge path by hand, on a board where the boot path
+                // leaves it masked. If it misbehaves the cure is a power cycle: nothing
+                // here is persisted, which is the whole reason it is offered from a screen
+                // rather than done at boot.
+                if screen == Screen::Keypad && *key == Key::Digit(0) {
+                    let (_, armed, _) = crate::keypad::edge_stats();
+                    if armed {
+                        ui.matrix.disarm_edge_now();
+                        crate::catlog!("keypad: edge entropy masked by hand");
+                    } else {
+                        let ok = ui.matrix.arm_edge_now();
+                        crate::catlog!(
+                            "keypad: edge entropy {}",
+                            if ok {
+                                "armed by hand"
+                            } else {
+                                "refused (storm guard)"
+                            }
+                        );
+                    }
+                    redraw = true;
+                }
                 let leave = match screen {
                     Screen::Keypad => *key == Key::Cancel && prev_key == Some(Key::Cancel),
                     _ => *key == Key::Cancel,
@@ -1366,8 +1388,30 @@ fn keypad_screen(
     let _ = write!(l, "count {seen}");
     let _ = lines.push(l);
 
+    // The edge path: whether the hard falling-edge interrupt is armed, how many edges it
+    // has taken, and whether the storm guard shut it off. On a board where it is not armed
+    // at boot this is the screen that arms it -- with a power cycle as the undo.
+    let (edges, armed, storm) = crate::keypad::edge_stats();
     let mut l = Line::new();
-    let _ = write!(l, "press what the cap says");
+    let _ = write!(
+        l,
+        "edges {edges} {}",
+        if storm {
+            "STORM, off"
+        } else if armed {
+            "armed"
+        } else {
+            "off"
+        }
+    );
+    let _ = lines.push(l);
+
+    let mut l = Line::new();
+    let _ = l.push_str(if armed {
+        "0 masks edges"
+    } else {
+        "0 arms edges"
+    });
     let _ = lines.push(l);
 
     let mut l = Line::new();

@@ -64,6 +64,27 @@ static EDGE_RTC1: AtomicU32 = AtomicU32::new(0);
 static EDGE_RTC2: AtomicU32 = AtomicU32::new(0);
 /// Set by the handler when a sample is waiting; cleared when the foreground drains it.
 static EDGE_READY: AtomicBool = AtomicBool::new(false);
+/// Edges seen since boot, for the Keypad debug screen.
+static EDGE_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Set when the edge path has been shut off and must not be re-armed: either it was never
+/// armed on this board, or the storm guard below tripped.
+static EDGE_OFF: AtomicBool = AtomicBool::new(true);
+/// Set by the storm guard so the foreground can say why the path went quiet.
+static EDGE_STORM: AtomicBool = AtomicBool::new(false);
+/// Edges inside the current window, and when the window started (DWT cycles).
+static EDGE_WINDOW: AtomicU32 = AtomicU32::new(0);
+static EDGE_WINDOW_AT: AtomicU32 = AtomicU32::new(0);
+
+/// Edges in one window that mean something other than a finger is driving the line.
+///
+/// The foreground re-arms once per scan, so a real key -- even one held down, even one
+/// bouncing -- cannot produce more than one edge per scan period, about sixty a second. Ten
+/// times that is not a person.
+const EDGE_STORM_LIMIT: u32 = 600;
+/// The window the limit is counted over: a second at the slowest core clock we run (mk3's
+/// 80 MHz), which is short enough to trip before a user notices and long enough that a fast
+/// mash cannot reach the limit.
+const EDGE_STORM_WINDOW_CYCLES: u32 = 80_000_000;
 
 /// Interrupt handler for a keypad column's falling edge.
 ///
@@ -82,8 +103,36 @@ pub fn on_key_edge() {
     EDGE_RTC1.store(r[1], Ordering::Relaxed);
     EDGE_RTC2.store(r[2], Ordering::Relaxed);
     EDGE_READY.store(true, Ordering::Release);
-    // SAFETY: writes EXTI PR1/IMR1 for our own lines only; the foreground re-arms them.
+    EDGE_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Storm guard. A column that is being driven by something other than the keypad -- a
+    // pin that is not the column we think it is, a line another peripheral owns -- raises
+    // an edge every time the foreground re-arms, and the device then spends its life in
+    // this handler: the keypad goes half-dead and USB, which is polled from the foreground,
+    // turns erratic. That is a device nobody can re-flash, and on a locked unit that is the
+    // end of it. So count the rate here, and shut the path off for good if it is not human.
+    let window_at = EDGE_WINDOW_AT.load(Ordering::Relaxed);
+    let elapsed = cycles.wrapping_sub(window_at);
+    if window_at == 0 || elapsed > EDGE_STORM_WINDOW_CYCLES {
+        EDGE_WINDOW_AT.store(cycles, Ordering::Relaxed);
+        EDGE_WINDOW.store(1, Ordering::Relaxed);
+    } else if EDGE_WINDOW.fetch_add(1, Ordering::Relaxed) + 1 >= EDGE_STORM_LIMIT {
+        EDGE_STORM.store(true, Ordering::Relaxed);
+        EDGE_OFF.store(true, Ordering::Release);
+    }
+
+    // SAFETY: writes EXTI PR1/IMR1 for our own lines only; the foreground re-arms them,
+    // and stops re-arming once `EDGE_OFF` is set.
     unsafe { exti::clear_and_mask(mask) };
+}
+
+/// Edges seen since boot, whether the path is still armed, and whether the guard tripped.
+pub fn edge_stats() -> (u32, bool, bool) {
+    (
+        EDGE_COUNT.load(Ordering::Relaxed),
+        !EDGE_OFF.load(Ordering::Relaxed),
+        EDGE_STORM.load(Ordering::Relaxed),
+    )
 }
 
 /// The DWT cycle count latched by the most recent keypad edge, or 0 if none ever fired.
@@ -200,8 +249,37 @@ impl GpioMatrix {
         // Unmask each distinct EXTI IRQ these columns can raise. The `DefaultHandler`
         // routes them to `on_key_edge`; nothing else is ever unmasked on those lines.
         crate::interrupts::enable_exti(self.edge_mask);
-        // Drive the rows low and unmask the lines for the first idle gap.
+
+        // Arm at boot only where this path has been watched running on real hardware. It
+        // is the one thing in the firmware that hands control to an interrupt before
+        // anybody can look at the device, and a board where it misbehaves comes up with a
+        // half-dead keypad and unreliable USB -- which is to say, a board that cannot be
+        // re-flashed. Where it is not proven the lines stay masked and the keypad is purely
+        // polled, exactly as every board ran before interrupts were enabled at boot; Debug
+        // -> Keypad arms it on demand, and a power cycle undoes that.
+        if BOARD.keypad_edge_at_boot {
+            EDGE_OFF.store(false, Ordering::Release);
+            self.arm_edge_detect();
+        } else {
+            crate::catlog!("keypad: edge entropy not armed at boot on this board");
+        }
+    }
+
+    /// Arm the edge path now, from the foreground. Returns false if the storm guard has
+    /// shut it off, which is permanent until the next boot.
+    pub fn arm_edge_now(&mut self) -> bool {
+        if EDGE_STORM.load(Ordering::Relaxed) {
+            return false;
+        }
+        EDGE_OFF.store(false, Ordering::Release);
         self.arm_edge_detect();
+        true
+    }
+
+    /// Mask the edge path and leave it masked.
+    pub fn disarm_edge_now(&mut self) {
+        EDGE_OFF.store(true, Ordering::Release);
+        self.disarm_edge_detect();
     }
 
     /// Idle the matrix for edge detection: drive every row low so any key pulls its column
@@ -217,7 +295,11 @@ impl GpioMatrix {
             for r in self.rows {
                 gpio::write(r, false);
             }
-            exti::arm(self.edge_mask);
+            // Not armed on a board where the path is not proven, and never again once the
+            // storm guard has tripped: the rows still idle low, so the scan is unaffected.
+            if !EDGE_OFF.load(Ordering::Acquire) {
+                exti::arm(self.edge_mask);
+            }
         }
     }
 

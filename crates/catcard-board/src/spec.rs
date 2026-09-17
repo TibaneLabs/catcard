@@ -228,6 +228,20 @@ pub struct BoardSpec {
     /// pins" [C]
     pub pwr_btn: MaybePin,
 
+    /// Whether the keypad's falling-edge EXTI path is armed from the boot path.
+    ///
+    /// The columns carry a hard interrupt so a keypress can be timestamped at the
+    /// electrical edge rather than at the next scan -- that sample is entropy, and it is
+    /// the only interrupt this firmware arms before anyone can look at the device. Where it
+    /// misbehaves the result is a board whose keypad half works and whose USB, polled from
+    /// the same foreground, turns unreliable: a unit that cannot be re-flashed, which on a
+    /// locked board is permanent.
+    ///
+    /// So this is false until the path has been watched working on that board, and Debug ->
+    /// Keypad arms it by hand meanwhile. Not an `Option`: "we have not checked" and "it
+    /// does not work here" want the same safe behaviour.
+    pub keypad_edge_at_boot: bool,
+
     /// Second secure element on I2C. Source: secure-elements.md §SE2 [C] for presence.
     pub has_se2: bool,
     /// SE2's bus pins, where they are confirmed. `None` means the chip is present but
@@ -353,6 +367,12 @@ pub const MK3: BoardSpec = BoardSpec {
     // mk3 has no USB activity line. Source: usb.md §"USB activity LED" [C]
     usb_active: None,
     pwr_btn: None,
+    // **Not** armed at boot. With interrupts enabled at boot this path came up on an mk3
+    // with a keypad that answered a few presses and then mostly stopped, and USB that did
+    // not work right -- a unit that could no longer be re-flashed. Whatever the mk3 columns
+    // do here has never been watched, so the keypad stays polled until it is: Debug ->
+    // Keypad arms it, and a power cycle undoes that.
+    keypad_edge_at_boot: false,
     has_se2: false,
     se2: None,
     nfc: None,
@@ -435,6 +455,8 @@ pub const MK4: BoardSpec = BoardSpec {
     // `USB_ACTIVE=PC6`, mk4 rev B and later. Source: usb.md §"USB activity LED" [C]
     usb_active: Some(pc(6)),
     pwr_btn: None,
+    // Armed at boot: watched working on this board (and on the mk5, which inherits this).
+    keypad_edge_at_boot: true,
     has_se2: true,
     // I2C2. The contradiction this used to record -- SE2 on PB13/PB14 versus an
     // inherited mk3 numpad claiming the same pins -- resolved in SE2's favour: the
@@ -566,6 +588,9 @@ pub const Q1: BoardSpec = BoardSpec {
     usb_active: MK4.usb_active,
     // `PWR_BTN`: the only board that truly powers off. Source: power.md [C]
     pwr_btn: Some(pb(12)),
+    // Armed at boot: watched working on this board -- the latch fills on every press
+    // and the boot survives with every line otherwise closed.
+    keypad_edge_at_boot: true,
     has_se2: true,
     // Source: generations-mk2-q-mk5.md §Q [C]
     se2: Some(Se2Pins {
