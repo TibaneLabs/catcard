@@ -105,6 +105,8 @@ enum Screen {
     FormatSd,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
     SignPsbt,
+    /// Type a BIP-39 passphrase, opening a second wallet from the same words.
+    Passphrase,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
     /// The Games submenu.
@@ -173,7 +175,7 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 }
 
 /// Settings, with "Destroy seed" only where there is a seed to destroy.
-const SETTINGS_ITEMS: &[&str] = &["Login", "Destroy seed"];
+const SETTINGS_ITEMS: &[&str] = &["Login", "Passphrase", "Destroy seed"];
 const SETTINGS_ITEMS_BLANK: &[&str] = &["Login"];
 
 /// The settings menu for the device in front of you.
@@ -587,6 +589,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         // Never returns, so `back` is unreachable; the bootloader reboots the device.
+        Screen::Passphrase => to(
+            |a| crate::passphrase::screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
@@ -747,6 +753,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
             (Key::Confirm, Some("Login")) => Screen::Login,
+            (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
@@ -1005,7 +1012,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::UsbDrive => {}
         Screen::ViewTrngWords => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
-        Screen::AddressExplorer | Screen::ExportWallet => {}
+        Screen::AddressExplorer | Screen::ExportWallet | Screen::Passphrase => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -1043,7 +1050,15 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
 fn menu_head(screen: Screen) -> (&'static str, Line) {
     let mut note = Line::new();
     let title = match screen {
-        Screen::Main => "CatCard",
+        Screen::Main => {
+            // A passphrase wallet looks exactly like the plain one otherwise, and the
+            // difference is which coins the device can spend. Say so where it is always
+            // visible.
+            if crate::passphrase::is_set() {
+                let _ = note.push_str("passphrase wallet");
+            }
+            "CatCard"
+        }
         Screen::Utils => "Utils",
         Screen::NewSeedMenu => {
             let _ = note.push_str("how many words?");
@@ -2991,8 +3006,8 @@ pub(crate) fn unlock_master(
     };
     secret.zeroize();
 
-    // Seed -> master. Empty passphrase: the plain wallet; passphrase wallets are a separate
-    // feature. Done once, then the seed material is gone and only the master remains.
+    // Seed -> master, through whatever passphrase is in force (none, normally).
+    // Done once, then the seed material is gone and only the master remains.
     //
     // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
@@ -3005,7 +3020,10 @@ pub(crate) fn unlock_master(
         let Ok(mnemonic) = mnemonic else {
             return Err("seed did not decode");
         };
-        Stretch::begin(&mnemonic, "", kw).map_err(|_| "key derivation failed")
+        // The BIP-39 passphrase in force, if any: it is part of the seed, so every screen
+        // that derives from the master follows it without asking.
+        Stretch::begin(&mnemonic, crate::passphrase::active(), kw)
+            .map_err(|_| "key derivation failed")
     });
     let master = stretch.and_then(|mut stretch| {
         // The 2048 PBKDF2 rounds run a slice at a time so the bar can move between them.
@@ -3184,6 +3202,33 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
 /// `held_count` is the debounced state of the pad, so this asks what is physically down
 /// instead of inferring it from events. Scanning still has to run while its events are
 /// thrown away: the scan is what updates that state.
+/// The wallet's first native-segwit receive address, `m/84h/0h/0h/0/0`.
+///
+/// What identifies a wallet to its owner: a fingerprint is four bytes of hex, an address is
+/// the thing they can compare with their watch-only wallet. `None` if it did not derive.
+pub(crate) fn first_receive_address(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    busy: &mut Working<'_>,
+    panel: &mut display::Panel,
+) -> Option<heapless::String<{ catcard_wallet::address::MAX_ADDRESS_LEN }>> {
+    use catcard_wallet::address::{self, AddressKind};
+    use catcard_wallet::bip32::{ChildNumber, Network};
+
+    let chain = receive_chain(master, AddressKind::P2wpkh, busy, panel)?;
+    let key = chain.derive_child(ChildNumber::normal(0).ok()?).ok()?;
+    let mut buf = [0u8; address::MAX_ADDRESS_LEN];
+    let n = address::encode(
+        AddressKind::P2wpkh,
+        Network::Mainnet,
+        &key.public_key,
+        &mut buf,
+    )
+    .ok()?;
+    let mut out = heapless::String::new();
+    out.push_str(core::str::from_utf8(&buf[..n]).ok()?).ok()?;
+    Some(out)
+}
+
 pub(crate) fn wait_for_release(ui: &mut Ui<'_>) {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -3280,7 +3325,7 @@ pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
 }
 
 /// A yes/no question, with the keys named the way this board labels them.
-fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
+pub(crate) fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     use catcard_ui::canvas::Canvas;
     use catcard_ui::icons;
     display::draw(panel, |c| {

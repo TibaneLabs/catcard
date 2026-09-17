@@ -42,6 +42,7 @@ mod menu;
 mod msc_drive;
 mod nor;
 mod panic;
+mod passphrase;
 mod pinentry;
 mod power;
 mod recovery;

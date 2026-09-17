@@ -22,7 +22,9 @@ Dependency first, then what a user needs to hold funds safely:
    own when there is one), change proven by re-deriving it, fee shown and capped,
    SIGNED.PSB written back and FINAL.TXN too when nothing further is needed. PSBT v2
    (BIP-370) is named as unsupported rather than misread.
-3. **BIP-39 passphrase** -- a second wallet from the same seed, not stored.
+3. ~~**BIP-39 passphrase**~~ -- written, untested on hardware: Settings → Passphrase, typed
+   on the keypad or keyboard, shown with the fingerprint and first address of the wallet it
+   opens, kept in RAM only, and the main menu says when one is in force.
 4. **Address Explorer and Verify Address** across the three single-sig types and accounts.
 5. **Message signing** (legacy and BIP-322).
 6. **BIP-85** child words, WIF, xprv, hex, passwords.
@@ -42,7 +44,7 @@ Dependency first, then what a user needs to hold funds safely:
 | Standard | Stock | CatCard | Where / what is left |
 |---|---|---|---|
 | BIP-32 | ✅ | ✅ | `catcard-wallet::bip32`, all official vectors |
-| BIP-39 | ✅ | 🟡 | words ✅; passphrase ❌ (and NFKD, `ROADMAP.md` M5) |
+| BIP-39 | ✅ | 🟡 | words ✅, passphrase ✅ (untested on hardware); NFKD still refused for non-ASCII (`ROADMAP.md` M5) |
 | BIP-43/44/49/84 | ✅ | 🟡 | paths and addresses ✅; accounts other than 0 not exposed |
 | BIP-45/48 (multisig paths) | ✅ | ❌ | step 8 |
 | BIP-67 sorted multisig | ✅ | ❌ | step 8 |
@@ -72,7 +74,7 @@ Dependency first, then what a user needs to hold funds safely:
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ❌ | steps 9-11 |
 | Seed XOR split and join | ✅ | ❌ | step 10 |
 | BIP-85 | ✅ | ❌ | step 6 |
-| BIP-39 passphrase | ✅ | ❌ | step 3 |
+| BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
 | Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ❌ | step 12 |
 | View seed words, SeedQR | ✅ | ❌ | words at creation only; needs a guarded view |
 | Destroy seed | ✅ | ✅ | Settings |
