@@ -163,9 +163,15 @@ const TDR: u32 = UART4 + 0x28;
 const CR1_UE: u32 = 1 << 0;
 const CR1_RE: u32 = 1 << 2;
 const CR1_TE: u32 = 1 << 3;
+/// `M1`: with `M0` clear, **7 data bits**. The single-wire symbols are 7-bit patterns --
+/// `0x7F` is a start bit and seven ones, a single short low -- and an eighth data bit adds
+/// a low the element reads as garbage. The bootloader's own UART4 has this bit set
+/// (`CR1 = 0x1000_000D`, read from a live mk3), which is also why reads mask with `0x7F`.
+const CR1_M1: u32 = 1 << 28;
 const CR2_RTOEN: u32 = 1 << 23;
 const CR3_HDSEL: u32 = 1 << 3;
-const CR3_ONEBIT: u32 = 1 << 15;
+/// `ONEBIT` is bit 11. The bootloader's UART4 reads `CR3 = 0x0000_0808`: `HDSEL` and this.
+const CR3_ONEBIT: u32 = 1 << 11;
 const RQR_RXFRQ: u32 = 1 << 3;
 const ISR_RXNE: u32 = 1 << 5;
 const ISR_TC: u32 = 1 << 6;
@@ -188,7 +194,8 @@ const AF_UART4: u8 = 8;
 /// 230400 bps. Source: se1-driver-spec.md §1 [C]
 const BAUD: u32 = 230_400;
 /// Data rate for the wake byte only: slow enough that a `0x00` holds the line low past
-/// the element's minimum wake time. See [`Se1Swi::wake`].
+/// the element's minimum wake time. See [`Se1Swi::wake`]. With 7-bit framing a `0x00` is
+/// eight bit periods low: ~139 µs.
 const WAKE_BAUD: u32 = 57_600;
 /// Receive timeout, in bit periods. Source: se1-driver-spec.md §1 [C]
 const RTOR_BITS: u32 = 24;
@@ -258,7 +265,7 @@ impl Se1Swi {
             }
 
             // CR2, CR3 and BRR are only writable with the UART disabled.
-            reg::write(CR1, 0);
+            reg::write(CR1, CR1_M1);
             reg::write(BRR, (fck + BAUD / 2) / BAUD);
             reg::write(RTOR, RTOR_BITS);
             reg::write(CR2, CR2_RTOEN);
@@ -267,7 +274,7 @@ impl Se1Swi {
             // In half duplex the TX pin is released when idle, so it is open drain against
             // the bus pull-up. Source: RM0351 §38.5.13 [C]
             gpio::set_alternate(pin, AF_UART4, OutputType::OpenDrain, Pull::Up, Speed::High);
-            reg::write(CR1, CR1_UE | CR1_TE | CR1_RE);
+            reg::write(CR1, CR1_M1 | CR1_UE | CR1_TE | CR1_RE);
             Ok(saved)
         }
     }
@@ -333,22 +340,22 @@ impl Se1Swi {
     /// The wake is a raw `0x00` byte (se1-driver-spec.md §3 [C]), but at 230400 bps that
     /// is nine bit periods, about 39 µs low -- under the ATECC608's 60 µs minimum wake low
     /// time (tWLO, ATECC608 datasheet). So the byte goes out at 57600 bps instead, about
-    /// 156 µs low. A low that long can only mean "wake" to the element, so the margin costs
+    /// 139 µs low (7-bit framing). A low that long can only mean "wake" to the element, so the margin costs
     /// nothing. The data rate is restored before anything else is sent.
     fn wake(&mut self) -> Result<(), Error> {
         // SAFETY: UART4 is ours for the life of `self`; BRR is written with UE clear.
         let fck = unsafe { crate::clock::pclk1_hz() };
         unsafe {
-            reg::write(CR1, 0);
+            reg::write(CR1, CR1_M1);
             reg::write(BRR, (fck + WAKE_BAUD / 2) / WAKE_BAUD);
-            reg::write(CR1, CR1_UE | CR1_TE);
+            reg::write(CR1, CR1_M1 | CR1_UE | CR1_TE);
         }
         let sent = self.send_raw(0x00);
         // SAFETY: as above.
         unsafe {
-            reg::write(CR1, 0);
+            reg::write(CR1, CR1_M1);
             reg::write(BRR, (fck + BAUD / 2) / BAUD);
-            reg::write(CR1, CR1_UE | CR1_TE | CR1_RE);
+            reg::write(CR1, CR1_M1 | CR1_UE | CR1_TE | CR1_RE);
         }
         sent?;
         // SAFETY: reads RCC only.
