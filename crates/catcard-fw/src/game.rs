@@ -473,7 +473,8 @@ pub(crate) fn block_mine(ui: &mut Ui<'_>) {
 
 // ============================ Block Cutter ============================
 //
-// A Qix/Xonix-style claim game. You move along the claimed edge (safe), and when you push
+// A Qix/Xonix-style claim game. You move along the border of the black (safe) -- never
+// across claimed ground away from it -- and when you push
 // into the black interior you draw a line; getting back to claimed ground closes it and
 // captures territory. Bouncing pixels roam the black. If one touches your line while you
 // are drawing it, you lose a life. A cut that splits the black in two keeps the side with
@@ -562,6 +563,57 @@ impl Cutter {
         }
     }
 
+    /// Whether claimed cell `(x, y)` is on the border of the black: one of its eight
+    /// neighbours is still black. Only these are walkable while not drawing.
+    ///
+    /// Eight neighbours, not four, so the corner cells count and the border around a black
+    /// region is one path of orthogonal steps -- the player can walk all the way round.
+    fn on_border(&self, x: usize, y: usize) -> bool {
+        let (x, y) = (x as isize, y as isize);
+        (-1..=1).any(|dy| (-1..=1).any(|dx| self.cell(x + dx, y + dy) == CB_BLACK))
+    }
+
+    /// Move the player to the nearest border cell, if it is not on one: a cut can capture
+    /// the side it was standing against, and the start position can end up inside claimed
+    /// ground. Searched over claimed cells from where the player is, so it is the nearest
+    /// by walking distance.
+    fn move_to_border(&mut self) {
+        if self.on_border(self.px, self.py) {
+            return;
+        }
+        let mut seen = [false; CN];
+        let mut queue = [0u16; CN];
+        let start = self.py * CW + self.px;
+        let (mut head, mut tail) = (0usize, 1usize);
+        queue[0] = start as u16;
+        seen[start] = true;
+        while head < tail {
+            let i = queue[head] as usize;
+            head += 1;
+            let (x, y) = (i % CW, i / CW);
+            if self.on_border(x, y) {
+                self.px = x;
+                self.py = y;
+                return;
+            }
+            for (nx, ny) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if nx < CW && ny < CH {
+                    let ni = ny * CW + nx;
+                    if !seen[ni] && self.grid[ni] == CB_FILLED {
+                        seen[ni] = true;
+                        queue[tail] = ni as u16;
+                        tail += 1;
+                    }
+                }
+            }
+        }
+    }
+
     fn black_count(&self) -> usize {
         self.grid.iter().filter(|&&c| c == CB_BLACK).count()
     }
@@ -577,6 +629,7 @@ impl Cutter {
         self.dx = 0;
         self.dy = 0;
         self.trailing = false;
+        self.move_to_border();
     }
 
     /// One movement step in the current direction. Lays or closes the trail as it goes.
@@ -613,6 +666,7 @@ impl Cutter {
                     self.py = ny;
                     self.trailing = false;
                     self.close_cut();
+                    self.move_to_border();
                 }
                 _ => {
                     self.grid[ny * CW + nx] = CB_TRAIL;
@@ -622,9 +676,15 @@ impl Cutter {
             }
         } else {
             match target {
-                CB_FILLED => {
+                // Claimed ground is walkable only along the black's border; the rest is
+                // captured and closed. Stop at its edge rather than walk in.
+                CB_FILLED if self.on_border(nx, ny) => {
                     self.px = nx;
                     self.py = ny;
+                }
+                CB_FILLED => {
+                    self.dx = 0;
+                    self.dy = 0;
                 }
                 CB_BLACK => {
                     self.grid[ny * CW + nx] = CB_TRAIL;
