@@ -257,6 +257,29 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         self.area
             .write(offset, data)
             .map_err(|_| Reject::StorageFault { offset })?;
+
+        // Read it back before believing it. The staging area is volatile memory reached
+        // over a bus of its own, and an image that stages one byte wrong fails its
+        // signature check with nothing to say why -- which is a long afternoon. Checking
+        // here means a bad medium reports itself, at the offset where it went wrong.
+        let mut back = [0u8; 64];
+        for (i, part) in data.chunks(back.len()).enumerate() {
+            let at = offset + (i * back.len()) as u32;
+            let seen = &mut back[..part.len()];
+            self.area
+                .read(at, seen)
+                .map_err(|_| Reject::StorageFault { offset: at })?;
+            if seen != part {
+                let byte = part
+                    .iter()
+                    .zip(seen.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(0);
+                return Err(Reject::StorageFault {
+                    offset: at + byte as u32,
+                });
+            }
+        }
         self.received = end;
         Ok(())
     }

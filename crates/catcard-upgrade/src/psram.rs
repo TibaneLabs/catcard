@@ -93,6 +93,69 @@ impl PsramArea {
     }
 }
 
+/// One 32-bit access in a span, and which bytes of it belong to the span.
+///
+/// Splitting the arithmetic out from the stores is what makes it testable: the addresses
+/// PSRAM sees cannot be checked on a host, but the plan that produces them can.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct Word {
+    /// The word's address: always 4-aligned.
+    at: u32,
+    /// First and last+1 byte of the word that the span covers (`0..4` when whole).
+    lo: u32,
+    hi: u32,
+    /// Offset into the span's data of the first of those bytes.
+    src: usize,
+}
+
+impl Word {
+    /// The span covers all four bytes, so no read-merge is needed.
+    fn whole(&self) -> bool {
+        self.lo == 0 && self.hi == 4
+    }
+
+    fn len(&self) -> usize {
+        (self.hi - self.lo) as usize
+    }
+}
+
+/// The words a byte span touches, in order.
+struct WordPlan {
+    at: u32,
+    end: u32,
+    start: u32,
+}
+
+impl WordPlan {
+    fn new(addr: u32, len: usize) -> Self {
+        Self {
+            at: addr & !3,
+            end: addr + len as u32,
+            start: addr,
+        }
+    }
+}
+
+impl Iterator for WordPlan {
+    type Item = Word;
+
+    fn next(&mut self) -> Option<Word> {
+        if self.at >= self.end {
+            return None;
+        }
+        let lo = self.start.max(self.at);
+        let hi = self.end.min(self.at + 4);
+        let word = Word {
+            at: self.at,
+            lo: lo - self.at,
+            hi: hi - self.at,
+            src: (lo - self.start) as usize,
+        };
+        self.at += 4;
+        Some(word)
+    }
+}
+
 impl StagingArea for PsramArea {
     type Error = OutOfRange;
 
@@ -100,21 +163,53 @@ impl StagingArea for PsramArea {
         self.capacity
     }
 
+    /// Write the span with **32-bit stores only**, never byte stores.
+    ///
+    /// Byte stores into memory-mapped PSRAM are not reliable: a run of them beginning at an
+    /// odd address comes back with a byte duplicated and the rest of the run shifted along
+    /// by one. Measured on a Q1 (`docs/PSRAM.md` has the experiment), and it is why a
+    /// firmware image read off a microSD card staged with one byte too many in the odd
+    /// block and failed its signature check.
+    ///
+    /// A partial word at either end is read, merged and written whole, so the bytes outside
+    /// the span keep their values.
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, data.len())?;
-        for (i, b) in data.iter().enumerate() {
-            // SAFETY: `in_range` bounded the whole span to the region claimed in `claim`,
-            // whose safety contract is that it is mapped and ours.
-            unsafe { core::ptr::write_volatile((addr as *mut u8).add(i), *b) };
+        for word in WordPlan::new(addr, data.len()) {
+            let value = if word.whole() {
+                u32::from_le_bytes([
+                    data[word.src],
+                    data[word.src + 1],
+                    data[word.src + 2],
+                    data[word.src + 3],
+                ])
+            } else {
+                // SAFETY: `in_range` bounded the span, and a partial word at the edge lies
+                // in the same word as bytes that are in it, so the word is mapped.
+                let mut bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }
+                    .to_le_bytes();
+                bytes[word.lo as usize..word.hi as usize]
+                    .copy_from_slice(&data[word.src..word.src + word.len()]);
+                u32::from_le_bytes(bytes)
+            };
+            // SAFETY: `WordPlan` only yields 4-aligned addresses inside the span's words,
+            // and `in_range` bounded the span to the region claimed in `claim`, whose
+            // safety contract is that it is mapped and ours.
+            unsafe { core::ptr::write_volatile(word.at as *mut u32, value) };
         }
         Ok(())
     }
 
+    /// Read the span with 32-bit loads, for symmetry with [`Self::write`] and because
+    /// digesting a staged image a byte at a time is four times the bus traffic.
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, out.len())?;
-        for (i, b) in out.iter_mut().enumerate() {
+        for word in WordPlan::new(addr, out.len()) {
             // SAFETY: as `write`.
-            *b = unsafe { core::ptr::read_volatile((addr as *const u8).add(i)) };
+            let bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
+            let len = word.len();
+            out[word.src..word.src + len]
+                .copy_from_slice(&bytes[word.lo as usize..word.hi as usize]);
         }
         Ok(())
     }
@@ -173,6 +268,48 @@ impl StagingArea for PsramArea {
 mod tests {
     use super::*;
     use catcard_board::spec::ALL;
+
+    /// Every byte of the span is covered exactly once, by 4-aligned words only.
+    #[test]
+    fn the_write_plan_covers_the_span_once_with_aligned_words() {
+        for addr in 0x2000_0000u32..0x2000_0008 {
+            for len in 1usize..24 {
+                let mut seen = vec![None; len];
+                let mut words = 0;
+                for w in WordPlan::new(addr, len) {
+                    assert_eq!(w.at % 4, 0, "{addr:#x}+{len}: unaligned word {:#x}", w.at);
+                    assert!(w.lo < w.hi && w.hi <= 4, "{addr:#x}+{len}: {w:?}");
+                    for i in 0..w.len() {
+                        let byte = w.src + i;
+                        assert!(byte < len, "{addr:#x}+{len}: {w:?} runs past the span");
+                        assert!(seen[byte].is_none(), "{addr:#x}+{len}: byte {byte} twice");
+                        // The byte of memory this covers is the byte of data it came from.
+                        seen[byte] = Some(w.at + w.lo + i as u32);
+                    }
+                    words += 1;
+                }
+                for (i, at) in seen.iter().enumerate() {
+                    assert_eq!(*at, Some(addr + i as u32), "{addr:#x}+{len}: byte {i}");
+                }
+                // No more words than the span can touch.
+                let expect = ((addr + len as u32 + 3) & !3).saturating_sub(addr & !3) / 4;
+                assert_eq!(words, expect, "{addr:#x}+{len}");
+            }
+        }
+    }
+
+    /// Only the words at the ends of a span can be partial, and only they need a merge.
+    #[test]
+    fn only_the_edges_of_a_span_are_partial_words() {
+        let plan: Vec<_> = WordPlan::new(0x2000_0002, 13).collect();
+        assert_eq!(plan.len(), 4);
+        assert!(!plan[0].whole(), "the head starts mid-word");
+        assert!(plan[1].whole() && plan[2].whole(), "the middle is whole words");
+        assert!(!plan[3].whole(), "the tail ends mid-word");
+        // A span that starts and ends on word boundaries needs no merge at all, which is
+        // the case every staging write takes: offsets there are multiples of 512.
+        assert!(WordPlan::new(0x2000_0000, 512).all(|w| w.whole()));
+    }
 
     #[test]
     fn the_staging_region_never_overlaps_the_recovery_header() {
