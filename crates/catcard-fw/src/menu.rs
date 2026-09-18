@@ -220,8 +220,6 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 const SETTINGS_ITEMS: &[&str] = &[
     "Login",
     "Passphrase",
-    #[cfg(not(feature = "board-mk3"))]
-    "Nickname",
     "Destroy seed",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
@@ -230,13 +228,10 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Debug",
 ];
 const SETTINGS_ITEMS_BLANK: &[&str] = &[
-    "Login",
-    // A nickname belongs to the device, not to a wallet, so a blank device can have one --
-    // and it is stored under the pre-login key, which exists either way.
-    #[cfg(not(feature = "board-mk3"))]
-    "Nickname",
-    "About",
-    "Debug",
+    // Login and its nickname are here on a blank device too: both belong to the device
+    // rather than to a wallet, and the nickname is stored under the pre-login key, which
+    // exists either way.
+    "Login", "About", "Debug",
 ];
 
 /// The settings menu for the device in front of you.
@@ -249,7 +244,16 @@ fn settings_items(no_seed: bool) -> &'static [&'static str] {
 }
 
 /// Login settings. Just the PIN today; a place for login-related settings to grow.
-const LOGIN_ITEMS: &[&str] = &["Change PIN"];
+/// Login settings.
+///
+/// The nickname belongs here rather than beside it: it is shown *during* login, before
+/// the PIN, so it is part of what logging in looks like rather than a preference about
+/// the device.
+const LOGIN_ITEMS: &[&str] = &[
+    "Change PIN",
+    #[cfg(not(feature = "board-mk3"))]
+    "Nickname",
+];
 /// How long a new seed should be.
 ///
 /// Twenty-four first, and under the cursor when the menu opens. Twelve is a sound
@@ -974,6 +978,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Nickname")) => Screen::Nickname,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Login,
         },
@@ -1027,8 +1033,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
-            #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("Nickname")) => Screen::Nickname,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
             #[cfg(not(feature = "board-mk3"))]
