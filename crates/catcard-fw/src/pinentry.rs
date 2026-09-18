@@ -276,8 +276,17 @@ pub fn show_nickname(
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     // SAFETY: reads RCC only.
     let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
-    // Two seconds, in ten-millisecond looks at the keypad.
-    for _ in 0..200 {
+
+    // Throw away the first sample. A fresh scanner reports a key that is already down as a
+    // new press, and a host that has just installed firmware has injected one -- so without
+    // this the screen is skipped by the keypress that caused the reboot, and the nickname
+    // flashes past on exactly the boot someone was waiting to see it on.
+    pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+    keys.clear();
+
+    // Three seconds, in ten-millisecond looks at the keypad. Long enough to read a nickname
+    // someone chose to be long, short enough not to be in the way.
+    for _ in 0..300 {
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             break;
