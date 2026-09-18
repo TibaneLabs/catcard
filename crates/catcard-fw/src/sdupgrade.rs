@@ -176,6 +176,7 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         at += n as u32;
     }
 
+    let staged_len = len;
     let running = crate::own_header();
     match staged.inspect(running.as_ref()) {
         Ok(approval) => Outcome::Offered(staged, approval),
@@ -200,6 +201,40 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
                     d[7]
                 );
             }
+            // Per-128 KB digests, so the log says which block of the image is wrong rather
+            // than only that the whole of it is. A boundary on a cluster edge points at how
+            // the file's clusters were followed; a scattered one at the memory.
+            let mut off = 0u32;
+            while off < staged_len {
+                let n = (staged_len - off).min(128 * 1024);
+                use purecrypto::hash::{Digest as _, Sha256};
+                let mut h = Sha256::new();
+                let mut chunk = [0u8; 256];
+                let mut at = 0u32;
+                let mut ok = true;
+                while at < n {
+                    let want = chunk.len().min((n - at) as usize);
+                    if staged.sample(off + at, &mut chunk[..want]).is_err() {
+                        ok = false;
+                        break;
+                    }
+                    h.update(&chunk[..want]);
+                    at += want as u32;
+                }
+                if ok {
+                    let d = h.finalize();
+                    crate::catlog!(
+                        "sd: block {:#08x} {:02x}{:02x}{:02x}{:02x}",
+                        off,
+                        d[0],
+                        d[1],
+                        d[2],
+                        d[3]
+                    );
+                }
+                off += n;
+            }
+
             let mut head = [0u8; 8];
             if staged.sample(0, &mut head).is_ok() {
                 crate::catlog!(

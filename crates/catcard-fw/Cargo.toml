@@ -33,6 +33,7 @@ board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]
 board-q1 = ["catcard-board/board-q1", "catcard-hal/board-q1"]
 
 [dependencies]
+purecrypto = { workspace = true, features = ["hash"] }
 catcard-settings = { path = "../catcard-settings", default-features = false }
 fstool = { workspace = true, default-features = false, features = ["littlefs"] }
 outscript = { workspace = true }

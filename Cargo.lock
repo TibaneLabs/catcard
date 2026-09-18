@@ -140,6 +140,7 @@ dependencies = [
  "fstool",
  "heapless",
  "outscript",
+ "purecrypto",
  "zeroize",
 ]
 
