@@ -77,6 +77,50 @@ fn interleaved(base: u32, nops: u32) -> (u32, u32) {
     (disagreed, lost)
 }
 
+/// The third sweep, and the one that matters: a **bulk** write, then a read of somewhere
+/// else, with `nops` between them.
+///
+/// This is the shape that broke firmware installs. Staging writes hundreds of kilobytes and
+/// `inspect` then reads the image's 128-byte header -- the first read after all that writing
+/// -- and it came back with its first forty bytes right and its last sixty-four wrong, so
+/// every image failed its signature check and nothing said why. One word written and read
+/// back does not reproduce it; this does.
+///
+/// Returns how many of `ROUNDS` reads came back wrong, and the first byte that differed.
+fn after_bulk(base: u32, nops: u32) -> (u32, usize) {
+    // A header-sized read from a header-ish offset, after a write of real size.
+    const BULK_WORDS: u32 = 16 * 1024; // 64 KB
+    const READ_AT: u32 = 0x3F80;
+    const READ_LEN: usize = 128;
+    const ROUNDS: u32 = 8;
+
+    let mut wrong = 0u32;
+    let mut first = READ_LEN;
+    for round in 0..ROUNDS {
+        // SAFETY: `base` is mapped, 4-aligned and above anything in use; the span stays
+        // below the recovery header, as the caller checked.
+        unsafe {
+            for i in 0..BULK_WORDS {
+                store((base + i * 4) as *mut u32, expected(i ^ round), nops);
+            }
+            // The gap under test: nothing between the last store and this read but NOPs.
+            for _ in 0..nops {
+                core::arch::asm!("nop", options(nostack, preserves_flags));
+            }
+            for i in 0..(READ_LEN as u32 / 4) {
+                let at = READ_AT + i * 4;
+                let got = core::ptr::read_volatile((base + at) as *const u32);
+                if got != expected((at / 4) ^ round) {
+                    wrong += 1;
+                    first = first.min(i as usize * 4);
+                    break;
+                }
+            }
+        }
+    }
+    (wrong, first)
+}
+
 /// Sweep the delays and report what each one cost.
 pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     use catcard_ui::scroll::Line as Row;
@@ -98,7 +142,7 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     }
 
     type Line = heapless::String<48>;
-    let mut lines: heapless::Vec<Line, { 2 * SWEEP.len() + 2 }> = heapless::Vec::new();
+    let mut lines: heapless::Vec<Line, { 3 * SWEEP.len() + 2 }> = heapless::Vec::new();
 
     for nops in SWEEP {
         crate::menu::blocking_screen(ui.panel, "PSRAM soak", "writing");
@@ -171,7 +215,26 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
         let _ = lines.push(l);
     }
 
-    let mut rows: heapless::Vec<Row, { 2 * SWEEP.len() + 2 }> = heapless::Vec::new();
+    // And the shape that actually broke installs: bulk write, then read elsewhere.
+    for nops in SWEEP {
+        crate::menu::blocking_screen(ui.panel, "PSRAM soak", "bulk then read");
+        let (wrong, first) = after_bulk(base, nops);
+        let mut l = Line::new();
+        if wrong == 0 {
+            let _ = write!(l, "{nops:2} nops bulk: clean");
+        } else {
+            let _ = write!(l, "{nops:2} nops bulk: {wrong}/8 wrong, 1st byte {first}");
+        }
+        crate::catlog!(
+            "psram soak: {} nops, after bulk write: {} of 8 reads wrong, first byte {}",
+            nops,
+            wrong,
+            first
+        );
+        let _ = lines.push(l);
+    }
+
+    let mut rows: heapless::Vec<Row, { 3 * SWEEP.len() + 2 }> = heapless::Vec::new();
     let _ = rows.push(Row::title("PSRAM soak"));
     for l in lines.iter() {
         let _ = rows.push(Row::body(l.as_str()).small());
