@@ -82,6 +82,31 @@ impl Blocks {
         })
     }
 
+    /// Claim the board's settings region **for reading only**.
+    ///
+    /// Makes no claim about the flash's bank configuration, so it opens on a part this
+    /// driver would otherwise refuse -- a Q1 whose `DBANK` is not what the board table
+    /// expects, for instance. [`FlashDriver::erase`] and `prog` then fail, so a volume
+    /// mounted through this cannot modify what it is reading, by construction rather than
+    /// by intention. That matters on a device whose settings are someone's notes.
+    ///
+    /// # Safety
+    /// The region is mapped and readable; nothing is written.
+    pub unsafe fn open_read_only() -> Result<Self, Error> {
+        let (start, len) = match BOARD.settings {
+            catcard_board::spec::SettingsArea::InternalFlash { start, len } => (start, len),
+            _ => return Err(Error::NotHere),
+        };
+        // SAFETY: forwarding the caller's guarantee.
+        let flash = unsafe { Internal::open_read_only(start, len)? };
+        Ok(Self {
+            flash,
+            // Unused: a read needs no page geometry, and an erase is refused.
+            page_size: BLOCK,
+            blocks: len / BLOCK as u32,
+        })
+    }
+
     /// Blocks per flash page.
     fn per_page(&self) -> u32 {
         (self.page_size / BLOCK) as u32

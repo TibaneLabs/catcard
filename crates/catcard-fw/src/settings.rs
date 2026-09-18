@@ -12,6 +12,20 @@ use catcard_settings::store::{MediumError, Slots};
 
 use crate::nvram::Blocks;
 
+/// Why the settings volume would not mount.
+///
+/// The reason is kept rather than flattened to one sentence: "no settings region" covers a
+/// board that keeps them elsewhere, a flash configured differently from the board table, and
+/// an address that does not divide into pages -- and which of those it is decides what to do
+/// next.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum MountFailed {
+    /// The region could not be claimed; the flash driver says why.
+    Region(crate::nvram::Error),
+    /// The region was claimed but holds no filesystem this can read.
+    NoFilesystem,
+}
+
 /// Slots stock keeps on a LittleFS device, as `settings/000.aes` upwards.
 /// Source: hw-reference/settings-nvstore-format.md §1 [C]
 pub const SLOT_COUNT: u32 = 100;
@@ -30,10 +44,21 @@ impl Files {
     ///
     /// # Safety
     /// As [`Blocks::open`]: nothing else may touch the region, and each write stalls the bus.
-    pub unsafe fn mount() -> Result<Self, &'static str> {
+    pub unsafe fn mount() -> Result<Self, MountFailed> {
         // SAFETY: forwarding the caller's guarantee.
-        let blocks = unsafe { Blocks::open() }.map_err(|_| "no settings region")?;
-        let vol = Volume::mount(blocks).map_err(|_| "no filesystem there")?;
+        let blocks = unsafe { Blocks::open() }.map_err(MountFailed::Region)?;
+        let vol = Volume::mount(blocks).map_err(|_| MountFailed::NoFilesystem)?;
+        Ok(Self { vol })
+    }
+
+    /// Mount it for reading only: nothing mounted this way can change what it reads.
+    ///
+    /// # Safety
+    /// The region is mapped and readable; nothing is written.
+    pub unsafe fn mount_read_only() -> Result<Self, MountFailed> {
+        // SAFETY: forwarding the caller's guarantee.
+        let blocks = unsafe { Blocks::open_read_only() }.map_err(MountFailed::Region)?;
+        let vol = Volume::mount(blocks).map_err(|_| MountFailed::NoFilesystem)?;
         Ok(Self { vol })
     }
 
@@ -132,11 +157,12 @@ pub(crate) fn inspect(
 
     // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
     // touches the settings region.
-    let mut files = match unsafe { Files::mount() } {
+    let mut files = match unsafe { Files::mount_read_only() } {
         Ok(f) => f,
         Err(why) => {
+            crate::catlog!("settings: mount failed: {:?}", why);
             let mut l = Note::new();
-            let _ = write!(l, "mount: {why}");
+            let _ = write!(l, "mount: {why:?}");
             let _ = notes.push(l);
             let _ = rows.push(Row::title("Settings"));
             let _ = rows.push(Row::body(notes[0].as_str()));

@@ -79,6 +79,8 @@ pub enum Error {
     Stuck,
     /// The controller reported an error; the `SR` flags are included.
     Reported { sr: u32 },
+    /// The region was opened for reading only, and something asked it to change.
+    ReadOnly,
 }
 
 /// Bytes programmed at once: flash takes a 64-bit doubleword. Source: RM0432 §3.3.7 [C]
@@ -127,6 +129,9 @@ pub struct Internal {
     page_size: u32,
     dual_bank: bool,
     bank_len: u32,
+    /// Opened for reading only: erasing and programming refuse. See
+    /// [`Self::open_read_only`].
+    read_only: bool,
 }
 
 impl Internal {
@@ -155,9 +160,32 @@ impl Internal {
             page_size,
             dual_bank,
             bank_len: flash_len / 2,
+            read_only: false,
         })
     }
 
+    /// Open the region **for reading only**, making no claim about the bank layout.
+    ///
+    /// Page size and bank numbering matter for erasing and programming, not for reading:
+    /// flash is memory-mapped, and a read is a copy. So a region whose configuration this
+    /// does not recognise can still be read -- which is what an inspector wants, and is
+    /// safer than reading it through a driver that believes it also knows how to erase it.
+    /// [`Self::erase`] and [`Self::program`] refuse on an area opened this way.
+    ///
+    /// # Safety
+    /// The region is mapped and readable. Nothing else need be true: nothing is written.
+    pub unsafe fn open_read_only(start: u32, len: u32) -> Result<Self, Error> {
+        Ok(Self {
+            start,
+            len,
+            page_size: 0,
+            dual_bank: false,
+            bank_len: 0,
+            read_only: true,
+        })
+    }
+
+    /// The page size, or zero on an area opened for reading only.
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
@@ -195,6 +223,9 @@ impl Internal {
     /// # Safety
     /// As [`open`](Self::open): this destroys 8 KB, and the bus stalls until it is done.
     pub unsafe fn erase(&mut self, index: u32) -> Result<(), Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         if index >= self.pages() {
             return Err(Error::Address {
                 addr: self.start + index * self.page_size,
@@ -230,6 +261,9 @@ impl Internal {
     /// # Safety
     /// As [`open`](Self::open).
     pub unsafe fn program(&mut self, off: u32, data: &[u8]) -> Result<(), Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         if !off.is_multiple_of(DWORD as u32) || !data.len().is_multiple_of(DWORD) {
             return Err(Error::Address {
                 addr: self.start + off,
