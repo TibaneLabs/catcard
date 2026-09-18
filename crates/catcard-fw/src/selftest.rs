@@ -46,8 +46,12 @@ fn render(report: &BootReport, last_key: Option<Key>, waiting: bool, panel: &mut
 /// Rows are positions on the 64-row panel this screen was designed on, spread in
 /// proportion over the real canvas, and columns count in body-face characters -- so the
 /// mk OLED keeps its exact placement and the Q1 fills its 320x240 in larger faces.
-fn draw_report(c: &mut display::Screen, report: &BootReport, last_key: Option<Key>, waiting: bool) {
-    use catcard_ui::canvas::Canvas;
+fn draw_report<C: catcard_ui::canvas::Canvas + ?Sized>(
+    c: &mut C,
+    report: &BootReport,
+    last_key: Option<Key>,
+    waiting: bool,
+) {
     c.clear();
 
     // Title in the layout's title face, status in its body face -- the same split a

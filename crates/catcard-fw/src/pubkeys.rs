@@ -160,6 +160,19 @@ pub(crate) fn account_key(
     Some(key)
 }
 
+/// This wallet's master fingerprint **only if this session already knows it**.
+///
+/// Never unlocks. For the status bar, which is painted on every frame: a bar that could
+/// stretch a seed to decorate itself would make the device unusable, and an empty space
+/// is the honest answer until a screen that needed the seed anyway has paid for it.
+///
+/// Only the Q1 has a status bar to put it in.
+#[cfg(feature = "board-q1")]
+pub(crate) fn known_fingerprint() -> Option<[u8; 4]> {
+    // SAFETY: foreground only; the read finishes within this statement.
+    unsafe { *core::ptr::addr_of!(FINGERPRINT) }
+}
+
 /// This wallet's master fingerprint, from this session or the seed.
 ///
 /// The same unlock that derives an account key learns this, so a screen that has already

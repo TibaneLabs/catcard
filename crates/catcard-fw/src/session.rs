@@ -89,6 +89,12 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // SAFETY: nothing else claims the power-button pin, and this runs once, in the boot
     // path, before any screen.
     unsafe { power::init(&gate) };
+    // Which pin reports the power source, and therefore what the status bar's icon says.
+    // SAFETY: bring-up; nothing else drives the battery-sense pins.
+    #[cfg(feature = "board-q1")]
+    unsafe {
+        crate::battery::init()
+    };
     // A device that cannot run the front panel -- no panel, no keypad, or no UI DRBG to
     // shuffle the scan with -- must still be reprogrammable, or a board whose drivers are
     // missing (Q1 today) runs a validly-signed image that nothing can replace. On a bench

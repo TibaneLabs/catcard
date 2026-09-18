@@ -178,7 +178,7 @@ fn pick_index(ui: &mut Ui<'_>, kind: Kind) -> Option<u32> {
             if moved {
                 break;
             }
-            catcard_hal::dwt::delay_cycles(crate::usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
     }
 }

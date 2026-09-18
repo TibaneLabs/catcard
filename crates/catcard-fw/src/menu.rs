@@ -412,7 +412,7 @@ pub fn run(session: Session<'_>) -> ! {
         }
 
         let _ = usbtask::pump();
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
 
         // The RTC screen redraws on a clock rather than on input: it is showing something
         // that changes on its own, and the whole question it answers is whether it does.
@@ -2055,7 +2055,7 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
                 Key::Char(_) => {}
             }
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
     }
 }
 
@@ -3634,7 +3634,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     _ => {}
                 }
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
     }
 }
@@ -3686,7 +3686,7 @@ pub(crate) fn wait_for_release(ui: &mut Ui<'_>) {
         if ui.pad.held_count() == 0 {
             return;
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
     }
 }
 
@@ -3726,7 +3726,7 @@ pub(crate) fn scroll_choice(
             if !keys.is_empty() {
                 break;
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
     }
 }
@@ -3743,7 +3743,7 @@ pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
         if !keys.is_empty() {
             return;
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
     }
 }
 
@@ -3768,7 +3768,7 @@ pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
                 Key::Char(_) => {}
             }
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
     }
 }
 
@@ -3981,7 +3981,7 @@ fn collect_rolls(
             if !keys.is_empty() {
                 break;
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
         warn = None;
         for k in keys.iter() {
@@ -4037,7 +4037,7 @@ fn add_user_entropy(ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
             if !keys.is_empty() {
                 break;
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
         // Take the first meaningful key of the batch, then redraw the menu.
         let mut done = false;
@@ -4544,7 +4544,7 @@ fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
                     Key::Char(_) => {}
                 }
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
         if !open_list {
             continue;
@@ -4881,7 +4881,7 @@ fn read_choice(ui: &mut Ui<'_>, n: usize) -> Choice {
                 _ => {}
             }
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        display::idle(ui.panel);
     }
 }
 
@@ -5282,7 +5282,7 @@ pub(crate) fn show_doc(
                         screen.draw(ui);
                     }
                 }
-                catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+                display::idle(ui.panel);
                 continue;
             }
             for k in keys.iter() {
@@ -5503,7 +5503,7 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
             if moved {
                 break;
             }
-            catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+            display::idle(ui.panel);
         }
     }
 }

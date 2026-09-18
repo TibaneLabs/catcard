@@ -188,7 +188,7 @@ fn read_message(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
                 }
             }
             if !redraw {
-                catcard_hal::dwt::delay_cycles(crate::usbtask::IDLE_PAUSE_CYCLES);
+                display::idle(ui.panel);
             }
         }
     }

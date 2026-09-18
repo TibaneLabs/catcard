@@ -43,6 +43,9 @@ pub(crate) fn pressed_keys(
     // very interrupt this uses to time a real press. Re-armed at the end for the idle gap.
     matrix.disarm_edge_detect();
     let n = pad.scan(matrix, drbg, events);
+    // The modifiers decode to no key, so this is the only place they are ever seen.
+    #[cfg(feature = "board-q1")]
+    crate::statusbar::note(pad);
     let mut physical = false;
     for e in &events[..n] {
         if let Event::Pressed(k) = e {
@@ -132,19 +135,19 @@ fn anti_phishing_words(w: catcard_pin::words::Words) -> [&'static str; 2] {
 const DESIGN_ROWS: usize = 64;
 
 /// Design row `y`, on this canvas.
-fn at(c: &display::Screen, y: usize) -> usize {
+fn at<C: Canvas + ?Sized>(c: &C, y: usize) -> usize {
     y * c.height() / DESIGN_ROWS
 }
 
 /// One line of the layout's title face, centred, at design row `y`.
-fn title(c: &mut display::Screen, y: usize, s: &str) {
+fn title<C: Canvas + ?Sized>(c: &mut C, y: usize, s: &str) {
     let f = display::LAYOUT.title;
     let (x, y) = (centred(f, s, c.width()), at(c, y));
     draw_text(c, f, x, y, s);
 }
 
 /// One line of the layout's body face, centred, at design row `y`.
-fn small(c: &mut display::Screen, y: usize, s: &str) {
+fn small<C: Canvas + ?Sized>(c: &mut C, y: usize, s: &str) {
     let f = display::LAYOUT.body;
     let (x, y) = (centred(f, s, c.width()), at(c, y));
     draw_text(c, f, x, y, s);
@@ -174,7 +177,7 @@ fn num(buf: &mut [u8; 3], mut v: u32) -> &str {
 ///
 /// Hidden at full count deliberately: a permanent attempt counter reads as a threat on
 /// a device that is working normally. It appears the moment one is spent.
-fn tries_left(c: &mut display::Screen, left: u32) {
+fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
     if left >= MAX_ATTEMPTS {
         return;
     }
@@ -222,7 +225,7 @@ fn screen_field(
 /// Writing "y" and "x" asked the reader to translate our wiring names into what is under
 /// their thumb, which is one more thing to get wrong on a device where the key map is the
 /// thing in doubt. Naming a mark the board does not carry would be the same mistake.
-fn two_key_hint(c: &mut display::Screen, y: usize, yes: &str, no: &str) {
+fn two_key_hint<C: Canvas + ?Sized>(c: &mut C, y: usize, yes: &str, no: &str) {
     use catcard_ui::icons;
     let f = display::LAYOUT.body;
     let gap = 3 * f.advance(b' ');

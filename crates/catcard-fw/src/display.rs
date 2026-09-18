@@ -410,6 +410,25 @@ pub type Screen = catcard_ui::Mono128x64;
 #[cfg(feature = "board-q1")]
 pub type Screen = catcard_ui::canvas::Gray320x240;
 
+/// What a screen is handed to draw into.
+///
+/// On the Q1 this is the panel with the status bar's rows withheld, so a screen simply
+/// cannot reach them: the alternative -- every screen remembering to start lower -- is
+/// one forgotten screen away from text under the bar. On the mono boards there is no bar
+/// and it is the whole framebuffer.
+#[cfg(feature = "board-q1")]
+pub type Surface<'a> = catcard_ui::canvas::Inset<'a, Screen>;
+/// As above, for the boards with no status bar.
+#[cfg(not(feature = "board-q1"))]
+pub type Surface<'a> = Screen;
+
+/// Rows the status bar occupies at the top of the panel.
+///
+/// Zero where there is no bar. Pinned to the face it is drawn in by a test below rather
+/// than being computed here, because it has to be a constant: [`SCREEN_H`] is derived
+/// from it and screens lay themselves out against that.
+#[cfg(feature = "board-q1")]
+pub const BAR_H: usize = 17;
 /// Which faces and spacing this board's screens use.
 #[cfg(not(feature = "board-q1"))]
 pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::compact();
@@ -443,9 +462,9 @@ pub const FONTS: catcard_ui::scroll::Fonts<'static> = catcard_ui::scroll::Fonts 
 /// number of rows depends on the body face, which the words layout changes).
 #[cfg(not(feature = "board-q1"))]
 pub const SCREEN_H: usize = 64;
-/// As above, for the Q1.
+/// As above, for the Q1, where the status bar's rows are not a screen's to lay out in.
 #[cfg(feature = "board-q1")]
-pub const SCREEN_H: usize = 240;
+pub const SCREEN_H: usize = 240 - BAR_H;
 
 /// Panel width in pixels, for wrapping a document to the panel.
 #[cfg(not(feature = "board-q1"))]
@@ -547,8 +566,76 @@ static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// the firmware. The splash and About screens are the exception: they draw through the
 /// artwork's own palette, where text is white so "CatCard" and the version stand off the
 /// cat rather than disappearing into it.
-pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
-    draw_with_palette(panel, &catcard_ui::st7789::AMBER, f);
+pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
+    use core::sync::atomic::Ordering;
+    if DRAWING.swap(true, Ordering::SeqCst) {
+        crate::catlog!("display: nested draw refused");
+        return;
+    }
+    // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
+    // single-threaded and nothing draws from interrupt context.
+    let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    #[cfg(feature = "board-q1")]
+    {
+        // The screen paints into the rows below the bar, then the bar goes on top of its
+        // own. It is painted last because the widgets clear their canvas every frame, and
+        // it is painted every frame because that is what keeps a held modifier honest.
+        {
+            let mut surface = catcard_ui::canvas::Inset::new(&mut *screen, BAR_H);
+            f(&mut surface);
+        }
+        catcard_ui::statusbar::render(screen, FONTS.small, &crate::statusbar::status());
+    }
+    #[cfg(not(feature = "board-q1"))]
+    f(screen);
+    #[cfg(feature = "board-q1")]
+    BAR_SHOWN.store(true, Ordering::SeqCst);
+    show(panel, screen, &catcard_ui::st7789::AMBER);
+    DRAWING.store(false, Ordering::SeqCst);
+}
+
+/// The pause a screen takes between keypad polls while it waits for a key.
+///
+/// The status bar is refreshed here rather than only when a frame is drawn, because the
+/// modifiers decode to no key: holding SHIFT produces no event, so nothing would repaint,
+/// and an indicator that lit only once you had typed would be reporting what you did
+/// rather than what you are about to do. Nothing happens unless the state actually moved.
+pub fn idle(panel: &mut Panel) {
+    #[cfg(feature = "board-q1")]
+    crate::statusbar::poll(panel);
+    #[cfg(not(feature = "board-q1"))]
+    let _ = panel;
+    catcard_hal::dwt::delay_cycles(crate::usbtask::IDLE_PAUSE_CYCLES);
+}
+
+/// Whether the frame on the panel is one with a status bar.
+///
+/// The artwork screens draw through their own palette and full height, so the bar has no
+/// place on them -- and repainting it there would flush the whole frame in the wrong
+/// palette, recolouring the art.
+#[cfg(feature = "board-q1")]
+static BAR_SHOWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Repaint the status bar over the frame already on the panel.
+///
+/// For the idle poll: a modifier is held and released without ever producing a key event,
+/// so nothing would otherwise redraw, and an indicator that lit up only once you typed
+/// would be telling you what you already did rather than what you are about to do. The
+/// content of the frame is untouched, and the row cache means only the bar's rows reach
+/// the wire.
+#[cfg(feature = "board-q1")]
+pub fn refresh_bar(panel: &mut Panel) {
+    use core::sync::atomic::Ordering;
+    // Nothing to refresh over artwork, and painting here would re-flush the whole frame
+    // in this function's palette rather than the art's.
+    if !BAR_SHOWN.load(Ordering::SeqCst) || DRAWING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // SAFETY: as in `draw`.
+    let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    catcard_ui::statusbar::render(screen, FONTS.small, &crate::statusbar::status());
+    show(panel, screen, &catcard_ui::st7789::AMBER);
+    DRAWING.store(false, Ordering::SeqCst);
 }
 
 /// Draw a screen whose canvas means colours rather than greys.
@@ -556,12 +643,15 @@ pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Screen)) {
 /// The canvas holds an index per pixel; `palette` says what those indices look like. Art
 /// baked by `tools/artgen/svg2rs.py` carries its own palette, with 0 the background and 15
 /// white, so text and the progress bar keep drawing in white over it.
+#[cfg(feature = "board-q1")]
 pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(&mut Screen)) {
     use core::sync::atomic::Ordering;
     if DRAWING.swap(true, Ordering::SeqCst) {
         crate::catlog!("display: nested draw refused");
         return;
     }
+    // Full height, own palette, no bar -- and say so, so an idle refresh leaves it be.
+    BAR_SHOWN.store(false, Ordering::SeqCst);
     // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };

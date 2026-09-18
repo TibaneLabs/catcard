@@ -22,6 +22,9 @@ use catcard_board::BOARD;
 use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
+/// Battery sensing exists only on the Q1; the other boards are USB-powered.
+#[cfg(feature = "board-q1")]
+mod battery;
 mod boot;
 mod derive;
 mod display;
@@ -73,6 +76,10 @@ mod signmsg;
 mod signtx;
 mod splash;
 mod staging;
+/// The Q1's status bar has no counterpart on the mono boards, whose 64 rows cannot spare
+/// any and whose keypad has no modifiers to report.
+#[cfg(feature = "board-q1")]
+mod statusbar;
 mod trng;
 mod ui;
 mod usbtask;

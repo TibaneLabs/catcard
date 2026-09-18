@@ -278,3 +278,129 @@ mod tests {
         );
     }
 }
+
+/// A canvas with rows reserved at the top, hidden from whatever draws into it.
+///
+/// The Q1 keeps a status bar up there. Rather than teach every screen to avoid those
+/// rows -- which is one forgotten screen away from text under the bar -- the screen is
+/// handed this: it reports the height that is actually free, and shifts everything down
+/// by `top`. A widget that clears the canvas clears its own area and leaves the bar
+/// alone, which is the property that makes this safe to wrap around code that knows
+/// nothing about it.
+pub struct Inset<'a, C: Canvas + ?Sized> {
+    inner: &'a mut C,
+    top: usize,
+}
+
+impl<'a, C: Canvas + ?Sized> Inset<'a, C> {
+    /// Reserve `top` rows of `inner`.
+    pub fn new(inner: &'a mut C, top: usize) -> Self {
+        Self { inner, top }
+    }
+}
+
+impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
+    fn width(&self) -> usize {
+        self.inner.width()
+    }
+
+    fn height(&self) -> usize {
+        self.inner.height().saturating_sub(self.top)
+    }
+
+    fn put(&mut self, x: usize, y: usize, level: Level) {
+        // Clipped against the *inset* height, not the panel's: without this a widget
+        // drawing one row past its canvas would land on the far side of the offset and
+        // scribble on the bar.
+        if y < self.height() {
+            self.inner.put(x, y + self.top, level);
+        }
+    }
+
+    fn get(&self, x: usize, y: usize) -> Level {
+        if y < self.height() {
+            self.inner.get(x, y + self.top)
+        } else {
+            PAPER
+        }
+    }
+}
+
+#[cfg(test)]
+mod inset_tests {
+    use super::*;
+
+    /// A 4x4 canvas that records what it was told, for checking the translation.
+    struct Grid([[Level; 4]; 4]);
+
+    impl Canvas for Grid {
+        fn width(&self) -> usize {
+            4
+        }
+        fn height(&self) -> usize {
+            4
+        }
+        fn put(&mut self, x: usize, y: usize, level: Level) {
+            if x < 4 && y < 4 {
+                self.0[y][x] = level;
+            }
+        }
+        fn get(&self, x: usize, y: usize) -> Level {
+            if x < 4 && y < 4 { self.0[y][x] } else { PAPER }
+        }
+    }
+
+    #[test]
+    fn an_inset_canvas_is_shorter_and_starts_lower() {
+        let mut grid = Grid([[PAPER; 4]; 4]);
+        {
+            let mut view = Inset::new(&mut grid, 2);
+            assert_eq!(view.height(), 2, "the reserved rows are not free");
+            assert_eq!(view.width(), 4, "the width is untouched");
+            view.put(1, 0, INK);
+        }
+        assert_eq!(grid.0[0][1], PAPER, "row 0 belongs to the bar");
+        assert_eq!(grid.0[2][1], INK, "the write did not land below the inset");
+    }
+
+    /// Clearing is the case that matters: widgets do it every frame.
+    #[test]
+    fn clearing_an_inset_canvas_leaves_the_reserved_rows_alone() {
+        let mut grid = Grid([[INK; 4]; 4]);
+        {
+            let mut view = Inset::new(&mut grid, 1);
+            view.clear();
+        }
+        assert_eq!(grid.0[0], [INK; 4], "clear wiped the status bar");
+        for row in 1..4 {
+            assert_eq!(grid.0[row], [PAPER; 4], "row {row} was not cleared");
+        }
+    }
+
+    /// A widget that draws past the bottom must not wrap onto the bar.
+    #[test]
+    fn drawing_past_the_bottom_does_not_reach_the_reserved_rows() {
+        let mut grid = Grid([[PAPER; 4]; 4]);
+        {
+            let mut view = Inset::new(&mut grid, 2);
+            // Row 2 of a 2-row view is off the end; the panel row it would map to is 4.
+            view.put(0, 2, INK);
+            // And far past it, where the arithmetic could wrap into the bar.
+            view.put(0, usize::MAX, INK);
+        }
+        assert!(
+            grid.0.iter().all(|r| r.iter().all(|&p| p == PAPER)),
+            "an out-of-range write landed somewhere"
+        );
+    }
+
+    /// Reading back is translated the same way, or `blend` would mix with the wrong pixel.
+    #[test]
+    fn reads_are_translated_like_writes() {
+        let mut grid = Grid([[PAPER; 4]; 4]);
+        grid.0[3][2] = INK;
+        let view = Inset::new(&mut grid, 2);
+        assert_eq!(view.get(2, 1), INK);
+        assert_eq!(view.get(2, 3), PAPER, "a read past the end is not the bar");
+    }
+}

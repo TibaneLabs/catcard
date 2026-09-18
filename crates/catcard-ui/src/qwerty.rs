@@ -315,6 +315,14 @@ impl Keypad {
         m
     }
 
+    /// Whether CAPS is latched on.
+    ///
+    /// Unlike SHIFT and SYMBOL this is not a held key, so it cannot be read off the
+    /// matrix: SHIFT+SYMBOL together toggle it and it stays until toggled again.
+    pub fn caps(&self) -> bool {
+        self.caps
+    }
+
     pub fn held_count(&self) -> usize {
         self.down.iter().filter(|d| **d).count()
     }

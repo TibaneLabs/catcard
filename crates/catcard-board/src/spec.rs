@@ -206,6 +206,31 @@ pub struct UsbPins {
     pub dp: Pin,
 }
 
+/// How a board reports whether it is on battery or external power.
+///
+/// There is no VBUS-present GPIO: USB power just feeds the regulator. `NOT_BATTERY` is
+/// the only signal, and it is **active-low** -- high means external/USB, low means
+/// battery. Which pin carries it depends on the board revision, which is itself a strap
+/// read at runtime, so both are here and the firmware picks.
+///
+/// Source: power.md §"Battery & power pins", §"Power source: battery vs USB" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct BatterySense {
+    /// `NOT_BATTERY`, on rev D and later.
+    pub not_battery: Pin,
+    /// `NOT_BATTERY_OLD`, on earlier revisions.
+    pub not_battery_old: Pin,
+    /// `REV_D`: read with a pull-up, high on rev D and later, which picks between the two
+    /// pins above.
+    pub rev_d: Pin,
+    /// `VIN_SENSE`, the divided battery voltage (ADC1 IN6, with a divide-by-two).
+    ///
+    /// Only meaningful while on battery. Not read yet -- the status bar shows the source,
+    /// not the level -- but it belongs with the rest of the description rather than being
+    /// rediscovered later.
+    pub vin_sense: Pin,
+}
+
 /// Everything the firmware needs to know about the hardware it was built for.
 #[derive(Copy, Clone, Debug)]
 pub struct BoardSpec {
@@ -241,6 +266,12 @@ pub struct BoardSpec {
     /// they have no button and nothing to switch off. Source: power.md §"Battery & power
     /// pins" [C]
     pub pwr_btn: MaybePin,
+
+    /// Whether this board runs on a battery, and how to tell.
+    ///
+    /// `None` on the USB-powered boards, which are never on battery and have no pin for
+    /// it. Source: power.md §"Battery & power pins" [C]
+    pub battery: Option<BatterySense>,
 
     /// How much of SRAM1, from its base, the bootloader will accept a callgate buffer in.
     ///
@@ -424,6 +455,7 @@ pub const MK3: BoardSpec = BoardSpec {
     // mk3 has no USB activity line. Source: usb.md §"USB activity LED" [C]
     usb_active: None,
     pwr_btn: None,
+    battery: None,
     // **Not** armed at boot. With interrupts enabled at boot this path came up on an mk3
     // with a keypad that answered a few presses and then mostly stopped, and USB that did
     // not work right -- a unit that could no longer be re-flashed. Whatever the mk3 columns
@@ -525,6 +557,7 @@ pub const MK4: BoardSpec = BoardSpec {
     // `USB_ACTIVE=PC6`, mk4 rev B and later. Source: usb.md §"USB activity LED" [C]
     usb_active: Some(pc(6)),
     pwr_btn: None,
+    battery: None,
     // Armed at boot: watched working on this board (and on the mk5, which inherits this).
     // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
     gate_buf_len: 192 * 1024,
@@ -668,6 +701,15 @@ pub const Q1: BoardSpec = BoardSpec {
     usb_active: MK4.usb_active,
     // `PWR_BTN`: the only board that truly powers off. Source: power.md [C]
     pwr_btn: Some(pb(12)),
+    // The only board with a battery. `NOT_BATTERY` is active-low (high = external/USB),
+    // and `REV_D` picks which pin carries it.
+    // Source: power.md §"Battery & power pins" [C]
+    battery: Some(BatterySense {
+        not_battery: pe(7),
+        not_battery_old: pc(1),
+        rev_d: pc(3),
+        vin_sense: pa(1),
+    }),
     // Armed at boot: watched working on this board -- the latch fills on every press
     // and the boot survives with every line otherwise closed.
     // Proven by use: every gate call this firmware makes on a Q1 passes a buffer on the

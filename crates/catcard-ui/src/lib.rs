@@ -26,6 +26,7 @@ pub mod scroll;
 pub mod splash;
 pub mod ssd1306;
 pub mod st7789;
+pub mod statusbar;
 pub mod text;
 pub mod textentry;
 pub mod widgets;
