@@ -21,4 +21,4 @@ minizlib = { workspace = true }
 
 [dev-dependencies]
 # The compressor, to build test fixtures with the code that will decode them.
-minizlib = { version = "0.1.0", default-features = false, features = ["decompress", "compress", "fixed", "dynamic", "stored"] }
+minizlib = { version = "0.1.1", default-features = false, features = ["decompress", "compress", "fixed", "dynamic", "stored"] }

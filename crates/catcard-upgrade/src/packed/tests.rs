@@ -137,3 +137,108 @@ fn a_flipped_bit_is_caught_here_or_by_the_signature() {
     // is why the image's signature is checked over what was produced.
     println!("{wrong} of 200 flipped bits decoded to different data");
 }
+
+// --- the pushed side: a block taken in pieces, as the transport will take it ---
+
+/// A block inflates the same whether it arrives whole or 62 bytes at a time.
+///
+/// 62 is what a HID report carries, so this is the real shape of the input.
+#[test]
+fn a_block_arriving_in_usb_frames_inflates_the_same() {
+    let original = firmwareish(BLOCK);
+    let packed = squash(&original);
+
+    let mut out = vec![0u8; BLOCK];
+    let n = {
+        let mut decoder = Block::new(&mut out, BLOCK as u32);
+        for frame in packed.chunks(62) {
+            assert_eq!(decoder.write(frame).unwrap(), frame.len());
+        }
+        decoder.finish().unwrap()
+    };
+    assert_eq!(&out[..n], &original[..]);
+}
+
+/// A piece may split anywhere, including inside a symbol, and nothing is lost.
+#[test]
+fn a_block_split_at_every_offset_inflates_the_same() {
+    let original = firmwareish(3000);
+    let packed = squash(&original);
+
+    for cut in [1, 2, 3, 7, 13, packed.len() / 2, packed.len() - 1] {
+        let mut out = vec![0u8; BLOCK];
+        let n = {
+            let mut decoder = Block::new(&mut out, 3000);
+            decoder.write(&packed[..cut]).unwrap();
+            decoder.write(&packed[cut..]).unwrap();
+            decoder.finish().unwrap()
+        };
+        assert_eq!(&out[..n], &original[..], "split at {cut}");
+    }
+}
+
+/// Blocks delimit themselves, which is why the format carries no lengths.
+///
+/// The transport hands over whatever arrived; the decoder takes one block's worth and
+/// says how much of the piece it used, and the rest starts the next block. If this did
+/// not hold, the format would need a length prefix -- and a second opinion about where
+/// a block ends is how a decoder gets talked past the end of its buffer.
+#[test]
+fn concatenated_blocks_split_themselves_without_any_framing() {
+    let image = firmwareish(BLOCK * 2 + 517);
+    let mut wire = Vec::new();
+    for piece in image.chunks(BLOCK) {
+        wire.extend_from_slice(&squash(piece));
+    }
+
+    let mut rebuilt: Vec<u8> = Vec::new();
+    let mut left = &wire[..];
+    let mut out = vec![0u8; BLOCK];
+    while !left.is_empty() {
+        let remaining = (image.len() - rebuilt.len()) as u32;
+        let (n, used) = {
+            let mut decoder = Block::new(&mut out, remaining);
+            let mut used = 0;
+            // Feed it in frames; stop the moment it says the stream ended.
+            while used < left.len() && !decoder.is_done() {
+                let frame = &left[used..(used + 62).min(left.len())];
+                used += decoder.write(frame).unwrap();
+            }
+            (decoder.finish().unwrap(), used)
+        };
+        rebuilt.extend_from_slice(&out[..n]);
+        left = &left[used..];
+    }
+    assert_eq!(rebuilt, image);
+}
+
+/// An upload that stops part way is refused, not accepted as a shorter image.
+///
+/// The tail of the slab is whatever the last upload left there. Passing a cut-short
+/// block on as a complete one would stage that as firmware.
+#[test]
+fn a_block_that_stops_part_way_is_refused_at_the_end() {
+    let original = firmwareish(BLOCK);
+    let packed = squash(&original);
+
+    let mut out = vec![0u8; BLOCK];
+    let mut decoder = Block::new(&mut out, BLOCK as u32);
+    decoder.write(&packed[..packed.len() / 2]).unwrap();
+    assert!(!decoder.is_done());
+    assert_eq!(decoder.finish(), Err(Error::Corrupt));
+}
+
+/// The cap is enforced while the bytes arrive, not once they have been written.
+#[test]
+fn a_pushed_block_cannot_overrun_the_image_either() {
+    let original = firmwareish(BLOCK);
+    let packed = squash(&original);
+
+    let mut out = vec![0u8; BLOCK];
+    let mut decoder = Block::new(&mut out, 100);
+    let refused = packed
+        .chunks(62)
+        .find_map(|frame| decoder.write(frame).err())
+        .expect("a block producing 8 KiB into a 100-byte cap must be refused");
+    assert_eq!(refused, Error::TooLong);
+}

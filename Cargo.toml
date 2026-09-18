@@ -68,7 +68,7 @@ catcard-qr = { path = "crates/catcard-qr", default-features = false }
 # linking a compressor into firmware would be paying flash for a direction that is
 # never travelled. The tests pull in `compress` as a dev-dependency to build their own
 # fixtures with the same code that will decode them.
-minizlib = { version = "0.1.0", default-features = false, features = ["decompress", "fixed", "dynamic", "stored"] }
+minizlib = { version = "0.1.1", default-features = false, features = ["decompress", "fixed", "dynamic", "stored"] }
 catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }

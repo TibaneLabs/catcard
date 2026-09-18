@@ -6,52 +6,50 @@
 //!
 //! # Why blocks, and not one deflate stream
 //!
-//! A single stream would compress better -- matches could reach back across the whole
-//! image rather than stopping at a boundary. It is the wrong shape for this transport
-//! anyway.
+//! A single stream compresses better, and the gap is small enough to measure rather
+//! than argue about: a real 353 KiB image goes to 65.8% in 8 KiB blocks against 63.7%
+//! as one stream with deflate's full 32 KiB window. Two points.
 //!
-//! Decompression **pulls**: `minizlib` asks its input for the next byte. USB **pushes**:
-//! frames arrive and the firmware is handed them. Reconciling those means one side
-//! blocks, and the side that would have to is the USB task, sitting inside an inflate
-//! call pumping its own endpoint to feed itself. That is a re-entrancy hazard in the one
+//! The reason is not that decompression cannot be fed a frame at a time -- it can, and
+//! this module does exactly that. It is that **a decompressor owns its output and never
+//! gives it back.** A single stream's decompressor would have to live across USB frames,
+//! in the same session state that owns the staging area, writing into the staging area
+//! through a sink it holds -- a value borrowing the thing stored beside it. That shape
+//! is a self-reference, and the ways out of it are a global or a raw pointer, in the one
 //! place on the device where being wrong means writing the wrong firmware.
 //!
-//! Independent blocks turn the problem around: a block is buffered until it is whole,
-//! and then inflated in one call from a slice that is entirely in hand. Nothing blocks,
-//! nothing re-enters, and the memory is two fixed buffers rather than a 32 KiB history
-//! window. The ratio lost at the boundaries buys all of that.
+//! Independent blocks dissolve it. A block's output is bounded by construction, so it
+//! can be a plain [`Buffer`] over a fixed slab: the decoder borrows the slab, the stream
+//! ends, and the caller reads the bytes straight out of it. Nothing is self-referential,
+//! nothing is global, and the memory is one slab rather than a 32 KiB history window.
+//! Two points of ratio is what that costs.
 //!
 //! # The format
 //!
 //! ```text
-//! block := <compressed length: u16 little-endian> <deflate data>
+//! image := <deflate stream> ...
 //! ```
 //!
-//! Each block inflates to exactly [`BLOCK`] bytes, except the last, which inflates to
-//! whatever is left of the image. Blocks appear in image order and the image's length is
-//! already known from the offer, so nothing else needs framing: the decoder knows when
-//! it is done because it has produced the bytes it was told to expect.
+//! Each stream inflates to exactly [`BLOCK`] bytes, except the last, which inflates to
+//! whatever is left of the image. Nothing frames them: deflate marks its own final block,
+//! so [`Block::write`] reports what it consumed and leaves the rest for the next one, and
+//! the image's length -- already known from the offer -- says when the last one has been
+//! seen. A length prefix would only be a second opinion about a boundary the data already
+//! carries, and two sources of truth about a length is how a decoder gets talked past the
+//! end of its buffer.
 //!
 //! A block that inflates to more than expected is refused rather than truncated. The
 //! length is what the signature was computed over, and a decompressor that can be talked
 //! into writing past its buffer is worth more to an attacker than any firmware.
 
-use minizlib::{Buffer, inflate};
+use minizlib::{Buffer, Decompressor, Raw};
 
 /// Bytes each block holds once inflated.
 ///
-/// Sets both buffers: one for the compressed block on its way in, one for the inflated
-/// bytes on their way out. Bigger compresses better and costs SRAM in a device that has
-/// other uses for it; 8 KiB is most of the ratio for a fraction of the window a single
-/// stream would need.
+/// This is the output slab, and the window a block's matches may reach back into. Bigger
+/// compresses better and costs SRAM in a device that has other uses for it; 8 KiB is most
+/// of the ratio a single stream would get for a quarter of the window it would need.
 pub const BLOCK: usize = 8 * 1024;
-
-/// The most a single compressed block may be.
-///
-/// Deflate can *grow* incompressible data slightly -- stored blocks carry five bytes of
-/// header each -- so this is the block plus room for that, and a host that sends more
-/// than this is not speaking the format.
-pub const MAX_COMPRESSED: usize = BLOCK + 256;
 
 /// Why a compressed upload could not be unpacked.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -65,20 +63,69 @@ pub enum Error {
     Short { got: u32, want: u32 },
 }
 
-/// Inflate one block into `out`, returning how many bytes it produced.
+impl From<minizlib::Error> for Error {
+    fn from(error: minizlib::Error) -> Self {
+        match error {
+            // The slab filling up is the interesting one: it means the block wanted to
+            // write past what the image can hold, which is the case worth its own name.
+            minizlib::Error::OutputFull => Error::TooLong,
+            // Everything else is a stream that does not decode, including one that
+            // stopped early -- an upload cut short is corrupt, not a shorter image.
+            _ => Error::Corrupt,
+        }
+    }
+}
+
+/// One block of the image, inflated into a caller-supplied slab as its bytes arrive.
 ///
-/// `remaining` is how much of the image is still to come, and caps what this block may
-/// produce: the last block is short, and any block claiming more than the image has left
-/// is refused.
+/// The compressed side comes in pieces of any size, so a USB frame can be handed over
+/// the moment it lands. The inflated side lands in the slab, and the caller reads it
+/// once [`finish`](Self::finish) has said how much there is.
+pub struct Block<'o> {
+    decoder: Decompressor<Buffer<'o>, Raw>,
+}
+
+impl<'o> Block<'o> {
+    /// Starts a block writing into `out`, which it may fill to at most `remaining`.
+    ///
+    /// `remaining` is how much of the image is still to come. It caps the block, so the
+    /// last one stops at the image's end instead of running on into the slab.
+    pub fn new(out: &'o mut [u8], remaining: u32) -> Self {
+        let room = (remaining as usize).min(out.len());
+        let (room, _) = out.split_at_mut(room);
+        Block {
+            decoder: Decompressor::new(Buffer::new(room)),
+        }
+    }
+
+    /// Takes the next piece of compressed data, returning how much of it this block
+    /// used. Anything left belongs to the next block.
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, Error> {
+        Ok(self.decoder.write(data)?)
+    }
+
+    /// Whether this block's stream has ended and it wants no more input.
+    pub fn is_done(&self) -> bool {
+        self.decoder.is_done()
+    }
+
+    /// Ends the block, returning how many bytes of the slab it filled.
+    ///
+    /// Fails if the stream did not end: a block cut short is refused here rather than
+    /// passed on as a shorter one, which would leave the image's tail as whatever the
+    /// slab happened to hold.
+    pub fn finish(mut self) -> Result<usize, Error> {
+        Ok(self.decoder.finish()? as usize)
+    }
+}
+
+/// Inflate one whole block into `out`, returning how many bytes it produced.
+///
+/// For a block that is already in hand. A caller taking it in pieces drives [`Block`].
 pub fn block(compressed: &[u8], out: &mut [u8], remaining: u32) -> Result<usize, Error> {
-    let room = (remaining as usize).min(out.len());
-    let produced = inflate(compressed, Buffer::new(&mut out[..room])).map_err(|e| match e {
-        // The buffer filling up is the interesting one: it means the block wanted to
-        // write past what the image can hold, which is the case worth its own name.
-        minizlib::Error::OutputFull => Error::TooLong,
-        _ => Error::Corrupt,
-    })?;
-    Ok(produced as usize)
+    let mut decoder = Block::new(out, remaining);
+    decoder.write(compressed)?;
+    decoder.finish()
 }
 
 #[cfg(test)]

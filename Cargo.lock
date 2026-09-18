@@ -460,9 +460,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "minizlib"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4f6c2bede13f1c8f2e55a5912137c9347ec709792b7dbd574e55dcb28a1d6d"
+checksum = "8b434635b7e6cad59a356a587405b3592e6bbac0fd5a0df6e8d13ec0e56fb18f"
 
 [[package]]
 name = "nb"
