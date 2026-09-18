@@ -103,21 +103,82 @@ fn an_impossible_length_is_refused_before_it_is_believed() {
     );
 }
 
-/// The acknowledgement is a reply-fid frame saying OKAY, and nothing else is.
+/// The acknowledgement is eight bytes, which is what says its body is not "OKAY".
+///
+/// The reference names the frame `OKAY` and writes it `wrap(0x9000, fid=1)` with a length
+/// of eight. Eight bytes is six of framing and **two** of body, so the name is a label
+/// and the payload is `0x90 0x00`. Reading the name as ASCII gives a ten-byte frame that
+/// matches nothing the module ever sends -- every command then looks unanswered, and a
+/// scanner sitting there replying looks absent. This test is the length, because the
+/// length is the part that cannot be talked out of.
 #[test]
-fn only_a_reply_saying_okay_is_an_acknowledgement() {
+fn the_acknowledgement_is_the_eight_byte_frame_the_reference_describes() {
     let mut out = [0u8; 32];
-    let ack = wrap(FID_REPLY, b"OKAY", &mut out).unwrap().to_vec();
+    let ack = wrap(FID_REPLY, &ACK, &mut out).unwrap().to_vec();
+    assert_eq!(ack.len(), 8, "the reference calls this an 8-byte frame");
     assert!(is_ack(&unwrap(&ack).unwrap()));
 
-    // The same body from the wrong direction is our own command echoed, not an ack.
+    // The name, taken literally, is a different length and is not an acknowledgement.
     let mut out = [0u8; 32];
-    let echoed = wrap(FID_COMMAND, b"OKAY", &mut out).unwrap().to_vec();
-    assert!(!is_ack(&unwrap(&echoed).unwrap()));
+    let named = wrap(FID_REPLY, b"OKAY", &mut out).unwrap().to_vec();
+    assert_eq!(named.len(), 10);
+    assert!(!is_ack(&unwrap(&named).unwrap()));
 
+    // And our own command echoed back is not one either, whatever its body.
     let mut out = [0u8; 32];
-    let other = wrap(FID_REPLY, b"NOPE", &mut out).unwrap().to_vec();
-    assert!(!is_ack(&unwrap(&other).unwrap()));
+    let echoed = wrap(FID_COMMAND, &ACK, &mut out).unwrap().to_vec();
+    assert!(!is_ack(&unwrap(&echoed).unwrap()));
+}
+
+/// The version query is answered with a version, not an acknowledgement.
+///
+/// It is the presence check, so treating "not an ack" as "nothing there" is how a working
+/// module is declared missing.
+#[test]
+fn a_version_reply_is_not_an_acknowledgement_and_should_not_need_to_be() {
+    let mut out = [0u8; 32];
+    let reply = wrap(FID_REPLY, b"V2.3.0.7", &mut out).unwrap().to_vec();
+    let f = unwrap(&reply).unwrap();
+    assert!(!is_ack(&f), "a version is not an ack");
+    assert!(is_version(f.body), "and it must still count as an answer");
+    assert!(!is_version(&ACK));
+    assert!(!is_version(b""));
+}
+
+/// The bare acknowledgement lands inside the barcode stream and has to come out.
+///
+/// A torch command sent while scanning is answered unframed, and the two bytes appear
+/// amongst the decoded text. Left in, they are spliced into whatever was scanned.
+#[test]
+fn an_inline_acknowledgement_is_taken_out_of_a_scanned_line() {
+    let mut line = *b"bc1q\x90\x00addr";
+    let n = strip_inline_ack(&mut line);
+    assert_eq!(&line[..n], b"bc1qaddr");
+
+    // Several, and at either end.
+    let mut line = [0x90, 0x00, b'a', 0x90, 0x00, b'b', 0x90, 0x00];
+    let n = strip_inline_ack(&mut line);
+    assert_eq!(&line[..n], b"ab");
+
+    // A line with none is untouched.
+    let mut line = *b"plain text";
+    let n = strip_inline_ack(&mut line);
+    assert_eq!(&line[..n], b"plain text");
+}
+
+/// Setup ends by locking the setting codes, and that has to be last.
+///
+/// `S_CMD_0000` is what stops a configuration barcode reprogramming the module. Locking
+/// before the settings are in would refuse them; not locking at all leaves the scanner
+/// reprogrammable by anything it is pointed at.
+#[test]
+fn the_config_sequence_locks_the_module_last() {
+    assert_eq!(*cmd::CONFIG.last().unwrap(), cmd::SAVE);
+    assert_eq!(cmd::CONFIG[0], cmd::FACTORY_RESET);
+    assert!(
+        cmd::CONFIG.contains(&cmd::APPEND_CRLF),
+        "without CRLF the reader never sees the end of a code"
+    );
 }
 
 /// Two frames back to back are read one at a time, by the length each declares.

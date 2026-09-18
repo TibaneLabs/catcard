@@ -136,12 +136,54 @@ pub fn unwrap(bytes: &[u8]) -> Result<Frame<'_>, Error> {
     })
 }
 
-/// The module's positive acknowledgement: a reply frame whose body is `OKAY`.
+/// The module's acknowledgement, as bytes.
+///
+/// The reference calls this `OKAY`, which is a **name and not the payload**: the frame it
+/// describes, `wrap(0x9000, fid=1)`, is eight bytes long, and eight bytes only leaves room
+/// for a two-byte body. Reading the name as ASCII gives a ten-byte frame that never
+/// matches anything the module sends, so every command reads as unanswered and the probe
+/// never finds a scanner that is sitting right there answering.
+pub const ACK: [u8; 2] = [0x90, 0x00];
+
+/// The module's positive acknowledgement.
 ///
 /// **Silence is the negative.** There is no NACK frame, so a caller waits for this and
 /// times out; treating "nothing yet" as "no" is how a slow module reads as a broken one.
 pub fn is_ack(frame: &Frame<'_>) -> bool {
-    frame.fid == FID_REPLY && frame.body == b"OKAY"
+    frame.fid == FID_REPLY && frame.body == ACK
+}
+
+/// Whether a reply looks like the version string `T_OUT_CVER` asks for, e.g. `V2.3.0.7`.
+///
+/// The version query is the *presence* check, and it does not answer with an
+/// acknowledgement -- it answers with the version. Waiting for an ack here is waiting for
+/// something the module will never send.
+pub fn is_version(body: &[u8]) -> bool {
+    matches!(body.first(), Some(b'V')) && body.len() >= 2
+}
+
+/// Remove the bare acknowledgement wherever it appears inside `line`, returning the new
+/// length.
+///
+/// Commands sent unframed while a scan is running -- the torch, notably -- are answered
+/// with a bare [`ACK`] that lands **in the middle of the barcode stream**. A reader that
+/// does not take it out hands back a QR's text with two bytes spliced into it, which is
+/// an address that does not parse or, worse, one that does.
+///
+/// Safe to do blindly: `0x90 0x00` is not a sequence a text QR contains.
+pub fn strip_inline_ack(line: &mut [u8]) -> usize {
+    let mut out = 0;
+    let mut i = 0;
+    while i < line.len() {
+        if line[i..].starts_with(&ACK) {
+            i += ACK.len();
+            continue;
+        }
+        line[out] = line[i];
+        out += 1;
+        i += 1;
+    }
+    out
 }
 
 /// Commands, as the strings that go inside a frame.
@@ -168,6 +210,41 @@ pub mod cmd {
     pub const TORCH_OFF: &[u8] = b"S_CMD_03L0";
     pub const TORCH_ON: &[u8] = b"S_CMD_03L1";
     pub const TORCH_AUTO: &[u8] = b"S_CMD_03L2";
+
+    /// Sleep, which drops the module's current to about nothing.
+    ///
+    /// Sent **bare, not framed**, and sent *twice* about 150 ms apart: the module has two
+    /// sleep layers and one command only reaches the first.
+    pub const SLEEP: &[u8] = b"SRDF0050";
+    /// Wake, also bare. The first send is swallowed while the module is still coming up,
+    /// so it is retried until it answers.
+    pub const WAKE: &[u8] = b"SRDF0051";
+
+    /// The setup sequence, in order, every one framed.
+    ///
+    /// Not a subset: the trigger mode, the sleep behaviour and the continuous-read
+    /// timings all have to be set, or the module scans on rules nobody chose. The last
+    /// entry locks the setting codes, so that pointing the scanner at a configuration
+    /// barcode cannot reprogram it -- which is a security property and belongs at the
+    /// end, after everything it is protecting.
+    ///
+    /// Source: hw-reference/input.md §"Full config sequence" [C]
+    pub const CONFIG: [&[u8]; 14] = [
+        FACTORY_RESET,
+        b"S_CMD_MTRS5000", // read timeout, 5000 ms
+        b"S_CMD_MT11",     // trigger on an edge, not a level
+        b"S_CMD_MT30",     // no delay before the same code may be read again
+        b"S_CMD_MT20",     // sleep by itself when idle
+        b"S_CMD_MTRF500",  // ... after 500 ms
+        APPEND_CRLF,       // required: the driver reads by line
+        TORCH_OFF,
+        STATUS_LED,
+        b"S_CMD_MARS0000", // continuous mode: single-read duration 0 ms
+        b"S_CMD_MARR000",  // continuous mode: interval between reads 0 ms
+        b"S_CMD_MA31",     // apply a delay before re-reading the same code
+        b"S_CMD_MARI0050", // ... of 50 ms
+        SAVE,              // lock the setting codes; must be last
+    ];
 }
 
 /// What the module says when it read a code it cannot represent as text.

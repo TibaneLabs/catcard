@@ -33,6 +33,12 @@ const RECOVERY_MS: u32 = 2_000;
 /// Attempts at finding the baud rate. Stock uses five; past that the module is not
 /// there, and trying forever would be a screen that never comes back.
 const PROBE_TRIES: usize = 5;
+/// Attempts at the configuration sequence, as stock bounds it.
+const SETUP_TRIES: usize = 3;
+/// Attempts at waking: the first is always lost, so one try is no try at all.
+const WAKE_TRIES: usize = 5;
+/// Between the two sleep commands, for the module's second sleep layer.
+const SLEEP_GAP_MS: u32 = 150;
 
 /// The longest decoded QR this will hand back.
 ///
@@ -57,22 +63,50 @@ pub enum Fault {
     TooLong,
 }
 
-/// Send one framed command and wait for its acknowledgement.
+/// Send one framed command and return whatever frame comes back.
 ///
 /// **Silence is the negative.** There is no NACK on this wire, so not hearing back is
 /// the failure, and the budget is what turns that into an answer.
-fn command(port: &mut Usart, body: &[u8]) -> bool {
+fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
     let mut out = [0u8; 64];
-    let Ok(frame) = wrap(catcard_qr::FID_COMMAND, body, &mut out) else {
+    let frame = wrap(catcard_qr::FID_COMMAND, body, &mut out).ok()?;
+    port.flush_input();
+    port.write(frame, BYTE_BUDGET).ok()?;
+    let n = port.read(reply, BYTE_BUDGET);
+    (n > 0).then_some(n)
+}
+
+/// Send one framed command and require its acknowledgement.
+fn command(port: &mut Usart, body: &[u8]) -> bool {
+    let mut reply = [0u8; 64];
+    let Some(n) = ask(port, body, &mut reply) else {
         return false;
     };
-    port.flush_input();
-    if port.write(frame, BYTE_BUDGET).is_err() {
-        return false;
-    }
-    let mut reply = [0u8; 32];
-    let n = port.read(&mut reply, BYTE_BUDGET);
     matches!(catcard_qr::unwrap(&reply[..n]), Ok(f) if catcard_qr::is_ack(&f))
+}
+
+/// Send a command the module expects **unframed**: sleep and wake.
+fn bare(port: &mut Usart, body: &[u8]) {
+    let _ = port.write(body, BYTE_BUDGET);
+}
+
+/// Wake the module, retrying: the first send lands while it is still down and is lost.
+fn wake(port: &mut Usart) {
+    for _ in 0..WAKE_TRIES {
+        bare(port, cmd::WAKE);
+        let mut reply = [0u8; 16];
+        if port.read(&mut reply, BYTE_BUDGET / 16) > 0 {
+            return;
+        }
+    }
+}
+
+/// Put it back to sleep. Twice, because the module has two sleep layers and one command
+/// only reaches the first.
+fn sleep(port: &mut Usart) {
+    bare(port, cmd::SLEEP);
+    catcard_hal::dwt::delay_cycles(ms_cycles(SLEEP_GAP_MS));
+    bare(port, cmd::SLEEP);
 }
 
 /// Find the rate the module is listening at, and lock the link to 57600.
@@ -80,7 +114,14 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
     for _ in 0..PROBE_TRIES {
         for rate in catcard_qr::BAUDS {
             port.set_baud(rate);
-            if command(port, cmd::VERSION) {
+            // The version query answers with a *version*, not an acknowledgement, so
+            // this is the one command whose reply is read for what it is. Requiring an
+            // ack here declares a module that is answering to be absent.
+            let mut reply = [0u8; 64];
+            let answered = ask(port, cmd::VERSION, &mut reply).is_some_and(|n| {
+                matches!(catcard_qr::unwrap(&reply[..n]), Ok(f) if catcard_qr::is_version(f.body))
+            });
+            if answered {
                 // Found it. Ask for the fast rate and follow it there; if the module
                 // does not take the change, carry on at the rate that answered rather
                 // than moving to one nothing is listening at.
@@ -94,21 +135,20 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
     Err(Fault::NotFound)
 }
 
-/// Put the module into a known state, then ask it to scan.
+/// Put the module into a known state.
+///
+/// The whole sequence, in order: the trigger mode, the sleep behaviour and the
+/// continuous-read timings all have to be set or the module scans on rules nobody chose,
+/// and the last command locks the setting codes so a configuration barcode cannot
+/// reprogram it. Retried as a whole, as stock retries it -- a step that times out leaves
+/// the module half-configured, and the cure is to start again rather than to carry on.
 fn setup(port: &mut Usart) -> Result<(), Fault> {
-    // Factory reset first, so this does not inherit whatever it was left configured as.
-    // CRLF is what marks the end of a decoded code, so it is the one that must land.
-    for body in [
-        cmd::FACTORY_RESET,
-        cmd::APPEND_CRLF,
-        cmd::STATUS_LED,
-        cmd::SAVE,
-    ] {
-        if !command(port, body) {
-            return Err(Fault::SetupRefused);
+    for _ in 0..SETUP_TRIES {
+        if cmd::CONFIG.iter().all(|body| command(port, body)) {
+            return Ok(());
         }
     }
-    Ok(())
+    Err(Fault::SetupRefused)
 }
 
 /// Read one decoded code, or stop when the owner cancels.
@@ -164,6 +204,7 @@ fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
         Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
     };
 
+    wake(&mut port);
     find(&mut port)?;
     setup(&mut port)?;
 
@@ -176,6 +217,7 @@ fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
     // does not leave the module running and the lamp on.
     let _ = command(&mut port, cmd::SCAN_STOP);
     let _ = command(&mut port, cmd::TORCH_OFF);
+    sleep(&mut port);
     read
 }
 
