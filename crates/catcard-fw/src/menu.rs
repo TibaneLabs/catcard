@@ -347,6 +347,9 @@ pub fn run(session: Session<'_>) -> ! {
     } = session;
     let mut screen = Screen::Main;
     let mut showing_offer = false;
+    // A transfer in flight owns the screen: last percentage drawn, so it repaints only
+    // when it moves.
+    let mut receiving: Option<u8> = None;
     let mut redraw = true;
     let mut v = View {
         report,
@@ -381,7 +384,7 @@ pub fn run(session: Session<'_>) -> ! {
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
     loop {
-        if redraw && !showing_offer {
+        if redraw && !showing_offer && receiving.is_none() {
             // On the PRNG-status screen, draw a fresh 32-bit sample first so the counters
             // snapshotted just below include that generate call. Done only here, so no
             // other screen advances the DRBG just by being shown.
@@ -438,6 +441,36 @@ pub fn run(session: Session<'_>) -> ! {
         // key has been read, the offer is already pending, and this check routes the key
         // to it. Single-threaded it is equally correct, since pump, read and check still
         // happen in order.
+        // An image arriving over USB takes the screen for as long as it is arriving: it
+        // says what is happening, how far along it is, and that cancel stops it. Stock does
+        // the same, and the alternative -- a device that looks idle while a host writes a
+        // megabyte into it -- tells its owner nothing.
+        if let Some((done, total)) = usbtask::receiving() {
+            let pct = if total == 0 {
+                0
+            } else {
+                ((done as u64 * 100) / total as u64) as u8
+            };
+            if receiving != Some(pct) {
+                if receiving.is_none() && screen == Screen::Colours {
+                    display::wipe(ui.panel);
+                }
+                receiving = Some(pct);
+                let mut note = Line::new();
+                let _ = write!(note, "{} of {} KB", done / 1024, total / 1024);
+                let mut hint = Line::new();
+                let _ = write!(hint, "{} to reject", display::CANCEL_KEY);
+                display::draw(ui.panel, |c| {
+                    let lines = [note.clone(), hint.clone()];
+                    catcard_ui::widgets::info(c, &display::LAYOUT, "Receiving", &lines);
+                    catcard_ui::splash::draw_progress(c, pct);
+                });
+            }
+        } else if receiving.is_some() {
+            receiving = None;
+            redraw = true;
+        }
+
         if let Some(a) = usbtask::pending() {
             if !showing_offer {
                 if screen == Screen::Colours {
@@ -452,6 +485,20 @@ pub fn run(session: Session<'_>) -> ! {
         }
 
         for key in keys.iter() {
+            // While an image is arriving, the only question on the screen is whether to
+            // let it finish. Cancel stops it and releases the staging medium; everything
+            // else is swallowed, so a keypress cannot reach the menu underneath a screen
+            // that is not showing it.
+            if receiving.is_some() {
+                if matches!(key, Key::Cancel) {
+                    usbtask::abandon();
+                    receiving = None;
+                    redraw = true;
+                    message(ui.panel, "Rejected", "the transfer was", "stopped");
+                    wait_for_any_key(&mut ui);
+                }
+                continue;
+            }
             if showing_offer {
                 match key {
                     Key::Confirm => match usbtask::approve() {

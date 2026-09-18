@@ -251,6 +251,31 @@ impl UsbTask {
     }
 
     /// An upgrade the user should be asked about, if there is one.
+    /// How far a transfer in flight has got: `(received, total)`.
+    ///
+    /// `None` when nothing is arriving. The screen uses this to say so and to offer a way
+    /// out: a megabyte over this link is not instant, and a device that looks asleep while
+    /// a host writes to it tells its owner nothing about what is happening.
+    pub fn receiving(&self) -> Option<(u32, u32)> {
+        match &self.stage {
+            Stage::Receiving(staged) => Some((staged.received(), staged.length())),
+            _ => None,
+        }
+    }
+
+    /// Abandon a transfer in flight, releasing the staging medium.
+    ///
+    /// The host is not told: it is mid-message and nothing is listening for a reply. It
+    /// finds out when its next frame is refused, which is the honest order -- the owner
+    /// said no before the host finished asking.
+    pub fn abandon(&mut self) {
+        if matches!(self.stage, Stage::Receiving(_)) {
+            crate::catlog!("upgrade: transfer cancelled at the screen");
+            self.stage = Stage::Idle;
+            self.frames.reset();
+        }
+    }
+
     pub fn pending(&self) -> Option<&Approval> {
         match &self.stage {
             Stage::Offered { approval, .. } => Some(approval),
@@ -1410,6 +1435,16 @@ pub fn approve() -> Result<catcard_upgrade::Region, Reject> {
 }
 
 /// Decline it, leaving nothing staged.
+/// How far a transfer in flight has got, for the screen that shows it.
+pub fn receiving() -> Option<(u32, u32)> {
+    with_task(|t| t.receiving()).flatten()
+}
+
+/// Abandon a transfer in flight, from the screen showing it.
+pub fn abandon() {
+    with_task(|t| t.abandon());
+}
+
 pub fn decline() {
     with_task(|t| t.decline());
 }
