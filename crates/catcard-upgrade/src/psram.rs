@@ -171,7 +171,7 @@ impl PsramArea {
 /// measurements cannot justify.
 pub const RECOVERY_NOPS: u32 = 1;
 
-/// Words this may touch before CE# must be allowed to rise: **32**, or 128 bytes.
+/// Words this may touch before CE# must be allowed to rise: **16**, or 64 bytes.
 ///
 /// **The part cannot be held selected for longer than 8 us** -- `tCEM` in Table 10-5 of the
 /// ESP-PSRAM64H datasheet (`hw-reference/datasheets/`) -- and §5.5 says why: *"CE# must be
@@ -187,14 +187,22 @@ pub const RECOVERY_NOPS: u32 = 1;
 /// | | clocks | at 60 MHz |
 /// |---|---|---|
 /// | command + address (+6 dummy cycles on a read) | ~14 | 0.23 us |
-/// | 128 bytes of data, half a byte per clock | 256 | 4.27 us |
-/// | **total** | **~270** | **~4.5 us** |
+/// | 64 bytes of data, half a byte per clock | 128 | 2.13 us |
+/// | **total** | **~142** | **~2.4 us** |
 ///
-/// Against 8 us that leaves about 45%, which is margin enough for a figure quoted as a
-/// maximum with no conditions attached. The budget is a *time*, so what would invalidate
-/// this is a slower bus: at 30 MHz these same 128 bytes would take 9 us and be over it.
-/// Anyone changing the prescaler has to revisit this number.
-pub const WORDS_PER_BURST: u32 = 32;
+/// Against 8 us that is 70% spare. It was 32 words -- ~4.5 us, 45% spare -- which the
+/// arithmetic says is fine and which staged an image over USB wrongly anyway, rarely and
+/// at random. Nothing here explains that, so the honest reading is that the budget is
+/// not the whole story: the figure is a maximum quoted with no conditions, the bus
+/// timing is inferred rather than measured on this board, and "45% spare" is spare
+/// against a number we do not fully trust. Halving it costs one extra gap per 64 bytes
+/// -- about 8 ms over a megabyte instead of 4 -- which buys nothing back in a place
+/// anyone can feel.
+///
+/// The budget is a *time*, so what would invalidate this is a slower bus: at 30 MHz
+/// these same 64 bytes take 4.5 us and the margin is back to where it was. Anyone
+/// changing the prescaler has to revisit this number.
+pub const WORDS_PER_BURST: u32 = 16;
 
 /// Cycles to leave the bus idle so CE# actually rises between bursts.
 ///

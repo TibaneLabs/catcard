@@ -151,6 +151,21 @@ impl Usart {
         }
     }
 
+    /// Read and discard until the line goes quiet, or until `limit` bytes have gone by.
+    ///
+    /// [`flush_input`](Self::flush_input) empties a one-deep receiver; this empties a
+    /// *stream*. Stopping a running scan means talking over whatever the module is still
+    /// sending, and a reply read out of the middle of that is barcode text, not an
+    /// answer. Bounded twice over -- a short budget per byte and a ceiling on the count
+    /// -- because a module that never stops talking must not hold the CPU.
+    pub fn drain(&mut self, limit: usize, budget: u32) {
+        for _ in 0..limit {
+            if self.read_byte(budget).is_err() {
+                return;
+            }
+        }
+    }
+
     /// Send one byte, waiting for room in the transmit register.
     pub fn write_byte(&mut self, b: u8, budget: u32) -> Result<(), Error> {
         for _ in 0..budget {

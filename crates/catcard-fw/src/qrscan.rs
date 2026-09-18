@@ -39,6 +39,12 @@ const SETUP_TRIES: usize = 3;
 const WAKE_TRIES: usize = 5;
 /// Between the two sleep commands, for the module's second sleep layer.
 const SLEEP_GAP_MS: u32 = 150;
+/// Attempts at stopping. Stock uses three, because a fresh read can land in the gap
+/// between deciding to stop and saying so.
+const STOP_TRIES: usize = 3;
+/// Bytes the drain will throw away before it gives up on the line going quiet. A
+/// version-40 code is 4350, so this is a code and a bit.
+const DRAIN_LIMIT: usize = 5_000;
 
 /// The longest decoded QR this will hand back.
 ///
@@ -76,6 +82,52 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
     (n > 0).then_some(n)
 }
 
+/// Stop scanning and put the module away.
+///
+/// Retried, because the module may be part-way through a read when the stop arrives and
+/// answers with the code rather than with an acknowledgement. Each attempt clears the
+/// stream first, so the reply being read is a reply and not the tail of a barcode.
+///
+/// If it will not answer at all, fall back to saying it blindly at both rates: a scanner
+/// left running is a lamp that stays on and a module that never sleeps, and by then the
+/// screen has gone and nobody is coming back to fix it.
+///
+/// Source: hw-reference/input.md §"Scan lifecycle" [C]
+fn stop(port: &mut Usart) {
+    for _ in 0..STOP_TRIES {
+        port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
+        if command(port, cmd::SCAN_STOP) {
+            let _ = command(port, cmd::TORCH_OFF);
+            sleep(port);
+            return;
+        }
+    }
+    crate::catlog!("qr: stop was not acknowledged; shutting the module down blind");
+    blind_shutdown(port);
+    sleep(port);
+}
+
+/// Tell it to stop at every rate it might be listening at, without waiting to be
+/// answered.
+///
+/// Used both as the last resort when a stop is not acknowledged, and as the *first*
+/// thing a scan does -- a module left running from a previous session cannot be probed
+/// until it stops talking, and it cannot be asked politely because its rate is the very
+/// thing that is unknown.
+fn blind_shutdown(port: &mut Usart) {
+    for rate in catcard_qr::BAUDS {
+        port.set_baud(rate);
+        let mut out = [0u8; 64];
+        for body in [cmd::SCAN_STOP, cmd::TORCH_OFF] {
+            if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, body, &mut out) {
+                let _ = port.write(frame, BYTE_BUDGET);
+            }
+        }
+        // Whatever it was mid-way through saying is not an answer to anything.
+        port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
+    }
+}
+
 /// Send one framed command and require its acknowledgement.
 fn command(port: &mut Usart, body: &[u8]) -> bool {
     let mut reply = [0u8; 64];
@@ -110,7 +162,13 @@ fn sleep(port: &mut Usart) {
 }
 
 /// Find the rate the module is listening at, and lock the link to 57600.
+///
+/// A module still scanning from a previous session answers a version query with barcode
+/// data, or with nothing, so the probe reads as "no scanner" on hardware that is sitting
+/// right there working. Quieten it first: the stop goes out blind at both rates, because
+/// the whole point is that we do not yet know which one it is listening at.
 fn find(port: &mut Usart) -> Result<(), Fault> {
+    blind_shutdown(port);
     for _ in 0..PROBE_TRIES {
         for rate in catcard_qr::BAUDS {
             port.set_baud(rate);
@@ -132,6 +190,10 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
             }
         }
     }
+    // Nothing answered. Leave it stopped rather than however it was found: the commonest
+    // reason to be here is a module that was left scanning, and walking away from it
+    // still scanning is what made this screen fail the *next* time too.
+    blind_shutdown(port);
     Err(Fault::NotFound)
 }
 
@@ -213,11 +275,9 @@ fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
         return Err(Fault::SetupRefused);
     }
     let read = read_code(&mut port, ui, out);
-    // Stop scanning and put the illumination out whatever happened, so a cancelled scan
-    // does not leave the module running and the lamp on.
-    let _ = command(&mut port, cmd::SCAN_STOP);
-    let _ = command(&mut port, cmd::TORCH_OFF);
-    sleep(&mut port);
+    // Whatever happened, and especially when the owner cancelled: a scan left running is
+    // a lamp that stays on and a module that never sleeps.
+    stop(&mut port);
     read
 }
 
