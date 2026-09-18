@@ -167,6 +167,9 @@ const DATA_TRIES: u32 = 2_000_000;
 /// whatever the flag does. A block is 512 bytes at 12 MHz on four lines -- about 85 us --
 /// so a transfer that has delivered everything is at its end already.
 const END_POLLS: u32 = 10_000;
+/// Words the receive FIFO holds: 32 on both IPs (a 128-byte FIFO).
+/// Source: RM0351 §SDMMC, RM0432 §SDMMC [C]
+const FIFO_WORDS: u32 = 32;
 
 /// Where the last data-path or command failure happened, what `STA` read at that moment
 /// (before `ICR` cleared it) and what `DCOUNT` still expected -- or, for a command, which
@@ -424,7 +427,14 @@ impl Transport for Sdmmc {
                             break;
                         }
                     }
-                    while reg::read(b + STA) & STA_RXFIFOE == 0 {
+                    // Drain at most a FIFO's worth. Bounded, because `RXFIFOE` is only
+                    // documented while the data path is running: once it has shut down the
+                    // flag cannot be trusted to read as "empty", and "read until empty"
+                    // would then never end -- a freeze, not a slow read.
+                    for _ in 0..FIFO_WORDS {
+                        if reg::read(b + STA) & STA_RXFIFOE != 0 {
+                            break;
+                        }
                         let _ = reg::read(b + FIFO);
                     }
                     // `DTEN` off: the old controller's data path stays armed otherwise, and
