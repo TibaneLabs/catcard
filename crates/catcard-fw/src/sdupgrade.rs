@@ -190,14 +190,28 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
             if let Ok(d) = staged.digest() {
                 crate::catlog!(
                     "sd: staged digest {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+                    d[0],
+                    d[1],
+                    d[2],
+                    d[3],
+                    d[4],
+                    d[5],
+                    d[6],
+                    d[7]
                 );
             }
             let mut head = [0u8; 8];
             if staged.sample(0, &mut head).is_ok() {
                 crate::catlog!(
                     "sd: staged head {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]
+                    head[0],
+                    head[1],
+                    head[2],
+                    head[3],
+                    head[4],
+                    head[5],
+                    head[6],
+                    head[7]
                 );
             }
             if let Some(h) = staged.header() {

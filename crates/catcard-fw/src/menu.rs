@@ -1364,35 +1364,81 @@ fn psram_probe(panel: &mut display::Panel) {
         message(panel, "PSRAM", "none on this board", "");
         return;
     };
-    // Scratch at the base of the staging half, clear of the recovery header.
-    let at = (p.base + p.len / 2) as *mut u32;
-    const PATTERN: u32 = 0xCA7C_A2D0;
+    // Every 4 KB across the whole region, each word holding its own offset. One word at one
+    // address only proves the region answers; a staged firmware fills megabytes of it, and
+    // an image that stages "successfully" and then hashes wrong is what a region that stops
+    // holding data part way through looks like from the outside.
+    const STEP: u32 = 4 * 1024;
+    let stamp = |off: u32| off ^ 0xCA7C_A2D0;
 
     message(panel, "Probing PSRAM", "hangs if unmapped", "");
-    // SAFETY: `at` is inside the region `BoardSpec` describes as memory-mapped PSRAM,
-    // aligned, and in the staging half, which nothing else is using while the menu is
-    // up. If the region is not actually mapped this faults -- which is the result being
-    // measured, and is why the screen above is drawn first.
-    let (wrote, read) = unsafe {
-        core::ptr::write_volatile(at, PATTERN);
-        let back = core::ptr::read_volatile(at);
-        (PATTERN, back)
+    // SAFETY: the region `BoardSpec` describes as memory-mapped PSRAM, aligned, nothing
+    // else using it while the menu is up. An unmapped region faults, which is the result
+    // being measured -- hence the screen above.
+    let (first_bad, alias) = unsafe {
+        let base = p.base as *mut u32;
+        let mut off = 0u32;
+        while off < p.len {
+            core::ptr::write_volatile(base.byte_add(off as usize), stamp(off));
+            off += STEP;
+        }
+        // Read every one back only after all of them are written: a write that lands
+        // somewhere else shows up here and not in an immediate read-back.
+        let mut first_bad = None;
+        let mut off = 0u32;
+        while off < p.len {
+            if core::ptr::read_volatile(base.byte_add(off as usize)) != stamp(off) {
+                first_bad = Some(off);
+                break;
+            }
+            off += STEP;
+        }
+        // Aliasing: if the window is smaller than the region claims, an address high up
+        // is the same cell as one low down, and writing one changes the other.
+        core::ptr::write_volatile(base, 0x1111_1111);
+        let mut alias = None;
+        let mut probe = 64 * 1024;
+        while probe < p.len {
+            core::ptr::write_volatile(base.byte_add(probe as usize), 0x2222_2222);
+            if core::ptr::read_volatile(base) != 0x1111_1111 {
+                alias = Some(probe);
+                break;
+            }
+            probe *= 2;
+        }
+        (first_bad, alias)
     };
 
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    let _ = lines.push(reg_line("wrote  ", wrote));
-    let _ = lines.push(reg_line("read   ", read));
     let mut l = Line::new();
-    let _ = write!(
-        l,
-        "{}",
-        if read == wrote {
-            "MAPPED: staging works"
-        } else {
-            "NOT MAPPED: upgrades fail"
-        }
-    );
+    let _ = write!(l, "region {} KB", p.len / 1024);
     let _ = lines.push(l);
+    let mut l = Line::new();
+    match first_bad {
+        None => {
+            let _ = write!(l, "all {} KB hold data", p.len / 1024);
+        }
+        Some(off) => {
+            let _ = write!(l, "first bad at {:#x}", off);
+        }
+    }
+    let _ = lines.push(l);
+    let mut l = Line::new();
+    match alias {
+        None => {
+            let _ = write!(l, "no aliasing");
+        }
+        Some(off) => {
+            let _ = write!(l, "aliases base at {:#x}", off);
+        }
+    }
+    let _ = lines.push(l);
+    crate::catlog!(
+        "psram: len {} first_bad {:?} alias {:?}",
+        p.len,
+        first_bad,
+        alias
+    );
     info(panel, "PSRAM probe", &lines);
 }
 
