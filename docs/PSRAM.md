@@ -51,7 +51,7 @@ soak exercises one data pattern at one temperature, and a megabyte of stores cos
 milliseconds. It is a cost worth paying for a rule we did not establish ourselves — but it is
 **not** the fix for what was wrong here, and this file should not be read as saying it was.
 
-## 3. What was actually wrong the second time: reads mixed into writes
+## 3. What was actually wrong the second time: reads mixed into writes  [C, confirmed]
 
 After the switch to word stores, staging still failed — one word per chunk or so arriving
 mis-issued, with the chunk's real data four bytes further on and a word in front of it that
@@ -69,10 +69,18 @@ word was mis-issued.
 The verification is gone, and with it the rewrite-on-mismatch retry that was papering over
 this. Neither was a fix; the first was an instrument and the second was a workaround.
 
+**Confirmed on the device:** with word stores and no interleaved reads, a stock `v1.5.2Q`
+image stages from microSD and installs. Nothing else changed between the failing build and
+the working one except the removal of the per-chunk read-back.
+
+Removing it costs nothing in safety. A staged image is digested and its signature checked
+before anything installs it -- by this firmware in `Staged::inspect`, and again by the
+bootloader at `gate 18/7` -- so corruption is caught either way. What the per-chunk check
+added was an earlier, more precise complaint; what it cost was causing the corruption it
+was there to find.
+
 ## Open
 
-- **Unconfirmed:** that staging with no interleaved reads is clean. That is the prediction
-  the removal rests on, and one SD install settles it.
 - If a read-back is ever wanted again, it belongs **after** the whole image is staged, not per
   chunk — one switch instead of thousands — and the image is verified by digest anyway.
 - We do not configure OCTOSPI at all; the bootloader's setup is inherited, including the
