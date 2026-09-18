@@ -29,8 +29,83 @@ use crate::ui::Ui;
 /// something that might still parse.
 const MAX_FILE: usize = 4096;
 
+/// Three full-slot buffers: the settings as they are, the rendered list, and the seal.
+///
+/// Static, because a screen has an 8 KB stack and a settings slot is four kilobytes. Only
+/// one settings screen is ever open, so importing and reading back share these.
+static mut DOC: [u8; SCRATCH] = [0; SCRATCH];
+static mut LIST: [u8; SCRATCH] = [0; SCRATCH];
+static mut SEAL: [u8; SCRATCH] = [0; SCRATCH];
+
+/// The parsed wallets, kept between calls so a slice of them can outlive [`registered`].
+///
+/// A `Multisig` is around two kilobytes -- fifteen extended keys and their origins -- so
+/// eight of them do not go on a stack either.
+static mut PARSED: heapless::Vec<Multisig, { wallets::MAX_WALLETS }> = heapless::Vec::new();
+
+/// The multisig wallets this device has registered.
+///
+/// Read once per transaction rather than once per input: it costs a settings mount and a
+/// callgate fetch of the login secret. **An empty slice is a meaningful answer** -- it is
+/// what a device with nothing registered returns, and it makes every multisig input refuse
+/// rather than be signed on the host's word about who the other cosigners are. So a
+/// settings store that will not mount reads as "none registered", never as "allow".
+///
+/// A descriptor that no longer parses is skipped rather than failing the list: one entry
+/// written by a version that stores more must not hide the wallets beside it.
+pub(crate) fn registered(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+) -> &'static [Multisig] {
+    use catcard_settings::json::Doc;
+    use catcard_settings::nvstore;
+    use catcard_settings::store;
+    use zeroize::Zeroize as _;
+
+    // SAFETY: foreground only; one settings screen at a time.
+    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
+        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
+    parsed.clear();
+
+    // SAFETY: foreground only, and the signing screen holds the display while this runs.
+    let Ok(mut files) = (unsafe { crate::settings::Files::mount() }) else {
+        crate::catlog!("multisig: no settings store, so no registered wallets");
+        return parsed;
+    };
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let Ok(mut secret) = login.fetch_secret(&pin_gate) else {
+        return parsed;
+    };
+    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+    secret.zeroize();
+
+    // SAFETY: as above.
+    let doc_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
+    let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
+    let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
+    let mut list = [Wallet {
+        name: "",
+        descriptor: "",
+    }; wallets::MAX_WALLETS];
+    let have = wallets::list(&doc, &mut list);
+    for w in &list[..have] {
+        match multisig::parse(w.descriptor) {
+            Ok(m) => {
+                let _ = parsed.push(m);
+            }
+            Err(why) => crate::catlog!("multisig: skipping {}: {:?}", w.name, why),
+        }
+    }
+    crate::catlog!("multisig: {} wallet(s) registered", parsed.len());
+    parsed
+}
+
 /// Import a wallet: pick the file, read it, show it, and store it if the owner agrees.
-pub(crate) fn import(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+pub(crate) fn import(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
     let Some(path) = menu::browse_sd(ui, "Pick a descriptor", None, true) else {
         return;
     };
@@ -191,9 +266,9 @@ fn save(
     descriptor: &str,
 ) -> Result<(), &'static str> {
     use catcard_settings::json::Doc;
+    use catcard_settings::json::RawJson;
     use catcard_settings::nvstore;
     use catcard_settings::store;
-    use catcard_settings::json::RawJson;
     use zeroize::Zeroize as _;
 
     menu::blocking_screen(ui.panel, "Register wallet", "saving");
@@ -208,11 +283,6 @@ fn save(
     let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
     secret.zeroize();
 
-    // Three full-slot buffers: the settings as they are, the rendered list, and the seal.
-    // Static, because a screen has an 8 KB stack.
-    static mut DOC: [u8; SCRATCH] = [0; SCRATCH];
-    static mut LIST: [u8; SCRATCH] = [0; SCRATCH];
-    static mut SEAL: [u8; SCRATCH] = [0; SCRATCH];
     // SAFETY: as above -- one settings screen at a time, foreground only.
     let doc_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
     // SAFETY: as above.
@@ -235,15 +305,13 @@ fn save(
             name: "",
             descriptor: "",
         }; wallets::MAX_WALLETS];
-        let added =
-            wallets::with_added(&current[..have], Wallet { name, descriptor }, &mut next).map_err(
-                |e| match e {
-                    wallets::Error::TooMany => "no room for another wallet",
-                    wallets::Error::NotStorable => "that descriptor cannot be stored",
-                    wallets::Error::NoChecksum => "no checksum",
-                    wallets::Error::Overflow => "too long",
-                },
-            )?;
+        let added = wallets::with_added(&current[..have], Wallet { name, descriptor }, &mut next)
+            .map_err(|e| match e {
+            wallets::Error::TooMany => "no room for another wallet",
+            wallets::Error::NotStorable => "that descriptor cannot be stored",
+            wallets::Error::NoChecksum => "no checksum",
+            wallets::Error::Overflow => "too long",
+        })?;
         crate::catlog!("multisig: registering, {} wallet(s) after this", added);
         wallets::render(&next[..added], list_buf).map_err(|_| "too long")?
     };

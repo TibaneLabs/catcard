@@ -21,11 +21,21 @@ const CHANGE: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, 0];
 /// The accounts a spend draws on, as `summarise` works them out. `destinations` takes them
 /// rather than deriving them again, so a test has to hand over the same list.
 fn accounts_of(psbt: &Psbt<'_>, master: &ExtendedPrivKey) -> Vec<Account> {
-    match summarise(psbt, master, OUR_FP, &Policy::default(), &kw()) {
+    match summarise(psbt, &owner(master, &[]), &Policy::default(), &kw()) {
         Ok(s) => s.accounts[..s.account_count].to_vec(),
         // A transaction this refuses has no accounts to speak of; the caller is testing
         // something else about it.
         Err(_) => Vec::new(),
+    }
+}
+
+/// This device, as the review functions want it: the seed, its fingerprint, and whichever
+/// multisig wallets the test has registered.
+fn owner<'a>(master: &'a ExtendedPrivKey, wallets: &'a [crate::multisig::Multisig]) -> Owner<'a> {
+    Owner {
+        master,
+        fingerprint: OUR_FP,
+        wallets,
     }
 }
 
@@ -203,7 +213,12 @@ fn ours_spend(amount: u64) -> Spend {
 
 fn summary_of(bytes: &[u8]) -> Result<Summary, Refusal> {
     let psbt = Psbt::parse(bytes).unwrap();
-    summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
+    summarise(
+        &psbt,
+        &owner(&master_of(OURS), &[]),
+        &Policy::default(),
+        &kw(),
+    )
 }
 
 #[test]
@@ -246,8 +261,7 @@ fn the_fee_change_and_destination_come_out_of_the_transaction() {
     let master = master_of(OURS);
     let found = destinations(
         &psbt,
-        &master,
-        OUR_FP,
+        &owner(&master, &[]),
         Network::Mainnet,
         &accounts_of(&psbt, &master),
         &mut dests,
@@ -374,8 +388,7 @@ fn a_fee_above_the_cap_is_refused_and_the_cap_is_configurable() {
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let s = summarise(
         &psbt,
-        &master_of(OURS),
-        OUR_FP,
+        &owner(&master_of(OURS), &[]),
         &Policy {
             max_fee_percent: 50,
             warn_fee_percent: 5,
@@ -655,8 +668,7 @@ fn change_is_still_found_behind_a_few_decoy_records() {
         &psbt,
         0,
         &script,
-        &master,
-        OUR_FP,
+        &owner(&master, &[]),
         &accounts_of(&psbt, &master),
         &kw()
     ));
@@ -674,8 +686,7 @@ fn an_output_cannot_ask_for_unbounded_derivation() {
         &psbt,
         0,
         &script,
-        &master,
-        OUR_FP,
+        &owner(&master, &[]),
         &accounts_of(&psbt, &master),
         &kw()
     ));
@@ -690,7 +701,7 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let master = master_of(OURS);
 
-    let sum = summarise(&psbt, &master, OUR_FP, &Policy::default(), &kw()).unwrap();
+    let sum = summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()).unwrap();
     assert_eq!(sum.change, 0);
     assert_eq!(sum.sending, 99_000);
 
@@ -703,8 +714,7 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
     }; 4];
     let found = destinations(
         &psbt,
-        &master,
-        OUR_FP,
+        &owner(&master, &[]),
         Network::Mainnet,
         &accounts_of(&psbt, &master),
         &mut dests,
@@ -772,7 +782,7 @@ fn change_at_an_index_no_scan_reaches_is_shown_as_leaving() {
     );
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let master = master_of(OURS);
-    let summary = summarise(&psbt, &master, OUR_FP, &Policy::default(), &kw());
+    let summary = summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw());
 
     // Priced as what it is: 98.9M leaving, not 98.9M folded away as change. The fee is
     // then measured against the whole spend, which is what the cap is for.
@@ -816,8 +826,13 @@ fn real_change_is_still_change() {
             &mut buf,
         );
         let psbt = Psbt::parse(&buf[..n]).unwrap();
-        let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
-            .expect("a plain spend with change");
+        let summary = summarise(
+            &psbt,
+            &owner(&master_of(OURS), &[]),
+            &Policy::default(),
+            &kw(),
+        )
+        .expect("a plain spend with change");
         assert_eq!(summary.change, 60_000, "{steps:?} is this wallet's change");
         assert_eq!(summary.sending, 39_000);
     }
@@ -843,8 +858,13 @@ fn another_account_of_the_same_seed_is_not_this_spends_change() {
         &mut buf,
     );
     let psbt = Psbt::parse(&buf[..n]).unwrap();
-    let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
-        .expect("the transaction is otherwise fine");
+    let summary = summarise(
+        &psbt,
+        &owner(&master_of(OURS), &[]),
+        &Policy::default(),
+        &kw(),
+    )
+    .expect("the transaction is otherwise fine");
     assert_eq!(summary.change, 0, "account 5 is not account 0's change");
     assert_eq!(summary.sending, 99_000);
 }
@@ -865,7 +885,284 @@ fn a_branch_outside_receive_and_change_is_not_change() {
         &mut buf,
     );
     let psbt = Psbt::parse(&buf[..n]).unwrap();
-    let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
-        .expect("the transaction is otherwise fine");
+    let summary = summarise(
+        &psbt,
+        &owner(&master_of(OURS), &[]),
+        &Policy::default(),
+        &kw(),
+    )
+    .expect("the transaction is otherwise fine");
     assert_eq!(summary.change, 0, "branch 9 is not a change branch");
+}
+
+// -- multisig ---------------------------------------------------------------
+
+/// A 2-of-2 P2WSH wallet of `OURS` and `STRANGER`, at `m/48h/0h/0h/2h`.
+///
+/// `sorted` picks `sortedmulti` or `multi`, which are two different wallets over the same
+/// cosigners: BIP-67 ordering changes the script and so changes every address.
+fn two_of_two(sorted: bool) -> crate::multisig::Multisig {
+    use crate::bip32::ChildNumber;
+
+    let mut keys: Vec<String> = Vec::new();
+    for phrase in [OURS, STRANGER] {
+        let master = master_of(phrase);
+        let fp = master.fingerprint(&kw());
+        let mut key = master;
+        for step in [48u32, 0, 0, 2] {
+            key = key
+                .derive_child(ChildNumber::hardened(step).unwrap(), &kw())
+                .unwrap();
+        }
+        keys.push(format!(
+            "[{:02x}{:02x}{:02x}{:02x}/48h/0h/0h/2h]{}/0/*",
+            fp[0],
+            fp[1],
+            fp[2],
+            fp[3],
+            key.to_extended_pub(&kw()).to_base58()
+        ));
+    }
+    let func = if sorted { "sortedmulti" } else { "multi" };
+    let body = format!("wsh({func}(2,{},{}))", keys[0], keys[1]);
+    let sum = crate::descriptor::checksum(&body).unwrap();
+    let text = format!("{body}#{}", core::str::from_utf8(&sum).unwrap());
+    crate::multisig::parse(&text).unwrap()
+}
+
+/// Our key inside that wallet, at `branch`/`index`.
+fn ms_key(branch: u32, index: u32) -> ([u8; 33], [u32; 6]) {
+    use crate::bip32::ChildNumber;
+    let mut key = master_of(OURS);
+    let steps = [
+        48 | 0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        2 | 0x8000_0000,
+        branch,
+        index,
+    ];
+    for step in steps {
+        let child = if step & 0x8000_0000 != 0 {
+            ChildNumber::hardened(step & 0x7FFF_FFFF).unwrap()
+        } else {
+            ChildNumber::normal(step).unwrap()
+        };
+        key = key.derive_child(child, &kw()).unwrap();
+    }
+    (key.public_key(&kw()), steps)
+}
+
+/// A PSBT spending one output of the 2-of-2 wallet, paying a stranger.
+///
+/// With `change`, a second output pays back to the wallet's own change address, described
+/// the way a host describes change: our derivation record at `.../1/0`.
+fn multisig_spend(wallet: &crate::multisig::Multisig, change: bool, buf: &mut [u8]) -> usize {
+    let mut spk = [0u8; 34];
+    let spk_len = wallet.script_pubkey(0, 0, &mut spk).unwrap();
+    let spk = &spk[..spk_len];
+    let mut witness_script = [0u8; crate::multisig::MAX_SCRIPT];
+    let ws_len = wallet.script(0, 0, &mut witness_script).unwrap();
+
+    let prev_ins = [RawTxIn {
+        txid: [0xC0; 32],
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    }];
+    let prev_outs = [RawTxOut {
+        amount: 100_000,
+        script: spk,
+    }];
+    let prev = RawTx {
+        version: 2,
+        inputs: &prev_ins,
+        outputs: &prev_outs,
+        locktime: 0,
+    };
+    let mut prev_raw = vec![0u8; prev.serialized_len()];
+    let n = prev.serialize_to_slice(&mut prev_raw).unwrap();
+    prev_raw.truncate(n);
+
+    let ins = [RawTxIn {
+        txid: prev.txid(),
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    }];
+    let pay = p2wpkh_script(&pubkey_at(STRANGER, &RECEIVE));
+    let mut back = [0u8; 34];
+    let back_len = wallet.script_pubkey(1, 0, &mut back).unwrap();
+    let mut outs = vec![RawTxOut {
+        amount: if change { 60_000 } else { 99_000 },
+        script: &pay,
+    }];
+    if change {
+        outs.push(RawTxOut {
+            amount: 39_000,
+            script: &back[..back_len],
+        });
+    }
+    let tx = RawTx {
+        version: 2,
+        inputs: &ins,
+        outputs: &outs,
+        locktime: 0,
+    };
+
+    let mut a = vec![0u8; 8192];
+    let mut b = vec![0u8; 8192];
+    let mut n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    macro_rules! step {
+        ($f:expr) => {{
+            let psbt = Psbt::parse(&a[..n]).unwrap();
+            let m = $f(&psbt, &mut b).unwrap();
+            a[..m].copy_from_slice(&b[..m]);
+            n = m;
+        }};
+    }
+    let (pk, steps) = ms_key(0, 0);
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(0, 100_000, spk, out));
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_non_witness_utxo(0, &prev_raw, out));
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_script(0, &witness_script[..ws_len], out));
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.add_input_bip32_derivation(0, &pk, OUR_FP, &steps, out));
+    if change {
+        let (pk, steps) = ms_key(1, 0);
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p
+            .add_output_bip32_derivation(1, &pk, OUR_FP, &steps, out));
+    }
+    buf[..n].copy_from_slice(&a[..n]);
+    n
+}
+
+/// A multisig input belonging to no registered wallet is refused, not signed.
+///
+/// The chain pins *which* script the coin is locked to -- the witness script has to hash
+/// to the scriptPubKey -- but not whose wallet it is. Signing one this device was never
+/// shown means trusting the host that the other cosigners are who it says, which is the
+/// whole thing registration exists to stop.
+#[test]
+fn a_multisig_input_from_an_unregistered_wallet_is_refused() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    assert_eq!(
+        summarise(
+            &psbt,
+            &owner(&master_of(OURS), &[]),
+            &Policy::default(),
+            &kw()
+        ),
+        Err(Refusal::UnknownMultisig { input: 0 }),
+        "an unknown multisig wallet was priced as if it were ours"
+    );
+}
+
+/// The same transaction, once the wallet is registered.
+#[test]
+fn a_multisig_input_from_a_registered_wallet_is_read() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let summary = summarise(
+        &psbt,
+        &owner(&master_of(OURS), &[wallet]),
+        &Policy::default(),
+        &kw(),
+    )
+    .expect("a registered wallet's own spend");
+    assert_eq!(summary.inputs, 1);
+    assert_eq!(summary.ours, 1, "our key in the wallet was not recognised");
+    assert_eq!(summary.total_in, 100_000);
+    assert_eq!(summary.sending, 99_000);
+    assert_eq!(summary.fee, 1_000);
+}
+
+/// A *different* registered wallet does not vouch for this input.
+///
+/// Registering one wallet must not make every multisig input acceptable: the script is
+/// rebuilt from each wallet's own cosigners and has to equal the one the coin is locked
+/// to, so a wallet with other keys simply does not match.
+#[test]
+fn another_registered_wallet_does_not_vouch_for_this_input() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    // The same two cosigners, unsorted: a different wallet, with different addresses.
+    let other = two_of_two(false);
+    assert_eq!(
+        summarise(
+            &psbt,
+            &owner(&master_of(OURS), &[other]),
+            &Policy::default(),
+            &kw()
+        ),
+        Err(Refusal::UnknownMultisig { input: 0 }),
+        "a different wallet vouched for someone else's script"
+    );
+}
+
+/// Change back to the registered wallet is change, and is not counted as leaving.
+#[test]
+fn change_to_a_registered_multisig_wallet_is_recognised() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, true, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let wallets = [wallet];
+
+    let summary = summarise(
+        &psbt,
+        &owner(&master_of(OURS), &wallets),
+        &Policy::default(),
+        &kw(),
+    )
+    .expect("our own multisig spend");
+    assert_eq!(summary.total_in, 100_000);
+    assert_eq!(
+        summary.change, 39_000,
+        "the change output was read as leaving"
+    );
+    assert_eq!(summary.sending, 60_000);
+    assert_eq!(summary.fee, 1_000);
+}
+
+/// Without the registration, that output is money leaving -- if the spend is shown at all.
+///
+/// This is the shape that matters: "looks like our multisig" is not a reason to subtract an
+/// amount from what the owner is told they are sending. Here the input is refused first, so
+/// the question never reaches the screen; [`is_change`] is asked directly to show that the
+/// output alone does not vouch for itself either.
+#[test]
+fn an_unregistered_multisig_output_is_not_change() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, true, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let mut spk = [0u8; 34];
+    let len = wallet.script_pubkey(1, 0, &mut spk).unwrap();
+    let accounts = [Account {
+        prefix: [48 | 0x8000_0000, 0x8000_0000, 0x8000_0000],
+        kind: AddressKind::P2wpkh,
+    }];
+    assert!(
+        !is_change(
+            &psbt,
+            1,
+            &spk[..len],
+            &owner(&master_of(OURS), &[]),
+            &accounts,
+            &kw()
+        ),
+        "an unregistered wallet's output was subtracted from the amount sent"
+    );
 }

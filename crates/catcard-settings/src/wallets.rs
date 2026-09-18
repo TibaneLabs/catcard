@@ -297,7 +297,11 @@ mod tests {
                 descriptor: bad,
             };
             let mut out = [w; MAX_WALLETS];
-            assert_eq!(with_added(&[], w, &mut out), Err(Error::NotStorable), "{bad}");
+            assert_eq!(
+                with_added(&[], w, &mut out),
+                Err(Error::NotStorable),
+                "{bad}"
+            );
         }
         // And in the name, which is typed by a person and can hold anything.
         let w = Wallet {

@@ -26,6 +26,7 @@ use outscript::psbt::{Psbt, input as in_key, output as out_key};
 use crate::KeyWork;
 use crate::address::{self, AddressKind};
 use crate::bip32::{ExtendedPrivKey, FINGERPRINT_LEN, Network};
+use crate::multisig::{self, Multisig};
 use crate::signer::{self, KeyRequest, MAX_KEYS_PER_INPUT};
 
 /// Sighash types this will sign.
@@ -72,6 +73,12 @@ pub enum Refusal {
     UnverifiedAmount { input: usize },
     /// The amounts do not add up: outputs exceed inputs.
     Unbalanced,
+    /// A script-hash input belongs to no registered multisig wallet.
+    ///
+    /// The script the coin is locked to is pinned by the chain, so a host cannot invent
+    /// one -- but whose wallet it is still has to be something this device was shown. An
+    /// input it cannot account for is one whose cosigners nobody here has ever seen.
+    UnknownMultisig { input: usize },
     /// The PSBT is already finalised; there is nothing to sign.
     AlreadyFinal,
 }
@@ -120,6 +127,23 @@ pub struct Summary {
     pub fee_warn: bool,
 }
 
+/// Who this device is, for the purpose of reading a transaction.
+///
+/// The seed and its fingerprint settle which single-signature addresses are ours. The
+/// registered wallets settle which multisig ones are, because a script alone cannot: the
+/// chain pins the script an input is locked to, but nothing on the chain says whose wallet
+/// produced it. These travel together because every question here -- is this input ours,
+/// is this output change -- needs both halves, and answering with one half is how a device
+/// signs a stranger's script or prices someone else's output as change.
+#[derive(Copy, Clone)]
+pub struct Owner<'a> {
+    pub master: &'a ExtendedPrivKey,
+    pub fingerprint: [u8; FINGERPRINT_LEN],
+    /// Multisig wallets the owner has registered on this device. Empty means this device
+    /// signs no multisig input at all, which is the correct answer before any import.
+    pub wallets: &'a [Multisig],
+}
+
 /// Examine `psbt` against this wallet and `policy`.
 ///
 /// Derives one key per input and per claimed-change output, so it costs elliptic-curve work
@@ -127,11 +151,11 @@ pub struct Summary {
 /// itself.
 pub fn summarise(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
-    fingerprint: [u8; FINGERPRINT_LEN],
+    owner: &Owner<'_>,
     policy: &Policy,
     kw: &KeyWork,
 ) -> Result<Summary, Refusal> {
+    let (master, fingerprint, wallets) = (owner.master, owner.fingerprint, owner.wallets);
     if psbt.is_finalized() {
         return Err(Refusal::AlreadyFinal);
     }
@@ -208,6 +232,20 @@ pub fn summarise(
         let utxo = psbt
             .utxo(index)
             .map_err(|_| Refusal::UnknownAmount { input: index })?;
+
+        // A script-hash input is a multisig one. The chain pins *which* script it is --
+        // the witness or redeem script has to hash to this scriptPubKey -- but not whose
+        // wallet it belongs to, and that is what a registration says. An input no
+        // registered wallet produces is refused rather than signed on the host's word
+        // that the other cosigners are who it claims.
+        if multisig::is_script_hash(utxo.script) {
+            let Some((branch, at)) = ours_address(psbt, index, fingerprint) else {
+                return Err(Refusal::UnknownMultisig { input: index });
+            };
+            if multisig::match_script(wallets, utxo.script, branch, at).is_none() {
+                return Err(Refusal::UnknownMultisig { input: index });
+            }
+        }
         total_in = total_in.saturating_add(utxo.amount);
     }
     if ours == 0 {
@@ -222,8 +260,7 @@ pub fn summarise(
             psbt,
             index,
             out.script,
-            master,
-            fingerprint,
+            owner,
             &accounts[..account_count],
             kw,
         ) {
@@ -319,6 +356,46 @@ pub const MAX_CHANGE_INDEX: u32 = 20_000;
 /// shows the amount as leaving rather than hiding it as change.
 pub const MAX_CHANGE_KEYS: usize = MAX_KEYS_PER_INPUT;
 
+/// The `branch`/`index` an input's own derivation record claims for us.
+///
+/// A claim only: it says where to look, and the rebuilt script is what settles whether the
+/// answer is right. Taken from a record naming our fingerprint, since that is the one
+/// describing this device's share of the wallet.
+fn ours_address(
+    psbt: &Psbt<'_>,
+    index: usize,
+    fingerprint: [u8; FINGERPRINT_LEN],
+) -> Option<(u32, u32)> {
+    let map = psbt.input(index)?.map();
+    for rec in map.records_of(in_key::BIP32_DERIVATION) {
+        if let Some(request) = signer::request_from_record(rec, fingerprint, false) {
+            let steps = request.steps();
+            if steps.len() >= 2 {
+                return Some((steps[steps.len() - 2], steps[steps.len() - 1]));
+            }
+        }
+    }
+    None
+}
+
+/// As [`ours_address`], for an output's map.
+fn output_address(
+    psbt: &Psbt<'_>,
+    index: usize,
+    fingerprint: [u8; FINGERPRINT_LEN],
+) -> Option<(u32, u32)> {
+    let map = psbt.output(index)?.map();
+    for rec in map.records_of(out_key::BIP32_DERIVATION) {
+        if let Some(request) = signer::request_from_record(rec, fingerprint, false) {
+            let steps = request.steps();
+            if steps.len() >= 2 {
+                return Some((steps[steps.len() - 2], steps[steps.len() - 1]));
+            }
+        }
+    }
+    None
+}
+
 /// The account a change path belongs to, if its shape allows it to be change at all.
 ///
 /// `None` -- meaning "not change" -- when the path is not five levels, when its first three
@@ -354,14 +431,26 @@ pub fn is_change(
     psbt: &Psbt<'_>,
     index: usize,
     script: &[u8],
-    master: &ExtendedPrivKey,
-    fingerprint: [u8; FINGERPRINT_LEN],
+    owner: &Owner<'_>,
     accounts: &[Account],
     kw: &KeyWork,
 ) -> bool {
+    let (master, fingerprint) = (owner.master, owner.fingerprint);
     let Some(map) = psbt.output(index).map(|o| o.map()) else {
         return false;
     };
+
+    // Change back to a registered multisig wallet, proven the same way an input is: the
+    // script is rebuilt from the wallet's own record and has to equal this output's. The
+    // shape rules that bound a single-signature change path apply here too -- an address
+    // no recovery will scan to is not change, whoever co-signs it.
+    if multisig::is_script_hash(script)
+        && let Some((branch, at)) = output_address(psbt, index, fingerprint)
+        && (branch <= 1 && at <= MAX_CHANGE_INDEX)
+        && multisig::match_script(owner.wallets, script, branch, at).is_some()
+    {
+        return true;
+    }
     let mut derived = 0usize;
     for taproot in [false, true] {
         let keytype = if taproot {
@@ -404,8 +493,7 @@ pub fn is_change(
 /// The destinations of `psbt`, written into `out`; returns how many were filled.
 pub fn destinations(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
-    fingerprint: [u8; FINGERPRINT_LEN],
+    owner: &Owner<'_>,
     network: Network,
     accounts: &[Account],
     out: &mut [Destination],
@@ -421,7 +509,7 @@ pub fn destinations(
         out[n] = Destination {
             index,
             amount: txout.amount,
-            change: is_change(psbt, index, txout.script, master, fingerprint, accounts, kw),
+            change: is_change(psbt, index, txout.script, owner, accounts, kw),
             address,
             address_len,
         };

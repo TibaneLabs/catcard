@@ -233,6 +233,9 @@ fn refusal_text(r: Refusal) -> &'static str {
         Refusal::UnverifiedAmount { .. } => "an input has no prev tx",
         Refusal::Unbalanced => "outputs exceed inputs",
         Refusal::AlreadyFinal => "already finalised",
+        // Not "unsupported": the wallet is simply one this device was never shown, and
+        // the cure is Utils -> Multisig -> Import.
+        Refusal::UnknownMultisig { .. } => "multisig wallet not registered",
     }
 }
 
@@ -281,6 +284,16 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
 
+    // The registered multisig wallets, read once. Without them a script-hash input is
+    // refused: the chain says which script the coin is locked to, but only a registration
+    // says whose wallet that script belongs to.
+    let wallets = crate::msimport::registered(gate, login);
+    let owner = psbtview::Owner {
+        master: &master,
+        fingerprint,
+        wallets,
+    };
+
     // The review. Every judgement here derives a key per input and per claimed change
     // output, so it runs masked, with the screen saying what it is doing.
     let mut busy = menu::Working::new(ui.panel, HEAD, "checking the transaction");
@@ -294,8 +307,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         }
     };
     let policy = Policy::default();
-    let summary =
-        crate::keywork::run(|kw| psbtview::summarise(&psbt, &master, fingerprint, &policy, kw));
+    let summary = crate::keywork::run(|kw| psbtview::summarise(&psbt, &owner, &policy, kw));
     busy.tick(ui.panel);
     let summary = match summary {
         Ok(s) => s,
@@ -316,8 +328,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     let count = crate::keywork::run(|kw| {
         psbtview::destinations(
             &psbt,
-            &master,
-            fingerprint,
+            &owner,
             catcard_wallet::bip32::Network::Mainnet,
             // The accounts the review already worked out from the inputs: an output is
             // change only if it belongs to one of them, and deriving them twice would be

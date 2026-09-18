@@ -126,7 +126,9 @@ impl Multisig {
     /// A claim, not a proof: the key still has to derive to what the script needs, which
     /// is what signing checks. This is for deciding whether a wallet is worth showing.
     pub fn involves(&self, fingerprint: [u8; 4]) -> bool {
-        self.cosigners().iter().any(|c| c.fingerprint == fingerprint)
+        self.cosigners()
+            .iter()
+            .any(|c| c.fingerprint == fingerprint)
     }
 
     /// Build the redeem or witness script for one address: `M <pubkey…> N CHECKMULTISIG`.
@@ -178,13 +180,68 @@ impl Multisig {
     }
 }
 
+/// Which registered wallet a script belongs to, at which address.
+///
+/// The script is rebuilt from each wallet's own record and compared with the one the coin
+/// is actually locked to. That is the whole check: a host cannot nominate a wallet, and a
+/// script that no registered wallet produces belongs to none of them.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Match {
+    /// Index into the slice of wallets that was searched.
+    pub wallet: usize,
+    pub branch: u32,
+    pub index: u32,
+}
+
+/// Find the registered wallet whose address at `branch`/`index` is `script_pubkey`.
+///
+/// `None` means no registered wallet owns it, which for an input is a refusal to sign and
+/// for an output is "not our change". Both are the safe answer: a multisig script this
+/// device cannot account for is one whose cosigners it has never been shown.
+pub fn match_script(
+    wallets: &[Multisig],
+    script_pubkey: &[u8],
+    branch: u32,
+    index: u32,
+) -> Option<Match> {
+    for (at, wallet) in wallets.iter().enumerate() {
+        let mut built = [0u8; 34];
+        let Ok(n) = wallet.script_pubkey(branch, index, &mut built) else {
+            continue;
+        };
+        if built[..n] == *script_pubkey {
+            return Some(Match {
+                wallet: at,
+                branch,
+                index,
+            });
+        }
+    }
+    None
+}
+
+/// Whether a scriptPubKey is one of the script-hash forms a multisig wallet produces.
+///
+/// Used to decide whether an input *needs* a registered wallet before it may be signed:
+/// a P2SH or P2WSH input is either a wallet this device knows or one it must refuse, and
+/// the two must not be confused with the single-signature forms.
+pub fn is_script_hash(script_pubkey: &[u8]) -> bool {
+    matches!(script_pubkey, [0xA9, 0x14, .., 0x87] if script_pubkey.len() == 23)
+        || matches!(script_pubkey, [0x00, 32, ..] if script_pubkey.len() == 34)
+}
+
 /// Write `M <key…> N CHECKMULTISIG` from keys already derived.
 ///
 /// Separate from [`Multisig::script`] so it can be checked against BIP-383's test vectors,
 /// which derive their keys along per-key paths this wallet model does not use. The bytes
 /// this produces are what every cosigner must agree on, so they are worth checking against
 /// someone else's implementation rather than only against ours.
-pub fn assemble(m: u8, keys: &mut [[u8; 33]], sorted: bool, out: &mut [u8]) -> Result<usize, Error> {
+pub fn assemble(
+    m: u8,
+    keys: &mut [[u8; 33]],
+    sorted: bool,
+    out: &mut [u8],
+) -> Result<usize, Error> {
     if keys.is_empty() || keys.len() > MAX_COSIGNERS {
         return Err(Error::CosignerCount { n: keys.len() });
     }

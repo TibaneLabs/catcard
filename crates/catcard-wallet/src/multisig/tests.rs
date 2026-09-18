@@ -10,7 +10,6 @@ use crate::KeyWork;
 use crate::bip32::ExtendedPrivKey;
 use crate::descriptor;
 
-
 /// Three accounts from three different seeds, as three cosigners would be.
 const SEEDS: [&str; 3] = [
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -164,7 +163,9 @@ fn the_script_is_shaped_as_consensus_expects() {
         );
     }
     // Sorted means sorted, in the script itself.
-    let keys: Vec<&[u8]> = (0..3).map(|i| &script[2 + i * 34..2 + i * 34 + 33]).collect();
+    let keys: Vec<&[u8]> = (0..3)
+        .map(|i| &script[2 + i * 34..2 + i * 34 + 33])
+        .collect();
     let mut want = keys.clone();
     want.sort_unstable();
     assert_eq!(keys, want, "the script's keys are out of order");
