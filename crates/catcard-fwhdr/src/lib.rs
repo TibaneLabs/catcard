@@ -362,6 +362,30 @@ pub fn pack_timestamp(year: u32, month: u32, day: u32, hour: u32, min: u32, sec:
     ]
 }
 
+/// The build time as `YYYY-MM-DD HH:MM`, from the header's BCD timestamp.
+///
+/// What a person actually compares when deciding whether an image is the one they meant
+/// to install: two builds of the same firmware carry the same version string and differ
+/// only here. The century is assumed, because the header stores two digits of year --
+/// that is what the bootloader compares, so it is all there is.
+///
+/// Invalid BCD renders as `?`, rather than as arithmetic on nibbles that are not digits.
+pub fn format_timestamp(ts: &[u8; 8]) -> [u8; 16] {
+    let mut out = *b"20??-??-?? ??:??";
+    let digits = |v: u8| -> Option<(u8, u8)> {
+        let (hi, lo) = (v >> 4, v & 0xF);
+        (hi <= 9 && lo <= 9).then_some((b'0' + hi, b'0' + lo))
+    };
+    // Where each BCD byte's two digits land in `YYYY-MM-DD HH:MM`.
+    for (byte, at) in [(0usize, 2usize), (1, 5), (2, 8), (3, 11), (4, 14)] {
+        if let Some((hi, lo)) = digits(ts[byte]) {
+            out[at] = hi;
+            out[at + 1] = lo;
+        }
+    }
+    out
+}
+
 /// The 32-byte digest the bootloader signs and verifies.
 ///
 /// Double SHA-256 over the whole image with **only** the 64-byte signature field
@@ -855,5 +879,40 @@ mod stream_tests {
     fn alloc_image(len: usize) -> Vec<u8> {
         // Every byte distinct enough that a misplaced one changes the hash.
         (0..len).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect()
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+
+    /// The date a person reads off the install screen is the one in the header.
+    ///
+    /// Two builds of the same firmware carry the same version string; the timestamp is
+    /// the only thing that tells them apart, so it has to be right rather than roughly
+    /// right.
+    #[test]
+    fn a_timestamp_renders_as_the_date_it_encodes() {
+        let ts = pack_timestamp(2026, 9, 18, 19, 4, 54);
+        assert_eq!(&format_timestamp(&ts), b"2026-09-18 19:04");
+
+        // Midnight on the first, where every field is a leading zero.
+        let ts = pack_timestamp(2030, 1, 1, 0, 0, 0);
+        assert_eq!(&format_timestamp(&ts), b"2030-01-01 00:00");
+
+        // And the end of a year, where nothing is.
+        let ts = pack_timestamp(2026, 12, 31, 23, 59, 59);
+        assert_eq!(&format_timestamp(&ts), b"2026-12-31 23:59");
+    }
+
+    /// A field that is not BCD shows as unknown rather than as a nonsense date.
+    ///
+    /// The header comes off a card or a USB cable, so its bytes are someone else's until
+    /// proven otherwise, and `0xAB` is not a month.
+    #[test]
+    fn a_field_that_is_not_bcd_reads_as_unknown() {
+        let mut ts = pack_timestamp(2026, 9, 18, 19, 4, 0);
+        ts[1] = 0xAB;
+        assert_eq!(&format_timestamp(&ts), b"2026-??-18 19:04");
     }
 }

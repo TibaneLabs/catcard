@@ -83,6 +83,9 @@ mod staging;
 /// any and whose keypad has no modifiers to report.
 #[cfg(feature = "board-q1")]
 mod statusbar;
+/// The lamp belongs to the scanner, so it is the Q1's too.
+#[cfg(feature = "board-q1")]
+mod torch;
 mod trng;
 mod ui;
 mod usbtask;

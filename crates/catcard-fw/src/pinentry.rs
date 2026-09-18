@@ -43,9 +43,12 @@ pub(crate) fn pressed_keys(
     // very interrupt this uses to time a real press. Re-armed at the end for the idle gap.
     matrix.disarm_edge_detect();
     let n = pad.scan(matrix, drbg, events);
-    // The modifiers decode to no key, so this is the only place they are ever seen.
+    // The modifiers and the lamp key decode to no key, so this is the only place either
+    // is ever seen.
     #[cfg(feature = "board-q1")]
     crate::statusbar::note(pad);
+    #[cfg(feature = "board-q1")]
+    crate::torch::note(pad);
     let mut physical = false;
     for e in &events[..n] {
         if let Event::Pressed(k) = e {

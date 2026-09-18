@@ -221,6 +221,20 @@ fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::Hmac
 /// behind and one we cannot, and the person about to overwrite their firmware is the one
 /// who should weigh it.
 pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
+    use core::fmt::Write as _;
+
+    // The version *and* the build time. Two builds of the same firmware carry the same
+    // version string and differ only in the timestamp, so on a bench -- or against a
+    // release someone published a date for -- the version alone does not say which image
+    // this is.
+    let stamp = catcard_fwhdr::format_timestamp(&a.header.timestamp);
+    let mut line: heapless::String<40> = heapless::String::new();
+    let _ = write!(
+        line,
+        "{}  {}",
+        a.header.version_str().unwrap_or("unknown version"),
+        core::str::from_utf8(&stamp).unwrap_or("")
+    );
     // State whose key signed the image. Every image that reaches this screen has a
     // signature that *verified* -- a bad one is refused outright before here -- so the
     // question is which key, and what that key means. We deliberately do not warn about a
@@ -229,7 +243,7 @@ pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approv
     message(
         panel,
         "Install firmware?",
-        a.header.version_str().unwrap_or("unknown version"),
+        line.as_str(),
         signature_status(a),
     );
 }

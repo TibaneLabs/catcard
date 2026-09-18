@@ -180,6 +180,8 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
                 matches!(catcard_qr::unwrap(&reply[..n]), Ok(f) if catcard_qr::is_version(f.body))
             });
             if answered {
+                // Tell the lamp where the module is, so it stops saying everything twice.
+                crate::torch::note_rate(rate);
                 // Found it. Ask for the fast rate and follow it there; if the module
                 // does not take the change, carry on at the rate that answered rather
                 // than moving to one nothing is listening at.
@@ -257,6 +259,8 @@ fn read_code(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize,
 fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
     let scanner = catcard_board::BOARD.qr.ok_or(Fault::NoScanner)?;
 
+    // The lamp holds the same port between presses; it stands down while a scan owns it.
+    crate::torch::release();
     menu::blocking_screen(ui.panel, "Scan QR", "waking the scanner");
     // SAFETY: the board table's scanner pins, and USART2, belong to this screen: nothing
     // else in the firmware touches either, and the menu waits for this to return.
