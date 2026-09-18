@@ -64,9 +64,9 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 
 ## What to do about the ❌ rows
 
-`Scan QR` reaches a screen that says the scanner is not driven yet. The wire protocol is
-in `catcard-qr`, tested against the reference's own worked example; what is missing is a
-USART driver, since nothing here owns a serial port.
+`Scan QR` works: the module is configured once at boot and slept, and the LAMP key
+lights its illumination while held, as stock does when idle. The wire protocol is in
+`catcard-qr`, tested against the reference's own worked example.
 
 They are not all worth fixing. The tile labels are short because a 107-pixel cell holds
 ten characters of the face they are drawn in, and `Advanced/Tools` is eighteen. But

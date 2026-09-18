@@ -108,13 +108,13 @@ pub(crate) fn note(pad: &Keypad) {
         // Held: say it again before the module's idle timer puts it out. Nothing is sent
         // while the lamp is off, so an untouched key costs one comparison.
         if down && elapsed_ms() >= REASSERT_MS {
-            set(true);
+            set(true, false);
         }
         return;
     }
     // SAFETY: as above.
     unsafe { *core::ptr::addr_of_mut!(LIT) = down };
-    set(down);
+    set(down, true);
 }
 
 /// Milliseconds since the lamp was last told anything.
@@ -136,7 +136,7 @@ fn elapsed_ms() -> u32 {
 /// reading codes nobody pointed it at.
 ///
 /// Source: hw-reference/qr.md §8 [C]
-fn set(on: bool) {
+fn set(on: bool, announce: bool) {
     let Some(scanner) = catcard_board::BOARD.qr else {
         return;
     };
@@ -205,12 +205,17 @@ fn set(on: bool) {
     }
     // SAFETY: foreground only.
     unsafe { *core::ptr::addr_of_mut!(LAST_SENT) = catcard_hal::dwt::cycles() };
-    crate::catlog!(
-        "torch: {} -> {} (woke at {})",
-        if on { "on" } else { "off" },
-        answered,
-        woke
-    );
+    // Edges only. The lamp is re-asserted four times a second while the key is held --
+    // otherwise the module's idle timer puts it out -- and logging that buries every
+    // other line in the log under a key nobody was even pressing hard.
+    if announce {
+        crate::catlog!(
+            "torch: {} -> {} (woke at {})",
+            if on { "on" } else { "off" },
+            answered,
+            woke
+        );
+    }
 }
 
 /// Wake the module, retrying as the reference says to.
