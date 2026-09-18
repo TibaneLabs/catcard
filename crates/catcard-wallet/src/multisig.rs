@@ -302,8 +302,9 @@ pub fn parse(text: &str) -> Result<Multisig, Error> {
     if !descriptor::verify(text) {
         return Err(Error::BadChecksum);
     }
-    // `verify` already established the shape; drop the checksum.
-    let body = text.split('#').next().unwrap_or(text);
+    // `verify` established the shape and that the body holds no `#`; split the
+    // same way it did, so both cover the same bytes.
+    let body = text.rsplit_once('#').map_or(text, |(body, _)| body);
 
     let (kind, inner) = if let Some(rest) = strip(body, "sh(wsh(") {
         (Kind::P2shP2wsh, strip_close(rest, 2)?)
