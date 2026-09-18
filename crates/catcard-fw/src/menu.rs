@@ -220,6 +220,11 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 const SETTINGS_ITEMS: &[&str] = &[
     "Login",
     "Passphrase",
+    // Stock keeps the wallet registry in Settings, gated on there being a seed, rather
+    // than beside the one-shot tools. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
+    // §SET "Multisig Wallets (has_secrets)" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Multisig",
     "Destroy seed",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
@@ -277,8 +282,6 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Format SD card",
     "Games",
-    #[cfg(not(feature = "board-mk3"))]
-    "Multisig",
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
@@ -292,8 +295,6 @@ const UTILS_ITEMS: &[&str] = &[
     "Export wallet",
     "Browse SD card",
     "Format SD card",
-    #[cfg(not(feature = "board-mk3"))]
-    "Multisig",
 ];
 
 /// What BIP-85 can derive. The order matches [`crate::derive::Kind`]'s.
@@ -963,6 +964,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::NewSeedMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Multisig")) => Screen::Multisig,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Login")) => Screen::Login,
@@ -1002,8 +1005,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
-            #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("Multisig")) => Screen::Multisig,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
