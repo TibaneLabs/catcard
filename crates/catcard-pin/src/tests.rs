@@ -305,6 +305,18 @@ fn the_happy_path_reaches_the_secret() {
 }
 
 #[test]
+fn the_secret_does_not_stay_in_the_struct_after_it_is_read() {
+    // The struct goes back to the gate on every later call, and each one copies all of it
+    // through the bootloader's staging buffer. A wallet only has to be read once.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+    assert_eq!(l.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
+    assert_eq!(l.attempt.secret, [0; SECRET_LEN], "the secret is still resident");
+    // And it is still readable: the gate, not this struct, is where it lives.
+    assert_eq!(l.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
+}
+
+#[test]
 fn the_prefix_and_suffix_are_joined_with_a_separator() {
     // The bootloader hashes the whole string, so where the dash goes is part of the
     // PIN. Getting it wrong would make every correct PIN read as wrong -- and cost the
