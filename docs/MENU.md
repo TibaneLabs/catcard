@@ -22,16 +22,16 @@ question for each item is only whether it is *reachable where a stock user would
 | `Notes` (Q1) | `Secure Notes & Passwords` (Q1, `secnap`) | 🔀 shorter; stock also gates on the `secnap` setting, which we do not read yet |
 | `Utils` | `Advanced/Tools` | ❌ different word for the same drawer |
 | `Settings` | `Settings` | ✅ |
-| `Logout` | `Secure Logout` — **mk4/mk5 only** | ❌ stock has no logout on the Q1 at all: it is a battery device and you power it off |
+| `Scan QR` (Q1) | `Scan Any QR Code` (Q1, `has_qr`) | ✅ same place; the tile it took is the one stock does not have |
+| `Logout` (mk3/mk4/mk5) | `Secure Logout` (`not has_battery`) | ✅ same gate: a device with a power button does not need a menu entry to stop |
 | — | `Passphrase` (top level, shortcut `p`) | ❌ ours is in Settings; a stock user looks for it on the main menu |
-| — | `Scan Any QR Code`, `Type Passwords`, `Seed Vault`, `Start HSM Mode` | not implemented |
+| — | `Type Passwords`, `Seed Vault`, `Start HSM Mode` | not implemented |
 | — | `<XFP>` header item | 🔀 ours is in the status bar instead, always visible |
 
 On a device with no seed, stock's top menu is `New Seed Words` / `Import Existing` /
 `Migrate Coldcard` / … / `Advanced/Tools` / `Settings`. Ours puts `New` and `Import` in
 the two tiles whose jobs do not exist yet (Sign and Addresses), which is the same idea in
-the grid's shape. ❌ We still show `Notes` there, which stock does not — there is no seed,
-so there are no notes to read.
+the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no notes.
 
 ## Settings
 
@@ -63,6 +63,10 @@ so there are no notes to read.
 `Debug` → `Install from SD`. ❌
 
 ## What to do about the ❌ rows
+
+`Scan QR` reaches a screen that says the scanner is not driven yet. The wire protocol is
+in `catcard-qr`, tested against the reference's own worked example; what is missing is a
+USART driver, since nothing here owns a serial port.
 
 They are not all worth fixing. The tile labels are short because a 107-pixel cell holds
 ten characters of the face they are drawn in, and `Advanced/Tools` is eighteen. But

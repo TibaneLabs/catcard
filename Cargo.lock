@@ -129,6 +129,7 @@ dependencies = [
  "catcard-kernel",
  "catcard-log",
  "catcard-pin",
+ "catcard-qr",
  "catcard-sd",
  "catcard-settings",
  "catcard-ui",
@@ -193,6 +194,10 @@ dependencies = [
  "catcard-wallet",
  "zeroize",
 ]
+
+[[package]]
+name = "catcard-qr"
+version = "7.0.0"
 
 [[package]]
 name = "catcard-sd"

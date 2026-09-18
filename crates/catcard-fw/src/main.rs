@@ -65,6 +65,9 @@ mod power;
 #[cfg(not(feature = "board-mk3"))]
 mod psramsoak;
 mod pubkeys;
+/// The QR scanner is the Q1's alone.
+#[cfg(feature = "board-q1")]
+mod qrscan;
 mod recovery;
 mod sdupgrade;
 mod selftest;

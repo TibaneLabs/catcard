@@ -52,6 +52,7 @@ catcard-kernel.workspace = true
 catcard-pin = { workspace = true, default-features = false }
 catcard-upgrade = { workspace = true, default-features = false }
 catcard-usb = { workspace = true, default-features = false }
+catcard-qr = { workspace = true, default-features = false }
 catcard-sd.workspace = true
 catcard-flash = { workspace = true, default-features = false }
 catcard-log.workspace = true

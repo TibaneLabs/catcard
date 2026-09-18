@@ -151,6 +151,9 @@ enum Screen {
     /// Flappy Cat, on the Q1's self-scrolling panel.
     #[cfg(all(feature = "games", feature = "board-q1"))]
     FlappyCat,
+    /// Reading a QR code with the Q1's scanner.
+    #[cfg(feature = "board-q1")]
+    ScanQr,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -189,6 +192,14 @@ const MAIN_ITEMS: &[&str] = &[
     "Notes",
     "Utils",
     "Settings",
+    // The scanner is the Q1's, and so is the absence of a logout: stock gates Secure
+    // Logout on `not has_battery`, because a device with a power button does not need a
+    // menu entry to stop. The USB-powered boards keep theirs -- pulling the cable is
+    // their only other way to end a session.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+    #[cfg(feature = "board-q1")]
+    "Scan QR",
+    #[cfg(not(feature = "board-q1"))]
     "Logout",
 ];
 /// The blank device's version: the two ways to get a wallet, in the two cells whose
@@ -200,10 +211,12 @@ const MAIN_ITEMS: &[&str] = &[
 const MAIN_ITEMS_BLANK: &[&str] = &[
     "New",
     "Import",
+    // No seed, so no notes to read: stock shows nothing of the sort on a blank device.
     #[cfg(feature = "board-q1")]
-    "Notes",
+    "Scan QR",
     "Utils",
     "Settings",
+    #[cfg(not(feature = "board-q1"))]
     "Logout",
 ];
 
@@ -798,6 +811,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::PsramSoak => to(|a| crate::psramsoak::run(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
+        #[cfg(feature = "board-q1")]
+        Screen::ScanQr => to(|a| crate::qrscan::screen(a.ui), Screen::Main),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Multisig => to(
             |a| crate::msimport::manage(a.gate, a.login, a.ui),
@@ -948,6 +963,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
@@ -1247,6 +1264,8 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Notes" => Some(&art::NOTES),
             "Utils" => Some(&art::UTILS),
             "Settings" => Some(&art::SETTINGS),
+            "Scan QR" => Some(&art::SCAN_QR_CODE),
+            // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
             // rather than borrowing one that would read as the wrong thing.
@@ -1312,7 +1331,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Multisig
         | Screen::NickPreview => {}
         #[cfg(feature = "board-q1")]
-        Screen::Notes => {}
+        Screen::Notes | Screen::ScanQr => {}
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
