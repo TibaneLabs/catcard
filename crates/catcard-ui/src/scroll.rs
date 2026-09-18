@@ -188,16 +188,37 @@ fn text_width(canvas_w: usize, fonts: &Fonts<'_>) -> usize {
     canvas_w.saturating_sub(fonts.margin + gutter)
 }
 
+/// A character boundary at or near `i`. `str::split_at` panics inside a multi-byte
+/// character, and a name off a card is not guaranteed ASCII. Walks down, then up when
+/// down would give zero -- which would leave [`wrap`] no progress to make.
+fn char_boundary(s: &str, i: usize) -> usize {
+    let mut at = i.min(s.len());
+    while at > 0 && !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    if at > 0 {
+        return at;
+    }
+    at = i.min(s.len()).max(1);
+    while at < s.len() && !s.is_char_boundary(at) {
+        at += 1;
+    }
+    at
+}
+
 /// Bytes of `s` that fit in `avail` pixels in `face`, broken at the last word boundary that
 /// fits; a single word wider than the line is hard-split so wrapping always makes progress.
-/// ASCII faces, so byte offsets are character offsets.
+///
+/// Always returns a character boundary. Widths are still summed per byte, so a multi-byte
+/// character costs a little room on the line and never an index.
 fn fit_prefix(face: &dyn Face, s: &str, avail: usize) -> usize {
     let b = s.as_bytes();
     let (mut w, mut i, mut brk) = (0usize, 0usize, 0usize);
     while i < b.len() {
         let adv = face.advance(b[i]);
         if w + adv > avail {
-            return if brk > 0 { brk } else { i.max(1) };
+            // `brk` indexes a space, already a boundary; only the hard split needs one.
+            return if brk > 0 { brk } else { char_boundary(s, i.max(1)) };
         }
         w += adv;
         i += 1;
@@ -693,6 +714,58 @@ mod tests {
             gap: 1,
             margin: 2,
         }
+    }
+
+    #[test]
+    fn a_name_that_is_not_ascii_wraps_instead_of_splitting_a_character() {
+        // A card holds whatever it holds, and a hard split on a byte index lands inside
+        // a character -- a panic, which on this firmware is a halt.
+        let fonts = compact_fonts();
+        for pad in 0..40usize {
+            for tail in ["", "x", "xxxxxxxxxxxxxxxxxxxx.psbt"] {
+                for ch in ['\u{e9}', '\u{20ac}', '\u{1f600}'] {
+                    let name = format!("{}{ch}{tail}", "a".repeat(pad));
+                    let out = wrap(&[Line::body(&name).wrapped()], 128, &fonts);
+                    // No spaces, so nothing is dropped at a break: the pieces must rejoin.
+                    let joined: String = out.iter().map(|l| l.text).collect();
+                    assert_eq!(joined, name, "{name:?} came apart");
+                }
+            }
+        }
+    }
+
+    /// The mono panel, as `catcard_fw::display` configures it. `compact_fonts` matches
+    /// its `FONTS`, so these tests answer for the build that ships.
+    const MONO_W: usize = 128;
+    const MONO_H: usize = 64;
+
+    #[test]
+    fn the_file_detail_screen_survives_a_name_that_is_not_ascii() {
+        // The document `file_info` builds, through the entry point `show_doc` uses.
+        let fonts = compact_fonts();
+        for pad in 0..40usize {
+            for ch in ['\u{e9}', '\u{20ac}', '\u{1f600}'] {
+                let name = format!("{}{ch}xxxxxxxx.psbt", "a".repeat(pad));
+                let sz = "4096 bytes";
+                let doc = [
+                    Line::title("File"),
+                    Line::body(&name).wrapped(),
+                    Line::body(sz).small(),
+                    Line::body("y = select this").centered(),
+                ];
+                let view = ScrollView::build(&doc, MONO_W, MONO_H, fonts);
+                assert!(view.content_height() > 0, "{name:?} laid out to nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_that_is_one_wide_character_still_makes_progress() {
+        // Walking down to a boundary gives zero here, and `wrap` would spin.
+        let fonts = compact_fonts();
+        let out = wrap(&[Line::body("\u{1f600}\u{1f600}\u{1f600}").wrapped()], 24, &fonts);
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|l| !l.text.is_empty()));
     }
 
     #[test]
