@@ -38,6 +38,14 @@ pub const HEADER_LEN: u32 = 16;
 pub const HEADER_FROM_END: u32 = 2048;
 
 /// A PSRAM region set up to stage one image.
+/// Which way the last access went, so a change of direction can be waited out.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Way {
+    Nothing,
+    Reading,
+    Writing,
+}
+
 pub struct PsramArea {
     /// Where the image itself goes: an absolute address, for the writes.
     image_base: u32,
@@ -50,6 +58,8 @@ pub struct PsramArea {
     capacity: u32,
     /// Where the bootloader reads the recovery header.
     header_at: u32,
+    /// Which way the last access went. See [`TURNAROUND_NOPS`].
+    way: Way,
 }
 
 /// Writing outside the region this area was built for.
@@ -81,6 +91,7 @@ impl PsramArea {
             // the image's last sixteen bytes happen to be.
             capacity: psram.staging_header - image_base,
             header_at: psram.staging_header,
+            way: Way::Nothing,
         }
     }
 
@@ -108,6 +119,34 @@ impl PsramArea {
 /// different command. Matching stock is better than picking a larger number that our own
 /// measurements cannot justify.
 pub const RECOVERY_NOPS: u32 = 1;
+
+/// NOPs between a write and a read of this memory, or a read and a write.
+///
+/// The controller cannot be reading and writing at once: **turning it round takes time**,
+/// and a read issued straight after a write comes back with what was there before, or with
+/// a word that was never written. That is not the same thing as [`RECOVERY_NOPS`], which is
+/// the gap between one store and the next; this is the gap when the direction changes.
+///
+/// Paid once per call rather than once per word, so it can afford to be generous: digesting
+/// a megabyte reads it in 256-byte pieces, four thousand of them, and even a thousand NOPs
+/// each is a few tens of milliseconds.
+///
+/// Measure it with Debug → PSRAM soak, whose second sweep is exactly this transition.
+pub const TURNAROUND_NOPS: u32 = 1_000;
+
+/// Wait out a change of direction, per [`TURNAROUND_NOPS`].
+#[inline(never)]
+pub fn turnaround() {
+    for _ in 0..TURNAROUND_NOPS {
+        #[cfg(target_arch = "arm")]
+        // SAFETY: a NOP. Not `nomem`, so it is not moved across the accesses it separates.
+        unsafe {
+            core::arch::asm!("nop", options(nostack, preserves_flags))
+        };
+        #[cfg(not(target_arch = "arm"))]
+        core::hint::spin_loop();
+    }
+}
 
 /// Wait out the write recovery, per [`RECOVERY_NOPS`].
 #[inline(always)]
@@ -206,6 +245,10 @@ impl StagingArea for PsramArea {
     /// the span keep their values.
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, data.len())?;
+        if self.way == Way::Reading {
+            turnaround();
+        }
+        self.way = Way::Writing;
         for word in WordPlan::new(addr, data.len()) {
             let value = if word.whole() {
                 u32::from_le_bytes([
@@ -236,6 +279,10 @@ impl StagingArea for PsramArea {
     /// digesting a staged image a byte at a time is four times the bus traffic.
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, out.len())?;
+        if self.way == Way::Writing {
+            turnaround();
+        }
+        self.way = Way::Reading;
         for word in WordPlan::new(addr, out.len()) {
             // SAFETY: as `write`.
             let bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
@@ -276,6 +323,8 @@ impl StagingArea for PsramArea {
             core::ptr::write_volatile(at, MAGIC1);
             recover();
         }
+        self.way = Way::Writing;
+        turnaround();
 
         // Read it back before anyone acts on it.
         //
