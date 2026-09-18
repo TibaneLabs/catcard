@@ -89,11 +89,16 @@ pub fn checksum(descriptor: &str) -> Option<[u8; CHECKSUM_LEN]> {
 }
 
 /// Whether `text` is a descriptor followed by `#` and its correct checksum.
+///
+/// A body containing `#` is refused: the checksum would cover bytes a reader
+/// splitting on the first `#` never sees.
 pub fn verify(text: &str) -> bool {
     let Some((body, sum)) = text.rsplit_once('#') else {
         return false;
     };
-    sum.len() == CHECKSUM_LEN && checksum(body).is_some_and(|c| c == sum.as_bytes())
+    !body.contains('#')
+        && sum.len() == CHECKSUM_LEN
+        && checksum(body).is_some_and(|c| c == sum.as_bytes())
 }
 
 /// A single-signature account: which script, and where its key sits under the master.
@@ -208,6 +213,17 @@ mod tests {
         assert!(!verify("raw(deedbeef)##9f8spxm"));
         assert!(!verify("raw(Ü)#00000000"));
         assert_eq!(checksum("raw(Ü)"), None);
+    }
+
+    #[test]
+    fn a_body_holding_a_hash_is_refused() {
+        // Checksummed over `raw(deadbeef)#pad`, which a reader splitting on the
+        // first `#` would parse as `raw(deadbeef)` with `pad` never seen.
+        let smuggled = "raw(deadbeef)#pad";
+        let sum = core::str::from_utf8(&checksum(smuggled).unwrap())
+            .unwrap()
+            .to_string();
+        assert!(!verify(&format!("{smuggled}#{sum}")));
     }
 
     #[test]
