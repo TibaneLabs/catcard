@@ -126,7 +126,7 @@ enum Screen {
     SettingsToSd,
     /// The before-login nickname screen, drawn from the menu so it can be looked at.
     #[cfg(not(feature = "board-mk3"))]
-    NicknameScreen,
+    NickPreview,
     /// The PSRAM write-recovery sweep: how many NOPs a store here needs.
     #[cfg(not(feature = "board-mk3"))]
     PsramSoak,
@@ -714,7 +714,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NicknameScreen => to(
+        Screen::NickPreview => to(
             |a| crate::settings::show_nickname_screen(a.ui),
             Screen::Debug,
         ),
@@ -939,7 +939,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
             #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("Nickname screen")) => Screen::NicknameScreen,
+            (Key::Confirm, Some("Nickname screen")) => Screen::NickPreview,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("PSRAM soak")) => Screen::PsramSoak,
             #[cfg(feature = "board-q1")]
@@ -1144,7 +1144,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::PsramSoak
         | Screen::Nickname
         | Screen::SettingsToSd
-        | Screen::NicknameScreen => {}
+        | Screen::NickPreview => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}
         Screen::Kernel => kernel_screen(panel),
