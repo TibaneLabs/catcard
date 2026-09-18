@@ -312,11 +312,24 @@ pub fn qr_payload<'a>(
     kind: AddressKind,
     out: &'a mut [u8; MAX_QR_PAYLOAD],
 ) -> Option<&'a str> {
+    qr_payload_of(address, kind.is_bech32(), out)
+}
+
+/// As [`qr_payload`], for an address whose form is known without an [`AddressKind`].
+///
+/// A multisig wallet's addresses have no single-signature kind to name them by -- the
+/// script form is the wallet's, not a key's -- and the encoding is the only thing this
+/// decision turns on, so it is asked for directly rather than through a stand-in kind that
+/// would be a lie about what is being shown.
+pub fn qr_payload_of<'a>(
+    address: &str,
+    bech32: bool,
+    out: &'a mut [u8; MAX_QR_PAYLOAD],
+) -> Option<&'a str> {
     let bytes = address.as_bytes();
     if bytes.is_empty() || !address.is_ascii() {
         return None;
     }
-    let bech32 = kind.is_bech32();
     let head = if bech32 { 0 } else { QR_SCHEME.len() };
     if head + bytes.len() > out.len() {
         return None;

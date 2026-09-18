@@ -40,7 +40,7 @@ Dependency first, then what a user needs to hold funds safely:
    to take a copy of the region first. What is left is the mk3's SPI-NOR medium, the
    re-key when the seed changes, and using the settings for the things that currently
    forget: chain, account numbers, display units.
-8. ~~**Multisig and descriptor import**~~ -- done bar export and Address Explorer; see §4.
+8. ~~**Multisig and descriptor import**~~ -- done; see §4. Untested on hardware.
 9. **Encrypted backup and restore**.
 10. **Import paths** beyond words: xprv, raw master secret, Seed XOR, backup file.
 11. **Q1 transports**: QR scanner and display (incl. BBQr), NFC.
@@ -97,7 +97,7 @@ Dependency first, then what a user needs to hold funds safely:
 | Accounts, change chain, start index | ✅ | 🟡 | account and chain keys in the explorer; no custom-path entry |
 | Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address only |
 | Verify address / ownership | ✅ | 🟡 | Utils → Verify address, 4 types x 3 accounts x 2 chains x 100 |
-| Multisig addresses | ✅ | 🟡 | P2SH, P2WSH and P2SH-P2WSH built from a registered wallet; not yet in Address Explorer |
+| Multisig addresses | ✅ | 🟡 | P2SH, P2WSH and P2SH-P2WSH, in the Address Explorer and with a QR |
 
 ## 4. Multisig and descriptors
 
@@ -109,8 +109,8 @@ Dependency first, then what a user needs to hold funds safely:
 | Remember them across a reboot | ✅ | 🟡 | settings key `ccms`, **not** stock's `multisig`, whose schema is undocumented -- a device can hold both |
 | Sign a multisig input | ✅ | 🟡 | only for a registered wallet; the rebuilt script must equal the one the coin is locked to |
 | Multisig change recognition | ✅ | 🟡 | same rule, plus the shape rules single-sig change obeys |
-| Export a multisig descriptor / cosigner file | ✅ | ❌ | |
-| Multisig in Address Explorer | ✅ | ❌ | |
+| Export this device's cosigner keys | ✅ | 🟡 | Utils → Export wallet writes the BIP-48 P2WSH and P2SH-P2WSH key expressions; a coordinator turns those into the descriptor |
+| Multisig in Address Explorer | ✅ | 🟡 | registered wallets sit past the single-sig types; no account axis, since the descriptor fixes it |
 | Skip-checksum, legacy `.txt` wallet formats | ✅ | ❌ | a descriptor without a checksum is refused, deliberately |
 
 Not available on the mk3, which has no settings store: nothing can be registered there, so

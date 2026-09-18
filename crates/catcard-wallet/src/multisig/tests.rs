@@ -369,3 +369,55 @@ fn an_unsorted_multi_keeps_the_order_it_was_given() {
     assert_ne!(script[..n], sorted_script[..m], "sorting changed nothing");
     assert_eq!(&sorted_script[2..35], &sorted_keys[0]);
 }
+
+/// What this device exports as a cosigner key must come back as a wallet it can use.
+///
+/// The export writes `[fp/48h/0h/0h/2h]xpub/<0;1>/*` -- BIP-389's multipath, which is what
+/// a coordinator asks for so one descriptor covers both chains. The round trip that has to
+/// hold is: export a key, have a coordinator paste it into a `sortedmulti`, import that,
+/// and get the same addresses as the single-branch spelling. If the two disagreed, a
+/// person would verify a receive address against a wallet the coordinator does not have.
+#[test]
+fn the_multipath_form_this_device_exports_describes_the_same_wallet() {
+    let single = descriptor_for(2, &SEEDS, "wsh", true);
+    let multipath = {
+        let body = single
+            .split('#')
+            .next()
+            .unwrap()
+            .replace("/0/*", "/<0;1>/*");
+        let sum = descriptor::checksum(&body).unwrap();
+        format!("{body}#{}", core::str::from_utf8(&sum).unwrap())
+    };
+
+    let a = parse(&single).expect("the single-branch form");
+    let b = parse(&multipath).expect("the form this device exports");
+    assert_eq!(a, b, "the derivation suffix changed the wallet");
+
+    // And the addresses themselves, on both branches.
+    for branch in [0u32, 1] {
+        for index in [0u32, 1, 7] {
+            let (mut x, mut y) = ([0u8; 34], [0u8; 34]);
+            let n = a.script_pubkey(branch, index, &mut x).unwrap();
+            let m = b.script_pubkey(branch, index, &mut y).unwrap();
+            assert_eq!(x[..n], y[..m], "branch {branch} index {index}");
+        }
+    }
+}
+
+/// A suffix that is not a wildcard is refused rather than read as address zero.
+///
+/// `[fp/48h/0h/0h/2h]xpub/0/5` names one key, not a chain of them. Accepting it and
+/// deriving `branch/index` below the account anyway would silently register a wallet
+/// whose addresses are not the ones the descriptor describes.
+#[test]
+fn a_fixed_key_is_not_a_wallet() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true).replace("/0/*", "/0/5");
+    let body = text.split('#').next().unwrap();
+    let sum = descriptor::checksum(body).unwrap();
+    let fixed = format!("{body}#{}", core::str::from_utf8(&sum).unwrap());
+    assert!(
+        matches!(parse(&fixed), Err(Error::BadKey { .. })),
+        "a fixed key was accepted as a wallet"
+    );
+}

@@ -3088,6 +3088,11 @@ fn qr_faces() -> (
 /// Version 8 is the largest symbol the buffers hold: 49 modules, already more than a 64-row
 /// panel can draw at one pixel each and far more than any address needs.
 fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::AddressKind) {
+    address_qr_of(ui, address, kind.is_bech32())
+}
+
+/// As [`address_qr`], for an address with no single-signature kind to name it by.
+fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_wallet::address;
 
@@ -3098,7 +3103,7 @@ fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::Add
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
     let mut payload = [0u8; address::MAX_QR_PAYLOAD];
-    let Some(payload) = address::qr_payload(address, kind, &mut payload) else {
+    let Some(payload) = address::qr_payload_of(address, bech32, &mut payload) else {
         message(ui.panel, "QR", "address not encodable", "");
         wait_for_any_key(ui);
         return;
@@ -3234,6 +3239,43 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
             "# {name}, m/{}h/0h/0h\n{}\n",
             kind.bip44_purpose(),
             core::str::from_utf8(&line[..len]).unwrap_or("")
+        );
+    }
+
+    // The multisig side: this device's account keys at BIP-48's paths, as descriptor key
+    // expressions. They are not wallets on their own -- a multisig wallet is an agreement
+    // between cosigners, and only a coordinator holding all of their keys can write the
+    // descriptor. What a person can do with these is hand one over and get that descriptor
+    // back, which Utils -> Multisig then imports.
+    const COSIGNER: [(u32, &str); 2] = [(2, "P2WSH"), (1, "P2SH-P2WSH")];
+    let _ = write!(
+        text,
+        "\n# Multisig cosigner keys (BIP-48). Give one of these to the coordinator;\n\
+         # it is a key, not a wallet. Import the descriptor it sends back.\n"
+    );
+    for (script, name) in COSIGNER {
+        let steps = [
+            ChildNumber::hardened(48),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(script),
+        ];
+        let [Ok(purpose), Ok(coin), Ok(acct), Ok(form)] = steps else {
+            continue;
+        };
+        let Some(account) = public_at(&master, &[purpose, coin, acct, form], &mut busy, ui.panel)
+        else {
+            crate::catlog!("export: {} cosigner key did not derive", name);
+            continue;
+        };
+        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
+        let Ok(xlen) = account.write_base58(&mut xpub) else {
+            continue;
+        };
+        let _ = write!(
+            text,
+            "# {name}, m/48h/0h/0h/{script}h\n[{a:02x}{b:02x}{c:02x}{d:02x}/48h/0h/0h/{script}h]{}/<0;1>/*\n",
+            core::str::from_utf8(&xpub[..xlen]).unwrap_or("")
         );
     }
     drop(master);
@@ -3385,6 +3427,15 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let Some(master) = unlock_master(gate, login, ui, "Addresses") else {
         return;
     };
+    // Registered multisig wallets sit past the single-signature types on the same axis.
+    // Their addresses come out of the wallet record, not out of this seed: that is the
+    // point of looking at them here, since an address a cosigner cannot reproduce is one
+    // nobody can spend from.
+    #[cfg(not(feature = "board-mk3"))]
+    let wallets = crate::msimport::registered(gate, login);
+    #[cfg(feature = "board-mk3")]
+    let wallets: &[catcard_wallet::multisig::Multisig] = &[];
+    let entries = PROTOCOLS.len() + wallets.len();
     // One cached chain key at a time, for the type, account and chain on screen. Caching
     // all of them would be four times the state for a screen that walks one at a time, and
     // each is half a second to rederive when the owner moves.
@@ -3409,35 +3460,55 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
-        let kind = PROTOCOLS[proto];
-        // First time this type, account and chain are asked for: derive the chain key,
-        // masked, and keep only the public half. Announced first -- it is about half a
-        // second during which nothing can repaint, and an unexplained pause is what made
-        // the old entry feel broken.
-        if !matches!(cached, Some((p, a, c, _)) if (p, a, c) == (proto, account, chain)) {
-            let mut busy = Working::new(ui.panel, "Deriving", kind_name(kind));
-            cached = chain_key(&master, kind, account, chain, &mut busy, ui.panel)
-                .map(|key| (proto, account, chain, key));
-        }
-        let chain_pub = cached.as_ref().map(|(_, _, _, k)| *k);
-
-        let mut path = Line::new();
-        let _ = write!(
-            path,
-            "m/{}h/0h/{account}h/{chain}/{index}",
-            kind.bip44_purpose()
-        );
-
+        // Past the single-signature types, `proto` names a registered wallet instead.
+        let wallet = proto
+            .checked_sub(PROTOCOLS.len())
+            .and_then(|i| wallets.get(i));
+        // Only read when `wallet` is none; clamped so the index cannot leave the table.
+        let kind = PROTOCOLS[proto.min(PROTOCOLS.len() - 1)];
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        // Public derivation from the chain's extended public key: no private key is
-        // involved, so this needs no masked region and costs the host nothing to watch.
-        // The index moves with the type, so the same position can be compared across them.
-        let addr = chain_pub.and_then(|chain| {
-            ChildNumber::normal(index)
+        let mut path = Line::new();
+        let mut title: heapless::String<24> = heapless::String::new();
+
+        let addr = if let Some(wallet) = wallet {
+            // No derivation of ours: the wallet's own cosigner records build the script,
+            // and the address is that script's. Public throughout, so no masked region.
+            let _ = write!(title, "{}-of-{} multisig", wallet.m, wallet.n());
+            let _ = write!(path, ".../{chain}/{index}");
+            let mut spk = [0u8; 34];
+            wallet
+                .script_pubkey(chain, index, &mut spk)
                 .ok()
-                .and_then(|c| chain.derive_child(c).ok())
-                .and_then(|k| address::encode(kind, Network::Mainnet, &k.public_key, &mut buf).ok())
-        });
+                .and_then(|n| address::from_script(&spk[..n], Network::Mainnet, &mut buf))
+        } else {
+            // First time this type, account and chain are asked for: derive the chain key,
+            // masked, and keep only the public half. Announced first -- it is about half a
+            // second during which nothing can repaint, and an unexplained pause is what
+            // made the old entry feel broken.
+            if !matches!(cached, Some((p, a, c, _)) if (p, a, c) == (proto, account, chain)) {
+                let mut busy = Working::new(ui.panel, "Deriving", kind_name(kind));
+                cached = chain_key(&master, kind, account, chain, &mut busy, ui.panel)
+                    .map(|key| (proto, account, chain, key));
+            }
+            let _ = title.push_str(kind_name(kind));
+            let _ = write!(
+                path,
+                "m/{}h/0h/{account}h/{chain}/{index}",
+                kind.bip44_purpose()
+            );
+            // Public derivation from the chain's extended public key: no private key is
+            // involved, so this needs no masked region and costs the host nothing to
+            // watch. The index moves with the type, so the same position can be compared
+            // across them.
+            cached.as_ref().map(|(_, _, _, k)| *k).and_then(|chain| {
+                ChildNumber::normal(index)
+                    .ok()
+                    .and_then(|c| chain.derive_child(c).ok())
+                    .and_then(|k| {
+                        address::encode(kind, Network::Mainnet, &k.public_key, &mut buf).ok()
+                    })
+            })
+        };
         let mut shown = Line::new();
         match addr {
             Some(n) => {
@@ -3465,16 +3536,20 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // thing on the screen worth reading carefully, and the elision costs less than the
         // squint did -- the whole of it, in blocks of four, is one keypress away.
         let mut doc: heapless::Vec<catcard_ui::scroll::Line, 8> = heapless::Vec::new();
-        let _ = doc.push(catcard_ui::scroll::Line::title(kind_name(kind)));
+        let _ = doc.push(catcard_ui::scroll::Line::title(title.as_str()));
         let _ = doc.push(catcard_ui::scroll::Line::body(path.as_str()).small());
         let _ = doc.push(catcard_ui::scroll::Line::body(shown.as_str()));
         let _ = doc.push(catcard_ui::scroll::Line::body("up/down address").small());
         let _ = doc.push(catcard_ui::scroll::Line::body("left/right type").small());
+        // A multisig wallet has no account axis here: the account is fixed by the
+        // descriptor its cosigners agreed on, so offering to change it would be offering
+        // a different wallet's addresses under this one's name.
         let _ = doc.push(
-            catcard_ui::scroll::Line::body(if chain == 0 {
-                "1/3 account  0 change chain"
-            } else {
-                "1/3 account  0 receive chain"
+            catcard_ui::scroll::Line::body(match (wallet.is_some(), chain) {
+                (true, 0) => "0 change chain",
+                (true, _) => "0 receive chain",
+                (false, 0) => "1/3 account  0 change chain",
+                (false, _) => "1/3 account  0 receive chain",
             })
             .small(),
         );
@@ -3498,7 +3573,15 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     // watch-only wallet, without reading out 42 characters.
                     Key::Confirm => {
                         if let Some(n) = addr {
-                            address_qr(ui, core::str::from_utf8(&buf[..n]).unwrap_or(""), kind);
+                            let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                            match wallet {
+                                Some(w) => address_qr_of(
+                                    ui,
+                                    text,
+                                    w.kind == catcard_wallet::multisig::Kind::P2wsh,
+                                ),
+                                None => address_qr(ui, text, kind),
+                            }
                         }
                         break 'wait;
                     }
@@ -3512,22 +3595,24 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     }
                     // Left and right walk the address types, wrapping both ways.
                     Key::Digit(9) => {
-                        proto = (proto + 1) % PROTOCOLS.len();
+                        proto = (proto + 1) % entries;
+                        index = 0;
                         break 'wait;
                     }
                     Key::Digit(7) => {
-                        proto = (proto + PROTOCOLS.len() - 1) % PROTOCOLS.len();
+                        proto = (proto + entries - 1) % entries;
+                        index = 0;
                         break 'wait;
                     }
                     // Accounts are separate wallets under one seed; the chain is receive or
                     // change. Both restart the index, because address 5 of one account has
                     // nothing to do with address 5 of another.
-                    Key::Digit(3) => {
+                    Key::Digit(3) if wallet.is_none() => {
                         account = account.saturating_add(1);
                         index = 0;
                         break 'wait;
                     }
-                    Key::Digit(1) => {
+                    Key::Digit(1) if wallet.is_none() => {
                         account = account.saturating_sub(1);
                         index = 0;
                         break 'wait;
