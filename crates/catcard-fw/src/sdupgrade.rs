@@ -204,9 +204,17 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
             // Per-128 KB digests, so the log says which block of the image is wrong rather
             // than only that the whole of it is. A boundary on a cluster edge points at how
             // the file's clusters were followed; a scattered one at the memory.
+            // Fine blocks over the first 128 KB, coarse after: the head and the header
+            // arrive intact while every 128 KB block differs, which is what a read that
+            // drifts by a sector somewhere early looks like. Small blocks find where.
             let mut off = 0u32;
             while off < staged_len {
-                let n = (staged_len - off).min(128 * 1024);
+                let step = if off < 128 * 1024 {
+                    16 * 1024
+                } else {
+                    128 * 1024
+                };
+                let n = (staged_len - off).min(step);
                 use purecrypto::hash::{Digest as _, Sha256};
                 let mut h = Sha256::new();
                 let mut chunk = [0u8; 256];
