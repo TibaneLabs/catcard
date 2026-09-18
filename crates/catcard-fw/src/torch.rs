@@ -48,6 +48,14 @@ const REASSERT_MS: u32 = 250;
 /// Between the two sleep commands, for the module's second sleep layer.
 const SLEEP_GAP_MS: u32 = 150;
 
+/// How long to give the module to answer before reading its reply.
+///
+/// A framed acknowledgement is eight bytes -- about 1.4 ms at 57600 -- and the module
+/// thinks before it sends them. Reading straight away timed out on every command,
+/// including the ones that plainly worked, which made the log say "silence" where it
+/// should have said "ack" and cost a round of chasing the wrong thing.
+const REPLY_MS: u32 = 10;
+
 /// How long to leave between wake attempts: **50 ms**, as the reference specifies.
 ///
 /// A real delay and not a loop budget. The budget this replaced came to something like
@@ -153,7 +161,11 @@ fn set(on: bool) {
             continue;
         }
         port.set_baud(rate);
-        if on && wake(port) {
+        // Wake in **both** directions. Lighting the lamp worked and putting it out did
+        // not, and the only difference between the two paths was this: the module had
+        // been woken before one and not the other. Waking something already awake costs
+        // one command it answers immediately.
+        if wake(port) {
             woke = rate;
         }
         // Framed, and framed only: bare is for the sleep and wake pokes, and raw ASCII
@@ -166,6 +178,8 @@ fn set(on: bool) {
         };
         port.flush_input();
         let _ = port.write(frame, BYTE_BUDGET);
+        // Give it time to answer before deciding it did not: see `REPLY_MS`.
+        catcard_hal::dwt::delay_cycles(ms_cycles(REPLY_MS));
         // What comes back is the whole diagnosis: an acknowledgement means the command
         // landed and an unlit lamp is the module's business, silence means it did not.
         let mut reply = [0u8; 16];
@@ -178,6 +192,10 @@ fn set(on: bool) {
         };
     }
     if !on {
+        // Only after the lamp has been told to go out, and answered. Sleeping on top of
+        // a command the module has not finished with is a good way to have it wake up
+        // later still lit.
+        //
         // Stock re-sleeps here, and an idle state that is not the one the rest of the
         // firmware assumes is a battery draining quietly. Twice, 150 ms apart: the
         // module has two sleep layers and one command only reaches the first.
