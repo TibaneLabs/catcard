@@ -19,16 +19,16 @@ use zeroize::Zeroize;
 /// Lower case first because that is what most passphrases are, then the digit itself, then
 /// upper case. `1` carries punctuation and `0` the space.
 pub const KEYS: [&str; 10] = [
-    " 0",          // 0
+    " 0",                     // 0
     ".,!?@#$%&*-_+=/:;'\"()", // 1
-    "abc2ABC",     // 2
-    "def3DEF",     // 3
-    "ghi4GHI",     // 4
-    "jkl5JKL",     // 5
-    "mno6MNO",     // 6
-    "pqrs7PQRS",   // 7
-    "tuv8TUV",     // 8
-    "wxyz9WXYZ",   // 9
+    "abc2ABC",                // 2
+    "def3DEF",                // 3
+    "ghi4GHI",                // 4
+    "jkl5JKL",                // 5
+    "mno6MNO",                // 6
+    "pqrs7PQRS",              // 7
+    "tuv8TUV",                // 8
+    "wxyz9WXYZ",              // 9
 ];
 
 /// Longest text this holds. Stock's passphrase limit is 100 characters; this matches it.
@@ -162,7 +162,11 @@ mod tests {
         assert_eq!(typed(&[(2, 3)]), "c");
         assert_eq!(typed(&[(2, 4)]), "2");
         assert_eq!(typed(&[(2, 5)]), "A");
-        assert_eq!(typed(&[(2, 8)]), "a", "seven characters, so the eighth wraps");
+        assert_eq!(
+            typed(&[(2, 8)]),
+            "a",
+            "seven characters, so the eighth wraps"
+        );
     }
 
     #[test]

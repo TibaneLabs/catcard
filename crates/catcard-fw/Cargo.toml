@@ -27,6 +27,11 @@ usb-debug-mem = []
 # The Games menu under Utils (Block Mine, ...). On by default; a build can drop it to
 # save flash without touching the rest of the UI.
 games = []
+# Every chain rather than Bitcoin alone: Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto,
+# Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
+# Bitcoin-only build is the one whose image carries no other chain's parser at all --
+# that is the point of it being a build rather than a menu.
+multichain = ["catcard-wallet/multichain"]
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]

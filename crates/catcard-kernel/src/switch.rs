@@ -73,7 +73,10 @@ pub(crate) unsafe fn bootstrap() -> ! {
     // SAFETY: the scratch is ours alone and is only ever written by the discarded first
     // save; `psp` is not in use yet because nothing has run in thread mode on it.
     unsafe {
-        let top = (core::ptr::addr_of_mut!(BOOTSTRAP_STACK)).cast::<u32>().add(40) as u32 & !7;
+        let top = (core::ptr::addr_of_mut!(BOOTSTRAP_STACK))
+            .cast::<u32>()
+            .add(40) as u32
+            & !7;
         cortex_m::register::psp::write(top);
     }
     // Mark "no current task", so that first save is dropped rather than written over a

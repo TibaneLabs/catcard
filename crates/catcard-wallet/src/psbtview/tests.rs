@@ -711,7 +711,10 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
         &kw(),
     );
     assert_eq!(found, 2);
-    assert!(!dests[0].change, "a stuffed output was still folded into change");
+    assert!(
+        !dests[0].change,
+        "a stuffed output was still folded into change"
+    );
     assert!(!dests[0].address().is_empty(), "shown without an address");
 }
 
@@ -785,7 +788,13 @@ fn real_change_is_still_change() {
     for steps in [
         CHANGE,
         [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 7],
-        [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, MAX_CHANGE_INDEX],
+        [
+            84 | 0x8000_0000,
+            0x8000_0000,
+            0x8000_0000,
+            1,
+            MAX_CHANGE_INDEX,
+        ],
     ] {
         let mut buf = vec![0u8; 1 << 16];
         let n = build(

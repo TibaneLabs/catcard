@@ -9,14 +9,21 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-# Every chain on by default. A single-coin build turns them off explicitly:
-#   --no-default-features --features chain-bitcoin
-default = ["std", "chain-bitcoin", "chain-ethereum", "chain-solana"]
+# Two products, not a lattice. **Bitcoin is always compiled** -- it is what this device
+# is -- and `multichain` adds the rest, so there are two firmware shapes to build, test
+# and reason about rather than one per subset. The per-chain features this replaced cost
+# more in build matrix and cfg noise than the granularity was ever worth: nobody ships a
+# Solana-only Coldcard.
+#
+#   cargo test -p catcard-wallet                            # bitcoin only
+#   cargo test -p catcard-wallet --features multichain      # everything
+default = ["std"]
 std = []
 
-chain-bitcoin = []
-chain-ethereum = []
-chain-solana = []
+# Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto, Ethereum (and other EVM chains),
+# Monacoin, Solana, Tron. The registry in `chain` says which of those this build actually
+# carries; the feature is the line between the two products.
+multichain = []
 
 [dependencies]
 purecrypto = { workspace = true, features = ["hash", "ec", "hazmat-secp256k1"] }

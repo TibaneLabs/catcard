@@ -514,10 +514,6 @@ fn a_released_stock_signature_verifies_under_the_key_its_header_names() {
     );
 }
 
-
-
-
-
 /// Staging writes whole words at word-aligned offsets, and reads nothing while it does.
 ///
 /// Both halves matter on the boards that stage into memory-mapped PSRAM: only a full 32-bit
@@ -558,12 +554,15 @@ fn staging_writes_aligned_words_and_reads_nothing_on_the_way() {
     let area = staged.area();
     for (offset, len) in &area.writes {
         assert_eq!(offset % 4, 0, "write at {offset:#x} is not word-aligned");
-        assert_eq!(len % 4, 0, "write at {offset:#x} is {len} bytes, not whole words");
+        assert_eq!(
+            len % 4,
+            0,
+            "write at {offset:#x} is {len} bytes, not whole words"
+        );
     }
     // Every byte of the image is there, and the pad past its end is at most three bytes.
     assert!(area.bytes[..image.len()] == image[..], "the bytes differ");
 }
-
 
 /// The ordinary path still installs: an approval commits the bytes it was granted over.
 #[test]

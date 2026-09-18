@@ -753,9 +753,7 @@ mod big_exfat {
             ..Default::default()
         };
         let mut fs = Exfat::format(&mut mem, &opts).expect("format exfat");
-        let dir = fs
-            .create_dir(&mut mem, "/q1", 0)
-            .expect("create directory");
+        let dir = fs.create_dir(&mut mem, "/q1", 0).expect("create directory");
         let _ = dir;
         let mut reader = fstool::io::Cursor::new(data.to_vec());
         fs.create_file(&mut mem, "/q1/fw.dfu", &mut reader, data.len() as u64, 0)
@@ -801,9 +799,7 @@ mod big_exfat {
             let mut at = 0usize;
             while at < got.len() {
                 let want = (got.len() - at).min(512);
-                let n = file
-                    .read(&mut vol, &mut got[at..at + want])
-                    .expect("read");
+                let n = file.read(&mut vol, &mut got[at..at + want]).expect("read");
                 assert_ne!(n, 0, "stopped at {at}, cluster shift {shift}");
                 at += n;
             }
@@ -832,9 +828,7 @@ mod big_exfat {
             let mut at = 0usize;
             while at < FILE_LEN {
                 let want = (FILE_LEN - at).min(256);
-                let n = file
-                    .read(&mut vol, &mut got[at..at + want])
-                    .expect("read");
+                let n = file.read(&mut vol, &mut got[at..at + want]).expect("read");
                 assert_ne!(n, 0, "read stopped at {at} with cluster shift {shift}");
                 at += n;
             }

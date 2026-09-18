@@ -289,8 +289,8 @@ impl StagingArea for PsramArea {
             } else {
                 // SAFETY: `in_range` bounded the span, and a partial word at the edge lies
                 // in the same word as bytes that are in it, so the word is mapped.
-                let mut bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }
-                    .to_le_bytes();
+                let mut bytes =
+                    unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
                 bytes[word.lo as usize..word.hi as usize]
                     .copy_from_slice(&data[word.src..word.src + word.len()]);
                 u32::from_le_bytes(bytes)
@@ -430,7 +430,10 @@ mod tests {
         let plan: Vec<_> = WordPlan::new(0x2000_0002, 13).collect();
         assert_eq!(plan.len(), 4);
         assert!(!plan[0].whole(), "the head starts mid-word");
-        assert!(plan[1].whole() && plan[2].whole(), "the middle is whole words");
+        assert!(
+            plan[1].whole() && plan[2].whole(),
+            "the middle is whole words"
+        );
         assert!(!plan[3].whole(), "the tail ends mid-word");
         // A span that starts and ends on word boundaries needs no merge at all, which is
         // the case every staging write takes: offsets there are multiples of 512.

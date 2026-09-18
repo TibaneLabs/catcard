@@ -371,8 +371,8 @@ mod tests {
 
 #[cfg(test)]
 mod save_tests {
-    use super::*;
     use super::tests::Ram;
+    use super::*;
 
     fn key() -> Key {
         nvstore::hash_key(&[0x11; 72])
@@ -468,7 +468,16 @@ mod save_tests {
         let k = key();
         let mut doc = [0u8; SCRATCH];
         let mut scratch = [0u8; SCRATCH];
-        set(&mut slots, &k, "idle_to", &600u32, 0, &mut doc, &mut scratch).unwrap();
+        set(
+            &mut slots,
+            &k,
+            "idle_to",
+            &600u32,
+            0,
+            &mut doc,
+            &mut scratch,
+        )
+        .unwrap();
         set(&mut slots, &k, "nfc", &true, 1, &mut doc, &mut scratch).unwrap();
         let n = read(&mut slots, &k, &mut doc).unwrap();
         let doc = Doc::parse(&doc[..n]).unwrap();

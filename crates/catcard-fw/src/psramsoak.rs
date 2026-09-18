@@ -169,7 +169,10 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     use core::fmt::Write as _;
 
     let Some(psram) = BOARD.psram else {
-        let rows = [Row::title("PSRAM soak"), Row::body("no PSRAM on this board")];
+        let rows = [
+            Row::title("PSRAM soak"),
+            Row::body("no PSRAM on this board"),
+        ];
         crate::menu::show_doc(ui, &rows, false, false);
         crate::menu::wait_for_any_key(ui);
         return;

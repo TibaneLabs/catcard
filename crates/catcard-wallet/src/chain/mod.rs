@@ -6,10 +6,16 @@
 //! code absent from the image rather than merely hidden.
 //!
 //! ```text
-//! cargo fw-mk4                                             # every chain
-//! cargo build ... --no-default-features \
-//!     --features board-mk4,chain-bitcoin                   # Bitcoin only
+//! cargo build ... --features board-mk4                     # Bitcoin only
+//! cargo build ... --features board-mk4,multichain          # every chain
 //! ```
+//!
+//! **Bitcoin is always compiled**; `multichain` adds the rest. Two shapes, not a lattice
+//! of per-coin features: the granularity cost more in build matrix and `cfg` noise than
+//! it was worth, and nobody ships a Solana-only Coldcard. The intended reach of
+//! `multichain` is Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto, Ethereum and other EVM
+//! chains, Monacoin, Solana and Tron; the registry below is what this build carries
+//! today, and a chain absent from it is absent from the image.
 //!
 //! # Why the code must be absent, not disabled
 //!
@@ -186,7 +192,6 @@ pub enum Unsupported {
 // ---------------------------------------------------------------------------
 
 /// Bitcoin. BIP-44/49/84/86 purposes over secp256k1.
-#[cfg(feature = "chain-bitcoin")]
 pub const BITCOIN: Chain = Chain {
     id: ChainId::Bitcoin,
     name: "Bitcoin",
@@ -195,7 +200,7 @@ pub const BITCOIN: Chain = Chain {
 };
 
 /// Ethereum and EVM chains. `m/44'/60'`, secp256k1, recoverable signatures.
-#[cfg(feature = "chain-ethereum")]
+#[cfg(feature = "multichain")]
 pub const ETHEREUM: Chain = Chain {
     id: ChainId::Ethereum,
     name: "Ethereum",
@@ -204,7 +209,7 @@ pub const ETHEREUM: Chain = Chain {
 };
 
 /// Solana. `m/44'/501'`, ed25519 under SLIP-0010, so hardened-only.
-#[cfg(feature = "chain-solana")]
+#[cfg(feature = "multichain")]
 pub const SOLANA: Chain = Chain {
     id: ChainId::Solana,
     name: "Solana",
@@ -214,11 +219,10 @@ pub const SOLANA: Chain = Chain {
 
 /// Chains compiled into this firmware.
 pub const SUPPORTED: &[Chain] = &[
-    #[cfg(feature = "chain-bitcoin")]
     BITCOIN,
-    #[cfg(feature = "chain-ethereum")]
+    #[cfg(feature = "multichain")]
     ETHEREUM,
-    #[cfg(feature = "chain-solana")]
+    #[cfg(feature = "multichain")]
     SOLANA,
 ];
 
@@ -366,7 +370,7 @@ mod tests {
 
     // -- chain confusion -----------------------------------------------------
 
-    #[cfg(all(feature = "chain-bitcoin", feature = "chain-ethereum"))]
+    #[cfg(feature = "multichain")]
     #[test]
     fn a_path_from_another_chain_is_refused() {
         // The core defence: a host naming Ethereum while supplying a Bitcoin path is
@@ -389,7 +393,6 @@ mod tests {
         assert!(BITCOIN.accepts_path(&path("m/44'/0'/0'/0/0")).is_ok());
     }
 
-    #[cfg(feature = "chain-bitcoin")]
     #[test]
     fn every_bitcoin_purpose_is_accepted() {
         // 44/49/84/86 are all Bitcoin; the check is on the coin type, not the purpose.
@@ -403,7 +406,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "chain-bitcoin")]
     #[test]
     fn short_and_unhardened_paths_are_refused() {
         // `m` and `m/44'` have no coin type to check. Accepting them would open the
@@ -427,7 +429,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chain-solana")]
+    #[cfg(feature = "multichain")]
     #[test]
     fn solana_paths_are_checked_the_same_way() {
         assert!(SOLANA.accepts_path(&path("m/44'/501'/0'/0'")).is_ok());
@@ -485,27 +487,43 @@ mod tests {
 
     // -- build shape ---------------------------------------------------------
 
+    /// A multichain build carries every chain the protocol knows.
+    ///
+    /// Guards against a chain being defined and then forgotten in `SUPPORTED`, which
+    /// would compile and then answer "unknown chain" to a host asking for it.
     #[test]
-    fn the_default_build_carries_every_known_chain() {
-        // Guards against a chain being defined and then forgotten in SUPPORTED.
-        #[cfg(all(
-            feature = "chain-bitcoin",
-            feature = "chain-ethereum",
-            feature = "chain-solana"
-        ))]
-        {
-            assert_eq!(SUPPORTED.len(), KNOWN.len());
-            for id in KNOWN {
-                assert!(SUPPORTED.iter().any(|c| c.id == *id), "{id:?} missing");
-            }
-            assert!(!is_single_chain());
+    #[cfg(feature = "multichain")]
+    fn a_multichain_build_carries_every_known_chain() {
+        assert_eq!(SUPPORTED.len(), KNOWN.len());
+        for id in KNOWN {
+            assert!(SUPPORTED.iter().any(|c| c.id == *id), "{id:?} missing");
         }
+        assert!(!is_single_chain());
+    }
+
+    /// A Bitcoin build carries Bitcoin and nothing else.
+    ///
+    /// The point of the two shapes: the other chains' code is *absent* from the image,
+    /// not merely unreachable, so a Bitcoin-only device has no Ethereum parser in it.
+    #[test]
+    #[cfg(not(feature = "multichain"))]
+    fn a_bitcoin_build_carries_only_bitcoin() {
+        assert_eq!(SUPPORTED.len(), 1);
+        assert_eq!(SUPPORTED[0].id, ChainId::Bitcoin);
+        assert!(is_single_chain());
+        // Known but absent is a different answer from never heard of, and a host has to
+        // be able to tell them apart.
+        assert!(KNOWN.contains(&ChainId::Ethereum));
+        assert!(matches!(
+            resolve(ChainId::Ethereum.as_u16()),
+            Err(Unsupported::NotInThisBuild { .. })
+        ));
     }
 
     #[test]
+    #[cfg(not(feature = "multichain"))]
     fn a_disabled_chain_is_absent_and_says_so() {
         // The point of the feature: not present, and distinguishable from unknown.
-        #[cfg(not(feature = "chain-ethereum"))]
         {
             assert!(!SUPPORTED.iter().any(|c| c.id == ChainId::Ethereum));
             assert_eq!(

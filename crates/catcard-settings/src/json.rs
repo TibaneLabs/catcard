@@ -244,12 +244,19 @@ mod tests {
     fn punctuation_inside_a_note_does_not_end_it() {
         let raw = r#"[{"title": "a}b],c", "misc": "{\"not\": \"json\"}"}, {"title": "z"}]"#;
         let got: Vec<&str> = super::elements(raw).unwrap().map(|e| e.unwrap()).collect();
-        assert_eq!(got.len(), 2, "the braces in the strings are text, not structure");
+        assert_eq!(
+            got.len(),
+            2,
+            "the braces in the strings are text, not structure"
+        );
         assert_eq!(
             Doc::parse(got[0].as_bytes()).unwrap().get_str("title"),
             Some("a}b],c")
         );
-        assert_eq!(Doc::parse(got[1].as_bytes()).unwrap().get_str("title"), Some("z"));
+        assert_eq!(
+            Doc::parse(got[1].as_bytes()).unwrap().get_str("title"),
+            Some("z")
+        );
     }
 
     /// The escapes stock writes have to come back as the text the owner typed.
@@ -301,9 +308,6 @@ mod tests {
         assert_eq!(doc.get("accts"), Some("[[0, 0], [8, 1]]"));
         assert!(doc.get("multisig").unwrap().starts_with("[[\"nunchuk\""));
     }
-
-
-
 
     #[test]
     fn a_string_holding_braces_or_escapes_does_not_confuse_the_scan() {
@@ -393,7 +397,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn numbers_and_literals_survive_as_written() {
         let doc =
@@ -405,4 +408,3 @@ mod tests {
         assert_eq!(doc.get_bool("e"), Some(false));
     }
 }
-

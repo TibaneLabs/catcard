@@ -717,8 +717,7 @@ pub fn unlock(
     drbg: &mut HmacDrbg,
     // The owner's nickname, shown once the device has attached to USB. Always `None` on the
     // mk3, whose settings medium is not wired up -- hence the underscore there.
-    #[cfg_attr(feature = "board-mk3", allow(unused_variables))]
-    nick: Option<&str>,
+    #[cfg_attr(feature = "board-mk3", allow(unused_variables))] nick: Option<&str>,
 ) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);

@@ -290,10 +290,8 @@ pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
     let text = entry.as_str();
     if text.len() > NICK_MAX {
         let mut why = heapless::String::<48>::new();
-        let _ = core::fmt::Write::write_fmt(
-            &mut why,
-            format_args!("{NICK_MAX} characters at most"),
-        );
+        let _ =
+            core::fmt::Write::write_fmt(&mut why, format_args!("{NICK_MAX} characters at most"));
         crate::menu::message(ui.panel, "Nickname", "too long", why.as_str());
         crate::menu::wait_for_any_key(ui);
         return;

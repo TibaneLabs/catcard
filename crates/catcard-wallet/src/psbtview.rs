@@ -166,7 +166,9 @@ pub fn summarise(
             if accounts[..account_count].iter().any(|a| a.prefix == prefix) {
                 continue;
             }
-            let Ok(spent) = psbt.utxo(index) else { continue };
+            let Ok(spent) = psbt.utxo(index) else {
+                continue;
+            };
             let pubkey = signer.public_key_bytes();
             for kind in [
                 AddressKind::P2wpkh,

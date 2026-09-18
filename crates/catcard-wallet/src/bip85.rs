@@ -73,11 +73,7 @@ pub enum Error {
 ///
 /// `steps` are the elements after the purpose, each of which is hardened here: for words
 /// that is `[language, word_count, index]`, for a password `[length, index]`.
-pub fn entropy(
-    master: &ExtendedPrivKey,
-    steps: &[u32],
-    kw: &KeyWork,
-) -> Result<Entropy, Error> {
+pub fn entropy(master: &ExtendedPrivKey, steps: &[u32], kw: &KeyWork) -> Result<Entropy, Error> {
     let mut here = master
         .derive_child(
             ChildNumber::hardened(PURPOSE).map_err(|_| Error::BadParameter)?,
@@ -86,7 +82,9 @@ pub fn entropy(
         .map_err(|_| Error::Derivation)?;
     for &step in steps {
         let child = ChildNumber::hardened(step).map_err(|_| Error::BadParameter)?;
-        here = here.derive_child(child, kw).map_err(|_| Error::Derivation)?;
+        here = here
+            .derive_child(child, kw)
+            .map_err(|_| Error::Derivation)?;
     }
     let mut mac = HmacSha512::new(HMAC_KEY);
     mac.update(here.secret_bytes());
@@ -121,11 +119,7 @@ pub fn words_entropy(
 /// **The halves are the other way round from BIP-32**: the first 32 bytes of the entropy
 /// are the chain code and the second 32 the key. Depth, child number and parent fingerprint
 /// are all zero, so the result is a root key in its own right.
-pub fn xprv(
-    master: &ExtendedPrivKey,
-    index: u32,
-    kw: &KeyWork,
-) -> Result<ExtendedPrivKey, Error> {
+pub fn xprv(master: &ExtendedPrivKey, index: u32, kw: &KeyWork) -> Result<ExtendedPrivKey, Error> {
     let e = entropy(master, &[app::XPRV, index], kw)?;
     let mut chain_code = [0u8; 32];
     let mut secret = [0u8; 32];

@@ -233,8 +233,14 @@ pub unsafe fn start(syst: &mut cortex_m::peripheral::SYST, hclk_hz: u32) -> ! {
     // SAFETY: setting the priority of two core exceptions, before either can fire.
     unsafe {
         let mut scb = cortex_m::Peripherals::steal().SCB;
-        scb.set_priority(cortex_m::peripheral::scb::SystemHandler::PendSV, PENDSV_PRIORITY);
-        scb.set_priority(cortex_m::peripheral::scb::SystemHandler::SysTick, SYSTICK_PRIORITY);
+        scb.set_priority(
+            cortex_m::peripheral::scb::SystemHandler::PendSV,
+            PENDSV_PRIORITY,
+        );
+        scb.set_priority(
+            cortex_m::peripheral::scb::SystemHandler::SysTick,
+            SYSTICK_PRIORITY,
+        );
     }
 
     let per_tick = hclk_hz / 1000 * TICK_MS;

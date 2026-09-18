@@ -1990,7 +1990,11 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         let _ = write!(
             wait,
             "{}",
-            if pass > 1 { "checking signature" } else { "reading" }
+            if pass > 1 {
+                "checking signature"
+            } else {
+                "reading"
+            }
         );
         display::draw(ui.panel, |c| {
             let lines = [wait.clone(), note.clone()];
@@ -1998,19 +2002,16 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             catcard_ui::splash::draw_progress(c, pct);
         });
     };
-    let (staged, approval) = match stage_from_card(
-        catcard_hal::sdmmc::Slot::A,
-        Some(&chosen),
-        &mut tick,
-    ) {
-        Outcome::Offered(s, a) => (s, a),
-        Outcome::Failed(why) => {
-            crate::catlog!("sd: {}", why);
-            message(ui.panel, "No upgrade", why, "any key to go back");
-            wait_for_any_key(ui);
-            return;
-        }
-    };
+    let (staged, approval) =
+        match stage_from_card(catcard_hal::sdmmc::Slot::A, Some(&chosen), &mut tick) {
+            Outcome::Offered(s, a) => (s, a),
+            Outcome::Failed(why) => {
+                crate::catlog!("sd: {}", why);
+                message(ui.panel, "No upgrade", why, "any key to go back");
+                wait_for_any_key(ui);
+                return;
+            }
+        };
 
     crate::session::show_offer(ui.panel, &approval);
 

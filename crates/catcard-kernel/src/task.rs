@@ -51,7 +51,10 @@ pub unsafe fn spawn(
     stack: &'static mut [u32],
     entry: extern "C" fn() -> !,
 ) -> Result<TaskId, Full> {
-    assert!(stack.len() > FRAME_WORDS + 8, "stack too small for a context");
+    assert!(
+        stack.len() > FRAME_WORDS + 8,
+        "stack too small for a context"
+    );
 
     // SAFETY: spawning happens on the boot path, before `start`, so nothing is scheduling.
     let tasks = unsafe { &mut *(core::ptr::addr_of_mut!(TASKS)) };
@@ -85,7 +88,8 @@ pub unsafe fn spawn(
             f.add(i).write(0);
         }
         // A task that returns has nowhere to go, so LR traps rather than wandering.
-        f.add(14).write(task_returned as *const () as usize as u32 | 1);
+        f.add(14)
+            .write(task_returned as *const () as usize as u32 | 1);
         f.add(15).write(entry as *const () as usize as u32 & !1);
         // Thumb bit. Clearing it faults on the first instruction instead of running.
         f.add(16).write(0x0100_0000);
@@ -190,7 +194,10 @@ pub fn stack_len(id: TaskId) -> usize {
     // SAFETY: read-only.
     unsafe {
         let tasks = &*core::ptr::addr_of!(TASKS);
-        tasks.get(id.0).and_then(|t| t.as_ref()).map_or(0, |t| t.len)
+        tasks
+            .get(id.0)
+            .and_then(|t| t.as_ref())
+            .map_or(0, |t| t.len)
     }
 }
 

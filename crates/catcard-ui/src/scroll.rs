@@ -218,7 +218,11 @@ fn fit_prefix(face: &dyn Face, s: &str, avail: usize) -> usize {
         let adv = face.advance(b[i]);
         if w + adv > avail {
             // `brk` indexes a space, already a boundary; only the hard split needs one.
-            return if brk > 0 { brk } else { char_boundary(s, i.max(1)) };
+            return if brk > 0 {
+                brk
+            } else {
+                char_boundary(s, i.max(1))
+            };
         }
         w += adv;
         i += 1;
@@ -763,7 +767,11 @@ mod tests {
     fn a_line_that_is_one_wide_character_still_makes_progress() {
         // Walking down to a boundary gives zero here, and `wrap` would spin.
         let fonts = compact_fonts();
-        let out = wrap(&[Line::body("\u{1f600}\u{1f600}\u{1f600}").wrapped()], 24, &fonts);
+        let out = wrap(
+            &[Line::body("\u{1f600}\u{1f600}\u{1f600}").wrapped()],
+            24,
+            &fonts,
+        );
         assert!(!out.is_empty());
         assert!(out.iter().all(|l| !l.text.is_empty()));
     }

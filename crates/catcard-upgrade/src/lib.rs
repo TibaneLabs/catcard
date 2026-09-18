@@ -35,8 +35,8 @@ use catcard_fwhdr::{
     hw_compat, is_factory_key,
 };
 
-pub mod dfuse;
 pub mod claim;
+pub mod dfuse;
 pub mod nor;
 pub mod psram;
 
@@ -332,7 +332,8 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         }
         let at = self.received - u32::from(self.carry_len);
         let mut word = [0u8; 4];
-        word[..usize::from(self.carry_len)].copy_from_slice(&self.carry[..usize::from(self.carry_len)]);
+        word[..usize::from(self.carry_len)]
+            .copy_from_slice(&self.carry[..usize::from(self.carry_len)]);
         self.area
             .write(at, &word)
             .map_err(|_| Reject::StorageFault { offset: at })?;

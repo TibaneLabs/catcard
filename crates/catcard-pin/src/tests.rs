@@ -311,7 +311,10 @@ fn the_secret_does_not_stay_in_the_struct_after_it_is_read() {
     let m = Model::new(b"12-3456");
     let (mut l, _) = login_with(&m, b"12", b"3456");
     assert_eq!(l.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
-    assert_eq!(l.attempt.secret, [0; SECRET_LEN], "the secret is still resident");
+    assert_eq!(
+        l.attempt.secret, [0; SECRET_LEN],
+        "the secret is still resident"
+    );
     // And it is still readable: the gate, not this struct, is where it lives.
     assert_eq!(l.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
 }

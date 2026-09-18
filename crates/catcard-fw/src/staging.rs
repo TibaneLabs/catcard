@@ -14,10 +14,10 @@
 //! screen — is board-agnostic and shared, exactly as it should be.
 
 use catcard_callgate::Callgate;
-use catcard_upgrade::StagingArea;
-use catcard_upgrade::claim::{Claim, Ticket};
 #[cfg(feature = "board-mk3")]
 use catcard_callgate::abi::LogoutMode;
+use catcard_upgrade::StagingArea;
+use catcard_upgrade::claim::{Claim, Ticket};
 
 use crate::display;
 
