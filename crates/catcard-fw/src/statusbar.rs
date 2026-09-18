@@ -16,8 +16,14 @@ use catcard_ui::statusbar::{Power, Status};
 
 /// The modifiers as the last scan saw them, packed so a change is one comparison.
 static mut MODIFIERS: u8 = 0;
-/// Set when [`note`] sees a change the panel has not been shown yet.
+/// Set when a poll sees a change the panel has not been shown yet.
 static mut DIRTY: bool = false;
+/// The power source as the last poll saw it.
+///
+/// Unlike the modifiers this changes with a *cable*, so there is no keypress and no scan
+/// to hang the notice off -- without sampling it, the icon would sit wrong until some
+/// unrelated thing happened to repaint the screen.
+static mut POWER: Option<crate::battery::Source> = None;
 
 const SHIFT: u8 = 1;
 const SYMBOL: u8 = 2;
@@ -73,12 +79,27 @@ pub(crate) fn status() -> Status {
     }
 }
 
-/// Repaint the bar if the modifiers moved since the last frame.
+/// Repaint the bar if anything on it moved since the last frame.
 ///
-/// For the idle poll of a screen that is waiting on a key. Cheap when nothing changed,
-/// which is almost always.
+/// For the idle poll of a screen that is waiting on a key. Two register reads and a
+/// comparison when nothing changed, which is almost always.
+///
+/// The modifiers arrive through [`note`], off the keypad scan. The power source has no
+/// such hook -- it changes when someone moves a cable -- so it is sampled here. Stock
+/// arms an edge interrupt on rev-D+ boards and polls as a backstop; polling alone is
+/// enough while a screen is waiting, which is whenever anyone is looking at the bar.
+///
+/// Source: hw-reference/power.md §"Power source: battery vs USB" [C]
 #[cfg(feature = "board-q1")]
 pub(crate) fn poll(panel: &mut crate::display::Panel) {
+    let now = crate::battery::source();
+    // SAFETY: foreground only, single core; the borrows end within this block.
+    unsafe {
+        if *core::ptr::addr_of!(POWER) != now {
+            *core::ptr::addr_of_mut!(POWER) = now;
+            *core::ptr::addr_of_mut!(DIRTY) = true;
+        }
+    }
     if take_dirty() {
         crate::display::refresh_bar(panel);
     }
