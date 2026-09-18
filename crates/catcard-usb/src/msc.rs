@@ -240,11 +240,12 @@ pub fn decode(cb: &[u8]) -> Command {
         Some(op::READ_FORMAT_CAPACITIES) if cb.len() >= 9 => {
             Command::ReadFormatCapacities { alloc: be16(7) }
         }
-        Some(op::READ_10) if cb.len() >= 8 => Command::Read {
+        // `be16(7)` reads bytes 7 *and* 8, so the bound is nine, as above.
+        Some(op::READ_10) if cb.len() >= 9 => Command::Read {
             lba: be32(2),
             blocks: be16(7),
         },
-        Some(op::WRITE_10) if cb.len() >= 8 => Command::Write {
+        Some(op::WRITE_10) if cb.len() >= 9 => Command::Write {
             lba: be32(2),
             blocks: be16(7),
         },
@@ -472,6 +473,49 @@ mod tests {
         assert_eq!(b[2] & 0x0F, 0x05);
         assert_eq!(b[12], 0x20);
         assert_eq!(b[7], 10);
+    }
+
+    #[test]
+    fn no_command_block_length_can_read_past_the_block() {
+        // `bCBWCBLength` is 1..=16 and `msc_drive` passes exactly that many bytes, so
+        // every length here is one a host can send.
+        for op in 0u8..=255 {
+            for len in 1usize..=16 {
+                let mut cb = [0u8; 16];
+                cb[0] = op;
+                // A set LOEJ bit, so START STOP UNIT takes its longer arm too.
+                if len > 4 {
+                    cb[4] = 0x02;
+                }
+                let _ = decode(&cb[..len]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_wire_cbw_declaring_an_eight_byte_block_decodes_safely() {
+        // The path `msc_drive` runs: a wire CBW, `Cbw::parse`, then the command block.
+        for op in [op::READ_10, op::WRITE_10] {
+            let mut pkt = [0u8; CBW_LEN];
+            pkt[0..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
+            pkt[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+            pkt[8..12].copy_from_slice(&512u32.to_le_bytes());
+            pkt[12] = 0x80; // device-to-host
+            pkt[14] = 8; // bCBWCBLength
+            pkt[15] = op;
+
+            let cbw = Cbw::parse(&pkt).expect("a well-formed CBW");
+            assert_eq!(cbw.cb_len, 8);
+            assert_eq!(decode(&cbw.cb[..cbw.cb_len as usize]), Command::Unsupported);
+        }
+    }
+
+    #[test]
+    fn a_read10_with_a_nine_byte_block_still_decodes() {
+        // Nine is the field's width, not a way of refusing short blocks.
+        let cb = [0x28u8, 0, 0, 0, 0, 1, 0, 0, 4];
+        assert_eq!(decode(&cb), Command::Read { lba: 1, blocks: 4 });
+        assert_eq!(decode(&cb[..8]), Command::Unsupported);
     }
 
     #[test]
