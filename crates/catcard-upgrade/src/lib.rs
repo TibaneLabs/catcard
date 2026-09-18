@@ -185,6 +185,10 @@ pub struct Staged<'a, A: StagingArea> {
     board: &'a BoardSpec,
     length: u32,
     received: u32,
+    /// Bytes accepted but not yet pushed to the area: fewer than four, always the tail of
+    /// what has been received. See [`Self::write`].
+    carry: [u8; 4],
+    carry_len: u8,
 }
 
 impl<'a, A: StagingArea> Staged<'a, A> {
@@ -209,6 +213,8 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             board,
             length,
             received: 0,
+            carry: [0; 4],
+            carry_len: 0,
         })
     }
 
@@ -254,19 +260,73 @@ impl<'a, A: StagingArea> Staged<'a, A> {
                 len: self.length,
             });
         }
-        self.area
-            .write(offset, data)
-            .map_err(|_| Reject::StorageFault { offset })?;
+        // Push whole four-byte words at word-aligned offsets, and nothing else.
+        //
+        // A staging area can be memory-mapped PSRAM, where only a full 32-bit store at a
+        // 4-aligned address is issued correctly, and where a read placed between writes
+        // corrupts them. Frames arriving over USB are 56 and 62 bytes, so most of them
+        // start unaligned -- and asking the area to write a partial word would make it
+        // read the word, merge and write it back, which is that read. So the odd bytes at
+        // the end of a write are carried and go out with the front of the next one.
+        //
+        // Writes are in order (checked above), so the carry is always the tail of what has
+        // been received, and `settle` puts the last of it away.
+        let mut at = offset - u32::from(self.carry_len);
+        let mut rest = data;
+        if self.carry_len > 0 {
+            let need = 4 - usize::from(self.carry_len);
+            if rest.len() < need {
+                // Still short of a word: keep them together and wait for more.
+                self.carry[usize::from(self.carry_len)..][..rest.len()].copy_from_slice(rest);
+                self.carry_len += rest.len() as u8;
+                self.received = end;
+                return Ok(());
+            }
+            let mut word = self.carry;
+            word[usize::from(self.carry_len)..].copy_from_slice(&rest[..need]);
+            self.area
+                .write(at, &word)
+                .map_err(|_| Reject::StorageFault { offset: at })?;
+            at += 4;
+            rest = &rest[need..];
+            self.carry_len = 0;
+        }
+        let whole = rest.len() & !3;
+        if whole > 0 {
+            self.area
+                .write(at, &rest[..whole])
+                .map_err(|_| Reject::StorageFault { offset: at })?;
+        }
+        let tail = &rest[whole..];
+        self.carry[..tail.len()].copy_from_slice(tail);
+        self.carry_len = tail.len() as u8;
 
-        // A read straight after a write has to see the write. The staging area can be
-        // memory mapped over a bus with a write buffer of its own, so order the two
-        // explicitly rather than trusting the read to be issued after the stores.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        self.area
-            .write(offset, data)
-            .map_err(|_| Reject::StorageFault { offset })?;
         self.received = end;
+        Ok(())
+    }
+
+    /// The staging area itself, for a test that checks how it was written.
+    #[cfg(test)]
+    pub(crate) fn area(&self) -> &A {
+        &self.area
+    }
+
+    /// Put the carried tail away, zero-padded to a whole word.
+    ///
+    /// The padding sits past the image's last byte, which nothing reads: the header says how
+    /// long the image is, and the signature covers exactly that much. Called before anything
+    /// reads the area back, so a reader never sees a hole where the last few bytes go.
+    fn settle(&mut self) -> Result<(), Reject> {
+        if self.carry_len == 0 {
+            return Ok(());
+        }
+        let at = self.received - u32::from(self.carry_len);
+        let mut word = [0u8; 4];
+        word[..usize::from(self.carry_len)].copy_from_slice(&self.carry[..usize::from(self.carry_len)]);
+        self.area
+            .write(at, &word)
+            .map_err(|_| Reject::StorageFault { offset: at })?;
+        self.carry_len = 0;
         Ok(())
     }
 
@@ -282,6 +342,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// how long it is, which boards it is for -- is what makes a rejection chaseable
     /// afterwards, and [`inspect`](Self::inspect) only says which check said no.
     pub fn header(&mut self) -> Option<FirmwareHeader> {
+        self.settle().ok()?;
         let mut raw = [0u8; catcard_fwhdr::FW_HEADER_SIZE as usize];
         self.area.read(HEADER_OFFSET as u32, &mut raw).ok()?;
         let header = FirmwareHeader::from_bytes(&raw);
@@ -289,6 +350,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     }
 
     pub fn inspect(&mut self, running: Option<&FirmwareHeader>) -> Result<Approval, Reject> {
+        self.settle()?;
         if !self.is_complete() {
             return Err(Reject::Incomplete {
                 have: self.received,
@@ -362,11 +424,13 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// a signature that will not verify is either the wrong bytes or the wrong key, and the
     /// digest is what tells those apart.
     pub fn digest(&mut self) -> Result<[u8; 32], Reject> {
+        self.settle()?;
         self.stored_digest()
     }
 
     /// Read `buf.len()` bytes of the staged image at `offset`, for the same reason.
     pub fn sample(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), Reject> {
+        self.settle()?;
         self.area
             .read(offset, buf)
             .map_err(|_| Reject::StorageFault { offset })
@@ -403,6 +467,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// mk4 and later nothing happens until a logged-in `gate 18/7` authorises *this*
     /// region, which is why the caller is handed it rather than left to recompute it.
     pub fn commit(mut self, approval: Approval) -> Result<Region, Reject> {
+        self.settle()?;
         let start = self.area.image_offset();
         self.area
             .publish(approval.length)

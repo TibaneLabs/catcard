@@ -14,6 +14,10 @@ struct Mem {
     header: Option<(u32, u32)>,
     /// Flip one bit on the way back out, to model memory that does not read back.
     corrupt_read_at: Option<u32>,
+    /// Offsets and lengths the area was asked to write, and how many times it was read.
+    /// A staging area that is memory-mapped PSRAM cares about both.
+    writes: Vec<(u32, usize)>,
+    reads: usize,
 }
 
 impl Mem {
@@ -22,6 +26,8 @@ impl Mem {
             bytes: vec![0xFF; capacity],
             header: None,
             corrupt_read_at: None,
+            writes: Vec::new(),
+            reads: 0,
         }
     }
 }
@@ -46,11 +52,13 @@ impl StagingArea for Mem {
         if end > self.bytes.len() {
             return Err(MemError);
         }
+        self.writes.push((offset, data.len()));
         self.bytes[at..end].copy_from_slice(data);
         Ok(())
     }
 
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), MemError> {
+        self.reads += 1;
         let at = offset as usize;
         let end = at.checked_add(out.len()).ok_or(MemError)?;
         if end > self.bytes.len() {
@@ -509,3 +517,49 @@ fn a_released_stock_signature_verifies_under_the_key_its_header_names() {
 
 
 
+
+/// Staging writes whole words at word-aligned offsets, and reads nothing while it does.
+///
+/// Both halves matter on the boards that stage into memory-mapped PSRAM: only a full 32-bit
+/// store at a 4-aligned address is issued correctly there, and a read placed between writes
+/// corrupts them. Frames over USB are 56 then 62 bytes, so most of them start unaligned --
+/// which is how a firmware image staged over USB came back failing its own signature check.
+#[test]
+fn staging_writes_aligned_words_and_reads_nothing_on_the_way() {
+    let image = image_for(&Q1, *b"20260918", 0);
+    let mut staged = Staged::begin(Mem::new(image.len()), &Q1, image.len() as u32).unwrap();
+
+    // Fed exactly as the USB path feeds it: a 56-byte first frame, then 62 bytes a frame.
+    let mut at = 0usize;
+    let mut first = true;
+    while at < image.len() {
+        let n = if first { 56 } else { 62 }.min(image.len() - at);
+        first = false;
+        staged.write(at as u32, &image[at..at + n]).unwrap();
+        at += n;
+    }
+    // Nothing was read while it was being written. Reading afterwards is fine and is what
+    // the digest does; a read *between* writes is what corrupts PSRAM.
+    assert_eq!(
+        staged.area().reads,
+        0,
+        "the area was read while it was being written"
+    );
+
+    // The digest reads the area, so the carried tail has to be put away first -- which
+    // `settle` does, and the image verifying at all is the proof.
+    let digest = staged.digest().unwrap();
+    assert_eq!(
+        digest,
+        signed_digest(&image).unwrap(),
+        "the staged image is the image"
+    );
+
+    let area = staged.area();
+    for (offset, len) in &area.writes {
+        assert_eq!(offset % 4, 0, "write at {offset:#x} is not word-aligned");
+        assert_eq!(len % 4, 0, "write at {offset:#x} is {len} bytes, not whole words");
+    }
+    // Every byte of the image is there, and the pad past its end is at most three bytes.
+    assert!(area.bytes[..image.len()] == image[..], "the bytes differ");
+}
