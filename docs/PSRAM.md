@@ -33,7 +33,29 @@ the plan that produces them can.
 **Why stock never meets this:** its PSRAM writes are always whole 512-byte blocks at
 block-aligned offsets, so its `memcpy` stays all-word-store.
 
-## 2. The recovery delay: required by the reference, not reproduced here
+## 2. CE# may not stay low for more than 8 us, or the part stops refreshing itself
+
+**This is the rule that explains the rest, and it comes from the datasheet rather than from
+us** (`hw-reference/datasheets/ESP-PSRAM64H-espressif.pdf`):
+
+- Table 10-5: **`tCEM`, CE# low pulse width, max 8 us**; `tCPH`, CE# high between bursts,
+  min 50 ns.
+- §5.5: *"CE# must be pulled high immediately after all read/write operations. Not doing so
+  will **block internal refresh operations and cause memory failure**."*
+
+It is a pseudo-SRAM: a DRAM array behind an SRAM interface, and it refreshes itself only
+while it is deselected. Hold it selected and it loses data -- **anywhere in the chip**, not
+at the address being accessed. That is the piece every earlier theory here was missing,
+because it is the only one that explains bytes going wrong in a header that nothing had
+written to.
+
+The bus runs quad at 60 MHz, so it moves half a byte per clock: 8 us is 480 clocks, 240
+bytes, sixty words. `PsramArea` now lets CE# rise every **twenty** words -- a third of the
+limit, since the figure is a maximum quoted without margin -- by idling the bus long enough
+for the controller's timeout (16 clocks, 267 ns as stock arms it) plus `tCPH`. A megabyte of
+staging pays that eight thousand times, which is about four milliseconds.
+
+## 3. The recovery delay: required by the reference, not reproduced here
 
 `storage.md` also says writes need "a NOP recovery delay after writes", without saying how
 long. Guessing invisibly short is how the rest of this bug presented, so it was measured:
@@ -51,7 +73,7 @@ soak exercises one data pattern at one temperature, and a megabyte of stores cos
 milliseconds. It is a cost worth paying for a rule we did not establish ourselves — but it is
 **not** the fix for what was wrong here, and this file should not be read as saying it was.
 
-## 3. What was actually wrong the second time: reads mixed into writes  [C, confirmed]
+## 4. Reads mixed into writes  [C, confirmed]
 
 After the switch to word stores, staging still failed — one word per chunk or so arriving
 mis-issued, with the chunk's real data four bytes further on and a word in front of it that

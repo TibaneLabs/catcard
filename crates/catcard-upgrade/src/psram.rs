@@ -120,6 +120,45 @@ impl PsramArea {
 /// measurements cannot justify.
 pub const RECOVERY_NOPS: u32 = 1;
 
+/// Words this may touch before CE# must be allowed to rise.
+///
+/// **The part cannot be held selected for longer than 8 us** -- `tCEM` in Table 10-5 of the
+/// ESP-PSRAM64H datasheet (`hw-reference/datasheets/`) -- and §5.5 says why: *"CE# must be
+/// pulled high immediately after all read/write operations. Not doing so will block internal
+/// refresh operations and cause memory failure."* Refresh is the whole difference between
+/// pseudo-SRAM and SRAM, and a starved refresh loses data **anywhere in the chip**, not
+/// where the access was. That is the shape of the corruption that made a staged firmware
+/// image fail its signature check: bytes went wrong in a header nothing had written to.
+///
+/// The arithmetic: the bus runs quad at 60 MHz (prescaler 2 off a 120 MHz kernel), so it
+/// moves half a byte per clock, and 8 us is 480 clocks or 240 bytes. Sixty words. This is a
+/// third of that, because the figure is a maximum with no margin quoted and because a run of
+/// stores is not the only thing on the bus.
+pub const WORDS_PER_BURST: u32 = 20;
+
+/// Cycles to leave the bus idle so CE# actually rises between bursts.
+///
+/// Long enough for the controller's memory-mapped timeout to fire -- stock arms it at 16
+/// clocks, which is 267 ns at 60 MHz -- plus `tCPH`, the 50 ns the part wants CE# high
+/// between bursts. At 120 MHz this is a little over half a microsecond, and a megabyte of
+/// staging pays it eight thousand times: about four milliseconds in total.
+pub const BURST_GAP_NOPS: u32 = 80;
+
+/// Let CE# rise: idle the bus long enough for the controller to deselect the part.
+#[inline(never)]
+pub fn burst_gap() {
+    for _ in 0..BURST_GAP_NOPS {
+        #[cfg(target_arch = "arm")]
+        // SAFETY: a NOP. Not `nomem`, so it is not moved out from between the accesses it
+        // is separating -- which is the whole point of it.
+        unsafe {
+            core::arch::asm!("nop", options(nostack, preserves_flags))
+        };
+        #[cfg(not(target_arch = "arm"))]
+        core::hint::spin_loop();
+    }
+}
+
 /// NOPs between a write and a read of this memory, or a read and a write.
 ///
 /// The controller cannot be reading and writing at once: **turning it round takes time**,
@@ -249,7 +288,14 @@ impl StagingArea for PsramArea {
             turnaround();
         }
         self.way = Way::Writing;
+        let mut since_gap = 0u32;
         for word in WordPlan::new(addr, data.len()) {
+            // CE# has to rise before `tCEM`, or the part stops refreshing itself.
+            if since_gap >= WORDS_PER_BURST {
+                burst_gap();
+                since_gap = 0;
+            }
+            since_gap += 1;
             let value = if word.whole() {
                 u32::from_le_bytes([
                     data[word.src],
@@ -283,7 +329,14 @@ impl StagingArea for PsramArea {
             turnaround();
         }
         self.way = Way::Reading;
+        let mut since_gap = 0u32;
         for word in WordPlan::new(addr, out.len()) {
+            // Reads hold CE# exactly as writes do, and the digest reads a megabyte.
+            if since_gap >= WORDS_PER_BURST {
+                burst_gap();
+                since_gap = 0;
+            }
+            since_gap += 1;
             // SAFETY: as `write`.
             let bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
             let len = word.len();
