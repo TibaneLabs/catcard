@@ -1,70 +1,81 @@
-# PSRAM: byte stores are not reliable, word stores are
+# PSRAM: what a memory-mapped write needs
 
 Measured on a real Q1 on 2026-09-18, chasing a genuine, correctly signed stock firmware
-image that failed its signature check after being read off a microSD card.
+image that failed its signature check after being staged from a microSD card.
 
-## What happens
+The rules come from `hw-reference/storage.md` §PSRAM, which is stock's own discipline
+(`mk4-bootloader/psram.c`): the part is an ESP-PSRAM64H on OCTOSPI1, memory-mapped at
+`0x9000_0000`, so **every CPU store is an OctoSPI write transaction**.
 
-A run of **byte** stores into memory-mapped PSRAM that begins at an **odd** address comes
-back with one byte duplicated and the rest of the run shifted along by one. The span's last
-byte is lost off the end. Word-aligned and even-aligned runs of byte stores came back clean
-in the same test; 32-bit stores came back clean everywhere.
+## 1. Only full 32-bit stores at 4-aligned addresses are issued correctly
 
-## The experiment
+`psram.c`'s own header: *"CAUTION: All writes must be word aligned. Unaligned read okay."* A
+byte or half-word store, or a word straddling an odd address, is mis-issued — the data lands
+at the wrong offset or is dropped. **Reads may be unaligned.**
 
-Through the USB memory monitor (`peek`/`poke`, the `usb-debug-mem` build), a 2 KB
-position-dependent pattern was written into unused staging space at `0x9060_0000` in 50-byte
-`poke` requests — so each request is a run of 50 byte stores — and read back with 32-bit
-`peek`. The only variable is the address the first request starts at:
+Confirmed here by the failure it caused. `PsramArea::write` wrote byte by byte, and a run of
+byte stores beginning at an **odd** address came back with one byte duplicated and the rest
+of the run shifted along by one:
 
-| start address mod 4 | result |
+| `poke` start address mod 4 | 2 KB pattern, byte stores |
 |---|---|
 | 0 | clean |
-| 1 | **wrong from the second byte**, 1027 of 2048 bytes differ |
+| 1 | **wrong from the second byte** |
 | 2 | clean |
-| 3 | **wrong from the second byte**, 1027 of 2048 bytes differ |
+| 3 | **wrong from the second byte** |
 
-and, from a 4-aligned start, in 51-byte requests (so the second request starts at `+51`,
-which is 3 mod 4):
+`PsramArea::write` and `::read` now use 32-bit accesses only. A partial word at either end of
+a span is read, merged and written whole, so bytes outside the span keep their values; every
+staging write in practice is 512-aligned and needs no merge. The word plan is a separate
+iterator with its own tests, because the addresses PSRAM sees cannot be checked on a host but
+the plan that produces them can.
 
-| | |
-|---|---|
-| first difference | byte 52, i.e. the second byte of the second request |
-| shape | the byte before it repeated, everything after shifted by one |
+**Why stock never meets this:** its PSRAM writes are always whole 512-byte blocks at
+block-aligned offsets, so its `memcpy` stays all-word-store.
 
-A 4 KB pattern written with 32-bit `poke` was byte-for-byte correct in every round.
+## 2. The recovery delay: required by the reference, not reproduced here
 
-**Read** accesses are not implicated: the same region read back through 128-word `peek`
-requests and through 16-word requests agreed exactly, and the firmware's own byte-wise
-digest of staged PSRAM agreed with a host digest of a word-wise dump.
+`storage.md` also says writes need "a NOP recovery delay after writes", without saying how
+long. Guessing invisibly short is how the rest of this bug presented, so it was measured:
+**Debug → PSRAM soak** writes 256 KB of a position-derived pattern per pass with word stores,
+counting words that did not stick and, separately, words holding their *neighbour's* value —
+the mis-issued-store signature.
 
-## Why it showed up on the SD path and not over USB
+Result on this Q1: **clean at 0, 1, 2, 4, 8, 16 and 32 NOPs.** At the fault rate seen when
+staging (about one 512-byte chunk in thirty-two) a 256 KB pass should have shown around
+sixteen faults, so whatever staging was hitting, an uninterrupted run of aligned word stores
+is not it.
 
-Both paths stage through `PsramArea::write`, which used to write byte by byte. The USB path
-writes each frame's payload as it arrives — 56 bytes, then 62 at a time — so its offsets are
-always even, which is the case that works. The SD path writes 512-byte chunks, also from an
-even offset, and mostly worked: about one 512-byte block in thirty-two came back with a byte
-duplicated at a word-aligned position, enough to fail a signature check every time and to
-look like "the card read badly".
+`RECOVERY_NOPS` is kept at 16 anyway: the reference documents the part as wanting it, our
+soak exercises one data pattern at one temperature, and a megabyte of stores costs a few
+milliseconds. It is a cost worth paying for a rule we did not establish ourselves — but it is
+**not** the fix for what was wrong here, and this file should not be read as saying it was.
 
-## What the code does now
+## 3. What was actually wrong the second time: reads mixed into writes
 
-`PsramArea::write` and `::read` use **32-bit accesses only** (`crates/catcard-upgrade/src/psram.rs`).
-A partial word at either end of a span is read, merged and written whole, so bytes outside
-the span keep their values; every staging write in practice is 512-aligned and needs no
-merge at all. The word plan is a separate iterator with its own tests, because the addresses
-PSRAM sees cannot be checked on a host but the plan that produces them can.
+After the switch to word stores, staging still failed — one word per chunk or so arriving
+mis-issued, with the chunk's real data four bytes further on and a word in front of it that
+was never written (`05000d90`, which reads as an address rather than image data). Peeking the
+region over USB confirmed PSRAM really held it that way, so the write landed wrong rather
+than the read returning wrong.
 
-`Staged::write` now also **reads back** what it wrote and returns
-`Reject::StorageFault { offset }` at the first byte that differs. A staging medium that
-corrupts an image now says so, at the offset where it went wrong, instead of handing on an
-image that fails verification for no stated reason.
+The build that failed this way had a **read-back verification**: it read every 512-byte chunk
+immediately after writing it. Memory-mapped reads and writes use different commands (quad
+read `0xEB` with 6 dummy cycles, quad write `0x02` with none), so a chunk-by-chunk read-back
+makes the controller switch between them thousands of times. Both symptoms seen are
+switch symptoms: once a read returned the region's *previous* contents, and at least once a
+word was mis-issued.
+
+The verification is gone, and with it the rewrite-on-mismatch retry that was papering over
+this. Neither was a fix; the first was an instrument and the second was a workaround.
 
 ## Open
 
-- The mechanism is not established. A 16-bit-wide PSRAM whose byte-enables are not honoured
-  for an unaligned run would behave this way, as would an OCTOSPI write buffer that pairs
-  consecutive byte stores; distinguishing them needs a bus trace, and the fix does not
-  depend on which it is.
-- Why even-aligned byte runs fail *occasionally* (the one-in-thirty-two blocks on the SD
-  path) rather than never is also unexplained. Word stores avoid the question.
+- **Unconfirmed:** that staging with no interleaved reads is clean. That is the prediction
+  the removal rests on, and one SD install settles it.
+- If a read-back is ever wanted again, it belongs **after** the whole image is staged, not per
+  chunk — one switch instead of thousands — and the image is verified by digest anyway.
+- We do not configure OCTOSPI at all; the bootloader's setup is inherited, including the
+  `TimeOutPeriod=16` that releases CS periodically for the part's refresh. If corruption ever
+  returns under sustained access, that setting and the part's `tCEM` limit are where to look
+  next: `storage.md` calls it a separate, latent risk.
