@@ -40,7 +40,7 @@ Dependency first, then what a user needs to hold funds safely:
    to take a copy of the region first. What is left is the mk3's SPI-NOR medium, the
    re-key when the seed changes, and using the settings for the things that currently
    forget: chain, account numbers, display units.
-8. **Multisig and descriptor import**.
+8. ~~**Multisig and descriptor import**~~ -- done bar export and Address Explorer; see §4.
 9. **Encrypted backup and restore**.
 10. **Import paths** beyond words: xprv, raw master secret, Seed XOR, backup file.
 11. **Q1 transports**: QR scanner and display (incl. BBQr), NFC.
@@ -55,8 +55,8 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-32 | ✅ | ✅ | `catcard-wallet::bip32`, all official vectors |
 | BIP-39 | ✅ | 🟡 | words ✅, passphrase ✅ (untested on hardware); NFKD still refused for non-ASCII (`ROADMAP.md` M5) |
 | BIP-43/44/49/84 | ✅ | ✅ | paths, addresses, accounts and both chains |
-| BIP-45/48 (multisig paths) | ✅ | ❌ | step 8 |
-| BIP-67 sorted multisig | ✅ | ❌ | step 8 |
+| BIP-45/48 (multisig paths) | ✅ | 🟡 | cosigner origins parsed and shown; untested on hardware |
+| BIP-67 sorted multisig | ✅ | ✅ | `sortedmulti`; BIP-383's vectors pass byte for byte |
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-137 legacy message | ✅ | 🟡 | signed and self-verified; untested on hardware |
 | BIP-141/143/144 | ✅ | ✅ | addresses, BIP-143 sighash, witness serialisation, finalise and extract |
@@ -64,7 +64,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-370 PSBT v2 | ✅ | ❌ | refused by name, not misread |
 | BIP-322 | ✅ | ❌ | step 5 |
 | BIP-21 URIs | ✅ | 🟡 | address QR carries `bitcoin:` for legacy/nested; no amounts or labels |
-| BIP-380/383 descriptors | ✅ | 🟡 | single-sig export ✅ (Utils → Export wallet, BIP-389 `<0;1>`; verified on an mk3 against Address Explorer); import: step 8 |
+| BIP-380/383 descriptors | ✅ | 🟡 | single-sig export ✅ (Utils → Export wallet, BIP-389 `<0;1>`; verified on an mk3 against Address Explorer); import: ✅ for multisig (Utils → Multisig) |
 | SLIP-132 | ✅ | ❌ | read with step 8; export optional |
 | SLIP-44 | ✅ | ✅ | coin type in paths |
 | BIP-86 taproot | ❌ (EDGE only) | ✅ | addresses, `tr()` export, BIP-341 key-path signing -- beyond parity |
@@ -97,12 +97,24 @@ Dependency first, then what a user needs to hold funds safely:
 | Accounts, change chain, start index | ✅ | 🟡 | account and chain keys in the explorer; no custom-path entry |
 | Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address only |
 | Verify address / ownership | ✅ | 🟡 | Utils → Verify address, 4 types x 3 accounts x 2 chains x 100 |
-| Multisig addresses | ✅ | ❌ | step 8 |
+| Multisig addresses | ✅ | 🟡 | P2SH, P2WSH and P2SH-P2WSH built from a registered wallet; not yet in Address Explorer |
 
 ## 4. Multisig and descriptors
 
-All ❌ -- step 8 (and step 1 for single-sig descriptor export). Needs the settings store to
-remember registered wallets.
+| Feature | Stock | CatCard | Notes |
+|---|---|---|---|
+| Import a wallet from a descriptor file | ✅ | 🟡 | Utils → Multisig → Import from SD; checksum required; untested on hardware |
+| Confirm the wallet before storing | ✅ | 🟡 | M-of-N, script form, sortedness, every cosigner fingerprint, and whether this device is one |
+| List, inspect and delete registered wallets | ✅ | 🟡 | Utils → Multisig; identity is the descriptor's checksum |
+| Remember them across a reboot | ✅ | 🟡 | settings key `ccms`, **not** stock's `multisig`, whose schema is undocumented -- a device can hold both |
+| Sign a multisig input | ✅ | 🟡 | only for a registered wallet; the rebuilt script must equal the one the coin is locked to |
+| Multisig change recognition | ✅ | 🟡 | same rule, plus the shape rules single-sig change obeys |
+| Export a multisig descriptor / cosigner file | ✅ | ❌ | |
+| Multisig in Address Explorer | ✅ | ❌ | |
+| Skip-checksum, legacy `.txt` wallet formats | ✅ | ❌ | a descriptor without a checksum is refused, deliberately |
+
+Not available on the mk3, which has no settings store: nothing can be registered there, so
+every multisig input is refused.
 
 ## 5. PSBT and signing
 
@@ -113,7 +125,7 @@ remember registered wallets.
 | Change validation, fee limit, sighash policy | ✅ | ✅ | change re-derived, 10% cap, SIGHASH_ALL only |
 | Finalise to a network transaction | ✅ | ✅ | FINAL.TXN, as hex |
 | Batch sign, Sign Text File, USB / NFC / QR entry | ✅ | ❌ | SD first; others with their transports |
-| Multisig inputs, foreign inputs, coinjoin | ✅ | ❌ | steps 2 and 8 |
+| Multisig inputs, foreign inputs, coinjoin | ✅ | 🟡 | multisig: registered wallets only (§4); foreign inputs and coinjoin: step 2 |
 
 ## 6. Message signing and Proof of Reserves
 
