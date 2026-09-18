@@ -15,7 +15,14 @@
 //! it. So an unlocated module is told twice, once at each rate; one of the two lands.
 //! Once [`crate::qrscan`] has found the rate it records it here and this stops guessing.
 //!
-//! Source: hw-reference/input.md §"QR scanner (Q1)" [C]
+//! # Held, where stock toggles
+//!
+//! Stock's LAMP key toggles the lamp: press once for on, again for off. This lights it
+//! while the key is down and puts it out when it is released, which is what was asked
+//! for and is a deliberate departure -- worth knowing, because it is the one place the
+//! key behaves differently from the device people may be used to.
+//!
+//! Source: hw-reference/qr.md §8 [C]
 
 use catcard_hal::usart::Usart;
 use catcard_qr::cmd;

@@ -243,6 +243,12 @@ impl Usart {
 /// pull-up afterwards, never driven high. The module needs about two seconds after this
 /// before it will answer, which is the caller's to wait out.
 ///
+/// It is a *pulse* and never a hold: the module reads a sustained low as a **wake**
+/// signal, so parking it by holding reset down does the opposite of parking it. The idle
+/// state is reset released and the module asleep.
+///
+/// Source: hw-reference/qr.md §2 [C]
+///
 /// # Safety
 /// Claims the pin. Source: hw-reference/input.md §"QR scanner (Q1)" [C]
 pub unsafe fn pulse_reset(pin: Pin, low_cycles: u32) {

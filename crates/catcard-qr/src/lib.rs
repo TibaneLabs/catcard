@@ -24,7 +24,7 @@
 //! A decoded QR does **not** arrive framed. It comes as plain CR/LF-terminated text,
 //! because setup asks for that (`S_CMD_059A`).
 //!
-//! Source: hw-reference/input.md §"QR scanner (Q1)" [C]
+//! Source: hw-reference/qr.md [C]
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -188,7 +188,7 @@ pub fn strip_inline_ack(line: &mut [u8]) -> usize {
 
 /// Commands, as the strings that go inside a frame.
 ///
-/// Source: hw-reference/input.md §"QR scanner (Q1)" [C]
+/// Source: hw-reference/qr.md §5, §7 [C]
 pub mod cmd {
     /// Ask the module its version. Used to find the baud rate it is listening at.
     pub const VERSION: &[u8] = b"T_OUT_CVER";
@@ -200,7 +200,12 @@ pub mod cmd {
     pub const SAVE: &[u8] = b"S_CMD_0000";
     /// Append CRLF to a decoded barcode, which is how a read is known to have ended.
     pub const APPEND_CRLF: &[u8] = b"S_CMD_059A";
-    /// Turn the small yellow status LED on.
+    /// Let the module assert its decode-success output.
+    ///
+    /// The yellow LED this lights is **on the board, not the module**: the FFC's
+    /// `DECODE_LED` drives `D14` through a MOSFET. This command only enables the module
+    /// to assert that line -- nothing here drives the LED, and no GPIO of ours does
+    /// either. Source: hw-reference/qr.md §8 [C]
     pub const STATUS_LED: &[u8] = b"S_CMD_0407";
     /// Start scanning, continuously.
     pub const SCAN_START: &[u8] = b"S_CMD_020E";
@@ -228,7 +233,7 @@ pub mod cmd {
     /// barcode cannot reprogram it -- which is a security property and belongs at the
     /// end, after everything it is protecting.
     ///
-    /// Source: hw-reference/input.md §"Full config sequence" [C]
+    /// Source: hw-reference/qr.md §5 [C]
     pub const CONFIG: [&[u8]; 14] = [
         FACTORY_RESET,
         b"S_CMD_MTRS5000", // read timeout, 5000 ms

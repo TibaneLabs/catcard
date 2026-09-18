@@ -12,7 +12,15 @@
 //! the link is locked to 57600. Stock does the same, and bounds its attempts; an
 //! unbounded probe on a module that is unplugged or asleep is a device that stops.
 //!
-//! Source: hw-reference/input.md §"QR scanner (Q1)" [C]
+//! # Where this differs from stock
+//!
+//! Stock configures the module **once**, early after boot, and then sleeps it; a scan
+//! wakes it, reads, and sleeps it again. This resets and reconfigures on every scan,
+//! which costs the two-second recovery each time. The idle state is the same -- asleep,
+//! reset released -- and that is the part that matters for a battery, but the wait is
+//! ours and stock does not pay it.
+//!
+//! Source: hw-reference/qr.md [C]
 
 use catcard_hal::usart::Usart;
 use catcard_qr::{cmd, wrap};
@@ -92,7 +100,7 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
 /// left running is a lamp that stays on and a module that never sleeps, and by then the
 /// screen has gone and nobody is coming back to fix it.
 ///
-/// Source: hw-reference/input.md §"Scan lifecycle" [C]
+/// Source: hw-reference/qr.md §6 [C]
 fn stop(port: &mut Usart) {
     for _ in 0..STOP_TRIES {
         port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
