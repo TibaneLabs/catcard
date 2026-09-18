@@ -77,6 +77,13 @@ pub enum Reject {
     BadSignature { digest: [u8; 4], sig: [u8; 4] },
     /// The staging area did not read back what was written.
     StorageFault { offset: u32 },
+    /// The image that arrived and the image the staging area reads back are not the
+    /// same. The transfer was fine; the medium lost or altered something.
+    ///
+    /// Its own variant because the cure is the opposite of the one for a bad signature:
+    /// this image is worth sending again, and a device that called it "not signed"
+    /// would be blaming the sender for a fault of its own.
+    ReadBack { sent: [u8; 4], read: [u8; 4] },
     /// This board has nowhere to put an image. Not a fault in the offer: the device
     /// cannot accept any upgrade over USB at all, and the host should stop rather than
     /// send a quarter of a megabyte to find out.
@@ -205,6 +212,16 @@ pub struct Staged<'a, A: StagingArea> {
     /// what has been received. See [`Self::write`].
     carry: [u8; 4],
     carry_len: u8,
+    /// The digest of what **arrived**, taken as it arrives.
+    ///
+    /// The other digest is of what the staging area *reads back*. Two digests of the
+    /// same image, one never touching the medium, is what tells a transfer that went
+    /// wrong apart from a medium that did -- and those two faults want opposite fixes,
+    /// so reporting either as the other costs a day.
+    ///
+    /// Valid because [`write`](Self::write) refuses anything out of order, so the bytes
+    /// reach this in image order, once each.
+    stream: DigestStream,
 }
 
 impl<'a, A: StagingArea> Staged<'a, A> {
@@ -231,6 +248,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             received: 0,
             carry: [0; 4],
             carry_len: 0,
+            stream: DigestStream::new(),
         })
     }
 
@@ -281,6 +299,10 @@ impl<'a, A: StagingArea> Staged<'a, A> {
                 len: self.length,
             });
         }
+        // Hashed here, before the medium sees any of it: this is the "what was sent"
+        // half of the comparison, and it must not depend on anything the area does.
+        self.stream.update(data);
+
         // Push whole four-byte words at word-aligned offsets, and nothing else.
         //
         // A staging area can be memory-mapped PSRAM, where only a full 32-bit store at a
@@ -430,6 +452,23 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // the exact double-SHA256 digest it signs (hw-reference/firmware-signing.md §2 [C]).
         let slot = header.pubkey_num;
         let digest = self.stored_digest_with(progress)?;
+
+        // Two digests of one image: what arrived, and what the area reads back. They
+        // must agree, and when they do not the fault is the staging area -- not the
+        // signature, which is what a device says when it cannot tell the difference.
+        //
+        // This is worth doing on every upgrade and not only when something fails. The
+        // digest deliberately skips the 64-byte signature window, so a medium that
+        // misreads *that* window alone still produces two matching digests and a
+        // signature that will not verify; knowing the rest of the image read back
+        // correctly is what makes that conclusion available at all.
+        let arrived = self.stream.clone().finish();
+        if arrived != digest {
+            return Err(Reject::ReadBack {
+                sent: [arrived[0], arrived[1], arrived[2], arrived[3]],
+                read: [digest[0], digest[1], digest[2], digest[3]],
+            });
+        }
         let key = compressed(&APPROVED_PUBKEYS[slot as usize]);
         let mut verified = matches!(
             catcard_sign::ecdsa_verify(&key, &digest, &header.signature),

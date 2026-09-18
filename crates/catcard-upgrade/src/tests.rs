@@ -260,6 +260,11 @@ fn storage_that_does_not_read_back_is_caught() {
     // The reason the digest is taken over the stored image rather than the received
     // one. The bytes that arrived were perfect; the bytes that will be installed are
     // not, and only a read-back can tell.
+    //
+    // And it is reported as what it is. This used to come out as `BadSignature`, which
+    // blames the sender for a fault of the medium and sends anyone reading the log
+    // looking for a tampered image. Hashing the bytes as they arrive gives a second
+    // opinion that never touches the staging area, so the two can be told apart.
     let image = image_for(&MK4, NEWER, 0);
     let area = Mem::new(image.len() + 4096);
     let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
@@ -267,7 +272,7 @@ fn storage_that_does_not_read_back_is_caught() {
     s.area.corrupt_read_at = Some(100_000);
     assert!(matches!(
         s.inspect(Some(&running(OLDER))),
-        Err(Reject::BadSignature { .. })
+        Err(Reject::ReadBack { .. })
     ));
 }
 
@@ -585,4 +590,35 @@ fn an_untouched_image_still_commits() {
     let approval = staged.inspect(None).expect("a signed image");
     let region = staged.commit(approval).expect("unchanged bytes commit");
     assert_eq!(region.len, image.len() as u32);
+}
+
+/// A good image still passes with the read-back check in place.
+///
+/// The check compares two digests of the same bytes, so the way to get it wrong is for
+/// it to disagree with itself -- the arriving stream skips the signature window, and so
+/// must the stored pass, or every honest upgrade is refused as a storage fault.
+#[test]
+fn the_two_digests_agree_on_an_image_that_is_fine() {
+    let image = image_for(&MK4, NEWER, 0);
+    let mut s = staged_with(&image);
+    let approval = s.inspect(Some(&running(OLDER))).expect("a good image");
+    assert_eq!(approval.length, image.len() as u32);
+}
+
+/// A signature that is genuinely wrong is still a signature fault, not a storage one.
+///
+/// The two must not collapse into each other: the new check sits in front of the
+/// signature check, so an image whose bytes stored perfectly and whose signature is
+/// simply invalid has to come out the far side still called unsigned.
+#[test]
+fn a_truly_bad_signature_is_not_blamed_on_the_medium() {
+    let mut image = image_for(&MK4, NEWER, 0);
+    // Flip a signature byte: the digest skips this window, so both digests still agree
+    // and only the signature check can object.
+    image[catcard_fwhdr::SIG_START] ^= 0x01;
+    let mut s = staged_with(&image);
+    assert!(matches!(
+        s.inspect(Some(&running(OLDER))),
+        Err(Reject::BadSignature { .. })
+    ));
 }

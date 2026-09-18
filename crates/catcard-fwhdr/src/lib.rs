@@ -420,6 +420,7 @@ pub fn signed_digest(image: &[u8]) -> Result<[u8; 32], Error> {
 /// Use it over the image **as stored**, not as received. Those differ exactly when the
 /// staging memory is faulty, which is the case worth catching: a digest taken on the way
 /// in would agree with the host and disagree with what the bootloader installs.
+#[derive(Clone)]
 pub struct DigestStream {
     inner: Sha256,
     at: usize,
