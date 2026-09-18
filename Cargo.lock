@@ -241,6 +241,7 @@ dependencies = [
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-sign",
+ "minizlib",
 ]
 
 [[package]]
@@ -456,6 +457,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "minizlib"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f4f6c2bede13f1c8f2e55a5912137c9347ec709792b7dbd574e55dcb28a1d6d"
 
 [[package]]
 name = "nb"

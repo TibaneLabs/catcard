@@ -61,6 +61,14 @@ catcard-pin = { path = "crates/catcard-pin", default-features = false }
 catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
 catcard-usb = { path = "crates/catcard-usb", default-features = false }
 catcard-qr = { path = "crates/catcard-qr", default-features = false }
+
+# --- minizlib: deflate for the USB upgrade transport, no_std and no alloc ---
+#
+# Decompression only. The device never compresses anything: the host does that, and
+# linking a compressor into firmware would be paying flash for a direction that is
+# never travelled. The tests pull in `compress` as a dev-dependency to build their own
+# fixtures with the same code that will decode them.
+minizlib = { version = "0.1.0", default-features = false, features = ["decompress", "fixed", "dynamic", "stored"] }
 catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }

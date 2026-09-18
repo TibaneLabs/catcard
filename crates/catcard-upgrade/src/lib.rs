@@ -656,5 +656,7 @@ fn compressed(raw: &[u8; 64]) -> [u8; 33] {
     out
 }
 
+pub mod packed;
+
 #[cfg(test)]
 mod tests;

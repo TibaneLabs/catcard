@@ -17,4 +17,8 @@ catcard-board.workspace = true
 catcard-fwhdr = { workspace = true, default-features = false }
 catcard-flash = { workspace = true, default-features = false }
 catcard-sign = { workspace = true, default-features = false }
+minizlib = { workspace = true }
 
+[dev-dependencies]
+# The compressor, to build test fixtures with the code that will decode them.
+minizlib = { version = "0.1.0", default-features = false, features = ["decompress", "compress", "fixed", "dynamic", "stored"] }
