@@ -18,6 +18,17 @@ const OUR_FP: [u8; 4] = [0x73, 0xc5, 0xda, 0x0a];
 const RECEIVE: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
 const CHANGE: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, 0];
 
+/// The accounts a spend draws on, as `summarise` works them out. `destinations` takes them
+/// rather than deriving them again, so a test has to hand over the same list.
+fn accounts_of(psbt: &Psbt<'_>, master: &ExtendedPrivKey) -> Vec<Account> {
+    match summarise(psbt, master, OUR_FP, &Policy::default(), &kw()) {
+        Ok(s) => s.accounts[..s.account_count].to_vec(),
+        // A transaction this refuses has no accounts to speak of; the caller is testing
+        // something else about it.
+        Err(_) => Vec::new(),
+    }
+}
+
 fn kw() -> KeyWork {
     KeyWork::host()
 }
@@ -232,11 +243,13 @@ fn the_fee_change_and_destination_come_out_of_the_transaction() {
         address: [0; address::MAX_ADDRESS_LEN],
         address_len: 0,
     }; 4];
+    let master = master_of(OURS);
     let found = destinations(
         &psbt,
-        &master_of(OURS),
+        &master,
         OUR_FP,
         Network::Mainnet,
+        &accounts_of(&psbt, &master),
         &mut dests,
         &kw(),
     );
@@ -637,12 +650,14 @@ fn change_is_still_found_behind_a_few_decoy_records() {
     let n = change_with_decoys(MAX_CHANGE_KEYS - 1, &mut buf);
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let script = p2wpkh_script(&pubkey_at(OURS, &CHANGE));
+    let master = master_of(OURS);
     assert!(is_change(
         &psbt,
         0,
         &script,
-        &master_of(OURS),
+        &master,
         OUR_FP,
+        &accounts_of(&psbt, &master),
         &kw()
     ));
 }
@@ -654,12 +669,14 @@ fn an_output_cannot_ask_for_unbounded_derivation() {
     let n = change_with_decoys(MAX_CHANGE_KEYS, &mut buf);
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let script = p2wpkh_script(&pubkey_at(OURS, &CHANGE));
+    let master = master_of(OURS);
     assert!(!is_change(
         &psbt,
         0,
         &script,
-        &master_of(OURS),
+        &master,
         OUR_FP,
+        &accounts_of(&psbt, &master),
         &kw()
     ));
 }
@@ -684,7 +701,15 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
         address: [0; address::MAX_ADDRESS_LEN],
         address_len: 0,
     }; 4];
-    let found = destinations(&psbt, &master, OUR_FP, Network::Mainnet, &mut dests, &kw());
+    let found = destinations(
+        &psbt,
+        &master,
+        OUR_FP,
+        Network::Mainnet,
+        &accounts_of(&psbt, &master),
+        &mut dests,
+        &kw(),
+    );
     assert_eq!(found, 2);
     assert!(!dests[0].change, "a stuffed output was still folded into change");
     assert!(!dests[0].address().is_empty(), "shown without an address");
@@ -711,4 +736,127 @@ fn a_signature_already_on_an_input_is_visible() {
     let len = crate::signer::sign_input(&psbt, 0, &master, OUR_FP, &mut signed, &kw()).unwrap();
     let signed = Psbt::parse(&signed[..len]).unwrap();
     assert!(already_signed(&signed, 0, &master, OUR_FP, &kw()));
+}
+
+/// Change parked where no recovery will find it is not change.
+///
+/// Reported as issue #8. The key derives to the script, so the seed does own the output --
+/// and that is all it proves. A host with the account xpub, which the exported descriptor
+/// publishes, can put any non-hardened descendant on an output and call it change. The
+/// damage is not only that nobody finds the coins: `sending` shrinks, so the fee cap is
+/// measured against whatever payment is left rather than against the transaction.
+#[test]
+fn change_at_an_index_no_scan_reaches_is_shown_as_leaving() {
+    let mut buf = vec![0u8; 1 << 16];
+    let hidden = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, 1_900_000_000];
+    let n = build(
+        &[ours_spend(100_000_000)],
+        &[
+            Pay {
+                phrase: OURS,
+                steps: hidden,
+                amount: 98_900_000,
+                claim_ours: true,
+            },
+            Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 1_000_000,
+                claim_ours: false,
+            },
+        ],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    let summary = summarise(&psbt, &master, OUR_FP, &Policy::default(), &kw());
+
+    // Priced as what it is: 98.9M leaving, not 98.9M folded away as change. The fee is
+    // then measured against the whole spend, which is what the cap is for.
+    let summary = summary.expect("the transaction is otherwise fine");
+    assert_eq!(summary.change, 0, "an unfindable index is not change");
+    assert_eq!(summary.sending, 99_900_000);
+    assert_eq!(summary.fee, 100_000);
+}
+
+/// Ordinary change still counts, at both branches and up to the bound.
+#[test]
+fn real_change_is_still_change() {
+    for steps in [
+        CHANGE,
+        [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 7],
+        [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, MAX_CHANGE_INDEX],
+    ] {
+        let mut buf = vec![0u8; 1 << 16];
+        let n = build(
+            &[ours_spend(100_000)],
+            &[
+                Pay {
+                    phrase: OURS,
+                    steps,
+                    amount: 60_000,
+                    claim_ours: true,
+                },
+                Pay {
+                    phrase: STRANGER,
+                    steps: RECEIVE,
+                    amount: 39_000,
+                    claim_ours: false,
+                },
+            ],
+            &mut buf,
+        );
+        let psbt = Psbt::parse(&buf[..n]).unwrap();
+        let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
+            .expect("a plain spend with change");
+        assert_eq!(summary.change, 60_000, "{steps:?} is this wallet's change");
+        assert_eq!(summary.sending, 39_000);
+    }
+}
+
+/// Change has to belong to an account these inputs actually spend from.
+///
+/// A different account of the same seed is the seed's money and is not this transaction's
+/// change: the wallet that spends account 0 does not find account 5's coins, and folding
+/// them into "change" hides the amount leaving this account.
+#[test]
+fn another_account_of_the_same_seed_is_not_this_spends_change() {
+    let mut buf = vec![0u8; 1 << 16];
+    let elsewhere = [84 | 0x8000_0000, 0x8000_0000, 5 | 0x8000_0000, 1, 0];
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: OURS,
+            steps: elsewhere,
+            amount: 99_000,
+            claim_ours: true,
+        }],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
+        .expect("the transaction is otherwise fine");
+    assert_eq!(summary.change, 0, "account 5 is not account 0's change");
+    assert_eq!(summary.sending, 99_000);
+}
+
+/// A branch that is neither receive nor change is not change either.
+#[test]
+fn a_branch_outside_receive_and_change_is_not_change() {
+    let mut buf = vec![0u8; 1 << 16];
+    let odd = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 9, 0];
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: OURS,
+            steps: odd,
+            amount: 99_000,
+            claim_ours: true,
+        }],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let summary = summarise(&psbt, &master_of(OURS), OUR_FP, &Policy::default(), &kw())
+        .expect("the transaction is otherwise fine");
+    assert_eq!(summary.change, 0, "branch 9 is not a change branch");
 }

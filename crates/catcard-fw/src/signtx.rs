@@ -319,6 +319,10 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
             &master,
             fingerprint,
             catcard_wallet::bip32::Network::Mainnet,
+            // The accounts the review already worked out from the inputs: an output is
+            // change only if it belongs to one of them, and deriving them twice would be
+            // twice the elliptic-curve work for the same answer.
+            &summary.accounts[..summary.account_count],
             &mut shown,
             kw,
         )
