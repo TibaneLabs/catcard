@@ -47,7 +47,7 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
         R::NotAnImage => "no firmware header",
         R::BadHeader(_) => "header is wrong",
         R::WrongBoard { .. } => "built for another board",
-        R::BadSignature => "signature does not verify",
+        R::BadSignature { .. } => "signature does not verify",
         R::StorageFault { .. } => "staging area failed",
         R::NoStagingArea => "nowhere to stage it",
         R::StagingBusy => "busy with another image",

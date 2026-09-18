@@ -386,3 +386,37 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod soak {
+    use super::*;
+
+    /// Every signature we produce must verify. Thousands of them, in release.
+    ///
+    /// The device refuses some firmware images and accepts others, deterministically per
+    /// image, with the digest and the signature bytes provably correct in both cases.
+    /// Every build carries a fresh signature, so "a fraction of signatures do not
+    /// verify" would look exactly like that -- and would be a far worse bug than a flaky
+    /// upgrade, because the same code signs transactions.
+    #[test]
+    fn thousands_of_signatures_all_verify() {
+        let secret = [0x11u8; 32];
+        let pubkey = Secp256k1EcdsaPrivateKey::from_bytes(&secret)
+            .unwrap()
+            .public_key()
+            .to_sec1_compressed();
+        let mut bad = 0usize;
+        for i in 0..3000u32 {
+            // Spread the digests across the value space rather than walking a counter,
+            // so a fault that depends on the high limbs has a chance to show.
+            let mut hash = [0u8; 32];
+            hash[..4].copy_from_slice(&i.to_le_bytes());
+            hash[28..].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+            let sig = ecdsa_sign(&secret, &hash).expect("sign");
+            if !matches!(ecdsa_verify(&pubkey, &hash, &sig), Ok(true)) {
+                bad += 1;
+            }
+        }
+        assert_eq!(bad, 0, "{bad} of 3000 signatures failed to verify");
+    }
+}

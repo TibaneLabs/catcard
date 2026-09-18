@@ -69,7 +69,12 @@ pub enum Reject {
     /// Built for a different board. Installing it would brick this one.
     WrongBoard { hw_compat: u32, board: u32 },
     /// The signature is present, we hold the key, and it does not verify.
-    BadSignature,
+    /// Carries the first bytes of the two things it judged. "Bad signature" alone
+    /// cannot tell a tampered image from a misread one, and the digest here is the
+    /// device's own -- computed inside the verification, on the same pass. Comparing it
+    /// against the digest the staging area reports separately is what distinguishes a
+    /// read that went wrong *during* verification from an image that is not signed.
+    BadSignature { digest: [u8; 4], sig: [u8; 4] },
     /// The staging area did not read back what was written.
     StorageFault { offset: u32 },
     /// This board has nowhere to put an image. Not a fault in the offer: the device
@@ -460,7 +465,15 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         if !verified {
             // We hold the key and it does not verify: corrupt or tampered. Refuse before
             // staging rather than let the bootloader find out after overwriting firmware.
-            return Err(Reject::BadSignature);
+            return Err(Reject::BadSignature {
+                digest: [digest[0], digest[1], digest[2], digest[3]],
+                sig: [
+                    header.signature[0],
+                    header.signature[1],
+                    header.signature[2],
+                    header.signature[3],
+                ],
+            });
         }
         let signature = classify(self.board, slot);
 

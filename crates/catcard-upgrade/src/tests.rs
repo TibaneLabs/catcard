@@ -182,7 +182,10 @@ fn a_dev_signature_wearing_a_factory_slot_label_is_rejected() {
     // than waved through as "uncheckable".
     let image = image_for(&MK4, NEWER, 3);
     let mut s = staged_with(&image);
-    assert_eq!(s.inspect(Some(&running(OLDER))), Err(Reject::BadSignature));
+    assert!(matches!(
+        s.inspect(Some(&running(OLDER))),
+        Err(Reject::BadSignature { .. })
+    ));
 }
 
 #[test]
@@ -228,7 +231,10 @@ fn a_tampered_body_is_caught_before_anything_is_installed() {
     let mut image = image_for(&MK4, NEWER, 0);
     image[70_000] ^= 0x01;
     let mut s = staged_with(&image);
-    assert_eq!(s.inspect(Some(&running(OLDER))), Err(Reject::BadSignature));
+    assert!(matches!(
+        s.inspect(Some(&running(OLDER))),
+        Err(Reject::BadSignature { .. })
+    ));
 }
 
 #[test]
@@ -243,7 +249,10 @@ fn a_tampered_header_field_is_caught_too() {
     let mut tampered = image.clone();
     tampered[HEADER_OFFSET + catcard_fwhdr::off::VERSION] = b'9';
     let mut s = staged_with(&tampered);
-    assert_eq!(s.inspect(Some(&running(OLDER))), Err(Reject::BadSignature));
+    assert!(matches!(
+        s.inspect(Some(&running(OLDER))),
+        Err(Reject::BadSignature { .. })
+    ));
 }
 
 #[test]
@@ -256,7 +265,10 @@ fn storage_that_does_not_read_back_is_caught() {
     let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
     feed(&mut s, &image).unwrap();
     s.area.corrupt_read_at = Some(100_000);
-    assert_eq!(s.inspect(Some(&running(OLDER))), Err(Reject::BadSignature));
+    assert!(matches!(
+        s.inspect(Some(&running(OLDER))),
+        Err(Reject::BadSignature { .. })
+    ));
 }
 
 #[test]

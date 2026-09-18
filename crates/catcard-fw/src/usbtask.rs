@@ -704,6 +704,22 @@ impl UsbTask {
                         staged.received()
                     );
                 }
+                // What the verification itself judged, against what the staging area
+                // says now. The same bytes read twice giving two answers is a read
+                // fault; the same answer twice is an image that is genuinely not signed.
+                if let Reject::BadSignature { digest, sig } = &r {
+                    crate::catlog!(
+                        "usb: verify used digest {:02x}{:02x}{:02x}{:02x} sig {:02x}{:02x}{:02x}{:02x}",
+                        digest[0],
+                        digest[1],
+                        digest[2],
+                        digest[3],
+                        sig[0],
+                        sig[1],
+                        sig[2],
+                        sig[3]
+                    );
+                }
                 let mut head = [0u8; 8];
                 if staged.sample(0, &mut head).is_ok() {
                     crate::catlog!(
@@ -843,7 +859,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::NotAnImage => 6,
         Reject::BadHeader(_) => 7,
         Reject::WrongBoard { .. } => 8,
-        Reject::BadSignature => 10,
+        Reject::BadSignature { .. } => 10,
         Reject::StorageFault { .. } => 11,
         Reject::NoStagingArea => 12,
         Reject::StagingBusy => 13,
