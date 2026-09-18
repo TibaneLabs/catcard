@@ -80,6 +80,15 @@ purecrypto = { version = "0.9.0", default-features = false }
 # Memory hygiene, not a primitive: kept.
 zeroize = { version = "1.9.0", default-features = false }
 
+# --- JSON: the settings blob, which another firmware may have written ---
+# Ours. Streaming pull parser plus an in-place editor, `no_std`, no allocator, no
+# `unsafe`, a few hundred bytes of state regardless of document size. Taken for two
+# properties the settings store needs: values come back as the **raw bytes they were
+# written as** (`raw_value`, zero copy), so a key this firmware has never heard of
+# survives a save byte-identically; and `edit::apply` changes one value in place by
+# moving the document's tail once, rather than re-rendering the object around it.
+emjson = { version = "0.1.0", default-features = false }
+
 # --- shared ---
 bitflags = { version = "2.13.1", default-features = false }
 

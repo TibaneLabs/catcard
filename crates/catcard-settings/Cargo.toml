@@ -13,6 +13,7 @@ default = ["std"]
 std = []
 
 [dependencies]
+emjson = { workspace = true }
 purecrypto = { workspace = true, features = ["hash", "cipher"] }
 heapless = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
