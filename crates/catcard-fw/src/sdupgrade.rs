@@ -55,6 +55,11 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
 }
 
 /// What an attempt produced.
+// The staged-image arm is far bigger than the failure arm, and boxing it is not on the
+// table: no allocator. One of these lives at a time, briefly, on the stack of the screen
+// that asked -- and the alternative, returning the failure by another channel, would split
+// a result that reads better whole.
+#[allow(clippy::large_enum_variant)]
 pub enum Outcome {
     /// An image is staged and inspected. Nothing is installed: the caller shows the
     /// approval and waits for a person, exactly as the USB path does.
