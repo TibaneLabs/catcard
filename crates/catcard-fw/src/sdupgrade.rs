@@ -50,6 +50,7 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
         R::BadSignature => "signature does not verify",
         R::StorageFault { .. } => "staging area failed",
         R::NoStagingArea => "nowhere to stage it",
+        R::StagedImageChanged => "the image changed after you were asked",
     }
 }
 

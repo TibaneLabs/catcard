@@ -105,7 +105,7 @@ STATUS = {0: "Ok", 1: "UnknownOpcode", 2: "NotNow", 3: "BadRequest",
 REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
           5: "Incomplete", 6: "NotAnImage", 7: "BadHeader", 8: "WrongBoard",
           9: "Downgrade", 10: "BadSignature", 11: "StorageFault",
-          12: "NoStagingArea"}
+          12: "NoStagingArea", 13: "StagedImageChanged"}
 
 # Capability bits, matching `catcard_usb::caps`.
 CAP_KEY_INJECTION = 1 << 0

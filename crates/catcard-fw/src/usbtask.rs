@@ -810,6 +810,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::BadSignature => 10,
         Reject::StorageFault { .. } => 11,
         Reject::NoStagingArea => 12,
+        Reject::StagedImageChanged => 13,
     };
     1
 }
