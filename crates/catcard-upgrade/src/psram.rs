@@ -101,10 +101,13 @@ impl PsramArea {
 /// mis-issued now and then -- a word appears that was never written and the rest of the run
 /// sits four bytes along.
 ///
-/// The count is not given anywhere we can read, so it was measured on the part: see
-/// `docs/PSRAM.md`. It is cheap -- a megabyte is 256k stores, so even sixteen NOPs each is a
-/// few milliseconds.
-pub const RECOVERY_NOPS: u32 = 16;
+/// **One**, which is what stock uses. A sweep on the part found an uninterrupted run of
+/// aligned word stores clean at every delay from zero upwards (`docs/PSRAM.md`), so the
+/// delay is not what a run of writes needs -- the likely reading of the rule is that it is
+/// the recovery a write needs before the controller is asked for a *read*, which is a
+/// different command. Matching stock is better than picking a larger number that our own
+/// measurements cannot justify.
+pub const RECOVERY_NOPS: u32 = 1;
 
 /// Wait out the write recovery, per [`RECOVERY_NOPS`].
 #[inline(always)]

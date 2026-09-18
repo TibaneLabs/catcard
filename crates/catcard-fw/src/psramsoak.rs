@@ -46,6 +46,37 @@ unsafe fn store(at: *mut u32, value: u32, nops: u32) {
     }
 }
 
+/// The second sweep: a read placed immediately after each write, which is the transition a
+/// write-then-verify makes and the one that corrupted a staged image.
+///
+/// Two counts, because they mean different things. `late` is a read that disagreed and then
+/// agreed when the same word was read again at the end of the pass -- the read was wrong.
+/// `lost` is a word still wrong at the end -- the write was wrong. The first says reads need
+/// the recovery; the second says writes do.
+fn interleaved(base: u32, nops: u32) -> (u32, u32) {
+    let mut disagreed = 0u32;
+    let mut lost = 0u32;
+    // A quarter of the write-only pass: enough to see a rate of one in tens of thousands.
+    let words = WORDS / 4;
+    // SAFETY: `base` is mapped, 4-aligned, and above anything in use; the caller checked
+    // that the span stays below the recovery header.
+    unsafe {
+        for i in 0..words {
+            let at = (base + i * 4) as *mut u32;
+            store(at, expected(i), nops);
+            if core::ptr::read_volatile(at as *const u32) != expected(i) {
+                disagreed += 1;
+            }
+        }
+        for i in 0..words {
+            if core::ptr::read_volatile((base + i * 4) as *const u32) != expected(i) {
+                lost += 1;
+            }
+        }
+    }
+    (disagreed, lost)
+}
+
 /// Sweep the delays and report what each one cost.
 pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     use catcard_ui::scroll::Line as Row;
@@ -67,7 +98,7 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     }
 
     type Line = heapless::String<48>;
-    let mut lines: heapless::Vec<Line, { SWEEP.len() + 2 }> = heapless::Vec::new();
+    let mut lines: heapless::Vec<Line, { 2 * SWEEP.len() + 2 }> = heapless::Vec::new();
 
     for nops in SWEEP {
         crate::menu::blocking_screen(ui.panel, "PSRAM soak", "writing");
@@ -120,7 +151,27 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
         let _ = lines.push(l);
     }
 
-    let mut rows: heapless::Vec<Row, { SWEEP.len() + 2 }> = heapless::Vec::new();
+    // Now the same delays, with a read after every write.
+    for nops in SWEEP {
+        crate::menu::blocking_screen(ui.panel, "PSRAM soak", "write then read");
+        let (disagreed, lost) = interleaved(base, nops);
+        let mut l = Line::new();
+        if disagreed == 0 && lost == 0 {
+            let _ = write!(l, "{nops:2} nops r/w: clean");
+        } else {
+            let _ = write!(l, "{nops:2} nops r/w: {disagreed} late, {lost} lost");
+        }
+        crate::catlog!(
+            "psram soak: {} nops, read after write: {} disagreed, {} lost of {}",
+            nops,
+            disagreed,
+            lost,
+            WORDS / 4
+        );
+        let _ = lines.push(l);
+    }
+
+    let mut rows: heapless::Vec<Row, { 2 * SWEEP.len() + 2 }> = heapless::Vec::new();
     let _ = rows.push(Row::title("PSRAM soak"));
     for l in lines.iter() {
         let _ = rows.push(Row::body(l.as_str()).small());
