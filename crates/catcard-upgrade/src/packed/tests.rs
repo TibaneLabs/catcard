@@ -128,7 +128,7 @@ fn a_flipped_bit_is_caught_here_or_by_the_signature() {
         bad[i] ^= 0x01;
         match block(&bad, &mut out, BLOCK as u32) {
             Err(_) => {}
-            Ok(n) if &out[..n] != &original[..] => wrong += 1,
+            Ok(n) if out[..n] != original[..] => wrong += 1,
             Ok(_) => {}
         }
     }
