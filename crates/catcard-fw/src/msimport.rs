@@ -412,8 +412,27 @@ pub(crate) fn import(
     // The fingerprint of this device, to say which cosigner is us. Public, and this
     // session may already have paid for it -- registering several wallets in a row should
     // not mean stretching the seed once per wallet.
-    let Some(ours) = crate::pubkeys::fingerprint(gate, login, ui, "Import") else {
+    let Some(ours_fp) = crate::pubkeys::fingerprint(gate, login, ui, "Import") else {
         return;
+    };
+
+    // A fingerprint is a claim by whoever wrote the file, not a proof. Where one names this
+    // device, derive our master along the claimed origin and require the key it reaches to
+    // be the one the descriptor names. Only a claim costs the unlock.
+    let ours = if wallet.cosigners().iter().any(|c| c.fingerprint == ours_fp) {
+        let Some(found) = crate::menu::unlock_master(gate, login, ui, "Import").map(|master| {
+            let found = crate::keywork::run(|kw| multisig::our_cosigner(&wallet, &master, kw));
+            drop(master);
+            found
+        }) else {
+            return;
+        };
+        match found {
+            Ok(found) => found,
+            Err(why) => return say(ui, "Import", describe(why)),
+        }
+    } else {
+        None
     };
 
     if !confirm(ui, &wallet, line, ours) {
@@ -456,7 +475,7 @@ fn pick_descriptor(text: &str) -> Option<(&str, &str)> {
 }
 
 /// Show the wallet and ask. Returns whether the owner accepted it.
-fn confirm(ui: &mut Ui<'_>, wallet: &Multisig, descriptor: &str, ours: [u8; 4]) -> bool {
+fn confirm(ui: &mut Ui<'_>, wallet: &Multisig, descriptor: &str, ours: Option<usize>) -> bool {
     use catcard_ui::scroll::Line as Row;
     use core::fmt::Write as _;
 
@@ -488,7 +507,7 @@ fn confirm(ui: &mut Ui<'_>, wallet: &Multisig, descriptor: &str, ours: [u8; 4]) 
 
     let mut mine = false;
     for (i, c) in wallet.cosigners().iter().enumerate() {
-        let is_ours = c.fingerprint == ours;
+        let is_ours = ours == Some(i);
         mine |= is_ours;
         let mut line = Text::new();
         let _ = write!(
@@ -587,6 +606,7 @@ fn describe(why: multisig::Error) -> &'static str {
         multisig::Error::BadKey { .. } => "a key is malformed",
         multisig::Error::CosignerCount { .. } => "too many cosigners",
         multisig::Error::DuplicateKey => "the same key appears twice",
+        multisig::Error::ForgedOrigin { .. } => "a key claims this device but is not ours",
         multisig::Error::Overflow => "too long",
     }
 }
