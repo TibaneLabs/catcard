@@ -258,6 +258,11 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             .write(offset, data)
             .map_err(|_| Reject::StorageFault { offset })?;
 
+        // A read straight after a write has to see the write. The staging area can be
+        // memory mapped over a bus with a write buffer of its own, so order the two
+        // explicitly rather than trusting the read to be issued after the stores.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         // Read it back before believing it. The staging area is volatile memory reached
         // over a bus of its own, and an image that stages one byte wrong fails its
         // signature check with nothing to say why -- which is a long afternoon. Checking
