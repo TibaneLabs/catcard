@@ -43,6 +43,8 @@ const RECOVERY_MS: u32 = 2_000;
 const PROBE_TRIES: usize = 5;
 /// Attempts at the configuration sequence, as stock bounds it.
 const SETUP_TRIES: usize = 3;
+/// How long to give the module to answer before reading its reply.
+const REPLY_MS: u32 = 10;
 /// Attempts at waking: the first is always lost, so one try is no try at all.
 const WAKE_TRIES: usize = 5;
 /// Between the two sleep commands, for the module's second sleep layer.
@@ -86,6 +88,11 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
     let frame = wrap(catcard_qr::FID_COMMAND, body, &mut out).ok()?;
     port.flush_input();
     port.write(frame, BYTE_BUDGET).ok()?;
+    // Let it answer before deciding it did not. A framed acknowledgement is eight bytes
+    // -- about 1.4 ms at 57600 -- and the module thinks first. Reading immediately is
+    // what made the lamp report "silence" for commands that plainly worked, and here it
+    // would mean a scan-start that succeeded looking like one that failed.
+    catcard_hal::dwt::delay_cycles(ms_cycles(REPLY_MS));
     let n = port.read(reply, BYTE_BUDGET);
     (n > 0).then_some(n)
 }
@@ -321,19 +328,29 @@ fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
         Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
     };
 
-    wake(&mut port);
-    find(&mut port)?;
-    setup(&mut port)?;
+    let outcome = run(&mut port, ui, out);
+
+    // **Every path out of here stops the module.** It used to be stopped only after a
+    // read returned, so the early exits above it -- a probe that found nothing, a setup
+    // that was refused, and worst of all a scan-start whose acknowledgement was missed
+    // -- all left it running. That last one is the real one: the command lands, the
+    // reply is not seen, and the screen goes away leaving the aimer lit and the module
+    // awake until something resets it.
+    stop(&mut port);
+    outcome
+}
+
+/// The scan itself, so that whichever way it ends the caller can stop the module.
+fn run(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
+    wake(port);
+    find(port)?;
+    setup(port)?;
 
     menu::blocking_screen(ui.panel, "Scan QR", "point it at a code");
-    if !command(&mut port, cmd::SCAN_START) {
+    if !command(port, cmd::SCAN_START) {
         return Err(Fault::SetupRefused);
     }
-    let read = read_code(&mut port, ui, out);
-    // Whatever happened, and especially when the owner cancelled: a scan left running is
-    // a lamp that stays on and a module that never sleeps.
-    stop(&mut port);
-    read
+    read_code(port, ui, out)
 }
 
 /// Milliseconds as CPU cycles.
