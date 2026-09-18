@@ -157,7 +157,8 @@ fn headless(gate: Callgate) -> ! {
                         };
                         from_card = None;
                         crate::catlog!("sd: slot {}: looking for a firmware", name);
-                        match stage_from_card(slot, None) {
+                        // No screen to draw on in recovery, so the progress goes nowhere.
+                        match stage_from_card(slot, None, |_, _| {}) {
                             Outcome::Offered(staged, approval) => {
                                 crate::catlog!(
                                     "sd: staged {}, {} -- key y installs, x declines",

@@ -1916,8 +1916,35 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     };
 
     crate::catlog!("sd: staging the chosen firmware");
-    message(ui.panel, "Reading card", "please wait", "");
-    let (staged, approval) = match stage_from_card(catcard_hal::sdmmc::Slot::A, Some(&chosen)) {
+    // A bar rather than "please wait": the length is known before the first byte is read,
+    // and a megabyte through a 512-byte buffer takes long enough that a still screen reads
+    // as a hung device. It also says *where* a real hang happened, which is worth having.
+    let mut shown = u8::MAX;
+    let mut tick = |done: u32, total: u32| {
+        let pct = if total == 0 {
+            100
+        } else {
+            ((done as u64 * 100) / total as u64) as u8
+        };
+        if pct == shown {
+            return;
+        }
+        shown = pct;
+        let mut note = Line::new();
+        let _ = write!(note, "{} of {} KB", done / 1024, total / 1024);
+        let mut wait = Line::new();
+        let _ = write!(wait, "please wait");
+        display::draw(ui.panel, |c| {
+            let lines = [wait.clone(), note.clone()];
+            catcard_ui::widgets::info(c, &display::LAYOUT, "Reading card", &lines);
+            catcard_ui::splash::draw_progress(c, pct);
+        });
+    };
+    let (staged, approval) = match stage_from_card(
+        catcard_hal::sdmmc::Slot::A,
+        Some(&chosen),
+        &mut tick,
+    ) {
         Outcome::Offered(s, a) => (s, a),
         Outcome::Failed(why) => {
             crate::catlog!("sd: {}", why);

@@ -66,7 +66,16 @@ pub enum Outcome {
 ///
 /// `chosen` names a specific file (a full path the browser returned); `None` falls back to
 /// the fixed [`CANDIDATES`] search, so the option still works without navigating.
-pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> Outcome {
+///
+/// `progress` is called with `(done, total)` as the image moves, so the screen can show how
+/// far along it is. The length is known before the first byte is read, and a megabyte over a
+/// 512-byte buffer takes long enough that a still screen reads as a hung device -- which,
+/// today, is exactly how a hung device read too.
+pub fn stage_from_card(
+    slot: catcard_hal::sdmmc::Slot,
+    chosen: Option<&str>,
+    mut progress: impl FnMut(u32, u32),
+) -> Outcome {
     if slot == catcard_hal::sdmmc::Slot::B && BOARD.sdmmc.slot_b.is_none() {
         return Outcome::Failed("no slot B on this board");
     }
@@ -160,7 +169,13 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         return Outcome::Failed("seek failed");
     }
     let mut at = 0u32;
-    let mut buf = [0u8; CHUNK];
+    // Word-aligned, because it is copied into memory-mapped PSRAM where a misaligned store
+    // is mis-issued. `repr(align(4))` on the buffer costs nothing and says why.
+    #[repr(align(4))]
+    struct Chunk([u8; CHUNK]);
+    let mut chunk = Chunk([0u8; CHUNK]);
+    let buf = &mut chunk.0;
+    progress(0, len);
     while at < len {
         let want = ((len - at) as usize).min(CHUNK);
         let n = match file.read(&mut vol, &mut buf[..want]) {
@@ -175,6 +190,7 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
             return Outcome::Failed("staging write failed");
         }
         at += n as u32;
+        progress(at, len);
     }
 
     // A staging area that needed a second look at what it had just written is worth a
