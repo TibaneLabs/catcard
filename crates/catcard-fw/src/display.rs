@@ -581,6 +581,16 @@ static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// artwork's own palette, where text is white so "CatCard" and the version stand off the
 /// cat rather than disappearing into it.
 pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
+    draw_with(panel, &catcard_ui::st7789::AMBER, f)
+}
+
+/// [`draw`], with the content drawn through a palette of the screen's choosing.
+///
+/// The status bar keeps its own greys either way; this is the band below it. A screen
+/// full of pixel art needs the art's colours rather than the amber ramp text reads best
+/// in, and the two cannot be mixed on one scanline -- the canvas holds indices and the
+/// palette is what they mean.
+pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
     use core::sync::atomic::Ordering;
     if DRAWING.swap(true, Ordering::SeqCst) {
         crate::catlog!("display: nested draw refused");
@@ -604,7 +614,7 @@ pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
     f(screen);
     #[cfg(feature = "board-q1")]
     BAR_SHOWN.store(true, Ordering::SeqCst);
-    show(panel, screen, &catcard_ui::st7789::AMBER, BAR_H);
+    show(panel, screen, content, BAR_H);
     DRAWING.store(false, Ordering::SeqCst);
 }
 

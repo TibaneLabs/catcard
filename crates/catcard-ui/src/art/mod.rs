@@ -3,6 +3,7 @@
 pub mod cat;
 pub mod flappy;
 pub mod indexed;
+pub mod menuicons;
 pub mod tibane;
 
 pub use indexed::{Indexed, draw_indexed};

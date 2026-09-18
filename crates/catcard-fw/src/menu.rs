@@ -151,6 +151,8 @@ enum Screen {
     /// Flappy Cat, on the Q1's self-scrolling panel.
     #[cfg(all(feature = "games", feature = "board-q1"))]
     FlappyCat,
+    /// How to get a wallet onto a blank device: new, or import.
+    GetWallet,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -175,25 +177,36 @@ enum Screen {
 /// here either -- it moved into Settings, behind its warnings. The first item is "Ready to
 /// Sign": a wallet exists, so the thing worth doing is signing a transaction the host has
 /// staged to the SD card.
+/// The six things the main menu offers, in the order the Q1 lays them out: the top row
+/// is what a wallet is *for*, the bottom row is the device itself.
+///
+/// The same six on every board -- the Q1 draws them as a grid of icons and the mono
+/// panels as a list, which is a difference of layout and not of structure. Everything
+/// diagnostic lives under Settings rather than beside them; a main menu is for the
+/// handful of things a person came to do.
 const MAIN_ITEMS: &[&str] = &[
-    "Ready to Sign",
+    "Sign",
+    "Addresses",
+    #[cfg(feature = "board-q1")]
+    "Notes",
     "Utils",
-    "About",
     "Settings",
-    "Debug",
-    "Secure Logout",
+    "Logout",
 ];
-/// The blank device's ordering: the two ways to get a wallet come first, since that is the
-/// only thing worth doing here. New/Import appear only in this list.
+/// The blank device's version. Only the first cell differs: with no wallet there is
+/// nothing to sign, and getting one on is the only thing worth doing here.
 const MAIN_ITEMS_BLANK: &[&str] = &[
-    "New wallet",
-    "Import seed",
+    "New",
+    "Addresses",
+    #[cfg(feature = "board-q1")]
+    "Notes",
     "Utils",
-    "About",
     "Settings",
-    "Debug",
-    "Secure Logout",
+    "Logout",
 ];
+
+/// How to get a wallet onto a blank device, behind the first cell.
+const GET_WALLET_ITEMS: &[&str] = &["New wallet", "Import seed"];
 
 /// The main menu, ordered for the device in front of you.
 fn main_items(no_seed: bool) -> &'static [&'static str] {
@@ -211,6 +224,11 @@ const SETTINGS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "Nickname",
     "Destroy seed",
+    // About and Debug sit here rather than on the main menu: both answer "what is this
+    // device", which is a question about the device and not one of the six things a
+    // person came to do.
+    "About",
+    "Debug",
 ];
 const SETTINGS_ITEMS_BLANK: &[&str] = &[
     "Login",
@@ -218,6 +236,8 @@ const SETTINGS_ITEMS_BLANK: &[&str] = &[
     // and it is stored under the pre-login key, which exists either way.
     #[cfg(not(feature = "board-mk3"))]
     "Nickname",
+    "About",
+    "Debug",
 ];
 
 /// The settings menu for the device in front of you.
@@ -581,8 +601,16 @@ pub fn run(session: Session<'_>) -> ! {
 
             // Cursor movement first: it stays on this screen, so it never reaches the
             // transition table below. The menu owns what moving means.
+            // On the grid, left and right move between columns. Everywhere else they
+            // are in and out, which `step` normalises to confirm and cancel -- so the
+            // grid has to claim them before that happens, or the main menu would act on
+            // a cell the moment someone tried to move to the next one.
+            #[cfg(feature = "board-q1")]
+            let sideways = is_grid(screen) && matches!(key, Key::Digit(7) | Key::Digit(9));
+            #[cfg(not(feature = "board-q1"))]
+            let sideways = false;
             if let Some(items) = items_of(screen, v.no_seed)
-                && matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0))
+                && (matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0)) || sideways)
             {
                 v.menu.key(&mut ui, screen, items, *key);
                 continue;
@@ -907,18 +935,24 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // at the wrong entry the moment the order changes, and the entry it used to
         // reach by falling through was Reboot.
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
-            // A wallet is present: the first item signs a transaction from the SD card.
-            (Key::Confirm, Some("Ready to Sign")) => Screen::SignPsbt,
-            (Key::Confirm, Some("Debug")) => Screen::Debug,
+            // A wallet is present: the first cell signs a transaction from the SD card.
+            (Key::Confirm, Some("Sign")) => Screen::SignPsbt,
+            // The same cell on a blank device, where there is nothing to sign yet.
+            (Key::Confirm, Some("New")) => Screen::GetWallet,
+            (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Notes")) => Screen::Notes,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
-            (Key::Confirm, Some("About")) => Screen::About,
-            // New/Import appear only on a blank device, but the arms are harmless anywhere.
-            (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
-            (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
-            (Key::Confirm, Some("Secure Logout")) => Screen::SecureLogout,
+            (Key::Confirm, Some("Logout")) => Screen::SecureLogout,
             _ => Screen::Main,
+        },
+        Screen::GetWallet => match (key, GET_WALLET_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
+            (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::GetWallet,
         },
         // By name again, for the same reason as Main: the list is short today and the
         // count is what the next screen acts on, so an index table would be one
@@ -930,6 +964,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::NewSeedMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
+            (Key::Confirm, Some("About")) => Screen::About,
+            (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
@@ -1126,8 +1162,12 @@ impl MenuScreen {
     }
 
     fn draw(&self, panel: &mut display::Panel, screen: Screen, no_seed: bool) {
-        let (title, note) = menu_head(screen);
         let items = items_of(screen, no_seed).unwrap_or(&[]);
+        #[cfg(feature = "board-q1")]
+        if is_grid(screen) {
+            return draw_grid(panel, items, self.cursor);
+        }
+        let (title, note) = menu_head(screen);
         let view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
         display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
     }
@@ -1138,6 +1178,11 @@ impl MenuScreen {
     /// and only pushes the view at an edge, and so pressing past the first or last item
     /// keeps scrolling to reveal the title.
     fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
+        #[cfg(feature = "board-q1")]
+        if is_grid(screen) {
+            self.cursor = grid_move(self.cursor, items.len(), k);
+            return;
+        }
         let (title, note) = menu_head(screen);
         let mut view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
         let old = view.off();
@@ -1157,6 +1202,63 @@ impl MenuScreen {
     }
 }
 
+/// Whether this screen is drawn as the icon grid rather than as a list.
+///
+/// The main menu only. Everything else is a list of words, where a grid would be a
+/// worse way to show fifteen settings than the list already is.
+#[cfg(feature = "board-q1")]
+fn is_grid(screen: Screen) -> bool {
+    screen == Screen::Main
+}
+
+/// Where a movement key takes the grid cursor.
+///
+/// Up and down move a whole row, left and right one cell, and neither wraps: wrapping
+/// off the end of a six-cell grid puts the cursor somewhere the eye did not follow, and
+/// the two rows are close enough that nobody needs the shortcut. `0` goes home.
+#[cfg(feature = "board-q1")]
+fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
+    use catcard_ui::grid::COLS;
+    let last = len.saturating_sub(1);
+    let next = match k {
+        Key::Digit(0) => 0,
+        Key::Digit(8) => cursor + COLS,
+        Key::Digit(5) => return cursor.saturating_sub(COLS),
+        Key::Digit(9) => cursor + 1,
+        Key::Digit(7) => return cursor.saturating_sub(1),
+        _ => cursor,
+    };
+    next.min(last)
+}
+
+/// The main menu as a grid of icons.
+#[cfg(feature = "board-q1")]
+fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
+    use catcard_ui::art::menuicons as art;
+    use catcard_ui::grid::{CELLS, Cell};
+
+    let mut cells: heapless::Vec<Cell<'_>, CELLS> = heapless::Vec::new();
+    for label in items.iter().take(CELLS) {
+        let icon = match *label {
+            "Sign" => Some(&art::SIGN),
+            "New" => Some(&art::NEW_PASSPHRASE),
+            "Addresses" => Some(&art::ADDRESS_LIST),
+            "Notes" => Some(&art::NOTES),
+            "Utils" => Some(&art::UTILS),
+            "Settings" => Some(&art::SETTINGS),
+            "Logout" => Some(&art::LOGOUT),
+            // A cell whose art has not been drawn keeps its name and loses its picture,
+            // rather than borrowing one that would read as the wrong thing.
+            _ => None,
+        };
+        let _ = cells.push(Cell { label, icon });
+    }
+    // The art's own palette, not the amber ramp: this screen is pictures.
+    display::draw_with(panel, &art::PALETTE, |c| {
+        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
+    });
+}
+
 /// The list on this screen, if it is a menu.
 fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
     match screen {
@@ -1164,6 +1266,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
+        Screen::GetWallet => Some(GET_WALLET_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DeriveMenu => Some(DERIVE_ITEMS),
@@ -1181,6 +1284,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Main
         | Screen::Utils
         | Screen::NewSeedMenu
+        | Screen::GetWallet
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
