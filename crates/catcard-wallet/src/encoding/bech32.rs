@@ -25,8 +25,10 @@ pub const CHECKSUM_LEN: usize = 6;
 pub const MAX_HRP_LEN: usize = 83;
 /// Largest witness program, per BIP-141.
 pub const MAX_PROGRAM_LEN: usize = 40;
-/// Data characters a `MAX_LENGTH` string can hold, after `1` and a 2-char HRP.
-pub const MAX_DATA_LEN: usize = MAX_LENGTH - 3;
+/// Data characters a `MAX_LENGTH` string can hold, after the separator and the shortest
+/// legal HRP -- one character, not the two a Bitcoin address happens to use. `decode`
+/// sizes its scratch on this, and a one-character HRP really does leave 88.
+pub const MAX_DATA_LEN: usize = MAX_LENGTH - 2;
 
 /// Which checksum a string uses.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -442,6 +444,20 @@ mod tests {
             "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         ),
     ];
+
+    #[test]
+    fn a_full_length_string_with_a_one_character_hrp_decodes() {
+        // 90 characters is legal and the HRP may be one of them, which leaves 88 data
+        // characters -- one more than a two-character HRP does. Sizing the scratch for
+        // `bc` made this a panic.
+        let text = format!("b1{}", "q".repeat(88));
+        assert_eq!(text.len(), MAX_LENGTH);
+        let mut hrp = [0u8; MAX_HRP_LEN];
+        let mut data = [0u8; MAX_DATA_LEN];
+        // The checksum will not verify -- these are arbitrary characters -- but it must
+        // fail as a checksum, not as an index.
+        assert_eq!(decode(&text, &mut hrp, &mut data), Err(Error::BadChecksum));
+    }
 
     #[test]
     fn official_segwit_vectors_decode() {
