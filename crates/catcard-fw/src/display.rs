@@ -212,9 +212,13 @@ pub fn wipe(panel: &mut Panel) {
     unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
 }
 
-/// Nothing to do: on the OLED every redraw covers the whole panel.
+/// On the OLED a redraw covers the whole panel, so there is nothing to clear -- but the
+/// next one has to actually be sent, which it would not be if it happened to match what
+/// the cache believes is already there.
 #[cfg(not(feature = "board-q1"))]
-pub fn wipe(_panel: &mut Panel) {}
+pub fn wipe(_panel: &mut Panel) {
+    forget_frame();
+}
 
 /// Hand the busy bar to the panel itself, so it keeps moving while the CPU cannot draw.
 ///
@@ -239,6 +243,11 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
     } else {
         panel.scroll_pages(last_page, last_page, interval)
     };
+    // The panel is now showing something the framebuffer does not describe, and the next
+    // flush is what stops the scrolling. So that flush must happen even if the frame is
+    // unchanged -- otherwise a bar handed over here would go on sliding under the next
+    // screen's text.
+    forget_frame();
 }
 
 /// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
@@ -663,7 +672,27 @@ pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(
 #[cfg(not(feature = "board-q1"))]
 fn show(panel: &mut Panel, screen: &Screen, _palette: &[u16; 16]) {
     // Two colours, so a palette says nothing here.
-    let _ = panel.flush(screen);
+    // SAFETY: only reached from a draw, under `DRAWING`; foreground, single core.
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_SENT) };
+    let _ = panel.flush_changed(screen, cache);
+}
+
+/// What the mono panel was last sent, so an identical frame is not sent again.
+///
+/// The colour panel has the same thing per row ([`ROWS_SENT`]); this one is per frame,
+/// because the SSD1306 is flushed whole.
+#[cfg(not(feature = "board-q1"))]
+static mut FRAME_SENT: catcard_ui::display::FrameCache = catcard_ui::display::FrameCache::new();
+
+/// Forget what the mono panel shows, so the next frame is sent whatever it holds.
+///
+/// For anything that writes to the panel without going through [`show`] -- a hardware
+/// scroll, a direct clear. Skipping an identical frame is only safe while the cache is
+/// telling the truth about what is on the glass.
+#[cfg(not(feature = "board-q1"))]
+fn forget_frame() {
+    // SAFETY: foreground only, single core, and never inside a draw.
+    unsafe { (*core::ptr::addr_of_mut!(FRAME_SENT)).invalidate() };
 }
 
 /// Which rows of the Q1 panel already show what the canvas holds.
@@ -700,7 +729,11 @@ static mut LAST_PALETTE: [u16; 16] = catcard_ui::st7789::GREYS;
 pub fn show_mono(panel: &mut Panel, fb: &catcard_ui::Mono128x64) {
     #[cfg(not(feature = "board-q1"))]
     {
-        let _ = panel.flush(fb);
+        // Through the same cache as `show`: it records what the panel was last sent, and
+        // this is the panel's own framebuffer type, whoever owns the buffer.
+        // SAFETY: foreground only, single core, and not inside a draw.
+        let cache = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_SENT) };
+        let _ = panel.flush_changed(fb, cache);
     }
     #[cfg(feature = "board-q1")]
     draw(panel, |c| {

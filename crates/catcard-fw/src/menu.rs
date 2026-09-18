@@ -3705,26 +3705,27 @@ pub(crate) fn scroll_choice(
     loop {
         display::draw(ui.panel, |c| catcard_ui::scroll::render(c, view));
         wait_for_release(ui);
-        loop {
+        'wait: loop {
             let _ = usbtask::pump();
             crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
             for k in keys.iter() {
-                match k {
+                let down = match k {
                     Key::Confirm => return true,
                     Key::Cancel => return false,
-                    Key::Digit(8) => {
-                        view.scroll(true, 1);
-                        break;
-                    }
-                    Key::Digit(5) => {
-                        view.scroll(false, 1);
-                        break;
-                    }
-                    _ => {}
+                    Key::Digit(8) => true,
+                    Key::Digit(5) => false,
+                    // An unused key. Keep waiting rather than repainting the same frame,
+                    // as `show_doc` does with `DocFlow::Ignored`.
+                    _ => continue,
+                };
+                let before = view.off();
+                view.scroll(down, 1);
+                // Only a view that actually moved is worth a frame. At either end of the
+                // document the key changes nothing, and repainting would also re-run
+                // `wait_for_release` for no reason.
+                if view.off() != before {
+                    break 'wait;
                 }
-            }
-            if !keys.is_empty() {
-                break;
             }
             display::idle(ui.panel);
         }

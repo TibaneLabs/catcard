@@ -28,6 +28,46 @@ pub trait DisplayBus {
 }
 
 /// A driver bound to a bus.
+/// What the panel was last sent, so an unchanged frame is not sent again.
+pub struct FrameCache {
+    hash: u32,
+    valid: bool,
+}
+
+impl Default for FrameCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameCache {
+    /// Knows nothing yet: the first flush through it always sends.
+    pub const fn new() -> Self {
+        Self {
+            hash: 0,
+            valid: false,
+        }
+    }
+
+    /// Forget what the panel shows, so the next flush sends whatever it is given.
+    ///
+    /// For anything that drew on the panel without going through the cache -- a reset, a
+    /// hardware scroll, the bootloader.
+    pub fn invalidate(&mut self) {
+        self.valid = false;
+    }
+}
+
+/// FNV-1a over a frame. The same function the colour panel hashes its rows with.
+fn frame_hash(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811C_9DC5;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 pub struct Ssd1306<B: DisplayBus> {
     bus: B,
     width: u8,
@@ -78,6 +118,34 @@ impl<B: DisplayBus> Ssd1306<B> {
         self.bus.command(&crate::ssd1306::SCROLL_OFF)?;
         self.bus.command(&full_window(self.width, self.pages))?;
         self.bus.data(fb.as_bytes())
+    }
+
+    /// Push the framebuffer only if it differs from what the panel was last sent.
+    ///
+    /// Screens repaint for reasons that often change nothing -- a key the screen ignores,
+    /// a poll that found no news -- and this panel has no partial-update path worth the
+    /// risk, so the choice is the whole kilobyte or none of it. A frame identical to the
+    /// last one is none of it.
+    ///
+    /// Returns whether anything was sent. The [`FrameCache`] must be
+    /// [invalidated](FrameCache::invalidate) by anything that writes to the panel behind
+    /// this, or the next identical frame would be skipped over a display that no longer
+    /// shows it.
+    pub fn flush_changed<const W: usize, const P: usize, const N: usize>(
+        &mut self,
+        fb: &Framebuffer<W, P, N>,
+        cache: &mut FrameCache,
+    ) -> Result<bool, B::Error> {
+        let hash = frame_hash(fb.as_bytes());
+        if cache.valid && cache.hash == hash {
+            return Ok(false);
+        }
+        self.flush(fb)?;
+        // Only after the write succeeded: a failed flush leaves the panel showing
+        // something else, and recording the hash would make the next attempt a no-op.
+        cache.hash = hash;
+        cache.valid = true;
+        Ok(true)
     }
 
     /// Have the controller scroll pages `first..=last` sideways until the next flush.
@@ -259,6 +327,97 @@ mod tests {
         assert_eq!(c[2], vec![cmd::SET_CONTRAST, 0x40]);
         assert_eq!(c[3], vec![cmd::INVERT_DISPLAY]);
         assert_eq!(c[4], vec![cmd::NORMAL_DISPLAY]);
+    }
+
+    /// The point of the cache: an unchanged frame is not sent again.
+    #[test]
+    fn an_identical_frame_is_not_sent_twice() {
+        let mut d = Ssd1306::new_128x64(MockBus::default());
+        let mut cache = FrameCache::new();
+        let fb = Mono128x64::new();
+
+        assert_eq!(d.flush_changed(&fb, &mut cache), Ok(true), "first frame");
+        let sent = d.bus_mut().data.len();
+        assert_eq!(sent, 1);
+
+        assert_eq!(d.flush_changed(&fb, &mut cache), Ok(false), "same frame");
+        assert_eq!(d.bus_mut().data.len(), sent, "an identical frame went out");
+        // Not even the window commands, which are the other half of the wire cost.
+        let commands = d.bus_mut().commands.len();
+        assert_eq!(d.flush_changed(&fb, &mut cache), Ok(false));
+        assert_eq!(d.bus_mut().commands.len(), commands);
+    }
+
+    /// One pixel is enough to make it a different frame.
+    #[test]
+    fn a_changed_frame_is_sent() {
+        use crate::canvas::{Canvas, INK};
+        let mut d = Ssd1306::new_128x64(MockBus::default());
+        let mut cache = FrameCache::new();
+        let mut fb = Mono128x64::new();
+
+        d.flush_changed(&fb, &mut cache).unwrap();
+        fb.put(63, 31, INK);
+        assert_eq!(
+            d.flush_changed(&fb, &mut cache),
+            Ok(true),
+            "a changed frame was skipped"
+        );
+        assert_eq!(d.bus_mut().data.len(), 2);
+
+        // And back again: returning to an earlier image is still a change from what the
+        // panel currently shows.
+        fb.put(63, 31, 0);
+        assert_eq!(d.flush_changed(&fb, &mut cache), Ok(true));
+    }
+
+    /// Invalidating makes the next flush send, whatever the frame holds.
+    ///
+    /// For anything that wrote to the panel behind the cache -- a hardware scroll, a
+    /// direct clear. Skipping is only safe while the cache describes the glass.
+    #[test]
+    fn invalidating_forces_the_next_frame_out() {
+        let mut d = Ssd1306::new_128x64(MockBus::default());
+        let mut cache = FrameCache::new();
+        let fb = Mono128x64::new();
+
+        d.flush_changed(&fb, &mut cache).unwrap();
+        assert_eq!(d.flush_changed(&fb, &mut cache), Ok(false));
+        cache.invalidate();
+        assert_eq!(
+            d.flush_changed(&fb, &mut cache),
+            Ok(true),
+            "the panel was left showing something else"
+        );
+    }
+
+    /// A flush that failed did not reach the panel, so it must not be remembered.
+    #[test]
+    fn a_failed_flush_is_retried_rather_than_cached() {
+        struct Flaky(bool);
+        impl DisplayBus for Flaky {
+            type Error = u8;
+            fn command(&mut self, _: &[u8]) -> Result<(), u8> {
+                if self.0 { Ok(()) } else { Err(7) }
+            }
+            fn data(&mut self, _: &[u8]) -> Result<(), u8> {
+                if self.0 { Ok(()) } else { Err(7) }
+            }
+            fn reset(&mut self) -> Result<(), u8> {
+                Ok(())
+            }
+        }
+        let mut d = Ssd1306::new_128x64(Flaky(false));
+        let mut cache = FrameCache::new();
+        let fb = Mono128x64::new();
+
+        assert_eq!(d.flush_changed(&fb, &mut cache), Err(7));
+        d.bus_mut().0 = true;
+        assert_eq!(
+            d.flush_changed(&fb, &mut cache),
+            Ok(true),
+            "a frame that never reached the panel was treated as shown"
+        );
     }
 
     #[test]
