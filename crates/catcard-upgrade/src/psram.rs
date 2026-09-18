@@ -61,6 +61,55 @@ pub struct PsramArea {
     /// Which way the last access went: a change of direction starts a new burst, which
     /// `tCPH` says must have CE# high before it. See [`burst_gap`].
     way: Way,
+    /// Words touched since CE# was last allowed to rise.
+    ///
+    /// **State of the part, not of one call.** The chip does not know where a `write`
+    /// ended and the next began -- it sees one unbroken run of accesses, and `tCEM` is a
+    /// limit on that run. A counter local to each call reads as "every call is a fresh
+    /// burst", which is only true if the calls are large.
+    ///
+    /// They are not. USB hands over [`CONT_PAYLOAD`](catcard_usb::CONT_PAYLOAD) -- 62
+    /// bytes, about fifteen words -- and `usbtask` writes each frame straight through as
+    /// it arrives. A per-call counter never reached [`WORDS_PER_BURST`], so staging a
+    /// whole image over USB released CE# exactly **never**, and the refresh starvation
+    /// that follows corrupted the staged image: a correct digest over bytes that were
+    /// right, and a signature that would not verify. Staging the same image from a card
+    /// worked, because a 512-byte sector is 128 words and does cross the threshold in
+    /// one call.
+    burst: Burst,
+}
+
+/// How many words have been touched since CE# was last allowed to rise.
+///
+/// A type of its own so the rule can be tested without a PSRAM: the thing that went
+/// wrong was not the arithmetic but *where the count lived*, and that is only visible
+/// across a sequence of calls.
+#[derive(Copy, Clone, Default)]
+pub struct Burst {
+    since: u32,
+}
+
+impl Burst {
+    pub const fn new() -> Self {
+        Self { since: 0 }
+    }
+
+    /// Account for one word, returning whether CE# must be released before it.
+    pub fn word(&mut self) -> bool {
+        if self.since >= WORDS_PER_BURST {
+            // This word begins the next burst, so it counts as its first.
+            self.since = 1;
+            true
+        } else {
+            self.since += 1;
+            false
+        }
+    }
+
+    /// A change of direction ends the run whatever its length.
+    pub fn turned(&mut self) {
+        self.since = 0;
+    }
 }
 
 /// Writing outside the region this area was built for.
@@ -93,6 +142,7 @@ impl PsramArea {
             capacity: psram.staging_header - image_base,
             header_at: psram.staging_header,
             way: Way::Nothing,
+            burst: Burst::new(),
         }
     }
 
@@ -269,16 +319,14 @@ impl StagingArea for PsramArea {
         // A change of direction is a new burst, and `tCPH` wants CE# high between bursts.
         if self.way == Way::Reading {
             burst_gap();
+            self.burst.turned();
         }
         self.way = Way::Writing;
-        let mut since_gap = 0u32;
         for word in WordPlan::new(addr, data.len()) {
             // CE# has to rise before `tCEM`, or the part stops refreshing itself.
-            if since_gap >= WORDS_PER_BURST {
+            if self.burst.word() {
                 burst_gap();
-                since_gap = 0;
             }
-            since_gap += 1;
             let value = if word.whole() {
                 u32::from_le_bytes([
                     data[word.src],
@@ -311,16 +359,14 @@ impl StagingArea for PsramArea {
         // As in `write`: turning the bus round starts a new burst.
         if self.way == Way::Writing {
             burst_gap();
+            self.burst.turned();
         }
         self.way = Way::Reading;
-        let mut since_gap = 0u32;
         for word in WordPlan::new(addr, out.len()) {
             // Reads hold CE# exactly as writes do, and the digest reads a megabyte.
-            if since_gap >= WORDS_PER_BURST {
+            if self.burst.word() {
                 burst_gap();
-                since_gap = 0;
             }
-            since_gap += 1;
             // SAFETY: as `write`.
             let bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
             let len = word.len();
@@ -507,5 +553,83 @@ mod tests {
             );
             assert!(a.image_offset < p.len, "{}: offset inside PSRAM", b.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod burst_tests {
+    use super::*;
+
+    /// Feed `calls` runs of `words` each through one counter, and report the longest run
+    /// of words that went by with no gap -- which is what the part actually experiences.
+    fn longest_run(calls: usize, words: usize) -> u32 {
+        let mut burst = Burst::new();
+        let (mut run, mut worst) = (0u32, 0u32);
+        for _ in 0..calls {
+            for _ in 0..words {
+                if burst.word() {
+                    worst = worst.max(run);
+                    run = 0;
+                }
+                run += 1;
+            }
+        }
+        worst.max(run)
+    }
+
+    /// The limit is on the part, not on a call: many small writes are one long run.
+    ///
+    /// This is the bug that corrupted a staged image. USB hands over 62-byte frames --
+    /// about fifteen words -- and `usbtask` writes each straight through. With the count
+    /// living in the call, no single call ever reached [`WORDS_PER_BURST`], so CE# was
+    /// never released across an entire 476 KB transfer. Staging from a card worked
+    /// because a 512-byte sector is 128 words and crosses the threshold on its own,
+    /// which is exactly why the failure looked like a USB problem.
+    #[test]
+    fn many_small_calls_still_release_the_part() {
+        // 62 bytes is 15 whole words plus a part-word either side: 15 to 17 in practice.
+        for words in [1usize, 4, 15, 16, 17, 31] {
+            let worst = longest_run(400, words);
+            assert!(
+                worst <= WORDS_PER_BURST,
+                "{words}-word calls ran {worst} words without releasing CE#, over the \
+                 {WORDS_PER_BURST} the 8 us tCEM budget allows"
+            );
+        }
+    }
+
+    /// And a call larger than the budget is broken up within itself, as before.
+    #[test]
+    fn one_large_call_is_broken_into_bursts() {
+        for words in [32usize, 33, 64, 128, 1000] {
+            let worst = longest_run(1, words);
+            assert!(
+                worst <= WORDS_PER_BURST,
+                "a {words}-word call ran {worst} words without releasing CE#"
+            );
+        }
+    }
+
+    /// The seam between two calls is a run like any other.
+    ///
+    /// The digest reads 256 bytes at a time -- 64 words, so one gap inside each call.
+    /// With a per-call counter the tail of one call and the head of the next ran back to
+    /// back: 64 words, twice the budget, every 256 bytes of a megabyte.
+    #[test]
+    fn the_seam_between_calls_is_not_a_free_burst() {
+        assert!(longest_run(50, 64) <= WORDS_PER_BURST);
+    }
+
+    /// Turning the bus round ends the run: the gap is emitted by the caller for `tCPH`.
+    #[test]
+    fn a_change_of_direction_starts_the_count_again() {
+        let mut burst = Burst::new();
+        for _ in 0..WORDS_PER_BURST {
+            assert!(!burst.word());
+        }
+        burst.turned();
+        // The next word follows a gap the direction change already paid for, so it must
+        // not ask for a second one.
+        assert!(!burst.word(), "a redundant gap after turning the bus");
     }
 }
