@@ -35,6 +35,19 @@
 //! off the device, hands it out, and receives coins only the forger can spend. What is
 //! cached here was derived from the seed, in this session.
 //!
+//! Those keys are therefore **ignored outright** -- not read, and not compared against
+//! what we derive. A comparison would have no correct response: the stored value is not
+//! evidence, so a mismatch could only mean "ignore the stored value", which is what
+//! ignoring it does already, without a warning that invites someone to doubt a correct
+//! address. It would also cry wolf by design -- with a BIP-39 passphrase in force the
+//! wallet legitimately differs from the one stock cached, so every passphrase wallet
+//! would carry a permanent alarm -- and it would hand anyone who can write that flash a
+//! way to raise one at will.
+//!
+//! Ignoring does mean *leaving alone*, not discarding: `store::set` edits in place, so
+//! stock's keys keep their exact bytes through our writes and a device that goes back to
+//! stock finds them intact.
+//!
 //! Source: hw-reference/settings-nvstore-format.md §2-3 [C]
 //!
 //! # Lifetime

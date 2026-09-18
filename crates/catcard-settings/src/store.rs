@@ -486,6 +486,50 @@ mod save_tests {
         assert_eq!(doc.get_u64("_age"), Some(2), "each save is a new version");
     }
 
+    /// Keys this firmware never reads survive a save, byte for byte and in order.
+    ///
+    /// Stock caches `xfp`/`xpub` here. This firmware ignores them -- it derives its own
+    /// from the seed, because this blob is encrypted and *not* authenticated, so a cached
+    /// public key in it is not evidence of anything. Ignoring has to mean leaving alone:
+    /// a device that has been stock, then this, then stock again must find its settings
+    /// intact, and re-rendering the object around a change is how that gets lost.
+    #[test]
+    fn keys_this_firmware_ignores_are_left_exactly_as_they_were() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+
+        // The shape stock leaves behind, including keys whose schema we never decided.
+        macro_rules! theirs {
+            () => {
+                r#""xfp":1130956799,"xpub":"xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6oDMSgv6Zz8idoc4a6mr8BDzTJY47LJhkJ8UB7WEGuduB","multisig":[{"opaque":1}],"chain":"BTC""#
+            };
+        }
+        const THEIRS: &str = theirs!();
+        const STOCK: &str = concat!(r#"{"_age":7,"#, theirs!(), "}");
+        write(&mut slots, &k, STOCK.as_bytes(), 3, &mut scratch).unwrap();
+
+        set(&mut slots, &k, "nick", &"ours", 4, &mut doc, &mut scratch).unwrap();
+
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let text = core::str::from_utf8(&doc[..n]).unwrap();
+        // One substring: proves the bytes *and* their order, together.
+        assert!(text.contains(THEIRS), "stock's keys were rewritten: {text}");
+
+        let parsed = Doc::parse(text.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.get_str("nick"),
+            Some("ours"),
+            "our own key is missing"
+        );
+        assert_eq!(
+            parsed.get_u64("_age"),
+            Some(8),
+            "the version did not advance"
+        );
+    }
+
     /// How many slots hold something.
     fn read_slot_count(slots: &mut Ram) -> usize {
         let mut buf = [0u8; SLOT_LEN];
