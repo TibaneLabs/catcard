@@ -5,9 +5,10 @@
 //! the host merely asserts. So everything here is derived from data the signature commits
 //! to, or refused:
 //!
-//! - **Amounts in** come from each input's own spent output, which BIP-143 puts inside the
-//!   signed preimage, and which `outscript` cross-checks against the previous transaction's
-//!   txid when the whole transaction is supplied.
+//! - **Amounts in** come from the previous transaction each input spends, whose txid
+//!   `outscript` checks against the outpoint. A witness UTXO alone is refused: BIP-143
+//!   binds the amount of the input being *signed*, so a wrong amount on any *other* input
+//!   costs a host nothing and still moves the fee this screen states.
 //! - **Amounts out** and their destinations come from the unsigned transaction, which every
 //!   signature commits to.
 //! - **The fee** is the difference, and a fee that cannot be computed -- an input whose
@@ -67,6 +68,8 @@ pub enum Refusal {
     /// An input's spent output was not provided, so the fee cannot be computed. Signing
     /// blind to the amounts is how a transaction that pays everything to fees gets signed.
     UnknownAmount { input: usize },
+    /// An input gave an amount with no transaction behind it, so nothing checks it.
+    UnverifiedAmount { input: usize },
     /// The amounts do not add up: outputs exceed inputs.
     Unbalanced,
     /// The PSBT is already finalised; there is nothing to sign.
@@ -149,7 +152,14 @@ pub fn summarise(
                 Some(kind) => return Err(Refusal::Sighash { input: index, kind }),
             }
         }
-        // Every input's amount matters to the fee, ours or not.
+        // Every input's amount matters to the fee, ours or not, and only the previous
+        // transaction settles it -- `utxo` checks its txid against this outpoint.
+        if psbt
+            .input(index)
+            .is_none_or(|i| i.non_witness_utxo().is_none())
+        {
+            return Err(Refusal::UnverifiedAmount { input: index });
+        }
         let utxo = psbt
             .utxo(index)
             .map_err(|_| Refusal::UnknownAmount { input: index })?;

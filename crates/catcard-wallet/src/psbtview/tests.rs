@@ -57,6 +57,11 @@ struct Spend {
     /// The fingerprint the PSBT claims, which need not be the truthful one.
     claim: [u8; 4],
     sighash: Option<u32>,
+    /// Withhold the previous transaction, leaving the amount as the host's word alone.
+    no_prev_tx: bool,
+    /// What the witness UTXO claims, when that is not what was really paid. The previous
+    /// transaction always carries `amount`, so a lie here does not move the outpoint.
+    declared: Option<u64>,
 }
 
 /// How an output is described.
@@ -70,9 +75,46 @@ struct Pay {
 
 /// Build a PSBT with these inputs and outputs. `buf` holds the result.
 fn build(spends: &[Spend], pays: &[Pay], buf: &mut [u8]) -> usize {
-    let ins: Vec<RawTxIn<'_>> = (0..spends.len())
-        .map(|i| RawTxIn {
-            txid: [i as u8 + 1; 32],
+    // A previous transaction per input, paying `amount` at its output 0, whose txid the
+    // input then spends.
+    let prev_scripts: Vec<[u8; 22]> = spends
+        .iter()
+        .map(|s| p2wpkh_script(&pubkey_at(s.phrase, &s.steps)))
+        .collect();
+    let built: Vec<(Vec<u8>, [u8; 32])> = spends
+        .iter()
+        .zip(&prev_scripts)
+        .enumerate()
+        .map(|(i, (s, spk))| {
+            let ins = [RawTxIn {
+                txid: [i as u8 + 0xA0; 32],
+                vout: 0,
+                script_sig: &[],
+                sequence: 0xffff_ffff,
+                witness: &[],
+            }];
+            let outs = [RawTxOut {
+                amount: s.amount,
+                script: spk,
+            }];
+            let tx = RawTx {
+                version: 2,
+                inputs: &ins,
+                outputs: &outs,
+                locktime: 0,
+            };
+            let mut raw = vec![0u8; tx.serialized_len()];
+            let n = tx.serialize_to_slice(&mut raw).unwrap();
+            raw.truncate(n);
+            (raw, tx.txid())
+        })
+        .collect();
+    let prevs: Vec<&[u8]> = built.iter().map(|(raw, _)| raw.as_slice()).collect();
+    let ins: Vec<RawTxIn<'_>> = built
+        .iter()
+        .map(|(_, txid)| txid)
+        .map(|txid| RawTxIn {
+            txid: *txid,
             vout: 0,
             script_sig: &[],
             sequence: 0xffff_ffff,
@@ -113,7 +155,11 @@ fn build(spends: &[Spend], pays: &[Pay], buf: &mut [u8]) -> usize {
     for (i, s) in spends.iter().enumerate() {
         let pk = pubkey_at(s.phrase, &s.steps);
         let spk = p2wpkh_script(&pk);
-        step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(i, s.amount, &spk, out));
+        let claimed = s.declared.unwrap_or(s.amount);
+        step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(i, claimed, &spk, out));
+        if !s.no_prev_tx {
+            step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_non_witness_utxo(i, prevs[i], out));
+        }
         step!(|p: &Psbt<'_>, out: &mut [u8]| p
             .add_input_bip32_derivation(i, &pk, s.claim, &s.steps, out));
         if let Some(kind) = s.sighash {
@@ -139,6 +185,8 @@ fn ours_spend(amount: u64) -> Spend {
         amount,
         claim: OUR_FP,
         sighash: None,
+        no_prev_tx: false,
+        declared: None,
     }
 }
 
@@ -241,6 +289,8 @@ fn an_input_that_is_not_ours_is_counted_but_not_signable() {
                 amount: 40_000,
                 claim: fingerprint_of(STRANGER),
                 sighash: None,
+                no_prev_tx: false,
+                declared: None,
             },
         ],
         &[Pay {
@@ -272,6 +322,8 @@ fn a_transaction_with_nothing_of_ours_is_refused() {
             amount: 50_000,
             claim: fingerprint_of(STRANGER),
             sighash: None,
+            no_prev_tx: false,
+            declared: None,
         }],
         &[Pay {
             phrase: STRANGER,
@@ -364,8 +416,8 @@ fn a_sighash_type_we_do_not_produce_stops_the_signing() {
 
 #[test]
 fn an_input_with_no_amount_is_refused_rather_than_priced_at_zero() {
-    // Build normally, then strip the witness UTXO: without it the fee is unknowable, and a
-    // transaction signed blind to amounts can pay everything to fees.
+    // The previous transaction is what prices an input: losing the witness UTXO changes
+    // nothing, losing the previous transaction is a refusal.
     let mut buf = vec![0u8; 8192];
     let n = build(
         &[ours_spend(100_000)],
@@ -378,13 +430,159 @@ fn an_input_with_no_amount_is_refused_rather_than_priced_at_zero() {
         &mut buf,
     );
     let psbt = Psbt::parse(&buf[..n]).unwrap();
-    let mut stripped = vec![0u8; 8192];
+
+    let mut without_witness = vec![0u8; 8192];
     let m = psbt
-        .remove_input_record(0, &[in_key::WITNESS_UTXO as u8], &mut stripped)
+        .remove_input_record(0, &[in_key::WITNESS_UTXO as u8], &mut without_witness)
+        .unwrap();
+    assert!(summary_of(&without_witness[..m]).is_ok());
+
+    let mut without_prev = vec![0u8; 8192];
+    let m = psbt
+        .remove_input_record(0, &[in_key::NON_WITNESS_UTXO as u8], &mut without_prev)
         .unwrap();
     assert_eq!(
-        summary_of(&stripped[..m]),
-        Err(Refusal::UnknownAmount { input: 0 })
+        summary_of(&without_prev[..m]),
+        Err(Refusal::UnverifiedAmount { input: 0 })
+    );
+}
+
+#[test]
+fn an_amount_the_host_merely_asserts_is_refused() {
+    // One honest input of 1.0 BTC and one declared at a single satoshi. Unrefused, the
+    // fee reads as 0.05 BTC against a 0.95 BTC payment on a transaction that burns 1.05.
+    let mut buf = vec![0u8; 16384];
+    let n = build(
+        &[
+            ours_spend(100_000_000),
+            Spend {
+                phrase: OURS,
+                steps: [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 1],
+                amount: 1,
+                claim: OUR_FP,
+                sighash: None,
+                // The lie: an amount with no transaction behind it.
+                no_prev_tx: true,
+                declared: None,
+            },
+        ],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 95_000_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    assert_eq!(
+        summary_of(&buf[..n]),
+        Err(Refusal::UnverifiedAmount { input: 1 })
+    );
+}
+
+#[test]
+fn a_witness_utxo_that_disagrees_with_the_previous_transaction_does_not_move_the_fee() {
+    // `Psbt::utxo` reads the amount out of the transaction whose txid it just checked, so
+    // a different number in the witness UTXO changes nothing.
+    let mut buf = vec![0u8; 16384];
+    let n = build(
+        &[Spend {
+            phrase: OURS,
+            steps: RECEIVE,
+            amount: 100_000,
+            claim: OUR_FP,
+            sighash: None,
+            no_prev_tx: false,
+            declared: Some(1),
+        }],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 99_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    let sum = summary_of(&buf[..n]).unwrap();
+    assert_eq!(sum.total_in, 100_000);
+    assert_eq!(sum.fee, 1_000);
+}
+
+#[test]
+fn a_signature_does_not_depend_on_another_inputs_declared_amount() {
+    // Why the refusal above is load-bearing. BIP-143 binds the amount of the input being
+    // *signed*, so a host that lies about the others still gets a usable signature for
+    // the one it told the truth about: one session per input collects the whole set.
+    // Nothing downstream stops it -- signing never looks at the other inputs.
+    use crate::signer;
+
+    const REAL: u64 = 100_000_000;
+    let other: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 1];
+    let spend = |steps: [u32; 5], lie: bool| Spend {
+        phrase: OURS,
+        steps,
+        amount: REAL,
+        claim: OUR_FP,
+        sighash: None,
+        // No previous transaction, so `utxo` has nothing to check the claim against.
+        no_prev_tx: lie,
+        declared: lie.then_some(1),
+    };
+    let pays = |amount: u64| Pay {
+        phrase: STRANGER,
+        steps: RECEIVE,
+        amount,
+        claim_ours: false,
+    };
+
+    let (mut hb, mut s0b, mut s1b) = (vec![0u8; 16384], vec![0u8; 16384], vec![0u8; 16384]);
+    let hn = build(
+        &[spend(RECEIVE, false), spend(other, false)],
+        &[pays(95_000_000)],
+        &mut hb,
+    );
+    let s0n = build(
+        &[spend(RECEIVE, false), spend(other, true)],
+        &[pays(95_000_000)],
+        &mut s0b,
+    );
+    let s1n = build(
+        &[spend(RECEIVE, true), spend(other, false)],
+        &[pays(95_000_000)],
+        &mut s1b,
+    );
+    let honest = Psbt::parse(&hb[..hn]).unwrap();
+    let s0 = Psbt::parse(&s0b[..s0n]).unwrap();
+    let s1 = Psbt::parse(&s1b[..s1n]).unwrap();
+
+    // One transaction, three descriptions of it.
+    assert_eq!(honest.unsigned_tx().txid(), s0.unsigned_tx().txid());
+    assert_eq!(honest.unsigned_tx().txid(), s1.unsigned_tx().txid());
+
+    // The signatures a host would collect, one truthful input per session.
+    let sign = |p: &Psbt<'_>, i: usize, steps: &[u32; 5]| -> Vec<u8> {
+        let mut out = vec![0u8; 32768];
+        let n = signer::sign_input(p, i, &master_of(OURS), OUR_FP, &mut out, &kw()).unwrap();
+        let signed = Psbt::parse(&out[..n]).unwrap();
+        signed
+            .input(i)
+            .unwrap()
+            .partial_sig(&pubkey_at(OURS, steps))
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(sign(&s0, 0, &RECEIVE), sign(&honest, 0, &RECEIVE));
+    assert_eq!(sign(&s1, 1, &other), sign(&honest, 1, &other));
+
+    // The only thing between a host and that set: each session is refused
+    // before a person is ever shown a fee computed from the lie.
+    assert_eq!(
+        summary_of(&s0b[..s0n]),
+        Err(Refusal::UnverifiedAmount { input: 1 })
+    );
+    assert_eq!(
+        summary_of(&s1b[..s1n]),
+        Err(Refusal::UnverifiedAmount { input: 0 })
     );
 }
 

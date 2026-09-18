@@ -230,6 +230,7 @@ fn refusal_text(r: Refusal) -> &'static str {
         Refusal::Sighash { .. } => "unsupported sighash",
         Refusal::FeeTooHigh { .. } => "fee above the limit",
         Refusal::UnknownAmount { .. } => "an input has no amount",
+        Refusal::UnverifiedAmount { .. } => "an input has no prev tx",
         Refusal::Unbalanced => "outputs exceed inputs",
         Refusal::AlreadyFinal => "already finalised",
     }
