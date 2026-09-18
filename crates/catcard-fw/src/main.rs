@@ -53,6 +53,13 @@ mod recovery;
 mod sdupgrade;
 mod selftest;
 mod session;
+/// Secure Notes & Passwords, read out of the settings blob.
+///
+/// Q1 only, as the feature is: stock offers it where there is a keyboard to type a note on,
+/// so a viewer on an mk4 or mk5 would only ever show an empty list.
+#[cfg(feature = "board-q1")]
+mod notes;
+/// The settings store itself: slots, keys, and the screen that reads them.
 #[cfg(not(feature = "board-mk3"))]
 mod settings;
 mod signmsg;

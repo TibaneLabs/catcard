@@ -118,6 +118,10 @@ enum Screen {
     /// Debug: exercise the settings store on internal flash.
     #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
+    /// Secure Notes & Passwords, read out of the settings blob. Q1 only: stock writes
+    /// them where there is a keyboard to type them on.
+    #[cfg(feature = "board-q1")]
+    Notes,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
     /// The Games submenu.
@@ -277,6 +281,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Factory Reset",
     #[cfg(not(feature = "board-mk3"))]
     "Settings store",
+    #[cfg(feature = "board-q1")]
+    "Secure notes",
 ];
 
 /// The BIP-85 child a [`DERIVE_ITEMS`] row selects.
@@ -671,6 +677,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::settings::inspect(a.gate, a.login, a.ui),
             Screen::Debug,
         ),
+        #[cfg(feature = "board-q1")]
+        Screen::Notes => to(|a| crate::notes::view(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -885,6 +893,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
             (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
@@ -1082,6 +1092,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore => {}
+        #[cfg(feature = "board-q1")]
+        Screen::Notes => {}
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),

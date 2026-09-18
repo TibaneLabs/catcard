@@ -156,6 +156,159 @@ impl<'a> Scan<'a> {
     }
 }
 
+/// The elements of a JSON array, each as the raw text it was written as.
+///
+/// `notes` is a list of objects, and reading it means walking the list and parsing each
+/// element as its own [`Doc`]. Nothing is interpreted here either: an element comes back as
+/// the bytes it was written as, so an object this firmware does not understand still comes
+/// out whole.
+pub struct Elements<'a> {
+    scan: Scan<'a>,
+    done: bool,
+}
+
+/// Walk a JSON array's elements. `raw` is the array including its brackets, as an
+/// [`Entry::raw`] gives it.
+pub fn elements(raw: &str) -> Result<Elements<'_>, Error> {
+    let mut scan = Scan {
+        src: raw.as_bytes(),
+        at: 0,
+    };
+    scan.skip_ws();
+    scan.expect(b'[')?;
+    Ok(Elements { scan, done: false })
+}
+
+impl<'a> Iterator for Elements<'a> {
+    type Item = Result<&'a str, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        self.scan.skip_ws();
+        match self.scan.byte() {
+            None => {
+                self.done = true;
+                Some(self.scan.err())
+            }
+            Some(b']') => {
+                self.done = true;
+                None
+            }
+            Some(_) => {
+                let (from, to) = match self.scan.value(1) {
+                    Ok(span) => span,
+                    Err(e) => {
+                        self.done = true;
+                        return Some(Err(e));
+                    }
+                };
+                self.scan.skip_ws();
+                if self.scan.byte() == Some(b',') {
+                    self.scan.at += 1;
+                }
+                // The span came from `value`, which only ever ends on a character boundary
+                // of the same `&str`.
+                Some(Ok(
+                    core::str::from_utf8(&self.scan.src[from..to]).unwrap_or("")
+                ))
+            }
+        }
+    }
+}
+
+/// Copy a JSON string's text into `out` with its escapes undone, returning the byte count.
+///
+/// `raw` is the string as written, quotes and all. Stock's `ujson.dumps` escapes anything
+/// non-ASCII as `\uXXXX`, so a note written with an accent or an emoji arrives that way and
+/// is unreadable until this runs; and a note's body carries real newlines as `\n`.
+pub fn unescape(raw: &str, out: &mut [u8]) -> Result<usize, Error> {
+    let src = raw.as_bytes();
+    // Not a string at all: hand back the text as it stands, so a number or `true` prints.
+    if !(src.len() >= 2 && src[0] == b'"' && src[src.len() - 1] == b'"') {
+        let n = src.len().min(out.len());
+        if n < src.len() {
+            return Err(Error::BufferTooSmall);
+        }
+        out[..n].copy_from_slice(&src[..n]);
+        return Ok(n);
+    }
+    let body = &src[1..src.len() - 1];
+    let mut at = 0;
+    let mut wrote = 0;
+    let mut put = |b: u8, wrote: &mut usize| -> Result<(), Error> {
+        if *wrote >= out.len() {
+            return Err(Error::BufferTooSmall);
+        }
+        out[*wrote] = b;
+        *wrote += 1;
+        Ok(())
+    };
+    while at < body.len() {
+        if body[at] != b'\\' {
+            put(body[at], &mut wrote)?;
+            at += 1;
+            continue;
+        }
+        at += 1;
+        let Some(&esc) = body.get(at) else {
+            return Err(Error::Malformed { at });
+        };
+        at += 1;
+        match esc {
+            b'"' | b'\\' | b'/' => put(esc, &mut wrote)?,
+            b'b' => put(0x08, &mut wrote)?,
+            b'f' => put(0x0C, &mut wrote)?,
+            b'n' => put(b'\n', &mut wrote)?,
+            b'r' => put(b'\r', &mut wrote)?,
+            b't' => put(b'\t', &mut wrote)?,
+            b'u' => {
+                let mut code = match hex4(body, at) {
+                    Some(c) => c,
+                    None => return Err(Error::Malformed { at }),
+                };
+                at += 4;
+                // A character outside the basic plane arrives as a surrogate pair; joining
+                // them is what turns an emoji in a note's title into one character rather
+                // than two broken ones.
+                if (0xD800..0xDC00).contains(&code) {
+                    let low = body
+                        .get(at..at + 2)
+                        .filter(|p| p == b"\\u")
+                        .and_then(|_| hex4(body, at + 2));
+                    match low {
+                        Some(low) if (0xDC00..0xE000).contains(&low) => {
+                            code = 0x1_0000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            at += 6;
+                        }
+                        // A lone surrogate is not a character. Say so rather than writing
+                        // bytes that are not UTF-8.
+                        _ => return Err(Error::Malformed { at }),
+                    }
+                }
+                let ch = char::from_u32(code).ok_or(Error::Malformed { at })?;
+                let mut buf = [0u8; 4];
+                for b in ch.encode_utf8(&mut buf).as_bytes() {
+                    put(*b, &mut wrote)?;
+                }
+            }
+            _ => return Err(Error::Malformed { at }),
+        }
+    }
+    Ok(wrote)
+}
+
+/// Four hex digits at `at`, as a number.
+fn hex4(src: &[u8], at: usize) -> Option<u32> {
+    let mut v = 0u32;
+    for i in 0..4 {
+        let d = (*src.get(at + i)? as char).to_digit(16)?;
+        v = v * 16 + d;
+    }
+    Some(v)
+}
+
 impl<'a> Doc<'a> {
     /// An empty object, for a device with no settings yet.
     pub fn new() -> Self {
@@ -316,6 +469,63 @@ impl<'a> Doc<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// `notes` is a list of objects, and each one has to come back whole.
+    #[test]
+    fn a_list_of_notes_walks_element_by_element() {
+        let raw = r#"[{"title": "Wifi", "misc": "hunter2"}, {"title": "Bank", "user": "me"}]"#;
+        let got: Vec<&str> = super::elements(raw).unwrap().map(|e| e.unwrap()).collect();
+        assert_eq!(got.len(), 2);
+        let first = Doc::parse(got[0].as_bytes()).unwrap();
+        assert_eq!(first.get_str("title"), Some("Wifi"));
+        assert_eq!(first.get_str("misc"), Some("hunter2"));
+        let second = Doc::parse(got[1].as_bytes()).unwrap();
+        assert_eq!(second.get_str("user"), Some("me"));
+        // An empty list is a list, not an error: a device with the feature enabled and no
+        // notes written yet has exactly this.
+        assert_eq!(super::elements("[]").unwrap().count(), 0);
+    }
+
+    /// A note's body holds braces, brackets and commas, and none of them end the element.
+    #[test]
+    fn punctuation_inside_a_note_does_not_end_it() {
+        let raw = r#"[{"title": "a}b],c", "misc": "{\"not\": \"json\"}"}, {"title": "z"}]"#;
+        let got: Vec<&str> = super::elements(raw).unwrap().map(|e| e.unwrap()).collect();
+        assert_eq!(got.len(), 2, "the braces in the strings are text, not structure");
+        assert_eq!(
+            Doc::parse(got[0].as_bytes()).unwrap().get_str("title"),
+            Some("a}b],c")
+        );
+        assert_eq!(Doc::parse(got[1].as_bytes()).unwrap().get_str("title"), Some("z"));
+    }
+
+    /// The escapes stock writes have to come back as the text the owner typed.
+    #[test]
+    fn a_notes_text_comes_back_as_it_was_typed() {
+        let mut out = [0u8; 64];
+        let n = super::unescape(r#""line one\nline \"two\"\ttabbed""#, &mut out).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "line one\nline \"two\"\ttabbed"
+        );
+        // ujson escapes everything non-ASCII, so an accent arrives as \uXXXX.
+        let n = super::unescape(r#""café""#, &mut out).unwrap();
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "café");
+        // Outside the basic plane it is a surrogate pair, and the two halves make one char.
+        let n = super::unescape(r#""😺""#, &mut out).unwrap();
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "😺");
+        // A lone surrogate is not a character: refuse rather than write invalid UTF-8.
+        assert!(super::unescape(r#""\ud83d""#, &mut out).is_err());
+        // A value that is not a string prints as it stands.
+        let n = super::unescape("true", &mut out).unwrap();
+        assert_eq!(&out[..n], b"true");
+        // A body longer than the screen's buffer says so instead of truncating silently.
+        let mut small = [0u8; 4];
+        assert_eq!(
+            super::unescape(r#""much longer than four""#, &mut small),
+            Err(Error::BufferTooSmall)
+        );
+    }
+
     use super::*;
 
     /// A blob shaped like one stock writes: numbers, strings, a nested list of objects.
