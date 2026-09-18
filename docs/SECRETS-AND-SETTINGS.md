@@ -181,7 +181,20 @@ The intended proof is a stock-written slot decrypted by our code. The pre-login 
 the ideal target because their key is 32 zero bytes, so the whole chain — geometry,
 CTR convention, digest — can be checked with no secret and no login.
 
-**That ground truth is not in hand, and the reason is odd enough to record.** On the Q1
+> **Settled, 2026-09-18 — the ground truth is now in hand [C].** A Q1 was run on stock
+> long enough to set a nickname and write a couple of Secure Notes, and the settings then
+> read back correctly on this firmware: the pre-login blob under thirty-two zero bytes and
+> the wallet blob under `hash_key(raw stash)`, both decrypting, both parsing, with `nick`,
+> `notes` and `secnap` where the format document says. The whole chain — geometry, slot
+> naming, CTR convention, digest, `_age` selection — is checked against a volume another
+> firmware wrote, which is what this section was waiting for.
+>
+> Debug → Settings to SD copies the region to a card; `/settings/001.aes` and
+> `/settings/002.aes`, 4096 bytes each, mount out of that image with the same LittleFS code
+> the firmware runs. The paragraphs below describe the volume **before stock had used it**
+> and are kept because the reasoning was sound and the emptiness was real.
+
+**That ground truth was not in hand, and the reason is odd enough to record.** On the Q1
 here the volume mounts, holds a valid superblock pair (blocks 0 and 1, revisions
 `…1df4`/`…1df5`), and reports an **empty `/settings` directory** — no `.aes` filename
 appears anywhere in the raw 512 KB. Every block from 2 to 1023 reads back as one identical
