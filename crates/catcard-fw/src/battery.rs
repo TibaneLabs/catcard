@@ -14,7 +14,8 @@
 //! percentage, so nothing needs it yet.
 //!
 //! Source: hw-reference/power.md §"Battery & power pins", §"Power source: battery vs USB"
-//! [C]
+//! [C], except the strap's polarity, which that document does not give and which was
+//! measured on hardware -- see [`init`].
 
 use core::ptr::addr_of_mut;
 
@@ -40,9 +41,8 @@ pub enum Source {
 pub unsafe fn init() {
     let Some(sense) = BOARD.battery else { return };
     // SAFETY: the caller is the boot path and these pins belong to nothing else.
-    let rev_d = unsafe {
+    let strap = unsafe {
         gpio::enable_port(sense.rev_d.port);
-        // Read with a pull-up, as stock does: the strap pulls low on the older boards.
         gpio::configure(
             sense.rev_d,
             Mode::Input,
@@ -52,6 +52,17 @@ pub unsafe fn init() {
         );
         gpio::read(sense.rev_d)
     };
+    // **Fitted reads low.** `power.md` says the strap selects the pin but not which way
+    // round, and guessing it the other way is why a Q1 on USB power showed a battery:
+    // it read `NOT_BATTERY_OLD`, which is not connected on this board, floating low.
+    //
+    // Measured on a **rev E** Q1 on 2026-09-18, through the debug-memory peek: `PC3`
+    // reads 0 against our own pull-up, so the strap is pulling it to ground; `PE7` reads
+    // 1 while on USB power, which is the documented "external" level; `PC1` reads 0 with
+    // no pull, which is a floating input and not a reading. The board revision is known
+    // independently, so this is the polarity itself and not an inference from which pin
+    // looked plausible. An unfitted strap reads 1 through the pull-up: the older boards.
+    let rev_d = !strap;
     let pin = if rev_d {
         sense.not_battery
     } else {
