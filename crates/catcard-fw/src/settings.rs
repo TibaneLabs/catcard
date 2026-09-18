@@ -98,90 +98,133 @@ impl Slots for Files {
     }
 }
 
-/// Debug: mount the settings volume, read what is there, write a slot and read it back.
+/// Debug: read the settings blobs and show what is in them, decrypted.
 ///
-/// The settings store erases and programs internal flash, which is the one medium on this
-/// device that cannot be undone by a power cycle. So it is exercised from the Debug menu
-/// first -- under the **pre-login key**, which only ever holds a nickname and a few
-/// preferences, never a seed's settings -- and only once that has been watched working
-/// does anything on the boot path depend on it.
-pub(crate) fn probe(ui: &mut crate::ui::Ui<'_>) {
+/// Read-only, deliberately. This is the screen used to check our understanding of a store
+/// another firmware wrote, and the settings on such a device are the owner's -- notes,
+/// passwords, wallet records. Nothing here writes: the write path has its own tests, and a
+/// diagnostic that can lose someone's data is not a diagnostic.
+///
+/// Two blobs are shown. The **pre-login** one is under a key of thirty-two zero bytes and
+/// holds only a nickname and a few preferences. The **wallet** one is under
+/// `hash_key(raw stash)` -- six SHA-256 rounds over the secret as the secure element
+/// returns it -- and holds everything else.
+pub(crate) fn inspect(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+) {
     use catcard_settings::json::Doc;
     use catcard_settings::nvstore;
     use catcard_settings::store::{self, SCRATCH};
+    use catcard_ui::scroll::Line as Row;
     use core::fmt::Write as _;
+    use zeroize::Zeroize as _;
 
-    type Line = heapless::String<48>;
-    let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
+    // The decrypted blob outlives the document that borrows its values, so it is declared
+    // first: the rows below point into it rather than copying it.
+    let mut buf = [0u8; SCRATCH];
+
+    type Note = heapless::String<64>;
+    // Owned text the document borrows: the summary lines, which have to be formatted.
+    let mut notes: heapless::Vec<Note, 6> = heapless::Vec::new();
+    let mut rows: heapless::Vec<Row, 48> = heapless::Vec::new();
 
     // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
     // touches the settings region.
     let mut files = match unsafe { Files::mount() } {
         Ok(f) => f,
         Err(why) => {
-            let mut l = Line::new();
+            let mut l = Note::new();
             let _ = write!(l, "mount: {why}");
-            let _ = lines.push(l);
-            crate::menu::info(ui.panel, "Settings", &lines);
-            crate::menu::wait_for_any_key(ui);
+            let _ = notes.push(l);
+            let _ = rows.push(Row::title("Settings"));
+            let _ = rows.push(Row::body(notes[0].as_str()));
+            crate::menu::show_doc(ui, &rows, false, false);
             return;
         }
     };
-    let mut l = Line::new();
-    let _ = write!(l, "mounted, {} slots", Slots::count(&files));
-    let _ = lines.push(l);
 
-    let key = nvstore::prelogin_key();
-    let mut buf = [0u8; SCRATCH];
-    let mut l = Line::new();
-    match store::read(&mut files, &key, &mut buf) {
+    // The pre-login blob first: it needs no secret, so a device that cannot be logged into
+    // still says something. Only its age and nickname are carried out, because the buffer
+    // is needed again for the wallet blob.
+    let mut pre = Note::new();
+    match store::read(&mut files, &nvstore::prelogin_key(), &mut buf) {
         Ok(n) => {
-            let age = Doc::parse(&buf[..n])
-                .ok()
-                .and_then(|d| d.get_u64("_age"))
-                .unwrap_or(0);
-            let _ = write!(l, "read {n} bytes, age {age}");
+            let doc = Doc::parse(&buf[..n]).ok();
+            let age = doc.as_ref().and_then(|d| d.get_u64("_age")).unwrap_or(0);
+            let nick = doc.as_ref().and_then(|d| d.get_str("nick")).unwrap_or("-");
+            let _ = write!(pre, "pre-login: age {age}, {} keys, nick {nick}",
+                doc.as_ref().map(|d| d.len()).unwrap_or(0));
         }
         Err(e) => {
-            let _ = write!(l, "read: {e:?}");
+            let _ = write!(pre, "pre-login: {e:?}");
         }
     }
-    let _ = lines.push(l);
+    let _ = notes.push(pre);
 
-    // Write one key and read it back. `_age` goes up, as a save must, so a later read
-    // prefers this over whatever was there.
-    let existing = store::read(&mut files, &key, &mut buf).unwrap_or(0);
-    let age = Doc::parse(&buf[..existing])
-        .map(|d| store::next_age(&d))
-        .unwrap_or(1);
-    let mut json: heapless::String<64> = heapless::String::new();
-    let _ = write!(json, r#"{{"_age":{age},"probe":{age}}}"#);
-    let mut scratch = [0u8; SCRATCH];
-    let mut l = Line::new();
-    match store::write(&mut files, &key, json.as_bytes(), age as u32, &mut scratch) {
-        Ok(slot) => {
-            let _ = write!(l, "wrote slot {slot:03x}");
-            let _ = lines.push(l);
-            let mut l = Line::new();
-            match store::read(&mut files, &key, &mut buf) {
-                Ok(n) if &buf[..n] == json.as_bytes() => {
-                    let _ = write!(l, "read back: matches");
-                }
-                Ok(n) => {
-                    let _ = write!(l, "read back: {n} bytes, differs");
-                }
-                Err(e) => {
-                    let _ = write!(l, "read back: {e:?}");
-                }
-            }
-            let _ = lines.push(l);
+    // Now the wallet blob, which needs the stash the secure element holds.
+    crate::menu::blocking_screen(ui.panel, "Settings", "reading seed");
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let mut secret = match login.fetch_secret(&pin_gate) {
+        Ok(s) => s,
+        Err(_) => {
+            let mut l = Note::new();
+            let _ = write!(l, "wallet: could not read the secret");
+            let _ = notes.push(l);
+            show(ui, &notes, &rows);
+            return;
+        }
+    };
+    // Six hashes over the raw stash. Derived from the secret, so it runs with interrupts
+    // masked; the slot scan below does not, because its shape is fixed -- a set number of
+    // slots, a fixed slot length, and no branch that depends on a key byte.
+    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+    secret.zeroize();
+
+    let mut wallet = Note::new();
+    let found = store::read(&mut files, &key, &mut buf);
+    match found {
+        Ok(n) => {
+            let _ = write!(wallet, "wallet: {n} bytes");
         }
         Err(e) => {
-            let _ = write!(l, "write: {e:?}");
-            let _ = lines.push(l);
+            let _ = write!(wallet, "wallet: {e:?}");
         }
     }
-    crate::catlog!("settings: probe age {}", age);
-    crate::menu::info(ui.panel, "Settings", &lines);
-    crate::menu::wait_for_any_key(ui);
+    let _ = notes.push(wallet);
+
+    // Header lines, then every key the wallet blob holds with its value underneath. The
+    // key names are small and the values full size: the point of the screen is the values,
+    // and a value is what tells us the decryption is right.
+    let _ = rows.push(Row::title("Settings"));
+    for n in notes.iter() {
+        let _ = rows.push(Row::body(n.as_str()).small());
+    }
+    if let Ok(n) = found {
+        if let Ok(doc) = Doc::parse(&buf[..n]) {
+            for e in doc.entries() {
+                let _ = rows.push(Row::body(e.key).small());
+                let _ = rows.push(Row::body(e.raw));
+            }
+        } else {
+            let _ = rows.push(Row::body("the blob decrypted but is not JSON"));
+        }
+    }
+    crate::menu::show_doc(ui, &rows, false, false);
+}
+
+/// Show just the summary lines, for the paths that stop early.
+fn show(
+    ui: &mut crate::ui::Ui<'_>,
+    notes: &[heapless::String<64>],
+    _rows: &[catcard_ui::scroll::Line<'_>],
+) {
+    use catcard_ui::scroll::Line as Row;
+    let mut rows: heapless::Vec<Row, 8> = heapless::Vec::new();
+    let _ = rows.push(Row::title("Settings"));
+    for n in notes {
+        let _ = rows.push(Row::body(n.as_str()).small());
+    }
+    crate::menu::show_doc(ui, &rows, false, false);
 }

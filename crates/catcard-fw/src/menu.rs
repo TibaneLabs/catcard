@@ -667,7 +667,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SettingsStore => to(|a| crate::settings::probe(a.ui), Screen::Debug),
+        Screen::SettingsStore => to(
+            |a| crate::settings::inspect(a.gate, a.login, a.ui),
+            Screen::Debug,
+        ),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -4948,7 +4951,7 @@ impl catcard_ui::pager::LineSource for LogLines {
 }
 
 /// How a scrollable document screen ([`show_doc`]) ended.
-enum DocExit {
+pub(crate) enum DocExit {
     /// A menu row was chosen; carries its `menu_item` id.
     Selected(u32),
     /// A reading screen was confirmed (Confirm on a document with no selectable lines).
@@ -4992,7 +4995,7 @@ fn glide_view(
 /// the chosen id on Confirm. `require_end`, for the seed backup, refuses Confirm on a
 /// reading screen until the bottom has been on screen -- the "read every word" gate the old
 /// pager enforced. `scramble` turns on the ragged sensitive-line marker.
-fn show_doc(
+pub(crate) fn show_doc(
     ui: &mut Ui<'_>,
     lines: &[catcard_ui::scroll::Line<'_>],
     scramble: bool,
