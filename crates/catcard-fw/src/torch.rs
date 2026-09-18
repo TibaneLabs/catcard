@@ -30,9 +30,14 @@ use catcard_qr::cmd;
 use crate::keypad::Keypad;
 
 /// Loop iterations one byte may take. Short: this runs inside the keypad poll, so it is
-/// a budget for "the port is there and idle", not for waiting on a reply. Nothing here
-/// waits on a reply at all.
+/// a budget for "the port is there and idle", not for waiting on a reply.
 const BYTE_BUDGET: u32 = 20_000;
+
+/// Attempts at waking. The first is expected to be swallowed, so one is none.
+const WAKE_TRIES: usize = 5;
+/// How long each wake attempt waits for an answer. This is in a key's path, so the whole
+/// sequence is bounded to something a thumb does not notice.
+const WAKE_GAP_BUDGET: u32 = 120_000;
 
 /// The port, opened the first time the key is pressed.
 ///
@@ -104,20 +109,49 @@ fn set(on: bool) {
 
     // SAFETY: reads a static that only the foreground writes.
     let rates = match unsafe { *core::ptr::addr_of!(KNOWN_RATE) } {
-        Some(rate) => [rate, rate],
+        Some(rate) => [rate, 0],
         None => catcard_qr::BAUDS,
     };
-    let mut last = 0;
+    let mut woke = 0u32;
     for rate in rates {
-        if rate != last {
-            port.set_baud(rate);
-            last = rate;
+        if rate == 0 {
+            continue;
         }
-        // Wake first: a module that has put itself to sleep hears nothing else. Bare,
-        // and not waited on -- waking is near-instant and this is in a key's path.
-        let _ = port.write(cmd::WAKE, BYTE_BUDGET);
+        port.set_baud(rate);
+        if wake(port) {
+            woke = rate;
+        }
+        // Framed is the normal form. Bare is what stock uses for the torch *during* a
+        // scan, and the module takes either -- so both go out, because which state it is
+        // in is exactly what is not known from here. A repeated lamp command is
+        // idempotent, so saying it twice costs only the bytes.
         let _ = port.write(frame, BYTE_BUDGET);
-        // Whatever it says back, including the bare acknowledgement, is not for us.
+        let _ = port.write(body, BYTE_BUDGET);
         port.drain(64, BYTE_BUDGET / 16);
     }
+    crate::catlog!(
+        "torch: {} (woke at {})",
+        if on { "on" } else { "off" },
+        woke
+    );
+}
+
+/// Wake the module, retrying as the reference says to.
+///
+/// **The first send is expected to be ignored.** It arrives while the module is still
+/// down, so a single attempt is no attempt at all -- which is why the lamp did nothing
+/// at first. Bounded at [`WAKE_TRIES`], with a gap between each so the module has time
+/// to come up and answer; it answers with a bare acknowledgement, so any byte back is
+/// the signal.
+///
+/// Source: hw-reference/qr.md §7 [C]
+fn wake(port: &mut Usart) -> bool {
+    for _ in 0..WAKE_TRIES {
+        let _ = port.write(cmd::WAKE, BYTE_BUDGET);
+        let mut got = [0u8; 8];
+        if port.read(&mut got, WAKE_GAP_BUDGET) > 0 {
+            return true;
+        }
+    }
+    false
 }
