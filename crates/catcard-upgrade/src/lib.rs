@@ -450,33 +450,41 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // -- dev or production alike -- against the exact key the bootloader would use, over
         // the exact double-SHA256 digest it signs (hw-reference/firmware-signing.md §2 [C]).
         let slot = header.pubkey_num;
-        let digest = self.stored_digest_with(progress)?;
 
-        // Two digests of one image: what arrived, and what the area reads back. They
-        // must agree, and when they do not this device has a bug -- the staging RAM did
-        // not keep what it was given. Reporting that as a bad signature blames the
-        // sender for a fault of ours.
+        // The digest of what *arrived*, taken as the bytes came in. Nothing is read back
+        // to get it.
         //
-        // This is worth doing on every upgrade and not only when something fails. The
-        // digest deliberately skips the 64-byte signature window, so a medium that
-        // misreads *that* window alone still produces two matching digests and a
-        // signature that will not verify; knowing the rest of the image read back
-        // correctly is what makes that conclusion available at all.
-        let arrived = self.stream.clone().finish();
-        if arrived != digest {
-            return Err(Reject::RamStoreFailed {
-                sent: [arrived[0], arrived[1], arrived[2], arrived[3]],
-                read: [digest[0], digest[1], digest[2], digest[3]],
-            });
-        }
+        // Reading the whole image out of PSRAM again is the single slowest thing an
+        // upgrade does -- a second full-length pass over a memory that is slow by
+        // nature -- and it was buying a digest this already has. The bootloader
+        // re-verifies the staged image in RAM before it installs anything
+        // (`verify_firmware_in_ram`, `-112 AUTH_FAIL`), so a staging area that lost
+        // bytes is caught there whatever we do here.
+        //
+        // Source: hw-reference/install-and-usb-transport.md §"install flow" [C]
+        let digest = self.stream.clone().finish();
         let key = compressed(&APPROVED_PUBKEYS[slot as usize]);
         let verified = matches!(
             catcard_sign::ecdsa_verify(&key, &digest, &header.signature),
             Ok(true)
         );
         if !verified {
-            // We hold the key and it does not verify: corrupt or tampered. Refuse before
-            // staging rather than let the bootloader find out after overwriting firmware.
+            // It did not verify. *Now* read the image back, because the answer to "why"
+            // is worth a slow pass when the fast path has already failed -- and only on
+            // this branch, so an upgrade that works never pays for it.
+            //
+            // If the stored image digests differently, the bytes arrived intact and this
+            // device failed to keep them: that is ours to fix, not a bad image. If it
+            // digests the same, the signature really does not match the key the header
+            // names.
+            if let Ok(stored) = self.stored_digest_with(progress)
+                && stored != digest
+            {
+                return Err(Reject::RamStoreFailed {
+                    sent: [digest[0], digest[1], digest[2], digest[3]],
+                    read: [stored[0], stored[1], stored[2], stored[3]],
+                });
+            }
             return Err(Reject::BadSignature {
                 digest: [digest[0], digest[1], digest[2], digest[3]],
                 sig: [
@@ -513,6 +521,32 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         self.area
             .read(offset, buf)
             .map_err(|_| Reject::StorageFault { offset })
+    }
+
+    /// Check that the staging area still holds what it was given.
+    ///
+    /// A full read-back, and therefore slow -- PSRAM is slow, and this is a second pass
+    /// over the whole image. [`inspect`](Self::inspect) deliberately does **not** do it:
+    /// it verifies the signature against the digest taken as the bytes arrived, which
+    /// costs nothing, and the bootloader re-verifies the staged image in RAM before it
+    /// installs anything. So a staging area that lost bytes is caught either way; the
+    /// question is only whether it is caught here, by name, or there, as `AUTH_FAIL`.
+    ///
+    /// Worth calling when something has already gone wrong, or from a diagnostic that
+    /// is asking this exact question about the hardware.
+    pub fn verify_stored(&mut self) -> Result<(), Reject>
+    where
+        A::Error: Into<StorageError>,
+    {
+        let sent = self.stream.clone().finish();
+        let read = self.stored_digest()?;
+        if sent == read {
+            return Ok(());
+        }
+        Err(Reject::RamStoreFailed {
+            sent: [sent[0], sent[1], sent[2], sent[3]],
+            read: [read[0], read[1], read[2], read[3]],
+        })
     }
 
     /// Digest the image as it now sits in the staging area.

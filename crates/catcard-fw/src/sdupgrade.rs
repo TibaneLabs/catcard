@@ -210,9 +210,8 @@ pub fn stage_from_card(
     // data, and only the log can tell the next person which this board does.
     let staged_len = len;
     let running = crate::own_header();
-    // Verifying is a second pass over the whole image -- the same length again -- so it
-    // gets the same bar rather than a still screen.
-    progress(0, len);
+    // No second bar: the digest was taken as the card was read, so verifying is now a
+    // header read and one signature check rather than another pass over a slow memory.
     match staged.inspect_with(running.as_ref(), &mut progress) {
         Ok(approval) => Outcome::Offered(staged, approval),
         Err(why) => {

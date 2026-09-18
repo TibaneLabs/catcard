@@ -261,20 +261,27 @@ fn storage_that_does_not_read_back_is_caught() {
     // one. The bytes that arrived were perfect; the bytes that will be installed are
     // not, and only a read-back can tell.
     //
-    // And it is reported as what it is: this device failed to store the image. It used
-    // to come out as `BadSignature`, which blames the sender for a fault of ours and
-    // sends anyone reading the log looking for a tampered image. Hashing the bytes as
-    // they arrive gives a second opinion that never touches the staging area, so the
-    // two can be told apart.
+    // And it is reported as what it is: this device failed to store the image, rather
+    // than `BadSignature`, which blames the sender for a fault of ours.
+    //
+    // **`inspect` no longer asks this question**, deliberately: it verifies against the
+    // digest taken as the bytes arrived, so it never reads the image back and an
+    // upgrade costs one pass instead of two. PSRAM is slow and that pass was the whole
+    // of the second progress bar. The safety net did not disappear -- the bootloader
+    // re-verifies the staged image in RAM before installing, and refuses with
+    // `AUTH_FAIL` -- so what changed is who names the fault, not whether a corrupt
+    // image can be installed.
     let image = image_for(&MK4, NEWER, 0);
     let area = Mem::new(image.len() + 4096);
     let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
     feed(&mut s, &image).unwrap();
     s.area.corrupt_read_at = Some(100_000);
     assert!(matches!(
-        s.inspect(Some(&running(OLDER))),
+        s.verify_stored(),
         Err(Reject::RamStoreFailed { .. })
     ));
+    // The fast path accepts it, because what arrived was genuinely signed.
+    assert!(s.inspect(Some(&running(OLDER))).is_ok());
 }
 
 #[test]
@@ -593,17 +600,39 @@ fn an_untouched_image_still_commits() {
     assert_eq!(region.len, image.len() as u32);
 }
 
-/// A good image still passes with the read-back check in place.
+/// The two digests agree on an image that is fine.
 ///
-/// The check compares two digests of the same bytes, so the way to get it wrong is for
-/// it to disagree with itself -- the arriving stream skips the signature window, and so
-/// must the stored pass, or every honest upgrade is refused as a storage fault.
+/// They are computed by different code over the same bytes -- one from the arriving
+/// stream, one by reading the area back -- and both skip the signature window. If they
+/// ever disagreed about *which* bytes to skip, every honest upgrade would be called a
+/// storage fault.
 #[test]
 fn the_two_digests_agree_on_an_image_that_is_fine() {
     let image = image_for(&MK4, NEWER, 0);
     let mut s = staged_with(&image);
+    assert_eq!(s.verify_stored(), Ok(()));
     let approval = s.inspect(Some(&running(OLDER))).expect("a good image");
     assert_eq!(approval.length, image.len() as u32);
+}
+
+/// Verifying costs no read of the staging area at all.
+///
+/// The point of the change: an upgrade used to read the whole image back to get a
+/// digest it could have taken on the way in. This counts the reads, because "it feels
+/// faster" is not a property anything can hold on to.
+#[test]
+fn a_good_image_is_verified_without_reading_the_area_back() {
+    let image = image_for(&MK4, NEWER, 0);
+    let mut s = staged_with(&image);
+    s.area.reads = 0;
+    s.inspect(Some(&running(OLDER))).expect("a good image");
+    // The header still comes from the area -- 128 bytes, once. What must not happen is
+    // a pass over the whole image.
+    assert!(
+        s.area.reads <= 2,
+        "inspect read the staging area {} times; it should need the header and no more",
+        s.area.reads
+    );
 }
 
 /// A signature that is genuinely wrong is still a signature fault, not a storage one.
