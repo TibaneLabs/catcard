@@ -53,6 +53,10 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
         R::StorageFault { .. } => "staging area failed",
         R::NoStagingArea => "nowhere to stage it",
         R::StagingBusy => "busy with another image",
+        // A card image is never compressed, so this cannot come from this path. It is
+        // still answered rather than lumped in with the transfer faults, because a
+        // screen saying the wrong thing is worse than one saying an odd thing.
+        R::Unpackable(_) => "compressed image did not decode",
     }
 }
 

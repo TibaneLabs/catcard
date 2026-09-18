@@ -75,6 +75,22 @@ pub enum Opcode {
     /// Nothing is installed by this. The device stages and validates it, then answers
     /// with what it found so a human can be asked.
     UpgradeOffer = 0x0010,
+    /// Payload is a complete signed firmware image, deflated.
+    ///
+    /// The image itself is the same one [`Opcode::UpgradeOffer`] takes, and reaches the
+    /// same staging area through the same checks -- only the wire is smaller. Firmware
+    /// deflates to about two thirds, and this transport moves 62 bytes a frame, so the
+    /// third that is not sent is a third of the wait.
+    ///
+    /// The payload is `[u32 uncompressed length][deflate streams...]`, each stream
+    /// inflating to 8 KiB except the last. The length is the one the signature was
+    /// computed over, and the device stops there: a stream claiming more is refused,
+    /// not truncated. The message's own `total` counts the compressed bytes, which is
+    /// what crosses the wire and not what is installed.
+    ///
+    /// Reported by [`caps::UPGRADE_PACKED`]. A host that does not see that bit sends
+    /// [`Opcode::UpgradeOffer`] instead, which every build understands.
+    UpgradePacked = 0x0013,
     /// Press a key, as though someone had pressed it on the device.
     ///
     /// Payload is one byte: `0x00..=0x09` a digit, [`KEY_CANCEL`], [`KEY_CONFIRM`].
@@ -146,6 +162,7 @@ impl Opcode {
             0x0002 => Opcode::Identify,
             0x0010 => Opcode::UpgradeOffer,
             0x0011 => Opcode::UpgradeCommit,
+            0x0013 => Opcode::UpgradePacked,
             0x0012 => Opcode::ReadLog,
             0x0020 => Opcode::InjectKey,
             0x0021 => Opcode::UnlockPin,
@@ -199,6 +216,11 @@ pub mod caps {
     /// This build accepts [`Opcode::UnlockPin`](super::Opcode::UnlockPin). Set exactly
     /// when `KEY_INJECTION` is: the two share the `usb-key-injection` feature.
     pub const UNLOCK_PIN: u8 = 1 << 3;
+    /// This build accepts [`Opcode::UpgradePacked`](super::Opcode::UpgradePacked), a
+    /// deflated image. Never set without [`UPGRADE`]: it is the same staging area
+    /// reached through a smaller wire, so a device that cannot install cannot install a
+    /// compressed one either.
+    pub const UPGRADE_PACKED: u8 = 1 << 4;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.

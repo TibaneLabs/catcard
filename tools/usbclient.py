@@ -26,6 +26,7 @@ KIND_START, KIND_CONT = 1, 2
 START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
 
 PING, IDENTIFY, UPGRADE_OFFER, UPGRADE_COMMIT = 0x0001, 0x0002, 0x0010, 0x0011
+UPGRADE_PACKED = 0x0013
 INJECT_KEY = 0x0020
 UNLOCK_PIN = 0x0021
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
@@ -105,12 +106,57 @@ STATUS = {0: "Ok", 1: "UnknownOpcode", 2: "NotNow", 3: "BadRequest",
 REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
           5: "Incomplete", 6: "NotAnImage", 7: "BadHeader", 8: "WrongBoard",
           9: "Downgrade", 10: "BadSignature", 11: "StorageFault",
-          12: "NoStagingArea", 13: "StagingBusy"}
+          12: "NoStagingArea", 13: "StagingBusy", 14: "RamStoreFailed",
+          15: "Unpackable"}
 
 # Capability bits, matching `catcard_usb::caps`.
 CAP_KEY_INJECTION = 1 << 0
 CAP_UPGRADE = 1 << 1
 CAP_UNLOCK_PIN = 1 << 3
+CAP_UPGRADE_PACKED = 1 << 4
+
+# One deflate stream per this many bytes of image, matching
+# `catcard_upgrade::packed::BLOCK`. The device inflates a block into a fixed slab, so
+# this is not a tuning knob on this side: a larger one overruns the slab and the upload
+# is refused.
+PACK_BLOCK = 8 * 1024
+
+
+def pack_image(blob):
+    """The image as the device's packed offer wants it.
+
+    `[u32 uncompressed length][deflate stream]...`, one stream per 8 KiB block. Nothing
+    frames the streams: deflate marks its own final block and the device splits them on
+    that, so there is one account of where a block ends rather than two.
+
+    The length prefix is the uncompressed one -- what the signature was computed over.
+    The device stops there, so a stream that would produce more is refused rather than
+    quietly truncated.
+    """
+    out = [struct.pack("<I", len(blob))]
+    for at in range(0, len(blob), PACK_BLOCK):
+        # `wbits=-15`: raw deflate, no zlib or gzip wrapper. The window is the block,
+        # which is all a block's matches can reach anyway.
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)
+        out.append(c.compress(blob[at:at + PACK_BLOCK]) + c.flush())
+    return b"".join(out)
+
+
+def offer(sock, blob, caps):
+    """Offer an image, compressed if the device says it can take one that way.
+
+    Returns `(status, body, sent)` -- `sent` being the bytes that actually crossed the
+    wire, which is the number worth printing next to the time.
+    """
+    if caps & CAP_UPGRADE_PACKED:
+        packed = pack_image(blob)
+        # Only if it is actually smaller. An image that does not compress -- already
+        # packed, or encrypted -- would otherwise pay the deflate overhead for nothing.
+        if len(packed) < len(blob):
+            st, body = request(sock, UPGRADE_PACKED, packed)
+            return st, body, len(packed)
+    st, body = request(sock, UPGRADE_OFFER, blob)
+    return st, body, len(blob)
 
 
 def frames(opcode, payload):
@@ -713,10 +759,11 @@ def main(path, image=None):
             print("offer     skipped: this board has nowhere to stage an image")
         elif image and ok:
             blob = load_image(image)
-            st, body = request(s, UPGRADE_OFFER, blob)
+            st, body, sent = offer(s, blob, caps)
             if st == 0:
                 print(f"offer     status=Ok verified={bool(body[0])} "
-                      f"len={struct.unpack('<I', body[1:5])[0]}")
+                      f"len={struct.unpack('<I', body[1:5])[0]} "
+                      f"[{sent} B sent of {len(blob)}]")
                 # Approve at the device, over USB. No reply is expected: this key is
                 # the one that reboots the device into its installer.
                 press(s, "y", expect_reply=False)
@@ -814,11 +861,12 @@ def main(path, image=None):
 
         # Now the whole image, for real.
         t0 = time.time()
-        st, body = request(s, UPGRADE_OFFER, blob)
+        st, body, sent = offer(s, blob, caps)
         dt = time.time() - t0
         if st == 0:
             print(f"offer(unlocked)   status=Ok verified={bool(body[0])} "
-                  f"len={struct.unpack('<I', body[1:5])[0]}  [{len(blob)} B in {dt:.1f}s]")
+                  f"len={struct.unpack('<I', body[1:5])[0]}  "
+                  f"[{sent} B of {len(blob)} in {dt:.1f}s]")
         else:
             why = REJECT.get(body[0], body[0]) if body else "?"
             print(f"offer(unlocked)   status={STATUS.get(st, st)} reason={why}")
@@ -829,7 +877,7 @@ def main(path, image=None):
     if image:
         blob = load_image(image)
         t0 = time.time()
-        st, body = request(s, UPGRADE_OFFER, blob)
+        st, body, sent = offer(s, blob, caps)
         dt = time.time() - t0
         if st == 0:
             verified = body[0]
@@ -840,7 +888,7 @@ def main(path, image=None):
             older = bool(body[22]) if len(body) > 22 else False
             print(f"offer     status=Ok verified={bool(verified)} len={length} "
                   f"version={ver} key_slot={slot} older={older}"
-                  f"  [{len(blob)} B in {dt:.1f}s]")
+                  f"  [{sent} B of {len(blob)} in {dt:.1f}s]")
         else:
             why = REJECT.get(body[0], body[0]) if body else "?"
             print(f"offer     status={STATUS.get(st, st)} reason={why}")

@@ -162,6 +162,7 @@ it is the signature.
 | `0x0002` | `Identify` | protocol version, board, firmware version |
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
+| `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][deflate streams]` |
 
 ### The log, which is the only diagnostic that does not need a screen
 
@@ -266,6 +267,32 @@ short read on hidraw discards the rest of the report rather than leaving it queu
 firmware knows nothing about DfuSe and should not: this parser is reachable by anything
 that can open the port, so it stays as small as it can be, and a container format is
 work the host can do instead.
+
+#### Deflated, when the device says it can take one
+
+`UpgradePacked` is the same image through the same checks, with a smaller wire. Firmware
+deflates to about two thirds, and at 62 bytes a report that third is a third of the wait.
+
+The payload is a `u32` uncompressed length followed by a run of raw deflate streams, each
+inflating to 8 KiB but the last. Nothing frames the streams: deflate marks its own final
+block, so the device splits them on that and there is one account of where a block ends
+rather than two — a second opinion about a length is how a decoder gets talked past the
+end of its buffer.
+
+The length prefix is the one the signature was computed over, and the device stops there.
+A stream that would produce more is refused (`Unpackable`), not truncated, and so is a
+transfer that stops short: the tail of the staging area is whatever the last upload left
+in it, and that is what would otherwise be installed. The message's own `total` counts
+the compressed bytes, because that is what crosses the wire.
+
+Blocks rather than one stream because a decompressor owns its output and never gives it
+back: a single stream's decoder would have to live across frames writing through a sink
+into the staging area stored beside it, which is a self-reference, and the ways out of it
+are a global or a raw pointer. A block's output is bounded, so it inflates into a fixed
+slab the caller reads afterwards. Measured cost on a real image: 65.8% against 63.7%.
+
+Advertised as `caps::UPGRADE_PACKED`, set exactly when `caps::UPGRADE` is. A host that
+does not see the bit sends `UpgradeOffer`, which every build understands.
 
 `tools/usbclient.py` therefore accepts either. Hand it a `.dfu` and it checks the
 signature, the suffix CRC and the declared sizes, then offers the element inside; hand it

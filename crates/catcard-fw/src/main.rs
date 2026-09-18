@@ -88,6 +88,8 @@ mod statusbar;
 mod torch;
 mod trng;
 mod ui;
+/// Deflated firmware images arriving over USB.
+mod unpack;
 mod usbtask;
 mod verify;
 

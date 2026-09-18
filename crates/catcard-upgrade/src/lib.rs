@@ -87,6 +87,14 @@ pub enum Reject {
     /// cannot accept any upgrade over USB at all, and the host should stop rather than
     /// send a quarter of a megabyte to find out.
     NoStagingArea,
+    /// A compressed upload did not decode.
+    ///
+    /// Only a deflated offer can produce this, and it is deliberately not a bad
+    /// signature: the image never became bytes to judge. The inner reason separates a
+    /// stream that is not deflate from one cut off part way and from one claiming to
+    /// produce more than the length the signature covers -- which is the difference
+    /// between a broken host, a broken cable, and a host trying its luck.
+    Unpackable(packed::Error),
     /// The staging medium is already held: another path is partway through an image, and
     /// there is only one staging area. Handing out a second view of the same bytes is how
     /// an approved image gets replaced by a different one before it installs.

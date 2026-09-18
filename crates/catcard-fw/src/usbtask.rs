@@ -36,10 +36,23 @@ use crate::VERSION;
 use crate::debug_mem;
 
 /// What the task is in the middle of.
+// The unpacking variant is about a kilobyte larger than the rest: a deflate decoder
+// carries its current block's code tables, and they have to survive between USB frames.
+// Boxing is what clippy suggests and there is no allocator, so the choice is where the
+// kilobyte lives, not whether it exists. It lives here, in the task's own static, rather
+// than in a second static that would cost the same and be further from what uses it.
+#[allow(clippy::large_enum_variant)]
 enum Stage {
     Idle,
     /// An image is arriving.
     Receiving(Staged<'static, staging::Area>),
+    /// A deflated image is arriving; each block is inflated and staged as it completes.
+    /// It becomes [`Stage::Receiving`] at the end, so everything past the transfer --
+    /// inspection, the offer, the approval -- is the one path.
+    Unpacking {
+        staged: Staged<'static, staging::Area>,
+        unpack: crate::unpack::Unpack,
+    },
     /// An image arrived and passed inspection; the user has not yet been asked.
     Offered {
         staged: Staged<'static, staging::Area>,
@@ -451,9 +464,15 @@ impl UsbTask {
             }
         };
 
+        // The packed offer eats a four-byte length off the front of its first frame, so
+        // what reaches the staging area below is not always what arrived.
+        let mut payload = progress.payload;
+
         if let Some(msg) = progress.started {
             match Opcode::from_u16(msg.opcode) {
-                Some(Opcode::UpgradeOffer | Opcode::UpgradeCommit) if !self.unlocked => {
+                Some(Opcode::UpgradeOffer | Opcode::UpgradePacked | Opcode::UpgradeCommit)
+                    if !self.unlocked =>
+                {
                     // Enumerating is free; rewriting the firmware is not. Refusing here
                     // rather than at the screen means a locked device never even stages
                     // an image.
@@ -490,6 +509,55 @@ impl UsbTask {
                         }
                     }
                 }
+                Some(Opcode::UpgradePacked) => {
+                    // A deflated image. The wire carries the compressed bytes, so
+                    // `msg.total` is not the image's length: the first four bytes of the
+                    // payload are, and they are what the signature was computed over.
+                    //
+                    // They must arrive whole in this first frame. A frame holds 56 bytes
+                    // of payload after the header, and an image is thousands of frames,
+                    // so the only way to split a four-byte prefix across two of them is
+                    // to be sending something that is not an image.
+                    self.stage = Stage::Idle;
+                    let Some(want) = payload.first_chunk::<4>().map(|b| u32::from_le_bytes(*b))
+                    else {
+                        self.frames.reset();
+                        self.begin_reply(Status::BadRequest, &[]);
+                        return;
+                    };
+                    payload = &payload[4..];
+
+                    let area = match staging::area() {
+                        Ok(a) => a,
+                        Err(why) => {
+                            self.frames.reset();
+                            self.refuse(match why {
+                                staging::Unavailable::NoMedium => Reject::NoStagingArea,
+                                staging::Unavailable::Busy => Reject::StagingBusy,
+                            });
+                            return;
+                        }
+                    };
+                    // `begin` checks the declared length against the staging area and the
+                    // bootloader's floor before a single compressed byte is decoded, so
+                    // an absurd length costs nothing.
+                    match Staged::begin(area, &BOARD, want) {
+                        Ok(staged) => {
+                            self.stage = Stage::Unpacking {
+                                staged,
+                                // SAFETY: the staging area was claimed just above and is
+                                // held by `staged`, which lives in this stage alongside
+                                // the unpacker -- so this is the only user of the slab.
+                                unpack: unsafe { crate::unpack::Unpack::begin(want) },
+                            };
+                        }
+                        Err(r) => {
+                            self.frames.reset();
+                            self.refuse(r);
+                            return;
+                        }
+                    }
+                }
                 Some(_) => {}
                 None => {
                     self.frames.reset();
@@ -499,17 +567,21 @@ impl UsbTask {
             }
         }
 
-        // Image bytes go straight to staging as they arrive; nothing is buffered.
-        if let Stage::Receiving(staged) = &mut self.stage {
+        // Image bytes go straight to staging as they arrive; nothing is buffered. The
+        // deflated path buffers one block, which is the whole of what it buffers.
+        if let Stage::Unpacking { staged, unpack } = &mut self.stage {
+            if let Err(r) = unpack.feed(staged, payload) {
+                crate::catlog!("upgrade: unpack failed at {}", staged.received());
+                self.frames.reset();
+                self.refuse(r);
+                return;
+            }
+        } else if let Stage::Receiving(staged) = &mut self.stage {
             let at = staged.received();
-            if let Err(r) = staged.write(at, progress.payload) {
+            if let Err(r) = staged.write(at, payload) {
                 // `at` is the stage's own count and the payload is what just arrived, so a
                 // storage fault here means the region itself was not what `begin` checked.
-                crate::catlog!(
-                    "upgrade: write failed at {} len {}",
-                    at,
-                    progress.payload.len()
-                );
+                crate::catlog!("upgrade: write failed at {} len {}", at, payload.len());
                 self.frames.reset();
                 self.refuse(r);
                 return;
@@ -657,12 +729,29 @@ impl UsbTask {
                 // the screen; until then this is simply not the time.
                 self.begin_reply(Status::NotNow, &[]);
             }
-            Some(Opcode::UpgradeOffer) | None => self.finish_offer(),
+            Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) | None => self.finish_offer(),
         }
     }
 
     /// The image is fully staged: inspect it and tell the host what we found.
     fn finish_offer(&mut self) {
+        // A deflated image becomes an ordinary staged one here: the last block has been
+        // inflated and written, so from this line on there is nothing left that knows
+        // the transfer was compressed. `finish` is what refuses a transfer that stopped
+        // short -- the staging area's tail would otherwise be whatever the last upload
+        // left in it, and that is what would be installed.
+        if let Stage::Unpacking { staged, unpack } =
+            core::mem::replace(&mut self.stage, Stage::Idle)
+        {
+            match unpack.finish() {
+                Ok(()) => self.stage = Stage::Receiving(staged),
+                Err(r) => {
+                    self.refuse(r);
+                    return;
+                }
+            }
+        }
+
         let Stage::Receiving(mut staged) = core::mem::replace(&mut self.stage, Stage::Idle) else {
             return;
         };
@@ -783,7 +872,9 @@ impl UsbTask {
         } else {
             0
         } | if staging::has_staging() {
-            catcard_usb::caps::UPGRADE
+            // The compressed offer reaches the same staging area through the same
+            // checks, so it is available exactly when staging is.
+            catcard_usb::caps::UPGRADE | catcard_usb::caps::UPGRADE_PACKED
         } else {
             0
         } | if cfg!(feature = "usb-debug-mem") {
@@ -878,6 +969,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::StorageFault { .. } => 11,
         Reject::NoStagingArea => 12,
         Reject::StagingBusy => 13,
+        Reject::Unpackable(_) => 15,
     };
     1
 }
