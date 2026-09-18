@@ -185,6 +185,9 @@ pub struct Staged<'a, A: StagingArea> {
     board: &'a BoardSpec,
     length: u32,
     received: u32,
+    /// How many times a read-back had to be repeated before it agreed with what had just
+    /// been written. See [`Self::stale_reads`].
+    stale_reads: u32,
 }
 
 impl<'a, A: StagingArea> Staged<'a, A> {
@@ -209,6 +212,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             board,
             length,
             received: 0,
+            stale_reads: 0,
         })
     }
 
@@ -267,26 +271,58 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // over a bus of its own, and an image that stages one byte wrong fails its
         // signature check with nothing to say why -- which is a long afternoon. Checking
         // here means a bad medium reports itself, at the offset where it went wrong.
-        let mut back = [0u8; 64];
-        for (i, part) in data.chunks(back.len()).enumerate() {
-            let at = offset + (i * back.len()) as u32;
-            let seen = &mut back[..part.len()];
-            self.area
-                .read(at, seen)
-                .map_err(|_| Reject::StorageFault { offset: at })?;
-            if seen != part {
-                let byte = part
-                    .iter()
-                    .zip(seen.iter())
-                    .position(|(a, b)| a != b)
-                    .unwrap_or(0);
-                return Err(Reject::StorageFault {
-                    offset: at + byte as u32,
-                });
-            }
+        //
+        // A read straight after a write does not always see it: on a memory-mapped PSRAM
+        // the first read back can return what was there before. That is a stale read, not
+        // a corrupt one, and it is told from corruption by reading again -- the bytes are
+        // still in `data`, so a second look costs nothing and settles it. Only a
+        // disagreement that survives the second read is a fault.
+        // Sixty-four bytes at a time: the read-back buffer is on the stack, and a chunk
+        // that size costs nothing while keeping the reported offset close to the fault.
+        const AT_A_TIME: usize = 64;
+        for (i, part) in data.chunks(AT_A_TIME).enumerate() {
+            let at = offset + (i * AT_A_TIME) as u32;
+            self.read_back(at, part)?;
         }
         self.received = end;
         Ok(())
+    }
+
+    /// Compare `want` against what the area holds at `at`, tolerating one stale read.
+    fn read_back(&mut self, at: u32, want: &[u8]) -> Result<(), Reject> {
+        let mut seen = [0u8; 64];
+        let seen = &mut seen[..want.len()];
+        for attempt in 0..2 {
+            // Order the read after the stores rather than trusting it to be issued after
+            // them; a bus with a write buffer of its own may not.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            self.area
+                .read(at, seen)
+                .map_err(|_| Reject::StorageFault { offset: at })?;
+            if seen == want {
+                if attempt > 0 {
+                    self.stale_reads += 1;
+                }
+                return Ok(());
+            }
+        }
+        let byte = want
+            .iter()
+            .zip(seen.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        Err(Reject::StorageFault {
+            offset: at + byte as u32,
+        })
+    }
+
+    /// Read-backs that disagreed at first and agreed when read again.
+    ///
+    /// Zero on a medium that answers a read immediately after a write. Anything else says
+    /// the staging area needs the second look, which is worth knowing: it is the
+    /// difference between "this medium is slow to settle" and "this medium loses data".
+    pub fn stale_reads(&self) -> u32 {
+        self.stale_reads
     }
 
     /// Read the image back and decide whether it may be installed.

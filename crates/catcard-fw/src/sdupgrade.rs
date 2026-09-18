@@ -213,6 +213,13 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
         at += n as u32;
     }
 
+    // A staging area that needed a second look at what it had just written is worth a
+    // line: it is the difference between a medium that settles slowly and one that loses
+    // data, and only the log can tell the next person which this board does.
+    if staged.stale_reads() > 0 {
+        crate::catlog!("sd: staging read back late {} time(s)", staged.stale_reads());
+    }
+
     let staged_len = len;
     let running = crate::own_header();
     match staged.inspect(running.as_ref()) {

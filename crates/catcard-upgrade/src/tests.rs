@@ -14,6 +14,9 @@ struct Mem {
     header: Option<(u32, u32)>,
     /// Flip one bit on the way back out, to model memory that does not read back.
     corrupt_read_at: Option<u32>,
+    /// Flip one bit on the way back out **once**, to model a read that overtakes the
+    /// write it follows: wrong the first time, right when read again.
+    stale_read_at: Option<u32>,
 }
 
 impl Mem {
@@ -22,6 +25,7 @@ impl Mem {
             bytes: vec![0xFF; capacity],
             header: None,
             corrupt_read_at: None,
+            stale_read_at: None,
         }
     }
 }
@@ -61,6 +65,13 @@ impl StagingArea for Mem {
             let bad = bad as usize;
             if (at..end).contains(&bad) {
                 out[bad - at] ^= 0x01;
+            }
+        }
+        if let Some(bad) = self.stale_read_at {
+            let at_bad = bad as usize;
+            if (at..end).contains(&at_bad) {
+                out[at_bad - at] ^= 0x01;
+                self.stale_read_at = None;
             }
         }
         Ok(())
@@ -504,4 +515,41 @@ fn a_released_stock_signature_verifies_under_the_key_its_header_names() {
         Ok(true),
         "our verifier refuses a signature the format's own rules accept"
     );
+}
+
+/// A read that overtakes its write is not a broken staging area.
+///
+/// On a memory-mapped PSRAM the first read back of a freshly written byte can return
+/// what was there before. Failing the upgrade for that would refuse a perfectly good
+/// image; the second read settles it, and the count says it happened.
+#[test]
+fn a_read_that_overtakes_its_write_is_read_again_rather_than_refused() {
+    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
+    mem.stale_read_at = Some(700);
+    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
+    let block = vec![0xA5u8; 1024];
+    assert_eq!(staged.write(0, &block), Ok(()));
+    assert_eq!(staged.received(), 1024);
+    assert_eq!(
+        staged.stale_reads(),
+        1,
+        "the second read agreed, and that is worth counting"
+    );
+}
+
+/// A disagreement that survives the second read is a fault, at the byte that differs.
+#[test]
+fn a_staging_area_that_does_not_read_back_fails_at_the_offset_that_differs() {
+    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
+    mem.corrupt_read_at = Some(700);
+    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
+    let block = vec![0xA5u8; 1024];
+    assert_eq!(
+        staged.write(0, &block),
+        Err(Reject::StorageFault { offset: 700 }),
+        "a medium that loses a byte has to say which one"
+    );
+    // Nothing is counted as received when the write did not stick.
+    assert_eq!(staged.received(), 0);
+    assert_eq!(staged.stale_reads(), 0);
 }
