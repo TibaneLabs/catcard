@@ -20,6 +20,11 @@
 
 use emjson::{Parser, Token};
 
+/// JSON that is already encoded, for a caller storing a value it has rendered itself --
+/// a wallet list, say. Re-exported so the firmware need not depend on `emjson` directly:
+/// the settings are this crate's business.
+pub use emjson::writer::RawJson;
+
 /// Keys one settings object can hold.
 ///
 /// Stock's own list is about forty; this leaves room for it to grow and for keys we have

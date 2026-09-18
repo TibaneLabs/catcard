@@ -182,7 +182,7 @@ fn lone_psbt() -> Option<heapless::String<{ PATH_MAX }>> {
 const PATH_MAX: usize = 160;
 
 /// Read the picked file into `buf`. Returns its length, or why not.
-fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
     with_card(|vol| {
         let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
         let len = file.len() as usize;
@@ -265,7 +265,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
 
     menu::message(ui.panel, HEAD, "reading the card", "");
-    let len = match read_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+    let len = match read_card_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
         Ok(len) => len,
         Err(why) => {
             crate::catlog!("sign: {}: {}", path.as_str(), why);

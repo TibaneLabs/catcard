@@ -41,6 +41,9 @@ mod interrupts;
 mod ktest;
 mod menu;
 mod msc_drive;
+/// Registering a multisig wallet from a descriptor on the card.
+#[cfg(not(feature = "board-mk3"))]
+mod msimport;
 mod nor;
 /// Secure Notes & Passwords, read out of the settings blob.
 ///

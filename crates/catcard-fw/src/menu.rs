@@ -118,6 +118,9 @@ enum Screen {
     /// Debug: exercise the settings store on internal flash.
     #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
+    /// Registering a multisig wallet from a descriptor on the card.
+    #[cfg(not(feature = "board-mk3"))]
+    MultisigImport,
     /// Typing the nickname shown before the PIN prompt.
     #[cfg(not(feature = "board-mk3"))]
     Nickname,
@@ -251,6 +254,8 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Format SD card",
     "Games",
+    #[cfg(not(feature = "board-mk3"))]
+    "Multisig",
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
@@ -264,6 +269,8 @@ const UTILS_ITEMS: &[&str] = &[
     "Export wallet",
     "Browse SD card",
     "Format SD card",
+    #[cfg(not(feature = "board-mk3"))]
+    "Multisig",
 ];
 
 /// What BIP-85 can derive. The order matches [`crate::derive::Kind`]'s.
@@ -760,6 +767,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(not(feature = "board-mk3"))]
+        Screen::MultisigImport => to(
+            |a| crate::msimport::import(a.gate, a.login, a.ui),
+            Screen::Utils,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NickPreview => to(
@@ -953,6 +965,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Multisig")) => Screen::MultisigImport,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -1192,6 +1206,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::PsramSoak
         | Screen::Nickname
         | Screen::SettingsToSd
+        | Screen::MultisigImport
         | Screen::NickPreview => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}
