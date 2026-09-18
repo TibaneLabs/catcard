@@ -270,6 +270,7 @@ pub fn show_nickname(
     let _ = doc.push(Line::body("any key to continue").small());
     let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
     display::draw(panel, |c| render(c, &view));
+    crate::catlog!("nick: drawn, {} lines", view.content_height());
 
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -286,13 +287,16 @@ pub fn show_nickname(
 
     // Three seconds, in ten-millisecond looks at the keypad. Long enough to read a nickname
     // someone chose to be long, short enough not to be in the way.
+    let mut waited = 0u32;
     for _ in 0..300 {
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             break;
         }
+        waited += 1;
         catcard_hal::dwt::delay_cycles(10 * per_ms);
     }
+    crate::catlog!("nick: shown for {} ms", waited * 10);
 }
 
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {

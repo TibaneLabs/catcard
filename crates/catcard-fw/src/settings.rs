@@ -206,6 +206,27 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
     Some(text)
 }
 
+/// Debug: draw the before-login nickname screen, and hold it.
+///
+/// The boot-path screen is up for three seconds between the bootloader's warning and the
+/// PIN prompt, which is long enough to read and short enough to argue about. This draws the
+/// same thing from the menu and waits, so what it looks like is a question that can be
+/// answered rather than caught.
+pub(crate) fn show_nickname_screen(ui: &mut crate::ui::Ui<'_>) {
+    // SAFETY: foreground only, as the boot path's call is.
+    let nick = unsafe { load_nickname() };
+    match nick {
+        Some(text) => {
+            crate::pinentry::show_nickname(ui.panel, ui.matrix, ui.drbg, text);
+            crate::menu::wait_for_any_key(ui);
+        }
+        None => {
+            crate::menu::message(ui.panel, "Nickname", "none set", "or it would not read");
+            crate::menu::wait_for_any_key(ui);
+        }
+    }
+}
+
 /// Copy the whole settings region to a card, byte for byte.
 ///
 /// A settings volume holds things whose only copy is on this device -- notes, passwords,

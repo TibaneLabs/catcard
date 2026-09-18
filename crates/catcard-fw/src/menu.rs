@@ -124,6 +124,9 @@ enum Screen {
     /// Copying the settings region to a card, before anything writes to it.
     #[cfg(not(feature = "board-mk3"))]
     SettingsToSd,
+    /// The before-login nickname screen, drawn from the menu so it can be looked at.
+    #[cfg(not(feature = "board-mk3"))]
+    NicknameScreen,
     /// The PSRAM write-recovery sweep: how many NOPs a store here needs.
     #[cfg(not(feature = "board-mk3"))]
     PsramSoak,
@@ -306,6 +309,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "PSRAM soak",
     #[cfg(not(feature = "board-mk3"))]
     "Settings to SD",
+    #[cfg(not(feature = "board-mk3"))]
+    "Nickname screen",
     #[cfg(feature = "board-q1")]
     "Secure notes",
 ];
@@ -708,6 +713,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NicknameScreen => to(
+            |a| crate::settings::show_nickname_screen(a.ui),
+            Screen::Debug,
+        ),
         #[cfg(feature = "board-q1")]
         Screen::Notes => to(|a| crate::notes::view(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(feature = "games")]
@@ -929,6 +939,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
             #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Nickname screen")) => Screen::NicknameScreen,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("PSRAM soak")) => Screen::PsramSoak,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
@@ -1128,7 +1140,11 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it takes the CPU and never returns.
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SettingsStore | Screen::PsramSoak | Screen::Nickname | Screen::SettingsToSd => {}
+        Screen::SettingsStore
+        | Screen::PsramSoak
+        | Screen::Nickname
+        | Screen::SettingsToSd
+        | Screen::NicknameScreen => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}
         Screen::Kernel => kernel_screen(panel),
