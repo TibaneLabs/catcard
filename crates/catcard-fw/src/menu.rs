@@ -151,8 +151,6 @@ enum Screen {
     /// Flappy Cat, on the Q1's self-scrolling panel.
     #[cfg(all(feature = "games", feature = "board-q1"))]
     FlappyCat,
-    /// How to get a wallet onto a blank device: new, or import.
-    GetWallet,
     /// Choosing how long a new seed should be.
     NewSeedMenu,
     /// Generating one, of this many words.
@@ -193,20 +191,21 @@ const MAIN_ITEMS: &[&str] = &[
     "Settings",
     "Logout",
 ];
-/// The blank device's version. Only the first cell differs: with no wallet there is
-/// nothing to sign, and getting one on is the only thing worth doing here.
+/// The blank device's version: the two ways to get a wallet, in the two cells whose
+/// jobs do not exist yet.
+///
+/// Nothing to sign without a seed, and no addresses to explore either -- an Address
+/// Explorer on a blank device is a screen that can only apologise. So those two cells
+/// carry New and Import instead, which is the whole of what a blank device is for.
 const MAIN_ITEMS_BLANK: &[&str] = &[
     "New",
-    "Addresses",
+    "Import",
     #[cfg(feature = "board-q1")]
     "Notes",
     "Utils",
     "Settings",
     "Logout",
 ];
-
-/// How to get a wallet onto a blank device, behind the first cell.
-const GET_WALLET_ITEMS: &[&str] = &["New wallet", "Import seed"];
 
 /// The main menu, ordered for the device in front of you.
 fn main_items(no_seed: bool) -> &'static [&'static str] {
@@ -937,8 +936,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
             // A wallet is present: the first cell signs a transaction from the SD card.
             (Key::Confirm, Some("Sign")) => Screen::SignPsbt,
-            // The same cell on a blank device, where there is nothing to sign yet.
-            (Key::Confirm, Some("New")) => Screen::GetWallet,
+            // The first two cells on a blank device, where there is nothing to sign and
+            // nothing to explore.
+            (Key::Confirm, Some("New")) => Screen::NewSeedMenu,
+            (Key::Confirm, Some("Import")) => Screen::ImportSeed,
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
@@ -947,12 +948,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             // Handled in `run`, where the login struct is in scope to be zeroized first.
             (Key::Confirm, Some("Logout")) => Screen::SecureLogout,
             _ => Screen::Main,
-        },
-        Screen::GetWallet => match (key, GET_WALLET_ITEMS.get(cursor).copied()) {
-            (Key::Confirm, Some("New wallet")) => Screen::NewSeedMenu,
-            (Key::Confirm, Some("Import seed")) => Screen::ImportSeed,
-            (Key::Cancel, _) => Screen::Main,
-            _ => Screen::GetWallet,
         },
         // By name again, for the same reason as Main: the list is short today and the
         // count is what the next screen acts on, so an index table would be one
@@ -1242,6 +1237,7 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
         let icon = match *label {
             "Sign" => Some(&art::SIGN),
             "New" => Some(&art::NEW_PASSPHRASE),
+            "Import" => Some(&art::IMPORT_PASSPHRASE),
             "Addresses" => Some(&art::ADDRESS_LIST),
             "Notes" => Some(&art::NOTES),
             "Utils" => Some(&art::UTILS),
@@ -1266,7 +1262,6 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
-        Screen::GetWallet => Some(GET_WALLET_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DeriveMenu => Some(DERIVE_ITEMS),
@@ -1284,7 +1279,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Main
         | Screen::Utils
         | Screen::NewSeedMenu
-        | Screen::GetWallet
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
