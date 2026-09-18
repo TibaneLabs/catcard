@@ -206,6 +206,25 @@ pub struct UsbPins {
     pub dp: Pin,
 }
 
+/// The Q1's QR scanner: a decoded-barcode engine on its own serial port.
+///
+/// Not a camera. The module images and decodes by itself and hands back plain text over
+/// USART2, so the firmware's side of it is a UART and two GPIOs.
+///
+/// Source: hw-reference/gpio.md §Q1, hw-reference/input.md §"QR scanner (Q1)" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct QrScanner {
+    /// `QR_TX`: this board's transmit, the module's receive.
+    pub tx: Pin,
+    /// `QR_RX`.
+    pub rx: Pin,
+    /// `QR_RESET`, **open-drain and active-low**: a 10 ms pulse, then the module needs
+    /// two seconds before it will answer.
+    pub reset: Pin,
+    /// `QR_TRIG`, open-drain. Stock leaves it alone and drives scanning over the UART.
+    pub trigger: Pin,
+}
+
 /// How a board reports whether it is on battery or external power.
 ///
 /// There is no VBUS-present GPIO: USB power just feeds the regulator. `NOT_BATTERY` is
@@ -266,6 +285,9 @@ pub struct BoardSpec {
     /// they have no button and nothing to switch off. Source: power.md §"Battery & power
     /// pins" [C]
     pub pwr_btn: MaybePin,
+
+    /// The QR scanner, on the one board that has one.
+    pub qr: Option<QrScanner>,
 
     /// Whether this board runs on a battery, and how to tell.
     ///
@@ -455,6 +477,7 @@ pub const MK3: BoardSpec = BoardSpec {
     // mk3 has no USB activity line. Source: usb.md §"USB activity LED" [C]
     usb_active: None,
     pwr_btn: None,
+    qr: None,
     battery: None,
     // **Not** armed at boot. With interrupts enabled at boot this path came up on an mk3
     // with a keypad that answered a few presses and then mostly stopped, and USB that did
@@ -557,6 +580,7 @@ pub const MK4: BoardSpec = BoardSpec {
     // `USB_ACTIVE=PC6`, mk4 rev B and later. Source: usb.md §"USB activity LED" [C]
     usb_active: Some(pc(6)),
     pwr_btn: None,
+    qr: None,
     battery: None,
     // Armed at boot: watched working on this board (and on the mk5, which inherits this).
     // Proven by use, as on the Q1: stack buffers at the top of SRAM1 are accepted.
@@ -701,6 +725,13 @@ pub const Q1: BoardSpec = BoardSpec {
     usb_active: MK4.usb_active,
     // `PWR_BTN`: the only board that truly powers off. Source: power.md [C]
     pwr_btn: Some(pb(12)),
+    // The only board with a scanner. Source: hw-reference/gpio.md §Q1 [C]
+    qr: Some(QrScanner {
+        tx: pa(2),
+        rx: pa(3),
+        reset: pe(0),
+        trigger: pe(1),
+    }),
     // The only board with a battery. `NOT_BATTERY` is active-low (high = external/USB),
     // and `REV_D` picks which pin carries it.
     // Source: power.md §"Battery & power pins" [C]

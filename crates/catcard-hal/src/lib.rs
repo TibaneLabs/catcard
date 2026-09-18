@@ -34,6 +34,7 @@ pub mod softi2c;
 pub mod spi;
 pub mod strap;
 pub mod uid;
+pub mod usart;
 
 /// Everything that can go wrong during early bring-up.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

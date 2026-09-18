@@ -3857,6 +3857,22 @@ pub(crate) fn scroll_choice(
     }
 }
 
+/// Whether cancel is being pressed, without waiting for it.
+///
+/// For a screen that is busy with something of its own and still has to be escapable --
+/// a scan that runs until it sees a code. Everything else here waits for a key; this
+/// asks and carries on, so the loop it sits in stays the screen's.
+///
+/// Only the QR scan needs this today, and only the Q1 has a scanner.
+#[cfg(feature = "board-q1")]
+pub(crate) fn cancel_pressed(ui: &mut Ui<'_>) -> bool {
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let _ = usbtask::pump();
+    crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+    keys.iter().any(|k| matches!(k, Key::Cancel))
+}
+
 pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
     wait_for_release(ui);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
