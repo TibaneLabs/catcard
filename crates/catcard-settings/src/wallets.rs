@@ -12,13 +12,16 @@
 //! of anyone whose device has been stock. So these live under [`KEY`] and stock's are left
 //! exactly as they were. A device can hold both and neither firmware loses anything.
 //!
-//! # Identity is the checksum
+//! # Identity is the descriptor
 //!
-//! Two descriptors describing the same wallet have the same checksum, and one character of
-//! difference gives a different one. So the checksum is the identity: re-importing a
-//! wallet replaces it rather than making a second, and a near-duplicate -- the same
-//! cosigners in another order, or `multi` where `sortedmulti` was meant -- is a different
-//! entry, visibly, instead of silently shadowing the first.
+//! Re-importing a wallet replaces it rather than making a second, and a near-duplicate --
+//! the same cosigners in another order, or `multi` where `sortedmulti` was meant -- is a
+//! different entry, visibly, instead of silently shadowing the first.
+//!
+//! What decides that is the descriptor text, not its checksum. The BIP-380 checksum is a
+//! BCH code over a linear function, so a descriptor carrying any chosen checksum can be
+//! constructed; keying on it would let an imported wallet replace an unrelated registered
+//! one.
 
 use crate::json::Doc;
 
@@ -108,9 +111,9 @@ pub fn with_added<'a>(
     wallet: Wallet<'a>,
     out: &mut [Wallet<'a>],
 ) -> Result<usize, Error> {
-    let Some(sum) = wallet.checksum() else {
+    if wallet.checksum().is_none() {
         return Err(Error::NoChecksum);
-    };
+    }
     if !storable(wallet.descriptor) || !storable(wallet.name) {
         return Err(Error::NotStorable);
     }
@@ -120,7 +123,7 @@ pub fn with_added<'a>(
         if n == out.len() {
             return Err(Error::TooMany);
         }
-        if w.checksum() == Some(sum) {
+        if w.descriptor == wallet.descriptor {
             out[n] = wallet;
             replaced = true;
         } else {
@@ -194,6 +197,51 @@ fn storable(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two descriptors, disjoint cosigner keys, the same BIP-380 checksum. The checksum is
+    /// a BCH code over a linear function, so one carrying any chosen value can be solved
+    /// for. Keying replacement on it would let the second delete the first.
+    #[test]
+    fn a_colliding_checksum_does_not_replace_another_wallet() {
+        let genuine = Wallet {
+            name: "genuine",
+            descriptor: "wsh(sortedmulti(2,[aabbccdd/48h/0h/0h/2h]xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*,[11223344/48h/0h/0h/2h]xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj/0/*))#rk2ttxtk",
+        };
+        let collider = Wallet {
+            name: "collider",
+            descriptor: "wsh(sortedmulti(2,[aabbccdd/48h/0h/0h/2h]xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/0/(69h324c]:2%*,[11223344/48h/0h/0h/2h]xpub68NZiKmJWnxxS6aaHmn81bvJeTESw724CRDs6HbuccFQN9Ku14VQrADWgqbhhTHBaohPX4CjNLf9fq9MYo6oDaPPLPxSb7gwQN3ih19Zm4Y/0/*))#rk2ttxtk",
+        };
+        assert_eq!(genuine.checksum(), collider.checksum());
+
+        let mut out = [Wallet {
+            name: "",
+            descriptor: "",
+        }; MAX_WALLETS];
+        let n = with_added(&[genuine], collider, &mut out).unwrap();
+        assert_eq!(n, 2, "the collider must not take the genuine wallet's slot");
+        assert!(out[..n].contains(&genuine));
+        assert!(out[..n].contains(&collider));
+    }
+
+    /// Re-importing the very same descriptor still replaces rather than duplicating.
+    #[test]
+    fn the_same_descriptor_replaces_itself() {
+        let first = Wallet {
+            name: "old",
+            descriptor: "raw(deadbeef)#89f8spxm",
+        };
+        let again = Wallet {
+            name: "new",
+            descriptor: "raw(deadbeef)#89f8spxm",
+        };
+        let mut out = [Wallet {
+            name: "",
+            descriptor: "",
+        }; MAX_WALLETS];
+        let n = with_added(&[first], again, &mut out).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(out[0].name, "new");
+    }
 
     const A: &str = "wsh(sortedmulti(2,[aabbccdd/48h/0h/0h/2h]xpubA/0/*,[11223344/48h/0h/0h/2h]xpubB/0/*))#abcdefgh";
     const B: &str = "sh(wsh(sortedmulti(2,[aabbccdd/48h/0h/0h/1h]xpubC/0/*,[11223344/48h/0h/0h/1h]xpubD/0/*)))#hgfedcba";
