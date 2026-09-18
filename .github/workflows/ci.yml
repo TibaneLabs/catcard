@@ -60,9 +60,14 @@ jobs:
             mk4-mk5) board=mk5; pkg=mk5;  compat="--hw-compat mk4,mk5" ;;
             q1)      board=q1;  pkg=q1;   compat="" ;;
           esac
-          # The bench crutches are deliberate here: every artefact this produces is a
-          # dev-key build for a bench device. A release strips them (`SHIP=1`).
-          feats="board-$board,usb-key-injection,usb-debug-mem"
+          # No bench crutches in anything published. `usb-debug-mem` is peek / poke /
+          # jsr on any address -- it would read the seed and the PIN out of RAM and run
+          # arbitrary code -- and `usb-key-injection` lets a host press the keys, which
+          # removes the physical-presence confirmation the rest of the design rests on,
+          # including approving a firmware upgrade. These artefacts are downloadable by
+          # anyone, so they are built the way a release is: neither feature compiled in.
+          # A bench build comes from `make` locally, where those are the default.
+          feats="board-$board"
           name="catcard-${{ matrix.board }}-${{ matrix.chains }}"
           if [ "${{ matrix.chains }}" = multichain ]; then
             feats="$feats,multichain"
@@ -92,6 +97,30 @@ jobs:
             --target thumbv7em-none-eabihf \
             --no-default-features --features ${{ steps.shape.outputs.features }}
 
+      # The debug monitor and key injection answer USB opcodes; a build carrying them
+      # logs that it does, on every boot, in words. Finding either string in an image
+      # meant for other people to download is the failure this guards, and checking the
+      # bytes beats trusting the feature list to have stayed right.
+      - name: No debug monitor, no key injection
+        run: |
+          set -euo pipefail
+          elf=target/thumbv7em-none-eabihf/release/catcard-fw
+          # Markers that track the features rather than the vocabulary: `debug_mem` is
+          # the module, gated on `usb-debug-mem`; `injected`/`inject_key` are the key
+          # path; and the boot warning is printed only by a build that has the monitor.
+          # Deliberately *not* "peek" or "poke", which also match `Peekable` from the
+          # filesystem iterators and `DebugPeek`, an opcode name that exists in every
+          # build because only its handler is compiled out.
+          #
+          # A dev build trips this (25 matches when last checked); a published one must
+          # have none.
+          if strings -a "$elf" \
+               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled"; then
+            echo "::error::bench features leaked into a published image"
+            exit 1
+          fi
+          echo "no debug monitor and no key injection in this image"
+
       # The build only proves it links. This proves the image the bootloader would
       # actually see is well-formed: header at 0x3F80, 512-aligned, signature over the
       # double-SHA256 digest, hw_compat permitting this board.
@@ -111,8 +140,9 @@ jobs:
           cargo run --release -p catcard-image -- info \
             out/${{ steps.shape.outputs.name }}.dfu
 
-      # Signed with the published developer key: these boot with a red genuine light and
-      # a 25-second warning, and are for bench devices. They are not releases.
+      # Signed with the published developer key, so these boot with a red genuine light
+      # and a 25-second warning: they are not releases. They do carry no debug monitor
+      # and no key injection, which is checked above rather than assumed.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.shape.outputs.name }}
