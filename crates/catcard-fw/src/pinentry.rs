@@ -262,11 +262,15 @@ pub fn show_nickname(
     nick: &str,
 ) {
     use catcard_ui::keypad::{Event, KEYS, Key};
-    display::draw(panel, |c| {
-        c.clear();
-        title(c, 14, nick);
-        small(c, 40, "any key to continue");
-    });
+    // Wrapped, not a title: a nickname is whatever its owner typed, and one of them turned
+    // out to be a paragraph. A title would draw it off both edges of the screen.
+    use catcard_ui::scroll::{Line, ScrollView, render};
+    let mut doc: heapless::Vec<Line, 4> = heapless::Vec::new();
+    let _ = doc.push(Line::body(nick).wrapped());
+    let _ = doc.push(Line::body("any key to continue").small());
+    let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    display::draw(panel, |c| render(c, &view));
+
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

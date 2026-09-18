@@ -123,9 +123,13 @@ impl Slots for Files {
     }
 }
 
-/// Longest nickname kept. Stock lets one be typed on the Q's keyboard; this is enough for
-/// anything that fits the screen, and a longer one is shown cut rather than refused.
-pub const NICK_MAX: usize = 32;
+/// Longest nickname kept.
+///
+/// Stock's own limit is not written down anywhere we can read, and a device turned up with
+/// one far longer than the thirty-two bytes this used to allow -- which the reader then
+/// refused, so the nickname silently did not appear. Long enough is better than tidy: the
+/// screen wraps what it is given, and anything past this is shown cut rather than dropped.
+pub const NICK_MAX: usize = 192;
 
 /// The owner's nickname, read from the pre-login blob at boot.
 static mut NICK: [u8; NICK_MAX] = [0; NICK_MAX];
@@ -264,12 +268,12 @@ pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
     };
     let text = entry.as_str();
     if text.len() > NICK_MAX {
-        crate::menu::message(
-            ui.panel,
-            "Nickname",
-            "too long to show",
-            "32 characters at most",
+        let mut why = heapless::String::<48>::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut why,
+            format_args!("{NICK_MAX} characters at most"),
         );
+        crate::menu::message(ui.panel, "Nickname", "too long", why.as_str());
         crate::menu::wait_for_any_key(ui);
         return;
     }
@@ -371,8 +375,18 @@ pub(crate) fn inspect(
             let doc = Doc::parse(&buf[..n]).ok();
             let age = doc.as_ref().and_then(|d| d.get_u64("_age")).unwrap_or(0);
             let nick = doc.as_ref().and_then(|d| d.get_str("nick")).unwrap_or("-");
-            let _ = write!(pre, "pre-login: age {age}, {} keys, nick {nick}",
-                doc.as_ref().map(|d| d.len()).unwrap_or(0));
+            let _ = write!(
+                pre,
+                "pre-login: age {age}, {} keys",
+                doc.as_ref().map(|d| d.len()).unwrap_or(0)
+            );
+            let _ = notes.push(pre.clone());
+            // The nickname goes on its own line and is never squeezed into the summary: a
+            // `heapless::String` that overflows drops the whole argument rather than
+            // truncating it, so a long nickname rendered as nothing and read as "not set".
+            pre.clear();
+            let room = pre.capacity() - 6;
+            let _ = write!(pre, "nick: {}", nick.get(..room).unwrap_or(nick));
         }
         Err(e) => {
             let _ = write!(pre, "pre-login: {e:?}");
