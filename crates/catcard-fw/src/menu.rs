@@ -3316,31 +3316,47 @@ pub(crate) fn unlock_master(
     ui: &mut Ui<'_>,
     head: &str,
 ) -> Option<catcard_wallet::bip32::ExtendedPrivKey> {
+    match master_quietly(gate, login, ui.panel, head) {
+        Ok(master) => Some(master),
+        Err(why) => {
+            message(ui.panel, head, why, "any key to go back");
+            wait_for_any_key(ui);
+            None
+        }
+    }
+}
+
+/// The stored BIP-39 wallet's master key, with a progress screen but no dialogs.
+///
+/// The same work as [`unlock_master`] without the part that needs a person: it reports
+/// why it could not rather than saying so and waiting for a key. For callers that are not
+/// a screen -- warming the status bar's fingerprint after login, where a message box
+/// would be an interruption nobody asked for, and a key wait would stall the device
+/// behind a question about something the owner never requested.
+pub(crate) fn master_quietly(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
     use catcard_callgate::pin::bip39_entropy;
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
-    let fail = |ui: &mut Ui<'_>, why: &str| message(ui.panel, head, why, "any key to go back");
-
     // Say so before asking for the secret, not after. The fetch is one callgate call: the
     // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
     // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so the firmware
     // cannot repaint across it. The panel can, where its controller scrolls on its own.
-    blocking_screen(ui.panel, head, "reading seed");
+    blocking_screen(panel, head, "reading seed");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = match login.fetch_secret(&pin_gate) {
-        Ok(s) => s,
-        Err(_) => {
-            fail(ui, "could not read seed");
-            wait_for_any_key(ui);
-            return None;
-        }
-    };
+    let mut secret = login
+        .fetch_secret(&pin_gate)
+        .map_err(|_| "could not read seed")?;
 
     // Copy the entropy out into an owned buffer so the secret can be wiped immediately;
     // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
-    // something this screen can enumerate.
+    // something this can enumerate.
     let mut ent = [0u8; 32];
     let ent_len = match bip39_entropy(&secret) {
         Some(e) if e.len() <= ent.len() => {
@@ -3353,19 +3369,14 @@ pub(crate) fn unlock_master(
             let kind = classify_secret(&secret);
             secret.zeroize();
             crate::catlog!("wallet: secret is {:?}, not BIP-39", kind);
-            fail(
-                ui,
-                match kind {
-                    SecretKind::Empty => "no wallet stored",
-                    SecretKind::Xprv => "xprv wallet: not yet",
-                    // 16 to 64 is a raw BIP-32 master secret of that length.
-                    // Source: hw-reference/secret-stash-format.md §Layout [C]
-                    SecretKind::Unknown { marker: 16..=64 } => "raw seed wallet: not yet",
-                    _ => "unknown wallet type",
-                },
-            );
-            wait_for_any_key(ui);
-            return None;
+            return Err(match kind {
+                SecretKind::Empty => "no wallet stored",
+                SecretKind::Xprv => "xprv wallet: not yet",
+                // 16 to 64 is a raw BIP-32 master secret of that length.
+                // Source: hw-reference/secret-stash-format.md §Layout [C]
+                SecretKind::Unknown { marker: 16..=64 } => "raw seed wallet: not yet",
+                _ => "unknown wallet type",
+            });
         }
     };
     secret.zeroize();
@@ -3377,7 +3388,7 @@ pub(crate) fn unlock_master(
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
     // is far too long to hold one frame, so it runs in slices with the busy bar stepped
     // between them: masked while a slice is in flight, repainting in the gaps.
-    let mut busy = Working::new(ui.panel, head, "stretching seed");
+    let mut busy = Working::new(panel, head, "stretching seed");
     let stretch = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();
@@ -3389,12 +3400,12 @@ pub(crate) fn unlock_master(
         Stretch::begin(&mnemonic, crate::passphrase::active(), kw)
             .map_err(|_| "key derivation failed")
     });
-    let master = stretch.and_then(|mut stretch| {
+    stretch.and_then(|mut stretch| {
         // The 2048 PBKDF2 rounds run a slice at a time so the bar can move between them.
         // The slices end at round counts fixed here, never at anything derived from the
         // seed, so what a watching host can see is the iteration count BIP-39 publishes.
         while !crate::keywork::run(|kw| stretch.step(STRETCH_SLICE, kw)) {
-            busy.tick(ui.panel);
+            busy.tick(panel);
         }
         crate::keywork::run(|kw| {
             let mut seed = [0u8; SEED_LEN];
@@ -3403,15 +3414,7 @@ pub(crate) fn unlock_master(
             seed.zeroize();
             master.ok_or("key derivation failed")
         })
-    });
-    match master {
-        Ok(master) => Some(master),
-        Err(why) => {
-            fail(ui, why);
-            wait_for_any_key(ui);
-            None
-        }
-    }
+    })
 }
 
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {

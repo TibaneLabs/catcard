@@ -160,6 +160,53 @@ pub(crate) fn account_key(
     Some(key)
 }
 
+/// Record the fingerprint of the wallet now in force.
+///
+/// For a screen that derived one as part of its own work, so the status bar gets it
+/// without a second stretch -- and for putting back the one that was in force when a
+/// passphrase is typed and then declined.
+#[cfg(feature = "board-q1")]
+pub(crate) fn note_fingerprint(fp: Option<[u8; 4]>) {
+    // SAFETY: foreground only; the write finishes within this statement.
+    unsafe { *core::ptr::addr_of_mut!(FINGERPRINT) = fp };
+}
+
+/// Derive the fingerprint now, if this session does not have it, so the status bar can
+/// name the wallet from the moment the menu appears.
+///
+/// Quiet by construction: no dialogs, no key waits. A device with no wallet, or one
+/// holding a secret this build cannot read, simply leaves the bar's fingerprint blank --
+/// a boot that stopped to complain about something the owner never asked for would be
+/// worse than a blank space.
+///
+/// Costs one seed stretch, once, at the point the owner has just entered their PIN and
+/// is waiting for the menu anyway. Everything derived from it afterwards is free.
+#[cfg(feature = "board-q1")]
+pub(crate) fn warm_fingerprint(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+) {
+    if known_fingerprint().is_some() {
+        return;
+    }
+    match menu::master_quietly(gate, login, panel, "Wallet") {
+        Ok(master) => {
+            let fp = crate::keywork::run(|kw| master.fingerprint(kw));
+            drop(master);
+            note_fingerprint(Some(fp));
+            crate::catlog!(
+                "wallet: fingerprint {:02x}{:02x}{:02x}{:02x}",
+                fp[0],
+                fp[1],
+                fp[2],
+                fp[3]
+            );
+        }
+        Err(why) => crate::catlog!("wallet: no fingerprint for the status bar: {}", why),
+    }
+}
+
 /// This wallet's master fingerprint **only if this session already knows it**.
 ///
 /// Never unlocks. For the status bar, which is painted on every frame: a bar that could

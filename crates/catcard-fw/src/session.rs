@@ -143,6 +143,15 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         "pin: secret slot {}",
         if no_seed { "EMPTY" } else { "IN USE" }
     );
+    // Name the wallet on the status bar from the first frame. One seed stretch, here,
+    // where the owner has just entered a PIN and is waiting for the menu -- rather than
+    // on the bar's own account, which is painted every frame and must never be the
+    // reason a seed is read. Skipped on a device with no wallet to name.
+    #[cfg(feature = "board-q1")]
+    if !no_seed {
+        crate::pubkeys::warm_fingerprint(&gate, &mut login, &mut panel);
+    }
+
     // Move the pool out of the report rather than borrowing it from inside: the menu
     // holds `&report` for as long as it runs, so a `&mut` into the same struct could
     // never coexist with it. Nothing reads `report.pool` after this point -- the UI DRBG

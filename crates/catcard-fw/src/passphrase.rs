@@ -71,10 +71,18 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         // An empty passphrase is the plain wallet, which is what clearing means.
         clear();
         crate::catlog!("passphrase: cleared");
+        // The status bar names the wallet in force, and the plain one's fingerprint is
+        // not what was cached a moment ago. Derive it rather than leave the bar blank.
+        #[cfg(feature = "board-q1")]
+        crate::pubkeys::warm_fingerprint(gate, login, ui.panel);
         menu::message(ui.panel, HEAD, "cleared", "the plain wallet");
         menu::wait_for_any_key(ui);
         return;
     }
+
+    // What the status bar is naming now, to put back if this is not applied.
+    #[cfg(feature = "board-q1")]
+    let previous = crate::pubkeys::known_fingerprint();
 
     // Derive with it and show where it lands, before it is in force anywhere else.
     set(entry.as_str());
@@ -82,6 +90,8 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
         // The seed could not be read, so nothing was proven: leave no passphrase in force.
         clear();
+        #[cfg(feature = "board-q1")]
+        crate::pubkeys::note_fingerprint(previous);
         return;
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
@@ -97,9 +107,15 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
     menu::ask(ui.panel, head.as_str(), shown, "use this wallet?");
     if menu::confirmed(ui) {
+        // This wallet is the one in force now, and its fingerprint was just derived --
+        // so the bar gets it without a second stretch.
+        #[cfg(feature = "board-q1")]
+        crate::pubkeys::note_fingerprint(Some(fingerprint));
         menu::message(ui.panel, HEAD, "in force", "until reboot");
     } else {
         clear();
+        #[cfg(feature = "board-q1")]
+        crate::pubkeys::note_fingerprint(previous);
         menu::message(ui.panel, HEAD, "not applied", "the plain wallet");
     }
     menu::wait_for_any_key(ui);
