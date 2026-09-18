@@ -118,9 +118,9 @@ enum Screen {
     /// Debug: exercise the settings store on internal flash.
     #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
-    /// Registering a multisig wallet from a descriptor on the card.
+    /// The registered multisig wallets: what is stored, and importing or removing one.
     #[cfg(not(feature = "board-mk3"))]
-    MultisigImport,
+    Multisig,
     /// Typing the nickname shown before the PIN prompt.
     #[cfg(not(feature = "board-mk3"))]
     Nickname,
@@ -767,8 +767,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::MultisigImport => to(
-            |a| crate::msimport::import(a.gate, a.login, a.ui),
+        Screen::Multisig => to(
+            |a| crate::msimport::manage(a.gate, a.login, a.ui),
             Screen::Utils,
         ),
         #[cfg(not(feature = "board-mk3"))]
@@ -966,7 +966,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
             #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("Multisig")) => Screen::MultisigImport,
+            (Key::Confirm, Some("Multisig")) => Screen::Multisig,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -1206,7 +1206,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::PsramSoak
         | Screen::Nickname
         | Screen::SettingsToSd
-        | Screen::MultisigImport
+        | Screen::Multisig
         | Screen::NickPreview => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}

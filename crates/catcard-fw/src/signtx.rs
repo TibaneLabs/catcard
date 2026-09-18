@@ -287,7 +287,13 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     // The registered multisig wallets, read once. Without them a script-hash input is
     // refused: the chain says which script the coin is locked to, but only a registration
     // says whose wallet that script belongs to.
+    #[cfg(not(feature = "board-mk3"))]
     let wallets = crate::msimport::registered(gate, login);
+    // The mk3 has no settings store yet, so nothing can be registered on it and every
+    // multisig input is refused. That is the safe direction, and the honest one: the
+    // alternative is signing for a wallet this device was never shown.
+    #[cfg(feature = "board-mk3")]
+    let wallets: &[catcard_wallet::multisig::Multisig] = &[];
     let owner = psbtview::Owner {
         master: &master,
         fingerprint,

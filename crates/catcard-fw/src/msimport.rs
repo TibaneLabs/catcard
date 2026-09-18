@@ -57,37 +57,24 @@ pub(crate) fn registered(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
 ) -> &'static [Multisig] {
-    use catcard_settings::json::Doc;
-    use catcard_settings::nvstore;
-    use catcard_settings::store;
-    use zeroize::Zeroize as _;
-
     // SAFETY: foreground only; one settings screen at a time.
     let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
         unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
     parsed.clear();
 
-    // SAFETY: foreground only, and the signing screen holds the display while this runs.
-    let Ok(mut files) = (unsafe { crate::settings::Files::mount() }) else {
-        crate::catlog!("multisig: no settings store, so no registered wallets");
-        return parsed;
-    };
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let Ok(mut secret) = login.fetch_secret(&pin_gate) else {
-        return parsed;
-    };
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
-
-    // SAFETY: as above.
-    let doc_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
-    let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
-    let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
     let mut list = [Wallet {
         name: "",
         descriptor: "",
     }; wallets::MAX_WALLETS];
-    let have = wallets::list(&doc, &mut list);
+    // SAFETY: foreground only, and the signing screen holds the display while this runs.
+    let doc_buf = unsafe { doc_scratch() };
+    let have = match load(gate, login, doc_buf, &mut list) {
+        Ok(n) => n,
+        Err(why) => {
+            crate::catlog!("multisig: {}, so no registered wallets", why);
+            return parsed;
+        }
+    };
     for w in &list[..have] {
         match multisig::parse(w.descriptor) {
             Ok(m) => {
@@ -98,6 +85,316 @@ pub(crate) fn registered(
     }
     crate::catlog!("multisig: {} wallet(s) registered", parsed.len());
     parsed
+}
+
+/// The stored wallet records, read into `doc_buf`. Returns how many `out` received.
+///
+/// The records borrow `doc_buf`, which is also the scratch a later write needs, so a
+/// caller that goes on to store something must let that borrow end first -- which is why
+/// the buffer is passed in rather than taken from [`DOC`] here.
+fn load<'a>(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    doc_buf: &'a mut [u8; SCRATCH],
+    out: &mut [Wallet<'a>],
+) -> Result<usize, &'static str> {
+    use catcard_settings::json::Doc;
+    use catcard_settings::nvstore;
+    use catcard_settings::store;
+    use zeroize::Zeroize as _;
+
+    // SAFETY: foreground only; the caller holds the display while this runs.
+    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let mut secret = login
+        .fetch_secret(&pin_gate)
+        .map_err(|_| "could not read the secret")?;
+    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+    secret.zeroize();
+
+    let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
+    let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
+    Ok(wallets::list(&doc, out))
+}
+
+/// The DOC scratch buffer.
+///
+/// # Safety
+/// Foreground only, one settings screen at a time, and the returned borrow must end
+/// before another call.
+unsafe fn doc_scratch() -> &'static mut [u8; SCRATCH] {
+    // SAFETY: the caller's contract.
+    unsafe { &mut *core::ptr::addr_of_mut!(DOC) }
+}
+
+/// The Multisig screen: what is registered, and what can be done about it.
+///
+/// A registration decides which spends this device will sign, so it cannot be write-only.
+/// A wallet imported from the wrong file has to be findable and removable, and the only
+/// way to notice one is to be able to look.
+pub(crate) fn manage(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    use catcard_ui::scroll::Line as Row;
+
+    /// The "Import from SD" row, numbered past any wallet.
+    const IMPORT: u32 = 1000;
+
+    /// What the list screen came back with. Nothing here borrows the settings buffer, so
+    /// acting on it can read and write the settings again.
+    enum Then {
+        Leave,
+        Import,
+        Delete(heapless::String<8>),
+    }
+
+    loop {
+        menu::blocking_screen(ui.panel, "Multisig", "reading");
+        // Scoped: the wallet records borrow the settings buffer, and deleting one reads
+        // the settings afresh.
+        let next = {
+            // SAFETY: foreground only; the menu waits for this screen.
+            let doc_buf = unsafe { doc_scratch() };
+            let mut list = [Wallet {
+                name: "",
+                descriptor: "",
+            }; wallets::MAX_WALLETS];
+            let have = match load(gate, login, doc_buf, &mut list) {
+                Ok(n) => n,
+                Err(why) => return say(ui, "Multisig", why),
+            };
+
+            // A label per wallet: its name if it has one, otherwise its shape, and its
+            // checksum -- which is what a person compares against the other cosigners.
+            let mut labels: heapless::Vec<heapless::String<40>, { wallets::MAX_WALLETS }> =
+                heapless::Vec::new();
+            for w in &list[..have] {
+                let _ = labels.push(label(w));
+            }
+
+            let exit = {
+                let mut rows: heapless::Vec<Row, { wallets::MAX_WALLETS + 3 }> =
+                    heapless::Vec::new();
+                let _ = rows.push(Row::title("Multisig"));
+                if have == 0 {
+                    let _ = rows.push(Row::body("(none registered)").centered());
+                }
+                for (i, l) in labels.iter().enumerate() {
+                    let _ = rows.push(Row::item(l.as_str(), i as u32));
+                }
+                let _ = rows.push(Row::item("Import from SD", IMPORT));
+                menu::show_doc(ui, &rows, false, false)
+            };
+
+            match exit {
+                menu::DocExit::Selected(IMPORT) => Then::Import,
+                menu::DocExit::Selected(i) if (i as usize) < have => {
+                    let w = &list[i as usize];
+                    let mut sum: heapless::String<8> = heapless::String::new();
+                    let _ = sum.push_str(w.checksum().unwrap_or(""));
+                    if detail(ui, w) && !sum.is_empty() {
+                        Then::Delete(sum)
+                    } else {
+                        continue;
+                    }
+                }
+                _ => Then::Leave,
+            }
+        };
+
+        match next {
+            Then::Leave => return,
+            Then::Import => import(gate, login, ui),
+            Then::Delete(sum) => match remove(gate, login, ui, &sum) {
+                Ok(()) => say(ui, "Multisig", "the wallet is gone"),
+                Err(why) => say(ui, "Multisig", why),
+            },
+        }
+    }
+}
+
+/// One line for the list: the owner's name for the wallet, or its shape, plus the checksum.
+fn label(w: &Wallet<'_>) -> heapless::String<40> {
+    use core::fmt::Write as _;
+    let mut text = heapless::String::new();
+    let shape = match multisig::parse(w.descriptor) {
+        Ok(m) => {
+            let mut s: heapless::String<16> = heapless::String::new();
+            let _ = write!(s, "{}-of-{}", m.m, m.n());
+            s
+        }
+        // A descriptor this build cannot read is still shown, so it can be deleted.
+        Err(_) => heapless::String::try_from("unreadable").unwrap_or_default(),
+    };
+    let name = if w.name.is_empty() {
+        shape.as_str()
+    } else {
+        w.name
+    };
+    let _ = write!(text, "{name}  {}", w.checksum().unwrap_or("?"));
+    text
+}
+
+/// Show one registered wallet. Returns whether the owner asked to delete it.
+fn detail(ui: &mut Ui<'_>, w: &Wallet<'_>) -> bool {
+    use catcard_ui::scroll::Line as Row;
+    use core::fmt::Write as _;
+
+    type Text = heapless::String<48>;
+    let mut lines: heapless::Vec<Text, { multisig::MAX_COSIGNERS + 4 }> = heapless::Vec::new();
+    match multisig::parse(w.descriptor) {
+        Ok(m) => {
+            let mut head = Text::new();
+            let _ = write!(
+                head,
+                "{}-of-{} {}{}",
+                m.m,
+                m.n(),
+                kind_name(m.kind),
+                if m.sorted { "" } else { ", unsorted" }
+            );
+            let _ = lines.push(head);
+            for (i, c) in m.cosigners().iter().enumerate() {
+                let mut line = Text::new();
+                let _ = write!(
+                    line,
+                    "{}: {:02x}{:02x}{:02x}{:02x}",
+                    i + 1,
+                    c.fingerprint[0],
+                    c.fingerprint[1],
+                    c.fingerprint[2],
+                    c.fingerprint[3]
+                );
+                let _ = lines.push(line);
+            }
+        }
+        Err(why) => {
+            let mut line = Text::new();
+            let _ = write!(line, "cannot read: {}", describe(why));
+            let _ = lines.push(line);
+        }
+    }
+    let mut sum = Text::new();
+    let _ = write!(sum, "checksum {}", w.checksum().unwrap_or("none"));
+    let _ = lines.push(sum);
+
+    let mut hint = Text::new();
+    let _ = write!(
+        hint,
+        "{} delete   {} back",
+        crate::display::CONFIRM_KEY,
+        crate::display::CANCEL_KEY
+    );
+
+    let title = if w.name.is_empty() { "Wallet" } else { w.name };
+    let mut rows: heapless::Vec<Row, { multisig::MAX_COSIGNERS + 6 }> = heapless::Vec::new();
+    let _ = rows.push(Row::title(title));
+    for l in lines.iter() {
+        let _ = rows.push(Row::body(l.as_str()).small());
+    }
+    let _ = rows.push(Row::body(hint.as_str()).small());
+    if !matches!(
+        menu::show_doc(ui, &rows, false, false),
+        menu::DocExit::Confirmed
+    ) {
+        return false;
+    }
+    // Deleting is not destroying coins -- the wallet can be imported again -- but it does
+    // stop this device signing for it until that happens, so it is asked once.
+    menu::ask(
+        ui.panel,
+        "Delete wallet?",
+        "this device will refuse",
+        "its spends until re-imported",
+    );
+    menu::confirmed(ui)
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::P2sh => "P2SH",
+        Kind::P2wsh => "P2WSH",
+        Kind::P2shP2wsh => "P2SH-P2WSH",
+    }
+}
+
+/// Store the wallet list without the one whose checksum is `sum`.
+fn remove(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    sum: &str,
+) -> Result<(), &'static str> {
+    menu::blocking_screen(ui.panel, "Multisig", "saving");
+    // SAFETY: foreground only; the menu waits for this screen.
+    let doc_buf = unsafe { doc_scratch() };
+    // Scoped: the records borrow `doc_buf`, which the write below reuses as scratch.
+    let len = {
+        let mut list = [Wallet {
+            name: "",
+            descriptor: "",
+        }; wallets::MAX_WALLETS];
+        let have = load(gate, login, doc_buf, &mut list)?;
+        let mut left = [Wallet {
+            name: "",
+            descriptor: "",
+        }; wallets::MAX_WALLETS];
+        let n = wallets::without(&list[..have], sum, &mut left);
+        if n == have {
+            return Err("no such wallet");
+        }
+        // SAFETY: as above.
+        let list_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
+        wallets::render(&left[..n], list_buf).map_err(|_| "too long")?
+    };
+    store_list(gate, login, ui, doc_buf, len)
+}
+
+/// Write the wallet list rendered into [`LIST`] into the settings.
+///
+/// `doc_buf` is the scratch the edit needs, and it must no longer be lent to any wallet
+/// record by the time this is called -- which is what the scopes above are for.
+fn store_list(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    doc_buf: &mut [u8; SCRATCH],
+    len: usize,
+) -> Result<(), &'static str> {
+    use catcard_settings::json::RawJson;
+    use catcard_settings::nvstore;
+    use catcard_settings::store;
+    use zeroize::Zeroize as _;
+
+    // SAFETY: foreground only; one settings screen at a time.
+    let list_buf: &[u8; SCRATCH] = unsafe { &*core::ptr::addr_of!(LIST) };
+    let text = core::str::from_utf8(&list_buf[..len]).map_err(|_| "not text")?;
+
+    // SAFETY: as above.
+    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let mut secret = login
+        .fetch_secret(&pin_gate)
+        .map_err(|_| "could not read the secret")?;
+    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+    secret.zeroize();
+
+    // SAFETY: as above.
+    let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
+    let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
+    store::set(
+        &mut files,
+        &key,
+        wallets::KEY,
+        &RawJson(text),
+        choose,
+        doc_buf,
+        seal,
+    )
+    .map_err(|_| "could not save")?;
+    Ok(())
 }
 
 /// Import a wallet: pick the file, read it, show it, and store it if the owner agrees.
@@ -265,41 +562,19 @@ fn save(
     name: &str,
     descriptor: &str,
 ) -> Result<(), &'static str> {
-    use catcard_settings::json::Doc;
-    use catcard_settings::json::RawJson;
-    use catcard_settings::nvstore;
-    use catcard_settings::store;
-    use zeroize::Zeroize as _;
-
     menu::blocking_screen(ui.panel, "Register wallet", "saving");
     // SAFETY: foreground only; the menu waits for this screen, and nothing else touches
     // the settings region.
-    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
+    let doc_buf = unsafe { doc_scratch() };
 
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = login
-        .fetch_secret(&pin_gate)
-        .map_err(|_| "could not read the secret")?;
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
-
-    // SAFETY: as above -- one settings screen at a time, foreground only.
-    let doc_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
-    // SAFETY: as above.
-    let list_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
-    // SAFETY: as above.
-    let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
-
-    // The read and the edit share nothing with the write: `doc_buf` is the settings as
-    // they are here, and the sealing pass below reuses it, so the borrow has to end first.
+    // Scoped: the records read here borrow `doc_buf`, and the write below reuses it as
+    // scratch, so the borrow has to end first.
     let len = {
-        let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
-        let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
         let mut current = [Wallet {
             name: "",
             descriptor: "",
         }; wallets::MAX_WALLETS];
-        let have = wallets::list(&doc, &mut current);
+        let have = load(gate, login, doc_buf, &mut current)?;
 
         let mut next = [Wallet {
             name: "",
@@ -313,22 +588,11 @@ fn save(
             wallets::Error::Overflow => "too long",
         })?;
         crate::catlog!("multisig: registering, {} wallet(s) after this", added);
+        // SAFETY: as above.
+        let list_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
         wallets::render(&next[..added], list_buf).map_err(|_| "too long")?
     };
-    let text = core::str::from_utf8(&list_buf[..len]).map_err(|_| "not text")?;
-
-    let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
-    store::set(
-        &mut files,
-        &key,
-        wallets::KEY,
-        &RawJson(text),
-        choose,
-        doc_buf,
-        seal,
-    )
-    .map_err(|_| "could not save")?;
-    Ok(())
+    store_list(gate, login, ui, doc_buf, len)
 }
 
 /// Why a descriptor was refused, in words rather than a variant name.

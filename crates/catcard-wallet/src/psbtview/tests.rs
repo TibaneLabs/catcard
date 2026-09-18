@@ -1166,3 +1166,64 @@ fn an_unregistered_multisig_output_is_not_change() {
         "an unregistered wallet's output was subtracted from the amount sent"
     );
 }
+
+/// The whole path, end to end: reviewed, listed as signable, and signed.
+///
+/// A 2-of-2 is only half-signed by this device, which is the point -- what has to be right
+/// here is that the digest commits to the *witness script*, not to a P2PKH template, so the
+/// other cosigner's software accepts the signature and the two combine.
+#[test]
+fn a_registered_multisig_input_signs() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, true, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    let wallets = [wallet];
+    let me = owner(&master, &wallets);
+
+    summarise(&psbt, &me, &Policy::default(), &kw()).expect("reviewed");
+
+    let mut ours = [0usize; 4];
+    let signable = our_inputs(&psbt, &master, OUR_FP, &mut ours, &kw());
+    assert_eq!(
+        &ours[..signable],
+        &[0],
+        "our share of the wallet was missed"
+    );
+    assert!(!already_signed(&psbt, 0, &master, OUR_FP, &kw()));
+
+    let mut out = vec![0u8; 1 << 16];
+    let len = signer::sign_input(&psbt, 0, &master, OUR_FP, &mut out, &kw()).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+
+    let (pk, _) = ms_key(0, 0);
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&pk)
+        .expect("no signature under our key in the wallet");
+    assert_eq!(sig.last(), Some(&0x01), "not SIGHASH_ALL");
+    assert!(already_signed(&signed, 0, &master, OUR_FP, &kw()));
+
+    // Only our share: the wallet still needs the other cosigner.
+    let (theirs, _) = {
+        let mut key = master_of(STRANGER);
+        let steps = [
+            48 | 0x8000_0000,
+            0x8000_0000,
+            0x8000_0000,
+            2 | 0x8000_0000,
+            0,
+            0,
+        ];
+        for step in steps {
+            key = key.derive_child(ChildNumber(step), &kw()).unwrap();
+        }
+        (key.public_key(&kw()), steps)
+    };
+    assert!(
+        signed.input(0).unwrap().partial_sig(&theirs).is_none(),
+        "this device signed for a key it does not hold"
+    );
+}
