@@ -109,6 +109,34 @@ pub const fn page_of(
     }
 }
 
+/// The page size and bank layout the part is **actually** configured for, read from
+/// `OPTR` rather than assumed.
+///
+/// On the L4+ `DBANK` decides both at once: clear, the 2 MB is one contiguous bank of 8 KB
+/// pages; set, it is two banks of 4 KB pages. Source: RM0432 §3.3.1 Table 7 [C], and a real
+/// Q1 reads `DBANK` **set** -- so this is read and not taken from the board table, which
+/// expected the other one and refused the region outright.
+///
+/// The mk3's L496 is a different part with a different register layout, so nothing is
+/// inferred for it here; [`expected`] still speaks for it.
+///
+/// # Safety
+/// A read of the flash interface's option register.
+pub unsafe fn configured(mcu: Mcu) -> (u32, bool) {
+    // SAFETY: a read of a memory-mapped register, no side effects.
+    let optr = unsafe { reg::read(FLASH + OPTR) };
+    match mcu {
+        Mcu::Stm32L4S5 => {
+            if optr & OPTR_DBANK != 0 {
+                (4 * 1024, true)
+            } else {
+                (8 * 1024, false)
+            }
+        }
+        Mcu::Stm32L496 => expected(mcu),
+    }
+}
+
 /// The page size and bank layout this MCU is configured for.
 ///
 /// mk3's L496 is dual bank with 2 KB pages; mk4/mk5/Q1's L4S5 runs single bank with 8 KB
@@ -145,11 +173,18 @@ impl Internal {
     /// single-bank part every operation stalls the bus, so the caller must not need
     /// interrupts serviced during one.
     pub unsafe fn open(mcu: Mcu, start: u32, len: u32, flash_len: u32) -> Result<Self, Error> {
-        let (page_size, dual_bank) = expected(mcu);
+        // What the part says it is, not what the board table hoped: a wrong page size
+        // erases the wrong 4 or 8 KB and there is no undo, so this is read from `OPTR`.
         // SAFETY: a read of the flash interface's option register.
-        let optr = unsafe { reg::read(FLASH + OPTR) };
-        if (optr & OPTR_DBANK != 0) != dual_bank {
-            return Err(Error::Configuration { optr });
+        let (page_size, dual_bank) = unsafe { configured(mcu) };
+        // The mk3's layout is not read from a register, so a part that disagrees with the
+        // table there is still refused rather than written with guessed page numbers.
+        if matches!(mcu, Mcu::Stm32L496) {
+            // SAFETY: as above.
+            let optr = unsafe { reg::read(FLASH + OPTR) };
+            if (optr & OPTR_DBANK != 0) != expected(mcu).1 {
+                return Err(Error::Configuration { optr });
+            }
         }
         if !start.is_multiple_of(page_size) || !len.is_multiple_of(page_size) {
             return Err(Error::Address { addr: start });
@@ -362,6 +397,32 @@ impl Internal {
 
 #[cfg(test)]
 mod tests {
+    /// The settings region lands in bank 2 when the part is dual bank, and the page
+    /// numbering has to say so.
+    ///
+    /// A real Q1 reads `DBANK` set, which puts `0x0818_0000` at page 128 of **bank 2** with
+    /// 4 KB pages. Numbering it from the start of flash instead would name page 384 of bank
+    /// 1 -- a page that exists, holds running code, and would be erased instead.
+    #[test]
+    fn the_q1_settings_region_is_bank_two_when_the_part_is_dual_bank() {
+        let (bank2, page) = page_of(0x0818_0000, 0x0800_0000, 4 * 1024, true, 1024 * 1024);
+        assert!(bank2, "0x08180000 is in the upper megabyte");
+        assert_eq!(page, 128);
+        // The same address with the layout the board table expected: one bank, 8 KB pages.
+        let (bank2, page) = page_of(0x0818_0000, 0x0800_0000, 8 * 1024, false, 1024 * 1024);
+        assert!(!bank2);
+        assert_eq!(page, 192);
+    }
+
+    /// 4 KB and 8 KB pages both divide into whole 512-byte filesystem blocks, so the
+    /// settings volume works either way -- sixteen blocks to a page or eight.
+    #[test]
+    fn either_page_size_holds_whole_filesystem_blocks() {
+        for page in [4 * 1024u32, 8 * 1024] {
+            assert_eq!(page % 512, 0, "{page} does not divide into blocks");
+        }
+    }
+
     use super::*;
 
     const BASE: u32 = 0x0800_0000;
