@@ -188,14 +188,20 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
                 matches!(catcard_qr::unwrap(&reply[..n]), Ok(f) if catcard_qr::is_version(f.body))
             });
             if answered {
-                // Tell the lamp where the module is, so it stops saying everything twice.
-                crate::torch::note_rate(rate);
                 // Found it. Ask for the fast rate and follow it there; if the module
                 // does not take the change, carry on at the rate that answered rather
                 // than moving to one nothing is listening at.
+                let mut settled = rate;
                 if rate != 57_600 && command(port, cmd::BAUD_57600) {
                     port.set_baud(57_600);
+                    settled = 57_600;
                 }
+                // The rate the module ends on, **not** the one that answered. A reset
+                // leaves it at its 9600 default -- which is why stock opens there -- so
+                // the probe almost always answers at 9600 and is then moved. Recording
+                // the answering rate left the lamp talking at 9600 to a module listening
+                // at 57600, which reads exactly like a module that is not there.
+                crate::torch::note_rate(settled);
                 return Ok(());
             }
         }
@@ -261,6 +267,43 @@ fn read_code(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize,
             return Err(Fault::Cancelled);
         }
     }
+}
+
+/// Put the module into a known state once, early in the boot.
+///
+/// Until this ran, the module was in whatever state the bootloader or the last session
+/// left it: never configured, still scanning, or asleep -- and a lamp command to a
+/// module in an unknown state does nothing you can predict. Stock does the same thing at
+/// the same point, and for the same reason.
+///
+/// Ends **asleep with reset released**, which is the idle state the reference describes:
+/// the module keeps its configuration and draws almost nothing, and a scan or the lamp
+/// wakes it. Leaving it awake would run the illumination on a battery device.
+///
+/// Costs the reset recovery -- two seconds -- once per boot rather than once per scan.
+/// Failure is silent: a board with no module, or one that will not answer, must not stop
+/// a boot over a scanner nobody has asked to use yet.
+///
+/// Source: hw-reference/qr.md §2 [C]
+pub(crate) fn boot_bringup() {
+    let Some(scanner) = catcard_board::BOARD.qr else {
+        return;
+    };
+    // SAFETY: bring-up, before any screen exists; nothing else has these pins or USART2.
+    let mut port = unsafe {
+        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
+        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
+        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
+    };
+    match find(&mut port).and_then(|()| setup(&mut port)) {
+        Ok(()) => crate::catlog!("qr: configured, sleeping"),
+        Err(why) => crate::catlog!("qr: not configured at boot: {:?}", why),
+    }
+    // Asleep either way: a module that answered but would not configure is still a
+    // module that should not sit there drawing current. This is the idle state the
+    // reference describes -- asleep, reset released, configuration retained -- and on a
+    // battery device it is the difference between a scanner and a flat battery.
+    sleep(&mut port);
 }
 
 /// Bring the scanner up, read one code, and put it back to sleep.

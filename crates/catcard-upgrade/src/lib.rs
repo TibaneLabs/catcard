@@ -44,6 +44,12 @@ pub mod psram;
 ///
 /// Every variant is a reason not to reboot. None of them leave the device worse off,
 /// which is the entire point of checking here rather than finding out afterwards.
+/// Times the signature is re-read before an image is called unsigned.
+///
+/// See the comment at the use site: the staging medium has transient read faults, and
+/// the signature is the one window the digest cannot check.
+const REREADS: usize = 3;
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Reject {
     /// Shorter than the bootloader's floor, or longer than the flash it installs into.
@@ -419,14 +425,38 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // the exact double-SHA256 digest it signs (hw-reference/firmware-signing.md §2 [C]).
         let slot = header.pubkey_num;
         let digest = self.stored_digest_with(progress)?;
-        let verified = matches!(
-            catcard_sign::ecdsa_verify(
-                &compressed(&APPROVED_PUBKEYS[slot as usize]),
-                &digest,
-                &header.signature,
-            ),
+        let key = compressed(&APPROVED_PUBKEYS[slot as usize]);
+        let mut verified = matches!(
+            catcard_sign::ecdsa_verify(&key, &digest, &header.signature),
             Ok(true)
         );
+
+        // Read the signature again and try once more.
+        //
+        // Not leniency: a signature that is genuinely wrong fails every attempt, and
+        // nothing here accepts a digest it did not compute. It is that the signature
+        // comes out of a staging medium with **transient read faults** -- a Q1 has
+        // refused a correct, correctly-staged image this way -- and the 64 bytes of
+        // signature are the one part of the image the digest cannot vouch for, because
+        // the digest is computed with that window skipped. Everything else agreeing
+        // while only this disagrees is the shape of a bad read, not of a bad image.
+        //
+        // So it is re-read from the medium rather than reused, which is the whole point:
+        // a second look at the same bytes.
+        for _ in 0..REREADS {
+            if verified {
+                break;
+            }
+            let mut again = [0u8; HEADER_LEN];
+            if self.area.read(HEADER_OFFSET as u32, &mut again).is_err() {
+                break;
+            }
+            let reread = FirmwareHeader::from_bytes(&again);
+            verified = matches!(
+                catcard_sign::ecdsa_verify(&key, &digest, &reread.signature),
+                Ok(true)
+            );
+        }
         if !verified {
             // We hold the key and it does not verify: corrupt or tampered. Refuse before
             // staging rather than let the bootloader find out after overwriting firmware.

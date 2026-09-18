@@ -45,6 +45,11 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // SAFETY: bring-up is complete and nothing else has claimed the keypad pins.
     let matrix = unsafe { keypad::GpioMatrix::init() };
 
+    // Put the QR module into a known state before anything can ask it for anything --
+    // the lamp key works from any screen, including the PIN prompt. Two seconds, once.
+    #[cfg(feature = "board-q1")]
+    crate::qrscan::boot_bringup();
+
     // The scan-order shuffle draws from the UI domain, never from the seed pool.
     let drbg = report
         .pool

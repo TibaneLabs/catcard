@@ -15,12 +15,12 @@
 //! it. So an unlocated module is told twice, once at each rate; one of the two lands.
 //! Once [`crate::qrscan`] has found the rate it records it here and this stops guessing.
 //!
-//! # Held, where stock toggles
+//! # Hold to light, as stock does when idle
 //!
-//! Stock's LAMP key toggles the lamp: press once for on, again for off. This lights it
-//! while the key is down and puts it out when it is released, which is what was asked
-//! for and is a deliberate departure -- worth knowing, because it is the one place the
-//! key behaves differently from the device people may be used to.
+//! Stock brackets the whole thing wake -> `S_CMD_03L1` -> (key released) `S_CMD_03L0`
+//! -> sleep, and **does not start a scan**: the illumination is a flashlight in its own
+//! right, not a side effect of imaging. Only *during* a scan does the key toggle
+//! instead, between auto (`L2`) and off, so a hand is free to hold the device.
 //!
 //! Source: hw-reference/qr.md §8 [C]
 
@@ -35,9 +35,25 @@ const BYTE_BUDGET: u32 = 20_000;
 
 /// Attempts at waking. The first is expected to be swallowed, so one is none.
 const WAKE_TRIES: usize = 5;
-/// How long each wake attempt waits for an answer. This is in a key's path, so the whole
-/// sequence is bounded to something a thumb does not notice.
-const WAKE_GAP_BUDGET: u32 = 120_000;
+
+/// How often the lamp is told again while the key is held.
+///
+/// **The module sleeps itself.** Its configuration sets automatic sleep after 500 ms of
+/// idle (`S_CMD_MT20`, `S_CMD_MTRF500`), and a sleeping module puts its lamp out -- so
+/// one command on the way down lights it for half a second and no longer. Saying it
+/// again inside that window is what makes "while the key is held" mean anything.
+///
+/// Source: hw-reference/qr.md §5 [C]
+const REASSERT_MS: u32 = 250;
+/// Between the two sleep commands, for the module's second sleep layer.
+const SLEEP_GAP_MS: u32 = 150;
+
+/// How long to leave between wake attempts: **50 ms**, as the reference specifies.
+///
+/// A real delay and not a loop budget. The budget this replaced came to something like
+/// eight milliseconds, so all five attempts landed inside the window where the module is
+/// still coming up -- which reads exactly like a module that is not there.
+const WAKE_GAP_MS: u32 = 50;
 
 /// The port, opened the first time the key is pressed.
 ///
@@ -48,6 +64,9 @@ static mut PORT: Option<Usart> = None;
 static mut LIT: bool = false;
 /// The rate a scan found the module at, once one has.
 static mut KNOWN_RATE: Option<u32> = None;
+/// When the lamp was last told to be on, so it can be told again before the module
+/// decides it has been idle long enough to sleep.
+static mut LAST_SENT: u32 = 0;
 
 /// Record the rate a successful probe found, so the lamp stops guessing.
 pub(crate) fn note_rate(rate: u32) {
@@ -78,6 +97,11 @@ pub(crate) fn note(pad: &Keypad) {
     // SAFETY: foreground only, single core.
     let lit = unsafe { *core::ptr::addr_of!(LIT) };
     if down == lit {
+        // Held: say it again before the module's idle timer puts it out. Nothing is sent
+        // while the lamp is off, so an untouched key costs one comparison.
+        if down && elapsed_ms() >= REASSERT_MS {
+            set(true);
+        }
         return;
     }
     // SAFETY: as above.
@@ -85,7 +109,25 @@ pub(crate) fn note(pad: &Keypad) {
     set(down);
 }
 
-/// Send the lamp command, at whichever rate the module might be listening at.
+/// Milliseconds since the lamp was last told anything.
+fn elapsed_ms() -> u32 {
+    // SAFETY: reads RCC and the cycle counter.
+    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000).max(1);
+    let now = catcard_hal::dwt::cycles();
+    // SAFETY: foreground only.
+    let then = unsafe { *core::ptr::addr_of!(LAST_SENT) };
+    now.wrapping_sub(then) / per_ms
+}
+
+/// Light the lamp, or put it out.
+///
+/// Exactly stock's idle sequence: wake, then always-on; on release, off, then sleep.
+/// **No scan is started.** The illumination is a flashlight in its own right -- the
+/// reference is explicit that turning it on issues no `S_CMD_020E` -- so holding a scan
+/// open to keep it lit would be lighting it by side effect and leaving the module
+/// reading codes nobody pointed it at.
+///
+/// Source: hw-reference/qr.md §8 [C]
 fn set(on: bool) {
     let Some(scanner) = catcard_board::BOARD.qr else {
         return;
@@ -94,18 +136,10 @@ fn set(on: bool) {
     // the scan screen releases them before it takes them.
     let port = unsafe { &mut *core::ptr::addr_of_mut!(PORT) };
     if port.is_none() {
-        // No reset and no configuration: see the module docs. Opening the port does not
-        // disturb a module that is asleep or mid-scan.
         // SAFETY: as above.
         *port = Some(unsafe { Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0]) });
     }
     let Some(port) = port.as_mut() else { return };
-
-    let body = if on { cmd::TORCH_ON } else { cmd::TORCH_OFF };
-    let mut framed = [0u8; 32];
-    let Ok(frame) = catcard_qr::wrap(catcard_qr::FID_COMMAND, body, &mut framed) else {
-        return;
-    };
 
     // SAFETY: reads a static that only the foreground writes.
     let rates = match unsafe { *core::ptr::addr_of!(KNOWN_RATE) } {
@@ -113,25 +147,50 @@ fn set(on: bool) {
         None => catcard_qr::BAUDS,
     };
     let mut woke = 0u32;
+    let mut answered = "silence";
     for rate in rates {
         if rate == 0 {
             continue;
         }
         port.set_baud(rate);
-        if wake(port) {
+        if on && wake(port) {
             woke = rate;
         }
-        // Framed is the normal form. Bare is what stock uses for the torch *during* a
-        // scan, and the module takes either -- so both go out, because which state it is
-        // in is exactly what is not known from here. A repeated lamp command is
-        // idempotent, so saying it twice costs only the bytes.
+        // Framed, and framed only: bare is for the sleep and wake pokes, and raw ASCII
+        // at a module expecting a frame is as likely to desynchronise its parser as to
+        // be understood.
+        let body = if on { cmd::TORCH_ON } else { cmd::TORCH_OFF };
+        let mut framed = [0u8; 32];
+        let Ok(frame) = catcard_qr::wrap(catcard_qr::FID_COMMAND, body, &mut framed) else {
+            return;
+        };
+        port.flush_input();
         let _ = port.write(frame, BYTE_BUDGET);
-        let _ = port.write(body, BYTE_BUDGET);
-        port.drain(64, BYTE_BUDGET / 16);
+        // What comes back is the whole diagnosis: an acknowledgement means the command
+        // landed and an unlit lamp is the module's business, silence means it did not.
+        let mut reply = [0u8; 16];
+        let n = port.read(&mut reply, BYTE_BUDGET);
+        answered = match catcard_qr::unwrap(&reply[..n]) {
+            Ok(f) if catcard_qr::is_ack(&f) => "ack",
+            Ok(_) => "a frame, but not an ack",
+            Err(_) if n > 0 => "bytes, but not a frame",
+            Err(_) => "silence",
+        };
     }
+    if !on {
+        // Stock re-sleeps here, and an idle state that is not the one the rest of the
+        // firmware assumes is a battery draining quietly. Twice, 150 ms apart: the
+        // module has two sleep layers and one command only reaches the first.
+        let _ = port.write(cmd::SLEEP, BYTE_BUDGET);
+        catcard_hal::dwt::delay_cycles(ms_cycles(SLEEP_GAP_MS));
+        let _ = port.write(cmd::SLEEP, BYTE_BUDGET);
+    }
+    // SAFETY: foreground only.
+    unsafe { *core::ptr::addr_of_mut!(LAST_SENT) = catcard_hal::dwt::cycles() };
     crate::catlog!(
-        "torch: {} (woke at {})",
+        "torch: {} -> {} (woke at {})",
         if on { "on" } else { "off" },
+        answered,
         woke
     );
 }
@@ -147,11 +206,20 @@ fn set(on: bool) {
 /// Source: hw-reference/qr.md §7 [C]
 fn wake(port: &mut Usart) -> bool {
     for _ in 0..WAKE_TRIES {
+        port.flush_input();
         let _ = port.write(cmd::WAKE, BYTE_BUDGET);
+        catcard_hal::dwt::delay_cycles(ms_cycles(WAKE_GAP_MS));
         let mut got = [0u8; 8];
-        if port.read(&mut got, WAKE_GAP_BUDGET) > 0 {
+        if port.read(&mut got, BYTE_BUDGET) > 0 {
             return true;
         }
     }
     false
+}
+
+/// Milliseconds as CPU cycles.
+fn ms_cycles(ms: u32) -> u32 {
+    // SAFETY: reads RCC only.
+    let hz = unsafe { catcard_hal::clock::hclk_hz() };
+    (hz / 1_000).saturating_mul(ms)
 }
