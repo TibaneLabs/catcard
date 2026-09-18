@@ -657,8 +657,16 @@ pub fn refresh_bar(panel: &mut Panel) {
     }
     // SAFETY: as in `draw`.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    // The palette the frame under the bar was actually drawn through, not this
+    // function's idea of one. Naming a different palette here makes `show` think the
+    // colours changed, which invalidates the row cache and re-sends the *whole* frame
+    // through it -- and that is what turned the icon grid amber the first time the bar
+    // refreshed over it. With the right palette nothing but the bar's rows differ.
+    // SAFETY: as above; the reads finish within these statements.
+    let palette = unsafe { *core::ptr::addr_of!(LAST_PALETTE) };
+    let split = unsafe { *core::ptr::addr_of!(LAST_SPLIT) };
     catcard_ui::statusbar::render(screen, FONTS.small, &crate::statusbar::status());
-    show(panel, screen, &catcard_ui::st7789::AMBER, BAR_H);
+    show(panel, screen, &palette, split);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
