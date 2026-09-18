@@ -50,10 +50,15 @@ because it is the only one that explains bytes going wrong in a header that noth
 written to.
 
 The bus runs quad at 60 MHz, so it moves half a byte per clock: 8 us is 480 clocks, 240
-bytes, sixty words. `PsramArea` now lets CE# rise every **twenty** words -- a third of the
-limit, since the figure is a maximum quoted without margin -- by idling the bus long enough
-for the controller's timeout (16 clocks, 267 ns as stock arms it) plus `tCPH`. A megabyte of
-staging pays that eight thousand times, which is about four milliseconds.
+bytes, sixty words. `PsramArea` lets CE# rise every **32 words** -- 128 bytes, which is 256
+clocks of data plus about 14 of command and address, so roughly **4.5 us of the 8 us
+budget** -- by idling the bus long enough for the controller's timeout (16 clocks, 267 ns as
+stock arms it) plus `tCPH`. A megabyte of staging pays that eight thousand times, which is a
+few milliseconds.
+
+The budget is a **time**, not an access count, so the figure depends on the bus clock: at 30
+MHz those same 128 bytes would take 9 us and be over the limit. Changing the OCTOSPI
+prescaler means revisiting `WORDS_PER_BURST`.
 
 ## 3. The recovery delay: required by the reference, not reproduced here
 

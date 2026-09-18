@@ -121,7 +121,7 @@ impl PsramArea {
 /// measurements cannot justify.
 pub const RECOVERY_NOPS: u32 = 1;
 
-/// Words this may touch before CE# must be allowed to rise.
+/// Words this may touch before CE# must be allowed to rise: **32**, or 128 bytes.
 ///
 /// **The part cannot be held selected for longer than 8 us** -- `tCEM` in Table 10-5 of the
 /// ESP-PSRAM64H datasheet (`hw-reference/datasheets/`) -- and §5.5 says why: *"CE# must be
@@ -131,11 +131,20 @@ pub const RECOVERY_NOPS: u32 = 1;
 /// where the access was. That is the shape of the corruption that made a staged firmware
 /// image fail its signature check: bytes went wrong in a header nothing had written to.
 ///
-/// The arithmetic: the bus runs quad at 60 MHz (prescaler 2 off a 120 MHz kernel), so it
-/// moves half a byte per clock, and 8 us is 480 clocks or 240 bytes. Sixty words. This is a
-/// third of that, because the figure is a maximum with no margin quoted and because a run of
-/// stores is not the only thing on the bus.
-pub const WORDS_PER_BURST: u32 = 20;
+/// The arithmetic, at the documented bus setup -- quad at 60 MHz, from a prescaler of 2 off
+/// the 120 MHz kernel clock (`hw-reference/storage.md` §PSRAM [C]):
+///
+/// | | clocks | at 60 MHz |
+/// |---|---|---|
+/// | command + address (+6 dummy cycles on a read) | ~14 | 0.23 us |
+/// | 128 bytes of data, half a byte per clock | 256 | 4.27 us |
+/// | **total** | **~270** | **~4.5 us** |
+///
+/// Against 8 us that leaves about 45%, which is margin enough for a figure quoted as a
+/// maximum with no conditions attached. The budget is a *time*, so what would invalidate
+/// this is a slower bus: at 30 MHz these same 128 bytes would take 9 us and be over it.
+/// Anyone changing the prescaler has to revisit this number.
+pub const WORDS_PER_BURST: u32 = 32;
 
 /// Cycles to leave the bus idle so CE# actually rises between bursts.
 ///
