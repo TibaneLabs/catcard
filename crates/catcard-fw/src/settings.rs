@@ -124,6 +124,66 @@ impl Slots for Files {
     }
 }
 
+/// Longest nickname kept. Stock lets one be typed on the Q's keyboard; this is enough for
+/// anything that fits the screen, and a longer one is shown cut rather than refused.
+pub const NICK_MAX: usize = 32;
+
+/// The owner's nickname, read from the pre-login blob at boot.
+static mut NICK: [u8; NICK_MAX] = [0; NICK_MAX];
+
+/// Read the pre-login settings and keep the nickname, for the screen before the PIN prompt.
+///
+/// The pre-login blob is encrypted under **thirty-two zero bytes**, so this needs no secret
+/// and can run before login -- which is the point: stock shows the nickname there, so the
+/// owner can tell their device from someone else's before typing a PIN into it.
+///
+/// Every failure is silent and returns `None`. This is on the boot path, where a missing
+/// nickname must cost nothing: no settings region, no filesystem, no blob, no `nick` key and
+/// a corrupt blob all mean the same thing here -- draw the PIN prompt as before. The log
+/// says which, for anyone asking why their nickname did not appear.
+///
+/// # Safety
+/// Call once, from the boot path, before anything else uses the settings volume.
+pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
+    use catcard_settings::json::{self, Doc};
+    use catcard_settings::nvstore;
+    use catcard_settings::store::{self, SCRATCH};
+
+    // The blob, off the stack: boot has the least stack to spare and this is four kilobytes.
+    static mut BLOB: [u8; SCRATCH] = [0; SCRATCH];
+    // SAFETY: the caller's guarantee -- once, from boot, before any other settings use.
+    let blob: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(BLOB) };
+
+    // SAFETY: read-only: the mount's erase and program refuse, so nothing here can change
+    // the settings of a device whose PIN has not even been entered yet.
+    let mut files = match unsafe { Files::mount_read_only() } {
+        Ok(f) => f,
+        Err(why) => {
+            crate::catlog!("nick: no settings store: {:?}", why);
+            return None;
+        }
+    };
+    let n = match store::read(&mut files, &nvstore::prelogin_key(), blob) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::catlog!("nick: pre-login settings: {:?}", e);
+            return None;
+        }
+    };
+    let doc = Doc::parse(&blob[..n]).ok()?;
+    let raw = doc.get("nick")?;
+
+    // SAFETY: as above; written once here and read-only afterwards.
+    let nick: &'static mut [u8; NICK_MAX] = unsafe { &mut *core::ptr::addr_of_mut!(NICK) };
+    let len = json::unescape(raw, nick).unwrap_or(0);
+    if len == 0 {
+        return None;
+    }
+    let text = core::str::from_utf8(&nick[..len]).ok()?;
+    crate::catlog!("nick: {} byte(s) from the pre-login settings", len);
+    Some(text)
+}
+
 /// Debug: read the settings blobs and show what is in them, decrypted.
 ///
 /// Read-only, deliberately. This is the screen used to check our understanding of a store

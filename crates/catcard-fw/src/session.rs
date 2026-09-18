@@ -105,6 +105,18 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // No boot selftest screen: boot goes straight to the PIN prompt, so a host can drive
     // an unlock with nothing touching the keypad. The self-test view lives under
     // Debug -> Selftest instead.
+    // The nickname, if the owner set one: shown before the prompt, which is the only place
+    // it is any use. Reading it needs no secret -- the pre-login blob is under a key of zero
+    // bytes -- and every failure is silent, because a device whose nickname cannot be read
+    // must still ask for its PIN.
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        // SAFETY: once, here, before anything else touches the settings volume.
+        if let Some(nick) = unsafe { crate::settings::load_nickname() } {
+            crate::pinentry::show_nickname(&mut panel, &mut matrix, &mut drbg, nick);
+        }
+    }
+
     crate::catlog!("pin: prompting");
     let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg);
     crate::catlog!("pin: unlocked");

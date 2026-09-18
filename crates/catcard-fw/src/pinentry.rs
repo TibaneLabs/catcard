@@ -245,6 +245,43 @@ fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
     });
 }
 
+/// The owner's nickname, before the PIN prompt, as stock shows it.
+///
+/// Its whole purpose is to be seen *before* a PIN is typed: it is how the owner tells their
+/// device from a substituted one. So it is drawn on its own screen rather than tucked into a
+/// corner of the prompt.
+///
+/// It waits a moment and moves on, rather than waiting for a key. A key wait here would be
+/// consumed by whatever is driving the device -- the host tools inject keypresses -- and a
+/// message nobody can get past is worse than one that passes on its own. A press skips it.
+#[cfg(not(feature = "board-mk3"))]
+pub fn show_nickname(
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    nick: &str,
+) {
+    use catcard_ui::keypad::{Event, KEYS, Key};
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 14, nick);
+        small(c, 40, "any key to continue");
+    });
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    // SAFETY: reads RCC only.
+    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+    // Two seconds, in ten-millisecond looks at the keypad.
+    for _ in 0..200 {
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if !keys.is_empty() {
+            break;
+        }
+        catcard_hal::dwt::delay_cycles(10 * per_ms);
+    }
+}
+
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     display::draw(panel, |c| {
         c.clear();
