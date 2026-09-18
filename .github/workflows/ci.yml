@@ -22,8 +22,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --exclude catcard-fw --all-targets
-      - run: cargo test --workspace --exclude catcard-fw
+      # `catcard-kernel` is ARM-only for the same reason `catcard-fw` is -- its context
+      # switch is Cortex-M assembly, and cortex-m's register access does not build for a
+      # host at all. The Makefile has excluded it all along and this had not, so the host
+      # job failed on `invalid register r0` before reaching a single test of ours.
+      - run: cargo clippy --workspace --exclude catcard-fw --exclude catcard-kernel --all-targets
+      - run: cargo test --workspace --exclude catcard-fw --exclude catcard-kernel
 
   firmware:
     name: ${{ matrix.board }} ${{ matrix.chains }}${{ matrix.games && ' +games' || '' }}
@@ -164,8 +168,12 @@ jobs:
       - name: Build twice and compare digests
         run: |
           set -euo pipefail
+          # The same features both times: `cargo fw-mk4` carries the default ones and
+          # the check below passes `--no-default-features`, so this used to compare two
+          # different firmwares and report the difference as non-determinism.
           build() {
-            cargo fw-mk4 >/dev/null
+            cargo build --release -p catcard-fw --target thumbv7em-none-eabihf \
+              --no-default-features --features board-mk4 >/dev/null
             cargo run --release -q -p catcard-image -- build \
               target/thumbv7em-none-eabihf/release/catcard-fw \
               --board mk4 --version 0.0.1 --bin "$1" | grep '^digest'

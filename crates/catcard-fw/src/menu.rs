@@ -282,6 +282,7 @@ const DERIVE_ITEMS: &[&str] = &[
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 /// Flappy Cat needs the Q1's panel to scroll itself.
 #[cfg(feature = "board-q1")]
+#[cfg(feature = "games")]
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",

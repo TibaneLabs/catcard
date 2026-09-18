@@ -569,12 +569,9 @@ mod tests {
         // Production key 1 -- what every shipped release is signed with -- begins d6a2c81d.
         assert_eq!(&APPROVED_PUBKEYS[1][..4], &[0xd6, 0xa2, 0xc8, 0x1d]);
         // Every key is distinct; a copy-paste slip would alias two slots.
-        for i in 0..APPROVED_PUBKEYS.len() {
-            for j in (i + 1)..APPROVED_PUBKEYS.len() {
-                assert_ne!(
-                    APPROVED_PUBKEYS[i], APPROVED_PUBKEYS[j],
-                    "slots {i} and {j}"
-                );
+        for (i, a) in APPROVED_PUBKEYS.iter().enumerate() {
+            for (j, b) in APPROVED_PUBKEYS.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "slots {i} and {j}");
             }
         }
         assert!(!is_factory_key(0));

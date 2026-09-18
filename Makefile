@@ -76,10 +76,22 @@ q1:
 test:
 	$(CARGO) test --workspace --exclude catcard-fw --exclude catcard-kernel
 
-# Lint both the dev build (default features on) and the stripped ship build.
+# What CI runs, so a green tree here means a green tree there.
+#
+# `-D warnings` is the part that matters: without it clippy's findings are warnings
+# locally and errors in CI, which is how this tree stayed red through a day of pushes
+# that all looked clean from here. The workspace clippy and the format check are the
+# other two gates CI applies and this did not.
+export RUSTFLAGS := -D warnings
+
 lint:
+	$(CARGO) fmt --all -- --check
+	$(CARGO) clippy --workspace --exclude catcard-fw --exclude catcard-kernel --all-targets
+	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std
+	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std,multichain
 	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5
 	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5
+	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,multichain
 
 clean:
 	rm -f $(OUT)/catcard-*.bin $(OUT)/catcard-*.dfu

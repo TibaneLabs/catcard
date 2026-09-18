@@ -363,10 +363,11 @@ mod tests {
     #[test]
     fn a_write_reaches_the_device_in_order() {
         let mut dev = Device::new(0x65);
-        let mut bus = SoftI2c::new(&mut dev);
-        assert_eq!(bus.write(0x65, b"a"), Ok(()));
-        assert_eq!(bus.write(0x65, &[0x12, 0x34]), Ok(()));
-        drop(bus);
+        {
+            let mut bus = SoftI2c::new(&mut dev);
+            assert_eq!(bus.write(0x65, b"a"), Ok(()));
+            assert_eq!(bus.write(0x65, &[0x12, 0x34]), Ok(()));
+        }
         assert_eq!(dev.received, vec![b'a', 0x12, 0x34]);
         assert_eq!((dev.starts, dev.stops), (2, 2));
     }
@@ -374,9 +375,10 @@ mod tests {
     #[test]
     fn nobody_home_is_a_nack_and_the_bus_is_still_released() {
         let mut dev = Device::new(0x65);
-        let mut bus = SoftI2c::new(&mut dev);
-        assert_eq!(bus.write(0x64, b"v"), Err(Error::Nack));
-        drop(bus);
+        {
+            let mut bus = SoftI2c::new(&mut dev);
+            assert_eq!(bus.write(0x64, b"v"), Err(Error::Nack));
+        }
         assert!(dev.received.is_empty());
         assert_eq!(dev.stops, 1, "no stop after a nack leaves the bus held");
         assert!(dev.master_sda && dev.scl);
@@ -396,9 +398,10 @@ mod tests {
     fn a_stretched_clock_is_waited_for_and_a_stuck_one_is_an_error() {
         let mut dev = Device::new(0x65);
         dev.stretch = 5;
-        let mut bus = SoftI2c::new(&mut dev);
-        assert_eq!(bus.write(0x65, b"a"), Ok(()));
-        drop(bus);
+        {
+            let mut bus = SoftI2c::new(&mut dev);
+            assert_eq!(bus.write(0x65, b"a"), Ok(()));
+        }
         assert_eq!(dev.received, vec![b'a']);
 
         let mut stuck = Device::new(0x65);

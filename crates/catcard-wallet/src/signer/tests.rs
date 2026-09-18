@@ -85,10 +85,8 @@ fn psbt_for(steps: &[u32], fingerprint: [u8; 4], buf: &mut [u8]) -> usize {
     let psbt = Psbt::parse(&b[..n]).unwrap();
 
     let path: Vec<u32> = steps.to_vec();
-    let n = psbt
-        .add_input_bip32_derivation(0, &pk, fingerprint, &path, buf)
-        .unwrap();
-    n
+    psbt.add_input_bip32_derivation(0, &pk, fingerprint, &path, buf)
+        .unwrap()
 }
 
 #[test]
