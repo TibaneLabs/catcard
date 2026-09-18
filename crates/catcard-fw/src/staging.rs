@@ -14,16 +14,64 @@
 //! screen — is board-agnostic and shared, exactly as it should be.
 
 use catcard_callgate::Callgate;
+use catcard_upgrade::StagingArea;
+use catcard_upgrade::claim::{Claim, Ticket};
 #[cfg(feature = "board-mk3")]
 use catcard_callgate::abi::LogoutMode;
 
 use crate::display;
 
-/// The staging area type for this board: PSRAM on mk4/mk5/Q1, SPI-NOR on mk3.
+/// The medium itself, before anything claims it.
 #[cfg(not(feature = "board-mk3"))]
-pub type Area = catcard_upgrade::psram::PsramArea;
+type Medium = catcard_upgrade::psram::PsramArea;
 #[cfg(feature = "board-mk3")]
-pub type Area = catcard_upgrade::nor::NorArea<crate::nor::NorBus>;
+type Medium = catcard_upgrade::nor::NorArea<crate::nor::NorBus>;
+
+/// One holder at a time: there is one staging area and several paths that stage into it.
+static HELD: Claim = Claim::new();
+
+/// The board's staging area, held exclusively for as long as this lives.
+///
+/// The ticket is released when this is dropped, which is wherever the staging ends --
+/// installed, declined, refused partway, or abandoned when a screen returns. Nothing has to
+/// remember to hand it back.
+pub struct Area {
+    medium: Medium,
+    _ticket: Ticket,
+}
+
+impl StagingArea for Area {
+    type Error = <Medium as StagingArea>::Error;
+
+    fn image_offset(&self) -> u32 {
+        self.medium.image_offset()
+    }
+
+    fn capacity(&self) -> u32 {
+        self.medium.capacity()
+    }
+
+    fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Self::Error> {
+        self.medium.write(offset, data)
+    }
+
+    fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), Self::Error> {
+        self.medium.read(offset, out)
+    }
+
+    fn publish(&mut self, len: u32) -> Result<(), Self::Error> {
+        self.medium.publish(len)
+    }
+}
+
+/// Why the staging area could not be had.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Unavailable {
+    /// This board has no staging medium, or it did not answer.
+    NoMedium,
+    /// Something else is partway through staging an image.
+    Busy,
+}
 
 /// Whether this board has a firmware-staging medium at all -- a cheap const check (no
 /// hardware brought up), for reporting the upgrade capability and refusing an offer early.
@@ -38,27 +86,38 @@ pub fn has_staging() -> bool {
     }
 }
 
-/// Claim the board's firmware-staging area, if it has one and it is reachable.
+/// Take the board's firmware-staging area, exclusively.
 ///
-/// `None` when the medium is absent (a board with neither PSRAM nor SPI-NOR) or, on mk3,
-/// when the SPI-NOR does not answer — either way there is nowhere to stage an image, which
-/// the caller reports rather than proceeding.
-pub fn area() -> Option<Area> {
+/// [`Unavailable::NoMedium`] when the board has none or the SPI-NOR does not answer;
+/// [`Unavailable::Busy`] when another path is holding it. The two are different answers to
+/// a person: one is "this board cannot", the other is "not while that is happening".
+pub fn area() -> Result<Area, Unavailable> {
+    // Taken before the medium is brought up: a second holder must be told no rather than
+    // handed a fresh view of the same bytes. This is what stops a USB offer overwriting an
+    // image while the screen is still asking about it.
+    let ticket = HELD.take().ok_or(Unavailable::Busy)?;
     #[cfg(not(feature = "board-mk3"))]
     {
-        let psram = catcard_board::BOARD.psram?;
+        let psram = catcard_board::BOARD.psram.ok_or(Unavailable::NoMedium)?;
         // SAFETY: the region is the memory-mapped PSRAM the board table describes and
         // nothing else in this firmware writes it. Whether it is actually mapped is what
         // `Debug → PSRAM` proves; an unmapped region shows up as a write that does not
         // read back, which staging catches.
-        Some(unsafe { catcard_upgrade::psram::PsramArea::claim(&psram) })
+        let medium = unsafe { catcard_upgrade::psram::PsramArea::claim(&psram) };
+        Ok(Area {
+            medium,
+            _ticket: ticket,
+        })
     }
     #[cfg(feature = "board-mk3")]
     {
         // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone; the menu waits for
         // an upgrade to finish before this can run again.
-        let nor = unsafe { crate::nor::init() }?;
-        Some(catcard_upgrade::nor::NorArea::new(nor))
+        let nor = unsafe { crate::nor::init() }.ok_or(Unavailable::NoMedium)?;
+        Ok(Area {
+            medium: catcard_upgrade::nor::NorArea::new(nor),
+            _ticket: ticket,
+        })
     }
 }
 

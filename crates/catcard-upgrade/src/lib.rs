@@ -36,6 +36,7 @@ use catcard_fwhdr::{
 };
 
 pub mod dfuse;
+pub mod claim;
 pub mod nor;
 pub mod psram;
 
@@ -69,9 +70,10 @@ pub enum Reject {
     /// cannot accept any upgrade over USB at all, and the host should stop rather than
     /// send a quarter of a megabyte to find out.
     NoStagingArea,
-    /// The staged bytes are not the ones the approval was granted over: something wrote
-    /// into the staging area between the question on the screen and the answer.
-    StagedImageChanged,
+    /// The staging medium is already held: another path is partway through an image, and
+    /// there is only one staging area. Handing out a second view of the same bytes is how
+    /// an approved image gets replaced by a different one before it installs.
+    StagingBusy,
 }
 
 impl From<catcard_fwhdr::Error> for Reject {
@@ -127,13 +129,6 @@ pub struct Approval {
     ///
     /// So it reaches the screen as a warning and a person decides.
     pub older_than_running: bool,
-    /// The digest of the bytes this approval was granted over.
-    ///
-    /// Checked again by [`Staged::commit`], because the staging area is one fixed region
-    /// with no lock on it: the screen showing this approval polls the keypad while the USB
-    /// task keeps answering, so a host can stage a second image into the same bytes while
-    /// someone reads the first one. See [`Reject::StagedImageChanged`].
-    digest: [u8; 32],
 }
 
 impl Approval {
@@ -236,6 +231,11 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// Bytes still to come.
     pub fn remaining(&self) -> u32 {
         self.length - self.received
+    }
+
+    /// Bytes the image will have when it is whole.
+    pub fn length(&self) -> u32 {
+        self.length
     }
 
     pub fn is_complete(&self) -> bool {
@@ -438,7 +438,6 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             signature,
             length: self.length,
             older_than_running,
-            digest,
         })
     }
 
@@ -501,21 +500,6 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// region, which is why the caller is handed it rather than left to recompute it.
     pub fn commit(mut self, approval: Approval) -> Result<Region, Reject> {
         self.settle()?;
-        // Digest the bytes again and refuse if they moved.
-        //
-        // The approval says a person looked at a screen and agreed to *those* bytes. The
-        // staging area is one fixed region that anything can claim, and the screen that
-        // showed the approval polls the keypad while the USB task goes on answering -- so
-        // a host can offer a second image into the same region between the question and
-        // the answer. The bootloader re-verifies what it installs, but a signature is not
-        // the same claim as "this is what was approved": the developer key is published,
-        // so anyone can produce an image that verifies.
-        //
-        // The cost is one more pass over the image, at the moment before the running
-        // firmware is overwritten, which is the right place to spend it.
-        if self.stored_digest()? != approval.digest {
-            return Err(Reject::StagedImageChanged);
-        }
         let start = self.area.image_offset();
         self.area
             .publish(approval.length)

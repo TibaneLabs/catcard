@@ -50,7 +50,7 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
         R::BadSignature => "signature does not verify",
         R::StorageFault { .. } => "staging area failed",
         R::NoStagingArea => "nowhere to stage it",
-        R::StagedImageChanged => "the image changed after you were asked",
+        R::StagingBusy => "busy with another image",
     }
 }
 
@@ -163,8 +163,12 @@ pub fn stage_from_card(
     // The board's staging area: PSRAM on mk4/mk5/Q1, the SPI-NOR on mk3 (brought up here).
     // `None` means there is nowhere to put an image -- no PSRAM/SPI-NOR, or the SPI-NOR did
     // not answer -- which is a clearer stop than failing partway through the write.
-    let Some(area) = staging::area() else {
-        return Outcome::Failed("no staging area");
+    let area = match staging::area() {
+        Ok(a) => a,
+        // Two different answers: this board cannot stage at all, or something else is
+        // partway through an image and this must not walk over it.
+        Err(staging::Unavailable::NoMedium) => return Outcome::Failed("no staging area"),
+        Err(staging::Unavailable::Busy) => return Outcome::Failed("busy with another image"),
     };
     let mut staged = match Staged::begin(area, &BOARD, len) {
         Ok(s) => s,

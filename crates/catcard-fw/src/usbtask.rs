@@ -440,10 +440,21 @@ impl UsbTask {
                     // Claim the board's staging area (PSRAM on mk4/mk5/Q1, SPI-NOR on mk3).
                     // `None` -- no medium, or the SPI-NOR did not answer -- is refused on
                     // this first frame rather than after 256 KB have crossed the wire.
-                    let Some(area) = staging::area() else {
-                        self.frames.reset();
-                        self.refuse(Reject::NoStagingArea);
-                        return;
+                    // Drop whatever this task was holding first: a host re-offering after
+                    // a failed attempt is the same holder coming back, not a second one.
+                    // Anything *else* holding the medium -- a card image waiting on the
+                    // approval screen -- is refused, which is the point.
+                    self.stage = Stage::Idle;
+                    let area = match staging::area() {
+                        Ok(a) => a,
+                        Err(why) => {
+                            self.frames.reset();
+                            self.refuse(match why {
+                                staging::Unavailable::NoMedium => Reject::NoStagingArea,
+                                staging::Unavailable::Busy => Reject::StagingBusy,
+                            });
+                            return;
+                        }
                     };
                     match Staged::begin(area, &BOARD, msg.total) {
                         Ok(s) => self.stage = Stage::Receiving(s),
@@ -810,7 +821,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::BadSignature => 10,
         Reject::StorageFault { .. } => 11,
         Reject::NoStagingArea => 12,
-        Reject::StagedImageChanged => 13,
+        Reject::StagingBusy => 13,
     };
     1
 }

@@ -209,7 +209,6 @@ fn is_verified_tracks_whether_this_board_accepts_the_key() {
         signature: sig,
         length: MIN_FIRMWARE_LENGTH,
         older_than_running: false,
-        digest: [0; 32],
     };
     // Verifies and the board accepts the key.
     assert!(approval(Signature::DeveloperKey).is_verified());
@@ -466,7 +465,6 @@ fn a_marker_that_does_not_read_back_stops_the_install() {
         signature: Signature::DeveloperKey,
         length: MIN_FIRMWARE_LENGTH,
         older_than_running: false,
-        digest: [0; 32],
     };
     let staged = Staged::begin(Deaf, &MK4, MIN_FIRMWARE_LENGTH).unwrap();
     assert!(
@@ -566,34 +564,6 @@ fn staging_writes_aligned_words_and_reads_nothing_on_the_way() {
     assert!(area.bytes[..image.len()] == image[..], "the bytes differ");
 }
 
-
-/// An image swapped in after the approval is refused at the moment of commit.
-///
-/// The staging area is one fixed region with nothing holding it: the screen that asks
-/// polls the keypad while the USB task keeps answering, so a host can offer a second image
-/// into the same bytes between the question and the answer. The bootloader re-verifies what
-/// it installs, but that is a different claim from "this is what was approved" -- the
-/// developer key is published, so anyone can produce an image that verifies.
-#[test]
-fn an_image_swapped_in_after_the_approval_is_not_installed() {
-    let approved = image_for(&Q1, *b"20260918", 0);
-    let mut staged = Staged::begin(Mem::new(approved.len()), &Q1, approved.len() as u32).unwrap();
-    staged.write(0, &approved).unwrap();
-    let approval = staged.inspect(None).expect("a signed image");
-
-    // A second image lands in the same region while the screen is still asking. It is
-    // signed by the same published key, so nothing downstream would notice.
-    let swapped = image_for(&Q1, *b"20260919", 0);
-    assert_ne!(swapped, approved, "the two images must differ");
-    let mut staged = Staged::begin(Mem::new(swapped.len()), &Q1, swapped.len() as u32).unwrap();
-    staged.write(0, &swapped).unwrap();
-
-    assert_eq!(
-        staged.commit(approval).err(),
-        Some(Reject::StagedImageChanged),
-        "what was approved is not what is there"
-    );
-}
 
 /// The ordinary path still installs: an approval commits the bytes it was granted over.
 #[test]
