@@ -58,7 +58,8 @@ pub struct PsramArea {
     capacity: u32,
     /// Where the bootloader reads the recovery header.
     header_at: u32,
-    /// Which way the last access went. See [`TURNAROUND_NOPS`].
+    /// Which way the last access went: a change of direction starts a new burst, which
+    /// `tCPH` says must have CE# high before it. See [`burst_gap`].
     way: Way,
 }
 
@@ -151,34 +152,6 @@ pub fn burst_gap() {
         #[cfg(target_arch = "arm")]
         // SAFETY: a NOP. Not `nomem`, so it is not moved out from between the accesses it
         // is separating -- which is the whole point of it.
-        unsafe {
-            core::arch::asm!("nop", options(nostack, preserves_flags))
-        };
-        #[cfg(not(target_arch = "arm"))]
-        core::hint::spin_loop();
-    }
-}
-
-/// NOPs between a write and a read of this memory, or a read and a write.
-///
-/// The controller cannot be reading and writing at once: **turning it round takes time**,
-/// and a read issued straight after a write comes back with what was there before, or with
-/// a word that was never written. That is not the same thing as [`RECOVERY_NOPS`], which is
-/// the gap between one store and the next; this is the gap when the direction changes.
-///
-/// Paid once per call rather than once per word, so it can afford to be generous: digesting
-/// a megabyte reads it in 256-byte pieces, four thousand of them, and even a thousand NOPs
-/// each is a few tens of milliseconds.
-///
-/// Measure it with Debug → PSRAM soak, whose second sweep is exactly this transition.
-pub const TURNAROUND_NOPS: u32 = 1_000;
-
-/// Wait out a change of direction, per [`TURNAROUND_NOPS`].
-#[inline(never)]
-pub fn turnaround() {
-    for _ in 0..TURNAROUND_NOPS {
-        #[cfg(target_arch = "arm")]
-        // SAFETY: a NOP. Not `nomem`, so it is not moved across the accesses it separates.
         unsafe {
             core::arch::asm!("nop", options(nostack, preserves_flags))
         };
@@ -284,8 +257,9 @@ impl StagingArea for PsramArea {
     /// the span keep their values.
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, data.len())?;
+        // A change of direction is a new burst, and `tCPH` wants CE# high between bursts.
         if self.way == Way::Reading {
-            turnaround();
+            burst_gap();
         }
         self.way = Way::Writing;
         let mut since_gap = 0u32;
@@ -325,8 +299,9 @@ impl StagingArea for PsramArea {
     /// digesting a staged image a byte at a time is four times the bus traffic.
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, out.len())?;
+        // As in `write`: turning the bus round starts a new burst.
         if self.way == Way::Writing {
-            turnaround();
+            burst_gap();
         }
         self.way = Way::Reading;
         let mut since_gap = 0u32;
@@ -377,7 +352,7 @@ impl StagingArea for PsramArea {
             recover();
         }
         self.way = Way::Writing;
-        turnaround();
+        burst_gap();
 
         // Read it back before anyone acts on it.
         //
