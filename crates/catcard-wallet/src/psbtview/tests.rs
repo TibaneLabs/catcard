@@ -388,6 +388,110 @@ fn an_input_with_no_amount_is_refused_rather_than_priced_at_zero() {
     );
 }
 
+/// A PSBT paying `CHANGE`, with `junk` decoy derivation records ahead of the real one.
+/// Each decoy names our fingerprint, so each costs a derivation; the real record is last,
+/// so a cap that fires hides it.
+fn change_with_decoys(junk: usize, buf: &mut [u8]) -> usize {
+    let mut a = vec![0u8; 1 << 17];
+    let mut b = vec![0u8; 1 << 17];
+    let mut n = build(
+        &[ours_spend(100_000)],
+        &[
+            Pay {
+                phrase: OURS,
+                steps: CHANGE,
+                amount: 60_000,
+                claim_ours: false,
+            },
+            // So `sending` is never zero, whichever way the change output is counted.
+            Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 39_000,
+                claim_ours: false,
+            },
+        ],
+        &mut a,
+    );
+    for j in 0..junk {
+        // Ours, so it derives, but not the key this output pays to.
+        let pk = pubkey_at(OURS, &[900 + j as u32]);
+        let steps = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 9, j as u32];
+        let psbt = Psbt::parse(&a[..n]).unwrap();
+        let m = psbt
+            .add_output_bip32_derivation(0, &pk, OUR_FP, &steps, &mut b)
+            .unwrap();
+        a[..m].copy_from_slice(&b[..m]);
+        n = m;
+    }
+    let pk = pubkey_at(OURS, &CHANGE);
+    let psbt = Psbt::parse(&a[..n]).unwrap();
+    let m = psbt
+        .add_output_bip32_derivation(0, &pk, OUR_FP, &CHANGE, &mut b)
+        .unwrap();
+    buf[..m].copy_from_slice(&b[..m]);
+    m
+}
+
+#[test]
+fn change_is_still_found_behind_a_few_decoy_records() {
+    let mut buf = vec![0u8; 1 << 17];
+    let n = change_with_decoys(MAX_CHANGE_KEYS - 1, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let script = p2wpkh_script(&pubkey_at(OURS, &CHANGE));
+    assert!(is_change(
+        &psbt,
+        0,
+        &script,
+        &master_of(OURS),
+        OUR_FP,
+        &kw()
+    ));
+}
+
+#[test]
+fn an_output_cannot_ask_for_unbounded_derivation() {
+    // Uncapped this is one masked derivation per record, for as many as the file holds.
+    let mut buf = vec![0u8; 1 << 17];
+    let n = change_with_decoys(MAX_CHANGE_KEYS, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let script = p2wpkh_script(&pubkey_at(OURS, &CHANGE));
+    assert!(!is_change(
+        &psbt,
+        0,
+        &script,
+        &master_of(OURS),
+        OUR_FP,
+        &kw()
+    ));
+}
+
+#[test]
+fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
+    // Through the callers the firmware uses, which walk every output inside the masked
+    // region, rather than `is_change` alone.
+    let mut buf = vec![0u8; 1 << 17];
+    let n = change_with_decoys(MAX_CHANGE_KEYS, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+
+    let sum = summarise(&psbt, &master, OUR_FP, &Policy::default(), &kw()).unwrap();
+    assert_eq!(sum.change, 0);
+    assert_eq!(sum.sending, 99_000);
+
+    let mut dests = [Destination {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; address::MAX_ADDRESS_LEN],
+        address_len: 0,
+    }; 4];
+    let found = destinations(&psbt, &master, OUR_FP, Network::Mainnet, &mut dests, &kw());
+    assert_eq!(found, 2);
+    assert!(!dests[0].change, "a stuffed output was still folded into change");
+    assert!(!dests[0].address().is_empty(), "shown without an address");
+}
+
 #[test]
 fn a_signature_already_on_an_input_is_visible() {
     let mut buf = vec![0u8; 8192];

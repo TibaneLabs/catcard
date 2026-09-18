@@ -202,11 +202,22 @@ pub fn summarise(
     })
 }
 
+/// Derivation records one output may ask this to follow.
+///
+/// The same bound, and for the same reason, as [`signer::MAX_KEYS_PER_INPUT`]: a record
+/// naming our master fingerprint -- which every exported descriptor publishes -- costs a
+/// walk of up to [`signer::MAX_STEPS`] elliptic-curve levels, and an output map holds as
+/// many records as the file has room for. Past the cap the answer is "not change", which
+/// shows the amount as leaving rather than hiding it as change.
+pub const MAX_CHANGE_KEYS: usize = MAX_KEYS_PER_INPUT;
+
 /// Whether output `index` pays back to this wallet.
 ///
 /// Not "does it claim our fingerprint": the key is derived down the claimed path and the
 /// output's script is rebuilt from it. Only a byte-for-byte match counts. A host that
 /// mislabels a stranger's output as change is trying to hide where the money goes.
+///
+/// At most [`MAX_CHANGE_KEYS`] records are followed: this runs with interrupts masked.
 pub fn is_change(
     psbt: &Psbt<'_>,
     index: usize,
@@ -218,6 +229,7 @@ pub fn is_change(
     let Some(map) = psbt.output(index).map(|o| o.map()) else {
         return false;
     };
+    let mut derived = 0usize;
     for taproot in [false, true] {
         let keytype = if taproot {
             out_key::TAP_BIP32_DERIVATION
@@ -225,9 +237,13 @@ pub fn is_change(
             out_key::BIP32_DERIVATION
         };
         for rec in map.records_of(keytype) {
+            if derived == MAX_CHANGE_KEYS {
+                return false;
+            }
             let Some(request) = signer::request_from_record(rec, fingerprint, taproot) else {
                 continue;
             };
+            derived += 1;
             let Ok(signer) = signer::match_key(master, &request, kw) else {
                 continue;
             };
