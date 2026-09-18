@@ -48,7 +48,6 @@ pub enum Error {
     /// The flash driver refused.
     Flash(iflash::Error),
     /// The page does not divide into whole blocks, which the emulation needs.
-    #[allow(dead_code)] // reported by the write path, which nothing calls yet
     Geometry { page_size: usize },
 }
 
@@ -65,7 +64,6 @@ impl Blocks {
     /// Nothing else may write the region while this lives, and each operation stalls the
     /// bus (the settings pages share a bank with the running code), so the caller must not
     /// need an interrupt serviced during one.
-    #[allow(dead_code)] // the writable path returns when settings are saved, not just read
     pub unsafe fn open() -> Result<Self, Error> {
         let (start, len) = match BOARD.settings {
             catcard_board::spec::SettingsArea::InternalFlash { start, len } => (start, len),

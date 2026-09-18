@@ -107,7 +107,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 /// each key walks its own characters -- press `2` for `a`, again for `b` -- and moving to
 /// another key, or confirming, settles the one before it. Cancel removes a character, and
 /// cancel on an empty field backs out.
-fn read(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
+pub(crate) fn read(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
     let mut entry = Entry::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

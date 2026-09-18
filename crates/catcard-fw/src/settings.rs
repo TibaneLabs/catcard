@@ -44,7 +44,6 @@ impl Files {
     ///
     /// # Safety
     /// As [`Blocks::open`]: nothing else may touch the region, and each write stalls the bus.
-    #[allow(dead_code)] // as `Blocks::open`: the writable path is not wired up yet
     pub unsafe fn mount() -> Result<Self, MountFailed> {
         // SAFETY: forwarding the caller's guarantee.
         let blocks = unsafe { Blocks::open() }.map_err(MountFailed::Region)?;
@@ -182,6 +181,118 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
     let text = core::str::from_utf8(&nick[..len]).ok()?;
     crate::catlog!("nick: {} byte(s) from the pre-login settings", len);
     Some(text)
+}
+
+/// Copy the whole settings region to a card, byte for byte.
+///
+/// A settings volume holds things whose only copy is on this device -- notes, passwords,
+/// multisig wallets. The store is built to survive losing power mid-save, but it is not
+/// built to survive a bug in this firmware, and the write path is new. So there is a way to
+/// take a copy first, and it is worth taking before letting anything write.
+///
+/// Nothing is decrypted: the slots go to the card exactly as they sit in flash, still
+/// encrypted under keys this file never sees here. A card holding this is worth what an
+/// attacker's copy of the flash is worth -- which is why the slots are encrypted.
+///
+/// The read is direct from memory-mapped flash, so a 512 KB region needs no buffer at all.
+pub(crate) fn backup_to_card(ui: &mut crate::ui::Ui<'_>) {
+    use core::fmt::Write as _;
+
+    let (start, len) = match catcard_board::BOARD.settings {
+        catcard_board::spec::SettingsArea::InternalFlash { start, len } => (start, len),
+        _ => {
+            crate::menu::message(ui.panel, "Settings to SD", "not this board", "");
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+
+    crate::menu::blocking_screen(ui.panel, "Settings to SD", "copying");
+    // SAFETY: internal flash is memory-mapped and readable; the region is the board
+    // table's, and this only reads it.
+    let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, len as usize) };
+
+    let mut note = heapless::String::<48>::new();
+    match crate::menu::write_card_file("/settings.img", bytes) {
+        Ok(()) => {
+            let _ = write!(note, "{} KB written", len / 1024);
+            crate::catlog!("settings: {} bytes copied to /settings.img", len);
+            crate::menu::message(ui.panel, "Settings to SD", "/settings.img", note.as_str());
+        }
+        Err(why) => {
+            crate::catlog!("settings: backup failed: {}", why);
+            crate::menu::message(ui.panel, "Settings to SD", why, "nothing written");
+        }
+    }
+    crate::menu::wait_for_any_key(ui);
+}
+
+/// Set the nickname shown before the PIN prompt.
+///
+/// It goes in the **pre-login** blob, under a key of thirty-two zero bytes, which is where
+/// stock keeps it and the only place it could be: the screen that shows it runs before
+/// anyone has logged in, so it cannot be under a key derived from the seed.
+///
+/// This is the first thing in this firmware to *write* the settings store. Everything it
+/// does not touch keeps its exact bytes -- see [`catcard_settings::store::set`] -- so a
+/// device that has been stock keeps its stock settings.
+pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
+    use catcard_settings::nvstore;
+    use catcard_settings::store::{self, SCRATCH};
+
+    let Some(entry) = crate::passphrase::read(ui, "Nickname") else {
+        return;
+    };
+    let text = entry.as_str();
+    if text.len() > NICK_MAX {
+        crate::menu::message(
+            ui.panel,
+            "Nickname",
+            "too long to show",
+            "32 characters at most",
+        );
+        crate::menu::wait_for_any_key(ui);
+        return;
+    }
+
+    crate::menu::blocking_screen(ui.panel, "Nickname", "saving");
+    // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
+    // touches the settings region. Writable, unlike everywhere else that opens this store.
+    let mut files = match unsafe { Files::mount() } {
+        Ok(f) => f,
+        Err(why) => {
+            crate::catlog!("nick: mount for writing failed: {:?}", why);
+            crate::menu::message(ui.panel, "Nickname", "no settings store", "nothing saved");
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+
+    // Two full-slot buffers: one holds the settings while the key is changed, the other
+    // seals them. Static, because a screen has an 8 KB stack and these are four each.
+    static mut DOC: [u8; SCRATCH] = [0; SCRATCH];
+    static mut SEAL: [u8; SCRATCH] = [0; SCRATCH];
+    // SAFETY: as above -- one settings screen at a time, foreground only.
+    let doc: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
+    // SAFETY: as above.
+    let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
+
+    // Which slot to write is drawn, so repeated saves spread over the hundred rather than
+    // wearing one out. A DRBG that will not answer is not a reason to lose a nickname: the
+    // spread is wear levelling, not a secret, so slot zero will do.
+    let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
+    let key = nvstore::prelogin_key();
+    match store::set(&mut files, &key, "nick", text, choose, doc, seal) {
+        Ok(slot) => {
+            crate::catlog!("nick: saved to slot {:03x}", slot);
+            crate::menu::message(ui.panel, "Nickname", text, "saved");
+        }
+        Err(e) => {
+            crate::catlog!("nick: save failed: {:?}", e);
+            crate::menu::message(ui.panel, "Nickname", "could not save", "nothing changed");
+        }
+    }
+    crate::menu::wait_for_any_key(ui);
 }
 
 /// Debug: read the settings blobs and show what is in them, decrypted.

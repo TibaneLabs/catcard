@@ -118,6 +118,12 @@ enum Screen {
     /// Debug: exercise the settings store on internal flash.
     #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
+    /// Typing the nickname shown before the PIN prompt.
+    #[cfg(not(feature = "board-mk3"))]
+    Nickname,
+    /// Copying the settings region to a card, before anything writes to it.
+    #[cfg(not(feature = "board-mk3"))]
+    SettingsToSd,
     /// The PSRAM write-recovery sweep: how many NOPs a store here needs.
     #[cfg(not(feature = "board-mk3"))]
     PsramSoak,
@@ -193,8 +199,20 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 }
 
 /// Settings, with "Destroy seed" only where there is a seed to destroy.
-const SETTINGS_ITEMS: &[&str] = &["Login", "Passphrase", "Destroy seed"];
-const SETTINGS_ITEMS_BLANK: &[&str] = &["Login"];
+const SETTINGS_ITEMS: &[&str] = &[
+    "Login",
+    "Passphrase",
+    #[cfg(not(feature = "board-mk3"))]
+    "Nickname",
+    "Destroy seed",
+];
+const SETTINGS_ITEMS_BLANK: &[&str] = &[
+    "Login",
+    // A nickname belongs to the device, not to a wallet, so a blank device can have one --
+    // and it is stored under the pre-login key, which exists either way.
+    #[cfg(not(feature = "board-mk3"))]
+    "Nickname",
+];
 
 /// The settings menu for the device in front of you.
 fn settings_items(no_seed: bool) -> &'static [&'static str] {
@@ -286,6 +304,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Settings store",
     #[cfg(not(feature = "board-mk3"))]
     "PSRAM soak",
+    #[cfg(not(feature = "board-mk3"))]
+    "Settings to SD",
     #[cfg(feature = "board-q1")]
     "Secure notes",
 ];
@@ -684,6 +704,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::PsramSoak => to(|a| crate::psramsoak::run(a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
         #[cfg(feature = "board-q1")]
         Screen::Notes => to(|a| crate::notes::view(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(feature = "games")]
@@ -901,6 +925,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
             #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Nickname")) => Screen::Nickname,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("PSRAM soak")) => Screen::PsramSoak,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
@@ -1100,7 +1128,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it takes the CPU and never returns.
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SettingsStore | Screen::PsramSoak => {}
+        Screen::SettingsStore | Screen::PsramSoak | Screen::Nickname | Screen::SettingsToSd => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}
         Screen::Kernel => kernel_screen(panel),

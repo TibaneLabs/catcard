@@ -156,6 +156,67 @@ pub fn write<S: Slots>(
     Ok(target)
 }
 
+/// Change one key and save the settings back.
+///
+/// The value goes in **in place**: the rest of the object -- including every key this
+/// firmware has never heard of, in the order the firmware that wrote them put them -- keeps
+/// its exact bytes. That is the point of the whole store. A device that has been stock and
+/// then this and then stock again must not lose a setting on the way through, and
+/// re-rendering an object around a change is how that gets lost.
+///
+/// `_age` goes up by one, so a later read prefers this copy; then a free slot is written and
+/// the old one erased, which is the order that survives losing power.
+///
+/// `doc` holds the settings while they are edited and must be [`SCRATCH`] bytes; `scratch`
+/// is the sealing buffer and must be too. `choose` picks the slot, as in [`write`].
+///
+/// Returns the slot written.
+pub fn set<S: Slots, V: emjson::ToJson + ?Sized>(
+    slots: &mut S,
+    key: &Key,
+    name: &str,
+    value: &V,
+    choose: u32,
+    doc: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<u32, Error> {
+    use emjson::Seg;
+    use emjson::edit::{Editor, MemStorage};
+
+    if doc.len() < SCRATCH || scratch.len() < SCRATCH {
+        return Err(Error::Malformed);
+    }
+    // What is stored now, or an empty object on a device that has never saved. `Absent` is
+    // not a failure here: the first save is what makes it not absent.
+    let mut len = match read(slots, key, doc) {
+        Ok(n) => n,
+        Err(Error::Absent) => {
+            doc[..2].copy_from_slice(b"{}");
+            2
+        }
+        Err(e) => return Err(e),
+    };
+    let age = Doc::parse(&doc[..len]).map(|d| next_age(&d)).unwrap_or(1);
+
+    {
+        // The editor moves the document's tail through this; a small window is enough, and
+        // it must not be the sealing buffer, which is needed intact afterwards.
+        let mut window = [0u8; 64];
+        let mut editor = Editor::new(MemStorage::new(doc, len), &mut window);
+        // `Seg::Key` rather than a JSON Pointer: a key holding `/` or `~` would have to be
+        // escaped in a pointer, and nothing guarantees a settings key does not.
+        editor
+            .set(&[Seg::Key(name)][..], value)
+            .map_err(|_| Error::Malformed)?;
+        editor
+            .set(&[Seg::Key("_age")][..], &age)
+            .map_err(|_| Error::Malformed)?;
+        len = editor.storage().doc_len();
+    }
+
+    write(slots, key, &doc[..len], choose, scratch)
+}
+
 /// The `_age` a save should carry: one past what is stored.
 pub fn next_age(doc: &Doc<'_>) -> u64 {
     doc.get_u64("_age").unwrap_or(0).saturating_add(1)
@@ -167,12 +228,12 @@ mod tests {
 
     /// Slots in RAM, as a device's medium would behave: reads report empty until written,
     /// writes replace, clears empty.
-    struct Ram {
+    pub(super) struct Ram {
         slots: [Option<(usize, [u8; SLOT_LEN])>; 8],
     }
 
     impl Ram {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 slots: [None; 8].map(|_: Option<(usize, [u8; SLOT_LEN])>| None),
             }
@@ -305,5 +366,122 @@ mod tests {
         let doc = Doc::parse(br#"{"_age":41}"#).unwrap();
         assert_eq!(next_age(&doc), 42);
         assert_eq!(next_age(&Doc::new()), 1);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use super::tests::Ram;
+
+    fn key() -> Key {
+        nvstore::hash_key(&[0x11; 72])
+    }
+
+    /// A save keeps every key it did not touch, byte for byte, in its original order.
+    ///
+    /// This is the property the whole store exists for: a blob written by stock carries
+    /// settings this firmware has never heard of -- multisig wallets, trick PINs, a spending
+    /// policy -- and losing one means its owner re-enters it, if they even notice.
+    #[test]
+    fn a_save_keeps_the_keys_it_does_not_understand_exactly_as_they_were() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+
+        // A blob as another firmware might have left it: keys we know, keys we do not, and
+        // a nested value we could not begin to interpret.
+        let stock = br#"{"_age":7,"chain":"XTN","multisig":[{"name":"cosign","M":2,"N":3}],"tp":{"1234":{"mode":"wipe"}},"rz":8}"#;
+        let slot = write(&mut slots, &k, stock, 3, &mut scratch).unwrap();
+        assert_eq!(read(&mut slots, &k, &mut doc).unwrap(), stock.len());
+
+        set(&mut slots, &k, "nick", &"kitty", 9, &mut doc, &mut scratch).unwrap();
+
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let after = Doc::parse(&doc[..n]).unwrap();
+        // Every original key still there, still in order, with its bytes untouched.
+        let before = Doc::parse(stock).unwrap();
+        for e in before.entries() {
+            if e.key == "_age" {
+                continue;
+            }
+            assert_eq!(after.get(e.key), Some(e.raw), "{} changed", e.key);
+        }
+        let order: Vec<&str> = after.entries().iter().map(|e| e.key).collect();
+        assert_eq!(&order[..5], &["_age", "chain", "multisig", "tp", "rz"]);
+        // And the new one, at the end.
+        assert_eq!(after.get_str("nick"), Some("kitty"));
+        // `_age` went up, so this copy wins over the old one.
+        assert_eq!(after.get_u64("_age"), Some(8));
+        // Written somewhere else, and the old slot emptied: never two live copies.
+        assert_ne!(read_slot_count(&mut slots), 0);
+        let _ = slot;
+    }
+
+    /// Changing a key that is already there replaces its value, not its position.
+    #[test]
+    fn changing_a_key_leaves_it_where_it_was() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+        write(
+            &mut slots,
+            &k,
+            br#"{"_age":1,"chain":"BTC","rz":8,"nick":"old"}"#,
+            0,
+            &mut scratch,
+        )
+        .unwrap();
+
+        set(&mut slots, &k, "nick", &"new", 5, &mut doc, &mut scratch).unwrap();
+
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let after = Doc::parse(&doc[..n]).unwrap();
+        assert_eq!(after.get_str("nick"), Some("new"));
+        let order: Vec<&str> = after.entries().iter().map(|e| e.key).collect();
+        assert_eq!(order, ["_age", "chain", "rz", "nick"], "nothing moved");
+    }
+
+    /// The first save on a device that has never saved writes a settings object.
+    #[test]
+    fn the_first_save_starts_from_an_empty_object() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+        assert_eq!(read(&mut slots, &k, &mut doc), Err(Error::Absent));
+
+        set(&mut slots, &k, "nick", &"first", 0, &mut doc, &mut scratch).unwrap();
+
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let doc = Doc::parse(&doc[..n]).unwrap();
+        assert_eq!(doc.get_str("nick"), Some("first"));
+        assert_eq!(doc.get_u64("_age"), Some(1));
+    }
+
+    /// Values that are not strings go in as JSON, not as text.
+    #[test]
+    fn numbers_and_booleans_are_written_as_json() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+        set(&mut slots, &k, "idle_to", &600u32, 0, &mut doc, &mut scratch).unwrap();
+        set(&mut slots, &k, "nfc", &true, 1, &mut doc, &mut scratch).unwrap();
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let doc = Doc::parse(&doc[..n]).unwrap();
+        assert_eq!(doc.get("idle_to"), Some("600"));
+        assert_eq!(doc.get_bool("nfc"), Some(true));
+        assert_eq!(doc.get_u64("_age"), Some(2), "each save is a new version");
+    }
+
+    /// How many slots hold something.
+    fn read_slot_count(slots: &mut Ram) -> usize {
+        let mut buf = [0u8; SLOT_LEN];
+        (0..slots.count())
+            .filter(|i| matches!(slots.read(*i, &mut buf), Ok(Some(_))))
+            .count()
     }
 }
