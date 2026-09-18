@@ -394,6 +394,30 @@ impl Transport for Sdmmc {
                     at += n;
                 }
                 if at >= BLOCK_LEN {
+                    // The bytes are all here, but the controller may not be done: `DATAEND`
+                    // is what says the data path has closed. Returning before it leaves the
+                    // DPSM running into the next command, and the block after this one then
+                    // starts against a transfer that has not finished -- which shows up as
+                    // an occasional block of a long read being wrong while its neighbours
+                    // are fine.
+                    let mut spin = 0u32;
+                    while reg::read(b + STA) & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT) == 0 {
+                        spin += 1;
+                        if spin >= DATA_TRIES {
+                            last_failure::record(
+                                last_failure::READ_STALLED,
+                                reg::read(b + STA),
+                                reg::read(b + DCOUNT),
+                            );
+                            reg::write(b + ICR, self.bits.icr_all);
+                            return Err(Error::DataError { block: u32::MAX });
+                        }
+                    }
+                    // Anything still in the FIFO belongs to this transfer; left there it
+                    // would be read as the first words of the next one.
+                    while reg::read(b + STA) & STA_RXFIFOE == 0 {
+                        let _ = reg::read(b + FIFO);
+                    }
                     break;
                 }
                 if sta & STA_DATAEND != 0 && at == 0 {

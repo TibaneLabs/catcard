@@ -768,6 +768,55 @@ mod big_exfat {
         image
     }
 
+    /// The upgrade path's exact sequence: open, read the container header, seek back to
+    /// where the image starts, then stream it in 512-byte blocks.
+    ///
+    /// Reading a file from the beginning is not what the firmware does -- it reads the
+    /// DfuSe header first to find out where the image is, and only then streams. A driver
+    /// whose position or cache is confused by that reads most of the file correctly and
+    /// some of it not, which is what the device reports.
+    #[test]
+    fn the_upgrade_paths_read_sequence_returns_the_file() {
+        let data = payload();
+        for shift in [8u8, 3] {
+            let image = card_with(&data, shift);
+            let mut vol: AnyVolume<_, 512> =
+                AnyVolume::mount_with(|| Ok(RamDisk(image.clone()))).expect("mount");
+            let mut file = vol.open_file("/q1/fw.dfu").expect("open");
+
+            // The container header, read in whatever pieces the driver gives.
+            const HEAD: usize = 293;
+            let mut head = [0u8; HEAD];
+            let mut got = 0;
+            while got < HEAD {
+                let n = file.read(&mut vol, &mut head[got..]).expect("head");
+                assert_ne!(n, 0);
+                got += n;
+            }
+            assert_eq!(&head[..], &data[..HEAD], "header, cluster shift {shift}");
+
+            // Back to the start of the image, then stream it.
+            file.seek(&mut vol, HEAD as u64).expect("seek");
+            let mut got = std::vec![0u8; FILE_LEN - HEAD];
+            let mut at = 0usize;
+            while at < got.len() {
+                let want = (got.len() - at).min(512);
+                let n = file
+                    .read(&mut vol, &mut got[at..at + want])
+                    .expect("read");
+                assert_ne!(n, 0, "stopped at {at}, cluster shift {shift}");
+                at += n;
+            }
+            if let Some(i) = (0..got.len()).find(|&i| got[i] != data[HEAD + i]) {
+                std::panic!(
+                    "cluster shift {shift}: first wrong byte at {:#x} of the image (cluster {})",
+                    i,
+                    (HEAD + i) / (512 << shift)
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_file_spanning_clusters_reads_back_byte_for_byte() {
         let data = payload();
