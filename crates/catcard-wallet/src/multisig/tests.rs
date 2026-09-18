@@ -421,3 +421,62 @@ fn a_fixed_key_is_not_a_wallet() {
         "a fixed key was accepted as a wallet"
     );
 }
+
+/// The master behind `SEEDS[i]`.
+fn master_of(phrase: &str) -> ExtendedPrivKey {
+    use crate::bip32::Network;
+    use crate::bip39::{Mnemonic, SEED_LEN};
+    let mnemonic = Mnemonic::parse(phrase, &kw()).expect("a test phrase");
+    let mut seed = [0u8; SEED_LEN];
+    mnemonic.to_seed("", &mut seed, &kw()).unwrap();
+    ExtendedPrivKey::from_seed(&seed, Network::Mainnet, &kw()).unwrap()
+}
+
+#[test]
+fn our_cosigner_is_found_when_the_key_really_derives_from_our_master() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true);
+    let wallet = parse(&text).unwrap();
+    for (i, phrase) in SEEDS.iter().enumerate() {
+        let found = our_cosigner(&wallet, &master_of(phrase), &kw()).unwrap();
+        assert!(found.is_some(), "seed {i} should own a cosigner");
+    }
+}
+
+#[test]
+fn a_foreign_master_owns_nothing() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true);
+    let wallet = parse(&text).unwrap();
+    let outsider = master_of("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong");
+    assert_eq!(our_cosigner(&wallet, &outsider, &kw()), Ok(None));
+}
+
+/// The attack: a descriptor carrying our real fingerprint against somebody else's key.
+/// Fingerprints are public, so this costs the attacker nothing to write.
+#[test]
+fn a_key_claiming_our_fingerprint_without_our_key_is_refused() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true);
+    let mut wallet = parse(&text).unwrap();
+    let ours = master_of(SEEDS[0]);
+    let mine = our_cosigner(&wallet, &ours, &kw())
+        .unwrap()
+        .expect("we own one");
+
+    // Take a cosigner that is not ours and stamp our fingerprint on it.
+    let theirs = (mine + 1) % wallet.n();
+    let stolen = wallet.cosigners()[theirs].xpub;
+    let victim = wallet.cosigners()[mine].fingerprint;
+    let origin = wallet.cosigners()[mine].origin;
+    let origin_len = wallet.cosigners()[mine].origin_len;
+    wallet.cosigners[mine] = Cosigner {
+        fingerprint: victim,
+        origin,
+        origin_len,
+        xpub: stolen,
+    };
+
+    assert_eq!(
+        our_cosigner(&wallet, &ours, &kw()),
+        Err(Error::ForgedOrigin { at: mine }),
+        "a claim on our fingerprint that does not derive to our key must be refused"
+    );
+}
