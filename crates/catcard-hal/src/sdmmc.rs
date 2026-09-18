@@ -152,6 +152,12 @@ const DCTRL_BLOCK_512: u32 = 9 << 4;
 const CMD_TRIES: u32 = 200_000;
 /// Polls waiting for data. Larger: a whole block has to arrive.
 const DATA_TRIES: u32 = 2_000_000;
+/// Polls waiting for a finished transfer to say so, once its bytes are already read.
+///
+/// Short on purpose: it is paid on every block of every read, and the bytes are in hand
+/// whatever the flag does. A block is 512 bytes at 12 MHz on four lines -- about 85 us --
+/// so a transfer that has delivered everything is at its end already.
+const END_POLLS: u32 = 10_000;
 
 /// Where the last data-path or command failure happened, what `STA` read at that moment
 /// (before `ICR` cleared it) and what `DCOUNT` still expected -- or, for a command, which
@@ -394,30 +400,27 @@ impl Transport for Sdmmc {
                     at += n;
                 }
                 if at >= BLOCK_LEN {
-                    // The bytes are all here, but the controller may not be done: `DATAEND`
-                    // is what says the data path has closed. Returning before it leaves the
-                    // DPSM running into the next command, and the block after this one then
-                    // starts against a transfer that has not finished -- which shows up as
-                    // an occasional block of a long read being wrong while its neighbours
-                    // are fine.
-                    let mut spin = 0u32;
-                    while reg::read(b + STA) & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT) == 0 {
-                        spin += 1;
-                        if spin >= DATA_TRIES {
-                            last_failure::record(
-                                last_failure::READ_STALLED,
-                                reg::read(b + STA),
-                                reg::read(b + DCOUNT),
-                            );
-                            reg::write(b + ICR, self.bits.icr_all);
-                            return Err(Error::DataError { block: u32::MAX });
+                    // The bytes are all here, but the controller may not be: `DATAEND` says
+                    // the data path has closed. Returning while it is still running lets it
+                    // run into the next command, and a word left in the FIFO is then read as
+                    // the start of the next block -- which is how a long read comes back
+                    // mostly right with the occasional block wrong.
+                    //
+                    // The wait is short and its expiry is not an error: the data is already
+                    // in hand. Whether it ended or not, the FIFO is emptied and the data
+                    // path is switched off below, so the next command starts clean either
+                    // way. A long wait here would cost every block of every read.
+                    for _ in 0..END_POLLS {
+                        if reg::read(b + STA) & (STA_DATAEND | STA_DCRCFAIL | STA_DTIMEOUT) != 0 {
+                            break;
                         }
                     }
-                    // Anything still in the FIFO belongs to this transfer; left there it
-                    // would be read as the first words of the next one.
                     while reg::read(b + STA) & STA_RXFIFOE == 0 {
                         let _ = reg::read(b + FIFO);
                     }
+                    // `DTEN` off: the old controller's data path stays armed otherwise, and
+                    // the new one ignores the bit. Either way the next transfer arms itself.
+                    reg::write(b + DCTRL, 0);
                     break;
                 }
                 if sta & STA_DATAEND != 0 && at == 0 {
