@@ -193,7 +193,7 @@ fn the_two_groups_do_not_collide() {
 /// whatever screen is up, or leave a dead strip below itself.
 #[test]
 fn the_bar_is_the_height_the_firmware_reserves_for_it() {
-    const FW_BAR_H: usize = 17;
+    const FW_BAR_H: usize = 16;
     assert_eq!(
         height(&FONT),
         FW_BAR_H,

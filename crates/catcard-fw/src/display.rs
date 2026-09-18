@@ -437,7 +437,12 @@ pub type Surface<'a> = Screen;
 /// than being computed here, because it has to be a constant: [`SCREEN_H`] is derived
 /// from it and screens lay themselves out against that.
 #[cfg(feature = "board-q1")]
-pub const BAR_H: usize = 17;
+pub const BAR_H: usize = 16;
+/// No bar on the mono boards: 16 of 64 rows is a quarter of the screen, and their keypad
+/// has no modifiers to report. Zero, rather than absent, because it is also the row the
+/// frame's palette changes at -- and on these boards it never does.
+#[cfg(not(feature = "board-q1"))]
+pub const BAR_H: usize = 0;
 /// Which faces and spacing this board's screens use.
 #[cfg(not(feature = "board-q1"))]
 pub const LAYOUT: catcard_ui::widgets::Layout<'static> = catcard_ui::widgets::Layout::compact();
@@ -599,7 +604,7 @@ pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
     f(screen);
     #[cfg(feature = "board-q1")]
     BAR_SHOWN.store(true, Ordering::SeqCst);
-    show(panel, screen, &catcard_ui::st7789::AMBER);
+    show(panel, screen, &catcard_ui::st7789::AMBER, BAR_H);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
@@ -643,7 +648,7 @@ pub fn refresh_bar(panel: &mut Panel) {
     // SAFETY: as in `draw`.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
     catcard_ui::statusbar::render(screen, FONTS.small, &crate::statusbar::status());
-    show(panel, screen, &catcard_ui::st7789::AMBER);
+    show(panel, screen, &catcard_ui::st7789::AMBER, BAR_H);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
@@ -665,12 +670,12 @@ pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
     f(screen);
-    show(panel, screen, palette);
+    show(panel, screen, palette, 0);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
 #[cfg(not(feature = "board-q1"))]
-fn show(panel: &mut Panel, screen: &Screen, _palette: &[u16; 16]) {
+fn show(panel: &mut Panel, screen: &Screen, _palette: &[u16; 16], _split: usize) {
     // Two colours, so a palette says nothing here.
     // SAFETY: only reached from a draw, under `DRAWING`; foreground, single core.
     let cache = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_SENT) };
@@ -699,22 +704,31 @@ fn forget_frame() {
 #[cfg(feature = "board-q1")]
 static mut ROWS_SENT: catcard_ui::st7789::RowCache<240> = catcard_ui::st7789::RowCache::new();
 
+/// Where the last frame's palette changed, so a change of layout invalidates the cache.
+#[cfg(feature = "board-q1")]
+static mut LAST_SPLIT: usize = 0;
+
 /// Send the rows of the canvas that changed. A cursor step or a progress tick is a few
 /// rows, not the 153,600 bytes of a full frame.
 #[cfg(feature = "board-q1")]
-fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16]) {
+fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
     reclaim_bus();
     // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
     // never inside a draw. Single core, nothing in interrupt context.
     let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
     let last = unsafe { &mut *core::ptr::addr_of_mut!(LAST_PALETTE) };
     // Same indices mean different colours under a new palette, so what the panel already
-    // shows is no longer what the cache says it shows.
-    if *last != *palette {
+    // shows is no longer what the cache says it shows. The split counts too: the bar's
+    // rows change ramp when a full-screen artwork frame gives way to an ordinary one.
+    // SAFETY: as above -- foreground, single core, inside a draw.
+    let last_split = unsafe { &mut *core::ptr::addr_of_mut!(LAST_SPLIT) };
+    if *last != *palette || *last_split != split {
         *last = *palette;
+        *last_split = split;
         cache.invalidate();
     }
-    let _ = panel.flush_gray_changed(screen, palette, cache);
+    let _ =
+        panel.flush_gray_changed_split(screen, &catcard_ui::st7789::GREYS, palette, split, cache);
 }
 
 /// The palette the panel was last flushed through.

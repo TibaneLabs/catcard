@@ -408,6 +408,28 @@ impl<B: DisplayBus> St7789<B> {
         palette: &[u16; 16],
         cache: &mut RowCache<H>,
     ) -> Result<usize, B::Error> {
+        self.flush_gray_changed_split(fb, palette, palette, 0, cache)
+    }
+
+    /// [`flush_gray_changed`](Self::flush_gray_changed) with a different palette for the
+    /// rows above `split`.
+    ///
+    /// The canvas holds an index per pixel and the palette is what turns one into a
+    /// colour, at send time -- so two regions of one frame can be two different colour
+    /// ramps without the drawing code knowing. That is how the status bar comes out in
+    /// grey and white over a screen that is otherwise the bootloader's amber: nothing
+    /// about the canvas changes, only which table its indices are read through.
+    ///
+    /// `split` is the first row that uses `bottom`; rows before it use `top`. A run of
+    /// changed rows never spans the boundary, since one send is one palette.
+    pub fn flush_gray_changed_split<const W: usize, const H: usize, const N: usize>(
+        &mut self,
+        fb: &Gray4<W, H, N>,
+        top: &[u16; 16],
+        bottom: &[u16; 16],
+        split: usize,
+        cache: &mut RowCache<H>,
+    ) -> Result<usize, B::Error> {
         let (w, h) = (W.min(WIDTH), H.min(HEIGHT));
         if w == 0 || h == 0 {
             return Ok(0);
@@ -423,6 +445,9 @@ impl<B: DisplayBus> St7789<B> {
             differs
         };
 
+        // Where a run must stop even if the next row also changed, because it would be
+        // sent through a different palette.
+        let boundary = split.min(h);
         let (mut y, mut sent) = (0, 0);
         while y < h {
             if !changed(cache, y) {
@@ -430,10 +455,12 @@ impl<B: DisplayBus> St7789<B> {
                 continue;
             }
             let start = y;
+            let limit = if start < boundary { boundary } else { h };
             y += 1;
-            while y < h && changed(cache, y) {
+            while y < limit && changed(cache, y) {
                 y += 1;
             }
+            let palette = if start < boundary { top } else { bottom };
             self.window(x0, y0 + start, x0 + w - 1, y0 + y - 1)?;
             self.send_gray_rows(fb, palette, w, start, y)?;
             sent += y - start;
@@ -528,6 +555,74 @@ mod tests {
         assert_eq!(log[2], (false, vec![cmd::VSCRDEF]));
         assert_eq!(log[3], (true, vec![0, 0, 0x01, 0x40, 0, 0]));
         assert_eq!(log[4], (false, vec![cmd::NORON]));
+    }
+
+    /// The status bar comes out grey and white over an amber screen, from one canvas.
+    ///
+    /// The canvas holds indices, not colours; the palette is applied at send time. So the
+    /// bar's rows are sent through the grey ramp and everything below through amber,
+    /// without the drawing code knowing there are two.
+    #[test]
+    fn the_rows_above_the_split_are_sent_through_the_other_palette() {
+        use crate::canvas::{Canvas, INK};
+
+        const SPLIT: usize = 4;
+        let mut fb: Gray4<8, 8, 32> = Gray4::new();
+        // Full ink everywhere: the index is the same above and below, so any difference
+        // in what goes out is the palette and nothing else.
+        fb.fill_rect(0, 0, 8, 8, INK);
+
+        let mut p = St7789::new(MockBus::default());
+        let mut cache = RowCache::<8>::new();
+        p.flush_gray_changed_split(&fb, &GREYS, &AMBER, SPLIT, &mut cache)
+            .unwrap();
+
+        // Pixel data only, in order: two runs, one per palette.
+        let data: Vec<Vec<u8>> = p
+            .bus_mut()
+            .log
+            .iter()
+            .filter(|(dc, b)| *dc && b.len() >= 16)
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert!(!data.is_empty(), "nothing was sent");
+        let white = WHITE.to_be_bytes();
+        let amber = AMBER[15].to_be_bytes();
+        assert_ne!(white, amber, "the two ramps must differ at full ink");
+
+        let top: Vec<u8> = data[..SPLIT].concat();
+        let bottom: Vec<u8> = data[SPLIT..].concat();
+        assert!(
+            top.chunks(2).all(|c| c == white),
+            "the bar's rows did not come out white"
+        );
+        assert!(
+            bottom.chunks(2).all(|c| c == amber),
+            "the screen below the bar did not come out amber"
+        );
+    }
+
+    /// A run of changed rows never spans the split, since one send is one palette.
+    #[test]
+    fn a_changed_run_stops_at_the_palette_boundary() {
+        use crate::canvas::{Canvas, INK};
+        let mut fb: Gray4<8, 8, 32> = Gray4::new();
+        fb.fill_rect(0, 0, 8, 8, INK);
+
+        let mut p = St7789::new(MockBus::default());
+        let mut cache = RowCache::<8>::new();
+        // Every row changed, so without a boundary this would be one window and one send.
+        let sent = p
+            .flush_gray_changed_split(&fb, &GREYS, &AMBER, 4, &mut cache)
+            .unwrap();
+        assert_eq!(sent, 8);
+        let windows = p
+            .bus_mut()
+            .log
+            .iter()
+            .filter(|(dc, b)| !*dc && b == &vec![cmd::RASET])
+            .count();
+        assert_eq!(windows, 2, "the run crossed the palette boundary");
     }
 
     #[derive(Default)]

@@ -67,8 +67,11 @@ const MARGIN: usize = 4;
 const ICON_W: usize = 14;
 
 /// How tall a bar in `font` is, the rule underneath included.
+///
+/// One row of padding above the text and the rule immediately below it. A second blank
+/// row read as a gap rather than as a border on hardware.
 pub fn height<F: Face + ?Sized>(font: &F) -> usize {
-    font.line_height() + 3
+    font.line_height() + 2
 }
 
 /// Draw the bar across the top of `canvas`.
