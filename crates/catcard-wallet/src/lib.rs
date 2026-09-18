@@ -64,6 +64,7 @@ pub mod bip39;
 pub mod bip85;
 pub mod chain;
 pub mod descriptor;
+pub mod multisig;
 pub mod encoding;
 pub mod message;
 pub mod psbtview;
