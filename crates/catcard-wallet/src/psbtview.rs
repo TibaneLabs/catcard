@@ -97,6 +97,12 @@ impl Destination {
 /// What the device will say about a transaction.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Summary {
+    /// The accounts the inputs draw on, which is what an output must belong to before it
+    /// may call itself change. Carried here so [`destinations`] need not derive them all
+    /// again: every one of those is a scalar multiplication.
+    pub accounts: [Account; MAX_ACCOUNTS],
+    /// How many of [`Self::accounts`] are real.
+    pub account_count: usize,
     /// Inputs in total, and how many this wallet can sign.
     pub inputs: usize,
     pub ours: usize,
@@ -135,12 +141,49 @@ pub fn summarise(
 
     let mut total_in = 0u64;
     let mut ours = 0usize;
+    // The accounts this spend draws on, gathered as the inputs are walked. An output may
+    // only call itself change if it belongs to one of them.
+    let mut accounts = [Account::NONE; MAX_ACCOUNTS];
+    let mut account_count = 0usize;
     for index in 0..inputs {
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
-        let mine = keys[..found]
-            .iter()
-            .any(|r| signer::match_key(master, r, kw).is_ok());
+        let mut mine = false;
+        for request in keys[..found].iter() {
+            let Ok(signer) = signer::match_key(master, request, kw) else {
+                continue;
+            };
+            mine = true;
+            // Which account, and in which form. The kind is settled by rebuilding the
+            // script from our own key and matching it against the output being spent --
+            // which `utxo` has already checked against the previous transaction's txid,
+            // so it is the chain's answer rather than the host's.
+            let steps = request.steps();
+            if steps.len() != CHANGE_DEPTH || account_count == MAX_ACCOUNTS {
+                continue;
+            }
+            let prefix = [steps[0], steps[1], steps[2]];
+            if accounts[..account_count].iter().any(|a| a.prefix == prefix) {
+                continue;
+            }
+            let Ok(spent) = psbt.utxo(index) else { continue };
+            let pubkey = signer.public_key_bytes();
+            for kind in [
+                AddressKind::P2wpkh,
+                AddressKind::P2shP2wpkh,
+                AddressKind::P2pkh,
+                AddressKind::P2tr,
+            ] {
+                let mut built = [0u8; 34];
+                if let Ok(n) = address::script_pubkey(kind, &pubkey, &mut built)
+                    && built[..n] == *spent.script
+                {
+                    accounts[account_count] = Account { prefix, kind };
+                    account_count += 1;
+                    break;
+                }
+            }
+        }
         if mine {
             ours += 1;
             // A sighash type we will not produce stops the whole transaction: signing the
@@ -173,7 +216,15 @@ pub fn summarise(
     let mut change = 0u64;
     for (index, out) in tx.outputs().enumerate() {
         total_out = total_out.saturating_add(out.amount);
-        if is_change(psbt, index, out.script, master, fingerprint, kw) {
+        if is_change(
+            psbt,
+            index,
+            out.script,
+            master,
+            fingerprint,
+            &accounts[..account_count],
+            kw,
+        ) {
             change = change.saturating_add(out.amount);
         }
     }
@@ -199,6 +250,8 @@ pub fn summarise(
     }
 
     Ok(Summary {
+        accounts,
+        account_count,
         inputs,
         ours,
         outputs,
@@ -212,6 +265,49 @@ pub fn summarise(
     })
 }
 
+/// An account this transaction spends from: the first three levels of a BIP-44-family
+/// path, and the script kind the input it came from actually used.
+///
+/// Gathered from the inputs rather than assumed, because it is the inputs that say whose
+/// money this is. An output claiming to be change has to belong to one of these.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Account {
+    /// `purpose'`, `coin'`, `account'`, as written in the record (hardened bit included).
+    pub prefix: [u32; 3],
+    /// The script kind of the input, rebuilt from its key and matched against the output
+    /// it spends -- not taken from anything the host says.
+    pub kind: AddressKind,
+}
+
+impl Account {
+    /// A slot nothing has been written into yet; its prefix matches no real path.
+    pub const NONE: Self = Self {
+        prefix: [u32::MAX; 3],
+        kind: AddressKind::P2wpkh,
+    };
+}
+
+/// Accounts one transaction may spend from before this stops counting them.
+///
+/// Four is more than a single-sig spend has any business using; past that the extra
+/// accounts simply cannot claim change, which shows their outputs as leaving.
+pub const MAX_ACCOUNTS: usize = 4;
+
+/// Levels a change path has: `purpose'/coin'/account'/branch/index`.
+pub const CHANGE_DEPTH: usize = 5;
+
+/// Highest change index this will call change.
+///
+/// A wallet finds its own change by scanning forward from zero with a gap limit, so change
+/// parked at an arbitrary index is change nobody will ever find: `.../1/1900000000` spends
+/// to the seed and to nothing a recovery can reach. Twenty thousand is far past any honest
+/// wallet's counter and far short of hiding money.
+///
+/// Stock bounds this against the highest index it has seen rather than a flat number. That
+/// wants somewhere to keep the highest index, which is what the settings store is for; the
+/// flat cap is what stands until then.
+pub const MAX_CHANGE_INDEX: u32 = 20_000;
+
 /// Derivation records one output may ask this to follow.
 ///
 /// The same bound, and for the same reason, as [`signer::MAX_KEYS_PER_INPUT`]: a record
@@ -220,6 +316,30 @@ pub fn summarise(
 /// many records as the file has room for. Past the cap the answer is "not change", which
 /// shows the amount as leaving rather than hiding it as change.
 pub const MAX_CHANGE_KEYS: usize = MAX_KEYS_PER_INPUT;
+
+/// The account a change path belongs to, if its shape allows it to be change at all.
+///
+/// `None` -- meaning "not change" -- when the path is not five levels, when its first three
+/// are not an account these inputs spend from, when the branch is neither receive nor
+/// change, when either of the last two levels is hardened, or when the index is past
+/// [`MAX_CHANGE_INDEX`].
+fn account_for(steps: &[u32], accounts: &[Account]) -> Option<Account> {
+    const HARDENED: u32 = 0x8000_0000;
+    if steps.len() != CHANGE_DEPTH {
+        return None;
+    }
+    let (branch, index) = (steps[3], steps[4]);
+    if branch & HARDENED != 0 || index & HARDENED != 0 {
+        return None;
+    }
+    // Receive and change branches both: a wallet that pays itself on the receive branch is
+    // unusual and not dishonest, and calling it "leaving" would overstate the spend.
+    if branch > 1 || index > MAX_CHANGE_INDEX {
+        return None;
+    }
+    let prefix = [steps[0], steps[1], steps[2]];
+    accounts.iter().find(|a| a.prefix == prefix).copied()
+}
 
 /// Whether output `index` pays back to this wallet.
 ///
@@ -234,6 +354,7 @@ pub fn is_change(
     script: &[u8],
     master: &ExtendedPrivKey,
     fingerprint: [u8; FINGERPRINT_LEN],
+    accounts: &[Account],
     kw: &KeyWork,
 ) -> bool {
     let Some(map) = psbt.output(index).map(|o| o.map()) else {
@@ -254,23 +375,24 @@ pub fn is_change(
                 continue;
             };
             derived += 1;
+            // The shape, before the arithmetic: the key deriving to the script proves the
+            // seed owns the output, and nothing about *where*. An account we are not
+            // spending from, a branch that is not a wallet branch, or an index no recovery
+            // will scan to, is money leaving -- so it is shown as leaving.
+            let Some(account) = account_for(request.steps(), accounts) else {
+                continue;
+            };
             let Ok(signer) = signer::match_key(master, &request, kw) else {
                 continue;
             };
-            // The script the key would produce, for whichever form this output takes.
+            // Only the kind that account's inputs used. A BIP-84 wallet does not make
+            // P2PKH change, and a host saying otherwise is describing a different wallet.
             let pubkey = signer.public_key_bytes();
-            for kind in [
-                AddressKind::P2wpkh,
-                AddressKind::P2shP2wpkh,
-                AddressKind::P2pkh,
-                AddressKind::P2tr,
-            ] {
-                let mut ours = [0u8; 34];
-                if let Ok(n) = address::script_pubkey(kind, &pubkey, &mut ours)
-                    && ours[..n] == *script
-                {
-                    return true;
-                }
+            let mut ours = [0u8; 34];
+            if let Ok(n) = address::script_pubkey(account.kind, &pubkey, &mut ours)
+                && ours[..n] == *script
+            {
+                return true;
             }
         }
     }
@@ -283,6 +405,7 @@ pub fn destinations(
     master: &ExtendedPrivKey,
     fingerprint: [u8; FINGERPRINT_LEN],
     network: Network,
+    accounts: &[Account],
     out: &mut [Destination],
     kw: &KeyWork,
 ) -> usize {
@@ -296,7 +419,7 @@ pub fn destinations(
         out[n] = Destination {
             index,
             amount: txout.amount,
-            change: is_change(psbt, index, txout.script, master, fingerprint, kw),
+            change: is_change(psbt, index, txout.script, master, fingerprint, accounts, kw),
             address,
             address_len,
         };
