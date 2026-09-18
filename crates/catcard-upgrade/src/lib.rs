@@ -44,12 +44,6 @@ pub mod psram;
 ///
 /// Every variant is a reason not to reboot. None of them leave the device worse off,
 /// which is the entire point of checking here rather than finding out afterwards.
-/// Times the signature is re-read before an image is called unsigned.
-///
-/// See the comment at the use site: the staging medium has transient read faults, and
-/// the signature is the one window the digest cannot check.
-const REREADS: usize = 3;
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Reject {
     /// Shorter than the bootloader's floor, or longer than the flash it installs into.
@@ -78,12 +72,17 @@ pub enum Reject {
     /// The staging area did not read back what was written.
     StorageFault { offset: u32 },
     /// The image that arrived and the image the staging area reads back are not the
-    /// same. The transfer was fine; the medium lost or altered something.
+    /// same: **this device failed to store it.**
     ///
-    /// Its own variant because the cure is the opposite of the one for a bad signature:
-    /// this image is worth sending again, and a device that called it "not signed"
-    /// would be blaming the sender for a fault of its own.
-    ReadBack { sent: [u8; 4], read: [u8; 4] },
+    /// Not a transfer problem and not something to try again. The bytes arrived intact
+    /// -- that is what the incoming digest proves -- and the staging RAM did not keep
+    /// them. Retrying just rolls the dice on a defect that is still there, so this says
+    /// what it is rather than inviting another go.
+    ///
+    /// Its own variant because the alternative was reporting it as a bad signature,
+    /// which blames the sender for a fault of ours and sends whoever reads the log
+    /// hunting for a tampered image.
+    RamStoreFailed { sent: [u8; 4], read: [u8; 4] },
     /// This board has nowhere to put an image. Not a fault in the offer: the device
     /// cannot accept any upgrade over USB at all, and the host should stop rather than
     /// send a quarter of a megabyte to find out.
@@ -454,8 +453,9 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         let digest = self.stored_digest_with(progress)?;
 
         // Two digests of one image: what arrived, and what the area reads back. They
-        // must agree, and when they do not the fault is the staging area -- not the
-        // signature, which is what a device says when it cannot tell the difference.
+        // must agree, and when they do not this device has a bug -- the staging RAM did
+        // not keep what it was given. Reporting that as a bad signature blames the
+        // sender for a fault of ours.
         //
         // This is worth doing on every upgrade and not only when something fails. The
         // digest deliberately skips the 64-byte signature window, so a medium that
@@ -464,43 +464,16 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // correctly is what makes that conclusion available at all.
         let arrived = self.stream.clone().finish();
         if arrived != digest {
-            return Err(Reject::ReadBack {
+            return Err(Reject::RamStoreFailed {
                 sent: [arrived[0], arrived[1], arrived[2], arrived[3]],
                 read: [digest[0], digest[1], digest[2], digest[3]],
             });
         }
         let key = compressed(&APPROVED_PUBKEYS[slot as usize]);
-        let mut verified = matches!(
+        let verified = matches!(
             catcard_sign::ecdsa_verify(&key, &digest, &header.signature),
             Ok(true)
         );
-
-        // Read the signature again and try once more.
-        //
-        // Not leniency: a signature that is genuinely wrong fails every attempt, and
-        // nothing here accepts a digest it did not compute. It is that the signature
-        // comes out of a staging medium with **transient read faults** -- a Q1 has
-        // refused a correct, correctly-staged image this way -- and the 64 bytes of
-        // signature are the one part of the image the digest cannot vouch for, because
-        // the digest is computed with that window skipped. Everything else agreeing
-        // while only this disagrees is the shape of a bad read, not of a bad image.
-        //
-        // So it is re-read from the medium rather than reused, which is the whole point:
-        // a second look at the same bytes.
-        for _ in 0..REREADS {
-            if verified {
-                break;
-            }
-            let mut again = [0u8; HEADER_LEN];
-            if self.area.read(HEADER_OFFSET as u32, &mut again).is_err() {
-                break;
-            }
-            let reread = FirmwareHeader::from_bytes(&again);
-            verified = matches!(
-                catcard_sign::ecdsa_verify(&key, &digest, &reread.signature),
-                Ok(true)
-            );
-        }
         if !verified {
             // We hold the key and it does not verify: corrupt or tampered. Refuse before
             // staging rather than let the bootloader find out after overwriting firmware.

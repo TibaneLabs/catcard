@@ -48,7 +48,8 @@ fn describe(why: catcard_upgrade::Reject) -> &'static str {
         R::BadHeader(_) => "header is wrong",
         R::WrongBoard { .. } => "built for another board",
         R::BadSignature { .. } => "signature does not verify",
-        R::ReadBack { .. } => "the card staged wrong; try again",
+        // Not "try again": the bytes arrived and this device did not keep them.
+        R::RamStoreFailed { .. } => "staging RAM failed; device fault",
         R::StorageFault { .. } => "staging area failed",
         R::NoStagingArea => "nowhere to stage it",
         R::StagingBusy => "busy with another image",

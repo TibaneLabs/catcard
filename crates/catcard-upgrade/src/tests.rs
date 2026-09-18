@@ -261,10 +261,11 @@ fn storage_that_does_not_read_back_is_caught() {
     // one. The bytes that arrived were perfect; the bytes that will be installed are
     // not, and only a read-back can tell.
     //
-    // And it is reported as what it is. This used to come out as `BadSignature`, which
-    // blames the sender for a fault of the medium and sends anyone reading the log
-    // looking for a tampered image. Hashing the bytes as they arrive gives a second
-    // opinion that never touches the staging area, so the two can be told apart.
+    // And it is reported as what it is: this device failed to store the image. It used
+    // to come out as `BadSignature`, which blames the sender for a fault of ours and
+    // sends anyone reading the log looking for a tampered image. Hashing the bytes as
+    // they arrive gives a second opinion that never touches the staging area, so the
+    // two can be told apart.
     let image = image_for(&MK4, NEWER, 0);
     let area = Mem::new(image.len() + 4096);
     let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
@@ -272,7 +273,7 @@ fn storage_that_does_not_read_back_is_caught() {
     s.area.corrupt_read_at = Some(100_000);
     assert!(matches!(
         s.inspect(Some(&running(OLDER))),
-        Err(Reject::ReadBack { .. })
+        Err(Reject::RamStoreFailed { .. })
     ));
 }
 
