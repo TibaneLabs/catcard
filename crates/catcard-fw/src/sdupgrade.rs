@@ -198,7 +198,10 @@ pub fn stage_from_card(
     // data, and only the log can tell the next person which this board does.
     let staged_len = len;
     let running = crate::own_header();
-    match staged.inspect(running.as_ref()) {
+    // Verifying is a second pass over the whole image -- the same length again -- so it
+    // gets the same bar rather than a still screen.
+    progress(0, len);
+    match staged.inspect_with(running.as_ref(), &mut progress) {
         Ok(approval) => Outcome::Offered(staged, approval),
         Err(why) => {
             // Which check refused matters: "refused" alone has already sent one person

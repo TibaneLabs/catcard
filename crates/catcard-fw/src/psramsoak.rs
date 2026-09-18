@@ -121,6 +121,48 @@ fn after_bulk(base: u32, nops: u32) -> (u32, usize) {
     (wrong, first)
 }
 
+/// The fourth sweep: write a lot, then read all of it back, as verifying an image does.
+///
+/// This is where the last of the corruption lives. A firmware image staged from a card now
+/// lands in PSRAM correctly -- reading it back over the debug monitor proves it -- and the
+/// firmware's *own* digest of it still disagreed about three blocks in a megabyte. So the
+/// reads are what to measure, at the size and shape the digest uses: 256 bytes at a time,
+/// straight through, with CE# released every `gap_words`.
+///
+/// Returns the number of 256-byte reads that came back wrong, out of the whole span.
+fn bulk_read_back(base: u32, words: u32, gap_words: u32, gap_nops: u32) -> u32 {
+    // SAFETY: `base` is mapped, 4-aligned, above anything in use and below the recovery
+    // header, as the caller checked.
+    unsafe {
+        let mut since = 0u32;
+        for i in 0..words {
+            if since >= gap_words {
+                for _ in 0..gap_nops {
+                    core::arch::asm!("nop", options(nostack, preserves_flags));
+                }
+                since = 0;
+            }
+            since += 1;
+            core::ptr::write_volatile((base + i * 4) as *mut u32, expected(i));
+        }
+        let mut wrong = 0u32;
+        let mut since = 0u32;
+        for i in 0..words {
+            if since >= gap_words {
+                for _ in 0..gap_nops {
+                    core::arch::asm!("nop", options(nostack, preserves_flags));
+                }
+                since = 0;
+            }
+            since += 1;
+            if core::ptr::read_volatile((base + i * 4) as *const u32) != expected(i) {
+                wrong += 1;
+            }
+        }
+        wrong
+    }
+}
+
 /// Sweep the delays and report what each one cost.
 pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     use catcard_ui::scroll::Line as Row;
@@ -142,7 +184,7 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     }
 
     type Line = heapless::String<48>;
-    let mut lines: heapless::Vec<Line, { 3 * SWEEP.len() + 2 }> = heapless::Vec::new();
+    let mut lines: heapless::Vec<Line, { 3 * SWEEP.len() + 6 }> = heapless::Vec::new();
 
     for nops in SWEEP {
         crate::menu::blocking_screen(ui.panel, "PSRAM soak", "writing");
@@ -234,7 +276,30 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
         let _ = lines.push(l);
     }
 
-    let mut rows: heapless::Vec<Row, { 3 * SWEEP.len() + 2 }> = heapless::Vec::new();
+    // The shape that still fails: a megabyte in, a megabyte back out. Swept by how often
+    // CE# is released rather than by how long the gap is, since the datasheet bounds the
+    // *time* the part may stay selected.
+    for gap_words in [0u32, 64, 20, 8] {
+        crate::menu::blocking_screen(ui.panel, "PSRAM soak", "write then verify");
+        let words = 256 * 1024 / 4; // 256 KB, four times the earlier pass
+        let effective = if gap_words == 0 { u32::MAX } else { gap_words };
+        let wrong = bulk_read_back(base, words, effective, 80);
+        let mut l = Line::new();
+        if gap_words == 0 {
+            let _ = write!(l, "no CE# gap: {wrong} wrong of {}", words);
+        } else {
+            let _ = write!(l, "gap every {gap_words}: {wrong} wrong of {}", words);
+        }
+        crate::catlog!(
+            "psram soak: CE# gap every {} word(s): {} of {} reads wrong",
+            gap_words,
+            wrong,
+            words
+        );
+        let _ = lines.push(l);
+    }
+
+    let mut rows: heapless::Vec<Row, { 3 * SWEEP.len() + 6 }> = heapless::Vec::new();
     let _ = rows.push(Row::title("PSRAM soak"));
     for l in lines.iter() {
         let _ = rows.push(Row::body(l.as_str()).small());

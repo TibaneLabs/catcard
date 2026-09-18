@@ -350,6 +350,19 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     }
 
     pub fn inspect(&mut self, running: Option<&FirmwareHeader>) -> Result<Approval, Reject> {
+        self.inspect_with(running, |_, _| {})
+    }
+
+    /// As [`inspect`](Self::inspect), reporting `(done, total)` as the image is digested.
+    ///
+    /// Reading a megabyte out of a staging area is not instant -- on PSRAM the bus has to be
+    /// released to the part often enough for it to refresh itself, which is most of the time
+    /// it takes -- and a screen that says nothing for that long reads as a hung device.
+    pub fn inspect_with(
+        &mut self,
+        running: Option<&FirmwareHeader>,
+        progress: impl FnMut(u32, u32),
+    ) -> Result<Approval, Reject> {
         self.settle()?;
         if !self.is_complete() {
             return Err(Reject::Incomplete {
@@ -394,7 +407,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // -- dev or production alike -- against the exact key the bootloader would use, over
         // the exact double-SHA256 digest it signs (hw-reference/firmware-signing.md §2 [C]).
         let slot = header.pubkey_num;
-        let digest = self.stored_digest()?;
+        let digest = self.stored_digest_with(progress)?;
         let verified = matches!(
             catcard_sign::ecdsa_verify(
                 &compressed(&APPROVED_PUBKEYS[slot as usize]),
@@ -438,6 +451,14 @@ impl<'a, A: StagingArea> Staged<'a, A> {
 
     /// Digest the image as it now sits in the staging area.
     fn stored_digest(&mut self) -> Result<[u8; 32], Reject> {
+        self.stored_digest_with(|_, _| {})
+    }
+
+    /// The digest, calling `progress` with `(done, total)` as it goes.
+    fn stored_digest_with(
+        &mut self,
+        mut progress: impl FnMut(u32, u32),
+    ) -> Result<[u8; 32], Reject> {
         let mut stream = DigestStream::new();
         let mut buf = [0u8; 256];
         let mut off = 0u32;
@@ -448,6 +469,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
                 .map_err(|_| Reject::StorageFault { offset: off })?;
             stream.update(&buf[..n]);
             off += n as u32;
+            progress(off, self.length);
         }
         Ok(stream.finish())
     }

@@ -1919,8 +1919,15 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // A bar rather than "please wait": the length is known before the first byte is read,
     // and a megabyte through a 512-byte buffer takes long enough that a still screen reads
     // as a hung device. It also says *where* a real hang happened, which is worth having.
+    // Two passes over the image -- reading it in, then digesting it to verify -- so the
+    // caption says which one is running rather than the bar appearing to restart.
     let mut shown = u8::MAX;
+    let mut pass = 0u8;
     let mut tick = |done: u32, total: u32| {
+        if done == 0 {
+            pass += 1;
+            shown = u8::MAX;
+        }
         let pct = if total == 0 {
             100
         } else {
@@ -1933,7 +1940,11 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         let mut note = Line::new();
         let _ = write!(note, "{} of {} KB", done / 1024, total / 1024);
         let mut wait = Line::new();
-        let _ = write!(wait, "please wait");
+        let _ = write!(
+            wait,
+            "{}",
+            if pass > 1 { "checking signature" } else { "reading" }
+        );
         display::draw(ui.panel, |c| {
             let lines = [wait.clone(), note.clone()];
             catcard_ui::widgets::info(c, &display::LAYOUT, "Reading card", &lines);
