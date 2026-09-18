@@ -44,6 +44,7 @@ impl Files {
     ///
     /// # Safety
     /// As [`Blocks::open`]: nothing else may touch the region, and each write stalls the bus.
+    #[allow(dead_code)] // as `Blocks::open`: the writable path is not wired up yet
     pub unsafe fn mount() -> Result<Self, MountFailed> {
         // SAFETY: forwarding the caller's guarantee.
         let blocks = unsafe { Blocks::open() }.map_err(MountFailed::Region)?;
