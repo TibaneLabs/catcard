@@ -35,6 +35,7 @@ use abi::{MAX_BUF_LEN, Method, PinOp, RngSource, err};
 use catcard_board::BoardSpec;
 use entry::{BootloaderInfo, EntryError};
 use pin::{PIN_ATTEMPT_SIZE, PinAttempt};
+use zeroize::Zeroize;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -90,7 +91,8 @@ pub fn check_buffer(sram1_base: u32, window: u32, addr: u32, len: usize) -> Resu
 /// a failure mode whose symptom was a device that could not be logged into at all.
 ///
 /// Only ever touched between masking and unmasking interrupts, inside [`Callgate::call`],
-/// so there is no second reference to alias.
+/// so there is no second reference to alias. Wiped before that call returns, so a secret
+/// the caller's own type zeroizes does not outlive it here.
 static mut GATE_BUF: [u8; MAX_BUF_LEN] = [0; MAX_BUF_LEN];
 
 /// A bound callgate: a validated entry address, the bootloader's protocol version, and
@@ -175,6 +177,11 @@ impl Callgate {
                     arg2,
                 );
                 core::ptr::copy_nonoverlapping(staging, buf.as_mut_ptr(), len);
+                // What passes through here is the caller's whole struct: `PinAttempt`
+                // carries the plaintext PIN, and after `FetchSecret` the wallet secret.
+                // Those types zeroize themselves; this static would keep a copy of them
+                // in `.bss` for the rest of the run.
+                core::slice::from_raw_parts_mut(staging, len).zeroize();
                 rv
             })
         };

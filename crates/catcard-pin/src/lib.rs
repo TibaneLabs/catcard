@@ -551,7 +551,15 @@ impl Login {
             return Err(Failure::Code(err::PIN_REQUIRED));
         }
         match gate.pin_attempt(PinOp::FetchSecret, &mut self.attempt) {
-            Ok(_) => Ok(self.attempt.secret),
+            Ok(_) => {
+                // The struct is handed back to the gate on every later call, and each one
+                // copies all of it through the bootloader's staging buffer. A wallet only
+                // has to be read once, so it does not stay here -- `set_secret` already
+                // takes the same care on the way in.
+                let secret = self.attempt.secret;
+                self.attempt.secret.zeroize();
+                Ok(secret)
+            }
             Err(e) => {
                 let s = classify(e);
                 self.step = s;
