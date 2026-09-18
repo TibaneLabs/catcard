@@ -141,6 +141,15 @@ const STA_TXUNDERR: u32 = 1 << 4;
 const STA_TXFIFOHE: u32 = 1 << 14;
 
 /// `DCTRL`: enable, card-to-host direction, and a block size of 2^9 = 512.
+/// The command's own flags in `ICR`: response CRC, response timeout, response received,
+/// command sent. Same four bits on both IPs.
+///
+/// Clearing *only* these after a response is what lets the data phase keep its own flags:
+/// the data path of a CMD17 is already running while the response is read, and a block that
+/// finishes quickly sets `DATAEND` before then. Clearing everything wiped it, and the read
+/// then waited for an end that had already happened and could not come again.
+const ICR_CMD: u32 = STA_CCRCFAIL | STA_CTIMEOUT | STA_CMDREND | STA_CMDSENT;
+
 const DCTRL_DTEN: u32 = 1 << 0;
 const DCTRL_DTDIR_CARD_TO_HOST: u32 = 1 << 1;
 const DCTRL_BLOCK_512: u32 = 9 << 4;
@@ -371,7 +380,7 @@ impl Transport for Sdmmc {
                     *word = reg::read(b + RESP1 + 4 * i as u32);
                 }
             }
-            reg::write(b + ICR, self.bits.icr_all);
+            reg::write(b + ICR, ICR_CMD);
             Ok(out)
         }
     }
