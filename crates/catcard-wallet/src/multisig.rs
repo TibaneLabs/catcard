@@ -23,7 +23,7 @@
 //!
 //! [BIP-67]: https://github.com/bitcoin/bips/blob/master/bip-0067.mediawiki
 
-use crate::bip32::{ChildNumber, ExtendedPubKey, hash160};
+use crate::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, HARDENED_OFFSET, hash160};
 use crate::descriptor;
 
 /// Cosigners one wallet may have. Stock's limit, and the point past which the witness
@@ -63,6 +63,49 @@ pub struct Cosigner {
     pub origin_len: usize,
     /// The account-level extended public key everything below is derived from.
     pub xpub: ExtendedPubKey,
+}
+
+/// Which cosigner, if any, is provably this device's.
+///
+/// A descriptor's `[fingerprint/path]` origin is a claim by whoever wrote the file, and
+/// master fingerprints are public: they appear in every exported descriptor. So a match on
+/// the fingerprint alone proves nothing. This derives `master` along the claimed path and
+/// requires the key it reaches to be the one the descriptor names.
+///
+/// [`Error::ForgedOrigin`] means a cosigner claimed this device's fingerprint and did not
+/// derive to its own key, which is the case worth refusing rather than displaying.
+pub fn our_cosigner(
+    wallet: &Multisig,
+    master: &ExtendedPrivKey,
+    kw: &crate::KeyWork,
+) -> Result<Option<usize>, Error> {
+    let fp = master.fingerprint(kw);
+    for (i, c) in wallet.cosigners().iter().enumerate() {
+        if c.fingerprint != fp {
+            continue;
+        }
+        let mut key = master.clone();
+        let mut reached = true;
+        for &step in c.origin() {
+            let child = if step & HARDENED_OFFSET != 0 {
+                ChildNumber::hardened(step & !HARDENED_OFFSET)
+            } else {
+                ChildNumber::normal(step)
+            };
+            match child.and_then(|ch| key.derive_child(ch, kw)) {
+                Ok(next) => key = next,
+                Err(_) => {
+                    reached = false;
+                    break;
+                }
+            }
+        }
+        if reached && key.to_extended_pub(kw) == c.xpub {
+            return Ok(Some(i));
+        }
+        return Err(Error::ForgedOrigin { at: i });
+    }
+    Ok(None)
 }
 
 impl Cosigner {
@@ -106,6 +149,9 @@ pub enum Error {
     /// Two cosigners share an extended key, so fewer parties hold the wallet than the
     /// threshold implies. Stock refuses this and so does this.
     DuplicateKey,
+    /// A cosigner claims this device's master fingerprint but its key does not derive from
+    /// this device's master along the origin the descriptor gives.
+    ForgedOrigin { at: usize },
     /// The output buffer was too small.
     Overflow,
 }
