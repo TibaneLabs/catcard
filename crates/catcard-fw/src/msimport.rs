@@ -425,13 +425,12 @@ pub(crate) fn import(
         Err(why) => return say(ui, "Import", describe(why)),
     };
 
-    // The fingerprint of this device, to say which cosigner is us.
-    let ours = crate::menu::unlock_master(gate, login, ui, "Import").map(|master| {
-        let fp = crate::keywork::run(|kw| master.fingerprint(kw));
-        drop(master);
-        fp
-    });
-    let Some(ours) = ours else { return };
+    // The fingerprint of this device, to say which cosigner is us. Public, and this
+    // session may already have paid for it -- registering several wallets in a row should
+    // not mean stretching the seed once per wallet.
+    let Some(ours) = crate::pubkeys::fingerprint(gate, login, ui, "Import") else {
+        return;
+    };
 
     if !confirm(ui, &wallet, line, ours) {
         return;

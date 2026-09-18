@@ -1,0 +1,174 @@
+//! Account public keys this session has already paid for.
+//!
+//! Reaching the seed is expensive and the cost is paid per screen: the bootloader's
+//! `fetch_secret` runs the PIN key-stretch inside the secure element (about 1.6 s on an
+//! mk4, and the firewall resets the CPU if an interrupt lands in it, so nothing can even
+//! repaint across it), then BIP-39's 2048 PBKDF2 rounds are about a second more. Screens
+//! that only ever show *public* data -- the address explorer, verify address, the wallet
+//! export -- were paying all of it again on every entry.
+//!
+//! So an account key, once derived, is kept for the session. Below the account level
+//! everything is unhardened, so the chain and the address index come out of it with no
+//! private key anywhere near them.
+//!
+//! # Why the account level, and not the master
+//!
+//! A master xpub cannot derive any of this. BIP-44 paths are hardened for their first
+//! three levels (`m/84h/0h/0h`), and hardened derivation needs the private key by
+//! definition. Caching `m` would speed up nothing but the fingerprint. The account key is
+//! the highest point that public derivation can descend from, which is why it is the unit
+//! here.
+//!
+//! # Why not the `xpub` in the settings
+//!
+//! Stock caches `xfp`/`xpub` in the settings blob and we can read them, but nothing is
+//! derived from them here. That blob is encrypted, not authenticated: a slot is
+//! `AES256CTR(plaintext ‖ SHA256(plaintext))` -- an unkeyed hash inside the same malleable
+//! stream -- and the counter, `pack('<4I',4,3,2,pos)`, is fixed per slot, so every rewrite
+//! of a slot reuses the keystream and the zero padding hands over a large window of it.
+//! Anyone able to write that flash region can substitute an xpub along with a digest that
+//! verifies.
+//!
+//! Which would matter here more than anywhere else. The screens this serves exist to
+//! answer "is this address really mine?", and an answer derived from flash rather than
+//! from the seed is worthless in exactly the case it is asked: a person reads an address
+//! off the device, hands it out, and receives coins only the forger can spend. What is
+//! cached here was derived from the seed, in this session.
+//!
+//! Source: hw-reference/settings-nvstore-format.md §2-3 [C]
+//!
+//! # Lifetime
+//!
+//! Until the device reboots, or the BIP-39 passphrase changes. The passphrase is part of
+//! the seed, so a key derived under one is a *different wallet's* key under another --
+//! [`crate::passphrase::set`] and [`crate::passphrase::clear`] call [`forget`] for that
+//! reason, and forgetting to would make this screen confidently show the wrong wallet's
+//! addresses. Secure Logout needs no such call: it wipes all of SRAM and reboots.
+//!
+//! An extended *public* key is not secret, but it is not nothing either -- it links every
+//! address of that account -- so this is a deliberate trade of a little residency for not
+//! re-deriving from the seed five times in a row.
+
+use catcard_wallet::address::AddressKind;
+use catcard_wallet::bip32::{ChildNumber, ExtendedPubKey};
+
+use crate::menu;
+use crate::ui::Ui;
+
+/// Account keys held at once.
+///
+/// Four address types across two accounts, which is more than a person walks in one
+/// sitting. Past this the oldest is dropped: the cost of a miss is the derivation that
+/// would have happened anyway.
+const MAX: usize = 8;
+
+/// One account key and the path it sits at.
+#[derive(Clone, Copy)]
+struct Cached {
+    purpose: u32,
+    account: u32,
+    key: ExtendedPubKey,
+}
+
+/// Foreground only, single core -- as with [`crate::passphrase`].
+static mut ACCOUNTS: heapless::Vec<Cached, MAX> = heapless::Vec::new();
+/// This wallet's master fingerprint, which costs the same unlock to learn.
+static mut FINGERPRINT: Option<[u8; 4]> = None;
+
+/// Drop everything derived for the wallet that was in force.
+///
+/// Called when the passphrase changes: what is cached describes the old wallet, and
+/// showing it under the new one would be a lie the owner has no way to catch.
+pub(crate) fn forget() {
+    // SAFETY: foreground only; the menu is the sole writer and holds no borrow across it.
+    unsafe {
+        (*core::ptr::addr_of_mut!(ACCOUNTS)).clear();
+        *core::ptr::addr_of_mut!(FINGERPRINT) = None;
+    }
+}
+
+/// The cached account key at `m/{purpose}h/0h/{account}h`, if this session has it.
+fn cached(purpose: u32, account: u32) -> Option<ExtendedPubKey> {
+    // SAFETY: as in `forget`.
+    let all = unsafe { &*core::ptr::addr_of!(ACCOUNTS) };
+    all.iter()
+        .find(|c| c.purpose == purpose && c.account == account)
+        .map(|c| c.key)
+}
+
+/// Remember an account key, evicting the oldest if there is no room.
+fn remember(purpose: u32, account: u32, key: ExtendedPubKey) {
+    // SAFETY: as in `forget`.
+    let all = unsafe { &mut *core::ptr::addr_of_mut!(ACCOUNTS) };
+    if all.is_full() {
+        all.remove(0);
+    }
+    let _ = all.push(Cached {
+        purpose,
+        account,
+        key,
+    });
+}
+
+/// The account key at `m/{purpose}h/0h/{account}h` for `kind`, from this session or the
+/// seed.
+///
+/// A hit costs nothing. A miss unlocks the seed, which shows its own screens and may be
+/// refused -- `None` once the owner has been told why.
+pub(crate) fn account_key(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    kind: AddressKind,
+    account: u32,
+) -> Option<ExtendedPubKey> {
+    let purpose = kind.bip44_purpose();
+    if let Some(key) = cached(purpose, account) {
+        return Some(key);
+    }
+
+    let master = menu::unlock_master(gate, login, ui, head)?;
+    // The fingerprint comes free with the unlock; taking it now saves a later one.
+    let fp = crate::keywork::run(|kw| master.fingerprint(kw));
+    // SAFETY: as in `forget`.
+    unsafe { *core::ptr::addr_of_mut!(FINGERPRINT) = Some(fp) };
+
+    let steps = [
+        ChildNumber::hardened(purpose).ok()?,
+        ChildNumber::hardened(0).ok()?,
+        ChildNumber::hardened(account).ok()?,
+    ];
+    let mut busy = menu::Working::new(ui.panel, head, "deriving account");
+    let key = menu::public_at(&master, &steps, &mut busy, ui.panel);
+    drop(master);
+    let key = key?;
+    remember(purpose, account, key);
+    Some(key)
+}
+
+/// This wallet's master fingerprint, from this session or the seed.
+///
+/// The same unlock that derives an account key learns this, so a screen that has already
+/// shown an address pays nothing for it.
+///
+/// Only the multisig import asks, and that is compiled out on the mk3, which has no
+/// settings store to register a wallet in.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn fingerprint(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<[u8; 4]> {
+    // SAFETY: as in `forget`.
+    if let Some(fp) = unsafe { *core::ptr::addr_of!(FINGERPRINT) } {
+        return Some(fp);
+    }
+    let master = menu::unlock_master(gate, login, ui, head)?;
+    let fp = crate::keywork::run(|kw| master.fingerprint(kw));
+    drop(master);
+    // SAFETY: as in `forget`.
+    unsafe { *core::ptr::addr_of_mut!(FINGERPRINT) = Some(fp) };
+    Some(fp)
+}

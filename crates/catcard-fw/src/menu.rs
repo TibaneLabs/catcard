@@ -2850,7 +2850,7 @@ fn receive_chain(
 /// next level and drops the previous one, and the last hop keeps only the public half.
 /// Splitting the path this way exposes which level is running -- a fixed, published shape
 /// -- and nothing about the key.
-fn public_at(
+pub(crate) fn public_at(
     master: &catcard_wallet::bip32::ExtendedPrivKey,
     steps: &[catcard_wallet::bip32::ChildNumber],
     busy: &mut Working<'_>,
@@ -3418,15 +3418,11 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     use catcard_wallet::address;
     use catcard_wallet::bip32::{ChildNumber, Network};
 
-    // The master key is kept for as long as this screen is open, so a type can be derived
-    // when it is first asked for instead of paying for all four up front. That is a
-    // deliberate trade: a private key is resident while the screen waits for keypresses.
-    // It is the master alone -- each chain key is derived inside a masked region and
-    // dropped there, leaving only its public half -- and it is zeroized on the way out,
-    // which `ExtendedPrivKey`'s `ZeroizeOnDrop` does at every return below.
-    let Some(master) = unlock_master(gate, login, ui, "Addresses") else {
-        return;
-    };
+    // No master key is held here at all. Account keys come from `pubkeys`, which derives
+    // one from the seed the first time this session asks and keeps the public half after
+    // that -- so re-entering this screen, or moving back to an account already seen, costs
+    // nothing instead of the ~2.6 s the secure element and BIP-39 want. Below the account
+    // everything is unhardened, so the chain and the index need no private key.
     // Registered multisig wallets sit past the single-signature types on the same axis.
     // Their addresses come out of the wallet record, not out of this seed: that is the
     // point of looking at them here, since an address a cosigner cannot reproduce is one
@@ -3436,10 +3432,13 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     #[cfg(feature = "board-mk3")]
     let wallets: &[catcard_wallet::multisig::Multisig] = &[];
     let entries = PROTOCOLS.len() + wallets.len();
-    // One cached chain key at a time, for the type, account and chain on screen. Caching
-    // all of them would be four times the state for a screen that walks one at a time, and
-    // each is half a second to rederive when the owner moves.
+    // The chain key for the type, account and chain on screen, kept so that walking the
+    // index does not redo the one unhardened step each frame.
     let mut cached: Option<(usize, u32, u32, catcard_wallet::bip32::ExtendedPubKey)> = None;
+    // The account whose unlock the owner declined, if any. Asking again on the next frame
+    // would be a prompt they cannot get past; asking again once they move to a different
+    // type or account is them asking for it.
+    let mut refused_at: Option<(usize, u32)> = None;
 
     // How many characters of the address fit on one line **in the large face**, asked of the
     // renderer rather than worked out from the panel width: it keeps a gutter for the scroll
@@ -3481,13 +3480,23 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 .ok()
                 .and_then(|n| address::from_script(&spk[..n], Network::Mainnet, &mut buf))
         } else {
-            // First time this type, account and chain are asked for: derive the chain key,
-            // masked, and keep only the public half. Announced first -- it is about half a
-            // second during which nothing can repaint, and an unexplained pause is what
-            // made the old entry feel broken.
+            // First time this type, account and chain are asked for: take the account key
+            // -- from this session, or from the seed if this is the first ask -- and step
+            // once to the chain. That step is public and quick; the seed is what is slow,
+            // and `pubkeys` pays for it at most once per account.
             if !matches!(cached, Some((p, a, c, _)) if (p, a, c) == (proto, account, chain)) {
-                let mut busy = Working::new(ui.panel, "Deriving", kind_name(kind));
-                cached = chain_key(&master, kind, account, chain, &mut busy, ui.panel)
+                let account_key = (refused_at != Some((proto, account)))
+                    .then(|| {
+                        crate::pubkeys::account_key(gate, login, ui, "Addresses", kind, account)
+                    })
+                    .flatten();
+                refused_at = account_key.is_none().then_some((proto, account));
+                cached = account_key
+                    .and_then(|acct| {
+                        ChildNumber::normal(chain)
+                            .ok()
+                            .and_then(|c| acct.derive_child(c).ok())
+                    })
                     .map(|key| (proto, account, chain, key));
             }
             let _ = title.push_str(kind_name(kind));

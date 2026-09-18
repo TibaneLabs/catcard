@@ -42,12 +42,16 @@ fn set(text: &str) {
     let slot = unsafe { &mut *core::ptr::addr_of_mut!(ACTIVE) };
     wipe(slot);
     let _ = slot.push_str(text);
+    // Anything derived under the previous passphrase belongs to a different wallet.
+    crate::pubkeys::forget();
 }
 
 /// Forget the passphrase, wiping it.
 pub(crate) fn clear() {
     // SAFETY: as in `active`.
     wipe(unsafe { &mut *core::ptr::addr_of_mut!(ACTIVE) });
+    // As in `set`: the cached keys are the passphrase's wallet, not this one.
+    crate::pubkeys::forget();
 }
 
 /// Empty a string and wipe the bytes it held, tail included.

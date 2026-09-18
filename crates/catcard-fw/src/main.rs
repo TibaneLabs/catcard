@@ -61,6 +61,7 @@ mod power;
 /// Measuring how much recovery delay a PSRAM write needs on this part.
 #[cfg(not(feature = "board-mk3"))]
 mod psramsoak;
+mod pubkeys;
 mod recovery;
 mod sdupgrade;
 mod selftest;
