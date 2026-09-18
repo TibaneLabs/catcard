@@ -169,13 +169,32 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
             return None;
         }
     };
-    let doc = Doc::parse(&blob[..n]).ok()?;
-    let raw = doc.get("nick")?;
+    // Every way this can come to nothing says so. A nickname that does not appear is
+    // otherwise indistinguishable from one that was never set, and the difference is
+    // between "type it again" and "this firmware cannot read what stock wrote".
+    let doc = match Doc::parse(&blob[..n]) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::catlog!("nick: {} bytes of settings would not parse: {:?}", n, e);
+            return None;
+        }
+    };
+    let Some(raw) = doc.get("nick") else {
+        crate::catlog!("nick: not set ({} pre-login key(s))", doc.len());
+        return None;
+    };
 
     // SAFETY: as above; written once here and read-only afterwards.
     let nick: &'static mut [u8; NICK_MAX] = unsafe { &mut *core::ptr::addr_of_mut!(NICK) };
-    let len = json::unescape(raw, nick).unwrap_or(0);
+    let len = match json::unescape(raw, nick) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::catlog!("nick: {} byte(s) of it will not fit: {:?}", raw.len(), e);
+            return None;
+        }
+    };
     if len == 0 {
+        crate::catlog!("nick: set but empty");
         return None;
     }
     let text = core::str::from_utf8(&nick[..len]).ok()?;

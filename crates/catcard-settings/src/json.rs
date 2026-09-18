@@ -313,6 +313,30 @@ mod tests {
         assert_eq!(doc.get_u64("b"), Some(1));
     }
 
+    /// A pre-login blob in stock's shape reads the same however it was spaced.
+    ///
+    /// `ujson.dumps` and `json.dumps` differ over the space after a colon, and a settings
+    /// blob can have been written by either, on any firmware version. The keys and the raw
+    /// values must come out identical either way.
+    #[test]
+    fn stock_spacing_does_not_change_what_is_read() {
+        let spaced = br#"{"_age": 3, "nick": "Kitty", "terms_ok": 1, "rngk": 0}"#;
+        let packed = br#"{"_age":3,"nick":"Kitty","terms_ok":1,"rngk":0}"#;
+        for src in [&spaced[..], &packed[..]] {
+            let doc = Doc::parse(src).unwrap();
+            let keys: Vec<&str> = doc.entries().iter().map(|e| e.key).collect();
+            assert_eq!(keys, ["_age", "nick", "terms_ok", "rngk"]);
+            assert_eq!(doc.get_u64("_age"), Some(3));
+            assert_eq!(doc.get_str("nick"), Some("Kitty"));
+            assert_eq!(doc.get_bool("terms_ok"), Some(true));
+        }
+        // An empty nickname is a value, not a missing key: the device that prompted this
+        // test held `"nick": ""`, and "set but empty" has to be tellable from "never set".
+        let doc = Doc::parse(br#"{"_age":3,"nick":""}"#).unwrap();
+        assert_eq!(doc.get("nick"), Some(r#""""#));
+        assert_eq!(doc.get_str("nick"), Some(""));
+    }
+
     /// An empty object is a settings blob: a device with the store formatted and nothing
     /// saved yet has exactly this, and reading it must not be an error.
     #[test]
@@ -381,3 +405,4 @@ mod tests {
         assert_eq!(doc.get_bool("e"), Some(false));
     }
 }
+
