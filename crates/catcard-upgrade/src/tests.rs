@@ -563,3 +563,4 @@ fn staging_writes_aligned_words_and_reads_nothing_on_the_way() {
     // Every byte of the image is there, and the pad past its end is at most three bytes.
     assert!(area.bytes[..image.len()] == image[..], "the bytes differ");
 }
+

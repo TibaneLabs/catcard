@@ -644,7 +644,46 @@ impl UsbTask {
                 self.stage = Stage::Offered { staged, approval };
                 self.begin_reply(Status::Ok, &body[..n]);
             }
-            Err(r) => self.refuse(r),
+            Err(r) => {
+                // Say what the image claimed and what the staging area actually holds. A
+                // bare "BadSignature" covers a corrupt transfer, a staging area that lost
+                // bytes and an image that really is not signed -- and the difference is
+                // the whole diagnosis. The SD path has said this for a while; the USB path
+                // refusing in silence is what turned one afternoon into two.
+                if let Some(h) = staged.header() {
+                    crate::catlog!(
+                        "usb: image claims key {} len {} hw_compat {:#x}",
+                        h.pubkey_num,
+                        h.firmware_length,
+                        h.hw_compat
+                    );
+                }
+                if let Ok(d) = staged.digest() {
+                    crate::catlog!(
+                        "usb: staged digest {:02x}{:02x}{:02x}{:02x}, {} bytes received",
+                        d[0],
+                        d[1],
+                        d[2],
+                        d[3],
+                        staged.received()
+                    );
+                }
+                let mut head = [0u8; 8];
+                if staged.sample(0, &mut head).is_ok() {
+                    crate::catlog!(
+                        "usb: staged head {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        head[0],
+                        head[1],
+                        head[2],
+                        head[3],
+                        head[4],
+                        head[5],
+                        head[6],
+                        head[7]
+                    );
+                }
+                self.refuse(r)
+            }
         }
     }
 
