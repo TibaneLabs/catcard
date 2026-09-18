@@ -249,11 +249,13 @@ fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
 ///
 /// Its whole purpose is to be seen *before* a PIN is typed: it is how the owner tells their
 /// device from a substituted one. So it is drawn on its own screen rather than tucked into a
-/// corner of the prompt.
+/// corner of the prompt, and it **waits for a key** rather than passing on its own -- a
+/// message that disappears while you are reading it is no use as a check.
 ///
-/// It waits a moment and moves on, rather than waiting for a key. A key wait here would be
-/// consumed by whatever is driving the device -- the host tools inject keypresses -- and a
-/// message nobody can get past is worse than one that passes on its own. A press skips it.
+/// USB is pumped while it waits, and it is shown *after* the device has attached, so a host
+/// can still reach a device sitting on this screen: the wait is indefinite from the owner's
+/// side, and the recovery path must not depend on someone being in the room. A key from the
+/// host dismisses it exactly as a key on the keypad does.
 #[cfg(not(feature = "board-mk3"))]
 pub fn show_nickname(
     panel: &mut display::Panel,
@@ -265,12 +267,17 @@ pub fn show_nickname(
     // Wrapped, not a title: a nickname is whatever its owner typed, and one of them turned
     // out to be a paragraph. A title would draw it off both edges of the screen.
     use catcard_ui::scroll::{Line, ScrollView, render};
+    let mut hint = heapless::String::<32>::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut hint,
+        format_args!("{} to continue", display::CONFIRM_KEY),
+    );
     let mut doc: heapless::Vec<Line, 4> = heapless::Vec::new();
     let _ = doc.push(Line::body(nick).wrapped());
-    let _ = doc.push(Line::body("any key to continue").small());
+    let _ = doc.push(Line::body(hint.as_str()).small());
     let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
     display::draw(panel, |c| render(c, &view));
-    crate::catlog!("nick: drawn, {} lines", view.content_height());
+    crate::catlog!("nick: drawn, {} px of content", view.content_height());
 
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -280,15 +287,15 @@ pub fn show_nickname(
 
     // Throw away the first sample. A fresh scanner reports a key that is already down as a
     // new press, and a host that has just installed firmware has injected one -- so without
-    // this the screen is skipped by the keypress that caused the reboot, and the nickname
-    // flashes past on exactly the boot someone was waiting to see it on.
+    // this the screen is dismissed by the keypress that caused the reboot.
     pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
     keys.clear();
 
-    // Three seconds, in ten-millisecond looks at the keypad. Long enough to read a nickname
-    // someone chose to be long, short enough not to be in the way.
+    // Bounded, as every wait here is: five minutes is far longer than anyone stands in
+    // front of a device, and a keypad that has failed must cost the screen, not the boot.
     let mut waited = 0u32;
-    for _ in 0..300 {
+    for _ in 0..30_000 {
+        let _ = crate::usbtask::pump();
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             break;
@@ -296,7 +303,7 @@ pub fn show_nickname(
         waited += 1;
         catcard_hal::dwt::delay_cycles(10 * per_ms);
     }
-    crate::catlog!("nick: shown for {} ms", waited * 10);
+    crate::catlog!("nick: dismissed after {} ms", waited * 10);
 }
 
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
@@ -708,6 +715,10 @@ pub fn unlock(
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
+    // The owner's nickname, shown once the device has attached to USB. Always `None` on the
+    // mk3, whose settings medium is not wired up -- hence the underscore there.
+    #[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+    nick: Option<&str>,
 ) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);
@@ -717,6 +728,14 @@ pub fn unlock(
     // that callgate held the CPU -- let the host start enumerating into a core nothing was
     // servicing, which wedged it. From here every enumeration packet is answered promptly.
     crate::usbtask::attach();
+
+    // The nickname, if the owner set one, before anything is typed -- and after `attach`,
+    // so a host can reach a device that is sitting on it.
+    #[cfg(not(feature = "board-mk3"))]
+    if let Some(nick) = nick {
+        show_nickname(panel, matrix, drbg, nick);
+    }
+
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
