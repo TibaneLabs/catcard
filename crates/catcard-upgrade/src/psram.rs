@@ -93,6 +93,34 @@ impl PsramArea {
     }
 }
 
+/// NOPs executed after each memory-mapped PSRAM write.
+///
+/// Source: hw-reference/storage.md §PSRAM — *"Writes must be word-aligned (+ a NOP recovery
+/// delay after writes)"* [C]. Every store into this region is an OctoSPI write transaction,
+/// and the controller needs a moment before the next one; issued back to back, one is
+/// mis-issued now and then -- a word appears that was never written and the rest of the run
+/// sits four bytes along.
+///
+/// The count is not given anywhere we can read, so it was measured on the part: see
+/// `docs/PSRAM.md`. It is cheap -- a megabyte is 256k stores, so even sixteen NOPs each is a
+/// few milliseconds.
+pub const RECOVERY_NOPS: u32 = 16;
+
+/// Wait out the write recovery, per [`RECOVERY_NOPS`].
+#[inline(always)]
+pub fn recover() {
+    for _ in 0..RECOVERY_NOPS {
+        #[cfg(target_arch = "arm")]
+        // SAFETY: a NOP. No operands, no memory, no flags. Deliberately *not* `nomem`, so
+        // it is not reordered away from the store it is recovering from.
+        unsafe {
+            core::arch::asm!("nop", options(nostack, preserves_flags))
+        };
+        #[cfg(not(target_arch = "arm"))]
+        core::hint::spin_loop();
+    }
+}
+
 /// One 32-bit access in a span, and which bytes of it belong to the span.
 ///
 /// Splitting the arithmetic out from the stores is what makes it testable: the addresses
@@ -196,6 +224,7 @@ impl StagingArea for PsramArea {
             // and `in_range` bounded the span to the region claimed in `claim`, whose
             // safety contract is that it is mapped and ours.
             unsafe { core::ptr::write_volatile(word.at as *mut u32, value) };
+            recover();
         }
         Ok(())
     }
@@ -229,12 +258,20 @@ impl StagingArea for PsramArea {
         // SAFETY: `header_at` came from the board table's confirmed staging address and
         // lies inside the region claimed in `claim`. The writes are volatile and ordered
         // by a compiler fence so `magic1` cannot be hoisted above the fields it validates.
+        // Each store gets its recovery delay, as every write into this region must. These
+        // four are the ones the bootloader acts on, so a mis-issued one here is worse than
+        // a mis-issued one in the image: the image is verified afterwards, the header is
+        // what says where the image is.
         unsafe {
             core::ptr::write_volatile(at.add(1), self.image_offset);
+            recover();
             core::ptr::write_volatile(at.add(2), len);
+            recover();
             core::ptr::write_volatile(at.add(3), MAGIC2);
+            recover();
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             core::ptr::write_volatile(at, MAGIC1);
+            recover();
         }
 
         // Read it back before anyone acts on it.

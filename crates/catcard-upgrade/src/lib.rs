@@ -185,11 +185,6 @@ pub struct Staged<'a, A: StagingArea> {
     board: &'a BoardSpec,
     length: u32,
     received: u32,
-    /// How many times a read-back had to be repeated before it agreed with what had just
-    /// been written. See [`Self::stale_reads`].
-    stale_reads: u32,
-    /// How many chunks had to be written again. See [`Self::rewrites`].
-    rewrites: u32,
 }
 
 impl<'a, A: StagingArea> Staged<'a, A> {
@@ -214,8 +209,6 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             board,
             length,
             received: 0,
-            stale_reads: 0,
-            rewrites: 0,
         })
     }
 
@@ -270,103 +263,11 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // explicitly rather than trusting the read to be issued after the stores.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Write it, read it back, and write it again if the two disagree.
-        //
-        // The staging area is volatile memory over a bus of its own, and on a Q1 it
-        // occasionally takes a run of stores wrong: a word appears that was never written
-        // and the rest of the chunk sits four bytes along from where it belongs. Once per
-        // sixteen kilobytes is enough to fail a signature check every time, and the
-        // refusal says nothing about why -- so the check is here, where the bytes are
-        // still in hand and writing them again costs nothing.
-        //
-        // Only a chunk that cannot be written correctly at all is a fault. Then the
-        // offset of the first byte that would not stick is what the log needs.
-        const ATTEMPTS: u32 = 4;
-        let mut bad = None;
-        for attempt in 0..ATTEMPTS {
-            if attempt > 0 {
-                self.rewrites += 1;
-                self.area
-                    .write(offset, data)
-                    .map_err(|_| Reject::StorageFault { offset })?;
-            }
-            match self.check(offset, data)? {
-                None => {
-                    bad = None;
-                    break;
-                }
-                Some(at) => bad = Some(at),
-            }
-        }
-        if let Some(offset) = bad {
-            return Err(Reject::StorageFault { offset });
-        }
+        self.area
+            .write(offset, data)
+            .map_err(|_| Reject::StorageFault { offset })?;
         self.received = end;
         Ok(())
-    }
-
-    /// The first offset in `data` that does not read back, or `None` if all of it does.
-    ///
-    /// Sixty-four bytes at a time: the read-back buffer is on the stack, and a chunk that
-    /// size costs nothing while keeping the reported offset close to the fault.
-    fn check(&mut self, offset: u32, data: &[u8]) -> Result<Option<u32>, Reject> {
-        const AT_A_TIME: usize = 64;
-        for (i, part) in data.chunks(AT_A_TIME).enumerate() {
-            let at = offset + (i * AT_A_TIME) as u32;
-            if let Some(bad) = self.read_back(at, part)? {
-                return Ok(Some(bad));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Compare `want` against what the area holds at `at`, tolerating one stale read.
-    ///
-    /// A read straight after a write does not always see it: the first read back can
-    /// return what was there before. That is a stale read, not a corrupt one, and reading
-    /// again settles it.
-    fn read_back(&mut self, at: u32, want: &[u8]) -> Result<Option<u32>, Reject> {
-        let mut seen = [0u8; 64];
-        let seen = &mut seen[..want.len()];
-        for attempt in 0..2 {
-            // Order the read after the stores rather than trusting it to be issued after
-            // them; a bus with a write buffer of its own may not.
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            self.area
-                .read(at, seen)
-                .map_err(|_| Reject::StorageFault { offset: at })?;
-            if seen == want {
-                if attempt > 0 {
-                    self.stale_reads += 1;
-                }
-                return Ok(None);
-            }
-        }
-        let byte = want
-            .iter()
-            .zip(seen.iter())
-            .position(|(a, b)| a != b)
-            .unwrap_or(0);
-        Ok(Some(at + byte as u32))
-    }
-
-    /// Chunks the staging area took wrong and had to be given again.
-    ///
-    /// Zero on a medium that stores what it is told. Anything else is the count of times a
-    /// chunk read back as something other than what had just been written -- worth logging,
-    /// because it is the difference between a medium that needs watching and one that is
-    /// failing.
-    pub fn rewrites(&self) -> u32 {
-        self.rewrites
-    }
-
-    /// Read-backs that disagreed at first and agreed when read again.
-    ///
-    /// Zero on a medium that answers a read immediately after a write. Anything else says
-    /// the staging area needs the second look, which is worth knowing: it is the
-    /// difference between "this medium is slow to settle" and "this medium loses data".
-    pub fn stale_reads(&self) -> u32 {
-        self.stale_reads
     }
 
     /// Read the image back and decide whether it may be installed.

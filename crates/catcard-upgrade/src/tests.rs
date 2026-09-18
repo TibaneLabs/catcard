@@ -14,13 +14,6 @@ struct Mem {
     header: Option<(u32, u32)>,
     /// Flip one bit on the way back out, to model memory that does not read back.
     corrupt_read_at: Option<u32>,
-    /// Flip one bit on the way back out **once**, to model a read that overtakes the
-    /// write it follows: wrong the first time, right when read again.
-    stale_read_at: Option<u32>,
-    /// Drop one byte of the **first** write that covers this offset, to model a staging
-    /// area that takes a run of stores wrong now and then and takes it correctly when
-    /// given the same bytes again.
-    lose_first_write_at: Option<u32>,
 }
 
 impl Mem {
@@ -29,8 +22,6 @@ impl Mem {
             bytes: vec![0xFF; capacity],
             header: None,
             corrupt_read_at: None,
-            stale_read_at: None,
-            lose_first_write_at: None,
         }
     }
 }
@@ -56,13 +47,6 @@ impl StagingArea for Mem {
             return Err(MemError);
         }
         self.bytes[at..end].copy_from_slice(data);
-        if let Some(bad) = self.lose_first_write_at {
-            let bad = bad as usize;
-            if (at..end).contains(&bad) {
-                self.bytes[bad] ^= 0x01;
-                self.lose_first_write_at = None;
-            }
-        }
         Ok(())
     }
 
@@ -77,13 +61,6 @@ impl StagingArea for Mem {
             let bad = bad as usize;
             if (at..end).contains(&bad) {
                 out[bad - at] ^= 0x01;
-            }
-        }
-        if let Some(bad) = self.stale_read_at {
-            let at_bad = bad as usize;
-            if (at..end).contains(&at_bad) {
-                out[at_bad - at] ^= 0x01;
-                self.stale_read_at = None;
             }
         }
         Ok(())
@@ -529,72 +506,6 @@ fn a_released_stock_signature_verifies_under_the_key_its_header_names() {
     );
 }
 
-/// A read that overtakes its write is not a broken staging area.
-///
-/// On a memory-mapped PSRAM the first read back of a freshly written byte can return
-/// what was there before. Failing the upgrade for that would refuse a perfectly good
-/// image; the second read settles it, and the count says it happened.
-#[test]
-fn a_read_that_overtakes_its_write_is_read_again_rather_than_refused() {
-    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
-    mem.stale_read_at = Some(700);
-    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
-    let block = vec![0xA5u8; 1024];
-    assert_eq!(staged.write(0, &block), Ok(()));
-    assert_eq!(staged.received(), 1024);
-    assert_eq!(
-        staged.stale_reads(),
-        1,
-        "the second read agreed, and that is worth counting"
-    );
-}
 
-/// A disagreement that survives the second read is a fault, at the byte that differs.
-#[test]
-fn a_staging_area_that_does_not_read_back_fails_at_the_offset_that_differs() {
-    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
-    mem.corrupt_read_at = Some(700);
-    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
-    let block = vec![0xA5u8; 1024];
-    assert_eq!(
-        staged.write(0, &block),
-        Err(Reject::StorageFault { offset: 700 }),
-        "a medium that loses a byte has to say which one"
-    );
-    // Nothing is counted as received when the write did not stick.
-    assert_eq!(staged.received(), 0);
-    assert_eq!(staged.stale_reads(), 0);
-}
 
-/// A staging area that takes one run of stores wrong is given the same bytes again.
-///
-/// This is what a Q1 does: about one chunk in thirty-two comes back with a word that was
-/// never written and the rest of the chunk shifted along. The bytes are still in hand when
-/// the check runs, so writing them again costs nothing -- and the alternative is a
-/// signature refusal that says nothing about why.
-#[test]
-fn a_chunk_the_area_took_wrong_is_written_again() {
-    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
-    mem.lose_first_write_at = Some(700);
-    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
-    let block = vec![0xA5u8; 1024];
-    assert_eq!(staged.write(0, &block), Ok(()));
-    assert_eq!(staged.received(), 1024);
-    assert_eq!(staged.rewrites(), 1, "one chunk had to be given again");
-    assert_eq!(staged.stale_reads(), 0, "the read was not stale, the write was wrong");
-}
 
-/// An area that never stores what it is told fails, rather than rewriting for ever.
-#[test]
-fn an_area_that_never_stores_what_it_is_told_gives_up_and_says_where() {
-    let mut mem = Mem::new(MIN_FIRMWARE_LENGTH as usize);
-    mem.corrupt_read_at = Some(700);
-    let mut staged = Staged::begin(mem, &Q1, MIN_FIRMWARE_LENGTH).unwrap();
-    let block = vec![0xA5u8; 1024];
-    assert_eq!(
-        staged.write(0, &block),
-        Err(Reject::StorageFault { offset: 700 })
-    );
-    assert!(staged.rewrites() > 0, "it tried again before giving up");
-    assert_eq!(staged.received(), 0);
-}

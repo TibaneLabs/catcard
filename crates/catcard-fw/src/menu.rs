@@ -118,6 +118,9 @@ enum Screen {
     /// Debug: exercise the settings store on internal flash.
     #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
+    /// The PSRAM write-recovery sweep: how many NOPs a store here needs.
+    #[cfg(not(feature = "board-mk3"))]
+    PsramSoak,
     /// Secure Notes & Passwords, read out of the settings blob. Q1 only: stock writes
     /// them where there is a keyboard to type them on.
     #[cfg(feature = "board-q1")]
@@ -281,6 +284,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Factory Reset",
     #[cfg(not(feature = "board-mk3"))]
     "Settings store",
+    #[cfg(not(feature = "board-mk3"))]
+    "PSRAM soak",
     #[cfg(feature = "board-q1")]
     "Secure notes",
 ];
@@ -677,6 +682,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::settings::inspect(a.gate, a.login, a.ui),
             Screen::Debug,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::PsramSoak => to(|a| crate::psramsoak::run(a.ui), Screen::Debug),
         #[cfg(feature = "board-q1")]
         Screen::Notes => to(|a| crate::notes::view(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(feature = "games")]
@@ -893,6 +900,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("PSRAM soak")) => Screen::PsramSoak,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
@@ -1091,7 +1100,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it takes the CPU and never returns.
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SettingsStore => {}
+        Screen::SettingsStore | Screen::PsramSoak => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes => {}
         Screen::Kernel => kernel_screen(panel),

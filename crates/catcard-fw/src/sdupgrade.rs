@@ -17,7 +17,7 @@
 //! bad card, a missing file and a broken container tell themselves apart on screen.
 
 use catcard_board::BOARD;
-use catcard_upgrade::{Approval, Reject, Staged, dfuse};
+use catcard_upgrade::{Approval, Staged, dfuse};
 
 use crate::staging;
 
@@ -169,45 +169,9 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
             Err(_) => return Outcome::Failed("read failed"),
         };
         if let Err(why) = staged.write(at, &buf[..n]) {
-            // Either the image ran past the area or the area did not read back what was
-            // written. On mk4/mk5 the second is what an unmapped PSRAM looks like.
-            //
-            // Say which byte and what it held. "Nothing there" is an area that is not
-            // answering, "what was there before" is a read that overtook the write, and
-            // "our bytes, moved along" is the medium mangling a run of stores -- three
-            // different faults that otherwise arrive as the same sentence.
+            // The image ran past the area, or the area refused. Name it: "refused" alone
+            // has already sent one person hunting for a reason nobody wrote down.
             crate::catlog!("sd: staging write refused: {:?}", why);
-            if let Reject::StorageFault { offset } = why {
-                let chunk = offset.saturating_sub(at).min(n as u32 - 1) as usize;
-                let mut back = [0u8; 8];
-                let from = offset.min(at + n as u32 - 8);
-                let _ = staged.sample(from, &mut back);
-                let src = (from - at) as usize;
-                crate::catlog!(
-                    "sd: at {:#x} wrote {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    from,
-                    buf[src],
-                    buf[src + 1],
-                    buf[src + 2],
-                    buf[src + 3],
-                    buf[src + 4],
-                    buf[src + 5],
-                    buf[src + 6],
-                    buf[src + 7]
-                );
-                crate::catlog!(
-                    "sd: read back  {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (byte {} of the chunk)",
-                    back[0],
-                    back[1],
-                    back[2],
-                    back[3],
-                    back[4],
-                    back[5],
-                    back[6],
-                    back[7],
-                    chunk
-                );
-            }
             return Outcome::Failed("staging write failed");
         }
         at += n as u32;
@@ -216,14 +180,6 @@ pub fn stage_from_card(slot: catcard_hal::sdmmc::Slot, chosen: Option<&str>) -> 
     // A staging area that needed a second look at what it had just written is worth a
     // line: it is the difference between a medium that settles slowly and one that loses
     // data, and only the log can tell the next person which this board does.
-    if staged.stale_reads() > 0 || staged.rewrites() > 0 {
-        crate::catlog!(
-            "sd: staging rewrote {} chunk(s), read back late {} time(s)",
-            staged.rewrites(),
-            staged.stale_reads()
-        );
-    }
-
     let staged_len = len;
     let running = crate::own_header();
     match staged.inspect(running.as_ref()) {

@@ -59,6 +59,9 @@ mod session;
 /// so a viewer on an mk4 or mk5 would only ever show an empty list.
 #[cfg(feature = "board-q1")]
 mod notes;
+/// Measuring how much recovery delay a PSRAM write needs on this part.
+#[cfg(not(feature = "board-mk3"))]
+mod psramsoak;
 /// The settings store itself: slots, keys, and the screen that reads them.
 #[cfg(not(feature = "board-mk3"))]
 mod settings;
