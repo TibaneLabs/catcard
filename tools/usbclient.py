@@ -577,6 +577,169 @@ def stage_by_poke(s, blob, progress=True):
     return start, total
 
 
+# --- triggering the install by hand: gate 18 / 7 -------------------------------------
+#
+# Staging puts the image in PSRAM; nothing installs it until a logged-in `gate 18/7`
+# authorises the region. These are the pieces of that call, taken from
+# `catcard-callgate` rather than from the reference, because they are the same numbers
+# the firmware itself uses and a disagreement would be silent.
+GATE_ENTRY_PTR = 0x0800_0040     # the gate's address is *published* here, never fixed
+METHOD_PIN_ATTEMPT = 18
+PIN_OP_FIRMWARE_UPGRADE = 7
+CHANGE_FIRMWARE = 0x040
+
+PA_MAGIC_V2 = 0x2EAF_6312
+PA_SIZE = 280
+PA_ATTEMPTS_LEFT = 56
+PA_STATE_FLAGS = 60
+PA_CHANGE_FLAGS = 100
+PA_SECRET = 176
+STATE_SUCCESSFUL = 0x01
+
+SRAM_BASE = 0x2000_0000
+
+
+def gate_entry(s):
+    """Where the bootloader's callgate is, read from where it publishes itself."""
+    addr = struct.unpack("<I", peek(s, GATE_ENTRY_PTR, 1, 4))[0]
+    # It lives in the bootloader, below our firmware, and is a Thumb address.
+    if not (0x0800_0000 <= (addr & ~1) < 0x0802_0000):
+        raise RuntimeError(f"gate entry {addr:#010x} is not in the bootloader")
+    return addr
+
+
+def find_attempt(s, sram_len=192 * 1024):
+    """Find the firmware's live `pinAttempt_t`, by its magic.
+
+    Returns a list of `(addr, state_flags, attempts_left)`, logged-in ones first. The
+    struct is not at a fixed place -- it belongs to the login state the session is
+    holding -- so it is searched for rather than assumed.
+    """
+    want = struct.pack("<I", PA_MAGIC_V2)
+    per = 64  # words per peek; the reply is one message, so keep it comfortable
+    hits = []
+    for base in range(SRAM_BASE, SRAM_BASE + sram_len, per * 4):
+        try:
+            blob = peek(s, base, per, 4)
+        except RuntimeError:
+            continue
+        off = 0
+        while True:
+            i = blob.find(want, off)
+            if i < 0 or i % 4:
+                if i < 0:
+                    break
+                off = i + 1
+                continue
+            at = base + i
+            try:
+                tail = peek(s, at + PA_ATTEMPTS_LEFT, 2, 4)
+                left, flags = struct.unpack("<II", tail)
+                hits.append((at, flags, left))
+            except RuntimeError:
+                pass
+            off = i + 4
+    hits.sort(key=lambda h: 0 if h[1] & STATE_SUCCESSFUL else 1)
+    return hits
+
+
+def gate_thunk(method, buf, length, arg2, dest):
+    """Machine code to call the gate with its own register convention.
+
+    `DebugJsr` calls `fn(u32) -> u32`, so it can set `r0` and nothing else; the gate
+    wants the method in `r0`, the buffer in `r1`, **its length in `r2`** -- not a second
+    argument -- and `arg2` in `r3`. So a few instructions load them from a literal pool
+    and branch. `r9` and `r10` are saved because the gate clobbers them, exactly as
+    `catcard_callgate::entry::invoke` does.
+
+    Hand-assembled Thumb-2. Laid out so the literals sit at fixed offsets from the
+    loads, which is the only fiddly part:
+
+        push.w {r4, r9, r10, lr}
+        ldr r0, [pc, #12]   ; method
+        ldr r1, [pc, #16]   ; buf
+        ldr r2, [pc, #16]   ; len
+        ldr r3, [pc, #20]   ; arg2
+        ldr r4, [pc, #20]   ; dest
+        blx r4
+        pop.w  {r4, r9, r10, pc}
+        .word method, buf, len, arg2, dest
+
+    Checked against a real assembler rather than trusted -- `clang --target=thumbv7em`
+    on the listing above produces these exact bytes, and `--selftest` asserts it here so
+    an edit cannot quietly change what runs on the device.
+    """
+    code = struct.pack(
+        "<HHHHHHHHHH",
+        0xE92D, 0x4610,   # push.w {r4, r9, r10, lr}
+        0x4803,           # ldr r0, [pc, #12]
+        0x4904,           # ldr r1, [pc, #16]
+        0x4A04,           # ldr r2, [pc, #16]
+        0x4B05,           # ldr r3, [pc, #20]
+        0x4C05,           # ldr r4, [pc, #20]
+        0x47A0,           # blx r4
+        0xE8BD, 0x8610,   # pop.w {r4, r9, r10, pc}
+    )
+    return code + struct.pack("<IIIII", method, buf, length, arg2, dest)
+
+
+# What the listing above assembles to, for `--selftest`. Any change to `gate_thunk`
+# that does not also change this is a change nobody looked at.
+THUNK_GOLDEN = bytes.fromhex(
+    "2de91046" "0348" "0449" "044a" "054b" "054c" "a047" "bde81086"
+    "12000000" "34120020" "18010000" "07000000" "05030008"
+)
+
+
+def selftest():
+    """Check the things that would be discovered on a device that cannot be recovered."""
+    got = gate_thunk(18, 0x2000_1234, 280, 7, 0x0800_0305)
+    assert got == THUNK_GOLDEN, f"thunk changed:\n  {got.hex()}\n  {THUNK_GOLDEN.hex()}"
+    # The literals have to land where the loads reach, which is the part that is easy
+    # to get wrong and impossible to notice until it runs.
+    assert struct.unpack_from("<I", got, 20)[0] == 18, "method literal moved"
+    assert struct.unpack_from("<I", got, 24)[0] == 0x2000_1234, "buf literal moved"
+    assert struct.unpack_from("<I", got, 28)[0] == 280, "len literal moved"
+    assert struct.unpack_from("<I", got, 32)[0] == 7, "arg2 literal moved"
+    assert struct.unpack_from("<I", got, 36)[0] == 0x0800_0305, "dest literal moved"
+    assert PA_SIZE == 280 and PA_SECRET == 176 and PA_CHANGE_FLAGS == 100
+    print("selftest  thunk and pinAttempt_t offsets ok")
+
+
+def gate_install(s, start, length, attempt, thunk_at):
+    """Authorise the staged region and install it. **Does not return on success.**
+
+    The device reboots into the bootloader, which verifies the staged image and writes
+    it to flash. A return means it refused: -112 is the image failing verification,
+    -103 a bad region.
+    """
+    dest = gate_entry(s)
+    print(f"gate      entry {dest:#010x}, attempt {attempt:#010x}")
+
+    # The two fields the caller owns. The bootloader's HMAC covers the struct only up to
+    # `hmac` (plus `cached_main_pin`), so these are writable without invalidating it --
+    # which is why the firmware's own `set_firmware_region` writes exactly these.
+    poke(s, attempt + PA_SECRET, struct.pack("<II", start, length))
+    poke(s, attempt + PA_CHANGE_FLAGS, struct.pack("<i", CHANGE_FIRMWARE))
+    print(f"gate      region start={start:#x} len={length}, change_flags=FIRMWARE")
+
+    thunk = gate_thunk(METHOD_PIN_ATTEMPT, attempt, PA_SIZE, PIN_OP_FIRMWARE_UPGRADE, dest)
+    poke(s, thunk_at, thunk)
+    back = peek(s, thunk_at, len(thunk) // 4, 4)
+    if back != thunk:
+        raise RuntimeError("the thunk did not read back; refusing to call it")
+    print(f"gate      thunk at {thunk_at:#010x} ({len(thunk)} bytes), verified")
+
+    try:
+        rv = jsr(s, thunk_at)
+    except Exception as e:
+        print(f"gate      no reply ({type(e).__name__}) -- the device is installing")
+        return None
+    rv = rv - (1 << 32) if rv >= (1 << 31) else rv
+    print(f"gate      returned {rv} -- it refused; nothing was written")
+    return rv
+
+
 def jsr(s, addr, arg=0):
     """Call `addr` as fn(u32)->u32; returns the u32 result."""
     st, body = request(s, DEBUG_JSR, struct.pack("<II", addr, arg))
@@ -792,6 +955,61 @@ def main(path, image=None):
         print("staged, but NOT installed. The bootloader only acts on this when a")
         print("logged-in `gate 18/7` authorises the region, or when it recovers a device")
         print(f"whose own firmware fails to verify. Region: start={start:#x} len={total}.")
+        return 0
+
+    if "--find-attempt" in sys.argv:
+        for at, flags, left in find_attempt(s):
+            mark = "LOGGED IN" if flags & STATE_SUCCESSFUL else "not logged in"
+            print(f"attempt   {at:#010x} state={flags:#x} ({mark}) attempts_left={left}")
+        return 0
+
+    if "--rescue" in sys.argv or "--install-staged" in sys.argv:
+        # The last resort: stage with the monitor and authorise the region by hand.
+        # For a device whose own staging path is what is broken, which is the case
+        # where every ordinary route is also the broken one.
+        st, body = request(s, IDENTIFY)
+        if not capabilities(body) & CAP_DEBUG_MEM:
+            print("rescue    this build has no memory monitor (needs usb-debug-mem)")
+            return 1
+        info = identify(body)
+        if not (info and info[1]):
+            print("rescue    the device must be unlocked: the gate call is the login's")
+            return 1
+
+        thunk_at = PSRAM_BASE
+        if "--thunk" in sys.argv:
+            thunk_at = int(arg_after("--thunk")[0], 0)
+
+        if "--rescue" in sys.argv:
+            a = arg_after("--rescue")
+            if not a:
+                print("usage: --rescue <image.dfu|image.bin>")
+                return 1
+            start, total = stage_by_poke(s, load_image(a[0]))
+        else:
+            # Already staged, by `--stage` or by a previous run that got that far.
+            hdr = peek(s, PSRAM_HEADER, 4, 4)
+            m1, start, total, m2 = struct.unpack("<IIII", hdr)
+            if m1 != HDR_MAGIC1 or m2 != HDR_MAGIC2:
+                print(f"rescue    no image staged (magics {m1:#x}/{m2:#x})")
+                return 1
+            print(f"rescue    using the staged image: start={start:#x} len={total}")
+
+        found = [h for h in find_attempt(s) if h[1] & STATE_SUCCESSFUL]
+        if not found:
+            print("rescue    no logged-in pinAttempt_t found in SRAM")
+            return 1
+        attempt = found[0][0]
+        if len(found) > 1:
+            print(f"rescue    {len(found)} logged-in candidates; using {attempt:#010x}")
+
+        print()
+        print("About to authorise the staged image. This is irreversible: the")
+        print("bootloader overwrites the running firmware and reboots.")
+        if "--yes" not in sys.argv:
+            print("Re-run with --yes to go ahead.")
+            return 1
+        gate_install(s, start, total, attempt, thunk_at)
         return 0
 
     if "--log" in sys.argv:
@@ -1018,4 +1236,9 @@ def main(path, image=None):
 
 
 if __name__ == "__main__":
+    # Checks that need no device, and that matter most when the device cannot be
+    # reached: the hand-assembled thunk and the struct offsets it depends on.
+    if "--selftest" in sys.argv:
+        selftest()
+        raise SystemExit(0)
     sys.exit(main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))

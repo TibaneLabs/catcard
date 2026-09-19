@@ -394,3 +394,41 @@ to see.
 The stock `ckcc` protocol (`vers`, `ncry`, `stxn`, …) is deliberately not implemented and
 deliberately not studied — see [`../CLEANROOM.md`](../CLEANROOM.md). Host compatibility
 with existing Coldcard tooling is not a goal.
+
+
+## Rescue: staging and installing with the memory monitor
+
+A device whose own staging path is broken cannot be fixed by either ordinary route: the
+USB offer and the card both run through the code that is failing. That happened on
+2026-09-19 — a barrier in `burst_gap` stopped the core part way through an image — and
+there was no way back. These modes exist for that, on a `usb-debug-mem` build:
+
+```sh
+usbclient.py hid --selftest                 # no device needed
+usbclient.py hid --stage out/catcard-q1.dfu # poke the image into PSRAM, publish the header
+usbclient.py hid --find-attempt             # locate the live pinAttempt_t
+usbclient.py hid --rescue out/catcard-q1.dfu --yes   # stage, then authorise and install
+```
+
+**Staging** pokes the image to `PSRAM_BASE + PSRAM_LEN/2` and writes the recovery header
+at `0x907F_F800` with `magic1` last, so no intermediate state reads as a valid header.
+It never calls the firmware's PSRAM driver. It is also gentle on the part by accident of
+shape: one frame per request means each write is a short burst with the bus idle until
+the next arrives, which is far more CE#-high time than `tCPH` asks for.
+
+**Installing** is `gate 18 / 7`, and needs the login's own `pinAttempt_t` — so the device
+must be unlocked. The struct is found by scanning SRAM for `PA_MAGIC_V2`; the two fields
+the caller owns (`change_flags` and the region in `secret[0..8]`) are poked, which does
+not disturb the bootloader's HMAC because that covers only the struct up to `hmac` plus
+`cached_main_pin`.
+
+`DebugJsr` calls `fn(u32) -> u32` and can set only `r0`, but the gate wants the method in
+`r0`, the buffer in `r1` and **its length in `r2`** — not a second argument. So a
+ten-instruction Thumb thunk loads them from a literal pool and branches, saving `r9` and
+`r10` because the gate clobbers them. It is poked into the unused lower half of PSRAM,
+read back before it is called, and its bytes are pinned by `--selftest` against what a
+real assembler produces from the listing in the source.
+
+On success the call does not return: the device reboots and the bootloader installs. A
+return is a refusal — `-112` is the staged image failing verification, `-103` a bad
+region.
