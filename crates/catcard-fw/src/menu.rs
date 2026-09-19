@@ -66,6 +66,10 @@ enum Screen {
     /// About's second page: the STM32 itself.
     AboutChip,
     SdInstall,
+    /// A firmware image read off animated QR: the way in when USB and the card are both
+    /// gone.
+    #[cfg(feature = "board-q1")]
+    QrInstall,
     Debug,
     Usb,
     Clocks,
@@ -395,6 +399,8 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
+    #[cfg(feature = "board-q1")]
+    "Install from QR",
     "USB",
     "Clocks",
     "RTC",
@@ -826,6 +832,8 @@ fn action_for(screen: Screen) -> Option<Action> {
 
     Some(match screen {
         Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
+        #[cfg(feature = "board-q1")]
+        Screen::QrInstall => to(|a| install_from_qr(a.gate, a.login, a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
         Screen::Logs => to(
             |a| {
@@ -1155,6 +1163,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // top), and an index table would silently point at the wrong entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Install from QR")) => Screen::QrInstall,
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
@@ -1487,6 +1497,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        #[cfg(feature = "board-q1")]
+        Screen::QrInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) => {}
@@ -2285,6 +2297,155 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             }
         };
 
+    offer_and_install(gate, login, ui, staged, approval);
+}
+
+/// Read a firmware off animated QR, ask, and install it.
+///
+/// The last way in. USB is the normal one and the card is the fallback, and this is what
+/// is left when both have stopped working -- which has happened to this device, more
+/// than once, and is why it exists at all. It needs nothing but a screen pointed at the
+/// scanner.
+///
+/// **Raw image only.** A DfuSe container puts the image a couple of hundred bytes into
+/// the file, and shifting it down in the staging area afterwards would mean reading that
+/// memory back while still writing it -- the one thing that reliably corrupts it. A
+/// container is refused with the reason rather than staged wrong.
+#[cfg(feature = "board-q1")]
+fn install_from_qr(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_upgrade::{Staged, StagingArea as _};
+
+    const HEAD: &str = "Install from QR";
+
+    // Taken before the scan, and held until this returns: the parts land straight in it,
+    // and a USB offer arriving halfway through must be told no rather than handed the
+    // same bytes.
+    let mut area = match crate::staging::area() {
+        Ok(a) => a,
+        Err(crate::staging::Unavailable::NoMedium) => {
+            message(ui.panel, HEAD, "no staging area", "any key to go back");
+            wait_for_any_key(ui);
+            return;
+        }
+        Err(crate::staging::Unavailable::Busy) => {
+            message(
+                ui.panel,
+                HEAD,
+                "busy with another image",
+                "any key to go back",
+            );
+            wait_for_any_key(ui);
+            return;
+        }
+    };
+    let capacity = area.capacity();
+
+    // The scan. Parts go to their own offsets as they are caught, so nothing is held in
+    // RAM waiting for the ones in front of it -- which for an image is a third of a
+    // megabyte of somewhere to hold them.
+    let len = {
+        let mut sink = crate::qrload::Staging {
+            area: &mut area,
+            capacity,
+        };
+        match crate::qrload::collect(ui, HEAD, &mut sink) {
+            Some(len) => len as u32,
+            // Cancelled, or a reason already shown.
+            None => return,
+        }
+    };
+    crate::catlog!("qr: staged {} bytes", len);
+
+    let mut staged = match Staged::begin(area, &catcard_board::BOARD, len) {
+        Ok(s) => s,
+        Err(why) => {
+            crate::catlog!("qr: image size refused: {:?}", why);
+            message(
+                ui.panel,
+                HEAD,
+                crate::sdupgrade::describe(why),
+                "any key to go back",
+            );
+            wait_for_any_key(ui);
+            return;
+        }
+    };
+    // The transport counted the parts, so it is the thing that knows this is whole --
+    // the highest offset written says nothing about holes before it.
+    staged.placed_all();
+
+    // A container would have been staged at the wrong offset. Caught here, where the
+    // answer is a sentence, rather than by the bootloader, where it is `-112`.
+    let mut head = [0u8; 8];
+    if staged.sample(0, &mut head).is_ok() && head.starts_with(b"DfuSe") {
+        message(
+            ui.panel,
+            HEAD,
+            "send the .bin, not the .dfu",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+        return;
+    }
+
+    // One pass over the staging area to digest it, then the signature. Scattered parts
+    // could not be hashed as they arrived, so this is the only place the image is read
+    // as a whole -- and it is affordable exactly because the transport took minutes.
+    let mut shown = u8::MAX;
+    let mut tick = |done: u32, total: u32| {
+        let pct = if total == 0 {
+            100
+        } else {
+            ((done as u64 * 100) / total as u64) as u8
+        };
+        if pct == shown {
+            return;
+        }
+        shown = pct;
+        let mut note = Line::new();
+        let _ = write!(note, "{} of {} KB", done / 1024, total / 1024);
+        display::draw(ui.panel, |c| {
+            let mut wait = Line::new();
+            let _ = write!(wait, "checking signature");
+            let lines = [wait, note.clone()];
+            catcard_ui::widgets::info(c, &display::LAYOUT, HEAD, &lines);
+            catcard_ui::splash::draw_progress(c, pct);
+        });
+    };
+    let approval = match staged.inspect_with(crate::own_header().as_ref(), &mut tick) {
+        Ok(a) => a,
+        Err(why) => {
+            crate::catlog!("qr: image refused: {:?}", why);
+            message(
+                ui.panel,
+                "No upgrade",
+                crate::sdupgrade::describe(why),
+                "any key to go back",
+            );
+            wait_for_any_key(ui);
+            return;
+        }
+    };
+
+    offer_and_install(gate, login, ui, staged, approval);
+}
+
+/// Show what was staged, and install it if the owner says so.
+///
+/// Shared by every way an image arrives, because the question and the two calls that
+/// follow it must not differ by route: an image that came in over QR is authorised by
+/// the same `commit` and the same `gate 18/7` as one that came off a card, and a person
+/// is asked the same thing in the same words.
+fn offer_and_install<A>(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    staged: catcard_upgrade::Staged<'_, A>,
+    approval: catcard_upgrade::Approval,
+) where
+    A: catcard_upgrade::StagingArea,
+    A::Error: Into<catcard_upgrade::StorageError>,
+{
     crate::session::show_offer(ui.panel, &approval);
 
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -2294,9 +2455,9 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         for k in keys.iter() {
             match k {
                 Key::Confirm => {
-                    // `commit` reads the image back before it says yes, so this can
-                    // refuse for a reason worth naming -- `RamStoreFailed` above all,
-                    // which is this device losing the bytes rather than a bad image.
+                    // `commit` publishes the recovery header and can refuse for a reason
+                    // worth naming -- this device losing the bytes rather than a bad
+                    // image being the one that matters.
                     match staged.commit(approval) {
                         Ok(region) => {
                             message(ui.panel, "Installing", "do not disconnect", "");

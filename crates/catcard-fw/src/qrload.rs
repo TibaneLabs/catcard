@@ -36,7 +36,11 @@ pub(crate) trait Sink {
     }
 
     /// Put `bytes` at `offset`. An error abandons the transfer.
-    fn place(&mut self, offset: usize, bytes: &[u8]) -> Result<(), &'static str>;
+    ///
+    /// `tail` is true when nothing in the payload follows these bytes. A sink writing
+    /// into PSRAM needs it: whole words only, except at the very end of the image where
+    /// there is nothing after the short word to be disturbed by padding it out.
+    fn place(&mut self, offset: usize, bytes: &[u8], tail: bool) -> Result<(), &'static str>;
 }
 
 /// A plain buffer, which is what a PSBT and every text payload want.
@@ -52,7 +56,7 @@ impl Sink for Buffer<'_> {
         Ok(())
     }
 
-    fn place(&mut self, offset: usize, bytes: &[u8]) -> Result<(), &'static str> {
+    fn place(&mut self, offset: usize, bytes: &[u8], _tail: bool) -> Result<(), &'static str> {
         let end = offset.checked_add(bytes.len()).ok_or("bad offset")?;
         let room = self
             .out
@@ -183,7 +187,7 @@ fn read_one(
                 if catcard_bbqr::decode(header.encoding, payload, room).is_err() {
                     return Ok(None);
                 }
-                sink.place(placed.offset, room)?;
+                sink.place(placed.offset, room, placed.index + 1 == placed.total)?;
             }
             let placed = collector.confirm(placed);
             // Only now is the length knowable: BBQr's parts are all the same size except
@@ -211,7 +215,7 @@ fn read_one(
                 let bytes = scratch
                     .get(from..from + placed.len)
                     .ok_or("a fragment was too long")?;
-                sink.place(offset, bytes)?;
+                sink.place(offset, bytes, placed.index + 1 == placed.total)?;
             }
             let placed = collector.confirm(placed);
             let have = placed.have;
@@ -249,4 +253,68 @@ fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) {
     use core::fmt::Write as _;
     let _ = write!(note, "{have} of {total}");
     menu::blocking_screen(ui.panel, head, &note);
+}
+
+/// The firmware staging area, for an image that arrived as QR.
+///
+/// # Word alignment is the whole of the difficulty
+///
+/// The staging area on every board but the mk3 is memory-mapped PSRAM, which takes
+/// aligned whole-word stores and nothing else: a partial word makes the area read back
+/// what is already there to merge with, and a read placed among writes is exactly what
+/// corrupts this part. So a part's offset must be a multiple of four, and so must its
+/// length -- except for the last part, where the short word can be padded out because
+/// there is nothing after it to disturb.
+///
+/// A BBQr part is five bytes per eight characters, so its size is always a multiple of
+/// five and only sometimes a multiple of four. **A sender must choose a part size that
+/// is a multiple of twenty** to satisfy both. Rather than quietly merging, a sender that
+/// did not is refused and told so.
+pub(crate) struct Staging<'a> {
+    pub area: &'a mut crate::staging::Area,
+    /// What the area will hold, so an over-large image is refused when its length is
+    /// learned rather than by a write running off the end.
+    pub capacity: u32,
+}
+
+impl Sink for Staging<'_> {
+    fn expect(&mut self, total: usize) -> Result<(), &'static str> {
+        if total as u32 > self.capacity {
+            return Err("image too large to stage");
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, offset: usize, bytes: &[u8], tail: bool) -> Result<(), &'static str> {
+        use catcard_upgrade::StagingArea as _;
+
+        let offset: u32 = offset.try_into().map_err(|_| "bad offset")?;
+        if !offset.is_multiple_of(4) {
+            return Err("sender's parts are not word-aligned");
+        }
+        if bytes.len().is_multiple_of(4) {
+            return self
+                .area
+                .write(offset, bytes)
+                .map_err(|_| "staging write failed");
+        }
+        if !tail {
+            return Err("sender's parts are not word-aligned");
+        }
+        // The last part, padded out to a whole word. The padding lands past the image's
+        // end in an area that is megabytes bigger than any image, and the digest covers
+        // the image's length rather than what was written.
+        let mut word = [0u8; 4];
+        let whole = bytes.len() & !3;
+        if whole > 0 {
+            self.area
+                .write(offset, &bytes[..whole])
+                .map_err(|_| "staging write failed")?;
+        }
+        let rest = &bytes[whole..];
+        word[..rest.len()].copy_from_slice(rest);
+        self.area
+            .write(offset + whole as u32, &word)
+            .map_err(|_| "staging write failed")
+    }
 }
