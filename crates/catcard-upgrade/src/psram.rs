@@ -257,41 +257,33 @@ pub const fn gap_cycles(ospi_hz: u32, timeout_clocks: u32, cpu_hz: u32) -> u32 {
     (((for_timeout + for_tcph) * GAP_SAFETY as u64) + 1) as u32
 }
 
-/// Let CE# rise: wait for the writes to land, then idle the bus long enough for the
-/// controller to deselect the part.
+/// Let CE# rise: idle the bus long enough for the controller to deselect the part.
 ///
-/// # The barrier is the point of this function
+/// # There was a `dsb` here, and it froze the device
 ///
-/// The PSRAM is mapped at `0x9000_0000`, which is in the `0x6000_0000..0xA000_0000`
-/// **External RAM** range of the Cortex-M4 default memory map -- *Normal* memory, which
-/// is **buffered**. `write_volatile` binds the compiler, not the bus: it guarantees the
-/// store is emitted and not reordered or elided, and guarantees nothing about when the
-/// store reaches the part. Stores retire into the write buffer and drain behind the CPU.
+/// The reasoning for it still looks right, which is why this comment exists rather than
+/// a clean deletion. The region is *Normal, buffered* memory in the Cortex-M4 default
+/// map, so `write_volatile` binds the compiler and not the bus: stores retire into the
+/// write buffer and drain behind the CPU, and a delay made only of NOPs can therefore
+/// run while the bus is still busy -- in which case the controller's memory-mapped
+/// timeout never fires and CE# never rises.
 ///
-/// So a gap made only of NOPs is not a gap. The processor runs the delay while the
-/// buffer is still draining into the controller, the controller still has data to send,
-/// and the bus never goes idle -- which means the memory-mapped timeout never fires and
-/// **CE# never rises**. A run of writes then holds the part selected from end to end,
-/// far past the 8 us `tCEM` allows, and a pseudo-SRAM that cannot refresh loses data
-/// anywhere in the chip: a word nobody wrote, in a header nothing touched.
+/// What happened when the barrier was added: the first build whose own staging code ran
+/// with it **froze the whole device** part way through writing an image, from the card
+/// and over USB alike. Not a stalled task -- the keypad and screen stopped too, which
+/// means the core itself was stopped on a bus access that never completed, which is what
+/// `DSB` does when it is waiting for one.
 ///
-/// `DSB` is the architectural answer -- it completes when the explicit memory accesses
-/// before it have completed -- so it goes first and the NOPs follow, and only then is
-/// the bus actually quiet for the timeout to count against.
+/// So the barrier is out on evidence of harm, not because the argument for it was
+/// wrong. Those are different things and the difference matters: without it the pacing
+/// here may well be decorative, and the corruption it was meant to fix is presumably
+/// still there. Settling it needs a way to try this on hardware that can be recovered
+/// without a working staging path -- which is exactly what the freeze took away.
 ///
-/// Source: ARMv7-M Architecture Reference Manual, default memory map and `DSB` [C].
-/// That the missing barrier is what corrupts *this* board's staging is the reading that
-/// fits the evidence -- intermittent, load-dependent, and improved but not cured by
-/// halving the burst length -- and it is a hypothesis until the soak test says so.
+/// Source: ARMv7-M Architecture Reference Manual, default memory map and `DSB` [C];
+/// the freeze, measured on a Q1, 2026-09-19.
 #[inline(never)]
 pub fn burst_gap(cycles: u32) {
-    // Wait for the writes to reach the part before timing anything.
-    #[cfg(target_arch = "arm")]
-    // SAFETY: a barrier. It has no operands and touches no memory of its own; `nomem`
-    // is deliberately absent so it is not moved across the accesses it is separating.
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags))
-    };
     for _ in 0..cycles {
         #[cfg(target_arch = "arm")]
         // SAFETY: a NOP. Not `nomem`, so it is not moved out from between the accesses it
