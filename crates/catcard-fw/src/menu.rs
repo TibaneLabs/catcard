@@ -1074,6 +1074,20 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Cancel => Screen::Utils,
             _ => Screen::DeriveMenu,
         },
+        // The export drawer. Its rows were briefly handled inside `Utils`, where none of
+        // them can ever be selected -- so Confirm fell through to the catch-all and put
+        // people in the Debug menu.
+        Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
+                Screen::GenericJson(cursor as u8)
+            }
+            (Key::Confirm, Some("Descriptor")) => Screen::ExportWallet,
+            (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
+            (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
+            (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
+            (Key::Cancel, _) => Screen::Utils,
+            _ => Screen::ExportMenu,
+        },
         Screen::XpubMenu => match key {
             Key::Confirm => Screen::Xpub(cursor as u8),
             Key::Cancel => Screen::ExportMenu,
@@ -1105,13 +1119,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
-            (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
-                Screen::GenericJson(cursor as u8)
-            }
-            (Key::Confirm, Some("Descriptor")) => Screen::ExportWallet,
-            (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
-            (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
-            (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -1169,7 +1176,14 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Confirm => Screen::PsramProbe,
             _ => Screen::Debug,
         },
-        // Every info screen leaves on any key.
+        // Every info screen leaves on any key, back to the drawer it was opened from.
+        //
+        // A **menu** that reaches here has simply forgotten to say what its keys do, and
+        // sending it to Debug is how the export drawer put people in the Debug menu
+        // instead of exporting anything. A menu with no arm stays where it is: a screen
+        // that does nothing is a bug someone can describe, and one that moves them
+        // somewhere else is a bug they cannot.
+        other if items_of(other, no_seed).is_some() => other,
         _ => Screen::Debug,
     }
 }
