@@ -29,9 +29,15 @@ use catcard_qr::cmd;
 
 use crate::keypad::Keypad;
 
-/// Loop iterations one byte may take. Short: this runs inside the keypad poll, so it is
-/// a budget for "the port is there and idle", not for waiting on a reply.
-const BYTE_BUDGET: u32 = 20_000;
+/// How long one byte may take on the wire. Short: this runs inside the keypad poll, so
+/// it is a budget for "the port is there and idle", not for waiting on a reply.
+const WIRE_MS: u32 = 2;
+/// And how long to wait for the first byte of an acknowledgement.
+///
+/// The lamp used to report "silence" for commands that visibly worked, and the reason
+/// was never the budget -- it was that the reply overran a one-byte-deep receiver while
+/// a sleep was running. There is no sleep now; this is the whole of the wait.
+const ACK_MS: u32 = 30;
 
 /// Attempts at waking. The first is expected to be swallowed, so one is none.
 const WAKE_TRIES: usize = 5;
@@ -177,13 +183,13 @@ fn set(on: bool, announce: bool) {
             return;
         };
         port.flush_input();
-        let _ = port.write(frame, BYTE_BUDGET);
+        let _ = port.write(frame, ms_cycles(WIRE_MS));
         // Give it time to answer before deciding it did not: see `REPLY_MS`.
         catcard_hal::dwt::delay_cycles(ms_cycles(REPLY_MS));
         // What comes back is the whole diagnosis: an acknowledgement means the command
         // landed and an unlit lamp is the module's business, silence means it did not.
         let mut reply = [0u8; 16];
-        let n = port.read(&mut reply, BYTE_BUDGET);
+        let n = port.read_reply(&mut reply, ms_cycles(ACK_MS), ms_cycles(WIRE_MS));
         answered = match catcard_qr::unwrap(&reply[..n]) {
             Ok(f) if catcard_qr::is_ack(&f) => "ack",
             Ok(_) => "a frame, but not an ack",
@@ -199,9 +205,9 @@ fn set(on: bool, announce: bool) {
         // Stock re-sleeps here, and an idle state that is not the one the rest of the
         // firmware assumes is a battery draining quietly. Twice, 150 ms apart: the
         // module has two sleep layers and one command only reaches the first.
-        let _ = port.write(cmd::SLEEP, BYTE_BUDGET);
+        let _ = port.write(cmd::SLEEP, ms_cycles(WIRE_MS));
         catcard_hal::dwt::delay_cycles(ms_cycles(SLEEP_GAP_MS));
-        let _ = port.write(cmd::SLEEP, BYTE_BUDGET);
+        let _ = port.write(cmd::SLEEP, ms_cycles(WIRE_MS));
     }
     // SAFETY: foreground only.
     unsafe { *core::ptr::addr_of_mut!(LAST_SENT) = catcard_hal::dwt::cycles() };
@@ -230,10 +236,10 @@ fn set(on: bool, announce: bool) {
 fn wake(port: &mut Usart) -> bool {
     for _ in 0..WAKE_TRIES {
         port.flush_input();
-        let _ = port.write(cmd::WAKE, BYTE_BUDGET);
+        let _ = port.write(cmd::WAKE, ms_cycles(WIRE_MS));
         catcard_hal::dwt::delay_cycles(ms_cycles(WAKE_GAP_MS));
         let mut got = [0u8; 8];
-        if port.read(&mut got, BYTE_BUDGET) > 0 {
+        if port.read_reply(&mut got, ms_cycles(ACK_MS), ms_cycles(WIRE_MS)) > 0 {
             return true;
         }
     }

@@ -33,7 +33,7 @@ use crate::ui::Ui;
 /// Loop iterations a single byte may take. At 9600 baud a byte is about a millisecond,
 /// and this is generous against that rather than tuned to it: the cost of being wrong
 /// high is a slower failure, and of being wrong low is a working scanner called broken.
-const BYTE_BUDGET: u32 = 400_000;
+const WIRE_MS: u32 = 20;
 
 /// How long the reset line is held low: 10 ms, per the reference.
 const RESET_MS: u32 = 10;
@@ -45,8 +45,14 @@ const RECOVERY_MS: u32 = 2_000;
 const PROBE_TRIES: usize = 5;
 /// Attempts at the configuration sequence, as stock bounds it.
 const SETUP_TRIES: usize = 3;
-/// How long to give the module to answer before reading its reply.
-const REPLY_MS: u32 = 10;
+/// How long to wait for the *first* byte of a reply.
+///
+/// The module thinks before it answers, and at the slowest rate the reply is several
+/// milliseconds of wire time on top. Generous, because the cost of being wrong here is
+/// declaring a working module absent.
+const FIRST_MS: u32 = 60;
+/// And between the bytes of one reply, which arrive back to back.
+const GAP_MS: u32 = 5;
 /// Attempts at waking: the first is always lost, so one try is no try at all.
 const WAKE_TRIES: usize = 5;
 /// Between the two sleep commands, for the module's second sleep layer.
@@ -89,13 +95,15 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
     let mut out = [0u8; 64];
     let frame = wrap(catcard_qr::FID_COMMAND, body, &mut out).ok()?;
     port.flush_input();
-    port.write(frame, BYTE_BUDGET).ok()?;
-    // Let it answer before deciding it did not. A framed acknowledgement is eight bytes
-    // -- about 1.4 ms at 57600 -- and the module thinks first. Reading immediately is
-    // what made the lamp report "silence" for commands that plainly worked, and here it
-    // would mean a scan-start that succeeded looking like one that failed.
-    catcard_hal::dwt::delay_cycles(ms_cycles(REPLY_MS));
-    let n = port.read(reply, BYTE_BUDGET);
+    port.write(frame, ms_cycles(GAP_MS)).ok()?;
+    // **Straight into the read.** There used to be a sleep here, to "let it answer
+    // before deciding it did not", and it was the bug: the receiver is one byte deep,
+    // so while nothing is draining it the reply overruns and all that survives is the
+    // first byte. `Debug -> QR probe` showed it exactly -- `57600 framed: 1B 5a`, the
+    // STX of a perfectly good frame and nothing else -- and `find` then read a
+    // one-byte frame, failed to parse it, and called a module that was answering
+    // absent. The wait belongs in the deadline for the first byte, not in a sleep.
+    let n = port.read_reply(reply, ms_cycles(FIRST_MS), ms_cycles(GAP_MS));
     (n > 0).then_some(n)
 }
 
@@ -112,7 +120,7 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
 /// Source: hw-reference/qr.md §6 [C]
 fn stop(port: &mut Usart) {
     for _ in 0..STOP_TRIES {
-        port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
+        port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
         if command(port, cmd::SCAN_STOP) {
             let _ = command(port, cmd::TORCH_OFF);
             sleep(port);
@@ -139,11 +147,11 @@ fn blind_stop(port: &mut Usart) {
         let mut out = [0u8; 64];
         for body in [cmd::SCAN_STOP, cmd::TORCH_OFF] {
             if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, body, &mut out) {
-                let _ = port.write(frame, BYTE_BUDGET);
+                let _ = port.write(frame, ms_cycles(WIRE_MS));
             }
         }
         // Whatever it was mid-way through saying is not an answer to anything.
-        port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
+        port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
     }
 }
 
@@ -182,7 +190,7 @@ fn command(port: &mut Usart, body: &[u8]) -> bool {
 
 /// Send a command the module expects **unframed**: sleep and wake.
 fn bare(port: &mut Usart, body: &[u8]) {
-    let _ = port.write(body, BYTE_BUDGET);
+    let _ = port.write(body, ms_cycles(WIRE_MS));
 }
 
 /// Wake the module, retrying: the first send lands while it is still down and is lost.
@@ -190,7 +198,7 @@ fn wake(port: &mut Usart) {
     for _ in 0..WAKE_TRIES {
         bare(port, cmd::WAKE);
         let mut reply = [0u8; 16];
-        if port.read(&mut reply, BYTE_BUDGET / 16) > 0 {
+        if port.read_reply(&mut reply, ms_cycles(FIRST_MS), ms_cycles(GAP_MS)) > 0 {
             return;
         }
     }
@@ -274,7 +282,7 @@ fn read_code(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize,
     let mut overflowed = false;
     loop {
         let mut byte = [0u8; 1];
-        if port.read(&mut byte, BYTE_BUDGET / 8) == 1 {
+        if port.read(&mut byte, ms_cycles(GAP_MS)) == 1 {
             match byte[0] {
                 b'\r' => {}
                 b'\n' if n > 0 || overflowed => {
@@ -499,17 +507,17 @@ pub(crate) fn probe(ui: &mut Ui<'_>) {
             let mut out = [0u8; 64];
             if framed {
                 if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, cmd::VERSION, &mut out) {
-                    let _ = port.write(frame, BYTE_BUDGET);
+                    let _ = port.write(frame, ms_cycles(WIRE_MS));
                 }
             } else {
-                let _ = port.write(cmd::VERSION, BYTE_BUDGET);
+                let _ = port.write(cmd::VERSION, ms_cycles(WIRE_MS));
             }
             // Generously: at 9600 a framed query is 17 ms on the wire before the module
             // has even heard it, and the reply is another 8. The scan path's budget is
             // tighter than that, which is itself worth knowing.
             catcard_hal::dwt::delay_cycles(ms_cycles(120));
             let mut reply = [0u8; 64];
-            let n = port.read(&mut reply, BYTE_BUDGET);
+            let n = port.read_reply(&mut reply, ms_cycles(FIRST_MS), ms_cycles(GAP_MS));
 
             let mut line: heapless::String<64> = heapless::String::new();
             let _ = write!(line, "{rate} {what}: {n}B");
