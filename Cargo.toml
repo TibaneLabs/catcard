@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/catcard-alloc",
     "crates/catcard-bbqr",
+    "crates/catcard-bcur",
     "crates/catcard-board",
     "crates/catcard-flash",
     "crates/catcard-fwhdr",
@@ -29,6 +30,7 @@ members = [
 default-members = [
     "crates/catcard-alloc",
     "crates/catcard-bbqr",
+    "crates/catcard-bcur",
     "crates/catcard-board",
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
@@ -56,6 +58,7 @@ authors = ["Karpeles Lab Inc."]
 [workspace.dependencies]
 catcard-alloc = { path = "crates/catcard-alloc", default-features = false }
 catcard-bbqr = { path = "crates/catcard-bbqr", default-features = false }
+catcard-bcur = { path = "crates/catcard-bcur", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
 catcard-flash = { path = "crates/catcard-flash", default-features = false }
 catcard-settings = { path = "crates/catcard-settings", default-features = false }
