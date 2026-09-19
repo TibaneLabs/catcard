@@ -347,3 +347,154 @@ fn a_zero_sized_request_still_gets_its_own_block() {
     }
     assert_eq!(o.heap.used(), 0);
 }
+
+// --- the workload this allocator is actually for -------------------------------------
+
+/// What each screen asks for, in bytes, as the firmware asks for it today.
+///
+/// Named rather than parameterised: the point of this test is to be wrong if the device
+/// changes, so a screen that grows a buffer has to come and edit this list.
+const MSC_DRIVE: &[usize] = &[16 * 1024]; // a run of card blocks, streamed to the host
+const MULTISIG_IMPORT: &[usize] = &[4096, 4096, 4096]; // settings doc, rendered list, seal
+const NOTES: &[usize] = &[4096, 6144]; // the settings blob, and the decoded text
+const NICKNAME: &[usize] = &[4096, 4096]; // the doc being edited, and its seal
+const NVRAM_PAGE: &[usize] = &[8192]; // one settings page, read-modify-written
+/// The compressed upload's inflate slab, which is held across a whole transfer and so
+/// can be live while any of the screens above is open.
+const UPLOAD: usize = 8192;
+
+/// The heap the firmware gives this allocator.
+///
+/// Sized from the worst case below rather than picked: the largest screen and an upload
+/// together come to 24 KiB of payload, and 24 KiB of heap is therefore exactly too
+/// small once each block carries a header. That failure is what set this number.
+const HEAP: usize = 32 * 1024;
+
+fn open(heap: &mut Heap, screen: &[usize]) -> Option<Vec<NonNull<u8>>> {
+    let mut held = Vec::new();
+    for &n in screen {
+        match heap.try_alloc(layout(n, 4)) {
+            Some(p) => held.push(p),
+            None => {
+                // Give back what this screen did get, as the firmware does when a
+                // screen cannot open.
+                for p in held {
+                    // SAFETY: allocated just above, freed once.
+                    unsafe { heap.dealloc(p) };
+                }
+                return None;
+            }
+        }
+    }
+    Some(held)
+}
+
+fn close(heap: &mut Heap, held: Vec<NonNull<u8>>) {
+    for p in held {
+        // SAFETY: from this heap, freed once.
+        unsafe { heap.dealloc(p) };
+    }
+}
+
+/// The device's real pattern never runs the heap out, and leaves it whole.
+///
+/// This is the check on every design choice in the module documentation. Screens open
+/// and close in an order nobody planned, a firmware upload sits across a run of them,
+/// and the question is only ever whether the next screen can have its buffers.
+#[test]
+fn the_real_workload_never_runs_out() {
+    let mut o = Owned::new(HEAP);
+    let whole = o.heap.largest_free();
+    let screens = [MSC_DRIVE, MULTISIG_IMPORT, NOTES, NICKNAME, NVRAM_PAGE];
+
+    // Every screen, one at a time, twice round.
+    for round in 0..2 {
+        for (i, s) in screens.iter().enumerate() {
+            let held = open(&mut o.heap, s)
+                .unwrap_or_else(|| panic!("round {round}: screen {i} could not open"));
+            close(&mut o.heap, held);
+        }
+    }
+    assert_eq!(o.heap.used(), 0);
+    assert_eq!(o.heap.largest_free(), whole, "screens alone fragmented it");
+
+    // Now with an upload held across all of them, which is the case the two halves of
+    // the old static layout could never have shared.
+    let upload = o
+        .heap
+        .try_alloc(layout(UPLOAD, 4))
+        .expect("an upload must fit alongside the screens");
+    for (i, s) in screens.iter().enumerate() {
+        let held = open(&mut o.heap, s)
+            .unwrap_or_else(|| panic!("screen {i} could not open during an upload"));
+        close(&mut o.heap, held);
+    }
+    // SAFETY: from this heap, freed once.
+    unsafe { o.heap.dealloc(upload) };
+
+    assert_eq!(o.heap.used(), 0, "the workload leaked");
+    assert_eq!(
+        o.heap.largest_free(),
+        whole,
+        "the workload left the heap fragmented"
+    );
+}
+
+/// Interleaving screens and uploads in a hostile order still leaves the heap whole.
+///
+/// The ordinary pattern is nearly LIFO and would flatter any allocator. This one frees
+/// in the wrong order on purpose -- the upload outlives some screens and is outlived by
+/// others -- because that is what a host does when it uploads while someone is using
+/// the device.
+#[test]
+fn screens_and_uploads_interleaved_out_of_order_stay_whole() {
+    let mut o = Owned::new(HEAP);
+    let whole = o.heap.largest_free();
+
+    for round in 0..6 {
+        let a = open(&mut o.heap, NOTES).expect("notes");
+        let upload = o.heap.try_alloc(layout(UPLOAD, 4)).expect("upload");
+        let b = open(&mut o.heap, NICKNAME).expect("nickname");
+
+        // Free the middle one first, every time: the upload is bracketed by two live
+        // screens, so nothing it leaves behind can merge until they go.
+        // SAFETY: from this heap, freed once.
+        unsafe { o.heap.dealloc(upload) };
+        if round % 2 == 0 {
+            close(&mut o.heap, a);
+            close(&mut o.heap, b);
+        } else {
+            close(&mut o.heap, b);
+            close(&mut o.heap, a);
+        }
+        assert_eq!(o.heap.used(), 0, "round {round} leaked");
+        assert_eq!(
+            o.heap.largest_free(),
+            whole,
+            "round {round} left the heap fragmented"
+        );
+    }
+}
+
+/// The heap is big enough for the worst pair, and the peak says by how much.
+///
+/// Printed rather than asserted tightly: this is the number that sizes the region, and
+/// it should be read and acted on rather than pinned to whatever it happens to be.
+#[test]
+fn the_heap_is_large_enough_for_the_worst_case() {
+    let mut o = Owned::new(HEAP);
+    // The largest screen, with an upload alongside it: the most that can be live.
+    let upload = o.heap.try_alloc(layout(UPLOAD, 4)).expect("upload");
+    let held = open(&mut o.heap, MSC_DRIVE).expect("the largest screen, during an upload");
+    let peak = o.heap.used();
+    close(&mut o.heap, held);
+    // SAFETY: from this heap, freed once.
+    unsafe { o.heap.dealloc(upload) };
+
+    std::println!("peak {peak} of {HEAP} bytes ({}% used)", peak * 100 / HEAP);
+    assert!(
+        peak <= HEAP,
+        "the worst case does not fit: {peak} of {HEAP}"
+    );
+    assert_eq!(o.heap.used(), 0);
+}
