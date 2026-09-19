@@ -7,8 +7,8 @@
 //! # Why blocks, and not one deflate stream
 //!
 //! A single stream compresses better, and the gap is small enough to measure rather
-//! than argue about: a real 353 KiB image goes to 65.8% in 8 KiB blocks against 63.7%
-//! as one stream with deflate's full 32 KiB window. Two points.
+//! than argue about: a real image goes to 64.4% in [`BLOCK`]-sized blocks against 63.7%
+//! as one stream with deflate's full 32 KiB window.
 //!
 //! The reason is not that decompression cannot be fed a frame at a time -- it can, and
 //! this module does exactly that. It is that **a decompressor owns its output and never
@@ -21,8 +21,9 @@
 //! Independent blocks dissolve it. A block's output is bounded by construction, so it
 //! can be a plain [`Buffer`] over a fixed slab: the decoder borrows the slab, the stream
 //! ends, and the caller reads the bytes straight out of it. Nothing is self-referential,
-//! nothing is global, and the memory is one slab rather than a 32 KiB history window.
-//! Two points of ratio is what that costs.
+//! nothing is global, and the memory is one slab rather than a 32 KiB history window --
+//! which on this device is the whole argument, since the slab comes out of the stack's
+//! headroom and there are only a few kilobytes of it.
 //!
 //! # The format
 //!
@@ -47,9 +48,20 @@ use minizlib::{Buffer, Decompressor, Raw};
 /// Bytes each block holds once inflated.
 ///
 /// This is the output slab, and the window a block's matches may reach back into. Bigger
-/// compresses better and costs SRAM in a device that has other uses for it; 8 KiB is most
-/// of the ratio a single stream would get for a quarter of the window it would need.
-pub const BLOCK: usize = 8 * 1024;
+/// compresses better; it also comes straight out of the stack's headroom, and on the Q1
+/// there is far less of that than the numbers suggest.
+///
+/// **2 KiB, and the reason is a bug this caused.** At 8 KiB the slab left the main stack
+/// 5,996 bytes before it ran into the top of `.bss`, which is not enough for the seed
+/// stretch: it overflowed, walked down over the statics living there, and the device
+/// panicked in the middle of reading a wallet. The visible symptom was the status bar's
+/// modifier flags flickering -- `MODIFIERS` sits 7,407 bytes below the stack top and was
+/// simply being overwritten by whatever the stretch had on its stack.
+///
+/// The ratio this costs, measured on the real 535,040-byte Q1 image: **64.4% in 2 KiB
+/// blocks against 60.4% in 8 KiB ones**. Four points, for six kilobytes of stack, in a
+/// device with 192 KB of SRAM in total that had six thousand bytes of margin.
+pub const BLOCK: usize = 2 * 1024;
 
 /// Why a compressed upload could not be unpacked.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

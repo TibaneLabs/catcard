@@ -41,6 +41,24 @@ static mut GATE: Option<Callgate> = None;
 static mut HOLD_CYCLES: u32 = 0;
 /// Cycle count when the current press started, or `None` while the button is up.
 static mut HELD_SINCE: Option<u32> = None;
+/// Cycle count of the previous poll, to tell a held button from an unwatched one.
+static mut LAST_POLL: Option<u32> = None;
+
+/// The longest gap between two polls that still counts as continuous observation.
+///
+/// A hold means the button was down *for* half a second, and the only evidence of that
+/// is having looked and found it down throughout. Between two polls far enough apart,
+/// nothing was looking, and a press seen at each end could as easily be two taps -- or
+/// one tap and one bad reading.
+///
+/// It matters because the gaps are not all small. Stretching a seed is about 1.7 s of
+/// masked hashing with the screen stepped between slices and nothing polling the front
+/// panel, and a device that powers itself off in the middle of reading a wallet is what
+/// this rule is here to stop. 100 ms is comfortably longer than the poll's natural
+/// period and far shorter than any of the long operations.
+const CONTINUITY_MS: u32 = 100;
+/// [`CONTINUITY_MS`] in cycles, alongside [`HOLD_CYCLES`].
+static mut CONTINUITY_CYCLES: u32 = 0;
 
 /// Configure the button and remember how to power down.
 ///
@@ -56,6 +74,7 @@ pub unsafe fn init(gate: &Callgate) {
         gpio::configure(pin, Mode::Input, OutputType::PushPull, Pull::Up, Speed::Low);
         let hz = catcard_hal::clock::hclk_hz();
         *addr_of_mut!(HOLD_CYCLES) = (hz / 1_000).saturating_mul(HOLD_MS);
+        *addr_of_mut!(CONTINUITY_CYCLES) = (hz / 1_000).saturating_mul(CONTINUITY_MS);
         *addr_of_mut!(GATE) = Some(*gate);
     }
     crate::catlog!("power: button armed, {} ms hold", HOLD_MS);
@@ -70,7 +89,13 @@ pub fn tick() {
     let Some(pin) = BOARD.pwr_btn else { return };
     // SAFETY: the foreground is single-threaded and every caller is the foreground poll;
     // each read finishes within this statement.
-    let (hold, gate) = unsafe { (*addr_of_mut!(HOLD_CYCLES), *addr_of_mut!(GATE)) };
+    let (hold, gate, continuity) = unsafe {
+        (
+            *addr_of_mut!(HOLD_CYCLES),
+            *addr_of_mut!(GATE),
+            *addr_of_mut!(CONTINUITY_CYCLES),
+        )
+    };
     // Never initialised, or the clock read gave nothing usable: stay inert. The hardware
     // failsafe still powers the device down on a long hold.
     if hold == 0 {
@@ -81,6 +106,24 @@ pub fn tick() {
     let pressed = !unsafe { gpio::read(pin) };
     // SAFETY: as above -- foreground only, and the borrow ends with this function.
     let since = unsafe { &mut *addr_of_mut!(HELD_SINCE) };
+    // SAFETY: as above.
+    let last = unsafe { &mut *addr_of_mut!(LAST_POLL) };
+
+    // How long since anything last looked at the button. A press cannot be counted as
+    // *held* across a gap nobody was watching: the screen may have spent that time
+    // stretching a seed with interrupts masked, and the button may have been released
+    // and pressed again, or never really pressed at all.
+    let now_cycles = dwt::cycles();
+    let watched = match *last {
+        Some(prev) => now_cycles.wrapping_sub(prev) <= continuity,
+        None => false,
+    };
+    *last = Some(now_cycles);
+    if !watched {
+        // Start the measurement again from this reading, which is the first one that can
+        // be vouched for. A genuine hold simply takes its half second from here.
+        *since = None;
+    }
 
     if !pressed {
         // Released: a tap, so forget it. This is the half that makes the hold deliberate.
@@ -95,7 +138,7 @@ pub fn tick() {
             // 120 MHz, far longer than the hold being measured.
             if now.wrapping_sub(started) >= hold {
                 if let Some(gate) = gate {
-                    crate::catlog!("power: held, powering down");
+                    crate::catlog!("power: held {} ms, powering down", HOLD_MS);
                     // The bootloader wipes all of SRAM on the way out, which is what
                     // takes any seed and the cached PIN with it.
                     //
