@@ -118,18 +118,20 @@ fn stop(port: &mut Usart) {
         }
     }
     crate::catlog!("qr: stop was not acknowledged; shutting the module down blind");
+    // Which now sleeps it too, at both rates. It used to stop it and then sleep at
+    // whichever rate the port happened to be set to, so the module we had just failed
+    // to talk to was left awake with its aimer on.
     blind_shutdown(port);
-    sleep(port);
 }
 
 /// Tell it to stop at every rate it might be listening at, without waiting to be
 /// answered.
 ///
-/// Used both as the last resort when a stop is not acknowledged, and as the *first*
-/// thing a scan does -- a module left running from a previous session cannot be probed
-/// until it stops talking, and it cannot be asked politely because its rate is the very
-/// thing that is unknown.
-fn blind_shutdown(port: &mut Usart) {
+/// The prelude to probing: a module left running from a previous session cannot be
+/// probed until it stops talking, and it cannot be asked politely because its rate is
+/// the very thing that is unknown. It stops there and stays awake, because the next
+/// thing that happens is a question.
+fn blind_stop(port: &mut Usart) {
     for rate in catcard_qr::BAUDS {
         port.set_baud(rate);
         let mut out = [0u8; 64];
@@ -140,6 +142,30 @@ fn blind_shutdown(port: &mut Usart) {
         }
         // Whatever it was mid-way through saying is not an answer to anything.
         port.drain(DRAIN_LIMIT, BYTE_BUDGET / 64);
+    }
+}
+
+/// Stop it **and put it to sleep**, at every rate it might be listening at.
+///
+/// For walking away from a module we could not get an answer out of. Stopping is not
+/// enough: an awake module drives the aimer, so one that is merely stopped sits there
+/// with its red light on and its current drawn until something else resets it. That is
+/// what "the scanner does not switch off at boot" was -- the stop landed and the sleep
+/// went out at one rate, chosen by whichever rate the probe happened to end on, which on
+/// a failed probe is not the rate the module is listening at.
+///
+/// Source: hw-reference/qr.md §7, which spells the recovery out as both bauds getting
+/// `S_CMD_020D`, `S_CMD_03L0`, then `SRDF0050` twice. [C]
+fn blind_shutdown(port: &mut Usart) {
+    blind_stop(port);
+    // Twice, 150 ms apart, for the module's two sleep layers -- and at both rates,
+    // since not knowing the rate is the reason to be here.
+    for _ in 0..2 {
+        for rate in catcard_qr::BAUDS {
+            port.set_baud(rate);
+            bare(port, cmd::SLEEP);
+        }
+        catcard_hal::dwt::delay_cycles(ms_cycles(SLEEP_GAP_MS));
     }
 }
 
@@ -183,7 +209,7 @@ fn sleep(port: &mut Usart) {
 /// right there working. Quieten it first: the stop goes out blind at both rates, because
 /// the whole point is that we do not yet know which one it is listening at.
 fn find(port: &mut Usart) -> Result<(), Fault> {
-    blind_shutdown(port);
+    blind_stop(port);
     for _ in 0..PROBE_TRIES {
         for rate in catcard_qr::BAUDS {
             port.set_baud(rate);
@@ -302,15 +328,25 @@ pub(crate) fn boot_bringup() {
         catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
         Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
     };
-    match find(&mut port).and_then(|()| setup(&mut port)) {
-        Ok(()) => crate::catlog!("qr: configured, sleeping"),
-        Err(why) => crate::catlog!("qr: not configured at boot: {:?}", why),
-    }
     // Asleep either way: a module that answered but would not configure is still a
     // module that should not sit there drawing current. This is the idle state the
     // reference describes -- asleep, reset released, configuration retained -- and on a
     // battery device it is the difference between a scanner and a flat battery.
-    sleep(&mut port);
+    //
+    // *How* it is put to sleep depends on whether we know what it is listening to. A
+    // configured module is at 57600 and can be told; one that never answered has to be
+    // told at every rate, which is the case that was getting a sleep sent at the rate
+    // the probe gave up on and leaving the aimer lit for the whole session.
+    match find(&mut port).and_then(|()| setup(&mut port)) {
+        Ok(()) => {
+            crate::catlog!("qr: configured, sleeping");
+            sleep(&mut port);
+        }
+        Err(why) => {
+            crate::catlog!("qr: not configured at boot: {:?}; blind shutdown", why);
+            blind_shutdown(&mut port);
+        }
+    }
 }
 
 /// Bring the scanner up, read one code, and put it back to sleep.
