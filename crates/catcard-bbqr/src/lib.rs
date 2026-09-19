@@ -16,22 +16,31 @@
 //! every part but the last carries the same number of payload bytes -- which is what
 //! lets a part be placed without having seen the ones before it.
 //!
-//! # Only the uncompressed encodings
+//! # `Z` is deferred, and which payload you are carrying decides whether that matters
 //!
-//! [`Encoding::Base32`] and [`Encoding::Hex`] are supported. `Z` -- deflate, then base32
-//! -- is not, and that is a decision rather than a gap.
+//! [`Encoding::Base32`] and [`Encoding::Hex`] are read. `Z` -- deflate, then base32 --
+//! is not, **yet**, and the reason is about size rather than about the format.
 //!
-//! `Z` compresses the **whole file** before splitting it, so no part can be decoded on
-//! its own: the entire compressed stream has to be reassembled before any of it becomes
-//! data. For a firmware image that is a third of a megabyte, and the only place to put
-//! it is the PSRAM the image is being staged into -- which would mean inflating from
-//! that part while writing to it, and interleaved reads and writes are the documented
-//! way to corrupt it (`hw-reference/storage.md`).
+//! `Z` compresses the whole file before splitting it, so no part decodes on its own:
+//! the entire compressed stream must be reassembled before any of it becomes data. For
+//! a **firmware image** that is a third of a megabyte, and the only place it fits is the
+//! PSRAM the image is being staged into -- so inflating would read that part while
+//! writing to it, and interleaved reads and writes are the documented way to corrupt it
+//! (`hw-reference/storage.md`). Uncompressed, a part decodes straight to its offset and
+//! is forgotten.
 //!
-//! Uncompressed, every part stands alone: decode it, write it at `index * part_len`,
-//! forget it. Nothing is held, nothing is re-read, and a part that arrives twice costs
-//! nothing. The price is about half as many bytes per code, which on the one payload
-//! where a wrong byte is a brick is worth paying.
+//! For a **PSBT** none of that applies. A few kilobytes of compressed stream sits in the
+//! heap, and inflating from there into the signing workspace reads SRAM and writes
+//! PSRAM, which is not the pattern that corrupts anything. PSBTs also compress well, so
+//! `Z` is the encoding that matters for them and is worth adding when they arrive.
+//!
+//! # Where the bytes go is the caller's business
+//!
+//! Two consumers want different destinations: a firmware image goes to the staging area
+//! through `Staged::place`, which takes whole words at an offset; a PSBT goes into a
+//! plain buffer. So [`Collector::accept`] works out *where* a part belongs and hands
+//! back its still-encoded payload, leaving the caller to decode it wherever it likes.
+//! [`Collector::take`] is the convenience for the buffer case.
 
 #![no_std]
 
@@ -244,6 +253,8 @@ pub struct Collector {
 /// What a part turned out to be.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Placed {
+    /// Which part this is, zero-based.
+    pub index: u16,
     /// Where its bytes belong in the file.
     pub offset: usize,
     /// How many bytes it carried.
@@ -286,19 +297,20 @@ impl Collector {
         self.count
     }
 
-    /// Take one line, decoding its payload into `out` at the offset it belongs.
+    /// Work out where a part belongs, without decoding it.
     ///
-    /// `out` is the whole file's buffer; this writes into the slice at the part's own
-    /// offset, so parts may arrive in any order and a repeat costs nothing.
+    /// Returns the placement and the part's still-encoded payload, so the caller can
+    /// decode it into whatever it is filling -- a buffer, or a staging area that takes
+    /// words at an offset. [`take`](Self::take) is the same thing for the simple case.
     ///
-    /// An index only becomes an offset once the **full part length** is known, and only
-    /// a part that is not the last one can say what that is -- the last is short by
-    /// however much the file does not divide evenly. So a last part seen before any
-    /// other is refused with [`Error::PartLenUnknown`] rather than placed at a guessed
-    /// offset: writing good data to the wrong address is indistinguishable from
-    /// corruption once it has been staged. The caller keeps scanning; the animation
-    /// comes round again.
-    pub fn take(&mut self, line: &[u8], out: &mut [u8]) -> Result<Placed, Error> {
+    /// This does **not** count the part. [`confirm`](Self::confirm) does, once the
+    /// caller has actually written it.
+    ///
+    /// That way round on purpose. A caller that forgets to confirm gets a scan that
+    /// never finishes, which is irritating; a collector that counted a part whose write
+    /// then failed would report a complete file with a hole in it, and for a firmware
+    /// image that is an install whose only remaining check is the signature.
+    pub fn accept<'a>(&mut self, line: &'a [u8]) -> Result<(Placed, &'a [u8]), Error> {
         let (header, payload) = parse(line)?;
         let len = decoded_len(header.encoding, payload)?;
         let is_last = header.index + 1 == header.total;
@@ -330,29 +342,58 @@ impl Collector {
         }
 
         let offset = self.part_len * header.index as usize;
-        let end = offset.checked_add(len).ok_or(Error::TooLong)?;
-        if end > out.len() {
-            return Err(Error::TooLong);
-        }
-        decode(header.encoding, payload, &mut out[offset..end])?;
+        offset.checked_add(len).ok_or(Error::TooLong)?;
 
-        if is_last {
-            self.last_len = len;
-        }
         let bit = 1u64 << (header.index % 64);
-        let word = header.index as usize / 64;
+        let fresh = self.seen[header.index as usize / 64] & bit == 0;
+        Ok((
+            Placed {
+                index: header.index,
+                offset,
+                len,
+                fresh,
+                have: self.count,
+                total: header.total,
+            },
+            payload,
+        ))
+    }
+
+    /// Record that a part accepted by [`accept`](Self::accept) has been written.
+    ///
+    /// Returns what the count is now, with `fresh` saying whether this was the first
+    /// sighting -- the animation loops, so most parts are confirmed many times.
+    pub fn confirm(&mut self, placed: Placed) -> Placed {
+        if placed.index + 1 == placed.total {
+            self.last_len = placed.len;
+        }
+        let bit = 1u64 << (placed.index % 64);
+        let word = placed.index as usize / 64;
         let fresh = self.seen[word] & bit == 0;
         if fresh {
             self.seen[word] |= bit;
             self.count += 1;
         }
-        Ok(Placed {
-            offset,
-            len,
+        Placed {
             fresh,
             have: self.count,
-            total: header.total,
-        })
+            ..placed
+        }
+    }
+
+    /// Take one line, decoding its payload into `out` at the offset it belongs.
+    ///
+    /// The convenience for a caller filling one buffer. A firmware image does not use
+    /// this -- it goes to the staging area a word at a time -- but a PSBT does.
+    pub fn take(&mut self, line: &[u8], out: &mut [u8]) -> Result<Placed, Error> {
+        let (placed, payload) = self.accept(line)?;
+        let end = placed.offset + placed.len;
+        if end > out.len() {
+            return Err(Error::TooLong);
+        }
+        let encoding = self.header.expect("accept set it").encoding;
+        decode(encoding, payload, &mut out[placed.offset..end])?;
+        Ok(self.confirm(placed))
     }
 
     /// The file's length, once every part has been seen.

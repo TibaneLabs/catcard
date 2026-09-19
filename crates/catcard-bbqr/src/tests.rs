@@ -317,3 +317,49 @@ fn a_firmware_sized_file_reassembles() {
     assert_eq!(c.file_len(), Some(image.len()));
     assert_eq!(out, image);
 }
+
+/// A part that is accepted but never written does not count.
+///
+/// The firmware path decodes into the staging area, which can refuse. If that refusal
+/// left the part counted, the collector would report a complete file with a hole in it
+/// -- and for a firmware image the only thing left to notice would be the signature.
+#[test]
+fn an_accepted_part_counts_only_once_it_is_confirmed() {
+    let image = firmwareish(3000);
+    let parts = split(&image, 4);
+    let mut c = Collector::new();
+
+    let (placed, payload) = c.accept(&parts[1]).expect("a part");
+    assert_eq!(placed.index, 1);
+    assert_eq!(c.have(), 0, "accepting is not confirming");
+
+    // The caller decides where it goes; only then does it count.
+    let mut out = vec![0u8; placed.len];
+    decode(Encoding::Base32, payload, &mut out).unwrap();
+    let done = c.confirm(placed);
+    assert!(done.fresh);
+    assert_eq!(c.have(), 1);
+
+    // And a second confirmation of the same part is not a second part.
+    let (again, _) = c.accept(&parts[1]).unwrap();
+    assert!(!c.confirm(again).fresh);
+    assert_eq!(c.have(), 1);
+}
+
+/// Accepting the same part repeatedly without confirming never advances the count.
+#[test]
+fn accepting_without_confirming_never_completes() {
+    let image = firmwareish(3000);
+    let parts = split(&image, 4);
+    let mut c = Collector::new();
+    for _ in 0..10 {
+        for p in &parts {
+            let _ = c.accept(p);
+        }
+    }
+    assert_eq!(c.have(), 0);
+    assert!(
+        !c.complete(),
+        "a scan that is never confirmed never finishes"
+    );
+}
