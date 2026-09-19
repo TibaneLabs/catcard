@@ -28,6 +28,8 @@ mod battery;
 mod boot;
 mod derive;
 mod display;
+/// Wallet-export file formats.
+mod export;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;
 #[cfg(feature = "games")]

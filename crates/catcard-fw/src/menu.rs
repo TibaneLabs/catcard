@@ -108,6 +108,9 @@ enum Screen {
     Xpub(u8),
     /// The BIP-48 cosigner key expressions on their own.
     ExportKeyExpr,
+    /// The generic JSON, by its row in [`EXPORT_ITEMS`] -- which decides the filename
+    /// and nothing else.
+    GenericJson(u8),
     /// Every account's first few addresses, to check against a watch-only wallet.
     DumpSummary,
     /// Ask whether a typed address belongs to this wallet.
@@ -324,10 +327,32 @@ const UTILS_ITEMS: &[&str] = &[
 /// looks. What is here is what this firmware can write from what it knows; the
 /// wallet-specific files are the rest of that work.
 const EXPORT_ITEMS: &[&str] = &[
+    "Generic JSON",
+    "Sparrow",
+    "Cove",
+    "Nunchuk",
+    "Fully Noded",
+    "Theya",
+    "Bitcoin Safe",
     "Descriptor",
     "Key Expression",
     "Export XPUB",
     "Dump Summary",
+];
+
+/// The filename each Format A entry writes under.
+///
+/// The bytes are identical across all of them; only the name differs, because the
+/// software that reads one looks for its own. Stock lower-cases the menu label and
+/// keeps the spaces, which is why `fully noded-export.json` has one in it.
+const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
+    ("Generic JSON", "/coldcard-export.json"),
+    ("Sparrow", "/sparrow-export.json"),
+    ("Cove", "/cove-export.json"),
+    ("Nunchuk", "/nunchuk-export.json"),
+    ("Fully Noded", "/fully noded-export.json"),
+    ("Theya", "/theya-export.json"),
+    ("Bitcoin Safe", "/bitcoin safe-export.json"),
 ];
 
 /// Which level to export a plain xpub from, in stock's order.
@@ -683,6 +708,7 @@ pub fn run(session: Session<'_>) -> ! {
                 Screen::NewSeed(w) => w,
                 Screen::Derive(w) => w,
                 Screen::Xpub(w) => w,
+                Screen::GenericJson(w) => w,
                 _ => 0,
             };
             if let Some(action) = action_for(next) {
@@ -809,6 +835,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::Xpub(_) => to(
             |a| export_xpub(a.gate, a.login, a.ui, a.words),
             Screen::XpubMenu,
+        ),
+        Screen::GenericJson(_) => to(
+            |a| export_generic_json(a.gate, a.login, a.ui, a.words),
+            Screen::ExportMenu,
         ),
         Screen::VerifyAddress => to(
             |a| crate::verify::screen(a.gate, a.login, a.ui),
@@ -1075,6 +1105,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
+            (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
+                Screen::GenericJson(cursor as u8)
+            }
             (Key::Confirm, Some("Descriptor")) => Screen::ExportWallet,
             (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
@@ -1409,6 +1442,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::ExportKeyExpr
         | Screen::DumpSummary
         | Screen::Xpub(_)
+        | Screen::GenericJson(_)
         | Screen::VerifyAddress
         | Screen::SignMessage
         | Screen::Passphrase => {}
@@ -3502,6 +3536,49 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
         }
     }
     wait_for_any_key(ui);
+}
+
+/// The file a Format A row writes under, if that row is one.
+fn generic_json_file(label: &str) -> Option<&'static str> {
+    GENERIC_JSON_NAMES
+        .iter()
+        .find(|(name, _)| *name == label)
+        .map(|(_, file)| *file)
+}
+
+/// The generic JSON export, under whichever vendor's filename was chosen.
+///
+/// Seven menu rows, one file. The bytes do not differ between them -- only the name,
+/// because each piece of software looks for its own and finding nothing is the failure
+/// people report as "it does not work with my wallet".
+fn export_generic_json(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    which: u8,
+) {
+    const HEAD: &str = "Export wallet";
+    let Some(label) = EXPORT_ITEMS.get(which as usize).copied() else {
+        return;
+    };
+    let Some(file) = generic_json_file(label) else {
+        return;
+    };
+    let Some(master) = unlock_master(gate, login, ui, label) else {
+        return;
+    };
+
+    let mut text: heapless::String<{ crate::export::MAX_LEN }> = heapless::String::new();
+    let mut busy = Working::new(ui.panel, label, "deriving accounts");
+    // Account zero: the number stock prompts for, and the one every wallet defaults to.
+    let built = crate::export::generic_json(&master, 0, &mut busy, ui.panel, &mut text);
+    drop(master);
+    if built.is_none() {
+        message(ui.panel, HEAD, "derivation failed", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    }
+    write_export(ui, label, file, text.as_bytes());
 }
 
 /// One account's extended public key, as plain text.

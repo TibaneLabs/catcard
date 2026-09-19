@@ -50,7 +50,7 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 
 | Ours | Stock | |
 |---|---|---|
-| `Export wallet` | `Export Wallet` | 🔀 a drawer now: Descriptor, Key Expression, Export XPUB, Dump Summary. Stock's fifteen named wallets are not here yet — five of them (Sparrow, Cove, Nunchuk, Theya, Bitcoin Safe) read the generic JSON, so what is missing is that file plus Electrum, Wasabi, Bitcoin Core, Unchained, Samourai, Bull Bitcoin, Zeus and Blue Wallet |
+| `Export wallet` | `Export Wallet` | 🔀 Generic JSON and the six vendors that read it, plus Descriptor, Key Expression, Export XPUB, Dump Summary. Still to write: Bitcoin Core (B), Electrum + Blue Wallet (C), Wasabi (D), Unchained (E), and the account-numbered descriptor variants — Bull Bitcoin, Zeus, Samourai pre/post-mix (F) |
 | `Derive child` | `Derive Seeds (BIP-85)` | ❌ different name for BIP-85 |
 | `Address Explorer` | *(top level; also here in neither)* | 🔀 ours is in both places |
 | `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat |
