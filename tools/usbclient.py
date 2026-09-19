@@ -115,6 +115,7 @@ REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
 # Capability bits, matching `catcard_usb::caps`.
 CAP_KEY_INJECTION = 1 << 0
 CAP_UPGRADE = 1 << 1
+CAP_DEBUG_MEM = 1 << 2
 CAP_UNLOCK_PIN = 1 << 3
 CAP_UPGRADE_PACKED = 1 << 4
 
@@ -511,6 +512,71 @@ def poke(s, addr, data, width=4):
         at += len(chunk)
 
 
+# --- staging by hand, for when the firmware's own staging path is the broken thing ---
+#
+# The PSRAM map, from `catcard_board::spec` and hw-reference/storage.md. Only the Q1 and
+# mk4/mk5 have PSRAM; mk3 stages into SPI-NOR and none of this applies.
+PSRAM_BASE = 0x9000_0000
+PSRAM_LEN = 8 * 1024 * 1024
+PSRAM_IMAGE = PSRAM_BASE + PSRAM_LEN // 2     # where an image stages: the upper half
+PSRAM_HEADER = 0x907F_F800                    # the bootloader's recovery marker
+HDR_MAGIC1 = 0xDBCC_8350
+HDR_MAGIC2 = 0xBAFC_FBA3
+
+
+def stage_by_poke(s, blob, progress=True):
+    """Write `blob` into PSRAM and publish the recovery header, using the monitor.
+
+    For the case the ordinary paths cannot cover: the firmware's own staging is what is
+    broken, so neither the USB offer nor the card can be used to replace it. Poking goes
+    straight to the bus and touches none of that code.
+
+    It is also gentler on the part than it looks. Each request carries one frame, so a
+    write is a short burst with the bus idle until the next one arrives -- which is far
+    more CE#-high time than the 50 ns the part asks for between bursts, without anything
+    having to arrange it.
+
+    Returns the region `(start_offset, length)` that `gate 18/7` would be given.
+    """
+    if len(blob) % 4:
+        blob = blob + b"\x00" * (4 - len(blob) % 4)
+    per = ((56 - 5) // 4) * 4
+    total = len(blob)
+
+    t0 = time.time()
+    at = 0
+    while at < total:
+        chunk = blob[at : at + per]
+        st, _ = request(s, DEBUG_POKE, struct.pack("<IB", PSRAM_IMAGE + at, 4) + chunk)
+        if st != 0:
+            raise RuntimeError(f"poke {PSRAM_IMAGE + at:#x}: {STATUS.get(st, st)}")
+        at += len(chunk)
+        if progress and (at % (per * 200) == 0 or at >= total):
+            done = 100 * at // total
+            rate = at / max(time.time() - t0, 1e-6) / 1024
+            print(f"\rstage     {at}/{total} ({done}%) {rate:.0f} KB/s", end="", flush=True)
+    if progress:
+        print()
+
+    # Spot-check what landed. Not a substitute for the bootloader's own verification --
+    # it checks the whole image and this checks four places -- but a staging area that
+    # dropped a whole run shows up here in a second rather than as `-112` in a minute.
+    for off in (0, total // 3, 2 * total // 3, total - 64):
+        off &= ~3
+        got = peek(s, PSRAM_IMAGE + off, 16, 4)
+        if got != blob[off : off + len(got)]:
+            raise RuntimeError(f"read-back differs at +{off:#x}: PSRAM did not keep it")
+    print("stage     read-back agrees at four points")
+
+    # The header last, and `magic1` last within it: the bootloader requires both magics,
+    # so until that final word lands every intermediate state reads as "nothing staged".
+    start = PSRAM_IMAGE - PSRAM_BASE
+    poke(s, PSRAM_HEADER + 4, struct.pack("<III", start, total, HDR_MAGIC2))
+    poke(s, PSRAM_HEADER, struct.pack("<I", HDR_MAGIC1))
+    print(f"stage     header published: start={start:#x} len={total}")
+    return start, total
+
+
 def jsr(s, addr, arg=0):
     """Call `addr` as fn(u32)->u32; returns the u32 result."""
     st, body = request(s, DEBUG_JSR, struct.pack("<II", addr, arg))
@@ -701,6 +767,31 @@ def main(path, image=None):
         addr = int(a[0], 0)
         arg = int(a[1], 0) if len(a) > 1 else 0
         print(f"jsr       {addr:#010x}(arg={arg:#x}) -> {jsr(s, addr, arg):#010x}")
+        return 0
+
+    if "--stage" in sys.argv:
+        # Stage an image into PSRAM with the monitor, for when the firmware's own
+        # staging is the thing that is broken -- a device that cannot install is
+        # otherwise a device that cannot be fixed, because every ordinary route to
+        # replacing its firmware runs through the code that is failing.
+        #
+        # This gets the bytes and the recovery header in place. It does **not** install:
+        # that is `gate 18/7`, which is PIN-authenticated and wants the logged-in
+        # `pinAttempt_t` the firmware is holding. See the note printed below.
+        a = arg_after("--stage")
+        if not a:
+            print("usage: --stage <image.dfu|image.bin>")
+            return 1
+        st, body = request(s, IDENTIFY)
+        if not capabilities(body) & CAP_DEBUG_MEM:
+            print("stage     this build has no memory monitor (needs usb-debug-mem)")
+            return 1
+        blob = load_image(a[0])
+        start, total = stage_by_poke(s, blob)
+        print()
+        print("staged, but NOT installed. The bootloader only acts on this when a")
+        print("logged-in `gate 18/7` authorises the region, or when it recovers a device")
+        print(f"whose own firmware fails to verify. Region: start={start:#x} len={total}.")
         return 0
 
     if "--log" in sys.argv:
