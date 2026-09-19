@@ -100,6 +100,16 @@ enum Screen {
     AddressExplorer,
     /// Output descriptors for a watch-only wallet, to the SD card.
     ExportWallet,
+    /// The export drawer: which shape of the same keys to write out.
+    ExportMenu,
+    /// Which account level to export a plain xpub from.
+    XpubMenu,
+    /// That level, by its row in [`XPUB_ITEMS`].
+    Xpub(u8),
+    /// The BIP-48 cosigner key expressions on their own.
+    ExportKeyExpr,
+    /// Every account's first few addresses, to check against a watch-only wallet.
+    DumpSummary,
     /// Ask whether a typed address belongs to this wallet.
     VerifyAddress,
     /// Sign a typed message with one of this wallet's keys.
@@ -305,6 +315,28 @@ const UTILS_ITEMS: &[&str] = &[
     "Export wallet",
     "Browse SD card",
     "Format SD card",
+];
+
+/// The shapes the same keys can be written in.
+///
+/// Stock names fifteen wallets here and five of them -- Sparrow, Cove, Nunchuk, Theya,
+/// Bitcoin Safe -- take the generic JSON unchanged, so the list is far shorter than it
+/// looks. What is here is what this firmware can write from what it knows; the
+/// wallet-specific files are the rest of that work.
+const EXPORT_ITEMS: &[&str] = &[
+    "Descriptor",
+    "Key Expression",
+    "Export XPUB",
+    "Dump Summary",
+];
+
+/// Which level to export a plain xpub from, in stock's order.
+const XPUB_ITEMS: &[&str] = &[
+    "Segwit (BIP-84)",
+    "Classic (BIP-44)",
+    "P2WPKH/P2SH (49)",
+    "Master XPUB",
+    "Current XFP",
 ];
 
 /// What BIP-85 can derive. The order matches [`crate::derive::Kind`]'s.
@@ -650,6 +682,7 @@ pub fn run(session: Session<'_>) -> ! {
             let words = match next {
                 Screen::NewSeed(w) => w,
                 Screen::Derive(w) => w,
+                Screen::Xpub(w) => w,
                 _ => 0,
             };
             if let Some(action) = action_for(next) {
@@ -767,7 +800,16 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
         Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
-        Screen::ExportWallet => to(|a| export_wallet(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::ExportWallet => to(|a| export_wallet(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::ExportKeyExpr => to(
+            |a| export_key_expression(a.gate, a.login, a.ui),
+            Screen::ExportMenu,
+        ),
+        Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::Xpub(_) => to(
+            |a| export_xpub(a.gate, a.login, a.ui, a.words),
+            Screen::XpubMenu,
+        ),
         Screen::VerifyAddress => to(
             |a| crate::verify::screen(a.gate, a.login, a.ui),
             Screen::Utils,
@@ -1002,6 +1044,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Cancel => Screen::Utils,
             _ => Screen::DeriveMenu,
         },
+        Screen::XpubMenu => match key {
+            Key::Confirm => Screen::Xpub(cursor as u8),
+            Key::Cancel => Screen::ExportMenu,
+            _ => Screen::XpubMenu,
+        },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
             #[cfg(not(feature = "board-mk3"))]
@@ -1027,7 +1074,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
-            (Key::Confirm, Some("Export wallet")) => Screen::ExportWallet,
+            (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
+            (Key::Confirm, Some("Descriptor")) => Screen::ExportWallet,
+            (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
+            (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
+            (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -1294,6 +1345,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DeriveMenu => Some(DERIVE_ITEMS),
+        Screen::ExportMenu => Some(EXPORT_ITEMS),
+        Screen::XpubMenu => Some(XPUB_ITEMS),
         #[cfg(feature = "games")]
         Screen::Games => Some(GAMES_ITEMS),
         _ => None,
@@ -1311,7 +1364,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
-        | Screen::DeriveMenu => draw_menu(panel, screen, v),
+        | Screen::DeriveMenu
+        | Screen::ExportMenu
+        | Screen::XpubMenu => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
@@ -1351,6 +1406,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         Screen::AddressExplorer
         | Screen::ExportWallet
+        | Screen::ExportKeyExpr
+        | Screen::DumpSummary
+        | Screen::Xpub(_)
         | Screen::VerifyAddress
         | Screen::SignMessage
         | Screen::Passphrase => {}
@@ -1410,6 +1468,14 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::DeriveMenu => {
             let _ = note.push_str("children of this seed");
             "Derive child"
+        }
+        Screen::ExportMenu => {
+            let _ = note.push_str("the same keys, several shapes");
+            "Export wallet"
+        }
+        Screen::XpubMenu => {
+            let _ = note.push_str("one account key, as text");
+            "Export XPUB"
         }
         Screen::Settings => "Settings",
         Screen::Login => "Login",
@@ -3421,6 +3487,245 @@ fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     match write_card_file(&path, text.as_bytes()) {
         Ok(()) => {
             crate::catlog!("export: wrote {} bytes to {}", text.len(), path.as_str());
+            message(ui.panel, "Exported", &path[1..], "any key to go back");
+        }
+        Err(why) => {
+            let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
+            crate::catlog!(
+                "export: failed: {}; sd last {} sta {:08x} detail {}",
+                why,
+                catcard_hal::sdmmc::last_failure::name(phase),
+                sta,
+                detail
+            );
+            message(ui.panel, "Export failed", why, "any key to go back");
+        }
+    }
+    wait_for_any_key(ui);
+}
+
+/// One account's extended public key, as plain text.
+///
+/// The simplest export there is, and the one a watch-only wallet asks for when it wants
+/// to be told a key rather than handed a file it has to parse. The row chosen says which
+/// level: the three single-signature purposes, the master key itself, or just the
+/// fingerprint.
+fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, which: u8) {
+    use catcard_wallet::bip32::ChildNumber;
+
+    const HEAD: &str = "Export XPUB";
+    // The rows of `XPUB_ITEMS`, in order. `None` is the master key, which is not
+    // derived at all, and the last row writes the fingerprint on its own.
+    let purpose = match which {
+        0 => Some(84),
+        1 => Some(44),
+        2 => Some(49),
+        3 => None,
+        _ => None,
+    };
+    let fingerprint_only = which == 4;
+
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
+    let [a, b, c, d] = fingerprint;
+
+    let mut text: heapless::String<256> = heapless::String::new();
+    if fingerprint_only {
+        let _ = writeln!(text, "{a:02X}{b:02X}{c:02X}{d:02X}");
+    } else {
+        let mut busy = Working::new(ui.panel, HEAD, "deriving");
+        let key = match purpose {
+            // The master key itself, which is not derived at all.
+            None => Some(crate::keywork::run(|kw| master.to_extended_pub(kw))),
+            Some(p) => {
+                let steps = [
+                    ChildNumber::hardened(p),
+                    ChildNumber::hardened(0),
+                    ChildNumber::hardened(0),
+                ];
+                match steps {
+                    [Ok(p), Ok(coin), Ok(acct)] => {
+                        public_at(&master, &[p, coin, acct], &mut busy, ui.panel)
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
+        let Some(len) = key.and_then(|k| k.write_base58(&mut xpub).ok()) else {
+            message(ui.panel, HEAD, "derivation failed", "any key to go back");
+            wait_for_any_key(ui);
+            return;
+        };
+        let _ = writeln!(text, "{}", core::str::from_utf8(&xpub[..len]).unwrap_or(""));
+    }
+    drop(master);
+
+    // Named for what it holds, so a card with several on it is still readable.
+    let mut path: heapless::String<24> = heapless::String::new();
+    let what = match (fingerprint_only, purpose) {
+        (true, _) => "XFP",
+        (_, None) => "MASTER",
+        (_, Some(p)) => match p {
+            84 => "BIP84",
+            44 => "BIP44",
+            _ => "BIP49",
+        },
+    };
+    let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-{what}.TXT");
+    write_export(ui, HEAD, &path, text.as_bytes());
+}
+
+/// The BIP-48 cosigner keys on their own.
+///
+/// A key expression is not a wallet: it is this device's share of one. The full export
+/// carries these among the descriptors, and a coordinator that wants only this should
+/// not have to be sent the rest.
+fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::bip32::ChildNumber;
+
+    const HEAD: &str = "Key Expression";
+    const COSIGNER: [(u32, &str); 2] = [(2, "P2WSH"), (1, "P2SH-P2WSH")];
+
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
+    let [a, b, c, d] = fingerprint;
+
+    let mut text: heapless::String<512> = heapless::String::new();
+    let _ = write!(
+        text,
+        "# CatCard cosigner keys (BIP-48), master fingerprint {a:02x}{b:02x}{c:02x}{d:02x}\n\
+         # Give one to the coordinator; it is a key, not a wallet.\n"
+    );
+    let mut busy = Working::new(ui.panel, HEAD, "deriving");
+    for (script, name) in COSIGNER {
+        busy.tick(ui.panel);
+        let steps = [
+            ChildNumber::hardened(48),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(script),
+        ];
+        let [Ok(purpose), Ok(coin), Ok(acct), Ok(form)] = steps else {
+            continue;
+        };
+        let Some(key) = public_at(&master, &[purpose, coin, acct, form], &mut busy, ui.panel)
+        else {
+            continue;
+        };
+        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
+        let Ok(xlen) = key.write_base58(&mut xpub) else {
+            continue;
+        };
+        let _ = write!(
+            text,
+            "# {name}, m/48h/0h/0h/{script}h\n[{a:02x}{b:02x}{c:02x}{d:02x}/48h/0h/0h/{script}h]{}/<0;1>/*\n",
+            core::str::from_utf8(&xpub[..xlen]).unwrap_or("")
+        );
+    }
+    drop(master);
+
+    let mut path: heapless::String<24> = heapless::String::new();
+    let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-KEYS.TXT");
+    write_export(ui, HEAD, &path, text.as_bytes());
+}
+
+/// The first few addresses of every account, to check a watch-only wallet against.
+///
+/// The point of it is comparison: a wallet that has been given the right keys shows
+/// these same addresses, and one that has been given the wrong ones does not. So the
+/// file is written to be read beside a screen, not parsed.
+fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::address::AddressKind;
+    use catcard_wallet::bip32::ChildNumber;
+
+    const HEAD: &str = "Dump Summary";
+    const SHOWN: u32 = 5;
+    const ACCOUNTS: [(AddressKind, &str); 4] = [
+        (AddressKind::P2wpkh, "Native segwit"),
+        (AddressKind::P2shP2wpkh, "Nested segwit"),
+        (AddressKind::P2pkh, "Legacy"),
+        (AddressKind::P2tr, "Taproot"),
+    ];
+
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
+    let [a, b, c, d] = fingerprint;
+
+    let mut text: heapless::String<2048> = heapless::String::new();
+    let _ = write!(
+        text,
+        "# CatCard summary, master fingerprint {a:02x}{b:02x}{c:02x}{d:02x}\n\
+         # The first {SHOWN} receive addresses of each account. A watch-only wallet\n\
+         # given the right keys shows these same addresses.\n"
+    );
+    let mut busy = Working::new(ui.panel, HEAD, "deriving addresses");
+    for (kind, name) in ACCOUNTS {
+        busy.tick(ui.panel);
+        let steps = [
+            ChildNumber::hardened(kind.bip44_purpose()),
+            ChildNumber::hardened(0),
+            ChildNumber::hardened(0),
+        ];
+        let [Ok(p), Ok(coin), Ok(acct)] = steps else {
+            continue;
+        };
+        let _ = write!(text, "\n# {name}, m/{}h/0h/0h\n", kind.bip44_purpose());
+        // The account key once, then the chain below it -- which is unhardened, so the
+        // addresses come from the public key and the seed is not touched again.
+        let Some(account) = public_at(&master, &[p, coin, acct], &mut busy, ui.panel) else {
+            continue;
+        };
+        for i in 0..SHOWN {
+            busy.tick(ui.panel);
+            let Some((chain, index)) = ChildNumber::normal(0).ok().zip(ChildNumber::normal(i).ok())
+            else {
+                continue;
+            };
+            // No `keywork::run` here: below the account everything is unhardened, so
+            // this is public-key arithmetic and the seed is not involved.
+            let Some(line) = (|| {
+                let leaf = account.derive_child(chain).ok()?.derive_child(index).ok()?;
+                let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
+                let n = catcard_wallet::address::encode(
+                    kind,
+                    catcard_wallet::bip32::Network::Mainnet,
+                    &leaf.public_key,
+                    &mut buf,
+                )
+                .ok()?;
+                let mut s: heapless::String<96> = heapless::String::new();
+                let _ = write!(s, ".../0/{i}  {}", core::str::from_utf8(&buf[..n]).ok()?);
+                Some(s)
+            })() else {
+                continue;
+            };
+            let _ = writeln!(text, "{line}");
+        }
+    }
+    drop(master);
+
+    let mut path: heapless::String<24> = heapless::String::new();
+    let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-SUMMARY.TXT");
+    write_export(ui, HEAD, &path, text.as_bytes());
+}
+
+/// Write an export to the card and say how it went.
+///
+/// The same three outcomes every time -- written, refused, or the card was not there --
+/// said the same way, because an export that fails differently each time is one nobody
+/// can help with.
+fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8]) {
+    message(ui.panel, head, "writing to SD card", "");
+    match write_card_file(path, body) {
+        Ok(()) => {
+            crate::catlog!("export: wrote {} bytes to {}", body.len(), path);
             message(ui.panel, "Exported", &path[1..], "any key to go back");
         }
         Err(why) => {
