@@ -54,6 +54,10 @@ pub enum Reject {
     OutOfOrder { expected: u32, got: u32 },
     /// A chunk ran past the length declared at the start.
     PastEnd { end: u32, len: u32 },
+    /// A scattered chunk was not word-aligned. The staging area is written in whole
+    /// words; a partial one would make it read what is there to merge with, and a read
+    /// among writes is what corrupts PSRAM.
+    Unaligned { offset: u32, len: u32 },
     /// Asked to install before every byte arrived.
     Incomplete { have: u32, want: u32 },
     /// The header at `0x3F80` is not a firmware header.
@@ -215,6 +219,9 @@ pub struct Staged<'a, A: StagingArea> {
     board: &'a BoardSpec,
     length: u32,
     received: u32,
+    /// Set by [`place`](Self::place): the image arrived out of order, so the digest
+    /// taken as it arrived means nothing and has to come from the medium instead.
+    scattered: bool,
     /// Bytes accepted but not yet pushed to the area: fewer than four, always the tail of
     /// what has been received. See [`Self::write`].
     carry: [u8; 4],
@@ -253,6 +260,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             board,
             length,
             received: 0,
+            scattered: false,
             carry: [0; 4],
             carry_len: 0,
             stream: DigestStream::new(),
@@ -276,6 +284,66 @@ impl<'a, A: StagingArea> Staged<'a, A> {
 
     pub fn is_complete(&self) -> bool {
         self.received == self.length
+    }
+
+    /// Store a chunk **at an offset of its own**, for a transport that does not deliver
+    /// in order.
+    ///
+    /// Animated QR is the case: a part carries its own index, the animation loops, and
+    /// which part is caught next is a matter of where the camera was pointing. Ordering
+    /// them would mean holding the ones that arrived early, which for a firmware image
+    /// is a third of a megabyte of somewhere to hold them.
+    ///
+    /// The cost is the digest. [`write`](Self::write) hashes each chunk as it passes,
+    /// which only works if the chunks are in order; this cannot, so an image placed
+    /// this way is digested by reading it back in [`inspect`](Self::inspect). That is a
+    /// full pass over a slow memory, which is affordable here precisely because the
+    /// transport that delivered it took minutes.
+    ///
+    /// **`offset` must be word-aligned**, and so must `data.len()` unless this is the
+    /// end of the image. A partial word makes the area read what is there to merge
+    /// with, and a read placed among writes is what corrupts PSRAM. A sender whose
+    /// parts are not a multiple of four bytes is refused rather than quietly merged.
+    pub fn place(&mut self, offset: u32, data: &[u8]) -> Result<(), Reject>
+    where
+        A::Error: Into<StorageError>,
+    {
+        let end = offset
+            .checked_add(data.len() as u32)
+            .ok_or(Reject::PastEnd {
+                end: u32::MAX,
+                len: self.length,
+            })?;
+        if end > self.length {
+            return Err(Reject::PastEnd {
+                end,
+                len: self.length,
+            });
+        }
+        // Aligned, or the area will read-modify-write and interleave a read into a run
+        // of writes. The end of the image is the one place a partial word is allowed,
+        // because nothing follows it to be disturbed.
+        if !offset.is_multiple_of(4) || (!data.len().is_multiple_of(4) && end != self.length) {
+            return Err(Reject::Unaligned {
+                offset,
+                len: data.len() as u32,
+            });
+        }
+        self.area
+            .write(offset, data)
+            .map_err(|_| Reject::StorageFault { offset })?;
+        self.scattered = true;
+        Ok(())
+    }
+
+    /// Declare a scattered image complete.
+    ///
+    /// Only the transport knows: the parts carry their own numbering and it is the
+    /// thing counting them. `Staged` deliberately does not guess from the highest
+    /// offset written, because that is true as soon as the *last* part lands and says
+    /// nothing about the holes before it.
+    pub fn placed_all(&mut self) {
+        self.received = self.length;
     }
 
     /// Store the next chunk.
@@ -412,7 +480,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     pub fn inspect_with(
         &mut self,
         running: Option<&FirmwareHeader>,
-        progress: impl FnMut(u32, u32),
+        mut progress: impl FnMut(u32, u32),
     ) -> Result<Approval, Reject> {
         self.settle()?;
         if !self.is_complete() {
@@ -470,7 +538,14 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         // bytes is caught there whatever we do here.
         //
         // Source: hw-reference/install-and-usb-transport.md §"install flow" [C]
-        let digest = self.stream.clone().finish();
+        //
+        // Unless the image was scattered, in which case there was no order to hash it
+        // in and this is the one path that must read it back. See `place`.
+        let digest = if self.scattered {
+            self.stored_digest_with(&mut progress)?
+        } else {
+            self.stream.clone().finish()
+        };
         let key = compressed(&APPROVED_PUBKEYS[slot as usize]);
         let verified = matches!(
             catcard_sign::ecdsa_verify(&key, &digest, &header.signature),

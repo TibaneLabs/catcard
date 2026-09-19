@@ -57,6 +57,9 @@ pub(crate) fn describe(why: catcard_upgrade::Reject) -> &'static str {
         // still answered rather than lumped in with the transfer faults, because a
         // screen saying the wrong thing is worse than one saying an odd thing.
         R::Unpackable(_) => "compressed image did not decode",
+        // Only the scattered path can produce this, and only from a sender whose parts
+        // are not a multiple of four bytes.
+        R::Unaligned { .. } => "parts are misaligned",
     }
 }
 

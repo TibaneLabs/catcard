@@ -652,3 +652,92 @@ fn a_truly_bad_signature_is_not_blamed_on_the_medium() {
         Err(Reject::BadSignature { .. })
     ));
 }
+
+// --- scattered placement, for a transport that delivers out of order ----------------
+
+/// The same image placed in a shuffled order verifies, exactly as the ordered one does.
+///
+/// This is the property the QR path rests on. The digest cannot be taken as the bytes
+/// arrive -- there is no order to take it in -- so `inspect` reads the image back
+/// instead, and the test is that the answer is the same either way.
+#[test]
+fn an_image_placed_out_of_order_still_verifies() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+
+    // Parts of 2,684 bytes -- a multiple of four, which the alignment rule requires --
+    // placed back to front, which is the worst order and a legal one.
+    let per = 2684usize;
+    let n = image.len().div_ceil(per);
+    for i in (0..n).rev() {
+        let at = i * per;
+        let end = (at + per).min(image.len());
+        s.place(at as u32, &image[at..end]).expect("a part");
+    }
+    s.placed_all();
+
+    let a = s.inspect(Some(&running(OLDER))).expect("it verifies");
+    assert_eq!(a.signature, Signature::DeveloperKey);
+    assert_eq!(a.length, image.len() as u32);
+}
+
+/// A part that is not word-aligned is refused, rather than merged.
+///
+/// Merging means the area reads the word it is about to change, and a read placed in
+/// among writes is what corrupts this part -- so a sender whose parts are not a
+/// multiple of four is told, rather than quietly given a staging area that will not
+/// read back.
+#[test]
+fn an_unaligned_part_is_refused() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+
+    // An offset that is not a multiple of four.
+    assert!(matches!(
+        s.place(2685, &image[..64]),
+        Err(Reject::Unaligned { .. })
+    ));
+    // A length that is not, in the middle of the image.
+    assert!(matches!(
+        s.place(0, &image[..2685]),
+        Err(Reject::Unaligned { .. })
+    ));
+    // But the end of the image may be a partial word: nothing follows it.
+    let tail = image.len() - 3;
+    s.place(tail as u32 & !3, &image[tail & !3..])
+        .expect("the tail");
+}
+
+/// A part past the declared end is refused, wherever it claims to go.
+#[test]
+fn a_placed_part_cannot_run_past_the_image() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+    let at = image.len() as u32 - 64;
+    assert!(matches!(
+        s.place(at, &image[..128]),
+        Err(Reject::PastEnd { .. })
+    ));
+}
+
+/// Completeness is the transport's to declare, not something inferred from offsets.
+///
+/// Writing the last part makes the highest offset touched equal the image length,
+/// which says nothing about the holes before it. `inspect` must still refuse until the
+/// thing counting the parts says they are all in.
+#[test]
+fn the_last_part_alone_does_not_make_an_image_complete() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+
+    let at = (image.len() - 64) as u32;
+    s.place(at, &image[at as usize..]).expect("the last part");
+    assert!(
+        matches!(s.inspect(None), Err(Reject::Incomplete { .. })),
+        "a single part at the end is not an image"
+    );
+}
