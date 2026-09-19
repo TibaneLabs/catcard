@@ -185,7 +185,9 @@ dependencies = [
 name = "catcard-image"
 version = "7.0.0"
 dependencies = [
+ "anyd",
  "anyhow",
+ "catcard-bbqr",
  "catcard-board",
  "catcard-fwhdr",
  "clap",

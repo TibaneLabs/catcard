@@ -13,7 +13,9 @@ name = "catcard-image"
 path = "src/main.rs"
 
 [dependencies]
+anyd.workspace = true
 catcard-board.workspace = true
+catcard-bbqr.workspace = true
 catcard-fwhdr = { workspace = true, features = ["std"] }
 anyhow.workspace = true
 clap.workspace = true

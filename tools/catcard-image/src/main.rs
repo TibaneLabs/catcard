@@ -18,6 +18,7 @@
 mod dfuse;
 mod elf;
 mod image;
+mod qrpage;
 mod sign;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -100,6 +101,27 @@ enum Cmd {
     /// Print the header of a `.bin` or `.dfu`.
     Info { file: PathBuf },
 
+    /// Write an HTML page that shows a signed `.bin` as animated BBQr.
+    ///
+    /// The sending half of the device's `Debug -> Install from QR`: the last way in when
+    /// USB and the card slot have both stopped working. Open the page, full-screen it,
+    /// and point the device at it -- parts are caught in any order, so let it loop.
+    ///
+    /// The page carries the finished QR matrices, so it needs no network and no library.
+    Qr {
+        /// The raw signed image. Not a `.dfu` -- run `extract` on one of those first.
+        bin: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Bytes per part. **Must be a multiple of twenty**: BBQr packs five bytes to
+        /// eight characters and the device stages parts as whole 32-bit words.
+        ///
+        /// Larger means fewer, denser codes -- fewer to catch, but each is harder to
+        /// read off a screen. Drop it if the device is slow to pick them up.
+        #[arg(long, default_value_t = qrpage::DEFAULT_PART)]
+        part: usize,
+    },
+
     /// Unwrap a DfuSe container to the raw signed image inside it.
     ///
     /// A `.dfu` is a wrapper; what a device stages and what the bootloader installs is
@@ -156,6 +178,7 @@ fn main() -> Result<()> {
         Cmd::Verify { bin, board } => cmd_verify(&bin, board.as_deref()),
         Cmd::Info { file } => cmd_info(&file),
         Cmd::Extract { dfu, out } => cmd_extract(&dfu, &out),
+        Cmd::Qr { bin, out, part } => qrpage::run(&bin, &out, part),
         Cmd::Dfuse {
             bin,
             board,
