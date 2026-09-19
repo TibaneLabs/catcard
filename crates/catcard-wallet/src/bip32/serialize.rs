@@ -212,7 +212,61 @@ impl ExtendedPrivKey {
     }
 }
 
+/// SLIP-132 version bytes: the same key, announced as the script type it is for.
+///
+/// An `xpub` says nothing about how its keys are meant to be spent, so SLIP-132 gives
+/// each script type its own version bytes and therefore its own prefix -- `ypub` for
+/// BIP-49, `zpub` for BIP-84, and the capitalised pair for the BIP-48 multisig levels.
+/// The key material is identical; only the four bytes in front of it differ.
+///
+/// It is not a BIP and plenty of software ignores it, which is why exports carry the
+/// classic form as `xpub` and add this alongside as `_pub` only when it differs.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Slip132 {
+    /// `xpub` / `tpub` -- BIP-44, and the form everything understands.
+    Classic,
+    /// `ypub` / `upub` -- BIP-49, P2WPKH nested in P2SH.
+    P2wpkhP2sh,
+    /// `zpub` / `vpub` -- BIP-84, native P2WPKH.
+    P2wpkh,
+    /// `Ypub` / `Upub` -- BIP-48 `.../1h`, P2WSH nested in P2SH.
+    P2wshP2sh,
+    /// `Zpub` / `Vpub` -- BIP-48 `.../2h`, native P2WSH.
+    P2wsh,
+}
+
+impl Slip132 {
+    /// The four version bytes this form is announced with.
+    pub const fn version(self, network: Network) -> [u8; 4] {
+        let v: u32 = match (self, network) {
+            (Slip132::Classic, Network::Mainnet) => 0x0488_B21E,
+            (Slip132::Classic, Network::Testnet) => 0x0435_87CF,
+            (Slip132::P2wpkhP2sh, Network::Mainnet) => 0x049D_7CB2,
+            (Slip132::P2wpkhP2sh, Network::Testnet) => 0x044A_5262,
+            (Slip132::P2wpkh, Network::Mainnet) => 0x04B2_4746,
+            (Slip132::P2wpkh, Network::Testnet) => 0x045F_1CF6,
+            (Slip132::P2wshP2sh, Network::Mainnet) => 0x0295_B43F,
+            (Slip132::P2wshP2sh, Network::Testnet) => 0x0242_89EF,
+            (Slip132::P2wsh, Network::Mainnet) => 0x02AA_7ED3,
+            (Slip132::P2wsh, Network::Testnet) => 0x0257_5483,
+        };
+        v.to_be_bytes()
+    }
+}
+
 impl ExtendedPubKey {
+    /// As [`write_base58`](Self::write_base58), in a SLIP-132 form.
+    ///
+    /// Only the version bytes change; the depth, fingerprint, chain code and key are the
+    /// same bytes in the same places, so the two encodings describe one key.
+    pub fn write_base58_as(&self, form: Slip132, out: &mut [u8]) -> Result<usize, Error> {
+        let mut raw = self.to_raw();
+        raw[..4].copy_from_slice(&form.version(self.network));
+        Ok(base58::encode_check(&raw, out)?)
+    }
+
     pub fn to_raw(&self) -> [u8; RAW_LEN] {
         let mut out = [0u8; RAW_LEN];
         write_common(
@@ -467,5 +521,90 @@ mod tests {
             core::str::from_utf8(&buf[..n]).unwrap(),
             m.to_base58(&crate::KeyWork::host())
         );
+    }
+}
+
+#[cfg(test)]
+mod slip132_tests {
+    use super::*;
+
+    /// Each form announces itself with the prefix the table says.
+    ///
+    /// The prefixes are the observable part: software recognises `zpub` and not the four
+    /// bytes behind it, so a wrong version byte shows up as a key nobody will take.
+    #[test]
+    fn every_form_produces_its_documented_prefix() {
+        // A key whose contents do not matter: only the version bytes are under test, and
+        // base58 puts them in the first characters.
+        let key = ExtendedPubKey {
+            network: Network::Mainnet,
+            depth: 3,
+            parent_fingerprint: [1, 2, 3, 4],
+            child_number: crate::bip32::ChildNumber::hardened(0).unwrap(),
+            chain_code: [7u8; 32],
+            public_key: {
+                // A valid compressed point: the generator.
+                let mut k = [0u8; 33];
+                k[0] = 0x02;
+                k[32] = 1;
+                k
+            },
+        };
+        for (form, want) in [
+            (Slip132::Classic, "xpub"),
+            (Slip132::P2wpkhP2sh, "ypub"),
+            (Slip132::P2wpkh, "zpub"),
+            (Slip132::P2wshP2sh, "Ypub"),
+            (Slip132::P2wsh, "Zpub"),
+        ] {
+            let mut out = [0u8; MAX_BASE58_LEN];
+            let n = key.write_base58_as(form, &mut out).expect("encodes");
+            let text = core::str::from_utf8(&out[..n]).unwrap();
+            assert!(text.starts_with(want), "{form:?} gave {}", &text[..4]);
+        }
+    }
+
+    /// Testnet has its own set, and they are not the mainnet ones.
+    #[test]
+    fn testnet_has_its_own_prefixes() {
+        for form in [
+            Slip132::Classic,
+            Slip132::P2wpkhP2sh,
+            Slip132::P2wpkh,
+            Slip132::P2wshP2sh,
+            Slip132::P2wsh,
+        ] {
+            assert_ne!(
+                form.version(Network::Mainnet),
+                form.version(Network::Testnet),
+                "{form:?} must differ by network"
+            );
+        }
+    }
+
+    /// The classic form is byte-for-byte what the ordinary encoder writes.
+    ///
+    /// If it were not, an export's `xpub` field and its `_pub` field would disagree about
+    /// the same key, and the rule for emitting `_pub` -- only when it differs -- would be
+    /// comparing the wrong things.
+    #[test]
+    fn the_classic_form_is_the_ordinary_one() {
+        let key = ExtendedPubKey {
+            network: Network::Mainnet,
+            depth: 1,
+            parent_fingerprint: [0; 4],
+            child_number: crate::bip32::ChildNumber::normal(0).unwrap(),
+            chain_code: [9u8; 32],
+            public_key: {
+                let mut k = [0u8; 33];
+                k[0] = 0x03;
+                k[32] = 2;
+                k
+            },
+        };
+        let (mut a, mut b) = ([0u8; MAX_BASE58_LEN], [0u8; MAX_BASE58_LEN]);
+        let n = key.write_base58(&mut a).unwrap();
+        let m = key.write_base58_as(Slip132::Classic, &mut b).unwrap();
+        assert_eq!(&a[..n], &b[..m]);
     }
 }
