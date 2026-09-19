@@ -363,3 +363,126 @@ fn accepting_without_confirming_never_completes() {
         "a scan that is never confirmed never finishes"
     );
 }
+
+// --- the writing direction ----------------------------------------------------------
+
+/// What this writes, it reads.
+///
+/// The decoder was checked against the RFC's own vectors, so a round trip through it is
+/// a check on the encoder rather than the two agreeing on a private mistake.
+#[test]
+fn what_is_written_can_be_read() {
+    let file = firmwareish(4001);
+    let per = 300;
+    let total = encode::parts_needed(file.len(), per) as u16;
+
+    let mut out = vec![0u8; file.len()];
+    let mut c = Collector::new();
+    let mut line = vec![0u8; encode::encoded_len(per)];
+    for i in 0..total {
+        let at = i as usize * per;
+        let chunk = &file[at..(at + per).min(file.len())];
+        let n = encode::part(chunk, FileType::BINARY, total, i, &mut line).unwrap();
+        c.take(&line[..n], &mut out).expect("its own part");
+    }
+    assert!(c.complete());
+    assert_eq!(c.file_len(), Some(file.len()));
+    assert_eq!(out, file);
+}
+
+/// Every character a part can contain is in QR's alphanumeric set.
+///
+/// The reason this format is worth preferring: alphanumeric mode holds 4,296 characters
+/// against byte mode's 2,953, and a line that strays outside the set silently costs a
+/// third of the capacity.
+#[test]
+fn every_character_is_alphanumeric() {
+    const QR_ALNUM: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+    let file = firmwareish(1024);
+    let mut line = vec![0u8; encode::encoded_len(256)];
+    for i in 0..4u16 {
+        let at = i as usize * 256;
+        let n = encode::part(&file[at..at + 256], FileType::BINARY, 4, i, &mut line).unwrap();
+        for &ch in &line[..n] {
+            assert!(
+                QR_ALNUM.as_bytes().contains(&ch),
+                "{:?} is not in QR's alphanumeric set",
+                ch as char
+            );
+        }
+    }
+}
+
+/// The size arithmetic agrees with itself, which is what a screen sizes a symbol from.
+#[test]
+fn the_length_arithmetic_is_consistent() {
+    for bytes in [0usize, 1, 2, 3, 4, 5, 6, 100, 255, 2684, 2685] {
+        let mut line = vec![0u8; encode::encoded_len(bytes) + 8];
+        let data = firmwareish(bytes);
+        let n = encode::part(&data, FileType::BINARY, 1, 0, &mut line).unwrap();
+        assert_eq!(n, encode::encoded_len(bytes), "{bytes} bytes");
+        // And `fits` is its inverse: what it says fits, does.
+        assert!(encode::encoded_len(encode::fits(n)) <= n, "{bytes} bytes");
+    }
+}
+
+/// A part that will not fit the buffer is refused rather than truncated.
+#[test]
+fn a_part_that_does_not_fit_is_refused() {
+    let data = firmwareish(100);
+    let mut small = [0u8; 16];
+    assert_eq!(
+        encode::part(&data, FileType::BINARY, 1, 0, &mut small),
+        Err(Error::TooLong)
+    );
+}
+
+/// Numbering that cannot describe a file is refused.
+#[test]
+fn impossible_numbering_is_refused() {
+    let data = firmwareish(10);
+    let mut line = [0u8; 64];
+    // No parts, an index at or past the total, and more parts than two base36 digits.
+    assert_eq!(
+        encode::part(&data, FileType::BINARY, 0, 0, &mut line),
+        Err(Error::Numbering)
+    );
+    assert_eq!(
+        encode::part(&data, FileType::BINARY, 3, 3, &mut line),
+        Err(Error::Numbering)
+    );
+    assert_eq!(
+        encode::part(&data, FileType::BINARY, 1297, 0, &mut line),
+        Err(Error::Numbering)
+    );
+}
+
+/// A wallet export, at the size it will really be, in symbols a screen can draw.
+///
+/// Two kilobytes of descriptors at three hundred bytes a part is seven codes of about
+/// five hundred characters -- a version-12 symbol, sixty-five modules, which is three
+/// screen pixels a module on a 320-wide panel.
+#[test]
+fn a_wallet_export_splits_into_readable_codes() {
+    let export = firmwareish(2048);
+    let per = 300;
+    let total = encode::parts_needed(export.len(), per);
+    assert_eq!(total, 7);
+    assert!(
+        encode::encoded_len(per) <= 535,
+        "a part must fit a version-12 alphanumeric symbol"
+    );
+
+    let mut out = vec![0u8; export.len()];
+    let mut c = Collector::new();
+    let mut line = vec![0u8; encode::encoded_len(per)];
+    // Shown as an animation, so read them in the order a camera happens to catch them.
+    for i in [3usize, 6, 0, 4, 1, 5, 2] {
+        let at = i * per;
+        let chunk = &export[at..(at + per).min(export.len())];
+        let n = encode::part(chunk, FileType::BINARY, total as u16, i as u16, &mut line).unwrap();
+        c.take(&line[..n], &mut out).expect("a part");
+    }
+    assert!(c.complete());
+    assert_eq!(out, export);
+}

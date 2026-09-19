@@ -44,6 +44,8 @@
 
 #![no_std]
 
+pub mod encode;
+
 /// What a line is not.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
