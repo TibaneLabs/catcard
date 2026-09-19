@@ -168,6 +168,18 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
     use catcard_ui::scroll::Line as Row;
     use core::fmt::Write as _;
 
+    // Held for the whole sweep. This test writes megabytes into the region other things
+    // stage into, so it has to be refused while a firmware image is sitting there rather
+    // than quietly scribbling over one that is waiting to be approved.
+    let _lease = match crate::psram::take(crate::psram::Use::Soak) {
+        Ok(lease) => lease,
+        Err(why) => {
+            let rows = [Row::title("PSRAM soak"), Row::body(why.message())];
+            crate::menu::show_doc(ui, &rows, false, false);
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+    };
     let Some(psram) = BOARD.psram else {
         let rows = [
             Row::title("PSRAM soak"),

@@ -52,72 +52,63 @@ static mut BUF_A: [u8; STATIC_BUF] = [0; STATIC_BUF];
 #[cfg(feature = "board-mk3")]
 static mut BUF_B: [u8; STATIC_BUF] = [0; STATIC_BUF];
 
-/// PSRAM windows for the two buffers: 2 MB each, in the lower half.
+/// The two working buffers and what keeps them ours.
 ///
-/// The **upper** half is where a firmware image stages, with the staging marker at the
-/// very top. This used to say the opposite and take the upper half accordingly, which
-/// put both buffers exactly where an image goes -- and the guard below, doing its job,
-/// then refused every time. Signing a PSBT from a card answered "no memory for this" on
-/// every board that has PSRAM.
+/// On a board with PSRAM this is a lease on the whole region, which is released when the
+/// screen returns however it returns. There is no reserved slice for signing: PSRAM is
+/// scratch and whoever holds it has all of it, so the thing that keeps a staged firmware
+/// image and a PSBT apart is that both are refused while the other is held, not an
+/// address range each promises to stay inside.
 ///
-/// The halves are separate because the two are not exclusive in time: a USB upload can
-/// be part way through while someone walks into the signing screen, so this cannot be
-/// "whichever half is free right now".
-#[cfg(not(feature = "board-mk3"))]
-const PSRAM_WINDOW: usize = 2 * 1024 * 1024;
-
-/// The buffers fit, checked while compiling.
-///
-/// This is here because of how the previous mistake hid. The runtime guard below is an
-/// `if` over values that are all constants, so when it was wrong the optimiser folded it
-/// to "always refuse", saw that everything after it was unreachable, and **deleted the
-/// whole signing implementation** -- 44 KB of sighashes, PSBT writing and the review
-/// screen simply were not in the image. A feature can disappear from a build without
-/// anything failing; only a check that runs at compile time can say so.
-#[cfg(not(feature = "board-mk3"))]
-const _: () = {
-    let Some(psram) = catcard_board::BOARD.psram else {
-        panic!("a board with no PSRAM cannot use the PSRAM buffers");
-    };
-    let (_, room) = psram.scratch();
-    assert!(
-        2 * PSRAM_WINDOW <= room as usize,
-        "the signing buffers do not fit in PSRAM's scratch half"
-    );
-};
-
-/// The two working buffers.
-///
-/// # Safety
-/// One caller at a time: the menu waits for this screen to return.
-unsafe fn buffers() -> Option<(&'static mut [u8], &'static mut [u8])> {
+/// On mk3, which has no PSRAM, they are two static buffers and there is nothing to hold:
+/// nothing else on that board wants them.
+enum Workspace {
     #[cfg(feature = "board-mk3")]
-    {
-        // SAFETY: foreground only, and this screen is the only user of either buffer.
-        unsafe {
-            Some((
-                &mut *core::ptr::addr_of_mut!(BUF_A),
-                &mut *core::ptr::addr_of_mut!(BUF_B),
-            ))
+    Static,
+    #[cfg(not(feature = "board-mk3"))]
+    Psram(crate::psram::Lease),
+}
+
+impl Workspace {
+    /// Take the memory, or say in a few words why not.
+    fn take() -> Result<Self, &'static str> {
+        #[cfg(feature = "board-mk3")]
+        {
+            Ok(Workspace::Static)
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        {
+            // The refusal names what has it. "Busy" alone leaves someone power-cycling
+            // a device that is doing exactly what they asked it to a minute ago.
+            crate::psram::take(crate::psram::Use::Signing)
+                .map(Workspace::Psram)
+                .map_err(crate::psram::Unavailable::message)
         }
     }
-    #[cfg(not(feature = "board-mk3"))]
-    {
-        let psram = catcard_board::BOARD.psram?;
-        let (scratch, room) = psram.scratch();
-        let base = scratch as usize;
-        // Both windows must fit in the half that is ours. Kept as a check rather than a
-        // comment: it is what stands between a long PSBT and a staged image.
-        if 2 * PSRAM_WINDOW > room as usize {
-            return None;
+
+    /// The two halves, for as long as the workspace lives.
+    fn split(&mut self) -> (&mut [u8], &mut [u8]) {
+        #[cfg(feature = "board-mk3")]
+        {
+            let Workspace::Static = self;
+            // SAFETY: foreground only, one signing screen at a time, and the returned
+            // borrows end with the workspace.
+            unsafe {
+                (
+                    &mut *core::ptr::addr_of_mut!(BUF_A),
+                    &mut *core::ptr::addr_of_mut!(BUF_B),
+                )
+            }
         }
-        // SAFETY: memory-mapped PSRAM the board table describes, in a region nothing else
-        // uses while this screen is open.
-        unsafe {
-            Some((
-                core::slice::from_raw_parts_mut(base as *mut u8, PSRAM_WINDOW),
-                core::slice::from_raw_parts_mut((base + PSRAM_WINDOW) as *mut u8, PSRAM_WINDOW),
-            ))
+        #[cfg(not(feature = "board-mk3"))]
+        {
+            let Workspace::Psram(lease) = self;
+            let all = lease.bytes();
+            // A word-aligned split, because everything that writes this region writes it
+            // in whole words and a buffer starting mid-word would have its first store
+            // straddle the boundary.
+            let half = (all.len() / 2) & !3;
+            all.split_at_mut(half)
         }
     }
 }
@@ -286,12 +277,16 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
             path
         }
     };
-    // SAFETY: the menu waits for this screen to return, so nothing else holds the buffers.
-    let Some((buf, spare)) = (unsafe { buffers() }) else {
-        menu::message(ui.panel, HEAD, "no memory for this", "any key to go back");
-        menu::wait_for_any_key(ui);
-        return;
+    // Held until this screen returns, and released by dropping whichever way it does.
+    let mut work = match Workspace::take() {
+        Ok(w) => w,
+        Err(why) => {
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
     };
+    let (buf, spare) = work.split();
 
     menu::message(ui.panel, HEAD, "reading the card", "");
     let len = match read_card_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {

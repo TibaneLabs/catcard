@@ -118,23 +118,24 @@ impl Psram {
         self.base + self.len
     }
 
-    /// Where a staged firmware image begins: the **upper** half.
+    /// Where a staged firmware image begins.
     ///
-    /// The split is here rather than in whichever code stages an image, because it is
-    /// not only the stager's business: a USB upload can be part way through while the
-    /// user walks around the menu, so anything else that wants room in PSRAM has to know
-    /// which half is not theirs. Both halves being 4 MB is arithmetic, not a decision --
-    /// an image is under a megabyte.
+    /// Half way in, which is not a partition -- PSRAM is claimed whole, one holder at a
+    /// time -- but simply where the bootloader has been handed images that it accepted.
+    /// The staging header carries this offset, so the bootloader is told rather than
+    /// assuming; moving it is nonetheless a change to the one path that can leave a
+    /// device unable to boot, and there is nothing to gain by it.
     pub const fn image_base(&self) -> u32 {
         self.base + self.len / 2
     }
 
-    /// The **lower** half: free for a screen that needs room, and never staged into.
+    /// Everything below the recovery header: the part a holder may use.
     ///
-    /// Returned as base and length so a caller cannot get the direction wrong, which is
-    /// the mistake this exists to stop.
-    pub const fn scratch(&self) -> (u32, u32) {
-        (self.base, self.len / 2)
+    /// The last two kilobytes are the bootloader's -- they say where a staged image is,
+    /// and they are read before any of this firmware runs -- so they are not scratch and
+    /// are not handed out.
+    pub const fn usable(&self) -> u32 {
+        self.staging_header - self.base
     }
 }
 
@@ -803,62 +804,29 @@ mod tests {
     use super::*;
     use crate::memory::{FW_HEADER_OFFSET, fixed};
 
-    /// The scratch half and the staging half do not overlap, on any board.
+    /// What a holder is handed stops short of the bootloader's recovery header.
     ///
-    /// They are not exclusive in time -- a USB upload can be part way through while
-    /// someone opens the signing screen -- so "nothing else is using it right now" is
-    /// not an argument available to either side. This is the whole of what keeps a long
-    /// PSBT off a staged firmware image.
-    ///
-    /// Written after both of them claimed the upper half: the signing screen took
-    /// `base + 4 MB` for two 2 MB buffers, which is exactly where an image stages.
+    /// PSRAM is claimed whole, so nothing inside it is protected from its holder by
+    /// address -- except those last two kilobytes, which are read by the bootloader
+    /// before this firmware runs and are the one part no holder may have.
     #[test]
-    fn the_scratch_half_never_touches_the_staging_half() {
+    fn the_usable_region_stops_short_of_the_recovery_header() {
         for board in ALL {
             let Some(psram) = board.psram else { continue };
-            let (scratch, room) = psram.scratch();
-            assert_eq!(
-                scratch, psram.base,
-                "{}: scratch is the low half",
-                board.name
-            );
-            assert!(
-                scratch + room <= psram.image_base(),
-                "{}: scratch {:#x}..{:#x} runs into staging at {:#x}",
-                board.name,
-                scratch,
-                scratch + room,
-                psram.image_base()
-            );
-            // And staging itself stops short of the marker that describes it.
-            assert!(
-                psram.image_base() < psram.staging_header,
-                "{}: nothing between the image and its header",
-                board.name
-            );
             assert!(
                 psram.staging_header < psram.end(),
-                "{}: header is off the chip",
+                "{}: the header is off the end of the chip",
                 board.name
             );
-        }
-    }
-
-    /// The signing screen's two 2 MB buffers fit in the scratch half.
-    ///
-    /// The number is repeated from `signtx.rs` on purpose: that crate does not build on
-    /// the host, so this is the only place the arithmetic can be checked at all. If the
-    /// window there grows past this, the screen stops being able to open -- silently,
-    /// because its guard reports "no memory for this" rather than failing to build.
-    #[test]
-    fn the_signing_buffers_fit_in_the_scratch_half() {
-        const WINDOW: u32 = 2 * 1024 * 1024;
-        for board in ALL {
-            let Some(psram) = board.psram else { continue };
-            let (_, room) = psram.scratch();
+            assert_eq!(
+                psram.base + psram.usable(),
+                psram.staging_header,
+                "{}: usable region does not end at the header",
+                board.name
+            );
             assert!(
-                2 * WINDOW <= room,
-                "{}: two {WINDOW}-byte buffers do not fit in {room}",
+                psram.image_base() < psram.staging_header,
+                "{}: no room between a staged image and the header describing it",
                 board.name
             );
         }

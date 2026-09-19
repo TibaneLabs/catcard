@@ -61,6 +61,9 @@ mod panic;
 mod passphrase;
 mod pinentry;
 mod power;
+/// PSRAM, and who is using it. mk3 has none.
+#[cfg(not(feature = "board-mk3"))]
+mod psram;
 /// Measuring how much recovery delay a PSRAM write needs on this part.
 #[cfg(not(feature = "board-mk3"))]
 mod psramsoak;

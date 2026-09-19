@@ -493,10 +493,7 @@ impl UsbTask {
                         Ok(a) => a,
                         Err(why) => {
                             self.frames.reset();
-                            self.refuse(match why {
-                                staging::Unavailable::NoMedium => Reject::NoStagingArea,
-                                staging::Unavailable::Busy => Reject::StagingBusy,
-                            });
+                            self.refuse(no_staging(why));
                             return;
                         }
                     };
@@ -531,10 +528,7 @@ impl UsbTask {
                         Ok(a) => a,
                         Err(why) => {
                             self.frames.reset();
-                            self.refuse(match why {
-                                staging::Unavailable::NoMedium => Reject::NoStagingArea,
-                                staging::Unavailable::Busy => Reject::StagingBusy,
-                            });
+                            self.refuse(no_staging(why));
                             return;
                         }
                     };
@@ -950,6 +944,26 @@ fn describe(a: &Approval, out: &mut [u8; 64]) -> usize {
     out[21] = a.header.pubkey_num as u8;
     out[22] = a.older_than_running as u8;
     23
+}
+
+/// Why an offer could not claim the staging medium, said in the log before it is said
+/// on the wire.
+///
+/// The wire has one byte for this and `StagingBusy` is all it can carry, which is enough
+/// for a host to stop but not enough for a person to know what to do. On a PSRAM board
+/// the holder may not be another image at all -- it may be a transaction being signed or
+/// a QR being read -- so the log says which and the host still gets its byte.
+fn no_staging(why: staging::Unavailable) -> Reject {
+    match why {
+        staging::Unavailable::NoMedium => Reject::NoStagingArea,
+        staging::Unavailable::Busy => {
+            #[cfg(not(feature = "board-mk3"))]
+            if let Some(who) = crate::psram::holder() {
+                crate::catlog!("upgrade: refused an offer, the PSRAM has {}", who.what());
+            }
+            Reject::StagingBusy
+        }
+    }
 }
 
 /// Name a refusal in one byte, plus whatever detail fits.

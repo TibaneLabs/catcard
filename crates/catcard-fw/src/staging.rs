@@ -17,6 +17,7 @@ use catcard_callgate::Callgate;
 #[cfg(feature = "board-mk3")]
 use catcard_callgate::abi::LogoutMode;
 use catcard_upgrade::StagingArea;
+#[cfg(feature = "board-mk3")]
 use catcard_upgrade::claim::{Claim, Ticket};
 
 use crate::display;
@@ -27,8 +28,19 @@ type Medium = catcard_upgrade::psram::PsramArea;
 #[cfg(feature = "board-mk3")]
 type Medium = catcard_upgrade::nor::NorArea<crate::nor::NorBus>;
 
-/// One holder at a time: there is one staging area and several paths that stage into it.
+/// One holder at a time for the **mk3's** SPI-NOR.
+///
+/// Every other board stages into PSRAM, which is claimed through [`crate::psram`]
+/// because several unrelated things want it. The mk3's flash is wanted by staging
+/// alone, so it keeps its own claim rather than pretending to be part of a resource
+/// that board does not have.
+#[cfg(feature = "board-mk3")]
 static HELD: Claim = Claim::new();
+
+/// The tag the mk3's claim is taken under. It has one holder, but a claim will not be
+/// taken anonymously -- a holder that cannot be named is one a refusal cannot explain.
+#[cfg(feature = "board-mk3")]
+const NOR_STAGING: u8 = 1;
 
 /// The board's staging area, held exclusively for as long as this lives.
 ///
@@ -37,6 +49,11 @@ static HELD: Claim = Claim::new();
 /// remember to hand it back.
 pub struct Area {
     medium: Medium,
+    /// What keeps the medium ours. On PSRAM boards this is the lease the rest of the
+    /// firmware asks for too; on mk3 it is the SPI-NOR's own ticket.
+    #[cfg(not(feature = "board-mk3"))]
+    _lease: crate::psram::Lease,
+    #[cfg(feature = "board-mk3")]
     _ticket: Ticket,
 }
 
@@ -69,7 +86,9 @@ impl StagingArea for Area {
 pub enum Unavailable {
     /// This board has no staging medium, or it did not answer.
     NoMedium,
-    /// Something else is partway through staging an image.
+    /// Something else has the medium. On a PSRAM board that is not necessarily another
+    /// image: it may be a transaction being signed or a QR being read, and
+    /// [`crate::psram::holder`] says which.
     Busy,
 }
 
@@ -94,23 +113,28 @@ pub fn has_staging() -> bool {
 pub fn area() -> Result<Area, Unavailable> {
     // Taken before the medium is brought up: a second holder must be told no rather than
     // handed a fresh view of the same bytes. This is what stops a USB offer overwriting an
-    // image while the screen is still asking about it.
-    let ticket = HELD.take().ok_or(Unavailable::Busy)?;
+    // image while the screen is still asking about it -- and, on a PSRAM board, what stops
+    // it landing on a transaction somebody is signing.
     #[cfg(not(feature = "board-mk3"))]
     {
+        let lease = crate::psram::take(crate::psram::Use::Upgrade).map_err(|why| match why {
+            crate::psram::Unavailable::NoMedium => Unavailable::NoMedium,
+            crate::psram::Unavailable::Busy(_) => Unavailable::Busy,
+        })?;
         let psram = catcard_board::BOARD.psram.ok_or(Unavailable::NoMedium)?;
         // SAFETY: the region is the memory-mapped PSRAM the board table describes and
-        // nothing else in this firmware writes it. Whether it is actually mapped is what
-        // `Debug → PSRAM` proves; an unmapped region shows up as a write that does not
-        // read back, which staging catches.
+        // the lease taken above is what says nothing else in this firmware is writing
+        // it. Whether it is actually mapped is what `Debug → PSRAM` proves; an unmapped
+        // region shows up as a write that does not read back, which staging catches.
         let medium = unsafe { catcard_upgrade::psram::PsramArea::claim(&psram) };
         Ok(Area {
             medium,
-            _ticket: ticket,
+            _lease: lease,
         })
     }
     #[cfg(feature = "board-mk3")]
     {
+        let ticket = HELD.take(NOR_STAGING).ok_or(Unavailable::Busy)?;
         // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone; the menu waits for
         // an upgrade to finish before this can run again.
         let nor = unsafe { crate::nor::init() }.ok_or(Unavailable::NoMedium)?;
