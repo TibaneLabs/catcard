@@ -3807,6 +3807,59 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
     offer_export(ui, HEAD, &path, text.as_bytes());
 }
 
+/// Ask which of `items` to use, or `None` if the user backs out.
+///
+/// A small list with a cursor, for a choice made **inside** an action rather than by
+/// navigating to it. The export destination is one: by the time it is asked, the keys
+/// have been derived and the payload exists, so turning it into another `Screen` would
+/// mean deriving them again on the way back.
+#[cfg(feature = "board-q1")]
+pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
+    use catcard_ui::menu::Scroll;
+
+    let mut cursor = 0usize;
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        display::draw(ui.panel, |c| {
+            catcard_ui::widgets::menu(
+                c,
+                &display::LAYOUT,
+                head,
+                note,
+                items,
+                Scroll { cursor, top: 0 },
+            );
+        });
+        wait_for_release(ui);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            let mut moved = false;
+            for k in keys.iter() {
+                match k {
+                    Key::Confirm => return Some(cursor),
+                    Key::Cancel => return None,
+                    // The same two keys that move every other list here.
+                    Key::Digit(8) if cursor + 1 < items.len() => {
+                        cursor += 1;
+                        moved = true;
+                    }
+                    Key::Digit(5) if cursor > 0 => {
+                        cursor -= 1;
+                        moved = true;
+                    }
+                    _ => {}
+                }
+            }
+            if moved {
+                break;
+            }
+            display::idle(ui.panel);
+        }
+    }
+}
+
 /// Where an export should go.
 ///
 /// Stock offers QR, NFC and the card for every export, and the choice matters more than
@@ -3815,17 +3868,15 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
 /// case this exists for.
 #[cfg(feature = "board-q1")]
 fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
-    // Two questions rather than one, so that **cancel always means "not that"**. A
-    // single yes/no would have to make one of the two answers the cancel key, and a
-    // cancel that writes a file is a trap for anyone pressing it to get out.
-    ask(ui.panel, head, "show as QR?", "for a phone to scan");
-    if confirmed(ui) {
-        crate::qrshow::animate(ui, head, body, catcard_bbqr::FileType::BINARY);
-        return;
-    }
-    ask(ui.panel, head, "save to SD card?", file);
-    if confirmed(ui) {
-        write_export(ui, head, file, body);
+    // A list, not a yes/no. Three destinations that are not ranked -- a card for a
+    // computer, BBQr for wallets that read it, BC-UR for everything else -- and cancel
+    // means none of them rather than one of them.
+    const WAYS: &[&str] = &["SD card", "BBQr", "BC-UR"];
+    match choose(ui, head, "how to export", WAYS) {
+        Some(0) => write_export(ui, head, file, body),
+        Some(1) => crate::qrshow::animate_bbqr(ui, head, body),
+        Some(2) => crate::qrshow::animate_bcur(ui, head, body),
+        _ => {}
     }
 }
 

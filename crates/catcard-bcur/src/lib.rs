@@ -43,6 +43,7 @@
 #![no_std]
 
 pub mod bytewords;
+pub mod encode;
 
 mod cbor;
 
@@ -125,7 +126,16 @@ struct Fields<'a> {
 ///
 /// A single-part UR has no sequence field; it reads as one fragment of one.
 fn split(line: &[u8]) -> Result<Fields<'_>, Error> {
-    let rest = line.strip_prefix(b"ur:").ok_or(Error::NotUr)?;
+    // Either case: a UR meant for a QR is upper-cased whole, prefix and type included,
+    // so that the symbol can use its alphanumeric mode.
+    let rest = match line {
+        [a, b, b':', rest @ ..]
+            if a.eq_ignore_ascii_case(&b'u') && b.eq_ignore_ascii_case(&b'r') =>
+        {
+            rest
+        }
+        _ => return Err(Error::NotUr),
+    };
     let mut it = rest.split(|&c| c == b'/');
     let ty = it.next().ok_or(Error::NotUr)?;
     let a = it.next().ok_or(Error::NotUr)?;

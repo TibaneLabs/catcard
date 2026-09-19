@@ -169,13 +169,16 @@ fn what_is_not_bytewords() {
         bytewords::decode(b"", &mut out),
         Err(bytewords::Error::Length)
     );
-    // 'q' begins no word; upper case is not the minimal alphabet.
+    // 'q' begins no word. Upper case, on the other hand, is legitimate -- a UR is
+    // upper-cased whole so a QR can use its alphanumeric mode -- so it is not tested
+    // here as a failure; `either_case_decodes` tests that it works.
     assert_eq!(
         bytewords::decode(b"qqaeadaoaxaaahamat", &mut out),
         Err(bytewords::Error::NotAWord)
     );
+    // A pair that is two letters but no word's ends.
     assert_eq!(
-        bytewords::decode(b"AEADAOAXAAAHAMAT", &mut out),
+        bytewords::decode(b"aeadjqaxaaahamat", &mut out),
         Err(bytewords::Error::NotAWord)
     );
 }
@@ -347,4 +350,109 @@ fn the_cbor_must_be_a_five_element_part() {
         c.accept(&line, &mut scratch),
         Err(Error::Cbor(CborError::NotAPart))
     ));
+}
+
+// --- the writing direction ----------------------------------------------------------
+
+/// What this writes, its own reader reads back.
+#[test]
+fn a_written_ur_round_trips() {
+    let message = payload(900);
+    let seq_len = 5u32;
+    let mut out = vec![0u8; message.len()];
+    let mut scratch = vec![0u8; 1024];
+    let mut line = vec![0u8; 4096];
+    let mut c = Collector::new();
+
+    for i in 1..=seq_len {
+        let n = encode::part("bytes", &message, i, seq_len, &mut line).unwrap();
+        let p = c.accept(&line[..n], &mut scratch).expect("its own part");
+        out[p.offset..p.offset + p.len].copy_from_slice(&scratch[p.at.start..p.at.start + p.len]);
+        c.confirm(p);
+    }
+    assert!(c.complete());
+    assert!(c.verify(&out));
+    assert_eq!(out, message);
+}
+
+/// Every character written is one QR's alphanumeric mode covers.
+///
+/// The reason to upper-case a UR at all: alphanumeric holds 4,296 characters against
+/// byte mode's 2,953, and a single lower-case letter costs the whole symbol that.
+#[test]
+fn a_written_ur_is_all_alphanumeric() {
+    const QR_ALNUM: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+    let message = payload(500);
+    let mut line = vec![0u8; 4096];
+    let n = encode::part("bytes", &message, 1, 3, &mut line).unwrap();
+    for &ch in &line[..n] {
+        assert!(
+            QR_ALNUM.as_bytes().contains(&ch),
+            "{:?} is not in QR's alphanumeric set",
+            ch as char
+        );
+    }
+}
+
+/// A reader must take either case, because both are legitimate.
+#[test]
+fn either_case_decodes() {
+    let data = payload(40);
+    let mut upper = vec![0u8; 256];
+    let n = bytewords::encode_upper(&data, &mut upper);
+    let upper = &upper[..n];
+    assert!(upper.iter().all(|c| !c.is_ascii_lowercase()));
+
+    let lower: Vec<u8> = upper.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let (mut a, mut b) = (vec![0u8; 64], vec![0u8; 64]);
+    let na = bytewords::decode(upper, &mut a).expect("upper");
+    let nb = bytewords::decode(&lower, &mut b).expect("lower");
+    assert_eq!((&a[..na], &b[..nb]), (&data[..], &data[..]));
+}
+
+/// The size estimate is never short, which is what a caller allocates from.
+#[test]
+fn the_length_estimate_is_never_short() {
+    let message = payload(1000);
+    for seq_len in [1u32, 2, 5, 10, 99, 100] {
+        let fragment = message.len().div_ceil(seq_len as usize);
+        let mut line = vec![0u8; encode::encoded_len("bytes", fragment, seq_len, seq_len)];
+        for i in [1, seq_len] {
+            let n = encode::part("bytes", &message, i, seq_len, &mut line)
+                .unwrap_or_else(|e| panic!("{seq_len} parts, part {i}: {e:?}"));
+            assert!(
+                n <= line.len(),
+                "{seq_len} parts: wrote {n} into {}",
+                line.len()
+            );
+        }
+    }
+}
+
+/// And `fits` gives back a fragment whose line really does fit.
+#[test]
+fn fits_is_a_size_that_fits() {
+    for chars in [200usize, 535, 1000, 4296] {
+        let fragment = encode::fits("bytes", chars, 99);
+        assert!(fragment > 0, "{chars} characters must hold something");
+        let message = payload(fragment * 99);
+        let mut line = vec![0u8; chars];
+        let n = encode::part("bytes", &message, 99, 99, &mut line)
+            .unwrap_or_else(|e| panic!("{chars} chars, fragment {fragment}: {e:?}"));
+        assert!(n <= chars, "{chars} chars: wrote {n}");
+    }
+}
+
+/// Numbering that cannot describe a message is refused.
+#[test]
+fn impossible_numbering_is_refused_when_writing() {
+    let message = payload(100);
+    let mut line = vec![0u8; 4096];
+    for (num, len) in [(0u32, 3u32), (4, 3), (1, 0)] {
+        assert_eq!(
+            encode::part("bytes", &message, num, len, &mut line),
+            Err(encode::Error::Numbering),
+            "{num} of {len}"
+        );
+    }
 }

@@ -121,7 +121,10 @@ pub fn decode(text: &[u8], out: &mut [u8]) -> Result<usize, Error> {
 }
 
 fn byte_of(pair: &[u8]) -> Result<u8, Error> {
-    let (a, b) = (pair[0], pair[1]);
+    // Either case. Bytewords are written lower case, but a UR may legitimately be
+    // upper-cased whole so that a QR can use its alphanumeric mode -- so a reader that
+    // insisted on lower case would refuse the denser half of what is out there.
+    let (a, b) = (pair[0].to_ascii_lowercase(), pair[1].to_ascii_lowercase());
     if !a.is_ascii_lowercase() || !b.is_ascii_lowercase() {
         return Err(Error::NotAWord);
     }
@@ -129,6 +132,32 @@ fn byte_of(pair: &[u8]) -> Result<u8, Error> {
         NONE => Err(Error::NotAWord),
         byte => Ok(byte as u8),
     }
+}
+
+/// Write `data` and its CRC-32 as minimal bytewords, **upper case**.
+///
+/// Upper case because that is the half of ASCII a QR's alphanumeric mode covers, and a
+/// UR written in it fits a third more in the same symbol. The specification allows it
+/// and readers lower-case what they receive, which is why [`decode`] takes either.
+///
+/// Returns how many characters were written: two per byte, including the checksum.
+pub fn encode_upper(data: &[u8], out: &mut [u8]) -> usize {
+    let mut at = 0;
+    let mut put = |byte: u8, out: &mut [u8]| {
+        let pair = &PAIRS[byte as usize * 2..][..2];
+        if at + 2 <= out.len() {
+            out[at] = pair[0].to_ascii_uppercase();
+            out[at + 1] = pair[1].to_ascii_uppercase();
+            at += 2;
+        }
+    };
+    for &b in data {
+        put(b, out);
+    }
+    for b in crc32(data).to_be_bytes() {
+        put(b, out);
+    }
+    at
 }
 
 /// CRC-32, the ordinary one: reflected, polynomial `0xEDB88320`, inverted either end.

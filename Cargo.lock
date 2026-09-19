@@ -102,6 +102,9 @@ version = "7.0.0"
 [[package]]
 name = "catcard-bcur"
 version = "7.0.0"
+dependencies = [
+ "heapless",
+]
 
 [[package]]
 name = "catcard-board"
@@ -134,6 +137,7 @@ dependencies = [
  "anyd",
  "catcard-alloc",
  "catcard-bbqr",
+ "catcard-bcur",
  "catcard-board",
  "catcard-callgate",
  "catcard-entropy",

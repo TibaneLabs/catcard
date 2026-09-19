@@ -1,0 +1,159 @@
+//! Writing UR parts, so a payload can leave the device as animated QR.
+//!
+//! The mirror of the reader: CBOR the header, append a CRC-32, spell the whole thing in
+//! bytewords, and put `ur:<type>/<seqNum>-<seqLen>/` in front.
+//!
+//! # Upper case, and why it costs nothing to say so
+//!
+//! Bytewords are lower case, and QR's alphanumeric mode is upper case only -- so a UR
+//! written as it reads forces byte mode and loses a third of the symbol's capacity. The
+//! UR specification allows the whole thing to be upper-cased for exactly this reason,
+//! and a conforming reader lower-cases it again. So [`part`] writes upper case: it is
+//! the same UR, in the mode that fits.
+//!
+//! Even upper-cased this is less dense than BBQr -- two characters a byte against
+//! base32's 1.6 -- which is why a Bitcoin-only payload should go the other way. This is
+//! here for the payloads BBQr has no file type for.
+
+use crate::bytewords;
+
+/// What a part could not be written as.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Error {
+    /// `seq_len` is zero, or `seq_num` is outside `1..=seq_len`.
+    Numbering,
+    /// The output buffer is too small for the line.
+    TooLong,
+}
+
+/// The `ur:` prefix and the separators, without the type or the payload.
+const FRAME: usize = "UR:".len() + 2; // two '/' separators
+
+/// Characters a part's line will occupy.
+///
+/// `fragment` is the payload bytes this part carries; `ty` is the UR type, and the
+/// sequence numbers are written in decimal so their width depends on how many there are.
+pub fn encoded_len(ty: &str, fragment: usize, seq_num: u32, seq_len: u32) -> usize {
+    // The CBOR header, generously: five elements, four integers of at most five bytes
+    // each, and a byte-string header of at most three.
+    let cbor = 1 + 4 * 5 + 3 + fragment;
+    // Bytewords is two characters a byte, and the CRC-32 adds four bytes.
+    FRAME + ty.len() + digits(seq_num) + 1 + digits(seq_len) + (cbor + 4) * 2
+}
+
+const fn digits(mut n: u32) -> usize {
+    let mut d = 1;
+    while n >= 10 {
+        n /= 10;
+        d += 1;
+    }
+    d
+}
+
+/// The bytes a fragment should carry if a part's line must fit `chars` characters.
+///
+/// Solved by trying, because the header's size depends on the numbers in it and the
+/// numbers do not depend on the fragment: a few steps, once, when a screen is opened.
+pub fn fits(ty: &str, chars: usize, seq_len: u32) -> usize {
+    let mut best = 0;
+    // The widest sequence number is the last one, so size against that.
+    for fragment in 1..chars {
+        if encoded_len(ty, fragment, seq_len, seq_len) <= chars {
+            best = fragment;
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+/// Write one part of `message` into `out`, returning how many characters it took.
+///
+/// Fragments are all the same length, the last padded with zeroes -- `message_len` in
+/// the header is what says where the real data stops, so a reader never sees the
+/// padding as content.
+pub fn part(
+    ty: &str,
+    message: &[u8],
+    seq_num: u32,
+    seq_len: u32,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if seq_len == 0 || seq_num == 0 || seq_num > seq_len {
+        return Err(Error::Numbering);
+    }
+    let fragment = message.len().div_ceil(seq_len as usize);
+    let at = (seq_num - 1) as usize * fragment;
+
+    // The CBOR body, built into the tail of `out` so there is one buffer rather than
+    // two: bytewords doubles the length, so the second half is always free at this
+    // point and is overwritten from the front as the words are written.
+    let checksum = bytewords::crc32(message);
+    let mut body: heapless::Vec<u8, 1024> = heapless::Vec::new();
+    let _ = body.push(0x85); // array of five
+    uint(seq_num as u64, &mut body);
+    uint(seq_len as u64, &mut body);
+    uint(message.len() as u64, &mut body);
+    uint(checksum as u64, &mut body);
+    bytes_header(fragment, &mut body);
+    for i in 0..fragment {
+        // Past the end of the message is padding, which the reader discards.
+        let _ = body.push(message.get(at + i).copied().unwrap_or(0));
+    }
+
+    let head = {
+        let mut h: heapless::String<64> = heapless::String::new();
+        use core::fmt::Write as _;
+        // The type is upper-cased along with everything else: one lower-case letter
+        // anywhere in the line drops the whole symbol out of alphanumeric mode.
+        let _ = write!(h, "UR:");
+        for c in ty.chars() {
+            let _ = h.push(c.to_ascii_uppercase());
+        }
+        let _ = write!(h, "/{seq_num}-{seq_len}/");
+        h
+    };
+    let need = head.len() + (body.len() + bytewords::CHECKSUM_LEN) * 2;
+    if need > out.len() {
+        return Err(Error::TooLong);
+    }
+    out[..head.len()].copy_from_slice(head.as_bytes());
+    let n = bytewords::encode_upper(&body, &mut out[head.len()..]);
+    Ok(head.len() + n)
+}
+
+/// A CBOR unsigned integer, shortest form.
+fn uint(n: u64, out: &mut heapless::Vec<u8, 1024>) {
+    match n {
+        0..=23 => {
+            let _ = out.push(n as u8);
+        }
+        24..=0xFF => {
+            let _ = out.extend_from_slice(&[24, n as u8]);
+        }
+        0x100..=0xFFFF => {
+            let _ = out.push(25);
+            let _ = out.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        _ => {
+            let _ = out.push(26);
+            let _ = out.extend_from_slice(&(n as u32).to_be_bytes());
+        }
+    }
+}
+
+/// A CBOR byte-string header of `len` bytes.
+fn bytes_header(len: usize, out: &mut heapless::Vec<u8, 1024>) {
+    match len {
+        0..=23 => {
+            let _ = out.push(0x40 | len as u8);
+        }
+        24..=0xFF => {
+            let _ = out.extend_from_slice(&[0x58, len as u8]);
+        }
+        _ => {
+            let _ = out.push(0x59);
+            let _ = out.extend_from_slice(&(len as u16).to_be_bytes());
+        }
+    }
+}

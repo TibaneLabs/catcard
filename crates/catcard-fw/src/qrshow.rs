@@ -42,11 +42,83 @@ const CHARS: usize = 535;
 /// enough that a hundred parts do not take all afternoon. Stock uses a comparable rate.
 const FRAME_MS: u32 = 250;
 
+/// Show `payload` as animated BBQr.
+///
+/// The denser of the two and the right choice for anything Bitcoin: base32 is five bits
+/// a character against BC-UR's four, so the same file is about a quarter fewer codes.
+pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
+    animate(ui, head, payload, FileType::BINARY)
+}
+
+/// Show `payload` as an animated BC-UR, as `ur:bytes`.
+///
+/// Less dense, and the one to use where BBQr has no file type for what is being sent --
+/// which is everything that is not Bitcoin.
+pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
+    use anyd::codes::qr::{EcLevel, QrEncoder, Version};
+    use catcard_bcur::encode as ur;
+
+    const MAX_VERSION: Version = match Version::new(VERSION) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+    const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
+    const TYPE: &str = "bytes";
+
+    // The fragment size depends on how many parts there are, and the number of parts
+    // depends on the fragment size. Two passes settle it: guess from a one-part header,
+    // then re-solve knowing how wide the sequence numbers will be.
+    let mut per = ur::fits(TYPE, CHARS, 1);
+    let mut total = payload.len().div_ceil(per.max(1)) as u32;
+    per = ur::fits(TYPE, CHARS, total.max(1));
+    if per == 0 {
+        menu::message(ui.panel, head, "too large to show", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    total = payload.len().div_ceil(per) as u32;
+
+    let (Some(mut line_mem), Some(mut scratch_mem), Some(mut store_mem)) = (
+        crate::heap::take(CHARS + 64),
+        crate::heap::take(BUF),
+        crate::heap::take(BUF),
+    ) else {
+        menu::message(ui.panel, head, "not enough memory", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+
+    let encoder = QrEncoder::new();
+    let mut at = 1u32;
+    let mut note: heapless::String<24> = heapless::String::new();
+    loop {
+        let Ok(n) = ur::part(TYPE, payload, at, total, line_mem.bytes()) else {
+            menu::message(ui.panel, head, "could not encode", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        };
+        note.clear();
+        let _ = write!(note, "{at} of {total}");
+        let text = &line_mem.bytes()[..n];
+        let (scratch, storage) = (scratch_mem.bytes(), store_mem.bytes());
+        let Ok((grid, _)) = encoder.encode_text_into(text, EcLevel::L, scratch, storage) else {
+            menu::message(ui.panel, head, "could not encode", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        };
+        show(ui, grid.width(), |x, y| grid.get(x, y), note.as_str());
+        if key_within(ui, FRAME_MS) {
+            return;
+        }
+        at = if at >= total { 1 } else { at + 1 };
+    }
+}
+
 /// Show `payload` as an animated BBQr, until a key is pressed.
 ///
 /// Returns when the user leaves. There is nothing to report: a QR that was shown may or
 /// may not have been read, and only the thing reading it knows.
-pub(crate) fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
+fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 
     const MAX_VERSION: Version = match Version::new(VERSION) {
@@ -100,24 +172,7 @@ pub(crate) fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: Fil
             return;
         };
 
-        display::draw(ui.panel, |c| {
-            // The counter beside the symbol says whether this is going anywhere: a
-            // reader that has stalled looks exactly like one that is working, and the
-            // only visible difference is the frame number still moving.
-            if catcard_ui::widgets::qr_with_text(
-                c,
-                menu::qr_faces(),
-                display::FONTS.gap,
-                grid.width(),
-                |x, y| grid.get(x, y),
-                note.as_str(),
-            )
-            .is_none()
-            {
-                // No arrangement fits the text; the symbol alone is what matters.
-                catcard_ui::widgets::qr(c, grid.width(), |x, y| grid.get(x, y));
-            }
-        });
+        show(ui, grid.width(), |x, y| grid.get(x, y), note.as_str());
 
         // A key leaves, checked while this frame is up rather than between cycles.
         if key_within(ui, FRAME_MS) {
@@ -125,6 +180,29 @@ pub(crate) fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: Fil
         }
         at = (at + 1) % total;
     }
+}
+
+/// Draw one symbol with its frame counter beside it.
+///
+/// The counter is what says whether this is going anywhere: a reader that has stalled
+/// looks exactly like one that is working, and the only visible difference is the
+/// number still moving.
+fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, note: &str) {
+    display::draw(ui.panel, |c| {
+        if catcard_ui::widgets::qr_with_text(
+            c,
+            menu::qr_faces(),
+            display::FONTS.gap,
+            modules,
+            &get,
+            note,
+        )
+        .is_none()
+        {
+            // No arrangement fits the text; the symbol alone is what matters.
+            catcard_ui::widgets::qr(c, modules, &get);
+        }
+    });
 }
 
 /// Wait up to `ms`, returning true if a key was pressed in that time.
