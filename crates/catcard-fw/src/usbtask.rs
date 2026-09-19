@@ -513,16 +513,22 @@ impl UsbTask {
                     //
                     // They must arrive whole in this first frame. A frame holds 56 bytes
                     // of payload after the header, and an image is thousands of frames,
-                    // so the only way to split a four-byte prefix across two of them is
+                    // so the only way to split an eight-byte prefix across two of them is
                     // to be sending something that is not an image.
                     self.stage = Stage::Idle;
-                    let Some(want) = payload.first_chunk::<4>().map(|b| u32::from_le_bytes(*b))
-                    else {
+                    let Some(head) = payload.first_chunk::<8>() else {
                         self.frames.reset();
                         self.begin_reply(Status::BadRequest, &[]);
                         return;
                     };
-                    payload = &payload[4..];
+                    let want = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
+                    // The size of the blocks the host chose. It travels with the image
+                    // because both ends used to hard-code it separately, and when they
+                    // drifted the upload failed part way through with a frame error and
+                    // the actual reason -- a block too big for the slab -- was never
+                    // reported at all.
+                    let block = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+                    payload = &payload[8..];
 
                     let area = match staging::area() {
                         Ok(a) => a,
@@ -541,9 +547,12 @@ impl UsbTask {
                             // there. That is not a refusal of the image: the same one
                             // sent uncompressed needs no slab, so the host is told to
                             // do exactly that rather than being left to guess.
-                            let Some(unpack) = crate::unpack::Unpack::begin(want) else {
+                            let Some(unpack) = crate::unpack::Unpack::begin(want, block) else {
                                 crate::catlog!(
-                                    "upgrade: no heap for the inflate slab; asking for it uncompressed"
+                                    "upgrade: {} byte blocks refused (slab {}), or no heap for one; \
+                                     asking for it uncompressed",
+                                    block,
+                                    catcard_upgrade::packed::BLOCK
                                 );
                                 self.frames.reset();
                                 self.begin_reply(Status::RetryUncompressed, &[]);

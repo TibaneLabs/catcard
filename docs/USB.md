@@ -162,7 +162,7 @@ it is the signature.
 | `0x0002` | `Identify` | protocol version, board, firmware version |
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
-| `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][deflate streams]` |
+| `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][u32 block size][deflate streams]` |
 
 ### The log, which is the only diagnostic that does not need a screen
 
@@ -273,8 +273,14 @@ work the host can do instead.
 `UpgradePacked` is the same image through the same checks, with a smaller wire. Firmware
 deflates to about two thirds, and at 62 bytes a report that third is a third of the wait.
 
-The payload is a `u32` uncompressed length followed by a run of raw deflate streams, each
-inflating to 8 KiB but the last. Nothing frames the streams: deflate marks its own final
+The payload is a `u32` uncompressed length, a `u32` block size, then a run of raw deflate
+streams, each inflating to that block size but the last.
+
+The block size is declared rather than assumed by both ends. It used to be a constant
+compiled separately into the firmware and the host tool; when the firmware's changed and
+the tool's did not, an upload failed part way through and surfaced as a frame error with
+the real reason — a block too large for the device's slab — reported nowhere. A device
+whose slab is smaller now answers `RetryUncompressed` before any of it is sent. Nothing frames the streams: deflate marks its own final
 block, so the device splits them on that and there is one account of where a block ends
 rather than two — a second opinion about a length is how a decoder gets talked past the
 end of its buffer.

@@ -6,18 +6,29 @@
 //!
 //! # Why blocks, and not one deflate stream
 //!
-//! A single stream compresses better, and the gap is small enough to measure rather
-//! than argue about: a real image goes to 60.4% in [`BLOCK`]-sized blocks against 63.7%
-//! as one stream with deflate's full 32 KiB window -- the blocks are actually ahead
-//! here, because this image compresses better in pieces than the 353 KiB one did.
+//! A single stream compresses better. Measured on the real 537,088-byte Q1 image:
+//! **58.4% as one stream with deflate's full 32 KiB window, against 60.5% in 8 KiB
+//! blocks.** Two points, and the blocks lose.
+//!
+//! (An earlier version of this paragraph had the blocks winning, by comparing this
+//! image's block figure with a different image's stream figure. They are not the same
+//! file and the numbers were never comparable.)
 //!
 //! The reason is not that decompression cannot be fed a frame at a time -- it can, and
-//! this module does exactly that. It is that **a decompressor owns its output and never
-//! gives it back.** A single stream's decompressor would have to live across USB frames,
-//! in the same session state that owns the staging area, writing into the staging area
-//! through a sink it holds -- a value borrowing the thing stored beside it. That shape
-//! is a self-reference, and the ways out of it are a global or a raw pointer, in the one
-//! place on the device where being wrong means writing the wrong firmware.
+//! this module does exactly that. It is the **sink**. A single stream's decompressor
+//! lives across USB frames and writes through a sink into the staging area stored
+//! beside it: a value borrowing its own sibling, which also moves when the transfer
+//! ends and the stage changes. The ways out are a raw pointer laundered through a
+//! static for the span of each call, or putting the staging area behind a global --
+//! both in the one place on the device where being wrong means writing the wrong
+//! firmware.
+//!
+//! Half of the original objection has since gone: the window needed a `'static` slice,
+//! and the heap's `leak_mut` provides exactly that. The sink is the half that remains.
+//!
+//! Inflating straight into PSRAM would dissolve the whole problem, and cannot: inflate
+//! writes a byte at a time and reads its own window back, and byte stores and
+//! interleaved reads are the two things that part mis-issues.
 //!
 //! Independent blocks dissolve it. A block's output is bounded by construction, so it
 //! can be a plain [`Buffer`] over a fixed slab: the decoder borrows the slab, the stream

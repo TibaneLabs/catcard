@@ -118,25 +118,32 @@ CAP_UPGRADE = 1 << 1
 CAP_UNLOCK_PIN = 1 << 3
 CAP_UPGRADE_PACKED = 1 << 4
 
-# One deflate stream per this many bytes of image, matching
-# `catcard_upgrade::packed::BLOCK`. The device inflates a block into a fixed slab, so
-# this is not a tuning knob on this side: a larger one overruns the slab and the upload
-# is refused.
+# One deflate stream per this many bytes of image.
+#
+# The device inflates a block into a fixed slab, so a larger one than its slab cannot
+# work. It used to be this side's job to know that number, and when the firmware's
+# changed and this did not, an upload failed part way through with a frame error and
+# no sign of why. So the size now travels in the offer and the device checks it --
+# this is a preference, not a shared secret.
 PACK_BLOCK = 8 * 1024
 
 
 def pack_image(blob):
     """The image as the device's packed offer wants it.
 
-    `[u32 uncompressed length][deflate stream]...`, one stream per 8 KiB block. Nothing
-    frames the streams: deflate marks its own final block and the device splits them on
-    that, so there is one account of where a block ends rather than two.
+    `[u32 uncompressed length][u32 block size][deflate stream]...`, one stream per
+    block. Nothing frames the streams: deflate marks its own final block and the device
+    splits them on that, so there is one account of where a block ends rather than two.
+
+    The block size is declared rather than assumed. A device whose slab is smaller
+    answers `RetryUncompressed` and gets the image the other way, instead of failing
+    somewhere in the middle of it.
 
     The length prefix is the uncompressed one -- what the signature was computed over.
     The device stops there, so a stream that would produce more is refused rather than
     quietly truncated.
     """
-    out = [struct.pack("<I", len(blob))]
+    out = [struct.pack("<II", len(blob), PACK_BLOCK)]
     for at in range(0, len(blob), PACK_BLOCK):
         # `wbits=-15`: raw deflate, no zlib or gzip wrapper. The window is the block,
         # which is all a block's matches can reach anyway.

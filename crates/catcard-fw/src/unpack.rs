@@ -39,7 +39,17 @@ impl Unpack {
     /// [`Status::RetryUncompressed`](catcard_usb::Status::RetryUncompressed) and the
     /// same image arrives uncompressed, which needs no slab at all -- compression buys
     /// wire time and costs memory, and a device short of memory should spend the time.
-    pub fn begin(want: u32) -> Option<Self> {
+    /// `block` is the size of the blocks the host chose, which it declares in the offer.
+    ///
+    /// A smaller block than our slab is fine -- the streams delimit themselves, so a
+    /// short one simply ends early. A **larger** one is not: it would inflate past the
+    /// slab and be refused halfway through an upload, which is how a block-size
+    /// disagreement last showed up as a frame error with the real reason nowhere in
+    /// sight. Refusing it here is what turns that into `RetryUncompressed`.
+    pub fn begin(want: u32, block: u32) -> Option<Self> {
+        if block as usize > BLOCK {
+            return None;
+        }
         let mut mem = crate::heap::take(BLOCK)?;
         // SAFETY: the slice points into the heap block stored beside it, which is
         // dropped with this struct and never earlier; the bytes do not move when the
