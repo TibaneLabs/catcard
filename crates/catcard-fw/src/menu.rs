@@ -66,6 +66,9 @@ enum Screen {
     /// About's second page: the STM32 itself.
     AboutChip,
     SdInstall,
+    /// Debug: what the scanner answers, per rate, in raw bytes.
+    #[cfg(feature = "board-q1")]
+    QrProbe,
     Debug,
     Usb,
     Clocks,
@@ -395,6 +398,8 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
+    #[cfg(feature = "board-q1")]
+    "QR probe",
     "USB",
     "Clocks",
     "RTC",
@@ -826,6 +831,8 @@ fn action_for(screen: Screen) -> Option<Action> {
 
     Some(match screen {
         Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
+        #[cfg(feature = "board-q1")]
+        Screen::QrProbe => to(|a| crate::qrscan::probe(a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
         Screen::Logs => to(
             |a| {
@@ -1158,6 +1165,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // top), and an index table would silently point at the wrong entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("QR probe")) => Screen::QrProbe,
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
@@ -1490,6 +1499,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        #[cfg(feature = "board-q1")]
+        Screen::QrProbe => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) => {}

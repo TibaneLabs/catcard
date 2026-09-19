@@ -448,6 +448,90 @@ fn collect(
     }
 }
 
+/// Debug: ask the module for its version at each rate and report exactly what came back.
+///
+/// The scan screen can only say "the scanner did not answer", which is true of a module
+/// that is absent, one at a rate nothing is asking at, and one whose replies are not
+/// reaching the pin. Those want different fixes, and the log had no way to tell them
+/// apart: the torch reports "silence" for commands that visibly work, so the module
+/// hears us and we do not hear it, and the next question is whether anything at all
+/// arrives on PA3.
+///
+/// So this reports the raw truth per rate -- bytes in, the first of them, and whether
+/// the line showed a framing or overrun error, which is what "wrong rate" looks like as
+/// against "nothing connected".
+pub(crate) fn probe(ui: &mut Ui<'_>) {
+    use core::fmt::Write as _;
+
+    const HEAD: &str = "QR probe";
+    let Some(scanner) = catcard_board::BOARD.qr else {
+        menu::message(
+            ui.panel,
+            HEAD,
+            "this board has no scanner",
+            "any key to go back",
+        );
+        menu::wait_for_any_key(ui);
+        return;
+    };
+
+    crate::torch::release();
+    menu::blocking_screen(ui.panel, HEAD, "resetting the module");
+    // SAFETY: as `scan_many` -- the board table's scanner pins and USART2 belong to this
+    // screen, and the menu waits for it to return.
+    let mut port = unsafe {
+        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
+        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
+        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
+    };
+
+    // The text is owned here and the rows borrow it afterwards: a `Line` holds a
+    // reference, and the obvious loop would hand it one that dies at the next iteration.
+    let mut said: heapless::Vec<heapless::String<64>, 8> = heapless::Vec::new();
+
+    // Both the framed query and a bare one. A module that answers neither is not
+    // talking; one that answers the bare command only is in a state the framing is
+    // wrong for, which is a different thing entirely.
+    for rate in catcard_qr::BAUDS {
+        port.set_baud(rate);
+        for (what, framed) in [("framed", true), ("bare", false)] {
+            port.flush_input();
+            let mut out = [0u8; 64];
+            if framed {
+                if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, cmd::VERSION, &mut out) {
+                    let _ = port.write(frame, BYTE_BUDGET);
+                }
+            } else {
+                let _ = port.write(cmd::VERSION, BYTE_BUDGET);
+            }
+            // Generously: at 9600 a framed query is 17 ms on the wire before the module
+            // has even heard it, and the reply is another 8. The scan path's budget is
+            // tighter than that, which is itself worth knowing.
+            catcard_hal::dwt::delay_cycles(ms_cycles(120));
+            let mut reply = [0u8; 64];
+            let n = port.read(&mut reply, BYTE_BUDGET);
+
+            let mut line: heapless::String<64> = heapless::String::new();
+            let _ = write!(line, "{rate} {what}: {n}B");
+            for b in reply.iter().take(6.min(n)) {
+                let _ = write!(line, " {b:02x}");
+            }
+            crate::catlog!("qr probe: {}", line.as_str());
+            let _ = said.push(line);
+        }
+    }
+
+    // Leave it as the scan screen would: stopped and asleep, not however it was found.
+    blind_shutdown(&mut port);
+
+    let mut rows: heapless::Vec<catcard_ui::scroll::Line, 10> = heapless::Vec::new();
+    let _ = rows.push(catcard_ui::scroll::Line::title("QR probe"));
+    for line in &said {
+        let _ = rows.push(catcard_ui::scroll::Line::body(line).small());
+    }
+    let _ = menu::show_doc(ui, &rows, false, false);
+}
+
 /// Milliseconds as CPU cycles.
 fn ms_cycles(ms: u32) -> u32 {
     // SAFETY: reads RCC only.
