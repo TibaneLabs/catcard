@@ -3431,7 +3431,11 @@ fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
     };
 
     let mut drawn = false;
-    display::draw(ui.panel, |c| {
+    // **Greys, not the amber.** A QR is read by a camera rather than by a person, and a
+    // scanner wants dark modules on a light field -- the closer to white, the more
+    // contrast it has to work with. The amber ramp is right for every screen someone
+    // reads and wrong for the two that get photographed, this and `qrshow`.
+    display::draw_with(ui.panel, &catcard_ui::st7789::GREYS, |c| {
         drawn = catcard_ui::widgets::qr_with_text(
             c,
             qr_faces(),
