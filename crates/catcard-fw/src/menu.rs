@@ -130,9 +130,6 @@ enum Screen {
     /// The before-login nickname screen, drawn from the menu so it can be looked at.
     #[cfg(not(feature = "board-mk3"))]
     NickPreview,
-    /// The PSRAM write-recovery sweep: how many NOPs a store here needs.
-    #[cfg(not(feature = "board-mk3"))]
-    PsramSoak,
     /// Secure Notes & Passwords, read out of the settings blob. Q1 only: stock writes
     /// them where there is a keyboard to type them on.
     #[cfg(feature = "board-q1")]
@@ -350,8 +347,6 @@ const DEBUG_ITEMS: &[&str] = &[
     "Factory Reset",
     #[cfg(not(feature = "board-mk3"))]
     "Settings store",
-    #[cfg(not(feature = "board-mk3"))]
-    "PSRAM soak",
     #[cfg(not(feature = "board-mk3"))]
     "Settings to SD",
     #[cfg(not(feature = "board-mk3"))]
@@ -820,7 +815,6 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Debug,
         ),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::PsramSoak => to(|a| crate::psramsoak::run(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(feature = "board-q1")]
@@ -1068,7 +1062,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Nickname screen")) => Screen::NickPreview,
             #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("PSRAM soak")) => Screen::PsramSoak,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
@@ -1337,7 +1330,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore
-        | Screen::PsramSoak
         | Screen::Nickname
         | Screen::SettingsToSd
         | Screen::Multisig

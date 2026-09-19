@@ -173,43 +173,54 @@ pub const RECOVERY_NOPS: u32 = 1;
 
 /// Words this may touch before CE# must be allowed to rise: **16**, or 64 bytes.
 ///
-/// **The part cannot be held selected for longer than 8 us** -- `tCEM` in Table 10-5 of the
-/// ESP-PSRAM64H datasheet (`hw-reference/datasheets/`) -- and §5.5 says why: *"CE# must be
-/// pulled high immediately after all read/write operations. Not doing so will block internal
-/// refresh operations and cause memory failure."* Refresh is the whole difference between
-/// pseudo-SRAM and SRAM, and a starved refresh loses data **anywhere in the chip**, not
-/// where the access was. That is the shape of the corruption that made a staged firmware
-/// image fail its signature check: bytes went wrong in a header nothing had written to.
+/// From the part's own numbers, not from trying values until one stopped failing.
+/// ESP-PSRAM64H datasheet, Table 10-5 (`hw-reference/datasheets/`) [C]:
 ///
-/// The arithmetic, at the documented bus setup -- quad at 60 MHz, from a prescaler of 2 off
-/// the 120 MHz kernel clock (`hw-reference/storage.md` §PSRAM [C]):
-///
-/// | | clocks | at 60 MHz |
+/// | symbol | parameter | |
 /// |---|---|---|
-/// | command + address (+6 dummy cycles on a read) | ~14 | 0.23 us |
-/// | 64 bytes of data, half a byte per clock | 128 | 2.13 us |
-/// | **total** | **~142** | **~2.4 us** |
+/// | `tCEM` | CE# low pulse width | **max 8 us** |
+/// | `tCPH` | CE# high between subsequent bursts | **min 50 ns** |
 ///
-/// Against 8 us that is 70% spare. It was 32 words -- ~4.5 us, 45% spare -- which the
-/// arithmetic says is fine and which staged an image over USB wrongly anyway, rarely and
-/// at random. Nothing here explains that, so the honest reading is that the budget is
-/// not the whole story: the figure is a maximum quoted with no conditions, the bus
-/// timing is inferred rather than measured on this board, and "45% spare" is spare
-/// against a number we do not fully trust. Halving it costs one extra gap per 64 bytes
-/// -- about 8 ms over a megabyte instead of 4 -- which buys nothing back in a place
-/// anyone can feel.
+/// Those two are the whole contract. There is no refresh interval to discover: the part
+/// refreshes itself whenever CE# is high, and §5.5 says what happens if it is not let
+/// go -- *"CE# must be pulled high immediately after all read/write operations. Not
+/// doing so will block internal refresh operations and cause memory failure."* A starved
+/// refresh loses data **anywhere in the chip**, not at the address being accessed and
+/// not necessarily at once, so the failure it produces is a word nobody wrote appearing
+/// somewhere nothing touched, a while later.
 ///
-/// The budget is a *time*, so what would invalidate this is a slower bus: at 30 MHz
-/// these same 64 bytes take 4.5 us and the margin is back to where it was. Anyone
-/// changing the prescaler has to revisit this number.
+/// The budget, at the documented bus setup -- quad at 60 MHz, prescaler 2 off the
+/// 120 MHz kernel clock (`hw-reference/storage.md` §PSRAM [C]):
+///
+/// - 8 us x 60 MHz = **480 clocks** of CE# low allowed.
+/// - Command and address take ~14, leaving 466 for data.
+/// - Quad is 4 bits a clock, so a 32-bit word is 8 clocks: **58 words is the maximum**.
+///
+/// | words | clocks | time | margin |
+/// |---|---|---|---|
+/// | 16 | 142 | 2.37 us | 70% |
+/// | 32 | 270 | 4.50 us | 44% |
+/// | 58 | 478 | 7.97 us | 0% |
+///
+/// **16**, for 70% margin against a maximum quoted with no conditions, on a bus whose
+/// clock we take from the reference rather than having measured. The cost of the margin
+/// is one extra gap per 64 bytes -- a few milliseconds over a megabyte.
+///
+/// The budget is a *time*, so a slower bus invalidates this: at 30 MHz these same 64
+/// bytes take 4.7 us and the margin is halved. Anyone changing the prescaler revisits
+/// this number, by redoing the arithmetic above.
 pub const WORDS_PER_BURST: u32 = 16;
 
 /// Cycles to leave the bus idle so CE# actually rises between bursts.
 ///
-/// Long enough for the controller's memory-mapped timeout to fire -- stock arms it at 16
-/// clocks, which is 267 ns at 60 MHz -- plus `tCPH`, the 50 ns the part wants CE# high
-/// between bursts. At 120 MHz this is a little over half a microsecond, and a megabyte of
-/// staging pays it eight thousand times: about four milliseconds in total.
+/// Two things have to happen in this window, and the longer one is not the part's:
+///
+/// - the controller's memory-mapped timeout has to fire, which is what actually drives
+///   CE# high once the bus goes quiet. Stock arms it at 16 clocks: **267 ns** at 60 MHz.
+/// - `tCPH`, the **50 ns** minimum CE# high between bursts (Table 10-5 [C]).
+///
+/// 317 ns in total, which is 38 cycles at 120 MHz. **80** is a little over twice that,
+/// and a megabyte of staging pays it eight thousand times: about four milliseconds.
 pub const BURST_GAP_NOPS: u32 = 80;
 
 /// Let CE# rise: wait for the writes to land, then idle the bus long enough for the

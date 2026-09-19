@@ -64,9 +64,6 @@ mod power;
 /// PSRAM, and who is using it. mk3 has none.
 #[cfg(not(feature = "board-mk3"))]
 mod psram;
-/// Measuring how much recovery delay a PSRAM write needs on this part.
-#[cfg(not(feature = "board-mk3"))]
-mod psramsoak;
 mod pubkeys;
 /// The QR scanner is the Q1's alone.
 #[cfg(feature = "board-q1")]
