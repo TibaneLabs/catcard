@@ -96,6 +96,10 @@ name = "catcard-alloc"
 version = "7.0.0"
 
 [[package]]
+name = "catcard-bbqr"
+version = "7.0.0"
+
+[[package]]
 name = "catcard-board"
 version = "7.0.0"
 

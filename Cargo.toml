@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/catcard-alloc",
+    "crates/catcard-bbqr",
     "crates/catcard-board",
     "crates/catcard-flash",
     "crates/catcard-fwhdr",
@@ -27,6 +28,7 @@ members = [
 # The firmware crates need `--target thumbv7em-none-eabihf` (see `cargo fw`).
 default-members = [
     "crates/catcard-alloc",
+    "crates/catcard-bbqr",
     "crates/catcard-board",
     "crates/catcard-fwhdr",
     "crates/catcard-entropy",
@@ -53,6 +55,7 @@ authors = ["Karpeles Lab Inc."]
 
 [workspace.dependencies]
 catcard-alloc = { path = "crates/catcard-alloc", default-features = false }
+catcard-bbqr = { path = "crates/catcard-bbqr", default-features = false }
 catcard-board = { path = "crates/catcard-board", default-features = false }
 catcard-flash = { path = "crates/catcard-flash", default-features = false }
 catcard-settings = { path = "crates/catcard-settings", default-features = false }

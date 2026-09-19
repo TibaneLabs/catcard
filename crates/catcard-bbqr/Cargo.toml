@@ -1,0 +1,11 @@
+[package]
+name = "catcard-bbqr"
+description = "BBQr: a file split across animated QR codes, as Coldcard's tooling writes them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
