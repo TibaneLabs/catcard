@@ -82,18 +82,23 @@ enum Which {
 /// code holding an address or a key is the common case, and the two cannot be told
 /// apart before one has been read.
 ///
-/// `None` if the owner cancelled or the scanner could not be used; the reason has
-/// already been shown in either case.
-pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Option<Received> {
+/// **Nothing is shown on failure.** `Err(Some(why))` is a reason for the caller to show
+/// and `Err(None)` is a cancel, which needs no words. That is not tidiness: the caller
+/// is holding the staging area, and a message this function waited on would hold it for
+/// as long as the screen stood there -- which is exactly how a scan that failed came to
+/// refuse every USB upgrade until somebody walked back to the device.
+pub(crate) fn collect_any(
+    ui: &mut Ui<'_>,
+    head: &str,
+    sink: &mut dyn Sink,
+) -> Result<Received, Option<&'static str>> {
     // Big enough for the largest line either format can hand over, decoded. BBQr's
     // base32 is five bits a character, so a line's payload is never more than five
     // eighths of it; BC-UR's bytewords are two characters a byte, so never more than a
     // half. Sized from the line rather than from a guess about part sizes.
     let scratch_len = qrscan::MAX_TEXT;
     let Some(mut scratch_mem) = crate::heap::take(scratch_len) else {
-        menu::message(ui.panel, head, "not enough memory", "any key to go back");
-        menu::wait_for_any_key(ui);
-        return None;
+        return Err(Some("not enough memory"));
     };
 
     let mut which = Which::Unknown;
@@ -153,22 +158,16 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
     });
 
     if let Some(why) = failure {
-        menu::message(ui.panel, head, why, "any key to go back");
-        menu::wait_for_any_key(ui);
-        return None;
+        return Err(Some(why));
     }
     match outcome {
-        Ok(()) if done > 0 => Some(Received {
+        Ok(()) if done > 0 => Ok(Received {
             len: done,
             compressed,
         }),
-        Ok(()) => None,
-        Err(qrscan::Fault::Cancelled) => None,
-        Err(why) => {
-            menu::message(ui.panel, head, qrscan::describe(why), "any key to go back");
-            menu::wait_for_any_key(ui);
-            None
-        }
+        Ok(()) => Err(None),
+        Err(qrscan::Fault::Cancelled) => Err(None),
+        Err(why) => Err(Some(qrscan::describe(why))),
     }
 }
 

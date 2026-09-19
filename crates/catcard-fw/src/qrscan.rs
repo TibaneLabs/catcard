@@ -578,11 +578,24 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         }
     };
     let mut sink = crate::qrload::Staging::new(area);
-    let Some(got) = crate::qrload::collect_any(ui, HEAD, &mut sink) else {
-        // Cancelled, or a reason already shown.
-        return;
-    };
+    let got = crate::qrload::collect_any(ui, HEAD, &mut sink);
     let mut area = sink.into_area();
+    let got = match got {
+        Ok(got) => got,
+        Err(why) => {
+            // **The memory goes back before the message goes up.** A screen waiting for
+            // a keypress waits as long as nobody is standing there, and every USB
+            // upgrade offered in the meantime is refused with "the PSRAM has reading a
+            // QR" -- which is how a scanner that would not answer became a device that
+            // would not take firmware.
+            drop(area);
+            if let Some(why) = why {
+                menu::message(ui.panel, HEAD, why, "any key to go back");
+                menu::wait_for_any_key(ui);
+            }
+            return;
+        }
+    };
     crate::catlog!(
         "qr: received {} bytes{}",
         got.len,
@@ -601,6 +614,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
                 n as usize
             }
             Err(why) => {
+                drop(area);
                 menu::message(ui.panel, HEAD, why, "any key to go back");
                 menu::wait_for_any_key(ui);
                 return;
@@ -674,6 +688,8 @@ fn offer(
         Content::Unknown => ("data this cannot use", &[]),
     };
     if actions.is_empty() {
+        // As above: the memory is handed back before anyone is asked to read anything.
+        drop(lease);
         let mut said: heapless::String<32> = heapless::String::new();
         use core::fmt::Write as _;
         let _ = write!(said, "{len} bytes, {note}");
