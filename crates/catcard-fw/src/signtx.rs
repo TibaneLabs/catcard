@@ -66,6 +66,26 @@ static mut BUF_B: [u8; STATIC_BUF] = [0; STATIC_BUF];
 #[cfg(not(feature = "board-mk3"))]
 const PSRAM_WINDOW: usize = 2 * 1024 * 1024;
 
+/// The buffers fit, checked while compiling.
+///
+/// This is here because of how the previous mistake hid. The runtime guard below is an
+/// `if` over values that are all constants, so when it was wrong the optimiser folded it
+/// to "always refuse", saw that everything after it was unreachable, and **deleted the
+/// whole signing implementation** -- 44 KB of sighashes, PSBT writing and the review
+/// screen simply were not in the image. A feature can disappear from a build without
+/// anything failing; only a check that runs at compile time can say so.
+#[cfg(not(feature = "board-mk3"))]
+const _: () = {
+    let Some(psram) = catcard_board::BOARD.psram else {
+        panic!("a board with no PSRAM cannot use the PSRAM buffers");
+    };
+    let (_, room) = psram.scratch();
+    assert!(
+        2 * PSRAM_WINDOW <= room as usize,
+        "the signing buffers do not fit in PSRAM's scratch half"
+    );
+};
+
 /// The two working buffers.
 ///
 /// # Safety
