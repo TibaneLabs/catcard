@@ -136,6 +136,9 @@ impl Write for Buf<'_> {
 /// with three hardened steps, a 111-character xpub, the multipath suffix and the checksum.
 pub const MAX_LEN: usize = 256;
 
+/// BIP-389's multipath element: receive and change in one descriptor.
+const MULTIPATH: &str = "<0;1>";
+
 impl SingleSig {
     /// Write the account's descriptor, checksum included, for the account-level extended
     /// public key `xpub` (Base58Check, `xpub...`), into `out`. Returns the length.
@@ -143,6 +146,24 @@ impl SingleSig {
     /// For example `wpkh([d34db33f/84h/0h/0h]xpub.../<0;1>/*)#checksum`. Hardened steps are
     /// written `h`, which every descriptor reader accepts and needs no shell quoting.
     pub fn write(&self, xpub: &str, out: &mut [u8]) -> Result<usize, Error> {
+        self.write_chain(xpub, MULTIPATH, out)
+    }
+
+    /// The BIP-389 multipath element, which is both chains in one descriptor.
+    ///
+    /// The default, because one line that covers receive and change is what a person
+    /// wants to copy. [`write_chain`](Self::write_chain) is for the readers that want
+    /// them apart.
+    pub const MULTIPATH: &'static str = MULTIPATH;
+
+    /// The same descriptor with `chain` in place of the multipath element.
+    ///
+    /// Pass `"0"` or `"1"` for a reader that wants the receive and change descriptors as
+    /// two separate objects -- Bitcoin Core's `importdescriptors` is the one that does,
+    /// because each carries its own `internal` flag. The checksum covers whatever was
+    /// written, so the two lines have different checksums and neither is the multipath
+    /// line's.
+    pub fn write_chain(&self, xpub: &str, chain: &str, out: &mut [u8]) -> Result<usize, Error> {
         // `tr` here is key-path only -- no script tree -- which is what BIP-86 single-sig
         // taproot is. Source: BIP-386 [C]
         let (open, close) = match self.kind {
@@ -155,7 +176,7 @@ impl SingleSig {
         let [a, b, c, d] = self.fingerprint;
         write!(
             buf,
-            "{open}[{a:02x}{b:02x}{c:02x}{d:02x}/{}h/{}h/{}h]{xpub}/<0;1>/*{close}",
+            "{open}[{a:02x}{b:02x}{c:02x}{d:02x}/{}h/{}h/{}h]{xpub}/{chain}/*{close}",
             self.kind.bip44_purpose(),
             self.coin,
             self.account,
@@ -194,6 +215,45 @@ mod tests {
         // `descsum_create` from BIP-380's own Python, run on these two strings.
         assert!(write(AddressKind::P2wpkh).ends_with("#fz79emew"));
         assert!(write(AddressKind::P2shP2wpkh).ends_with("#sn8q85u0"));
+    }
+
+    /// The two single-chain descriptors are not the multipath one with a digit swapped:
+    /// each covers a different string, so each gets its own checksum. A reader handed the
+    /// multipath checksum on a `/0/*` line rejects the whole descriptor.
+    #[test]
+    fn splitting_the_chains_recomputes_the_checksum() {
+        let a = SingleSig {
+            kind: AddressKind::P2wpkh,
+            fingerprint: [0x0f, 0x05, 0x69, 0x43],
+            coin: 0,
+            account: 0,
+        };
+        let xpub = "xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj";
+        let mut buf = [0u8; MAX_LEN];
+
+        let n = a.write(xpub, &mut buf).unwrap();
+        let both = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(both.contains("/<0;1>/*"), "{both}");
+        assert!(verify(both), "{both}");
+
+        let mut sums = [[0u8; CHECKSUM_LEN]; 2];
+        for (chain, slot) in ["0", "1"].iter().zip(sums.iter_mut()) {
+            let mut one = [0u8; MAX_LEN];
+            let n = a.write_chain(xpub, chain, &mut one).unwrap();
+            let line = core::str::from_utf8(&one[..n]).unwrap();
+            let body = &line[..n - CHECKSUM_LEN - 1];
+            assert!(body.ends_with(chain) || body.ends_with("/*)"), "{line}");
+            assert!(
+                line.contains(if *chain == "0" { "/0/*" } else { "/1/*" }),
+                "{line}"
+            );
+            assert!(!line.contains("<0;1>"), "{line}");
+            assert!(verify(line), "{line}");
+            slot.copy_from_slice(&one[n - CHECKSUM_LEN..n]);
+        }
+        // Three descriptors, three distinct checksums.
+        assert_ne!(sums[0], sums[1]);
+        assert_ne!(sums[0][..], both.as_bytes()[both.len() - CHECKSUM_LEN..]);
     }
 
     #[test]

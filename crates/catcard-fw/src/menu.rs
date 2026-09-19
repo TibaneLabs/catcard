@@ -98,8 +98,10 @@ enum Screen {
     UsbDrive,
     ViewTrngWords,
     AddressExplorer,
-    /// Output descriptors for a watch-only wallet, to the SD card.
-    ExportWallet,
+    /// One of the exports that is neither the generic JSON nor a plain key: Bitcoin
+    /// Core, Electrum, Wasabi, Unchained or a single-signature descriptor. By its row in
+    /// [`EXPORT_ITEMS`], which [`ONE_OFFS`] turns into a format and a filename.
+    ExportOne(u8),
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
     /// Which account level to export a plain xpub from.
@@ -334,7 +336,16 @@ const EXPORT_ITEMS: &[&str] = &[
     "Fully Noded",
     "Theya",
     "Bitcoin Safe",
+    "Bitcoin Core",
+    "Electrum Wallet",
+    "Blue Wallet",
+    "Wasabi Wallet",
+    "Unchained",
     "Descriptor",
+    "Bull Bitcoin",
+    "Zeus",
+    "Samourai Postmix",
+    "Samourai Premix",
     "Key Expression",
     "Export XPUB",
     "Dump Summary",
@@ -826,7 +837,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
         Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
-        Screen::ExportWallet => to(|a| export_wallet(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::ExportOne(_) => to(
+            |a| export_one(a.gate, a.login, a.ui, a.words),
+            Screen::ExportMenu,
+        ),
         Screen::ExportKeyExpr => to(
             |a| export_key_expression(a.gate, a.login, a.ui),
             Screen::ExportMenu,
@@ -1081,7 +1095,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
                 Screen::GenericJson(cursor as u8)
             }
-            (Key::Confirm, Some("Descriptor")) => Screen::ExportWallet,
+            (Key::Confirm, Some(name)) if one_off(name).is_some() => {
+                Screen::ExportOne(cursor as u8)
+            }
             (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
@@ -1452,7 +1468,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ViewTrngWords => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         Screen::AddressExplorer
-        | Screen::ExportWallet
+        | Screen::ExportOne(_)
         | Screen::ExportKeyExpr
         | Screen::DumpSummary
         | Screen::Xpub(_)
@@ -3417,139 +3433,245 @@ fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
     wait_for_any_key(ui);
 }
 
-/// Export the wallet for a watch-only wallet on a computer: one output descriptor per
-/// single-signature account type, written to the SD card.
-///
-/// A descriptor carries the account's extended public key with its origin -- master
-/// fingerprint and path -- and a checksum, which is everything a wallet such as Sparrow or
-/// Bitcoin Core needs to show balances and build transactions for this device to sign. No
-/// private key leaves: the account keys are derived masked and only their public halves
-/// are kept, and the master is dropped before the card is touched.
-///
-/// The file is named for the master fingerprint (`73C5DA0A.TXT`), so exports of different
-/// wallets never overwrite each other, and re-exporting the same wallet replaces its file.
-/// Lines starting `#` say which account each descriptor is.
-fn export_wallet(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use catcard_wallet::address::AddressKind;
-    use catcard_wallet::bip32::ChildNumber;
-    use catcard_wallet::descriptor::{self, SingleSig};
+use catcard_wallet::address::AddressKind;
 
-    const HEAD: &str = "Export wallet";
-    const ACCOUNTS: [(AddressKind, &str); 4] = [
-        (AddressKind::P2wpkh, "Native segwit"),
-        (AddressKind::P2shP2wpkh, "Nested segwit"),
-        (AddressKind::P2pkh, "Legacy"),
-        (AddressKind::P2tr, "Taproot"),
-    ];
+/// The exports that are one file each and are not the generic JSON.
+///
+/// Nine menu rows over five formats. What varies between rows of the same format is the
+/// filename, which address types the row offers, and -- for Samourai, whose two entries
+/// *are* two account numbers -- the account. Everything else is in [`crate::export`].
+///
+/// Source: hw-reference/wallet-export-formats.md §"Summary table" [C].
+const ONE_OFFS: &[OneOff] = &[
+    OneOff {
+        item: "Bitcoin Core",
+        file: "/bitcoin-core.txt",
+        format: Format::BitcoinCore,
+        types: &[],
+        account: 0,
+    },
+    OneOff {
+        item: "Electrum Wallet",
+        file: "/new-electrum.json",
+        format: Format::Electrum,
+        types: SINGLE_SIG,
+        account: 0,
+    },
+    OneOff {
+        item: "Blue Wallet",
+        file: "/new-blue.json",
+        format: Format::Electrum,
+        types: SINGLE_SIG,
+        account: 0,
+    },
+    OneOff {
+        item: "Wasabi Wallet",
+        file: "/new-wasabi.json",
+        format: Format::Wasabi,
+        types: &[],
+        account: 0,
+    },
+    // The one filename with the fingerprint in it, so the `{}` is filled in later.
+    OneOff {
+        item: "Unchained",
+        file: "/unchained-{}.json",
+        format: Format::Unchained,
+        types: &[],
+        account: 0,
+    },
+    OneOff {
+        item: "Descriptor",
+        file: "/descriptor.txt",
+        format: Format::Descriptor,
+        types: SINGLE_SIG,
+        account: 0,
+    },
+    OneOff {
+        item: "Bull Bitcoin",
+        file: "/bull-bitcoin.txt",
+        format: Format::Descriptor,
+        types: &[(AddressKind::P2wpkh, "Segwit P2WPKH")],
+        account: 0,
+    },
+    OneOff {
+        item: "Zeus",
+        file: "/zeus-export.txt",
+        format: Format::Descriptor,
+        types: &[
+            (AddressKind::P2wpkh, "Segwit P2WPKH"),
+            (AddressKind::P2shP2wpkh, "P2SH-Segwit"),
+        ],
+        account: 0,
+    },
+    // Samourai's two pools are two fixed accounts near the top of the unhardened range.
+    // They are not prompted for, because using a different number would not be a
+    // Samourai export any more.
+    OneOff {
+        item: "Samourai Postmix",
+        file: "/samourai-post-mix.txt",
+        format: Format::Descriptor,
+        types: &[(AddressKind::P2wpkh, "Segwit P2WPKH")],
+        account: 2_147_483_646,
+    },
+    OneOff {
+        item: "Samourai Premix",
+        file: "/samourai-pre-mix.txt",
+        format: Format::Descriptor,
+        types: &[(AddressKind::P2wpkh, "Segwit P2WPKH")],
+        account: 2_147_483_645,
+    },
+];
 
-    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+/// The three script types a single-signature export can be asked for, in stock's order.
+const SINGLE_SIG: &[(AddressKind, &str)] = &[
+    (AddressKind::P2wpkh, "Segwit P2WPKH"),
+    (AddressKind::P2pkh, "Classic P2PKH"),
+    (AddressKind::P2shP2wpkh, "P2SH-Segwit"),
+];
+
+/// One row of [`ONE_OFFS`].
+struct OneOff {
+    /// The menu label, which is how a row is found.
+    item: &'static str,
+    /// The filename, with `{}` standing in for the master fingerprint where a format
+    /// puts it in the name.
+    file: &'static str,
+    format: Format,
+    /// The address types offered on a submenu. Empty means the format fixes it.
+    types: &'static [(AddressKind, &'static str)],
+    account: u32,
+}
+
+/// Which writer in [`crate::export`] a row uses.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Format {
+    BitcoinCore,
+    /// Electrum's, which Blue Wallet also reads.
+    Electrum,
+    Wasabi,
+    Unchained,
+    /// A single-signature output descriptor: Descriptor, Bull Bitcoin, Zeus, Samourai.
+    Descriptor,
+}
+
+impl Format {
+    /// What a reader should be told this payload is, when it goes out as a QR.
+    fn filetype(self) -> catcard_bbqr::FileType {
+        match self {
+            // Bitcoin Core's is prose with two JSON blobs quoted inside it, and the
+            // descriptor formats are one line of text. Neither parses as JSON.
+            Format::BitcoinCore | Format::Descriptor => catcard_bbqr::FileType::TEXT,
+            Format::Electrum | Format::Wasabi | Format::Unchained => catcard_bbqr::FileType::JSON,
+        }
+    }
+}
+
+/// The row of [`ONE_OFFS`] a menu label names, if it names one.
+fn one_off(label: &str) -> Option<&'static OneOff> {
+    ONE_OFFS.iter().find(|o| o.item == label)
+}
+
+/// Which script type to export, when the row offers more than one.
+#[cfg(feature = "board-q1")]
+fn pick_type(
+    ui: &mut Ui<'_>,
+    head: &str,
+    many: &[(AddressKind, &'static str)],
+) -> Option<AddressKind> {
+    let mut names: heapless::Vec<&str, 4> = heapless::Vec::new();
+    for (_, name) in many {
+        let _ = names.push(name);
+    }
+    choose(ui, head, "address type", &names).map(|at| many[at].0)
+}
+
+/// The first one offered, which is native segwit on every row that offers a choice.
+///
+/// mk3 and mk4 have no in-action chooser, and adding one for this would be a keypad
+/// menu on a four-line screen. The rows are ordered with the type nearly everyone wants
+/// first, so taking it is the right default rather than an arbitrary one -- and a person
+/// who needs one of the others can get it from the generic JSON, which carries all three.
+#[cfg(not(feature = "board-q1"))]
+fn pick_type(
+    _ui: &mut Ui<'_>,
+    _head: &str,
+    many: &[(AddressKind, &'static str)],
+) -> Option<AddressKind> {
+    many.first().map(|(kind, _)| *kind)
+}
+
+/// Build and offer one of the exports in [`ONE_OFFS`].
+///
+/// The rows share this because the difference between them is data, not code: pick the
+/// script type if the row offers a choice, derive, write, offer. Adding a wallet that
+/// wants one of these five formats under a different name is a row in the table.
+fn export_one(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, which: u8) {
+    let Some(label) = EXPORT_ITEMS.get(which as usize).copied() else {
+        return;
+    };
+    let Some(row) = one_off(label) else {
+        return;
+    };
+
+    // The script type first, before the PIN: backing out of a submenu should not have
+    // cost an unlock.
+    let kind = match row.types {
+        [] => AddressKind::P2wpkh,
+        [(only, _)] => *only,
+        many => match pick_type(ui, label, many) {
+            Some(kind) => kind,
+            None => return,
+        },
+    };
+
+    let Some(master) = unlock_master(gate, login, ui, label) else {
         return;
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
 
-    let mut text: heapless::String<2048> = heapless::String::new();
-    let [a, b, c, d] = fingerprint;
-    let _ = write!(
-        text,
-        "# CatCard wallet export, master fingerprint {a:02x}{b:02x}{c:02x}{d:02x}\n\
-         # Output descriptors (BIP-380), receive and change chains as <0;1> (BIP-389).\n"
-    );
-    let mut busy = Working::new(ui.panel, HEAD, "deriving accounts");
-    for (kind, name) in ACCOUNTS {
-        let steps = [
-            ChildNumber::hardened(kind.bip44_purpose()),
-            ChildNumber::hardened(0),
-            ChildNumber::hardened(0),
-        ];
-        let [Ok(p), Ok(c), Ok(n)] = steps else {
-            continue;
-        };
-        let Some(account) = public_at(&master, &[p, c, n], &mut busy, ui.panel) else {
-            crate::catlog!("export: {} account did not derive", name);
-            continue;
-        };
-        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
-        let Ok(xlen) = account.write_base58(&mut xpub) else {
-            continue;
-        };
-        let xpub = core::str::from_utf8(&xpub[..xlen]).unwrap_or("");
-        let single = SingleSig {
+    let mut text: heapless::String<{ crate::export::MAX_LEN }> = heapless::String::new();
+    let mut busy = Working::new(ui.panel, label, "deriving accounts");
+    let built = match row.format {
+        Format::BitcoinCore => {
+            crate::export::bitcoin_core(&master, row.account, &mut busy, ui.panel, &mut text)
+        }
+        Format::Electrum => {
+            crate::export::electrum(&master, kind, row.account, &mut busy, ui.panel, &mut text)
+        }
+        Format::Wasabi => crate::export::wasabi(&master, &mut busy, ui.panel, &mut text),
+        Format::Unchained => {
+            crate::export::unchained(&master, row.account, &mut busy, ui.panel, &mut text)
+        }
+        // One multipath line covering both chains, which is stock's default and the
+        // only form the four vendor rows use.
+        Format::Descriptor => crate::export::ss_descriptor(
+            &master,
             kind,
-            fingerprint,
-            coin: 0,
-            account: 0,
-        };
-        let mut line = [0u8; descriptor::MAX_LEN];
-        let Ok(len) = single.write(xpub, &mut line) else {
-            continue;
-        };
-        let _ = write!(
-            text,
-            "# {name}, m/{}h/0h/0h\n{}\n",
-            kind.bip44_purpose(),
-            core::str::from_utf8(&line[..len]).unwrap_or("")
-        );
-    }
-
-    // The multisig side: this device's account keys at BIP-48's paths, as descriptor key
-    // expressions. They are not wallets on their own -- a multisig wallet is an agreement
-    // between cosigners, and only a coordinator holding all of their keys can write the
-    // descriptor. What a person can do with these is hand one over and get that descriptor
-    // back, which Utils -> Multisig then imports.
-    const COSIGNER: [(u32, &str); 2] = [(2, "P2WSH"), (1, "P2SH-P2WSH")];
-    let _ = write!(
-        text,
-        "\n# Multisig cosigner keys (BIP-48). Give one of these to the coordinator;\n\
-         # it is a key, not a wallet. Import the descriptor it sends back.\n"
-    );
-    for (script, name) in COSIGNER {
-        let steps = [
-            ChildNumber::hardened(48),
-            ChildNumber::hardened(0),
-            ChildNumber::hardened(0),
-            ChildNumber::hardened(script),
-        ];
-        let [Ok(purpose), Ok(coin), Ok(acct), Ok(form)] = steps else {
-            continue;
-        };
-        let Some(account) = public_at(&master, &[purpose, coin, acct, form], &mut busy, ui.panel)
-        else {
-            crate::catlog!("export: {} cosigner key did not derive", name);
-            continue;
-        };
-        let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
-        let Ok(xlen) = account.write_base58(&mut xpub) else {
-            continue;
-        };
-        let _ = write!(
-            text,
-            "# {name}, m/48h/0h/0h/{script}h\n[{a:02x}{b:02x}{c:02x}{d:02x}/48h/0h/0h/{script}h]{}/<0;1>/*\n",
-            core::str::from_utf8(&xpub[..xlen]).unwrap_or("")
-        );
-    }
+            row.account,
+            true,
+            &mut busy,
+            ui.panel,
+            &mut text,
+        ),
+    };
     drop(master);
+    if built.is_none() {
+        message(ui.panel, label, "derivation failed", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    }
 
-    let mut path: heapless::String<16> = heapless::String::new();
-    let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}.TXT");
-    message(ui.panel, HEAD, "writing to SD card", "");
-    match write_card_file(&path, text.as_bytes()) {
-        Ok(()) => {
-            crate::catlog!("export: wrote {} bytes to {}", text.len(), path.as_str());
-            message(ui.panel, "Exported", &path[1..], "any key to go back");
+    let [a, b, c, d] = fingerprint;
+    let mut file: heapless::String<32> = heapless::String::new();
+    match row.file.split_once("{}") {
+        Some((head, tail)) => {
+            let _ = write!(file, "{head}{a:02X}{b:02X}{c:02X}{d:02X}{tail}");
         }
-        Err(why) => {
-            let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
-            crate::catlog!(
-                "export: failed: {}; sd last {} sta {:08x} detail {}",
-                why,
-                catcard_hal::sdmmc::last_failure::name(phase),
-                sta,
-                detail
-            );
-            message(ui.panel, "Export failed", why, "any key to go back");
+        None => {
+            let _ = file.push_str(row.file);
         }
     }
-    wait_for_any_key(ui);
+    offer_export(ui, label, &file, text.as_bytes(), row.format.filetype());
 }
 
 /// The file a Format A row writes under, if that row is one.
@@ -3592,7 +3714,13 @@ fn export_generic_json(
         wait_for_any_key(ui);
         return;
     }
-    offer_export(ui, label, file, text.as_bytes(), catcard_bbqr::FileType::JSON);
+    offer_export(
+        ui,
+        label,
+        file,
+        text.as_bytes(),
+        catcard_bbqr::FileType::JSON,
+    );
 }
 
 /// One account's extended public key, as plain text.
@@ -3666,7 +3794,13 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         },
     };
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-{what}.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
+    offer_export(
+        ui,
+        HEAD,
+        &path,
+        text.as_bytes(),
+        catcard_bbqr::FileType::TEXT,
+    );
 }
 
 /// The BIP-48 cosigner keys on their own.
@@ -3722,7 +3856,13 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-KEYS.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
+    offer_export(
+        ui,
+        HEAD,
+        &path,
+        text.as_bytes(),
+        catcard_bbqr::FileType::TEXT,
+    );
 }
 
 /// The first few addresses of every account, to check a watch-only wallet against.
@@ -3804,7 +3944,13 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-SUMMARY.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
+    offer_export(
+        ui,
+        HEAD,
+        &path,
+        text.as_bytes(),
+        catcard_bbqr::FileType::TEXT,
+    );
 }
 
 /// Ask which of `items` to use, or `None` if the user backs out.
