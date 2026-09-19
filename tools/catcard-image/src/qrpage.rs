@@ -25,31 +25,39 @@ use catcard_bbqr::{Encoding, FileType, Header, encode_part_to_slice, part_len, p
 /// it. Roughly half the codes, for the one failure mode this hardware has already had.
 const ENCODING: Encoding = Encoding::Base32;
 
+/// The longest line the device's scanner will hand over, from `qrscan::MAX_TEXT`.
+///
+/// Stated here rather than shared, because it is a property of the receiving firmware
+/// and this tool has to work against a device it was not built alongside. A part whose
+/// line is longer is not read at all -- silently, since the scan just never completes.
+const SCANNER_BUFFER: usize = 2048;
+
 /// The largest symbol this will build. Version 40 is the largest there is; the encoder
 /// picks the smallest that fits, so this only sizes the buffers.
 const MAX_VERSION: u8 = 40;
 
 /// Bytes per part, unless the caller says otherwise.
 ///
-/// **A multiple of twenty**, which is the constraint neither format states on its own. A
-/// BBQr part is five bytes per eight characters, so its size is a multiple of five; the
-/// device writes parts straight into PSRAM, which takes whole aligned words, so it must
-/// also be a multiple of four. Twenty satisfies both.
+/// **A multiple of five**, which is base32's own constraint: eight characters carry five
+/// bytes, so a part that is not the last must be a whole number of groups or the parts
+/// after it do not decode on their own.
 ///
-/// 1260 rather than a rounder number because the device's scanner buffer holds 2048
-/// characters, and 1260 bytes is 2024 of them with the header. The next multiple of
-/// twenty up does not fit.
-pub const DEFAULT_PART: usize = 1260;
+/// 1275 because the device's scanner buffer holds 2048 characters and 1275 bytes is
+/// 2048 of them with the header -- the largest part that fits. There is no alignment
+/// rule on top of that: parts land in PSRAM through a driver that paces them, and at one
+/// part every few hundred milliseconds the odd unaligned edge has all the time it needs.
+pub const DEFAULT_PART: usize = 1275;
 
 /// Build the page.
 pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
-    if part == 0 || !part.is_multiple_of(20) {
-        bail!("part size must be a positive multiple of 20 (got {part})");
+    if part == 0 || !part.is_multiple_of(5) {
+        bail!("part size must be a positive multiple of 5 (got {part})");
     }
     let line_len = part_len(ENCODING, part);
-    if line_len > 2048 {
+    if line_len > SCANNER_BUFFER {
         bail!(
-            "a {part}-byte part is {line_len} characters, over the device's 2048-character limit"
+            "a {part}-byte part is {line_len} characters, over the device's \
+             {SCANNER_BUFFER}-character limit"
         );
     }
     let total = parts_needed(image.len(), part);
@@ -245,29 +253,27 @@ mod tests {
         assert_eq!(b64(b"foobar"), "Zm9vYmFy");
     }
 
-    /// The constraint the device cannot state for itself: its staging area takes whole
-    /// aligned words, so a part that is not a multiple of four lands unaligned at every
-    /// offset after the first. A multiple of five is BBQr's own. Only the intersection
-    /// works, and this is the number that gets it wrong quietly if it ever drifts.
+    /// The default is the largest part whose line still fits the device's scanner
+    /// buffer, and a whole number of base32 groups. Both fail quietly if they drift: an
+    /// over-long line is simply never read, and a part that is not a whole number of
+    /// groups puts every part after the first at the wrong offset.
     #[test]
-    fn the_default_part_suits_both_constraints() {
-        assert_eq!(DEFAULT_PART % 4, 0, "PSRAM wants whole words");
-        assert_eq!(DEFAULT_PART % 5, 0, "BBQr packs five bytes to eight chars");
+    fn the_default_part_is_the_largest_that_fits() {
         assert_eq!(
-            fits(ENCODING, part_len(ENCODING, DEFAULT_PART)),
-            DEFAULT_PART
+            DEFAULT_PART % 5,
+            0,
+            "base32 packs five bytes to eight chars"
         );
-        assert!(
-            part_len(ENCODING, DEFAULT_PART) <= 2048,
-            "over the device's scanner buffer"
-        );
+        assert_eq!(fits(ENCODING, SCANNER_BUFFER), DEFAULT_PART);
+        assert!(part_len(ENCODING, DEFAULT_PART) <= SCANNER_BUFFER);
     }
 
     #[test]
-    fn a_part_size_that_would_stage_misaligned_is_refused() {
-        // 1275 bytes is the largest that fits the line limit, and is a multiple of five
-        // -- so BBQr is happy and PSRAM is not. It must not be quietly accepted.
-        assert!(render(&[0u8; 4096], 1275, "x").is_err());
+    fn a_part_size_the_format_cannot_carry_is_refused() {
+        // Not a whole number of base32 groups.
+        assert!(render(&[0u8; 4096], 1024, "x").is_err());
         assert!(render(&[0u8; 4096], 0, "x").is_err());
+        // Over the scanner's line buffer, so the device would never read one.
+        assert!(render(&[0u8; 4096], 2000, "x").is_err());
     }
 }

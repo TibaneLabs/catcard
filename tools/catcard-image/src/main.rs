@@ -113,8 +113,8 @@ enum Cmd {
         bin: PathBuf,
         #[arg(long)]
         out: PathBuf,
-        /// Bytes per part. **Must be a multiple of twenty**: BBQr packs five bytes to
-        /// eight characters and the device stages parts as whole 32-bit words.
+        /// Bytes per part. **Must be a multiple of five**, which is what base32 packs
+        /// into eight characters.
         ///
         /// Larger means fewer, denser codes -- fewer to catch, but each is harder to
         /// read off a screen. Drop it if the device is slow to pick them up.
