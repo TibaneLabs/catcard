@@ -52,13 +52,17 @@ static mut BUF_A: [u8; STATIC_BUF] = [0; STATIC_BUF];
 #[cfg(feature = "board-mk3")]
 static mut BUF_B: [u8; STATIC_BUF] = [0; STATIC_BUF];
 
-/// PSRAM windows for the two buffers: 2 MB each, starting 4 MB in.
+/// PSRAM windows for the two buffers: 2 MB each, in the lower half.
 ///
-/// The low half is where a firmware image stages, and the staging marker sits at the very
-/// top (`psram.staging_header`), so signing a transaction cannot disturb a pending upgrade
-/// and an upgrade cannot land on a PSBT.
-#[cfg(not(feature = "board-mk3"))]
-const PSRAM_OFFSET: usize = 4 * 1024 * 1024;
+/// The **upper** half is where a firmware image stages, with the staging marker at the
+/// very top. This used to say the opposite and take the upper half accordingly, which
+/// put both buffers exactly where an image goes -- and the guard below, doing its job,
+/// then refused every time. Signing a PSBT from a card answered "no memory for this" on
+/// every board that has PSRAM.
+///
+/// The halves are separate because the two are not exclusive in time: a USB upload can
+/// be part way through while someone walks into the signing screen, so this cannot be
+/// "whichever half is free right now".
 #[cfg(not(feature = "board-mk3"))]
 const PSRAM_WINDOW: usize = 2 * 1024 * 1024;
 
@@ -80,9 +84,11 @@ unsafe fn buffers() -> Option<(&'static mut [u8], &'static mut [u8])> {
     #[cfg(not(feature = "board-mk3"))]
     {
         let psram = catcard_board::BOARD.psram?;
-        let base = psram.base as usize + PSRAM_OFFSET;
-        // The second window must end before the staging marker.
-        if base + 2 * PSRAM_WINDOW > psram.staging_header as usize {
+        let (scratch, room) = psram.scratch();
+        let base = scratch as usize;
+        // Both windows must fit in the half that is ours. Kept as a check rather than a
+        // comment: it is what stands between a long PSBT and a staged image.
+        if 2 * PSRAM_WINDOW > room as usize {
             return None;
         }
         // SAFETY: memory-mapped PSRAM the board table describes, in a region nothing else

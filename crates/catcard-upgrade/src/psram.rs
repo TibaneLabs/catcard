@@ -132,7 +132,7 @@ impl PsramArea {
     /// and nothing else may be using its upper half. Writes go straight to the address
     /// space with no further checking beyond the bounds recorded here.
     pub const unsafe fn claim(psram: &Psram) -> Self {
-        let image_base = psram.base + psram.len / 2;
+        let image_base = psram.image_base();
         Self {
             image_base,
             image_offset: image_base - psram.base,
