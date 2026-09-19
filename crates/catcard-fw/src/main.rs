@@ -34,6 +34,8 @@ mod flappy;
 mod game;
 #[cfg(feature = "board-q1")]
 mod gpu;
+/// The heap: one region, lent out a block at a time.
+mod heap;
 mod keypad;
 mod keywork;
 #[macro_use]
@@ -138,6 +140,12 @@ fn main() -> ! {
         let cp = cortex_m::Peripherals::steal();
         cp.SCB.vtor.write(BOARD.memory.firmware_base);
     }
+
+    // Before anything can allocate, which on this device means before anything at all:
+    // the global allocator is registered, so a stray `Vec` anywhere in the image would
+    // otherwise reach a heap with no region and be told no.
+    // SAFETY: the reset path, once, before any allocation.
+    unsafe { heap::init() };
 
     // The bootloader hands off with interrupts **masked**, and nothing on the way in
     // turns them back on: cortex-m-rt's reset path does not, `#[entry]` does not, and the

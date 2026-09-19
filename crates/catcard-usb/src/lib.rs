@@ -241,6 +241,13 @@ pub enum Status {
     Refused = 0x0005,
     /// The device is busy with something a host cannot interrupt.
     Busy = 0x0006,
+    /// The device cannot spare the memory to decompress right now. **Not a refusal of
+    /// the image**: the same image sent with [`Opcode::UpgradeOffer`] will be accepted.
+    ///
+    /// Compression buys wire time and costs a buffer, and a device that is short of
+    /// room should spend the time rather than fail. So this is the one status a host is
+    /// expected to act on by itself, without asking anybody.
+    RetryUncompressed = 0x0007,
 }
 
 /// A framing error. All of them mean the host and the device have lost sync, and the

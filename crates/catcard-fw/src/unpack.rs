@@ -15,26 +15,14 @@
 use catcard_upgrade::packed::{self, BLOCK, Block};
 use catcard_upgrade::{Reject, Staged, StagingArea};
 
-/// Where a block's bytes land on their way from the wire to the staging area.
-///
-/// Static, because it is eight kilobytes and the USB task's stack is not. One compressed
-/// upload runs at a time -- the staging area is claimed for the length of it -- so there
-/// is one of these.
-static mut SLAB: [u8; BLOCK] = [0; BLOCK];
-
-/// The inflate slab.
-///
-/// # Safety
-/// The caller must hold the staging area, and any previous borrow -- the [`Block`] that
-/// was writing into it -- must already have been dropped. Both hold for [`Unpack`],
-/// which is built only from a claimed area and drops each block before starting the next.
-unsafe fn slab() -> &'static mut [u8] {
-    // SAFETY: the caller's contract.
-    unsafe { &mut *core::ptr::addr_of_mut!(SLAB) }
-}
-
 /// A deflated image arriving.
 pub struct Unpack {
+    /// Where a block's bytes land on the way from the wire to the staging area.
+    ///
+    /// Taken from the heap for the length of the transfer, not reserved for the life of
+    /// the device: a Q1 spends almost none of its time being upgraded, and eight
+    /// kilobytes of `.bss` is eight kilobytes the boot stack does not have.
+    mem: crate::heap::Block,
     /// The block being inflated, absent only between the last block and the end.
     block: Option<Block<'static>>,
     /// How much of the image has reached the staging area.
@@ -44,18 +32,26 @@ pub struct Unpack {
 }
 
 impl Unpack {
-    /// Starts an image of `want` uncompressed bytes.
+    /// Starts an image of `want` uncompressed bytes, or `None` if the heap has no room
+    /// for the inflate slab.
     ///
-    /// # Safety
-    /// The caller must hold the staging area for as long as this lives: it is what makes
-    /// this the only user of the slab.
-    pub unsafe fn begin(want: u32) -> Self {
-        Unpack {
-            // SAFETY: the caller's contract, and no block exists yet to hold the slab.
-            block: Some(Block::new(unsafe { slab() }, want)),
+    /// `None` is not a refusal of the image. The caller answers
+    /// [`Status::RetryUncompressed`](catcard_usb::Status::RetryUncompressed) and the
+    /// same image arrives uncompressed, which needs no slab at all -- compression buys
+    /// wire time and costs memory, and a device short of memory should spend the time.
+    pub fn begin(want: u32) -> Option<Self> {
+        let mut mem = crate::heap::take(BLOCK)?;
+        // SAFETY: the slice points into the heap block stored beside it, which is
+        // dropped with this struct and never earlier; the bytes do not move when the
+        // struct does, because they live in the heap region and not in the struct. No
+        // other reference to them exists -- this is the only call before `close`.
+        let slab: &'static mut [u8] = unsafe { mem.leak_mut() };
+        Some(Unpack {
+            mem,
+            block: Some(Block::new(slab, want)),
             done: 0,
             want,
-        }
+        })
     }
 
     /// Takes the next piece of compressed data and stages whatever it completes.
@@ -99,14 +95,14 @@ impl Unpack {
 
         // SAFETY: the block that held the slab was consumed by `finish` above, so this
         // is the only live borrow of it.
-        let bytes = unsafe { slab() };
+        let bytes = unsafe { self.mem.leak_mut() };
         staged.write(self.done, &bytes[..produced as usize])?;
         self.done += produced;
 
         let left = self.want - self.done;
         self.block = (left > 0).then(|| {
             // SAFETY: the borrow taken for `bytes` ends here, and no other block exists.
-            Block::new(unsafe { slab() }, left)
+            Block::new(unsafe { self.mem.leak_mut() }, left)
         });
         Ok(())
     }

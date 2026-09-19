@@ -101,8 +101,11 @@ def press(sock, keys, settle=0.35, expect_reply=True):
         if st != 0:
             raise RuntimeError(f"key {k!r} refused: {STATUS.get(st, st)}")
         time.sleep(settle)
+RETRY_UNCOMPRESSED = 0x0007
+
 STATUS = {0: "Ok", 1: "UnknownOpcode", 2: "NotNow", 3: "BadRequest",
-          4: "Declined", 5: "Refused", 6: "Busy"}
+          4: "Declined", 5: "Refused", 6: "Busy",
+          7: "RetryUncompressed"}
 REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
           5: "Incomplete", 6: "NotAnImage", 7: "BadHeader", 8: "WrongBoard",
           9: "Downgrade", 10: "BadSignature", 11: "StorageFault",
@@ -154,7 +157,13 @@ def offer(sock, blob, caps):
         # packed, or encrypted -- would otherwise pay the deflate overhead for nothing.
         if len(packed) < len(blob):
             st, body = request(sock, UPGRADE_PACKED, packed)
-            return st, body, len(packed)
+            # The device can decline the *compression* without declining the image: it
+            # takes a buffer to inflate into and it may not have one to spare. Sending
+            # it uncompressed needs no buffer at all, so that is simply what we do --
+            # no question for the user, who did not ask about compression either way.
+            if st != RETRY_UNCOMPRESSED:
+                return st, body, len(packed)
+            print("offer     device has no room to decompress; resending uncompressed")
     st, body = request(sock, UPGRADE_OFFER, blob)
     return st, body, len(blob)
 

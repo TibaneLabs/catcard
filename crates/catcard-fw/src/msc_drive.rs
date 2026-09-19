@@ -19,6 +19,15 @@ const IDLE_LIMIT: u32 = 2_000_000;
 
 /// Serve the card as a USB drive until `should_exit` returns true.
 pub fn run(dev: &mut Sdmmc, card: &Card, mut should_exit: impl FnMut() -> bool) {
+    // The read buffer, for as long as this screen is up. A device that cannot spare
+    // sixteen kilobytes right now simply does not offer the drive -- which is a screen
+    // declining to open, not a failure anyone has to recover from.
+    let Some(mut held) = crate::heap::take(CHUNK_LEN) else {
+        crate::catlog!("msc: no room for a {} byte read buffer", CHUNK_LEN);
+        return;
+    };
+    let chunk = held.bytes();
+
     let mut sense = Sense::OK;
     let mut pkt = [0u8; 64];
     let mut block = [0u8; BLOCK_LEN];
@@ -47,7 +56,7 @@ pub fn run(dev: &mut Sdmmc, card: &Card, mut should_exit: impl FnMut() -> bool) 
             send_bytes(&cswb);
             return;
         }
-        let (status, moved) = dispatch(dev, card, &cbw, cmd, &mut block, &mut sense);
+        let (status, moved) = dispatch(dev, card, &cbw, cmd, &mut block, chunk, &mut sense);
         // If a Bulk-Only Mass Storage Reset arrived while this command was in flight, the
         // host has abandoned it and is not waiting for a CSW. Drop it and go back to
         // waiting for the next CBW -- sending a stale CSW now would be read as the front
@@ -74,6 +83,7 @@ fn dispatch(
     cbw: &Cbw,
     cmd: Command,
     block: &mut [u8; BLOCK_LEN],
+    chunk: &mut [u8],
     sense: &mut Sense,
 ) -> (u8, u32) {
     let mut reply = [0u8; 64];
@@ -101,7 +111,7 @@ fn dispatch(
             *sense = Sense::OK; // sense is consumed by being read
             reply_in(&reply[..n], cbw)
         }
-        Command::Read { lba, blocks } => transfer_read(dev, card, lba, blocks, sense),
+        Command::Read { lba, blocks } => transfer_read(dev, card, lba, blocks, chunk, sense),
         Command::Write { lba, blocks } => transfer_write(dev, card, lba, blocks, block, sense),
         Command::Unsupported => {
             *sense = Sense::INVALID_COMMAND;
@@ -130,24 +140,23 @@ fn out_of_range(card: &Card, lba: u32, blocks: u16) -> bool {
 const CHUNK_BLOCKS: usize = 32;
 const CHUNK_LEN: usize = CHUNK_BLOCKS * BLOCK_LEN;
 
-/// The read buffer. Used only by the single-threaded USB Drive loop, one reader at a
-/// time; big enough that a typical readahead is one gapless transfer.
-static mut READ_CHUNK: [u8; CHUNK_LEN] = [0; CHUNK_LEN];
+// The read buffer is taken from the heap for the life of the screen -- see `run`. It
+// used to be a `static`, sixteen kilobytes resident for a device that spends almost
+// none of its life pretending to be a disk.
 
 fn transfer_read(
     dev: &mut Sdmmc,
     card: &Card,
     lba: u32,
     blocks: u16,
+    buf: &mut [u8],
     sense: &mut Sense,
 ) -> (u8, u32) {
     if out_of_range(card, lba, blocks) {
         *sense = Sense::LBA_OUT_OF_RANGE;
         return (csw_status::FAILED, 0);
     }
-    // SAFETY: the USB Drive screen is single-threaded and `transfer_read` is its only
-    // user of this buffer; no other reference is live while `run` is on the stack.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(READ_CHUNK) };
+
     let total = blocks as u32;
     let mut sent = 0u32;
     let mut done = 0u32;

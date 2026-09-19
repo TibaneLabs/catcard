@@ -26,18 +26,20 @@ use fstool::device::FlashDriver;
 /// The filesystem's block size, as a stock volume is formatted.
 pub const BLOCK: usize = 512;
 
-/// The page rewrite buffer. One page, so a block erase can put back what it must keep.
-///
-/// Static rather than on the stack: 8 KB is more than a screen's call chain should carry,
-/// and only one settings operation runs at a time.
+/// The largest page this driver will rewrite. Eight kilobytes is more than a screen's
+/// call chain should carry on the stack, so the buffer comes from the heap instead --
+/// taken when the region is opened and given back when it is dropped, rather than
+/// reserved for the life of a device that spends most of it not writing settings.
 const PAGE_MAX: usize = 8 * 1024;
-static mut PAGE_BUF: [u8; PAGE_MAX] = [0; PAGE_MAX];
 
 /// Internal flash, in filesystem blocks.
 pub struct Blocks {
     flash: Internal,
     page_size: usize,
     blocks: u32,
+    /// One page, so a block erase can put back what it must keep. `None` on a
+    /// read-only open, which never erases.
+    page: Option<crate::heap::Block>,
 }
 
 /// Why the region could not be opened or written.
@@ -49,6 +51,9 @@ pub enum Error {
     Flash(iflash::Error),
     /// The page does not divide into whole blocks, which the emulation needs.
     Geometry { page_size: usize },
+    /// No heap room for the page rewrite buffer. Said at `open`, not part way through
+    /// an erase -- there is no good answer to running out in the middle of one.
+    NoMemory,
 }
 
 impl From<iflash::Error> for Error {
@@ -75,10 +80,14 @@ impl Blocks {
         if !page_size.is_multiple_of(BLOCK) || page_size > PAGE_MAX {
             return Err(Error::Geometry { page_size });
         }
+        // The rewrite buffer, for as long as this region is open. Refused here rather
+        // than part way through an erase, where there is no answer but to lose the page.
+        let page = crate::heap::take(page_size).ok_or(Error::NoMemory)?;
         Ok(Self {
             flash,
             page_size,
             blocks: len / BLOCK as u32,
+            page: Some(page),
         })
     }
 
@@ -104,6 +113,7 @@ impl Blocks {
             // Unused: a read needs no page geometry, and an erase is refused.
             page_size: BLOCK,
             blocks: len / BLOCK as u32,
+            page: None,
         })
     }
 
@@ -151,14 +161,23 @@ impl FlashDriver for Blocks {
         let page = block / per_page;
         let page_off = page * self.page_size as u32;
         let within = (block % per_page) as usize * BLOCK;
+        let page_size = self.page_size;
 
-        // SAFETY: one settings operation at a time, foreground only.
-        let scratch: &mut [u8; PAGE_MAX] = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_BUF) };
-        let buf = &mut scratch[..self.page_size];
+        // Destructured so the buffer and the flash are borrowed as the separate fields
+        // they are; going through `&mut self` twice would not compile.
+        let Self {
+            flash, page: held, ..
+        } = self;
+        let Some(held) = held.as_mut() else {
+            // A read-only open has no rewrite buffer, and erasing is what it does not
+            // do. The flash driver already has the right word for this.
+            return Err(iflash::Error::ReadOnly);
+        };
+        let buf = &mut held.bytes()[..page_size];
         // SAFETY: as in `open`. Read the page, blank this block's share of it, put the
         // rest back: the fifteen other blocks in the page belong to the filesystem too.
         unsafe {
-            self.flash.read(page_off, buf)?;
+            flash.read(page_off, buf)?;
             buf[within..within + BLOCK].fill(0xFF);
             self.flash.erase(page)?;
             // Nothing to program where the page is already erased; skipping those keeps a

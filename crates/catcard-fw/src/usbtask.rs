@@ -537,13 +537,19 @@ impl UsbTask {
                     // an absurd length costs nothing.
                     match Staged::begin(area, &BOARD, want) {
                         Ok(staged) => {
-                            self.stage = Stage::Unpacking {
-                                staged,
-                                // SAFETY: the staging area was claimed just above and is
-                                // held by `staged`, which lives in this stage alongside
-                                // the unpacker -- so this is the only user of the slab.
-                                unpack: unsafe { crate::unpack::Unpack::begin(want) },
+                            // The inflate slab comes from the heap, and may not be
+                            // there. That is not a refusal of the image: the same one
+                            // sent uncompressed needs no slab, so the host is told to
+                            // do exactly that rather than being left to guess.
+                            let Some(unpack) = crate::unpack::Unpack::begin(want) else {
+                                crate::catlog!(
+                                    "upgrade: no heap for the inflate slab; asking for it uncompressed"
+                                );
+                                self.frames.reset();
+                                self.begin_reply(Status::RetryUncompressed, &[]);
+                                return;
                             };
+                            self.stage = Stage::Unpacking { staged, unpack };
                         }
                         Err(r) => {
                             self.frames.reset();

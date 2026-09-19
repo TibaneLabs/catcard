@@ -152,10 +152,11 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
     use catcard_settings::nvstore;
     use catcard_settings::store::{self, SCRATCH};
 
-    // The blob, off the stack: boot has the least stack to spare and this is four kilobytes.
-    static mut BLOB: [u8; SCRATCH] = [0; SCRATCH];
-    // SAFETY: the caller's guarantee -- once, from boot, before any other settings use.
-    let blob: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(BLOB) };
+    // The blob, off the stack: boot has the least stack to spare and this is four
+    // kilobytes. From the heap and given back on return, rather than four kilobytes
+    // held for the life of a device to read one string once.
+    let mut blob_held = crate::heap::take(SCRATCH)?;
+    let blob: &mut [u8] = blob_held.bytes();
 
     // SAFETY: read-only: the mount's erase and program refuse, so nothing here can change
     // the settings of a device whose PIN has not even been entered yet.
@@ -311,13 +312,17 @@ pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
     };
 
     // Two full-slot buffers: one holds the settings while the key is changed, the other
-    // seals them. Static, because a screen has an 8 KB stack and these are four each.
-    static mut DOC: [u8; SCRATCH] = [0; SCRATCH];
-    static mut SEAL: [u8; SCRATCH] = [0; SCRATCH];
-    // SAFETY: as above -- one settings screen at a time, foreground only.
-    let doc: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(DOC) };
-    // SAFETY: as above.
-    let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
+    // seals them. Four kilobytes each, which is a screen's whole task stack, so they
+    // come from the heap and go back when this returns.
+    let (Some(mut doc_held), Some(mut seal_held)) =
+        (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
+    else {
+        crate::menu::message(ui.panel, "Nickname", "not enough", "memory");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let doc: &mut [u8] = doc_held.bytes();
+    let seal: &mut [u8] = seal_held.bytes();
 
     // Which slot to write is drawn, so repeated saves spread over the hundred rather than
     // wearing one out. A DRBG that will not answer is not a reason to lose a nickname: the

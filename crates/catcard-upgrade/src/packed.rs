@@ -7,8 +7,9 @@
 //! # Why blocks, and not one deflate stream
 //!
 //! A single stream compresses better, and the gap is small enough to measure rather
-//! than argue about: a real image goes to 64.4% in [`BLOCK`]-sized blocks against 63.7%
-//! as one stream with deflate's full 32 KiB window.
+//! than argue about: a real image goes to 60.4% in [`BLOCK`]-sized blocks against 63.7%
+//! as one stream with deflate's full 32 KiB window -- the blocks are actually ahead
+//! here, because this image compresses better in pieces than the 353 KiB one did.
 //!
 //! The reason is not that decompression cannot be fed a frame at a time -- it can, and
 //! this module does exactly that. It is that **a decompressor owns its output and never
@@ -47,21 +48,17 @@ use minizlib::{Buffer, Decompressor, Raw};
 
 /// Bytes each block holds once inflated.
 ///
-/// This is the output slab, and the window a block's matches may reach back into. Bigger
-/// compresses better; it also comes straight out of the stack's headroom, and on the Q1
-/// there is far less of that than the numbers suggest.
+/// This is the output slab, and the window a block's matches may reach back into.
+/// Bigger compresses better and costs memory only while a transfer is running: the
+/// firmware takes it from the heap when a compressed offer starts and gives it back at
+/// the end, so it is no longer eight kilobytes resident on a device that spends almost
+/// none of its life being upgraded.
 ///
-/// **2 KiB, and the reason is a bug this caused.** At 8 KiB the slab left the main stack
-/// 5,996 bytes before it ran into the top of `.bss`, which is not enough for the seed
-/// stretch: it overflowed, walked down over the statics living there, and the device
-/// panicked in the middle of reading a wallet. The visible symptom was the status bar's
-/// modifier flags flickering -- `MODIFIERS` sits 7,407 bytes below the stack top and was
-/// simply being overwritten by whatever the stretch had on its stack.
-///
-/// The ratio this costs, measured on the real 535,040-byte Q1 image: **64.4% in 2 KiB
-/// blocks against 60.4% in 8 KiB ones**. Four points, for six kilobytes of stack, in a
-/// device with 192 KB of SRAM in total that had six thousand bytes of margin.
-pub const BLOCK: usize = 2 * 1024;
+/// It was briefly 2 KiB, when this was a `static` and those eight kilobytes were coming
+/// out of the boot stack -- which overflowed and took the device down. The heap is what
+/// makes 8 KiB affordable again, and the ratio comes back with it: measured on the real
+/// 535,040-byte Q1 image, **60.4% in 8 KiB blocks against 64.4% in 2 KiB ones**.
+pub const BLOCK: usize = 8 * 1024;
 
 /// Why a compressed upload could not be unpacked.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

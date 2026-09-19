@@ -124,6 +124,7 @@ name = "catcard-fw"
 version = "7.0.0"
 dependencies = [
  "anyd",
+ "catcard-alloc",
  "catcard-board",
  "catcard-callgate",
  "catcard-entropy",

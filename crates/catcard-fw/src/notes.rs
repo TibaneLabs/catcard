@@ -13,18 +13,16 @@ use catcard_settings::json::{self, Doc};
 use catcard_settings::store::SCRATCH;
 use catcard_ui::scroll::Line as Row;
 
-/// The decrypted settings blob.
-///
-/// Static rather than on the stack: a screen runs on an 8 KB task stack and the blob is
-/// four of those kilobytes. One settings screen runs at a time.
-static mut BLOB: [u8; SCRATCH] = [0; SCRATCH];
+// The decrypted settings blob and the unescaped note text both come from the heap, for
+// as long as this screen is up. Neither belongs on the stack -- a screen runs on an 8 KB
+// task stack and the blob alone is four of those kilobytes -- and neither belongs in
+// `.bss`, where they were resident on a device that mostly never opens this screen.
 
 /// Unescaped note text, which the rows on screen borrow.
 ///
-/// A note can hold a whole text file, so this is sized for the document rather than for a
-/// title: the point of the screen is to show what is in there.
+/// Sized for the document rather than for a title: a note can hold a whole text file,
+/// and the point of the screen is to show what is in there.
 const TEXT_LEN: usize = 6 * 1024;
-static mut TEXT: [u8; TEXT_LEN] = [0; TEXT_LEN];
 
 /// Rows the document can hold: a title plus a few fields per note.
 const MAX_ROWS: usize = 96;
@@ -55,10 +53,19 @@ pub(crate) fn view(
     use catcard_settings::store;
     use zeroize::Zeroize as _;
 
-    // SAFETY: foreground only -- the menu waits for this screen to return -- and no other
-    // settings screen is running, so these buffers are this screen's alone.
-    let blob: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(BLOB) };
-    let mut arena: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(TEXT) };
+    // Held for as long as this screen is up, and given back however it leaves. A device
+    // with no room for them does not open the screen, which is a thing to say rather
+    // than a thing to crash over.
+    let (Some(mut blob_held), Some(mut text_held)) =
+        (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
+    else {
+        let rows = [Row::title("Secure Notes"), Row::body("not enough memory")];
+        crate::menu::show_doc(ui, &rows, false, false);
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let blob: &mut [u8] = blob_held.bytes();
+    let mut arena: &mut [u8] = text_held.bytes();
 
     let mut rows: heapless::Vec<Row, MAX_ROWS> = heapless::Vec::new();
     let _ = rows.push(Row::title("Secure Notes"));
