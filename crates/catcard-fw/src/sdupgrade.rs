@@ -38,7 +38,7 @@ const CANDIDATES: &[&str] = &[
 ];
 
 /// The reject, in the few words a screen has. The log carries the whole of it.
-fn describe(why: catcard_upgrade::Reject) -> &'static str {
+pub(crate) fn describe(why: catcard_upgrade::Reject) -> &'static str {
     use catcard_upgrade::Reject as R;
     match why {
         R::Length { .. } => "wrong size for this board",

@@ -395,6 +395,15 @@ impl StagingArea for PsramArea {
     }
 
     fn publish(&mut self, len: u32) -> Result<(), OutOfRange> {
+        // Turning the bus round starts a new burst, exactly as in `write`. This matters
+        // now that `commit` reads the whole image back first: without it, the header --
+        // the sixteen bytes the bootloader acts on -- would be the first write after a
+        // megabyte of reads, issued with CE# still low from the read run.
+        if self.way == Way::Reading {
+            burst_gap();
+            self.burst.turned();
+        }
+        self.way = Way::Writing;
         let at = self.header_at as *mut u32;
         // SAFETY: `header_at` came from the board table's confirmed staging address and
         // lies inside the region claimed in `claim`. The writes are volatile and ordered

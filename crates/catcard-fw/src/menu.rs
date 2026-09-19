@@ -550,13 +550,25 @@ pub fn run(session: Session<'_>) -> ! {
                         Ok(region) => {
                             message(ui.panel, "Installing", "do not disconnect", "");
                             crate::staging::install(gate, login, ui.panel, region);
+                            // `install` only returns when the install did *not* happen,
+                            // and what it painted says why. Redrawing the menu over it
+                            // without waiting threw that away, which is how a refusal
+                            // came to look like a device that had simply stopped.
+                            wait_for_any_key(&mut ui);
                             showing_offer = false;
                             redraw = true;
                         }
-                        Err(_) => {
-                            crate::catlog!("install: staging failed");
-                            message(ui.panel, "Failed", "could not stage", "the image");
+                        Err(why) => {
+                            crate::catlog!("install: commit refused: {:?}", why);
+                            message(
+                                ui.panel,
+                                "Not installed",
+                                crate::sdupgrade::describe(why),
+                                "any key to go back",
+                            );
+                            wait_for_any_key(&mut ui);
                             showing_offer = false;
+                            redraw = true;
                         }
                     },
                     Key::Cancel => {
@@ -2160,13 +2172,22 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         for k in keys.iter() {
             match k {
                 Key::Confirm => {
+                    // `commit` reads the image back before it says yes, so this can
+                    // refuse for a reason worth naming -- `RamStoreFailed` above all,
+                    // which is this device losing the bytes rather than a bad image.
                     match staged.commit(approval) {
                         Ok(region) => {
                             message(ui.panel, "Installing", "do not disconnect", "");
                             crate::staging::install(gate, login, ui.panel, region);
                         }
-                        Err(_) => {
-                            message(ui.panel, "Failed", "could not stage", "any key to go back");
+                        Err(why) => {
+                            crate::catlog!("install: commit refused: {:?}", why);
+                            message(
+                                ui.panel,
+                                "Not installed",
+                                crate::sdupgrade::describe(why),
+                                "any key to go back",
+                            );
                         }
                     }
                     wait_for_any_key(ui);
