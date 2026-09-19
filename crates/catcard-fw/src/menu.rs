@@ -3314,7 +3314,7 @@ impl<'a> Working<'a> {
 }
 
 /// The two faces the QR screen offers its text, largest first.
-fn qr_faces() -> (
+pub(crate) fn qr_faces() -> (
     &'static dyn catcard_ui::face::Face,
     &'static dyn catcard_ui::face::Face,
 ) {
@@ -3592,7 +3592,7 @@ fn export_generic_json(
         wait_for_any_key(ui);
         return;
     }
-    write_export(ui, label, file, text.as_bytes());
+    offer_export(ui, label, file, text.as_bytes());
 }
 
 /// One account's extended public key, as plain text.
@@ -3666,7 +3666,7 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         },
     };
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-{what}.TXT");
-    write_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes());
 }
 
 /// The BIP-48 cosigner keys on their own.
@@ -3722,7 +3722,7 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-KEYS.TXT");
-    write_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes());
 }
 
 /// The first few addresses of every account, to check a watch-only wallet against.
@@ -3804,7 +3804,35 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-SUMMARY.TXT");
-    write_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes());
+}
+
+/// Where an export should go.
+///
+/// Stock offers QR, NFC and the card for every export, and the choice matters more than
+/// it looks: a card is the only one that leaves a file behind, and a QR is the only one
+/// that needs nothing but a phone. The device with no card in it and no cable is the
+/// case this exists for.
+#[cfg(feature = "board-q1")]
+fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
+    // Two questions rather than one, so that **cancel always means "not that"**. A
+    // single yes/no would have to make one of the two answers the cancel key, and a
+    // cancel that writes a file is a trap for anyone pressing it to get out.
+    ask(ui.panel, head, "show as QR?", "for a phone to scan");
+    if confirmed(ui) {
+        crate::qrshow::animate(ui, head, body, catcard_bbqr::FileType::BINARY);
+        return;
+    }
+    ask(ui.panel, head, "save to SD card?", file);
+    if confirmed(ui) {
+        write_export(ui, head, file, body);
+    }
+}
+
+/// mk3 and mk4 have no scanner and no screen for this; the card is the only way out.
+#[cfg(not(feature = "board-q1"))]
+fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
+    write_export(ui, head, file, body);
 }
 
 /// Write an export to the card and say how it went.

@@ -72,6 +72,9 @@ mod pubkeys;
 /// The QR scanner is the Q1's alone.
 #[cfg(feature = "board-q1")]
 mod qrscan;
+/// Showing a file as animated QR.
+#[cfg(feature = "board-q1")]
+mod qrshow;
 mod recovery;
 mod sdupgrade;
 mod selftest;

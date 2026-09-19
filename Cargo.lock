@@ -133,6 +133,7 @@ version = "7.0.0"
 dependencies = [
  "anyd",
  "catcard-alloc",
+ "catcard-bbqr",
  "catcard-board",
  "catcard-callgate",
  "catcard-entropy",

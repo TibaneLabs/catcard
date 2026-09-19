@@ -44,6 +44,7 @@ fstool = { workspace = true, default-features = false, features = ["littlefs"] }
 outscript = { workspace = true }
 zeroize = { workspace = true, default-features = false }
 catcard-alloc.workspace = true
+catcard-bbqr.workspace = true
 catcard-board.workspace = true
 catcard-callgate.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
