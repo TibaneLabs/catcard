@@ -62,7 +62,7 @@ const DRAIN_LIMIT: usize = 5_000;
 /// more than the 8 KB stack a screen gets. What arrives past this is dropped, and the
 /// screen says the code was too long rather than showing a truncated prefix of it --
 /// half an address is not an address.
-pub const MAX_TEXT: usize = 512;
+pub const MAX_TEXT: usize = 2048;
 
 /// Why a scan did not produce anything.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -403,6 +403,89 @@ fn run(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault
     read_code(port, ui, out)
 }
 
+/// Whether a collecting scan wants another code.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Next {
+    /// Keep reading. The module stays configured and running.
+    More,
+    /// Everything has arrived.
+    Done,
+}
+
+/// Read codes until `on_code` has what it wants, or the owner cancels.
+///
+/// The animated-QR loop. A payload too large for one symbol arrives as a few hundred of
+/// them, shown in a cycle, and the reader takes whichever it catches in whatever order
+/// it catches them -- so the module has to stay awake and configured across the whole
+/// transfer. Bringing it up per code would cost the two-second reset recovery each time
+/// and turn a two-minute transfer into an afternoon.
+///
+/// `on_code` gets each decoded line and says whether it needs more. Its own screen
+/// drawing is up to it: this only draws the first "point it at a code".
+///
+/// **A single unreadable code is not a failed transfer.** One line longer than
+/// [`MAX_TEXT`] is skipped rather than fatal -- the animation comes round again, and
+/// giving up on the whole thing because one frame was caught badly is the behaviour that
+/// makes people stop trusting the feature.
+pub(crate) fn scan_many(
+    ui: &mut Ui<'_>,
+    head: &str,
+    on_code: &mut dyn FnMut(&mut Ui<'_>, &[u8]) -> Next,
+) -> Result<(), Fault> {
+    let scanner = catcard_board::BOARD.qr.ok_or(Fault::NoScanner)?;
+
+    crate::torch::release();
+    menu::blocking_screen(ui.panel, head, "waking the scanner");
+    // SAFETY: the board table's scanner pins, and USART2, belong to this screen: nothing
+    // else in the firmware touches either, and the menu waits for this to return.
+    let mut port = unsafe {
+        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
+        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
+        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
+    };
+
+    let outcome = collect(&mut port, ui, head, on_code);
+    // Every path out stops the module, for the reason `scan` gives at length.
+    stop(&mut port);
+    outcome
+}
+
+/// The collecting loop, so that whichever way it ends the caller can stop the module.
+fn collect(
+    port: &mut Usart,
+    ui: &mut Ui<'_>,
+    head: &str,
+    on_code: &mut dyn FnMut(&mut Ui<'_>, &[u8]) -> Next,
+) -> Result<(), Fault> {
+    wake(port);
+    find(port)?;
+    setup(port)?;
+
+    menu::blocking_screen(ui.panel, head, "point it at the codes");
+    if !command(port, cmd::SCAN_START) {
+        return Err(Fault::SetupRefused);
+    }
+
+    // One buffer for the whole transfer rather than one per code: a couple of kilobytes
+    // is worth keeping off the stack of every iteration.
+    let Some(mut line_mem) = crate::heap::take(MAX_TEXT) else {
+        return Err(Fault::TooLong);
+    };
+    loop {
+        let line = line_mem.bytes();
+        match read_code(port, ui, line) {
+            Ok(n) => {
+                if on_code(ui, &line_mem.bytes()[..n]) == Next::Done {
+                    return Ok(());
+                }
+            }
+            // One badly caught frame. The animation loops, so it comes round again.
+            Err(Fault::TooLong) => {}
+            Err(why) => return Err(why),
+        }
+    }
+}
+
 /// Milliseconds as CPU cycles.
 fn ms_cycles(ms: u32) -> u32 {
     // SAFETY: reads RCC only.
@@ -445,7 +528,7 @@ fn show(ui: &mut Ui<'_>, raw: &[u8]) {
     let _ = menu::show_doc(ui, &rows, false, false);
 }
 
-fn describe(why: Fault) -> &'static str {
+pub(crate) fn describe(why: Fault) -> &'static str {
     match why {
         Fault::NoScanner => "this board has no scanner",
         Fault::NotFound => "the scanner did not answer",

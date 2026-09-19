@@ -69,6 +69,9 @@ mod power;
 #[cfg(not(feature = "board-mk3"))]
 mod psram;
 mod pubkeys;
+/// Reading a file that arrived as animated QR.
+#[cfg(feature = "board-q1")]
+mod qrload;
 /// The QR scanner is the Q1's alone.
 #[cfg(feature = "board-q1")]
 mod qrscan;

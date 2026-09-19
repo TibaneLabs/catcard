@@ -198,6 +198,29 @@ fn lone_psbt() -> Option<heapless::String<{ PATH_MAX }>> {
 /// Longest path this screen carries.
 const PATH_MAX: usize = 160;
 
+/// Where the transaction was read from.
+///
+/// mk3 and mk4 have no scanner, so there is only one variant to construct there -- but
+/// the type still exists on those boards, because the alternative is a `cfg` around
+/// every use of it and this way the code that does not care reads the same everywhere.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Source {
+    Card,
+    #[cfg(feature = "board-q1")]
+    Qr,
+}
+
+impl Source {
+    /// What to write in the log: the path for a card, the format for a scan.
+    fn name(self, path: &str) -> &str {
+        match self {
+            Source::Card => path,
+            #[cfg(feature = "board-q1")]
+            Source::Qr => "a QR code",
+        }
+    }
+}
+
 /// Read the picked file into `buf`. Returns its length, or why not.
 pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
     with_card(|vol| {
@@ -260,22 +283,40 @@ fn refusal_text(r: Refusal) -> &'static str {
 pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign";
 
-    // A card with one transaction on it needs no picker; two or more, and the owner says
-    // which.
-    let path = match lone_psbt() {
-        Some(p) => p,
-        None => {
-            let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
-                return;
-            };
-            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
-            if path.push_str(p.as_str()).is_err() {
-                menu::message(ui.panel, HEAD, "path too long", "any key to go back");
-                menu::wait_for_any_key(ui);
-                return;
+    // Where the transaction comes from. The card unless this board can scan and the
+    // owner picks the camera -- which is the way in when the card slot is the thing that
+    // has stopped working, and the way most coordinators prefer to send anyway.
+    #[cfg(feature = "board-q1")]
+    let source = match menu::choose(ui, HEAD, "where from", &["SD card", "QR code"]) {
+        Some(0) => Source::Card,
+        Some(1) => Source::Qr,
+        _ => return,
+    };
+    #[cfg(not(feature = "board-q1"))]
+    let source = Source::Card;
+
+    // Picked before the workspace is taken: browsing the card with the staging area held
+    // would refuse a USB upload for as long as someone spent choosing a file.
+    let path = match source {
+        #[cfg(feature = "board-q1")]
+        Source::Qr => heapless::String::<PATH_MAX>::new(),
+        Source::Card => match lone_psbt() {
+            // A card with one transaction on it needs no picker; two or more, and the
+            // owner says which.
+            Some(p) => p,
+            None => {
+                let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
+                    return;
+                };
+                let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+                if path.push_str(p.as_str()).is_err() {
+                    menu::message(ui.panel, HEAD, "path too long", "any key to go back");
+                    menu::wait_for_any_key(ui);
+                    return;
+                }
+                path
             }
-            path
-        }
+        },
     };
     // Held until this screen returns, and released by dropping whichever way it does.
     let mut work = match Workspace::take() {
@@ -288,8 +329,23 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     let (buf, spare) = work.split();
 
-    menu::message(ui.panel, HEAD, "reading the card", "");
-    let len = match read_card_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+    let read = match source {
+        Source::Card => {
+            menu::message(ui.panel, HEAD, "reading the card", "");
+            read_card_file(&path, buf)
+        }
+        #[cfg(feature = "board-q1")]
+        Source::Qr => {
+            let mut sink = crate::qrload::Buffer { out: buf };
+            // `None` here is a cancel or a failure that has already said so on screen,
+            // so this returns quietly rather than showing a second message.
+            match crate::qrload::collect(ui, HEAD, &mut sink) {
+                Some(len) => Ok(len),
+                None => return,
+            }
+        }
+    };
+    let len = match read.and_then(|len| as_psbt_bytes(buf, len, spare)) {
         Ok(len) => len,
         Err(why) => {
             crate::catlog!("sign: {}: {}", path.as_str(), why);
@@ -298,7 +354,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
             return;
         }
     };
-    crate::catlog!("sign: {} bytes from {}", len, path.as_str());
+    crate::catlog!("sign: {} bytes from {}", len, source.name(&path));
 
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
         return;
