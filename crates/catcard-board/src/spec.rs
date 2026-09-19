@@ -105,6 +105,24 @@ pub struct Psram {
     /// Where the chip appears in the address space.
     pub base: u32,
     pub len: u32,
+    /// The OCTOSPI clock, in hertz.
+    ///
+    /// How long the part is held selected for a given number of bytes is a function of
+    /// this, and the limit it has to stay under is a time (`tCEM`). So the burst length
+    /// is arithmetic, not a constant, and it is arithmetic **per board**: a figure worked
+    /// out on one board's bus is silently wrong on another's.
+    ///
+    /// Source: hw-reference/storage.md §PSRAM — prescaler 2 off the 120 MHz kernel
+    /// clock, for all three boards that have PSRAM [C].
+    pub ospi_hz: u32,
+    /// The controller's memory-mapped timeout, in OCTOSPI clocks.
+    ///
+    /// What actually drives CE# high once the bus goes idle, and therefore how long a
+    /// gap between bursts has to be before it is a gap at all. We inherit this from the
+    /// bootloader rather than setting it -- see `docs/HARDWARE-OPEN-ITEMS.md`.
+    ///
+    /// Source: hw-reference/storage.md §PSRAM — stock arms `TimeOutPeriod=16` [C].
+    pub mmap_timeout_clocks: u32,
     /// Where the bootloader reads the firmware-staging recovery header.
     ///
     /// `base + len - 2048`, but written out rather than computed: it is confirmed as an
@@ -634,6 +652,8 @@ pub const MK4: BoardSpec = BoardSpec {
     psram: Some(Psram {
         base: 0x9000_0000,
         len: 8 * 1024 * 1024,
+        ospi_hz: 60_000_000,
+        mmap_timeout_clocks: 16,
         staging_header: 0x907F_F800,
     }),
     has_callgate_se_rng: true,
@@ -791,6 +811,8 @@ pub const Q1: BoardSpec = BoardSpec {
     psram: Some(Psram {
         base: 0x9000_0000,
         len: 8 * 1024 * 1024,
+        ospi_hz: 60_000_000,
+        mmap_timeout_clocks: 16,
         staging_header: 0x907F_F800,
     }),
     has_callgate_se_rng: true,

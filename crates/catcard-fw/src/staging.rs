@@ -122,11 +122,18 @@ pub fn area() -> Result<Area, Unavailable> {
             crate::psram::Unavailable::Busy(_) => Unavailable::Busy,
         })?;
         let psram = catcard_board::BOARD.psram.ok_or(Unavailable::NoMedium)?;
+        // How long the part may be held selected is a time, so how many words fit in it
+        // depends on both clocks: the driver works that out from the board's OCTOSPI
+        // clock and the CPU clock it is actually running at, rather than from a figure
+        // that happened to suit the board it was written on.
+        // SAFETY: reading RCC. The clocks are up -- boot configured them long before any
+        // screen exists.
+        let cpu_hz = unsafe { catcard_hal::clock::hclk_hz() };
         // SAFETY: the region is the memory-mapped PSRAM the board table describes and
         // the lease taken above is what says nothing else in this firmware is writing
         // it. Whether it is actually mapped is what `Debug → PSRAM` proves; an unmapped
         // region shows up as a write that does not read back, which staging catches.
-        let medium = unsafe { catcard_upgrade::psram::PsramArea::claim(&psram) };
+        let medium = unsafe { catcard_upgrade::psram::PsramArea::claim(&psram, cpu_hz) };
         Ok(Area {
             medium,
             _lease: lease,

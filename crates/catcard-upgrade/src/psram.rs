@@ -61,6 +61,8 @@ pub struct PsramArea {
     /// Which way the last access went: a change of direction starts a new burst, which
     /// `tCPH` says must have CE# high before it. See [`burst_gap`].
     way: Way,
+    /// CPU cycles to idle between bursts, from [`gap_cycles`] and this board's clocks.
+    gap: u32,
     /// Words touched since CE# was last allowed to rise.
     ///
     /// **State of the part, not of one call.** The chip does not know where a `write`
@@ -87,16 +89,19 @@ pub struct PsramArea {
 #[derive(Copy, Clone, Default)]
 pub struct Burst {
     since: u32,
+    /// Words this bus may carry in one CE# assertion, from [`words_per_burst`]. Carried
+    /// rather than global: it is a property of the board's clock, not of the code.
+    limit: u32,
 }
 
 impl Burst {
-    pub const fn new() -> Self {
-        Self { since: 0 }
+    pub const fn new(limit: u32) -> Self {
+        Self { since: 0, limit }
     }
 
     /// Account for one word, returning whether CE# must be released before it.
     pub fn word(&mut self) -> bool {
-        if self.since >= WORDS_PER_BURST {
+        if self.since >= self.limit {
             // This word begins the next burst, so it counts as its first.
             self.since = 1;
             true
@@ -131,7 +136,7 @@ impl PsramArea {
     /// `psram` must describe a memory-mapped PSRAM that is actually present and mapped,
     /// and nothing else may be using its upper half. Writes go straight to the address
     /// space with no further checking beyond the bounds recorded here.
-    pub const unsafe fn claim(psram: &Psram) -> Self {
+    pub const unsafe fn claim(psram: &Psram, cpu_hz: u32) -> Self {
         let image_base = psram.image_base();
         Self {
             image_base,
@@ -142,7 +147,10 @@ impl PsramArea {
             capacity: psram.staging_header - image_base,
             header_at: psram.staging_header,
             way: Way::Nothing,
-            burst: Burst::new(),
+            // Both from this board's clocks, not from a constant that happened to suit
+            // the board it was worked out on.
+            burst: Burst::new(words_per_burst(psram.ospi_hz)),
+            gap: gap_cycles(psram.ospi_hz, psram.mmap_timeout_clocks, cpu_hz),
         }
     }
 
@@ -171,57 +179,83 @@ impl PsramArea {
 /// measurements cannot justify.
 pub const RECOVERY_NOPS: u32 = 1;
 
-/// Words this may touch before CE# must be allowed to rise: **16**, or 64 bytes.
-///
-/// From the part's own numbers, not from trying values until one stopped failing.
-/// ESP-PSRAM64H datasheet, Table 10-5 (`hw-reference/datasheets/`) [C]:
-///
-/// | symbol | parameter | |
-/// |---|---|---|
-/// | `tCEM` | CE# low pulse width | **max 8 us** |
-/// | `tCPH` | CE# high between subsequent bursts | **min 50 ns** |
-///
-/// Those two are the whole contract. There is no refresh interval to discover: the part
-/// refreshes itself whenever CE# is high, and §5.5 says what happens if it is not let
-/// go -- *"CE# must be pulled high immediately after all read/write operations. Not
-/// doing so will block internal refresh operations and cause memory failure."* A starved
-/// refresh loses data **anywhere in the chip**, not at the address being accessed and
-/// not necessarily at once, so the failure it produces is a word nobody wrote appearing
-/// somewhere nothing touched, a while later.
-///
-/// The budget, at the documented bus setup -- quad at 60 MHz, prescaler 2 off the
-/// 120 MHz kernel clock (`hw-reference/storage.md` §PSRAM [C]):
-///
-/// - 8 us x 60 MHz = **480 clocks** of CE# low allowed.
-/// - Command and address take ~14, leaving 466 for data.
-/// - Quad is 4 bits a clock, so a 32-bit word is 8 clocks: **58 words is the maximum**.
-///
-/// | words | clocks | time | margin |
-/// |---|---|---|---|
-/// | 16 | 142 | 2.37 us | 70% |
-/// | 32 | 270 | 4.50 us | 44% |
-/// | 58 | 478 | 7.97 us | 0% |
-///
-/// **16**, for 70% margin against a maximum quoted with no conditions, on a bus whose
-/// clock we take from the reference rather than having measured. The cost of the margin
-/// is one extra gap per 64 bytes -- a few milliseconds over a megabyte.
-///
-/// The budget is a *time*, so a slower bus invalidates this: at 30 MHz these same 64
-/// bytes take 4.7 us and the margin is halved. Anyone changing the prescaler revisits
-/// this number, by redoing the arithmetic above.
-pub const WORDS_PER_BURST: u32 = 16;
+// --- what the part specifies -------------------------------------------------------
+//
+// ESP-PSRAM64H datasheet, Table 10-5 (`hw-reference/datasheets/`) [C]. These two are
+// the whole contract. There is no refresh interval to discover: the part refreshes
+// itself whenever CE# is high, and §5.5 says what happens if it is not let go --
+// *"CE# must be pulled high immediately after all read/write operations. Not doing so
+// will block internal refresh operations and cause memory failure."*
+//
+// A starved refresh loses data **anywhere in the chip**, not at the address being
+// accessed, and not at once: the 8 us is the boundary of a guarantee, not the moment
+// data goes bad. So the fault it produces is a word nobody wrote turning up somewhere
+// nothing touched, a while later -- which is why it cannot be found by writing a region
+// and reading the same words back, and why these are taken from the vendor rather than
+// measured.
 
-/// Cycles to leave the bus idle so CE# actually rises between bursts.
+/// `tCEM`: the longest CE# may stay low, in nanoseconds.
+pub const TCEM_NS: u32 = 8_000;
+/// `tCPH`: the shortest CE# may stay high between bursts, in nanoseconds.
+pub const TCPH_NS: u32 = 50;
+
+// --- what the bus costs ------------------------------------------------------------
+
+/// Clocks a burst spends on its command and address before any data moves.
 ///
-/// Two things have to happen in this window, and the longer one is not the part's:
+/// Quad instruction and 24-bit address, plus the read command's 6 dummy cycles, which
+/// is the more expensive of the two directions and so the one to budget for.
+/// Source: hw-reference/storage.md §PSRAM [C].
+const CMD_ADDR_CLOCKS: u32 = 14;
+
+/// Clocks to move one 32-bit word: quad is four bits a clock, so eight.
+const CLOCKS_PER_WORD: u32 = 32 / 4;
+
+/// How much of `tCEM` a burst is allowed to use, as a percentage.
 ///
-/// - the controller's memory-mapped timeout has to fire, which is what actually drives
-///   CE# high once the bus goes quiet. Stock arms it at 16 clocks: **267 ns** at 60 MHz.
-/// - `tCPH`, the **50 ns** minimum CE# high between bursts (Table 10-5 [C]).
+/// Not all of it. The datasheet quotes the maximum with no conditions attached, and the
+/// bus clock it is measured against comes from the reference rather than from anything
+/// we have put a probe on. A third of the budget leaves room for both to be somewhat
+/// worse than believed, and costs only more frequent gaps -- a few milliseconds over a
+/// megabyte, in a place nobody can feel.
+const BUDGET_PERCENT: u32 = 30;
+
+/// Multiple of the minimum gap actually taken, for the same reason.
+const GAP_SAFETY: u32 = 2;
+
+/// Words that may be written before CE# must be allowed to rise, on a given bus.
 ///
-/// 317 ns in total, which is 38 cycles at 120 MHz. **80** is a little over twice that,
-/// and a megabyte of staging pays it eight thousand times: about four milliseconds.
-pub const BURST_GAP_NOPS: u32 = 80;
+/// Derived, because the limit is a **time** and the number of words that fits inside it
+/// depends on the clock: a figure worked out for one board is wrong on another, and
+/// wrong in the direction that corrupts memory rather than the one that is slow.
+///
+/// At 60 MHz: 8 us is 480 clocks, a third of that is 144, less 14 for command and
+/// address leaves 130, which is 16 words. Nobody has to trust that sentence -- the
+/// tests check it, and they check what happens when the clock changes.
+pub const fn words_per_burst(ospi_hz: u32) -> u32 {
+    let budget = (ospi_hz as u64 * TCEM_NS as u64) / 1_000_000_000;
+    let allowed = (budget * BUDGET_PERCENT as u64) / 100;
+    let for_data = allowed.saturating_sub(CMD_ADDR_CLOCKS as u64);
+    let words = for_data / CLOCKS_PER_WORD as u64;
+    // Never zero: a burst of no words makes no progress, and a bus too slow to carry a
+    // single word inside the budget is a configuration to reject, not to loop on.
+    if words == 0 { 1 } else { words as u32 }
+}
+
+/// CPU cycles to idle so that CE# actually rises between bursts.
+///
+/// Two things have to fit, and the longer one is not the part's: the controller's
+/// memory-mapped timeout has to fire, which is what drives CE# high once the bus goes
+/// quiet, and then `tCPH` has to pass. Both convert into CPU cycles, so both depend on
+/// two clocks that differ by board.
+pub const fn gap_cycles(ospi_hz: u32, timeout_clocks: u32, cpu_hz: u32) -> u32 {
+    if ospi_hz == 0 {
+        return 0;
+    }
+    let for_timeout = (timeout_clocks as u64 * cpu_hz as u64) / ospi_hz as u64;
+    let for_tcph = (TCPH_NS as u64 * cpu_hz as u64) / 1_000_000_000;
+    (((for_timeout + for_tcph) * GAP_SAFETY as u64) + 1) as u32
+}
 
 /// Let CE# rise: wait for the writes to land, then idle the bus long enough for the
 /// controller to deselect the part.
@@ -250,7 +284,7 @@ pub const BURST_GAP_NOPS: u32 = 80;
 /// fits the evidence -- intermittent, load-dependent, and improved but not cured by
 /// halving the burst length -- and it is a hypothesis until the soak test says so.
 #[inline(never)]
-pub fn burst_gap() {
+pub fn burst_gap(cycles: u32) {
     // Wait for the writes to reach the part before timing anything.
     #[cfg(target_arch = "arm")]
     // SAFETY: a barrier. It has no operands and touches no memory of its own; `nomem`
@@ -258,7 +292,7 @@ pub fn burst_gap() {
     unsafe {
         core::arch::asm!("dsb sy", options(nostack, preserves_flags))
     };
-    for _ in 0..BURST_GAP_NOPS {
+    for _ in 0..cycles {
         #[cfg(target_arch = "arm")]
         // SAFETY: a NOP. Not `nomem`, so it is not moved out from between the accesses it
         // is separating -- which is the whole point of it.
@@ -369,14 +403,14 @@ impl StagingArea for PsramArea {
         let addr = self.in_range(offset, data.len())?;
         // A change of direction is a new burst, and `tCPH` wants CE# high between bursts.
         if self.way == Way::Reading {
-            burst_gap();
+            burst_gap(self.gap);
             self.burst.turned();
         }
         self.way = Way::Writing;
         for word in WordPlan::new(addr, data.len()) {
             // CE# has to rise before `tCEM`, or the part stops refreshing itself.
             if self.burst.word() {
-                burst_gap();
+                burst_gap(self.gap);
             }
             let value = if word.whole() {
                 u32::from_le_bytes([
@@ -409,14 +443,14 @@ impl StagingArea for PsramArea {
         let addr = self.in_range(offset, out.len())?;
         // As in `write`: turning the bus round starts a new burst.
         if self.way == Way::Writing {
-            burst_gap();
+            burst_gap(self.gap);
             self.burst.turned();
         }
         self.way = Way::Reading;
         for word in WordPlan::new(addr, out.len()) {
             // Reads hold CE# exactly as writes do, and the digest reads a megabyte.
             if self.burst.word() {
-                burst_gap();
+                burst_gap(self.gap);
             }
             // SAFETY: as `write`.
             let bytes = unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
@@ -443,7 +477,7 @@ impl StagingArea for PsramArea {
         // the sixteen bytes the bootloader acts on -- would be the first write after a
         // megabyte of reads, issued with CE# still low from the read run.
         if self.way == Way::Reading {
-            burst_gap();
+            burst_gap(self.gap);
             self.burst.turned();
         }
         self.way = Way::Writing;
@@ -467,7 +501,7 @@ impl StagingArea for PsramArea {
             recover();
         }
         self.way = Way::Writing;
-        burst_gap();
+        burst_gap(self.gap);
 
         // Read it back before anyone acts on it.
         //
@@ -500,6 +534,94 @@ impl StagingArea for PsramArea {
 mod tests {
     use super::*;
     use catcard_board::spec::ALL;
+
+    /// The derivation, spelled out once so nobody has to redo it in their head.
+    ///
+    /// At 60 MHz, `tCEM` of 8 us is 480 OCTOSPI clocks. A third of that is 144; command
+    /// and address take 14, leaving 130; quad moves a 32-bit word in 8 clocks, so 16
+    /// words. Every number here is from the datasheet or the reference, and the point of
+    /// the test is that the code computes it rather than a comment asserting it.
+    #[test]
+    fn the_burst_length_comes_out_of_the_bus_clock() {
+        assert_eq!(words_per_burst(60_000_000), 16);
+
+        // Halve the clock and the same bytes take twice as long, so half as many fit.
+        assert_eq!(words_per_burst(30_000_000), 7);
+        // Double it and more do. This is the whole reason it is not a constant: the
+        // limit is a time, and a figure worked out on one board's bus silently allows
+        // twice the CE# low it should on a board clocked half as fast.
+        assert_eq!(words_per_burst(120_000_000), 34);
+    }
+
+    /// Whatever the clock, a burst stays inside the part's actual limit.
+    ///
+    /// The property that matters, checked against `tCEM` itself rather than against the
+    /// number the function returned -- so an error in the derivation shows up here
+    /// instead of being confirmed by its own output.
+    #[test]
+    fn no_bus_speed_produces_a_burst_longer_than_tcem() {
+        for ospi_hz in [
+            8_000_000,
+            15_000_000,
+            30_000_000,
+            48_000_000,
+            60_000_000,
+            80_000_000,
+            100_000_000,
+            120_000_000,
+            133_000_000,
+        ] {
+            let words = words_per_burst(ospi_hz);
+            let clocks = CMD_ADDR_CLOCKS as u64 + words as u64 * CLOCKS_PER_WORD as u64;
+            let ns = clocks * 1_000_000_000 / ospi_hz as u64;
+            assert!(
+                ns <= TCEM_NS as u64,
+                "at {ospi_hz} Hz a {words}-word burst holds CE# for {ns} ns, past the \
+                 {TCEM_NS} ns tCEM allows"
+            );
+            assert!(words >= 1, "a burst of no words makes no progress");
+        }
+    }
+
+    /// The gap outlasts what has to happen inside it, on any pair of clocks.
+    ///
+    /// The controller's timeout is what drives CE# high, and `tCPH` is what the part
+    /// wants after that. Both are times; both turn into CPU cycles through two clocks
+    /// that differ by board.
+    #[test]
+    fn the_gap_outlasts_the_timeout_and_tcph() {
+        for (ospi_hz, cpu_hz) in [
+            (60_000_000, 120_000_000),
+            (30_000_000, 120_000_000),
+            (60_000_000, 80_000_000),
+            (120_000_000, 200_000_000),
+        ] {
+            let cycles = gap_cycles(ospi_hz, 16, cpu_hz);
+            let ns = cycles as u64 * 1_000_000_000 / cpu_hz as u64;
+            let needed = 16 * 1_000_000_000 / ospi_hz as u64 + TCPH_NS as u64;
+            assert!(
+                ns >= needed,
+                "at {ospi_hz}/{cpu_hz} the gap is {ns} ns, short of the {needed} ns the \
+                 timeout and tCPH need"
+            );
+        }
+    }
+
+    /// Q1 and mk4/mk5 are the same bus, so the same burst -- but each is read from its
+    /// own board entry, not assumed.
+    #[test]
+    fn every_board_with_psram_gets_a_workable_burst() {
+        for board in ALL {
+            let Some(psram) = board.psram else { continue };
+            let words = words_per_burst(psram.ospi_hz);
+            assert!(words >= 1, "{}: no words fit in tCEM", board.name);
+            assert!(
+                gap_cycles(psram.ospi_hz, psram.mmap_timeout_clocks, 120_000_000) > 0,
+                "{}: a gap of no cycles is not a gap",
+                board.name
+            );
+        }
+    }
 
     /// Every byte of the span is covered exactly once, by 4-aligned words only.
     #[test]
@@ -554,7 +676,7 @@ mod tests {
         for b in ALL {
             let Some(p) = b.psram else { continue };
             // SAFETY: not dereferenced; only the arithmetic is under test.
-            let a = unsafe { PsramArea::claim(&p) };
+            let a = unsafe { PsramArea::claim(&p, 120_000_000) };
             assert!(a.image_base + a.capacity <= a.header_at, "{}", b.name);
             // The documented placement: 2 KB below the top, not 16 bytes below it.
             assert_eq!(a.header_at + HEADER_FROM_END, p.end(), "{}", b.name);
@@ -569,7 +691,7 @@ mod tests {
         for b in ALL {
             let Some(p) = b.psram else { continue };
             // SAFETY: arithmetic only.
-            let a = unsafe { PsramArea::claim(&p) };
+            let a = unsafe { PsramArea::claim(&p, 120_000_000) };
             assert!(
                 a.capacity() >= b.memory.firmware_flash_len,
                 "{}: {} of staging for {} of flash",
@@ -587,7 +709,7 @@ mod tests {
         for b in ALL {
             let Some(p) = b.psram else { continue };
             // SAFETY: arithmetic only.
-            let a = unsafe { PsramArea::claim(&p) };
+            let a = unsafe { PsramArea::claim(&p, 120_000_000) };
             assert!(a.image_base >= p.base + p.len / 2, "{}", b.name);
         }
     }
@@ -604,7 +726,7 @@ mod tests {
             // The value the recovery header and gate 18/7 carry must be an OFFSET from
             // the PSRAM base, not the absolute staging address -- the bootloader adds it
             // to the base, and an absolute value sent it a gigabyte past the end.
-            let a = unsafe { PsramArea::claim(&p) };
+            let a = unsafe { PsramArea::claim(&p, 120_000_000) };
             assert_eq!(
                 a.image_offset,
                 a.image_base - p.base,
@@ -620,10 +742,14 @@ mod tests {
 mod burst_tests {
     use super::*;
 
+    /// The burst limit on the boards we have. Named from a real bus clock rather than
+    /// written down, so these tests keep meaning the same thing if the bus changes.
+    const Q1_WORDS: u32 = words_per_burst(60_000_000);
+
     /// Feed `calls` runs of `words` each through one counter, and report the longest run
     /// of words that went by with no gap -- which is what the part actually experiences.
     fn longest_run(calls: usize, words: usize) -> u32 {
-        let mut burst = Burst::new();
+        let mut burst = Burst::new(Q1_WORDS);
         let (mut run, mut worst) = (0u32, 0u32);
         for _ in 0..calls {
             for _ in 0..words {
@@ -641,7 +767,7 @@ mod burst_tests {
     ///
     /// This is the bug that corrupted a staged image. USB hands over 62-byte frames --
     /// about fifteen words -- and `usbtask` writes each straight through. With the count
-    /// living in the call, no single call ever reached [`WORDS_PER_BURST`], so CE# was
+    /// living in the call, no single call ever reached the burst limit, so CE# was
     /// never released across an entire 476 KB transfer. Staging from a card worked
     /// because a 512-byte sector is 128 words and crosses the threshold on its own,
     /// which is exactly why the failure looked like a USB problem.
@@ -651,9 +777,9 @@ mod burst_tests {
         for words in [1usize, 4, 15, 16, 17, 31] {
             let worst = longest_run(400, words);
             assert!(
-                worst <= WORDS_PER_BURST,
+                worst <= Q1_WORDS,
                 "{words}-word calls ran {worst} words without releasing CE#, over the \
-                 {WORDS_PER_BURST} the 8 us tCEM budget allows"
+                 {Q1_WORDS} the 8 us tCEM budget allows"
             );
         }
     }
@@ -664,7 +790,7 @@ mod burst_tests {
         for words in [32usize, 33, 64, 128, 1000] {
             let worst = longest_run(1, words);
             assert!(
-                worst <= WORDS_PER_BURST,
+                worst <= Q1_WORDS,
                 "a {words}-word call ran {worst} words without releasing CE#"
             );
         }
@@ -677,14 +803,14 @@ mod burst_tests {
     /// back: 64 words, twice the budget, every 256 bytes of a megabyte.
     #[test]
     fn the_seam_between_calls_is_not_a_free_burst() {
-        assert!(longest_run(50, 64) <= WORDS_PER_BURST);
+        assert!(longest_run(50, 64) <= Q1_WORDS);
     }
 
     /// Turning the bus round ends the run: the gap is emitted by the caller for `tCPH`.
     #[test]
     fn a_change_of_direction_starts_the_count_again() {
-        let mut burst = Burst::new();
-        for _ in 0..WORDS_PER_BURST {
+        let mut burst = Burst::new(Q1_WORDS);
+        for _ in 0..Q1_WORDS {
             assert!(!burst.word());
         }
         burst.turned();
