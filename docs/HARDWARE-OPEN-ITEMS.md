@@ -403,30 +403,29 @@ step 2 alone, that is also an answer.
 
 ---
 
-## OCTOSPI is never configured, so PSRAM is not mapped
+## ~~OCTOSPI is never configured, so PSRAM is not mapped~~ — resolved: the bootloader owns it
 
-**Blocks: the firmware upgrade path, on hardware.** `PsramArea::claim` documents a
-safety contract that the PSRAM "must describe a memory-mapped PSRAM that is actually
-present and mapped". Nothing in this firmware maps it: there is no OCTOSPI driver, and
-`RCC_AHB3ENR.OSPI1EN` is never set.
+**Not an open item, and the resolution is the opposite of what this entry used to
+propose.** OCTOSPI1 belongs to the **bootloader**, which sets it up once in
+`psram_setup()` at boot: clock enable, PE10–PE15 at AF10 (`OCTOSPIM_P1`),
+`HAL_OSPI_Init` (prescaler 2 → 60 MHz, ClockMode 0, DHQC), the chip init sequence
+(`0xF5` / `0x66` / `0x99` / `0x9F` / `0x35`), then `HAL_OSPI_MemoryMapped` with
+**`TimeOutPeriod = 16`**. It stays memory-mapped for the firmware's whole lifetime.
 
-Every emulator run passed because the emulator maps the region unconditionally. On
-hardware, `0x9000_0000` is not backed until OCTOSPI1 is configured for memory-mapped
-mode, so staging an image writes nowhere it can be read back from — and staging is the
-last step before an irreversible install, and the only route back to stock firmware.
+The firmware inherits that and uses the address space, exactly as it inherits the clock
+tree and the Q1's LCD. `RCC_AHB3ENR.OSPI1EN` is not set here because it is already set.
 
-This is the same shape as the `PWREN` fault: a peripheral used without being turned on,
-invisible to an emulator that does not model the gate.
+> **Do not write an OCTOSPI driver.** This entry previously said to, and that is now the
+> thing most likely to break the upgrade path: re-initialising the controller, re-clocking
+> it, or switching it back to indirect mode would take apart a working configuration that
+> nothing in this firmware is in a position to rebuild. The firmware never re-inits,
+> re-clocks, or leaves memory-mapped mode.
 
-**Debug → PSRAM says so on the device**, and deliberately does not probe the region: a
-read of an unmapped address faults, and a fault needs a power cycle to clear, so naming
-the gap is worth more than crashing to prove it.
-
-**How to resolve.** Write the OCTOSPI1 driver: clock, pins on the GPIOE bank, the PSRAM
-part's read/write commands, then memory-mapped mode. Until then the upgrade path cannot
-work on real hardware, whatever USB does.
-
----
+What this settles, beyond the mapping: **`TimeOutPeriod = 16` is armed**, so CE# does rise
+once the bus goes idle — that is the mechanism the PSRAM driver's burst gaps rely on, and
+it is present rather than assumed. It is recorded as `Psram::mmap_timeout_clocks` so the
+gap length is computed from it rather than guessed, and the value is the bootloader's to
+change, not ours.
 
 ## One image for mk4 and mk5 needs runtime board detection
 

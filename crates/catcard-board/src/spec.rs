@@ -118,10 +118,15 @@ pub struct Psram {
     /// The controller's memory-mapped timeout, in OCTOSPI clocks.
     ///
     /// What actually drives CE# high once the bus goes idle, and therefore how long a
-    /// gap between bursts has to be before it is a gap at all. We inherit this from the
-    /// bootloader rather than setting it -- see `docs/HARDWARE-OPEN-ITEMS.md`.
+    /// gap between bursts has to be before it is a gap at all.
     ///
-    /// Source: hw-reference/storage.md §PSRAM — stock arms `TimeOutPeriod=16` [C].
+    /// **The bootloader's, not ours.** `psram_setup()` runs once at boot and hands over
+    /// a controller that is clocked, initialised and memory-mapped with
+    /// `TimeOutPeriod = 16`; this firmware inherits it the way it inherits the clock
+    /// tree and the LCD, and never re-inits, re-clocks, or leaves memory-mapped mode.
+    /// So this is a number to read and compute against, never one to write.
+    ///
+    /// Source: hw-reference/storage.md §PSRAM, `mk4-bootloader/psram.c` [C].
     pub mmap_timeout_clocks: u32,
     /// Where the bootloader reads the firmware-staging recovery header.
     ///
