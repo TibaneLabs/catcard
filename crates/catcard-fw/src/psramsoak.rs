@@ -130,16 +130,14 @@ fn after_bulk(base: u32, nops: u32) -> (u32, usize) {
 /// straight through, with CE# released every `gap_words`.
 ///
 /// Returns the number of 256-byte reads that came back wrong, out of the whole span.
-fn bulk_read_back(base: u32, words: u32, gap_words: u32, gap_nops: u32) -> u32 {
+fn bulk_read_back(base: u32, words: u32, gap_words: u32, gap_nops: u32, barrier: bool) -> u32 {
     // SAFETY: `base` is mapped, 4-aligned, above anything in use and below the recovery
     // header, as the caller checked.
     unsafe {
         let mut since = 0u32;
         for i in 0..words {
             if since >= gap_words {
-                for _ in 0..gap_nops {
-                    core::arch::asm!("nop", options(nostack, preserves_flags));
-                }
+                gap(gap_nops, barrier);
                 since = 0;
             }
             since += 1;
@@ -149,9 +147,7 @@ fn bulk_read_back(base: u32, words: u32, gap_words: u32, gap_nops: u32) -> u32 {
         let mut since = 0u32;
         for i in 0..words {
             if since >= gap_words {
-                for _ in 0..gap_nops {
-                    core::arch::asm!("nop", options(nostack, preserves_flags));
-                }
+                gap(gap_nops, barrier);
                 since = 0;
             }
             since += 1;
@@ -160,6 +156,25 @@ fn bulk_read_back(base: u32, words: u32, gap_words: u32, gap_nops: u32) -> u32 {
             }
         }
         wrong
+    }
+}
+
+/// A gap between bursts, with or without draining the write buffer first.
+///
+/// `barrier` is the whole question this test exists to answer. The PSRAM is Normal,
+/// buffered memory, so stores retire into the write buffer and drain behind the CPU:
+/// a delay made only of NOPs can run while the bus is still busy, which would mean the
+/// controller's memory-mapped timeout never fires and CE# never rises -- no gap at all,
+/// however many NOPs were counted. `DSB` waits for them to land first.
+#[inline(always)]
+fn gap(nops: u32, barrier: bool) {
+    if barrier {
+        // SAFETY: a barrier, no operands, no memory of its own.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+    }
+    for _ in 0..nops {
+        // SAFETY: a NOP.
+        unsafe { core::arch::asm!("nop", options(nostack, preserves_flags)) };
     }
 }
 
@@ -298,7 +313,7 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
         crate::menu::blocking_screen(ui.panel, "PSRAM soak", "write then verify");
         let words = 256 * 1024 / 4; // 256 KB, four times the earlier pass
         let effective = if gap_words == 0 { u32::MAX } else { gap_words };
-        let wrong = bulk_read_back(base, words, effective, 80);
+        let wrong = bulk_read_back(base, words, effective, 80, false);
         let mut l = Line::new();
         if gap_words == 0 {
             let _ = write!(l, "no CE# gap: {wrong} wrong of {}", words);
@@ -308,6 +323,38 @@ pub(crate) fn run(ui: &mut crate::ui::Ui<'_>) {
         crate::catlog!(
             "psram soak: CE# gap every {} word(s): {} of {} reads wrong",
             gap_words,
+            wrong,
+            words
+        );
+        let _ = lines.push(l);
+    }
+
+    // The question the driver now turns on: does the gap need a barrier in front of it?
+    //
+    // Both arms use the driver's own settings -- a gap every `WORDS_PER_BURST` words, of
+    // `BURST_GAP_NOPS` -- and differ only in whether the write buffer is drained before
+    // the delay is counted. If the barrier arm is clean and the other is not, then a
+    // NOP delay was never a gap: the stores were still draining through the controller
+    // while it ran, the bus never went idle, the memory-mapped timeout never fired and
+    // CE# stayed low across the whole run. That is the difference between pacing the
+    // part and only appearing to.
+    for barrier in [false, true] {
+        crate::menu::blocking_screen(ui.panel, "PSRAM soak", "barrier or not");
+        let words = 256 * 1024 / 4;
+        let wrong = bulk_read_back(
+            base,
+            words,
+            catcard_upgrade::psram::WORDS_PER_BURST,
+            catcard_upgrade::psram::BURST_GAP_NOPS,
+            barrier,
+        );
+        let mut l = Line::new();
+        let how = if barrier { "dsb+nops" } else { "nops only" };
+        let _ = write!(l, "{how}: {wrong} wrong of {words}");
+        crate::catlog!(
+            "psram soak: gap {} every {} words: {} of {} wrong",
+            how,
+            catcard_upgrade::psram::WORDS_PER_BURST,
             wrong,
             words
         );

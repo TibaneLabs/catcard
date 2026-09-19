@@ -212,9 +212,41 @@ pub const WORDS_PER_BURST: u32 = 16;
 /// staging pays it eight thousand times: about four milliseconds in total.
 pub const BURST_GAP_NOPS: u32 = 80;
 
-/// Let CE# rise: idle the bus long enough for the controller to deselect the part.
+/// Let CE# rise: wait for the writes to land, then idle the bus long enough for the
+/// controller to deselect the part.
+///
+/// # The barrier is the point of this function
+///
+/// The PSRAM is mapped at `0x9000_0000`, which is in the `0x6000_0000..0xA000_0000`
+/// **External RAM** range of the Cortex-M4 default memory map -- *Normal* memory, which
+/// is **buffered**. `write_volatile` binds the compiler, not the bus: it guarantees the
+/// store is emitted and not reordered or elided, and guarantees nothing about when the
+/// store reaches the part. Stores retire into the write buffer and drain behind the CPU.
+///
+/// So a gap made only of NOPs is not a gap. The processor runs the delay while the
+/// buffer is still draining into the controller, the controller still has data to send,
+/// and the bus never goes idle -- which means the memory-mapped timeout never fires and
+/// **CE# never rises**. A run of writes then holds the part selected from end to end,
+/// far past the 8 us `tCEM` allows, and a pseudo-SRAM that cannot refresh loses data
+/// anywhere in the chip: a word nobody wrote, in a header nothing touched.
+///
+/// `DSB` is the architectural answer -- it completes when the explicit memory accesses
+/// before it have completed -- so it goes first and the NOPs follow, and only then is
+/// the bus actually quiet for the timeout to count against.
+///
+/// Source: ARMv7-M Architecture Reference Manual, default memory map and `DSB` [C].
+/// That the missing barrier is what corrupts *this* board's staging is the reading that
+/// fits the evidence -- intermittent, load-dependent, and improved but not cured by
+/// halving the burst length -- and it is a hypothesis until the soak test says so.
 #[inline(never)]
 pub fn burst_gap() {
+    // Wait for the writes to reach the part before timing anything.
+    #[cfg(target_arch = "arm")]
+    // SAFETY: a barrier. It has no operands and touches no memory of its own; `nomem`
+    // is deliberately absent so it is not moved across the accesses it is separating.
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags))
+    };
     for _ in 0..BURST_GAP_NOPS {
         #[cfg(target_arch = "arm")]
         // SAFETY: a NOP. Not `nomem`, so it is not moved out from between the accesses it

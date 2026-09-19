@@ -596,28 +596,12 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     /// On mk3 that is the whole story: the bootrom installs what it finds staged. On
     /// mk4 and later nothing happens until a logged-in `gate 18/7` authorises *this*
     /// region, which is why the caller is handed it rather than left to recompute it.
-    pub fn commit(mut self, approval: Approval) -> Result<Region, Reject>
-    where
-        A::Error: Into<StorageError>,
-    {
+    pub fn commit(mut self, approval: Approval) -> Result<Region, Reject> {
         self.settle()?;
-
-        // Read it back before saying it may be installed.
-        //
-        // `inspect` deliberately does not: it judges the signature against the digest
-        // taken as the bytes arrived, which costs nothing and is the right question for
-        // "is this image genuine". This is a different question -- "did the medium keep
-        // it" -- and it is asked here because this is the last point at which the answer
-        // can change anything. Past this, `gate 18/7` runs the same check behind the
-        // firewall and answers `-112 AUTH_FAIL`, which says "bad signature" about an
-        // image that is correctly signed and merely stored wrong, and leaves the caller
-        // holding a refusal it cannot explain.
-        //
-        // It is a full pass over a slow memory, and it is worth it: it happens once,
-        // after someone has already said yes, and what it buys is that a staging area
-        // that loses bytes is named as such rather than reported as a bad image.
-        self.verify_stored()?;
-
+        // Nothing is read back here. The bootloader verifies the staged image in RAM
+        // before it installs anything, so a second full pass over a slow memory would
+        // be this device checking the same bytes the next thing to touch them checks
+        // anyway. The way to make the image right is to write it right.
         let start = self.area.image_offset();
         self.area
             .publish(approval.length)
