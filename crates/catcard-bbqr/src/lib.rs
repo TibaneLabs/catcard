@@ -81,12 +81,21 @@ pub enum Encoding {
 pub struct FileType(pub u8);
 
 impl FileType {
-    /// A firmware image, as `catcard-image` writes it.
-    pub const BINARY: FileType = FileType(b'B');
-    /// An executable, which some tools use for the same thing.
-    pub const EXECUTABLE: FileType = FileType(b'X');
+    /// A JSON document -- a wallet export, for instance.
+    ///
+    /// **Not [`BINARY`](Self::BINARY).** A reader dispatches on this letter to decide
+    /// what it has been handed, so a wallet export sent as binary is refused by
+    /// software that would happily have taken the same bytes as JSON. Sparrow says
+    /// "BBQR type BINARY is not supported", which is correct of it.
+    pub const JSON: FileType = FileType(b'J');
+    /// Unicode text: descriptors, key expressions, a summary to read.
+    pub const TEXT: FileType = FileType(b'U');
     /// A PSBT.
     pub const PSBT: FileType = FileType(b'P');
+    /// Arbitrary bytes, for something with no better description -- a firmware image.
+    pub const BINARY: FileType = FileType(b'B');
+    /// An executable, which some tools use where this uses [`BINARY`](Self::BINARY).
+    pub const EXECUTABLE: FileType = FileType(b'X');
 }
 
 /// A part's header: which file, how many parts, and which one this is.

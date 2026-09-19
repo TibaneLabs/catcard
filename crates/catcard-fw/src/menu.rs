@@ -3592,7 +3592,7 @@ fn export_generic_json(
         wait_for_any_key(ui);
         return;
     }
-    offer_export(ui, label, file, text.as_bytes());
+    offer_export(ui, label, file, text.as_bytes(), catcard_bbqr::FileType::JSON);
 }
 
 /// One account's extended public key, as plain text.
@@ -3666,7 +3666,7 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         },
     };
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-{what}.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
 }
 
 /// The BIP-48 cosigner keys on their own.
@@ -3722,7 +3722,7 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-KEYS.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
 }
 
 /// The first few addresses of every account, to check a watch-only wallet against.
@@ -3804,7 +3804,7 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-SUMMARY.TXT");
-    offer_export(ui, HEAD, &path, text.as_bytes());
+    offer_export(ui, HEAD, &path, text.as_bytes(), catcard_bbqr::FileType::TEXT);
 }
 
 /// Ask which of `items` to use, or `None` if the user backs out.
@@ -3867,14 +3867,20 @@ pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) ->
 /// that needs nothing but a phone. The device with no card in it and no cable is the
 /// case this exists for.
 #[cfg(feature = "board-q1")]
-fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
+fn offer_export(
+    ui: &mut Ui<'_>,
+    head: &str,
+    file: &str,
+    body: &[u8],
+    kind: catcard_bbqr::FileType,
+) {
     // A list, not a yes/no. Three destinations that are not ranked -- a card for a
     // computer, BBQr for wallets that read it, BC-UR for everything else -- and cancel
     // means none of them rather than one of them.
     const WAYS: &[&str] = &["SD card", "BBQr", "BC-UR"];
     match choose(ui, head, "how to export", WAYS) {
         Some(0) => write_export(ui, head, file, body),
-        Some(1) => crate::qrshow::animate_bbqr(ui, head, body),
+        Some(1) => crate::qrshow::animate_bbqr(ui, head, body, kind),
         Some(2) => crate::qrshow::animate_bcur(ui, head, body),
         _ => {}
     }
@@ -3882,7 +3888,13 @@ fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
 
 /// mk3 and mk4 have no scanner and no screen for this; the card is the only way out.
 #[cfg(not(feature = "board-q1"))]
-fn offer_export(ui: &mut Ui<'_>, head: &str, file: &str, body: &[u8]) {
+fn offer_export(
+    ui: &mut Ui<'_>,
+    head: &str,
+    file: &str,
+    body: &[u8],
+    _kind: catcard_bbqr::FileType,
+) {
     write_export(ui, head, file, body);
 }
 

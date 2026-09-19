@@ -52,8 +52,12 @@ const FRAME_MS: u32 = 250;
 ///
 /// The denser of the two and the right choice for anything Bitcoin: base32 is five bits
 /// a character against BC-UR's four, so the same file is about a quarter fewer codes.
-pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
-    animate(ui, head, payload, FileType::BINARY)
+///
+/// `filetype` is not decoration. A reader dispatches on it to decide what it has been
+/// handed, and sending a wallet export as `BINARY` gets it refused by software that
+/// would have taken the same bytes as `JSON`.
+pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
+    animate(ui, head, payload, filetype)
 }
 
 /// Show `payload` as an animated BC-UR, as `ur:bytes`.
