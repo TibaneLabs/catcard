@@ -17,24 +17,30 @@
 use catcard_bbqr::FileType;
 use catcard_bbqr::encode;
 
-use core::fmt::Write as _;
-
 use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::display;
 use crate::menu;
 use crate::ui::Ui;
 
-/// The largest symbol drawn. Version 12 is 65 modules, which is three pixels a module on
-/// a 320-wide panel with its quiet zone -- about the smallest a phone reads reliably at
-/// arm's length.
-const VERSION: u8 = 12;
-/// Characters a version-12 symbol holds in alphanumeric mode at error-correction L.
+/// The symbol drawn. **Version 7: 45 modules.**
+///
+/// Sized from the pixels, not from the capacity. The content area is 224 rows, and a
+/// symbol needs its four-module quiet zone, so 45 modules get `224 / 53 = 4` pixels
+/// each. Version 12 would hold two and a half times as much and get three pixels, and
+/// with the frame counter beside it only two -- which is what made the codes hard to
+/// read. Four pixels a module is twice the linear size and four times the area.
+///
+/// The cost is more codes: 135 bytes a part against 330, so a two-kilobyte export is
+/// about sixteen frames instead of seven. A code that scans first time beats a shorter
+/// animation that does not.
+const VERSION: u8 = 7;
+/// Characters a version-7 symbol holds in alphanumeric mode at error-correction L.
 ///
 /// From the QR specification's capacity table. L rather than M because every part is
 /// shown repeatedly: a symbol misread once comes round again, so correction that costs
 /// capacity buys less here than it does on an address shown once.
-const CHARS: usize = 535;
+const CHARS: usize = 224;
 
 /// Milliseconds each part is shown for.
 ///
@@ -90,15 +96,12 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
 
     let encoder = QrEncoder::new();
     let mut at = 1u32;
-    let mut note: heapless::String<24> = heapless::String::new();
     loop {
         let Ok(n) = ur::part(TYPE, payload, at, total, line_mem.bytes()) else {
             menu::message(ui.panel, head, "could not encode", "any key to go back");
             menu::wait_for_any_key(ui);
             return;
         };
-        note.clear();
-        let _ = write!(note, "{at} of {total}");
         let text = &line_mem.bytes()[..n];
         let (scratch, storage) = (scratch_mem.bytes(), store_mem.bytes());
         let Ok((grid, _)) = encoder.encode_text_into(text, EcLevel::L, scratch, storage) else {
@@ -106,7 +109,7 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
             menu::wait_for_any_key(ui);
             return;
         };
-        show(ui, grid.width(), |x, y| grid.get(x, y), note.as_str());
+        show(ui, grid.width(), |x, y| grid.get(x, y), at, total);
         if key_within(ui, FRAME_MS) {
             return;
         }
@@ -150,7 +153,6 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
 
     let encoder = QrEncoder::new();
     let mut at = 0usize;
-    let mut note: heapless::String<24> = heapless::String::new();
 
     loop {
         let start = at * per;
@@ -161,8 +163,6 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
             return;
         };
 
-        note.clear();
-        let _ = write!(note, "{} of {total}", at + 1);
         // Three separate blocks, so all three can be borrowed at once.
         let text = &line_mem.bytes()[..n];
         let (scratch, storage) = (scratch_mem.bytes(), store_mem.bytes());
@@ -172,7 +172,13 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
             return;
         };
 
-        show(ui, grid.width(), |x, y| grid.get(x, y), note.as_str());
+        show(
+            ui,
+            grid.width(),
+            |x, y| grid.get(x, y),
+            at as u32 + 1,
+            total as u32,
+        );
 
         // A key leaves, checked while this frame is up rather than between cycles.
         if key_within(ui, FRAME_MS) {
@@ -182,26 +188,43 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     }
 }
 
-/// Draw one symbol with its frame counter beside it.
+/// Draw one symbol as large as the screen allows, with a progress bar beside it.
 ///
-/// The counter is what says whether this is going anywhere: a reader that has stalled
-/// looks exactly like one that is working, and the only visible difference is the
-/// number still moving.
-fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, note: &str) {
-    display::draw(ui.panel, |c| {
-        if catcard_ui::widgets::qr_with_text(
-            c,
-            menu::qr_faces(),
-            display::FONTS.gap,
-            modules,
-            &get,
-            note,
-        )
-        .is_none()
-        {
-            // No arrangement fits the text; the symbol alone is what matters.
-            catcard_ui::widgets::qr(c, modules, &get);
+/// **White, not amber.** Every other screen here is the Coldcard amber, but a QR is read
+/// by a camera rather than a person: scanners expect dark modules on a light field, and
+/// the closer that field is to white the more contrast there is to work with. The greys
+/// palette puts white at the top of its ramp, so the symbol is drawn through that rather
+/// than through the amber one.
+///
+/// **A bar, not a counter.** The text counter had to sit beside the symbol, which cost
+/// it a third of the width and was the main reason the codes were too small. The bar
+/// goes in the margin the square symbol leaves on a wide screen, so it costs nothing --
+/// and it answers the only question anyone has while holding a phone at the screen,
+/// which is whether this is going anywhere at all.
+fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, at: u32, total: u32) {
+    use catcard_ui::canvas::{Canvas, INK, PAPER};
+
+    display::draw_with(ui.panel, &catcard_ui::st7789::GREYS, |c| {
+        catcard_ui::widgets::qr(c, modules, &get);
+
+        // The symbol is square and centred, so on a 320-wide panel showing 224 rows it
+        // leaves about fifty pixels each side. The bar lives in the right-hand one and
+        // never touches the code.
+        let (w, h) = (c.width(), c.height());
+        let side = h.min(w);
+        let gutter = w.saturating_sub(side) / 2;
+        if gutter < 8 || total == 0 {
+            return;
         }
+        let bar_w = (gutter / 3).clamp(3, 10);
+        let x = w - gutter / 2 - bar_w / 2;
+        let top = h / 8;
+        let span = h - 2 * top;
+        // The whole track faintly, then the part done brightly: an empty bar and a
+        // missing bar look the same, and only one of them means something is wrong.
+        c.fill_rect(x, top, bar_w, span, PAPER + 4);
+        let done = (span * at as usize / total as usize).max(1);
+        c.fill_rect(x, top, bar_w, done, INK);
     });
 }
 
