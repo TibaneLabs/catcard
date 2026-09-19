@@ -3702,7 +3702,7 @@ impl Format {
         match self {
             // Bitcoin Core's is prose with two JSON blobs quoted inside it, and the
             // descriptor formats are one line of text. Neither parses as JSON.
-            Format::BitcoinCore | Format::Descriptor => catcard_bbqr::FileType::TEXT,
+            Format::BitcoinCore | Format::Descriptor => catcard_bbqr::FileType::UNICODE,
             Format::Electrum | Format::Wasabi | Format::Unchained => catcard_bbqr::FileType::JSON,
         }
     }
@@ -3968,7 +3968,7 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         HEAD,
         &path,
         text.as_bytes(),
-        catcard_bbqr::FileType::TEXT,
+        catcard_bbqr::FileType::UNICODE,
         signer,
     );
 }
@@ -4033,7 +4033,7 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         HEAD,
         &path,
         text.as_bytes(),
-        catcard_bbqr::FileType::TEXT,
+        catcard_bbqr::FileType::UNICODE,
         signer,
     );
 }
@@ -4125,7 +4125,7 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
         HEAD,
         &path,
         text.as_bytes(),
-        catcard_bbqr::FileType::TEXT,
+        catcard_bbqr::FileType::UNICODE,
         signer,
     );
 }

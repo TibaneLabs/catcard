@@ -42,12 +42,14 @@
 
 #![no_std]
 
-pub mod bytewords;
 pub mod encode;
 
 mod cbor;
 
 pub use cbor::Error as CborError;
+/// The format itself -- bytewords, the checksum and the `ur:` line -- is outscript's.
+/// What is here is the part that needs no allocator: where a fragment belongs.
+pub use outscript::bcur::{Ur, bytewords, crc32};
 
 /// What a part is not.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -57,7 +59,7 @@ pub enum Error {
     /// The sequence field is not `<seqNum>-<seqLen>`, or the numbers are impossible.
     Numbering,
     /// The bytewords would not decode, or their checksum did not match.
-    Bytewords(bytewords::Error),
+    Bytewords(outscript::bcur::Error),
     /// The CBOR inside is not the five-element part this expects.
     Cbor(CborError),
     /// A fountain mixture rather than a single fragment. Not an error in the payload --
@@ -69,8 +71,8 @@ pub enum Error {
     TooLong,
 }
 
-impl From<bytewords::Error> for Error {
-    fn from(e: bytewords::Error) -> Self {
+impl From<outscript::bcur::Error> for Error {
+    fn from(e: outscript::bcur::Error) -> Self {
         Error::Bytewords(e)
     }
 }
@@ -112,62 +114,6 @@ pub struct Placed {
     pub fresh: bool,
     pub have: u32,
     pub total: u32,
-}
-
-/// A UR line taken apart: its type, its sequence field if it has one, and its payload.
-struct Fields<'a> {
-    #[allow(dead_code)]
-    ty: &'a [u8],
-    seq: Option<&'a [u8]>,
-    payload: &'a [u8],
-}
-
-/// Split `ur:type/seq/payload`.
-///
-/// A single-part UR has no sequence field; it reads as one fragment of one.
-fn split(line: &[u8]) -> Result<Fields<'_>, Error> {
-    // Either case: a UR meant for a QR is upper-cased whole, prefix and type included,
-    // so that the symbol can use its alphanumeric mode.
-    let rest = match line {
-        [a, b, b':', rest @ ..]
-            if a.eq_ignore_ascii_case(&b'u') && b.eq_ignore_ascii_case(&b'r') =>
-        {
-            rest
-        }
-        _ => return Err(Error::NotUr),
-    };
-    let mut it = rest.split(|&c| c == b'/');
-    let ty = it.next().ok_or(Error::NotUr)?;
-    let a = it.next().ok_or(Error::NotUr)?;
-    match it.next() {
-        Some(b) if it.next().is_none() => Ok(Fields {
-            ty,
-            seq: Some(a),
-            payload: b,
-        }),
-        None => Ok(Fields {
-            ty,
-            seq: None,
-            payload: a,
-        }),
-        _ => Err(Error::NotUr),
-    }
-}
-
-fn decimal(text: &[u8]) -> Option<u32> {
-    if text.is_empty() {
-        return None;
-    }
-    let mut n: u32 = 0;
-    for &c in text {
-        n = n
-            .checked_mul(10)?
-            .checked_add(c.checked_sub(b'0')? as u32)?;
-        if c > b'9' {
-            return None;
-        }
-    }
-    Some(n)
 }
 
 /// Collects the fragments of one message.
@@ -217,23 +163,13 @@ impl Collector {
     ///
     /// Does **not** count the part. [`confirm`](Self::confirm) does, once the caller has
     /// stored it.
-    pub fn accept(&mut self, line: &[u8], scratch: &mut [u8]) -> Result<Placed, Error> {
-        let Fields { seq, payload, .. } = split(line)?;
-
-        // The sequence field is a claim the CBOR inside repeats; it is parsed to reject
-        // a malformed line early, and the CBOR is what is believed.
-        if let Some(seq) = seq {
-            let mut halves = seq.split(|&c| c == b'-');
-            let (a, b) = (halves.next(), halves.next());
-            if halves.next().is_some() || a.and_then(decimal).is_none() {
-                return Err(Error::Numbering);
-            }
-            if b.and_then(decimal).is_none() {
-                return Err(Error::Numbering);
-            }
-        }
-
-        let n = bytewords::decode(payload, scratch)?;
+    pub fn accept(&mut self, line: &str, scratch: &mut [u8]) -> Result<Placed, Error> {
+        // Either case: a UR meant for a QR is upper-cased whole, prefix and type
+        // included, so that the symbol can use its alphanumeric mode. The sequence
+        // field it carries is a claim the CBOR inside repeats -- parsing it here
+        // rejects a malformed line early, and the CBOR is what is believed.
+        let ur = Ur::parse(line).map_err(|_| Error::NotUr)?;
+        let n = ur.decode_to_slice(scratch)?;
         let (part, data) = cbor::part(&scratch[..n])?;
 
         if part.seq_len == 0 || part.seq_len as usize > MAX_PARTS {
@@ -309,7 +245,7 @@ impl Collector {
     /// it is here.
     pub fn verify(&self, message: &[u8]) -> bool {
         self.of
-            .is_some_and(|p| self.complete() && bytewords::crc32(message) == p.checksum)
+            .is_some_and(|p| self.complete() && crc32(message) == p.checksum)
     }
 }
 

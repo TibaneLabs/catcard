@@ -15,7 +15,7 @@
 //! base32's 1.6 -- which is why a Bitcoin-only payload should go the other way. This is
 //! here for the payloads BBQr has no file type for.
 
-use crate::bytewords;
+use outscript::bcur::bytewords::{self, Style};
 
 /// What a part could not be written as.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -37,8 +37,13 @@ pub fn encoded_len(ty: &str, fragment: usize, seq_num: u32, seq_len: u32) -> usi
     // The CBOR header, generously: five elements, four integers of at most five bytes
     // each, and a byte-string header of at most three.
     let cbor = 1 + 4 * 5 + 3 + fragment;
-    // Bytewords is two characters a byte, and the CRC-32 adds four bytes.
-    FRAME + ty.len() + digits(seq_num) + 1 + digits(seq_len) + (cbor + 4) * 2
+    // Bytewords is two characters a byte, and the checksum adds four of them.
+    FRAME
+        + ty.len()
+        + digits(seq_num)
+        + 1
+        + digits(seq_len)
+        + bytewords::encoded_len(cbor, Style::Minimal)
 }
 
 const fn digits(mut n: u32) -> usize {
@@ -88,7 +93,7 @@ pub fn part(
     // The CBOR body, built into the tail of `out` so there is one buffer rather than
     // two: bytewords doubles the length, so the second half is always free at this
     // point and is overwritten from the front as the words are written.
-    let checksum = bytewords::crc32(message);
+    let checksum = outscript::bcur::crc32(message);
     let mut body: heapless::Vec<u8, 1024> = heapless::Vec::new();
     let _ = body.push(0x85); // array of five
     uint(seq_num as u64, &mut body);
@@ -113,12 +118,18 @@ pub fn part(
         let _ = write!(h, "/{seq_num}-{seq_len}/");
         h
     };
-    let need = head.len() + (body.len() + bytewords::CHECKSUM_LEN) * 2;
+    let need = head.len() + bytewords::encoded_len(body.len(), Style::Minimal);
     if need > out.len() {
         return Err(Error::TooLong);
     }
     out[..head.len()].copy_from_slice(head.as_bytes());
-    let n = bytewords::encode_upper(&body, &mut out[head.len()..]);
+    let n = bytewords::encode_to_slice(&body, Style::Minimal, &mut out[head.len()..])
+        .map_err(|_| Error::TooLong)?;
+    // Upper case, for the same reason the prefix and the type are: one lower-case letter
+    // anywhere in the line drops the whole symbol out of QR's alphanumeric mode, which
+    // costs a third of its capacity. The specification allows it and a reader lower-cases
+    // it again.
+    out[head.len()..head.len() + n].make_ascii_uppercase();
     Ok(head.len() + n)
 }
 

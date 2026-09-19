@@ -9,32 +9,14 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// The four-letter words, needed only to encode in the tests.
-const WORDS: &str = include_str!("words.txt");
+use outscript::bcur::bytewords::Style;
 
-fn pairs() -> Vec<[u8; 2]> {
-    WORDS
-        .split_whitespace()
-        .map(|w| {
-            let b = w.as_bytes();
-            [b[0], b[3]]
-        })
-        .collect()
-}
-
+/// Bytewords, through the real encoder -- the table and the checksum are outscript's,
+/// and tested there. These are about what is done with the bytes afterwards.
 fn encode_bytewords(data: &[u8]) -> String {
-    let p = pairs();
-    let mut s = String::new();
-    let full: Vec<u8> = data
-        .iter()
-        .copied()
-        .chain(bytewords::crc32(data).to_be_bytes())
-        .collect();
-    for b in full {
-        s.push(p[b as usize][0] as char);
-        s.push(p[b as usize][1] as char);
-    }
-    s
+    let mut out = vec![0u8; bytewords::encoded_len(data.len(), Style::Minimal)];
+    let n = bytewords::encode_to_slice(data, Style::Minimal, &mut out).expect("encodes");
+    String::from_utf8(out[..n].to_vec()).expect("ascii")
 }
 
 /// CBOR: an unsigned integer, in the shortest form that holds it.
@@ -71,7 +53,7 @@ fn cbor_bytes(data: &[u8], out: &mut Vec<u8>) {
 }
 
 /// One part of `message`, as a conforming encoder writes it.
-fn part_line(message: &[u8], seq_len: u32, seq_num: u32) -> Vec<u8> {
+fn part_line(message: &[u8], seq_len: u32, seq_num: u32) -> String {
     let fragment = message.len().div_ceil(seq_len as usize);
     let at = (seq_num - 1) as usize * fragment;
     // Every fragment is the same length; the last is padded with zeroes.
@@ -85,14 +67,13 @@ fn part_line(message: &[u8], seq_len: u32, seq_num: u32) -> Vec<u8> {
     cbor_uint(seq_num as u64, &mut cbor);
     cbor_uint(seq_len as u64, &mut cbor);
     cbor_uint(message.len() as u64, &mut cbor);
-    cbor_uint(bytewords::crc32(message) as u64, &mut cbor);
+    cbor_uint(crc32(message) as u64, &mut cbor);
     cbor_bytes(&data, &mut cbor);
 
     format!(
         "ur:crypto-psbt/{seq_num}-{seq_len}/{}",
         encode_bytewords(&cbor)
     )
-    .into_bytes()
 }
 
 fn payload(len: usize) -> Vec<u8> {
@@ -100,89 +81,6 @@ fn payload(len: usize) -> Vec<u8> {
 }
 
 /// The spec's own vector, which is what says the word list is the right word list.
-#[test]
-fn the_spec_test_vector() {
-    let data = [
-        0xc7, 0x09, 0x85, 0x80, 0x12, 0x5e, 0x2a, 0xb0, 0x98, 0x12, 0x53, 0x46, 0x8b, 0x2d, 0xbc,
-        0x52,
-    ];
-    assert_eq!(bytewords::crc32(&data), 0xfeac_0dea);
-    let encoded = encode_bytewords(&data);
-    assert_eq!(encoded, "staslplabghydrpfmkbggufgludprfgmzepsbtwd");
-
-    let mut out = [0u8; 16];
-    let n = bytewords::decode(encoded.as_bytes(), &mut out).unwrap();
-    assert_eq!((&out[..n], n), (&data[..], 16));
-}
-
-/// Every one of the 256 bytes survives the round trip.
-///
-/// The test that was missing. The lookup table marked "no such word" with `0xFF`,
-/// which is also the index of `zoom`, so the byte `0xFF` decoded as not-a-word -- and
-/// the spec's own test vector happens to contain no `0xFF`, so it passed. A payload
-/// that did contain one failed, which is to say almost every real payload.
-#[test]
-fn every_byte_survives() {
-    let all: Vec<u8> = (0..=255u8).collect();
-    let encoded = encode_bytewords(&all);
-    assert_eq!(encoded.len(), (256 + 4) * 2);
-    let mut out = vec![0u8; 256];
-    let n = bytewords::decode(encoded.as_bytes(), &mut out).expect("all 256");
-    assert_eq!(n, 256);
-    assert_eq!(out, all);
-}
-
-/// And each byte on its own, so a failure names the byte rather than the payload.
-#[test]
-fn each_byte_on_its_own() {
-    for b in 0..=255u8 {
-        let encoded = encode_bytewords(&[b]);
-        let mut out = [0u8; 1];
-        let n = bytewords::decode(encoded.as_bytes(), &mut out)
-            .unwrap_or_else(|e| panic!("byte {b} encodes to {encoded} and fails: {e:?}"));
-        assert_eq!((n, out[0]), (1, b), "byte {b}");
-    }
-}
-
-#[test]
-fn a_damaged_sequence_fails_its_checksum() {
-    let data = payload(32);
-    let mut encoded = encode_bytewords(&data).into_bytes();
-    // Change one character to another valid word: the decode succeeds, the CRC does not.
-    let last = encoded.len() - 10;
-    encoded[last] = if encoded[last] == b'a' { b'b' } else { b'a' };
-    let mut out = [0u8; 64];
-    match bytewords::decode(&encoded, &mut out) {
-        Err(bytewords::Error::Checksum { .. }) | Err(bytewords::Error::NotAWord) => {}
-        other => panic!("a changed character must not pass: {other:?}"),
-    }
-}
-
-#[test]
-fn what_is_not_bytewords() {
-    let mut out = [0u8; 64];
-    assert_eq!(
-        bytewords::decode(b"abc", &mut out),
-        Err(bytewords::Error::Length)
-    );
-    assert_eq!(
-        bytewords::decode(b"", &mut out),
-        Err(bytewords::Error::Length)
-    );
-    // 'q' begins no word. Upper case, on the other hand, is legitimate -- a UR is
-    // upper-cased whole so a QR can use its alphanumeric mode -- so it is not tested
-    // here as a failure; `either_case_decodes` tests that it works.
-    assert_eq!(
-        bytewords::decode(b"qqaeadaoaxaaahamat", &mut out),
-        Err(bytewords::Error::NotAWord)
-    );
-    // A pair that is two letters but no word's ends.
-    assert_eq!(
-        bytewords::decode(b"aeadjqaxaaahamat", &mut out),
-        Err(bytewords::Error::NotAWord)
-    );
-}
-
 #[test]
 fn a_message_in_order_reassembles() {
     let message = payload(1000);
@@ -259,9 +157,9 @@ fn a_fountain_mixture_is_skipped() {
     cbor_uint(6, &mut cbor);
     cbor_uint(5, &mut cbor);
     cbor_uint(message.len() as u64, &mut cbor);
-    cbor_uint(bytewords::crc32(&message) as u64, &mut cbor);
+    cbor_uint(crc32(&message) as u64, &mut cbor);
     cbor_bytes(&[0u8; 200], &mut cbor);
-    let line = format!("ur:crypto-psbt/6-5/{}", encode_bytewords(&cbor)).into_bytes();
+    let line = format!("ur:crypto-psbt/6-5/{}", encode_bytewords(&cbor));
 
     assert_eq!(
         c.accept(&line, &mut scratch),
@@ -319,19 +217,21 @@ fn what_is_not_a_ur() {
     let mut scratch = vec![0u8; 512];
     let mut c = Collector::new();
     for line in [
-        &b"hello"[..],
-        b"ur:",
-        b"ur:crypto-psbt",
-        b"ur:crypto-psbt/1-2/3-4/aeae",
+        "hello",
+        "ur:",
+        "ur:crypto-psbt",
+        "ur:crypto-psbt/1-2/3-4/aeae",
     ] {
         assert!(
             matches!(c.accept(line, &mut scratch), Err(Error::NotUr)),
             "{line:?} is not a UR"
         );
     }
+    // A sequence field that is not two numbers is not a UR either -- the codec rejects
+    // the line before there is anything to number.
     assert!(matches!(
-        c.accept(b"ur:crypto-psbt/x-2/aeadaoax", &mut scratch),
-        Err(Error::Numbering)
+        c.accept("ur:crypto-psbt/x-2/aeadaoax", &mut scratch),
+        Err(Error::NotUr)
     ));
 }
 
@@ -345,7 +245,7 @@ fn the_cbor_must_be_a_five_element_part() {
     for n in [1u64, 1, 8, 0] {
         cbor_uint(n, &mut cbor);
     }
-    let line = format!("ur:crypto-psbt/1-1/{}", encode_bytewords(&cbor)).into_bytes();
+    let line = format!("ur:crypto-psbt/1-1/{}", encode_bytewords(&cbor));
     assert!(matches!(
         c.accept(&line, &mut scratch),
         Err(Error::Cbor(CborError::NotAPart))
@@ -366,7 +266,8 @@ fn a_written_ur_round_trips() {
 
     for i in 1..=seq_len {
         let n = encode::part("bytes", &message, i, seq_len, &mut line).unwrap();
-        let p = c.accept(&line[..n], &mut scratch).expect("its own part");
+        let text = core::str::from_utf8(&line[..n]).expect("ascii");
+        let p = c.accept(text, &mut scratch).expect("its own part");
         out[p.offset..p.offset + p.len].copy_from_slice(&scratch[p.at.start..p.at.start + p.len]);
         c.confirm(p);
     }
@@ -394,20 +295,24 @@ fn a_written_ur_is_all_alphanumeric() {
     }
 }
 
-/// A reader must take either case, because both are legitimate.
+/// A reader must take either case, because both are legitimate: the lower case the
+/// specification writes, and the upper case a UR is put into to stay in QR's
+/// alphanumeric mode. Every UR this device ever shows is the upper one.
 #[test]
-fn either_case_decodes() {
-    let data = payload(40);
-    let mut upper = vec![0u8; 256];
-    let n = bytewords::encode_upper(&data, &mut upper);
-    let upper = &upper[..n];
-    assert!(upper.iter().all(|c| !c.is_ascii_lowercase()));
+fn either_case_is_read() {
+    let message = payload(200);
+    let line = part_line(&message, 2, 1);
+    let mut scratch = vec![0u8; 512];
 
-    let lower: Vec<u8> = upper.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let (mut a, mut b) = (vec![0u8; 64], vec![0u8; 64]);
-    let na = bytewords::decode(upper, &mut a).expect("upper");
-    let nb = bytewords::decode(&lower, &mut b).expect("lower");
-    assert_eq!((&a[..na], &b[..nb]), (&data[..], &data[..]));
+    let mut lower = Collector::new();
+    let a = lower
+        .accept(&line.to_ascii_lowercase(), &mut scratch)
+        .expect("lower");
+    let mut upper = Collector::new();
+    let b = upper
+        .accept(&line.to_ascii_uppercase(), &mut scratch)
+        .expect("upper");
+    assert_eq!((a.offset, a.len, a.total), (b.offset, b.len, b.total));
 }
 
 /// The size estimate is never short, which is what a caller allocates from.

@@ -106,7 +106,10 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
                 }
             };
         }
-        match read_one(&mut which, line, scratch, sink) {
+        let Some(text) = as_text(line) else {
+            return Next::More;
+        };
+        match read_one(&mut which, text, scratch, sink) {
             Ok(Some(landed)) => {
                 if (landed.have, landed.total) != shown {
                     shown = (landed.have, landed.total);
@@ -154,7 +157,7 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
 /// fatal: the sink refused, or two different files are in shot.
 fn read_one(
     which: &mut Which,
-    line: &[u8],
+    line: &str,
     scratch: &mut [u8],
     sink: &mut dyn Sink,
 ) -> Result<Option<Landed>, &'static str> {
@@ -162,9 +165,9 @@ fn read_one(
     // parse, because a line that announces itself as BBQr and then fails to parse is a
     // damaged BBQr line, not an invitation to try it as BC-UR.
     if matches!(which, Which::Unknown) {
-        if line.starts_with(b"B$") {
+        if line.as_bytes().starts_with(b"B$") {
             *which = Which::Bbqr(catcard_bbqr::Collector::new());
-        } else if starts_with_ur(line) {
+        } else if starts_with_ur(line.as_bytes()) {
             *which = Which::Bcur(catcard_bcur::Collector::new());
         } else {
             return Ok(None);
@@ -174,18 +177,20 @@ fn read_one(
     match which {
         Which::Unknown => Ok(None),
         Which::Bbqr(collector) => {
-            let Ok((placed, payload)) = collector.accept(line) else {
-                return Ok(None);
+            let placed = match collector.accept(line) {
+                Ok(placed) => placed,
+                // The one refusal worth a screen: the sender compressed the file, which
+                // cannot be reassembled in place. Everything else is a bad frame.
+                Err(catcard_bbqr::Error::Compressed) => return Err("send it uncompressed"),
+                Err(_) => return Ok(None),
             };
             // An upper bound: every part but the last is this long, and the last is
             // shorter. Told before anything is written, because a sink that sizes itself
             // from this cannot be told after the fact.
             sink.expect(placed.len * placed.total as usize)?;
             if placed.fresh {
-                let end = placed.len;
-                let room = scratch.get_mut(..end).ok_or("a part was too long")?;
-                let header = collector.header().ok_or("a part was too long")?;
-                if catcard_bbqr::decode(header.encoding, payload, room).is_err() {
+                let room = scratch.get_mut(..placed.len).ok_or("a part was too long")?;
+                if catcard_bbqr::decode_part_to_slice(line, room).is_err() {
                     return Ok(None);
                 }
                 sink.place(placed.offset, room, placed.index + 1 == placed.total)?;
@@ -242,6 +247,12 @@ fn read_one(
 /// Whether a line says it is part of a multi-code transfer.
 fn announced(line: &[u8]) -> bool {
     line.starts_with(b"B$") || starts_with_ur(line)
+}
+
+/// A line as text, which both formats are: every character of a BBQr part and of a UR
+/// is ASCII. Anything else is not one of them, whatever else it may be.
+fn as_text(line: &[u8]) -> Option<&str> {
+    core::str::from_utf8(line).ok()
 }
 
 /// Whether a line announces itself as a UR, in either case.

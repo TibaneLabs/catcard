@@ -1,272 +1,75 @@
-//! BBQr: one file split across a series of QR codes.
+//! Placing BBQr parts as they are caught, without holding on to any of them.
 //!
-//! A QR code holds a few kilobytes at most, so anything larger arrives as a sequence of
-//! them shown in turn while the scanner watches. BBQr is the format Coldcard's tooling
-//! writes for that, and this reads it.
+//! The format itself -- headers, base32, hex, deflate -- is [`outscript::bbqr`]. What is
+//! here is the one thing that crate deliberately does not do without an allocator: work
+//! out *where* a part belongs so it can be written straight to its destination and
+//! forgotten.
 //!
-//! Each code carries one line:
+//! # Why not `outscript::bbqr::Joiner`
 //!
-//! ```text
-//! B$ <encoding> <filetype> <total> <index> <payload>
-//!    1 char     1 char     2 chars 2 chars
-//! ```
+//! `Joiner` keeps every part in a `Vec<Vec<u8>>` until the file is whole, which is the
+//! right shape on a host and impossible here: the largest thing this device reads by QR
+//! is a firmware image, and the only memory it fits in is the staging area it is being
+//! written into. There is nowhere to hold a second copy.
 //!
-//! `total` and `index` are base36 (`0-9A-Z`), so a file can be up to 1296 parts and the
-//! index is zero-based. Every part of a file agrees on the header but for its index, and
-//! every part but the last carries the same number of payload bytes -- which is what
-//! lets a part be placed without having seen the ones before it.
+//! So [`Collector`] holds no data at all -- a bitmap of which parts have been seen, and
+//! the part length, which is all that is needed to turn an index into an offset. Each
+//! part is decoded once, straight to where it goes.
 //!
-//! # `Z` is deferred, and which payload you are carrying decides whether that matters
+//! # `accept` then `confirm`, in that order
 //!
-//! [`Encoding::Base32`] and [`Encoding::Hex`] are read. `Z` -- deflate, then base32 --
-//! is not, **yet**, and the reason is about size rather than about the format.
-//!
-//! `Z` compresses the whole file before splitting it, so no part decodes on its own:
-//! the entire compressed stream must be reassembled before any of it becomes data. For
-//! a **firmware image** that is a third of a megabyte, and the only place it fits is the
-//! PSRAM the image is being staged into -- so inflating would read that part while
-//! writing to it, and interleaved reads and writes are the documented way to corrupt it
-//! (`hw-reference/storage.md`). Uncompressed, a part decodes straight to its offset and
-//! is forgotten.
-//!
-//! For a **PSBT** none of that applies. A few kilobytes of compressed stream sits in the
-//! heap, and inflating from there into the signing workspace reads SRAM and writes
-//! PSRAM, which is not the pattern that corrupts anything. PSBTs also compress well, so
-//! `Z` is the encoding that matters for them and is worth adding when they arrive.
+//! A part is counted only once the caller has actually stored it. A collector that
+//! counted on sight would report a complete file after a write that failed, and for a
+//! firmware image the only remaining check would be the signature.
 //!
 //! # Where the bytes go is the caller's business
 //!
-//! Two consumers want different destinations: a firmware image goes to the staging area
-//! through `Staged::place`, which takes whole words at an offset; a PSBT goes into a
-//! plain buffer. So [`Collector::accept`] works out *where* a part belongs and hands
-//! back its still-encoded payload, leaving the caller to decode it wherever it likes.
-//! [`Collector::take`] is the convenience for the buffer case.
+//! Two consumers want different destinations: a firmware image goes to the staging area,
+//! which takes whole words at an offset; a PSBT goes into a plain buffer. So `accept`
+//! says where a part belongs and leaves the decoding to the caller, and [`Collector::take`]
+//! is the convenience for the buffer case.
 
 #![no_std]
 
-pub mod encode;
+pub use outscript::bbqr::{
+    Encoding, FileType, HEADER_LEN, Header, MAX_PARTS, decode_part_to_slice, decoded_len_bound,
+    encode_part_to_slice, encoded_len,
+};
 
-/// What a line is not.
+/// What went wrong with a part.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
-    /// Not a BBQr line at all: no `B$`, or too short to hold a header.
-    NotBbqr,
-    /// The encoding character is not one this reads.
-    Encoding(u8),
-    /// `total` or `index` is not base36, or the index is not below the total.
-    Numbering,
-    /// The payload is not valid for its encoding, or is not a whole number of bytes.
-    Payload,
-    /// The payload decodes to more than the caller left room for.
-    TooLong,
+    /// The format itself refused it: not a header, bad base32, an index out of range.
+    Codec(outscript::bbqr::Error),
+    /// The parts are compressed as a whole, which this cannot reassemble in place.
+    ///
+    /// `Z` deflates the file *before* cutting it up, so no part means anything on its
+    /// own and the entire compressed stream has to be whole before any of it is data.
+    /// For a firmware image the only memory that holds it is the staging area the image
+    /// is being written into, so inflating would read that part while writing to it --
+    /// the documented way to corrupt it (`hw-reference/storage.md`).
+    Compressed,
     /// This part disagrees with the ones already seen about what file this is.
     Mismatch,
+    /// The payload decodes to more than the caller left room for.
+    TooLong,
     /// The last part arrived before any other, so there is nothing to measure a full
     /// part against and its offset is not yet knowable. Keep scanning.
     PartLenUnknown,
 }
 
-/// How a part's payload is written.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Encoding {
-    /// RFC 4648 base32, no padding. Alphanumeric, which is the QR mode that fits most.
-    Base32,
-    /// Plain hex, upper case. Half the density; accepted because it is trivial to make.
-    Hex,
-}
-
-/// What kind of file the parts carry. Passed through rather than acted on, except that
-/// a screen expecting one kind should refuse another.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct FileType(pub u8);
-
-impl FileType {
-    /// A JSON document -- a wallet export, for instance.
-    ///
-    /// **Not [`BINARY`](Self::BINARY).** A reader dispatches on this letter to decide
-    /// what it has been handed, so a wallet export sent as binary is refused by
-    /// software that would happily have taken the same bytes as JSON. Sparrow says
-    /// "BBQR type BINARY is not supported", which is correct of it.
-    pub const JSON: FileType = FileType(b'J');
-    /// Unicode text: descriptors, key expressions, a summary to read.
-    pub const TEXT: FileType = FileType(b'U');
-    /// A PSBT.
-    pub const PSBT: FileType = FileType(b'P');
-    /// Arbitrary bytes, for something with no better description -- a firmware image.
-    pub const BINARY: FileType = FileType(b'B');
-    /// An executable, which some tools use where this uses [`BINARY`](Self::BINARY).
-    pub const EXECUTABLE: FileType = FileType(b'X');
-}
-
-/// A part's header: which file, how many parts, and which one this is.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct Header {
-    pub encoding: Encoding,
-    pub filetype: FileType,
-    pub total: u16,
-    pub index: u16,
-}
-
-/// Bytes of header before the payload.
-pub const HEADER_LEN: usize = 8;
-
-/// One base36 digit.
-fn base36(c: u8) -> Option<u16> {
-    match c {
-        b'0'..=b'9' => Some((c - b'0') as u16),
-        b'A'..=b'Z' => Some((c - b'A') as u16 + 10),
-        _ => None,
+impl From<outscript::bbqr::Error> for Error {
+    fn from(e: outscript::bbqr::Error) -> Self {
+        Error::Codec(e)
     }
 }
 
-/// Split a line into its header and its still-encoded payload.
-pub fn parse(line: &[u8]) -> Result<(Header, &[u8]), Error> {
-    if line.len() < HEADER_LEN || &line[..2] != b"B$" {
-        return Err(Error::NotBbqr);
-    }
-    let encoding = match line[2] {
-        b'2' => Encoding::Base32,
-        b'H' => Encoding::Hex,
-        other => return Err(Error::Encoding(other)),
-    };
-    let total = base36(line[4])
-        .zip(base36(line[5]))
-        .map(|(a, b)| a * 36 + b)
-        .ok_or(Error::Numbering)?;
-    let index = base36(line[6])
-        .zip(base36(line[7]))
-        .map(|(a, b)| a * 36 + b)
-        .ok_or(Error::Numbering)?;
-    // A file of no parts, or a part past the end, describes nothing that can be
-    // assembled. Caught here so no caller has to wonder whether it was checked.
-    if total == 0 || index >= total {
-        return Err(Error::Numbering);
-    }
-    Ok((
-        Header {
-            encoding,
-            filetype: FileType(line[3]),
-            total,
-            index,
-        },
-        &line[HEADER_LEN..],
-    ))
-}
-
-/// How many bytes `payload` will decode to, without decoding it.
-///
-/// For deciding whether it fits before writing any of it.
-pub fn decoded_len(encoding: Encoding, payload: &[u8]) -> Result<usize, Error> {
-    match encoding {
-        // Five bytes per eight characters. Anything else is a part that was cut.
-        Encoding::Base32 => match payload.len() % 8 {
-            0 => Ok(payload.len() / 8 * 5),
-            // The tail lengths base32 can legitimately end on, and what each carries.
-            2 => Ok(payload.len() / 8 * 5 + 1),
-            4 => Ok(payload.len() / 8 * 5 + 2),
-            5 => Ok(payload.len() / 8 * 5 + 3),
-            7 => Ok(payload.len() / 8 * 5 + 4),
-            _ => Err(Error::Payload),
-        },
-        Encoding::Hex => payload
-            .len()
-            .is_multiple_of(2)
-            .then_some(payload.len() / 2)
-            .ok_or(Error::Payload),
-    }
-}
-
-/// Decode `payload` into `out`, returning how many bytes it produced.
-pub fn decode(encoding: Encoding, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let need = decoded_len(encoding, payload)?;
-    if need > out.len() {
-        return Err(Error::TooLong);
-    }
-    match encoding {
-        Encoding::Base32 => decode_base32(payload, &mut out[..need]),
-        Encoding::Hex => decode_hex(payload, &mut out[..need]),
-    }?;
-    Ok(need)
-}
-
-/// One base32 character, RFC 4648: `A-Z` then `2-7`.
-fn b32(c: u8) -> Option<u32> {
-    match c {
-        b'A'..=b'Z' => Some((c - b'A') as u32),
-        b'2'..=b'7' => Some((c - b'2') as u32 + 26),
-        _ => None,
-    }
-}
-
-fn decode_base32(payload: &[u8], out: &mut [u8]) -> Result<(), Error> {
-    // Five bits at a time into a bit accumulator, a byte out whenever eight are in.
-    let (mut acc, mut bits, mut at) = (0u32, 0u32, 0usize);
-    for &c in payload {
-        acc = (acc << 5) | b32(c).ok_or(Error::Payload)?;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            let byte = (acc >> bits) as u8;
-            // The final characters of a part can carry padding bits beyond the last
-            // whole byte; those are dropped rather than written past the end.
-            if at < out.len() {
-                out[at] = byte;
-                at += 1;
-            }
-            acc &= (1 << bits) - 1;
-        }
-    }
-    // Whatever is left is padding, and padding must be zero. A non-zero tail means the
-    // characters were not produced by this encoding, and taking it anyway would accept
-    // a part that had been altered.
-    if acc != 0 {
-        return Err(Error::Payload);
-    }
-    (at == out.len()).then_some(()).ok_or(Error::Payload)
-}
-
-fn decode_hex(payload: &[u8], out: &mut [u8]) -> Result<(), Error> {
-    fn nib(c: u8) -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            _ => None,
-        }
-    }
-    for (slot, pair) in out.iter_mut().zip(payload.chunks(2)) {
-        let hi = nib(pair[0]).ok_or(Error::Payload)?;
-        let lo = nib(pair[1]).ok_or(Error::Payload)?;
-        *slot = hi << 4 | lo;
-    }
-    Ok(())
-}
-
-/// The most parts a file can be split into: two base36 digits.
-pub const MAX_PARTS: usize = 36 * 36;
-
-/// Which parts of a file have been seen, and where the next one belongs.
-///
-/// Holds no data. A part is decoded straight into whatever the caller is filling --
-/// which for a firmware image is the staging area -- so nothing here grows with the
-/// size of the file.
-pub struct Collector {
-    header: Option<Header>,
-    /// The payload length of a full part, learned from the first one seen. Every part
-    /// but the last carries this much, which is what makes an index an offset.
-    part_len: usize,
-    /// The last part's length, which with `part_len` gives the file's size.
-    last_len: usize,
-    seen: [u64; MAX_PARTS / 64],
-    count: u16,
-}
-
-/// What a part turned out to be.
+/// Where a part belongs, and how far along the file is.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Placed {
-    /// Which part this is, zero-based.
+    /// Zero-based part number.
     pub index: u16,
-    /// Where its bytes belong in the file.
+    /// Where its bytes go in the file.
     pub offset: usize,
     /// How many bytes it carried.
     pub len: usize,
@@ -277,13 +80,31 @@ pub struct Placed {
     pub total: u16,
 }
 
+/// Which parts of one file have arrived.
+pub struct Collector {
+    /// What every part agrees on. Its `index` is not meaningful.
+    header: Option<Header>,
+    /// The length of a full part, learned from the first one that is not the last.
+    part_len: usize,
+    /// The last part's length, which is the only one that may be short.
+    last_len: usize,
+    seen: [u64; MAX_PARTS.div_ceil(64)],
+    count: u16,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collector {
     pub const fn new() -> Self {
         Collector {
             header: None,
             part_len: 0,
             last_len: 0,
-            seen: [0; MAX_PARTS / 64],
+            seen: [0; MAX_PARTS.div_ceil(64)],
             count: 0,
         }
     }
@@ -293,14 +114,14 @@ impl Collector {
         *self = Self::new();
     }
 
-    /// The header of the file being collected, once a part has been seen.
+    /// What is being collected, once a part has been seen.
     pub fn header(&self) -> Option<Header> {
         self.header
     }
 
     /// Whether every part has been seen.
     pub fn complete(&self) -> bool {
-        self.header.is_some_and(|h| self.count == h.total)
+        self.header.is_some_and(|h| self.count == h.num_parts)
     }
 
     /// Parts seen so far.
@@ -308,31 +129,23 @@ impl Collector {
         self.count
     }
 
-    /// Work out where a part belongs, without decoding it.
+    /// Work out where a part belongs, without storing it.
     ///
-    /// Returns the placement and the part's still-encoded payload, so the caller can
-    /// decode it into whatever it is filling -- a buffer, or a staging area that takes
-    /// words at an offset. [`take`](Self::take) is the same thing for the simple case.
-    ///
-    /// This does **not** count the part. [`confirm`](Self::confirm) does, once the
-    /// caller has actually written it.
-    ///
-    /// That way round on purpose. A caller that forgets to confirm gets a scan that
-    /// never finishes, which is irritating; a collector that counted a part whose write
-    /// then failed would report a complete file with a hole in it, and for a firmware
-    /// image that is an install whose only remaining check is the signature.
-    pub fn accept<'a>(&mut self, line: &'a [u8]) -> Result<(Placed, &'a [u8]), Error> {
-        let (header, payload) = parse(line)?;
-        let len = decoded_len(header.encoding, payload)?;
-        let is_last = header.index + 1 == header.total;
+    /// Does **not** count the part; [`confirm`](Self::confirm) does, once the caller has
+    /// written it.
+    pub fn accept(&mut self, line: &str) -> Result<Placed, Error> {
+        let (header, body) = Header::parse(line)?;
+        if header.encoding == Encoding::Zlib {
+            return Err(Error::Compressed);
+        }
+        let len = decoded_len_bound(header.encoding, body.len());
+        let is_last = header.index + 1 == header.num_parts;
 
         match self.header {
-            None => self.header = Some(header),
+            None => self.header = Some(Header { index: 0, ..header }),
             Some(seen) => {
                 // The same file, or a different one. Everything but the index agrees.
-                if (seen.encoding, seen.filetype, seen.total)
-                    != (header.encoding, header.filetype, header.total)
-                {
+                if seen != (Header { index: 0, ..header }) {
                     return Err(Error::Mismatch);
                 }
             }
@@ -344,6 +157,12 @@ impl Collector {
                 known if known != len => return Err(Error::Mismatch),
                 _ => {}
             }
+        } else if header.index == 0 {
+            // Both the first part and the last: the whole file is this one code, so its
+            // offset is zero and there is nothing to measure it against. Without this a
+            // single-code file -- which most wallet exports are -- waits forever for a
+            // full part that is never coming.
+            self.part_len = len;
         } else if self.part_len == 0 {
             // The last part, and nothing to measure it against yet.
             return Err(Error::PartLenUnknown);
@@ -357,17 +176,14 @@ impl Collector {
 
         let bit = 1u64 << (header.index % 64);
         let fresh = self.seen[header.index as usize / 64] & bit == 0;
-        Ok((
-            Placed {
-                index: header.index,
-                offset,
-                len,
-                fresh,
-                have: self.count,
-                total: header.total,
-            },
-            payload,
-        ))
+        Ok(Placed {
+            index: header.index,
+            offset,
+            len,
+            fresh,
+            have: self.count,
+            total: header.num_parts,
+        })
     }
 
     /// Record that a part accepted by [`accept`](Self::accept) has been written.
@@ -392,18 +208,15 @@ impl Collector {
         }
     }
 
-    /// Take one line, decoding its payload into `out` at the offset it belongs.
+    /// Take one line, decoding it into `out` at the offset it belongs.
     ///
     /// The convenience for a caller filling one buffer. A firmware image does not use
     /// this -- it goes to the staging area a word at a time -- but a PSBT does.
-    pub fn take(&mut self, line: &[u8], out: &mut [u8]) -> Result<Placed, Error> {
-        let (placed, payload) = self.accept(line)?;
+    pub fn take(&mut self, line: &str, out: &mut [u8]) -> Result<Placed, Error> {
+        let placed = self.accept(line)?;
         let end = placed.offset + placed.len;
-        if end > out.len() {
-            return Err(Error::TooLong);
-        }
-        let encoding = self.header.expect("accept set it").encoding;
-        decode(encoding, payload, &mut out[placed.offset..end])?;
+        let room = out.get_mut(placed.offset..end).ok_or(Error::TooLong)?;
+        decode_part_to_slice(line, room)?;
         Ok(self.confirm(placed))
     }
 
@@ -414,14 +227,39 @@ impl Collector {
     pub fn file_len(&self) -> Option<usize> {
         let h = self.header?;
         self.complete()
-            .then(|| self.part_len * (h.total as usize - 1) + self.last_len)
+            .then(|| self.part_len * (h.num_parts as usize - 1) + self.last_len)
     }
 }
 
-impl Default for Collector {
-    fn default() -> Self {
-        Self::new()
+/// Characters a part of `bytes` bytes will occupy, header included.
+pub const fn part_len(encoding: Encoding, bytes: usize) -> usize {
+    HEADER_LEN + encoded_len(encoding, bytes)
+}
+
+/// The most bytes a part may carry if its line must fit `chars` characters.
+///
+/// For choosing a part size from what a screen can draw legibly, or from what a scanner
+/// will hold, rather than from what a symbol could theoretically contain.
+pub const fn fits(encoding: Encoding, chars: usize) -> usize {
+    if chars <= HEADER_LEN {
+        return 0;
     }
+    let body = chars - HEADER_LEN;
+    match encoding {
+        Encoding::Hex => body / 2,
+        // Eight characters carry five bytes, and a part that is not the last must be a
+        // whole number of groups or the ones after it do not line up.
+        Encoding::Base32 | Encoding::Zlib => body / 8 * 5,
+    }
+}
+
+/// How many parts a file of `len` bytes needs at `per` bytes each.
+pub const fn parts_needed(len: usize, per: usize) -> usize {
+    if per == 0 {
+        return 0;
+    }
+    // A file of nothing is still one part, or there would be nothing to show.
+    if len == 0 { 1 } else { len.div_ceil(per) }
 }
 
 #[cfg(test)]

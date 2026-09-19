@@ -10,3 +10,4 @@ authors.workspace = true
 
 [dependencies]
 heapless.workspace = true
+outscript = { workspace = true }

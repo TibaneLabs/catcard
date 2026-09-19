@@ -14,8 +14,7 @@
 //! from the largest symbol that still gets three pixels a module, and
 //! [`catcard_bbqr::encode::fits`] turns that back into bytes.
 
-use catcard_bbqr::FileType;
-use catcard_bbqr::encode;
+use catcard_bbqr::{Encoding, FileType, Header};
 
 use catcard_ui::keypad::{Event, KEYS, Key};
 
@@ -41,6 +40,14 @@ const VERSION: u8 = 7;
 /// shown repeatedly: a symbol misread once comes round again, so correction that costs
 /// capacity buys less here than it does on an address shown once.
 const CHARS: usize = 224;
+
+/// How a part's bytes are written.
+///
+/// Base32 rather than hex: five bits a character against four, so the same file takes a
+/// fifth fewer codes and every character still sits in QR's alphanumeric mode. `Z` would
+/// be denser still, but the device on the other side cannot inflate a stream it is
+/// staging in place -- see [`catcard_bbqr::Error::Compressed`].
+const ENCODING: Encoding = Encoding::Base32;
 
 /// Milliseconds each part is shown for.
 ///
@@ -134,8 +141,8 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     };
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
-    let per = encode::fits(CHARS);
-    let total = encode::parts_needed(payload.len(), per);
+    let per = catcard_bbqr::fits(ENCODING, CHARS);
+    let total = catcard_bbqr::parts_needed(payload.len(), per);
     if total == 0 || total > 36 * 36 {
         menu::message(ui.panel, head, "too large to show", "any key to go back");
         menu::wait_for_any_key(ui);
@@ -146,7 +153,7 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     // kilobytes is more than a screen's stack should carry, and this screen is one of
     // the few that can ask for memory and be told no.
     let (Some(mut line_mem), Some(mut scratch_mem), Some(mut store_mem)) = (
-        crate::heap::take(encode::encoded_len(per)),
+        crate::heap::take(catcard_bbqr::part_len(ENCODING, per)),
         crate::heap::take(BUF),
         crate::heap::take(BUF),
     ) else {
@@ -161,7 +168,13 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     loop {
         let start = at * per;
         let chunk = &payload[start..(start + per).min(payload.len())];
-        let Ok(n) = encode::part(chunk, filetype, total as u16, at as u16, line_mem.bytes()) else {
+        let header = Header {
+            encoding: ENCODING,
+            file_type: filetype,
+            num_parts: total as u16,
+            index: at as u16,
+        };
+        let Ok(n) = catcard_bbqr::encode_part_to_slice(&header, chunk, line_mem.bytes()) else {
             menu::message(ui.panel, head, "could not encode", "any key to go back");
             menu::wait_for_any_key(ui);
             return;

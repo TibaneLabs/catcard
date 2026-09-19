@@ -98,12 +98,16 @@ version = "7.0.0"
 [[package]]
 name = "catcard-bbqr"
 version = "7.0.0"
+dependencies = [
+ "outscript",
+]
 
 [[package]]
 name = "catcard-bcur"
 version = "7.0.0"
 dependencies = [
  "heapless",
+ "outscript",
 ]
 
 [[package]]
@@ -513,10 +517,11 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "outscript"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a37763d52e3cc48892e4adc7456fc8b3e2416180716107f36c2ffc6a15558849"
+checksum = "c887cbcce06db4e202d547df5ded2d691b39ee959d6277fdffa7601e10a1872e"
 dependencies = [
+ "minizlib",
  "purecrypto",
 ]
 

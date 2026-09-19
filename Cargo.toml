@@ -124,7 +124,7 @@ anyd = { version = "0.1.4", default-features = false, features = ["encode", "qr"
 # the PSBT roles, all writing into caller buffers. The other chains stay out of the image
 # until there is something to do with them.
 fstool = { version = "0.4.32", default-features = false }
-outscript = { version = "0.2.2", default-features = false, features = ["bitcoin"] }
+outscript = { version = "0.2.4", default-features = false, features = ["bitcoin", "bbqr", "bcur"] }
 
 # --- host tooling ---
 anyhow = "1.0.104"

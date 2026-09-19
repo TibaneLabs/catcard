@@ -15,7 +15,15 @@
 
 use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 use anyhow::{Context, Result, bail};
-use catcard_bbqr::{FileType, encode};
+use catcard_bbqr::{Encoding, FileType, Header, encode_part_to_slice, part_len, parts_needed};
+
+/// How a part's bytes are written.
+///
+/// Base32, not `Z`. The device stages an image straight into the memory it will install
+/// from, and `Z` compresses the whole file before cutting it up -- so nothing is data
+/// until every part is in, and inflating would mean reading that memory while writing
+/// it. Roughly half the codes, for the one failure mode this hardware has already had.
+const ENCODING: Encoding = Encoding::Base32;
 
 /// The largest symbol this will build. Version 40 is the largest there is; the encoder
 /// picks the smallest that fits, so this only sizes the buffers.
@@ -38,13 +46,13 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
     if part == 0 || !part.is_multiple_of(20) {
         bail!("part size must be a positive multiple of 20 (got {part})");
     }
-    let line_len = encode::encoded_len(part);
+    let line_len = part_len(ENCODING, part);
     if line_len > 2048 {
         bail!(
             "a {part}-byte part is {line_len} characters, over the device's 2048-character limit"
         );
     }
-    let total = encode::parts_needed(image.len(), part);
+    let total = parts_needed(image.len(), part);
     if total > 36 * 36 {
         bail!("{total} parts, over BBQr's 1296; use a larger --part (currently {part} bytes)");
     }
@@ -67,14 +75,14 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
         // BINARY, because that is what a firmware image is. The device does not dispatch
         // on the letter here -- it was asked for an image -- but a reader that stumbled
         // on these codes should not be told they are JSON.
-        let n = encode::part(
-            chunk,
-            FileType::BINARY,
-            total as u16,
-            index as u16,
-            &mut line,
-        )
-        .map_err(|e| anyhow::anyhow!("could not encode part {index}: {e:?}"))?;
+        let header = Header {
+            encoding: ENCODING,
+            file_type: FileType::BINARY,
+            num_parts: total as u16,
+            index: index as u16,
+        };
+        let n = encode_part_to_slice(&header, chunk, &mut line)
+            .map_err(|e| anyhow::anyhow!("could not encode part {index}: {e:?}"))?;
         let (grid, _) = encoder
             .encode_text_into(&line[..n], EcLevel::L, &mut scratch, &mut storage)
             .map_err(|e| anyhow::anyhow!("could not build a QR for part {index}: {e:?}"))?;
@@ -215,7 +223,7 @@ pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<
     println!(
         "wrote         {} ({} parts of {} bytes)",
         out.display(),
-        catcard_bbqr::encode::parts_needed(image.len(), part),
+        parts_needed(image.len(), part),
         part
     );
     Ok(())
@@ -224,6 +232,7 @@ pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcard_bbqr::fits;
 
     #[test]
     fn base64_matches_the_rfc_vectors() {
@@ -244,8 +253,12 @@ mod tests {
     fn the_default_part_suits_both_constraints() {
         assert_eq!(DEFAULT_PART % 4, 0, "PSRAM wants whole words");
         assert_eq!(DEFAULT_PART % 5, 0, "BBQr packs five bytes to eight chars");
+        assert_eq!(
+            fits(ENCODING, part_len(ENCODING, DEFAULT_PART)),
+            DEFAULT_PART
+        );
         assert!(
-            encode::encoded_len(DEFAULT_PART) <= 2048,
+            part_len(ENCODING, DEFAULT_PART) <= 2048,
             "over the device's scanner buffer"
         );
     }
