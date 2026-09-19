@@ -337,6 +337,20 @@ pub(crate) fn boot_bringup() {
     // configured module is at 57600 and can be told; one that never answered has to be
     // told at every rate, which is the case that was getting a sleep sent at the rate
     // the probe gave up on and leaving the aimer lit for the whole session.
+    // Wake it first, at both rates, because the state we leave it in is **asleep** and
+    // an MCU reset does not change that. The reset line is pulsed above, but a module
+    // left asleep by the previous session answers nothing until it is told to wake, so
+    // probing it reads as "no scanner" on hardware that is sitting right there working.
+    //
+    // That is exactly what the boot log had been saying -- `not configured at boot:
+    // NotFound` -- on a device whose lamp worked perfectly. The lamp works because it
+    // wakes at each rate before it speaks; this did not, and the asymmetry was the bug.
+    // The scan path already woke before probing, which is why only boot was affected.
+    for rate in catcard_qr::BAUDS {
+        port.set_baud(rate);
+        wake(&mut port);
+    }
+
     match find(&mut port).and_then(|()| setup(&mut port)) {
         Ok(()) => {
             crate::catlog!("qr: configured, sleeping");
