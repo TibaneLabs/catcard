@@ -81,6 +81,23 @@ impl StagingArea for Area {
     }
 }
 
+/// Q1 only, because the scanner is the only thing that claims this memory before it
+/// knows what it is holding.
+#[cfg(feature = "board-q1")]
+impl Area {
+    /// Give the PSRAM back as a plain slice, dropping the paced driver over it.
+    ///
+    /// For the scanner, which claims the memory before it knows what is arriving. Once
+    /// the bytes are in, a transaction is signed out of them the way one read off a card
+    /// is -- two alternating buffers, rewritten in place -- and that wants a slice, not a
+    /// staging medium. An image goes the other way, back through [`area_from`].
+    ///
+    /// The lease is unchanged throughout, so nothing else can take the memory in the gap.
+    pub fn into_lease(self) -> crate::psram::Lease {
+        self._lease
+    }
+}
+
 /// Why the staging area could not be had.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Unavailable {
@@ -121,6 +138,30 @@ pub fn area() -> Result<Area, Unavailable> {
             crate::psram::Unavailable::NoMedium => Unavailable::NoMedium,
             crate::psram::Unavailable::Busy(_) => Unavailable::Busy,
         })?;
+        area_from(lease)
+    }
+    #[cfg(feature = "board-mk3")]
+    {
+        let ticket = HELD.take(NOR_STAGING).ok_or(Unavailable::Busy)?;
+        // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone; the menu waits for
+        // an upgrade to finish before this can run again.
+        let nor = unsafe { crate::nor::init() }.ok_or(Unavailable::NoMedium)?;
+        Ok(Area {
+            medium: catcard_upgrade::nor::NorArea::new(nor),
+            _ticket: ticket,
+        })
+    }
+}
+
+/// The staging area over a PSRAM lease that has already been taken.
+///
+/// For a screen that claimed the memory for something else first and only then found it
+/// was holding a firmware image -- the QR scanner, which cannot know what it is reading
+/// until it has read it. Taking the lease again would refuse against itself, so the one
+/// already held is handed over instead.
+#[cfg(not(feature = "board-mk3"))]
+pub fn area_from(lease: crate::psram::Lease) -> Result<Area, Unavailable> {
+    {
         let psram = catcard_board::BOARD.psram.ok_or(Unavailable::NoMedium)?;
         // How long the part may be held selected is a time, so how many words fit in it
         // depends on both clocks: the driver works that out from the board's OCTOSPI
@@ -137,17 +178,6 @@ pub fn area() -> Result<Area, Unavailable> {
         Ok(Area {
             medium,
             _lease: lease,
-        })
-    }
-    #[cfg(feature = "board-mk3")]
-    {
-        let ticket = HELD.take(NOR_STAGING).ok_or(Unavailable::Busy)?;
-        // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone; the menu waits for
-        // an upgrade to finish before this can run again.
-        let nor = unsafe { crate::nor::init() }.ok_or(Unavailable::NoMedium)?;
-        Ok(Area {
-            medium: catcard_upgrade::nor::NorArea::new(nor),
-            _ticket: ticket,
         })
     }
 }

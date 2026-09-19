@@ -25,6 +25,8 @@
 use catcard_hal::usart::Usart;
 use catcard_qr::{cmd, wrap};
 
+use catcard_callgate::Callgate;
+
 use crate::menu;
 use crate::ui::Ui;
 
@@ -363,46 +365,6 @@ pub(crate) fn boot_bringup() {
     }
 }
 
-/// Bring the scanner up, read one code, and put it back to sleep.
-fn scan(ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
-    let scanner = catcard_board::BOARD.qr.ok_or(Fault::NoScanner)?;
-
-    // The lamp holds the same port between presses; it stands down while a scan owns it.
-    crate::torch::release();
-    menu::blocking_screen(ui.panel, "Scan QR", "waking the scanner");
-    // SAFETY: the board table's scanner pins, and USART2, belong to this screen: nothing
-    // else in the firmware touches either, and the menu waits for this to return.
-    let mut port = unsafe {
-        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
-        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
-        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
-    };
-
-    let outcome = run(&mut port, ui, out);
-
-    // **Every path out of here stops the module.** It used to be stopped only after a
-    // read returned, so the early exits above it -- a probe that found nothing, a setup
-    // that was refused, and worst of all a scan-start whose acknowledgement was missed
-    // -- all left it running. That last one is the real one: the command lands, the
-    // reply is not seen, and the screen goes away leaving the aimer lit and the module
-    // awake until something resets it.
-    stop(&mut port);
-    outcome
-}
-
-/// The scan itself, so that whichever way it ends the caller can stop the module.
-fn run(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
-    wake(port);
-    find(port)?;
-    setup(port)?;
-
-    menu::blocking_screen(ui.panel, "Scan QR", "point it at a code");
-    if !command(port, cmd::SCAN_START) {
-        return Err(Fault::SetupRefused);
-    }
-    read_code(port, ui, out)
-}
-
 /// Whether a collecting scan wants another code.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Next {
@@ -493,29 +455,189 @@ fn ms_cycles(ms: u32) -> u32 {
     (hz / 1_000).saturating_mul(ms)
 }
 
-/// The Scan QR screen: read a code and show what it said.
-pub(crate) fn screen(ui: &mut Ui<'_>) {
-    let mut text = [0u8; MAX_TEXT];
-    match scan(ui, &mut text) {
-        Ok(n) => show(ui, &text[..n]),
-        Err(Fault::Cancelled) => {}
+/// The Scan QR screen: read whatever is shown, then offer what can be done with it.
+///
+/// One way in for everything that arrives by camera. A single code holds an address or a
+/// key; a few hundred of them hold a PSBT or a whole firmware image, and which of those
+/// is being shown is not something a person should have to say in advance -- the codes
+/// themselves say it. So this reads first and asks afterwards.
+///
+/// # Everything lands in PSRAM
+///
+/// Including a single short code, which does not need it. The point is not the size but
+/// the ownership: the moment this screen might be receiving an image, it has to be the
+/// only thing using that memory, and deciding that partway through -- after some parts
+/// are already somewhere else -- means moving them. So the claim is taken at the door,
+/// and a USB upload offered while someone is scanning is refused with "reading a QR"
+/// rather than landing on top of it.
+pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Scan QR";
+
+    let lease = match crate::psram::take(crate::psram::Use::AnimatedQr) {
+        Ok(l) => l,
         Err(why) => {
-            menu::message(ui.panel, "Scan QR", describe(why), "any key to go back");
+            menu::message(ui.panel, HEAD, why.message(), "any key to go back");
             menu::wait_for_any_key(ui);
+            return;
         }
+    };
+
+    // Written through the staging driver rather than as a plain slice: a quarter of a
+    // megabyte stored with whatever the compiler picked, and none of the CE# timing this
+    // part needs, is how it loses data.
+    let area = match crate::staging::area_from(lease) {
+        Ok(a) => a,
+        Err(_) => {
+            menu::message(ui.panel, HEAD, "no staging area", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    let mut sink = crate::qrload::Staging::new(area);
+    let Some(got) = crate::qrload::collect_any(ui, HEAD, &mut sink) else {
+        // Cancelled, or a reason already shown.
+        return;
+    };
+    crate::catlog!("qr: received {} bytes", got);
+    offer(gate, login, ui, HEAD, sink.into_area(), got);
+}
+
+/// What the scanned bytes look like.
+enum Content {
+    /// A signed CatCard image: the header magic is where a header would be.
+    Firmware,
+    /// A PSBT, binary or base64.
+    Psbt,
+    /// Something a person can read.
+    Text,
+    /// Bytes that are none of the above.
+    Unknown,
+}
+
+/// Decide what arrived.
+///
+/// Cheap checks in the order that a false positive matters least. The firmware magic is
+/// four bytes at a fixed offset inside a quarter-megabyte image, so nothing short can
+/// claim to be one; the PSBT magic is its first five bytes. Only what neither claims is
+/// offered as text.
+fn sniff(bytes: &[u8]) -> Content {
+    const PSBT_MAGIC: &[u8] = b"psbt\xff";
+    if bytes.starts_with(PSBT_MAGIC) {
+        return Content::Psbt;
+    }
+    let at = catcard_fwhdr::HEADER_OFFSET;
+    if bytes.len() > at + 4
+        && u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+            == catcard_fwhdr::MAGIC
+    {
+        return Content::Firmware;
+    }
+    // Base64 of a PSBT, as a `.psbt` written as text is. Checked before the general text
+    // case so it is offered for signing rather than shown as gibberish.
+    if bytes.starts_with(b"cHNidP") {
+        return Content::Psbt;
+    }
+    match core::str::from_utf8(bytes) {
+        Ok(_) => Content::Text,
+        Err(_) => Content::Unknown,
     }
 }
 
+/// Say what arrived and offer what can be done with it.
+fn offer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    area: crate::staging::Area,
+    len: usize,
+) {
+    // A plain view of the same memory, for looking at what arrived. Reading it back is
+    // fine now: every write is done, and it is only a run of writes that a read must not
+    // be placed among.
+    let mut lease = area.into_lease();
+    let what = sniff(&lease.bytes()[..len]);
+    let (note, actions): (&str, &[&str]) = match what {
+        Content::Firmware => ("a firmware image", &["Install it"]),
+        Content::Psbt => ("a transaction", &["Sign it"]),
+        Content::Text => ("text", &["Show it"]),
+        Content::Unknown => ("data this cannot use", &[]),
+    };
+    if actions.is_empty() {
+        let mut said: heapless::String<32> = heapless::String::new();
+        use core::fmt::Write as _;
+        let _ = write!(said, "{len} bytes, {note}");
+        menu::message(ui.panel, head, &said, "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    if menu::choose(ui, head, note, actions).is_none() {
+        return;
+    }
+
+    match what {
+        Content::Firmware => install(gate, login, ui, lease, len),
+        Content::Psbt => sign(gate, login, ui, lease, len),
+        Content::Text => {
+            // Borrowed for the length of the screen; the lease is dropped after it.
+            let text = core::str::from_utf8(&lease.bytes()[..len]).unwrap_or("(not text)");
+            show(ui, text);
+        }
+        Content::Unknown => {}
+    }
+}
+
+/// Hand a staged image to the installer.
+fn install(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    lease: crate::psram::Lease,
+    len: usize,
+) {
+    // The lease this screen already holds becomes the staging area's. Taking it again
+    // would refuse against itself.
+    let area = match crate::staging::area_from(lease) {
+        Ok(a) => a,
+        Err(_) => {
+            menu::message(ui.panel, "Install", "no staging area", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    menu::install_staged_image(gate, login, ui, area, len as u32);
+}
+
+/// Hand a received transaction to the signer.
+fn sign(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    mut lease: crate::psram::Lease,
+    len: usize,
+) {
+    // The same two alternating buffers the card path uses: each signature rewrites the
+    // whole container. A word-aligned split, because everything writing this region
+    // writes whole words.
+    let all = lease.bytes();
+    let half = (all.len() / 2) & !3;
+    let (buf, spare) = all.split_at_mut(half);
+    let len = match crate::signtx::as_psbt_bytes(buf, len, spare) {
+        Ok(n) => n,
+        Err(why) => {
+            menu::message(ui.panel, "Sign", why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    crate::signtx::review_and_sign(gate, login, ui, buf, spare, len);
+}
+
 /// Show what was read.
-///
-/// Only shown, for now: nothing here decides that a string is an address or a PSBT and
-/// acts on it. Reading a code and acting on one are different features, and the second
-/// is where a wrong guess sends money somewhere.
-fn show(ui: &mut Ui<'_>, raw: &[u8]) {
+fn show(ui: &mut Ui<'_>, text: &str) {
     use catcard_ui::scroll::Line as Row;
 
-    let text = core::str::from_utf8(raw).unwrap_or("(not text)");
-    let text = if raw == catcard_qr::UNSUPPORTED {
+    let text = if text.as_bytes() == catcard_qr::UNSUPPORTED {
         // The module's way of saying it read a code that held bytes rather than
         // characters. Passing it on as the contents would be a lie about what is there.
         "the code was not text"

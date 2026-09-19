@@ -66,10 +66,6 @@ enum Screen {
     /// About's second page: the STM32 itself.
     AboutChip,
     SdInstall,
-    /// A firmware image read off animated QR: the way in when USB and the card are both
-    /// gone.
-    #[cfg(feature = "board-q1")]
-    QrInstall,
     Debug,
     Usb,
     Clocks,
@@ -399,8 +395,6 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
-    #[cfg(feature = "board-q1")]
-    "Install from QR",
     "USB",
     "Clocks",
     "RTC",
@@ -832,8 +826,6 @@ fn action_for(screen: Screen) -> Option<Action> {
 
     Some(match screen {
         Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
-        #[cfg(feature = "board-q1")]
-        Screen::QrInstall => to(|a| install_from_qr(a.gate, a.login, a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
         Screen::Logs => to(
             |a| {
@@ -912,7 +904,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(feature = "board-q1")]
-        Screen::ScanQr => to(|a| crate::qrscan::screen(a.ui), Screen::Main),
+        Screen::ScanQr => to(
+            |a| crate::qrscan::screen(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Multisig => to(
             |a| crate::msimport::manage(a.gate, a.login, a.ui),
@@ -1163,8 +1158,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // top), and an index table would silently point at the wrong entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("Install from QR")) => Screen::QrInstall,
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
@@ -1497,8 +1490,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
-        #[cfg(feature = "board-q1")]
-        Screen::QrInstall => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) => {}
@@ -2300,66 +2291,34 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     offer_and_install(gate, login, ui, staged, approval);
 }
 
-/// Read a firmware off animated QR, ask, and install it.
+/// Inspect an image already sitting in `area`, ask, and install it.
 ///
-/// The last way in. USB is the normal one and the card is the fallback, and this is what
-/// is left when both have stopped working -- which has happened to this device, more
-/// than once, and is why it exists at all. It needs nothing but a screen pointed at the
-/// scanner.
+/// For a transport that placed its parts itself: the QR scanner writes each one to its
+/// own offset as it is caught, so by the time this runs the bytes are there and only
+/// the checking is left.
 ///
 /// **Raw image only.** A DfuSe container puts the image a couple of hundred bytes into
 /// the file, and shifting it down in the staging area afterwards would mean reading that
 /// memory back while still writing it -- the one thing that reliably corrupts it. A
 /// container is refused with the reason rather than staged wrong.
+///
+/// Q1 only, because the scanner is: it is the only transport that places its own parts.
 #[cfg(feature = "board-q1")]
-fn install_from_qr(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use catcard_upgrade::{Staged, StagingArea as _};
+pub(crate) fn install_staged_image(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    area: crate::staging::Area,
+    len: u32,
+) {
+    use catcard_upgrade::Staged;
 
-    const HEAD: &str = "Install from QR";
-
-    // Taken before the scan, and held until this returns: the parts land straight in it,
-    // and a USB offer arriving halfway through must be told no rather than handed the
-    // same bytes.
-    let mut area = match crate::staging::area() {
-        Ok(a) => a,
-        Err(crate::staging::Unavailable::NoMedium) => {
-            message(ui.panel, HEAD, "no staging area", "any key to go back");
-            wait_for_any_key(ui);
-            return;
-        }
-        Err(crate::staging::Unavailable::Busy) => {
-            message(
-                ui.panel,
-                HEAD,
-                "busy with another image",
-                "any key to go back",
-            );
-            wait_for_any_key(ui);
-            return;
-        }
-    };
-    let capacity = area.capacity();
-
-    // The scan. Parts go to their own offsets as they are caught, so nothing is held in
-    // RAM waiting for the ones in front of it -- which for an image is a third of a
-    // megabyte of somewhere to hold them.
-    let len = {
-        let mut sink = crate::qrload::Staging {
-            area: &mut area,
-            capacity,
-        };
-        match crate::qrload::collect(ui, HEAD, &mut sink) {
-            Some(len) => len as u32,
-            // Cancelled, or a reason already shown.
-            None => return,
-        }
-    };
-    crate::catlog!("qr: staged {} bytes", len);
+    const HEAD: &str = "Install";
 
     let mut staged = match Staged::begin(area, &catcard_board::BOARD, len) {
         Ok(s) => s,
         Err(why) => {
-            crate::catlog!("qr: image size refused: {:?}", why);
+            crate::catlog!("install: image size refused: {:?}", why);
             message(
                 ui.panel,
                 HEAD,
@@ -2415,7 +2374,7 @@ fn install_from_qr(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     let approval = match staged.inspect_with(crate::own_header().as_ref(), &mut tick) {
         Ok(a) => a,
         Err(why) => {
-            crate::catlog!("qr: image refused: {:?}", why);
+            crate::catlog!("install: image refused: {:?}", why);
             message(
                 ui.panel,
                 "No upgrade",

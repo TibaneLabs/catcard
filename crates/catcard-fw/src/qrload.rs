@@ -25,13 +25,16 @@ use crate::ui::Ui;
 
 /// Where collected bytes go.
 pub(crate) trait Sink {
-    /// The payload's total length, once it is known.
+    /// About how long the payload is.
     ///
-    /// Called at most once, and not always before the first [`place`](Self::place):
-    /// BBQr does not know the length until its last part has arrived, whenever that is.
-    /// A sink that needs the length up front has to refuse a payload that overruns it in
-    /// `place` as well.
-    fn expect(&mut self, _total: usize) -> Result<(), &'static str> {
+    /// Called as early as the transport can say -- for BC-UR that is the first fragment,
+    /// for BBQr it is the first part's length times the count, which is an upper bound
+    /// because the last part is short. Called again, exactly, when the payload is whole.
+    ///
+    /// So a sink may be told more than once and the first figure may be a little high.
+    /// What it buys is the one decision that has to be made before any bytes land: how
+    /// big this is going to be.
+    fn expect(&mut self, _about: usize) -> Result<(), &'static str> {
         Ok(())
     }
 
@@ -41,30 +44,6 @@ pub(crate) trait Sink {
     /// into PSRAM needs it: whole words only, except at the very end of the image where
     /// there is nothing after the short word to be disturbed by padding it out.
     fn place(&mut self, offset: usize, bytes: &[u8], tail: bool) -> Result<(), &'static str>;
-}
-
-/// A plain buffer, which is what a PSBT and every text payload want.
-pub(crate) struct Buffer<'a> {
-    pub out: &'a mut [u8],
-}
-
-impl Sink for Buffer<'_> {
-    fn expect(&mut self, total: usize) -> Result<(), &'static str> {
-        if total > self.out.len() {
-            return Err("too large for this device");
-        }
-        Ok(())
-    }
-
-    fn place(&mut self, offset: usize, bytes: &[u8], _tail: bool) -> Result<(), &'static str> {
-        let end = offset.checked_add(bytes.len()).ok_or("bad offset")?;
-        let room = self
-            .out
-            .get_mut(offset..end)
-            .ok_or("too large for this device")?;
-        room.copy_from_slice(bytes);
-        Ok(())
-    }
 }
 
 /// What one code turned out to be worth.
@@ -85,9 +64,13 @@ enum Which {
 
 /// Read an animated QR into `sink`, returning the payload's length.
 ///
+/// A first code that is neither BBQr nor a UR is taken as the whole payload: a single
+/// code holding an address or a key is the common case, and the two cannot be told
+/// apart before one has been read.
+///
 /// `None` if the owner cancelled or the scanner could not be used; the reason has
 /// already been shown in either case.
-pub(crate) fn collect(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Option<usize> {
+pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Option<usize> {
     // Big enough for the largest line either format can hand over, decoded. BBQr's
     // base32 is five bits a character, so a line's payload is never more than five
     // eighths of it; BC-UR's bytewords are two characters a byte, so never more than a
@@ -109,6 +92,20 @@ pub(crate) fn collect(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Optio
 
     let outcome = qrscan::scan_many(ui, head, &mut |ui, line| {
         let scratch = scratch_mem.bytes();
+        // A lone code that announces neither format is its own payload, whole. Only the
+        // first one: once a transfer has started, a stray code in shot must not end it.
+        if matches!(which, Which::Unknown) && !announced(line) {
+            return match sink.place(0, line, true) {
+                Ok(()) => {
+                    done = line.len();
+                    Next::Done
+                }
+                Err(why) => {
+                    failure = Some(why);
+                    Next::Done
+                }
+            };
+        }
         match read_one(&mut which, line, scratch, sink) {
             Ok(Some(landed)) => {
                 if (landed.have, landed.total) != shown {
@@ -180,6 +177,10 @@ fn read_one(
             let Ok((placed, payload)) = collector.accept(line) else {
                 return Ok(None);
             };
+            // An upper bound: every part but the last is this long, and the last is
+            // shorter. Told before anything is written, because a sink that sizes itself
+            // from this cannot be told after the fact.
+            sink.expect(placed.len * placed.total as usize)?;
             if placed.fresh {
                 let end = placed.len;
                 let room = scratch.get_mut(..end).ok_or("a part was too long")?;
@@ -207,6 +208,10 @@ fn read_one(
                 return Ok(None);
             };
             let (offset, total) = (placed.offset, placed.total);
+            // Exact from the first fragment: the message length is in every header.
+            if let Some(about) = collector.about() {
+                sink.expect(about.message_len as usize)?;
+            }
             if placed.fresh {
                 // `at` is a range into the scratch, and `len` stops before the last
                 // fragment's padding -- which is not part of the message and must not be
@@ -234,6 +239,11 @@ fn read_one(
     }
 }
 
+/// Whether a line says it is part of a multi-code transfer.
+fn announced(line: &[u8]) -> bool {
+    line.starts_with(b"B$") || starts_with_ur(line)
+}
+
 /// Whether a line announces itself as a UR, in either case.
 ///
 /// Upper case is the one that matters: a UR meant for a QR is upper-cased so the symbol
@@ -255,33 +265,58 @@ fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) {
     menu::blocking_screen(ui.panel, head, &note);
 }
 
-/// The firmware staging area, for an image that arrived as QR.
+/// The PSRAM staging area, which is where everything scanned goes.
 ///
-/// # Word alignment is the whole of the difficulty
+/// # Why everything, and not just an image
 ///
-/// The staging area on every board but the mk3 is memory-mapped PSRAM, which takes
-/// aligned whole-word stores and nothing else: a partial word makes the area read back
-/// what is already there to merge with, and a read placed among writes is exactly what
-/// corrupts this part. So a part's offset must be a multiple of four, and so must its
-/// length -- except for the last part, where the short word can be padded out because
-/// there is nothing after it to disturb.
+/// The scanner cannot know what it is reading until it has read it, and by then the
+/// bytes are wherever they were put. So they go somewhere that can hold the largest
+/// thing they might be, through the driver that paces the part properly -- a plain slice
+/// over the mapped region would write a quarter of a megabyte with whatever stores the
+/// compiler felt like and none of the CE# timing the part needs.
 ///
-/// A BBQr part is five bytes per eight characters, so its size is always a multiple of
-/// five and only sometimes a multiple of four. **A sender must choose a part size that
-/// is a multiple of twenty** to satisfy both. Rather than quietly merging, a sender that
-/// did not is refused and told so.
-pub(crate) struct Staging<'a> {
-    pub area: &'a mut crate::staging::Area,
-    /// What the area will hold, so an over-large image is refused when its length is
-    /// learned rather than by a write running off the end.
-    pub capacity: u32,
+/// # Strictness is decided by size
+///
+/// PSRAM takes aligned whole-word stores; a partial word makes the driver read back the
+/// word to merge with, and a read placed among writes is what corrupts this part. For a
+/// few stray words at the edges of a small payload that is a risk worth taking, because
+/// there is no alternative -- another wallet's BBQr parts are whatever size that wallet
+/// chose. For a firmware image it is not: that is hundreds of merges through a memory
+/// this device has already lost data to once.
+///
+/// So a payload big enough to be an image is held to whole words and a sender that does
+/// not is refused with the reason. **A BBQr part must be a multiple of twenty** to be
+/// both five bytes per eight characters and a whole number of words; `catcard-image qr`
+/// picks such a size.
+pub(crate) struct Staging {
+    area: crate::staging::Area,
+    /// `None` until the transport says how big this is.
+    strict: Option<bool>,
 }
 
-impl Sink for Staging<'_> {
-    fn expect(&mut self, total: usize) -> Result<(), &'static str> {
-        if total as u32 > self.capacity {
-            return Err("image too large to stage");
+impl Staging {
+    pub fn new(area: crate::staging::Area) -> Self {
+        Staging { area, strict: None }
+    }
+
+    /// The area back, with whatever was written in it.
+    pub fn into_area(self) -> crate::staging::Area {
+        self.area
+    }
+}
+
+impl Sink for Staging {
+    fn expect(&mut self, about: usize) -> Result<(), &'static str> {
+        use catcard_upgrade::StagingArea as _;
+
+        if about as u32 > self.area.capacity() {
+            return Err("too large for this device");
         }
+        // Only an image is this big -- nothing else that arrives by camera comes close
+        // to the bootloader's floor for a firmware length. Decided once, from the first
+        // figure, because by the second there are already bytes in the area.
+        self.strict
+            .get_or_insert(about as u32 >= catcard_fwhdr::MIN_FIRMWARE_LENGTH);
         Ok(())
     }
 
@@ -289,32 +324,14 @@ impl Sink for Staging<'_> {
         use catcard_upgrade::StagingArea as _;
 
         let offset: u32 = offset.try_into().map_err(|_| "bad offset")?;
-        if !offset.is_multiple_of(4) {
+        // The end of the payload is the one place a partial word is always fine: nothing
+        // follows it, so the word it completes holds nothing that matters.
+        let whole = offset.is_multiple_of(4) && (bytes.len().is_multiple_of(4) || tail);
+        if self.strict == Some(true) && !whole {
             return Err("sender's parts are not word-aligned");
         }
-        if bytes.len().is_multiple_of(4) {
-            return self
-                .area
-                .write(offset, bytes)
-                .map_err(|_| "staging write failed");
-        }
-        if !tail {
-            return Err("sender's parts are not word-aligned");
-        }
-        // The last part, padded out to a whole word. The padding lands past the image's
-        // end in an area that is megabytes bigger than any image, and the digest covers
-        // the image's length rather than what was written.
-        let mut word = [0u8; 4];
-        let whole = bytes.len() & !3;
-        if whole > 0 {
-            self.area
-                .write(offset, &bytes[..whole])
-                .map_err(|_| "staging write failed")?;
-        }
-        let rest = &bytes[whole..];
-        word[..rest.len()].copy_from_slice(rest);
         self.area
-            .write(offset + whole as u32, &word)
+            .write(offset, bytes)
             .map_err(|_| "staging write failed")
     }
 }
