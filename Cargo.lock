@@ -162,6 +162,7 @@ dependencies = [
  "cortex-m-rt",
  "fstool",
  "heapless",
+ "minizlib",
  "outscript",
  "purecrypto",
  "zeroize",
@@ -196,6 +197,7 @@ dependencies = [
  "catcard-fwhdr",
  "clap",
  "hex",
+ "outscript",
  "purecrypto",
 ]
 

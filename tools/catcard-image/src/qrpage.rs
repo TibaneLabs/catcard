@@ -16,14 +16,7 @@
 use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 use anyhow::{Context, Result, bail};
 use catcard_bbqr::{Encoding, FileType, Header, encode_part_to_slice, part_len, parts_needed};
-
-/// How a part's bytes are written.
-///
-/// Base32, not `Z`. The device stages an image straight into the memory it will install
-/// from, and `Z` compresses the whole file before cutting it up -- so nothing is data
-/// until every part is in, and inflating would mean reading that memory while writing
-/// it. Roughly half the codes, for the one failure mode this hardware has already had.
-const ENCODING: Encoding = Encoding::Base32;
+use outscript::bbqr::{deflate_len_bound, deflate_to_slice};
 
 /// The longest line the device's scanner will hand over, from `qrscan::MAX_TEXT`.
 ///
@@ -48,12 +41,33 @@ const MAX_VERSION: u8 = 40;
 /// part every few hundred milliseconds the odd unaligned edge has all the time it needs.
 pub const DEFAULT_PART: usize = 1275;
 
+/// Compress the image if that makes fewer codes, and say which was used.
+///
+/// The device reads both. `Z` deflates the whole file before it is cut up, so the parts
+/// reassemble into a stream the device expands once they are all in -- the codes are
+/// what is saved, not the work. The compressor keeps its back-references within a
+/// kilobyte, which is what makes the stream expandable on a device with a window it can
+/// afford, and also what stops it compressing very well; on a file with little
+/// redundancy it can come out longer, so the shorter of the two wins.
+fn best_encoding(image: &[u8]) -> (Encoding, Vec<u8>) {
+    let mut packed = vec![0u8; deflate_len_bound(image.len())];
+    match deflate_to_slice(image, &mut packed) {
+        Ok(n) if n < image.len() => {
+            packed.truncate(n);
+            (Encoding::Zlib, packed)
+        }
+        _ => (Encoding::Base32, image.to_vec()),
+    }
+}
+
 /// Build the page.
 pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
     if part == 0 || !part.is_multiple_of(5) {
         bail!("part size must be a positive multiple of 5 (got {part})");
     }
-    let line_len = part_len(ENCODING, part);
+    let (encoding, body) = best_encoding(image);
+    let image = &body[..];
+    let line_len = part_len(encoding, part);
     if line_len > SCANNER_BUFFER {
         bail!(
             "a {part}-byte part is {line_len} characters, over the device's \
@@ -84,7 +98,7 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
         // on the letter here -- it was asked for an image -- but a reader that stumbled
         // on these codes should not be told they are JSON.
         let header = Header {
-            encoding: ENCODING,
+            encoding,
             file_type: FileType::BINARY,
             num_parts: total as u16,
             index: index as u16,
@@ -107,7 +121,7 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
         frames.push((w, bits));
     }
 
-    Ok(page(&frames, total, image.len(), part, title))
+    Ok(page(&frames, total, image.len(), part, title, encoding))
 }
 
 /// The HTML, with the frames as base64 bit-planes.
@@ -117,7 +131,12 @@ fn page(
     bytes: usize,
     part: usize,
     title: &str,
+    encoding: Encoding,
 ) -> String {
+    let note = match encoding {
+        Encoding::Zlib => " (compressed)",
+        _ => "",
+    };
     let mut data = String::new();
     for (w, bits) in frames {
         data.push_str(&format!("[{w},\"{}\"],", b64(bits)));
@@ -144,8 +163,8 @@ fn page(
   <span id="at"></span>
 </div>
 <div id="hint">
-  {bytes} bytes in {total} parts of {part}.
-  On the device: <b>Debug &rarr; Install from QR</b>, then point it here.
+  {bytes} bytes{note} in {total} parts of {part}.
+  On the device: <b>Scan QR</b>, then point it here.
   Parts are caught in any order, so let it loop. Full-screen the window and
   raise the display brightness if it is slow to catch them.
 </div>
@@ -228,11 +247,21 @@ pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<
         .unwrap_or_else(|| "image".into());
     let html = render(&image, part, &title)?;
     std::fs::write(out, html).with_context(|| format!("writing {}", out.display()))?;
+    let (encoding, body) = best_encoding(&image);
     println!(
-        "wrote         {} ({} parts of {} bytes)",
+        "wrote         {} ({} parts of {} bytes, {})",
         out.display(),
-        parts_needed(image.len(), part),
-        part
+        parts_needed(body.len(), part),
+        part,
+        match encoding {
+            Encoding::Zlib => format!(
+                "deflate: {} of {} bytes, {:.1}%",
+                body.len(),
+                image.len(),
+                body.len() as f64 * 100.0 / image.len() as f64
+            ),
+            _ => "uncompressed".into(),
+        }
     );
     Ok(())
 }
@@ -264,8 +293,13 @@ mod tests {
             0,
             "base32 packs five bytes to eight chars"
         );
-        assert_eq!(fits(ENCODING, SCANNER_BUFFER), DEFAULT_PART);
-        assert!(part_len(ENCODING, DEFAULT_PART) <= SCANNER_BUFFER);
+        assert_eq!(fits(Encoding::Base32, SCANNER_BUFFER), DEFAULT_PART);
+        assert!(part_len(Encoding::Base32, DEFAULT_PART) <= SCANNER_BUFFER);
+        // `Z` is base32 underneath, so the line arithmetic is the same either way.
+        assert_eq!(
+            part_len(Encoding::Zlib, DEFAULT_PART),
+            part_len(Encoding::Base32, DEFAULT_PART)
+        );
     }
 
     #[test]

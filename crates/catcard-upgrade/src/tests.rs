@@ -741,3 +741,213 @@ fn the_last_part_alone_does_not_make_an_image_complete() {
         "a single part at the end is not an image"
     );
 }
+
+// --- expanding a compressed stream in place ----------------------------------------
+
+mod expanding {
+    use super::*;
+    use crate::expand::{self, Error};
+
+    /// Where a compressed stream sits: past anything it can expand into.
+    const FROM: u32 = 6 * 1024 * 1024;
+    const CAPACITY: usize = 8 * 1024 * 1024;
+    /// What BBQr's compressor keeps its back-references inside.
+    const SENDER_WINDOW: usize = 1024;
+
+    fn firmwareish(len: usize) -> Vec<u8> {
+        // Code-like: repetitive enough to compress, not uniform enough to be trivial.
+        (0..len)
+            .map(|i| match i % 11 {
+                0 => 0x00,
+                1 => 0xF0,
+                2 => 0x4B,
+                n => ((i / 11).wrapping_mul(7) + n) as u8,
+            })
+            .collect()
+    }
+
+    /// Deflate the way the sender does: raw, matching only within its window.
+    fn deflate(data: &[u8], window: usize) -> Vec<u8> {
+        let mut out = vec![0u8; data.len() * 2 + 1024];
+        let mut table = vec![0u16; window];
+        let mut c = minizlib::Compressor::<_, minizlib::Raw>::new(
+            minizlib::Buffer::new(&mut out),
+            &mut table,
+        );
+        for block in data.chunks(window) {
+            c.write(block).expect("compresses");
+        }
+        let n = c.finish().expect("finishes") as usize;
+        out.truncate(n);
+        out
+    }
+
+    fn staged(stream: &[u8]) -> Mem {
+        let mut mem = Mem::new(CAPACITY);
+        mem.write(FROM, stream).expect("stages");
+        mem
+    }
+
+    /// The whole point: what went in compressed comes out identical, with the window in
+    /// ordinary memory and both ends crossing the medium in chunks.
+    #[test]
+    fn a_stream_expands_to_what_was_compressed() {
+        let image = firmwareish(300 * 1024);
+        let stream = deflate(&image, SENDER_WINDOW);
+        assert!(stream.len() < image.len(), "the fixture should compress");
+
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+        let n = expand::inflate(
+            &mut mem,
+            FROM,
+            stream.len() as u32,
+            image.len() as u32,
+            &mut window,
+            &mut chunk,
+        )
+        .expect("expands");
+
+        assert_eq!(n as usize, image.len());
+        assert_eq!(&mem.bytes[..image.len()], &image[..]);
+    }
+
+    /// The expansion runs forwards over the front of the area while the stream is being
+    /// read from the back of it. They must not meet -- and with the real offsets they
+    /// cannot, which is what this pins.
+    #[test]
+    fn the_expansion_never_reaches_the_stream() {
+        let image = firmwareish(300 * 1024);
+        let stream = deflate(&image, SENDER_WINDOW);
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+        expand::inflate(
+            &mut mem,
+            FROM,
+            stream.len() as u32,
+            image.len() as u32,
+            &mut window,
+            &mut chunk,
+        )
+        .expect("expands");
+
+        // Every write landed below where the stream starts.
+        for &(offset, len) in &mem.writes {
+            if offset == FROM {
+                continue; // the staging write this test did itself
+            }
+            assert!(
+                offset + len as u32 <= FROM,
+                "wrote {len} at {offset}, into the stream"
+            );
+        }
+        // And the stream is still there, untouched.
+        let mut back = vec![0u8; stream.len()];
+        mem.read(FROM, &mut back).expect("reads");
+        assert_eq!(back, stream);
+    }
+
+    /// A few kilobytes of deflate can become gigabytes. The caller says how much it is
+    /// prepared to receive, and that is where it stops -- not at the end of the area.
+    #[test]
+    fn it_stops_at_the_length_the_caller_allowed() {
+        let image = firmwareish(200 * 1024);
+        let stream = deflate(&image, SENDER_WINDOW);
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+        assert_eq!(
+            expand::inflate(
+                &mut mem,
+                FROM,
+                stream.len() as u32,
+                (image.len() - 1) as u32,
+                &mut window,
+                &mut chunk,
+            ),
+            Err(Error::TooLong)
+        );
+    }
+
+    /// A stream compressed with a wider window than the reader has says so, rather than
+    /// producing bytes that are wrong in the middle.
+    #[test]
+    fn too_wide_a_window_is_named_not_guessed() {
+        let image = firmwareish(200 * 1024);
+        let stream = deflate(&image, 16 * 1024);
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 1024];
+        let mut chunk = vec![0u8; 1024];
+        assert_eq!(
+            expand::inflate(
+                &mut mem,
+                FROM,
+                stream.len() as u32,
+                image.len() as u32,
+                &mut window,
+                &mut chunk,
+            ),
+            Err(Error::WindowTooSmall)
+        );
+    }
+
+    /// **Raw deflate carries no checksum**, so a damaged stream can expand to exactly
+    /// the right length and simply be the wrong bytes -- there is nothing in the format
+    /// to notice. That is not a gap to be closed here: the image's signature is checked
+    /// over what comes out, and it is the thing that catches this. What matters is that
+    /// the damage is not silently repaired into the original, which would mean the
+    /// expansion was ignoring the stream.
+    #[test]
+    fn damage_survives_to_where_the_signature_can_see_it() {
+        let image = firmwareish(64 * 1024);
+        let mut stream = deflate(&image, SENDER_WINDOW);
+        let middle = stream.len() / 2;
+        stream[middle] ^= 0xFF;
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+        match expand::inflate(
+            &mut mem,
+            FROM,
+            stream.len() as u32,
+            image.len() as u32,
+            &mut window,
+            &mut chunk,
+        ) {
+            // Caught by the format, which it sometimes is.
+            Err(_) => {}
+            // Or not, in which case the bytes must differ from the image -- the
+            // signature check is what refuses them.
+            Ok(n) => assert_ne!(
+                &mem.bytes[..n as usize],
+                &image[..n as usize],
+                "damage was expanded away"
+            ),
+        }
+    }
+
+    /// The chunk size only changes how often the bus turns round, never the result.
+    #[test]
+    fn the_chunk_size_does_not_change_the_answer() {
+        let image = firmwareish(128 * 1024);
+        let stream = deflate(&image, SENDER_WINDOW);
+        for chunk_len in [1usize, 7, 64, 1024, 4096] {
+            let mut mem = staged(&stream);
+            let mut window = vec![0u8; 8 * 1024];
+            let mut chunk = vec![0u8; chunk_len];
+            let n = expand::inflate(
+                &mut mem,
+                FROM,
+                stream.len() as u32,
+                image.len() as u32,
+                &mut window,
+                &mut chunk,
+            )
+            .unwrap_or_else(|e| panic!("chunk {chunk_len}: {e:?}"));
+            assert_eq!(n as usize, image.len(), "chunk {chunk_len}");
+            assert_eq!(&mem.bytes[..image.len()], &image[..], "chunk {chunk_len}");
+        }
+    }
+}

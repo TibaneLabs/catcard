@@ -40,6 +40,22 @@ pub(crate) trait Sink {
 
     /// Put `bytes` at `offset`. An error abandons the transfer.
     fn place(&mut self, offset: usize, bytes: &[u8]) -> Result<(), &'static str>;
+
+    /// What is arriving is a deflate stream, not the payload.
+    ///
+    /// Said once, before any bytes, because where a sink puts a stream it will have to
+    /// expand is not where it puts a file it can use as it stands.
+    fn compressed(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+}
+
+/// What a completed scan left behind.
+pub(crate) struct Received {
+    /// Bytes handed to the sink.
+    pub len: usize,
+    /// Whether they are a deflate stream rather than the payload itself.
+    pub compressed: bool,
 }
 
 /// What one code turned out to be worth.
@@ -49,6 +65,8 @@ struct Landed {
     total: u32,
     /// The payload's length, once every part is in. `None` while any are missing.
     complete: Option<usize>,
+    /// Whether what is being placed is a deflate stream.
+    compressed: bool,
 }
 
 /// Which format is being read, decided by the first line that parsed.
@@ -66,7 +84,7 @@ enum Which {
 ///
 /// `None` if the owner cancelled or the scanner could not be used; the reason has
 /// already been shown in either case.
-pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Option<usize> {
+pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> Option<Received> {
     // Big enough for the largest line either format can hand over, decoded. BBQr's
     // base32 is five bits a character, so a line's payload is never more than five
     // eighths of it; BC-UR's bytewords are two characters a byte, so never more than a
@@ -79,12 +97,15 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
     };
 
     let mut which = Which::Unknown;
+    // The sink is told once that a stream is coming, not once per part.
+    let mut told = false;
     let mut failure: Option<&'static str> = None;
     // Redrawn only when a part lands that was not already held. Every other code is a
     // repeat of one already caught, and redrawing for those would make the screen flicker
     // through the whole animation without the count ever moving.
     let mut shown = (0u32, 0u32);
     let mut done = 0usize;
+    let mut compressed = false;
 
     let outcome = qrscan::scan_many(ui, head, &mut |ui, line| {
         let scratch = scratch_mem.bytes();
@@ -105,8 +126,9 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
         let Some(text) = as_text(line) else {
             return Next::More;
         };
-        match read_one(&mut which, text, scratch, sink) {
+        match read_one(&mut which, &mut told, text, scratch, sink) {
             Ok(Some(landed)) => {
+                compressed = landed.compressed;
                 if (landed.have, landed.total) != shown {
                     shown = (landed.have, landed.total);
                     progress(ui, head, landed.have, landed.total);
@@ -136,7 +158,10 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
         return None;
     }
     match outcome {
-        Ok(()) if done > 0 => Some(done),
+        Ok(()) if done > 0 => Some(Received {
+            len: done,
+            compressed,
+        }),
         Ok(()) => None,
         Err(qrscan::Fault::Cancelled) => None,
         Err(why) => {
@@ -153,6 +178,7 @@ pub(crate) fn collect_any(ui: &mut Ui<'_>, head: &str, sink: &mut dyn Sink) -> O
 /// fatal: the sink refused, or two different files are in shot.
 fn read_one(
     which: &mut Which,
+    told: &mut bool,
     line: &str,
     scratch: &mut [u8],
     sink: &mut dyn Sink,
@@ -173,17 +199,18 @@ fn read_one(
     match which {
         Which::Unknown => Ok(None),
         Which::Bbqr(collector) => {
-            let placed = match collector.accept(line) {
-                Ok(placed) => placed,
-                // The one refusal worth a screen: the sender compressed the file, which
-                // cannot be reassembled in place. Everything else is a bad frame.
-                Err(catcard_bbqr::Error::Compressed) => return Err("send it uncompressed"),
-                Err(_) => return Ok(None),
+            let Ok(placed) = collector.accept(line) else {
+                return Ok(None);
             };
             // An upper bound: every part but the last is this long, and the last is
             // shorter. Told before anything is written, because a sink that sizes itself
             // from this cannot be told after the fact.
             sink.expect(placed.len * placed.total as usize)?;
+            // Before any bytes land, because it decides where they land.
+            if collector.compressed() && !*told {
+                sink.compressed()?;
+                *told = true;
+            }
             if placed.fresh {
                 let room = scratch.get_mut(..placed.len).ok_or("a part was too long")?;
                 if catcard_bbqr::decode_part_to_slice(line, room).is_err() {
@@ -202,6 +229,7 @@ fn read_one(
                 have: placed.have as u32,
                 total: placed.total as u32,
                 complete: len,
+                compressed: collector.compressed(),
             }))
         }
         Which::Bcur(collector) => {
@@ -235,6 +263,8 @@ fn read_one(
                 have,
                 total,
                 complete: collector.complete().then_some(total_len).flatten(),
+                // BC-UR has no compressed form; a UR carries what it carries.
+                compressed: false,
             }))
         }
     }
@@ -297,11 +327,15 @@ fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) {
 /// satisfied it.
 pub(crate) struct Staging {
     area: crate::staging::Area,
+    /// Where offset zero of the payload goes. Zero for a file, and out of the way for a
+    /// deflate stream, which has to survive being read while what it expands to is
+    /// written over the front of the area.
+    base: u32,
 }
 
 impl Staging {
     pub fn new(area: crate::staging::Area) -> Self {
-        Staging { area }
+        Staging { area, base: 0 }
     }
 
     /// The area back, with whatever was written in it.
@@ -314,9 +348,15 @@ impl Sink for Staging {
     fn expect(&mut self, about: usize) -> Result<(), &'static str> {
         use catcard_upgrade::StagingArea as _;
 
-        if about as u32 > self.area.capacity() {
+        let end = self.base.checked_add(about as u32).ok_or("bad length")?;
+        if end > self.area.capacity() {
             return Err("too large for this device");
         }
+        Ok(())
+    }
+
+    fn compressed(&mut self) -> Result<(), &'static str> {
+        self.base = crate::inflate::COMPRESSED_AT;
         Ok(())
     }
 
@@ -324,8 +364,9 @@ impl Sink for Staging {
         use catcard_upgrade::StagingArea as _;
 
         let offset: u32 = offset.try_into().map_err(|_| "bad offset")?;
+        let at = self.base.checked_add(offset).ok_or("bad offset")?;
         self.area
-            .write(offset, bytes)
+            .write(at, bytes)
             .map_err(|_| "staging write failed")
     }
 }

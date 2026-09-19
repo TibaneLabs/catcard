@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyd.workspace = true
 catcard-board.workspace = true
 catcard-bbqr.workspace = true
+outscript.workspace = true
 catcard-fwhdr = { workspace = true, features = ["std"] }
 anyhow.workspace = true
 clap.workspace = true

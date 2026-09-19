@@ -37,6 +37,7 @@ use catcard_fwhdr::{
 
 pub mod claim;
 pub mod dfuse;
+pub mod expand;
 pub mod nor;
 pub mod psram;
 

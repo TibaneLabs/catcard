@@ -498,8 +498,34 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         // Cancelled, or a reason already shown.
         return;
     };
-    crate::catlog!("qr: received {} bytes", got);
-    offer(gate, login, ui, HEAD, sink.into_area(), got);
+    let mut area = sink.into_area();
+    crate::catlog!(
+        "qr: received {} bytes{}",
+        got.len,
+        if got.compressed { ", compressed" } else { "" }
+    );
+
+    // A `Z` transfer reassembles the deflate stream, not the file. Expanding it is a
+    // pass over the whole thing, so it says so -- on a payload this size it is not
+    // instant, and a screen that has stopped changing reads as a device that has hung.
+    let len = if got.compressed {
+        menu::blocking_screen(ui.panel, HEAD, "expanding");
+        let max = catcard_board::BOARD.memory.firmware_flash_len;
+        match crate::inflate::staged(&mut area, got.len as u32, max) {
+            Ok(n) => {
+                crate::catlog!("qr: expanded to {} bytes", n);
+                n as usize
+            }
+            Err(why) => {
+                menu::message(ui.panel, HEAD, why, "any key to go back");
+                menu::wait_for_any_key(ui);
+                return;
+            }
+        }
+    } else {
+        got.len
+    };
+    offer(gate, login, ui, HEAD, area, len);
 }
 
 /// What the scanned bytes look like.

@@ -44,6 +44,9 @@ mod keywork;
 mod logbuf;
 #[cfg(feature = "usb-debug-mem")]
 mod debug_mem;
+/// Expanding a deflate stream that is already in the staging area.
+#[cfg(feature = "board-q1")]
+mod inflate;
 mod interrupts;
 mod ktest;
 mod menu;

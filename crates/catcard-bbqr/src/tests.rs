@@ -263,14 +263,28 @@ fn hex_works_too() {
     assert_eq!(out, file);
 }
 
-/// `Z` deflates the whole file before cutting it, so no part is data on its own and the
-/// compressed stream has to be reassembled before any of it can be inflated. Refused
-/// with its own reason, so the screen can say why rather than "bad code".
+/// `Z` deflates the whole file before cutting it, so the parts place like any others
+/// and what they reassemble into is the compressed stream. The collector says so and
+/// leaves the expanding to whoever knows where the bytes went.
 #[test]
-fn compressed_parts_are_refused_by_name() {
+fn compressed_parts_place_like_any_other() {
+    let stream = firmwareish(200);
+    let mut out = vec![0u8; stream.len()];
     let mut c = Collector::new();
-    let line = part_with(Encoding::Zlib, &[1, 2, 3, 4, 5], 2, 0);
-    assert_eq!(c.accept(&line), Err(Error::Compressed));
+    assert!(!c.compressed(), "nothing seen yet");
+    for i in 0..2u16 {
+        let at = i as usize * 100;
+        c.take(
+            &part_with(Encoding::Zlib, &stream[at..at + 100], 2, i),
+            &mut out,
+        )
+        .expect("a part");
+    }
+    assert!(c.compressed());
+    assert!(c.complete());
+    // The reassembled bytes are the deflate stream, not the file.
+    assert_eq!(c.file_len(), Some(stream.len()));
+    assert_eq!(out, stream);
 }
 
 #[test]

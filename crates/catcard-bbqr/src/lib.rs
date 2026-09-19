@@ -22,6 +22,13 @@
 //! counted on sight would report a complete file after a write that failed, and for a
 //! firmware image the only remaining check would be the signature.
 //!
+//! # `Z` reassembles a stream, not a file
+//!
+//! [`Encoding::Zlib`] deflates the whole file and only then cuts it up, so the parts
+//! place and reassemble exactly as any others do -- what comes out is the compressed
+//! stream. [`Collector::compressed`] says so; expanding it is the caller's, because
+//! only the caller knows where the bytes landed and what it can spend.
+//!
 //! # Where the bytes go is the caller's business
 //!
 //! Two consumers want different destinations: a firmware image goes to the staging area,
@@ -41,14 +48,6 @@ pub use outscript::bbqr::{
 pub enum Error {
     /// The format itself refused it: not a header, bad base32, an index out of range.
     Codec(outscript::bbqr::Error),
-    /// The parts are compressed as a whole, which this cannot reassemble in place.
-    ///
-    /// `Z` deflates the file *before* cutting it up, so no part means anything on its
-    /// own and the entire compressed stream has to be whole before any of it is data.
-    /// For a firmware image the only memory that holds it is the staging area the image
-    /// is being written into, so inflating would read that part while writing to it --
-    /// the documented way to corrupt it (`hw-reference/storage.md`).
-    Compressed,
     /// This part disagrees with the ones already seen about what file this is.
     Mismatch,
     /// The payload decodes to more than the caller left room for.
@@ -119,6 +118,15 @@ impl Collector {
         self.header
     }
 
+    /// Whether what is being collected is a deflate stream rather than the file.
+    ///
+    /// `Z` compresses the whole file before cutting it up, so the parts reassemble into
+    /// something that still has to be expanded. Nothing here does that -- the caller
+    /// knows where the bytes went and what it can spend on expanding them.
+    pub fn compressed(&self) -> bool {
+        self.header.is_some_and(|h| h.encoding == Encoding::Zlib)
+    }
+
     /// Whether every part has been seen.
     pub fn complete(&self) -> bool {
         self.header.is_some_and(|h| self.count == h.num_parts)
@@ -135,9 +143,6 @@ impl Collector {
     /// written it.
     pub fn accept(&mut self, line: &str) -> Result<Placed, Error> {
         let (header, body) = Header::parse(line)?;
-        if header.encoding == Encoding::Zlib {
-            return Err(Error::Compressed);
-        }
         let len = decoded_len_bound(header.encoding, body.len());
         let is_last = header.index + 1 == header.num_parts;
 
