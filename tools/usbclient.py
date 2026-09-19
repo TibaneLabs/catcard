@@ -570,6 +570,14 @@ def connect(path, timeout=300.0):
         # Raw libusb, for when the hidraw node is not readable.
         return LibUsbPort()
     if path in ("hid",):
+        # macOS gives no hidraw node and will not let a process take the interface from
+        # its own HID driver, so the way in there is hidapi. Imported here rather than at
+        # the top because `machid` imports this module: by the time anyone calls this,
+        # both are loaded and the cycle cannot bite.
+        if sys.platform == "darwin":
+            from machid import MacHid
+
+            return MacHid()
         deadline = time.time() + timeout
         while True:
             found = find_hidraw()
@@ -617,6 +625,10 @@ def main(path, image=None):
                              if a.startswith("--timeout=")), 90.0)))
 
     st, body = request(s, IDENTIFY)
+    # Read once, here, so every branch below has it. It used to be set only inside the
+    # branches that happen to run first, which left the plain "offer an image" path
+    # reaching for a name that was never bound.
+    caps = capabilities(body) if st == 0 else 0
     if st == 0:
         info = identify(body)
         if info is None:
