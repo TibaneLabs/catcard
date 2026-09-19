@@ -31,15 +31,19 @@ const MAX_VERSION: u8 = 40;
 
 /// Bytes per part, unless the caller says otherwise.
 ///
-/// **A multiple of five**, which is base32's own constraint: eight characters carry five
-/// bytes, so a part that is not the last must be a whole number of groups or the parts
-/// after it do not decode on their own.
+/// **A multiple of twenty.** Five is base32's own constraint -- eight characters carry
+/// five bytes, so a part that is not the last must be a whole number of groups or the
+/// parts after it do not decode on their own. Four is the device's: parts land in PSRAM,
+/// which takes whole aligned words, and a part whose length is not a multiple of four
+/// puts every part after it at an unaligned offset.
 ///
-/// 1275 because the device's scanner buffer holds 2048 characters and 1275 bytes is
-/// 2048 of them with the header -- the largest part that fits. There is no alignment
-/// rule on top of that: parts land in PSRAM through a driver that paces them, and at one
-/// part every few hundred milliseconds the odd unaligned edge has all the time it needs.
-pub const DEFAULT_PART: usize = 1275;
+/// The device does **not** require this -- it cannot, since another wallet's BBQr parts
+/// are whatever size that wallet chose, and its driver merges an odd edge rather than
+/// refusing. But when the sender is ours there is no reason to make it: every part lands
+/// as whole words and the medium is never read during the transfer at all.
+///
+/// 1260 is the largest such size whose line still fits the device's scanner buffer.
+pub const DEFAULT_PART: usize = 1260;
 
 /// Compress the image if that makes fewer codes, and say which was used.
 ///
@@ -282,10 +286,11 @@ mod tests {
         assert_eq!(b64(b"foobar"), "Zm9vYmFy");
     }
 
-    /// The default is the largest part whose line still fits the device's scanner
-    /// buffer, and a whole number of base32 groups. Both fail quietly if they drift: an
-    /// over-long line is simply never read, and a part that is not a whole number of
-    /// groups puts every part after the first at the wrong offset.
+    /// The default is the largest part that satisfies both formats and still fits the
+    /// device's scanner buffer. All three fail quietly if they drift: an over-long line
+    /// is simply never read, a part that is not a whole number of base32 groups puts
+    /// every part after the first at the wrong offset, and one that is not a whole
+    /// number of words makes the device merge every part edge instead of writing it.
     #[test]
     fn the_default_part_is_the_largest_that_fits() {
         assert_eq!(
@@ -293,8 +298,15 @@ mod tests {
             0,
             "base32 packs five bytes to eight chars"
         );
-        assert_eq!(fits(Encoding::Base32, SCANNER_BUFFER), DEFAULT_PART);
+        assert_eq!(DEFAULT_PART % 4, 0, "the device stages whole words");
         assert!(part_len(Encoding::Base32, DEFAULT_PART) <= SCANNER_BUFFER);
+        // The largest such size that fits: the next one up does not.
+        assert!(part_len(Encoding::Base32, DEFAULT_PART + 20) > SCANNER_BUFFER);
+        // And it is what base32 alone would allow, rounded down to a whole word.
+        assert_eq!(
+            fits(Encoding::Base32, SCANNER_BUFFER) / 20 * 20,
+            DEFAULT_PART
+        );
         // `Z` is base32 underneath, so the line arithmetic is the same either way.
         assert_eq!(
             part_len(Encoding::Zlib, DEFAULT_PART),

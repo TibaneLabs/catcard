@@ -71,6 +71,15 @@ pub fn inflate<A: StagingArea>(
     // can see the other half-done.
     let mut read_at = 0u32;
     let mut write_at = 0u32;
+    // The tail of the last chunk, when it did not end on a word boundary.
+    //
+    // **The medium only ever sees whole aligned words.** A partial word would make the
+    // area read the word back to merge with, and this is the one place in the transfer
+    // where reads and writes really are interleaved at full speed rather than a part at
+    // a time. The output is sequential, so three bytes of carry is the whole fix: the
+    // odd tail waits for the front of the next chunk to complete its word.
+    let mut carry = [0u8; 4];
+    let mut carried = 0usize;
 
     let outcome = {
         let reader = Reader::new(chunk, |buf: &mut [u8]| {
@@ -86,12 +95,44 @@ pub fn inflate<A: StagingArea>(
         });
         let stream = Stream::new(window, max as u64, |data: &[u8]| {
             let mut area = cell.try_borrow_mut().map_err(|_| ZError::Io)?;
-            area.write(write_at, data).map_err(|_| ZError::Io)?;
-            write_at += data.len() as u32;
+            let mut data = data;
+
+            // Finish the word left over from last time before anything else.
+            if carried > 0 {
+                let take = data.len().min(4 - carried);
+                carry[carried..carried + take].copy_from_slice(&data[..take]);
+                carried += take;
+                data = &data[take..];
+                if carried < 4 {
+                    return Ok(());
+                }
+                area.write(write_at, &carry).map_err(|_| ZError::Io)?;
+                write_at += 4;
+                carried = 0;
+            }
+
+            let whole = data.len() & !3;
+            if whole > 0 {
+                area.write(write_at, &data[..whole])
+                    .map_err(|_| ZError::Io)?;
+                write_at += whole as u32;
+            }
+            carried = data.len() - whole;
+            carry[..carried].copy_from_slice(&data[whole..]);
             Ok(())
         });
         minizlib::inflate(reader, stream)
     };
+
+    // The last few bytes of the image, if it does not end on a word boundary. Nothing
+    // follows them, so the word they complete holds nothing that matters and the
+    // padding is past the image's length.
+    if outcome.is_ok() && carried > 0 {
+        carry[carried..].fill(0);
+        cell.borrow_mut()
+            .write(write_at, &carry)
+            .map_err(|_| Error::Storage)?;
+    }
 
     match outcome {
         Ok(n) => Ok(n as u32),

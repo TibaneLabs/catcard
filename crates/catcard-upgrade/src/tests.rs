@@ -893,6 +893,39 @@ mod expanding {
         );
     }
 
+    /// **The medium never sees a partial word.** A short write would make the area read
+    /// the word back to merge with, and the expansion is the one place in a QR transfer
+    /// where reads and writes are interleaved at full speed rather than a part at a
+    /// time. Every write but the last is a whole number of aligned words; the last may
+    /// be padded, because nothing follows the image's end.
+    #[test]
+    fn every_write_is_whole_aligned_words() {
+        let image = firmwareish(200 * 1024 + 3);
+        let stream = deflate(&image, SENDER_WINDOW);
+        let mut mem = staged(&stream);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+        let n = expand::inflate(
+            &mut mem,
+            FROM,
+            stream.len() as u32,
+            image.len() as u32 + 4,
+            &mut window,
+            &mut chunk,
+        )
+        .expect("expands");
+        assert_eq!(n as usize, image.len());
+
+        for &(offset, len) in &mem.writes {
+            if offset == FROM {
+                continue; // the staging write this test did itself
+            }
+            assert_eq!(offset % 4, 0, "wrote {len} at unaligned {offset}");
+            assert_eq!(len % 4, 0, "wrote a partial word of {len} at {offset}");
+        }
+        assert_eq!(&mem.bytes[..image.len()], &image[..]);
+    }
+
     /// **Raw deflate carries no checksum**, so a damaged stream can expand to exactly
     /// the right length and simply be the wrong bytes -- there is nothing in the format
     /// to notice. That is not a gap to be closed here: the image's signature is checked
