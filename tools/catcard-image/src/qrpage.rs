@@ -323,3 +323,155 @@ mod tests {
         assert!(render(&[0u8; 4096], 2000, "x").is_err());
     }
 }
+
+/// The whole transfer, on the host: what this tool emits, taken apart the way the
+/// device takes it apart.
+///
+/// The two halves are tested separately -- placement in `catcard-bbqr`, expansion in
+/// `catcard-upgrade` -- and separately is not enough. What they have to agree about is
+/// the part size: this tool chooses it, and the device derives every offset from it. A
+/// disagreement there is not an error anywhere, it is an image that assembles and fails
+/// its signature, which is the report that reads as bad hardware.
+#[cfg(test)]
+mod round_trip {
+    use super::*;
+    use catcard_bbqr::{Collector, decoded_len_bound};
+
+    fn firmwareish(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| match i % 11 {
+                0 => 0x00,
+                1 => 0xF0,
+                2 => 0x4B,
+                n => ((i / 11).wrapping_mul(7) + n) as u8,
+            })
+            .collect()
+    }
+
+    /// Cut a payload up exactly as `render` does, and put it back exactly as the device
+    /// does: place each part at the offset its index gives, out of order.
+    fn reassemble(image: &[u8], part: usize) -> (Vec<u8>, bool) {
+        let (encoding, body) = best_encoding(image);
+        let total = parts_needed(body.len(), part);
+        let mut line = vec![0u8; part_len(encoding, part)];
+
+        let mut out = vec![0u8; body.len()];
+        let mut c = Collector::new();
+        // Back to front, so nothing can be relying on having seen part zero.
+        for index in (0..total).rev() {
+            let at = index * part;
+            let chunk = &body[at..(at + part).min(body.len())];
+            let header = Header {
+                encoding,
+                file_type: FileType::BINARY,
+                num_parts: total as u16,
+                index: index as u16,
+            };
+            let n = encode_part_to_slice(&header, chunk, &mut line).expect("encodes");
+            let text = std::str::from_utf8(&line[..n]).expect("ascii");
+            // A part whose offset is not yet knowable comes round again, as it does on
+            // a looping animation.
+            if c.take(text, &mut out).is_err() {
+                continue;
+            }
+        }
+        for index in 0..total {
+            let at = index * part;
+            let chunk = &body[at..(at + part).min(body.len())];
+            let header = Header {
+                encoding,
+                file_type: FileType::BINARY,
+                num_parts: total as u16,
+                index: index as u16,
+            };
+            let n = encode_part_to_slice(&header, chunk, &mut line).expect("encodes");
+            let text = std::str::from_utf8(&line[..n]).expect("ascii");
+            c.take(text, &mut out).expect("a part");
+        }
+        assert!(c.complete(), "every part was placed");
+        assert_eq!(c.file_len(), Some(body.len()), "and the length agrees");
+        (out, encoding == Encoding::Zlib)
+    }
+
+    /// Compressed, which is what a firmware image takes: the parts reassemble the
+    /// deflate stream, and expanding it gives back the image.
+    #[test]
+    fn a_compressed_image_survives_the_round_trip() {
+        let image = firmwareish(300 * 1024);
+        let (stream, compressed) = reassemble(&image, DEFAULT_PART);
+        assert!(compressed, "this fixture should compress");
+
+        let mut out = vec![0u8; image.len() + 4];
+        let n = outscript::bbqr::inflate_to_slice(&stream, &mut out).expect("expands");
+        assert_eq!(n, image.len());
+        assert_eq!(&out[..n], &image[..]);
+    }
+
+    /// Bytes with nothing in them for a compressor to find.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x1234_5678u32;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// A payload that does not compress goes as plain base32 -- the compressor can make
+    /// a file longer, and the shorter of the two is what gets sent.
+    #[test]
+    fn an_incompressible_image_goes_uncompressed() {
+        let image = noise(200 * 1024);
+        let (out, compressed) = reassemble(&image, DEFAULT_PART);
+        assert!(!compressed, "nothing to gain, so it should go uncompressed");
+        assert_eq!(out, image);
+    }
+
+    /// The part the device is told and the part this tool used are the same number, and
+    /// the offsets it derives from it land where the bytes were cut.
+    #[test]
+    fn the_device_derives_the_offsets_this_tool_cut_at() {
+        let image = firmwareish(64 * 1024);
+        let (_, body) = best_encoding(&image);
+        let total = parts_needed(body.len(), DEFAULT_PART);
+        let mut line = vec![0u8; part_len(Encoding::Zlib, DEFAULT_PART)];
+        let mut c = Collector::new();
+
+        for index in 0..total {
+            let at = index * DEFAULT_PART;
+            let chunk = &body[at..(at + DEFAULT_PART).min(body.len())];
+            let header = Header {
+                encoding: Encoding::Zlib,
+                file_type: FileType::BINARY,
+                num_parts: total as u16,
+                index: index as u16,
+            };
+            let n = encode_part_to_slice(&header, chunk, &mut line).expect("encodes");
+            let text = std::str::from_utf8(&line[..n]).expect("ascii");
+            let placed = c.accept(text).expect("a part");
+            assert_eq!(placed.offset, at, "part {index} placed wrong");
+            assert_eq!(placed.len, chunk.len(), "part {index} sized wrong");
+            assert_eq!(
+                decoded_len_bound(Encoding::Zlib, n - 8),
+                chunk.len(),
+                "the line length does not imply the part length"
+            );
+            c.confirm(placed);
+        }
+    }
+
+    /// Every part's offset is a whole number of words, which is what lets the device
+    /// write them without merging anything.
+    #[test]
+    fn the_default_part_puts_every_offset_on_a_word() {
+        let image = firmwareish(300 * 1024);
+        let (_, body) = best_encoding(&image);
+        let total = parts_needed(body.len(), DEFAULT_PART);
+        for index in 0..total {
+            assert_eq!((index * DEFAULT_PART) % 4, 0, "part {index} is unaligned");
+        }
+    }
+}
