@@ -19,6 +19,8 @@ use catcard_wallet::bip32::serialize::Slip132;
 use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, Network};
 use catcard_wallet::descriptor::{self, SingleSig};
 
+use zeroize::Zeroize as _;
+
 use crate::display;
 use crate::menu::{Working, public_at};
 
@@ -598,6 +600,152 @@ pub fn ss_descriptor(
         let _ = out.push('\n');
     }
     Some(())
+}
+
+// ---------------------------------------------------------------------------
+// The detached signature.
+// ---------------------------------------------------------------------------
+
+/// Where a format's detached signature is signed from.
+///
+/// Every format names its own: a path down to one leaf, and the address form that leaf
+/// is written in. They differ -- Bitcoin Core signs from its native-segwit account, the
+/// generic JSON from BIP-44's -- and the file says which address signed, so a verifier
+/// needs to be told nothing else.
+///
+/// Source: hw-reference/wallet-export-formats.md, the "Signing derivation" line of each
+/// format [C].
+#[derive(Clone)]
+pub struct Signing {
+    /// The whole path from the master, hardened steps included.
+    pub steps: heapless::Vec<ChildNumber, 6>,
+    /// Which address form the signing key is written as.
+    pub kind: catcard_wallet::address::AddressKind,
+}
+
+impl Signing {
+    /// `m/{purpose}h/{COIN}h/{account}h/0/0`, which is what most formats sign from.
+    pub fn account(
+        purpose: u32,
+        account: u32,
+        kind: catcard_wallet::address::AddressKind,
+    ) -> Option<Self> {
+        let mut steps = heapless::Vec::new();
+        for step in [
+            ChildNumber::hardened(purpose).ok()?,
+            ChildNumber::hardened(COIN).ok()?,
+            ChildNumber::hardened(account).ok()?,
+            ChildNumber::normal(0).ok()?,
+            ChildNumber::normal(0).ok()?,
+        ] {
+            steps.push(step).ok()?;
+        }
+        Some(Signing { steps, kind })
+    }
+
+    /// `m/48h/{COIN}h/{account}h/2h/0/0`, which is Unchained's.
+    pub fn cosigner(account: u32) -> Option<Self> {
+        let mut steps = heapless::Vec::new();
+        for step in [
+            ChildNumber::hardened(48).ok()?,
+            ChildNumber::hardened(COIN).ok()?,
+            ChildNumber::hardened(account).ok()?,
+            ChildNumber::hardened(2).ok()?,
+            ChildNumber::normal(0).ok()?,
+            ChildNumber::normal(0).ok()?,
+        ] {
+            steps.push(step).ok()?;
+        }
+        Some(Signing {
+            steps,
+            kind: catcard_wallet::address::AddressKind::P2pkh,
+        })
+    }
+}
+
+/// The longest a `.sig` file gets: the two banner lines, a 64-character digest and a
+/// filename, an address and 88 characters of base64.
+pub const MAX_SIG_LEN: usize = 320;
+
+/// Write the detached signature for `contents` under `basename`.
+///
+/// An RFC-2440-style armoured block over one line: the lower-case hex of the file's
+/// SHA-256, two spaces, and the file's name without its directory. Signing the name
+/// along with the digest is what stops a signature being lifted off one export and
+/// presented with another.
+///
+/// The name has to be the one actually written, which is why this runs after the
+/// collision numbering has picked it and not before.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Detached signature file" [C].
+pub fn signature_file(
+    master: &ExtendedPrivKey,
+    signing: &Signing,
+    contents: &[u8],
+    basename: &str,
+    out: &mut heapless::String<MAX_SIG_LEN>,
+) -> Result<(), &'static str> {
+    use catcard_wallet::message;
+
+    let digest = {
+        use purecrypto::hash::{Digest as _, Sha256};
+        let mut h = Sha256::new();
+        h.update(contents);
+        h.finalize()
+    };
+    // The signed body. Two spaces between the digest and the name, which is the format.
+    let mut body: heapless::String<{ message::MAX_MESSAGE }> = heapless::String::new();
+    for byte in digest {
+        write!(body, "{byte:02x}").map_err(|_| "name too long")?;
+    }
+    body.push_str("  ").map_err(|_| "name too long")?;
+    body.push_str(basename).map_err(|_| "name too long")?;
+
+    let signed = crate::keywork::run(|kw| {
+        let mut here = master.clone();
+        for &step in &signing.steps {
+            here = here
+                .derive_child(step, kw)
+                .map_err(|_| "derivation failed")?;
+        }
+        let mut secret = *here.secret_bytes();
+        let sig = message::sign(&body, &secret, signing.kind, kw);
+        secret.zeroize();
+        let sig = sig.map_err(|_| "could not sign")?;
+        // Check our own work before it leaves: recover the key from the signature and
+        // compare it with the one that signed. A sidecar that does not verify is worse
+        // than no sidecar, because it looks like tampering.
+        let pubkey = here.public_key(kw);
+        match message::recover(&body, &sig) {
+            Ok((recovered, _)) if recovered == pubkey => {}
+            _ => return Err("signature did not verify"),
+        }
+        let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
+        let n = catcard_wallet::address::encode(signing.kind, NETWORK, &pubkey, &mut buf)
+            .map_err(|_| "address failed")?;
+        let mut addr: heapless::String<{ catcard_wallet::address::MAX_ADDRESS_LEN }> =
+            heapless::String::new();
+        addr.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
+            .map_err(|_| "address failed")?;
+        Ok((sig, addr))
+    })?;
+
+    let (sig, addr) = signed;
+    let mut armoured = [0u8; message::MAX_ARMOURED];
+    let n = message::armour(&sig, &mut armoured).map_err(|_| "could not encode it")?;
+    let armoured = core::str::from_utf8(&armoured[..n]).map_err(|_| "could not encode it")?;
+
+    // Every line ends with a newline, the last one included.
+    write!(
+        out,
+        "-----BEGIN BITCOIN SIGNED MESSAGE-----\n\
+         {body}\n\
+         -----BEGIN BITCOIN SIGNATURE-----\n\
+         {addr}\n\
+         {armoured}\n\
+         -----END BITCOIN SIGNATURE-----\n"
+    )
+    .map_err(|_| "signature too long")
 }
 
 /// The SLIP-132 form that announces `kind`.

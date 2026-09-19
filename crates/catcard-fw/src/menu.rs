@@ -2362,9 +2362,22 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
 /// the `Err` for the caller to show and log -- the step is what tells a bad card apart
 /// from a full one or a filesystem it cannot mount.
 pub(crate) fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static str> {
+    let mut vol = mount_card()?;
+    write_into(&mut vol, path, bytes)?;
+    vol.flush().map_err(|_| "flush failed")
+}
+
+/// The card, mounted, as every writer here wants it.
+///
+/// Split out because an export writes two files -- the export and its detached signature
+/// -- and has to look at what is already there before it picks a name. Mounting once and
+/// doing all three against the same volume is both faster and the only way the numbering
+/// can be right: a name checked under one mount and written under another is a name that
+/// could have been taken in between.
+fn mount_card() -> Result<CardVolume, &'static str> {
     // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
     let mut why: &'static str = "card error";
-    let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
+    let vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
         // to return before it can be chosen again.
         let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
@@ -2392,17 +2405,22 @@ pub(crate) fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static s
         catcard_sd::MountError::Device => why,
         catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
     })?;
+    Ok(vol)
+}
+
+/// The mounted card, spelled out once so it can be passed around.
+type CardVolume = catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>;
+
+/// Write `bytes` to `path` on an already-mounted card, replacing what was there.
+fn write_into(vol: &mut CardVolume, path: &str, bytes: &[u8]) -> Result<(), &'static str> {
     let mut file = vol
         .open_or_create_file(path)
         .map_err(|_| "could not open file")?;
-    file.write_all(&mut vol, bytes)
-        .map_err(|_| "write failed")?;
+    file.write_all(vol, bytes).map_err(|_| "write failed")?;
     // Trim any tail from a longer earlier file, so it holds exactly these bytes.
-    file.set_len(&mut vol, bytes.len() as u64)
+    file.set_len(vol, bytes.len() as u64)
         .map_err(|_| "truncate failed")?;
-    file.flush(&mut vol).map_err(|_| "flush failed")?;
-    vol.flush().map_err(|_| "flush failed")?;
-    Ok(())
+    file.flush(vol).map_err(|_| "flush failed")
 }
 
 /// Longest file name a browser row keeps; longer names are truncated for display (the
@@ -3654,12 +3672,23 @@ fn export_one(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             &mut text,
         ),
     };
-    drop(master);
     if built.is_none() {
         message(ui.panel, label, "derivation failed", "any key to go back");
         wait_for_any_key(ui);
         return;
     }
+    // Each format names the key its signature comes from; they are not the same key.
+    let signing = match row.format {
+        Format::BitcoinCore => {
+            crate::export::Signing::account(84, row.account, AddressKind::P2wpkh)
+        }
+        Format::Electrum | Format::Descriptor => {
+            crate::export::Signing::account(kind.bip44_purpose(), row.account, kind)
+        }
+        Format::Wasabi => crate::export::Signing::account(84, 0, AddressKind::P2wpkh),
+        Format::Unchained => crate::export::Signing::cosigner(row.account),
+    };
+    let signer = signer_for(master, signing);
 
     let [a, b, c, d] = fingerprint;
     let mut file: heapless::String<32> = heapless::String::new();
@@ -3671,7 +3700,14 @@ fn export_one(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             let _ = file.push_str(row.file);
         }
     }
-    offer_export(ui, label, &file, text.as_bytes(), row.format.filetype());
+    offer_export(
+        ui,
+        label,
+        &file,
+        text.as_bytes(),
+        row.format.filetype(),
+        signer,
+    );
 }
 
 /// The file a Format A row writes under, if that row is one.
@@ -3708,18 +3744,22 @@ fn export_generic_json(
     let mut busy = Working::new(ui.panel, label, "deriving accounts");
     // Account zero: the number stock prompts for, and the one every wallet defaults to.
     let built = crate::export::generic_json(&master, 0, &mut busy, ui.panel, &mut text);
-    drop(master);
     if built.is_none() {
         message(ui.panel, HEAD, "derivation failed", "any key to go back");
         wait_for_any_key(ui);
         return;
     }
+    let signer = signer_for(
+        master,
+        crate::export::Signing::account(44, 0, AddressKind::P2pkh),
+    );
     offer_export(
         ui,
         label,
         file,
         text.as_bytes(),
         catcard_bbqr::FileType::JSON,
+        signer,
     );
 }
 
@@ -3780,7 +3820,12 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         };
         let _ = writeln!(text, "{}", core::str::from_utf8(&xpub[..len]).unwrap_or(""));
     }
-    drop(master);
+    // Stock shows this one only as a QR and never writes a file, so it names no signing
+    // derivation. BIP-44's first receive key is what the other text exports use.
+    let signer = signer_for(
+        master,
+        crate::export::Signing::account(44, 0, AddressKind::P2pkh),
+    );
 
     // Named for what it holds, so a card with several on it is still readable.
     let mut path: heapless::String<24> = heapless::String::new();
@@ -3800,6 +3845,7 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         &path,
         text.as_bytes(),
         catcard_bbqr::FileType::TEXT,
+        signer,
     );
 }
 
@@ -3852,7 +3898,9 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
             core::str::from_utf8(&xpub[..xlen]).unwrap_or("")
         );
     }
-    drop(master);
+    // Format G's multisig and custom-path rows sign classic, and these are the BIP-48
+    // cosigner keys, so the signature comes from the P2WSH leg.
+    let signer = signer_for(master, crate::export::Signing::cosigner(0));
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-KEYS.TXT");
@@ -3862,6 +3910,7 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         &path,
         text.as_bytes(),
         catcard_bbqr::FileType::TEXT,
+        signer,
     );
 }
 
@@ -3940,7 +3989,10 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
             let _ = writeln!(text, "{line}");
         }
     }
-    drop(master);
+    let signer = signer_for(
+        master,
+        crate::export::Signing::account(44, 0, AddressKind::P2pkh),
+    );
 
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-SUMMARY.TXT");
@@ -3950,6 +4002,7 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
         &path,
         text.as_bytes(),
         catcard_bbqr::FileType::TEXT,
+        signer,
     );
 }
 
@@ -4019,16 +4072,26 @@ fn offer_export(
     file: &str,
     body: &[u8],
     kind: catcard_bbqr::FileType,
+    signer: Option<Signer>,
 ) {
     // A list, not a yes/no. Three destinations that are not ranked -- a card for a
     // computer, BBQr for wallets that read it, BC-UR for everything else -- and cancel
     // means none of them rather than one of them.
     const WAYS: &[&str] = &["SD card", "BBQr", "BC-UR"];
+    // The signature is a card-only thing: a QR carries the same bytes and no signature,
+    // because there is nowhere alongside it to put one. So every path but the card drops
+    // the key first, before a screen that stays up until someone walks away from it.
     match choose(ui, head, "how to export", WAYS) {
-        Some(0) => write_export(ui, head, file, body),
-        Some(1) => crate::qrshow::animate_bbqr(ui, head, body, kind),
-        Some(2) => crate::qrshow::animate_bcur(ui, head, body),
-        _ => {}
+        Some(0) => write_export(ui, head, file, body, signer),
+        Some(1) => {
+            drop(signer);
+            crate::qrshow::animate_bbqr(ui, head, body, kind);
+        }
+        Some(2) => {
+            drop(signer);
+            crate::qrshow::animate_bcur(ui, head, body);
+        }
+        _ => drop(signer),
     }
 }
 
@@ -4040,8 +4103,9 @@ fn offer_export(
     file: &str,
     body: &[u8],
     _kind: catcard_bbqr::FileType,
+    signer: Option<Signer>,
 ) {
-    write_export(ui, head, file, body);
+    write_export(ui, head, file, body, signer);
 }
 
 /// Write an export to the card and say how it went.
@@ -4049,12 +4113,12 @@ fn offer_export(
 /// The same three outcomes every time -- written, refused, or the card was not there --
 /// said the same way, because an export that fails differently each time is one nobody
 /// can help with.
-fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8]) {
+fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8], signer: Option<Signer>) {
     message(ui.panel, head, "writing to SD card", "");
-    match write_card_file(path, body) {
-        Ok(()) => {
-            crate::catlog!("export: wrote {} bytes to {}", body.len(), path);
-            message(ui.panel, "Exported", &path[1..], "any key to go back");
+    match write_card_export(path, body, signer) {
+        Ok(name) => {
+            crate::catlog!("export: wrote {} bytes to {}", body.len(), name.as_str());
+            message(ui.panel, "Exported", &name[1..], "any key to go back");
         }
         Err(why) => {
             let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
@@ -4069,6 +4133,99 @@ fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8]) {
         }
     }
     wait_for_any_key(ui);
+}
+
+/// The longest export filename, with room for a collision number.
+const EXPORT_NAME_MAX: usize = 40;
+
+/// Write an export and, when there is a key for it, its detached signature.
+///
+/// Returns the name actually used, which is not always the one asked for.
+///
+/// **Nothing is overwritten.** If `path` is taken the file goes to `base-2.ext`, then
+/// `base-3.ext` and so on. Stock does this and it matters more here than it looks: two
+/// exports of the same wallet at different accounts, or of two different wallets, land on
+/// the same filename, and silently replacing the first one destroys a file someone may
+/// have been about to use.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Filenames, output channels, and
+/// signing" [C] -- including that the first collision yields `-2`, not `-1`.
+fn write_card_export(
+    path: &str,
+    body: &[u8],
+    signer: Option<Signer>,
+) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
+    let mut vol = mount_card()?;
+
+    let (stem, ext) = match path.rsplit_once('.') {
+        Some((stem, ext)) => (stem, ext),
+        None => (path, ""),
+    };
+    let mut name: heapless::String<EXPORT_NAME_MAX> = heapless::String::new();
+    name.push_str(path).map_err(|_| "name too long")?;
+    // Bounded, because an unbounded search on a card with a corrupt directory would spin
+    // forever. A hundred exports under one name is already more than anyone has.
+    for n in 2..100 {
+        if vol.open_file(&name).is_err() {
+            break;
+        }
+        name.clear();
+        write!(name, "{stem}-{n}").map_err(|_| "name too long")?;
+        if !ext.is_empty() {
+            write!(name, ".{ext}").map_err(|_| "name too long")?;
+        }
+    }
+
+    write_into(&mut vol, &name, body)?;
+
+    // The signature covers the name that was actually used, so it is built here rather
+    // than by the caller: the caller does not know yet what the file will be called.
+    if let Some(signer) = signer {
+        let basename = name.strip_prefix('/').unwrap_or(&name);
+        let mut armoured: heapless::String<{ crate::export::MAX_SIG_LEN }> =
+            heapless::String::new();
+        crate::export::signature_file(
+            &signer.master,
+            &signer.signing,
+            body,
+            basename,
+            &mut armoured,
+        )?;
+        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name);
+        let mut sig_name: heapless::String<EXPORT_NAME_MAX> = heapless::String::new();
+        write!(sig_name, "{stem}.sig").map_err(|_| "name too long")?;
+        write_into(&mut vol, &sig_name, armoured.as_bytes())?;
+    }
+
+    vol.flush().map_err(|_| "flush failed")?;
+    Ok(name)
+}
+
+/// The seed, kept just long enough to sign an export's detached signature.
+///
+/// It exists because the signature covers the filename, and the filename is only settled
+/// once the card has been looked at -- so the key cannot be finished with before the
+/// destination is known. It goes no further than that: [`offer_export`] drops it the
+/// moment a QR destination is chosen, because an animation stays up until someone walks
+/// away from it and a master key should not be waiting in RAM for that.
+struct Signer {
+    master: catcard_wallet::bip32::ExtendedPrivKey,
+    signing: crate::export::Signing,
+}
+
+/// Pair a master key with where its export's signature comes from.
+///
+/// `None` if the derivation could not even be described, which leaves the export
+/// unsigned rather than unwritten: a file without its sidecar is still the file someone
+/// asked for.
+fn signer_for(
+    master: catcard_wallet::bip32::ExtendedPrivKey,
+    signing: Option<crate::export::Signing>,
+) -> Option<Signer> {
+    Some(Signer {
+        master,
+        signing: signing?,
+    })
 }
 
 /// The stored BIP-39 wallet's master key, for a screen titled `head`: the secret fetched,
