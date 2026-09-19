@@ -45,6 +45,9 @@ pub enum Error {
     TooLong,
     /// The compressed data is malformed.
     Damaged,
+    /// The stream does not sit where it can be expanded past: either it starts below
+    /// what the expansion may write, or it runs off the end of the area.
+    NoRoom,
 }
 
 /// Expand `len` compressed bytes at `from` into the same area, starting at zero.
@@ -53,8 +56,11 @@ pub enum Error {
 /// at least as wide as the one the stream was made with; `chunk` is how much compressed
 /// input is fetched per bus turnaround, and only affects how often that happens.
 ///
-/// **`from` must be past `max`**, or the expansion overwrites input it has not read yet.
-/// That is the caller's to arrange, because the caller chose where to put the stream.
+/// **`from` must be past `max` and the stream must fit the area.** Checked here rather
+/// than assumed: it used to be a `debug_assert` on the first half only, which is absent
+/// from a release build and said nothing about the second -- and the second is the one
+/// that was wrong, by two megabytes, for as long as the staging area was mistaken for
+/// the whole of the PSRAM part.
 pub fn inflate<A: StagingArea>(
     area: &mut A,
     from: u32,
@@ -63,7 +69,10 @@ pub fn inflate<A: StagingArea>(
     window: &mut [u8],
     chunk: &mut [u8],
 ) -> Result<u32, Error> {
-    debug_assert!(from >= max, "the expansion would overwrite the stream");
+    let end = from.checked_add(len).ok_or(Error::NoRoom)?;
+    if from < max || end > area.capacity() {
+        return Err(Error::NoRoom);
+    }
 
     let cell = RefCell::new(area);
     // How much of the stream has been handed over, and where the expanded bytes go

@@ -694,6 +694,33 @@ mod tests {
         }
     }
 
+    /// A compressed image is staged *above* the space it expands into, so the area has
+    /// to hold both at once. The stream is only ever used when it came out shorter than
+    /// the file, so the worst case is a stream just under the largest image -- twice
+    /// the flash length, near enough.
+    ///
+    /// This is the test that was missing. The offset the scanner staged a stream at was
+    /// reasoned out against the size of the PSRAM part, which is twice the size of the
+    /// staging area: the area is the upper half of the part, stopping short of the
+    /// bootloader's header. Every write landed two megabytes past the end and said only
+    /// "staging write failed".
+    #[test]
+    fn there_is_room_for_a_compressed_image_and_what_it_expands_to() {
+        for b in ALL {
+            let Some(p) = b.psram else { continue };
+            // SAFETY: arithmetic only.
+            let a = unsafe { PsramArea::claim(&p, 120_000_000) };
+            let need = b.memory.firmware_flash_len as u64 * 2;
+            assert!(
+                a.capacity() as u64 >= need,
+                "{}: {} of staging, but an image and its stream want {}",
+                b.name,
+                a.capacity(),
+                need
+            );
+        }
+    }
+
     #[test]
     fn staging_stays_in_the_upper_half() {
         // The lower half is the scratch filesystem's. Receiving firmware must not walk

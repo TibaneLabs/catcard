@@ -893,6 +893,46 @@ mod expanding {
         );
     }
 
+    /// A stream that does not sit where it can be expanded past is refused, rather than
+    /// half-written and then found out. Both halves: one that starts inside what the
+    /// expansion will write, and one that runs off the end of the area.
+    #[test]
+    fn a_stream_with_nowhere_to_go_is_refused() {
+        let image = firmwareish(64 * 1024);
+        let stream = deflate(&image, SENDER_WINDOW);
+        let mut window = vec![0u8; 8 * 1024];
+        let mut chunk = vec![0u8; 1024];
+
+        // Starting below what the expansion writes: it would eat its own input.
+        let mut mem = staged(&stream);
+        assert_eq!(
+            expand::inflate(
+                &mut mem,
+                image.len() as u32 / 2,
+                stream.len() as u32,
+                image.len() as u32,
+                &mut window,
+                &mut chunk,
+            ),
+            Err(Error::NoRoom)
+        );
+
+        // Past the end of the area, which is how a compressed scan failed with nothing
+        // but "staging write failed" to say for itself.
+        let mut mem = Mem::new(CAPACITY);
+        assert_eq!(
+            expand::inflate(
+                &mut mem,
+                CAPACITY as u32 - 16,
+                stream.len() as u32,
+                image.len() as u32,
+                &mut window,
+                &mut chunk,
+            ),
+            Err(Error::NoRoom)
+        );
+    }
+
     /// **The medium never sees a partial word.** A short write would make the area read
     /// the word back to merge with, and the expansion is the one place in a QR transfer
     /// where reads and writes are interleaved at full speed rather than a part at a

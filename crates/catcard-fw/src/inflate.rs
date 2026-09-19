@@ -28,13 +28,25 @@ const CHUNK: usize = 1024;
 
 /// Where the scanner puts a compressed stream, as an offset into the staging area.
 ///
-/// Past anything that can be expanded out of it: the expanded image starts at zero and
-/// the bootloader will not take one larger than the board's flash, which is a fraction
-/// of this. Keeping the two apart is what lets the expansion run forwards without ever
-/// overwriting input it has not read yet.
-pub const COMPRESSED_AT: u32 = 6 * 1024 * 1024;
+/// Immediately above the largest image that can be expanded out of it. The expansion
+/// writes from zero and `Staged::begin` refuses an image longer than the board's
+/// firmware flash, so nothing the expansion produces can reach this -- which is what
+/// lets it run forwards without ever overwriting input it has not read yet.
+///
+/// **Derived, not chosen.** It was 6 MiB, picked against the size of the PSRAM part.
+/// The staging area is not the part: it is the upper half of it, stopping short of the
+/// bootloader's header, so its capacity is about four megabytes and every write of a
+/// compressed stream landed two megabytes past the end. A number reasoned out against
+/// the wrong object looks just as deliberate as one reasoned out against the right one.
+pub const fn compressed_at() -> u32 {
+    // Word-aligned, because everything written here is written in whole words.
+    catcard_board::BOARD
+        .memory
+        .firmware_flash_len
+        .next_multiple_of(4)
+}
 
-/// Expand `len` compressed bytes at [`COMPRESSED_AT`] into the area from offset zero.
+/// Expand `len` compressed bytes at [`compressed_at`] into the area from offset zero.
 ///
 /// The buffers come from the heap, which is the only reason this is not just the call
 /// underneath. Returns how many bytes came out.
@@ -43,16 +55,22 @@ pub fn staged(area: &mut Area, len: u32, max: u32) -> Result<u32, &'static str> 
     else {
         return Err("not enough memory to expand it");
     };
-    catcard_upgrade::expand::inflate(area, COMPRESSED_AT, len, max, window.bytes(), chunk.bytes())
-        .map_err(|why| {
-            crate::catlog!("inflate: refused: {:?}", why);
-            match why {
-                catcard_upgrade::expand::Error::WindowTooSmall => {
-                    "compressed with too wide a window"
-                }
-                catcard_upgrade::expand::Error::TooLong => "it expands to more than can be staged",
-                catcard_upgrade::expand::Error::Storage => "staging write failed",
-                catcard_upgrade::expand::Error::Damaged => "the compressed data is damaged",
-            }
-        })
+    catcard_upgrade::expand::inflate(
+        area,
+        compressed_at(),
+        len,
+        max,
+        window.bytes(),
+        chunk.bytes(),
+    )
+    .map_err(|why| {
+        crate::catlog!("inflate: refused: {:?}", why);
+        match why {
+            catcard_upgrade::expand::Error::WindowTooSmall => "compressed with too wide a window",
+            catcard_upgrade::expand::Error::TooLong => "it expands to more than can be staged",
+            catcard_upgrade::expand::Error::Storage => "staging write failed",
+            catcard_upgrade::expand::Error::NoRoom => "no room to expand it",
+            catcard_upgrade::expand::Error::Damaged => "the compressed data is damaged",
+        }
+    })
 }

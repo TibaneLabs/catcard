@@ -355,7 +355,7 @@ impl Sink for Staging {
     }
 
     fn compressed(&mut self) -> Result<(), &'static str> {
-        self.base = crate::inflate::COMPRESSED_AT;
+        self.base = crate::inflate::compressed_at();
         Ok(())
     }
 
