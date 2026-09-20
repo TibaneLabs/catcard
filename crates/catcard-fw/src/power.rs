@@ -43,6 +43,18 @@ static mut HOLD_CYCLES: u32 = 0;
 static mut HELD_SINCE: Option<u32> = None;
 /// Cycle count of the previous poll, to tell a held button from an unwatched one.
 static mut LAST_POLL: Option<u32> = None;
+/// Whether the button has been seen *up* since the firmware started watching it.
+///
+/// **This is how a Q1 gets switched on.** The button is held to power the device up, so
+/// it is still down when the firmware boots -- and a poll that reads a level rather than
+/// an edge counts that as a press that began the moment it started looking. The device
+/// then switched itself off the instant it reached the PIN prompt, which is simply the
+/// first screen that waits long enough to poll.
+///
+/// Stock arms a *falling-edge* interrupt, which is a transition and cannot fire for a
+/// button that was already down. This is the same rule for a poll: nothing counts until
+/// the button has been let go once.
+static mut SEEN_UP: bool = false;
 
 /// The longest gap between two polls that still counts as continuous observation.
 ///
@@ -76,6 +88,8 @@ pub unsafe fn init(gate: &Callgate) {
         *addr_of_mut!(HOLD_CYCLES) = (hz / 1_000).saturating_mul(HOLD_MS);
         *addr_of_mut!(CONTINUITY_CYCLES) = (hz / 1_000).saturating_mul(CONTINUITY_MS);
         *addr_of_mut!(GATE) = Some(*gate);
+        // Not armed yet, whatever the pin reads now: see `SEEN_UP`.
+        *addr_of_mut!(SEEN_UP) = false;
     }
     crate::catlog!("power: button armed, {} ms hold", HOLD_MS);
 }
@@ -104,6 +118,18 @@ pub fn tick() {
     // Active-low with a pull-up: pressed reads 0.
     // SAFETY: reads one GPIO input register.
     let pressed = !unsafe { gpio::read(pin) };
+
+    // The button that turned the device on is still down. Until it has been released
+    // once, there is no press here to measure -- only the one that is still ending.
+    // SAFETY: foreground only, and the borrow ends with this statement.
+    let seen_up = unsafe { &mut *addr_of_mut!(SEEN_UP) };
+    if !*seen_up {
+        if !pressed {
+            *seen_up = true;
+            crate::catlog!("power: button released, now live");
+        }
+        return;
+    }
     // SAFETY: as above -- foreground only, and the borrow ends with this function.
     let since = unsafe { &mut *addr_of_mut!(HELD_SINCE) };
     // SAFETY: as above.
