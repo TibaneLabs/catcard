@@ -91,6 +91,16 @@ pub unsafe fn init(gate: &Callgate) {
         // Not armed yet, whatever the pin reads now: see `SEEN_UP`.
         *addr_of_mut!(SEEN_UP) = false;
     }
+    // **Say so if it already reads pressed.** That is either a device switched on by
+    // holding the button, or a pin that is lying -- and on one unit it was the latter:
+    // solder on U9 shorting the net, so the button read as held whenever the humidity
+    // was up, and the device powered itself off half a second into the PIN prompt with
+    // nothing in the log to say why. One line here would have been the whole diagnosis.
+    //
+    // SAFETY: reads one GPIO input register; the pin is configured just above.
+    if !unsafe { gpio::read(pin) } {
+        crate::catlog!("power: button reads PRESSED at boot -- held, or the pin is stuck");
+    }
     crate::catlog!("power: button armed, {} ms hold", HOLD_MS);
 }
 
