@@ -197,3 +197,33 @@ fn frames_are_read_one_at_a_time_from_a_stream() {
     assert_eq!(g.body, cmd::VERSION);
     assert_eq!(f.used + g.used, stream.len());
 }
+
+/// A command sent during a scan is answered in the middle of a barcode, so the ack has
+/// to be found where it actually lands rather than at the front of the buffer.
+#[test]
+fn an_ack_is_found_amongst_whatever_else_is_on_the_line() {
+    let mut framed = [0u8; 16];
+    let ack = wrap(FID_REPLY, &ACK, &mut framed).expect("wraps").to_vec();
+
+    // On its own, both forms.
+    assert!(ack_within(&ack));
+    assert!(ack_within(&ACK));
+
+    // Buried in barcode text, which is the case that matters.
+    let mut noisy = b"B$2B0100SOMEDATA".to_vec();
+    noisy.extend_from_slice(&ack);
+    noisy.extend_from_slice(b"MOREDATA\r\n");
+    assert!(ack_within(&noisy));
+
+    let mut bare = b"1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2".to_vec();
+    bare.extend_from_slice(&ACK);
+    assert!(ack_within(&bare));
+
+    // And not conjured out of data that has no ack in it.
+    assert!(!ack_within(b""));
+    assert!(!ack_within(b"B$2B0100SOMEDATA\r\n"));
+    // A frame that is a reply but not an acknowledgement.
+    let mut other = [0u8; 32];
+    let hello = wrap(FID_REPLY, b"V2.3.0.7", &mut other).expect("wraps");
+    assert!(!ack_within(hello));
+}

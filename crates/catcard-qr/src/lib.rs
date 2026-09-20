@@ -153,6 +153,25 @@ pub fn is_ack(frame: &Frame<'_>) -> bool {
     frame.fid == FID_REPLY && frame.body == ACK
 }
 
+/// Whether an acknowledgement appears **anywhere** in `bytes`.
+///
+/// A command sent while the module is scanning is answered in the middle of whatever it
+/// was already saying: the reply is not at the front of the buffer, it is somewhere
+/// inside a barcode. Insisting the whole buffer be an ack is how stopping a running scan
+/// came to fail every time and fall back to the blind shutdown -- which leaves the
+/// module awake with its aimer lit, since the blind path cannot know whether it landed.
+///
+/// Both forms, because both occur: the framed reply to a framed command, and the bare
+/// [`ACK`] that answers an unframed one.
+pub fn ack_within(bytes: &[u8]) -> bool {
+    if bytes.windows(ACK.len()).any(|w| w == ACK) {
+        return true;
+    }
+    // A framed ack can start at any offset, so every plausible start is tried. Bounded
+    // by the buffer, which a caller sizes.
+    (0..bytes.len()).any(|at| matches!(unwrap(&bytes[at..]), Ok(f) if is_ack(&f)))
+}
+
 /// Whether a reply looks like the version string `T_OUT_CVER` asks for, e.g. `V2.3.0.7`.
 ///
 /// The version query is the *presence* check, and it does not answer with an

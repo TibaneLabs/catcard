@@ -180,12 +180,17 @@ fn blind_shutdown(port: &mut Usart) {
 }
 
 /// Send one framed command and require its acknowledgement.
+///
+/// The ack is looked for *within* the reply rather than as the whole of it. A command
+/// sent while the module is scanning is answered in the middle of whatever it was
+/// already saying, so an exact match on the buffer fails for a command that worked --
+/// which is how every attempt to stop a running scan ended in the blind shutdown.
 fn command(port: &mut Usart, body: &[u8]) -> bool {
     let mut reply = [0u8; 64];
     let Some(n) = ask(port, body, &mut reply) else {
         return false;
     };
-    matches!(catcard_qr::unwrap(&reply[..n]), Ok(f) if catcard_qr::is_ack(&f))
+    catcard_qr::ack_within(&reply[..n])
 }
 
 /// Send a command the module expects **unframed**: sleep and wake.
@@ -289,7 +294,19 @@ fn read_code(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize,
                     return if overflowed {
                         Err(Fault::TooLong)
                     } else {
-                        Ok(n)
+                        // **Strip the inline acknowledgements before anyone reads this.**
+                        // A bare command sent while the scan is running -- the torch,
+                        // above all -- is answered with `0x90 0x00` that lands in the RX
+                        // stream amongst the decoded data. A line with those two bytes in
+                        // it does not begin `B$` any more, so a BBQr part reads as an
+                        // unrecognised payload, and it is no longer text either. The
+                        // reference calls this out as the reimplementation gotcha and it
+                        // was the one thing here not doing it.
+                        //
+                        // Safe: a real text QR cannot contain that sequence.
+                        //
+                        // Source: hw-reference/qr.md §6 [C]
+                        Ok(catcard_qr::strip_inline_ack(&mut out[..n]))
                     };
                 }
                 b'\n' => {}
@@ -689,6 +706,14 @@ fn offer(
     // be placed among.
     let mut lease = area.into_lease();
     let what = sniff(&lease.bytes()[..len]);
+    // What arrived, when it was nothing this device can use. The screen has room for a
+    // length and a word, and the length alone has never been enough to say what went
+    // wrong: a line with two stray bytes in it and a line that is genuinely not ours
+    // look identical from there.
+    if matches!(what, Content::Unknown) {
+        let head = &lease.bytes()[..len.min(16)];
+        crate::catlog!("qr: {} bytes, not recognised; starts {:02x?}", len, head);
+    }
     let (note, actions): (&str, &[&str]) = match what {
         Content::Firmware => ("a firmware image", &["Install it"]),
         Content::Psbt => ("a transaction", &["Sign it"]),
