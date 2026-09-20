@@ -92,6 +92,9 @@ mod signmsg;
 mod signtx;
 mod splash;
 mod staging;
+/// Everything this device keeps, written to a card in one file.
+#[cfg(not(feature = "board-mk3"))]
+mod statedump;
 /// The Q1's status bar has no counterpart on the mono boards, whose 64 rows cannot spare
 /// any and whose keypad has no modifiers to report.
 #[cfg(feature = "board-q1")]

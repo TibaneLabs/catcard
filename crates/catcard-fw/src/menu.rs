@@ -66,6 +66,9 @@ enum Screen {
     /// About's second page: the STM32 itself.
     AboutChip,
     SdInstall,
+    /// Debug: the settings volume and the seed, to a card, in the clear.
+    #[cfg(not(feature = "board-mk3"))]
+    DumpState,
     /// Debug: what the scanner answers, per rate, in raw bytes.
     #[cfg(feature = "board-q1")]
     QrProbe,
@@ -398,6 +401,8 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
+    #[cfg(not(feature = "board-mk3"))]
+    "Dump state",
     #[cfg(feature = "board-q1")]
     "QR probe",
     "USB",
@@ -831,6 +836,11 @@ fn action_for(screen: Screen) -> Option<Action> {
 
     Some(match screen {
         Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::DumpState => to(
+            |a| crate::statedump::screen(a.gate, a.login, a.ui),
+            Screen::Debug,
+        ),
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => to(|a| crate::qrscan::probe(a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
@@ -1165,6 +1175,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // top), and an index table would silently point at the wrong entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Dump state")) => Screen::DumpState,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("QR probe")) => Screen::QrProbe,
             (Key::Confirm, Some("USB")) => Screen::Usb,
@@ -1499,6 +1511,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::DumpState => {}
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
@@ -4292,24 +4306,7 @@ fn write_card_export(
 ) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
     let mut vol = mount_card()?;
 
-    let (stem, ext) = match path.rsplit_once('.') {
-        Some((stem, ext)) => (stem, ext),
-        None => (path, ""),
-    };
-    let mut name: heapless::String<EXPORT_NAME_MAX> = heapless::String::new();
-    name.push_str(path).map_err(|_| "name too long")?;
-    // Bounded, because an unbounded search on a card with a corrupt directory would spin
-    // forever. A hundred exports under one name is already more than anyone has.
-    for n in 2..100 {
-        if vol.open_file(&name).is_err() {
-            break;
-        }
-        name.clear();
-        write!(name, "{stem}-{n}").map_err(|_| "name too long")?;
-        if !ext.is_empty() {
-            write!(name, ".{ext}").map_err(|_| "name too long")?;
-        }
-    }
+    let name = unused_name(&mut vol, path)?;
 
     write_into(&mut vol, &name, body)?;
 
@@ -4332,6 +4329,60 @@ fn write_card_export(
         write_into(&mut vol, &sig_name, armoured.as_bytes())?;
     }
 
+    vol.flush().map_err(|_| "flush failed")?;
+    Ok(name)
+}
+
+/// The first name of this shape that nothing on the card is using.
+///
+/// `base.ext`, then `base-2.ext`, `base-3.ext`. Bounded, because an unbounded search on
+/// a card with a corrupt directory would spin forever, and a hundred files under one
+/// name is already more than anyone has.
+fn unused_name(
+    vol: &mut CardVolume,
+    path: &str,
+) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
+    let (stem, ext) = match path.rsplit_once('.') {
+        Some((stem, ext)) => (stem, ext),
+        None => (path, ""),
+    };
+    let mut name: heapless::String<EXPORT_NAME_MAX> = heapless::String::new();
+    name.push_str(path).map_err(|_| "name too long")?;
+    for n in 2..100 {
+        if vol.open_file(&name).is_err() {
+            return Ok(name);
+        }
+        name.clear();
+        write!(name, "{stem}-{n}").map_err(|_| "name too long")?;
+        if !ext.is_empty() {
+            write!(name, ".{ext}").map_err(|_| "name too long")?;
+        }
+    }
+    Err("too many of those already")
+}
+
+/// Write several pieces to one new file, in order, and return the name used.
+///
+/// For a payload that is not one buffer and could not be: the settings region is half a
+/// megabyte of memory-mapped flash, so it goes to the card as a slice over the flash
+/// itself rather than through a copy this device has nowhere to put.
+///
+/// Not mk3: its settings are raw SPI-NOR slots, not a region that can be sliced, and
+/// [`crate::statedump`] is compiled out there for the same reason.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn write_card_parts(
+    path: &str,
+    parts: &[&[u8]],
+) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
+    let mut vol = mount_card()?;
+    let name = unused_name(&mut vol, path)?;
+    let mut file = vol
+        .open_or_create_file(&name)
+        .map_err(|_| "could not open file")?;
+    for part in parts {
+        file.write_all(&mut vol, part).map_err(|_| "write failed")?;
+    }
+    file.flush(&mut vol).map_err(|_| "flush failed")?;
     vol.flush().map_err(|_| "flush failed")?;
     Ok(name)
 }
