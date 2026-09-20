@@ -21,6 +21,8 @@ the seed, exactly as they sit in the device's flash.
 
 import argparse
 import hashlib
+import json
+import os
 import sys
 
 # The marker byte of the secret stash. Source: hw-reference/secret-stash-format.md,
@@ -94,6 +96,54 @@ def describe_secret(blob, wordlist=None, reveal=False):
     return [f"secret:   unrecognised marker {marker:#04x}", f"  raw:    {blob.hex()}"]
 
 
+# --- the settings slots -------------------------------------------------------------
+#
+# One slot is a single AES-256-CTR stream over `JSON || zero padding to 4064 ||
+# SHA256(that)`, so 4096 bytes. The digest is inside the stream and covers the padding.
+#
+# Source: hw-reference/settings-nvstore-format.md §2, §3, mirrored by
+# `catcard_settings::nvstore`, which is what the device itself runs.
+SLOT_LEN = 4096
+BODY_LEN = 4064
+
+
+def slot_key(raw_secret):
+    """Six SHA-256 rounds over the **raw 72-byte secret**, not the decoded seed.
+
+    Five that append `b"pad"`, then one plain. Before login there is no secret and the
+    key is 32 zero bytes instead; that is what the nickname lives under.
+    """
+    a, first = b"", True
+    for _ in range(5):
+        h = hashlib.sha256()
+        h.update(raw_secret if first else a)
+        h.update(b"pad")
+        a, first = h.digest(), False
+    return hashlib.sha256(a).digest()
+
+
+def slot_counter(pos):
+    """`pack('<4I', 4, 3, 2, pos)` -- three fixed words, then the slot's own index.
+
+    The index is in the counter so a slot copied to another position does not decrypt.
+    """
+    return b"".join(x.to_bytes(4, "little") for x in (4, 3, 2, pos))
+
+
+def decrypt_slot(blob, key, pos):
+    """Decrypt one slot and return its JSON text, or raise if the digest disagrees."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    # CTR counts the whole 16-byte block big-endian, which is what `cryptography` does.
+    c = Cipher(algorithms.AES(key), modes.CTR(slot_counter(pos)))
+    plain = c.decryptor().update(blob)
+
+    body, digest = plain[:BODY_LEN], plain[BODY_LEN:BODY_LEN + 32]
+    if hashlib.sha256(body).digest() != digest:
+        raise ValueError("digest mismatch -- wrong key, wrong slot index, or damaged")
+    return body.rstrip(b"\x00").decode("utf-8", "replace")
+
+
 def find_wordlist():
     """The English BIP-39 wordlist, taken from the firmware's own copy.
 
@@ -128,9 +178,69 @@ def main():
                          "machine or a screen you would not trust with the coins.")
     ap.add_argument("--extract", nargs=2, metavar=("SECTION", "OUT"),
                     help="write one section to a file")
+    ap.add_argument("--decrypt", nargs="+", metavar="SLOT",
+                    help="decrypt settings slots (000.aes ...) pulled out of the "
+                         "LittleFS image, using the secret in this dump")
     args = ap.parse_args()
 
     manifest, sections = read(args.file)
+    if args.decrypt:
+        secret = sections.get("secret")
+        if not secret:
+            sys.exit("this dump has no secret section, so there is no key to derive")
+        # Every key a slot in this store might be under. A device with a seedvault
+        # keeps each vaulted wallet's settings in its own slot under a key derived from
+        # *that* wallet's secret, so the main seed opens only its own -- and the vault
+        # entries, which carry the raw stash as hex, are what opens the rest. Padded
+        # back out to 72 bytes first: the key is six hashes over the whole stash, not
+        # over the marker and entropy alone.
+        keys = [("main seed", slot_key(secret)), ("pre-login", bytes(32))]
+        main = None
+        for _, k in list(keys):
+            for probe in range(16):
+                try:
+                    main = json.loads(decrypt_slot(
+                        open(args.decrypt[0], "rb").read(), k, probe))
+                except Exception:
+                    continue
+                break
+            if main:
+                break
+        for path in args.decrypt:
+            try:
+                pos = int(os.path.basename(path).split(".")[0], 16)
+            except ValueError:
+                continue
+            for _, k in list(keys):
+                try:
+                    doc = json.loads(decrypt_slot(open(path, "rb").read(), k, pos))
+                except Exception:
+                    continue
+                for entry in doc.get("seeds", []):
+                    if len(entry) >= 2:
+                        raw = bytes.fromhex(entry[1]).ljust(72, b"\x00")
+                        keys.append((f"vault {entry[0]}", slot_key(raw)))
+                break
+        for path in args.decrypt:
+            # The slot's index is in its name and in its counter; they have to agree.
+            stem = os.path.basename(path).split(".")[0]
+            try:
+                pos = int(stem, 16)
+            except ValueError:
+                sys.exit(f"{path}: cannot read a slot index out of {stem!r}")
+            blob = open(path, "rb").read()
+            for what, key in keys:
+                try:
+                    text = decrypt_slot(blob, key, pos)
+                except Exception:
+                    continue
+                print(f"--- {os.path.basename(path)} (slot {pos}, {what} key) ---")
+                print(text)
+                break
+            else:
+                print(f"--- {os.path.basename(path)}: no key decrypts it ---")
+        return
+
     if args.extract:
         name, out = args.extract
         if name not in sections:
