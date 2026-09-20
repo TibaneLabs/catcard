@@ -178,6 +178,9 @@ def main():
                          "machine or a screen you would not trust with the coins.")
     ap.add_argument("--extract", nargs=2, metavar=("SECTION", "OUT"),
                     help="write one section to a file")
+    ap.add_argument("--out", metavar="DIR",
+                    help="with --decrypt, write each slot's JSON there as well as "
+                         "printing it, named for the slot and the key that opened it")
     ap.add_argument("--decrypt", nargs="+", metavar="SLOT",
                     help="decrypt settings slots (000.aes ...) pulled out of the "
                          "LittleFS image, using the secret in this dump")
@@ -195,6 +198,8 @@ def main():
         # back out to 72 bytes first: the key is six hashes over the whole stash, not
         # over the marker and entropy alone.
         keys = [("main seed", slot_key(secret)), ("pre-login", bytes(32))]
+        vault = []
+        written = []
         main = None
         for _, k in list(keys):
             for probe in range(16):
@@ -220,6 +225,7 @@ def main():
                     if len(entry) >= 2:
                         raw = bytes.fromhex(entry[1]).ljust(72, b"\x00")
                         keys.append((f"vault {entry[0]}", slot_key(raw)))
+                        vault.append(entry)
                 break
         for path in args.decrypt:
             # The slot's index is in its name and in its counter; they have to agree.
@@ -236,9 +242,61 @@ def main():
                     continue
                 print(f"--- {os.path.basename(path)} (slot {pos}, {what} key) ---")
                 print(text)
+                if args.out:
+                    os.makedirs(args.out, exist_ok=True)
+                    tag = what.replace(" ", "-")
+                    out = os.path.join(args.out, f"{pos:03x}-{tag}.json")
+                    # Pretty-printed: these are read by people, and the device's own
+                    # copy is compact because it is read by the device.
+                    try:
+                        body = json.dumps(json.loads(text), indent=2, sort_keys=True)
+                    except Exception:
+                        body = text
+                    with open(out, "w") as fh:
+                        fh.write(body + "\n")
+                    written.append(out)
                 break
             else:
                 print(f"--- {os.path.basename(path)}: no key decrypts it ---")
+
+        # A vaulted wallet is a wallet: its stash is right there in the settings, so it
+        # decodes the same way the main one does. Behind `--words` for the same reason.
+        if args.out and written:
+            print(f"\nwrote {len(written)} file(s) to {args.out}/")
+        if vault:
+            print(f"\n--- seedvault: {len(vault)} wallet(s) ---")
+            wl = find_wordlist()
+            for entry in vault:
+                xfp, hexsecret = entry[0], entry[1]
+                label = entry[2] if len(entry) > 2 else ""
+                blob = bytes.fromhex(hexsecret)
+                if not args.words:
+                    n = BIP39_LEN.get(blob[0], 0)
+                    count = (n * 8 + n * 8 // 32) // 11 if n else "?"
+                    print(f"{xfp}  {count} words  {label}")
+                    continue
+                for line in describe_secret(blob, wl, True):
+                    pass
+                n = BIP39_LEN.get(blob[0])
+                if n and wl:
+                    print(f"{xfp}  {label}")
+                    print("   " + " ".join(words(blob[1:1 + n], wl)))
+                else:
+                    print(f"{xfp}  {label}: not a BIP-39 stash ({hexsecret})")
+            if not args.words:
+                print("(pass --words to print them)")
+            elif args.out:
+                os.makedirs(args.out, exist_ok=True)
+                out = os.path.join(args.out, "seedvault.txt")
+                with open(out, "w") as fh:
+                    fh.write("# CatCard seedvault -- THESE ARE THE WALLETS\n")
+                    for entry in vault:
+                        blob = bytes.fromhex(entry[1])
+                        n = BIP39_LEN.get(blob[0])
+                        label = entry[2] if len(entry) > 2 else ""
+                        got = " ".join(words(blob[1:1 + n], wl)) if (n and wl) else entry[1]
+                        fh.write(f"{entry[0]}\t{label}\t{got}\n")
+                print(f"wrote {out}")
         return
 
     if args.extract:
