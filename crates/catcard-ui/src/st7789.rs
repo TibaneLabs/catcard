@@ -136,6 +136,29 @@ fn hue(s: usize) -> u16 {
     rgb565(r >> 1, g, b >> 1)
 }
 
+/// Full-colour pixels laid over the canvas as it is flushed: a `w` x `h` rectangle at
+/// `(x, y)` in the framebuffer's own coordinates, `pixels` row after row, RGB565.
+///
+/// The canvas is 4 bits a pixel; the panel takes 16. Something that needs its own colours
+/// -- a coin's logo -- is put into each row's line as the flush builds it, so every pixel
+/// reaches the panel once, already final. Painted afterwards instead, the row would first
+/// go out with a hole where the picture belongs, and the hole would show as a flicker.
+pub struct Overlay<'a> {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+    pub pixels: &'a [u16],
+}
+
+impl Overlay<'_> {
+    /// This overlay's pixels on framebuffer row `y`, if it covers it.
+    fn row(&self, y: usize) -> Option<&[u16]> {
+        let dy = y.checked_sub(self.y).filter(|&d| d < self.h)?;
+        self.pixels.get(dy * self.w..(dy + 1) * self.w)
+    }
+}
+
 /// Hashes of the rows last sent, so a redraw sends only the rows that changed.
 ///
 /// A full frame is 153,600 bytes of SPI, polled a byte at a time; a menu step or a progress
@@ -166,20 +189,6 @@ impl<const H: usize> RowCache<H> {
     /// drew on the panel without going through the cache.
     pub fn invalidate(&mut self) {
         self.valid = false;
-    }
-
-    /// Forget what `rows` show, so the next flush sends them whatever they hold -- for
-    /// something drawn over them straight to the panel, such as a full-colour mark.
-    ///
-    /// Flips a bit of each row's hash rather than keeping a flag per row: the stored hash
-    /// then matches no content the row could have had a moment ago, which is all a flush
-    /// asks, and it costs no memory the Q1's stack would miss.
-    pub fn forget_rows(&mut self, rows: core::ops::Range<usize>) {
-        for y in rows {
-            if let Some(h) = self.hashes.get_mut(y) {
-                *h ^= 1;
-            }
-        }
     }
 }
 
@@ -408,7 +417,7 @@ impl<B: DisplayBus> St7789<B> {
         }
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
         self.window(x0, y0, x0 + w - 1, y0 + h - 1)?;
-        self.send_gray_rows(fb, palette, w, 0, h)
+        self.send_gray_rows(fb, palette, w, 0, h, &[])
     }
 
     /// [`flush_gray`](Self::flush_gray), sending only the rows that changed since the last
@@ -422,7 +431,7 @@ impl<B: DisplayBus> St7789<B> {
         palette: &[u16; 16],
         cache: &mut RowCache<H>,
     ) -> Result<usize, B::Error> {
-        self.flush_gray_changed_split(fb, palette, palette, 0, cache)
+        self.flush_gray_changed_split(fb, palette, palette, 0, cache, &[])
     }
 
     /// [`flush_gray_changed`](Self::flush_gray_changed) with a different palette for the
@@ -443,6 +452,7 @@ impl<B: DisplayBus> St7789<B> {
         bottom: &[u16; 16],
         split: usize,
         cache: &mut RowCache<H>,
+        overlays: &[Overlay<'_>],
     ) -> Result<usize, B::Error> {
         let (w, h) = (W.min(WIDTH), H.min(HEIGHT));
         if w == 0 || h == 0 {
@@ -453,7 +463,21 @@ impl<B: DisplayBus> St7789<B> {
         let row_len = W.div_ceil(2);
         let trusted = core::mem::replace(&mut cache.valid, false);
         let changed = |cache: &mut RowCache<H>, y: usize| {
-            let hash = row_hash(&bytes[y * row_len..(y + 1) * row_len]);
+            // What goes out on this row is the canvas row *and* any overlay on it, so both
+            // go into the hash: a logo that changes on an unchanged row still resends it,
+            // and an unchanged row with its logo is not sent at all.
+            let mut hash = row_hash(&bytes[y * row_len..(y + 1) * row_len]);
+            for o in overlays {
+                if let Some(px) = o.row(y) {
+                    for p in px {
+                        for b in p.to_be_bytes() {
+                            hash ^= b as u32;
+                            hash = hash.wrapping_mul(0x0100_0193);
+                        }
+                    }
+                    hash ^= o.x as u32;
+                }
+            }
             let differs = !trusted || cache.hashes[y] != hash;
             cache.hashes[y] = hash;
             differs
@@ -476,7 +500,7 @@ impl<B: DisplayBus> St7789<B> {
             }
             let palette = if start < boundary { top } else { bottom };
             self.window(x0, y0 + start, x0 + w - 1, y0 + y - 1)?;
-            self.send_gray_rows(fb, palette, w, start, y)?;
+            self.send_gray_rows(fb, palette, w, start, y, overlays)?;
             sent += y - start;
         }
         cache.valid = true;
@@ -491,6 +515,7 @@ impl<B: DisplayBus> St7789<B> {
         w: usize,
         start: usize,
         end: usize,
+        overlays: &[Overlay<'_>],
     ) -> Result<(), B::Error> {
         // A packed byte holds two pixels, the even one in its high nibble. Expanding a whole
         // byte through a 256-entry table built once per flush turns 76 800 bounds-checked
@@ -510,6 +535,15 @@ impl<B: DisplayBus> St7789<B> {
             let row = &bytes[y * row_len..y * row_len + w.div_ceil(2)];
             for (packed, out) in row.iter().zip(line.as_chunks_mut::<4>().0.iter_mut()) {
                 *out = expand[*packed as usize];
+            }
+            for o in overlays {
+                let Some(px) = o.row(y) else { continue };
+                for (dx, p) in px.iter().enumerate() {
+                    let x = o.x + dx;
+                    if x < w {
+                        line[x * 2..x * 2 + 2].copy_from_slice(&p.to_be_bytes());
+                    }
+                }
             }
             self.bus.data(&line[..w * 2])?;
         }
@@ -588,7 +622,7 @@ mod tests {
 
         let mut p = St7789::new(MockBus::default());
         let mut cache = RowCache::<8>::new();
-        p.flush_gray_changed_split(&fb, &GREYS, &AMBER, SPLIT, &mut cache)
+        p.flush_gray_changed_split(&fb, &GREYS, &AMBER, SPLIT, &mut cache, &[])
             .unwrap();
 
         // Pixel data only, in order: two runs, one per palette.
@@ -616,6 +650,53 @@ mod tests {
         );
     }
 
+    /// An overlay's own pixels go out in place, in the same pass as the canvas -- and a
+    /// second flush of the same frame and the same overlay sends nothing, which is the
+    /// whole of the flicker fix: nothing is resent, so nothing blinks.
+    #[test]
+    fn an_overlay_goes_out_with_its_rows_and_only_when_they_change() {
+        use crate::canvas::Gray320x240;
+        let fb = Gray320x240::new();
+        let logo = [0xF81F_u16; 4 * 3]; // magenta, 4x3
+        let at = [Overlay {
+            x: 10,
+            y: 20,
+            w: 4,
+            h: 3,
+            pixels: &logo,
+        }];
+        let mut p = St7789::new(MockBus::default());
+        let mut cache = RowCache::<240>::new();
+        p.flush_gray_changed_split(&fb, &GREYS, &AMBER, 0, &mut cache, &at)
+            .unwrap();
+        let frame = replay(&p.bus_mut().log);
+        assert_eq!(frame[20 * WIDTH + 10], 0xF81F);
+        assert_eq!(frame[22 * WIDTH + 13], 0xF81F);
+        assert_ne!(frame[20 * WIDTH + 14], 0xF81F, "past its width");
+        assert_ne!(frame[23 * WIDTH + 10], 0xF81F, "past its height");
+
+        // The same frame again: nothing to send.
+        p.bus_mut().log.clear();
+        let sent = p
+            .flush_gray_changed_split(&fb, &GREYS, &AMBER, 0, &mut cache, &at)
+            .unwrap();
+        assert_eq!(sent, 0);
+
+        // A different logo on the same rows: exactly those rows go again.
+        let other = [0x07E0_u16; 4 * 3];
+        let moved = [Overlay {
+            x: 10,
+            y: 20,
+            w: 4,
+            h: 3,
+            pixels: &other,
+        }];
+        let sent = p
+            .flush_gray_changed_split(&fb, &GREYS, &AMBER, 0, &mut cache, &moved)
+            .unwrap();
+        assert_eq!(sent, 3);
+    }
+
     /// A run of changed rows never spans the split, since one send is one palette.
     #[test]
     fn a_changed_run_stops_at_the_palette_boundary() {
@@ -627,7 +708,7 @@ mod tests {
         let mut cache = RowCache::<8>::new();
         // Every row changed, so without a boundary this would be one window and one send.
         let sent = p
-            .flush_gray_changed_split(&fb, &GREYS, &AMBER, 4, &mut cache)
+            .flush_gray_changed_split(&fb, &GREYS, &AMBER, 4, &mut cache, &[])
             .unwrap();
         assert_eq!(sent, 8);
         let windows = p

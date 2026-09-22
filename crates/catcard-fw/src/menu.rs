@@ -7456,10 +7456,13 @@ impl<'a> DocScreen<'a> {
     }
 
     fn draw(&self, ui: &mut Ui<'_>) {
-        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
-        // Full-colour marks go to the panel after the frame; see `overlay_marks`.
+        // Full-colour marks go out inside the frame, not after it; see `draw_with_marks`.
         #[cfg(feature = "board-q1")]
-        display::overlay_marks(ui.panel, &self.view, &catcard_ui::st7789::AMBER);
+        display::draw_with_marks(ui.panel, &self.view, |c| {
+            catcard_ui::scroll::render(c, &self.view)
+        });
+        #[cfg(not(feature = "board-q1"))]
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
     }
 
     fn needs_marquee(&self) -> bool {

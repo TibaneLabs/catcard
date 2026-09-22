@@ -256,48 +256,97 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
     forget_frame();
 }
 
-/// Write a document's full-colour marks straight to the panel, after its frame.
+/// Full-colour marks laid over the current frame, decoded, until the next ordinary draw.
 ///
-/// The canvas is 4 bits a pixel and the panel 16 (COLMOD `0x05`, RGB565 -- display.md §Q1
-/// init step 3 [C]), so a logo with its own colours does not go through the canvas at
-/// all. [`catcard_ui::scroll::render`] leaves its space empty; this decodes each one and
-/// paints it there, blended onto what the row is -- `palette[0]` as a rule, `palette[15]`
-/// on the selection bar -- so its anti-aliased edge is right on both.
-///
-/// Those rows then differ from what the row cache recorded sending, so they are forgotten
-/// and the next frame sends them from the canvas again, blank where the mark was, before
-/// this paints the marks that frame has.
+/// Kept rather than rebuilt per flush because a frame can be flushed more than once: the
+/// status bar's idle refresh re-runs the same flush, and a flush without the marks would
+/// wipe them.
 #[cfg(feature = "board-q1")]
-pub fn overlay_marks(
-    panel: &mut Panel,
-    view: &catcard_ui::scroll::ScrollView<'_>,
-    palette: &[u16; 16],
-) {
-    use catcard_ui::art::rgba;
-
-    /// The largest mark this paints: a row's worth.
-    const MAX: usize = 24;
-    reclaim_bus();
-    for shown in view.marks_shown() {
-        let (w, h) = (shown.art.width as usize, shown.art.height as usize);
-        if w > MAX || h > MAX {
-            continue;
-        }
-        let bg = if shown.selected {
-            palette[15]
-        } else {
-            palette[0]
-        };
-        let mut px = [bg; MAX * MAX];
-        let _ = rgba::decode(shown.art, |x, y, p| px[y * MAX + x] = rgba::over(p, bg));
-        let y = shown.y + BAR_H;
-        let _ = panel.paint(shown.x, y, w, h, |dx, dy| px[dy * MAX + dx]);
-        // SAFETY: foreground, single core, not inside a draw.
-        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).forget_rows(y..y + h) };
-    }
+struct Marks {
+    /// RGB565, every mark back to back.
+    buf: crate::heap::Block,
+    /// `(x, y, w, h, first pixel)`, in panel coordinates.
+    at: heapless::Vec<(usize, usize, usize, usize, usize), MARKS_MAX>,
 }
 
-/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
+/// Marks a frame carries at once: a screen of list rows.
+#[cfg(feature = "board-q1")]
+const MARKS_MAX: usize = 12;
+
+/// The largest mark carried: a list row's height.
+#[cfg(feature = "board-q1")]
+const MARK_SIDE: usize = 24;
+
+#[cfg(feature = "board-q1")]
+static mut MARKS: Option<Marks> = None;
+
+/// [`draw`], with `view`'s full-colour marks composited into the frame as it is sent.
+///
+/// The canvas is 4 bits a pixel and the panel 16 (COLMOD `0x05`, RGB565 -- display.md §Q1
+/// init step 3 [C]), so a logo with its own colours does not go through the canvas:
+/// [`catcard_ui::scroll::render`] leaves its space empty, and each is decoded here --
+/// blended onto the row's own background, black or the amber selection bar -- and handed
+/// to the flush as a [`catcard_ui::st7789::Overlay`], which puts it into the row's pixels
+/// as the row goes out.
+///
+/// **One pass, not two.** Painting the marks after the frame sent their rows first with a
+/// hole where each logo belongs, and the hole showed as a flicker on every cursor move.
+/// Now each pixel reaches the panel once, already final, and a row whose canvas and logo
+/// are both unchanged is not sent at all.
+#[cfg(feature = "board-q1")]
+pub fn draw_with_marks(
+    panel: &mut Panel,
+    view: &catcard_ui::scroll::ScrollView<'_>,
+    f: impl FnOnce(&mut Surface<'_>),
+) {
+    use catcard_ui::art::rgba;
+    let palette = &catcard_ui::st7789::AMBER;
+
+    // Exactly what this frame's marks need, and nothing for a list with none: every
+    // document screen comes through here.
+    let need: usize = view
+        .marks_shown()
+        .take(MARKS_MAX)
+        .map(|m| m.art.width as usize * m.art.height as usize * 2)
+        .sum();
+    let marks = (need > 0)
+        .then(|| crate::heap::take(need))
+        .flatten()
+        .map(|mut buf| {
+            let mut at = heapless::Vec::new();
+            // SAFETY: the heap hands out 4-byte-aligned blocks, and these are bytes the block
+            // owns exclusively; read back as u16 only through the same block.
+            let px: &mut [u16] = unsafe {
+                let b = buf.bytes();
+                core::slice::from_raw_parts_mut(b.as_mut_ptr() as *mut u16, b.len() / 2)
+            };
+            let mut next = 0usize;
+            for shown in view.marks_shown() {
+                let (w, h) = (shown.art.width as usize, shown.art.height as usize);
+                if w > MARK_SIDE || h > MARK_SIDE || at.is_full() {
+                    continue;
+                }
+                let bg = if shown.selected {
+                    palette[15]
+                } else {
+                    palette[0]
+                };
+                let Some(slot) = px.get_mut(next..next + w * h) else {
+                    break;
+                };
+                slot.fill(bg);
+                let _ = rgba::decode(shown.art, |x, y, p| slot[y * w + x] = rgba::over(p, bg));
+                let _ = at.push((shown.x, shown.y + BAR_H, w, h, next));
+                next += w * h;
+            }
+            Marks { buf, at }
+        });
+    // SAFETY: foreground, single core, not inside a draw.
+    unsafe { *core::ptr::addr_of_mut!(MARKS) = marks };
+    draw_keeping_marks(panel, palette, f);
+}
+
+/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar./// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
 ///
 /// Watched working on the Q1 from Debug -> Scroll test before this was turned on: a PIN
 /// check is on the boot path, and this board has no recovery.
@@ -845,6 +894,17 @@ pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
 /// in, and the two cannot be mixed on one scanline -- the canvas holds indices and the
 /// palette is what they mean.
 pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
+    // An ordinary frame carries no marks; whatever the last one had is not on this one.
+    // SAFETY: foreground, single core, not inside a draw.
+    #[cfg(feature = "board-q1")]
+    unsafe {
+        *core::ptr::addr_of_mut!(MARKS) = None
+    };
+    draw_keeping_marks(panel, content, f);
+}
+
+/// [`draw_with`], leaving whatever marks are set in place.
+fn draw_keeping_marks(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
     use core::sync::atomic::Ordering;
     if DRAWING.swap(true, Ordering::SeqCst) {
         crate::catlog!("display: nested draw refused");
@@ -964,6 +1024,9 @@ pub fn refresh_bar(panel: &mut Panel) {
 #[cfg(feature = "board-q1")]
 pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(&mut Screen)) {
     use core::sync::atomic::Ordering;
+    // Artwork carries no marks, and a list's must not be laid over it.
+    // SAFETY: foreground, single core, not inside a draw.
+    unsafe { *core::ptr::addr_of_mut!(MARKS) = None };
     if DRAWING.swap(true, Ordering::SeqCst) {
         crate::catlog!("display: nested draw refused");
         return;
@@ -1045,8 +1108,34 @@ fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
         *last_split = split;
         cache.invalidate();
     }
-    let _ =
-        panel.flush_gray_changed_split(screen, &catcard_ui::st7789::GREYS, palette, split, cache);
+    // The frame's full-colour marks, if it has any: composited into their rows as they go.
+    let mut overlays: heapless::Vec<catcard_ui::st7789::Overlay<'_>, MARKS_MAX> =
+        heapless::Vec::new();
+    // SAFETY: foreground, single core; the marks are only replaced outside a draw.
+    if let Some(m) = unsafe { (*core::ptr::addr_of_mut!(MARKS)).as_mut() } {
+        // SAFETY: as where they were written -- aligned, owned by the block.
+        let px: &[u16] = unsafe {
+            let b = m.buf.bytes();
+            core::slice::from_raw_parts(b.as_ptr() as *const u16, b.len() / 2)
+        };
+        for &(x, y, w, h, first) in &m.at {
+            let _ = overlays.push(catcard_ui::st7789::Overlay {
+                x,
+                y,
+                w,
+                h,
+                pixels: &px[first..first + w * h],
+            });
+        }
+    }
+    let _ = panel.flush_gray_changed_split(
+        screen,
+        &catcard_ui::st7789::GREYS,
+        palette,
+        split,
+        cache,
+        &overlays,
+    );
 }
 
 /// The palette the panel was last flushed through.
