@@ -93,6 +93,9 @@ pub(crate) fn wallet_key(
         // The stored wallet: the stash exactly as the secure element returns it, which
         // is what stock hashes and what every settings file this device already has was
         // written under.
+        // A second and a half inside the bootloader: say so, rather than holding
+        // whatever was on screen still.
+        crate::menu::reading_seed(panel, head);
         let pin_gate = crate::pinentry::BootloaderGate::new(gate);
         let mut secret = login
             .fetch_secret(&pin_gate)
@@ -773,7 +776,7 @@ pub(crate) fn inspect(
     let _ = notes.push(pre);
 
     // Now the wallet blob, which needs the stash the secure element holds.
-    crate::menu::blocking_screen(ui.panel, "Settings", "reading seed");
+    crate::menu::reading_seed(ui.panel, "Settings");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,

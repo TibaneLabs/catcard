@@ -77,7 +77,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // The stash exactly as the secure element returns it, marker byte and all. Not the
     // derived master: a dump is for seeing what is *stored*, and the master is a
     // function of this plus whatever passphrase was in force.
-    menu::blocking_screen(ui.panel, HEAD, "reading the seed");
+    menu::reading_seed(ui.panel, HEAD);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,

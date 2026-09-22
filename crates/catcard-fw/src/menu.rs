@@ -3677,6 +3677,45 @@ pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str
     }
 }
 
+/// The screen for reading the seed out of the secure element: the cat, reading.
+///
+/// Every screen that needs the seed waits on the same thing -- callgate 18/4, about 1.6 s
+/// with the CPU inside the bootloader -- so they all wait on the same picture rather than
+/// each on a line of text of its own. On the Q1 that is the reading cat in the middle of
+/// the page and the blue sweep along the bottom, which is safe around exactly this call
+/// (docs/CALLGATE-DMA.md, watched working 2026-09-22). Elsewhere it is the plain
+/// [`blocking_screen`].
+///
+/// Only for a wait that *is* the seed read. Before a callgate that draws for itself --
+/// logout, wipe -- the sweep would leave the bootloader a bus that is not its own.
+pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
+    #[cfg(feature = "board-q1")]
+    {
+        use catcard_ui::art::menuicons::READING_SEED as ART;
+        use catcard_ui::canvas::Canvas as _;
+        use catcard_ui::text::{centred, draw_text};
+
+        const NOTE: &str = "reading the seed";
+        let (title, body) = (display::LAYOUT.title, display::LAYOUT.body);
+        display::draw_field_page(panel, |c| {
+            c.clear();
+            draw_text(c, title, centred(title, head, c.width()), 12, head);
+            // In the middle of what is left above the sweep, which takes the bottom rows.
+            let (w, h) = (ART.width as usize, ART.height as usize);
+            let room = c.height().saturating_sub(catcard_ui::sweep::H);
+            let x = c.width().saturating_sub(w) / 2;
+            let y = room.saturating_sub(h) / 2;
+            catcard_ui::art::indexed::draw_indexed(c, &ART, x, y);
+            draw_text(c, body, centred(body, NOTE, c.width()), y + h + 10, NOTE);
+        });
+        if !display::start_sweep(panel) && display::GPU_BAR_ON_BLOCKING {
+            display::scroll_busy_bar(panel);
+        }
+    }
+    #[cfg(not(feature = "board-q1"))]
+    blocking_screen(panel, head, "reading seed");
+}
+
 /// The screen shown while something slow runs: a heading, a note, and a bar that moves.
 ///
 /// The bar is the whole point. Every computation behind one of these screens runs with
@@ -4960,7 +4999,7 @@ pub(crate) fn seed_entropy(
     // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
     // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so the firmware
     // cannot repaint across it. The panel can, where its controller scrolls on its own.
-    blocking_screen(panel, head, "reading seed");
+    reading_seed(panel, head);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = login
         .fetch_secret(&pin_gate)

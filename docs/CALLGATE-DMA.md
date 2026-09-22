@@ -46,7 +46,8 @@ Calls through the published callgate entry (`0x0800_0040`), interrupts masked:
 
 ## What this firmware does with it
 
-Before gate 16 and gate 18/2 on the Q1 PIN prompt: set the panel window to the bottom
+Before gate 16 and gate 18/2 on the Q1 PIN prompt, and before every gate 18/4 seed
+read (`menu::reading_seed`): set the panel window to the bottom
 320x5 strip, issue RAMWR, hold CS low and D/C high, slow SPI1 to /128, and start DMA1
 channel 7 (DMAMUX1 input 11, SPI1_TX) circular from a heap buffer outside the range in
 (5), with no DMA interrupts. After the call, the next draw stops the channel, drains SPI1

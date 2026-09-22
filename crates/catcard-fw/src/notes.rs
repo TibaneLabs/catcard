@@ -86,7 +86,7 @@ pub(crate) fn view(
         }
     };
 
-    crate::menu::blocking_screen(ui.panel, "Secure Notes", "reading seed");
+    crate::menu::reading_seed(ui.panel, "Secure Notes");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,
