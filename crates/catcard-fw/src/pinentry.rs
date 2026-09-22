@@ -194,7 +194,7 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
     }
 }
 
-/// The PIN prompt on the Q1: two boxes, the words appearing in the first.
+/// The PIN prompt on the Q1: one field in two halves, the words appearing in the first.
 ///
 /// # Why one screen instead of three
 ///
@@ -203,19 +203,32 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
 /// one PIN, and the words -- the thing the owner is meant to *check* -- were on a screen
 /// that had gone by the time the half that matters was typed.
 ///
-/// Here the first box holds the prefix, and the moment it is accepted the words take its
-/// place with the cursor in the second box. One press, and the words stay in front of
+/// Here the top half holds the prefix, and the moment it is accepted the words take its
+/// place with the cursor in the bottom half. One press, and the words stay in front of
 /// the owner for as long as they are typing the half that would be given away if the
 /// device were not theirs.
 ///
-/// # Laid out on the co-processor's grid
+/// # The two halves share an edge
 ///
-/// The digits sit on the GPU's own character cells ([`crate::gpu::CELL_W`] and friends),
-/// because the blinking cursor lands on that grid whatever the firmware drew. Putting
-/// the digits anywhere else would leave the cursor next to them rather than under them.
+/// One frame with a line across it, not two boxes with air between them: they are two
+/// halves of one PIN rather than two questions, and the space that would have gone
+/// between them goes into the prints instead.
 ///
-/// The grey is the main menu's, so the login does not look like a different device from
-/// the one behind it.
+/// The half being typed into is a dark well; the other is the background. That, and the
+/// cursor blinking in it, is what says where the next key lands -- a brighter outline
+/// was not enough to tell them apart at arm's length.
+///
+/// # Paw prints, at the size the mk boards draw them
+///
+/// One print per digit, the same [`draw_paw_trail`](catcard_ui::icons::draw_paw_trail)
+/// every other PIN field on the device uses, at scale 3. It gives away exactly what a
+/// row of stars did -- how many -- and nothing about which.
+///
+/// The blinking cursor is the co-processor's, so it lands on *its* character grid
+/// whatever the firmware drew. The halves are therefore three grid rows tall each, which
+/// leaves the middle row of each half free for a cursor that sits among the prints
+/// rather than above or below them, and the cursor is placed in the cell holding the
+/// centre of the print that has not been made yet.
 #[cfg(feature = "board-q1")]
 fn screen_pin(
     panel: &mut display::Panel,
@@ -224,60 +237,71 @@ fn screen_pin(
     suffix: usize,
     left: u32,
 ) {
-    use crate::gpu::{CELL_H, CELL_LEFT, CELL_TOP, CELL_W, Cursor};
-    use catcard_ui::canvas::{Canvas as _, INK, PAPER};
+    use crate::gpu::{CELL_COLS, CELL_H, CELL_LEFT, CELL_TOP, CELL_W, Cursor};
+    use catcard_ui::canvas::{Canvas as _, Level};
+    use catcard_ui::icons::{draw_paw_trail, paw_trail_size};
     use catcard_ui::text::{draw_text, width_of};
 
-    // Where each box's digits begin, in the co-processor's cells. Six wide, centred,
-    // and two rows apart so a box can be drawn round each without them touching.
-    const DIGITS: usize = MAX_PART_LEN;
-    const COL: usize = (crate::gpu::CELL_COLS - DIGITS) / 2;
-    const ROW_TOP: usize = 2;
-    const ROW_BOTTOM: usize = 5;
-    // The panel's own rows, which is what the canvas is addressed in. The status bar
-    // takes the top of the panel and the canvas starts below it.
-    let cell_y = |row: usize| (CELL_TOP + row * CELL_H).saturating_sub(display::BAR_H);
-    let cell_x = |col: usize| CELL_LEFT + col * CELL_W;
+    /// The cat, at the size every other PIN field on this panel draws it.
+    const SCALE: usize = 3;
+    /// Co-processor rows one half is tall. Three: a trail is 51 pixels and a row is 22,
+    /// so three rows hold it with the middle one left for the cursor.
+    const ROWS: usize = 3;
+    /// The row the field starts on, leaving a line above it for the heading.
+    const TOP: usize = 2;
+    /// Space either side of the trail, inside the frame. Wide enough that the two
+    /// longest words in the BIP-39 list still sit inside it.
+    const PAD: usize = 20;
+    /// The icon palette is not a grey ramp -- see [`catcard_ui::art::menuicons`] -- so
+    /// the frame and the well are named indices rather than offsets from `PAPER`.
+    const FRAME: Level = 4;
+    /// Black: the half being typed into, which reads as a well cut into the grey.
+    const WELL: Level = 1;
 
     let f = display::LAYOUT.title;
     let body = display::LAYOUT.body;
-    let filled = suffix > 0 || words.is_some();
+    // The words are only in hand once the prefix has been accepted, so their presence
+    // is also "the bottom half is the live one".
+    let filled = words.is_some();
 
-    // The art palette: index 0 is the menu's grey and 15 is white, so `PAPER` and `INK`
-    // mean exactly the background and the text this screen wants.
+    // The co-processor's grid, in the canvas's own rows: the status bar takes the top of
+    // the panel and the canvas starts below it.
+    let cell_y = |row: usize| (CELL_TOP + row * CELL_H).saturating_sub(display::BAR_H);
+    let (trail_w, trail_h) = paw_trail_size(MAX_PART_LEN, SCALE);
+    // One print's width and the gait's stride, from the same function that sized the
+    // trail, so nothing here has to know the step the icons crate chose.
+    let paw_w = paw_trail_size(1, SCALE).0;
+    let step = paw_trail_size(2, SCALE).0 - paw_w;
+
+    let box_w = trail_w + 2 * PAD;
+    let box_x = display::SCREEN_W.saturating_sub(box_w) / 2;
+    let trail_x = box_x + PAD;
+    let half_h = ROWS * CELL_H;
+    let (top_y, mid_y, bot_y) = (cell_y(TOP), cell_y(TOP + ROWS), cell_y(TOP + 2 * ROWS));
+    let trail_dy = half_h.saturating_sub(trail_h) / 2;
+
+    // The art palette: index 0 is the menu's grey, so the login does not look like a
+    // different device from the one behind it, and 15 is the white the text draws in.
     display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
         c.clear();
 
-        let mut box_at = |row: usize, active: bool| {
-            let (x, y) = (cell_x(COL), cell_y(row));
-            let (w, h) = (DIGITS * CELL_W, CELL_H);
-            // An outline, brighter for the box being typed into: two boxes with nothing
-            // to tell them apart is a screen that does not say where the next key goes.
-            let pad = 4;
-            let edge = if active { INK } else { PAPER + 6 };
-            let (bx, by) = (x.saturating_sub(pad), y.saturating_sub(pad / 2));
-            let (bw, bh) = (w + 2 * pad, h + pad);
-            c.fill_rect(bx, by, bw, 1, edge);
-            c.fill_rect(bx, by + bh - 1, bw, 1, edge);
-            c.fill_rect(bx, by, 1, bh, edge);
-            c.fill_rect(bx + bw - 1, by, 1, bh, edge);
-        };
-        box_at(ROW_TOP, !filled);
-        box_at(ROW_BOTTOM, filled);
+        // The live half first, so the frame draws over its edges rather than under them.
+        let well_y = if filled { mid_y } else { top_y };
+        c.fill_rect(box_x + 1, well_y + 1, box_w - 2, half_h - 1, WELL);
+
+        for y in [top_y, mid_y, bot_y] {
+            c.fill_rect(box_x, y, box_w, 1, FRAME);
+        }
+        let h = bot_y - top_y + 1;
+        c.fill_rect(box_x, top_y, 1, h, FRAME);
+        c.fill_rect(box_x + box_w - 1, top_y, 1, h, FRAME);
 
         match words {
-            // The prefix, as one mark a cell: the same thing a row of stars said -- how
-            // many -- and nothing about which.
-            None => {
-                for i in 0..prefix {
-                    let (x, y) = (cell_x(COL + i), cell_y(ROW_TOP));
-                    c.fill_rect(x + CELL_W / 3, y + CELL_H / 2, CELL_W / 3, 3, INK);
-                }
-            }
-            // Accepted: the words take the box, and stay there while the second half is
-            // typed. That is the whole point of them.
+            None => draw_paw_trail(c, prefix, trail_x, top_y + trail_dy, SCALE),
+            // Accepted: the words take the top half and stay there while the second
+            // half is typed. That is the whole point of them.
             Some([a, b]) => {
-                let y = cell_y(ROW_TOP) + (CELL_H.saturating_sub(f.line_height())) / 2;
+                let y = top_y + half_h.saturating_sub(f.line_height()) / 2;
                 let gap = 2 * f.advance(b' ');
                 let total = width_of(f, a) + gap + width_of(f, b);
                 let mut x = c.width().saturating_sub(total) / 2;
@@ -285,10 +309,7 @@ fn screen_pin(
                 draw_text(c, f, x, y, b);
             }
         }
-        for i in 0..suffix {
-            let (x, y) = (cell_x(COL + i), cell_y(ROW_BOTTOM));
-            c.fill_rect(x + CELL_W / 3, y + CELL_H / 2, CELL_W / 3, 3, INK);
-        }
+        draw_paw_trail(c, suffix, trail_x, mid_y + trail_dy, SCALE);
 
         // What the two halves are, and what the keys do, in the space around them.
         let head = if filled {
@@ -301,7 +322,7 @@ fn screen_pin(
             c,
             body,
             hx,
-            cell_y(ROW_TOP).saturating_sub(body.line_height() + 6),
+            top_y.saturating_sub(body.line_height() + 6),
             head,
         );
 
@@ -314,19 +335,22 @@ fn screen_pin(
             "accept for the words"
         };
         let fx = centred(body, foot, c.width());
-        draw_text(c, body, fx, cell_y(ROW_BOTTOM) + CELL_H + 8, foot);
+        draw_text(c, body, fx, bot_y + 6, foot);
         tries_left(c, left);
     });
 
     // The cursor last, and only then the bus: the co-processor draws while it owns it,
     // and the next screen takes it back.
     let (row, at) = if filled {
-        (ROW_BOTTOM, suffix)
+        (TOP + ROWS + 1, suffix)
     } else {
-        (ROW_TOP, prefix)
+        (TOP + 1, prefix)
     };
-    if at < DIGITS && crate::gpu::cursor(COL + at, row, Cursor::Solid) {
-        display::give_bus_for_cursor();
+    if at < MAX_PART_LEN {
+        let col = (trail_x + at * step + paw_w / 2).saturating_sub(CELL_LEFT) / CELL_W;
+        if col < CELL_COLS && crate::gpu::cursor(col, row, Cursor::Solid) {
+            display::give_bus_for_cursor();
+        }
     }
 }
 
