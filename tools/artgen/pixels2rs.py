@@ -32,6 +32,9 @@ import sys
 
 from PIL import Image
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import deflate  # noqa: E402  -- beside this file
+
 BACKGROUND, WHITE = 0, 15
 BLACK_RGB, WHITE_RGB = (0, 0, 0), (255, 255, 255)
 
@@ -159,26 +162,29 @@ def main():
         "];",
         "",
     ]
+    raw = packed_total = 0
     for stem, (w, h, px) in art.items():
         data = pack(px, w, table)
+        squeezed = deflate.deflate(data)
+        raw += len(data)
+        packed_total += len(squeezed)
+        name = ident(stem)
+        lines += deflate.rust_array(f"{name}_DEFLATED", squeezed)
         lines += [
             f"/// `{stem}.png`, {w}x{h}.",
-            "#[rustfmt::skip]",
-            f"pub const {ident(stem)}: Indexed = Indexed {{",
+            f"pub const {name}: Indexed = Indexed {{",
             f"    width: {w},",
             f"    height: {h},",
             "    palette: PALETTE,",
-            "    pixels: &[",
+            f"    deflated: &{name}_DEFLATED,",
+            "};",
+            "",
         ]
-        per = 16
-        for i in range(0, len(data), per):
-            chunk = ", ".join(f"0x{b:02X}" for b in data[i : i + per])
-            lines.append(f"        {chunk},")
-        lines += ["    ],", "};", ""]
 
     args.out.write_text("\n".join(lines))
     used = len([c for c in table])
     print(f"{len(art)} icons, {size[0]}x{size[1]}, {used} colours -> {args.out}")
+    print(f"   {raw} bytes of pixels, {packed_total} deflated")
     print(f"   0  #{bg.upper()}  (background)")
     for c, i in sorted(table.items(), key=lambda kv: kv[1]):
         print(f"  {i:2}  #{c[0]:02X}{c[1]:02X}{c[2]:02X}")

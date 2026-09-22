@@ -256,6 +256,7 @@ dependencies = [
  "catcard-board",
  "catcard-entropy",
  "heapless",
+ "minizlib",
  "zeroize",
 ]
 

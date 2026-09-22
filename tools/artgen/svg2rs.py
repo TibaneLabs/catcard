@@ -18,6 +18,9 @@ import argparse, pathlib, subprocess, sys
 
 from PIL import Image
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import deflate  # noqa: E402  -- beside this file
+
 BLACK, WHITE = 0, 15
 ART_COLOURS = 14
 
@@ -72,11 +75,8 @@ def build(img: Image.Image):
 
 
 def emit(name, source, w, h, palette, pixels) -> str:
-    rows = []
-    row_len = (w + 1) // 2
-    for y in range(h):
-        row = pixels[y * row_len : (y + 1) * row_len]
-        rows.append("    " + " ".join(f"0x{b:02x}," for b in row))
+    """`pixels` packed two to a byte, as `build` makes them; emitted deflated."""
+    arrays = "\n".join(deflate.rust_array("LOGO_DEFLATED", deflate.deflate(pixels)))
     pal = "\n".join(f"    {c:#06x}," for c in palette)
     return f'''//! {source.name}, rasterised and baked as indexed-colour pixels.
 //!
@@ -86,14 +86,11 @@ def emit(name, source, w, h, palette, pixels) -> str:
 //! Rendered on black at {w}x{h}, the size it is shown at, so the glow and the gradient are
 //! the renderer's own pixels rather than something reconstructed on the device. Quantised
 //! to {ART_COLOURS} colours; index 0 is the background (not drawn) and index 15 is white,
-//! left for text on the same canvas.
+//! left for text on the same canvas. Stored deflated: see `indexed.rs`.
 
 use super::Indexed;
 
-#[rustfmt::skip]
-static PIXELS: [u8; {len(pixels)}] = [
-{chr(10).join(rows)}
-];
+{arrays}
 
 /// The palette these pixels index, RGB565.
 #[rustfmt::skip]
@@ -105,7 +102,7 @@ pub const {name}: Indexed = Indexed {{
     width: {w},
     height: {h},
     palette: PALETTE,
-    pixels: &PIXELS,
+    deflated: &LOGO_DEFLATED,
 }};
 '''
 
