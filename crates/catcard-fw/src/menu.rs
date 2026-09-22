@@ -4500,9 +4500,13 @@ fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
     let mut complaint = "";
 
     loop {
+        // Sized for what the index can hold, ten digits, not for the width of the panel.
+        // Both rows say so because the card is one box and takes its widest row.
         let fields = [
-            Field::text("words", count.as_str()),
-            Field::text("index", input.as_str()).live(true),
+            Field::text("words", count.as_str()).max(MAX_DIGITS),
+            Field::text("index", input.as_str())
+                .max(MAX_DIGITS)
+                .live(true),
         ];
         let body = display::LAYOUT.body;
         let foot = if complaint.is_empty() {

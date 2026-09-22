@@ -231,23 +231,18 @@ fn screen_pin(
 
     /// Stand-ins for the digits: the widget draws one print per character and never
     /// looks at them, so the marks row is handed a count and not a PIN.
-    const PLACEHOLDER: &str = "......";
+    const DOTS: &str = "......";
 
     let body = display::LAYOUT.body;
     let filled = words.is_some();
 
-    // The two words as one line, for the row that replaces the prefix.
-    let mut said: heapless::String<24> = heapless::String::new();
-    if let Some([a, b]) = words {
-        let _ = core::fmt::Write::write_fmt(&mut said, format_args!("{a}  {b}"));
-    }
-
-    let top = if filled {
-        Field::text("", said.as_str()).centred()
-    } else {
-        Field::marks(&PLACEHOLDER[..prefix.min(MAX_PART_LEN)], MAX_PART_LEN).live(true)
-    };
-    let bottom = Field::marks(&PLACEHOLDER[..suffix.min(MAX_PART_LEN)], MAX_PART_LEN).live(filled);
+    // Both rows are six-print rows the whole time. Once the prefix is accepted the top
+    // one shows the two words, one per line, as its placeholder -- keeping its size, so
+    // the card does not jump at the moment the owner is meant to be reading it.
+    let said: [&str; 2] = words.unwrap_or(["", ""]);
+    let top = Field::marks(&DOTS[..prefix.min(MAX_PART_LEN)], MAX_PART_LEN).live(!filled);
+    let top = if filled { top.placeholder(&said) } else { top };
+    let bottom = Field::marks(&DOTS[..suffix.min(MAX_PART_LEN)], MAX_PART_LEN).live(filled);
     let fields = [top, bottom];
 
     display::draw_field_page(panel, |c| {

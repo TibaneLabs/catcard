@@ -171,6 +171,18 @@ pub struct Field<'a> {
     pub active: bool,
     /// Centre the value instead of starting it at the left.
     pub centred: bool,
+    /// The most characters a text row takes, which is what sizes it. `None` for a row
+    /// that should have the whole width -- a passphrase is as long as its owner makes it.
+    /// A marks row is sized by its own `max` and ignores this.
+    pub max: Option<usize>,
+    /// Lines shown in place of the content, one per line, centred -- with the row keeping
+    /// the size its input gives it.
+    ///
+    /// For a row that is showing something *about* what was typed rather than the typing:
+    /// the PIN prompt's prefix, once accepted, becomes its two anti-phishing words. The
+    /// row stays the size of six paw prints, so the card does not change shape under the
+    /// owner's hands at the moment they are meant to be reading it.
+    pub placeholder: &'a [&'a str],
 }
 
 impl<'a> Field<'a> {
@@ -182,6 +194,8 @@ impl<'a> Field<'a> {
             show: Show::Text { lines: 1 },
             active: false,
             centred: false,
+            max: None,
+            placeholder: &[],
         }
     }
 
@@ -193,6 +207,8 @@ impl<'a> Field<'a> {
             show: Show::Marks { max },
             active: false,
             centred: true,
+            max: None,
+            placeholder: &[],
         }
     }
 
@@ -205,6 +221,18 @@ impl<'a> Field<'a> {
     /// Centred in the row rather than starting at the left.
     pub fn centred(mut self) -> Self {
         self.centred = true;
+        self
+    }
+
+    /// Sized for at most `n` characters rather than the whole width.
+    pub fn max(mut self, n: usize) -> Self {
+        self.max = Some(n);
+        self
+    }
+
+    /// Show these lines instead of the content, keeping the row's size.
+    pub fn placeholder(mut self, lines: &'a [&'a str]) -> Self {
+        self.placeholder = lines;
         self
     }
 
@@ -233,6 +261,29 @@ fn row_height(l: &Layout<'_>, f: &Field<'_>, scale: usize) -> usize {
     }
 }
 
+/// How wide a row's content can get, or `None` if it should have the whole width.
+fn natural_width(l: &Layout<'_>, f: &Field<'_>, scale: usize) -> Option<usize> {
+    let label = if f.label.is_empty() {
+        0
+    } else {
+        width_of(l.body, f.label) + LABEL_GAP
+    };
+    let content = match f.show {
+        Show::Marks { max } => crate::icons::paw_trail_size(max, scale).0,
+        // The widest glyph, so a field of `n` of anything fits in it, with room for the
+        // caret after the last.
+        Show::Text { .. } => f.max? * l.body.advance(b'W') + 2,
+    };
+    // A placeholder has to fit too: the words are longer than six prints in some cases.
+    let shown = f
+        .placeholder
+        .iter()
+        .map(|line| width_of(l.title, line))
+        .max()
+        .unwrap_or(0);
+    Some(label + content.max(shown))
+}
+
 /// Total height of the card these rows make.
 pub fn height(c_height: usize, l: &Layout<'_>, fields: &[Field<'_>]) -> usize {
     let scale = mark_scale(c_height);
@@ -256,10 +307,18 @@ pub fn stack<C: Canvas + ?Sized>(
     }
     let scale = mark_scale(c.height());
     let pad = 2 * l.margin;
-    // One width for every card on the device, whatever is in it. A card sized to its
-    // content would be a different shape on each screen -- and would change shape under
-    // the owner's hands when the PIN prompt swaps its prints for two words.
-    let w = c.width().saturating_sub(2 * pad);
+    // As wide as the widest row needs for the most it can hold, and no wider: a six-digit
+    // field that spans the panel says "type a lot here". A row with no maximum takes the
+    // whole width. Sized by capacity, never by what is in it now, so the card keeps its
+    // shape as it fills -- and as a placeholder replaces the content, which keeps the
+    // row's own size.
+    let full = c.width().saturating_sub(2 * pad);
+    let w = fields
+        .iter()
+        .map(|f| natural_width(l, f, scale).map_or(full, |n| n + 2 * pad))
+        .max()
+        .unwrap_or(full)
+        .min(full);
     let x = c.width().saturating_sub(w) / 2;
     let total: usize = fields.iter().map(|f| row_height(l, f, scale)).sum();
 
@@ -292,6 +351,11 @@ pub fn stack<C: Canvas + ?Sized>(
         }
         let right = x + w.saturating_sub(pad);
         let live = caret && f.active;
+        if !f.placeholder.is_empty() {
+            row_placeholder(c, l, f.placeholder, left, right, row_y, h, ink);
+            row_y += h;
+            continue;
+        }
         match f.show {
             Show::Text { lines } => row_text(c, l, f, left, right, row_y, h, lines, ink, live),
             Show::Marks { max } => {
@@ -369,6 +433,31 @@ fn row_text<C: Canvas + ?Sized>(
         c.fill_rect(lx, top, CARET_W, l.body.line_height(), ink);
     }
     let _ = end_x;
+}
+
+/// Placeholder lines, each centred, the block centred in the row.
+///
+/// In the title face: these are what the owner is meant to *read* -- the anti-phishing
+/// words -- and the row they sit in is sized for paw prints, which is room enough.
+#[allow(clippy::too_many_arguments)]
+fn row_placeholder<C: Canvas + ?Sized>(
+    c: &mut C,
+    l: &Layout<'_>,
+    lines: &[&str],
+    left: usize,
+    right: usize,
+    y: usize,
+    h: usize,
+    ink: Level,
+) {
+    let face = l.title;
+    let lh = face.line_height();
+    let span = right.saturating_sub(left);
+    let top = y + h.saturating_sub(lines.len() * lh) / 2;
+    for (n, line) in lines.iter().enumerate() {
+        let lx = left + span.saturating_sub(width_of(face, line)) / 2;
+        draw_text_in(c, face, lx, top + n * lh, line, ink);
+    }
 }
 
 /// One print per character, and the caret where the next one will land.
@@ -525,6 +614,73 @@ mod tests {
         // The middle of the card is not painted over; the frame is there.
         assert!(!c.get(c.width() / 2, 10 + h / 2 - 1), "inside stays dark");
         assert!(c.get(c.width() / 2, 10), "the top edge is drawn");
+    }
+
+    /// A six-digit field is as wide as six prints, not as wide as the panel; a row with
+    /// no maximum still takes the whole width.
+    #[test]
+    fn a_field_is_as_wide_as_what_it_can_hold() {
+        let l = roomy();
+        let mut pin = Gray320x240::new();
+        pin.clear();
+        stack(&mut pin, &l, 40, &[Field::marks("", 6)], Skin::Paper, false);
+        let mut wide = Gray320x240::new();
+        wide.clear();
+        stack(
+            &mut wide,
+            &l,
+            40,
+            &[Field::text("", "")],
+            Skin::Paper,
+            false,
+        );
+        // Just inside the full-width card's edge: card there, page for the PIN field.
+        let edge = 2 * l.margin + 4;
+        assert_eq!(wide.get(edge, 44), INK, "the unbounded row is full width");
+        assert_eq!(pin.get(edge, 44), PAPER, "six prints do not need the panel");
+        // But the PIN field still holds its six prints.
+        assert_eq!(pin.get(pin.width() / 2, 44), INK);
+
+        // A text row with a maximum is sized by it too.
+        let mut index = Gray320x240::new();
+        index.clear();
+        stack(
+            &mut index,
+            &l,
+            40,
+            &[Field::text("index", "").max(10)],
+            Skin::Paper,
+            false,
+        );
+        assert_eq!(index.get(edge, 44), PAPER);
+    }
+
+    /// Swapping the prints for two words keeps the row exactly the size it was: the card
+    /// does not move under the owner at the moment they are meant to be reading it.
+    #[test]
+    fn a_placeholder_keeps_the_rows_size() {
+        let l = roomy();
+        let words: &[&str] = &["abandon", "ability"];
+        let prints = [Field::marks("123", 6), Field::marks("", 6).live(true)];
+        let shown = [
+            Field::marks("", 6).placeholder(words),
+            Field::marks("", 6).live(true),
+        ];
+        assert_eq!(height(240, &l, &prints), height(240, &l, &shown));
+
+        let mut a = Gray320x240::new();
+        a.clear();
+        let mut b = Gray320x240::new();
+        b.clear();
+        let below_a = stack(&mut a, &l, 40, &prints, Skin::Paper, false);
+        let below_b = stack(&mut b, &l, 40, &shown, Skin::Paper, false);
+        assert_eq!(below_a, below_b, "same height");
+        // Same width: the card's left edge is in the same column.
+        let row = 44;
+        let edge = |c: &Gray320x240| (0..c.width()).find(|&x| c.get(x, row) == INK);
+        assert_eq!(edge(&a), edge(&b), "same width");
+        // And the words are drawn.
+        assert!(ink_count(&b, MARK) > 0);
     }
 
     /// A digits field takes digits and nothing else -- which is what makes it safe to
