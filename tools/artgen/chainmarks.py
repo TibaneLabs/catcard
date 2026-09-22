@@ -142,14 +142,18 @@ def main():
         "//! A chain without a PNG has a placeholder: its colour as a disc and a letter.",
         "",
         "use super::Bitmap;",
+        '#[cfg(feature = "colour-marks")]',
         "use super::rgba::Rgba;",
+        "use crate::scroll::Mark;",
         "",
     ]
     for ticker, real, data, (bpr, bits) in marks:
         what = "from its PNG" if real else "a placeholder"
+        lines += ['#[cfg(feature = "colour-marks")]']
         lines += deflate.rust_array(f"{ticker}_DEFLATED", data)
         lines += [
             f"/// {ticker}, {SIZE}x{SIZE}, {what}.",
+            '#[cfg(feature = "colour-marks")]',
             f"pub const {ticker}: Rgba = Rgba {{",
             f"    width: {SIZE},",
             f"    height: {SIZE},",
@@ -165,13 +169,28 @@ def main():
             "};",
             "",
         ]
+    # The mark a row should carry, decided here rather than at the call site: a board
+    # whose panel cannot show colour does not have the colour art at all, so this is the
+    # only place that can answer without a `cfg` in the menu code.
     lines += [
-        "/// The colour and 1-bit marks for a ticker, if there are any.",
-        "pub fn mark(ticker: &str) -> Option<(&'static Rgba, &'static Bitmap)> {",
+        "/// The mark for a ticker, in whichever forms this build has.",
+        '#[cfg(feature = "colour-marks")]',
+        "pub fn mark(ticker: &str) -> Option<Mark<'static>> {",
         "    Some(match ticker {",
     ]
     for ticker, *_ in marks:
-        lines.append(f'        "{ticker}" => (&{ticker}, &{ticker}_MONO),')
+        lines.append(
+            f'        "{ticker}" => Mark::Art {{ colour: &{ticker}, mono: &{ticker}_MONO }},'
+        )
+    lines += ["        _ => return None,", "    })", "}", ""]
+    lines += [
+        "/// The mark for a ticker: one bit, on a board with no colour art baked in.",
+        '#[cfg(not(feature = "colour-marks"))]',
+        "pub fn mark(ticker: &str) -> Option<Mark<'static>> {",
+        "    Some(match ticker {",
+    ]
+    for ticker, *_ in marks:
+        lines.append(f'        "{ticker}" => Mark::Mono(&{ticker}_MONO),')
     lines += ["        _ => return None,", "    })", "}", ""]
     a.out.write_text("\n".join(lines))
     print(f"{len(marks)} marks, full colour -> {a.out}")

@@ -150,13 +150,19 @@ mod tests {
         assert!(half > 0x7000 && half < 0x9000, "{half:#06x}");
     }
 
-    /// Every chain mark decodes to exactly its size.
+    /// Every chain mark decodes to exactly its size. Only where the colour art is in the
+    /// build at all -- a one-bit board carries none of it.
+    #[cfg(feature = "colour-marks")]
     #[test]
     fn every_chain_mark_decodes() {
         for t in [
             "BTC", "ETH", "SOL", "LTC", "BCH", "DOGE", "TRX", "MONA", "NMC", "XEP",
         ] {
-            let (art, _) = crate::art::chainicons::mark(t).unwrap();
+            let crate::scroll::Mark::Art { colour: art, .. } =
+                crate::art::chainicons::mark(t).unwrap()
+            else {
+                panic!("{t}: a colour build should give the colour form");
+            };
             let mut n = 0;
             decode(art, |_, _, _| n += 1).unwrap_or_else(|e| panic!("{t}: {e:?}"));
             assert_eq!(n, art.width as usize * art.height as usize, "{t}");

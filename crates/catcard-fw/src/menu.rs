@@ -1854,6 +1854,12 @@ impl MenuScreen {
         }
         let (title, note) = menu_head(screen);
         let view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
+        // Through the marks path, like every other screen that renders a document: a
+        // list menu can carry a colour mark too, and one drawn plain would leave its
+        // space empty.
+        #[cfg(feature = "board-q1")]
+        display::draw_with_marks(panel, &view, |c| catcard_ui::scroll::render(c, &view));
+        #[cfg(not(feature = "board-q1"))]
         display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
     }
 
@@ -6205,19 +6211,13 @@ fn pick_addresses(
 #[cfg(feature = "multichain")]
 fn chain_row(c: &catcard_wallet::chain::Chain, id: u32) -> catcard_ui::scroll::Line<'static> {
     use catcard_ui::art::chainicons;
-    use catcard_ui::scroll::{Line as DLine, Mark};
+    use catcard_ui::scroll::Line as DLine;
     let mut line = DLine::item(c.name, id).large();
-    if let Some((colour, mono)) = chainicons::mark(c.ticker) {
-        #[cfg(feature = "board-q1")]
-        {
-            let _ = mono;
-            line = line.with_mark(Mark::Full(colour));
-        }
-        #[cfg(not(feature = "board-q1"))]
-        {
-            let _ = colour;
-            line = line.with_mark(Mark::Mono(mono));
-        }
+    // Whichever forms this build has: a board whose panel cannot show colour does not
+    // carry the colour art at all, so `mark` answers with the one-bit form and the row
+    // says nothing about which board it is on.
+    if let Some(mark) = chainicons::mark(c.ticker) {
+        line = line.with_mark(mark);
     }
     line
 }

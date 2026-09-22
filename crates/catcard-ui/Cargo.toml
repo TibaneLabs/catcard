@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# The chains' logos in full colour, ~10 KB of deflated RGBA. Only a panel that takes 16
+# bits a pixel can draw them, so only such a board's build turns this on: elsewhere the
+# art is not merely unused, it is absent, and every row falls back to its one-bit form.
+colour-marks = []
+
 [dependencies]
 catcard-board.workspace = true
 catcard-entropy = { workspace = true, default-features = false }

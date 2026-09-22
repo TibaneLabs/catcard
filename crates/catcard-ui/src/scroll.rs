@@ -45,6 +45,16 @@ pub struct Fonts<'a> {
     pub gap: usize,
     /// Left margin for text, and the base of the right gutter kept for arrows and markers.
     pub margin: usize,
+    /// Whether this panel can show a mark in full colour.
+    ///
+    /// The canvas holds four bits a pixel either way, so a colour mark is never drawn
+    /// *on* it: the row leaves its space empty and the panel's owner writes the art
+    /// straight out at 16 bits ([`ScrollView::marks_shown`]). Where that cannot happen --
+    /// a one-bit OLED -- the same row draws its one-bit art instead, in the row's ink.
+    ///
+    /// It lives here because it changes **layout**, not just appearance: the two arts are
+    /// different sizes, so the text beside them starts in a different place.
+    pub colour: bool,
 }
 
 impl<'a> Fonts<'a> {
@@ -76,20 +86,40 @@ pub fn text_cols(fonts: &Fonts<'_>, size: Size, width: usize) -> usize {
 /// is a glyph scaled to the line's face.
 #[derive(Copy, Clone)]
 pub enum Mark<'a> {
-    /// Full-colour art. **Not drawn on the canvas**, which holds 4 bits a pixel: its space
-    /// is left empty and [`ScrollView::marks_shown`] says where it goes, so the panel's
-    /// owner can write it straight to the panel at 16 bits, blended onto the row.
-    Full(&'a crate::art::rgba::Rgba),
-    /// One bit, drawn in the row's ink -- so it inverts with the text when selected.
+    /// One picture in both forms: full colour where the panel can show it, one bit where
+    /// it cannot.
+    ///
+    /// Both, always, so a row cannot be written that shows a logo on one board and a gap
+    /// on another -- which is what a colour-only mark did before this carried the pair.
+    /// Which one is drawn is [`Fonts::colour`], asked once per panel rather than at every
+    /// call site.
+    Art {
+        colour: &'a crate::art::rgba::Rgba,
+        mono: &'a Bitmap,
+    },
+    /// One bit and nothing else, drawn in the row's ink -- so it inverts with the text
+    /// when the row is selected.
     Mono(&'a Bitmap),
 }
 
 impl Mark<'_> {
-    /// Its width and height, in pixels.
-    pub fn size(&self) -> (usize, usize) {
+    /// The width and height of the form a `colour` panel will draw.
+    ///
+    /// The two forms are different sizes, and this is what the row is laid out around, so
+    /// it takes the panel's answer rather than assuming one.
+    pub fn size(&self, colour: bool) -> (usize, usize) {
         match self {
-            Mark::Full(a) => (a.width as usize, a.height as usize),
-            Mark::Mono(b) => (b.width as usize, b.height as usize),
+            Mark::Art { colour: art, .. } if colour => (art.width as usize, art.height as usize),
+            Mark::Art { mono, .. } | Mark::Mono(mono) => {
+                (mono.width as usize, mono.height as usize)
+            }
+        }
+    }
+
+    /// The one-bit form, where that is what gets drawn.
+    fn mono(&self) -> &Bitmap {
+        match self {
+            Mark::Art { mono, .. } | Mark::Mono(mono) => mono,
         }
     }
 }
@@ -476,7 +506,7 @@ impl<'a> ScrollView<'a> {
     /// [`crate::icons`].
     fn icon_advance(&self, i: usize) -> usize {
         if let Some(m) = self.lines[i].mark {
-            return m.size().0 + 4;
+            return m.size(self.fonts.colour).0 + 4;
         }
         match self.lines[i].icon {
             Some(bmp) => {
@@ -490,15 +520,22 @@ impl<'a> ScrollView<'a> {
     /// The full-colour marks [`render`] left room for, where they go -- clipped to the
     /// view, so one sliding in or out at an edge during a scroll shows the part that is
     /// on screen rather than popping in whole.
+    ///
+    /// Empty on a panel that cannot show colour ([`Fonts::colour`]): there, `render` drew
+    /// the one-bit form into the canvas itself and there is nothing left for the caller
+    /// to write out.
     pub fn marks_shown(&self) -> impl Iterator<Item = Shown<'a>> + '_ {
         let h = self.height as isize;
+        let colour = self.fonts.colour;
         self.lines.iter().enumerate().filter_map(move |(i, vl)| {
-            let (Some(Mark::Full(art)), Align::Left) = (vl.mark, vl.align) else {
+            let (Some(Mark::Art { colour: art, .. }), Align::Left, true) =
+                (vl.mark, vl.align, colour)
+            else {
                 return None;
             };
             let lh = self.fonts.face(vl.size).line_height();
             let top = self.top(i) as isize - self.off as isize;
-            let (_, mh) = Mark::Full(art).size();
+            let mh = art.height as usize;
             let my = top + (lh as isize - mh as isize) / 2;
             let first = my.max(0);
             let last = (my + mh as isize).min(h);
@@ -753,13 +790,14 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
         // A mark, at its own size, centred on the row. Only when the whole of it is on
         // screen: half a logo at the edge of a scroll reads as a different logo.
         if let (Some(mark), Align::Left) = (vl.mark, vl.align) {
-            let (mw, mh) = mark.size();
+            let (mw, mh) = mark.size(fonts.colour);
             let my = top + (lh as isize - mh as isize) / 2;
-            if my >= 0 && my as usize + mh <= h {
-                // A full-colour mark is the panel's to draw; see `marks_shown`.
-                if let Mark::Mono(bmp) = mark {
-                    draw_icon(canvas, bmp, fonts.margin, my, 1, ink, h);
-                }
+            // Colour is the panel's to draw, past this canvas -- `marks_shown` says
+            // where. One bit is drawn here, in the row's ink, so it inverts with the
+            // text when the row is selected.
+            let one_bit = !matches!(mark, Mark::Art { .. }) || !fonts.colour;
+            if one_bit && my >= 0 && my as usize + mh <= h {
+                draw_icon(canvas, mark.mono(), fonts.margin, my, 1, ink, h);
             }
             tx = fonts.margin + mw + 4;
         }
@@ -828,6 +866,7 @@ mod tests {
             small: &misc4x6::FONT,
             gap: 2,
             margin: 6,
+            colour: true,
         }
     }
 
@@ -839,6 +878,7 @@ mod tests {
             small: &misc4x6::FONT,
             gap: 1,
             margin: 2,
+            colour: false,
         }
     }
 
@@ -1228,21 +1268,23 @@ mod tests {
 
     #[test]
     fn a_mark_is_drawn_at_its_own_size_and_indents_the_text() {
-        use crate::art::chainicons;
+        let colour = colour_art();
         let fonts = Fonts {
             title: &peep10x20::FONT,
             body: &peep7x14::FONT,
             small: &misc4x6::FONT,
             gap: 2,
             margin: 6,
+            colour: true,
         };
         let doc = [
-            Line::item("Bitcoin", 0)
-                .large()
-                .with_mark(Mark::Full(&chainicons::BTC)),
+            Line::item("Bitcoin", 0).large().with_mark(Mark::Art {
+                colour: &colour,
+                mono: &crate::art::chainicons::BTC_MONO,
+            }),
             Line::item("Ethereum", 1)
                 .large()
-                .with_mark(Mark::Mono(&chainicons::ETH_MONO)),
+                .with_mark(Mark::Mono(&crate::art::chainicons::ETH_MONO)),
         ];
         let view = ScrollView::build(&doc, 320, 224, fonts);
         let mut c = Gray320x240::new();
@@ -1269,21 +1311,114 @@ mod tests {
         assert_eq!(view.text_left(1), 6 + 12 + 4);
     }
 
+    /// A 20x20 colour mark, deflated here so the tests do not depend on art that a
+    /// build without `colour-marks` does not carry.
+    fn colour_art() -> crate::art::rgba::Rgba {
+        crate::art::rgba::Rgba {
+            width: 20,
+            height: 20,
+            deflated: &COLOUR_ART,
+        }
+    }
+
+    /// 20x20 RGBA of one opaque colour, raw-deflated (stored blocks).
+    static COLOUR_ART: [u8; 1614] = {
+        let mut out = [0u8; 1614];
+        // Two stored blocks: 1600 bytes of pixels needs a 65535-max block, so one
+        // suffices; the header is 5 bytes and the last block is marked final.
+        out[0] = 0x01;
+        out[1] = 0x40;
+        out[2] = 0x06;
+        out[3] = 0xBF;
+        out[4] = 0xF9;
+        let mut i = 0;
+        while i < 1600 {
+            out[5 + i] = match i % 4 {
+                0 => 0x20,
+                1 => 0x80,
+                2 => 0xFF,
+                _ => 0xFF,
+            };
+            i += 1;
+        }
+        out
+    };
+
+    /// The panel decides which form is drawn, and the row is laid out around that one.
+    ///
+    /// The two are different sizes -- a 20x20 logo, a 12x12 disc -- so a panel that drew
+    /// one and measured the other would put every name in the wrong place.
+    #[test]
+    fn a_marks_two_forms_are_chosen_by_the_panel() {
+        let colour = colour_art();
+        let art = Mark::Art {
+            colour: &colour,
+            mono: &crate::art::chainicons::BTC_MONO,
+        };
+        assert_eq!(art.size(true), (20, 20));
+        assert_eq!(art.size(false), (12, 12));
+
+        let doc = [Line::item("Bitcoin", 0).large().with_mark(art)];
+        for colour in [true, false] {
+            let fonts = Fonts { colour, ..fonts() };
+            let view = ScrollView::build(&doc, 320, 240, fonts);
+            let shown: Vec<_> = view.marks_shown().collect();
+            // Colour is written past the canvas, so it is reported; one bit is already
+            // in the canvas by then, so there is nothing to report.
+            assert_eq!(shown.len(), usize::from(colour), "colour = {colour}");
+        }
+    }
+
+    /// A one-bit panel draws the mark into the canvas itself, where the colour panel
+    /// leaves its space empty for the caller to fill.
+    #[test]
+    fn a_mono_panel_draws_the_mark_into_the_canvas() {
+        let colour = colour_art();
+        // A body line, not an item: an item would be the cursor's row, and the
+        // highlight behind it inks the very columns this counts.
+        let doc = [Line::body("Bitcoin").with_mark(Mark::Art {
+            colour: &colour,
+            mono: &crate::art::chainicons::BTC_MONO,
+        })];
+        let ink = |colour: bool| {
+            let fonts = Fonts {
+                colour,
+                ..compact_fonts()
+            };
+            let view = ScrollView::build(&doc, 128, 64, fonts);
+            let mut c = crate::framebuffer::Mono128x64::new();
+            render(&mut c, &view);
+            // Just the mark's own column range, so the name's pixels are not counted.
+            (0..64)
+                .flat_map(|y| (0..14).map(move |x| (x, y)))
+                .filter(|&(x, y)| crate::canvas::Canvas::get(&c, x, y) != PAPER)
+                .count()
+        };
+        assert!(ink(false) > 40, "the one-bit mark should be drawn");
+        assert_eq!(
+            ink(true),
+            0,
+            "colour is the panel's to draw, not the canvas's"
+        );
+    }
+
     /// A mark scrolled half off the top reports the half still on screen.
     #[test]
     fn a_mark_at_the_edge_is_clipped_not_dropped() {
-        use crate::art::chainicons;
+        let colour = colour_art();
         let fonts = Fonts {
             title: &peep10x20::FONT,
             body: &peep7x14::FONT,
             small: &misc4x6::FONT,
             gap: 2,
             margin: 6,
+            colour: true,
         };
         let doc = [
-            Line::item("Bitcoin", 0)
-                .large()
-                .with_mark(Mark::Full(&chainicons::BTC)),
+            Line::item("Bitcoin", 0).large().with_mark(Mark::Art {
+                colour: &colour,
+                mono: &crate::art::chainicons::BTC_MONO,
+            }),
             Line::item("Two", 1).large(),
             Line::item("Three", 2).large(),
             Line::item("Four", 3).large(),
