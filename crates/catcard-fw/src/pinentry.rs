@@ -22,6 +22,7 @@ use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::keypad::Keypad;
 use catcard_ui::pinentry::PinBuffer;
+use catcard_ui::scramble::Layout as KeyLayout;
 use catcard_ui::text::{centred, draw_text};
 
 use crate::{display, keypad::GpioMatrix};
@@ -218,6 +219,7 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
 /// `caret` is the blink, which belongs to the loop that polls the keypad -- see
 /// [`unlock`].
 #[cfg(feature = "board-q1")]
+#[allow(clippy::too_many_arguments)]
 fn screen_pin(
     panel: &mut display::Panel,
     prefix: usize,
@@ -226,6 +228,7 @@ fn screen_pin(
     caret: bool,
     busy: bool,
     left: u32,
+    layout: &KeyLayout,
 ) {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Field};
@@ -293,6 +296,18 @@ fn screen_pin(
         };
         let fx = centred(body, foot, c.width());
         draw_text(c, body, fx, below + 6, foot);
+        if !busy && !layout.is_plain() {
+            // Under the hint, in the same face: the number row's labels, and what each
+            // key types this time.
+            let (mut keys, mut types) = ([0u8; 19], [0u8; 19]);
+            let n = layout.legend(true, &mut keys, &mut types);
+            let keys = core::str::from_utf8(&keys[..n]).unwrap_or("");
+            let types = core::str::from_utf8(&types[..n]).unwrap_or("");
+            let lx = centred(body, keys, c.width());
+            let ly = below + 6 + body.line_height() + 8;
+            draw_text(c, body, lx, ly, keys);
+            draw_text(c, body, lx, ly + body.line_height() + 2, types);
+        }
         tries_left(c, left);
     });
 }
@@ -316,7 +331,16 @@ fn checking(panel: &mut display::Panel, login: &Login, prefix: usize) {
     }
     // Only the prefix: the words are on their way back to this same screen, so the row
     // says so in place rather than the page going away for a second.
-    screen_pin(panel, prefix, None, 0, false, true, login.attempts_left());
+    screen_pin(
+        panel,
+        prefix,
+        None,
+        0,
+        false,
+        true,
+        login.attempts_left(),
+        &KeyLayout::PLAIN,
+    );
     // Our own bar, fed to the panel by DMA while the bootloader holds the CPU -- safe for
     // exactly these two calls, which leave SPI1, the LCD and DMA alone
     // (docs/CALLGATE-DMA.md). The co-processor's orange bar if it cannot start.
@@ -326,11 +350,58 @@ fn checking(panel: &mut display::Panel, login: &Login, prefix: usize) {
     }
 }
 
+/// What the owner chose about logging in, read from the pre-login settings before the PIN
+/// prompt. The defaults are what a device with no settings, or unreadable ones, gets.
+#[derive(Copy, Clone, Default)]
+pub struct LoginPrefs<'a> {
+    /// Shown before the prompt. Never set on the mk3, which has no settings medium.
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    pub nick: Option<&'a str>,
+    /// Shuffle the number row for each half of the PIN.
+    pub scramble: bool,
+    /// Minutes to wait after a correct PIN before the menu.
+    pub countdown_minutes: Option<u32>,
+}
+
+/// A fresh shuffle of the number row, or the plain one if scrambling is off.
+///
+/// From the UI DRBG, as all screen randomness is. A DRBG that will not answer gives the
+/// plain row rather than no login: the scramble is a guard against a watcher, and falling
+/// back to the keys as printed is what the owner would get with it switched off.
+fn key_layout(drbg: &mut HmacDrbg, scramble: bool) -> KeyLayout {
+    if !scramble {
+        return KeyLayout::PLAIN;
+    }
+    KeyLayout::shuffled(|n| drbg.below(n)).unwrap_or_else(|| {
+        crate::catlog!("pin: DRBG refused; number row not scrambled this time");
+        KeyLayout::PLAIN
+    })
+}
+
+/// The scrambled row's legend at design row `y`: the keys' own labels, and under each the
+/// digit it types this time. Nothing when the row is plain.
+fn legend<C: Canvas + ?Sized>(c: &mut C, y: usize, layout: &KeyLayout) {
+    if layout.is_plain() {
+        return;
+    }
+    let f = display::LAYOUT.body;
+    let (mut keys, mut types) = ([0u8; 19], [0u8; 19]);
+    let wide = 19 * f.advance(b'0') <= c.width();
+    let n = layout.legend(wide, &mut keys, &mut types);
+    let keys = core::str::from_utf8(&keys[..n]).unwrap_or("");
+    let types = core::str::from_utf8(&types[..n]).unwrap_or("");
+    let x = centred(f, keys, c.width());
+    let y = at(c, y);
+    draw_text(c, f, x, y, keys);
+    draw_text(c, f, x, y + f.line_height() + 1, types);
+}
+
 fn screen_field(
     panel: &mut display::Panel,
     heading: &str,
     buf: &PinBuffer<MAX_PART_LEN>,
     left: u32,
+    layout: &KeyLayout,
 ) {
     display::draw(panel, |c| {
         c.clear();
@@ -344,11 +415,16 @@ fn screen_field(
         let scale = (c.height() / DESIGN_ROWS).max(1);
         let (trail_w, _) = paw_trail_size(MAX_PART_LEN, scale);
         let x = c.width().saturating_sub(trail_w) / 2;
-        draw_paw_trail(c, buf.len(), x, at(c, 22), scale);
+        // A scrambled row needs its legend under the prints, so everything below moves
+        // down a little to make room.
+        let scrambled = !layout.is_plain();
+        let (trail_y, hint_y) = if scrambled { (18, 50) } else { (22, 46) };
+        draw_paw_trail(c, buf.len(), x, at(c, trail_y), scale);
+        legend(c, 36, layout);
         if buf.len() < MIN_PART_LEN {
-            small(c, 46, "2 to 6 digits");
+            small(c, hint_y, "2 to 6 digits");
         } else {
-            two_key_hint(c, 46, "accept", "delete");
+            two_key_hint(c, hint_y, "accept", "delete");
         }
         tries_left(c, left);
     });
@@ -485,7 +561,7 @@ fn setup_first_pin(
     drbg: &mut HmacDrbg,
     login: &mut Login,
 ) -> bool {
-    let Some(prefix) = collect(panel, matrix, drbg, "New PIN prefix") else {
+    let Some(prefix) = collect(panel, matrix, drbg, "New PIN prefix", false) else {
         return false;
     };
     // A query, not the login path: `set_first_pin` only acts while the device is still
@@ -497,17 +573,17 @@ fn setup_first_pin(
             return false;
         }
     }
-    let Some(suffix) = collect(panel, matrix, drbg, "New PIN suffix") else {
+    let Some(suffix) = collect(panel, matrix, drbg, "New PIN suffix", false) else {
         return false;
     };
 
     // Entered again and compared, exactly as a PIN change is, so a typo cannot set a first
     // PIN the owner does not know -- which on a blank device would be unrecoverable, since
     // both login and Factory Reset need the PIN nobody typed on purpose.
-    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix") else {
+    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix", false) else {
         return false;
     };
-    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix") else {
+    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix", false) else {
         return false;
     };
     if again_prefix.as_bytes() != prefix.as_bytes() || again_suffix.as_bytes() != suffix.as_bytes()
@@ -606,12 +682,14 @@ fn collect(
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     heading: &str,
+    scramble: bool,
 ) -> Option<PinBuffer<MAX_PART_LEN>> {
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    screen_field(panel, heading, &field, MAX_ATTEMPTS);
+    let layout = key_layout(drbg, scramble);
+    screen_field(panel, heading, &field, MAX_ATTEMPTS, &layout);
 
     loop {
         crate::usbtask::pump();
@@ -620,7 +698,7 @@ fn collect(
         for k in keys.iter() {
             match k {
                 Key::Digit(d) => {
-                    field.push(*d);
+                    field.push(layout.digit(*d));
                     changed = true;
                 }
                 Key::Cancel => {
@@ -640,7 +718,7 @@ fn collect(
             }
         }
         if changed {
-            screen_field(panel, heading, &field, MAX_ATTEMPTS);
+            screen_field(panel, heading, &field, MAX_ATTEMPTS, &layout);
         }
         catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
     }
@@ -724,7 +802,7 @@ pub(crate) fn change_pin(
     let g = BootloaderGate::new(gate);
 
     // The current PIN, with its anti-phishing words, as a login would show them.
-    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix") else {
+    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix", false) else {
         return ChangePin::Cancelled;
     };
     working(panel, "Checking");
@@ -734,12 +812,12 @@ pub(crate) fn change_pin(
             return ChangePin::Cancelled;
         }
     }
-    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix") else {
+    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix", false) else {
         return ChangePin::Cancelled;
     };
 
     // The new PIN, its words shown once so the owner can learn them.
-    let Some(new_prefix) = collect(panel, matrix, drbg, "New prefix") else {
+    let Some(new_prefix) = collect(panel, matrix, drbg, "New prefix", false) else {
         return ChangePin::Cancelled;
     };
     working(panel, "Checking");
@@ -749,15 +827,15 @@ pub(crate) fn change_pin(
             return ChangePin::Cancelled;
         }
     }
-    let Some(new_suffix) = collect(panel, matrix, drbg, "New suffix") else {
+    let Some(new_suffix) = collect(panel, matrix, drbg, "New suffix", false) else {
         return ChangePin::Cancelled;
     };
 
     // Entered again, and compared, so a typo cannot set an unknown PIN.
-    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix") else {
+    let Some(again_prefix) = collect(panel, matrix, drbg, "Repeat prefix", false) else {
         return ChangePin::Cancelled;
     };
-    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix") else {
+    let Some(again_suffix) = collect(panel, matrix, drbg, "Repeat suffix", false) else {
         return ChangePin::Cancelled;
     };
     if again_prefix.as_bytes() != new_prefix.as_bytes()
@@ -816,7 +894,7 @@ pub(crate) fn factory_reset(
 
     // The current PIN, with its anti-phishing words, exactly as a login or a PIN change
     // shows them -- this is a PIN change (to nothing), so it needs the current PIN.
-    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix") else {
+    let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix", false) else {
         return FactoryReset::Cancelled;
     };
     working(panel, "Checking");
@@ -826,7 +904,7 @@ pub(crate) fn factory_reset(
             return FactoryReset::Cancelled;
         }
     }
-    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix") else {
+    let Some(old_suffix) = collect(panel, matrix, drbg, "Current suffix", false) else {
         return FactoryReset::Cancelled;
     };
 
@@ -853,9 +931,9 @@ pub fn unlock(
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
-    // The owner's nickname, shown once the device has attached to USB. Always `None` on the
-    // mk3, whose settings medium is not wired up -- hence the underscore there.
-    #[cfg_attr(feature = "board-mk3", allow(unused_variables))] nick: Option<&str>,
+    // The nickname, shown once the device has attached to USB, and the login preferences.
+    // Always the defaults on the mk3, whose settings medium is not wired up.
+    prefs: LoginPrefs<'_>,
 ) -> (Unlocked, Login) {
     let g = BootloaderGate { gate };
     let mut login = Login::new(&g);
@@ -869,9 +947,14 @@ pub fn unlock(
     // The nickname, if the owner set one, before anything is typed -- and after `attach`,
     // so a host can reach a device that is sitting on it.
     #[cfg(not(feature = "board-mk3"))]
-    if let Some(nick) = nick {
+    if let Some(nick) = prefs.nick {
         show_nickname(panel, matrix, drbg, nick);
     }
+
+    // The number row's layout for the half being typed, drawn again whenever the step
+    // moves to the other half -- so the two halves do not share one.
+    let mut layout = KeyLayout::PLAIN;
+    let mut layout_for: Option<bool> = None;
 
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
@@ -892,6 +975,19 @@ pub fn unlock(
     loop {
         // A host driving this device needs to know which screen it is looking at.
         crate::usbtask::set_blank(matches!(login.step(), Step::Blank));
+
+        // A fresh layout each time a half of the PIN starts: `Some(true)` the prefix,
+        // `Some(false)` the suffix.
+        let half = match login.step() {
+            Step::Prefix => Some(true),
+            Step::Suffix => Some(false),
+            _ => None,
+        };
+        if half != layout_for {
+            layout_for = half;
+            layout = key_layout(drbg, prefs.scramble && half.is_some());
+            redraw = true;
+        }
 
         // Only where there is a caret to blink: anywhere else this would repaint a
         // static screen twice a second for nothing.
@@ -920,6 +1016,7 @@ pub fn unlock(
                     caret,
                     false,
                     login.attempts_left(),
+                    &layout,
                 ),
                 // Not normally drawn: the accept key that submits the prefix also
                 // passes this step, because the screen it would show is the screen
@@ -933,6 +1030,7 @@ pub fn unlock(
                     caret,
                     false,
                     login.attempts_left(),
+                    &KeyLayout::PLAIN,
                 ),
                 #[cfg(feature = "board-q1")]
                 Step::Suffix => screen_pin(
@@ -943,13 +1041,18 @@ pub fn unlock(
                     caret,
                     false,
                     login.attempts_left(),
+                    &layout,
                 ),
                 #[cfg(not(feature = "board-q1"))]
-                Step::Prefix => screen_field(panel, "PIN prefix", &field, login.attempts_left()),
+                Step::Prefix => {
+                    screen_field(panel, "PIN prefix", &field, login.attempts_left(), &layout)
+                }
                 #[cfg(not(feature = "board-q1"))]
                 Step::ConfirmWords(w) => screen_words(panel, anti_phishing_words(w)),
                 #[cfg(not(feature = "board-q1"))]
-                Step::Suffix => screen_field(panel, "PIN suffix", &field, login.attempts_left()),
+                Step::Suffix => {
+                    screen_field(panel, "PIN suffix", &field, login.attempts_left(), &layout)
+                }
                 Step::Wrong { attempts_left, .. } => {
                     let mut n = [0u8; 3];
                     let mut m = [0u8; 3];
@@ -1005,6 +1108,11 @@ pub fn unlock(
         }
 
         if let Step::In { zero_secret } = login.step() {
+            // The countdown the owner chose, after the PIN and before the menu. Whatever
+            // way the PIN arrived -- typed, or from a host -- it waits the same.
+            if let Some(minutes) = prefs.countdown_minutes {
+                countdown(panel, matrix, drbg, u64::from(minutes) * 60);
+            }
             // The login travels back out with the result. On mk4 and later an upgrade is
             // authorised through this same struct, and only a logged-in one carries the
             // bootloader's signature that `gate 18/7` demands -- so throwing it away
@@ -1071,8 +1179,9 @@ pub fn unlock(
                 }
                 (Step::ConfirmWords(_), Key::Digit(_)) => {}
 
+                // The key's digit through this half's layout -- itself, unless scrambled.
                 (Step::Prefix | Step::Suffix, Key::Digit(d)) => {
-                    field.push(*d);
+                    field.push(layout.digit(*d));
                 }
                 (Step::Prefix | Step::Suffix, Key::Cancel) => {
                     if !field.pop() {
@@ -1130,5 +1239,151 @@ pub fn unlock(
         }
 
         catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+    }
+}
+
+/// Wait `seconds` with the clock on screen, then return. The login countdown.
+///
+/// **Bounded by construction.** Time is the cycle counter's, added up a scan at a time --
+/// each step far shorter than the counter's wrap -- into a 64-bit total compared against a
+/// fixed target. Keys do nothing: a countdown a keypress could end would be no countdown.
+/// USB is served throughout, so a host still reaches a device that is waiting.
+pub(crate) fn countdown(
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    seconds: u64,
+) {
+    // SAFETY: reads RCC only.
+    let hz = u64::from(unsafe { catcard_hal::clock::hclk_hz() }).max(1);
+    let target = seconds.saturating_mul(hz);
+    crate::catlog!("login: countdown of {} s", seconds);
+
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut elapsed: u64 = 0;
+    let mut last = catcard_hal::dwt::cycles();
+    let mut shown = u64::MAX;
+    while elapsed < target {
+        let left = (target - elapsed).div_ceil(hz);
+        if left != shown {
+            shown = left;
+            let mut clock = [0u8; 16];
+            let text = clock_text(left, &mut clock);
+            screen_message(panel, "Login countdown", text, "then the menu");
+        }
+        let _ = crate::usbtask::pump();
+        // Scanned so the keypad stays live for the DRBG's timing samples; the keys
+        // themselves are dropped.
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+        let now = catcard_hal::dwt::cycles();
+        elapsed += u64::from(now.wrapping_sub(last));
+        last = now;
+    }
+    crate::catlog!("login: countdown done");
+}
+
+/// `seconds` as `d h mm:ss`, `h:mm:ss` or `m:ss`, into `out`.
+fn clock_text(seconds: u64, out: &mut [u8; 16]) -> &str {
+    use core::fmt::Write as _;
+    let (d, h, m, s) = (
+        seconds / 86_400,
+        (seconds / 3600) % 24,
+        (seconds / 60) % 60,
+        seconds % 60,
+    );
+    let mut t = heapless::String::<16>::new();
+    let _ = if d > 0 {
+        write!(t, "{d}d {h}:{m:02}:{s:02}")
+    } else if h > 0 {
+        write!(t, "{h}:{m:02}:{s:02}")
+    } else {
+        write!(t, "{m}:{s:02}")
+    };
+    let n = t.len();
+    out[..n].copy_from_slice(t.as_bytes());
+    core::str::from_utf8(&out[..n]).unwrap_or("")
+}
+
+/// How a test login ended.
+pub(crate) enum TestLogin {
+    /// The PIN is the one the device has. The session now runs on the test's login.
+    Correct,
+    /// It is not; an attempt was spent.
+    Wrong { attempts_left: u32 },
+    /// Backed out before the suffix was sent: nothing spent.
+    Cancelled,
+    /// Refused to start: too few attempts left to spend one on a test.
+    TooFewTries { attempts_left: u32 },
+    /// The gate answered with something other than right or wrong.
+    Failed,
+}
+
+/// Below this many attempts left, a test is refused: it is not worth an attempt when the
+/// device is this close to bricking itself.
+const TEST_MIN_ATTEMPTS: u32 = 4;
+
+/// Settings → Login → Test login: type the PIN as at login, and be told whether it is
+/// right, without logging out.
+///
+/// **A wrong PIN here is a real wrong PIN**: the bootloader counts it, as stock's test
+/// does, and thirteen brick the device. So the count is shown before starting, a test is
+/// refused outright once only a few are left, and nothing is sent until the words are
+/// confirmed -- backing out before the suffix costs nothing.
+///
+/// `scramble` shuffles the number row as login would. On success the session's login is
+/// replaced by the test's, which is itself a fresh successful login -- so nothing the
+/// bootloader keeps between calls can leave the menu's copy stale.
+pub(crate) fn test_login(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    session: &mut Login,
+    scramble: bool,
+) -> TestLogin {
+    let g = BootloaderGate { gate };
+    let mut test = Login::new(&g);
+    log_state(&test, "test setup");
+    if !matches!(test.step(), Step::Prefix) {
+        return TestLogin::Failed;
+    }
+    let left = test.attempts_left();
+    if left < TEST_MIN_ATTEMPTS {
+        return TestLogin::TooFewTries {
+            attempts_left: left,
+        };
+    }
+
+    let Some(prefix) = collect(panel, matrix, drbg, "Test: prefix", scramble) else {
+        return TestLogin::Cancelled;
+    };
+    working(panel, "Checking");
+    let _ = test.prefix_entered(&g, prefix.as_bytes());
+    log_state(&test, "test prefix");
+    let Step::ConfirmWords(w) = test.step() else {
+        return TestLogin::Failed;
+    };
+    screen_words(panel, anti_phishing_words(w));
+    if !wait_for_confirm(matrix, drbg) {
+        return TestLogin::Cancelled;
+    }
+    test.words_confirmed();
+
+    let Some(suffix) = collect(panel, matrix, drbg, "Test: suffix", scramble) else {
+        return TestLogin::Cancelled;
+    };
+    working(panel, "Checking PIN");
+    let _ = test.attempt(&g, suffix.as_bytes());
+    log_state(&test, "test attempt");
+    match test.step() {
+        Step::In { .. } => {
+            *session = test;
+            TestLogin::Correct
+        }
+        Step::Wrong { attempts_left, .. } => TestLogin::Wrong { attempts_left },
+        _ => TestLogin::Failed,
     }
 }

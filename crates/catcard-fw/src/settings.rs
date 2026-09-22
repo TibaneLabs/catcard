@@ -506,28 +506,51 @@ pub const NICK_MAX: usize = 192;
 /// The owner's nickname, read from the pre-login blob at boot.
 static mut NICK: [u8; NICK_MAX] = [0; NICK_MAX];
 
-/// Read the pre-login settings and keep the nickname, for the screen before the PIN prompt.
+/// The login preferences as the boot path read them, updated when a screen saves one --
+/// so a test login run from the menu uses the layout the next boot will.
+static mut SCRAMBLE: bool = false;
+static mut COUNTDOWN: Option<u32> = None;
+
+/// Whether the number row is shuffled at login.
+pub(crate) fn scramble_keys() -> bool {
+    // SAFETY: foreground only; written by `load_prelogin` and the save helpers.
+    unsafe { *core::ptr::addr_of!(SCRAMBLE) }
+}
+
+/// The login countdown in minutes, if one is set.
+pub(crate) fn login_countdown() -> Option<u32> {
+    // SAFETY: as in `scramble_keys`.
+    unsafe { *core::ptr::addr_of!(COUNTDOWN) }
+}
+
+/// Read the pre-login settings: the nickname for the screen before the PIN prompt, and the
+/// login preferences.
 ///
 /// The pre-login blob is encrypted under **thirty-two zero bytes**, so this needs no secret
 /// and can run before login -- which is the point: stock shows the nickname there, so the
 /// owner can tell their device from someone else's before typing a PIN into it.
 ///
-/// Every failure is silent and returns `None`. This is on the boot path, where a missing
-/// nickname must cost nothing: no settings region, no filesystem, no blob, no `nick` key and
-/// a corrupt blob all mean the same thing here -- draw the PIN prompt as before. The log
-/// says which, for anyone asking why their nickname did not appear.
+/// Every failure is silent and gives the defaults: no nickname, no scrambling, no
+/// countdown. This is on the boot path, where a settings problem must never stand between
+/// an owner and their PIN prompt: no settings region, no filesystem, no blob, a missing key
+/// and a corrupt blob all mean the same thing here. The log says which.
 ///
 /// # Safety
 /// Call once, from the boot path, before anything else uses the settings volume.
-pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
+pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     use catcard_settings::json::{self, Doc};
     use catcard_settings::nvstore;
+    use catcard_settings::prelogin;
     use catcard_settings::store::{self, SCRATCH};
+
+    let mut prefs = crate::pinentry::LoginPrefs::default();
 
     // The blob, off the stack: boot has the least stack to spare and this is four
     // kilobytes. From the heap and given back on return, rather than four kilobytes
     // held for the life of a device to read one string once.
-    let mut blob_held = crate::heap::take(SCRATCH)?;
+    let Some(mut blob_held) = crate::heap::take(SCRATCH) else {
+        return prefs;
+    };
     let blob: &mut [u8] = blob_held.bytes();
 
     // SAFETY: read-only: the mount's erase and program refuse, so nothing here can change
@@ -536,7 +559,7 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
         Ok(f) => f,
         Err(why) => {
             crate::catlog!("nick: no settings store: {:?}", why);
-            return None;
+            return prefs;
         }
     };
     let n = match store::read(&mut files, &nvstore::prelogin_key(), blob) {
@@ -551,7 +574,7 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
                 c.heads,
                 c.opened
             );
-            return None;
+            return prefs;
         }
     };
     // Every way this can come to nothing says so. A nickname that does not appear is
@@ -561,12 +584,26 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
         Ok(d) => d,
         Err(e) => {
             crate::catlog!("nick: {} bytes of settings would not parse: {:?}", n, e);
-            return None;
+            return prefs;
         }
     };
+
+    prefs.scramble = prelogin::scramble(&doc);
+    prefs.countdown_minutes = prelogin::countdown_minutes(&doc);
+    // SAFETY: foreground only, boot path.
+    unsafe {
+        *core::ptr::addr_of_mut!(SCRAMBLE) = prefs.scramble;
+        *core::ptr::addr_of_mut!(COUNTDOWN) = prefs.countdown_minutes;
+    }
+    crate::catlog!(
+        "login: scramble {}, countdown {} min",
+        prefs.scramble,
+        prefs.countdown_minutes.unwrap_or(0)
+    );
+
     let Some(raw) = doc.get("nick") else {
         crate::catlog!("nick: not set ({} pre-login key(s))", doc.len());
-        return None;
+        return prefs;
     };
 
     // SAFETY: as above; written once here and read-only afterwards.
@@ -575,16 +612,16 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
         Ok(n) => n,
         Err(e) => {
             crate::catlog!("nick: {} byte(s) of it will not fit: {:?}", raw.len(), e);
-            return None;
+            return prefs;
         }
     };
     if len == 0 {
         crate::catlog!("nick: set but empty");
-        return None;
+        return prefs;
     }
-    let text = core::str::from_utf8(&nick[..len]).ok()?;
+    prefs.nick = core::str::from_utf8(&nick[..len]).ok();
     crate::catlog!("nick: {} byte(s) from the pre-login settings", len);
-    Some(text)
+    prefs
 }
 
 /// Debug: draw the before-login nickname screen, and hold it.
@@ -595,7 +632,7 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
 /// answered rather than caught.
 pub(crate) fn show_nickname_screen(ui: &mut crate::ui::Ui<'_>) {
     // SAFETY: foreground only, as the boot path's call is.
-    let nick = unsafe { load_nickname() };
+    let nick = unsafe { load_prelogin() }.nick;
     match nick {
         Some(text) => {
             crate::pinentry::show_nickname(ui.panel, ui.matrix, ui.drbg, text);
@@ -662,9 +699,6 @@ pub(crate) fn backup_to_card(ui: &mut crate::ui::Ui<'_>) {
 /// does not touch keeps its exact bytes -- see [`catcard_settings::store::set`] -- so a
 /// device that has been stock keeps its stock settings.
 pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
-    use catcard_settings::nvstore;
-    use catcard_settings::store::{self, SCRATCH};
-
     let Some(entry) = crate::passphrase::read(ui, "Nickname") else {
         return;
     };
@@ -677,17 +711,52 @@ pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
         crate::menu::wait_for_any_key(ui);
         return;
     }
+    let saved = save_prelogin(ui, "Nickname", "nick", text);
+    if saved {
+        crate::menu::message(ui.panel, "Nickname", text, "saved");
+    } else {
+        crate::menu::message(ui.panel, "Nickname", "could not save", "nothing changed");
+    }
+    crate::menu::wait_for_any_key(ui);
+}
 
-    crate::menu::blocking_screen(ui.panel, "Nickname", "saving");
+/// Turn the scrambled number row on or off, from the next login.
+pub(crate) fn save_scramble(ui: &mut crate::ui::Ui<'_>, on: bool) -> bool {
+    let key = catcard_settings::prelogin::SCRAMBLE;
+    let ok = save_prelogin(ui, "Scramble keys", key, if on { "1" } else { "0" });
+    if ok {
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(SCRAMBLE) = on };
+    }
+    ok
+}
+
+/// Set the login countdown, in minutes; `None` turns it off.
+pub(crate) fn save_countdown(ui: &mut crate::ui::Ui<'_>, minutes: Option<u32>) -> bool {
+    let mut text = heapless::String::<8>::new();
+    let _ = core::fmt::Write::write_fmt(&mut text, format_args!("{}", minutes.unwrap_or(0)));
+    let key = catcard_settings::prelogin::COUNTDOWN;
+    let ok = save_prelogin(ui, "Login countdown", key, &text);
+    if ok {
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(COUNTDOWN) = minutes };
+    }
+    ok
+}
+
+/// Write one string into the pre-login settings, keeping everything else there as it was.
+fn save_prelogin(ui: &mut crate::ui::Ui<'_>, head: &str, name: &str, text: &str) -> bool {
+    use catcard_settings::nvstore;
+    use catcard_settings::store::{self, SCRATCH};
+
+    crate::menu::blocking_screen(ui.panel, head, "saving");
     // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
     // touches the settings region. Writable, unlike everywhere else that opens this store.
     let mut files = match unsafe { Files::mount() } {
         Ok(f) => f,
         Err(why) => {
-            crate::catlog!("nick: mount for writing failed: {:?}", why);
-            crate::menu::message(ui.panel, "Nickname", "no settings store", "nothing saved");
-            crate::menu::wait_for_any_key(ui);
-            return;
+            crate::catlog!("prelogin: mount for writing failed: {:?}", why);
+            return false;
         }
     };
 
@@ -697,29 +766,27 @@ pub(crate) fn edit_nickname(ui: &mut crate::ui::Ui<'_>) {
     let (Some(mut doc_held), Some(mut seal_held)) =
         (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
     else {
-        crate::menu::message(ui.panel, "Nickname", "not enough", "memory");
-        crate::menu::wait_for_any_key(ui);
-        return;
+        crate::catlog!("prelogin: no memory to save {}", name);
+        return false;
     };
     let doc: &mut [u8] = doc_held.bytes();
     let seal: &mut [u8] = seal_held.bytes();
 
     // Which slot to write is drawn, so repeated saves spread over the hundred rather than
-    // wearing one out. A DRBG that will not answer is not a reason to lose a nickname: the
+    // wearing one out. A DRBG that will not answer is not a reason to lose a setting: the
     // spread is wear levelling, not a secret, so slot zero will do.
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
     let key = nvstore::prelogin_key();
-    match store::set(&mut files, &key, "nick", text, choose, doc, seal) {
+    match store::set(&mut files, &key, name, text, choose, doc, seal) {
         Ok(slot) => {
-            crate::catlog!("nick: saved to slot {:03x}", slot);
-            crate::menu::message(ui.panel, "Nickname", text, "saved");
+            crate::catlog!("prelogin: {} saved to slot {:03x}", name, slot);
+            true
         }
         Err(e) => {
-            crate::catlog!("nick: save failed: {:?}", e);
-            crate::menu::message(ui.panel, "Nickname", "could not save", "nothing changed");
+            crate::catlog!("prelogin: saving {} failed: {:?}", name, e);
+            false
         }
     }
-    crate::menu::wait_for_any_key(ui);
 }
 
 /// Debug: read the settings blobs and show what is in them, decrypted.

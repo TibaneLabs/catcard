@@ -24,6 +24,7 @@ pub mod menu;
 pub mod pager;
 pub mod pinentry;
 pub mod qwerty;
+pub mod scramble;
 pub mod scroll;
 pub mod splash;
 pub mod ssd1306;

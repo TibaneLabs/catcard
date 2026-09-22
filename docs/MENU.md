@@ -39,6 +39,10 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 |---|---|---|
 | `Login` → `Change PIN` | `Login Settings` → `Change Main PIN` | ✅ |
 | `Login` → `Nickname` | `Login Settings` → `Set Nickname` | ✅ |
+| `Login` → `Test login` | `Login Settings` → `Test Login Now` | ✅ a wrong PIN counts, as in stock; refused with fewer than 4 tries left |
+| `Login` → `Scramble keys` | `Login Settings` → `Scramble Keys` (`rngk`) | 🔀 stored as our own `cat_rngk` until stock's value format is known; switched on only after a test login with the row shuffled |
+| `Login` → `Login countdown` | `Login Settings` → `Login Countdown` (`lgto`) | 🔀 stored as our own `cat_lgto` (minutes), same 5 min–28 day range; a 10 s sample runs before it is saved |
+| — | `Trick PINs`, `Kill Key`, `MicroSD 2FA`, `Calculator Login` | not implemented |
 | `Passphrase` | *(top level in stock)* | ❌ see above; also under Derive |
 | `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
 | `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |

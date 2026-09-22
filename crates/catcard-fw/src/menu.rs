@@ -209,6 +209,14 @@ enum Screen {
     LockDown,
     /// Changing the main PIN.
     ChangePin,
+    /// Type the PIN as at login, and be told whether it is right.
+    TestLogin,
+    /// Shuffle the number row at login.
+    #[cfg(not(feature = "board-mk3"))]
+    ScrambleKeys,
+    /// Wait a chosen time after a correct PIN.
+    #[cfg(not(feature = "board-mk3"))]
+    LoginCountdown,
     WipeSeed,
     /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
     FactoryReset,
@@ -405,8 +413,14 @@ fn seed_tools_items() -> &'static [&'static str] {
 /// the device.
 const LOGIN_ITEMS: &[&str] = &[
     "Change PIN",
+    "Test login",
     #[cfg(not(feature = "board-mk3"))]
     "Nickname",
+    // Both live in the pre-login settings, which the mk3 has no medium for.
+    #[cfg(not(feature = "board-mk3"))]
+    "Scramble keys",
+    #[cfg(not(feature = "board-mk3"))]
+    "Login countdown",
 ];
 /// How long a new seed should be.
 ///
@@ -1114,6 +1128,14 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
+        Screen::TestLogin => to(|a| test_login_screen(a.gate, a.login, a.ui), Screen::Login),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::ScrambleKeys => to(
+            |a| scramble_keys_screen(a.gate, a.login, a.ui),
+            Screen::Login,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::LoginCountdown => to(|a| login_countdown_screen(a.ui), Screen::Login),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::FactoryReset => to(
@@ -1321,6 +1343,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
+            (Key::Confirm, Some("Test login")) => Screen::TestLogin,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Scramble keys")) => Screen::ScrambleKeys,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Login countdown")) => Screen::LoginCountdown,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Nickname")) => Screen::Nickname,
             (Key::Cancel, _) => Screen::Settings,
@@ -1754,7 +1781,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FlappyCat => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
-        Screen::ViewWords | Screen::LockDown => {}
+        Screen::ViewWords | Screen::LockDown | Screen::TestLogin => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::ScrambleKeys | Screen::LoginCountdown => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
     }
@@ -4619,7 +4648,7 @@ fn sweep_test(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
 /// board, unlike [`choose`], because a document renders at whatever size the panel is.
 pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
     use catcard_ui::scroll::Line as DLine;
-    let mut lines: heapless::Vec<DLine, 12> = heapless::Vec::new();
+    let mut lines: heapless::Vec<DLine, 20> = heapless::Vec::new();
     let _ = lines.push(DLine::title(head));
     if !note.is_empty() {
         let _ = lines.push(DLine::body(note).small());
@@ -7441,6 +7470,169 @@ fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
             }
         }
     }
+}
+
+/// Settings → Login → Test login.
+fn test_login_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Test login";
+    ask(ui.panel, HEAD, "a wrong PIN here", "counts as a wrong PIN");
+    if !confirmed(ui) {
+        return;
+    }
+    #[cfg(not(feature = "board-mk3"))]
+    let scramble = crate::settings::scramble_keys();
+    #[cfg(feature = "board-mk3")]
+    let scramble = false;
+    let outcome = crate::pinentry::test_login(gate, ui.panel, ui.matrix, ui.drbg, login, scramble);
+    say_test(ui, HEAD, outcome);
+}
+
+/// Say how a test login went. True if the PIN was right.
+fn say_test(ui: &mut Ui<'_>, head: &str, outcome: crate::pinentry::TestLogin) -> bool {
+    use crate::pinentry::TestLogin;
+    let mut n: heapless::String<24> = heapless::String::new();
+    let (a, b, right) = match outcome {
+        TestLogin::Correct => ("PIN is correct", "", true),
+        TestLogin::Cancelled => return false,
+        TestLogin::Wrong { attempts_left } => {
+            let _ = write!(n, "{attempts_left} tries left");
+            ("Wrong PIN", n.as_str(), false)
+        }
+        TestLogin::TooFewTries { attempts_left } => {
+            let _ = write!(n, "only {attempts_left} tries left");
+            (n.as_str(), "not spending one", false)
+        }
+        TestLogin::Failed => ("could not check it", "see the log", false),
+    };
+    crate::catlog!("test login: {}", if right { "correct" } else { a });
+    message(ui.panel, head, a, b);
+    wait_for_any_key(ui);
+    right
+}
+
+/// Settings → Login → Scramble keys.
+///
+/// **On only after a test login with the keys shuffled succeeds.** A scrambled row that
+/// typed something other than it showed would spend an attempt at every login; proving it
+/// on this device, with this PIN, before it is saved is what keeps the setting from ever
+/// being the thing that locks the owner out. Off needs no proof.
+#[cfg(not(feature = "board-mk3"))]
+fn scramble_keys_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Scramble keys";
+    let on = crate::settings::scramble_keys();
+    let note = if on { "now on" } else { "now off" };
+    let Some(row) = pick_row(ui, HEAD, note, &["On", "Off"]) else {
+        return;
+    };
+    match (row, on) {
+        (0, false) => {
+            ask(
+                ui.panel,
+                HEAD,
+                "log in once to try it:",
+                "the keys will be shuffled",
+            );
+            if !confirmed(ui) {
+                return;
+            }
+            let outcome =
+                crate::pinentry::test_login(gate, ui.panel, ui.matrix, ui.drbg, login, true);
+            if !say_test(ui, HEAD, outcome) {
+                message(ui.panel, HEAD, "left off", "");
+            } else if crate::settings::save_scramble(ui, true) {
+                message(ui.panel, HEAD, "on", "from the next login");
+            } else {
+                message(ui.panel, HEAD, "could not save", "still off");
+            }
+        }
+        (1, true) => {
+            if crate::settings::save_scramble(ui, false) {
+                message(ui.panel, HEAD, "off", "from the next login");
+            } else {
+                message(ui.panel, HEAD, "could not save", "still on");
+            }
+        }
+        _ => message(ui.panel, HEAD, "unchanged", ""),
+    }
+    wait_for_any_key(ui);
+}
+
+/// The countdowns offered, stock's range: five minutes to twenty-eight days.
+#[cfg(not(feature = "board-mk3"))]
+const COUNTDOWN_ROWS: &[&str] = &[
+    "Off",
+    "5 minutes",
+    "15 minutes",
+    "30 minutes",
+    "1 hour",
+    "2 hours",
+    "4 hours",
+    "8 hours",
+    "12 hours",
+    "1 day",
+    "2 days",
+    "3 days",
+    "1 week",
+    "2 weeks",
+    "4 weeks",
+];
+#[cfg(not(feature = "board-mk3"))]
+const COUNTDOWN_MINUTES: [u32; 15] = [
+    0, 5, 15, 30, 60, 120, 240, 480, 720, 1440, 2880, 4320, 10080, 20160, 40320,
+];
+#[cfg(not(feature = "board-mk3"))]
+const _: () = assert!(COUNTDOWN_ROWS.len() == COUNTDOWN_MINUTES.len());
+
+/// Settings → Login → Login countdown.
+///
+/// Every login from then on waits this long after the PIN, and **nothing skips it** -- that
+/// is what it is for. So it is asked twice, and before it is saved a ten-second sample runs
+/// on this device: the same code the login will run, seen to finish.
+#[cfg(not(feature = "board-mk3"))]
+fn login_countdown_screen(ui: &mut Ui<'_>) {
+    const HEAD: &str = "Login countdown";
+    let now = crate::settings::login_countdown();
+    let mut note: heapless::String<24> = heapless::String::new();
+    let _ = match now {
+        Some(m) => write!(note, "now {m} min"),
+        None => write!(note, "now off"),
+    };
+    let Some(row) = pick_row(ui, HEAD, &note, COUNTDOWN_ROWS) else {
+        return;
+    };
+    let minutes = COUNTDOWN_MINUTES[row];
+    if minutes == 0 {
+        if now.is_none() {
+            message(ui.panel, HEAD, "already off", "");
+        } else if crate::settings::save_countdown(ui, None) {
+            message(ui.panel, HEAD, "off", "from the next login");
+        } else {
+            message(ui.panel, HEAD, "could not save", "unchanged");
+        }
+        wait_for_any_key(ui);
+        return;
+    }
+
+    ask(ui.panel, HEAD, "every login waits", COUNTDOWN_ROWS[row]);
+    if !confirmed(ui) {
+        return;
+    }
+    ask(
+        ui.panel,
+        "Nothing skips it",
+        "not even power:",
+        "it starts again",
+    );
+    if !confirmed(ui) {
+        return;
+    }
+    crate::pinentry::countdown(ui.panel, ui.matrix, ui.drbg, 10);
+    if crate::settings::save_countdown(ui, Some(minutes)) {
+        message(ui.panel, HEAD, COUNTDOWN_ROWS[row], "from the next login");
+    } else {
+        message(ui.panel, HEAD, "could not save", "unchanged");
+    }
+    wait_for_any_key(ui);
 }
 
 /// Danger zone → Seed tools → Lock down seed: the key in force becomes the stored seed.
