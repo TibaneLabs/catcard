@@ -2001,7 +2001,10 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         // The Sign grid.
         "Scan" => &art::SIGN_QR,
         "From SD" => &art::SIGN_SD,
+        "By NFC" => &art::SIGN_NFC,
         "Message" => &art::SIGN_TEXT,
+        "Text file" => &art::SIGN_TEXT_FILE,
+        "Verify" => &art::VERIFY_SIGNATURE,
         // The Utils grid.
         "Analyze RNG" => &art::ANALYZE_RNG,
         "USB Drive" => &art::USB_DRIVE,

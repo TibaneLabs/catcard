@@ -7,7 +7,8 @@
 #   make                 # dev images for every board
 #   make mk4-mk5         # just the mk4/mk5 image  -> out/catcard-mk4-mk5.{bin,dfu}
 #   make mk4-mk5 SHIP=1  # same file, stripped of the debug crutches for a real release
-#   make q1 MULTICHAIN=1 # every chain the registry knows, not just Bitcoin
+#   make q1              # every chain the registry knows (the default)
+#   make q1 BITCOIN=1    # Bitcoin alone: no other chain's parser in the image
 #   make test lint       # host tests / firmware clippy
 #   make clean
 #
@@ -48,7 +49,12 @@ VERSION ?=
 VER      = $(if $(VERSION),--version $(VERSION),)
 SHIP    ?=
 NODEF    = $(if $(SHIP),--no-default-features,)
-MULTICHAIN ?=
+# Every chain by default, because a bench build is for using the device and the device
+# is meant to hold more than Bitcoin. The Bitcoin-only image is the one that has to be
+# asked for -- `make q1 BITCOIN=1` -- and CI builds both shapes from its own matrix
+# rather than from these defaults, so neither can quietly stop being built.
+BITCOIN ?=
+MULTICHAIN ?= $(if $(BITCOIN),,1)
 comma   := ,
 CHAINS   = $(if $(MULTICHAIN),$(comma)multichain,)
 
