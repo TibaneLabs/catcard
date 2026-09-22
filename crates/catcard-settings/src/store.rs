@@ -96,6 +96,49 @@ fn newest<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Option<Best> {
     best
 }
 
+/// What a scan of every slot found, for saying *why* a read came back [`Error::Absent`].
+///
+/// A missing wallet file, a medium that shows no files at all, and files that are there
+/// but not under this key all read as `Absent`, and they need different fixes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Census {
+    /// Slots the medium returned bytes for.
+    pub files: u32,
+    /// Slots the medium failed to read.
+    pub errors: u32,
+    /// Of those, the ones whose first two bytes decrypt to `{"` under this key.
+    pub heads: u32,
+    /// Of those, the ones whose digest also checks out.
+    pub opened: u32,
+}
+
+/// Look at every slot under `key` and count what was found at each stage.
+///
+/// Diagnostic only: a read uses [`read`], which stops caring after the newest copy.
+pub fn census<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Census {
+    let mut c = Census::default();
+    for index in 0..slots.count() {
+        let pos = slots.pos(index);
+        let len = match slots.read(index, buf) {
+            Ok(Some(len)) => len,
+            Ok(None) => continue,
+            Err(_) => {
+                c.errors += 1;
+                continue;
+            }
+        };
+        c.files += 1;
+        if len < 2 || !nvstore::looks_like_ours(&buf[..2], key, pos) {
+            continue;
+        }
+        c.heads += 1;
+        if nvstore::open(&mut buf[..len], key, pos).is_ok() {
+            c.opened += 1;
+        }
+    }
+    c
+}
+
 /// Read the settings under `key` into `buf`, returning the JSON's length.
 ///
 /// `buf` must be at least [`SLOT_LEN`]; the JSON is left at its start.
@@ -538,6 +581,25 @@ mod save_tests {
         // What was there is still there, untouched.
         assert_eq!(after.get("ovc"), Some(r#"["a","b"]"#));
         assert_eq!(after.get_u64("du"), Some(1));
+    }
+
+    /// The census tells the three kinds of `Absent` apart: no files, files under other
+    /// keys, and a file under this key.
+    #[test]
+    fn a_census_says_why_nothing_was_found() {
+        let mut slots = Ram::new();
+        let mine = key();
+        let other = nvstore::hash_key(b"another wallet entirely");
+        let mut buf = [0u8; SCRATCH];
+        assert_eq!(census(&mut slots, &mine, &mut buf), Census::default());
+
+        write(&mut slots, &other, br#"{"_age":1}"#, 0, &mut buf).unwrap();
+        let c = census(&mut slots, &mine, &mut buf);
+        assert_eq!((c.files, c.heads, c.opened), (1, 0, 0));
+
+        write(&mut slots, &mine, br#"{"_age":1}"#, 1, &mut buf).unwrap();
+        let c = census(&mut slots, &mine, &mut buf);
+        assert_eq!((c.files, c.heads, c.opened), (2, 1, 1));
     }
 
     /// The first save on a device that has never saved writes a settings object.

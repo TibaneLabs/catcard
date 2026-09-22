@@ -192,7 +192,35 @@ pub(crate) fn open_wallet(
                 whose
             );
         }
-        Err(Error::Absent) => crate::catlog!("settings: {} has no file yet", label),
+        Err(Error::Absent) => {
+            let c = store::census(&mut files, &key, buf);
+            crate::catlog!(
+                "settings: {} has no file (ro: {} files, {} errors, {} heads, {} open)",
+                label,
+                c.files,
+                c.errors,
+                c.heads,
+                c.opened
+            );
+            // The same read through the writable mount, which the vault's own read uses
+            // and which found the root's file. If this one finds it and the read-only
+            // one did not, the difference is the mount and not the key.
+            drop(files);
+            // SAFETY: as `mount`; nothing is written here, only read.
+            match unsafe { Files::mount() } {
+                Ok(mut rw) => {
+                    let c = store::census(&mut rw, &key, buf);
+                    crate::catlog!(
+                        "settings: rw mount: {} files, {} errors, {} heads, {} open",
+                        c.files,
+                        c.errors,
+                        c.heads,
+                        c.opened
+                    );
+                }
+                Err(e) => crate::catlog!("settings: rw mount failed: {:?}", e),
+            }
+        }
         Err(e) => crate::catlog!("settings: {} file unreadable: {:?}", label, e),
     }
 }
@@ -469,7 +497,15 @@ pub(crate) unsafe fn load_nickname() -> Option<&'static str> {
     let n = match store::read(&mut files, &nvstore::prelogin_key(), blob) {
         Ok(n) => n,
         Err(e) => {
-            crate::catlog!("nick: pre-login settings: {:?}", e);
+            let c = store::census(&mut files, &nvstore::prelogin_key(), blob);
+            crate::catlog!(
+                "nick: pre-login settings: {:?} ({} files, {} errors, {} heads, {} open)",
+                e,
+                c.files,
+                c.errors,
+                c.heads,
+                c.opened
+            );
             return None;
         }
     };
