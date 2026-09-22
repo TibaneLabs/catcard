@@ -76,9 +76,10 @@ pub fn text_cols(fonts: &Fonts<'_>, size: Size, width: usize) -> usize {
 /// is a glyph scaled to the line's face.
 #[derive(Copy, Clone)]
 pub enum Mark<'a> {
-    /// Colour art, drawn through whatever palette the page is shown in. Keeps its own
-    /// colours on the selection bar.
-    Colour(&'a crate::art::indexed::Indexed),
+    /// Full-colour art. **Not drawn on the canvas**, which holds 4 bits a pixel: its space
+    /// is left empty and [`ScrollView::marks_shown`] says where it goes, so the panel's
+    /// owner can write it straight to the panel at 16 bits, blended onto the row.
+    Full(&'a crate::art::rgba::Rgba),
     /// One bit, drawn in the row's ink -- so it inverts with the text when selected.
     Mono(&'a Bitmap),
 }
@@ -87,10 +88,19 @@ impl Mark<'_> {
     /// Its width and height, in pixels.
     pub fn size(&self) -> (usize, usize) {
         match self {
-            Mark::Colour(a) => (a.width as usize, a.height as usize),
+            Mark::Full(a) => (a.width as usize, a.height as usize),
             Mark::Mono(b) => (b.width as usize, b.height as usize),
         }
     }
+}
+
+/// A full-colour mark on screen: where its top-left is on the canvas, and whether its row
+/// is the selected one -- which decides what it is blended onto.
+pub struct Shown<'a> {
+    pub x: usize,
+    pub y: usize,
+    pub art: &'a crate::art::rgba::Rgba,
+    pub selected: bool,
 }
 
 /// One line of a document, before wrapping.
@@ -458,6 +468,27 @@ impl<'a> ScrollView<'a> {
         }
     }
 
+    /// The full-colour marks [`render`] left room for, where they go -- only those wholly
+    /// on screen, as `render` draws a one-bit mark.
+    pub fn marks_shown(&self) -> impl Iterator<Item = Shown<'a>> + '_ {
+        let h = self.height;
+        self.lines.iter().enumerate().filter_map(move |(i, vl)| {
+            let (Some(Mark::Full(art)), Align::Left) = (vl.mark, vl.align) else {
+                return None;
+            };
+            let lh = self.fonts.face(vl.size).line_height();
+            let top = self.top(i) as isize - self.off as isize;
+            let (_, mh) = Mark::Full(art).size();
+            let my = top + (lh as isize - mh as isize) / 2;
+            (my >= 0 && my as usize + mh <= h).then_some(Shown {
+                x: self.fonts.margin,
+                y: my as usize,
+                art,
+                selected: self.cursor == Some(i),
+            })
+        })
+    }
+
     /// Where line `i`'s text starts: past the left margin and any icon.
     fn text_left(&self, i: usize) -> usize {
         self.fonts.margin + self.icon_advance(i)
@@ -691,11 +722,9 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
             let (mw, mh) = mark.size();
             let my = top + (lh as isize - mh as isize) / 2;
             if my >= 0 && my as usize + mh <= h {
-                match mark {
-                    Mark::Colour(art) => {
-                        crate::art::indexed::draw_indexed(canvas, art, fonts.margin, my as usize)
-                    }
-                    Mark::Mono(bmp) => draw_icon(canvas, bmp, fonts.margin, my, 1, ink, h),
+                // A full-colour mark is the panel's to draw; see `marks_shown`.
+                if let Mark::Mono(bmp) = mark {
+                    draw_icon(canvas, bmp, fonts.margin, my, 1, ink, h);
                 }
             }
             tx = fonts.margin + mw + 4;
@@ -1115,7 +1144,7 @@ mod tests {
         let doc = [
             Line::item("Bitcoin", 0)
                 .large()
-                .with_mark(Mark::Colour(&chainicons::BTC)),
+                .with_mark(Mark::Full(&chainicons::BTC)),
             Line::item("Ethereum", 1)
                 .large()
                 .with_mark(Mark::Mono(&chainicons::ETH_MONO)),
@@ -1123,15 +1152,18 @@ mod tests {
         let view = ScrollView::build(&doc, 320, 224, fonts);
         let mut c = Gray320x240::new();
         render(&mut c, &view);
-        // The colour mark's own indices land at the left margin, inside its 20x20.
-        let coloured = (0..20)
-            .flat_map(|y| (6..26).map(move |x| (x, y)))
-            .filter(|&(x, y)| {
-                let v = c.get(x, y);
-                v != PAPER && v != crate::canvas::INK
-            })
+        // The full-colour mark is not on the canvas -- its 20x20 is left alone -- and is
+        // reported instead, at the left margin, on the selected first row.
+        let shown: Vec<_> = view.marks_shown().collect();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].x, 6);
+        assert!(shown[0].selected);
+        let (x, y) = (shown[0].x, shown[0].y);
+        let inked = (y..y + 20)
+            .flat_map(|yy| (x..x + 20).map(move |xx| (xx, yy)))
+            .filter(|&(xx, yy)| c.get(xx, yy) != crate::canvas::INK)
             .count();
-        assert!(coloured > 0, "the colour mark is drawn in its own colours");
+        assert_eq!(inked, 0, "the selection bar is left whole under the mark");
         // Nothing of either row's text starts before the mark's width.
         assert_eq!(view.text_left(0), 6 + 20 + 4);
         assert_eq!(view.text_left(1), 6 + 12 + 4);

@@ -167,6 +167,20 @@ impl<const H: usize> RowCache<H> {
     pub fn invalidate(&mut self) {
         self.valid = false;
     }
+
+    /// Forget what `rows` show, so the next flush sends them whatever they hold -- for
+    /// something drawn over them straight to the panel, such as a full-colour mark.
+    ///
+    /// Flips a bit of each row's hash rather than keeping a flag per row: the stored hash
+    /// then matches no content the row could have had a moment ago, which is all a flush
+    /// asks, and it costs no memory the Q1's stack would miss.
+    pub fn forget_rows(&mut self, rows: core::ops::Range<usize>) {
+        for y in rows {
+            if let Some(h) = self.hashes.get_mut(y) {
+                *h ^= 1;
+            }
+        }
+    }
 }
 
 /// FNV-1a over one packed row.

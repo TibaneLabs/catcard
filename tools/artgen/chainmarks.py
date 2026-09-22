@@ -12,11 +12,10 @@ works before the real art does; dropping a PNG in and re-running replaces one.
 The 1-bit mark is always drawn here, 12x12: the disc with the letter knocked out. A
 colour logo thresholded to one bit reads worse than that at twelve pixels.
 
-**The palette is the picker page's**, not the icons' own: index 0 is the list's
-background and 15 its ink (amber, as every other list on the device), because the list's
-rows and its selection bar are drawn in those two and the icons share the canvas with
-them. Slots 1 to 14 are the icons' colours: when the marks bring more than fourteen between
-them, which real logos do, they are quantized together to fourteen (`quantize`).
+**Full colour, with alpha.** The colour marks are stored RGBA8888, deflated, and never go
+on the 4-bit canvas: the firmware writes them straight to the panel, which takes 16 bits a
+pixel, blending each against the row it sits on (`art::rgba`). So a logo keeps every colour
+it has and its anti-aliased edge -- nothing is quantized.
 """
 
 import argparse
@@ -27,10 +26,6 @@ from PIL import Image
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import deflate  # noqa: E402  -- beside this file
-
-# The list's own ends, from `catcard_ui::st7789::AMBER`.
-PAGE_BG = 0x0000
-PAGE_INK = 0xFD60
 
 # Ticker, placeholder letter, placeholder colour. The colours are each chain's familiar
 # brand colour, near enough to tell them apart; the real marks replace them.
@@ -85,95 +80,25 @@ def glyph_at(letter, size, scale, x, y):
 
 
 def placeholder(letter, colour):
-    """RGB tuples, None where transparent."""
+    """RGBA tuples: the chain's colour as a disc, a white letter on it."""
     px = []
     for y in range(SIZE):
         for x in range(SIZE):
             if not disc(SIZE, x, y):
-                px.append(None)
+                px.append((0, 0, 0, 0))
             elif glyph_at(letter, SIZE, 2, x, y):
-                px.append(WHITE)
+                px.append(WHITE + (255,))
             else:
-                px.append(colour)
+                px.append(colour + (255,))
     return px
 
 
-# Below this alpha a pixel is page; at or above it, it is the logo's own colour.
-#
-# A hard edge, not a blend. Blending a downscaled logo's rim onto the page black made
-# dozens of dark in-between shades, which the fourteen shared slots could not hold: they
-# were mapped to whatever dark slot was nearest -- blue and teal specks round an orange
-# coin -- and spent slots a logo's real colours needed. At twenty pixels a clean edge
-# reads better than a smooth one drawn in the wrong colours.
-ALPHA_CUT = 128
-
-
 def load(path):
+    """RGBA tuples, as the PNG has them."""
     im = Image.open(path).convert("RGBA")
     if im.size != (SIZE, SIZE):
         sys.exit(f"{path.name} is {im.size[0]}x{im.size[1]}, want {SIZE}x{SIZE}")
-    return [None if a < ALPHA_CUT else (r, g, b) for r, g, b, a in im.get_flattened_data()]
-
-
-def quantize(marks, colours=14, per=3):
-    """Bring every mark's colours down to `colours` shared ones.
-
-    The marks share one page palette with fourteen free slots, and real logos -- a
-    gradient, a coin's shading -- bring far more than that between them.
-
-    **Per logo first, then together.** One median cut over every pixel spends the slots
-    by pixel count, so a logo drawn in thin strokes -- Solana's three bars -- loses its
-    signature colour to the big discs around it. So each logo is cut to its own `per`
-    colours first, and only then are the closest of those merged, weighted by how many
-    pixels use them, until `colours` remain: every logo keeps its dominant colours, and
-    what is merged away is what two logos nearly shared anyway.
-    """
-
-    def cut(pixels, n):
-        strip = Image.new("RGB", (len(pixels), 1))
-        strip.putdata(pixels)
-        q = strip.quantize(colors=n, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-        pal = q.getpalette()
-        counts = {}
-        for i in q.get_flattened_data():
-            counts[i] = counts.get(i, 0) + 1
-        return [(tuple(pal[i * 3 : i * 3 + 3]), k) for i, k in counts.items()]
-
-    if len({c for px in marks for c in px if c is not None}) <= colours:
-        return marks
-
-    # White is pinned: most of these logos draw their glyph in it, and merged with a
-    # neighbour's cream it turns every one of them faintly yellow.
-    def snap(c):
-        return WHITE if min(c) >= 225 else c
-
-    marks = [[None if c is None else snap(c) for c in px] for px in marks]
-
-    picks = [[WHITE, 1]]  # [colour, weight]; white first, never merged
-    for px in marks:
-        opaque = [c for c in px if c is not None and c != WHITE]
-        if opaque:
-            picks += [[c, k] for c, k in cut(opaque, per)]
-
-    def dist(a, b):
-        return sum((x - y) ** 2 for x, y in zip(a, b))
-
-    while len(picks) > colours:
-        i, j = min(
-            ((i, j) for i in range(1, len(picks)) for j in range(i + 1, len(picks))),
-            key=lambda ij: dist(picks[ij[0]][0], picks[ij[1]][0]),
-        )
-        (a, wa), (b, wb) = picks[i], picks[j]
-        merged = tuple((x * wa + y * wb) // (wa + wb) for x, y in zip(a, b))
-        picks[i] = [merged, wa + wb]
-        del picks[j]
-
-    table = [c for c, _ in picks]
-
-    def nearest(c):
-        return min(table, key=lambda t: dist(t, c))
-
-    return [[None if c is None else nearest(c) for c in px] for px in marks]
+    return list(im.get_flattened_data())
 
 
 def mono(letter):
@@ -195,31 +120,12 @@ def main():
     ap.add_argument("out", type=pathlib.Path)
     a = ap.parse_args()
 
-    sources = []
+    marks = []
     for ticker, letter, colour in CHAINS:
         png = a.src / f"{ticker}.png"
-        sources.append(load(png) if png.exists() else placeholder(letter, colour))
-    sources = quantize(sources)
-
-    slots = {}  # colour -> palette index 1..=14
-    marks = []
-    for (ticker, letter, colour), px in zip(CHAINS, sources):
-        png = a.src / f"{ticker}.png"
-        for c in px:
-            if c is not None and c not in slots:
-                if len(slots) == 14:
-                    sys.exit("more than fourteen colours across the marks")
-                slots[c] = len(slots) + 1
-        packed = bytearray()
-        for y in range(SIZE):
-            row = [0 if c is None else slots[c] for c in px[y * SIZE : (y + 1) * SIZE]]
-            for i in range(0, SIZE, 2):
-                packed.append((row[i] << 4) | (row[i + 1] if i + 1 < SIZE else 0))
-        marks.append((ticker, png.exists(), deflate.deflate(packed), mono(letter)))
-
-    palette = [PAGE_BG] + [0] * 14 + [PAGE_INK]
-    for c, i in slots.items():
-        palette[i] = rgb565(c)
+        px = load(png) if png.exists() else placeholder(letter, colour)
+        raw = bytes(v for p in px for v in p)
+        marks.append((ticker, png.exists(), deflate.deflate(raw), mono(letter)))
 
     lines = [
         "//! Chain marks for the chain picker: colour for the Q1, 1-bit for the OLED.",
@@ -234,14 +140,7 @@ def main():
         "//! A chain without a PNG has a placeholder: its colour as a disc and a letter.",
         "",
         "use super::Bitmap;",
-        "use super::indexed::Indexed;",
-        "",
-        "/// The picker page's palette: the list's background and amber ink at 0 and 15, the",
-        "/// marks' colours between.",
-        "#[rustfmt::skip]",
-        "pub const PALETTE: [u16; 16] = [",
-        "    " + ", ".join(f"0x{v:04X}" for v in palette) + ",",
-        "];",
+        "use super::rgba::Rgba;",
         "",
     ]
     for ticker, real, data, (bpr, bits) in marks:
@@ -249,10 +148,9 @@ def main():
         lines += deflate.rust_array(f"{ticker}_DEFLATED", data)
         lines += [
             f"/// {ticker}, {SIZE}x{SIZE}, {what}.",
-            f"pub const {ticker}: Indexed = Indexed {{",
+            f"pub const {ticker}: Rgba = Rgba {{",
             f"    width: {SIZE},",
             f"    height: {SIZE},",
-            "    palette: PALETTE,",
             f"    deflated: &{ticker}_DEFLATED,",
             "};",
             f"/// {ticker}, {MONO}x{MONO}, one bit.",
@@ -267,14 +165,14 @@ def main():
         ]
     lines += [
         "/// The colour and 1-bit marks for a ticker, if there are any.",
-        "pub fn mark(ticker: &str) -> Option<(&'static Indexed, &'static Bitmap)> {",
+        "pub fn mark(ticker: &str) -> Option<(&'static Rgba, &'static Bitmap)> {",
         "    Some(match ticker {",
     ]
     for ticker, *_ in marks:
         lines.append(f'        "{ticker}" => (&{ticker}, &{ticker}_MONO),')
     lines += ["        _ => return None,", "    })", "}", ""]
     a.out.write_text("\n".join(lines))
-    print(f"{len(marks)} marks, {len(slots)} colours -> {a.out}")
+    print(f"{len(marks)} marks, full colour -> {a.out}")
 
 
 if __name__ == "__main__":

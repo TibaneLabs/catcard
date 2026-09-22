@@ -5209,8 +5209,8 @@ fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 
 /// Which chain, from the wallet in force's list: its mark and its name, a row each.
 ///
-/// Colour marks on the Q1, drawn through the marks' own page palette; one-bit ones on
-/// the OLED. With only one chain on the list there is nothing to ask.
+/// The logos in full colour on the Q1, written to the panel past the canvas; one-bit
+/// marks on the OLED. With only one chain on the list there is nothing to ask.
 #[cfg(feature = "multichain")]
 fn pick_chain(
     gate: &Callgate,
@@ -5232,7 +5232,7 @@ fn pick_chain(
             #[cfg(feature = "board-q1")]
             {
                 let _ = mono;
-                line = line.with_mark(Mark::Colour(colour));
+                line = line.with_mark(Mark::Full(colour));
             }
             #[cfg(not(feature = "board-q1"))]
             {
@@ -5242,11 +5242,7 @@ fn pick_chain(
         }
         let _ = lines.push(line);
     }
-    #[cfg(feature = "board-q1")]
-    let palette = &chainicons::PALETTE;
-    #[cfg(not(feature = "board-q1"))]
-    let palette = &catcard_ui::st7789::AMBER;
-    match show_doc_in(ui, &lines, false, false, palette) {
+    match show_doc(ui, &lines, false, false) {
         DocExit::Selected(i) => chains.get(i as usize).copied(),
         _ => None,
     }
@@ -7363,20 +7359,7 @@ pub(crate) fn show_doc(
     scramble: bool,
     require_end: bool,
 ) -> DocExit {
-    show_doc_in(ui, lines, scramble, require_end, &catcard_ui::st7789::AMBER)
-}
-
-/// [`show_doc`], drawn through `palette` -- for a document whose rows carry colour marks,
-/// which need the marks' colours where the amber ramp has its middle greys.
-pub(crate) fn show_doc_in(
-    ui: &mut Ui<'_>,
-    lines: &[catcard_ui::scroll::Line<'_>],
-    scramble: bool,
-    require_end: bool,
-    palette: &'static [u16; 16],
-) -> DocExit {
     let mut screen = DocScreen::new(ui, lines, scramble, require_end);
-    screen.palette = palette;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
@@ -7427,8 +7410,6 @@ pub(crate) fn show_doc_in(
 /// plumbing.
 struct DocScreen<'a> {
     view: catcard_ui::scroll::ScrollView<'a>,
-    /// What the page is drawn through: the amber ramp, unless the rows carry colour.
-    palette: &'static [u16; 16],
     /// Some line is selectable, so `5`/`8` move a cursor instead of scrolling.
     is_menu: bool,
     /// Refuse Confirm until the last line has been on screen: the seed backup's gate.
@@ -7469,16 +7450,16 @@ impl<'a> DocScreen<'a> {
         let is_menu = view.is_menu();
         Self {
             view,
-            palette: &catcard_ui::st7789::AMBER,
             is_menu,
             require_end,
         }
     }
 
     fn draw(&self, ui: &mut Ui<'_>) {
-        display::draw_with(ui.panel, self.palette, |c| {
-            catcard_ui::scroll::render(c, &self.view)
-        });
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
+        // Full-colour marks go to the panel after the frame; see `overlay_marks`.
+        #[cfg(feature = "board-q1")]
+        display::overlay_marks(ui.panel, &self.view, &catcard_ui::st7789::AMBER);
     }
 
     fn needs_marquee(&self) -> bool {

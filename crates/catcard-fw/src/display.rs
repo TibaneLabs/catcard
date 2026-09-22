@@ -256,6 +256,47 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
     forget_frame();
 }
 
+/// Write a document's full-colour marks straight to the panel, after its frame.
+///
+/// The canvas is 4 bits a pixel and the panel 16 (COLMOD `0x05`, RGB565 -- display.md §Q1
+/// init step 3 [C]), so a logo with its own colours does not go through the canvas at
+/// all. [`catcard_ui::scroll::render`] leaves its space empty; this decodes each one and
+/// paints it there, blended onto what the row is -- `palette[0]` as a rule, `palette[15]`
+/// on the selection bar -- so its anti-aliased edge is right on both.
+///
+/// Those rows then differ from what the row cache recorded sending, so they are forgotten
+/// and the next frame sends them from the canvas again, blank where the mark was, before
+/// this paints the marks that frame has.
+#[cfg(feature = "board-q1")]
+pub fn overlay_marks(
+    panel: &mut Panel,
+    view: &catcard_ui::scroll::ScrollView<'_>,
+    palette: &[u16; 16],
+) {
+    use catcard_ui::art::rgba;
+
+    /// The largest mark this paints: a row's worth.
+    const MAX: usize = 24;
+    reclaim_bus();
+    for shown in view.marks_shown() {
+        let (w, h) = (shown.art.width as usize, shown.art.height as usize);
+        if w > MAX || h > MAX {
+            continue;
+        }
+        let bg = if shown.selected {
+            palette[15]
+        } else {
+            palette[0]
+        };
+        let mut px = [bg; MAX * MAX];
+        let _ = rgba::decode(shown.art, |x, y, p| px[y * MAX + x] = rgba::over(p, bg));
+        let y = shown.y + BAR_H;
+        let _ = panel.paint(shown.x, y, w, h, |dx, dy| px[dy * MAX + dx]);
+        // SAFETY: foreground, single core, not inside a draw.
+        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).forget_rows(y..y + h) };
+    }
+}
+
 /// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
 ///
 /// Watched working on the Q1 from Debug -> Scroll test before this was turned on: a PIN

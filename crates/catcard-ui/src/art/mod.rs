@@ -5,6 +5,7 @@ pub mod chainicons;
 pub mod flappy;
 pub mod indexed;
 pub mod menuicons;
+pub mod rgba;
 pub mod tibane;
 
 pub use indexed::{Indexed, draw_indexed};
