@@ -211,6 +211,17 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 
 /// Whether cancel is down right now, sampled for long enough for the keypad's debounce to
 /// settle on a key that was already held when sampling began.
+///
+/// **A hold, not a press.** This used to return true the moment a `Pressed` event for
+/// cancel appeared anywhere in the sampling window, which is a different question: a
+/// press is an edge, and one glitchy scan manufactures one. Getting it wrong is not a
+/// small thing -- a false positive runs the whole session's menu polled on the main
+/// stack, which is what SRAM1 has left after `.bss`, with none of the kernel's stack
+/// guard or heartbeat behind it.
+///
+/// So the window is scanned to let the debounce settle, and then the question is asked
+/// of the settled state: is the key *still* down. A glitch has to last the whole window
+/// to pass that, and a finger holding the key passes it every time.
 fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::HmacDrbg) -> bool {
     use catcard_ui::keypad::{Event, KEYS, Key};
     // A fresh scanner reads a key that is already down as a new press, which is exactly the
@@ -220,14 +231,20 @@ fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::Hmac
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     // SAFETY: reads RCC only.
     let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+    // Twenty samples at 10 ms is 200 ms: several times the debounce, and short enough
+    // that nobody holding the key notices the wait.
+    let mut held_for = 0u32;
     for _ in 0..20 {
         pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
-        if keys.contains(&Key::Cancel) {
-            return true;
-        }
+        // Held through the last stretch of the window, not merely seen once in it.
+        held_for = if pad.holds(Key::Cancel) {
+            held_for + 1
+        } else {
+            0
+        };
         catcard_hal::dwt::delay_cycles(10 * per_ms);
     }
-    false
+    held_for >= 3
 }
 
 /// Ask about a staged firmware image.

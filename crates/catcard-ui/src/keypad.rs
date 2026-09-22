@@ -250,6 +250,19 @@ impl Keypad {
         m
     }
 
+    /// Whether `key` is down right now, after debounce.
+    ///
+    /// For asking "is this being held", which is a different question from "was it
+    /// pressed" -- a press is an edge and one glitchy sample can manufacture one, while
+    /// a hold has to still be true when you look. The boot-time check for a held cancel
+    /// asks this one.
+    pub fn holds(&self, key: Key) -> bool {
+        self.down
+            .iter()
+            .enumerate()
+            .any(|(i, &d)| d && LAYOUT[i] == key)
+    }
+
     pub fn held_count(&self) -> usize {
         self.down.iter().filter(|d| **d).count()
     }
