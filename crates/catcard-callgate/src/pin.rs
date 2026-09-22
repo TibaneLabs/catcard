@@ -321,10 +321,68 @@ pub fn bip39_entropy(secret: &[u8; SECRET_LEN]) -> Option<&[u8]> {
     Some(&secret[1..1 + len])
 }
 
+/// The chain code and private key inside an xprv secret, or `None` if this is not one.
+///
+/// The node *is* the wallet: no stretching, no words. Source: as above [C].
+pub fn xprv_parts(secret: &[u8; SECRET_LEN]) -> Option<(&[u8; 32], &[u8; 32])> {
+    if secret[0] != XPRV_MARKER {
+        return None;
+    }
+    Some((
+        secret[1..33].try_into().ok()?,
+        secret[33..65].try_into().ok()?,
+    ))
+}
+
+/// The raw BIP-32 master secret a plain-length marker introduces, or `None`.
+///
+/// 16 to 64 bytes, fed straight into BIP-32's master step rather than through BIP-39.
+/// Source: as above [C].
+pub fn raw_master(secret: &[u8; SECRET_LEN]) -> Option<&[u8]> {
+    let len = secret[0] as usize;
+    (16..=64).contains(&len).then(|| &secret[1..1 + len])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::offset_of;
+
+    /// Each marker introduces its own shape, and reads as nothing under the others.
+    #[test]
+    fn the_three_stash_shapes_read_only_as_themselves() {
+        let words = encode_bip39(&[7; 32]).unwrap();
+        assert_eq!(bip39_entropy(&words), Some(&[7u8; 32][..]));
+        assert_eq!(xprv_parts(&words), None);
+        assert_eq!(raw_master(&words), None);
+
+        let node = encode_xprv(&[1; 32], &[2; 32]);
+        assert_eq!(xprv_parts(&node), Some((&[1u8; 32], &[2u8; 32])));
+        assert_eq!(bip39_entropy(&node), None);
+        assert_eq!(raw_master(&node), None);
+
+        let mut raw = [0u8; SECRET_LEN];
+        raw[0] = 32;
+        raw[1..33].copy_from_slice(&[9; 32]);
+        assert_eq!(raw_master(&raw), Some(&[9u8; 32][..]));
+        assert_eq!(bip39_entropy(&raw), None);
+        assert_eq!(xprv_parts(&raw), None);
+        assert!(matches!(
+            classify_secret(&raw),
+            SecretKind::Unknown { marker: 32 }
+        ));
+    }
+
+    /// Lengths outside 16..=64 are not raw master secrets -- 0 is an empty slot, and the
+    /// BIP-39 markers all have the top bit set.
+    #[test]
+    fn a_length_outside_the_range_is_not_a_raw_master() {
+        for marker in [0u8, 1, 15, 65, 0x7f] {
+            let mut s = [0u8; SECRET_LEN];
+            s[0] = marker;
+            assert_eq!(raw_master(&s), None, "marker {marker}");
+        }
+    }
 
     #[test]
     fn layout_matches_documented_size() {

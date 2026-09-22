@@ -73,8 +73,11 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
 
 - **Login.** Two-part PIN against the bootloader's gate, anti-phishing words, nickname,
   attempt counter; Test login, scrambled keys and a login countdown.
-- **Wallets.** Create a seed from the entropy pool (12 or 24 words) or import one;
-  passphrase; Seed XOR split and join; BIP-85 children (words, XPRV, WIF, password,
+- **Wallets.** Create a seed from the entropy pool (12 or 24 words) or import one, as
+  words, an XPRV node or a raw master secret -- all three shapes stock can store;
+  passphrase; Import key, which takes words, an XPRV or a WIF key in for the session
+  without touching the stored one; Seed XOR split and join; BIP-85 children (words, XPRV,
+  WIF, password,
   hex), where the words, XPRV and WIF children can be put in force; a key vault in
   stock's own format, so keys saved by either firmware are readable by the other.
 - **Addresses.** An explorer over all four single-sig types, accounts and both chains,

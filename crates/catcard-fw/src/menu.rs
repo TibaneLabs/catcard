@@ -510,6 +510,7 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 const KEY_ITEMS_ROOT: &[&str] = &[
     "Passphrase",
     "BIP-85",
+    "Import key",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -520,6 +521,7 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "Back to root",
     "Passphrase",
     "BIP-85",
+    "Import key",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -1658,6 +1660,7 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Back to root" => Some(&art::RETURN_ROOT_KEY),
             "Passphrase" => Some(&art::DERIVE_PASSPHRASE),
             "BIP-85" => Some(&art::DERIVE_BIP85_INDEX),
+            "Import key" => Some(&art::IMPORT_PASSPHRASE),
             "XOR split" => Some(&art::XOR_SPLIT),
             "XOR join" => Some(&art::XOR_JOIN),
             "Key vault" => Some(&art::KEY_VAULT),
@@ -4566,6 +4569,102 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
     );
 }
 
+/// Derive → Import key: take a key in from outside and work in it for this session.
+///
+/// Nothing is stored: the stored seed is untouched, and a reboot comes up in it again.
+/// That is what makes this safe to offer beside the wallet in use -- and what makes
+/// Danger zone → Seed tools → Lock down seed the deliberate second step for someone who
+/// meant to replace the stored one.
+///
+/// Returns whether a key is now in force; the caller names it.
+fn import_key(ui: &mut Ui<'_>) -> bool {
+    use catcard_wallet::bip32::ExtendedPrivKey;
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Import key";
+
+    let Some(row) = pick_row(ui, HEAD, "for this session", &["Words", "XPRV", "WIF key"]) else {
+        return false;
+    };
+    match row {
+        0 => {
+            message(ui.panel, HEAD, "enter each word,", "then y y to finish");
+            wait_for_any_key(ui);
+            let Some(mnemonic) = read_phrase(ui) else {
+                return false;
+            };
+            let mut what = Line::new();
+            let _ = write!(what, "{} words, checksum ok", mnemonic.word_count());
+            ask(ui.panel, "Work in this?", &what, "the stored seed stays");
+            if !confirmed(ui) {
+                return false;
+            }
+            if !crate::key::set_temporary(mnemonic.entropy(), "Words") {
+                message(ui.panel, HEAD, "that seed length", "is not usable");
+                wait_for_any_key(ui);
+                return false;
+            }
+            true
+        }
+        1 => {
+            let Some(entry) = crate::passphrase::read(ui, "XPRV") else {
+                return false;
+            };
+            // Parsed inside the masked region: what it decodes to is a private key.
+            let parsed = crate::keywork::run(|kw| {
+                ExtendedPrivKey::from_base58(entry.as_str().trim(), kw)
+                    .ok()
+                    .map(|key| (key.chain_code, *key.secret_bytes()))
+            });
+            let Some((chain_code, mut secret)) = parsed else {
+                message(ui.panel, HEAD, "not an xprv", "check what was typed");
+                wait_for_any_key(ui);
+                return false;
+            };
+            let loaded = crate::key::set_temporary_xprv(&chain_code, &secret, "XPRV");
+            secret.zeroize();
+            if !loaded {
+                message(ui.panel, HEAD, "that key is not usable", "");
+                wait_for_any_key(ui);
+            }
+            loaded
+        }
+        _ => {
+            let Some(entry) = crate::passphrase::read(ui, "WIF key") else {
+                return false;
+            };
+            let mut raw = [0u8; 40];
+            let decoded =
+                catcard_wallet::encoding::base58::decode_check(entry.as_str().trim(), &mut raw);
+            // A mainnet key, compressed or not: `0x80`, the scalar, and the compression
+            // byte where the key is used compressed. Every address this device shows is
+            // from a compressed key, so an uncompressed WIF is refused rather than shown
+            // against addresses its owner would not recognise.
+            let loaded = match decoded {
+                Ok(34) if raw[0] == 0x80 && raw[33] == 0x01 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&raw[1..33]);
+                    let ok = crate::key::set_temporary_wif(&key, "WIF");
+                    key.zeroize();
+                    ok
+                }
+                Ok(33) if raw[0] == 0x80 => {
+                    message(ui.panel, HEAD, "uncompressed WIF", "not supported");
+                    wait_for_any_key(ui);
+                    raw.zeroize();
+                    return false;
+                }
+                _ => false,
+            };
+            raw.zeroize();
+            if !loaded {
+                message(ui.panel, HEAD, "not a mainnet WIF", "check what was typed");
+                wait_for_any_key(ui);
+            }
+            loaded
+        }
+    }
+}
+
 /// Act on one row of [`KEY_ITEMS`]: change the wallet the device works in.
 ///
 /// The new wallet's fingerprint is shown before anything else uses it. That is the
@@ -4584,6 +4683,14 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
     let was = crate::key::in_force();
     match row {
         "Back to root" => crate::key::to_root(),
+        // A key from outside, for this session: words, a node, or a single key. Stock's
+        // Temporary Seed, which it reaches from its own menu.
+        // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
+        "Import key" => {
+            if !import_key(ui) {
+                return;
+            }
+        }
         "BIP-85" => {
             use crate::derive::Chosen;
             let Some(child) = crate::derive::bip85(gate, login, ui) else {
@@ -5123,12 +5230,53 @@ pub(crate) fn unlock_master(
     }
 }
 
+/// What the secure element's slot holds.
+///
+/// Three shapes, all of them a wallet: the words' entropy, a BIP-32 node, or a raw master
+/// secret. Stock writes all three (hw-reference/secret-stash-format.md §Layout [C]), so a
+/// device that has run stock can arrive with any of them, and a firmware that understood
+/// only the first said "not yet" to a wallet it was holding.
+pub(crate) enum Stored {
+    /// BIP-39 entropy: the only shape with words to write down.
+    Words { entropy: [u8; 32], len: usize },
+    /// A node. It *is* the master -- nothing to stretch, and no words.
+    Xprv { chain_code: [u8; 32], key: [u8; 32] },
+    /// Bytes fed straight into BIP-32's master step.
+    Raw { bytes: [u8; 64], len: usize },
+}
+
+impl Drop for Stored {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        match self {
+            Stored::Words { entropy, .. } => entropy.zeroize(),
+            Stored::Xprv { chain_code, key } => {
+                chain_code.zeroize();
+                key.zeroize();
+            }
+            Stored::Raw { bytes, .. } => bytes.zeroize(),
+        }
+    }
+}
+
+impl Stored {
+    /// What a screen calls this, for a refusal that names what is there.
+    fn what(&self) -> &'static str {
+        match self {
+            Stored::Words { .. } => "these words",
+            Stored::Xprv { .. } => "an XPRV",
+            Stored::Raw { .. } => "a raw master",
+        }
+    }
+}
+
 /// The BIP-39 entropy of the wallet in force, with a progress screen.
 ///
 /// The secret the secure element holds, or -- when a BIP-85 child is in force -- that
 /// child's own entropy, which is a different seed derived from the same backup. Not the
 /// master key and not the passphrase: this is the *words*, which is what a seed backup,
-/// a split or a word list is made of. A loaded XPRV or WIF key has none, and says so.
+/// a split or a word list is made of. A wallet with no words -- a loaded XPRV or WIF key,
+/// a stored node or raw master -- says so.
 ///
 /// Its own function because two things want it and they must not disagree:
 /// [`master_quietly`], which stretches it into a key, and Seed XOR, which cuts it up.
@@ -5139,7 +5287,6 @@ pub(crate) fn seed_entropy(
     head: &str,
 ) -> Result<([u8; 32], usize), &'static str> {
     use crate::key::Loaded;
-    use zeroize::Zeroize;
 
     // A key the owner brought in for this session is the wallet, and it is already
     // here: nothing to fetch, and no child to derive -- it is not a child of anything.
@@ -5155,48 +5302,49 @@ pub(crate) fn seed_entropy(
         None => {}
     }
 
-    let (mut ent, mut ent_len) = root_entropy(gate, login, panel, head)?;
-
     // The wallet in force may not be the one the secure element holds: a BIP-85 child
     // is a separate seed derived from the same backup, and every screen has to land in
-    // the same one. So the selection is applied here, once, where the seed already is
-    // -- rather than at each screen, where they would disagree.
+    // the same one.
     //
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
     if let crate::key::Source::Bip85 { words, index } = crate::key::in_force() {
+        let master = bip85_parent(gate, login, panel, head)?;
         let mut busy = Working::seed(panel, head, "deriving the key");
         let child = crate::keywork::run(|kw| {
-            let master = plain_master(&ent[..ent_len], kw)?;
             let (child, len) = catcard_wallet::bip85::words_entropy(&master, words, index, kw)
                 .map_err(|_| "that child does not derive")?;
-            ent.zeroize();
+            let mut ent = [0u8; 32];
             ent[..len].copy_from_slice(&child.as_bytes()[..len]);
-            Ok::<usize, &'static str>(len)
+            Ok::<([u8; 32], usize), &'static str>((ent, len))
         });
         busy.tick(panel);
-        match child {
-            Ok(len) => ent_len = len,
-            Err(why) => {
-                ent.zeroize();
-                return Err(why);
-            }
-        }
+        return child;
     }
-    Ok((ent, ent_len))
+
+    match root_stored(gate, login, panel, head)? {
+        Stored::Words { entropy, len } => Ok((entropy, len)),
+        // Both are wallets this firmware can work in; neither has words to hand back.
+        other => Err(match other {
+            Stored::Xprv { .. } => "the stored key is an XPRV: no words",
+            _ => "the stored key is raw: no words",
+        }),
+    }
 }
 
-/// The entropy the secure element holds, whatever wallet is in force.
+/// What the secure element holds, whatever shape it is in.
 ///
 /// The reading-seed screen first, then the fetch -- one callgate call during which the
 /// bootloader runs the PIN key-stretch inside the secure element, about 1.6 s on an mk4,
 /// with the CPU unable to repaint.
-fn root_entropy(
+fn root_stored(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     head: &str,
-) -> Result<([u8; 32], usize), &'static str> {
-    use catcard_callgate::pin::bip39_entropy;
+) -> Result<Stored, &'static str> {
+    use catcard_callgate::pin::{
+        SecretKind, bip39_entropy, classify_secret, raw_master, xprv_parts,
+    };
     use zeroize::Zeroize;
 
     reading_seed(panel, head);
@@ -5205,37 +5353,49 @@ fn root_entropy(
         .fetch_secret(&pin_gate)
         .map_err(|_| "could not read seed")?;
 
-    // Copy the entropy out into an owned buffer so the secret can be wiped immediately;
-    // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
-    // something this can enumerate.
-    let mut ent = [0u8; 32];
-    let len = match bip39_entropy(&secret) {
-        Some(e) if e.len() <= ent.len() => {
-            crate::key::note_stored_seed(true);
-            ent[..e.len()].copy_from_slice(e);
-            e.len()
-        }
-        _ => {
-            use catcard_callgate::pin::{SecretKind, classify_secret};
-            // Say what is there instead: the type only, from the marker byte.
-            let kind = classify_secret(&secret);
-            secret.zeroize();
-            // Empty means the slot holds nothing to work in, whatever the login's flag
-            // said: a destroyed seed leaves zeros behind with the flag still set.
-            crate::key::note_stored_seed(!matches!(kind, SecretKind::Empty));
-            crate::catlog!("wallet: secret is {:?}, not BIP-39", kind);
-            return Err(match kind {
-                SecretKind::Empty => "no wallet stored",
-                SecretKind::Xprv => "xprv wallet: not yet",
-                // 16 to 64 is a raw BIP-32 master secret of that length.
-                // Source: hw-reference/secret-stash-format.md §Layout [C]
-                SecretKind::Unknown { marker: 16..=64 } => "raw seed wallet: not yet",
-                _ => "unknown wallet type",
-            });
-        }
+    // Copied out so the secret can be wiped at once, and classified by its marker byte:
+    // what the slot holds decides what every screen above can offer.
+    let stored = if let Some(e) = bip39_entropy(&secret).filter(|e| e.len() <= 32) {
+        let mut entropy = [0u8; 32];
+        entropy[..e.len()].copy_from_slice(e);
+        Some(Stored::Words {
+            entropy,
+            len: e.len(),
+        })
+    } else if let Some((chain_code, key)) = xprv_parts(&secret) {
+        Some(Stored::Xprv {
+            chain_code: *chain_code,
+            key: *key,
+        })
+    } else if let Some(raw) = raw_master(&secret).filter(|r| r.len() <= 64) {
+        let mut bytes = [0u8; 64];
+        bytes[..raw.len()].copy_from_slice(raw);
+        Some(Stored::Raw {
+            bytes,
+            len: raw.len(),
+        })
+    } else {
+        None
     };
+    let kind = classify_secret(&secret);
     secret.zeroize();
-    Ok((ent, len))
+
+    // Empty means the slot holds nothing, whatever the login's flag said: a destroyed
+    // seed leaves zeros behind with the flag still set.
+    crate::key::note_stored_seed(!matches!(kind, SecretKind::Empty));
+    match stored {
+        Some(stored) => {
+            crate::catlog!("wallet: stored secret is {:?}", kind);
+            Ok(stored)
+        }
+        None => {
+            crate::catlog!("wallet: secret is {:?}, not a wallet", kind);
+            Err(match kind {
+                SecretKind::Empty => "no wallet stored",
+                _ => "unknown wallet type",
+            })
+        }
+    }
 }
 
 /// BIP-39 entropy to its BIP-32 master **with no passphrase**, inside the masked region.
@@ -5257,26 +5417,50 @@ fn plain_master(
     master
 }
 
-/// The key every BIP-85 child comes from: the root's master, **without** the passphrase,
-/// whatever wallet is in force.
+/// The stored wallet's master key, **without** its passphrase, whichever shape it is in.
 ///
-/// The passphrase belongs to the wallet that is finally in force, not to the path taken
-/// to reach it -- applying it on the way down as well would give a wallet nothing else
-/// agrees with. And the root rather than the key in force, so a child shown here is the
-/// child [`seed_entropy`] loads, and the same one again from any wallet the owner is in.
+/// The key every BIP-85 child comes from, and what a screen wants when it needs the root
+/// rather than the wallet in force. The passphrase belongs to the wallet finally in force,
+/// not to the path taken to reach it -- applying it on the way down as well would give a
+/// wallet nothing else agrees with.
+pub(crate) fn root_master(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+
+    let stored = root_stored(gate, login, panel, head)?;
+    let mut busy = Working::seed(panel, head, "deriving the key");
+    let master = crate::keywork::run(|kw| match &stored {
+        Stored::Words { entropy, len } => plain_master(&entropy[..*len], kw),
+        // The node is the master already: no stretch, and nothing to derive it from.
+        Stored::Xprv { chain_code, key } => Ok(ExtendedPrivKey::root_from_parts(
+            Network::Mainnet,
+            *chain_code,
+            *key,
+        )),
+        Stored::Raw { bytes, len } => {
+            ExtendedPrivKey::from_seed(&bytes[..*len], Network::Mainnet, kw)
+                .map_err(|_| "key derivation failed")
+        }
+    });
+    busy.tick(panel);
+    master
+}
+
+/// The key every BIP-85 child comes from: the root's master, without the passphrase.
+///
+/// The root rather than the key in force, so a child shown is the child [`seed_entropy`]
+/// loads, and the same one again from any wallet the owner is in.
 pub(crate) fn bip85_parent(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
-    use zeroize::Zeroize;
-    let (mut ent, len) = root_entropy(gate, login, panel, head)?;
-    let mut busy = Working::seed(panel, head, "deriving the key");
-    let master = crate::keywork::run(|kw| plain_master(&ent[..len], kw));
-    ent.zeroize();
-    busy.tick(panel);
-    master
+    root_master(gate, login, panel, head)
 }
 
 /// The wallet in force's master key, with a progress screen but no dialogs.
@@ -5287,16 +5471,17 @@ pub(crate) fn bip85_parent(
 /// would be an interruption nobody asked for, and a key wait would stall the device
 /// behind a question about something the owner never requested.
 ///
-/// A loaded XPRV **is** the master, so there is nothing to stretch. A loaded WIF key has
-/// no master at all: every HD screen stops here, with the reason, rather than inventing a
-/// chain code to derive something nobody else would find.
+/// A loaded XPRV, and a stored node or raw master, **are** the master: there is nothing to
+/// stretch and no passphrase to apply, so one in force is refused rather than silently
+/// ignored. A loaded WIF key has no master at all: every HD screen stops here, with the
+/// reason, rather than inventing a chain code to derive something nobody else would find.
 pub(crate) fn master_quietly(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
-    use crate::key::Loaded;
+    use crate::key::{Loaded, Source};
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
@@ -5309,6 +5494,36 @@ pub(crate) fn master_quietly(
         }
         Some(Loaded::Wif) => return Err("a WIF key is not HD"),
         _ => {}
+    }
+    // The stored wallet itself, which may have no words to stretch. A BIP-85 child or a
+    // loaded seed always has them, and goes the long way round.
+    if crate::key::in_force() == Source::Root {
+        let stored = root_stored(gate, login, panel, head)?;
+        if !matches!(stored, Stored::Words { .. }) && crate::passphrase::is_set() {
+            // A BIP-39 passphrase changes the seed words stretch to. There are no words
+            // here, so a passphrase would change nothing -- and a wallet that ignored one
+            // silently is a wallet the owner did not choose.
+            return Err(match stored.what() {
+                "an XPRV" => "no passphrase on an XPRV",
+                _ => "no passphrase on a raw master",
+            });
+        }
+        return match stored {
+            Stored::Words { mut entropy, len } => {
+                stretch_words(panel, head, &mut entropy, len, |seed, kw| {
+                    ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
+                })
+            }
+            Stored::Xprv { chain_code, key } => Ok(ExtendedPrivKey::root_from_parts(
+                Network::Mainnet,
+                chain_code,
+                key,
+            )),
+            Stored::Raw { bytes, len } => crate::keywork::run(|kw| {
+                ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
+            })
+            .map_err(|_| "key derivation failed"),
+        };
     }
     with_seed(gate, login, panel, head, |seed, kw| {
         ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
@@ -5329,21 +5544,33 @@ pub(crate) fn with_seed<T>(
     head: &str,
     then: impl FnOnce(&[u8; catcard_wallet::bip39::SEED_LEN], &catcard_wallet::KeyWork) -> Option<T>,
 ) -> Result<T, &'static str> {
+    let (mut ent, ent_len) = seed_entropy(gate, login, panel, head)?;
+    stretch_words(panel, head, &mut ent, ent_len, then)
+}
+
+/// Stretch `entropy`'s words into the BIP-39 seed, through the passphrase in force, and
+/// run `then` on it inside the same masked region. The entropy and the seed are both gone
+/// before this returns.
+///
+/// Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second of
+/// hashing by design. That is far too long to hold one frame, so it runs in slices: masked
+/// while a slice is in flight, the sweep moving underneath. The slices end at round counts
+/// fixed here, never at anything derived from the seed, so what a watching host can see is
+/// the iteration count BIP-39 publishes.
+fn stretch_words<T>(
+    panel: &mut display::Panel,
+    head: &str,
+    entropy: &mut [u8; 32],
+    len: usize,
+    then: impl FnOnce(&[u8; catcard_wallet::bip39::SEED_LEN], &catcard_wallet::KeyWork) -> Option<T>,
+) -> Result<T, &'static str> {
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
-    let (mut ent, ent_len) = seed_entropy(gate, login, panel, head)?;
-
-    // Seed -> whatever `then` makes of it, through the passphrase in force (none,
-    // normally). Done once, then the seed material is gone.
-    //
-    // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
-    // of hashing by design. That is far too long to hold one frame, so it runs in slices:
-    // masked while a slice is in flight, the sweep moving underneath.
     let mut busy = Working::seed(panel, head, "stretching the seed");
     let stretch = crate::keywork::run(|kw| {
-        let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
-        ent.zeroize();
+        let mnemonic = Mnemonic::from_entropy(&entropy[..len], kw);
+        entropy.zeroize();
         let Ok(mnemonic) = mnemonic else {
             return Err("seed did not decode");
         };
@@ -5353,9 +5580,6 @@ pub(crate) fn with_seed<T>(
             .map_err(|_| "key derivation failed")
     });
     stretch.and_then(|mut stretch| {
-        // The 2048 PBKDF2 rounds run a slice at a time. The slices end at round counts
-        // fixed here, never at anything derived from the seed, so what a watching host can
-        // see is the iteration count BIP-39 publishes.
         while !crate::keywork::run(|kw| stretch.step(STRETCH_SLICE, kw)) {
             busy.tick(panel);
         }
@@ -7584,11 +7808,10 @@ fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
         _ => {
             let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
                 Ok(got) => got,
-                Err(why) => {
-                    message(ui.panel, HEAD, why, "any key to go back");
-                    wait_for_any_key(ui);
-                    return;
-                }
+                // A stored node or raw master is a wallet with no words. Show what it is
+                // instead of refusing: this screen's job is to put the key in front of its
+                // owner, and for those the key is the backup.
+                Err(why) => return stored_key_shown(gate, login, ui, why),
             };
             let words = crate::keywork::run(|kw| {
                 catcard_wallet::bip39::Mnemonic::from_entropy(&ent[..len], kw)
@@ -7786,17 +8009,15 @@ fn login_countdown_screen(ui: &mut Ui<'_>) {
 /// which stay on flash under a key nothing here can make any more. So it is asked twice,
 /// as Destroy seed is, and the second question says what brings the old seed back.
 ///
-/// A words key only: the root and a BIP-85 words child or a loaded seed all store as
-/// their entropy. An XPRV has a stash form, but this firmware cannot yet start from an
-/// XPRV root, so storing one would leave a device it cannot use; a WIF key has no stash
-/// form at all. The passphrase is not stored, as it never is.
+/// Words store as their entropy and a loaded XPRV as a node, which is what the stash has
+/// shapes for and what this firmware comes up in. A WIF key has no stash form at all, so
+/// it is refused. The passphrase is not stored, as it never is.
 fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use crate::key::{Loaded, Source};
     use zeroize::Zeroize as _;
     const HEAD: &str = "Lock down seed";
 
     let refused = match crate::key::loaded() {
-        Some(Loaded::Xprv) => Some(("an XPRV cannot be", "the stored seed yet")),
         Some(Loaded::Wif) => Some(("a WIF key cannot be", "a stored seed")),
         _ if crate::key::in_force() == Source::Root => Some(("this already is", "the stored seed")),
         _ => None,
@@ -7807,30 +8028,44 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         return;
     }
 
-    let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
-        Ok(got) => got,
-        Err(why) => {
-            message(ui.panel, HEAD, why, "any key to go back");
-            wait_for_any_key(ui);
-            return;
+    // The stash to write, and the fingerprint the stored wallet will have: its own,
+    // without any passphrase, which is the root this device will come up in.
+    let made = if let Some((chain_code, key)) = crate::key::temporary_xprv() {
+        // A node stores as a node: the stash has a shape for it, and this firmware now
+        // comes up in one (`root_stored`).
+        use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+        let fp = crate::keywork::run(|kw| {
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key).fingerprint(kw)
+        });
+        Some((catcard_callgate::pin::encode_xprv(chain_code, key), fp))
+    } else {
+        let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
+            Ok(got) => got,
+            Err(why) => {
+                message(ui.panel, HEAD, why, "any key to go back");
+                wait_for_any_key(ui);
+                return;
+            }
+        };
+        let secret = catcard_callgate::pin::encode_bip39(&ent[..len]);
+        let mut busy = Working::seed(ui.panel, HEAD, "checking the key");
+        let fp = crate::keywork::run(|kw| plain_master(&ent[..len], kw).map(|m| m.fingerprint(kw)));
+        busy.tick(ui.panel);
+        ent.zeroize();
+        match (secret, fp) {
+            (Ok(secret), Ok(fp)) => Some((secret, fp)),
+            _ => None,
         }
     };
-    let secret = catcard_callgate::pin::encode_bip39(&ent[..len]);
-    // The fingerprint the stored seed will have: its own, without any passphrase -- which
-    // is the root this device will come up in.
-    let mut busy = Working::seed(ui.panel, HEAD, "checking the key");
-    let fp = crate::keywork::run(|kw| plain_master(&ent[..len], kw).map(|m| m.fingerprint(kw)));
-    busy.tick(ui.panel);
-    ent.zeroize();
-    let (Ok(mut secret), Ok([a, b, c, d])) = (secret, fp) else {
-        message(ui.panel, HEAD, "could not encode", "that seed");
+    let Some((mut secret, [a, b, c, d])) = made else {
+        message(ui.panel, HEAD, "could not encode", "that key");
         wait_for_any_key(ui);
         return;
     };
     let mut said: heapless::String<24> = heapless::String::new();
     let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
 
-    if crate::passphrase::is_set() {
+    if crate::passphrase::is_set() && crate::key::temporary_xprv().is_none() {
         ask(
             ui.panel,
             HEAD,
@@ -7890,6 +8125,42 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         }
     }
     wait_for_any_key(ui);
+}
+
+/// View words, where the wallet in force has none: the master as an xprv, which for a
+/// stored node or raw master is what its owner writes down.
+fn stored_key_shown(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    why: &'static str,
+) {
+    use catcard_ui::scroll::Line as DLine;
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "View words";
+
+    let Ok(master) = master_quietly(gate, login, ui.panel, HEAD) else {
+        message(ui.panel, HEAD, why, "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    let mut buf = [0u8; 120];
+    let written = crate::keywork::run(|kw| master.write_base58(&mut buf, kw).ok());
+    drop(master);
+    let Some(n) = written else {
+        buf.zeroize();
+        message(ui.panel, HEAD, "could not write it", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+    let lines = [
+        DLine::title("XPRV"),
+        DLine::body(why).small(),
+        DLine::body(text).secret().wrapped(),
+    ];
+    show_doc(ui, &lines, true, true);
+    buf.zeroize();
 }
 
 /// Show the words: when a wallet is made, and from Danger zone → Seed tools.

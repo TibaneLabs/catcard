@@ -44,10 +44,15 @@ Dependency first, then what a user needs to hold funds safely:
    forget: chain, account numbers, display units.
 8. ~~**Multisig and descriptor import**~~ -- done; see §4. Untested on hardware.
 9. **Encrypted backup and restore**.
-10. **Import paths** beyond words: xprv, raw master secret, backup file. (Seed XOR is
-    done -- split and join, under Derive.)
+10. ~~**Import paths** beyond words~~ -- mostly done: a stored secret that is an xprv
+    node or a raw master is now a wallet this firmware comes up in and works from, and
+    Derive → Import key takes words, an XPRV or a WIF key in for the session (stock's
+    Temporary Seed). What is left is the backup file, which is step 9. (Seed XOR is done
+    -- split and join, under Derive.)
 11. **Q1 transports**: QR scanner and display (incl. BBQr), NFC.
-12. **Trick PINs, login protections, Seed Vault, temporary seeds**.
+12. **Trick PINs** -- blocked on gate 22's slot layout (HARDWARE-OPEN-ITEMS). The rest of
+    step 12 is done: login protections (Test login, Scramble keys, Login countdown, and
+    Kill key / microSD 2FA in release builds), the Seed Vault, and temporary seeds.
 13. **HSM, Spending Policy, Coldcard Cosign** -- last: they are policy engines on top of
     everything above.
 
