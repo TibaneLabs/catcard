@@ -17,8 +17,13 @@ question for each item is only whether it is *reachable where a stock user would
 
 | Ours | Stock | |
 |---|---|---|
+<<<<<<< HEAD
 | `Sign` → `Scan` (Q1), `From SD`, `By NFC`, `Message` | `Ready To Sign`; `NFC Tools` → `Sign PSBT`; `File Management` → `Sign Text File` | 🔀 one entry for everything signable, asking where it comes from; stock scatters the three |
 | `Addresses` | `Address Explorer` | 🔀 shorter, to fit a tile. Stock's `Account Number` and `Start Idx` rows are keys on the address screen here (`2` and `4`), because that screen holds the state they change; `Custom Path` is a row on the list, as it is in stock |
+=======
+| `Sign` → `Scan` (Q1), `From SD`, `Message`, `Text file`, `Verify` | `Ready To Sign`; `NFC Tools` → `Sign PSBT`; `File Management` → `Sign Text File`, `Verify Sig File` | 🔀 one entry for everything signable, asking where it comes from; stock scatters the four |
+| `Addresses` | `Address Explorer` | 🔀 shorter, to fit a tile |
+>>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
 | `Notes` (Q1) | `Secure Notes & Passwords` (Q1, `secnap`) | 🔀 shorter; stock also gates on the `secnap` setting, which we do not read yet |
 | `Utils` | `Advanced/Tools` | ❌ different word for the same drawer |
 | `Settings` | `Settings` | ✅ |
@@ -81,9 +86,15 @@ store, so these rows are absent there rather than present and inert.
 |---|---|---|
 | `Export wallet` | `Export Wallet` | 🔀 Generic JSON and the six vendors that read it, plus Descriptor, Key Expression, Export XPUB, Dump Summary, Address CSV (stock writes that one from the explorer; it is here too because it is an export). Still to write: Bitcoin Core (B), Electrum + Blue Wallet (C), Wasabi (D), Unchained (E), and the account-numbered descriptor variants — Bull Bitcoin, Zeus, Samourai pre/post-mix (F) |
 | *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list, and the words, XPRV and WIF children can be put in force from it |
+<<<<<<< HEAD
 | `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat. Selecting a file in the listing offers `Delete file` — asked first, and irreversible; the file picker used mid-signing does not offer it |
 | *(Sign → Message; Addresses → Verify an address)* | `File Management` → `Sign Text File`; `NFC Tools` → `Verify Address` | 🔀 message signing under the one Sign; verify sits with the addresses it checks, rather than in a tag drawer — the tag is reached from whichever screen has something to put on it |
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer -- but the switch is stock's: with `Virtual Disk` (or the USB port) off, this refuses to start |
+=======
+| `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat |
+| *(Sign → Message, Text file, Verify; Addresses → Verify an address)* | `File Management` → `Sign Text File`, `Verify Sig File`; `NFC Tools` → `Verify Address` | 🔀 message signing and checking under the one Sign; verify an address with the addresses it checks, as we have no NFC |
+| `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer |
+>>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
 | `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
 | — | `Backup`, `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |

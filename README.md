@@ -88,7 +88,8 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   chains' formats on a multichain build.
 - **Signing.** PSBT signing for single-sig (P2PKH, P2SH-P2WPKH, P2WPKH and P2TR key
   path) and registered multisig, with the fee shown and capped and change proven by
-  re-deriving it; legacy message signing.
+  re-deriving it. Messages too: typed or read off a text file, signed the legacy way or
+  under BIP-322, and a signed file checked against the address it names.
 - **Transfer.** USB HID, microSD (browse, format, import, export), firmware upgrade from
   either, and on the Q1 a QR scanner with BBQr and BC-UR. The NFC tag carries three
   things: a fully signed transaction goes out as a link, and a phone that taps the device

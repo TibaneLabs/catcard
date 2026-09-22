@@ -163,6 +163,10 @@ enum Screen {
     SignNfc,
     /// Sign a typed message with one of this wallet's keys.
     SignMessage,
+    /// Sign the text in a file on the card, and write the signature beside it.
+    SignTextFile,
+    /// Check a signed-message file from the card against the address it names.
+    VerifySig,
     /// Type a BIP-39 passphrase, opening a second wallet from the same words.
     Passphrase,
     /// Debug: exercise the settings store on internal flash.
@@ -596,7 +600,15 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Where the thing to sign comes from. The scanner is the Q1's; the mono boards have no
+<<<<<<< HEAD
 /// camera, so they have no row for one. The tag is on every board past the mk3.
+=======
+/// camera, so they have no row for one.
+///
+/// The last two are the message pair: a text file on the card signed, and a signed file
+/// checked. `Verify` is the one row here that needs no wallet at all -- a signature is
+/// public -- so it works on a device that has never been given a seed.
+>>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
 const SIGN_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Scan",
@@ -604,6 +616,8 @@ const SIGN_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "By NFC",
     "Message",
+    "Text file",
+    "Verify",
 ];
 
 /// Ways to change the wallet in force, from the root.
@@ -1188,6 +1202,12 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::signmsg::screen(a.gate, a.login, a.ui),
             Screen::SignMenu,
         ),
+        Screen::SignTextFile => to(
+            |a| crate::signmsg::text_file(a.gate, a.login, a.ui),
+            Screen::SignMenu,
+        ),
+        // No key, no login: checking a signature is arithmetic on public values.
+        Screen::VerifySig => to(|a| crate::verifysig::screen(a.ui), Screen::SignMenu),
         Screen::Passphrase => to(
             |a| crate::passphrase::screen(a.gate, a.login, a.ui),
             Screen::Settings,
@@ -1549,6 +1569,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("By NFC")) => Screen::SignNfc,
             (Key::Confirm, Some("Message")) => Screen::SignMessage,
+            (Key::Confirm, Some("Text file")) => Screen::SignTextFile,
+            (Key::Confirm, Some("Verify")) => Screen::VerifySig,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::SignMenu,
         },
@@ -2045,10 +2067,14 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
+<<<<<<< HEAD
         Screen::SignPsbt | Screen::SignMessage => {}
         // Handled in `run`: it drives the tag and the panel itself.
         #[cfg(not(feature = "board-mk3"))]
         Screen::SignNfc => {}
+=======
+        Screen::SignPsbt | Screen::SignMessage | Screen::SignTextFile | Screen::VerifySig => {}
+>>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
         // Handled in `run`: it zeroizes the login and calls the bootloader; never drawn.
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.

@@ -30,9 +30,13 @@ Dependency first, then what a user needs to hold funds safely:
    rather than stepped, a custom path in any type, and a CSV of index, path and address to
    the card; Verify address types an address and searches this wallet's own derivations
    for it.
-5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Sign → Message,
-   armoured to SIGNED.TXT. BIP-322, Verify Sig File and signing a message from a file
-   still to do.
+5. ~~**Message signing**~~ -- written, untested on hardware: Sign → Message types one,
+   Sign → Text file signs a `.txt` off the card and writes `<name>-signed.txt` beside it,
+   and Sign → Verify checks a signed file against the address it names, with no PIN
+   because a signature is public. Either format, chosen on screen: legacy (BIP-137) or
+   BIP-322 simple, the latter against the BIP's own vectors. What is left is Proof of
+   Reserves, and the BIP-322 variants a single-key device cannot satisfy alone (`ful`,
+   `pof`, P2WSH multisig), which are refused rather than guessed.
 6. ~~**BIP-85**~~ -- written, untested on hardware: Derive → BIP-85, with 12 to 24 words,
    XPRV, WIF, a base64 password and 32 bytes of hex, all against the BIP's own vectors.
    Words, XPRV and WIF children can be put in force; a WIF key is a single-key wallet
@@ -138,16 +142,19 @@ every multisig input is refused.
 | Parse, review, sign, write back | ✅ | 🟡 | done; untested on hardware |
 | Change validation, fee limit, sighash policy | ✅ | ✅ | change re-derived, SIGHASH_ALL only; the cap is Settings → Max network fee (10% default, 25/50/none) |
 | Finalise to a network transaction | ✅ | ✅ | FINAL.TXN, as hex |
-| Batch sign, Sign Text File, USB / NFC / QR entry | ✅ | 🟡 | `Sign` takes a PSBT from SD, from the Q1 scanner and from the NFC tag; batch and text files remain |
+| Batch sign, USB / NFC / QR entry | ✅ | 🟡 | `Sign` takes a PSBT from SD, from the Q1 scanner and from the NFC tag; batch remains |
+| Sign Text File | ✅ | 🟡 | Sign → Text file (§6) |
 | Multisig inputs, foreign inputs, coinjoin | ✅ | 🟡 | multisig: registered wallets only (§4); foreign inputs and coinjoin: step 2 |
 
 ## 6. Message signing and Proof of Reserves
 
 | Feature | Stock | CatCard | Notes |
 |---|---|---|---|
-| Legacy signed message | ✅ | 🟡 | Utils → Sign message, typed on the device, armoured to SIGNED.TXT |
-| Signing a message from a file | ✅ | ❌ | with the other file flows |
-| BIP-322, Proof of Reserves | ✅ | ❌ | step 5's remainder |
+| Legacy signed message | ✅ | 🟡 | Sign → Message, typed on the device, armoured to SIGNED.TXT |
+| Signing a message from a file | ✅ | 🟡 | Sign → Text file: a `.txt` off the card, `<name>-signed.txt` written beside it |
+| Verify Sig File | ✅ | 🟡 | Sign → Verify, either scheme; needs no wallet, and says "cannot check" rather than "invalid" for a script it has no interpreter for |
+| BIP-322 | ✅ | 🟡 | simple variant, P2WPKH and taproot key path, against the BIP's own vectors; `ful`, `pof` and P2WSH refused |
+| Proof of Reserves | ✅ | ❌ | step 5's remainder |
 
 ## 7. Backup, stores and transports
 
@@ -191,7 +198,7 @@ every multisig input is refused.
 | DFU Upgrade, Bless Firmware | ✅ | ❌ | |
 | Reflash GPU (Q1) | ✅ | ❌ | the GPU is only probed and driven |
 | List / delete files, format SD | ✅ | 🟡 | browse and format ✅; delete ❌ |
-| Verify Sig File | ✅ | ❌ | with step 5 |
+| Verify Sig File | ✅ | 🟡 | Sign → Verify (§6) |
 | Selftest, Warm Reset, versions | ✅ | 🟡 | selftest in Debug, version and chip in About; no warm reset entry |
 | Preferences (units, timeouts, brightness, USB/NFC/VDisk toggles, testnet) | ✅ | 🟡 | Settings holds idle timeout, display units, max network fee, Hardware On/Off (USB port, Virtual Disk) and menu wrapping, all per wallet and untried on hardware; brightness, NFC and testnet remain. Only switches the firmware obeys are offered |
 

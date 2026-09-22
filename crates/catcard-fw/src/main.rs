@@ -135,6 +135,8 @@ mod usbtask;
 #[cfg(not(feature = "board-mk3"))]
 mod vault;
 mod verify;
+/// Checking a signed-message file from the card, which needs no key.
+mod verifysig;
 
 /// Board this image was built for, from `build.rs`.
 /// The board this was *built* for, from the selected feature.
