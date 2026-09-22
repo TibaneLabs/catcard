@@ -172,9 +172,14 @@ pub fn write<S: Slots>(
         return Err(Error::Malformed);
     }
     let live = newest(slots, key, scratch).map(|b| b.index);
-    // Somewhere that is not where the readable copy is. `choose` is a random number from
-    // the caller's DRBG, so repeated saves spread across the slots rather than wearing one
-    // out -- the whole reason there are a hundred of them.
+    // An **empty** slot -- one the medium has no file for. Not merely "not where our own
+    // copy is": the hundred slots are shared by every wallet this device has been in, one
+    // file each, and a file that does not open under this key is another wallet's
+    // settings, not free space. Choosing any slot but our own once overwrote those, and a
+    // Q1 went from nine files to one.
+    //
+    // `choose` is a random number from the caller's DRBG, so repeated saves spread across
+    // the free slots rather than wearing one out -- the whole reason there are a hundred.
     let count = slots.count();
     let mut target = None;
     for step in 0..count {
@@ -182,8 +187,15 @@ pub fn write<S: Slots>(
         if Some(index) == live {
             continue;
         }
-        target = Some(index);
-        break;
+        match slots.read(index, scratch) {
+            Ok(None) => {
+                target = Some(index);
+                break;
+            }
+            // Somebody's file, or one the medium cannot read: either way not ours to
+            // replace. An unreadable slot might be the only copy of a wallet's settings.
+            Ok(Some(_)) | Err(_) => continue,
+        }
     }
     let target = target.ok_or(Error::Full)?;
 
@@ -600,6 +612,65 @@ mod save_tests {
         write(&mut slots, &mine, br#"{"_age":1}"#, 1, &mut buf).unwrap();
         let c = census(&mut slots, &mine, &mut buf);
         assert_eq!((c.files, c.heads, c.opened), (2, 1, 1));
+    }
+
+    /// A save never lands on another wallet's file. The slots are shared, one file per
+    /// wallet, and a file that does not open under this key is somebody's settings --
+    /// this is the test for the bug that took a Q1 from nine files to one.
+    #[test]
+    fn a_save_never_overwrites_another_wallets_file() {
+        let mut slots = Ram::new();
+        let mine = key();
+        let other = nvstore::hash_key(b"another wallet entirely");
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+        // The other wallet's file sits in slot 3, and every save is steered at slot 3.
+        let theirs = write(
+            &mut slots,
+            &other,
+            br#"{"_age":1,"theirs":true}"#,
+            3,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(theirs, 3);
+        for n in 0..6 {
+            let slot = set(&mut slots, &mine, "n", &n, 3, &mut doc, &mut scratch).unwrap();
+            assert_ne!(slot, 3, "save {n} went onto the other wallet's file");
+        }
+        // Theirs is still there, still theirs.
+        let len = read(&mut slots, &other, &mut doc).unwrap();
+        assert_eq!(
+            Doc::parse(&doc[..len]).unwrap().get_bool("theirs"),
+            Some(true)
+        );
+        // And ours is the latest.
+        let len = read(&mut slots, &mine, &mut doc).unwrap();
+        assert_eq!(Doc::parse(&doc[..len]).unwrap().get_u64("n"), Some(5));
+    }
+
+    /// With every slot taken by other wallets there is nowhere to write, and the answer
+    /// is `Full` -- not the least-bad file to overwrite.
+    #[test]
+    fn a_store_full_of_other_wallets_refuses_rather_than_overwrites() {
+        let mut slots = Ram::new();
+        let mine = key();
+        let mut scratch = [0u8; SCRATCH];
+        let count = slots.count();
+        for i in 0..count {
+            let k = nvstore::hash_key(&[i as u8; 8]);
+            write(&mut slots, &k, br#"{"_age":1}"#, i, &mut scratch).unwrap();
+        }
+        assert_eq!(
+            write(&mut slots, &mine, br#"{"_age":1}"#, 0, &mut scratch),
+            Err(Error::Full)
+        );
+        // Every other wallet still reads.
+        let mut buf = [0u8; SCRATCH];
+        for i in 0..count {
+            let k = nvstore::hash_key(&[i as u8; 8]);
+            assert!(read(&mut slots, &k, &mut buf).is_ok(), "slot {i} lost");
+        }
     }
 
     /// The first save on a device that has never saved writes a settings object.
