@@ -1886,7 +1886,13 @@ impl MenuScreen {
     fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
         #[cfg(feature = "board-q1")]
         if is_grid_items(items) {
-            self.cursor = grid_move(self.cursor, items.len(), k);
+            let from = self.cursor;
+            self.cursor = grid_move(from, items.len(), k);
+            let (was, _) = catcard_ui::grid::place(from);
+            let (now, _) = catcard_ui::grid::place(self.cursor);
+            if now != was {
+                slide_grid(ui.panel, items, self.cursor, now > was);
+            }
             return;
         }
         let (title, note) = menu_head(screen);
@@ -2001,12 +2007,15 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
     })
 }
 
-/// Draw a menu as pages of icons, with the page the cursor is on showing.
+/// Paint one page of a menu's icons onto a surface.
+///
+/// No header row: the Q1 has a status bar, and it already names the wallet in force and
+/// shows its fingerprint. A second copy on the grid would be the same answer twice, in
+/// the screen with the least room for it. (The boards with no bar put the row in the
+/// menu instead -- see `main_items`.)
 #[cfg(feature = "board-q1")]
-fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
-    use catcard_ui::art::menuicons as art;
+fn grid_frame(c: &mut display::Surface<'_>, items: &[&str], cursor: usize) {
     use catcard_ui::grid::{CELLS, Cell};
-
     let (page, within) = catcard_ui::grid::place(cursor);
     let pages = catcard_ui::grid::pages(items.len());
     let mut cells: heapless::Vec<Cell<'_>, CELLS> = heapless::Vec::new();
@@ -2016,23 +2025,36 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             icon: grid_icon(label),
         });
     }
-    // No header row here: the Q1 has a status bar, and it already names the wallet in
-    // force and shows its fingerprint. A second copy on the grid would be the same
-    // answer twice, in the screen with the least room for it.
-    //
-    // The boards with no bar put the row in the menu instead -- see `main_items`.
-    //
-    // The art's own palette: this screen is pictures.
-    display::draw_with(panel, &art::PALETTE, |c| {
-        catcard_ui::grid::render_page(
-            c,
-            display::LAYOUT.title,
-            display::LAYOUT.body,
-            &cells,
-            within,
-            page,
-            pages,
-        );
+    catcard_ui::grid::render_page(
+        c,
+        display::LAYOUT.title,
+        display::LAYOUT.body,
+        &cells,
+        within,
+        page,
+        pages,
+    );
+}
+
+/// Draw a menu as pages of icons, with the page the cursor is on showing.
+///
+/// The art's own palette, not the text ramp: this screen is pictures.
+#[cfg(feature = "board-q1")]
+fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
+    display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
+        grid_frame(c, items, cursor)
+    });
+}
+
+/// Draw the page the cursor has moved to, sliding it in from the side it is on.
+///
+/// The pages are laid out side by side, so a page change is a movement along a strip
+/// and is shown as one -- by the panel's own scrolling, which costs one command a frame
+/// rather than a redraw a frame.
+#[cfg(feature = "board-q1")]
+fn slide_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, right: bool) {
+    display::slide_frame(panel, &catcard_ui::art::menuicons::PALETTE, right, |c| {
+        grid_frame(c, items, cursor)
     });
 }
 

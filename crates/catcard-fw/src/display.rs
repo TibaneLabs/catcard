@@ -247,6 +247,130 @@ pub fn show_picture(panel: &mut Panel, x: usize, y: usize, w: usize, h: usize, p
 #[cfg(feature = "board-q1")]
 pub const SURROUND: u16 = catcard_ui::st7789::rgb565(0x30, 0x30, 0x30);
 
+/// Slide a new full-screen frame in from one side, with the panel doing the moving.
+///
+/// `right` means the new frame comes in from the right, which is what moving the cursor
+/// rightwards off the edge of a grid page looks like.
+///
+/// # Why the panel and not the firmware
+///
+/// A frame is 153,600 bytes over a polled bus. Animating a sideways move by redrawing
+/// the whole screen a few times would cost that several times over and arrive as a
+/// stutter. The ST7789 can do it for nothing: its frame memory is a ring of 320 lines --
+/// which on this board, mounted landscape, are the screen's *columns* -- and one command
+/// picks which line is shown first. So the move is one command a frame, and the only
+/// pixels sent are the new page's, once each, into the lines that have just scrolled off
+/// the other side.
+///
+/// That is the same trick Flappy Cat runs on, which is where the direction comes from:
+/// a rising start moves the picture left, so the new content arrives from the right.
+///
+/// # What travels
+///
+/// Everything, the status bar included -- the scroll moves whole columns and the fixed
+/// strips this panel can keep are at the left and right edges, not the top. The bar's
+/// pixels are already in the lines they belong to, so it wraps across during the
+/// movement and lands back exactly where it was. Only the rows below it are painted.
+///
+/// Falls back to an ordinary flush if the panel refuses a command, so a failure here
+/// costs the animation and not the screen.
+#[cfg(feature = "board-q1")]
+pub fn slide_frame(
+    panel: &mut Panel,
+    content: &[u16; 16],
+    right: bool,
+    f: impl FnOnce(&mut Surface<'_>),
+) {
+    use core::sync::atomic::Ordering;
+    if DRAWING.swap(true, Ordering::SeqCst) {
+        crate::catlog!("display: nested draw refused");
+        return;
+    }
+    // A slid frame carries no marks; whatever the last one had is not on this one.
+    // SAFETY: foreground, single core, inside the draw flag.
+    unsafe { *core::ptr::addr_of_mut!(MARKS) = None };
+    // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`.
+    let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    {
+        let mut surface = catcard_ui::canvas::Inset::new(&mut *screen, BAR_H);
+        f(&mut surface);
+    }
+    catcard_ui::statusbar::render(screen, FONTS.small, &crate::statusbar::status());
+    BAR_SHOWN.store(true, Ordering::SeqCst);
+
+    reclaim_bus();
+    // The sweep paints the bottom rows behind the cache's back, and it must not be
+    // running while the panel's scroll register is being driven from here.
+    let stopped = stop_sweep(panel.bus_mut());
+    // SAFETY: foreground, single core, not inside a flush.
+    unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
+
+    if slide(panel, screen, content, right) {
+        // The glass now holds this canvas below the bar. Tell the cache so, so the next
+        // frame sends the bar if it changed and nothing at all if it did not.
+        // SAFETY: foreground, single core, not inside a flush.
+        let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
+        cache.note(screen, BAR_H);
+    } else if stopped {
+        // SAFETY: as above.
+        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+    }
+    // Either finishes the job (the bar, if it moved) or does the whole thing, depending
+    // on what the cache above was told.
+    show(panel, screen, content, BAR_H);
+    DRAWING.store(false, Ordering::SeqCst);
+}
+
+/// Move the picture one screen sideways, painting the incoming columns as they are
+/// needed. `true` if the panel did it.
+///
+/// Screen position `p` shows frame-memory line `(start + p) mod 320`, so the line that
+/// has just left one edge is the one about to arrive at the other: each step fills the
+/// lines it is about to expose and then advances the start past them. After a whole
+/// screen the start is back where it began and every line holds the new frame, so
+/// nothing has to be put back afterwards.
+#[cfg(feature = "board-q1")]
+fn slide(panel: &mut Panel, screen: &Screen, content: &[u16; 16], right: bool) -> bool {
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::st7789::{HEIGHT, WIDTH};
+
+    /// Columns per step. Twenty steps across the panel: fine enough to read as motion,
+    /// coarse enough that each step is one worthwhile transfer rather than a command
+    /// for every column.
+    const STEP: usize = 16;
+
+    if panel.set_scroll_area(0, 0).is_err() {
+        return false;
+    }
+    let mut done = 0;
+    while done < WIDTH {
+        let run = STEP.min(WIDTH - done);
+        // Where the incoming columns go, and where the start lands once they are there.
+        // Coming from the right the picture moves left and the start rises; coming from
+        // the left it moves right and the start falls back toward zero.
+        let (at, start) = if right {
+            (done, done + run)
+        } else {
+            (WIDTH - done - run, WIDTH - done - run)
+        };
+        let ok = panel
+            .paint(at, BAR_H, run, HEIGHT - BAR_H, |dx, dy| {
+                content[screen.get(at + dx, BAR_H + dy) as usize]
+            })
+            .is_ok();
+        if !ok || panel.set_scroll_start(start % WIDTH).is_err() {
+            // Put the picture back where it was before giving up: a half-scrolled panel
+            // with the cache saying otherwise is worse than no animation.
+            let _ = panel.set_scroll_start(0);
+            return false;
+        }
+        // One step a tear pulse, so the movement is even and never tears.
+        wait_tear();
+        done += run;
+    }
+    panel.set_scroll_start(0).is_ok()
+}
+
 /// On the OLED a redraw covers the whole panel, so there is nothing to clear -- but the
 /// next one has to actually be sent, which it would not be if it happened to match what
 /// the cache believes is already there.

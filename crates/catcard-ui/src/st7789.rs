@@ -225,6 +225,28 @@ impl<const H: usize> RowCache<H> {
     }
 }
 
+impl<const H: usize> RowCache<H> {
+    /// Record rows `from..` as already on the glass, for a caller that put them there
+    /// by another route -- a page slid in by the panel's own scrolling, which reaches
+    /// the frame memory without going through a flush.
+    ///
+    /// Rows above `from` keep the hashes they had, which still describe what the panel
+    /// shows: a caller that scrolls a page moves those rows about but does not change
+    /// what is in them. The next flush then sends exactly the rows that really did
+    /// change -- the status bar, if the clock ticked -- and nothing else.
+    ///
+    /// Overlays are not considered: a frame put there this way carries no full-colour
+    /// marks, and a caller that has some must flush instead.
+    pub fn note<const W: usize, const N: usize>(&mut self, fb: &Gray4<W, H, N>, from: usize) {
+        let row_len = W.div_ceil(2);
+        let bytes = fb.as_bytes();
+        for y in from..H.min(HEIGHT) {
+            self.hashes[y] = row_hash(&bytes[y * row_len..(y + 1) * row_len]);
+        }
+        self.valid = true;
+    }
+}
+
 /// FNV-1a over one packed row.
 fn row_hash(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
