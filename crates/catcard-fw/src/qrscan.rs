@@ -55,6 +55,11 @@ const FIRST_MS: u32 = 60;
 const GAP_MS: u32 = 5;
 /// Attempts at waking: the first is always lost, so one try is no try at all.
 const WAKE_TRIES: usize = 5;
+/// How long the line must stay silent before a stop is believed.
+///
+/// Long enough to outlast the gap between two decoded codes, short enough that three
+/// tries do not hold the screen. A module that is still scanning talks inside this.
+const QUIET_MS: u32 = 120;
 /// Between the two sleep commands, for the module's second sleep layer.
 const SLEEP_GAP_MS: u32 = 150;
 /// Attempts at stopping. Stock uses three, because a fresh read can land in the gap
@@ -109,29 +114,49 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
 
 /// Stop scanning and put the module away.
 ///
-/// Retried, because the module may be part-way through a read when the stop arrives and
-/// answers with the code rather than with an acknowledgement. Each attempt clears the
-/// stream first, so the reply being read is a reply and not the tail of a barcode.
+/// **Silence is the proof, not an acknowledgement.** A stop is sent while the module is
+/// mid-sentence -- it is streaming decoded codes, which is the state we are trying to
+/// leave -- so its reply lands somewhere after however much barcode was already in
+/// flight, past the end of any reply buffer worth having. Waiting for an ack therefore
+/// reported failure for stops that had plainly worked, every time, and the fallback
+/// path took over: the screen went away and the aimer stayed lit.
 ///
-/// If it will not answer at all, fall back to saying it blindly at both rates: a scanner
-/// left running is a lamp that stays on and a module that never sleeps, and by then the
-/// screen has gone and nobody is coming back to fix it.
+/// What a stop that landed actually does is make the module stop talking. So that is
+/// what is checked.
 ///
-/// Source: hw-reference/qr.md §6 [C]
+/// The light and the sleep go out **whether or not** the stop was confirmed. They were
+/// conditional on it, which meant the one case that needed them most -- a module still
+/// running that would not answer -- was the case that skipped them.
+///
+/// Source: hw-reference/qr.md §6, §7 [C]
 fn stop(port: &mut Usart) {
     for _ in 0..STOP_TRIES {
+        // Talk over whatever it is saying, then say it.
         port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
-        if command(port, cmd::SCAN_STOP) {
+        let mut out = [0u8; 64];
+        if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, cmd::SCAN_STOP, &mut out) {
+            let _ = port.write(frame, ms_cycles(WIRE_MS));
+        }
+        // Whatever was already on its way, plus the reply, and then -- if it worked --
+        // nothing.
+        port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
+        if quiet(port) {
             let _ = command(port, cmd::TORCH_OFF);
             sleep(port);
             return;
         }
     }
-    crate::catlog!("qr: stop was not acknowledged; shutting the module down blind");
-    // Which now sleeps it too, at both rates. It used to stop it and then sleep at
-    // whichever rate the port happened to be set to, so the module we had just failed
-    // to talk to was left awake with its aimer on.
+    crate::catlog!("qr: it would not stop talking; shutting the module down blind");
     blind_shutdown(port);
+}
+
+/// Whether the module says nothing for [`QUIET_MS`].
+///
+/// A running scan is never quiet for that long: it is reporting codes, or the aimer is
+/// on and it is about to. Silence is what stopping looks like from here.
+fn quiet(port: &mut Usart) -> bool {
+    let mut byte = [0u8; 1];
+    port.read(&mut byte, ms_cycles(QUIET_MS)) == 0
 }
 
 /// Tell it to stop at every rate it might be listening at, without waiting to be
