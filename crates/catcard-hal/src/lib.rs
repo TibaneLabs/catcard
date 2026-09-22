@@ -20,6 +20,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod clock;
+pub mod dma;
 pub mod dwt;
 pub mod exti;
 pub mod gpio;

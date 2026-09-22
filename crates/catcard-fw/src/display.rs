@@ -119,6 +119,12 @@ impl PanelBus {
     /// Drive a transfer with D/C at `dc_high`, framed by chip-select.
     #[allow(clippy::needless_lifetimes)]
     fn transfer(&mut self, dc_high: bool, bytes: &[u8]) -> Result<(), spi::Error> {
+        // A DMA channel may be feeding this SPI instance. Nothing else can share it with
+        // that, so any transfer stops it first. `show` stops it earlier, where it can also
+        // forget the rows it drew; this is the net under anything that talks to the panel
+        // some other way.
+        #[cfg(feature = "board-q1")]
+        stop_sweep(self);
         // SAFETY: these pins were configured as outputs in `init`.
         unsafe {
             gpio::write(self.dc, dc_high);
@@ -269,6 +275,156 @@ pub fn scroll_busy_bar(_panel: &mut Panel) {
         // SAFETY: foreground only; not inside a draw, which never calls this.
         unsafe { give_bus() };
     }
+}
+
+/// Whether the PIN check uses [`start_sweep`] rather than the co-processor's bar.
+///
+/// **Off until it has been watched working.** The PIN check is the boot path, and on an
+/// RDP=2 unit a boot path that hangs is a brick, not a reflash. Debug -> Sweep test runs
+/// it around a real callgate first; this turns on only after that has been seen.
+#[cfg(feature = "board-q1")]
+pub const SWEEP_AT_LOGIN: bool = false;
+
+/// The DMA-driven bar, while it runs. Foreground only, single core.
+#[cfg(feature = "board-q1")]
+static mut SWEEP: Option<Sweep> = None;
+
+#[cfg(feature = "board-q1")]
+struct Sweep {
+    run: catcard_hal::dma::Circular,
+    spi: spi::TxDma,
+    /// The stream the channel reads. Held here so it outlives the call that started
+    /// it; freed when the sweep stops.
+    _buf: crate::heap::Block,
+}
+
+/// The callgate's own stack, which the bootloader wipes on entry and exit. A buffer a
+/// DMA channel is reading must not be in it.
+/// Source: docs/CALLGATE-DMA.md (5) [C]
+#[cfg(feature = "board-q1")]
+const CALLGATE_SRAM: core::ops::Range<u32> = 0x2009_E000..0x200A_0000;
+
+/// DMA1 channel 7, which the bootloader never uses -- it uses no DMA at all.
+/// Source: docs/CALLGATE-DMA.md (3) [C]
+#[cfg(feature = "board-q1")]
+const SWEEP_CHANNEL: u8 = 7;
+
+/// DMAMUX1 input for SPI1_TX on the STM32L4S5.
+/// Source: embassy stm32-data-generated, chip STM32L4S5VI, SPI1 `dma_channels` TX
+/// `request: 11` [C]
+#[cfg(feature = "board-q1")]
+const SPI1_TX_REQUEST: u8 = 11;
+
+/// SPI1 at /128 while the sweep runs: 120 MHz / 128 is about 937 kHz, so a pass of the
+/// 3,210-byte stream takes 27 ms and the highlight moves about 180 pixels a second.
+#[cfg(feature = "board-q1")]
+const SWEEP_PRESCALER: spi::Prescaler = spi::Prescaler::Div128;
+
+/// Start a blue-white-blue bar moving along the bottom of the panel, with nothing on
+/// the CPU driving it -- for the callgates that hold the CPU with interrupts masked.
+///
+/// A DMA channel streams [`catcard_ui::sweep`]'s buffer into the panel's memory-write
+/// over and over, and the buffer's length makes each pass land a few pixels on. The
+/// next draw stops it (see [`show`]) and puts SPI1 back exactly as it was, which the
+/// bootloader's own error screens depend on.
+///
+/// False, with nothing changed, if the buffer cannot be had or would sit in the
+/// callgate's stack -- the caller falls back to the co-processor's bar.
+///
+/// Only for callgates 16 and 18/2 and 18/4, which leave SPI1, the LCD pins and DMA alone:
+/// docs/CALLGATE-DMA.md. Never before a callgate that draws (logout, wipe, the death
+/// screen): the bootloader would draw into a bus that is not its.
+#[cfg(feature = "board-q1")]
+pub fn start_sweep(panel: &mut Panel) -> bool {
+    use catcard_ui::display::DisplayBus as _;
+    use catcard_ui::st7789::cmd;
+
+    reclaim_bus();
+    let bus = panel.bus_mut();
+    stop_sweep(bus);
+
+    let Some(mut buf) = crate::heap::take(catcard_ui::sweep::LEN * 2) else {
+        return false;
+    };
+    let Some(n) = catcard_ui::sweep::fill(buf.bytes()) else {
+        return false;
+    };
+    let at = buf.bytes().as_ptr() as u32;
+    if at < CALLGATE_SRAM.end && at + n as u32 > CALLGATE_SRAM.start {
+        crate::catlog!("sweep: buffer at {:#010x} is in the callgate's SRAM", at);
+        return false;
+    }
+
+    // The bottom rows, as the panel addresses them (the canvas starts under the bar, the
+    // panel does not). Then RAMWR, after which every byte is a pixel.
+    let be = |v: usize| (v as u16).to_be_bytes();
+    let (x0, x1) = (be(0), be(catcard_ui::sweep::W - 1));
+    let (y0, y1) = (be(240 - catcard_ui::sweep::H), be(239));
+    let opened = bus.command(&[cmd::CASET]).is_ok()
+        && bus.data(&[x0[0], x0[1], x1[0], x1[1]]).is_ok()
+        && bus.command(&[cmd::RASET]).is_ok()
+        && bus.data(&[y0[0], y0[1], y1[0], y1[1]]).is_ok()
+        && bus.command(&[cmd::RAMWR]).is_ok();
+    if !opened {
+        return false;
+    }
+    // Selected, and data, for as long as the channel runs.
+    // SAFETY: the panel's own pins, outputs since `init`.
+    unsafe {
+        gpio::write(bus.dc, true);
+        gpio::write(bus.cs, false);
+    }
+    // SAFETY: nothing else uses SPI1 until `stop_sweep`: every transfer stops it first.
+    let saved = match unsafe { bus.spi.begin_tx_dma(SWEEP_PRESCALER) } {
+        Ok(s) => s,
+        Err(_) => {
+            // SAFETY: as above.
+            unsafe { gpio::write(bus.cs, true) };
+            return false;
+        }
+    };
+    // SAFETY: the buffer lives in `SWEEP` until the channel is stopped; channel 7 and
+    // its DMAMUX input are nobody else's; SPI1's DR takes byte writes and is raising
+    // TX requests since `begin_tx_dma`.
+    let run = match unsafe {
+        catcard_hal::dma::start(
+            SWEEP_CHANNEL,
+            SPI1_TX_REQUEST,
+            bus.spi.dr_address(),
+            &buf.bytes()[..n],
+        )
+    } {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = bus.spi.end_tx_dma(saved);
+            // SAFETY: as above.
+            unsafe { gpio::write(bus.cs, true) };
+            return false;
+        }
+    };
+    // SAFETY: foreground, single core.
+    unsafe {
+        *core::ptr::addr_of_mut!(SWEEP) = Some(Sweep {
+            run,
+            spi: saved,
+            _buf: buf,
+        })
+    };
+    true
+}
+
+/// Stop the sweep if one is running, and give SPI1 back as it was. True if one was.
+#[cfg(feature = "board-q1")]
+fn stop_sweep(bus: &mut PanelBus) -> bool {
+    // SAFETY: foreground, single core.
+    let Some(sweep) = (unsafe { (*core::ptr::addr_of_mut!(SWEEP)).take() }) else {
+        return false;
+    };
+    catcard_hal::dma::stop(sweep.run);
+    let _ = bus.spi.end_tx_dma(sweep.spi);
+    // SAFETY: the panel's chip-select, an output since `init`.
+    unsafe { gpio::write(bus.cs, true) };
+    true
 }
 
 /// Wait for the start of the panel's next tear pulse, so a change made now lands between
@@ -763,6 +919,11 @@ static mut LAST_SPLIT: usize = 0;
 #[cfg(feature = "board-q1")]
 fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
     reclaim_bus();
+    // The sweep painted rows the row cache knows nothing about.
+    if stop_sweep(panel.bus_mut()) {
+        // SAFETY: foreground, single core, not yet inside the flush that borrows it.
+        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+    }
     // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
     // never inside a draw. Single core, nothing in interrupt context.
     let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };

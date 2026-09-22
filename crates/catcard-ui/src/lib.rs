@@ -29,6 +29,7 @@ pub mod splash;
 pub mod ssd1306;
 pub mod st7789;
 pub mod statusbar;
+pub mod sweep;
 pub mod text;
 pub mod textentry;
 pub mod widgets;

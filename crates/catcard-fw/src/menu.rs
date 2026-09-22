@@ -75,6 +75,10 @@ enum Screen {
     /// Debug: what the scanner answers, per rate, in raw bytes.
     #[cfg(feature = "board-q1")]
     QrProbe,
+    /// Debug: the DMA-driven bar, run around a real callgate before it goes on the
+    /// boot path.
+    #[cfg(feature = "board-q1")]
+    SweepTest,
     Debug,
     Usb,
     Clocks,
@@ -538,6 +542,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Restore settings",
     #[cfg(feature = "board-q1")]
     "QR probe",
+    #[cfg(feature = "board-q1")]
+    "Sweep test",
     "USB",
     "Clocks",
     "RTC",
@@ -975,6 +981,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => to(|a| crate::qrscan::probe(a.ui), Screen::Debug),
+        #[cfg(feature = "board-q1")]
+        Screen::SweepTest => to(|a| sweep_test(a.gate, a.login, a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
         Screen::Logs => to(
             |a| {
@@ -1358,6 +1366,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Restore settings")) => Screen::RestoreSettings,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("QR probe")) => Screen::QrProbe,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Sweep test")) => Screen::SweepTest,
             (Key::Confirm, Some("USB")) => Screen::Usb,
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
@@ -1722,6 +1732,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::RestoreSettings => {}
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => {}
+        #[cfg(feature = "board-q1")]
+        Screen::SweepTest => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) => {}
@@ -4421,6 +4433,47 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             message(ui.panel, HEAD, why, "unchanged");
         }
     }
+    wait_for_any_key(ui);
+}
+
+/// Debug: run the DMA-driven bar around a real callgate, to be watched.
+///
+/// `fetch_secret` is callgate 18/4, which holds the CPU inside the bootloader with
+/// interrupts masked for about as long as a PIN check does -- the exact condition the bar
+/// exists for, and one that leaves SPI1, the LCD and DMA alone (docs/CALLGATE-DMA.md).
+/// What comes back is zeroized at once. Then another second and a half with the CPU free,
+/// so the motion can be seen for longer than the call lasts.
+#[cfg(feature = "board-q1")]
+fn sweep_test(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Sweep test";
+
+    message(ui.panel, HEAD, "a blue bar should move", "along the bottom");
+    let started = display::start_sweep(ui.panel);
+    crate::catlog!("sweep: test started: {}", started);
+    if !started {
+        message(ui.panel, HEAD, "it did not start", "see the log");
+        wait_for_any_key(ui);
+        return;
+    }
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    // SAFETY: reads RCC only.
+    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
+    let t0 = catcard_hal::dwt::cycles();
+    let fetched = login.fetch_secret(&pin_gate);
+    let ms = catcard_hal::dwt::cycles().wrapping_sub(t0) / per_ms;
+    let ok = match fetched {
+        Ok(mut s) => {
+            s.zeroize();
+            true
+        }
+        Err(_) => false,
+    };
+    // SAFETY: reads RCC only.
+    unsafe { catcard_hal::dwt::delay_ms(1500) };
+    crate::catlog!("sweep: callgate 18/4 took {} ms, ok {}", ms, ok);
+    // Drawing stops it and gives SPI1 back.
+    message(ui.panel, HEAD, "did the bar move?", "any key to go back");
     wait_for_any_key(ui);
 }
 

@@ -47,6 +47,9 @@ const CR2_DS_MASK: u32 = 0b1111 << CR2_DS_SHIFT;
 const CR2_DS_8BIT: u32 = 0b0111 << CR2_DS_SHIFT;
 /// RXNE threshold: assert at 8 bits rather than 16.
 const CR2_FRXTH: u32 = 1 << 12;
+/// TX buffer DMA enable: the FIFO raises a DMA request while it has room.
+/// Source: RM0432 §43.6.2; embassy stm32-data `spi_v3` CR2.TXDMAEN bit 1 [C]
+const CR2_TXDMAEN: u32 = 1 << 1;
 
 // SR
 const SR_RXNE: u32 = 1 << 0;
@@ -162,6 +165,15 @@ const fn base_of(instance: u8) -> Option<u32> {
 /// An initialised SPI master.
 pub struct Spi {
     base: u32,
+}
+
+/// What an instance was before DMA took its transmit side. Hand it back to
+/// [`Spi::end_tx_dma`].
+#[derive(Copy, Clone, Debug)]
+#[must_use]
+pub struct TxDma {
+    cr1: u32,
+    cr2: u32,
 }
 
 impl Spi {
@@ -302,6 +314,67 @@ impl Spi {
             *slot = self.transfer_byte(0xFF)?;
         }
         Ok(())
+    }
+
+    /// The data register's address, for a DMA channel to write to.
+    pub fn dr_address(&self) -> u32 {
+        self.base + DR
+    }
+
+    /// Hand the transmit side to DMA, at `prescaler`.
+    ///
+    /// Returns what the peripheral was, so [`end_tx_dma`](Self::end_tx_dma) can put it
+    /// back exactly -- which matters beyond this firmware: the bootloader draws its own
+    /// error screens through this peripheral assuming the configuration it left.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may use this instance until `end_tx_dma`; a DMA channel is writing it.
+    pub unsafe fn begin_tx_dma(&mut self, prescaler: Prescaler) -> Result<TxDma, Error> {
+        self.flush()?;
+        // SAFETY: this instance's registers; CR1 is only changed with SPE clear.
+        unsafe {
+            let saved = TxDma {
+                cr1: reg::read(self.base + CR1),
+                cr2: reg::read(self.base + CR2),
+            };
+            reg::clear_bits(self.base + CR1, CR1_SPE);
+            reg::modify(
+                self.base + CR1,
+                CR1_BR_MASK,
+                ((prescaler as u32) << CR1_BR_SHIFT) & CR1_BR_MASK,
+            );
+            reg::set_bits(self.base + CR1, CR1_SPE);
+            reg::set_bits(self.base + CR2, CR2_TXDMAEN);
+            Ok(saved)
+        }
+    }
+
+    /// Take the transmit side back from DMA and restore the peripheral as it was.
+    ///
+    /// Call after the DMA channel is stopped. Waits (bounded) for what is queued to go
+    /// out, empties the receive FIFO the transfer filled -- the panel has no MISO, but
+    /// full duplex still clocks bytes in -- clears the overrun that left, and restores
+    /// `CR1`/`CR2`.
+    pub fn end_tx_dma(&mut self, saved: TxDma) -> Result<(), Error> {
+        let drained = self.flush();
+        // SAFETY: this instance's registers; CR1 is only changed with SPE clear.
+        unsafe {
+            reg::clear_bits(self.base + CR1, CR1_SPE);
+            // Whatever full duplex clocked in while nobody read it. Bounded by the FIFO
+            // depth; a reading of DR then SR is also what clears OVR.
+            for _ in 0..8 {
+                if reg::read(self.base + SR) & SR_RXNE == 0 {
+                    break;
+                }
+                let _ = core::ptr::read_volatile((self.base + DR) as *const u8);
+            }
+            let _ = reg::read(self.base + SR);
+            reg::write(self.base + CR2, saved.cr2);
+            reg::write(self.base + CR1, saved.cr1 & !CR1_SPE);
+            reg::write(self.base + CR1, saved.cr1);
+        }
+        drained
     }
 
     /// Block until the shift register and FIFO have drained.

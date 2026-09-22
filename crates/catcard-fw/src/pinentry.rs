@@ -303,8 +303,8 @@ fn screen_pin(
     });
 }
 
-/// The PIN screen, with the row just accepted saying it is being checked, and the
-/// co-processor's bar moving under it.
+/// The PIN screen, with the row just accepted saying it is being checked, and a bar
+/// moving under it.
 ///
 /// Drawn **before** the callgate, which holds the CPU for a second or more with nothing
 /// able to repaint: a device that shows no reaction to the accept key invites a second
@@ -327,7 +327,11 @@ fn checking(panel: &mut display::Panel, login: &Login, prefix: usize, suffix: us
         true,
         login.attempts_left(),
     );
-    if display::GPU_BAR_ON_BLOCKING {
+    // Our own bar, fed to the panel by DMA while the bootloader holds the CPU -- safe for
+    // exactly these two calls, which leave SPI1, the LCD and DMA alone
+    // (docs/CALLGATE-DMA.md). The co-processor's orange bar if it cannot start.
+    let swept = display::SWEEP_AT_LOGIN && display::start_sweep(panel);
+    if !swept && display::GPU_BAR_ON_BLOCKING {
         display::scroll_busy_bar(panel);
     }
 }
