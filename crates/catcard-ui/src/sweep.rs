@@ -70,12 +70,40 @@ pub fn colour_at(i: usize) -> (u8, u8, u8) {
 /// Fill `out` with the stream: `LEN` pixels, two bytes each. Returns the bytes written,
 /// or `None` if `out` is shorter than that.
 pub fn fill(out: &mut [u8]) -> Option<usize> {
+    fill_from(out, 0)
+}
+
+/// [`fill`], starting `phase` pixels into the hump.
+///
+/// Still seamless for any phase: the buffer is a whole number of humps, so shifting where
+/// it starts only rotates it.
+pub fn fill_from(out: &mut [u8], phase: usize) -> Option<usize> {
     let bytes = LEN * 2;
     let out = out.get_mut(..bytes)?;
     for (i, px) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-        *px = rgb565_be(colour_at(i));
+        *px = rgb565_be(colour_at(phase + i));
     }
     Some(bytes)
+}
+
+/// Where a stopped sweep was: `(phase, at)`, the pattern phase of the last pixel sent
+/// and the window position it went to.
+///
+/// `started` is the phase it was started at, `passes` how many whole passes of the
+/// buffer went out, `into` how many pixels of the current one.
+pub const fn stopped_at(started: usize, passes: usize, into: usize) -> (usize, usize) {
+    let k = passes * LEN + into;
+    ((started + k) % PERIOD, k % (W * H))
+}
+
+/// The phase to start again at so the sweep carries on from where it stopped.
+///
+/// A restart always writes the window from its top-left, so the new first pass has to be
+/// *the pass that was in progress* -- the pixels already on the glass from it are then
+/// rewritten with themselves, and the ones it had not reached yet get what they were
+/// about to. `phase` and `at` are [`stopped_at`]'s.
+pub const fn resume_phase(phase: usize, at: usize) -> usize {
+    (phase + PERIOD - at % PERIOD) % PERIOD
 }
 
 #[cfg(test)]
@@ -134,6 +162,49 @@ mod tests {
         assert_eq!(colour_at(0), BLUE);
         assert_eq!(colour_at(PERIOD / 2), WHITE);
         assert_eq!(colour_at(PERIOD - 1), colour_at(1));
+    }
+
+    /// Stop anywhere, start again at `resume_phase`, and the first pass puts back exactly
+    /// what the stopped sweep was about to: the glass shows no jump.
+    #[test]
+    fn a_resumed_sweep_carries_on_where_it_stopped() {
+        let px = |buf: &[u8]| -> Vec<u16> {
+            buf.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
+                .collect()
+        };
+        let first = px(&buffer());
+        for &(passes, into) in &[(0usize, 700usize), (3, 1), (7, 1604), (12, 800)] {
+            let k = passes * LEN + into;
+            // What the unbroken stream would have put at each window position next.
+            let next: Vec<u16> = (0..(W * H))
+                .map(|q| {
+                    let w = k % (W * H);
+                    let step = if q >= w { q - w } else { W * H - w + q };
+                    first[(k + step) % LEN]
+                })
+                .collect();
+            // What a restart writes on its first pass.
+            let (phase, at) = stopped_at(0, passes, into);
+            let mut again = vec![0u8; LEN * 2];
+            fill_from(&mut again, resume_phase(phase, at)).unwrap();
+            let again = px(&again);
+            // The pixels the old pass had not reached: exactly what they were about to be.
+            let w = k % (W * H);
+            for q in w..(W * H) {
+                assert_eq!(again[q], next[q], "stop {passes}/{into}: pixel {q}");
+            }
+            // The ones it had: the same as they already are -- the current pass again.
+            for q in 0..w {
+                assert_eq!(
+                    again[q],
+                    first[(k - w + q) % LEN],
+                    "stop {passes}/{into}: pixel {q}"
+                );
+            }
+        }
     }
 
     /// Short buffers are refused rather than half filled.

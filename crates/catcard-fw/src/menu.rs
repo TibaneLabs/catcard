@@ -3690,30 +3690,40 @@ pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str
 /// logout, wipe -- the sweep would leave the bootloader a bus that is not its own.
 pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
     #[cfg(feature = "board-q1")]
-    {
-        use catcard_ui::art::menuicons::READING_SEED as ART;
-        use catcard_ui::canvas::Canvas as _;
-        use catcard_ui::text::{centred, draw_text};
-
-        const NOTE: &str = "reading the seed";
-        let (title, body) = (display::LAYOUT.title, display::LAYOUT.body);
-        display::draw_field_page(panel, |c| {
-            c.clear();
-            draw_text(c, title, centred(title, head, c.width()), 12, head);
-            // In the middle of what is left above the sweep, which takes the bottom rows.
-            let (w, h) = (ART.width as usize, ART.height as usize);
-            let room = c.height().saturating_sub(catcard_ui::sweep::H);
-            let x = c.width().saturating_sub(w) / 2;
-            let y = room.saturating_sub(h) / 2;
-            catcard_ui::art::indexed::draw_indexed(c, &ART, x, y);
-            draw_text(c, body, centred(body, NOTE, c.width()), y + h + 10, NOTE);
-        });
-        if !display::start_sweep(panel) && display::GPU_BAR_ON_BLOCKING {
-            display::scroll_busy_bar(panel);
-        }
+    if !seed_wait(panel, head, "reading the seed") && display::GPU_BAR_ON_BLOCKING {
+        display::scroll_busy_bar(panel);
     }
     #[cfg(not(feature = "board-q1"))]
     blocking_screen(panel, head, "reading seed");
+}
+
+/// The seed-wait page -- the reading cat, `head` above, `note` below -- and the sweep
+/// under it, carried on from the last one if the glass still shows it. False if the
+/// sweep could not start.
+///
+/// One page for every stage of getting at the seed, reading it and stretching it alike,
+/// so going from one to the next changes the caption and nothing else: the bar keeps
+/// moving from where it was.
+#[cfg(feature = "board-q1")]
+fn seed_wait(panel: &mut display::Panel, head: &str, note: &str) -> bool {
+    use catcard_ui::art::menuicons::READING_SEED as ART;
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::text::{centred, draw_text};
+
+    let (title, body) = (display::LAYOUT.title, display::LAYOUT.body);
+    display::keep_sweep();
+    display::draw_field_page(panel, |c| {
+        c.clear();
+        draw_text(c, title, centred(title, head, c.width()), 12, head);
+        // In the middle of what is left above the sweep, which takes the bottom rows.
+        let (w, h) = (ART.width as usize, ART.height as usize);
+        let room = c.height().saturating_sub(catcard_ui::sweep::H);
+        let x = c.width().saturating_sub(w) / 2;
+        let y = room.saturating_sub(h) / 2;
+        catcard_ui::art::indexed::draw_indexed(c, &ART, x, y);
+        draw_text(c, body, centred(body, note, c.width()), y + h + 10, note);
+    });
+    display::start_sweep(panel)
 }
 
 /// The screen shown while something slow runs: a heading, a note, and a bar that moves.
@@ -3727,6 +3737,9 @@ pub(crate) struct Working<'a> {
     head: &'a str,
     note: Line,
     phase: u32,
+    /// The DMA sweep is supplying the motion, so a tick has nothing to draw -- and
+    /// drawing would stop the sweep it is meant to be showing.
+    swept: bool,
 }
 
 impl<'a> Working<'a> {
@@ -3737,14 +3750,36 @@ impl<'a> Working<'a> {
             head,
             note: Line::new(),
             phase: 0,
+            swept: false,
         };
         let _ = w.note.push_str(note);
         w.draw(panel);
         w
     }
 
+    /// The same, for a stage of getting at the seed: the seed-wait page and the sweep,
+    /// carrying on from the screen before (see [`reading_seed`]). If the sweep cannot
+    /// start, it is [`Working::new`] and its ticking bar.
+    pub(crate) fn seed(panel: &mut display::Panel, head: &'a str, note: &str) -> Self {
+        #[cfg(feature = "board-q1")]
+        if seed_wait(panel, head, note) {
+            let mut w = Self {
+                head,
+                note: Line::new(),
+                phase: 0,
+                swept: true,
+            };
+            let _ = w.note.push_str(note);
+            return w;
+        }
+        Self::new(panel, head, note)
+    }
+
     /// Advance the bar one step and redraw.
     pub(crate) fn tick(&mut self, panel: &mut display::Panel) {
+        if self.swept {
+            return;
+        }
         self.phase = self.phase.wrapping_add(1);
         self.draw(panel);
     }
@@ -5043,7 +5078,7 @@ pub(crate) fn seed_entropy(
         // passphrase belongs to the wallet that is finally in force, not to the path
         // taken to reach it. Applying it twice would give a wallet nothing else agrees
         // with.
-        let mut busy = Working::new(panel, head, "deriving the key");
+        let mut busy = Working::seed(panel, head, "deriving the key");
         let child = crate::keywork::run(|kw| {
             let root =
                 Mnemonic::from_entropy(&ent[..ent_len], kw).map_err(|_| "seed did not decode")?;
@@ -5091,7 +5126,7 @@ pub(crate) fn master_quietly(
     // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
     // is far too long to hold one frame, so it runs in slices with the busy bar stepped
     // between them: masked while a slice is in flight, repainting in the gaps.
-    let mut busy = Working::new(panel, head, "stretching seed");
+    let mut busy = Working::seed(panel, head, "stretching the seed");
     let stretch = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
         ent.zeroize();

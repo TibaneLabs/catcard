@@ -290,9 +290,22 @@ pub const SWEEP_AT_LOGIN: bool = true;
 #[cfg(feature = "board-q1")]
 static mut SWEEP: Option<Sweep> = None;
 
+/// Where the last sweep stopped, `(phase, at)` as [`catcard_ui::sweep::stopped_at`]
+/// gives it -- for as long as the glass still shows it.
+#[cfg(feature = "board-q1")]
+static mut SWEEP_LAST: Option<(usize, usize)> = None;
+
+/// Set by [`keep_sweep`]: the next frame leaves the sweep's rows as the glass has them.
+#[cfg(feature = "board-q1")]
+static mut SWEEP_KEEP: bool = false;
+
 #[cfg(feature = "board-q1")]
 struct Sweep {
     run: catcard_hal::dma::Circular,
+    /// The phase the buffer was filled from, and when it started, in DWT cycles: with
+    /// the count register these say where it is.
+    phase: usize,
+    started: u32,
     spi: spi::TxDma,
     /// The stream the channel reads. Held here so it outlives the call that started
     /// it; freed when the sweep stops.
@@ -321,6 +334,18 @@ const SPI1_TX_REQUEST: u8 = 11;
 #[cfg(feature = "board-q1")]
 const SWEEP_PRESCALER: spi::Prescaler = spi::Prescaler::Div128;
 
+/// Say that the next frame is followed by [`start_sweep`], so the bar should carry on.
+///
+/// The frame leaves the sweep's rows as the glass has them, and the restart picks up the
+/// pattern where it stopped: two screens of one wait -- reading the seed, then stretching
+/// it -- read as one bar that never stopped. Only works across frames drawn through the
+/// same palette: a palette change repaints everything, bar rows included.
+#[cfg(feature = "board-q1")]
+pub fn keep_sweep() {
+    // SAFETY: foreground, single core.
+    unsafe { *core::ptr::addr_of_mut!(SWEEP_KEEP) = true };
+}
+
 /// Start a blue-white-blue bar moving along the bottom of the panel, with nothing on
 /// the CPU driving it -- for the callgates that hold the CPU with interrupts masked.
 ///
@@ -344,10 +369,15 @@ pub fn start_sweep(panel: &mut Panel) -> bool {
     let bus = panel.bus_mut();
     stop_sweep(bus);
 
+    // Carry on from the last sweep if the glass still shows it; from the start if not.
+    // SAFETY: foreground, single core.
+    let phase = unsafe { (*core::ptr::addr_of_mut!(SWEEP_LAST)).take() }
+        .map_or(0, |(p, at)| catcard_ui::sweep::resume_phase(p, at));
+
     let Some(mut buf) = crate::heap::take(catcard_ui::sweep::LEN * 2) else {
         return false;
     };
-    let Some(n) = catcard_ui::sweep::fill(buf.bytes()) else {
+    let Some(n) = catcard_ui::sweep::fill_from(buf.bytes(), phase) else {
         return false;
     };
     let at = buf.bytes().as_ptr() as u32;
@@ -407,6 +437,8 @@ pub fn start_sweep(panel: &mut Panel) -> bool {
     unsafe {
         *core::ptr::addr_of_mut!(SWEEP) = Some(Sweep {
             run,
+            phase,
+            started: catcard_hal::dwt::cycles(),
             spi: saved,
             _buf: buf,
         })
@@ -421,7 +453,31 @@ fn stop_sweep(bus: &mut PanelBus) -> bool {
     let Some(sweep) = (unsafe { (*core::ptr::addr_of_mut!(SWEEP)).take() }) else {
         return false;
     };
+    // Where it is: the count register says exactly how far into the current pass, and
+    // the time since it started says how many passes -- which only has to be right to half
+    // a pass (14 ms), so the cycle counter is ample. Read before the channel stops, which
+    // freezes neither but ends the passes.
+    let pass = (catcard_ui::sweep::LEN * 2) as u64;
+    let left = catcard_hal::dma::remaining(&sweep.run) as u64;
+    let elapsed = catcard_hal::dwt::cycles().wrapping_sub(sweep.started) as u64;
     catcard_hal::dma::stop(sweep.run);
+    // SAFETY: reads RCC only.
+    let (hclk, pclk2) = unsafe {
+        (
+            catcard_hal::clock::hclk_hz() as u64,
+            catcard_hal::clock::pclk2_hz() as u64,
+        )
+    };
+    // Bytes a second on the wire: PCLK2 / prescaler / 8 bits.
+    let per_s = pclk2 / (1u64 << (SWEEP_PRESCALER as u32 + 1)) / 8;
+    let sent = elapsed * per_s / hclk.max(1);
+    let into = (pass - left.min(pass)) % pass;
+    let passes = (sent.saturating_sub(into) + pass / 2) / pass;
+    // Pixels, not bytes: a stop mid-pixel loses that half, and the next RAMWR resets the
+    // panel's byte pairing anyway.
+    let at = catcard_ui::sweep::stopped_at(sweep.phase, passes as usize, (into / 2) as usize);
+    // SAFETY: foreground, single core.
+    unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = Some(at) };
     let _ = bus.spi.end_tx_dma(sweep.spi);
     // SAFETY: the panel's chip-select, an output since `init`.
     unsafe { gpio::write(bus.cs, true) };
@@ -920,10 +976,19 @@ static mut LAST_SPLIT: usize = 0;
 #[cfg(feature = "board-q1")]
 fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
     reclaim_bus();
-    // The sweep painted rows the row cache knows nothing about.
-    if stop_sweep(panel.bus_mut()) {
-        // SAFETY: foreground, single core, not yet inside the flush that borrows it.
-        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+    // The sweep painted rows the row cache knows nothing about. Repaint them -- unless the
+    // frame asked to keep them, because it is about to start the sweep again from where
+    // it stopped, and repainting would blank the bar for a frame.
+    let stopped = stop_sweep(panel.bus_mut());
+    // SAFETY: foreground, single core.
+    let keep = unsafe { core::ptr::replace(core::ptr::addr_of_mut!(SWEEP_KEEP), false) };
+    if !keep {
+        // SAFETY: as above.
+        unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
+        if stopped {
+            // SAFETY: foreground, single core, not yet inside the flush that borrows it.
+            unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+        }
     }
     // SAFETY: only reached from `draw`, under `DRAWING`; `wipe` runs in the foreground and
     // never inside a draw. Single core, nothing in interrupt context.

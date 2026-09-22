@@ -99,6 +99,13 @@ pub unsafe fn start(channel: u8, request: u8, periph: u32, mem: &[u8]) -> Result
     Ok(Circular { channel })
 }
 
+/// Bytes left in the current pass: `CNDTR`, which a circular channel reloads to the
+/// buffer's length each time it reaches zero.
+pub fn remaining(run: &Circular) -> u32 {
+    // SAFETY: a read of this channel's count register, which `run` is the proof of owning.
+    unsafe { reg::read(ch_base(run.channel) + 0x4) & 0xFFFF }
+}
+
 /// Stop the channel and release its DMAMUX input.
 ///
 /// A byte already fetched still reaches the peripheral; the caller drains the peripheral
