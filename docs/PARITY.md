@@ -171,7 +171,7 @@ every multisig input is refused.
 | Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card, and Settings → Hardware On/Off can refuse it; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
 | NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast, an address goes out as a `bitcoin:` URI, and a PSBT a phone writes to the tag comes in to the signing screen (`crate::nfc`); all of it untried on hardware, and file share remains |
-| QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, shows files as animated QR, and reads and writes SeedQR; NFC-side transfers remain |
+| QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR -- single-part or animated, and a `crypto-psbt` reaches the signer as a PSBT -- signs what it catches, hands the signed transaction back as BBQr or `ur:crypto-psbt`, exports the account keys as `ur:crypto-account`, and reads and writes SeedQR; NFC-side transfers remain |
 | PushTx, Key Teleport | ✅ | ❌ | after step 11 |
 
 ## 8. Security features

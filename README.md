@@ -163,7 +163,7 @@ crates/
   catcard-usb        HID transport framing, descriptors, control transfers
   catcard-qr         the Q1's QR scanner protocol
   catcard-bbqr       BBQr: a payload split across QR codes, as stock writes them
-  catcard-bcur       BC-UR: the same for the chains that are not Bitcoin
+  catcard-bcur       BC-UR: the same, plus the registry items wallets exchange
   catcard-sd         SD card bring-up and block reads; FAT12/16/32 and exFAT
   catcard-flash      SPI-NOR driver
   catcard-settings   authenticated, power-fail-safe settings store
