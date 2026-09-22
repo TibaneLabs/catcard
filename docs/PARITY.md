@@ -30,8 +30,10 @@ Dependency first, then what a user needs to hold funds safely:
    searches this wallet's own derivations for it.
 5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Utils → Sign
    message, armoured to SIGNED.TXT. BIP-322 still to do.
-6. ~~**BIP-85**~~ -- written, untested on hardware: Utils → Derive child, with 12/24 words,
+6. ~~**BIP-85**~~ -- written, untested on hardware: Derive → BIP-85, with 12 to 24 words,
    XPRV, WIF, a base64 password and 32 bytes of hex, all against the BIP's own vectors.
+   Words, XPRV and WIF children can be put in force; a WIF key is a single-key wallet
+   (its addresses, and nothing HD), which stock does not offer.
 7. **Settings store** -- reading is **proven on hardware**: a Q1 that had run stock
    decrypts both blobs, the wallet one under `hash_key(raw stash)` and the pre-login one
    under thirty-two zero bytes, and Debug → Secure notes reads the Notes & Passwords stock

@@ -155,19 +155,40 @@ pub fn xprv(master: &ExtendedPrivKey, index: u32, kw: &KeyWork) -> Result<Extend
     Ok(child)
 }
 
-/// The private key at `m/83696968'/2'/{index}'`, for a Bitcoin Core `hdseed`.
+/// The private key at `m/83696968'/2'/{index}'`, as bytes: the most significant 32 of the
+/// entropy. The caller wipes it.
 ///
-/// The most significant 32 bytes of the entropy, as WIF. Returns the length written.
+/// A key outside `1..n-1` is refused, as for [`xprv`], so the caller moves to the next
+/// index rather than holding something no wallet can use.
+pub fn wif_secret(master: &ExtendedPrivKey, index: u32, kw: &KeyWork) -> Result<[u8; 32], Error> {
+    let e = entropy(master, &[app::WIF, index], kw)?;
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&e.as_bytes()[..32]);
+    if !crate::bip32::is_valid_secret(&secret) {
+        secret.zeroize();
+        return Err(Error::Derivation);
+    }
+    Ok(secret)
+}
+
+/// The same key written as WIF, for a Bitcoin Core `hdseed`. Returns the length written.
 pub fn wif(
     master: &ExtendedPrivKey,
     index: u32,
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
-    let e = entropy(master, &[app::WIF, index], kw)?;
+    let mut secret = wif_secret(master, index, kw)?;
+    let n = encode_wif(&secret, out);
+    secret.zeroize();
+    n
+}
+
+/// A mainnet private key, used compressed, as WIF. Returns the length written.
+pub fn encode_wif(secret: &[u8; 32], out: &mut [u8]) -> Result<usize, Error> {
     let mut payload = [0u8; 34];
     payload[0] = 0x80; // mainnet private key
-    payload[1..33].copy_from_slice(&e.as_bytes()[..32]);
+    payload[1..33].copy_from_slice(secret);
     payload[33] = 0x01; // the key is used compressed
     let n = crate::encoding::base58::encode_check(&payload, out).map_err(|_| Error::BufferTooSmall);
     payload.zeroize();
@@ -314,6 +335,26 @@ mod tests {
             core::str::from_utf8(&out[..n]).unwrap(),
             "Kzyv4uF39d4Jrw2W7UryTHwZr1zQVNk4dAFyqE6BuMrMh1Za7uhp"
         );
+    }
+
+    /// The bytes a WIF child is loaded from are the key the vector's WIF encodes, and
+    /// their public key is the one an xprv holding the same scalar would give.
+    #[test]
+    fn the_wif_secret_is_the_key_the_vector_names() {
+        let kw = KeyWork::host();
+        let secret = wif_secret(&root(), 0, &kw).unwrap();
+        let mut out = [0u8; 64];
+        let n = encode_wif(&secret, &mut out).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "Kzyv4uF39d4Jrw2W7UryTHwZr1zQVNk4dAFyqE6BuMrMh1Za7uhp"
+        );
+        let as_xprv = ExtendedPrivKey::root_from_parts(Network::Mainnet, [7; 32], secret);
+        assert_eq!(
+            crate::bip32::public_key_of(&secret, &kw),
+            Some(as_xprv.public_key(&kw))
+        );
+        assert_eq!(crate::bip32::public_key_of(&[0; 32], &kw), None);
     }
 
     #[test]

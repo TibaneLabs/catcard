@@ -39,8 +39,13 @@ use crate::ui::Ui;
 
 const HEAD: &str = "Key vault";
 
-/// The most bytes a stored secret takes: the marker and 32 of entropy.
-const RAW_MAX: usize = 1 + catcard_wallet::bip39::MAX_ENTROPY_LEN;
+/// The most bytes a stored secret takes: the marker, a chain code and a key.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C] -- `0x01`, then 32 + 32.
+const RAW_MAX: usize = 1 + 64;
+
+/// The stash marker for an XPRV. Source: as above [C].
+const XPRV_MARKER: u8 = 0x01;
 
 /// A fingerprint as it is written in the vault and on screen.
 type Xfp = heapless::String<8>;
@@ -218,20 +223,25 @@ fn use_seed(
     method: &str,
     expected: &str,
 ) {
-    // The marker says what the rest is. Only a BIP-39 wallet has entropy this can put in
-    // force; an xprv entry is somebody else's firmware's, and saying so beats deriving
-    // something that is not the wallet the entry names.
-    let Some(entropy) = bip39_part(raw) else {
+    // The marker says what the rest is: words, or an XPRV. A raw master secret is a
+    // third kind stock can hold, which this cannot put in force yet -- saying so beats
+    // deriving something that is not the wallet the entry names.
+    let was = crate::key::in_force();
+    if let Some(entropy) = bip39_part(raw) {
+        if !crate::key::set_temporary(entropy, method) {
+            return drop(say(ui, "that seed length is not usable"));
+        }
+    } else if let Some((chain_code, key)) = xprv_part(raw) {
+        if !crate::key::set_temporary_xprv(chain_code, key, method) {
+            return drop(say(ui, "that key is not usable"));
+        }
+    } else {
         crate::catlog!(
-            "vault: {} has marker {:02x}, not words",
+            "vault: {} has marker {:02x}, not words or an xprv",
             expected,
             raw.first().copied().unwrap_or(0)
         );
-        return drop(say(ui, "not a words wallet"));
-    };
-    let was = crate::key::in_force();
-    if !crate::key::set_temporary(entropy, method) {
-        return drop(say(ui, "that seed length is not usable"));
+        return drop(say(ui, "not a kind this can load"));
     }
     match menu::master_quietly(gate, login, ui.panel, HEAD) {
         Ok(master) => {
@@ -288,6 +298,20 @@ fn bip39_part(raw: &[u8]) -> Option<&[u8]> {
     catcard_wallet::bip39::words_for_entropy(len).map(|_| body)
 }
 
+/// The chain code and key inside a stash whose marker says XPRV, if that is what it is.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C] -- `[1:33]` chain code,
+/// `[33:65]` private key.
+fn xprv_part(raw: &[u8]) -> Option<(&[u8; 32], &[u8; 32])> {
+    if *raw.first()? != XPRV_MARKER {
+        return None;
+    }
+    Some((
+        raw.get(1..33)?.try_into().ok()?,
+        raw.get(33..65)?.try_into().ok()?,
+    ))
+}
+
 /// Keep the key in force, under a label.
 fn store_current(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // The passphrase is not in the entropy, so an entry made here reaches the wallet
@@ -304,23 +328,34 @@ fn store_current(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
         }
     }
 
-    let (mut ent, len) = match menu::seed_entropy(gate, login, ui.panel, HEAD) {
-        Ok(got) => got,
-        Err(why) => return drop(say(ui, why)),
+    // The stash as the secure element would hold it: the marker, then the entropy -- or
+    // the chain code and key, for an XPRV. A single key has no stash form at all.
+    if crate::key::loaded() == Some(crate::key::Loaded::Wif) {
+        return drop(say(ui, "a WIF key has no vault form"));
+    }
+    let mut raw = [0u8; RAW_MAX];
+    let used = if let Some((chain_code, key)) = crate::key::temporary_xprv() {
+        raw[0] = XPRV_MARKER;
+        raw[1..33].copy_from_slice(chain_code);
+        raw[33..65].copy_from_slice(key);
+        65
+    } else {
+        let (mut ent, len) = match menu::seed_entropy(gate, login, ui.panel, HEAD) {
+            Ok(got) => got,
+            Err(why) => return drop(say(ui, why)),
+        };
+        raw[0] = 0x80 | ((len / 8) as u8).saturating_sub(2);
+        raw[1..1 + len].copy_from_slice(&ent[..len]);
+        ent.zeroize();
+        1 + len
     };
     let Some(fp) = crate::pubkeys::fingerprint(gate, login, ui, HEAD) else {
-        ent.zeroize();
+        raw.zeroize();
         return;
     };
     let xfp = hex_xfp(fp);
-
-    // The stash as the secure element would hold it: the marker, then the entropy.
-    let mut raw = [0u8; RAW_MAX];
-    raw[0] = 0x80 | ((len / 8) as u8).saturating_sub(2);
-    raw[1..1 + len].copy_from_slice(&ent[..len]);
-    ent.zeroize();
     let mut hex = [0u8; 2 * RAW_MAX];
-    let secret = vault::encode_secret(&raw[..1 + len], &mut hex).unwrap_or("");
+    let secret = vault::encode_secret(&raw[..used], &mut hex).unwrap_or("");
     let method = crate::key::method();
 
     // The default label is the fingerprint in brackets, which is what the list shows

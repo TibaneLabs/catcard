@@ -18,11 +18,16 @@
 //!
 //! # A temporary seed is one of them
 //!
-//! [`Source::Temporary`] is a seed the owner brought in for this session -- today, the
-//! result of joining Seed XOR parts -- used as if it were the master. Unlike the other
-//! two it is not derived from the root at all, so the bytes have to live somewhere: they
-//! are here, beside the selection, and [`crate::menu::seed_entropy`] returns them instead
-//! of reading the secure element.
+//! [`Source::Temporary`] is a key the owner brought in for this session -- joined Seed XOR
+//! parts, a vault entry, a BIP-85 XPRV or WIF child -- used as if it were the master.
+//! Unlike the other two it is not derived from the root at all, so the bytes have to live
+//! somewhere: they are here, beside the selection, and the menu's key helpers return them
+//! instead of reading the secure element.
+//!
+//! It is one of three shapes ([`Loaded`]): BIP-39 entropy, which is a whole wallet with
+//! words; an XPRV, which is a whole HD wallet with no words; or a WIF key, which is one
+//! key and nothing below it. What a screen can do depends on which -- there are no words
+//! to split in an XPRV, and no account to derive under a WIF key -- so each asks.
 //!
 //! What is still missing from stock's version is a *vault*: somewhere to keep several and
 //! choose between them, and the option to make one permanent. This holds exactly one, and
@@ -44,20 +49,31 @@ pub(crate) enum Source {
     /// can only say two -- and what identifies this wallet is the number in the
     /// derivation path, not which row was pressed to get here.
     Bip85 { words: u32, index: u32 },
-    /// A seed from outside, in force for this session only.
+    /// A key from outside, in force for this session only.
     ///
-    /// The entropy is in [`TEMP`] rather than in the variant: it is up to 32 bytes of
-    /// wallet, which has no business being `Copy`, being compared with `==`, or being
-    /// returned by value from [`in_force`] to whoever asks what wallet this is.
+    /// The bytes are in [`TEMP`] rather than in the variant: they are a wallet, which has
+    /// no business being `Copy`, being compared with `==`, or being returned by value from
+    /// [`in_force`] to whoever asks what wallet this is.
     Temporary,
 }
 
-/// The temporary seed's entropy, and how much of it is real.
+/// What shape a loaded key is. See the module notes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Loaded {
+    /// BIP-39 entropy: 16 to 32 bytes.
+    Words,
+    /// A BIP-32 root: the chain code, then the key -- 64 bytes, in the stash's order.
+    Xprv,
+    /// One private key, 32 bytes.
+    Wif,
+}
+
+/// The loaded key's bytes, how many are real, and what they are.
 ///
 /// Foreground only, single core, and wiped whenever the selection leaves it.
-static mut TEMP: [u8; catcard_wallet::bip39::MAX_ENTROPY_LEN] =
-    [0; catcard_wallet::bip39::MAX_ENTROPY_LEN];
+static mut TEMP: [u8; 64] = [0; 64];
 static mut TEMP_LEN: usize = 0;
+static mut TEMP_KIND: Loaded = Loaded::Words;
 
 /// How the temporary seed was made -- `XOR`, `BIP85`, whatever the vault recorded.
 ///
@@ -87,19 +103,40 @@ pub(crate) fn is_root() -> bool {
     in_force() == Source::Root && !crate::passphrase::is_set()
 }
 
-/// The temporary seed's entropy, if one is in force.
-pub(crate) fn temporary() -> Option<&'static [u8]> {
-    if in_force() != Source::Temporary {
+/// What shape the loaded key is, if one is in force.
+pub(crate) fn loaded() -> Option<Loaded> {
+    // SAFETY: foreground only; the only writer is `load`.
+    (in_force() == Source::Temporary).then(|| unsafe { *core::ptr::addr_of!(TEMP_KIND) })
+}
+
+/// The loaded key's bytes, if it is `kind`.
+fn loaded_bytes(kind: Loaded) -> Option<&'static [u8]> {
+    if loaded() != Some(kind) {
         return None;
     }
-    // SAFETY: foreground only; the only writer is `set_temporary`, which holds no
-    // borrow across the write, and the length is never longer than the array.
+    // SAFETY: foreground only; the only writer is `load`, which holds no borrow across
+    // the write, and the length is never longer than the array.
     unsafe {
         let len = *core::ptr::addr_of!(TEMP_LEN);
-        let all: &'static [u8; catcard_wallet::bip39::MAX_ENTROPY_LEN] =
-            &*core::ptr::addr_of!(TEMP);
+        let all: &'static [u8; 64] = &*core::ptr::addr_of!(TEMP);
         Some(&all[..len])
     }
+}
+
+/// The loaded seed's entropy, if a words key is in force.
+pub(crate) fn temporary() -> Option<&'static [u8]> {
+    loaded_bytes(Loaded::Words)
+}
+
+/// The loaded XPRV's chain code and key, if one is in force.
+pub(crate) fn temporary_xprv() -> Option<(&'static [u8; 32], &'static [u8; 32])> {
+    let b = loaded_bytes(Loaded::Xprv)?;
+    Some((b[..32].try_into().ok()?, b[32..64].try_into().ok()?))
+}
+
+/// The loaded WIF key, if one is in force.
+pub(crate) fn temporary_wif() -> Option<&'static [u8; 32]> {
+    loaded_bytes(Loaded::Wif)?.try_into().ok()
 }
 
 /// Work from `entropy` as if it were the stored seed, for this session.
@@ -110,12 +147,47 @@ pub(crate) fn set_temporary(entropy: &[u8], method: &str) -> bool {
     if catcard_wallet::bip39::words_for_entropy(entropy.len()).is_none() {
         return false;
     }
-    // SAFETY: as in `temporary`.
+    load(Loaded::Words, &[entropy], method);
+    true
+}
+
+/// Work in an XPRV -- `chain_code`, then `key` -- for this session.
+///
+/// A passphrase is a BIP-39 thing: it changes the seed the words stretch to, and an XPRV
+/// has no words. So one in force is dropped here rather than left looking as though it
+/// applied. Refuses a key outside the curve order.
+pub(crate) fn set_temporary_xprv(chain_code: &[u8; 32], key: &[u8; 32], method: &str) -> bool {
+    if !catcard_wallet::bip32::is_valid_secret(key) {
+        return false;
+    }
+    crate::passphrase::clear();
+    load(Loaded::Xprv, &[chain_code, key], method);
+    true
+}
+
+/// Work in a single private key for this session. As for an XPRV, the passphrase goes.
+pub(crate) fn set_temporary_wif(key: &[u8; 32], method: &str) -> bool {
+    if !catcard_wallet::bip32::is_valid_secret(key) {
+        return false;
+    }
+    crate::passphrase::clear();
+    load(Loaded::Wif, &[key], method);
+    true
+}
+
+/// Put `parts`, end to end, in force as a `kind` key made by `method`.
+fn load(kind: Loaded, parts: &[&[u8]], method: &str) {
+    // SAFETY: as in `loaded_bytes`.
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(TEMP);
         slot.zeroize();
-        slot[..entropy.len()].copy_from_slice(entropy);
-        *core::ptr::addr_of_mut!(TEMP_LEN) = entropy.len();
+        let mut len = 0;
+        for p in parts {
+            slot[len..len + p.len()].copy_from_slice(p);
+            len += p.len();
+        }
+        *core::ptr::addr_of_mut!(TEMP_LEN) = len;
+        *core::ptr::addr_of_mut!(TEMP_KIND) = kind;
         let m = &mut *core::ptr::addr_of_mut!(TEMP_METHOD);
         m.clear();
         let _ = m.push_str(&method[..method.len().min(m.capacity())]);
@@ -125,7 +197,6 @@ pub(crate) fn set_temporary(entropy: &[u8], method: &str) -> bool {
         let _ = pp.push_str("+PP");
     }
     set(Source::Temporary);
-    true
 }
 
 /// How the wallet in force came to be, as the Seed Vault records it.
@@ -136,7 +207,7 @@ pub(crate) fn method() -> &'static str {
         // one wallet the vault has no reason to hold.
         Source::Root => "Master",
         Source::Bip85 { .. } => "BIP85",
-        // SAFETY: as in `temporary`; the only writer is `set_temporary`.
+        // SAFETY: as in `loaded_bytes`; the only writer is `load`.
         Source::Temporary => {
             let m: &'static heapless::String<16> = unsafe { &*core::ptr::addr_of!(TEMP_METHOD) };
             if m.is_empty() { "Imported" } else { m.as_str() }
@@ -150,7 +221,7 @@ pub(crate) fn set(source: Source) {
     // copy, and a seed that outlived its selection would be a wallet in force that no
     // screen names.
     if source != Source::Temporary {
-        // SAFETY: as in `temporary`.
+        // SAFETY: as in `loaded_bytes`.
         unsafe {
             (*core::ptr::addr_of_mut!(TEMP)).zeroize();
             *core::ptr::addr_of_mut!(TEMP_LEN) = 0;
@@ -194,7 +265,7 @@ pub(crate) fn label() -> &'static str {
         (Source::Bip85 { .. }, true) => "BIP85+PP",
         (Source::Temporary, false) => method(),
         (Source::Temporary, true) => {
-            // SAFETY: as in `temporary`; the only writer is `set_temporary`.
+            // SAFETY: as in `loaded_bytes`; the only writer is `load`.
             let pp: &'static heapless::String<20> =
                 unsafe { &*core::ptr::addr_of!(TEMP_METHOD_PP) };
             if pp.is_empty() {

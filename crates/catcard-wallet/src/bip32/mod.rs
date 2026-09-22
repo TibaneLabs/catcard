@@ -128,6 +128,12 @@ pub fn is_valid_secret(bytes: &[u8; PRIVKEY_LEN]) -> bool {
     scalar_from_bytes(bytes).is_some()
 }
 
+/// The compressed public key of a bare private key -- one with no chain code, such as a
+/// WIF key. `None` for bytes that are not a usable key.
+pub fn public_key_of(secret: &[u8; PRIVKEY_LEN], _kw: &crate::KeyWork) -> Option<[u8; PUBKEY_LEN]> {
+    compress(&ProjectivePoint::mul_generator(&scalar_from_bytes(secret)?))
+}
+
 /// Interpret 32 bytes as a scalar, rejecting values at or above the curve order.
 ///
 /// BIP-32 requires this check. Reducing modulo n instead — which is what a `Reduce`

@@ -82,16 +82,25 @@ pub(crate) fn wallet_key(
         return Ok(key);
     }
 
+    use crate::key::Loaded;
+    // A single key has no stash form -- the secure element's format has no marker for one
+    // -- so there is nothing stock could open a file with, and none is kept.
+    if crate::key::loaded() == Some(Loaded::Wif) {
+        return Err("a WIF key keeps no settings");
+    }
+    // A passphrase wallet, and a loaded XPRV, are known by their master: the stash they
+    // would be stored as is the xprv one.
+    let as_xprv = crate::passphrase::is_set() || crate::key::loaded() == Some(Loaded::Xprv);
     let kind = if crate::key::is_root() {
         "stored stash"
-    } else if crate::passphrase::is_set() {
+    } else if as_xprv {
         "xprv stash"
     } else {
         "words stash"
     };
     let key = if crate::key::is_root() {
         root_key(gate, login, panel, head)?
-    } else if crate::passphrase::is_set() {
+    } else if as_xprv {
         let master = crate::menu::master_quietly(gate, login, panel, head)?;
         let mut stash =
             catcard_callgate::pin::encode_xprv(&master.chain_code, master.secret_bytes());

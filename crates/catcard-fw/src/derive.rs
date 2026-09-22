@@ -1,8 +1,13 @@
-//! BIP-85: showing a child of the seed.
+//! BIP-85: children of the seed, shown -- and the ones that are keys, put in force.
 //!
 //! The seed is backed up once; everything else comes out of it on demand. This screen
-//! derives one child and shows it, and nothing is stored: the same words give the same
-//! child again whenever it is asked for.
+//! derives one child, shows it, and for the three that are wallets -- words, an XPRV, a
+//! WIF key -- offers to work in it. Nothing is stored: the same seed gives the same child
+//! again whenever it is asked for.
+//!
+//! Every child comes from the **root** without its passphrase ([`menu::bip85_parent`]),
+//! whichever wallet is in force when it is asked for. So the child shown here is the one
+//! the key menu loads, and the same one again from anywhere.
 //!
 //! A child is shown, not exported to a card. What is on screen here -- words, a key, a
 //! password -- is the whole secret of another wallet or another account, and writing it to
@@ -12,41 +17,57 @@
 use catcard_callgate::Callgate;
 use catcard_wallet::bip85;
 use core::fmt::Write as _;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::display;
 use crate::menu;
 use crate::ui::Ui;
 
-/// What can be derived, in the order the menu lists them.
+const HEAD: &str = "BIP-85";
+
+/// What can be derived.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum Kind {
-    Words24,
-    Words12,
+enum Kind {
+    /// A BIP-39 phrase of this many words.
+    Words(u32),
     Xprv,
     Wif,
     Password,
     Hex32,
 }
 
-impl Kind {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Kind::Words24 => "24 words",
-            Kind::Words12 => "12 words",
-            Kind::Xprv => "XPRV",
-            Kind::Wif => "WIF key",
-            Kind::Password => "Password",
-            Kind::Hex32 => "32 bytes hex",
-        }
-    }
+/// The list, in the order it is shown. Every word count BIP-39 defines: the BIP names 12,
+/// 18 and 24, and 15 and 21 derive by the same rule -- fewer wallets will reproduce them.
+const ROWS: &[&str] = &[
+    "12 words",
+    "15 words",
+    "18 words",
+    "21 words",
+    "24 words",
+    "XPRV",
+    "WIF key",
+    "Password",
+    "32 bytes hex",
+];
+const KINDS: [Kind; 9] = [
+    Kind::Words(12),
+    Kind::Words(15),
+    Kind::Words(18),
+    Kind::Words(21),
+    Kind::Words(24),
+    Kind::Xprv,
+    Kind::Wif,
+    Kind::Password,
+    Kind::Hex32,
+];
+const _: () = assert!(ROWS.len() == KINDS.len());
 
+impl Kind {
     /// The BIP-85 path this uses, for the screen to show.
     fn path(self, index: u32) -> heapless::String<48> {
         let mut s = heapless::String::new();
         let _ = match self {
-            Kind::Words24 => write!(s, "m/83696968h/39h/0h/24h/{index}h"),
-            Kind::Words12 => write!(s, "m/83696968h/39h/0h/12h/{index}h"),
+            Kind::Words(n) => write!(s, "m/83696968h/39h/0h/{n}h/{index}h"),
             Kind::Xprv => write!(s, "m/83696968h/32h/{index}h"),
             Kind::Wif => write!(s, "m/83696968h/2h/{index}h"),
             Kind::Password => write!(s, "m/83696968h/707764h/21h/{index}h"),
@@ -56,146 +77,148 @@ impl Kind {
     }
 }
 
-/// Characters the longest answer needs: a 24-word phrase.
-const MAX_OUT: usize = catcard_wallet::bip39::MAX_PHRASE_LEN;
-
-/// Derive `kind` at `index` and show it.
-pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, kind: Kind) {
-    const HEAD: &str = "Derive";
-
-    let index = match pick_index(ui, kind) {
-        Some(i) => i,
-        None => return,
-    };
-    let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
-        return;
-    };
-
-    let mut busy = menu::Working::new(ui.panel, HEAD, kind.label());
-    // The child is derived and rendered inside one masked region: what comes out is a
-    // secret in its own right, and the derivation is private-key work.
-    let shown = crate::keywork::run(|kw| {
-        let mut out: heapless::String<MAX_OUT> = heapless::String::new();
-        let mut buf = [0u8; MAX_OUT];
-        let written = match kind {
-            Kind::Words24 | Kind::Words12 => {
-                let words = if kind == Kind::Words24 { 24 } else { 12 };
-                let (entropy, len) = bip85::words_entropy(&master, words, index, kw)
-                    .map_err(|_| "could not derive it")?;
-                let mnemonic =
-                    catcard_wallet::bip39::Mnemonic::from_entropy(&entropy.as_bytes()[..len], kw)
-                        .map_err(|_| "could not derive it")?;
-                Ok(mnemonic.render(&mut buf))
-            }
-            Kind::Xprv => {
-                let child = bip85::xprv(&master, index, kw).map_err(|_| "could not derive it")?;
-                child
-                    .write_base58(&mut buf, kw)
-                    .map_err(|_| "could not derive it")
-            }
-            Kind::Wif => {
-                bip85::wif(&master, index, &mut buf, kw).map_err(|_| "could not derive it")
-            }
-            Kind::Password => {
-                bip85::password(&master, 21, index, &mut buf, kw).map_err(|_| "could not derive it")
-            }
-            Kind::Hex32 => {
-                bip85::hex(&master, 32, index, &mut buf, kw).map_err(|_| "could not derive it")
-            }
-        }?;
-        let text = core::str::from_utf8(&buf[..written]).map_err(|_| "could not show it")?;
-        let _ = out.push_str(text);
-        buf.zeroize();
-        Ok(out)
-    });
-    busy.tick(ui.panel);
-    drop(master);
-
-    let mut shown = match shown {
-        Ok(s) => s,
-        Err(why) => {
-            crate::catlog!("derive: {}", why);
-            menu::message(ui.panel, HEAD, why, "any key to go back");
-            menu::wait_for_any_key(ui);
-            return;
-        }
-    };
-    crate::catlog!("derive: {} at index {}", kind.label(), index);
-    show(ui, kind, index, shown.as_str());
-    // The answer leaves no copy behind on the way out.
-    let mut bytes = core::mem::take(&mut shown).into_bytes();
-    bytes.zeroize();
+/// A child the owner chose to work in. Wiped when dropped.
+pub(crate) enum Chosen {
+    /// Words: loaded by their place in the tree, as [`crate::key::Source::Bip85`], and
+    /// derived again from the root whenever a screen needs the seed.
+    Words { words: u32, index: u32 },
+    /// An XPRV: the chain code, then the key.
+    Xprv { chain_code: [u8; 32], key: [u8; 32] },
+    /// A WIF key.
+    Wif { key: [u8; 32] },
 }
 
-/// Choose the index. Up and down move it, confirm accepts, cancel backs out.
-fn pick_index(ui: &mut Ui<'_>, kind: Kind) -> Option<u32> {
-    use catcard_ui::keypad::{Event, KEYS, Key};
-    use catcard_ui::scroll::{Line, ScrollView, render};
-
-    let mut index: u32 = 0;
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    loop {
-        let path = kind.path(index);
-        let mut line = heapless::String::<32>::new();
-        let _ = write!(line, "index {index}");
-        let mut hint = heapless::String::<48>::new();
-        let _ = write!(
-            hint,
-            "{} derive   {} back",
-            display::CONFIRM_KEY,
-            display::CANCEL_KEY
-        );
-        let mut doc: heapless::Vec<Line, 6> = heapless::Vec::new();
-        let _ = doc.push(Line::title(kind.label()));
-        let _ = doc.push(Line::body(line.as_str()));
-        let _ = doc.push(Line::body(path.as_str()).small().wrapped());
-        let _ = doc.push(Line::body("up/down index").small());
-        let _ = doc.push(Line::body(hint.as_str()).small());
-        let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-        display::draw(ui.panel, |c| render(c, &view));
-
-        menu::wait_for_release(ui);
-        loop {
-            let _ = crate::usbtask::pump();
-            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-            let mut moved = false;
-            for k in keys.iter() {
-                match k {
-                    Key::Confirm => return Some(index),
-                    Key::Cancel => return None,
-                    Key::Digit(8) => {
-                        index = index.saturating_add(1);
-                        moved = true;
-                    }
-                    Key::Digit(5) => {
-                        index = index.saturating_sub(1);
-                        moved = true;
-                    }
-                    _ => {}
-                }
+impl Drop for Chosen {
+    fn drop(&mut self) {
+        match self {
+            Chosen::Words { .. } => {}
+            Chosen::Xprv { chain_code, key } => {
+                chain_code.zeroize();
+                key.zeroize();
             }
-            if moved {
-                break;
-            }
-            display::idle(ui.panel);
+            Chosen::Wif { key } => key.zeroize(),
         }
     }
 }
 
-/// Show the child, scrollable, until a key is pressed.
-fn show(ui: &mut Ui<'_>, kind: Kind, index: u32, text: &str) {
+/// Characters the longest answer needs: a 24-word phrase.
+const MAX_OUT: usize = catcard_wallet::bip39::MAX_PHRASE_LEN;
+
+/// What a child is written as, and the key it is if it is one.
+type Derived = (Zeroizing<[u8; MAX_OUT]>, usize, Option<Chosen>);
+
+/// Pick a child, derive it and show it. `Some` if the owner chose to work in it.
+pub(crate) fn bip85(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<Chosen> {
+    let (row, index) = loop {
+        let row = menu::pick_row(ui, HEAD, "derive a child", ROWS)?;
+        // Backing out of the index goes back to the list, not out of BIP-85: they are a
+        // pair, and getting the second wrong should not cost the first.
+        if let Some(index) = menu::ask_index(ui, HEAD, ROWS[row]) {
+            break (row, index);
+        }
+    };
+    let kind = KINDS[row];
+
+    let master = match menu::bip85_parent(gate, login, ui.panel, HEAD) {
+        Ok(m) => m,
+        Err(why) => {
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return None;
+        }
+    };
+    // Derived and written out inside one masked region: what comes out is a secret in its
+    // own right, and the derivation is private-key work.
+    let derived = crate::keywork::run(|kw| derive(&master, kind, index, kw));
+    drop(master);
+
+    let (text, len, chosen) = match derived {
+        Ok(d) => d,
+        Err(why) => {
+            crate::catlog!("bip85: {} at {}: {}", ROWS[row], index, why);
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return None;
+        }
+    };
+    crate::catlog!("bip85: {} at index {}", ROWS[row], index);
+    let text = core::str::from_utf8(&text[..len]).unwrap_or("");
+    let take = show(ui, kind, ROWS[row], index, text, chosen.is_some());
+    chosen.filter(|_| take)
+}
+
+fn derive(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    kind: Kind,
+    index: u32,
+    kw: &catcard_wallet::KeyWork,
+) -> Result<Derived, &'static str> {
+    const BAD: &str = "could not derive it";
+    let mut buf = Zeroizing::new([0u8; MAX_OUT]);
+    let out = &mut buf[..];
+    let (len, chosen) = match kind {
+        Kind::Words(words) => {
+            let (entropy, n) = bip85::words_entropy(master, words, index, kw).map_err(|_| BAD)?;
+            let mnemonic =
+                catcard_wallet::bip39::Mnemonic::from_entropy(&entropy.as_bytes()[..n], kw)
+                    .map_err(|_| BAD)?;
+            (mnemonic.render(out), Some(Chosen::Words { words, index }))
+        }
+        Kind::Xprv => {
+            let child = bip85::xprv(master, index, kw).map_err(|_| BAD)?;
+            let len = child.write_base58(out, kw).map_err(|_| BAD)?;
+            let chosen = Chosen::Xprv {
+                chain_code: child.chain_code,
+                key: *child.secret_bytes(),
+            };
+            (len, Some(chosen))
+        }
+        Kind::Wif => {
+            let chosen = Chosen::Wif {
+                key: bip85::wif_secret(master, index, kw).map_err(|_| BAD)?,
+            };
+            let Chosen::Wif { key } = &chosen else {
+                return Err(BAD);
+            };
+            (bip85::encode_wif(key, out).map_err(|_| BAD)?, Some(chosen))
+        }
+        Kind::Password => (
+            bip85::password(master, 21, index, out, kw).map_err(|_| BAD)?,
+            None,
+        ),
+        Kind::Hex32 => (
+            bip85::hex(master, 32, index, out, kw).map_err(|_| BAD)?,
+            None,
+        ),
+    };
+    Ok((buf, len, chosen))
+}
+
+/// Show the child, scrollable. True if the owner chose to work in it -- offered only when
+/// `loadable`, since a password or a hex string is not a wallet.
+fn show(ui: &mut Ui<'_>, kind: Kind, label: &str, index: u32, text: &str, loadable: bool) -> bool {
     use catcard_ui::scroll::{Line, ScrollView};
     let path = kind.path(index);
+    let mut hint = heapless::String::<48>::new();
+    if loadable {
+        let _ = write!(
+            hint,
+            "{} work in it   {} back",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+    } else {
+        let _ = hint.push_str("write it down; it is not stored");
+    }
     let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
-    let _ = doc.push(Line::title(kind.label()));
+    let _ = doc.push(Line::title(label));
     let _ = doc.push(Line::body(text).wrapped());
     let _ = doc.push(Line::body(path.as_str()).small().wrapped());
-    let _ = doc.push(
-        Line::body("write it down; it is not stored")
-            .small()
-            .wrapped(),
-    );
+    let _ = doc.push(Line::body(hint.as_str()).small().wrapped());
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    let _ = menu::scroll_choice(ui, &mut view);
+    menu::scroll_choice(ui, &mut view) && loadable
 }

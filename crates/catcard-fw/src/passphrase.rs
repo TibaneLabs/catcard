@@ -64,6 +64,21 @@ fn wipe(s: &mut heapless::String<MAX_LEN>) {
 pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Passphrase";
 
+    // A passphrase changes the seed that words stretch to. An XPRV or a single key has
+    // no words, so there is nothing for one to change -- said, rather than taking a
+    // passphrase that would silently do nothing.
+    use crate::key::Loaded;
+    if let Some(kind @ (Loaded::Xprv | Loaded::Wif)) = crate::key::loaded() {
+        let what = if kind == Loaded::Xprv {
+            "an XPRV has no words"
+        } else {
+            "a WIF key has no words"
+        };
+        menu::message(ui.panel, HEAD, what, "for a passphrase to change");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+
     let Some(mut entry) = read(ui, HEAD) else {
         return;
     };

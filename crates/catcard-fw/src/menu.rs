@@ -145,10 +145,6 @@ enum Screen {
     VerifyAddress,
     /// Sign a typed message with one of this wallet's keys.
     SignMessage,
-    /// Which kind of BIP-85 child to derive.
-    DeriveMenu,
-    /// Derive and show one BIP-85 child.
-    Derive(u8),
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -275,7 +271,6 @@ impl Screen {
     fn row(self) -> u8 {
         match self {
             Screen::NewSeed(w)
-            | Screen::Derive(w)
             | Screen::Xpub(w)
             | Screen::GenericJson(w)
             | Screen::ExportOne(w)
@@ -401,7 +396,6 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Verify address",
     "Sign message",
-    "Derive child",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -414,7 +408,6 @@ const UTILS_ITEMS: &[&str] = &[
     "View TRNG Words",
     "Verify address",
     "Sign message",
-    "Derive child",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -471,7 +464,7 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 /// owner looking for Seed XOR looks where the key lives rather than in a tool drawer.
 const KEY_ITEMS_ROOT: &[&str] = &[
     "Passphrase",
-    "BIP-85 key",
+    "BIP-85",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -481,7 +474,7 @@ const KEY_ITEMS_ROOT: &[&str] = &[
 const KEY_ITEMS_DERIVED: &[&str] = &[
     "Back to root",
     "Passphrase",
-    "BIP-85 key",
+    "BIP-85",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -508,16 +501,6 @@ const XPUB_ITEMS: &[&str] = &[
     "P2WPKH/P2SH (49)",
     "Master XPUB",
     "Current XFP",
-];
-
-/// What BIP-85 can derive. The order matches [`crate::derive::Kind`]'s.
-const DERIVE_ITEMS: &[&str] = &[
-    "24 words",
-    "12 words",
-    "XPRV",
-    "WIF key",
-    "Password",
-    "32 bytes hex",
 ];
 
 /// The games in the Games submenu.
@@ -565,20 +548,6 @@ const DEBUG_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Secure notes",
 ];
-
-/// The BIP-85 child a [`DERIVE_ITEMS`] row selects.
-fn derive_kind(which: u8) -> Option<crate::derive::Kind> {
-    use crate::derive::Kind;
-    Some(match which {
-        0 => Kind::Words24,
-        1 => Kind::Words12,
-        2 => Kind::Xprv,
-        3 => Kind::Wif,
-        4 => Kind::Password,
-        5 => Kind::Hex32,
-        _ => return None,
-    })
-}
 
 /// Run the menu. Never returns.
 ///
@@ -923,8 +892,8 @@ struct Act<'a, 'u> {
     /// The boot entropy pool. `None` on a device whose pool never met its policy, which
     /// is a refusal to generate a seed rather than a reason to use something weaker.
     pool: Option<&'a mut catcard_entropy::EntropyPool>,
-    /// The word count carried by `Screen::NewSeed(n)`, or the row carried by
-    /// `Screen::Derive(n)`; zero for every other action.
+    /// The word count carried by `Screen::NewSeed(n)`, or the row a list screen's
+    /// variant carries ([`Screen::row`]); zero for every other action.
     words: u8,
     /// The boot report, for an action that has to restart the session around it.
     report: &'a BootReport,
@@ -1027,14 +996,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::SignMessage => to(
             |a| crate::signmsg::screen(a.gate, a.login, a.ui),
             Screen::Utils,
-        ),
-        Screen::Derive(_) => to(
-            |a| {
-                if let Some(kind) = derive_kind(a.words) {
-                    crate::derive::screen(a.gate, a.login, a.ui, kind);
-                }
-            },
-            Screen::DeriveMenu,
         ),
         Screen::BrowseSd => to(
             |a| {
@@ -1279,11 +1240,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
-        Screen::DeriveMenu => match key {
-            Key::Confirm => Screen::Derive(cursor as u8),
-            Key::Cancel => Screen::Utils,
-            _ => Screen::DeriveMenu,
-        },
         // The export drawer. Its rows were briefly handled inside `Utils`, where none of
         // them can ever be selected -- so Confirm fell through to the catch-all and put
         // people in the Debug menu.
@@ -1342,7 +1298,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
-            (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
@@ -1608,7 +1563,7 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             // The Derive grid.
             "Back to root" => Some(&art::RETURN_ROOT_KEY),
             "Passphrase" => Some(&art::DERIVE_PASSPHRASE),
-            "BIP-85 key" => Some(&art::DERIVE_BIP85_INDEX),
+            "BIP-85" => Some(&art::DERIVE_BIP85_INDEX),
             "XOR split" => Some(&art::XOR_SPLIT),
             "XOR join" => Some(&art::XOR_JOIN),
             "Key vault" => Some(&art::KEY_VAULT),
@@ -1641,7 +1596,6 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
-        Screen::DeriveMenu => Some(DERIVE_ITEMS),
         Screen::KeyMenu => Some(key_items()),
         Screen::ExportMenu => Some(EXPORT_ITEMS),
         Screen::XpubMenu => Some(XPUB_ITEMS),
@@ -1663,7 +1617,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
-        | Screen::DeriveMenu
         | Screen::ExportMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
@@ -1713,7 +1666,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::SignMessage
         | Screen::Passphrase
         | Screen::KeyPassphrase => {}
-        Screen::Derive(_) => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -1779,10 +1731,6 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
             "New wallet"
         }
         Screen::Debug => "Debug",
-        Screen::DeriveMenu => {
-            let _ = note.push_str("children of this seed");
-            "Derive child"
-        }
         Screen::KeyMenu => {
             let _ = note.push_str(if crate::key::is_root() {
                 "working in the root wallet"
@@ -4485,22 +4433,66 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
         return;
     };
 
-    let chosen = match row {
-        "Back to root" => Source::Root,
-        "BIP-85 key" => {
-            let Some((words, index)) = ask_bip85(ui, HEAD) else {
+    let was = crate::key::in_force();
+    match row {
+        "Back to root" => crate::key::to_root(),
+        "BIP-85" => {
+            use crate::derive::Chosen;
+            let Some(child) = crate::derive::bip85(gate, login, ui) else {
                 return;
             };
-            Source::Bip85 { words, index }
+            // A words child is loaded by its place in the tree and derived again when
+            // needed; an XPRV or WIF child is its key, held for the session.
+            let loaded = match &child {
+                Chosen::Words { words, index } => {
+                    crate::key::set(Source::Bip85 {
+                        words: *words,
+                        index: *index,
+                    });
+                    true
+                }
+                Chosen::Xprv { chain_code, key } => {
+                    crate::key::set_temporary_xprv(chain_code, key, "BIP85 XPRV")
+                }
+                Chosen::Wif { key } => crate::key::set_temporary_wif(key, "BIP85 WIF"),
+            };
+            drop(child);
+            if !loaded {
+                message(ui.panel, HEAD, "that key is not usable", "unchanged");
+                wait_for_any_key(ui);
+                return;
+            }
         }
         _ => return,
-    };
+    }
 
-    let was = crate::key::in_force();
-    if chosen == Source::Root {
-        crate::key::to_root();
-    } else {
-        crate::key::set(chosen);
+    // A single key has no master to take a fingerprint of. What names it instead is its
+    // own: the first four bytes of its hash160, which is what BIP-32 would call this key's
+    // fingerprint if it were a node. It keeps no settings file.
+    if let Some(key) = crate::key::temporary_wif() {
+        let fp = crate::keywork::run(|kw| {
+            catcard_wallet::bip32::public_key_of(key, kw)
+                .map(|pk| catcard_wallet::bip32::hash160(&pk))
+        });
+        let Some(id) = fp else {
+            crate::key::set(was);
+            message(ui.panel, HEAD, "that key is not usable", "unchanged");
+            wait_for_any_key(ui);
+            return;
+        };
+        let [a, b, c, d] = [id[0], id[1], id[2], id[3]];
+        let mut said: heapless::String<24> = heapless::String::new();
+        let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
+        crate::catlog!(
+            "key: now WIF key {} ({})",
+            said.as_str(),
+            crate::key::label()
+        );
+        #[cfg(feature = "board-q1")]
+        crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
+        message(ui.panel, HEAD, &said, crate::key::label());
+        wait_for_any_key(ui);
+        return;
     }
 
     // Derive it now, so the fingerprint on screen is this wallet's and not a promise.
@@ -4566,15 +4558,6 @@ fn sweep_test(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
     wait_for_any_key(ui);
 }
 
-/// Every word count BIP-39 defines, as the rows of a list.
-///
-/// The BIP names 12, 18 and 24; 15 and 21 derive by the same rule and are offered
-/// because the rule does not stop at three -- with the caveat, on the screen that
-/// derives them, that fewer wallets will reproduce them.
-const BIP85_WORD_ROWS: &[&str] = &["12 words", "15 words", "18 words", "21 words", "24 words"];
-const BIP85_WORDS: [u32; 5] = [12, 15, 18, 21, 24];
-const _: () = assert!(BIP85_WORDS.len() == BIP85_WORD_ROWS.len());
-
 /// A one-question list, returning the row chosen.
 ///
 /// For a choice made *inside* an action, where turning it into another `Screen` would
@@ -4582,7 +4565,7 @@ const _: () = assert!(BIP85_WORDS.len() == BIP85_WORD_ROWS.len());
 /// board, unlike [`choose`], because a document renders at whatever size the panel is.
 pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
     use catcard_ui::scroll::Line as DLine;
-    let mut lines: heapless::Vec<DLine, 10> = heapless::Vec::new();
+    let mut lines: heapless::Vec<DLine, 12> = heapless::Vec::new();
     let _ = lines.push(DLine::title(head));
     if !note.is_empty() {
         let _ = lines.push(DLine::body(note).small());
@@ -4596,33 +4579,17 @@ pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) 
     }
 }
 
-/// Pick the two things that identify a BIP-85 child: how many words, and which one.
-///
-/// **A list, then a typed number.** The index used to be nudged one at a time with two
-/// arrow keys, which is fine for child 3 and useless for the birthday or the year people
-/// actually use -- and the arrows on this board are the digit keys, so a field that took
-/// both could not tell them apart. So the word count, which has five values, is a list;
-/// and the index, which has two billion, is typed.
-///
-/// Cancel on an empty index goes back to the word count rather than out of the screen:
-/// they are a pair, a child is *both*, and getting the second one wrong should not cost
-/// the first.
-fn ask_bip85(ui: &mut Ui<'_>, head: &str) -> Option<(u32, u32)> {
-    loop {
-        let row = pick_row(ui, head, "how many words", BIP85_WORD_ROWS)?;
-        let words = BIP85_WORDS[row];
-        if let Some(index) = ask_index(ui, head, words) {
-            return Some((words, index));
-        }
-    }
-}
-
 /// The index of a BIP-85 child, typed.
 ///
-/// Both halves of the choice are on screen: the word count as a row that is not live,
-/// the index under it with the caret. An empty field is index zero, which is the child
-/// almost everyone means, so the common case is one press of the accept key.
-fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
+/// **Typed, not stepped.** The index used to be nudged one at a time with two arrow keys,
+/// which is fine for child 3 and useless for the birthday or the year people actually
+/// use -- and the arrows on the numpad boards are digit keys, so a field that took both
+/// could not tell them apart.
+///
+/// Both halves of the choice are on screen: `what` (the kind of child) as a row that is
+/// not live, the index under it with the caret. An empty field is index zero, which is the
+/// child almost everyone means, so the common case is one press of the accept key.
+pub(crate) fn ask_index(ui: &mut Ui<'_>, head: &str, what: &str) -> Option<u32> {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Accept, Field, Input};
     use catcard_ui::text::{centred, draw_text};
@@ -4633,8 +4600,10 @@ fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
     let top_y = display::FIELD_TOP;
 
     let mut input = Input::<MAX_DIGITS>::new(Accept::Digits, MAX_DIGITS);
-    let mut count: heapless::String<12> = heapless::String::new();
-    let _ = write!(count, "{words}");
+    // Sized for what the index can hold, ten digits, not for the width of the panel --
+    // or for the kind above it, where that is longer. Both rows say so because the card
+    // is one box and takes its widest row.
+    let width = MAX_DIGITS.max(what.len());
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     // Said only once it has happened, so the screen is not shouting a rule at someone
@@ -4642,13 +4611,9 @@ fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
     let mut complaint = "";
 
     loop {
-        // Sized for what the index can hold, ten digits, not for the width of the panel.
-        // Both rows say so because the card is one box and takes its widest row.
         let fields = [
-            Field::text("words", count.as_str()).max(MAX_DIGITS),
-            Field::text("index", input.as_str())
-                .max(MAX_DIGITS)
-                .live(true),
+            Field::text("child", what).max(width),
+            Field::text("index", input.as_str()).max(width).live(true),
         ];
         let body = display::LAYOUT.body;
         let foot = if complaint.is_empty() {
@@ -5010,19 +4975,12 @@ pub(crate) fn unlock_master(
     }
 }
 
-/// The stored BIP-39 wallet's master key, with a progress screen but no dialogs.
-///
-/// The same work as [`unlock_master`] without the part that needs a person: it reports
-/// why it could not rather than saying so and waiting for a key. For callers that are not
-/// a screen -- warming the status bar's fingerprint after login, where a message box
-/// would be an interruption nobody asked for, and a key wait would stall the device
-/// behind a question about something the owner never requested.
 /// The BIP-39 entropy of the wallet in force, with a progress screen.
 ///
 /// The secret the secure element holds, or -- when a BIP-85 child is in force -- that
 /// child's own entropy, which is a different seed derived from the same backup. Not the
 /// master key and not the passphrase: this is the *words*, which is what a seed backup,
-/// a split or a word list is made of.
+/// a split or a word list is made of. A loaded XPRV or WIF key has none, and says so.
 ///
 /// Its own function because two things want it and they must not disagree:
 /// [`master_quietly`], which stretches it into a key, and Seed XOR, which cuts it up.
@@ -5032,24 +4990,67 @@ pub(crate) fn seed_entropy(
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<([u8; 32], usize), &'static str> {
-    use catcard_callgate::pin::bip39_entropy;
-    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
-    use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
+    use crate::key::Loaded;
     use zeroize::Zeroize;
 
-    let mut ent = [0u8; 32];
-
-    // A seed the owner brought in for this session is the wallet, and it is already
+    // A key the owner brought in for this session is the wallet, and it is already
     // here: nothing to fetch, and no child to derive -- it is not a child of anything.
-    if let Some(temp) = crate::key::temporary() {
-        ent[..temp.len()].copy_from_slice(temp);
-        return Ok((ent, temp.len()));
+    match crate::key::loaded() {
+        Some(Loaded::Words) => {
+            let mut ent = [0u8; 32];
+            let temp = crate::key::temporary().ok_or("no key loaded")?;
+            ent[..temp.len()].copy_from_slice(temp);
+            return Ok((ent, temp.len()));
+        }
+        Some(Loaded::Xprv) => return Err("an XPRV has no words"),
+        Some(Loaded::Wif) => return Err("a WIF key has no words"),
+        None => {}
     }
 
-    // Say so before asking for the secret, not after. The fetch is one callgate call: the
-    // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
-    // mk4 -- and the firewall resets the CPU if an interrupt lands in it, so the firmware
-    // cannot repaint across it. The panel can, where its controller scrolls on its own.
+    let (mut ent, mut ent_len) = root_entropy(gate, login, panel, head)?;
+
+    // The wallet in force may not be the one the secure element holds: a BIP-85 child
+    // is a separate seed derived from the same backup, and every screen has to land in
+    // the same one. So the selection is applied here, once, where the seed already is
+    // -- rather than at each screen, where they would disagree.
+    //
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
+    if let crate::key::Source::Bip85 { words, index } = crate::key::in_force() {
+        let mut busy = Working::seed(panel, head, "deriving the key");
+        let child = crate::keywork::run(|kw| {
+            let master = plain_master(&ent[..ent_len], kw)?;
+            let (child, len) = catcard_wallet::bip85::words_entropy(&master, words, index, kw)
+                .map_err(|_| "that child does not derive")?;
+            ent.zeroize();
+            ent[..len].copy_from_slice(&child.as_bytes()[..len]);
+            Ok::<usize, &'static str>(len)
+        });
+        busy.tick(panel);
+        match child {
+            Ok(len) => ent_len = len,
+            Err(why) => {
+                ent.zeroize();
+                return Err(why);
+            }
+        }
+    }
+    Ok((ent, ent_len))
+}
+
+/// The entropy the secure element holds, whatever wallet is in force.
+///
+/// The reading-seed screen first, then the fetch -- one callgate call during which the
+/// bootloader runs the PIN key-stretch inside the secure element, about 1.6 s on an mk4,
+/// with the CPU unable to repaint.
+fn root_entropy(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<([u8; 32], usize), &'static str> {
+    use catcard_callgate::pin::bip39_entropy;
+    use zeroize::Zeroize;
+
     reading_seed(panel, head);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = login
@@ -5059,8 +5060,8 @@ pub(crate) fn seed_entropy(
     // Copy the entropy out into an owned buffer so the secret can be wiped immediately;
     // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
     // something this can enumerate.
-    #[allow(unused_mut)]
-    let mut ent_len = match bip39_entropy(&secret) {
+    let mut ent = [0u8; 32];
+    let len = match bip39_entropy(&secret) {
         Some(e) if e.len() <= ent.len() => {
             ent[..e.len()].copy_from_slice(e);
             e.len()
@@ -5082,54 +5083,81 @@ pub(crate) fn seed_entropy(
         }
     };
     secret.zeroize();
-
-    // The wallet in force may not be the one the secure element holds: a BIP-85 child
-    // is a separate seed derived from the same backup, and every screen has to land in
-    // the same one. So the selection is applied here, once, where the seed already is
-    // -- rather than at each screen, where they would disagree.
-    //
-    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
-    if let crate::key::Source::Bip85 { words, index } = crate::key::in_force() {
-        // The child is derived from the root's master **without** the passphrase: the
-        // passphrase belongs to the wallet that is finally in force, not to the path
-        // taken to reach it. Applying it twice would give a wallet nothing else agrees
-        // with.
-        let mut busy = Working::seed(panel, head, "deriving the key");
-        let child = crate::keywork::run(|kw| {
-            let root =
-                Mnemonic::from_entropy(&ent[..ent_len], kw).map_err(|_| "seed did not decode")?;
-            let mut seed = [0u8; SEED_LEN];
-            root.to_seed("", &mut seed, kw)
-                .map_err(|_| "key derivation failed")?;
-            let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw)
-                .map_err(|_| "key derivation failed");
-            seed.zeroize();
-            let master = master?;
-            let (child, len) = catcard_wallet::bip85::words_entropy(&master, words, index, kw)
-                .map_err(|_| "that child does not derive")?;
-            ent.zeroize();
-            ent[..len].copy_from_slice(&child.as_bytes()[..len]);
-            Ok::<usize, &'static str>(len)
-        });
-        busy.tick(panel);
-        match child {
-            Ok(len) => ent_len = len,
-            Err(why) => {
-                ent.zeroize();
-                return Err(why);
-            }
-        }
-    }
-    Ok((ent, ent_len))
+    Ok((ent, len))
 }
 
+/// BIP-39 entropy to its BIP-32 master **with no passphrase**, inside the masked region.
+fn plain_master(
+    entropy: &[u8],
+    kw: &catcard_wallet::KeyWork,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
+    use zeroize::Zeroize;
+
+    let root = Mnemonic::from_entropy(entropy, kw).map_err(|_| "seed did not decode")?;
+    let mut seed = [0u8; SEED_LEN];
+    root.to_seed("", &mut seed, kw)
+        .map_err(|_| "key derivation failed")?;
+    let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw)
+        .map_err(|_| "key derivation failed");
+    seed.zeroize();
+    master
+}
+
+/// The key every BIP-85 child comes from: the root's master, **without** the passphrase,
+/// whatever wallet is in force.
+///
+/// The passphrase belongs to the wallet that is finally in force, not to the path taken
+/// to reach it -- applying it on the way down as well would give a wallet nothing else
+/// agrees with. And the root rather than the key in force, so a child shown here is the
+/// child [`seed_entropy`] loads, and the same one again from any wallet the owner is in.
+pub(crate) fn bip85_parent(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use zeroize::Zeroize;
+    let (mut ent, len) = root_entropy(gate, login, panel, head)?;
+    let mut busy = Working::seed(panel, head, "deriving the key");
+    let master = crate::keywork::run(|kw| plain_master(&ent[..len], kw));
+    ent.zeroize();
+    busy.tick(panel);
+    master
+}
+
+/// The wallet in force's master key, with a progress screen but no dialogs.
+///
+/// The same work as [`unlock_master`] without the part that needs a person: it reports
+/// why it could not rather than saying so and waiting for a key. For callers that are not
+/// a screen -- warming the status bar's fingerprint after login, where a message box
+/// would be an interruption nobody asked for, and a key wait would stall the device
+/// behind a question about something the owner never requested.
+///
+/// A loaded XPRV **is** the master, so there is nothing to stretch. A loaded WIF key has
+/// no master at all: every HD screen stops here, with the reason, rather than inventing a
+/// chain code to derive something nobody else would find.
 pub(crate) fn master_quietly(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use crate::key::Loaded;
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    match crate::key::loaded() {
+        Some(Loaded::Xprv) => {
+            let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
+            return Ok(ExtendedPrivKey::root_from_parts(
+                Network::Mainnet,
+                *chain_code,
+                *key,
+            ));
+        }
+        Some(Loaded::Wif) => return Err("a WIF key is not HD"),
+        _ => {}
+    }
     with_seed(gate, login, panel, head, |seed, kw| {
         ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
     })
@@ -5196,6 +5224,9 @@ pub(crate) fn with_seed<T>(
 /// explorer comes back to the picker, and leaving the picker leaves -- unless there is
 /// only one chain to pick, when there is no picker to come back to.
 fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    if crate::key::loaded() == Some(crate::key::Loaded::Wif) {
+        return wif_addresses(gate, login, ui);
+    }
     #[cfg(feature = "multichain")]
     loop {
         let offered = crate::chains::enabled(gate, login, ui).len();
@@ -5213,6 +5244,97 @@ fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     }
     #[cfg(not(feature = "multichain"))]
     address_explorer(gate, login, ui)
+}
+
+/// Addresses for a loaded WIF key: one key, so one address per format -- no accounts, no
+/// indices, nothing below it. On a multichain build, the chain first, as for any wallet.
+fn wif_addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    let Some(key) = crate::key::temporary_wif() else {
+        return;
+    };
+    let Some(pubkey) = crate::keywork::run(|kw| catcard_wallet::bip32::public_key_of(key, kw))
+    else {
+        message(
+            ui.panel,
+            "Addresses",
+            "that key is not usable",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+        return;
+    };
+    #[cfg(feature = "multichain")]
+    loop {
+        let offered = crate::chains::enabled(gate, login, ui).len();
+        let Some(chain) = pick_chain(gate, login, ui) else {
+            return;
+        };
+        single_key_addresses(ui, chain, &pubkey);
+        if offered <= 1 {
+            return;
+        }
+    }
+    #[cfg(not(feature = "multichain"))]
+    {
+        let _ = (gate, login);
+        single_key_addresses(ui, &catcard_wallet::chain::BITCOIN, &pubkey);
+    }
+}
+
+/// One key's address in each of `chain`'s formats, a row each; choosing one shows its QR.
+///
+/// secp256k1 only: a WIF key is a secp256k1 scalar, so a chain whose addresses are
+/// ed25519 keys (Solana) has none for it, and says so.
+fn single_key_addresses(
+    ui: &mut Ui<'_>,
+    chain: &catcard_wallet::chain::Chain,
+    pubkey: &[u8; catcard_wallet::address::PUBKEY_LEN],
+) {
+    use catcard_ui::scroll::Line as DLine;
+    use catcard_wallet::chain::{Encoding, address};
+
+    type Addr = heapless::String<{ address::MAX_LEN }>;
+    let mut shown: heapless::Vec<(&str, Addr), 6> = heapless::Vec::new();
+    for f in chain
+        .formats
+        .iter()
+        .filter(|f| f.encoding != Encoding::Solana)
+    {
+        let mut buf = [0u8; address::MAX_LEN];
+        let Ok(n) = address::from_secp256k1(chain, f.encoding, pubkey, &mut buf) else {
+            continue;
+        };
+        let mut text = Addr::new();
+        let _ = text.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
+        let _ = shown.push((f.label, text));
+    }
+    if shown.is_empty() {
+        message(
+            ui.panel,
+            chain.name,
+            "a WIF key has no",
+            "address on this chain",
+        );
+        wait_for_any_key(ui);
+        return;
+    }
+    loop {
+        let mut lines: heapless::Vec<DLine, 16> = heapless::Vec::new();
+        let _ = lines.push(DLine::title(chain.name));
+        let _ = lines.push(DLine::body("one key: no accounts").small());
+        for (i, (label, text)) in shown.iter().enumerate() {
+            let _ = lines.push(DLine::item(label, i as u32));
+            let _ = lines.push(DLine::body(text.as_str()).small().wrapped());
+        }
+        match show_doc(ui, &lines, false, false) {
+            DocExit::Selected(i) => {
+                if let Some((_, text)) = shown.get(i as usize) {
+                    qr_screen(ui, text.as_str(), text.as_str());
+                }
+            }
+            _ => return,
+        }
+    }
 }
 
 /// Which chain, from the wallet in force's list: its mark and its name, a row each.
