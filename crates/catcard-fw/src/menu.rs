@@ -1015,7 +1015,8 @@ pub fn run(session: Session<'_>) -> ! {
             // grid has to claim them before that happens, or the main menu would act on
             // a cell the moment someone tried to move to the next one.
             #[cfg(feature = "board-q1")]
-            let sideways = is_grid(screen) && matches!(key, Key::Digit(7) | Key::Digit(9));
+            let sideways =
+                is_grid(screen, v.blank()) && matches!(key, Key::Digit(7) | Key::Digit(9));
             #[cfg(not(feature = "board-q1"))]
             let sideways = false;
             if let Some(items) = items_of(screen, v.blank())
@@ -1863,7 +1864,7 @@ impl MenuScreen {
     fn draw(&self, panel: &mut display::Panel, screen: Screen, no_seed: bool) {
         let items = items_of(screen, no_seed).unwrap_or(&[]);
         #[cfg(feature = "board-q1")]
-        if is_grid(screen) {
+        if is_grid_items(items) {
             return draw_grid(panel, items, self.cursor);
         }
         let (title, note) = menu_head(screen);
@@ -1884,7 +1885,7 @@ impl MenuScreen {
     /// keeps scrolling to reveal the title.
     fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
         #[cfg(feature = "board-q1")]
-        if is_grid(screen) {
+        if is_grid_items(items) {
             self.cursor = grid_move(self.cursor, items.len(), k);
             return;
         }
@@ -1907,41 +1908,44 @@ impl MenuScreen {
     }
 }
 
-/// Whether this screen is drawn as the icon grid rather than as a list.
+/// Whether a menu is drawn as the icon grid rather than as a list.
 ///
-/// The menus of *tools* -- Main, Derive, Utils -- where each entry is a place to go and
-/// has a picture. Everything else is a list of words, where a grid would be a worse way
-/// to show fifteen settings than the list already is.
+/// **The grid is the Q1's view of an ordinary menu, not a set of special screens.** It
+/// used to be four named ones; naming them meant a new menu of tools was a list until
+/// somebody remembered, and a menu that lost an icon stayed a grid with a hole in it.
+/// The rule now is the one that was always meant: a menu every entry of which has art is
+/// pictures, and a menu with a wordy entry in it is a list. Drawing the icons is what
+/// turns one into the other.
+///
+/// A list is still the right shape for most of them -- fifteen settings are words, and
+/// six words in boxes are harder to read than six words in a column, not easier.
 #[cfg(feature = "board-q1")]
-fn is_grid(screen: Screen) -> bool {
-    // Derive and Utils as well as Main: short lists of things a person picks *between*
-    // rather than reads, which is what the grid is for -- and reached from the grid, so a
-    // list there would be a change of shape for no reason. Utils runs past six, so the
-    // grid pages.
-    matches!(
-        screen,
-        Screen::Main | Screen::KeyMenu | Screen::Utils | Screen::SignMenu
-    )
+fn is_grid_items(items: &[&str]) -> bool {
+    !items.is_empty() && items.iter().all(|l| grid_icon(l).is_some())
+}
+
+/// As [`is_grid_items`], for a screen whose items are not already in hand.
+#[cfg(feature = "board-q1")]
+fn is_grid(screen: Screen, no_seed: bool) -> bool {
+    items_of(screen, no_seed).is_some_and(is_grid_items)
 }
 
 /// Where a movement key takes the grid cursor.
 ///
-/// Up and down move a whole row, left and right one cell, and neither wraps: wrapping
-/// off the end of a six-cell grid puts the cursor somewhere the eye did not follow, and
-/// the two rows are close enough that nobody needs the shortcut. `0` goes home.
+/// The arithmetic is [`catcard_ui::grid::step`], which is where it can be tested against
+/// a strip of pages; this is only the key mapping.
 #[cfg(feature = "board-q1")]
 fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
-    use catcard_ui::grid::COLS;
-    let last = len.saturating_sub(1);
-    let next = match k {
-        Key::Digit(0) => 0,
-        Key::Digit(8) => cursor + COLS,
-        Key::Digit(5) => return cursor.saturating_sub(COLS),
-        Key::Digit(9) => cursor + 1,
-        Key::Digit(7) => return cursor.saturating_sub(1),
-        _ => cursor,
+    use catcard_ui::grid::Dir;
+    let dir = match k {
+        Key::Digit(0) => Dir::Home,
+        Key::Digit(8) => Dir::Down,
+        Key::Digit(5) => Dir::Up,
+        Key::Digit(9) => Dir::Right,
+        Key::Digit(7) => Dir::Left,
+        _ => return cursor,
     };
-    next.min(last)
+    catcard_ui::grid::step(cursor, len, dir)
 }
 
 /// A menu as a grid of icons, six to a page.
@@ -1950,54 +1954,67 @@ fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
 /// next and up off the top row turns back -- the same keys, no new ones to learn. A menu
 /// longer than a page says which page it is on, under the middle column.
 #[cfg(feature = "board-q1")]
+/// The art a grid cell shows for a label, if that label has any.
+///
+/// **This is also what decides whether a menu is a grid at all.** A menu every one of
+/// whose entries answers here is drawn as pictures on the Q1; one with an entry that
+/// does not stays a list. So adding a grid is drawing its icons, and a half-drawn set
+/// never produces a screen of named empty boxes.
+#[cfg(feature = "board-q1")]
+fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> {
+    use catcard_ui::art::menuicons as art;
+    Some(match label {
+        // The main menu.
+        "Sign" => &art::SIGN,
+        "New" => &art::NEW_PASSPHRASE,
+        "Import" => &art::IMPORT_PASSPHRASE,
+        "Addresses" => &art::ADDRESS_LIST,
+        "Notes" => &art::NOTES,
+        "Utils" => &art::UTILS,
+        "Settings" => &art::SETTINGS,
+        "Scan QR" => &art::SCAN_QR_CODE,
+        "Derive" => &art::DERIVE_KEY,
+        // The Derive grid.
+        "Back to root" => &art::RETURN_ROOT_KEY,
+        "Passphrase" => &art::DERIVE_PASSPHRASE,
+        "BIP-85" => &art::DERIVE_BIP85_INDEX,
+        "Import key" => &art::IMPORT_PASSPHRASE,
+        "XOR split" => &art::XOR_SPLIT,
+        "XOR join" => &art::XOR_JOIN,
+        "Key vault" => &art::KEY_VAULT,
+        // The Sign grid.
+        "Scan" => &art::SIGN_QR,
+        "From SD" => &art::SIGN_SD,
+        "Message" => &art::SIGN_TEXT,
+        // The Utils grid.
+        "Analyze RNG" => &art::ANALYZE_RNG,
+        "USB Drive" => &art::USB_DRIVE,
+        "Export wallet" => &art::EXPORT_WALLET,
+        "Browse SD card" => &art::MICROSD_BROWSE,
+        "Format SD card" => &art::MICROSD_FORMAT,
+        "Games" => &art::GAMES,
+        "Backup" => &art::BACKUP,
+        "Upgrade Firmware" => &art::FIRMWARE_UPGRADE,
+        // Only the boards with no power button still offer this.
+        "Logout" => &art::LOGOUT,
+        _ => return None,
+    })
+}
+
+/// Draw a menu as pages of icons, with the page the cursor is on showing.
+#[cfg(feature = "board-q1")]
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
     use catcard_ui::art::menuicons as art;
     use catcard_ui::grid::{CELLS, Cell};
 
-    let first = cursor / CELLS * CELLS;
-    let pages = items.len().div_ceil(CELLS);
+    let (page, within) = catcard_ui::grid::place(cursor);
+    let pages = catcard_ui::grid::pages(items.len());
     let mut cells: heapless::Vec<Cell<'_>, CELLS> = heapless::Vec::new();
-    for label in items.iter().skip(first).take(CELLS) {
-        let icon = match *label {
-            "Sign" => Some(&art::SIGN),
-            "New" => Some(&art::NEW_PASSPHRASE),
-            "Import" => Some(&art::IMPORT_PASSPHRASE),
-            "Addresses" => Some(&art::ADDRESS_LIST),
-            "Notes" => Some(&art::NOTES),
-            "Utils" => Some(&art::UTILS),
-            "Settings" => Some(&art::SETTINGS),
-            "Scan QR" => Some(&art::SCAN_QR_CODE),
-            "Derive" => Some(&art::DERIVE_KEY),
-            // The Derive grid.
-            "Back to root" => Some(&art::RETURN_ROOT_KEY),
-            "Passphrase" => Some(&art::DERIVE_PASSPHRASE),
-            "BIP-85" => Some(&art::DERIVE_BIP85_INDEX),
-            "Import key" => Some(&art::IMPORT_PASSPHRASE),
-            "XOR split" => Some(&art::XOR_SPLIT),
-            "XOR join" => Some(&art::XOR_JOIN),
-            "Key vault" => Some(&art::KEY_VAULT),
-            // The Utils grid.
-            // The Sign grid.
-            #[cfg(feature = "board-q1")]
-            "Scan" => Some(&art::SIGN_QR),
-            "From SD" => Some(&art::SIGN_SD),
-            "Message" => Some(&art::SIGN_TEXT),
-            // The Utils grid.
-            "Analyze RNG" => Some(&art::ANALYZE_RNG),
-            "USB Drive" => Some(&art::USB_DRIVE),
-            "Export wallet" => Some(&art::EXPORT_WALLET),
-            "Browse SD card" => Some(&art::MICROSD_BROWSE),
-            "Format SD card" => Some(&art::MICROSD_FORMAT),
-            "Games" => Some(&art::GAMES),
-            "Backup" => Some(&art::BACKUP),
-            "Upgrade Firmware" => Some(&art::FIRMWARE_UPGRADE),
-            // Only the boards with no power button still offer this.
-            "Logout" => Some(&art::LOGOUT),
-            // A cell whose art has not been drawn keeps its name and loses its picture,
-            // rather than borrowing one that would read as the wrong thing.
-            _ => None,
-        };
-        let _ = cells.push(Cell { label, icon });
+    for label in items.iter().skip(page * CELLS).take(CELLS) {
+        let _ = cells.push(Cell {
+            label,
+            icon: grid_icon(label),
+        });
     }
     // No header row here: the Q1 has a status bar, and it already names the wallet in
     // force and shows its fingerprint. A second copy on the grid would be the same
@@ -2005,18 +2022,17 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
     //
     // The boards with no bar put the row in the menu instead -- see `main_items`.
     //
-    // The art's own palette, not the amber ramp: this screen is pictures.
+    // The art's own palette: this screen is pictures.
     display::draw_with(panel, &art::PALETTE, |c| {
-        use catcard_ui::canvas::Canvas as _;
-        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor - first);
-        if pages > 1 {
-            let mut at: heapless::String<8> = heapless::String::new();
-            let _ = write!(at, "{}/{}", first / CELLS + 1, pages);
-            let f = display::LAYOUT.body;
-            let x = catcard_ui::text::centred(f, &at, c.width());
-            let y = c.height().saturating_sub(f.line_height());
-            catcard_ui::text::draw_text(c, f, x, y, &at);
-        }
+        catcard_ui::grid::render_page(
+            c,
+            display::LAYOUT.title,
+            display::LAYOUT.body,
+            &cells,
+            within,
+            page,
+            pages,
+        );
     });
 }
 
