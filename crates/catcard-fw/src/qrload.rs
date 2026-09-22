@@ -111,22 +111,47 @@ pub(crate) fn collect_any(
     let mut shown = (0u32, 0u32);
     let mut done = 0usize;
     let mut compressed = false;
+    // The last unannounced line, kept only to see whether the next one agrees with it.
+    let Some(mut seen_plain) = crate::heap::take(scratch_len) else {
+        return Err(Some("not enough memory"));
+    };
+    let mut plain_len: Option<usize> = None;
 
     let outcome = qrscan::scan_many(ui, head, &mut |ui, line| {
         let scratch = scratch_mem.bytes();
-        // A lone code that announces neither format is its own payload, whole. Only the
-        // first one: once a transfer has started, a stray code in shot must not end it.
+        // A lone code that announces neither format is its own payload -- but not on
+        // the strength of one sighting.
+        //
+        // **The first line read is the one most likely to be a fragment.** The module
+        // is already transmitting when the read starts, so what comes back first is
+        // whatever was left of a code in flight: a tail with no `B$` on the front,
+        // which read as a payload of its own and ended the scan after one code. An
+        // animated page then looked like a single static QR.
+        //
+        // A continuous scan repeats, so a real lone code arrives again, identical. Two
+        // agreeing sightings is the whole test -- and any line that does announce
+        // itself wins immediately, because a fragment cannot fake a header.
         if matches!(which, Which::Unknown) && !announced(line) {
-            return match sink.place(0, line) {
-                Ok(()) => {
-                    done = line.len();
-                    Next::Done
-                }
-                Err(why) => {
-                    failure = Some(why);
-                    Next::Done
-                }
-            };
+            let held = seen_plain.bytes();
+            if plain_len == Some(line.len()) && held[..line.len()] == *line {
+                return match sink.place(0, line) {
+                    Ok(()) => {
+                        done = line.len();
+                        Next::Done
+                    }
+                    Err(why) => {
+                        failure = Some(why);
+                        Next::Done
+                    }
+                };
+            }
+            if line.len() <= held.len() {
+                held[..line.len()].copy_from_slice(line);
+                plain_len = Some(line.len());
+            } else {
+                plain_len = None;
+            }
+            return Next::More;
         }
         let Some(text) = as_text(line) else {
             return Next::More;
