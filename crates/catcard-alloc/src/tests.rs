@@ -540,7 +540,9 @@ impl TwoRegions {
         let bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(self.backing.as_ptr().cast(), self.backing.len() * 8)
         };
-        bytes[self.gap_at..self.gap_at + GAP].iter().all(|&b| b == 0)
+        bytes[self.gap_at..self.gap_at + GAP]
+            .iter()
+            .all(|&b| b == 0)
     }
 }
 

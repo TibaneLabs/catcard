@@ -399,7 +399,15 @@ fn a_small_picture_is_enlarged_by_whole_steps_only() {
     let (plan, rows) = draw(&quad().bytes(), 5, 4).expect("decodes");
     assert_eq!(plan.scale, Scale::Up(2));
     assert_eq!((plan.w, plan.h), (4, 4));
-    assert_eq!(rows[0], vec![rgb(255, 0, 0), rgb(255, 0, 0), rgb(0, 255, 0), rgb(0, 255, 0)]);
+    assert_eq!(
+        rows[0],
+        vec![
+            rgb(255, 0, 0),
+            rgb(255, 0, 0),
+            rgb(0, 255, 0),
+            rgb(0, 255, 0)
+        ]
+    );
     assert_eq!(rows[1], rows[0]);
     assert_eq!(
         rows[2],
@@ -477,7 +485,11 @@ fn a_transparent_colour_is_honoured_for_types_without_an_alpha_channel() {
     png.trns = Some(vec![0, 0, 0, 255, 0, 0]);
     let (_, rows) = draw_on(&png.bytes(), 2, 1, [0, 0, 255], 1024).expect("decodes");
     assert_eq!(rows[0][0], rgb(255, 0, 0));
-    assert_eq!(rows[0][1], rgb(0, 0, 255), "the transparent pixel is not the background");
+    assert_eq!(
+        rows[0][1],
+        rgb(0, 0, 255),
+        "the transparent pixel is not the background"
+    );
 }
 
 #[test]
@@ -485,7 +497,11 @@ fn grey_with_alpha_is_read_as_two_samples() {
     let file = Png::new(2, 1, 8, 4, vec![0, 0xFF, 0xFF, 0xFF, 0x00]).bytes();
     let (_, rows) = draw_on(&file, 2, 1, [0, 0, 0], 1024).expect("decodes");
     assert_eq!(rows[0][0], rgb(255, 255, 255));
-    assert_eq!(rows[0][1], rgb(0, 0, 0), "a fully clear pixel is the background");
+    assert_eq!(
+        rows[0][1],
+        rgb(0, 0, 0),
+        "a fully clear pixel is the background"
+    );
 }
 
 #[test]
@@ -508,8 +524,10 @@ fn the_file_can_arrive_one_byte_at_a_time() {
 #[test]
 fn chunks_this_does_not_understand_are_stepped_over() {
     let mut png = quad();
-    png.extra.push((*b"tEXt", b"Comment\0by another tool".to_vec()));
-    png.extra.push((*b"pHYs", vec![0, 0, 11, 18, 0, 0, 11, 18, 1]));
+    png.extra
+        .push((*b"tEXt", b"Comment\0by another tool".to_vec()));
+    png.extra
+        .push((*b"pHYs", vec![0, 0, 11, 18, 0, 0, 11, 18, 1]));
     let (_, rows) = draw(&png.bytes(), 2, 2).expect("decodes");
     assert_eq!(rows[0], vec![rgb(255, 0, 0), rgb(0, 255, 0)]);
 }
@@ -611,7 +629,11 @@ fn a_card_that_goes_away_is_the_cards_fault_and_a_screen_that_refuses_is_the_scr
         },
         |_, _| Err(()),
     );
-    assert_eq!(got, Err(Error::Sink), "the sink's refusal was reported as the card's");
+    assert_eq!(
+        got,
+        Err(Error::Sink),
+        "the sink's refusal was reported as the card's"
+    );
 }
 
 #[test]
@@ -625,7 +647,14 @@ fn a_real_file_from_a_real_encoder_decodes() {
 
     let (plan, rows) = draw(file, 320, 240).expect("decodes");
     // 320/27 = 11, 240/30 = 8, so eight whole steps.
-    assert_eq!(plan, Plan { w: 27 * 8, h: 240, scale: Scale::Up(8) });
+    assert_eq!(
+        plan,
+        Plan {
+            w: 27 * 8,
+            h: 240,
+            scale: Scale::Up(8)
+        }
+    );
     assert_eq!(rows.len(), 240);
 
     // It is a picture, not a flat field: a decoder that produced one colour everywhere
