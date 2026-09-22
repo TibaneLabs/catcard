@@ -449,7 +449,15 @@ pub(crate) fn scan_many(
     let scanner = catcard_board::BOARD.qr.ok_or(Fault::NoScanner)?;
 
     crate::torch::release();
-    menu::blocking_screen(ui.panel, head, "waking the scanner");
+    // The scanner's own icon while it comes up: the reset and its recovery take a couple
+    // of seconds before the first code can be read, and a line of text alone made that
+    // look like a device thinking about nothing in particular.
+    menu::icon_page(
+        ui.panel,
+        &catcard_ui::art::menuicons::SCAN_QR_CODE,
+        head,
+        "waking the scanner",
+    );
     // SAFETY: the board table's scanner pins, and USART2, belong to this screen: nothing
     // else in the firmware touches either, and the menu waits for this to return.
     let mut port = unsafe {
