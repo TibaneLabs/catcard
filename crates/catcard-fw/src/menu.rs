@@ -110,8 +110,10 @@ enum Screen {
     ExportOne(u8),
     /// Which wallet the device works in: the root, a passphrase, a BIP-85 child.
     KeyMenu,
-    /// Acting on one row of [`KEY_ITEMS`].
+    /// Acting on one row of the Derive menu.
     KeyPick(u8),
+    /// The passphrase screen, opened from Derive rather than from Settings.
+    KeyPassphrase,
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
     /// Which account level to export a plain xpub from.
@@ -243,6 +245,31 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     #[cfg(not(feature = "board-q1"))]
     "Logout",
 ];
+
+impl Screen {
+    /// The row a screen was opened on, for the variants that carry one.
+    ///
+    /// **Next to the enum on purpose.** This used to live beside the dispatch, and a
+    /// variant added with a payload but not added here silently acted on row zero --
+    /// which is not a crash, it is the *first* row, doing something plausible. Two
+    /// screens shipped that way: BIP-85 did nothing, and every one-off wallet export
+    /// quietly exported nothing, because row zero of each happens to be a case its
+    /// handler returns early on.
+    ///
+    /// So it sits where a variant is written, and the catch-all returns a row no
+    /// payload-carrying screen should ever be reading.
+    fn row(self) -> u8 {
+        match self {
+            Screen::NewSeed(w)
+            | Screen::Derive(w)
+            | Screen::Xpub(w)
+            | Screen::GenericJson(w)
+            | Screen::ExportOne(w)
+            | Screen::KeyPick(w) => w,
+            _ => 0,
+        }
+    }
+}
 
 /// The main menu, ordered for the device in front of you.
 fn main_items(no_seed: bool) -> &'static [&'static str] {
@@ -800,13 +827,7 @@ pub fn run(session: Session<'_>) -> ! {
             // `if next == Screen::X` blocks, each spelling out `reset_menu` / `screen =` /
             // `break` again -- three chances per action to name the wrong screen, and no
             // way to see the whole set at once.
-            let words = match next {
-                Screen::NewSeed(w) => w,
-                Screen::Derive(w) => w,
-                Screen::Xpub(w) => w,
-                Screen::GenericJson(w) => w,
-                _ => 0,
-            };
+            let words = next.row();
             if let Some(action) = action_for(next) {
                 {
                     let mut act = Act {
@@ -977,10 +998,15 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::Main,
         ),
-        // Never returns, so `back` is unreachable; the bootloader reboots the device.
         Screen::Passphrase => to(
             |a| crate::passphrase::screen(a.gate, a.login, a.ui),
             Screen::Settings,
+        ),
+        // The same screen, reached from `Derive` -- and going back there rather than
+        // to Settings. A screen's way out belongs to the way in, and this one has two.
+        Screen::KeyPassphrase => to(
+            |a| crate::passphrase::screen(a.gate, a.login, a.ui),
+            Screen::KeyMenu,
         ),
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Both take the CPU for good once they start; they return only to refuse a
@@ -1193,7 +1219,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // them can ever be selected -- so Confirm fell through to the catch-all and put
         // people in the Debug menu.
         Screen::KeyMenu => match (key, key_items().get(cursor).copied()) {
-            (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
+            (Key::Confirm, Some("Passphrase")) => Screen::KeyPassphrase,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::KeyMenu,
@@ -1601,7 +1627,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::GenericJson(_)
         | Screen::VerifyAddress
         | Screen::SignMessage
-        | Screen::Passphrase => {}
+        | Screen::Passphrase
+        | Screen::KeyPassphrase => {}
         Screen::Derive(_) => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
