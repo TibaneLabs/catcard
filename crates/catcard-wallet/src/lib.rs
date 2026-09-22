@@ -70,4 +70,6 @@ pub mod multisig;
 pub mod psbtview;
 pub mod seedxor;
 pub mod signer;
+#[cfg(feature = "multichain")]
+pub mod slip10;
 pub mod tx;

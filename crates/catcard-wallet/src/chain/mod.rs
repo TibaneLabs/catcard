@@ -37,6 +37,8 @@
 
 use crate::bip32::{ChildNumber, DerivationPath};
 
+pub mod address;
+
 /// Signature curve.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Curve {
@@ -88,6 +90,12 @@ pub enum ChainId {
     Bitcoin = 1,
     Ethereum = 2,
     Solana = 3,
+    Litecoin = 4,
+    Dogecoin = 5,
+    BitcoinCash = 6,
+    Monacoin = 7,
+    ElectraProtocol = 8,
+    Tron = 9,
 }
 
 impl ChainId {
@@ -101,7 +109,46 @@ impl ChainId {
             1 => Some(ChainId::Bitcoin),
             2 => Some(ChainId::Ethereum),
             3 => Some(ChainId::Solana),
+            4 => Some(ChainId::Litecoin),
+            5 => Some(ChainId::Dogecoin),
+            6 => Some(ChainId::BitcoinCash),
+            7 => Some(ChainId::Monacoin),
+            8 => Some(ChainId::ElectraProtocol),
+            9 => Some(ChainId::Tron),
             _ => None,
+        }
+    }
+}
+
+/// How an address is written, given the key it pays to.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Encoding {
+    /// A Bitcoin-family script, in the chain's own version bytes and prefix.
+    Utxo(crate::address::AddressKind),
+    /// Keccak-256 of the uncompressed key, last 20 bytes, EIP-55 checksummed hex.
+    Evm,
+    /// The same 20 bytes, base58check under version `0x41`: a `T...` address.
+    Tron,
+    /// The ed25519 public key itself, base58.
+    Solana,
+}
+
+/// One kind of address a chain has: which BIP-44 purpose it lives under, how it is
+/// written, and what to call it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Format {
+    pub purpose: u32,
+    pub encoding: Encoding,
+    /// Shown on screen.
+    pub label: &'static str,
+}
+
+impl Format {
+    const fn utxo(kind: crate::address::AddressKind, label: &'static str) -> Self {
+        Self {
+            purpose: kind.bip44_purpose(),
+            encoding: Encoding::Utxo(kind),
+            label,
         }
     }
 }
@@ -112,9 +159,19 @@ pub struct Chain {
     pub id: ChainId,
     /// Shown on screen. Short enough for a 16-column panel.
     pub name: &'static str,
+    /// The symbol, as the settings list and a person both name it: `BTC`, `LTC`.
+    pub ticker: &'static str,
     pub scheme: Scheme,
     /// SLIP-44 coin type, the `m/44'/<coin>'` level.
     pub coin_type: u32,
+    /// The network name `outscript` knows this chain's Bitcoin-family encodings by --
+    /// version bytes and bech32 prefix. Empty for a chain that has none.
+    pub network: &'static str,
+    /// Every kind of address this chain has, most usual first.
+    ///
+    /// The list *is* the rule: a chain without segwit simply has no segwit entry, so
+    /// nothing can ask for a Bitcoin Cash `bc1` address and get one.
+    pub formats: &'static [Format],
 }
 
 impl Chain {
@@ -191,12 +248,33 @@ pub enum Unsupported {
 // The registry. One entry per feature.
 // ---------------------------------------------------------------------------
 
+use crate::address::AddressKind;
+
+/// The four Bitcoin address kinds, in the order the explorer has always shown them.
+const BITCOIN_FORMATS: &[Format] = &[
+    Format::utxo(AddressKind::P2wpkh, "Native segwit"),
+    Format::utxo(AddressKind::P2tr, "Taproot"),
+    Format::utxo(AddressKind::P2shP2wpkh, "Nested segwit"),
+    Format::utxo(AddressKind::P2pkh, "Legacy"),
+];
+
+/// Segwit without taproot, which is what the Litecoin-family chains adopted.
+#[cfg(feature = "multichain")]
+const SEGWIT_FORMATS: &[Format] = &[
+    Format::utxo(AddressKind::P2wpkh, "Native segwit"),
+    Format::utxo(AddressKind::P2shP2wpkh, "Nested segwit"),
+    Format::utxo(AddressKind::P2pkh, "Legacy"),
+];
+
 /// Bitcoin. BIP-44/49/84/86 purposes over secp256k1.
 pub const BITCOIN: Chain = Chain {
     id: ChainId::Bitcoin,
     name: "Bitcoin",
+    ticker: "BTC",
     scheme: Scheme::Bip32,
     coin_type: 0,
+    network: "bitcoin",
+    formats: BITCOIN_FORMATS,
 };
 
 /// Ethereum and EVM chains. `m/44'/60'`, secp256k1, recoverable signatures.
@@ -204,8 +282,15 @@ pub const BITCOIN: Chain = Chain {
 pub const ETHEREUM: Chain = Chain {
     id: ChainId::Ethereum,
     name: "Ethereum",
+    ticker: "ETH",
     scheme: Scheme::Bip32,
     coin_type: 60,
+    network: "",
+    formats: &[Format {
+        purpose: 44,
+        encoding: Encoding::Evm,
+        label: "Ethereum",
+    }],
 };
 
 /// Solana. `m/44'/501'`, ed25519 under SLIP-0010, so hardened-only.
@@ -213,23 +298,138 @@ pub const ETHEREUM: Chain = Chain {
 pub const SOLANA: Chain = Chain {
     id: ChainId::Solana,
     name: "Solana",
+    ticker: "SOL",
     scheme: Scheme::Slip10Ed25519,
     coin_type: 501,
+    network: "",
+    formats: &[Format {
+        purpose: 44,
+        encoding: Encoding::Solana,
+        label: "Solana",
+    }],
 };
 
-/// Chains compiled into this firmware.
+/// Litecoin. Segwit, no taproot.
+#[cfg(feature = "multichain")]
+pub const LITECOIN: Chain = Chain {
+    id: ChainId::Litecoin,
+    name: "Litecoin",
+    ticker: "LTC",
+    scheme: Scheme::Bip32,
+    coin_type: 2,
+    network: "litecoin",
+    formats: SEGWIT_FORMATS,
+};
+
+/// Dogecoin. Legacy addresses only: it never adopted segwit.
+#[cfg(feature = "multichain")]
+pub const DOGECOIN: Chain = Chain {
+    id: ChainId::Dogecoin,
+    name: "Dogecoin",
+    ticker: "DOGE",
+    scheme: Scheme::Bip32,
+    coin_type: 3,
+    network: "dogecoin",
+    formats: &[Format::utxo(AddressKind::P2pkh, "Legacy")],
+};
+
+/// Bitcoin Cash. Legacy keys under its own coin type, written as CashAddr -- and no
+/// segwit, which the chain split away from.
+#[cfg(feature = "multichain")]
+pub const BITCOIN_CASH: Chain = Chain {
+    id: ChainId::BitcoinCash,
+    name: "Bitcoin Cash",
+    ticker: "BCH",
+    scheme: Scheme::Bip32,
+    coin_type: 145,
+    network: "bitcoin-cash",
+    formats: &[Format::utxo(AddressKind::P2pkh, "CashAddr")],
+};
+
+/// Monacoin. Segwit, no taproot.
+#[cfg(feature = "multichain")]
+pub const MONACOIN: Chain = Chain {
+    id: ChainId::Monacoin,
+    name: "Monacoin",
+    ticker: "MONA",
+    scheme: Scheme::Bip32,
+    coin_type: 22,
+    network: "monacoin",
+    formats: SEGWIT_FORMATS,
+};
+
+/// Electra Protocol. Segwit, no taproot.
+#[cfg(feature = "multichain")]
+pub const ELECTRA_PROTOCOL: Chain = Chain {
+    id: ChainId::ElectraProtocol,
+    name: "Electra Protocol",
+    ticker: "XEP",
+    scheme: Scheme::Bip32,
+    coin_type: 597,
+    network: "electraproto",
+    formats: SEGWIT_FORMATS,
+};
+
+/// Tron. Ethereum's key and hash, written base58check.
+#[cfg(feature = "multichain")]
+pub const TRON: Chain = Chain {
+    id: ChainId::Tron,
+    name: "Tron",
+    ticker: "TRX",
+    scheme: Scheme::Bip32,
+    coin_type: 195,
+    network: "",
+    formats: &[Format {
+        purpose: 44,
+        encoding: Encoding::Tron,
+        label: "Tron",
+    }],
+};
+
+/// Chains compiled into this firmware, in the order a new owner sees them.
+///
+/// Coin types from SLIP-44 (satoshilabs/slips `slip-0044.md`, checked 2026-09-22) [C]:
+/// BTC 0, LTC 2, DOGE 3, MONA 22, ETH 60, BCH 145, TRX 195, SOL 501, XEP 597.
 pub const SUPPORTED: &[Chain] = &[
     BITCOIN,
     #[cfg(feature = "multichain")]
     ETHEREUM,
     #[cfg(feature = "multichain")]
     SOLANA,
+    #[cfg(feature = "multichain")]
+    LITECOIN,
+    #[cfg(feature = "multichain")]
+    BITCOIN_CASH,
+    #[cfg(feature = "multichain")]
+    DOGECOIN,
+    #[cfg(feature = "multichain")]
+    TRON,
+    #[cfg(feature = "multichain")]
+    MONACOIN,
+    #[cfg(feature = "multichain")]
+    ELECTRA_PROTOCOL,
 ];
+
+/// The chain with this ticker in this build, if there is one. Case matters: tickers are
+/// written upper case, and a list that stored them otherwise is not ours.
+pub fn by_ticker(ticker: &str) -> Option<&'static Chain> {
+    SUPPORTED.iter().find(|c| c.ticker == ticker)
+}
 
 /// Every chain this protocol version defines, enabled or not.
 ///
 /// Used to tell "compiled out" from "never heard of it" — see [`Unsupported`].
-pub const KNOWN: &[ChainId] = &[ChainId::Bitcoin, ChainId::Ethereum, ChainId::Solana];
+pub const KNOWN: &[ChainId] = &[
+    ChainId::Bitcoin,
+    ChainId::Ethereum,
+    ChainId::Solana,
+    ChainId::Litecoin,
+    ChainId::Dogecoin,
+    ChainId::BitcoinCash,
+    ChainId::Monacoin,
+    ChainId::ElectraProtocol,
+    ChainId::Tron,
+];
 
 /// Look up a chain by wire identifier.
 pub fn resolve(id: u16) -> Result<&'static Chain, Unsupported> {
@@ -259,6 +459,12 @@ pub fn build_tag(out: &mut [u8]) -> usize {
             ChainId::Bitcoin => b"btc",
             ChainId::Ethereum => b"eth",
             ChainId::Solana => b"sol",
+            ChainId::Litecoin => b"ltc",
+            ChainId::Dogecoin => b"doge",
+            ChainId::BitcoinCash => b"bch",
+            ChainId::Monacoin => b"mona",
+            ChainId::ElectraProtocol => b"xep",
+            ChainId::Tron => b"trx",
         };
         if i > 0 {
             if at == out.len() {
@@ -294,6 +500,12 @@ mod tests {
         assert_eq!(ChainId::Bitcoin.as_u16(), 1);
         assert_eq!(ChainId::Ethereum.as_u16(), 2);
         assert_eq!(ChainId::Solana.as_u16(), 3);
+        assert_eq!(ChainId::Litecoin.as_u16(), 4);
+        assert_eq!(ChainId::Dogecoin.as_u16(), 5);
+        assert_eq!(ChainId::BitcoinCash.as_u16(), 6);
+        assert_eq!(ChainId::Monacoin.as_u16(), 7);
+        assert_eq!(ChainId::ElectraProtocol.as_u16(), 8);
+        assert_eq!(ChainId::Tron.as_u16(), 9);
         for id in KNOWN {
             assert_eq!(ChainId::from_u16(id.as_u16()), Some(*id));
         }
@@ -322,6 +534,12 @@ mod tests {
                 ChainId::Bitcoin => 0,
                 ChainId::Ethereum => 60,
                 ChainId::Solana => 501,
+                ChainId::Litecoin => 2,
+                ChainId::Dogecoin => 3,
+                ChainId::BitcoinCash => 145,
+                ChainId::Monacoin => 22,
+                ChainId::ElectraProtocol => 597,
+                ChainId::Tron => 195,
             };
             assert_eq!(c.coin_type, expect, "{}", c.name);
         }
@@ -366,6 +584,52 @@ mod tests {
                 assert_ne!(a.coin_type, b.coin_type, "{} vs {}", a.name, b.name);
             }
         }
+    }
+
+    #[test]
+    fn tickers_are_unique_upper_case_and_found() {
+        for (i, a) in SUPPORTED.iter().enumerate() {
+            assert_eq!(a.ticker, a.ticker.to_ascii_uppercase());
+            assert_eq!(by_ticker(a.ticker).map(|c| c.id), Some(a.id));
+            for b in &SUPPORTED[i + 1..] {
+                assert_ne!(a.ticker, b.ticker);
+            }
+        }
+        assert!(by_ticker("btc").is_none(), "case matters");
+    }
+
+    /// Every chain has at least one address to show, and no chain offers a format it
+    /// cannot write: taproot is Bitcoin's alone, and only secp256k1 chains have scripts.
+    #[test]
+    fn every_chain_has_formats_it_can_write() {
+        for c in SUPPORTED {
+            assert!(!c.formats.is_empty(), "{}", c.name);
+            for f in c.formats {
+                match f.encoding {
+                    Encoding::Utxo(kind) => {
+                        assert_eq!(c.scheme, Scheme::Bip32, "{}", c.name);
+                        assert!(!c.network.is_empty(), "{}", c.name);
+                        assert_eq!(f.purpose, kind.bip44_purpose());
+                        if kind == AddressKind::P2tr {
+                            assert_eq!(c.id, ChainId::Bitcoin, "taproot on {}", c.name);
+                        }
+                    }
+                    Encoding::Solana => assert_eq!(c.scheme, Scheme::Slip10Ed25519),
+                    Encoding::Evm | Encoding::Tron => assert_eq!(c.scheme, Scheme::Bip32),
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "multichain")]
+    #[test]
+    fn bitcoin_cash_has_no_segwit() {
+        assert!(
+            BITCOIN_CASH
+                .formats
+                .iter()
+                .all(|f| matches!(f.encoding, Encoding::Utxo(AddressKind::P2pkh)))
+        );
     }
 
     // -- chain confusion -----------------------------------------------------
@@ -541,7 +805,7 @@ mod tests {
 
     #[test]
     fn build_tag_names_the_chain_set() {
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; 64];
         let n = build_tag(&mut buf);
         let tag = core::str::from_utf8(&buf[..n]).unwrap();
 
@@ -550,6 +814,12 @@ mod tests {
                 ChainId::Bitcoin => "btc",
                 ChainId::Ethereum => "eth",
                 ChainId::Solana => "sol",
+                ChainId::Litecoin => "ltc",
+                ChainId::Dogecoin => "doge",
+                ChainId::BitcoinCash => "bch",
+                ChainId::Monacoin => "mona",
+                ChainId::ElectraProtocol => "xep",
+                ChainId::Tron => "trx",
             };
             assert!(tag.contains(expect), "{tag} missing {expect}");
         }

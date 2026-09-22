@@ -23,7 +23,9 @@ std = []
 # Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto, Ethereum (and other EVM chains),
 # Monacoin, Solana, Tron. The registry in `chain` says which of those this build actually
 # carries; the feature is the line between the two products.
-multichain = []
+# Ethereum/Tron need Keccak and EIP-55, Solana ed25519: outscript's `evm` and `solana`,
+# pulled in only here so a Bitcoin build carries neither.
+multichain = ["outscript/evm", "outscript/solana"]
 
 [dependencies]
 purecrypto = { workspace = true, features = ["hash", "ec", "hazmat-secp256k1"] }
