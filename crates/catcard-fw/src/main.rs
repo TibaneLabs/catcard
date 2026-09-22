@@ -23,6 +23,11 @@ use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
 /// Backup System and Restore Backup: the wallet in an encrypted 7-Zip archive.
+// `alloc`, for the collections that are too big to put on a stack. The global
+// allocator is `crate::heap`; the abort-on-failure APIs are never used -- see the
+// module docs there, and `Vec::try_reserve_exact` at the call sites.
+extern crate alloc;
+
 mod backup;
 /// Battery sensing exists only on the Q1; the other boards are USB-powered.
 #[cfg(feature = "board-q1")]

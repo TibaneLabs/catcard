@@ -142,8 +142,15 @@ pub fn decode(kn: usize, shift: bool, symbol: bool, caps: bool) -> Option<Key> {
         return None;
     }
     match kn {
-        // Navigation and the two answer keys, unchanged under every modifier.
-        3..=8 | 54 => LAYOUT[kn],
+        // The QR key, navigation and the two answer keys, unchanged under every
+        // modifier.
+        //
+        // **`2` belongs here.** It was left out when the QR key was given a `Key` of its
+        // own: the position was mapped in `LAYOUT` but fell through to the character
+        // tables below, where row 0 is all dead entries -- so the one button whose whole
+        // job is to open the scanner returned `None` on every press, on a board where it
+        // is the second key from the left.
+        2..=8 | 54 => LAYOUT[kn],
         KN_LAMP | KN_SHIFT | KN_SYMBOL => None,
         // Digits, unless a modifier turns the row into symbols. CAPS is not one of them:
         // it upper-cases letters and leaves digits alone, so a PIN still types.
@@ -251,20 +258,17 @@ impl Keypad {
         }
         matrix.release_rows();
 
-        // Modifiers are read from the raw scan, not from debounced events: they are held
-        // while another key is struck, so they must be current for that key's decode.
-        let shift = raw[KN_SHIFT];
-        let symbol = raw[KN_SYMBOL];
-        if shift && symbol {
-            if !self.caps_combo {
-                self.caps = !self.caps;
-                self.caps_combo = true;
-            }
-        } else {
-            self.caps_combo = false;
-        }
-
-        let mut n = 0;
+        // Settle every position first, modifiers included, and only then look at what
+        // is held. **The modifiers used to be read straight off the raw scan**, on the
+        // reasoning that they must be current for the key they modify -- but that made
+        // them the two positions on the keyboard with no debounce at all, and SHIFT and
+        // SYMBOL reading low together in a single scan is what toggles CAPS. One glitch
+        // on two lines, and a Q1 nobody was typing on lit SYM and CAPS by itself.
+        //
+        // Reading them from the debounced state costs nothing in currency: a key only
+        // becomes an event after the same three samples, so a modifier held when the
+        // key was struck is settled by the time the key is.
+        let mut changed = [false; KEYS];
         for (i, &now) in raw.iter().enumerate() {
             if now == self.down[i] {
                 self.counters[i] = 0;
@@ -276,15 +280,31 @@ impl Keypad {
             }
             self.counters[i] = 0;
             self.down[i] = now;
+            changed[i] = true;
             if now {
                 self.last_kn = Some(i as u8);
             }
+        }
+
+        let shift = self.down[KN_SHIFT];
+        let symbol = self.down[KN_SYMBOL];
+        if shift && symbol {
+            if !self.caps_combo {
+                self.caps = !self.caps;
+                self.caps_combo = true;
+            }
+        } else {
+            self.caps_combo = false;
+        }
+
+        let mut n = 0;
+        for (i, _) in changed.iter().enumerate().filter(|(_, c)| **c) {
             // Decoded with the modifiers as they are now. A key released after its
             // modifier was let go reports the unmodified key; screens act on presses.
             if let Some(key) = decode(i, shift, symbol, self.caps)
                 && n < events.len()
             {
-                events[n] = if now {
+                events[n] = if self.down[i] {
                     Event::Pressed(key)
                 } else {
                     Event::Released(key)
@@ -582,5 +602,76 @@ mod tests {
             assert!(n <= ev.len());
         }
         assert_eq!(pad.held_count(), 17);
+    }
+
+    /// The keys that are keys whatever is held decode that way through `decode`, which
+    /// is what the firmware calls -- not through `LAYOUT`, which is only where it looks.
+    ///
+    /// The QR button was in `LAYOUT` and not in `decode`'s pass-through arm, so it fell
+    /// into the character tables, where row 0 is dead: the button did nothing on real
+    /// hardware while a test asserting `LAYOUT[2]` passed.
+    #[test]
+    fn the_specials_decode_under_every_modifier() {
+        let specials = [
+            (2, Key::Qr),
+            (3, Key::Digit(7)),
+            (4, Key::Digit(5)),
+            (5, Key::Digit(8)),
+            (6, Key::Digit(9)),
+            (7, Key::Cancel),
+            (8, Key::Confirm),
+            (54, Key::Cancel),
+        ];
+        for (kn, want) in specials {
+            for shift in [false, true] {
+                for symbol in [false, true] {
+                    for caps in [false, true] {
+                        assert_eq!(
+                            decode(kn, shift, symbol, caps),
+                            Some(want),
+                            "kn{kn} with shift={shift} symbol={symbol} caps={caps}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A glitch on one scan cannot latch CAPS.
+    ///
+    /// SHIFT and SYMBOL used to be read straight off the raw scan while every other
+    /// position was debounced, so the two of them reading low together for a single
+    /// sample toggled CAPS -- which is how a Q1 nobody was typing on lit SYM and CAPS.
+    #[test]
+    fn a_single_glitchy_scan_does_not_latch_caps() {
+        let mut d = drbg();
+        let mut m = MockMatrix::new();
+        let mut pad = Keypad::new();
+        let mut ev = [Event::Pressed(Key::Cancel); 12];
+
+        // Settle with nothing down.
+        for _ in 0..DEBOUNCE_SAMPLES + 1 {
+            pad.scan(&mut m, &mut d, &mut ev);
+        }
+        assert!(!pad.caps());
+
+        // One scan with both modifiers reading down, then back to nothing.
+        m.hold(KN_SHIFT, true);
+        m.hold(KN_SYMBOL, true);
+        pad.scan(&mut m, &mut d, &mut ev);
+        m.hold(KN_SHIFT, false);
+        m.hold(KN_SYMBOL, false);
+        for _ in 0..DEBOUNCE_SAMPLES + 1 {
+            pad.scan(&mut m, &mut d, &mut ev);
+        }
+        assert!(!pad.caps(), "one glitchy sample latched CAPS");
+
+        // Held properly, it still works.
+        m.hold(KN_SHIFT, true);
+        m.hold(KN_SYMBOL, true);
+        for _ in 0..DEBOUNCE_SAMPLES + 1 {
+            pad.scan(&mut m, &mut d, &mut ev);
+        }
+        assert!(pad.caps(), "holding both modifiers no longer toggles CAPS");
     }
 }

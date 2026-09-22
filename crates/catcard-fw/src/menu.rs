@@ -3353,6 +3353,20 @@ pub(crate) const BROWSE_PATH_MAX: usize = 160;
 /// The id the "Parent" row carries; real entries carry their (small) index.
 const BROWSE_PARENT: u32 = u32::MAX;
 
+/// Push onto a reserved `Vec`, dropping the item if that would grow past the
+/// reservation.
+///
+/// `heapless::Vec::push` returns a `Result` and this screen threw it away: a folder with
+/// more entries than it tracks showed the first of them. An allocating `Vec` **aborts**
+/// instead, which on this device means the panic handler -- so the same bound is kept
+/// explicitly. Nothing here ever reallocates either, which is what makes the reservation
+/// the whole of what this screen asks the heap for.
+fn push_within<T>(v: &mut alloc::vec::Vec<T>, item: T) {
+    if v.len() < v.capacity() {
+        v.push(item);
+    }
+}
+
 /// One directory entry as the browser holds it, copied out of the lending `DirEntry`.
 struct BrowseEntry {
     name: heapless::String<BROWSE_NAME_MAX>,
@@ -3547,7 +3561,23 @@ pub(crate) fn browse_sd(
     };
 
     let mut path: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
-    let mut entries: heapless::Vec<BrowseEntry, BROWSE_ENTRIES> = heapless::Vec::new();
+    // **On the heap, not on the stack.** Forty-eight entries of a 64-byte name is four
+    // kilobytes, and the row list built from them below is three more -- on a screen
+    // reached from a menu that is itself several frames deep. That was survivable while
+    // the menu ran as a kernel task, which has a 32 KiB stack with a guard on it; it is
+    // not survivable on the polled path taken when cancel is held at boot, where the
+    // menu runs on the main stack -- what SRAM1 has left over after `.bss`, with no
+    // guard and nothing watching. It overflowed there into the keypad's own state, and
+    // announced itself by lighting SYM and CAPS on a Q1 nobody was typing on.
+    //
+    // `try_reserve_exact` rather than `Vec::with_capacity`: the allocating collections
+    // abort when they cannot grow, and on this device aborting means the panic handler
+    // wipes the screen and stops. A browser that cannot get its memory says so instead.
+    let mut entries: alloc::vec::Vec<BrowseEntry> = alloc::vec::Vec::new();
+    if entries.try_reserve_exact(BROWSE_ENTRIES).is_err() {
+        fail(ui, "not enough memory to list a folder");
+        return None;
+    }
 
     loop {
         // List the current directory, copying each entry the callback is handed (its name
@@ -3561,7 +3591,10 @@ pub(crate) fn browse_sd(
                 {
                     return;
                 }
-                if entries.is_full() {
+                // Bounded by the reservation above, so pushing never reallocates and
+                // never aborts: a folder with more than this many entries shows the
+                // first `BROWSE_ENTRIES` of them, as it did before.
+                if entries.len() == BROWSE_ENTRIES {
                     return;
                 }
                 let mut nm = heapless::String::new();
@@ -3570,11 +3603,14 @@ pub(crate) fn browse_sd(
                         break;
                     }
                 }
-                let _ = entries.push(BrowseEntry {
-                    name: nm,
-                    is_dir,
-                    len,
-                });
+                push_within(
+                    &mut entries,
+                    BrowseEntry {
+                        name: nm,
+                        is_dir,
+                        len,
+                    },
+                );
             })
             .is_ok();
 
@@ -3584,31 +3620,42 @@ pub(crate) fn browse_sd(
         let exit = {
             use catcard_ui::scroll::Line as DLine;
             let header: &str = if path.is_empty() { title } else { &path };
-            let mut lines: heapless::Vec<DLine, { BROWSE_ENTRIES + 3 }> = heapless::Vec::new();
-            let _ = lines.push(DLine::title(header));
+            // As `entries`: on the heap, and fallibly. Rebuilt each pass round the
+            // loop, so the block is taken and given back with the listing rather than
+            // held for as long as the browser is open.
+            let mut lines: alloc::vec::Vec<DLine> = alloc::vec::Vec::new();
+            if lines.try_reserve_exact(BROWSE_ENTRIES + 3).is_err() {
+                fail(ui, "not enough memory to draw a folder");
+                return None;
+            }
+            push_within(&mut lines, DLine::title(header));
             if !path.is_empty() {
-                let _ = lines
-                    .push(DLine::item("Parent", BROWSE_PARENT).with_icon(&catcard_ui::icons::BACK));
+                push_within(
+                    &mut lines,
+                    DLine::item("Parent", BROWSE_PARENT).with_icon(&catcard_ui::icons::BACK),
+                );
             }
             // First, so a folder chosen at a glance is one press: the row is about the
             // listing on screen, not about anything in it.
             if mode == Browse::Folder {
-                let _ = lines.push(
+                push_within(
+                    &mut lines,
                     DLine::item("Save here", BROWSE_USE_FOLDER)
                         .with_icon(&catcard_ui::icons::FOLDER),
                 );
             }
             if !listing_ok {
-                let _ = lines.push(DLine::body("(could not read)").centered());
+                push_within(&mut lines, DLine::body("(could not read)").centered());
             } else if entries.is_empty() {
-                let _ = lines.push(DLine::body("(empty)").centered());
+                push_within(&mut lines, DLine::body("(empty)").centered());
             }
             for (i, e) in entries.iter().enumerate() {
                 // What the name says it is, as a picture: in colour where the panel can
                 // show one, as a 12x12 silhouette where it cannot. A row is easier to
                 // find by shape than by reading the end of its name.
                 use catcard_ui::art::fileicons::{Kind, mark};
-                let _ = lines.push(
+                push_within(
+                    &mut lines,
                     DLine::item(&e.name, i as u32).with_mark(mark(Kind::of(&e.name, e.is_dir))),
                 );
             }
