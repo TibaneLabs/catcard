@@ -114,6 +114,10 @@ enum Screen {
     KeyPick(u8),
     /// The passphrase screen, opened from Derive rather than from Settings.
     KeyPassphrase,
+    /// Seed XOR: the wallet in force, cut into parts that XOR back to it.
+    XorSplit,
+    /// Seed XOR: parts typed back in, and the seed they make put in force.
+    XorJoin,
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
     /// Which account level to export a plain xpub from.
@@ -457,9 +461,19 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Ways to change the wallet in force, from the root.
-const KEY_ITEMS_ROOT: &[&str] = &["Passphrase", "BIP-85 key"];
+///
+/// `XOR split` is here with them although it changes nothing: it is about which wallet
+/// the words on the table belong to, which is the question this menu answers, and an
+/// owner looking for Seed XOR looks where the key lives rather than in a tool drawer.
+const KEY_ITEMS_ROOT: &[&str] = &["Passphrase", "BIP-85 key", "XOR split", "XOR join"];
 /// The same, from anywhere else: there is now somewhere to go back to.
-const KEY_ITEMS_DERIVED: &[&str] = &["Back to root", "Passphrase", "BIP-85 key"];
+const KEY_ITEMS_DERIVED: &[&str] = &[
+    "Back to root",
+    "Passphrase",
+    "BIP-85 key",
+    "XOR split",
+    "XOR join",
+];
 
 /// The rows this menu has, which depend on where the device already is.
 ///
@@ -1008,6 +1022,16 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::passphrase::screen(a.gate, a.login, a.ui),
             Screen::KeyMenu,
         ),
+        Screen::XorSplit => to(
+            |a| crate::seedxor::split(a.gate, a.login, a.ui, a.pool.take()),
+            Screen::KeyMenu,
+        ),
+        // A join can leave a seed stored where there was none, which is the one thing
+        // that reorders the main menu.
+        Screen::XorJoin => reseeds(
+            |a| crate::seedxor::join(a.gate, a.login, a.ui),
+            Screen::KeyMenu,
+        ),
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
@@ -1220,11 +1244,14 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // people in the Debug menu.
         Screen::KeyMenu => match (key, key_items().get(cursor).copied()) {
             (Key::Confirm, Some("Passphrase")) => Screen::KeyPassphrase,
+            (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
+            (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::KeyMenu,
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
+        Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
                 Screen::GenericJson(cursor as u8)
@@ -1535,6 +1562,8 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Back to root" => Some(&art::RETURN_ROOT_KEY),
             "Passphrase" => Some(&art::DERIVE_PASSPHRASE),
             "BIP-85 key" => Some(&art::DERIVE_BIP85_INDEX),
+            "XOR split" => Some(&art::XOR_SPLIT),
+            "XOR join" => Some(&art::XOR_JOIN),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
@@ -1649,6 +1678,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SdInstall => {}
         // Handled in `run`: it derives, which needs the login struct.
         Screen::KeyPick(_) => {}
+        // Handled in `run`: both drive their own screens from the keypad.
+        Screen::XorSplit | Screen::XorJoin => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => {}
         #[cfg(feature = "board-q1")]
@@ -4726,16 +4757,34 @@ pub(crate) fn unlock_master(
 /// a screen -- warming the status bar's fingerprint after login, where a message box
 /// would be an interruption nobody asked for, and a key wait would stall the device
 /// behind a question about something the owner never requested.
-pub(crate) fn master_quietly(
+/// The BIP-39 entropy of the wallet in force, with a progress screen.
+///
+/// The secret the secure element holds, or -- when a BIP-85 child is in force -- that
+/// child's own entropy, which is a different seed derived from the same backup. Not the
+/// master key and not the passphrase: this is the *words*, which is what a seed backup,
+/// a split or a word list is made of.
+///
+/// Its own function because two things want it and they must not disagree:
+/// [`master_quietly`], which stretches it into a key, and Seed XOR, which cuts it up.
+pub(crate) fn seed_entropy(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     head: &str,
-) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+) -> Result<([u8; 32], usize), &'static str> {
     use catcard_callgate::pin::bip39_entropy;
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
-    use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
+    use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
     use zeroize::Zeroize;
+
+    let mut ent = [0u8; 32];
+
+    // A seed the owner brought in for this session is the wallet, and it is already
+    // here: nothing to fetch, and no child to derive -- it is not a child of anything.
+    if let Some(temp) = crate::key::temporary() {
+        ent[..temp.len()].copy_from_slice(temp);
+        return Ok((ent, temp.len()));
+    }
 
     // Say so before asking for the secret, not after. The fetch is one callgate call: the
     // bootloader runs the PIN key-stretch inside the secure element -- about 1.6 s on an
@@ -4750,7 +4799,6 @@ pub(crate) fn master_quietly(
     // Copy the entropy out into an owned buffer so the secret can be wiped immediately;
     // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
     // something this can enumerate.
-    let mut ent = [0u8; 32];
     #[allow(unused_mut)]
     let mut ent_len = match bip39_entropy(&secret) {
         Some(e) if e.len() <= ent.len() => {
@@ -4812,6 +4860,20 @@ pub(crate) fn master_quietly(
             }
         }
     }
+    Ok((ent, ent_len))
+}
+
+pub(crate) fn master_quietly(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
+    use zeroize::Zeroize;
+
+    let (mut ent, ent_len) = seed_entropy(gate, login, panel, head)?;
 
     // Seed -> master, through whatever passphrase is in force (none, normally).
     // Done once, then the seed material is gone and only the master remains.
@@ -6073,45 +6135,17 @@ fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
     }
 }
 
-/// Restore a wallet from a written-down BIP-39 phrase, typed on the keypad.
+/// Type a BIP-39 phrase on the keypad, and do not hand it back until it checks out.
 ///
 /// The count is not asked: the owner types each word and presses `y` twice to end. The
-/// checksum is the whole safety story -- a restore stores whatever it is given, so nothing
-/// is committed until [`Mnemonic::parse`] rebuilds the entropy and verifies the checksum.
-/// A phrase that does not check out drops the owner into [`edit_menu`]: the words shown as
-/// a list to fix in place, add to, or discard, and the checksum is re-tested after each
-/// change. Only once it checks out is the import offered and stored.
+/// checksum is the whole safety story -- a phrase is a wallet, so nothing is returned
+/// until [`Mnemonic::parse`] rebuilds the entropy and verifies it. A phrase that does
+/// not check out drops the owner into [`edit_menu`]: the words as a list to fix in
+/// place, add to, or discard, re-tested after each change.
 ///
-/// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
-/// reason: a slot that did not keep the words must be reported, not assumed.
-fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+/// `None` if the owner backed out, in which case the caller says what was not done.
+pub(crate) fn read_phrase(ui: &mut Ui<'_>) -> Option<catcard_wallet::bip39::Mnemonic> {
     use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
-    use zeroize::Zeroize;
-
-    fn cancelled(ui: &mut Ui<'_>) {
-        message(ui.panel, "Import cancelled", "nothing was", "stored");
-        wait_for_any_key(ui);
-    }
-
-    // Overwriting an in-use wallet is the destructive case; this is the only warning.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
-        ask(
-            ui.panel,
-            "Wallet exists",
-            "a restore DESTROYS",
-            "the one stored now",
-        );
-        if !confirmed(ui) {
-            return;
-        }
-    }
-    message(
-        ui.panel,
-        "Import seed",
-        "enter each word,",
-        "then y y to finish",
-    );
-    wait_for_any_key(ui);
 
     let mut idx: heapless::Vec<u16, 24> = heapless::Vec::new();
 
@@ -6125,18 +6159,16 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
                     break;
                 }
             }
+            // Backing off the first word abandons the phrase.
             WordPick::Back => {
-                if idx.pop().is_none() {
-                    cancelled(ui);
-                    return;
-                }
+                idx.pop()?;
             }
             WordPick::Finish => break,
         }
     }
 
     // Verify, and until it checks out let the owner fix it. Each pass reparses the phrase.
-    let mnemonic = loop {
+    Some(loop {
         let mut phrase: heapless::String<256> = heapless::String::new();
         for (n, &i) in idx.iter().enumerate() {
             if n > 0 {
@@ -6170,13 +6202,55 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
                             let _ = idx.push(i);
                         }
                     }
-                    EditChoice::Cancel => {
-                        cancelled(ui);
-                        return;
-                    }
+                    EditChoice::Cancel => return None,
                 }
             }
         }
+    })
+}
+
+/// Restore a wallet from a written-down BIP-39 phrase, typed on the keypad.
+///
+/// The count is not asked: the owner types each word and presses `y` twice to end. The
+/// checksum is the whole safety story -- a restore stores whatever it is given, so nothing
+/// is committed until [`Mnemonic::parse`] rebuilds the entropy and verifies the checksum.
+/// A phrase that does not check out drops the owner into [`edit_menu`]: the words shown as
+/// a list to fix in place, add to, or discard, and the checksum is re-tested after each
+/// change. Only once it checks out is the import offered and stored.
+///
+/// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
+/// reason: a slot that did not keep the words must be reported, not assumed.
+fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use zeroize::Zeroize;
+
+    fn cancelled(ui: &mut Ui<'_>) {
+        message(ui.panel, "Import cancelled", "nothing was", "stored");
+        wait_for_any_key(ui);
+    }
+
+    // Overwriting an in-use wallet is the destructive case; this is the only warning.
+    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+        ask(
+            ui.panel,
+            "Wallet exists",
+            "a restore DESTROYS",
+            "the one stored now",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    message(
+        ui.panel,
+        "Import seed",
+        "enter each word,",
+        "then y y to finish",
+    );
+    wait_for_any_key(ui);
+
+    let Some(mnemonic) = read_phrase(ui) else {
+        cancelled(ui);
+        return;
     };
 
     // It checks out: offer to complete, then store.
@@ -6533,7 +6607,7 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
 /// Paged rather than flashed past: ENTER moves forward and only means "done" once the
 /// last word has been on screen. The previous version advanced on *any* key, which is
 /// how a held key walked through a page of someone's backup before they could read it.
-fn show_words(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) {
+pub(crate) fn show_words(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) {
     let texts = word_texts(m);
     let mut lines: heapless::Vec<catcard_ui::scroll::Line, 26> = heapless::Vec::new();
     let _ = lines.push(catcard_ui::scroll::Line::title("Write these down"));

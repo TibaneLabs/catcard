@@ -42,7 +42,8 @@ Dependency first, then what a user needs to hold funds safely:
    forget: chain, account numbers, display units.
 8. ~~**Multisig and descriptor import**~~ -- done; see §4. Untested on hardware.
 9. **Encrypted backup and restore**.
-10. **Import paths** beyond words: xprv, raw master secret, Seed XOR, backup file.
+10. **Import paths** beyond words: xprv, raw master secret, backup file. (Seed XOR is
+    done -- split and join, under Derive.)
 11. **Q1 transports**: QR scanner and display (incl. BBQr), NFC.
 12. **Trick PINs, login protections, Seed Vault, temporary seeds**.
 13. **HSM, Spending Policy, Coldcard Cosign** -- last: they are policy engines on top of
@@ -81,10 +82,10 @@ Dependency first, then what a user needs to hold funds safely:
 | Dice-only seed | ✅ | ❌ | |
 | Import words (12/18/24) | ✅ | ✅ | |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ❌ | steps 9-11 |
-| Seed XOR split and join | ✅ | ❌ | step 10 |
+| Seed XOR split and join | ✅ | ✅ | Derive; the published examples are host tests |
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
-| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ❌ | step 12 |
+| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | 🟡 | one temporary seed, from an XOR join; no vault, no lock-down |
 | View seed words, SeedQR | ✅ | ❌ | words at creation only; needs a guarded view |
 | Destroy seed | ✅ | ✅ | Settings |
 

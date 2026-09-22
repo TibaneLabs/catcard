@@ -16,15 +16,21 @@
 //! passphrase is. That is deliberate and matches stock: the device comes up in the root
 //! wallet, which is the one whose backup the owner has.
 //!
-//! # What it is not
+//! # A temporary seed is one of them
 //!
-//! Not a *temporary seed* in stock's fuller sense -- words imported from a card or a QR
-//! and used as if they were the master. That needs somewhere to hold the seed itself and
-//! a vault to keep several; this holds a derivation *path* from a root that is already
-//! there. The two meet later: a temporary seed would be another variant here, and every
-//! consumer of [`in_force`] already asks the right question.
+//! [`Source::Temporary`] is a seed the owner brought in for this session -- today, the
+//! result of joining Seed XOR parts -- used as if it were the master. Unlike the other
+//! two it is not derived from the root at all, so the bytes have to live somewhere: they
+//! are here, beside the selection, and [`crate::menu::seed_entropy`] returns them instead
+//! of reading the secure element.
+//!
+//! What is still missing from stock's version is a *vault*: somewhere to keep several and
+//! choose between them, and the option to make one permanent. This holds exactly one, and
+//! forgets it on reboot like everything else here.
 //!
 //! Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3, §S1 [C]
+
+use zeroize::Zeroize as _;
 
 /// Where the wallet in force comes from.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -38,7 +44,20 @@ pub(crate) enum Source {
     /// can only say two -- and what identifies this wallet is the number in the
     /// derivation path, not which row was pressed to get here.
     Bip85 { words: u32, index: u32 },
+    /// A seed from outside, in force for this session only.
+    ///
+    /// The entropy is in [`TEMP`] rather than in the variant: it is up to 32 bytes of
+    /// wallet, which has no business being `Copy`, being compared with `==`, or being
+    /// returned by value from [`in_force`] to whoever asks what wallet this is.
+    Temporary,
 }
+
+/// The temporary seed's entropy, and how much of it is real.
+///
+/// Foreground only, single core, and wiped whenever the selection leaves it.
+static mut TEMP: [u8; catcard_wallet::bip39::MAX_ENTROPY_LEN] =
+    [0; catcard_wallet::bip39::MAX_ENTROPY_LEN];
+static mut TEMP_LEN: usize = 0;
 
 /// The selection in force. Foreground only, single core.
 static mut SOURCE: Source = Source::Root;
@@ -57,8 +76,52 @@ pub(crate) fn is_root() -> bool {
     in_force() == Source::Root && !crate::passphrase::is_set()
 }
 
+/// The temporary seed's entropy, if one is in force.
+pub(crate) fn temporary() -> Option<&'static [u8]> {
+    if in_force() != Source::Temporary {
+        return None;
+    }
+    // SAFETY: foreground only; the only writer is `set_temporary`, which holds no
+    // borrow across the write, and the length is never longer than the array.
+    unsafe {
+        let len = *core::ptr::addr_of!(TEMP_LEN);
+        let all: &'static [u8; catcard_wallet::bip39::MAX_ENTROPY_LEN] =
+            &*core::ptr::addr_of!(TEMP);
+        Some(&all[..len])
+    }
+}
+
+/// Work from `entropy` as if it were the stored seed, for this session.
+///
+/// Refuses a length BIP-39 has no words for: everything downstream turns this back into
+/// a phrase, and a seed that cannot be written down is not one anybody can keep.
+pub(crate) fn set_temporary(entropy: &[u8]) -> bool {
+    if catcard_wallet::bip39::words_for_entropy(entropy.len()).is_none() {
+        return false;
+    }
+    // SAFETY: as in `temporary`.
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(TEMP);
+        slot.zeroize();
+        slot[..entropy.len()].copy_from_slice(entropy);
+        *core::ptr::addr_of_mut!(TEMP_LEN) = entropy.len();
+    }
+    set(Source::Temporary);
+    true
+}
+
 /// Work in `source` from now on.
 pub(crate) fn set(source: Source) {
+    // Leaving the temporary seed is the only chance to wipe it: nothing else holds a
+    // copy, and a seed that outlived its selection would be a wallet in force that no
+    // screen names.
+    if source != Source::Temporary {
+        // SAFETY: as in `temporary`.
+        unsafe {
+            (*core::ptr::addr_of_mut!(TEMP)).zeroize();
+            *core::ptr::addr_of_mut!(TEMP_LEN) = 0;
+        }
+    }
     // SAFETY: as in `in_force`.
     unsafe { *core::ptr::addr_of_mut!(SOURCE) = source };
     // Everything cached belongs to the wallet that was in force a moment ago.
@@ -85,5 +148,7 @@ pub(crate) fn label() -> &'static str {
         (Source::Root, true) => "PASSPHRASE",
         (Source::Bip85 { .. }, false) => "BIP85",
         (Source::Bip85 { .. }, true) => "BIP85+PP",
+        (Source::Temporary, false) => "TEMP",
+        (Source::Temporary, true) => "TEMP+PP",
     }
 }

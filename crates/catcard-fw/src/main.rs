@@ -84,6 +84,7 @@ mod qrscan;
 mod qrshow;
 mod recovery;
 mod sdupgrade;
+mod seedxor;
 mod selftest;
 mod session;
 /// The settings store itself: slots, keys, and the screen that reads them.
