@@ -103,9 +103,185 @@ def load(path):
     return list(im.get_flattened_data())
 
 
-def mono(letter):
-    """Rows of bytes, MSB first: the disc with the letter knocked out."""
+# The 1-bit marks, at the size the OLED draws them. `#` is ink, `.` is a hole in the
+# coin, ` ` is off the coin altogether.
+#
+# **Each chain's own symbol, not its initial.** A disc with a letter in it is what this
+# drew before, and on the mk5 it meant Bitcoin-Cash was a `C` and ElectraProto an `X`:
+# ten coins that all looked like the same coin, told apart by reading. These are the
+# marks themselves, knocked out of the disc so the outline still reads as a coin at
+# twelve pixels.
+#
+# Written out rather than reduced from the colour art, for the reason the file icons
+# are: a logo thresholded to one bit at this size is a blob, and the blobs all match.
+SILHOUETTES = {
+    # Bitcoin: the B with its two stems.
+    "BTC": [
+        "    #  #    ",
+        "    #  #    ",
+        "  #######   ",
+        "  ##    ##  ",
+        "  ##    ##  ",
+        "  #######   ",
+        "  ##    ##  ",
+        "  ##    ##  ",
+        "  #######   ",
+        "    #  #    ",
+        "    #  #    ",
+        "            ",
+    ],
+    # Bitcoin-Cash: the same mark leaning, which is how the two differ on paper too.
+    "BCH": [
+        "      #  #  ",
+        "      #  #  ",
+        "    ####### ",
+        "   ##    ## ",
+        "   ##    ## ",
+        "   #######  ",
+        "  ##    ##  ",
+        "  ##    ##  ",
+        " #######    ",
+        " #  #       ",
+        " #  #       ",
+        "            ",
+    ],
+    # Ethereum: the two triangles, point to point.
+    "ETH": [
+        "     ##     ",
+        "    ####    ",
+        "   ######   ",
+        "  ########  ",
+        " ########## ",
+        "  ########  ",
+        "            ",
+        "  ########  ",
+        "   ######   ",
+        "    ####    ",
+        "     ##     ",
+        "            ",
+    ],
+    # Litecoin: the crossed L.
+    "LTC": [
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "   ######   ",
+        "    ###     ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "    #####   ",
+        "   ######   ",
+        "            ",
+        "            ",
+    ],
+    # Solana: three bars, each sheared the way the logo's are.
+    "SOL": [
+        "            ",
+        "   ######## ",
+        "  ########  ",
+        "            ",
+        "  ########  ",
+        "   ######## ",
+        "            ",
+        "   ######## ",
+        "  ########  ",
+        "            ",
+        "            ",
+        "            ",
+    ],
+    # Dogecoin: the crossed D.
+    "DOGE": [
+        "            ",
+        "   #####    ",
+        "   ##  ##   ",
+        "   ##   ##  ",
+        "  #####  ## ",
+        "  #####  ## ",
+        "   ##   ##  ",
+        "   ##  ##   ",
+        "   #####    ",
+        "            ",
+        "            ",
+        "            ",
+    ],
+    # Tron, Monacoin, Namecoin and ElectraProto have no mark that survives twelve
+    # pixels, so they keep a letter -- drawn at the full size rather than shrunk into a
+    # coin, which is what made the old ones unreadable.
+    "TRX": [
+        "            ",
+        " ########## ",
+        " ########## ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "     ##     ",
+        "            ",
+        "            ",
+    ],
+    "MONA": [
+        "            ",
+        " ##      ## ",
+        " ###    ### ",
+        " ####  #### ",
+        " ## #### ## ",
+        " ##  ##  ## ",
+        " ##      ## ",
+        " ##      ## ",
+        " ##      ## ",
+        " ##      ## ",
+        "            ",
+        "            ",
+    ],
+    "NMC": [
+        "    #  #    ",
+        " ##      ## ",
+        " ###     ## ",
+        " ####    ## ",
+        " ## ##   ## ",
+        " ##  ##  ## ",
+        " ##   ## ## ",
+        " ##    #### ",
+        " ##     ### ",
+        " ##      ## ",
+        "    #  #    ",
+        "            ",
+    ],
+    "XEP": [
+        "            ",
+        " ##      ## ",
+        "  ##    ##  ",
+        "   ##  ##   ",
+        "    ####    ",
+        "     ##     ",
+        "    ####    ",
+        "   ##  ##   ",
+        "  ##    ##  ",
+        " ##      ## ",
+        "            ",
+        "            ",
+    ],
+}
+
+
+def mono(ticker, letter):
+    """Rows of bytes, MSB first: the chain's own mark, or a disc and its letter."""
     bpr = (MONO + 7) // 8
+    rows = SILHOUETTES.get(ticker)
+    if rows is not None:
+        if len(rows) != MONO or any(len(r) != MONO for r in rows):
+            sys.exit(f"{ticker}: the silhouette is not {MONO}x{MONO}")
+        out = []
+        for row in rows:
+            bits = [0] * bpr
+            for x, c in enumerate(row):
+                if c == "#":
+                    bits[x // 8] |= 0x80 >> (x % 8)
+            out += bits
+        return bpr, out
     out = []
     for y in range(MONO):
         row = [0] * bpr
@@ -127,7 +303,7 @@ def main():
         png = a.src / f"{ticker}.png"
         px = load(png) if png.exists() else placeholder(letter, colour)
         raw = bytes(v for p in px for v in p)
-        marks.append((ticker, png.exists(), deflate.deflate(raw), mono(letter)))
+        marks.append((ticker, png.exists(), deflate.deflate(raw), mono(ticker, letter)))
 
     lines = [
         "//! Chain marks for the chain picker: colour for the Q1, 1-bit for the OLED.",
