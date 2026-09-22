@@ -115,6 +115,115 @@ pub(crate) fn wallet_key(
     Ok(key)
 }
 
+/// Save `(name, raw)` into the wallet in force's own settings file.
+///
+/// `raw` is the value as JSON text. Every per-wallet write goes through here, so the file
+/// is always the right one ([`wallet_key`]) and always says whose it is.
+///
+/// # A file says whose it is
+///
+/// The files are found by trying keys, so nothing *outside* a file says which wallet it
+/// belongs to. Stock writes that inside: `xfp` (the fingerprint as a little-endian
+/// number -- `C2AAB8AA` is `2864229058`), `words`, the master `xpub`, and `chain`. The
+/// first time this saves into a file that lacks them, they go in with the change, in the
+/// same slot write -- a slot is the whole object rewritten, so four more keys cost
+/// nothing but the derivation, and that is paid once per wallet.
+pub(crate) fn save_wallet(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    (name, raw): (&str, &str),
+    doc: &mut [u8],
+    seal: &mut [u8],
+) -> Result<(), &'static str> {
+    use catcard_settings::json::Doc;
+    use catcard_settings::store;
+
+    let key = wallet_key(gate, login, ui.panel, head)?;
+    // SAFETY: foreground only; the caller holds the display while this runs.
+    let mut files = unsafe { Files::mount() }.map_err(|_| "no settings store")?;
+
+    // Does this file already say whose it is?
+    let n = store::read(&mut files, &key, doc).unwrap_or(0);
+    let known = Doc::parse(&doc[..n])
+        .ok()
+        .is_some_and(|d| d.get("xfp").is_some());
+
+    let mut xfp_text: heapless::String<12> = heapless::String::new();
+    let mut words_text: heapless::String<4> = heapless::String::new();
+    let mut xpub_text: heapless::String<{ catcard_wallet::bip32::serialize::MAX_BASE58_LEN + 2 }> =
+        heapless::String::new();
+    if !known {
+        identity(
+            gate,
+            login,
+            ui,
+            head,
+            &mut xfp_text,
+            &mut words_text,
+            &mut xpub_text,
+        );
+    }
+
+    let mut pairs: heapless::Vec<(&str, &str), 5> = heapless::Vec::new();
+    if !xfp_text.is_empty() {
+        let _ = pairs.push(("chain", "\"BTC\""));
+        let _ = pairs.push(("xfp", xfp_text.as_str()));
+        if !words_text.is_empty() {
+            let _ = pairs.push(("words", words_text.as_str()));
+        }
+        if !xpub_text.is_empty() {
+            let _ = pairs.push(("xpub", xpub_text.as_str()));
+        }
+    }
+    let _ = pairs.push((name, raw));
+
+    let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
+    store::set_many(&mut files, &key, &pairs, choose, doc, seal).map_err(|_| "could not save")?;
+    Ok(())
+}
+
+/// The wallet in force's fingerprint, word count and master xpub, as JSON text.
+///
+/// Left empty on any failure: a file without them is still a working file, and a save
+/// that failed because it could not decorate itself would be the wrong trade.
+fn identity(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    xfp: &mut heapless::String<12>,
+    words: &mut heapless::String<4>,
+    xpub: &mut heapless::String<{ catcard_wallet::bip32::serialize::MAX_BASE58_LEN + 2 }>,
+) {
+    use core::fmt::Write as _;
+    use zeroize::Zeroize as _;
+
+    // Words describe the seed, so only a words wallet has a count -- and a passphrase
+    // wallet's master is not the seed's, but the count is still the seed's.
+    if let Ok((mut ent, len)) = crate::menu::seed_entropy(gate, login, ui.panel, head) {
+        ent.zeroize();
+        if let Some(n) = catcard_wallet::bip39::words_for_entropy(len) {
+            let _ = write!(words, "{n}");
+        }
+    }
+    let Ok(master) = crate::menu::master_quietly(gate, login, ui.panel, head) else {
+        return;
+    };
+    let fp = crate::keywork::run(|kw| master.fingerprint(kw));
+    // Little-endian, which is how stock turns the four bytes into its number.
+    let _ = write!(xfp, "{}", u32::from_le_bytes(fp));
+    let public = crate::keywork::run(|kw| master.to_extended_pub(kw));
+    drop(master);
+    let mut buf = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
+    if let Ok(n) = public.write_base58(&mut buf)
+        && let Ok(text) = core::str::from_utf8(&buf[..n])
+    {
+        let _ = write!(xpub, "\"{text}\"");
+    }
+}
+
 /// Slots stock keeps on a LittleFS device, as `settings/000.aes` upwards.
 /// Source: hw-reference/settings-nvstore-format.md §1 [C]
 pub const SLOT_COUNT: u32 = 100;

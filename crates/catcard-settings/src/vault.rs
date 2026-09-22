@@ -7,11 +7,12 @@
 //!
 //! # Where they live, and what that means
 //!
-//! In the wallet settings blob, under `"seeds"`, beside the nickname and the multisig
-//! registrations. That blob is encrypted under a key derived from the **stored** secret, so
-//! the vault is readable exactly when the device is unlocked with its own PIN -- and is
-//! gone with the seed if the device is wiped. It is not a backup: an entry here is a
-//! convenience for reaching a wallet whose words are written down somewhere else.
+//! In a wallet's own settings file, under `"seeds"`, beside its multisig registrations.
+//! Every wallet the device works in has one, encrypted under that wallet's stash, so a
+//! BIP-85 child's vault is the child's and not the root's. All of them are readable only
+//! on an unlocked device, and all of them go when it is wiped. It is not a backup: an
+//! entry here is a convenience for reaching a wallet whose words are written down
+//! somewhere else.
 //!
 //! # The format is stock's
 //!

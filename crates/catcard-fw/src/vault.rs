@@ -7,9 +7,16 @@
 //! # What goes in, and what comes back
 //!
 //! An entry is a wallet's own BIP-39 entropy -- a BIP-85 child, a seed joined from XOR
-//! parts -- held as the secure element would hold it, in the settings blob that is already
-//! encrypted under the stored secret. Loading one makes it the session's temporary key,
-//! exactly as joining the XOR parts by hand would have.
+//! parts -- held as the secure element would hold it, in the settings file of the wallet
+//! in force. Loading one makes it the session's temporary key, exactly as joining the XOR
+//! parts by hand would have.
+//!
+//! # Every wallet has its own vault
+//!
+//! Each wallet's settings are a file of their own, encrypted under that wallet's stash
+//! ([`crate::settings::wallet_key`]). So the vault seen from the root is the root's; load
+//! a key from it, open the vault again, and what is listed is *that* key's vault -- which
+//! can hold keys of its own.
 //!
 //! A **passphrase** wallet cannot go in. Its master is words plus a passphrase, and there
 //! is no BIP-39 entropy that reproduces it, so there is nothing of the right shape to
@@ -367,9 +374,6 @@ fn save(
     ui: &mut Ui<'_>,
     change: Change<'_>,
 ) -> Result<(), &'static str> {
-    use catcard_settings::json::RawJson;
-    use catcard_settings::store;
-
     menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc_held), Some(mut seal_held)) =
         (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
@@ -377,7 +381,6 @@ fn save(
         return Err("not enough memory");
     };
     let doc_buf = doc_held.bytes();
-    let key = crate::settings::wallet_key(gate, login, ui.panel, HEAD)?;
     let n = read_doc(gate, login, ui.panel, doc_buf)?;
 
     // The new list is rendered into its own buffer before the document is touched: the
@@ -407,28 +410,21 @@ fn save(
     };
     let text = core::str::from_utf8(&out_buf[..len]).map_err(|_| "not text")?;
 
-    // SAFETY: foreground only; the menu waits for this screen to return.
-    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-    let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
-    let seal = seal_held.bytes();
-    store::set(
-        &mut files,
-        &key,
-        vault::KEY,
-        &RawJson(text),
-        choose,
+    crate::settings::save_wallet(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (vault::KEY, text),
         doc_buf,
-        seal,
+        seal_held.bytes(),
     )
-    .map_err(|_| "could not save")?;
-    Ok(())
 }
 
-/// The wallet settings document, into `buf`. Returns its length.
+/// The settings document of the wallet in force, into `buf`. Returns its length.
 ///
-/// Always under the **stored** secret's key, even when a temporary seed is in force: the
-/// vault belongs to the device, and a vault that moved with the key in force would be
-/// unreachable from the key that is in it.
+/// That wallet's **own** file ([`crate::settings::wallet_key`]): a BIP-85 child has a
+/// vault of its own, and the keys kept in it are not the root's.
 fn read_doc(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

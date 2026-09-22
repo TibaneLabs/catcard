@@ -360,32 +360,22 @@ fn store_list(
     doc_buf: &mut [u8; SCRATCH],
     len: usize,
 ) -> Result<(), &'static str> {
-    use catcard_settings::json::RawJson;
-    use catcard_settings::store;
-
     // SAFETY: foreground only; one settings screen at a time.
     let list_buf: &[u8; SCRATCH] = unsafe { &*core::ptr::addr_of!(LIST) };
     let text = core::str::from_utf8(&list_buf[..len]).map_err(|_| "not text")?;
 
-    // The file belongs to the wallet in force, as the read did.
-    let key = crate::settings::wallet_key(gate, login, ui.panel, "Multisig")?;
-    // SAFETY: as above.
-    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-
     // SAFETY: as above.
     let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
-    let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
-    store::set(
-        &mut files,
-        &key,
-        wallets::KEY,
-        &RawJson(text),
-        choose,
+    // Into the wallet in force's own file, as the read was.
+    crate::settings::save_wallet(
+        gate,
+        login,
+        ui,
+        "Multisig",
+        (wallets::KEY, text),
         doc_buf,
         seal,
     )
-    .map_err(|_| "could not save")?;
-    Ok(())
 }
 
 /// Import a wallet: pick the file, read it, show it, and store it if the owner agrees.

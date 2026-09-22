@@ -217,6 +217,56 @@ pub fn set<S: Slots, V: emjson::ToJson + ?Sized>(
     write(slots, key, &doc[..len], choose, scratch)
 }
 
+/// Change several keys and save the settings back, in one slot write.
+///
+/// [`set`] for more than one key. A slot is the whole object -- the JSON, zero padding to
+/// [`BODY_LEN`](crate::nvstore::BODY_LEN), and a digest -- rewritten in full on every
+/// save, so two keys changed in two saves cost two slot writes and leave a moment where
+/// one is new and the other is not. Changing them together costs one, and there is no
+/// such moment.
+///
+/// Each value is JSON text as it should appear, quotes and all: `("chain", "\"BTC\"")`.
+/// Everything else in the object keeps its exact bytes, as with [`set`].
+pub fn set_many<S: Slots>(
+    slots: &mut S,
+    key: &Key,
+    pairs: &[(&str, &str)],
+    choose: u32,
+    doc: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<u32, Error> {
+    use crate::json::RawJson;
+    use emjson::Seg;
+    use emjson::edit::{Editor, MemStorage};
+
+    if doc.len() < SCRATCH || scratch.len() < SCRATCH {
+        return Err(Error::Malformed);
+    }
+    let mut len = match read(slots, key, doc) {
+        Ok(n) => n,
+        Err(Error::Absent) => {
+            doc[..2].copy_from_slice(b"{}");
+            2
+        }
+        Err(e) => return Err(e),
+    };
+    let age = Doc::parse(&doc[..len]).map(|d| next_age(&d)).unwrap_or(1);
+    {
+        let mut window = [0u8; 64];
+        let mut editor = Editor::new(MemStorage::new(doc, len), &mut window);
+        for (name, raw) in pairs {
+            editor
+                .set(&[Seg::Key(name)][..], &RawJson(raw))
+                .map_err(|_| Error::Malformed)?;
+        }
+        editor
+            .set(&[Seg::Key("_age")][..], &age)
+            .map_err(|_| Error::Malformed)?;
+        len = editor.storage().doc_len();
+    }
+    write(slots, key, &doc[..len], choose, scratch)
+}
+
 /// The `_age` a save should carry: one past what is stored.
 pub fn next_age(doc: &Doc<'_>) -> u64 {
     doc.get_u64("_age").unwrap_or(0).saturating_add(1)
@@ -442,6 +492,52 @@ mod save_tests {
         assert_eq!(after.get_str("nick"), Some("new"));
         let order: Vec<&str> = after.entries().iter().map(|e| e.key).collect();
         assert_eq!(order, ["_age", "chain", "rz", "nick"], "nothing moved");
+    }
+
+    /// Several keys go in together: one save, one `_age` step, and every key there.
+    ///
+    /// The shape stock writes for a wallet's own file -- its fingerprint as a number, its
+    /// word count, its master xpub -- next to the key that caused the save.
+    #[test]
+    fn several_keys_are_one_save() {
+        let mut slots = Ram::new();
+        let k = key();
+        let mut doc = [0u8; SCRATCH];
+        let mut scratch = [0u8; SCRATCH];
+        write(
+            &mut slots,
+            &k,
+            br#"{"_age":6,"du":1,"ovc":["a","b"]}"#,
+            0,
+            &mut scratch,
+        )
+        .unwrap();
+
+        set_many(
+            &mut slots,
+            &k,
+            &[
+                ("chain", "\"BTC\""),
+                ("xfp", "2864229058"),
+                ("words", "12"),
+                ("seeds", "[]"),
+            ],
+            3,
+            &mut doc,
+            &mut scratch,
+        )
+        .unwrap();
+
+        let n = read(&mut slots, &k, &mut doc).unwrap();
+        let after = Doc::parse(&doc[..n]).unwrap();
+        assert_eq!(after.get_u64("_age"), Some(7), "one step, not four");
+        assert_eq!(after.get_str("chain"), Some("BTC"));
+        assert_eq!(after.get_u64("xfp"), Some(2_864_229_058));
+        assert_eq!(after.get_u64("words"), Some(12));
+        assert_eq!(after.get("seeds"), Some("[]"));
+        // What was there is still there, untouched.
+        assert_eq!(after.get("ovc"), Some(r#"["a","b"]"#));
+        assert_eq!(after.get_u64("du"), Some(1));
     }
 
     /// The first save on a device that has never saved writes a settings object.
