@@ -1,0 +1,24 @@
+[package]
+name = "catcard-png"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minizlib = { workspace = true }
+
+[dev-dependencies]
+# Fixtures are built with the same code that will read them back: a test that encodes
+# with one implementation and decodes with another is testing the pair, not this crate.
+minizlib = { version = "0.1.1", default-features = false, features = [
+    "decompress",
+    "compress",
+    "zlib",
+    "checksum",
+    "fixed",
+    "dynamic",
+    "stored",
+] }

@@ -12,6 +12,7 @@ members = [
     "crates/catcard-wallet",
     "crates/catcard-entropy",
     "crates/catcard-pin",
+    "crates/catcard-png",
     "crates/catcard-hal",
     "crates/catcard-kernel",
     "crates/catcard-nfc",
@@ -40,6 +41,7 @@ default-members = [
     "crates/catcard-flash",
     "crates/catcard-qr",
     "crates/catcard-pin",
+    "crates/catcard-png",
     "crates/catcard-settings",
     "crates/catcard-upgrade",
     "crates/catcard-usb",
@@ -75,6 +77,7 @@ catcard-pin = { path = "crates/catcard-pin", default-features = false }
 catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
 catcard-usb = { path = "crates/catcard-usb", default-features = false }
 catcard-qr = { path = "crates/catcard-qr", default-features = false }
+catcard-png = { path = "crates/catcard-png", default-features = false }
 
 # --- minizlib: deflate for the USB upgrade transport, no_std and no alloc ---
 #
@@ -82,7 +85,18 @@ catcard-qr = { path = "crates/catcard-qr", default-features = false }
 # linking a compressor into firmware would be paying flash for a direction that is
 # never travelled. The tests pull in `compress` as a dev-dependency to build their own
 # fixtures with the same code that will decode them.
-minizlib = { version = "0.1.1", default-features = false, features = ["decompress", "fixed", "dynamic", "stored"] }
+# `zlib` and `checksum` are for PNG: its image data is a zlib stream, and the Adler-32
+# at the end of it is the one check that the picture arrived whole. BBQr's `Z` is raw
+# deflate and needs neither, so this costs the upgrade path a header parser it will
+# never call.
+minizlib = { version = "0.1.1", default-features = false, features = [
+    "decompress",
+    "zlib",
+    "checksum",
+    "fixed",
+    "dynamic",
+    "stored",
+] }
 catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
