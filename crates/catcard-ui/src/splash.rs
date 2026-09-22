@@ -38,6 +38,18 @@ pub fn draw_bitmap_scaled<C: Canvas + ?Sized>(
     y: usize,
     scale: usize,
 ) {
+    draw_bitmap_scaled_in(fb, bmp, x, y, scale, INK);
+}
+
+/// [`draw_bitmap_scaled`] at a chosen ink level, for art on a light background.
+pub fn draw_bitmap_scaled_in<C: Canvas + ?Sized>(
+    fb: &mut C,
+    bmp: &Bitmap,
+    x: usize,
+    y: usize,
+    scale: usize,
+    level: crate::canvas::Level,
+) {
     let scale = scale.max(1);
     for by in 0..bmp.height as usize {
         for bx in 0..bmp.width as usize {
@@ -47,7 +59,7 @@ pub fn draw_bitmap_scaled<C: Canvas + ?Sized>(
                     y.saturating_add(by * scale),
                     scale,
                     scale,
-                    INK,
+                    level,
                 );
             }
         }

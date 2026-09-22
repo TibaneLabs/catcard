@@ -229,12 +229,24 @@ pub fn draw_paw_trail<C: crate::canvas::Canvas + ?Sized>(
     y: usize,
     scale: usize,
 ) {
+    draw_paw_trail_in(fb, count, x, y, scale, crate::canvas::INK);
+}
+
+/// [`draw_paw_trail`] in a chosen ink, for a trail walking across a light field.
+pub fn draw_paw_trail_in<C: crate::canvas::Canvas + ?Sized>(
+    fb: &mut C,
+    count: usize,
+    x: usize,
+    y: usize,
+    scale: usize,
+    level: crate::canvas::Level,
+) {
     let scale = scale.max(1);
     let (_, box_h) = paw_trail_size(1, scale);
     let low = box_h - PAW.height as usize * scale;
     for i in 0..count {
         let top = if i % 2 == 0 { y } else { y + low };
-        crate::splash::draw_bitmap_scaled(fb, &PAW, x + i * PAW_STEP * scale, top, scale);
+        crate::splash::draw_bitmap_scaled_in(fb, &PAW, x + i * PAW_STEP * scale, top, scale, level);
     }
 }
 
