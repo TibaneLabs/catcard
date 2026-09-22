@@ -26,6 +26,95 @@ pub enum MountFailed {
     NoFilesystem,
 }
 
+/// The settings key for the wallet in force, kept for the session.
+///
+/// Cleared by [`forget_key`] whenever the key changes.
+static mut WALLET_KEY: Option<catcard_settings::nvstore::Key> = None;
+
+/// Forget the cached settings key. Called whenever the wallet in force changes.
+pub(crate) fn forget_key() {
+    // SAFETY: foreground only, single core; the write finishes within this statement.
+    unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = None };
+}
+
+/// The settings key of the wallet in force -- **its own file, not the master's**.
+///
+/// # Every key has its own settings
+///
+/// A slot is encrypted under six SHA-256 rounds over the 72-byte stash of the wallet it
+/// belongs to, so the hundred `NNN.aes` files hold one object per wallet this device has
+/// ever been in. Nothing indexes them: finding the right one is trying each in turn,
+/// decrypting two bytes to see whether they come out as `{"` and only then hashing the
+/// rest ([`catcard_settings::store::read`]). That is why the key is the whole of the
+/// addressing, and why a wallet whose key we compute differently from stock's simply has
+/// a different file rather than a broken one.
+///
+/// So a BIP-85 child has its own nickname, its own multisig registrations and its own
+/// Seed Vault, and none of them follow the owner back to the root.
+///
+/// # Which stash
+///
+/// - **Words**, with no passphrase: the entropy packed as the secure element holds it.
+///   For the root that is the stash it returned; for a BIP-85 child or a temporary seed
+///   it is that wallet's own entropy in the same layout, which is what stock would have
+///   stored had the owner made it permanent.
+/// - **A passphrase in force**: the master node itself, as
+///   [`encode_xprv`](catcard_callgate::pin::encode_xprv) -- there is no entropy that
+///   reproduces a passphrase wallet, so there is nothing else of the right shape. `[?]`:
+///   stock is known to keep per-wallet settings for passphrase wallets, but which stash
+///   it hashes for them is not something this firmware can confirm. Being wrong here
+///   costs interoperability for that wallet's settings and nothing else -- the file we
+///   read is the file we wrote.
+///
+/// Deriving this can cost a stretch, so it is cached for the session and dropped by
+/// [`forget_key`] the moment the wallet changes.
+pub(crate) fn wallet_key(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    head: &str,
+) -> Result<catcard_settings::nvstore::Key, &'static str> {
+    use catcard_settings::nvstore;
+    use zeroize::Zeroize as _;
+
+    // SAFETY: foreground only, single core; the borrow ends within this statement.
+    if let Some(key) = unsafe { (*core::ptr::addr_of!(WALLET_KEY)).clone() } {
+        return Ok(key);
+    }
+
+    let key = if crate::key::is_root() {
+        // The stored wallet: the stash exactly as the secure element returns it, which
+        // is what stock hashes and what every settings file this device already has was
+        // written under.
+        let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+        let mut secret = login
+            .fetch_secret(&pin_gate)
+            .map_err(|_| "could not read the secret")?;
+        let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+        secret.zeroize();
+        key
+    } else if crate::passphrase::is_set() {
+        let master = crate::menu::master_quietly(gate, login, panel, head)?;
+        let mut stash =
+            catcard_callgate::pin::encode_xprv(&master.chain_code, master.secret_bytes());
+        drop(master);
+        let key = crate::keywork::run(|_| nvstore::hash_key(&stash));
+        stash.zeroize();
+        key
+    } else {
+        let (mut ent, len) = crate::menu::seed_entropy(gate, login, panel, head)?;
+        let stash = catcard_callgate::pin::encode_bip39(&ent[..len]);
+        ent.zeroize();
+        let mut stash = stash.map_err(|_| "that seed length has no stash")?;
+        let key = crate::keywork::run(|_| nvstore::hash_key(&stash));
+        stash.zeroize();
+        key
+    };
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key.clone()) };
+    Ok(key)
+}
+
 /// Slots stock keeps on a LittleFS device, as `settings/000.aes` upwards.
 /// Source: hw-reference/settings-nvstore-format.md §1 [C]
 pub const SLOT_COUNT: u32 = 100;

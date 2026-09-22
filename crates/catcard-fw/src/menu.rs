@@ -5022,7 +5022,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     // point of looking at them here, since an address a cosigner cannot reproduce is one
     // nobody can spend from.
     #[cfg(not(feature = "board-mk3"))]
-    let wallets = crate::msimport::registered(gate, login);
+    let wallets = crate::msimport::registered(gate, login, ui.panel);
     #[cfg(feature = "board-mk3")]
     let wallets: &[catcard_wallet::multisig::Multisig] = &[];
     let entries = PROTOCOLS.len() + wallets.len();

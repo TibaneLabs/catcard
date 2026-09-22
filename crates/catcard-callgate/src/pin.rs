@@ -215,6 +215,11 @@ pub enum SecretKind {
     Unknown { marker: u8 },
 }
 
+/// The marker that introduces a BIP-32 node: chain code then private key.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub const XPRV_MARKER: u8 = 0x01;
+
 /// Classify a secret blob by its marker byte.
 ///
 /// Source: bootloader-callgate-abi.md [C] — `0x01` = xprv, `0x80`+ = BIP-39 words.
@@ -223,7 +228,7 @@ pub enum SecretKind {
 pub fn classify_secret(secret: &[u8; SECRET_LEN]) -> SecretKind {
     match secret[0] {
         0x00 if secret.iter().all(|&b| b == 0) => SecretKind::Empty,
-        0x01 => SecretKind::Xprv,
+        XPRV_MARKER => SecretKind::Xprv,
         m if m >= 0x80 => SecretKind::Bip39 { marker: m },
         m => SecretKind::Unknown { marker: m },
     }
@@ -288,6 +293,24 @@ pub fn encode_bip39(entropy: &[u8]) -> Result<[u8; SECRET_LEN], UnsupportedEntro
     out[0] = marker;
     out[1..1 + entropy.len()].copy_from_slice(entropy);
     Ok(out)
+}
+
+/// Pack a BIP-32 node into the 72-byte secret slot: marker `0x01`, chain code, key.
+///
+/// The layout stock uses for a wallet that is a *node* rather than words -- an imported
+/// xprv, and any wallet whose master cannot be written as entropy, such as one a BIP-39
+/// passphrase produced. Nothing here writes it to the secure element yet; it is what the
+/// per-wallet settings key is derived from, which needs the same bytes stock would hash.
+///
+/// The returned array is key material -- zeroize it once it has been used.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C]
+pub fn encode_xprv(chain_code: &[u8; 32], privkey: &[u8; 32]) -> [u8; SECRET_LEN] {
+    let mut out = [0u8; SECRET_LEN];
+    out[0] = XPRV_MARKER;
+    out[1..33].copy_from_slice(chain_code);
+    out[33..65].copy_from_slice(privkey);
+    out
 }
 
 /// The entropy inside a BIP-39 secret, or `None` if this is not one.

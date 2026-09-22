@@ -84,7 +84,7 @@ fn list_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
         return say(ui, "not enough memory");
     };
     let doc_buf = held.bytes();
-    let n = match read_doc(gate, login, doc_buf) {
+    let n = match read_doc(gate, login, ui.panel, doc_buf) {
         Ok(n) => n,
         Err(why) => return say(ui, why),
     };
@@ -368,7 +368,7 @@ fn save(
     change: Change<'_>,
 ) -> Result<(), &'static str> {
     use catcard_settings::json::RawJson;
-    use catcard_settings::{nvstore, store};
+    use catcard_settings::store;
 
     menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc_held), Some(mut seal_held)) =
@@ -377,7 +377,8 @@ fn save(
         return Err("not enough memory");
     };
     let doc_buf = doc_held.bytes();
-    let n = read_doc(gate, login, doc_buf)?;
+    let key = crate::settings::wallet_key(gate, login, ui.panel, HEAD)?;
+    let n = read_doc(gate, login, ui.panel, doc_buf)?;
 
     // The new list is rendered into its own buffer before the document is touched: the
     // entries borrow the document, so the rendering has to finish before the editor
@@ -408,12 +409,6 @@ fn save(
 
     // SAFETY: foreground only; the menu waits for this screen to return.
     let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = login
-        .fetch_secret(&pin_gate)
-        .map_err(|_| "could not read the secret")?;
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
     let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
     let seal = seal_held.bytes();
     store::set(
@@ -437,18 +432,14 @@ fn save(
 fn read_doc(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
     buf: &mut [u8],
 ) -> Result<usize, &'static str> {
-    use catcard_settings::{nvstore, store};
+    use catcard_settings::store;
 
+    let key = crate::settings::wallet_key(gate, login, panel, HEAD)?;
     // SAFETY: foreground only; the caller holds the display while this runs.
     let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = login
-        .fetch_secret(&pin_gate)
-        .map_err(|_| "could not read the secret")?;
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
     Ok(store::read(&mut files, &key, buf).unwrap_or(0))
 }
 

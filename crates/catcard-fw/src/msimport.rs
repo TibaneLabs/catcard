@@ -56,6 +56,7 @@ static mut PARSED: heapless::Vec<Multisig, { wallets::MAX_WALLETS }> = heapless:
 pub(crate) fn registered(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
 ) -> &'static [Multisig] {
     // SAFETY: foreground only; one settings screen at a time.
     let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
@@ -68,7 +69,7 @@ pub(crate) fn registered(
     }; wallets::MAX_WALLETS];
     // SAFETY: foreground only, and the signing screen holds the display while this runs.
     let doc_buf = unsafe { doc_scratch() };
-    let have = match load(gate, login, doc_buf, &mut list) {
+    let have = match load(gate, login, panel, doc_buf, &mut list) {
         Ok(n) => n,
         Err(why) => {
             crate::catlog!("multisig: {}, so no registered wallets", why);
@@ -95,22 +96,18 @@ pub(crate) fn registered(
 fn load<'a>(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
     doc_buf: &'a mut [u8; SCRATCH],
     out: &mut [Wallet<'a>],
 ) -> Result<usize, &'static str> {
     use catcard_settings::json::Doc;
-    use catcard_settings::nvstore;
     use catcard_settings::store;
-    use zeroize::Zeroize as _;
 
+    // The wallet in force has its own settings file, so a registration made under a
+    // BIP-85 child or a temporary seed belongs to that wallet and not to the root's.
+    let key = crate::settings::wallet_key(gate, login, panel, "Multisig")?;
     // SAFETY: foreground only; the caller holds the display while this runs.
     let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = login
-        .fetch_secret(&pin_gate)
-        .map_err(|_| "could not read the secret")?;
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
 
     let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
     let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
@@ -161,7 +158,7 @@ pub(crate) fn manage(
                 name: "",
                 descriptor: "",
             }; wallets::MAX_WALLETS];
-            let have = match load(gate, login, doc_buf, &mut list) {
+            let have = match load(gate, login, ui.panel, doc_buf, &mut list) {
                 Ok(n) => n,
                 Err(why) => return say(ui, "Multisig", why),
             };
@@ -336,7 +333,7 @@ fn remove(
             name: "",
             descriptor: "",
         }; wallets::MAX_WALLETS];
-        let have = load(gate, login, doc_buf, &mut list)?;
+        let have = load(gate, login, ui.panel, doc_buf, &mut list)?;
         let mut left = [Wallet {
             name: "",
             descriptor: "",
@@ -364,22 +361,16 @@ fn store_list(
     len: usize,
 ) -> Result<(), &'static str> {
     use catcard_settings::json::RawJson;
-    use catcard_settings::nvstore;
     use catcard_settings::store;
-    use zeroize::Zeroize as _;
 
     // SAFETY: foreground only; one settings screen at a time.
     let list_buf: &[u8; SCRATCH] = unsafe { &*core::ptr::addr_of!(LIST) };
     let text = core::str::from_utf8(&list_buf[..len]).map_err(|_| "not text")?;
 
+    // The file belongs to the wallet in force, as the read did.
+    let key = crate::settings::wallet_key(gate, login, ui.panel, "Multisig")?;
     // SAFETY: as above.
     let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let mut secret = login
-        .fetch_secret(&pin_gate)
-        .map_err(|_| "could not read the secret")?;
-    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-    secret.zeroize();
 
     // SAFETY: as above.
     let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
@@ -573,7 +564,7 @@ fn save(
             name: "",
             descriptor: "",
         }; wallets::MAX_WALLETS];
-        let have = load(gate, login, doc_buf, &mut current)?;
+        let have = load(gate, login, ui.panel, doc_buf, &mut current)?;
 
         let mut next = [Wallet {
             name: "",
