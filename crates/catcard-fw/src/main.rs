@@ -96,6 +96,9 @@ mod recovery;
 #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 mod restore;
 mod sdupgrade;
+/// SeedQR: the seed as a code, and a scanned code back as the seed.
+#[cfg(feature = "board-q1")]
+mod seedqr;
 mod seedxor;
 mod selftest;
 mod session;

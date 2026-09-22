@@ -19,6 +19,8 @@
 //! the part that is genuinely shared -- sniffing, placing, counting, the progress screen
 //! and the cancel -- is written once.
 
+use zeroize::Zeroize as _;
+
 use crate::menu;
 use crate::qrscan::{self, Next};
 use crate::ui::Ui;
@@ -181,6 +183,12 @@ pub(crate) fn collect_any(
             }
         }
     });
+
+    // Both blocks have held whatever was scanned, and one of the things that can be
+    // scanned is a seed. They go back to the heap wiped, for the reason `heap` gives:
+    // key material in a freed block is key material nobody is tracking.
+    scratch_mem.bytes().zeroize();
+    seen_plain.bytes().zeroize();
 
     if let Some(why) = failure {
         return Err(Some(why));
