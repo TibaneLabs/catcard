@@ -224,10 +224,14 @@ fn screen_pin(
     words: Option<[&str; 2]>,
     suffix: usize,
     caret: bool,
+    busy: bool,
     left: u32,
 ) {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Field};
+
+    /// What the row just accepted says while the secure element is working on it.
+    const CHECKING: &[&str] = &["Checking", "please wait"];
 
     /// Stand-ins for the digits: the widget draws one print per character and never
     /// looks at them, so the marks row is handed a count and not a PIN.
@@ -241,8 +245,20 @@ fn screen_pin(
     // the card does not jump at the moment the owner is meant to be reading it.
     let said: [&str; 2] = words.unwrap_or(["", ""]);
     let top = Field::marks(&DOTS[..prefix.min(MAX_PART_LEN)], MAX_PART_LEN).live(!filled);
-    let top = if filled { top.placeholder(&said) } else { top };
+    let top = match (filled, busy) {
+        (true, _) => top.placeholder(&said),
+        // The prefix was just accepted and its words are being fetched: this row says
+        // so, in place, rather than the whole screen going away for a second.
+        (false, true) => top.placeholder(CHECKING).live(false),
+        (false, false) => top,
+    };
     let bottom = Field::marks(&DOTS[..suffix.min(MAX_PART_LEN)], MAX_PART_LEN).live(filled);
+    // The same for the suffix, while the PIN itself is being tried.
+    let bottom = if filled && busy {
+        bottom.placeholder(CHECKING).live(false)
+    } else {
+        bottom
+    };
     let fields = [top, bottom];
 
     display::draw_field_page(panel, |c| {
@@ -272,7 +288,9 @@ fn screen_pin(
         );
 
         let typed = if filled { suffix } else { prefix };
-        let foot = if typed < MIN_PART_LEN {
+        let foot = if busy {
+            ""
+        } else if typed < MIN_PART_LEN {
             "2 to 6 digits"
         } else if filled {
             "accept to log in"
@@ -283,6 +301,35 @@ fn screen_pin(
         draw_text(c, body, fx, below + 6, foot);
         tries_left(c, left);
     });
+}
+
+/// The PIN screen, with the row just accepted saying it is being checked, and the
+/// co-processor's bar moving under it.
+///
+/// Drawn **before** the callgate, which holds the CPU for a second or more with nothing
+/// able to repaint: a device that shows no reaction to the accept key invites a second
+/// press, and on the suffix a second press is a second attempt spent. This used to be a
+/// separate "Checking" screen; it is the same screen now, so the words stay in view.
+#[cfg(feature = "board-q1")]
+fn checking(panel: &mut display::Panel, login: &Login, prefix: usize, suffix: usize) {
+    let words = login.words().map(anti_phishing_words);
+    let words = if matches!(login.step(), Step::Suffix) {
+        words
+    } else {
+        None
+    };
+    screen_pin(
+        panel,
+        prefix,
+        words,
+        suffix,
+        false,
+        true,
+        login.attempts_left(),
+    );
+    if display::GPU_BAR_ON_BLOCKING {
+        display::scroll_busy_bar(panel);
+    }
 }
 
 fn screen_field(
@@ -871,9 +918,15 @@ pub fn unlock(
                 // is meant to check stay in front of them while the half that matters
                 // is typed, and it costs one press of the accept key rather than two.
                 #[cfg(feature = "board-q1")]
-                Step::Prefix => {
-                    screen_pin(panel, field.len(), None, 0, caret, login.attempts_left())
-                }
+                Step::Prefix => screen_pin(
+                    panel,
+                    field.len(),
+                    None,
+                    0,
+                    caret,
+                    false,
+                    login.attempts_left(),
+                ),
                 // Not normally drawn: the accept key that submits the prefix also
                 // passes this step, because the screen it would show is the screen
                 // already on its way. Kept so a path that does stop here has a picture.
@@ -884,6 +937,7 @@ pub fn unlock(
                     Some(anti_phishing_words(w)),
                     0,
                     caret,
+                    false,
                     login.attempts_left(),
                 ),
                 #[cfg(feature = "board-q1")]
@@ -893,6 +947,7 @@ pub fn unlock(
                     login.words().map(anti_phishing_words),
                     field.len(),
                     caret,
+                    false,
                     login.attempts_left(),
                 ),
                 #[cfg(not(feature = "board-q1"))]
@@ -1042,6 +1097,9 @@ pub fn unlock(
                         // a screen first, the device looks like it ignored the key --
                         // and the natural response to that is to press it again, which
                         // on the suffix means spending a second PIN attempt.
+                        #[cfg(feature = "board-q1")]
+                        checking(panel, &login, field.len(), 0);
+                        #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking");
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         log_state(&login, "prefix");
@@ -1057,6 +1115,9 @@ pub fn unlock(
                 }
                 (Step::Suffix, Key::Confirm) => {
                     if field.len() >= MIN_PART_LEN {
+                        #[cfg(feature = "board-q1")]
+                        checking(panel, &login, 0, field.len());
+                        #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());
                         log_state(&login, "attempt");
