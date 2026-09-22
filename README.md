@@ -82,8 +82,10 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   hex), where the words, XPRV and WIF children can be put in force; a key vault in
   stock's own format, so keys saved by either firmware are readable by the other.
 - **Addresses.** An explorer over all four single-sig types, accounts and both chains,
-  with QR codes; Verify address; registered multisig wallets; the other chains' formats
-  on a multichain build.
+  with QR codes; the account and the starting index typed rather than stepped to; a
+  derivation path of your own, shown in every type it could be spent as; a CSV of index,
+  path and address to the card; Verify address; registered multisig wallets; the other
+  chains' formats on a multichain build.
 - **Signing.** PSBT signing for single-sig (P2PKH, P2SH-P2WPKH, P2WPKH and P2TR key
   path) and registered multisig, with the fee shown and capped and change proven by
   re-deriving it; legacy message signing.

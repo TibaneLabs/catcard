@@ -26,8 +26,10 @@ Dependency first, then what a user needs to hold funds safely:
    on the keypad or keyboard, shown with the fingerprint and first address of the wallet it
    opens, kept in RAM only, and the main menu says when one is in force.
 4. ~~**Address Explorer and Verify Address**~~ -- written, untested on hardware: all four
-   types, accounts and both chains in the explorer; Verify address types an address and
-   searches this wallet's own derivations for it.
+   types, accounts and both chains in the explorer, the account and the start index typed
+   rather than stepped, a custom path in any type, and a CSV of index, path and address to
+   the card; Verify address types an address and searches this wallet's own derivations
+   for it.
 5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Sign → Message,
    armoured to SIGNED.TXT. BIP-322, Verify Sig File and signing a message from a file
    still to do.
@@ -103,8 +105,9 @@ Dependency first, then what a user needs to hold funds safely:
 |---|---|---|---|
 | P2PKH, P2WPKH, P2SH-P2WPKH display | ✅ | ✅ | Address Explorer, with QR |
 | Taproot display | ✅ | ✅ | Address Explorer |
-| Accounts, change chain, start index | ✅ | 🟡 | account and chain keys in the explorer; no custom-path entry |
-| Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address, and `2` puts the same address on the NFC tag as a `bitcoin:` URI; no CSV |
+| Accounts, change chain, start index | ✅ | ✅ | stepped with the arrows, or typed: `2` the account, `4` where the walk starts |
+| Custom derivation path | ✅ | ✅ | Addresses → Custom path: typed on the Q1's keyboard, built a level at a time on a numpad, shown in all four types |
+| Explorer export (CSV, QR, NFC) | ✅ | ✅ | `6` offers the card or the tag: CSV of index, path and address (up to 250 rows, also Export wallet → Address CSV), or the address on the NFC tag as a `bitcoin:` URI. QR per address as before |
 | Verify address / ownership | ✅ | 🟡 | Utils → Verify address, 4 types x 3 accounts x 2 chains x 100 |
 | Multisig addresses | ✅ | 🟡 | P2SH, P2WSH and P2SH-P2WSH, in the Address Explorer and with a QR |
 

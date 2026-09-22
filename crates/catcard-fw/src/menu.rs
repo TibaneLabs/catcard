@@ -148,6 +148,8 @@ enum Screen {
     GenericJson(u8),
     /// Every account's first few addresses, to check against a watch-only wallet.
     DumpSummary,
+    /// A run of one account's receive addresses, written to the card as CSV.
+    AddressCsv,
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -526,6 +528,10 @@ const EXPORT_ITEMS: &[&str] = &[
     "Key Expression",
     "Export XPUB",
     "Dump Summary",
+    // Addresses rather than keys: the file a watch-only wallet's owner checks against, or
+    // hands to whoever is paying them, without either side needing an xpub.
+    // Source: hw-reference/firmware-features.md §3 "Address Explorer ... export (CSV)" [C]
+    "Address CSV",
 ];
 
 /// The filename each Format A entry writes under.
@@ -1093,6 +1099,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::KeyMenu,
         ),
         Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::AddressCsv => to(
+            |a| export_address_csv(a.gate, a.login, a.ui),
+            Screen::ExportMenu,
+        ),
         Screen::Xpub(_) => to(
             |a| export_xpub(a.gate, a.login, a.ui, a.words),
             Screen::XpubMenu,
@@ -1459,6 +1469,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
+            (Key::Confirm, Some("Address CSV")) => Screen::AddressCsv,
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::ExportMenu,
         },
@@ -1922,6 +1933,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::ExportOne(_)
         | Screen::ExportKeyExpr
         | Screen::DumpSummary
+        | Screen::AddressCsv
         | Screen::Xpub(_)
         | Screen::GenericJson(_)
         | Screen::Passphrase
@@ -3029,6 +3041,53 @@ fn write_into(vol: &mut CardVolume, path: &str, bytes: &[u8]) -> Result<(), &'st
     file.set_len(vol, bytes.len() as u64)
         .map_err(|_| "truncate failed")?;
     file.flush(vol).map_err(|_| "flush failed")
+}
+
+/// How much of a streamed file is held in memory at once. One chunk is a few rows of a
+/// CSV, which is all the stack this costs however long the file becomes.
+pub(crate) const CARD_CHUNK: usize = 512;
+/// The buffer [`write_card_chunks`] hands its producer.
+pub(crate) type CardChunk = heapless::String<CARD_CHUNK>;
+
+/// Write a file the caller produces a piece at a time, and answer with its length.
+///
+/// The other shape of [`write_card_file`], for output whose size is decided by how much
+/// of it the owner asked for rather than by a buffer: an address export of 250 rows is
+/// twenty kilobytes, and a stack frame that large on a board with 192 KB of SRAM is how
+/// the menu's own stack gets eaten. `next` fills the buffer it is handed and returns
+/// false when there is nothing left; each fill is written as it arrives, so what is held
+/// at once is one [`CARD_CHUNK`].
+///
+/// The producer runs with the card mounted, so it must not show a screen, wait for a key
+/// or reach the seed -- everything it needs has to be in hand before the call.
+pub(crate) fn write_card_chunks(
+    path: &str,
+    next: &mut dyn FnMut(&mut CardChunk) -> bool,
+) -> Result<u64, &'static str> {
+    let mut vol = mount_card()?;
+    let mut file = vol
+        .open_or_create_file(path)
+        .map_err(|_| "could not open file")?;
+    let mut chunk = CardChunk::new();
+    let mut written: u64 = 0;
+    loop {
+        chunk.clear();
+        if !next(&mut chunk) {
+            break;
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        file.write_all(&mut vol, chunk.as_bytes())
+            .map_err(|_| "write failed")?;
+        written += chunk.len() as u64;
+    }
+    // Trim any tail from a longer earlier file, so it holds exactly what was produced.
+    file.set_len(&mut vol, written)
+        .map_err(|_| "truncate failed")?;
+    file.flush(&mut vol).map_err(|_| "flush failed")?;
+    vol.flush().map_err(|_| "flush failed")?;
+    Ok(written)
 }
 
 /// Longest file name a browser row keeps; longer names are truncated for display (the
@@ -5085,6 +5144,26 @@ pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) 
 /// not live, the index under it with the caret. An empty field is index zero, which is the
 /// child almost everyone means, so the common case is one press of the accept key.
 pub(crate) fn ask_index(ui: &mut Ui<'_>, head: &str, what: &str) -> Option<u32> {
+    ask_number(ui, head, Some(("child", what)), "index", "")
+}
+
+/// [`ask_index`] with the rows named by the caller.
+///
+/// The BIP-85 screen asks for the index of a *child*, and shows which kind of child above
+/// the field. The address explorer asks for an account number and for the index its walk
+/// starts at: one number, no context row, and "child" would be a word borrowed from a
+/// different screen. So both labels travel with the caller, and `above` is `None` where
+/// there is nothing to say above the field.
+///
+/// `note`, when it is not empty, replaces the "digits, then accept" footer: the place to
+/// say what an empty field means here.
+pub(crate) fn ask_number(
+    ui: &mut Ui<'_>,
+    head: &str,
+    above: Option<(&str, &str)>,
+    value_label: &str,
+    note: &str,
+) -> Option<u32> {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Accept, Field, Input};
     use catcard_ui::text::{centred, draw_text};
@@ -5098,7 +5177,7 @@ pub(crate) fn ask_index(ui: &mut Ui<'_>, head: &str, what: &str) -> Option<u32> 
     // Sized for what the index can hold, ten digits, not for the width of the panel --
     // or for the kind above it, where that is longer. Both rows say so because the card
     // is one box and takes its widest row.
-    let width = MAX_DIGITS.max(what.len());
+    let width = MAX_DIGITS.max(above.map_or(0, |(_, what)| what.len()));
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     // Said only once it has happened, so the screen is not shouting a rule at someone
@@ -5106,37 +5185,49 @@ pub(crate) fn ask_index(ui: &mut Ui<'_>, head: &str, what: &str) -> Option<u32> 
     let mut complaint = "";
 
     loop {
-        let fields = [
-            Field::text("child", what).max(width),
-            Field::text("index", input.as_str()).max(width).live(true),
-        ];
-        let body = display::LAYOUT.body;
-        let foot = if complaint.is_empty() {
-            "digits, then accept"
-        } else {
-            complaint
-        };
-        display::draw_field_page(ui.panel, |c| {
-            c.clear();
-            let hx = centred(body, head, c.width());
-            draw_text(
-                c,
-                body,
-                hx,
-                top_y.saturating_sub(body.line_height() + 6),
-                head,
+        // The rows are built and drawn inside a block of their own: a `Vec` of them has a
+        // `Drop`, so its borrow of the input would otherwise run to the end of the loop
+        // body -- where the keys typing into that input are read.
+        {
+            // Two rows where there is context to show, one where there is not: a card
+            // with an empty row on it reads as a field that failed to draw.
+            let mut fields: heapless::Vec<Field<'_>, 2> = heapless::Vec::new();
+            if let Some((label, what)) = above {
+                let _ = fields.push(Field::text(label, what).max(width));
+            }
+            let _ = fields.push(
+                Field::text(value_label, input.as_str())
+                    .max(width)
+                    .live(true),
             );
-            let below = field::stack(
-                c,
-                &display::LAYOUT,
-                top_y,
-                &fields,
-                display::FIELD_SKIN,
-                true,
-            );
-            let fx = centred(body, foot, c.width());
-            draw_text(c, body, fx, below + 6, foot);
-        });
+            let body = display::LAYOUT.body;
+            let foot = match (complaint.is_empty(), note.is_empty()) {
+                (false, _) => complaint,
+                (true, false) => note,
+                (true, true) => "digits, then accept",
+            };
+            display::draw_field_page(ui.panel, |c| {
+                c.clear();
+                let hx = centred(body, head, c.width());
+                draw_text(
+                    c,
+                    body,
+                    hx,
+                    top_y.saturating_sub(body.line_height() + 6),
+                    head,
+                );
+                let below = field::stack(
+                    c,
+                    &display::LAYOUT,
+                    top_y,
+                    &fields,
+                    display::FIELD_SKIN,
+                    true,
+                );
+                let fx = centred(body, foot, c.width());
+                draw_text(c, body, fx, below + 6, foot);
+            });
+        }
         wait_for_release(ui);
 
         let mut redraw = false;
@@ -5856,6 +5947,7 @@ fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         match pick_addresses(gate, login, ui) {
             None => return,
             Some(AddressPick::Verify) => crate::verify::screen(gate, login, ui),
+            Some(AddressPick::Custom) => custom_path(gate, login, ui),
             #[cfg(feature = "multichain")]
             Some(AddressPick::Chain(chain))
                 if chain.id != catcard_wallet::chain::ChainId::Bitcoin =>
@@ -5875,6 +5967,8 @@ enum AddressPick {
         &'static catcard_wallet::chain::Chain,
     ),
     Verify,
+    /// The address at a path the owner writes out themselves.
+    Custom,
 }
 
 /// Most chains the Addresses list shows.
@@ -5884,8 +5978,11 @@ const _: () = assert!(CHAINS_LISTED >= crate::chains::MAX);
 
 /// The id the "Verify an address" row carries: past any chain's index.
 const VERIFY_ROW: u32 = 1000;
+/// The id the "Custom path" row carries.
+const CUSTOM_PATH_ROW: u32 = 1001;
 
-/// The Addresses list: the chains, or Bitcoin alone, then "Verify an address".
+/// The Addresses list: the chains, or Bitcoin alone, then "Custom path" and "Verify an
+/// address".
 fn pick_addresses(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -5900,8 +5997,8 @@ fn pick_addresses(
         let _ = (gate, login);
         &[&catcard_wallet::chain::BITCOIN]
     };
-    // The title, every chain a build can list, and the verify row.
-    let mut lines: heapless::Vec<DLine, { CHAINS_LISTED + 2 }> = heapless::Vec::new();
+    // The title, every chain a build can list, and the two rows under them.
+    let mut lines: heapless::Vec<DLine, { CHAINS_LISTED + 3 }> = heapless::Vec::new();
     let _ = lines.push(DLine::title("Addresses"));
     #[cfg(feature = "multichain")]
     for (i, c) in chains.iter().enumerate() {
@@ -5909,9 +6006,14 @@ fn pick_addresses(
     }
     #[cfg(not(feature = "multichain"))]
     let _ = lines.push(DLine::item("Browse addresses", 0).large());
+    // Under the chains, because it is not one: a path the owner writes out reaches any
+    // key this seed has, whichever account or purpose it sits under.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE "Custom Path" [C]
+    let _ = lines.push(DLine::item("Custom path", CUSTOM_PATH_ROW).large());
     let _ = lines.push(DLine::item("Verify an address", VERIFY_ROW).large());
     match show_doc(ui, &lines, false, false) {
         DocExit::Selected(VERIFY_ROW) => Some(AddressPick::Verify),
+        DocExit::Selected(CUSTOM_PATH_ROW) => Some(AddressPick::Custom),
         DocExit::Selected(i) => chains.get(i as usize).map(|c| AddressPick::Chain(c)),
         _ => None,
     }
@@ -6094,6 +6196,43 @@ fn solana_batch(
 /// The same screen and keys as Bitcoin's explorer, with the axes a chain does not have
 /// left out: no change chain for account-model chains (Ethereum, Tron, Solana), and no
 /// account axis for Solana, whose account *is* the index.
+/// One of the other chains' addresses, from `start` on, written to the card.
+///
+/// Its own function rather than a branch of the key handler: the row producer runs with
+/// the card mounted, and what it may touch -- one already-derived public key and the
+/// chain's own encoder -- is easier to see when it is not four levels inside a `match`.
+#[cfg(feature = "multichain")]
+fn export_other_chain_csv(
+    ui: &mut Ui<'_>,
+    chain: &'static catcard_wallet::chain::Chain,
+    format: catcard_wallet::chain::Format,
+    account: u32,
+    change: u32,
+    start: u32,
+    chain_key: &catcard_wallet::bip32::ExtendedPubKey,
+) {
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::chain::address as caddr;
+
+    let Some(count) = ask_row_count(ui, chain.name) else {
+        return;
+    };
+    let file = address_csv_name();
+    write_address_csv(ui, chain.name, file.as_str(), start, count, &mut |index| {
+        let leaf = chain_key
+            .derive_child(ChildNumber::normal(index).ok()?)
+            .ok()?;
+        let mut out = [0u8; caddr::MAX_LEN];
+        let n = caddr::from_secp256k1(chain, format.encoding, &leaf.public_key, &mut out).ok()?;
+        let mut text = AddrText::new();
+        text.push_str(core::str::from_utf8(&out[..n]).ok()?).ok()?;
+        Some((
+            bip44_path(format.purpose, chain.coin_type, account, change, index)?,
+            text,
+        ))
+    });
+}
+
 #[cfg(feature = "multichain")]
 fn chain_explorer(
     gate: &Callgate,
@@ -6209,7 +6348,7 @@ fn chain_explorer(
             (false, false) => "1/3 account",
         };
 
-        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 8> = heapless::Vec::new();
+        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 10> = heapless::Vec::new();
         let _ = doc.push(catcard_ui::scroll::Line::title(chain.name));
         if formats.len() > 1 {
             let _ = doc.push(catcard_ui::scroll::Line::body(f.label).small());
@@ -6223,6 +6362,17 @@ fn chain_explorer(
         if !axes.is_empty() {
             let _ = doc.push(catcard_ui::scroll::Line::body(axes).small());
         }
+        // The typed axes, as on Bitcoin's explorer. Solana has no account axis to type
+        // into -- its account *is* the index -- and no export, because every one of its
+        // addresses needs the seed again and a file of them would be a screen full of
+        // unlock prompts.
+        let _ = doc.push(
+            catcard_ui::scroll::Line::body(match solana {
+                true => "4 start idx",
+                false => "2 account  4 start idx  6 to card",
+            })
+            .small(),
+        );
         let _ = doc.push(catcard_ui::scroll::Line::body(key_hint.as_str()).small());
         let view = catcard_ui::scroll::ScrollView::build(
             &doc,
@@ -6276,6 +6426,35 @@ fn chain_explorer(
                         index = 0;
                         break 'wait;
                     }
+                    // The account and the start index typed, as on Bitcoin's explorer.
+                    Key::Digit(2) if !solana => {
+                        if let Some(n) =
+                            ask_number(ui, chain.name, None, "account", "empty is account 0")
+                        {
+                            account = n;
+                            index = 0;
+                        }
+                        break 'wait;
+                    }
+                    Key::Digit(4) => {
+                        if let Some(n) =
+                            ask_number(ui, chain.name, None, "start", "empty starts at 0")
+                        {
+                            index = n;
+                        }
+                        break 'wait;
+                    }
+                    // This chain's addresses from here on, to the card. Not offered for
+                    // Solana: SLIP-0010 has no public derivation, so each row would need
+                    // the seed again.
+                    Key::Digit(6) if !solana => {
+                        if let Some(chain_key) = cached.as_ref().map(|(_, _, _, k)| *k) {
+                            export_other_chain_csv(
+                                ui, chain, f, account, change, index, &chain_key,
+                            );
+                        }
+                        break 'wait;
+                    }
                     Key::Digit(0) if utxo => {
                         change = 1 - change;
                         index = 0;
@@ -6287,6 +6466,516 @@ fn chain_explorer(
             display::idle(ui.panel);
         }
     }
+}
+
+/// Characters a written-out path can take: every level of `MAX_PATH_DEPTH` as ten digits
+/// and a hardened marker, after the leading `m`.
+const PATH_CHARS: usize = catcard_wallet::bip32::MAX_PATH_DEPTH * 12 + 1;
+/// A path as it is shown and as it is typed.
+type PathText = heapless::String<PATH_CHARS>;
+/// Characters the longest address of any chain this build carries can take. Bitcoin's
+/// bech32 limit is the shorter of the two; a row producer is shared with the other
+/// chains, so the buffer is sized for whichever is longer rather than for Bitcoin.
+const ADDR_CHARS: usize = {
+    let bitcoin = catcard_wallet::address::MAX_ADDRESS_LEN;
+    let other = catcard_wallet::chain::address::MAX_LEN;
+    if other > bitcoin { other } else { bitcoin }
+};
+/// One address as a row producer hands it over.
+type AddrText = heapless::String<ADDR_CHARS>;
+
+/// Why a typed path was refused, in the words of the screen that shows it. Only a board
+/// with a keyboard can type a path wrong: the guided build cannot produce one.
+#[cfg(feature = "board-q1")]
+fn describe_path_error(e: catcard_wallet::bip32::path::ParseError, out: &mut Line) {
+    use catcard_wallet::bip32::path::ParseError as E;
+    out.clear();
+    let _ = match e {
+        E::Empty => write!(out, "type a path, or x to go back"),
+        // `position` counts from the first step, and a person counts from one.
+        E::EmptyStep { position } => write!(out, "level {} is empty", position + 1),
+        E::BadStep { position } => write!(out, "level {} is not a number", position + 1),
+        E::IndexTooLarge { position } => write!(out, "level {} is over 2147483647", position + 1),
+        E::TooDeep => write!(
+            out,
+            "{} levels is the most",
+            catcard_wallet::bip32::MAX_PATH_DEPTH
+        ),
+    };
+}
+
+/// Type a derivation path on a board with a keyboard.
+///
+/// **Typed here, built a level at a time on the numpad boards** (the other `ask_path`
+/// below). The choice is the keyboard: a Q1 has `/`, `h` and the digits under the owner's
+/// fingers, so `m/48h/0h/0h/2h/0/5` is one line of typing and the whole path is visible
+/// while it is checked. A numpad has ten digits and two keys, no separator and no letter,
+/// so the same path would have to be spelled through a mode of its own -- which is what
+/// the guided build is, without inventing a meaning for a digit key.
+///
+/// Parsing is `DerivationPath`'s own, so what is accepted here is exactly what the rest
+/// of the firmware derives from, and the complaint names the level that was wrong.
+#[cfg(feature = "board-q1")]
+fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::DerivationPath> {
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::field::{self, Accept, Field, Input};
+    use catcard_ui::text::{centred, draw_text};
+
+    let top_y = display::FIELD_TOP;
+    let mut input = Input::<PATH_CHARS>::new(Accept::Text, PATH_CHARS);
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut complaint = Line::new();
+
+    loop {
+        // Two lines: a path with six levels does not fit one, and a path shown half-way
+        // is a path nobody can check.
+        let fields = [Field::text("path", input.as_str()).lines(2).live(true)];
+        let body = display::LAYOUT.body;
+        let foot = if complaint.is_empty() {
+            "m/48h/0h/0h/2h/0/5"
+        } else {
+            complaint.as_str()
+        };
+        display::draw_field_page(ui.panel, |c| {
+            c.clear();
+            let hx = centred(body, head, c.width());
+            draw_text(
+                c,
+                body,
+                hx,
+                top_y.saturating_sub(body.line_height() + 6),
+                head,
+            );
+            let below = field::stack(
+                c,
+                &display::LAYOUT,
+                top_y,
+                &fields,
+                display::FIELD_SKIN,
+                true,
+            );
+            let fx = centred(body, foot, c.width());
+            draw_text(c, body, fx, below + 6, foot);
+        });
+        wait_for_release(ui);
+
+        let mut redraw = false;
+        while !redraw {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    Key::Confirm => match input.as_str().parse() {
+                        Ok(path) => return Some(path),
+                        Err(e) => {
+                            describe_path_error(e, &mut complaint);
+                            redraw = true;
+                        }
+                    },
+                    Key::Cancel => {
+                        if !input.backspace() {
+                            return None;
+                        }
+                        complaint.clear();
+                        redraw = true;
+                    }
+                    Key::Qr => {}
+                    // The number row means digits, as it does in every other field on
+                    // this board; the arrow keys arrive as digits too, which is the
+                    // price of the shared keypad model and is documented in `qwerty`.
+                    Key::Digit(d) => {
+                        input.put((b'0' + d) as char);
+                        complaint.clear();
+                        redraw = true;
+                    }
+                    Key::Char(c) => {
+                        input.put(*c as char);
+                        complaint.clear();
+                        redraw = true;
+                    }
+                }
+            }
+            if !redraw {
+                display::idle(ui.panel);
+            }
+        }
+    }
+}
+
+/// Build a derivation path a level at a time, on a board with no keyboard.
+///
+/// **Guided rather than Q1-only.** Stock builds a path this way on every board it runs
+/// on (hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE "Custom Path → KeypathMenu" [C]),
+/// and a screen that exists on one board of three is a screen an owner cannot be told
+/// about. What it costs is two presses of accept per level; what it avoids is giving a
+/// digit key a second meaning inside a field where every digit is already a digit.
+///
+/// Each level is added by its own row, so hardened and normal are separate choices
+/// rather than a modifier -- `0` and `0h` are different keys, and a menu that made the
+/// difference a toggle would make it a thing to misread.
+#[cfg(not(feature = "board-q1"))]
+fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::DerivationPath> {
+    use catcard_wallet::bip32::{ChildNumber, DerivationPath, MAX_PATH_DEPTH};
+
+    let mut path = DerivationPath::MASTER;
+    loop {
+        let mut shown = PathText::new();
+        let _ = write!(shown, "{path}");
+        let room = path.len() < MAX_PATH_DEPTH;
+        // The rows that would do nothing are not offered: "add a level" on a full path
+        // and "remove" on `m` are both rows that can only refuse.
+        let mut items: heapless::Vec<&str, 4> = heapless::Vec::new();
+        if room {
+            let _ = items.push("Add /n");
+            let _ = items.push("Add /nh");
+        }
+        if !path.is_empty() {
+            let _ = items.push("Remove last");
+        }
+        let _ = items.push("Use this path");
+        let row = pick_row(ui, head, shown.as_str(), &items)?;
+        match items[row] {
+            "Add /n" | "Add /nh" => {
+                let hardened = items[row] == "Add /nh";
+                let label = if hardened { "level h" } else { "level" };
+                let Some(index) = ask_number(ui, head, None, label, "digits, then accept") else {
+                    continue;
+                };
+                let child = if hardened {
+                    ChildNumber::hardened(index)
+                } else {
+                    ChildNumber::normal(index)
+                };
+                // Both refusals are already impossible here -- `ask_number` caps at
+                // 2^31 - 1 and the rows above check the depth -- so this says so by
+                // dropping the level rather than by claiming it was added.
+                if let Ok(child) = child {
+                    let _ = path.push(child);
+                }
+            }
+            "Remove last" => {
+                let steps: heapless::Vec<ChildNumber, MAX_PATH_DEPTH> = path.iter().collect();
+                path = DerivationPath::from_slice(&steps[..steps.len() - 1])
+                    .unwrap_or(DerivationPath::MASTER);
+            }
+            _ => return Some(path),
+        }
+    }
+}
+
+/// The address at a path the owner chose, in each type it could be spent as.
+///
+/// **Every type, not the one the path implies.** A purpose level is a convention and not
+/// a commitment: `m/48h/0h/0h/2h/0/5` is a multisig cosigner path, and the same public
+/// key has a legacy, a nested, a native segwit and a taproot address, all of them real.
+/// Guessing one from the path is how a wallet ends up showing an address nobody can spend
+/// from -- the rule `catcard_wallet::address` states about `bip44_purpose` -- so the four
+/// are listed and the owner says which one they meant.
+///
+/// One unlock, one walk. A custom path can be hardened at any level, so unlike the
+/// explorer's walk it cannot come out of a cached account key; it is derived once, and
+/// every format below comes from that one public key.
+fn custom_path(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_ui::scroll::Line as DLine;
+    use catcard_wallet::address;
+    use catcard_wallet::bip32::{ChildNumber, MAX_PATH_DEPTH, Network};
+
+    const HEAD: &str = "Custom path";
+
+    let Some(path) = ask_path(ui, HEAD) else {
+        return;
+    };
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let steps: heapless::Vec<ChildNumber, MAX_PATH_DEPTH> = path.iter().collect();
+    let mut busy = Working::new(ui.panel, HEAD, "deriving");
+    let key = if steps.is_empty() {
+        // `m` itself: the master's own public key, which `public_at` cannot walk to
+        // because there is no step to take.
+        Some(crate::keywork::run(|kw| master.to_extended_pub(kw)))
+    } else {
+        public_at(&master, &steps, &mut busy, ui.panel)
+    };
+    drop(master);
+    let Some(key) = key else {
+        message(
+            ui.panel,
+            HEAD,
+            "that path did not derive",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+        return;
+    };
+
+    let mut shown = PathText::new();
+    let _ = write!(shown, "{path}");
+    // The kind travels with its address, not the row number: a type that would not
+    // encode is left out, and a row index read back against `PROTOCOLS` would then name
+    // the wrong one -- which is a QR of one address labelled as another.
+    let mut addresses: heapless::Vec<(address::AddressKind, AddrText), { PROTOCOLS.len() }> =
+        heapless::Vec::new();
+    for kind in PROTOCOLS {
+        let mut buf = [0u8; address::MAX_ADDRESS_LEN];
+        let Ok(n) = address::encode(kind, Network::Mainnet, &key.public_key, &mut buf) else {
+            continue;
+        };
+        let mut text = AddrText::new();
+        let _ = text.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
+        let _ = addresses.push((kind, text));
+    }
+    if addresses.is_empty() {
+        message(
+            ui.panel,
+            HEAD,
+            "no address at that path",
+            "any key to go back",
+        );
+        wait_for_any_key(ui);
+        return;
+    }
+
+    loop {
+        let mut lines: heapless::Vec<DLine, { 2 + 2 * PROTOCOLS.len() }> = heapless::Vec::new();
+        let _ = lines.push(DLine::title(HEAD));
+        let _ = lines.push(DLine::body(shown.as_str()).small().wrapped());
+        for (i, (kind, text)) in addresses.iter().enumerate() {
+            let _ = lines.push(DLine::item(kind_name(*kind), i as u32));
+            let _ = lines.push(DLine::body(text.as_str()).small().wrapped());
+        }
+        match show_doc(ui, &lines, false, false) {
+            DocExit::Selected(i) => {
+                if let Some((kind, text)) = addresses.get(i as usize) {
+                    address_qr(ui, text.as_str(), *kind);
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// Row counts the address export offers.
+///
+/// Bounded, and bounded by a choice rather than by a buffer: a card write that takes a
+/// minute with nothing on the glass is one an owner pulls the card out of. Two hundred
+/// and fifty rows is a watch-only wallet's usual look-ahead window and the most this
+/// offers.
+const CSV_COUNTS: [u32; 4] = [10, 25, 50, 250];
+const CSV_COUNT_ROWS: [&str; 4] = ["10 addresses", "25 addresses", "50 addresses", "250"];
+
+/// A worst-case row -- a ten-digit index, the deepest path, the longest address, all
+/// quoted -- has to fit one chunk, or it would be written short and the file would carry
+/// half an address that still looks like one.
+const _: () = assert!(
+    12 + 1 + (PATH_CHARS + 2) + 1 + (ADDR_CHARS + 2) + 2 <= CARD_CHUNK,
+    "a CSV row must fit one card chunk"
+);
+
+fn ask_row_count(ui: &mut Ui<'_>, head: &str) -> Option<u32> {
+    let row = pick_row(ui, head, "how many to write", &CSV_COUNT_ROWS)?;
+    CSV_COUNTS.get(row).copied()
+}
+
+/// Write `count` addresses from `start` to the card as CSV, and say how many landed.
+///
+/// `row` is asked for one index at a time and answers with the path and the address
+/// there, or `None` for an index that has none -- a child number that lands on an
+/// unusable scalar, which is vanishingly rare and must leave a gap rather than a wrong
+/// line. It runs with the card mounted, so it derives and nothing else: the key it works
+/// from is in the caller's hand before this is called, and no seed is reached here.
+fn write_address_csv(
+    ui: &mut Ui<'_>,
+    head: &str,
+    file: &str,
+    start: u32,
+    count: u32,
+    row: &mut dyn FnMut(u32) -> Option<(catcard_wallet::bip32::DerivationPath, AddrText)>,
+) {
+    use catcard_wallet::csv;
+
+    card_wait(ui.panel, head, "writing to the card");
+    let mut at: u32 = 0;
+    let mut rows: u32 = 0;
+    let written = write_card_chunks(file, &mut |chunk| {
+        if at == 0 {
+            at = 1;
+            return csv::write_header(chunk).is_ok();
+        }
+        while at <= count {
+            let index = start.saturating_add(at - 1);
+            at += 1;
+            if let Some((path, address)) = row(index) {
+                if csv::write_address_row(chunk, index, &path, address.as_str()).is_err() {
+                    return false;
+                }
+                rows += 1;
+                return true;
+            }
+        }
+        false
+    });
+    match written {
+        Ok(bytes) => {
+            crate::catlog!(
+                "addresses: wrote {} rows, {} bytes to {}",
+                rows,
+                bytes,
+                file
+            );
+            let mut said = Line::new();
+            let _ = write!(said, "{rows} addresses written");
+            message(ui.panel, "Exported", said.as_str(), file);
+        }
+        Err(why) => {
+            crate::catlog!("addresses: export failed: {}", why);
+            message(ui.panel, "Export failed", why, "any key to go back");
+        }
+    }
+    wait_for_any_key(ui);
+}
+
+/// The file an address export is written to: this wallet's, by its fingerprint, so two
+/// wallets' exports do not overwrite each other on one card.
+fn address_csv_name() -> heapless::String<24> {
+    let mut path = heapless::String::new();
+    match crate::pubkeys::known_fingerprint() {
+        Some([a, b, c, d]) => {
+            let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-ADDRS.CSV");
+        }
+        // Nothing has derived a fingerprint this session, which cannot happen on the way
+        // out of a screen that has shown an address -- but a name is needed either way.
+        None => {
+            let _ = path.push_str("/ADDRESSES.CSV");
+        }
+    }
+    path
+}
+
+/// The path `m/{purpose}h/{coin}h/{account}h/{chain}/{index}` as a parsed path, for the
+/// CSV's path column.
+fn bip44_path(
+    purpose: u32,
+    coin: u32,
+    account: u32,
+    chain: u32,
+    index: u32,
+) -> Option<catcard_wallet::bip32::DerivationPath> {
+    use catcard_wallet::bip32::{ChildNumber, DerivationPath};
+    let steps = [
+        ChildNumber::hardened(purpose).ok()?,
+        ChildNumber::hardened(coin).ok()?,
+        ChildNumber::hardened(account).ok()?,
+        ChildNumber::normal(chain).ok()?,
+        ChildNumber::normal(index).ok()?,
+    ];
+    DerivationPath::from_slice(&steps).ok()
+}
+
+/// Export addresses below a chain key that is already in hand: the explorer's `6` key and
+/// the export drawer's row both end here.
+///
+/// `chain_key` is the extended *public* key at `m/{purpose}h/{coin}h/{account}h/{chain}`,
+/// so every row is one unhardened step and no seed is touched however many are asked for.
+fn export_chain_csv(
+    ui: &mut Ui<'_>,
+    head: &str,
+    run: AddressRun,
+    chain_key: &catcard_wallet::bip32::ExtendedPubKey,
+) {
+    use catcard_wallet::address;
+    use catcard_wallet::bip32::{ChildNumber, Network};
+
+    let Some(count) = ask_row_count(ui, head) else {
+        return;
+    };
+    let file = address_csv_name();
+    write_address_csv(ui, head, file.as_str(), run.start, count, &mut |index| {
+        let leaf = chain_key
+            .derive_child(ChildNumber::normal(index).ok()?)
+            .ok()?;
+        let mut buf = [0u8; address::MAX_ADDRESS_LEN];
+        let n = address::encode(run.kind, Network::Mainnet, &leaf.public_key, &mut buf).ok()?;
+        let mut text = AddrText::new();
+        text.push_str(core::str::from_utf8(&buf[..n]).ok()?).ok()?;
+        Some((
+            bip44_path(
+                run.kind.bip44_purpose(),
+                run.coin,
+                run.account,
+                run.chain,
+                index,
+            )?,
+            text,
+        ))
+    });
+}
+
+/// Which addresses an export is of: the type, and the numbers that name the key they hang
+/// under. Together rather than as five arguments, because every one of them is a small
+/// integer and a caller that swapped two would export a different wallet's addresses
+/// under this one's name.
+#[derive(Copy, Clone)]
+struct AddressRun {
+    kind: catcard_wallet::address::AddressKind,
+    /// SLIP-44 coin type. Zero here: Bitcoin's explorer and the export drawer are the
+    /// two callers, and the other chains build their own rows.
+    coin: u32,
+    account: u32,
+    /// 0 receive, 1 change.
+    chain: u32,
+    /// The first index written.
+    start: u32,
+}
+
+/// Export drawer → Address CSV: pick a type, an account and a start, and write the
+/// receive addresses from there.
+///
+/// Receive addresses only. The change chain is derivable from the same key and is on the
+/// explorer's `6` key when it is what is on screen, but a file handed to someone else so
+/// they can pay this wallet should not carry the addresses its change goes to.
+fn export_address_csv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::bip32::ChildNumber;
+
+    const HEAD: &str = "Address CSV";
+
+    let names: heapless::Vec<&str, { PROTOCOLS.len() }> =
+        PROTOCOLS.iter().map(|k| kind_name(*k)).collect();
+    let Some(row) = pick_row(ui, HEAD, "which address type", &names) else {
+        return;
+    };
+    let kind = PROTOCOLS[row];
+    let Some(account) = ask_number(ui, HEAD, None, "account", "empty is account 0") else {
+        return;
+    };
+    let Some(start) = ask_number(ui, HEAD, None, "start", "empty starts at 0") else {
+        return;
+    };
+    let Some(account_key) = crate::pubkeys::account_key(gate, login, ui, HEAD, kind, account)
+    else {
+        return;
+    };
+    let Some(chain_key) = ChildNumber::normal(0)
+        .ok()
+        .and_then(|c| account_key.derive_child(c).ok())
+    else {
+        message(ui.panel, HEAD, "that account did not", "derive a chain key");
+        wait_for_any_key(ui);
+        return;
+    };
+    export_chain_csv(
+        ui,
+        HEAD,
+        AddressRun {
+            kind,
+            coin: 0,
+            account,
+            chain: 0,
+            start,
+        },
+        &chain_key,
+    );
 }
 
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
@@ -6419,12 +7108,12 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             display::CANCEL_KEY
         );
         #[cfg(not(feature = "board-mk3"))]
-        let _ = write!(key_hint, "   2 NFC");
+        let _ = write!(key_hint, "   6 export");
 
         // The address in the large face, everything else in the small one. It is the only
         // thing on the screen worth reading carefully, and the elision costs less than the
         // squint did -- the whole of it, in blocks of four, is one keypress away.
-        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 8> = heapless::Vec::new();
+        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 10> = heapless::Vec::new();
         let _ = doc.push(catcard_ui::scroll::Line::title(title.as_str()));
         let _ = doc.push(catcard_ui::scroll::Line::body(path.as_str()).small());
         let _ = doc.push(catcard_ui::scroll::Line::body(shown.as_str()));
@@ -6439,6 +7128,19 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 (true, _) => "0 receive chain",
                 (false, 0) => "1/3 account  0 change chain",
                 (false, _) => "1/3 account  0 receive chain",
+            })
+            .small(),
+        );
+        // The typed axes, on the three digits the arrows and the chain do not already
+        // use. `2` and `4` are what stock's "Account Number" and "Start Idx" rows do --
+        // type the number instead of stepping to it, which is the difference between
+        // reaching account 100 in one screen and in a hundred presses.
+        // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE [C]
+        let _ = doc.push(
+            catcard_ui::scroll::Line::body(if wallet.is_some() {
+                "4 start idx"
+            } else {
+                "2 account  4 start idx  6 to card"
             })
             .small(),
         );
@@ -6474,17 +7176,6 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                         }
                         break 'wait;
                     }
-                    // The same address onto the NFC tag, so a phone tapped on the device
-                    // reads it. Nothing is written until this is pressed, and the tag is
-                    // blanked again when that screen is left.
-                    #[cfg(not(feature = "board-mk3"))]
-                    Key::Digit(2) => {
-                        if let Some(n) = addr {
-                            let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                            crate::nfc::share_address(ui, text);
-                        }
-                        break 'wait;
-                    }
                     Key::Digit(8) => {
                         index = index.saturating_add(1);
                         break 'wait;
@@ -6515,6 +7206,82 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     Key::Digit(1) if wallet.is_none() => {
                         account = account.saturating_sub(1);
                         index = 0;
+                        break 'wait;
+                    }
+                    // The account typed rather than stepped to, which is what stock's
+                    // "Account Number" row does: account 100 is one screen away instead
+                    // of a hundred presses, and the number is read back before it is
+                    // used. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE [C]
+                    Key::Digit(2) if wallet.is_none() => {
+                        if let Some(n) =
+                            ask_number(ui, "Addresses", None, "account", "empty is account 0")
+                        {
+                            account = n;
+                            index = 0;
+                        }
+                        break 'wait;
+                    }
+                    // Where the walk starts, stock's "Start Idx". The same axis the
+                    // up/down keys move, reached in one go -- checking the address a
+                    // wallet is showing at index 312 is the case this exists for.
+                    Key::Digit(4) => {
+                        if let Some(n) =
+                            ask_number(ui, "Addresses", None, "start", "empty starts at 0")
+                        {
+                            index = n;
+                        }
+                        break 'wait;
+                    }
+                    // What is on screen, written out from here on.
+                    // Getting what is on screen *out*: to a file, or onto the tag. Both
+                    // live behind one key because every digit is spoken for -- the ten
+                    // are the four axes, the two typed values and this -- and because
+                    // they are the same question asked of two media.
+                    Key::Digit(6) => {
+                        #[cfg(not(feature = "board-mk3"))]
+                        {
+                            let rows: &[&str] = &["CSV to card", "Share by NFC"];
+                            match pick_row(ui, "Export", "what is on screen", rows) {
+                                Some(1) => {
+                                    if let Some(n) = addr {
+                                        let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                                        crate::nfc::share_address(ui, text);
+                                    }
+                                    break 'wait;
+                                }
+                                Some(_) => {}
+                                None => break 'wait,
+                            }
+                        }
+                        match (wallet, cached.as_ref().map(|(_, _, _, k)| *k)) {
+                            (None, Some(chain_key)) => export_chain_csv(
+                                ui,
+                                "Addresses",
+                                AddressRun {
+                                    kind,
+                                    coin: 0,
+                                    account,
+                                    chain,
+                                    start: index,
+                                },
+                                &chain_key,
+                            ),
+                            // A registered wallet's addresses have no one path: each
+                            // cosigner reaches them from their own seed by their own
+                            // path, so the column the file wants does not exist here.
+                            (Some(_), _) => {
+                                message(
+                                    ui.panel,
+                                    "Addresses",
+                                    "each cosigner derives these",
+                                    "by a path of their own",
+                                );
+                                wait_for_any_key(ui);
+                            }
+                            // No chain key: the unlock was declined, and the screen is
+                            // already showing "(no address)".
+                            (None, None) => {}
+                        }
                         break 'wait;
                     }
                     Key::Digit(0) => {

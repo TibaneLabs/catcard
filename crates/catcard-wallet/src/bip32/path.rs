@@ -100,6 +100,27 @@ impl DerivationPath {
     }
 }
 
+/// Writes `m/44h/0h/0h/0/0` -- the master marker, then every step, hardened ones marked.
+///
+/// `h` rather than `'`: both parse, and an apostrophe inside a CSV field or a filename is
+/// the character most likely to be eaten by whatever reads it next. The master path is
+/// `m` on its own, so this never ends in a separator.
+///
+/// The inverse of [`FromStr`](core::str::FromStr) on the same type, which is the property
+/// the tests state: a path shown on the glass is the path that would be typed back in.
+impl core::fmt::Display for DerivationPath {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("m")?;
+        for child in self.iter() {
+            write!(f, "/{}", child.index())?;
+            if child.is_hardened() {
+                f.write_str("h")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Parses `m/44'/0'/0'/0/0`. Accepts `'`, `h` or `H` for hardened, and tolerates a
 /// missing leading `m/`.
 impl core::str::FromStr for DerivationPath {
@@ -284,5 +305,50 @@ mod tests {
     #[test]
     fn whitespace_around_a_path_is_tolerated() {
         assert_eq!(p("  m/0'/1  "), p("m/0'/1"));
+    }
+
+    // The failure mode: a path shown beside an address, or written into an export, that
+    // cannot be typed back in -- so the reader derives a *different* key and blames the
+    // device. Formatting has to be the exact inverse of parsing.
+    #[test]
+    fn a_formatted_path_parses_back_to_itself() {
+        for s in [
+            "m",
+            "m/0",
+            "m/44'/0'/0'/0/0",
+            "m/48'/0'/0'/2'/0/5",
+            "m/2147483647'/2147483647",
+        ] {
+            let path = p(s);
+            let shown = path.to_string();
+            assert_eq!(p(&shown), path, "round trip of {s:?} via {shown:?}");
+        }
+    }
+
+    // The failure mode: the hardened marker dropped in the rendering, so `m/84h/0h/0h`
+    // reads as `m/84/0/0` -- a real path, a different wallet, and nothing says so.
+    #[test]
+    fn hardened_steps_keep_their_marker() {
+        assert_eq!(p("m/84'/0'/0'/0/0").to_string(), "m/84h/0h/0h/0/0");
+        assert_eq!(p("m/0").to_string(), "m/0");
+        assert_eq!(p("m/0'").to_string(), "m/0h");
+    }
+
+    // The failure mode: `m` rendered as `m/` or as the empty string, neither of which
+    // parses back to the master path.
+    #[test]
+    fn the_master_path_is_just_m() {
+        assert_eq!(DerivationPath::MASTER.to_string(), "m");
+        assert_eq!(p(&DerivationPath::MASTER.to_string()), p("m"));
+    }
+
+    #[test]
+    fn the_deepest_path_still_formats() {
+        let deep = core::iter::repeat_n("2147483647h", MAX_PATH_DEPTH)
+            .collect::<Vec<_>>()
+            .join("/");
+        let path = p(&format!("m/{deep}"));
+        assert_eq!(path.len(), MAX_PATH_DEPTH);
+        assert_eq!(p(&path.to_string()), path);
     }
 }
