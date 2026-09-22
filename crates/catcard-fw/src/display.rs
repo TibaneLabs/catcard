@@ -279,11 +279,12 @@ pub fn scroll_busy_bar(_panel: &mut Panel) {
 
 /// Whether the PIN check uses [`start_sweep`] rather than the co-processor's bar.
 ///
-/// **Off until it has been watched working.** The PIN check is the boot path, and on an
-/// RDP=2 unit a boot path that hangs is a brick, not a reflash. Debug -> Sweep test runs
-/// it around a real callgate first; this turns on only after that has been seen.
+/// The PIN check is the boot path, and on an RDP=2 unit a boot path that hangs is a
+/// brick, not a reflash -- so this stayed off until Debug -> Sweep test had been watched
+/// working around a real callgate on a Q1 (2026-09-22: 18/4 took 1,635 ms with the bar
+/// moving, and returned normally). Set false to go back to the co-processor's bar.
 #[cfg(feature = "board-q1")]
-pub const SWEEP_AT_LOGIN: bool = false;
+pub const SWEEP_AT_LOGIN: bool = true;
 
 /// The DMA-driven bar, while it runs. Foreground only, single core.
 #[cfg(feature = "board-q1")]
