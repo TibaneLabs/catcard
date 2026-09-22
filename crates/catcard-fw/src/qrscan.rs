@@ -29,6 +29,7 @@ use zeroize::Zeroize as _;
 use catcard_callgate::Callgate;
 
 use crate::menu;
+use crate::sniff::Content;
 use crate::ui::Ui;
 
 /// Loop iterations a single byte may take. At 9600 baud a byte is about a millisecond,
@@ -684,67 +685,6 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     offer(gate, login, ui, HEAD, area, len);
 }
 
-/// What the scanned bytes look like.
-enum Content {
-    /// A signed CatCard image: the header magic is where a header would be.
-    Firmware,
-    /// A PSBT, binary or base64.
-    Psbt,
-    /// A SeedQR: a whole wallet, in one of its two shapes.
-    Seed(catcard_wallet::seedqr::Kind),
-    /// Something a person can read.
-    Text,
-    /// Bytes that are none of the above.
-    Unknown,
-}
-
-/// Decide what arrived.
-///
-/// Cheap checks in the order that a false positive matters least. The firmware magic is
-/// four bytes at a fixed offset inside a quarter-megabyte image, so nothing short can
-/// claim to be one; the PSBT magic is its first five bytes. Only what neither claims is
-/// offered as text.
-fn sniff(bytes: &[u8]) -> Content {
-    const PSBT_MAGIC: &[u8] = b"psbt\xff";
-    if bytes.starts_with(PSBT_MAGIC) {
-        return Content::Psbt;
-    }
-    let at = catcard_fwhdr::HEADER_OFFSET;
-    if bytes.len() > at + 4
-        && u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-            == catcard_fwhdr::MAGIC
-    {
-        return Content::Firmware;
-    }
-    // Base64 of a PSBT, as a `.psbt` written as text is. Checked before the general text
-    // case so it is offered for signing rather than shown as gibberish.
-    if bytes.starts_with(b"cHNidP") {
-        return Content::Psbt;
-    }
-    // A SeedQR, in either shape. Before the text case, because a Standard one *is* text
-    // -- 48 to 96 digits -- and showing a seed on the glass as "here is what you
-    // scanned" is not what someone holding their backup up to the camera asked for.
-    //
-    // The two shapes are sniffed differently on purpose. Standard is claimed on its own
-    // terms: nothing else this device reads is exactly that many characters of nothing
-    // but digits. Compact is 16 to 32 arbitrary bytes and has no shape at all, so it is
-    // claimed only where the alternative reading was `Unknown` -- a payload of that
-    // length that is valid text stays text, and a Compact code whose entropy happens to
-    // be printable is a case this loses to a rule that keeps every text scan working.
-    let text = core::str::from_utf8(bytes).ok();
-    match catcard_wallet::seedqr::kind_of(bytes) {
-        Some(kind @ catcard_wallet::seedqr::Kind::Standard) => return Content::Seed(kind),
-        Some(kind @ catcard_wallet::seedqr::Kind::Compact) if text.is_none() => {
-            return Content::Seed(kind);
-        }
-        _ => {}
-    }
-    match text {
-        Some(_) => Content::Text,
-        None => Content::Unknown,
-    }
-}
-
 /// Say what arrived and offer what can be done with it.
 fn offer(
     gate: &Callgate,
@@ -762,7 +702,7 @@ fn offer(
     // wrote through the staging area, which lives in the upper half of the part.
     let at = area.image_at();
     let mut lease = area.into_lease();
-    let what = sniff(&lease.bytes()[at..at + len]);
+    let what = crate::sniff::sniff(&lease.bytes()[at..at + len]);
 
     // A whole wallet arrived. It is taken out and the memory it came through is wiped
     // before anybody is asked anything: the screens that follow can stand there for as
@@ -796,14 +736,7 @@ fn offer(
         let head = &lease.bytes()[at..at + len.min(16)];
         crate::catlog!("qr: {} bytes, not recognised; starts {:02x?}", len, head);
     }
-    let (note, actions): (&str, &[&str]) = match what {
-        Content::Firmware => ("a firmware image", &["Install it"]),
-        Content::Psbt => ("a transaction", &["Sign it"]),
-        // Handled above, where the payload is copied out before any screen goes up.
-        Content::Seed(_) => return,
-        Content::Text => ("text", &["Show it"]),
-        Content::Unknown => ("data this cannot use", &[]),
-    };
+    let (note, actions) = what.offer();
     if actions.is_empty() {
         // As above: the memory is handed back before anyone is asked to read anything.
         drop(lease);

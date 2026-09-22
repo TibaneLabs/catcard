@@ -104,7 +104,7 @@ Dependency first, then what a user needs to hold funds safely:
 | P2PKH, P2WPKH, P2SH-P2WPKH display | ✅ | ✅ | Address Explorer, with QR |
 | Taproot display | ✅ | ✅ | Address Explorer |
 | Accounts, change chain, start index | ✅ | 🟡 | account and chain keys in the explorer; no custom-path entry |
-| Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address only |
+| Explorer export (CSV, QR, NFC) | ✅ | 🟡 | QR per address, and `2` puts the same address on the NFC tag as a `bitcoin:` URI; no CSV |
 | Verify address / ownership | ✅ | 🟡 | Utils → Verify address, 4 types x 3 accounts x 2 chains x 100 |
 | Multisig addresses | ✅ | 🟡 | P2SH, P2WSH and P2SH-P2WSH, in the Address Explorer and with a QR |
 
@@ -133,7 +133,7 @@ every multisig input is refused.
 | Parse, review, sign, write back | ✅ | 🟡 | done; untested on hardware |
 | Change validation, fee limit, sighash policy | ✅ | ✅ | change re-derived, 10% cap, SIGHASH_ALL only |
 | Finalise to a network transaction | ✅ | ✅ | FINAL.TXN, as hex |
-| Batch sign, Sign Text File, USB / NFC / QR entry | ✅ | ❌ | SD first; others with their transports |
+| Batch sign, Sign Text File, USB / NFC / QR entry | ✅ | 🟡 | `Sign` takes a PSBT from SD, from the Q1 scanner and from the NFC tag; batch and text files remain |
 | Multisig inputs, foreign inputs, coinjoin | ✅ | 🟡 | multisig: registered wallets only (§4); foreign inputs and coinjoin: step 2 |
 
 ## 6. Message signing and Proof of Reserves
@@ -155,7 +155,7 @@ every multisig input is refused.
 | microSD | ✅ | ✅ | FAT12/16/32 and exFAT, cards to 2 TB, format |
 | Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
-| NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast (`crate::nfc`), untried on hardware; sharing addresses, taking a PSBT in and file share remain |
+| NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast, an address goes out as a `bitcoin:` URI, and a PSBT a phone writes to the tag comes in to the signing screen (`crate::nfc`); all of it untried on hardware, and file share remains |
 | QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, shows files as animated QR, and reads and writes SeedQR; NFC-side transfers remain |
 | PushTx, Key Teleport | ✅ | ❌ | after step 11 |
 

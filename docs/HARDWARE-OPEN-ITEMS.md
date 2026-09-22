@@ -629,9 +629,40 @@ Both are one `const` each at the top of `crates/catcard-fw/src/nfc.rs`.
 
 The driver follows the datasheet -- device select `0xA6`, two address bytes, one 16-byte
 row per write, `tW` waited out afterwards -- but no tag has answered it yet. It is off the
-boot path: Debug → NFC test writes a fixed URL and says whether the tag answered, and the
-broadcast offer only appears after a transaction is fully signed.
+boot path: Debug → NFC test writes a fixed URL and says whether the tag answered, the
+broadcast offer only appears after a transaction is fully signed, Addresses → `2` writes
+the address on screen, and Sign → By NFC is a menu action.
 
 Unknown until then: whether the factory capability container differs from the one written
 here, whether a phone reads the image back as a URL, and whether the co-processor sharing
 this bus needs to be quiet during the write.
+
+## Reading the NFC tag back has not been tried either `[I]`
+
+Receiving works the other way round -- `crate::nfc::read_user_memory` loads the address
+counter with a dummy write, turns the bus around with a **repeated** start
+(`SoftI2c::write_read`), and reads 8192 bytes out in one transfer. Both halves are
+datasheet-confirmed (§6.5.1 random address read, §6.5.3 sequential read access), and the
+repeated start is tested on the host against the bit-bang mock. What is not confirmed is
+the part answering it.
+
+Unknown until a tag is in front of it:
+
+- **Whether the poll sees a phone's write.** `Sign → By NFC` marks the tag with a text
+  record and then watches the first 24 bytes of user memory until they change and settle.
+  That a phone's NDEF write lands in those bytes, and that an I²C read taken during an RF
+  field returns either the old value or the new one rather than something else, is `[I]` --
+  read off the format and the bus, not measured.
+- **How long a full read takes.** ~74 000 bit times at the bit-bang's quarter period, so
+  under a second by arithmetic, with the screen held. Not timed.
+- **Whether a phone's write arrives whole.** The settle window is two quiet polls, about
+  0.4 s. If a phone writes its blocks with longer gaps than that, a partial message would
+  be read -- which `catcard_nfc::read` refuses as `Truncated` rather than signing, so the
+  failure is "nothing this can use" and another tap, not a wrong transaction.
+
+The two mechanisms the part has for announcing an RF write are deliberately **not** used,
+and why is in the module header: the fast transfer mode mailbox is 256 bytes and needs
+ST's own RF commands (§4.5, Table 15), and the `RF_WRITE` bit of `IT_STS_Dyn` is only
+reported once it is enabled in the `GPO1` *system* register, which needs the I²C security
+session open (Table 31, Table 37, §5.4.5). Both would mean writing configuration registers
+on a part nobody here has tried.

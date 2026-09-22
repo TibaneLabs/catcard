@@ -63,7 +63,34 @@ impl<L: Lines> SoftI2c<L> {
 
     /// Fill `out` from the 7-bit address `addr`.
     pub fn read(&mut self, addr: u8, out: &mut [u8]) -> Result<(), Error> {
-        let mut r = self.start().and_then(|()| self.write_byte((addr << 1) | 1));
+        let r = self.start().and_then(|()| self.write_byte((addr << 1) | 1));
+        self.read_into(r, out)
+    }
+
+    /// Write `bytes`, then read `out` back **without letting go of the bus between**.
+    ///
+    /// The second start is a *repeated* start: no stop condition separates the two halves.
+    /// That is what an addressed read of a memory wants -- the write carries the address to
+    /// read from, and a stop in the middle would let another master in between the two, or
+    /// leave a device free to decide the transfer was over.
+    ///
+    /// Source: ST25DV64KC datasheet §6.5.1 "Random address read" -- "A dummy write is first
+    /// performed to load the address into this address counter ... but without sending a
+    /// Stop condition. Then, the bus controller sends another Start condition (reStart)"
+    /// [C]
+    pub fn write_read(&mut self, addr: u8, bytes: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        let r = self
+            .start()
+            .and_then(|()| self.write_byte(addr << 1))
+            .and_then(|()| bytes.iter().try_for_each(|&b| self.write_byte(b)))
+            .and_then(|()| self.start())
+            .and_then(|()| self.write_byte((addr << 1) | 1));
+        self.read_into(r, out)
+    }
+
+    /// The reading half both of the above share: bytes in, acknowledged until the last, and
+    /// a stop whatever happened so a failed transfer does not leave the bus held.
+    fn read_into(&mut self, mut r: Result<(), Error>, out: &mut [u8]) -> Result<(), Error> {
         let n = out.len();
         for (i, slot) in out.iter_mut().enumerate() {
             if r.is_err() {
@@ -392,6 +419,41 @@ mod tests {
         let mut out = [0u8; 6];
         assert_eq!(bus.read(0x65, &mut out), Ok(()));
         assert_eq!(&out, b"1.3.3\0");
+    }
+
+    /// An addressed read: the address goes out, then a **repeated** start turns the
+    /// transfer around. Two starts and one stop is the whole statement -- a stop between
+    /// the halves would end the transfer, and a memory whose address counter was just
+    /// loaded would be free to forget it.
+    #[test]
+    fn a_write_read_turns_the_bus_around_without_letting_go_of_it() {
+        let mut dev = Device::new(0x53);
+        dev.reply = vec![0xE2, 0x40, 0x00, 0x01];
+        {
+            let mut bus = SoftI2c::new(&mut dev);
+            let mut out = [0u8; 4];
+            assert_eq!(bus.write_read(0x53, &[0x00, 0x00], &mut out), Ok(()));
+            assert_eq!(out, [0xE2, 0x40, 0x00, 0x01]);
+        }
+        assert_eq!(dev.received, vec![0x00, 0x00]);
+        assert_eq!((dev.starts, dev.stops), (2, 1));
+    }
+
+    /// Nobody at that address: no bytes are written, nothing is read, and the bus is let go.
+    #[test]
+    fn a_write_read_to_nobody_is_a_nack() {
+        let mut dev = Device::new(0x53);
+        {
+            let mut bus = SoftI2c::new(&mut dev);
+            let mut out = [0u8; 4];
+            assert_eq!(
+                bus.write_read(0x52, &[0x00, 0x00], &mut out),
+                Err(Error::Nack)
+            );
+            assert_eq!(out, [0, 0, 0, 0]);
+        }
+        assert!(dev.received.is_empty());
+        assert_eq!(dev.stops, 1);
     }
 
     #[test]

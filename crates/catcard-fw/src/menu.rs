@@ -155,6 +155,10 @@ enum Screen {
     SignMenu,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
     SignPsbt,
+    /// Take a transaction in through the NFC tag: mark it, wait for a phone to write, and
+    /// offer whatever arrived.
+    #[cfg(not(feature = "board-mk3"))]
+    SignNfc,
     /// Sign a typed message with one of this wallet's keys.
     SignMessage,
     /// Type a BIP-39 passphrase, opening a second wallet from the same words.
@@ -540,11 +544,13 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Where the thing to sign comes from. The scanner is the Q1's; the mono boards have no
-/// camera, so they have no row for one.
+/// camera, so they have no row for one. The tag is on every board past the mk3.
 const SIGN_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Scan",
     "From SD",
+    #[cfg(not(feature = "board-mk3"))]
+    "By NFC",
     "Message",
 ];
 
@@ -1106,6 +1112,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::SignMenu,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SignNfc => to(
+            |a| crate::nfc::receive_screen(a.gate, a.login, a.ui),
+            Screen::SignMenu,
+        ),
         Screen::SignMessage => to(
             |a| crate::signmsg::screen(a.gate, a.login, a.ui),
             Screen::SignMenu,
@@ -1427,6 +1438,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Scan")) => Screen::ScanQr,
             (Key::Confirm, Some("From SD")) => Screen::SignPsbt,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("By NFC")) => Screen::SignNfc,
             (Key::Confirm, Some("Message")) => Screen::SignMessage,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::SignMenu,
@@ -1919,6 +1932,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt | Screen::SignMessage => {}
+        // Handled in `run`: it drives the tag and the panel itself.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SignNfc => {}
         // Handled in `run`: it zeroizes the login and calls the bootloader; never drawn.
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
@@ -5178,7 +5194,10 @@ pub(crate) fn ask_index(ui: &mut Ui<'_>, head: &str, what: &str) -> Option<u32> 
 /// navigating to it. The export destination is one: by the time it is asked, the keys
 /// have been derived and the payload exists, so turning it into another `Screen` would
 /// mean deriving them again on the way back.
-#[cfg(feature = "board-q1")]
+///
+/// On every board past the mk3: the Q1's scan offers what it read this way, and so does
+/// the NFC receive screen.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
     use catcard_ui::menu::Scroll;
 
@@ -6389,6 +6408,9 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // Name the keys the way the owner sees them. `5`/`8`/`7`/`9` is what the firmware
         // reads, but the keypad prints arrows on those keys and the Q1 has real arrow keys,
         // so digits here would send someone hunting for a number that is not the point.
+        //
+        // `2` is a digit and stays one: it is not on an axis, and the boards that have an
+        // NFC tag print a plain `2` on that key.
         let mut key_hint = Line::new();
         let _ = write!(
             key_hint,
@@ -6396,6 +6418,8 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             display::CONFIRM_KEY,
             display::CANCEL_KEY
         );
+        #[cfg(not(feature = "board-mk3"))]
+        let _ = write!(key_hint, "   2 NFC");
 
         // The address in the large face, everything else in the small one. It is the only
         // thing on the screen worth reading carefully, and the elision costs less than the
@@ -6447,6 +6471,17 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                                 ),
                                 None => address_qr(ui, text, kind),
                             }
+                        }
+                        break 'wait;
+                    }
+                    // The same address onto the NFC tag, so a phone tapped on the device
+                    // reads it. Nothing is written until this is pressed, and the tag is
+                    // blanked again when that screen is left.
+                    #[cfg(not(feature = "board-mk3"))]
+                    Key::Digit(2) => {
+                        if let Some(n) = addr {
+                            let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                            crate::nfc::share_address(ui, text);
                         }
                         break 'wait;
                     }
@@ -6594,8 +6629,9 @@ pub(crate) fn scroll_choice(
 /// a scan that runs until it sees a code. Everything else here waits for a key; this
 /// asks and carries on, so the loop it sits in stays the screen's.
 ///
-/// Only the QR scan needs this today, and only the Q1 has a scanner.
-#[cfg(feature = "board-q1")]
+/// The QR scan and the NFC receive screen both wait this way: one until a code is read,
+/// the other until a phone writes to the tag.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn cancel_pressed(ui: &mut Ui<'_>) -> bool {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

@@ -107,6 +107,9 @@ mod session;
 mod settings;
 mod signmsg;
 mod signtx;
+/// What arrived, when the device did not ask for anything in particular.
+#[cfg(not(feature = "board-mk3"))]
+mod sniff;
 mod splash;
 mod staging;
 /// Everything this device keeps, written to a card in one file.
