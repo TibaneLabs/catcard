@@ -205,6 +205,8 @@ enum Screen {
     SeedTools,
     /// Show the key in force: its words, or its XPRV or WIF.
     ViewWords,
+    /// Store the key in force as the device's seed, replacing the one it held.
+    LockDown,
     /// Changing the main PIN.
     ChangePin,
     WipeSeed,
@@ -343,7 +345,8 @@ fn main_items_with_key() -> &'static [&'static str] {
     }
 }
 
-/// Settings, with "Destroy seed" only where there is a seed to destroy.
+/// Settings on a device with a seed. The seed tools, "Destroy seed" among them, are in
+/// the Danger zone, which a blank device does not have.
 const SETTINGS_ITEMS: &[&str] = &[
     "Login",
     "Passphrase",
@@ -353,7 +356,6 @@ const SETTINGS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "Multisig",
     "Danger zone",
-    "Destroy seed",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
     // person came to do.
@@ -379,8 +381,21 @@ fn settings_items(no_seed: bool) -> &'static [&'static str] {
 /// Settings that show or change secrets. Stock calls it the same, and keeps its seed
 /// functions there. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
 const DANGER_ITEMS: &[&str] = &["Seed tools"];
-/// Tools that work on the seed itself.
-const SEED_TOOLS_ITEMS: &[&str] = &["View words"];
+/// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
+/// ours is under Derive.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Seed Functions" [C]
+const SEED_TOOLS_ITEMS: &[&str] = &["View words", "Destroy seed"];
+/// The same while some other key is in force, which can be locked down in its place.
+/// Stock gates the row the same way (`is_tmp`).
+const SEED_TOOLS_ITEMS_LOADED: &[&str] = &["View words", "Destroy seed", "Lock down seed"];
+
+fn seed_tools_items() -> &'static [&'static str] {
+    if crate::key::in_force() == crate::key::Source::Root {
+        SEED_TOOLS_ITEMS
+    } else {
+        SEED_TOOLS_ITEMS_LOADED
+    }
+}
 
 /// Login settings. Just the PIN today; a place for login-related settings to grow.
 /// Login settings.
@@ -1100,6 +1115,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
+        Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::FactoryReset => to(
             |a| factory_reset_screen(a.gate, a.login, a.ui),
             Screen::Debug,
@@ -1251,7 +1267,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
-            (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
@@ -1261,8 +1276,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
-        Screen::SeedTools => match (key, SEED_TOOLS_ITEMS.get(cursor).copied()) {
+        Screen::SeedTools => match (key, seed_tools_items().get(cursor).copied()) {
             (Key::Confirm, Some("View words")) => Screen::ViewWords,
+            (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
+            (Key::Confirm, Some("Lock down seed")) => Screen::LockDown,
             (Key::Cancel, _) => Screen::DangerZone,
             _ => Screen::SeedTools,
         },
@@ -1281,6 +1298,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
         Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
+        Screen::LockDown => Screen::SeedTools,
         #[cfg(not(feature = "board-mk3"))]
         Screen::KeyVault => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
@@ -1623,7 +1641,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DangerZone => Some(DANGER_ITEMS),
-        Screen::SeedTools => Some(SEED_TOOLS_ITEMS),
+        Screen::SeedTools => Some(seed_tools_items()),
         Screen::KeyMenu => Some(key_items()),
         Screen::ExportMenu => Some(EXPORT_ITEMS),
         Screen::XpubMenu => Some(XPUB_ITEMS),
@@ -1736,7 +1754,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FlappyCat => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
-        Screen::ViewWords => {}
+        Screen::ViewWords | Screen::LockDown => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
     }
@@ -7423,6 +7441,119 @@ fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
             }
         }
     }
+}
+
+/// Danger zone → Seed tools → Lock down seed: the key in force becomes the stored seed.
+///
+/// **Irreversible.** The seed the secure element held is overwritten, and with it goes
+/// the only way this device had to reach that wallet -- its vault and settings included,
+/// which stay on flash under a key nothing here can make any more. So it is asked twice,
+/// as Destroy seed is, and the second question says what brings the old seed back.
+///
+/// A words key only: the root and a BIP-85 words child or a loaded seed all store as
+/// their entropy. An XPRV has a stash form, but this firmware cannot yet start from an
+/// XPRV root, so storing one would leave a device it cannot use; a WIF key has no stash
+/// form at all. The passphrase is not stored, as it never is.
+fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use crate::key::{Loaded, Source};
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Lock down seed";
+
+    let refused = match crate::key::loaded() {
+        Some(Loaded::Xprv) => Some(("an XPRV cannot be", "the stored seed yet")),
+        Some(Loaded::Wif) => Some(("a WIF key cannot be", "a stored seed")),
+        _ if crate::key::in_force() == Source::Root => Some(("this already is", "the stored seed")),
+        _ => None,
+    };
+    if let Some((a, b)) = refused {
+        message(ui.panel, HEAD, a, b);
+        wait_for_any_key(ui);
+        return;
+    }
+
+    let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
+        Ok(got) => got,
+        Err(why) => {
+            message(ui.panel, HEAD, why, "any key to go back");
+            wait_for_any_key(ui);
+            return;
+        }
+    };
+    let secret = catcard_callgate::pin::encode_bip39(&ent[..len]);
+    // The fingerprint the stored seed will have: its own, without any passphrase -- which
+    // is the root this device will come up in.
+    let mut busy = Working::seed(ui.panel, HEAD, "checking the key");
+    let fp = crate::keywork::run(|kw| plain_master(&ent[..len], kw).map(|m| m.fingerprint(kw)));
+    busy.tick(ui.panel);
+    ent.zeroize();
+    let (Ok(mut secret), Ok([a, b, c, d])) = (secret, fp) else {
+        message(ui.panel, HEAD, "could not encode", "that seed");
+        wait_for_any_key(ui);
+        return;
+    };
+    let mut said: heapless::String<24> = heapless::String::new();
+    let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
+
+    if crate::passphrase::is_set() {
+        ask(
+            ui.panel,
+            HEAD,
+            "stores the WORDS only",
+            "your passphrase is not in them",
+        );
+        if !confirmed(ui) {
+            secret.zeroize();
+            return;
+        }
+    }
+    ask(ui.panel, "Replace stored seed?", "with", &said);
+    if !confirmed(ui) {
+        secret.zeroize();
+        return;
+    }
+    ask(
+        ui.panel,
+        "Really replace?",
+        "only the old words can",
+        "ever bring it back",
+    );
+    if !confirmed(ui) {
+        secret.zeroize();
+        return;
+    }
+
+    message(ui.panel, "Storing", "do not disconnect", "");
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let stored = login.set_secret(&pin_gate, &secret);
+    // Read back before anyone is told it worked, as Destroy seed does: the next unlock is
+    // too late to find out the words on the table are not the ones stored.
+    let kept = stored.is_ok() && login.verify_secret(&pin_gate, &secret).unwrap_or(false);
+    secret.zeroize();
+    match stored {
+        Ok(_) if kept => {
+            // Once stored it *is* the root. Keeping the loaded selection would be the same
+            // wallet under two names.
+            crate::key::to_root();
+            #[cfg(feature = "board-q1")]
+            crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
+            crate::catlog!("lockdown: {} is the stored seed", said.as_str());
+            message(ui.panel, "Locked down", &said, "is the stored seed");
+        }
+        Ok(_) => {
+            crate::catlog!("lockdown: stored but did not read back");
+            message(
+                ui.panel,
+                "Not confirmed",
+                "it did not read back",
+                "check View words",
+            );
+        }
+        Err(f) => {
+            crate::catlog!("lockdown: store failed");
+            message(ui.panel, "Not stored", why_failed(f), "any key to go back");
+        }
+    }
+    wait_for_any_key(ui);
 }
 
 /// Show the words: when a wallet is made, and from Danger zone → Seed tools.

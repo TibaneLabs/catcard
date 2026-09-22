@@ -39,9 +39,13 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 |---|---|---|
 | `Login` → `Change PIN` | `Login Settings` → `Change Main PIN` | ✅ |
 | `Login` → `Nickname` | `Login Settings` → `Set Nickname` | ✅ |
-| `Passphrase` | *(top level in stock)* | ❌ see above |
+| `Passphrase` | *(top level in stock)* | ❌ see above; also under Derive |
 | `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
-| `Destroy seed` | `Advanced/Tools` → `Danger Zone` → `Destroy Seed` | ❌ ours is two steps shallower than stock's, on the most destructive entry we have |
+| `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |
+| `Danger zone` → `Seed tools` → `Destroy seed` | `… Seed Functions` → `Destroy Seed` | ✅ |
+| `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; words keys only -- an XPRV root is not usable here yet |
+| Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet |
+| — | `… Seed Functions` → `Export SeedQR`; the rest of `Danger Zone` | not implemented |
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
 | — | `Hardware On/Off`, `Display Units`, `Max Network Fee`, `Idle Timeout`, `NFC Push Tx`, `Keyboard EMU`, `Buried Settings` | not implemented |
