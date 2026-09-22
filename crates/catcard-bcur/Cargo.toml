@@ -11,3 +11,9 @@ authors.workspace = true
 [dependencies]
 heapless.workspace = true
 outscript = { workspace = true }
+
+[dev-dependencies]
+# For the one test that starts from the BCR's own BIP-39 phrase and derives its way to
+# the published account bytes. A dev-dependency only: the crate itself knows nothing
+# about keys, and must not -- it encodes what it is handed.
+catcard-wallet = { workspace = true, features = ["std"] }

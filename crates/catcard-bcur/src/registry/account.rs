@@ -22,10 +22,10 @@
 //! BCR-2023-010 -- is a different structure and is refused as such, not misread as
 //! this one. [C]
 
-use super::hdkey::Tags;
+use super::hdkey::{self, Tags};
 use super::{
-    Error, HdKey, TAG_ACCOUNT_V1, TAG_ACCOUNT_V2, TAG_HDKEY_V1, TAG_HDKEY_V2, TAG_OUTPUT_V1,
-    TAG_OUTPUT_V2,
+    Component, Error, HdKey, KeyPath, TAG_ACCOUNT_V1, TAG_ACCOUNT_V2, TAG_HDKEY_V1, TAG_HDKEY_V2,
+    TAG_OUTPUT_V1, TAG_OUTPUT_V2,
 };
 use crate::cbor::{self, Reader, Writer};
 
@@ -158,6 +158,39 @@ impl Descriptor {
         })
     }
 
+    /// An account-level descriptor, from the BIP-32 parts of the key.
+    ///
+    /// `path` is the derivation, all hardened, each index without the hardening bit --
+    /// one of [`STANDARD`]'s rows. The three optional fields BCR-2020-007 calls out
+    /// are all filled in: with the chain code, the origin and the parent fingerprint
+    /// present, the key is isomorphic with its BIP-32 serialization, and a wallet that
+    /// receives anything less cannot derive an address from it.
+    /// [C] BCR-2020-007 §"CDDL for HDKey"
+    ///
+    /// `use-info` is deliberately absent: an omitted one means mainnet Bitcoin, which
+    /// is what this is, and every published vector leaves it out for that reason. [C]
+    pub fn account_key(
+        script: Script,
+        path: &[u32],
+        master_fingerprint: u32,
+        parent_fingerprint: u32,
+        public_key: [u8; 33],
+        chain_code: [u8; 32],
+    ) -> Result<Self, Error> {
+        let mut components: heapless::Vec<Component, { hdkey::MAX_COMPONENTS }> =
+            heapless::Vec::new();
+        for &index in path {
+            components
+                .push(Component::hardened(index))
+                .map_err(|_| Error::TooMany)?;
+        }
+        let mut key = HdKey::derived(public_key);
+        key.chain_code = Some(chain_code);
+        key.parent_fingerprint = Some(parent_fingerprint);
+        key.origin = Some(KeyPath::new(master_fingerprint, &components)?);
+        Ok(Descriptor { script, key })
+    }
+
     /// Write one `crypto-output` message, untagged as a UR's top level.
     ///
     /// Version 1 throughout: the script tags only exist in a version-1 descriptor, so
@@ -176,6 +209,26 @@ impl Descriptor {
         self.key.write(Tags::V1, w)
     }
 }
+
+/// The standard account derivations, with the script each one is for.
+///
+/// Exactly BCR-2020-015's table, for Bitcoin mainnet and account zero. Every level is
+/// hardened, and the index is written without the hardening bit -- 44, not the number
+/// BIP-32 derives with -- because the BCR carries the flag beside the number.
+/// [C] BCR-2020-015 §Introduction, BCR-2020-007 §"CDDL for Key Path"
+///
+/// Here rather than in the firmware, so that the table the device exports from is the
+/// one the published vector is checked against.
+pub const STANDARD: [(Script, &[u32]); 7] = [
+    (Script::Pkh, &[44, 0, 0]),
+    (Script::ShWpkh, &[49, 0, 0]),
+    (Script::Wpkh, &[84, 0, 0]),
+    // BIP-45's path is a single level and takes neither coin nor account. [C]
+    (Script::ShCosigner, &[45]),
+    (Script::ShWshCosigner, &[48, 0, 0, 1]),
+    (Script::WshCosigner, &[48, 0, 0, 2]),
+    (Script::Tr, &[86, 0, 0]),
+];
 
 /// The most output descriptors an account may carry.
 ///

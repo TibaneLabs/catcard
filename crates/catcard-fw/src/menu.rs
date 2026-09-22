@@ -148,6 +148,9 @@ enum Screen {
     GenericJson(u8),
     /// Every account's first few addresses, to check against a watch-only wallet.
     DumpSummary,
+    /// This device's account keys as one `ur:crypto-account` code.
+    #[cfg(feature = "board-q1")]
+    AccountUr,
     /// A run of one account's receive addresses, written to the card as CSV.
     AddressCsv,
     BrowseSd,
@@ -594,6 +597,10 @@ const EXPORT_ITEMS: &[&str] = &[
     "Samourai Premix",
     "Key Expression",
     "Export XPUB",
+    // The BC-UR account structure, as one code. Not a file: a UR is a QR format, and
+    // the software that reads one is pointing a camera rather than reading a card.
+    #[cfg(feature = "board-q1")]
+    "Account (UR)",
     "Dump Summary",
     // Addresses rather than keys: the file a watch-only wallet's owner checks against, or
     // hands to whoever is paying them, without either side needing an xpub.
@@ -1184,6 +1191,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::KeyMenu,
         ),
         Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        #[cfg(feature = "board-q1")]
+        Screen::AccountUr => to(
+            |a| export_account_ur(a.gate, a.login, a.ui),
+            Screen::ExportMenu,
+        ),
         Screen::AddressCsv => to(
             |a| export_address_csv(a.gate, a.login, a.ui),
             Screen::ExportMenu,
@@ -1611,6 +1623,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             }
             (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Account (UR)")) => Screen::AccountUr,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Address CSV")) => Screen::AddressCsv,
             (Key::Cancel, _) => Screen::Utils,
@@ -2091,6 +2105,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
+        #[cfg(feature = "board-q1")]
+        Screen::AccountUr => {}
         Screen::AddressExplorer
         | Screen::ExportOne(_)
         | Screen::ExportKeyExpr
@@ -4928,6 +4944,106 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
         catcard_bbqr::FileType::UNICODE,
         signer,
     );
+}
+
+/// Export this device's account keys as one `ur:crypto-account` code.
+///
+/// # What a wallet gets, and why in one code
+///
+/// Every other row here writes a *file*: JSON, a descriptor, an xpub as text. This
+/// writes the structure BCR-2020-015 defines for exactly this job -- the master
+/// fingerprint and the account-level extended key for each standard script type, so
+/// the software on the other side picks the one it wants instead of the owner being
+/// asked which script they are using before they know what the wallet will ask for.
+/// [C] BCR-2020-015 §Abstract
+///
+/// The seven derivations are the ones that BCR tabulates for Bitcoin mainnet, account
+/// zero. [C] BCR-2020-015 §Introduction. Account zero and mainnet are not a limit of
+/// the format -- they are what every other export on this device uses, and an account
+/// picker here would be a second place to get that answer wrong.
+///
+/// # Q1 only, and QR only
+///
+/// A UR is a QR format. There is no card here because there is nothing sensible to
+/// write: the bytes are CBOR, which no wallet reads off a card, and the text form is
+/// the code itself. The mono boards have no screen to draw it on.
+#[cfg(feature = "board-q1")]
+fn export_account_ur(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_bcur::registry::Kind;
+
+    const HEAD: &str = "Account (UR)";
+    /// Room for the whole account. The published seven-descriptor example is 776
+    /// bytes; this is twice that, which is still a fraction of what the code it feeds
+    /// will take as characters.
+    const ROOM: usize = 2048;
+
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    // Big-endian, because that is how BIP-32 numbers a fingerprint and how the BCR's
+    // own vectors encode one: `37b5eed4` as the integer 934670036. [C] BCR-2020-015
+    let fingerprint = u32::from_be_bytes(crate::keywork::run(|kw| master.fingerprint(kw)));
+
+    let Some(mut mem) = crate::heap::take(ROOM) else {
+        message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+
+    let mut busy = Working::new(ui.panel, HEAD, "deriving accounts");
+    let built = build_account_ur(&master, fingerprint, mem.bytes(), &mut busy, ui);
+    // The key goes before the screen does: an animation stands there until somebody
+    // walks up to it, and nothing after this point needs a private key.
+    drop(master);
+
+    let Some(len) = built else {
+        message(ui.panel, HEAD, "derivation failed", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    let message = &mem.bytes()[..len];
+    crate::qrshow::animate_bcur(ui, HEAD, Kind::Account.written_as(), message);
+}
+
+/// Derive each account key and write the `crypto-account` into `out`.
+///
+/// Split out so the key is dropped at one place in the caller rather than at each of
+/// the half-dozen ways this can fail.
+#[cfg(feature = "board-q1")]
+fn build_account_ur(
+    master: &catcard_wallet::bip32::ExtendedPrivKey,
+    fingerprint: u32,
+    out: &mut [u8],
+    busy: &mut Working<'_>,
+    ui: &mut Ui<'_>,
+) -> Option<usize> {
+    use catcard_bcur::registry::{Descriptor, account};
+    use catcard_wallet::bip32::ChildNumber;
+
+    /// The deepest of the standard paths is BIP-48's four levels.
+    const DEPTH: usize = 4;
+
+    let mut enc = account::Encoder::new(out, fingerprint, account::STANDARD.len() as u32).ok()?;
+    for (script, path) in account::STANDARD {
+        let mut steps: heapless::Vec<ChildNumber, DEPTH> = heapless::Vec::new();
+        for &index in path {
+            steps.push(ChildNumber::hardened(index).ok()?).ok()?;
+        }
+        let xpub = public_at(master, &steps, busy, ui.panel)?;
+        let d = Descriptor::account_key(
+            script,
+            path,
+            fingerprint,
+            // Big-endian, as BIP-32 numbers a fingerprint and as the BCR's vectors
+            // encode one. [C] BCR-2020-007 §"Example/Test Vector 2"
+            u32::from_be_bytes(xpub.parent_fingerprint),
+            xpub.public_key,
+            xpub.chain_code,
+        )
+        .ok()?;
+        enc.push(d.script, &d.key).ok()?;
+    }
+    enc.finish().ok()
 }
 
 /// The BIP-48 cosigner keys on their own.

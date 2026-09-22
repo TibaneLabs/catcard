@@ -115,6 +115,7 @@ dependencies = [
 name = "catcard-bcur"
 version = "7.0.0"
 dependencies = [
+ "catcard-wallet",
  "heapless",
  "outscript",
 ]

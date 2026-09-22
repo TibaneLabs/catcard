@@ -709,3 +709,56 @@ fn collect(line: &str, kind: Kind) -> Vec<u8> {
     assert_eq!(c.kind(), Some(kind));
     message
 }
+
+/// The published account, built the way the device builds it: from the seed.
+///
+/// Everything above reads the BCR's bytes or writes them back. This one starts from
+/// the BIP-39 phrase the BCR says the account is for and derives its way to the same
+/// bytes -- so it is the derivation table, the fingerprint's byte order, the hardened
+/// indices and the encoder all at once, against a document written by someone else.
+///
+/// It is the test that would have caught a fingerprint written little-endian, which
+/// reads perfectly well and names the wrong wallet.
+#[test]
+fn the_published_account_is_reached_from_its_own_seed() {
+    use catcard_wallet::KeyWork;
+    use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
+    use catcard_wallet::bip39::Mnemonic;
+
+    // BCR-2020-015 §"Example/Test Vector": "Defines the #0 account for BTC mainnet for
+    // the following BIP39 seed". [C]
+    const PHRASE: &str = "shield group erode awake lock sausage cash glare wave crew flame glove";
+
+    let kw = KeyWork::host();
+    let mnemonic = Mnemonic::parse(PHRASE, &kw).expect("a valid phrase");
+    let mut seed = [0u8; catcard_wallet::bip39::SEED_LEN];
+    mnemonic.to_seed("", &mut seed, &kw).expect("a seed");
+    let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, &kw).expect("a master key");
+    let fingerprint = u32::from_be_bytes(master.fingerprint(&kw));
+    assert_eq!(fingerprint, MASTER_FP, "the BCR's master fingerprint");
+
+    let mut out = vec![0u8; 2048];
+    let mut enc =
+        account::Encoder::new(&mut out, fingerprint, account::STANDARD.len() as u32).unwrap();
+    for (script, path) in account::STANDARD {
+        let mut here = master.clone();
+        for &index in path {
+            here = here
+                .derive_child(ChildNumber::hardened(index).unwrap(), &kw)
+                .expect("a child");
+        }
+        let xpub = here.to_extended_pub(&kw);
+        let d = Descriptor::account_key(
+            script,
+            path,
+            fingerprint,
+            u32::from_be_bytes(xpub.parent_fingerprint),
+            xpub.public_key,
+            xpub.chain_code,
+        )
+        .expect("a descriptor");
+        enc.push(d.script, &d.key).expect("room");
+    }
+    let n = enc.finish().expect("all seven");
+    assert_eq!(to_hex(&out[..n]), ACCOUNT_CBOR);
+}
