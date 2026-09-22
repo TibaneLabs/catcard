@@ -206,6 +206,32 @@ pub fn decrypt<'o>(
     key: &Key,
     out: &'o mut [u8],
 ) -> Result<&'o [u8], Error> {
+    let end = ciphertext_end(archive.len(), s)?;
+    if out.len() < s.packed_len {
+        return Err(Error::BufferTooSmall);
+    }
+    out[..s.packed_len].copy_from_slice(&archive[s.offset..end]);
+    unwrap_at_front(out, s, key)
+}
+
+/// Decrypts `s` to the **front of the buffer the archive is already in**.
+///
+/// The archive is destroyed in the process, which is the point: a device reading a
+/// backup off a card has one buffer, and copying the ciphertext somewhere else to
+/// decrypt it would mean holding two copies of the seed at once. The plaintext comes
+/// back at offset zero.
+pub fn decrypt_in_place<'a>(
+    archive: &'a mut [u8],
+    s: &Stream,
+    key: &Key,
+) -> Result<&'a [u8], Error> {
+    let end = ciphertext_end(archive.len(), s)?;
+    archive.copy_within(s.offset..end, 0);
+    unwrap_at_front(archive, s, key)
+}
+
+/// Where the ciphertext ends, once its lengths have been agreed with.
+fn ciphertext_end(archive_len: usize, s: &Stream) -> Result<usize, Error> {
     if !s.packed_len.is_multiple_of(16) {
         return Err(Error::BadCiphertext);
     }
@@ -213,18 +239,18 @@ pub fn decrypt<'o>(
         return Err(Error::BadCiphertext);
     }
     let end = s.offset.checked_add(s.packed_len).ok_or(Error::Truncated)?;
-    if end > archive.len() {
+    if end > archive_len {
         return Err(Error::Truncated);
     }
-    if out.len() < s.packed_len {
-        return Err(Error::BufferTooSmall);
-    }
-    let work = &mut out[..s.packed_len];
-    work.copy_from_slice(&archive[s.offset..end]);
+    Ok(end)
+}
+
+/// Decrypts `buf[..packed_len]` in place and checks what comes out.
+fn unwrap_at_front<'o>(buf: &'o mut [u8], s: &Stream, key: &Key) -> Result<&'o [u8], Error> {
     Cbc::new(Aes256::new(key.as_bytes()), &s.iv)
-        .decrypt(work)
+        .decrypt(&mut buf[..s.packed_len])
         .map_err(|_| Error::BadCiphertext)?;
-    let plain = &out[..s.unpacked_len];
+    let plain = &buf[..s.unpacked_len];
     if let Some(want) = s.crc
         && crc32(plain) != want
     {
@@ -567,34 +593,53 @@ pub fn write<'o>(
     salt: &[u8],
     cycles_power: u8,
 ) -> Result<&'o [u8], Error> {
+    let end = BODY_OFFSET
+        .checked_add(data.len())
+        .ok_or(Error::BufferTooSmall)?;
+    if out.len() < end {
+        return Err(Error::BufferTooSmall);
+    }
+    out[BODY_OFFSET..end].copy_from_slice(data);
+    seal_at(out, data.len(), name, key, iv, salt, cycles_power)
+}
+
+/// Where a body must sit for [`seal_at`] to wrap it: exactly where the ciphertext goes.
+pub const BODY_OFFSET: usize = BASE;
+
+/// Wraps a body **already written** at `out[BODY_OFFSET..][..body_len]`.
+///
+/// The device has one buffer of any size, and the body in it is the seed in plaintext.
+/// Building it somewhere else and copying it in would mean two copies of the seed alive
+/// at once, so the caller builds it where it will be encrypted and this seals it in
+/// place. [`write`] is the same thing with the copy, for a caller that does not care.
+#[allow(clippy::too_many_arguments)]
+pub fn seal_at<'o>(
+    out: &'o mut [u8],
+    body_len: usize,
+    name: &str,
+    key: &Key,
+    iv: &[u8; 16],
+    salt: &[u8],
+    cycles_power: u8,
+) -> Result<&'o [u8], Error> {
     if salt.len() > MAX_SALT || cycles_power > 0x3F {
         return Err(Error::BadArchive);
     }
-    let padded = data.len().next_multiple_of(16);
+    let padded = body_len.next_multiple_of(16);
     let ct_end = BASE.checked_add(padded).ok_or(Error::BufferTooSmall)?;
     if out.len() < ct_end {
         return Err(Error::BufferTooSmall);
     }
-    let crc = crc32(data);
+    let crc = crc32(&out[BASE..BASE + body_len]);
 
-    out[BASE..BASE + data.len()].copy_from_slice(data);
-    out[BASE + data.len()..ct_end].fill(0);
+    out[BASE + body_len..ct_end].fill(0);
     Cbc::new(Aes256::new(key.as_bytes()), iv)
         .encrypt(&mut out[BASE..ct_end])
         .map_err(|_| Error::BadCiphertext)?;
 
     let header_len = {
         let mut w = Writer::new(&mut out[ct_end..]);
-        write_header(
-            &mut w,
-            name,
-            data.len(),
-            padded,
-            crc,
-            iv,
-            salt,
-            cycles_power,
-        );
+        write_header(&mut w, name, body_len, padded, crc, iv, salt, cycles_power);
         w.finish()?
     };
 
@@ -936,6 +981,31 @@ mod tests {
         assert_eq!((s.packed_len, s.unpacked_len), (0, 0));
         let mut out = [0u8; 16];
         assert_eq!(decrypt(&archive, &s, &key, &mut out).unwrap(), b"");
+    }
+
+    /// The path the device actually takes: one buffer, the body built where it will be
+    /// encrypted, and the restore decrypting back into the same bytes it read. If this
+    /// ever disagreed with the copying pair, a backup written on hardware would not be
+    /// the backup the host tests check.
+    #[test]
+    fn the_one_buffer_path_agrees_with_the_copying_one() {
+        let key = Key::from_bytes([9u8; 32]);
+        let iv = [0x2Cu8; 16];
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\n\nchain = \"BTC\"\n\n# EOF\n";
+
+        let mut a = vec![0u8; len_bound("b.txt", body.len())];
+        a[BODY_OFFSET..BODY_OFFSET + body.len()].copy_from_slice(body);
+        let sealed = seal_at(&mut a, body.len(), "b.txt", &key, &iv, &[], 12)
+            .unwrap()
+            .to_vec();
+
+        let mut b = vec![0u8; len_bound("b.txt", body.len())];
+        let written = write(&mut b, "b.txt", body, &key, &iv, &[], 12).unwrap();
+        assert_eq!(sealed, written, "the two writers must agree byte for byte");
+
+        let mut held = sealed.clone();
+        let s = only_file(&held);
+        assert_eq!(decrypt_in_place(&mut held, &s, &key).unwrap(), body);
     }
 
     #[test]

@@ -153,6 +153,12 @@ enum Screen {
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
+    /// Write or read the encrypted backup file.
+    BackupMenu,
+    /// Write the wallet to the card, encrypted under twelve fresh words.
+    BackupSave,
+    /// Put a wallet back from a backup file on the card.
+    BackupRestore,
     /// Where a transaction or a message to sign comes from.
     SignMenu,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
@@ -536,6 +542,7 @@ const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
     "Export wallet",
+    "Backup",
     "Browse SD card",
     "Format SD card",
     "Games",
@@ -546,10 +553,20 @@ const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
     "Export wallet",
+    // Stock's `Advanced/Tools` → `Backup`, in the drawer this firmware calls Utils.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT [C]
+    "Backup",
     "Browse SD card",
     "Format SD card",
     "Upgrade Firmware",
 ];
+
+/// The two halves of the backup file, together rather than in separate drawers: one
+/// writes it and the other reads it, and the words that open it are the same thing.
+///
+/// Restore is here on a blank device too -- Utils is on the blank main menu -- which is
+/// the only place a device with no wallet can get one from a file.
+const BACKUP_ITEMS: &[&str] = &["Save backup", "Restore backup"];
 
 /// The shapes the same keys can be written in.
 ///
@@ -1186,6 +1203,15 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
+        Screen::BackupSave => to(
+            |a| crate::backup::save(a.gate, a.login, a.ui),
+            Screen::BackupMenu,
+        ),
+        // A restore replaces the stored secret, so the session has to re-read it.
+        Screen::BackupRestore => reseeds(
+            |a| crate::backup::restore(a.gate, a.login, a.ui),
+            Screen::BackupMenu,
+        ),
         Screen::SignPsbt => to(
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::SignMenu,
@@ -1625,6 +1651,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
+            (Key::Confirm, Some("Backup")) => Screen::BackupMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
@@ -1632,6 +1659,12 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
+        },
+        Screen::BackupMenu => match (key, BACKUP_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Save backup")) => Screen::BackupSave,
+            (Key::Confirm, Some("Restore backup")) => Screen::BackupRestore,
+            (Key::Cancel, _) => Screen::Utils,
+            _ => Screen::BackupMenu,
         },
         #[cfg(feature = "games")]
         Screen::Games => match (key, GAMES_ITEMS.get(cursor).copied()) {
@@ -1975,6 +2008,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Main => Some(main_items(no_seed)),
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
+        Screen::BackupMenu => Some(BACKUP_ITEMS),
         Screen::SignMenu => Some(SIGN_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
@@ -2008,6 +2042,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::DangerZone
         | Screen::SeedTools
         | Screen::ExportMenu
+        | Screen::BackupMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Hardware => draw_menu(panel, screen, v),
@@ -2061,6 +2096,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::KeyPassphrase => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
         Screen::BrowseSd => {}
+        // Handled in `run`: both drive their own screens -- the words, the progress bar
+        // for the key derivation, and the card.
+        Screen::BackupSave | Screen::BackupRestore => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
@@ -2141,6 +2179,10 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
             "CatCard"
         }
         Screen::Utils => "Utils",
+        Screen::BackupMenu => {
+            let _ = note.push_str("the whole wallet, in one file");
+            "Backup"
+        }
         Screen::NewSeedMenu => {
             let _ = note.push_str("how many words?");
             "New wallet"
@@ -5551,7 +5593,7 @@ fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8], signer: Op
 }
 
 /// The longest export filename, with room for a collision number.
-const EXPORT_NAME_MAX: usize = 40;
+pub(crate) const EXPORT_NAME_MAX: usize = 40;
 
 /// Write an export and, when there is a key for it, its detached signature.
 ///
@@ -5565,7 +5607,7 @@ const EXPORT_NAME_MAX: usize = 40;
 ///
 /// Source: hw-reference/wallet-export-formats.md §"Filenames, output channels, and
 /// signing" [C] -- including that the first collision yields `-2`, not `-1`.
-fn write_card_export(
+pub(crate) fn write_card_export(
     path: &str,
     body: &[u8],
     signer: Option<Signer>,
@@ -5660,7 +5702,7 @@ pub(crate) fn write_card_parts(
 /// destination is known. It goes no further than that: [`offer_export`] drops it the
 /// moment a QR destination is chosen, because an animation stays up until someone walks
 /// away from it and a master key should not be waiting in RAM for that.
-struct Signer {
+pub(crate) struct Signer {
     master: catcard_wallet::bip32::ExtendedPrivKey,
     signing: crate::export::Signing,
 }
@@ -5872,7 +5914,7 @@ fn root_stored(
 }
 
 /// BIP-39 entropy to its BIP-32 master **with no passphrase**, inside the masked region.
-fn plain_master(
+pub(crate) fn plain_master(
     entropy: &[u8],
     kw: &catcard_wallet::KeyWork,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {

@@ -49,6 +49,7 @@ fstool = { workspace = true, default-features = false, features = ["littlefs"] }
 outscript = { workspace = true }
 zeroize = { workspace = true, default-features = false }
 catcard-alloc.workspace = true
+catcard-backup = { workspace = true, default-features = false }
 catcard-bbqr.workspace = true
 catcard-bcur.workspace = true
 catcard-board.workspace = true

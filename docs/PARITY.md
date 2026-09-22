@@ -52,11 +52,14 @@ Dependency first, then what a user needs to hold funds safely:
    named in `crate::prefs`. What is left is the mk3's SPI-NOR medium, the re-key when the
    seed changes, and the settings for chain and account numbers.
 8. ~~**Multisig and descriptor import**~~ -- done; see §4. Untested on hardware.
-9. **Encrypted backup and restore**.
+9. ~~**Encrypted backup and restore**~~ -- done; see §7. `catcard-backup` writes and
+   reads the 7-Zip AES-256 file and the `key = value` body inside it, and Utils → Backup
+   is both halves. Untested on hardware. The backup words come from the UI DRBG, never
+   from the seed; compressed archives are refused by name rather than guessed at.
 10. ~~**Import paths** beyond words~~ -- mostly done: a stored secret that is an xprv
     node or a raw master is now a wallet this firmware comes up in and works from, and
     Derive → Import key takes words, an XPRV or a WIF key in for the session (stock's
-    Temporary Seed). What is left is the backup file, which is step 9. (Seed XOR is done
+    Temporary Seed), and the backup file is step 9, now done. (Seed XOR is done
     -- split and join, under Derive.)
 11. **Q1 transports**: QR scanner and display (incl. BBQr), NFC.
 12. **Trick PINs** -- blocked on gate 22's slot layout (HARDWARE-OPEN-ITEMS). The rest of
@@ -97,7 +100,7 @@ Dependency first, then what a user needs to hold funds safely:
 | View TRNG Words | ✅ | ✅ | Utils |
 | Dice-only seed | ✅ | ❌ | deliberate: user entropy adds to the TRNGs, never replaces them (`ENTROPY.md`) |
 | Import words (12/18/24) | ✅ | ✅ | |
-| Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | 🟡 | xprv and raw master: stored ones are read and worked in, and Derive → Import key types either in for the session; backup, clone, TAPSIGNER and QR remain (steps 9-11) |
+| Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | 🟡 | xprv and raw master: stored ones are read and worked in, and Derive → Import key types either in for the session; backup: Utils → Backup → Restore backup; clone, TAPSIGNER and QR remain (steps 10-11) |
 | Seed XOR split and join | ✅ | ✅ | Derive; the published examples are host tests |
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
@@ -160,7 +163,7 @@ every multisig input is refused.
 
 | Feature | Stock | CatCard | Notes |
 |---|---|---|---|
-| Encrypted backup and restore | ✅ | ❌ | step 9 |
+| Encrypted backup and restore | ✅ | 🟡 | Utils → Backup. 7-Zip AES-256 with the stock body format; checked against `7z` 17.05 both ways as a host test. Untested on hardware |
 | Clone Coldcard | ✅ | ❌ | after step 9 |
 | Secure Notes, WIF store | ✅ | ❌ | after step 7 |
 | Wallet export presets | ✅ | 🟡 | descriptor file for the three single-sig accounts; presets that are not standards need a public format |

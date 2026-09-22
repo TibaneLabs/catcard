@@ -22,6 +22,8 @@ use catcard_board::BOARD;
 use catcard_entropy::{EntropyPool, Policy};
 use cortex_m_rt::entry;
 
+/// Backup System and Restore Backup: the wallet in an encrypted 7-Zip archive.
+mod backup;
 /// Battery sensing exists only on the Q1; the other boards are USB-powered.
 #[cfg(feature = "board-q1")]
 mod battery;

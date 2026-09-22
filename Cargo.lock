@@ -149,6 +149,7 @@ version = "7.0.0"
 dependencies = [
  "anyd",
  "catcard-alloc",
+ "catcard-backup",
  "catcard-bbqr",
  "catcard-bcur",
  "catcard-board",

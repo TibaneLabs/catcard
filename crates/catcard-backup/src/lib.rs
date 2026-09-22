@@ -126,3 +126,92 @@ impl core::fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Body in, body out, through the container -- the whole contract in one test.
+    ///
+    /// Written the way the firmware writes it: the body built where it will be
+    /// encrypted, sealed in place, and read back by decrypting over the same bytes. The
+    /// two sides are tested apart elsewhere; this is the one that fails if they stop
+    /// fitting together.
+    #[test]
+    fn a_backup_survives_the_whole_round_trip() {
+        const PASSWORD: &str = "canary lantern rubble twine";
+        // Cheap rounds: the round count is pinned against the reference tool in
+        // `kdf`, and repeating half a million SHA-256s here proves nothing new.
+        const CYCLES: u8 = 8;
+
+        let mut buf = [0u8; 1024];
+        let body_len = {
+            let mut w = body::BodyWriter::new(&mut buf[sevenz::BODY_OFFSET..]);
+            w.preamble();
+            w.section("Private key details: Bitcoin Mainnet");
+            w.text("mnemonic", "abandon abandon abandon about");
+            w.text("chain", "BTC");
+            w.hex("raw_secret", &[0x82; 72]);
+            w.section("User preferences");
+            w.setting("xfp", "1130522146");
+            w.eof();
+            w.finish().unwrap().len()
+        };
+
+        let key = kdf::derive(PASSWORD, &[], CYCLES).unwrap();
+        let archive_len = sevenz::seal_at(
+            &mut buf,
+            body_len,
+            "backup.txt",
+            &key,
+            &[0x33; 16],
+            &[],
+            CYCLES,
+        )
+        .unwrap()
+        .len();
+
+        let file = match sevenz::open(&buf[..archive_len]).unwrap() {
+            sevenz::Found::File(s) => s,
+            sevenz::Found::Header(_) => panic!("we do not write encrypted headers"),
+        };
+        let back = {
+            let plain = sevenz::decrypt_in_place(&mut buf[..archive_len], &file, &key).unwrap();
+            core::str::from_utf8(plain).unwrap()
+        };
+
+        let got = body::scan(back).unwrap();
+        assert_eq!(got.details.mnemonic, Some("abandon abandon abandon about"));
+        assert_eq!(got.details.raw_secret.map(str::len), Some(144));
+        assert_eq!(got.settings, 1);
+    }
+
+    /// The other half of that: the wrong words must not produce a *parseable* body.
+    /// Without the archive's CRC there would be nothing between a typo and a restore of
+    /// whatever the noise happened to decode as.
+    #[test]
+    fn the_wrong_words_never_reach_the_parser() {
+        let mut buf = [0u8; 512];
+        let body_len = {
+            let mut w = body::BodyWriter::new(&mut buf[sevenz::BODY_OFFSET..]);
+            w.preamble();
+            w.text("mnemonic", "abandon abandon about");
+            w.eof();
+            w.finish().unwrap().len()
+        };
+        let key = kdf::derive("right words here", &[], 8).unwrap();
+        let n = sevenz::seal_at(&mut buf, body_len, "b", &key, &[1; 16], &[], 8)
+            .unwrap()
+            .len();
+
+        let file = match sevenz::open(&buf[..n]).unwrap() {
+            sevenz::Found::File(s) => s,
+            sevenz::Found::Header(_) => unreachable!(),
+        };
+        let wrong = kdf::derive("wrong words here", &[], 8).unwrap();
+        assert_eq!(
+            sevenz::decrypt_in_place(&mut buf[..n], &file, &wrong).unwrap_err(),
+            Error::BadChecksum
+        );
+    }
+}
