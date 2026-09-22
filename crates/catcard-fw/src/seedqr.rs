@@ -221,7 +221,7 @@ pub(crate) fn received(
     // stored seed is somebody's wallet and a scanner is not where it gets replaced --
     // Import seed is, with its own warning, and Lock down seed is the deliberate second
     // step for a key that came in this way.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: true }) {
+    if !crate::key::stored_wallet(login) {
         menu::ask(
             ui.panel,
             "Keep this seed?",

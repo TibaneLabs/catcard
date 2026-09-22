@@ -7976,9 +7976,11 @@ fn new_seed(
     };
 
     // Overwriting a wallet that already exists is the destructive case, and this is the
-    // only warning anyone gets. `zero_secret` is the bootloader's own answer about the
-    // slot, not a guess of ours.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+    // only warning anyone gets. Asked of `key::stored_wallet`, which is the bootloader's
+    // flag *and* what the slot turned out to hold: the flag alone says "in use" about a
+    // slot whose seed was destroyed, and warning about a wallet that is not there
+    // teaches an owner to press through the one warning that matters.
+    if crate::key::stored_wallet(login) {
         ask(
             ui.panel,
             "Wallet exists",
@@ -8555,7 +8557,8 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     }
 
     // Overwriting an in-use wallet is the destructive case; this is the only warning.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+    // As in `new_seed`: the slot's contents, not the flag alone.
+    if crate::key::stored_wallet(login) {
         ask(
             ui.panel,
             "Wallet exists",
@@ -8867,8 +8870,9 @@ fn wipe_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -
     use zeroize::Zeroize;
 
     // Nothing to destroy is worth saying, rather than going through the motions and
-    // reporting success for a wallet that never existed.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: true }) {
+    // reporting success for a wallet that never existed -- or for one already destroyed,
+    // which the flag alone still calls in use.
+    if !crate::key::stored_wallet(login) {
         message(ui.panel, "No wallet", "there is no seed", "to destroy");
         wait_for_any_key(ui);
         return true;

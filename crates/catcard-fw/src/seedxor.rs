@@ -277,7 +277,7 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     // On a device with no seed of its own this is a restore, not a session: offer to
     // keep it. Anywhere else the stored seed is somebody's wallet and this screen is
     // not where it gets replaced -- that is what Import is for, with its own warning.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: true }) {
+    if !crate::key::stored_wallet(login) {
         menu::ask(
             ui.panel,
             "Keep this seed?",

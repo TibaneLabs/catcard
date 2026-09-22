@@ -359,7 +359,7 @@ fn write_preferences(_w: &mut body::BodyWriter<'_>, _secret: &[u8; SECRET_LEN]) 
 /// Read a backup off the card and put its wallet back.
 pub(crate) fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // The destructive case, and the only warning: this replaces whatever is stored.
-    if matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) {
+    if crate::key::stored_wallet(login) {
         menu::ask(
             ui.panel,
             "Wallet exists",

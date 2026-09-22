@@ -110,6 +110,18 @@ pub(crate) fn stored_seed_missing() -> bool {
     unsafe { *core::ptr::addr_of!(STORED_SEED) == Some(false) }
 }
 
+/// Whether there is a stored wallet to lose -- what a screen about to overwrite the slot
+/// has to know.
+///
+/// Both answers, because they mean different things and only one of them is about a
+/// wallet. The bootloader's flag says whether a secret was ever *written*; a seed
+/// destroyed since leaves the slot zeroed with that flag still set (see
+/// [`note_stored_seed`]). A device in that state was warning that a new seed would
+/// destroy the one stored -- when there was nothing there to destroy.
+pub(crate) fn stored_wallet(login: &catcard_pin::Login) -> bool {
+    matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) && !stored_seed_missing()
+}
+
 /// What the device is working in.
 pub(crate) fn in_force() -> Source {
     // SAFETY: foreground only; the menu is the sole writer and holds no borrow across it.
