@@ -45,6 +45,9 @@ board-q1 = [
     "catcard-hal/board-q1",
     # The only panel that can draw them.
     "catcard-ui/colour-marks",
+    # And the only one that can show a photograph: the others are 128x64 and two
+    # colours, where a picture would have to be dithered rather than resized.
+    "dep:catcard-png",
 ]
 
 [dependencies]
@@ -56,6 +59,7 @@ zeroize = { workspace = true, default-features = false }
 catcard-alloc.workspace = true
 catcard-backup = { workspace = true, default-features = false }
 catcard-bbqr.workspace = true
+catcard-png = { workspace = true, optional = true }
 catcard-bcur.workspace = true
 catcard-board.workspace = true
 catcard-nfc = { path = "../catcard-nfc" }

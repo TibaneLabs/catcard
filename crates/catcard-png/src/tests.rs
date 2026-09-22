@@ -534,9 +534,63 @@ fn chunks_this_does_not_understand_are_stepped_over() {
 
 #[test]
 fn a_file_that_stops_early_is_truncated_not_a_half_picture() {
+    // Cut into the image data itself, past the 12-byte IEND.
     let file = quad().bytes();
-    let cut = &file[..file.len() - 12];
+    let cut = &file[..file.len() - 30];
     assert_eq!(draw(cut, 2, 2), Err(Error::Truncated));
+}
+
+#[test]
+fn nothing_past_the_last_scanline_is_read() {
+    // Reading stops when the compressed stream ends. What is appended after it --
+    // here a megabyte of it -- must cost nothing, which is both why a long file is
+    // quick and why a file that is long on purpose cannot hold the device.
+    let mut file = quad().bytes();
+    let honest = file.len();
+    file.extend_from_slice(&chunk(b"junk", &vec![0xAB; 1024 * 1024]));
+    file.extend_from_slice(&chunk(b"IEND", &[]));
+
+    let mut read_to = 0usize;
+    let hdr = header(&file[..HEADER_BYTES]).expect("a header");
+    let plan = fit(&hdr, 2, 2);
+    let mut window = vec![0u8; WINDOW];
+    let mut lines = vec![0u8; hdr.lines_needed()];
+    let mut acc = vec![0u32; Buffers::acc_needed(plan.w)];
+    let mut out = vec![0u16; plan.w];
+    render(
+        &hdr,
+        &plan,
+        Buffers {
+            window: &mut window,
+            lines: &mut lines,
+            acc: &mut acc,
+            out: &mut out,
+        },
+        [255, 255, 255],
+        |buf| {
+            let n = buf.len().min(file.len() - read_to);
+            buf[..n].copy_from_slice(&file[read_to..read_to + n]);
+            read_to += n;
+            Ok(n)
+        },
+        |_, _| Ok(()),
+    )
+    .expect("decodes");
+    // Within one buffered read of where the image data ended, not a megabyte past it.
+    assert!(
+        read_to <= honest + 1024,
+        "read {read_to} bytes of a {honest}-byte picture"
+    );
+}
+
+#[test]
+fn a_picture_whose_file_forgot_its_end_marker_still_shows() {
+    // `IEND` says the file is over, not that the picture is complete -- the scanlines
+    // and the Adler-32 over them do that, and both are already in hand by then. A
+    // truncation that costs only the marker is not a reason to refuse a whole picture.
+    let file = quad().bytes();
+    let (_, rows) = draw(&file[..file.len() - 12], 2, 2).expect("decodes");
+    assert_eq!(rows[0], vec![rgb(255, 0, 0), rgb(0, 255, 0)]);
 }
 
 #[test]

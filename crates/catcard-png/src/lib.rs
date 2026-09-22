@@ -401,6 +401,8 @@ where
 
         let mut len = idat_len;
         let mut kind = *b"IDAT";
+        // Set when the compressed stream ends, which is where reading stops.
+        let mut done = false;
         // Whether something has come between the image data chunks. The format requires
         // them to be consecutive, and a file that splits them is one whose zlib stream
         // this would be reassembling on a guess.
@@ -426,14 +428,41 @@ where
                     let taken = dec
                         .write(piece)
                         .map_err(|e| zerror(e, &failed, Error::Damaged))?;
-                    // A decompressor that stops short has found the end of the stream
-                    // with chunk data still to come: a malformed file, not something to
-                    // carry on past.
+                    src.consume(taken);
+                    left -= taken;
+                    // **The last scanline is the last thing worth reading.** Once the
+                    // stream has ended, whatever follows it -- padding inside this
+                    // chunk, more chunks, a second image somebody appended -- cannot
+                    // change a pixel, and reading it would be time spent on a card for
+                    // nothing. A file that is merely long stops costing here; a file
+                    // that is long on purpose stops being a way to keep the device
+                    // busy.
+                    //
+                    // Nothing is lost by not walking to `IEND`: the check that the
+                    // picture is whole is the byte count below, not the presence of a
+                    // chunk at the end of the file.
+                    if dec.is_done() {
+                        done = true;
+                        break;
+                    }
                     if taken != n {
+                        // Not done, and yet it took less than it was given: the
+                        // decompressor is neither finished nor hungry, which it cannot
+                        // be on well-formed input.
                         return Err(Error::Damaged);
                     }
-                    src.consume(n);
-                    left -= n;
+                }
+                if done {
+                    // The chunk itself is still checked when the stream ended exactly
+                    // where the chunk did, which is where an encoder puts it; only the
+                    // file past this point goes unread. A stream that ended mid-chunk
+                    // leaves bytes this never hashed, so there is no CRC to compare --
+                    // what vouches for the picture there is the Adler-32 the zlib
+                    // stream carries over the scanlines themselves.
+                    if left == 0 {
+                        src.check_crc(crc)?;
+                    }
+                    break;
                 }
                 src.check_crc(crc)?;
             } else {

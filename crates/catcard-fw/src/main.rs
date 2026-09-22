@@ -81,6 +81,8 @@ mod nvram;
 mod panic;
 mod passphrase;
 mod pinentry;
+#[cfg(feature = "board-q1")]
+mod pngview;
 mod power;
 /// The device preferences of the wallet in force, and what honours each of them.
 mod prefs;

@@ -163,6 +163,7 @@ dependencies = [
  "catcard-log",
  "catcard-nfc",
  "catcard-pin",
+ "catcard-png",
  "catcard-qr",
  "catcard-sd",
  "catcard-settings",

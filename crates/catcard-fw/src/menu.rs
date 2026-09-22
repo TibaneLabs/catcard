@@ -3195,7 +3195,7 @@ pub(crate) fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static s
 /// doing all three against the same volume is both faster and the only way the numbering
 /// can be right: a name checked under one mount and written under another is a name that
 /// could have been taken in between.
-fn mount_card() -> Result<CardVolume, &'static str> {
+pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
     // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
     let mut why: &'static str = "card error";
     let vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
@@ -3230,7 +3230,8 @@ fn mount_card() -> Result<CardVolume, &'static str> {
 }
 
 /// The mounted card, spelled out once so it can be passed around.
-type CardVolume = catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>;
+pub(crate) type CardVolume =
+    catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>;
 
 /// Write `bytes` to `path` on an already-mounted card, replacing what was there.
 fn write_into(vol: &mut CardVolume, path: &str, bytes: &[u8]) -> Result<(), &'static str> {
@@ -3333,6 +3334,9 @@ enum FileChoice {
     /// Delete it: only offered while the browser is a viewer, and asked again before
     /// anything is written.
     Delete,
+    /// Show it: a picture, on the one board with a screen that can.
+    #[cfg(feature = "board-q1")]
+    View,
 }
 
 /// What the browser is for.
@@ -3349,9 +3353,11 @@ pub(crate) enum Browse {
 /// The id the "use this folder" row carries, out of the way of any entry's index.
 const BROWSE_USE_FOLDER: u32 = BROWSE_PARENT - 1;
 
-/// The id the "Delete file" row carries. The detail screen has exactly one selectable
-/// row, so any id would do; naming it keeps the match below readable.
+/// The ids the detail screen's rows carry. Named rather than counted, because which
+/// rows are there depends on the file and on the board.
 const FILE_DELETE_ROW: u32 = 0;
+#[cfg(feature = "board-q1")]
+const FILE_VIEW_ROW: u32 = 1;
 
 /// Show a file's details, and offer what can be done with it from here.
 ///
@@ -3374,6 +3380,12 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
     if pick {
         let _ = lines.push(DLine::body("y = select this").centered());
     } else {
+        // Showing it comes before removing it: it is the harmless one, and it is what
+        // somebody who opened a picture was probably after.
+        #[cfg(feature = "board-q1")]
+        if crate::pngview::is_png(name) {
+            let _ = lines.push(DLine::item("View", FILE_VIEW_ROW));
+        }
         let _ = lines.push(DLine::item("Delete file", FILE_DELETE_ROW));
     }
     match show_doc(ui, &lines, false, false) {
@@ -3381,6 +3393,8 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
         // `Selected` and never as `Confirmed`; the two arms cannot both fire.
         DocExit::Confirmed if pick => FileChoice::Pick,
         DocExit::Selected(FILE_DELETE_ROW) => FileChoice::Delete,
+        #[cfg(feature = "board-q1")]
+        DocExit::Selected(FILE_VIEW_ROW) => FileChoice::View,
         _ => FileChoice::None,
     }
 }
@@ -3580,6 +3594,22 @@ pub(crate) fn browse_sd(
                         // the glass after a delete is what is on the card -- including
                         // the case where the delete was refused and nothing moved.
                         FileChoice::Delete => delete_card_file(ui, &mut vol, &full, &e.name),
+                        // The viewer mounts the card itself, so this volume is dropped
+                        // for the duration rather than lent: two mounts of one card at
+                        // once is not something the driver promises.
+                        #[cfg(feature = "board-q1")]
+                        FileChoice::View => {
+                            let path = full.clone();
+                            drop(vol);
+                            crate::pngview::view(ui, &path);
+                            vol = match mount_card() {
+                                Ok(v) => v,
+                                Err(why) => {
+                                    fail(ui, why);
+                                    return None;
+                                }
+                            };
+                        }
                         FileChoice::None => {}
                     }
                 }

@@ -102,6 +102,28 @@ impl Block {
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
+    /// The block as words, for a buffer that is counted in `u32`s.
+    ///
+    /// Only the picture viewer asks for these today, and that is a Q1 screen, so on the
+    /// other boards they are compiled with nothing calling them.
+    ///
+    /// Blocks come out of the heap aligned to a word -- [`take`] asks for it -- so this
+    /// is a view, not a copy. A tail of fewer than four bytes is left out rather than
+    /// rounded up.
+    #[cfg_attr(not(feature = "board-q1"), allow(dead_code))]
+    pub fn words(&mut self) -> &mut [u32] {
+        // SAFETY: `ptr` is 4-aligned and `len` bytes long, this block owns them, and the
+        // borrow checker ties the slice to `&mut self` as it does for `bytes`.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<u32>(), self.len / 4) }
+    }
+
+    /// The block as 16-bit pixels, for a picture on the way to the panel.
+    #[cfg_attr(not(feature = "board-q1"), allow(dead_code))]
+    pub fn pixels(&mut self) -> &mut [u16] {
+        // SAFETY: as `words` -- a word-aligned block is also halfword-aligned.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<u16>(), self.len / 2) }
+    }
+
     /// The bytes, with the borrow detached from this block.
     ///
     /// For the one shape [`bytes`](Self::bytes) cannot serve: a decoder that holds its
