@@ -191,27 +191,40 @@ fn page(
   <button id="slower">slower</button>
   <span id="rate"></span>
   <button id="faster">faster</button>
+  <button id="smaller">smaller</button>
+  <span id="size"></span>
+  <button id="bigger">bigger</button>
   <span id="at"></span>
 </div>
 <div id="hint">
   {bytes} bytes{note} in {total} parts of {part}.
   On the device: <b>Scan QR</b>, then point it here.
-  Parts are caught in any order, so let it loop. Full-screen the window and
-  raise the display brightness if it is slow to catch them.
+  Parts are caught in any order, so let it loop. Hold the scanner close to the code
+  rather than standing back; use <b>smaller</b> / <b>bigger</b> until it reads on the
+  first look, and <b>slower</b> if the count skips parts.
 </div>
 <script>
 const FRAMES = [{data}];
 const c = document.getElementById('c'), g = c.getContext('2d');
 let i = 0, ms = {ms}, running = true, timer = null;
+// Pixels per module. Three is the usual floor for a camera to threshold cleanly, and
+// on a 125-module symbol that is about four hundred pixels -- a code you hold the
+// device against rather than stand back from.
+let px = 3;
 
 function draw() {{
   const [w, b64s] = FRAMES[i];
   const raw = atob(b64s);
-  // As large as the window allows, in whole pixels per module -- a module drawn at a
-  // fractional size is a module with a grey edge, which is what a camera struggles on.
+  // **Not as large as the window allows.** Filling a big monitor pushes the reader far
+  // enough back that its fixed-focus camera struggles, and the whole symbol has to sit
+  // inside the field of view at that distance. Small enough to hold the device close is
+  // what actually reads; `smaller`/`bigger` find it.
+  //
+  // Whole pixels per module either way -- a module drawn at a fractional size has a
+  // grey edge, which is the thing a camera cannot threshold.
   const quiet = 4, side = w + 2 * quiet;
-  const room = Math.min(window.innerWidth, window.innerHeight - 90);
-  const scale = Math.max(1, Math.floor(room / side));
+  const room = Math.min(window.innerWidth, window.innerHeight - 110);
+  const scale = Math.max(1, Math.min(px, Math.floor(room / side)));
   c.width = c.height = side * scale;
   g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
   g.fillStyle = '#000';
@@ -222,6 +235,7 @@ function draw() {{
   }}
   document.getElementById('at').textContent = (i + 1) + ' / ' + FRAMES.length;
   document.getElementById('rate').textContent = ms + ' ms';
+  document.getElementById('size').textContent = scale + ' px/module, ' + c.width + ' px';
 }}
 
 function step() {{ i = (i + 1) % FRAMES.length; draw(); }}
@@ -233,6 +247,8 @@ document.getElementById('go').onclick = e => {{
 }};
 document.getElementById('slower').onclick = () => {{ ms = Math.min(2000, ms + 50); restart(); draw(); }};
 document.getElementById('faster').onclick = () => {{ ms = Math.max(50, ms - 50); restart(); draw(); }};
+document.getElementById('smaller').onclick = () => {{ px = Math.max(1, px - 1); draw(); }};
+document.getElementById('bigger').onclick = () => {{ px = Math.min(20, px + 1); draw(); }};
 window.onresize = draw;
 draw(); restart();
 </script>
