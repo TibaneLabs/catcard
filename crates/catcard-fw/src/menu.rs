@@ -600,15 +600,12 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Where the thing to sign comes from. The scanner is the Q1's; the mono boards have no
-<<<<<<< HEAD
 /// camera, so they have no row for one. The tag is on every board past the mk3.
-=======
-/// camera, so they have no row for one.
 ///
 /// The last two are the message pair: a text file on the card signed, and a signed file
-/// checked. `Verify` is the one row here that needs no wallet at all -- a signature is
-/// public -- so it works on a device that has never been given a seed.
->>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
+/// checked. `Verify` is the one row here that touches no key -- a signature is public --
+/// so it asks for no PIN, although it lives behind the same menu as the rest: it is a
+/// thing done with signatures, and that is where someone will look for it.
 const SIGN_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Scan",
@@ -2067,14 +2064,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
-<<<<<<< HEAD
-        Screen::SignPsbt | Screen::SignMessage => {}
+        Screen::SignPsbt | Screen::SignMessage | Screen::SignTextFile | Screen::VerifySig => {}
         // Handled in `run`: it drives the tag and the panel itself.
         #[cfg(not(feature = "board-mk3"))]
         Screen::SignNfc => {}
-=======
-        Screen::SignPsbt | Screen::SignMessage | Screen::SignTextFile | Screen::VerifySig => {}
->>>>>>> c871b9e (sign: a message off the card, and a signed file checked)
         // Handled in `run`: it zeroizes the login and calls the bootloader; never drawn.
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.

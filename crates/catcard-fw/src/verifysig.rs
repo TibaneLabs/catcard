@@ -1,7 +1,7 @@
 //! Checking a signed-message file from the card.
 //!
 //! The other half of [`crate::signmsg`], and the half that needs no key at all: a
-//! signature is public, so this screen works with no wallet loaded and asks for no PIN.
+//! signature is public, so nothing here unlocks the secure element or asks for a PIN.
 //! It is the screen someone uses to check what a counterparty sent them, and the thing it
 //! must never do is say yes on the file's say-so.
 //!
