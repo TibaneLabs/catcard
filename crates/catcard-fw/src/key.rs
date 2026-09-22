@@ -59,6 +59,13 @@ static mut TEMP: [u8; catcard_wallet::bip39::MAX_ENTROPY_LEN] =
     [0; catcard_wallet::bip39::MAX_ENTROPY_LEN];
 static mut TEMP_LEN: usize = 0;
 
+/// How the temporary seed was made -- `XOR`, `BIP85`, whatever the vault recorded.
+///
+/// The *kind* only. It is what the Seed Vault writes beside an entry, so an owner can
+/// tell two keys apart without the parameters that would make the entry a second copy
+/// of the key itself.
+static mut TEMP_METHOD: heapless::String<16> = heapless::String::new();
+
 /// The selection in force. Foreground only, single core.
 static mut SOURCE: Source = Source::Root;
 
@@ -95,7 +102,7 @@ pub(crate) fn temporary() -> Option<&'static [u8]> {
 ///
 /// Refuses a length BIP-39 has no words for: everything downstream turns this back into
 /// a phrase, and a seed that cannot be written down is not one anybody can keep.
-pub(crate) fn set_temporary(entropy: &[u8]) -> bool {
+pub(crate) fn set_temporary(entropy: &[u8], method: &str) -> bool {
     if catcard_wallet::bip39::words_for_entropy(entropy.len()).is_none() {
         return false;
     }
@@ -105,9 +112,31 @@ pub(crate) fn set_temporary(entropy: &[u8]) -> bool {
         slot.zeroize();
         slot[..entropy.len()].copy_from_slice(entropy);
         *core::ptr::addr_of_mut!(TEMP_LEN) = entropy.len();
+        let m = &mut *core::ptr::addr_of_mut!(TEMP_METHOD);
+        m.clear();
+        let _ = m.push_str(&method[..method.len().min(m.capacity())]);
     }
     set(Source::Temporary);
     true
+}
+
+/// How the wallet in force came to be, as the Seed Vault records it.
+///
+/// The mk3 has no settings store and so no vault; the string is still defined there
+/// rather than cfg'd away, because what a key *is* does not depend on the panel.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn method() -> &'static str {
+    match in_force() {
+        // Nothing here made the stored seed, and nothing here can ask. It is also the
+        // one wallet the vault has no reason to hold.
+        Source::Root => "Master",
+        Source::Bip85 { .. } => "BIP85",
+        // SAFETY: as in `temporary`; the only writer is `set_temporary`.
+        Source::Temporary => {
+            let m: &'static heapless::String<16> = unsafe { &*core::ptr::addr_of!(TEMP_METHOD) };
+            if m.is_empty() { "Imported" } else { m.as_str() }
+        }
+    }
 }
 
 /// Work in `source` from now on.

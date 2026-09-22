@@ -118,6 +118,9 @@ enum Screen {
     XorSplit,
     /// Seed XOR: parts typed back in, and the seed they make put in force.
     XorJoin,
+    /// The Seed Vault: keys kept in the settings, and the one in force.
+    #[cfg(not(feature = "board-mk3"))]
+    KeyVault,
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
     /// Which account level to export a plain xpub from.
@@ -465,7 +468,14 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
 /// `XOR split` is here with them although it changes nothing: it is about which wallet
 /// the words on the table belong to, which is the question this menu answers, and an
 /// owner looking for Seed XOR looks where the key lives rather than in a tool drawer.
-const KEY_ITEMS_ROOT: &[&str] = &["Passphrase", "BIP-85 key", "XOR split", "XOR join"];
+const KEY_ITEMS_ROOT: &[&str] = &[
+    "Passphrase",
+    "BIP-85 key",
+    "XOR split",
+    "XOR join",
+    #[cfg(not(feature = "board-mk3"))]
+    "Key vault",
+];
 /// The same, from anywhere else: there is now somewhere to go back to.
 const KEY_ITEMS_DERIVED: &[&str] = &[
     "Back to root",
@@ -473,6 +483,8 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "BIP-85 key",
     "XOR split",
     "XOR join",
+    #[cfg(not(feature = "board-mk3"))]
+    "Key vault",
 ];
 
 /// The rows this menu has, which depend on where the device already is.
@@ -1032,6 +1044,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::seedxor::join(a.gate, a.login, a.ui),
             Screen::KeyMenu,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::KeyVault => to(
+            |a| crate::vault::screen(a.gate, a.login, a.ui),
+            Screen::KeyMenu,
+        ),
         Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
@@ -1246,12 +1263,16 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Passphrase")) => Screen::KeyPassphrase,
             (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
             (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::KeyMenu,
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
         Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::KeyVault => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
                 Screen::GenericJson(cursor as u8)
@@ -1564,6 +1585,7 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "BIP-85 key" => Some(&art::DERIVE_BIP85_INDEX),
             "XOR split" => Some(&art::XOR_SPLIT),
             "XOR join" => Some(&art::XOR_JOIN),
+            "Key vault" => Some(&art::KEY_VAULT),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
@@ -1680,6 +1702,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::KeyPick(_) => {}
         // Handled in `run`: both drive their own screens from the keypad.
         Screen::XorSplit | Screen::XorJoin => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::KeyVault => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => {}
         #[cfg(feature = "board-q1")]

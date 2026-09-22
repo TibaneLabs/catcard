@@ -109,6 +109,9 @@ mod ui;
 /// Deflated firmware images arriving over USB.
 mod unpack;
 mod usbtask;
+/// The Seed Vault: keys kept in the settings store, which the mk3 has none of.
+#[cfg(not(feature = "board-mk3"))]
+mod vault;
 mod verify;
 
 /// Board this image was built for, from `build.rs`.

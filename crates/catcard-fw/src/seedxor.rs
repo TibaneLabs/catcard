@@ -246,7 +246,7 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     drop(words);
 
     let was = crate::key::in_force();
-    if !crate::key::set_temporary(&joined[..n]) {
+    if !crate::key::set_temporary(&joined[..n], "XOR") {
         joined.zeroize();
         menu::message(ui.panel, JOIN, "that seed length", "is not usable");
         menu::wait_for_any_key(ui);

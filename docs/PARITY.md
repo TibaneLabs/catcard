@@ -85,7 +85,7 @@ Dependency first, then what a user needs to hold funds safely:
 | Seed XOR split and join | ✅ | ✅ | Derive; the published examples are host tests |
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
-| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | 🟡 | one temporary seed, from an XOR join; no vault, no lock-down |
+| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | 🟡 | temporary seed + Seed Vault (Derive → Key vault), stock's `seeds` format; no lock-down |
 | View seed words, SeedQR | ✅ | ❌ | words at creation only; needs a guarded view |
 | Destroy seed | ✅ | ✅ | Settings |
 
