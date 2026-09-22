@@ -133,7 +133,7 @@ than entering it.
 
 ## Installing from a microSD card
 
-*Main menu → Install from SD*, on mk4/mk5/Q1. Put the image on a FAT card as
+*Main menu → Utils → Upgrade Firmware*, on mk4/mk5/Q1. Put the image on a FAT card as
 `catcard.dfu` in the root (`firmware.dfu` also works, either case):
 
 ```sh

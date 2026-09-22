@@ -65,7 +65,11 @@ enum Screen {
     About,
     /// About's second page: the STM32 itself.
     AboutChip,
+    /// Install a firmware image from the card. Reached from `Utils` -> `Upgrade
+    /// Firmware`, where a stock user looks for it.
     SdInstall,
+    /// Debug: restart the device through the bootloader, after asking.
+    WarmReset,
     /// Debug: the settings volume and the seed, to a card, in the clear.
     #[cfg(not(feature = "board-mk3"))]
     DumpState,
@@ -447,6 +451,13 @@ const LOGIN_ITEMS: &[&str] = &[
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
+/// The tool drawer, stock's `Advanced/Tools`.
+///
+/// `Upgrade Firmware` is last, and last on purpose: it is stock's own name for the entry,
+/// which is the whole reason it is here rather than under Debug, and putting it at the end
+/// leaves the six cells that have art as the Q1's first grid page. It has no icon of its
+/// own, so the grid draws its name alone -- see `draw_grid` -- on a page of its own.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV "Upgrade Firmware" [C]
 #[cfg(feature = "games")]
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
@@ -455,6 +466,7 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Format SD card",
     "Games",
+    "Upgrade Firmware",
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
@@ -463,6 +475,7 @@ const UTILS_ITEMS: &[&str] = &[
     "Export wallet",
     "Browse SD card",
     "Format SD card",
+    "Upgrade Firmware",
 ];
 
 /// The shapes the same keys can be written in.
@@ -575,7 +588,6 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 #[cfg(feature = "games")]
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
-    "Install from SD",
     // The TRNG's raw output as words: for checking the generator, not for keeping.
     "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
@@ -605,6 +617,11 @@ const DEBUG_ITEMS: &[&str] = &[
     "Logs",
     "Save log to SD",
     "Colours",
+    // The two rows that end the session, together at the bottom: one restarts the device,
+    // the other clears the PIN. Both ask first, and only one of them is irreversible.
+    // Stock keeps its `Warm Reset` in the developer drawer too.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D4 "Warm Reset" [C]
+    "Warm Reset",
     "Factory Reset",
     #[cfg(not(feature = "board-mk3"))]
     "Settings store",
@@ -1009,7 +1026,10 @@ fn action_for(screen: Screen) -> Option<Action> {
     }
 
     Some(match screen {
-        Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Main),
+        // Back to Utils, which is where it is now reached from: a screen's way out
+        // belongs to the way in.
+        Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => to(
             |a| crate::statedump::screen(a.gate, a.login, a.ui),
@@ -1188,6 +1208,38 @@ fn secure_logout(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     login.zeroize();
     message(ui.panel, "Secure Logout", "wiping memory", "");
     // SAFETY: nothing after this runs; the bootloader clears SRAM.
+    unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+}
+
+/// Restart the device, cleanly, after asking.
+///
+/// The bootloader's own restart: `LogoutMode::LogoutAndReboot` wipes SRAM and comes back
+/// at the PIN prompt, which is exactly what pulling the cable does and nothing more. It is
+/// not the sort of reset that keeps the session -- so the question says the PIN will be
+/// asked for again rather than leaving someone to find that out.
+///
+/// Nothing stored is touched: no seed, no settings, no PIN. That is why this one asks once
+/// where `Factory Reset` two rows below asks twice.
+///
+/// The login struct is zeroized first, as [`secure_logout`] does. The bootloader clears
+/// SRAM on the way through, so this is belt and braces -- and it costs nothing on a path
+/// that is about to stop running code.
+fn warm_reset(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use zeroize::Zeroize;
+
+    ask(
+        ui.panel,
+        "Warm reset?",
+        "the device reboots",
+        "and asks for the PIN",
+    );
+    if !confirmed(ui) {
+        return;
+    }
+    crate::catlog!("menu: warm reset");
+    login.zeroize();
+    message(ui.panel, "Rebooting", "", "");
+    // SAFETY: nothing after this runs; the bootloader clears SRAM and restarts the CPU.
     unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
 }
 
@@ -1412,6 +1464,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
+            (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -1424,10 +1477,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::Games,
         },
-        // By name, like Main: the list reorders (Install from SD was just added at the
-        // top), and an index table would silently point at the wrong entry.
+        // By name, like Main: the list reorders -- Install from SD sat at the top of it
+        // until it moved to Utils -- and an index table would silently point at the wrong
+        // entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
-            (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
@@ -1465,6 +1518,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Logs")) => Screen::Logs,
             (Key::Confirm, Some("Save log to SD")) => Screen::SaveLog,
             (Key::Confirm, Some("Colours")) => Screen::Colours,
+            (Key::Confirm, Some("Warm Reset")) => Screen::WarmReset,
             (Key::Confirm, Some("Factory Reset")) => Screen::FactoryReset,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
@@ -1721,6 +1775,10 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
             // rather than borrowing one that would read as the wrong thing.
+            //
+            // `Upgrade Firmware` is the one that lands here today, and deliberately: the
+            // microSD icon beside it would say "a card" where what is being chosen is
+            // "replace the firmware on this device".
             _ => None,
         };
         let _ = cells.push(Cell { label, icon });
@@ -1841,6 +1899,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        // Handled in `run`: it asks, then calls the bootloader; never drawn.
+        Screen::WarmReset => {}
         // Handled in `run`: it derives, which needs the login struct.
         Screen::KeyPick(_) => {}
         // Handled in `run`: both drive their own screens from the keypad.
@@ -2961,9 +3021,32 @@ fn pop_segment(path: &mut heapless::String<BROWSE_PATH_MAX>) {
     }
 }
 
-/// Show a file's details, and -- when picking -- offer to choose it. Returns whether the
-/// owner confirmed (chose it).
-fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> bool {
+/// What the file-detail screen was asked for.
+enum FileChoice {
+    /// Back to the listing, with the card untouched.
+    None,
+    /// Use this file: only offered while the browser is picking one.
+    Pick,
+    /// Delete it: only offered while the browser is a viewer, and asked again before
+    /// anything is written.
+    Delete,
+}
+
+/// The id the "Delete file" row carries. The detail screen has exactly one selectable
+/// row, so any id would do; naming it keeps the match below readable.
+const FILE_DELETE_ROW: u32 = 0;
+
+/// Show a file's details, and offer what can be done with it from here.
+///
+/// Picking and deleting are deliberately not both on offer. A browser opened to choose a
+/// `.psbt` is part-way through signing something, and a delete row under the cursor there
+/// is one keypress from removing the file the host just wrote; the viewer -- `Utils` ->
+/// `Browse SD card` -- is where a file gets deleted.
+///
+/// Stock reaches a file listing through `File Management` -> `List Files`.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]. That the listing is also
+/// where a file is deleted is [I]: the map names the drawer, not its per-file actions.
+fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
     use catcard_ui::scroll::Line as DLine;
     let mut sz = Line::new();
     let _ = write!(sz, "{len} bytes");
@@ -2973,8 +3056,46 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> bool {
     let _ = lines.push(DLine::body(&sz).small());
     if pick {
         let _ = lines.push(DLine::body("y = select this").centered());
+    } else {
+        let _ = lines.push(DLine::item("Delete file", FILE_DELETE_ROW));
     }
-    matches!(show_doc(ui, &lines, false, false), DocExit::Confirmed)
+    match show_doc(ui, &lines, false, false) {
+        // With a selectable row present the screen is a menu, so Confirm arrives as
+        // `Selected` and never as `Confirmed`; the two arms cannot both fire.
+        DocExit::Confirmed if pick => FileChoice::Pick,
+        DocExit::Selected(FILE_DELETE_ROW) => FileChoice::Delete,
+        _ => FileChoice::None,
+    }
+}
+
+/// Delete one file off the card, behind a confirmation.
+///
+/// **Irreversible, and labelled as such.** A card has no trash: the directory entry goes
+/// and the clusters go back to the free list, so the question names the file and says the
+/// delete cannot be undone. The volume is flushed before anyone is told it worked -- a
+/// delete that lives only in the driver's cache is a file that comes back on the next
+/// mount, which is the one claim this screen must never make wrongly.
+fn delete_card_file(ui: &mut Ui<'_>, vol: &mut CardVolume, path: &str, name: &str) {
+    ask(ui.panel, "Delete file?", name, "cannot be undone");
+    if !confirmed(ui) {
+        return;
+    }
+    match vol.remove_file(path).and_then(|()| vol.flush()) {
+        Ok(()) => {
+            crate::catlog!("sd: deleted {}", path);
+            message(ui.panel, "Deleted", name, "any key to go back");
+        }
+        Err(()) => {
+            crate::catlog!("sd: could not delete {}", path);
+            message(
+                ui.panel,
+                "Not deleted",
+                "the card refused",
+                "any key to go back",
+            );
+        }
+    }
+    wait_for_any_key(ui);
 }
 
 /// A generic microSD file browser.
@@ -3118,8 +3239,13 @@ pub(crate) fn browse_sd(
                     let _ = full.push_str(&path);
                     let _ = full.push('/');
                     let _ = full.push_str(&e.name);
-                    if file_info(ui, &e.name, e.len, pick) && pick {
-                        return Some(full);
+                    match file_info(ui, &e.name, e.len, pick) {
+                        FileChoice::Pick => return Some(full),
+                        // The listing is rebuilt at the top of this loop, so what is on
+                        // the glass after a delete is what is on the card -- including
+                        // the case where the delete was refused and nothing moved.
+                        FileChoice::Delete => delete_card_file(ui, &mut vol, &full, &e.name),
+                        FileChoice::None => {}
                     }
                 }
             }

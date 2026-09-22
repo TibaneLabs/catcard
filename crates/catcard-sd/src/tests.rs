@@ -662,6 +662,47 @@ mod fat_round_trip {
         );
     }
 
+    /// Deleting through [`AnyVolume`] really removes the entry, and only that one.
+    ///
+    /// The browser re-lists the card after a delete, so what this has to be true of is the
+    /// card and not the open volume: the file is gone after a fresh mount, and the file
+    /// beside it is not. A delete that only cleared the in-memory directory would pass a
+    /// same-mount check and lose nothing on the card.
+    #[test]
+    fn a_deleted_file_is_gone_after_a_remount_and_its_neighbour_is_not() {
+        let image = {
+            let mut vol = fat::Volume::<_, 512>::mount(rw_card(blank_fat32())).expect("mount");
+            for name in ["/GONE.TXT", "/KEPT.TXT"] {
+                let mut f = vol.create_file(name).expect("create");
+                f.write_all(&mut vol, b"hello").expect("write");
+                f.flush(&mut vol).expect("flush file");
+            }
+            vol.flush().expect("flush volume");
+            vol.unmount().expect("unmount").into_inner().image
+        };
+
+        let image = {
+            let mounted = fat::Volume::<_, 512>::mount(rw_card(image)).expect("remount");
+            let mut vol = AnyVolume::Fat(mounted);
+            vol.remove_file("/GONE.TXT").expect("remove");
+            vol.flush().expect("flush volume");
+            match vol {
+                AnyVolume::Fat(v) => v.unmount().expect("unmount").into_inner().image,
+                AnyVolume::Exfat(_) => unreachable!("mounted as FAT above"),
+            }
+        };
+
+        let mut vol = fat::Volume::<_, 512>::mount(rw_card(image)).expect("remount");
+        assert!(
+            vol.open_file("/GONE.TXT").is_err(),
+            "the deleted file is still on the card"
+        );
+        assert!(
+            vol.open_file("/KEPT.TXT").is_ok(),
+            "the file beside the deleted one went with it"
+        );
+    }
+
     /// A read-only transport (the default `write_data`) turns a write into `ReadOnly`
     /// rather than a silent success, so a mount that needs to write fails loudly.
     #[test]

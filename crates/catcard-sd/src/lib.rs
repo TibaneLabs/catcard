@@ -543,6 +543,20 @@ impl<D: fat::SectorDriver, const S: usize> AnyVolume<D, S> {
         }
     }
 
+    /// Delete a file, freeing the clusters it held.
+    ///
+    /// Files only. Both backends refuse a directory rather than walking into it, which is
+    /// what the browser wants: the one thing a person can delete from a listing is the file
+    /// under the cursor, and a recursive delete behind one keypress is not a feature a
+    /// wallet should have. The error is the usual `()` -- there is nothing the caller can do
+    /// with "not found" that it would not also do with "the card refused the write".
+    pub fn remove_file(&mut self, path: &str) -> Result<(), ()> {
+        match self {
+            AnyVolume::Fat(v) => v.remove_file(path).map_err(|_| ()),
+            AnyVolume::Exfat(v) => v.remove_file(path).map_err(|_| ()),
+        }
+    }
+
     /// Flush the volume's own metadata.
     pub fn flush(&mut self) -> Result<(), ()> {
         match self {

@@ -59,6 +59,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | — | `… Seed Functions` → `Export SeedQR`; the rest of `Danger Zone` | not implemented |
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
+| `Debug` → `Warm Reset` | `I Am Developer.` → `Warm Reset`; `Danger Zone` → `Debug Functions` → `Warm Reset` | ✅ same drawer; ours asks first and says the PIN is asked for again |
 | — | `Hardware On/Off`, `Display Units`, `Max Network Fee`, `Idle Timeout`, `NFC Push Tx`, `Keyboard EMU`, `Buried Settings` | not implemented |
 
 ## Utils (stock: Advanced/Tools)
@@ -67,14 +68,15 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 |---|---|---|
 | `Export wallet` | `Export Wallet` | 🔀 Generic JSON and the six vendors that read it, plus Descriptor, Key Expression, Export XPUB, Dump Summary. Still to write: Bitcoin Core (B), Electrum + Blue Wallet (C), Wasabi (D), Unchained (E), and the account-numbered descriptor variants — Bull Bitcoin, Zeus, Samourai pre/post-mix (F) |
 | *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list, and the words, XPRV and WIF children can be put in force from it |
-| `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat |
+| `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat. Selecting a file in the listing offers `Delete file` — asked first, and irreversible; the file picker used mid-signing does not offer it |
 | *(Sign → Message; Addresses → Verify an address)* | `File Management` → `Sign Text File`; `NFC Tools` → `Verify Address` | 🔀 message signing under the one Sign; verify with the addresses it checks, as we have no NFC |
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer |
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
-| — | `Backup`, `Upgrade Firmware`, `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
+| `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
+| — | `Backup`, `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
 
-`Upgrade Firmware` is worth noting: stock has it under Advanced/Tools, ours is
-`Debug` → `Install from SD`. ❌
+`Upgrade Firmware` has no icon, so on the Q1 it is the one cell that shows its name
+alone — and, as the seventh entry, it is alone on the grid's second page.
 
 ## What to do about the ❌ rows
 
@@ -87,3 +89,8 @@ ten characters of the face they are drawn in, and `Advanced/Tools` is eighteen. 
 `Passphrase`, `Destroy seed` and `Upgrade Firmware` are the three where a stock user
 would genuinely hunt, and the last two matter most: one destroys a wallet and the other
 replaces the firmware.
+
+`Upgrade Firmware` is done: it was `Debug` → `Install from SD`, which is a drawer a
+stock user has no reason to open, and it is now `Utils` → `Upgrade Firmware` under
+stock's own name. It is the widest tile label on the Q1, which is the cost of using
+stock's wording and worth paying for the one entry that replaces the firmware.

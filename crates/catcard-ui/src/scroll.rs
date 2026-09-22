@@ -857,6 +857,20 @@ mod tests {
                 ];
                 let view = ScrollView::build(&doc, MONO_W, MONO_H, fonts);
                 assert!(view.content_height() > 0, "{name:?} laid out to nothing");
+
+                // The viewer's shape: the same three lines with a selectable "Delete
+                // file" row in place of the pick hint. The cursor has to land on it --
+                // an unselected row is a delete that cannot be reached, whatever the
+                // name above it wrapped to.
+                let doc = [
+                    Line::title("File"),
+                    Line::body(&name).wrapped(),
+                    Line::body(sz).small(),
+                    Line::item("Delete file", 0),
+                ];
+                let view = ScrollView::build(&doc, MONO_W, MONO_H, fonts);
+                assert!(view.is_menu(), "{name:?}: the delete row is not selectable");
+                assert_eq!(view.selected(), Some(0), "{name:?}: cursor missed the row");
             }
         }
     }
