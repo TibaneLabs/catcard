@@ -130,6 +130,13 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg, prefs);
     crate::catlog!("pin: unlocked");
 
+    // microSD 2FA, where it is enrolled: the card before the menu, or the seed goes.
+    // Release builds only; see `crate::guard`.
+    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+    if matches!(unlocked, pinentry::Unlocked::In { zero_secret: false }) {
+        crate::guard::check_card(&gate, &mut login);
+    }
+
     // The PIN is in. Upgrades are allowed from here; a blank device reaches this too,
     // which is what keeps a unit with no PIN set recoverable.
     usbtask::unlocked();

@@ -217,6 +217,12 @@ enum Screen {
     /// Wait a chosen time after a correct PIN.
     #[cfg(not(feature = "board-mk3"))]
     LoginCountdown,
+    /// Release builds only: a digit that erases the seed at login.
+    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+    KillKey,
+    /// Release builds only: a login needs an enrolled microSD card.
+    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+    Sd2fa,
     WipeSeed,
     /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
     FactoryReset,
@@ -421,6 +427,12 @@ const LOGIN_ITEMS: &[&str] = &[
     "Scramble keys",
     #[cfg(not(feature = "board-mk3"))]
     "Login countdown",
+    // They erase the seed on their own, so a development build -- which every bench unit
+    // runs -- does not have them. See `crate::guard`.
+    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+    "Kill key",
+    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+    "MicroSD 2FA",
 ];
 /// How long a new seed should be.
 ///
@@ -1136,6 +1148,13 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::LoginCountdown => to(|a| login_countdown_screen(a.ui), Screen::Login),
+        #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+        Screen::KillKey => to(
+            |a| crate::guard::kill_key_screen(a.gate, a.login, a.ui),
+            Screen::Login,
+        ),
+        #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+        Screen::Sd2fa => to(|a| crate::guard::sd2fa_screen(a.ui), Screen::Login),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::FactoryReset => to(
@@ -1348,6 +1367,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Scramble keys")) => Screen::ScrambleKeys,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Login countdown")) => Screen::LoginCountdown,
+            #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+            (Key::Confirm, Some("Kill key")) => Screen::KillKey,
+            #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+            (Key::Confirm, Some("MicroSD 2FA")) => Screen::Sd2fa,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Nickname")) => Screen::Nickname,
             (Key::Cancel, _) => Screen::Settings,
@@ -1784,6 +1807,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ViewWords | Screen::LockDown | Screen::TestLogin => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys | Screen::LoginCountdown => {}
+        #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+        Screen::KillKey | Screen::Sd2fa => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
     }
@@ -7488,11 +7513,11 @@ fn test_login_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 }
 
 /// Say how a test login went. True if the PIN was right.
-fn say_test(ui: &mut Ui<'_>, head: &str, outcome: crate::pinentry::TestLogin) -> bool {
+pub(crate) fn say_test(ui: &mut Ui<'_>, head: &str, outcome: crate::pinentry::TestLogin) -> bool {
     use crate::pinentry::TestLogin;
     let mut n: heapless::String<24> = heapless::String::new();
     let (a, b, right) = match outcome {
-        TestLogin::Correct => ("PIN is correct", "", true),
+        TestLogin::Correct { .. } => ("PIN is correct", "", true),
         TestLogin::Cancelled => return false,
         TestLogin::Wrong { attempts_left } => {
             let _ = write!(n, "{attempts_left} tries left");

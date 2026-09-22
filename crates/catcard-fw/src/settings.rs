@@ -511,6 +511,33 @@ static mut NICK: [u8; NICK_MAX] = [0; NICK_MAX];
 static mut SCRAMBLE: bool = false;
 static mut COUNTDOWN: Option<u32> = None;
 
+/// The kill key's digit, and the enrolled 2FA cards, as the boot path read them.
+static mut KILL_KEY: Option<u8> = None;
+static mut SD2FA: (
+    catcard_settings::prelogin::Sd2fa,
+    [[u8; 32]; catcard_settings::prelogin::SD2FA_MAX],
+) = (
+    catcard_settings::prelogin::Sd2fa::Off,
+    [[0; 32]; catcard_settings::prelogin::SD2FA_MAX],
+);
+
+/// The kill key's digit, if one is armed.
+#[cfg_attr(feature = "dev", allow(dead_code))]
+pub(crate) fn kill_key() -> Option<u8> {
+    // SAFETY: foreground only; written by `load_prelogin` and the save helpers.
+    unsafe { *core::ptr::addr_of!(KILL_KEY) }
+}
+
+/// What microSD 2FA is set to, and the enrolled cards' digests.
+#[cfg_attr(feature = "dev", allow(dead_code))]
+pub(crate) fn sd2fa() -> (
+    catcard_settings::prelogin::Sd2fa,
+    [[u8; 32]; catcard_settings::prelogin::SD2FA_MAX],
+) {
+    // SAFETY: as in `kill_key`.
+    unsafe { *core::ptr::addr_of!(SD2FA) }
+}
+
 /// Whether the number row is shuffled at login.
 pub(crate) fn scramble_keys() -> bool {
     // SAFETY: foreground only; written by `load_prelogin` and the save helpers.
@@ -590,11 +617,21 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
 
     prefs.scramble = prelogin::scramble(&doc);
     prefs.countdown_minutes = prelogin::countdown_minutes(&doc);
+    prefs.kill_key = prelogin::kill_key(&doc);
+    let mut cards = [[0u8; 32]; prelogin::SD2FA_MAX];
+    let cards_state = prelogin::sd2fa(&doc, &mut cards);
     // SAFETY: foreground only, boot path.
     unsafe {
         *core::ptr::addr_of_mut!(SCRAMBLE) = prefs.scramble;
         *core::ptr::addr_of_mut!(COUNTDOWN) = prefs.countdown_minutes;
+        *core::ptr::addr_of_mut!(KILL_KEY) = prefs.kill_key;
+        *core::ptr::addr_of_mut!(SD2FA) = (cards_state, cards);
     }
+    crate::catlog!(
+        "login: kill key {}, 2fa {:?}",
+        prefs.kill_key.is_some(),
+        cards_state
+    );
     crate::catlog!(
         "login: scramble {}, countdown {} min",
         prefs.scramble,
@@ -740,6 +777,45 @@ pub(crate) fn save_countdown(ui: &mut crate::ui::Ui<'_>, minutes: Option<u32>) -
     if ok {
         // SAFETY: foreground only.
         unsafe { *core::ptr::addr_of_mut!(COUNTDOWN) = minutes };
+    }
+    ok
+}
+
+/// Arm the kill key on `digit`, or disarm it.
+#[cfg_attr(feature = "dev", allow(dead_code))]
+pub(crate) fn save_kill_key(ui: &mut crate::ui::Ui<'_>, digit: Option<u8>) -> bool {
+    let mut text = heapless::String::<2>::new();
+    if let Some(d) = digit {
+        let _ = text.push((b'0' + d) as char);
+    }
+    let key = catcard_settings::prelogin::KILL_KEY;
+    let ok = save_prelogin(ui, "Kill key", key, &text);
+    if ok {
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(KILL_KEY) = digit };
+    }
+    ok
+}
+
+/// Enrol exactly these cards for microSD 2FA; none turns it off.
+#[cfg_attr(feature = "dev", allow(dead_code))]
+pub(crate) fn save_sd2fa(ui: &mut crate::ui::Ui<'_>, digests: &[[u8; 32]]) -> bool {
+    use catcard_settings::prelogin::{self, Sd2fa};
+    let mut buf = [0u8; prelogin::SD2FA_MAX * 65];
+    let Some(text) = prelogin::render_sd2fa(digests, &mut buf) else {
+        return false;
+    };
+    let ok = save_prelogin(ui, "MicroSD 2FA", prelogin::SD2FA, text);
+    if ok {
+        let mut all = [[0u8; 32]; prelogin::SD2FA_MAX];
+        all[..digests.len()].copy_from_slice(digests);
+        let state = if digests.is_empty() {
+            Sd2fa::Off
+        } else {
+            Sd2fa::Cards(digests.len())
+        };
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(SD2FA) = (state, all) };
     }
     ok
 }

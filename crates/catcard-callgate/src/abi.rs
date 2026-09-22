@@ -37,9 +37,22 @@ pub enum Method {
     ReadSeConfig = 20,
     /// Anti-downgrade high-water mark and the SE monotonic counter. See [`OtpOp`].
     Downgrade = 21,
+    /// Wipe the seed and reset. **One-way.** `arg2` is [`FastWipe`]. mk4 and later only.
+    FastWipe = 23,
     /// Read TRNG bytes from a secure element. `arg2` selects [`RngSource`].
     /// mk4 and later only.
     ReadSeRng = 26,
+}
+
+/// `arg2` for [`Method::FastWipe`]: the only two values it takes.
+/// Source: hw-reference/bootloader-callgate-abi.md, method 23 [C].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum FastWipe {
+    /// Wipe and reset with nothing on screen to say so.
+    Silent = 0xBEEF,
+    /// Wipe and reset, saying so.
+    Noisy = 0xDEAD,
 }
 
 /// `arg2` for [`Method::EnterDfu`].

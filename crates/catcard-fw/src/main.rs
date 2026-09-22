@@ -39,6 +39,9 @@ mod flappy;
 mod game;
 #[cfg(feature = "board-q1")]
 mod gpu;
+/// Login protections that erase the seed on their own. Release builds, mk4 and later.
+#[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+mod guard;
 /// The heap: one region, lent out a block at a time.
 mod heap;
 mod key;

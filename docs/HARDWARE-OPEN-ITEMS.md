@@ -549,3 +549,39 @@ each element separately — a column that lags is visible rather than hidden.
 
 Worth knowing before designing around it: whether the rate is constant or a burst
 followed by a slower refill, and whether it resets across a reboot.
+
+## Fast wipe (callgate 23) through the ordinary gate entry `[I]`
+
+`Callgate::fast_wipe` calls method 23 with `0xBEEF` (silent) or `0xDEAD` (noisy), which the
+reference gives `[C]`. What is **inferred** is the entry: stock reaches 23 through
+`ckcc.oneway`, a second entry beside the gate (bootloader-callgate-abi.md §"A second entry
+point"). Methods 2 and 3 are on the same oneway list and answer through our ordinary gate
+entry on real hardware, so 23 is called the same way.
+
+Used only by the kill key, and as the fallback in microSD 2FA — both in release builds
+alone (`crate::guard`), so no bench unit has run it and none can. If the gate returned
+instead of wiping, `fast_wipe` stops rather than carrying on as though the seed were gone.
+
+To confirm without losing a device: a unit whose seed is disposable (the mk5's test seed),
+a release build, arm the kill key, type it.
+
+## Trick PINs (callgate 22) — BLOCKED on the slot layout
+
+The reference gives the outline only: 14 SE2 slots, each a PIN and a flag word with the
+flag values (`0x8000` wipe, `0x4000` brick, `0x2000` fake-out, `0x1000` word duress,
+`0x0800` xprv duress, `0x0400` delta, `0x0200` reboot), `0xF800` hidden from the firmware,
+1–2 data pages of duress entropy per slot, and gate 22's sub-methods (0 clear all, 1 get by
+PIN, 2 clear/update slot) — secure-elements.md §"Trick PINs", bootloader-callgate-abi.md
+method 22 `[C]`.
+
+Not given, and each one is a struct the secure element acts on — the brick flag among them —
+so none of it is guessed:
+
+1. The slot buffer gate 22 takes and returns: its size, field order and widths (slot number,
+   flags, PIN bytes and length, tail/data fields), byte order, and what `arg2` carries
+   besides the sub-method.
+2. How a login that matched a trick PIN comes back through gate 18: which state flags or
+   return codes, and what `fetch_secret` returns afterwards for a duress or delta slot.
+3. How the duress wallet's data pages are written and read (which call, which offsets).
+4. Whether "get by PIN" needs the main-PIN login gate 22 requires, or can run from the
+   prompt.

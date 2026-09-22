@@ -22,6 +22,17 @@ pub const SCRAMBLE: &str = "cat_rngk";
 /// Wait this many minutes after a correct PIN before the menu: decimal digits, as a string.
 pub const COUNTDOWN: &str = "cat_lgto";
 
+/// The digit that, typed at login, erases the seed: `"0"` to `"9"`. Release builds only.
+pub const KILL_KEY: &str = "cat_kbtn";
+/// The microSD cards that let a login through: SHA-256 of each card's token, hex, joined
+/// by commas. Release builds only.
+pub const SD2FA: &str = "cat_sd2fa";
+/// Most cards enrolled at once.
+pub const SD2FA_MAX: usize = 4;
+/// The token's file on the card, and its size.
+pub const SD2FA_FILE: &str = "catcard.2fa";
+pub const SD2FA_TOKEN_LEN: usize = 32;
+
 /// The longest countdown offered: twenty-eight days, stock's own ceiling.
 /// Source: hw-reference/firmware-features.md §"PIN & login" -- "5 min–28 days" [C]
 pub const MAX_COUNTDOWN_MINUTES: u32 = 28 * 24 * 60;
@@ -44,6 +55,92 @@ pub fn countdown_minutes(doc: &Doc<'_>) -> Option<u32> {
     }
     let m: u32 = t.parse().ok()?;
     (1..=MAX_COUNTDOWN_MINUTES).contains(&m).then_some(m)
+}
+
+/// The kill key's digit, if one is set and is a single digit.
+///
+/// Doubt reads as **no kill key**. That is the one direction a misread here must never
+/// go the other way: a kill key read from garbage would erase the seed of an owner who
+/// never set one.
+pub fn kill_key(doc: &Doc<'_>) -> Option<u8> {
+    match text(doc, KILL_KEY)?.as_bytes() {
+        [d @ b'0'..=b'9'] => Some(d - b'0'),
+        _ => None,
+    }
+}
+
+/// The enrolled cards' digests, as many as `out` holds; how many.
+///
+/// **Here doubt cannot simply read as off**, because off means "no card needed" and the
+/// feature exists to stop exactly that. So a list that is present but malformed is still
+/// *enrolled*: [`Sd2fa::Damaged`], which the login treats as a card that does not match.
+/// Only an absent key, or an empty string, is off.
+pub fn sd2fa(doc: &Doc<'_>, out: &mut [[u8; 32]; SD2FA_MAX]) -> Sd2fa {
+    let Some(raw) = doc.get(SD2FA) else {
+        return Sd2fa::Off;
+    };
+    let Some(t) = raw.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
+        return Sd2fa::Damaged;
+    };
+    if t.is_empty() {
+        return Sd2fa::Off;
+    }
+    let mut n = 0;
+    for part in t.split(',') {
+        if n == SD2FA_MAX || part.len() != 64 {
+            return Sd2fa::Damaged;
+        }
+        for (i, pair) in part.as_bytes().chunks(2).enumerate() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            match (hex(pair[0]), hex(pair[1])) {
+                (Some(a), Some(b)) => out[n][i] = (a * 16 + b) as u8,
+                _ => return Sd2fa::Damaged,
+            }
+        }
+        n += 1;
+    }
+    Sd2fa::Cards(n)
+}
+
+/// What the pre-login settings say about microSD 2FA.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Sd2fa {
+    /// Not in use.
+    Off,
+    /// This many cards enrolled, their digests in the caller's buffer.
+    Cards(usize),
+    /// Enrolled, but the list will not read. No card can match it.
+    Damaged,
+}
+
+/// The digest a card's token is enrolled under.
+pub fn card_digest(token: &[u8]) -> [u8; 32] {
+    use purecrypto::hash::{Digest, Sha256};
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&Sha256::digest(token));
+    out
+}
+
+/// Write `digests` as the [`SD2FA`] value, into `out`. `None` if it will not fit.
+pub fn render_sd2fa<'o>(digests: &[[u8; 32]], out: &'o mut [u8]) -> Option<&'o str> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let need = digests.len() * 65;
+    if digests.len() > SD2FA_MAX || out.len() < need {
+        return None;
+    }
+    let mut at = 0;
+    for (i, d) in digests.iter().enumerate() {
+        if i > 0 {
+            out[at] = b',';
+            at += 1;
+        }
+        for b in d {
+            out[at] = HEX[(b >> 4) as usize];
+            out[at + 1] = HEX[(b & 15) as usize];
+            at += 2;
+        }
+    }
+    core::str::from_utf8(&out[..at]).ok()
 }
 
 #[cfg(test)]
@@ -84,6 +181,46 @@ mod tests {
     fn the_ceiling_is_inclusive() {
         let d = doc(r#"{"cat_lgto":"40320"}"#);
         assert_eq!(countdown_minutes(&d), Some(MAX_COUNTDOWN_MINUTES));
+    }
+
+    #[test]
+    fn the_kill_key_is_one_digit_or_nothing() {
+        assert_eq!(kill_key(&doc(r#"{"cat_kbtn":"7"}"#)), Some(7));
+        assert_eq!(kill_key(&doc(r#"{"cat_kbtn":"0"}"#)), Some(0));
+        for json in [
+            r#"{}"#,
+            r#"{"cat_kbtn":""}"#,
+            r#"{"cat_kbtn":"77"}"#,
+            r#"{"cat_kbtn":"x"}"#,
+            r#"{"cat_kbtn":7}"#,
+            r#"{"kbtn":"7"}"#,
+        ] {
+            assert_eq!(kill_key(&doc(json)), None, "{json}");
+        }
+    }
+
+    /// Enrolled cards round-trip; absent or empty is off; anything else present is
+    /// damaged -- never off, which would let a login through without its card.
+    #[test]
+    fn sd2fa_reads_back_and_damage_is_not_off() {
+        let a = card_digest(b"card a");
+        let b = card_digest(b"card b");
+        let mut buf = [0u8; 200];
+        let text = render_sd2fa(&[a, b], &mut buf).unwrap().to_owned();
+        let json = format!(r#"{{"cat_sd2fa":"{text}"}}"#);
+        let mut out = [[0u8; 32]; SD2FA_MAX];
+        assert_eq!(sd2fa(&doc(&json), &mut out), Sd2fa::Cards(2));
+        assert_eq!((out[0], out[1]), (a, b));
+
+        assert_eq!(sd2fa(&doc(r#"{}"#), &mut out), Sd2fa::Off);
+        assert_eq!(sd2fa(&doc(r#"{"cat_sd2fa":""}"#), &mut out), Sd2fa::Off);
+        for json in [
+            r#"{"cat_sd2fa":"abc"}"#,
+            r#"{"cat_sd2fa":1}"#,
+            r#"{"cat_sd2fa":"zz00000000000000000000000000000000000000000000000000000000000000"}"#,
+        ] {
+            assert_eq!(sd2fa(&doc(json), &mut out), Sd2fa::Damaged, "{json}");
+        }
     }
 
     /// Stock's own keys are not ours to read until their shape is known.

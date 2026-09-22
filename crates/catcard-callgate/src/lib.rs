@@ -345,6 +345,28 @@ impl Callgate {
         }
     }
 
+    /// Callgate 23: wipe the seed and reset. **Irreversible, and does not return.**
+    ///
+    /// mk4 and later only. Needs no login, which is the point: it is how a device erases
+    /// itself from the PIN prompt.
+    ///
+    /// Stock reaches this through `ckcc.oneway`, a second entry beside the gate
+    /// (hw-reference/bootloader-callgate-abi.md §"A second entry point" [C]). Methods 2 and
+    /// 3 are on the same list and answer through this gate on real hardware, so 23 is
+    /// called the same way -- **inferred, not seen [I]**; docs/HARDWARE-OPEN-ITEMS.md. If
+    /// the gate were to return instead, this stops rather than carrying on as though the
+    /// seed were gone.
+    ///
+    /// # Safety
+    /// Destroys the stored wallet. See [`Self::call_no_buf`].
+    pub unsafe fn fast_wipe(&self, mode: abi::FastWipe) -> ! {
+        // SAFETY: this method takes no buffer.
+        let _ = unsafe { self.call_no_buf(Method::FastWipe, mode as u32) };
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Callgate 18 with a [`PinAttempt`] buffer.
     ///
     /// # Safety

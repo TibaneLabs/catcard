@@ -42,7 +42,14 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 | `Login` → `Test login` | `Login Settings` → `Test Login Now` | ✅ a wrong PIN counts, as in stock; refused with fewer than 4 tries left |
 | `Login` → `Scramble keys` | `Login Settings` → `Scramble Keys` (`rngk`) | 🔀 stored as our own `cat_rngk` until stock's value format is known; switched on only after a test login with the row shuffled |
 | `Login` → `Login countdown` | `Login Settings` → `Login Countdown` (`lgto`) | 🔀 stored as our own `cat_lgto` (minutes), same 5 min–28 day range; a 10 s sample runs before it is saved |
-| — | `Trick PINs`, `Kill Key`, `MicroSD 2FA`, `Calculator Login` | not implemented |
+| `Login` → `Kill key` (release builds) | `Login Settings` → `Kill Key` (`kbtn`) | 🔀 own key `cat_kbtn`; a digit, armed only after a test login shows the PIN lacks it; fast wipe `[I]` |
+| `Login` → `MicroSD 2FA` (release builds) | `Login Settings` → `MicroSD 2FA` (`sd2fa`) | 🔀 own key `cat_sd2fa` and card file `catcard.2fa`; a token read back before it is enrolled |
+| — | `Trick PINs` | blocked: gate 22's slot layout is not in the reference (HARDWARE-OPEN-ITEMS) |
+| — | `Calculator Login` | not implemented |
+
+Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
+out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can lose its seed
+to one. `make lint` still type-checks them through the release-shape clippy runs.
 | `Passphrase` | *(top level in stock)* | ❌ see above; also under Derive |
 | `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
 | `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |

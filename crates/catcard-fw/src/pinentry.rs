@@ -361,6 +361,10 @@ pub struct LoginPrefs<'a> {
     pub scramble: bool,
     /// Minutes to wait after a correct PIN before the menu.
     pub countdown_minutes: Option<u32>,
+    /// The digit that erases the seed when typed. Acted on only in a release build on
+    /// mk4 or later; see `crate::guard`.
+    #[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
+    pub kill_key: Option<u8>,
 }
 
 /// A fresh shuffle of the number row, or the plain one if scrambling is off.
@@ -1181,7 +1185,14 @@ pub fn unlock(
 
                 // The key's digit through this half's layout -- itself, unless scrambled.
                 (Step::Prefix | Step::Suffix, Key::Digit(d)) => {
-                    field.push(layout.digit(*d));
+                    let digit = layout.digit(*d);
+                    // The kill key: the digit as typed, after the layout, which is the one
+                    // the owner checked their PIN does not contain.
+                    #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
+                    if prefs.kill_key == Some(digit) {
+                        crate::guard::kill(gate);
+                    }
+                    field.push(digit);
                 }
                 (Step::Prefix | Step::Suffix, Key::Cancel) => {
                     if !field.pop() {
@@ -1310,7 +1321,11 @@ fn clock_text(seconds: u64, out: &mut [u8; 16]) -> &str {
 /// How a test login ended.
 pub(crate) enum TestLogin {
     /// The PIN is the one the device has. The session now runs on the test's login.
-    Correct,
+    /// `digits` has bit `d` set for every digit `d` the PIN contains.
+    Correct {
+        #[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
+        digits: u16,
+    },
     /// It is not; an attempt was spent.
     Wrong { attempts_left: u32 },
     /// Backed out before the suffix was sent: nothing spent.
@@ -1378,10 +1393,16 @@ pub(crate) fn test_login(
     working(panel, "Checking PIN");
     let _ = test.attempt(&g, suffix.as_bytes());
     log_state(&test, "test attempt");
+    let digits = prefix
+        .as_bytes()
+        .iter()
+        .chain(suffix.as_bytes())
+        .filter(|b| b.is_ascii_digit())
+        .fold(0u16, |m, b| m | 1 << (b - b'0'));
     match test.step() {
         Step::In { .. } => {
             *session = test;
-            TestLogin::Correct
+            TestLogin::Correct { digits }
         }
         Step::Wrong { attempts_left, .. } => TestLogin::Wrong { attempts_left },
         _ => TestLogin::Failed,
