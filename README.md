@@ -6,7 +6,8 @@ Rust. Bitcoin first, but not Bitcoin-only — see [`docs/ROADMAP.md`](docs/ROADM
 MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 
 > **Status: runs on real hardware, not ready for funds.** Dev-signed images install and
-> run on mk4, mk5 and Q1: the device boots, logs in against the real secure element,
+> run on every board -- mk3, mk4, mk5 and Q1: the device boots, logs in against the real
+> secure element,
 > generates and stores a seed, reads a settings store that stock firmware wrote, and
 > takes its own firmware upgrades over USB. Signing, multisig and the Q1's QR
 > transports are written and covered by host tests against the standards' own vectors,
@@ -45,11 +46,11 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   the loop rather than through an interpreter. Every key is debounced separately, a key
   held from the previous screen cannot skip the next one, and each press is timestamped
   at its electrical edge (where the board supports it) so the timing feeds the RNG.
-- **Improved UI.** The Q1's main menus are icon grids; slow operations show a bar that
-  keeps moving, driven by DMA on the Q1 and by the panel itself on the OLED boards, so
-  it moves even while the CPU is shut inside a secure-element call. Addresses are shown
-  in a large face and as a QR code. One layout engine fits the 128×64 OLED and the Q1's
-  320×240 colour screen alike.
+- **A drawn UI, not a text one.** Stock is text on amber. Here the menus a person lives
+  in -- the main one, Derive, Utils, Sign -- are grids of drawn icons on the Q1, chains
+  carry their own logos in full colour, and the screens that wait on the secure element
+  show a picture rather than a word. One layout engine fits the 128x64 OLED and the Q1's
+  320x240 colour screen alike, so the mono boards get the same shapes at their own size.
 - **Login protections.** A scrambled number row and a login countdown, each switched on
   only after it has proved itself on the device, plus Test login. Release builds add a
   kill key and microSD 2FA; development builds leave those out, so a bench unit cannot
@@ -101,7 +102,7 @@ Stock feature by stock feature, with what is left: [`docs/PARITY.md`](docs/PARIT
 
 | board | MCU | firmware base | status |
 |---|---|---|---|
-| `mk3` | STM32L496RG | `0x0800_8000` | builds and boots; no settings medium wired (SPI-NOR) |
+| `mk3` | STM32L496RG | `0x0800_8000` | runs; no settings medium wired yet (SPI-NOR) |
 | `mk4` | STM32L4S5xx | `0x0802_0000` | runs; installs over USB |
 | `mk5` | STM32L4S5xx | `0x0802_0000` | runs; same image as mk4, which the header claims for both |
 | `q1` | STM32L4S5xx | `0x0802_0000` | runs; colour screen, keyboard, QR scanner, PSRAM |
