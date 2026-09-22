@@ -174,6 +174,7 @@ fn read_message(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
                         }
                         redraw = true;
                     }
+                    Key::Qr => {}
                     Key::Char(c) => {
                         entry.put(*c as char);
                         redraw = true;

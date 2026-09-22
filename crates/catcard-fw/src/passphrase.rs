@@ -154,6 +154,7 @@ pub(crate) fn read(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
                         redraw = true;
                     }
                     // A keyboard's letters and symbols.
+                    Key::Qr => {}
                     Key::Char(c) => {
                         entry.put(*c as char);
                         redraw = true;

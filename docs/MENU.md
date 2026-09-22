@@ -22,7 +22,7 @@ question for each item is only whether it is *reachable where a stock user would
 | `Notes` (Q1) | `Secure Notes & Passwords` (Q1, `secnap`) | 🔀 shorter; stock also gates on the `secnap` setting, which we do not read yet |
 | `Utils` | `Advanced/Tools` | ❌ different word for the same drawer |
 | `Settings` | `Settings` | ✅ |
-| `Scan QR` (Q1) | `Scan Any QR Code` (Q1, `has_qr`) | ✅ same place; the tile it took is the one stock does not have |
+| `Scan QR` (Q1, blank device) | `Scan Any QR Code` (Q1, `has_qr`) | 🔀 a tile only on a blank device; with a wallet, the QR key opens the scanner from any menu |
 | `Logout` (mk3/mk4/mk5) | `Secure Logout` (`not has_battery`) | ✅ same gate: a device with a power button does not need a menu entry to stop |
 | — | `Passphrase` (top level, shortcut `p`) | ❌ ours is in Settings; a stock user looks for it on the main menu |
 | — | `Type Passwords`, `Seed Vault`, `Start HSM Mode` | not implemented |

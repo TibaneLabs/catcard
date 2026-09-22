@@ -253,12 +253,6 @@ fn screen_pin(
         (false, false) => top,
     };
     let bottom = Field::marks(&DOTS[..suffix.min(MAX_PART_LEN)], MAX_PART_LEN).live(filled);
-    // The same for the suffix, while the PIN itself is being tried.
-    let bottom = if filled && busy {
-        bottom.placeholder(CHECKING).live(false)
-    } else {
-        bottom
-    };
     let fields = [top, bottom];
 
     display::draw_field_page(panel, |c| {
@@ -311,22 +305,18 @@ fn screen_pin(
 /// press, and on the suffix a second press is a second attempt spent. This used to be a
 /// separate "Checking" screen; it is the same screen now, so the words stay in view.
 #[cfg(feature = "board-q1")]
-fn checking(panel: &mut display::Panel, login: &Login, prefix: usize, suffix: usize) {
-    let words = login.words().map(anti_phishing_words);
-    let words = if matches!(login.step(), Step::Suffix) {
-        words
-    } else {
-        None
-    };
-    screen_pin(
-        panel,
-        prefix,
-        words,
-        suffix,
-        false,
-        true,
-        login.attempts_left(),
-    );
+fn checking(panel: &mut display::Panel, login: &Login, prefix: usize) {
+    // The whole PIN is in: the loading page, the one every wait for the secure element
+    // shows, so the sweep carries on unbroken into reading the seed if that comes next.
+    if matches!(login.step(), Step::Suffix) {
+        if !crate::menu::seed_wait(panel, "Logging in...", "") && display::GPU_BAR_ON_BLOCKING {
+            display::scroll_busy_bar(panel);
+        }
+        return;
+    }
+    // Only the prefix: the words are on their way back to this same screen, so the row
+    // says so in place rather than the page going away for a second.
+    screen_pin(panel, prefix, None, 0, false, true, login.attempts_left());
     // Our own bar, fed to the panel by DMA while the bootloader holds the CPU -- safe for
     // exactly these two calls, which leave SPI1, the LCD and DMA alone
     // (docs/CALLGATE-DMA.md). The co-processor's orange bar if it cannot start.
@@ -646,7 +636,7 @@ fn collect(
                         return Some(field);
                     }
                 }
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
         if changed {
@@ -1102,7 +1092,7 @@ pub fn unlock(
                         // and the natural response to that is to press it again, which
                         // on the suffix means spending a second PIN attempt.
                         #[cfg(feature = "board-q1")]
-                        checking(panel, &login, field.len(), 0);
+                        checking(panel, &login, field.len());
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking");
                         let _ = login.prefix_entered(&g, field.as_bytes());
@@ -1120,7 +1110,7 @@ pub fn unlock(
                 (Step::Suffix, Key::Confirm) => {
                     if field.len() >= MIN_PART_LEN {
                         #[cfg(feature = "board-q1")]
-                        checking(panel, &login, 0, field.len());
+                        checking(panel, &login, 0);
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());

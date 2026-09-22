@@ -396,8 +396,6 @@ const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
 #[cfg(feature = "games")]
 const UTILS_ITEMS: &[&str] = &[
-    #[cfg(feature = "board-q1")]
-    "Scan QR",
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
@@ -411,8 +409,6 @@ const UTILS_ITEMS: &[&str] = &[
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
-    #[cfg(feature = "board-q1")]
-    "Scan QR",
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
@@ -787,7 +783,7 @@ pub fn run(session: Session<'_>) -> ! {
                         redraw = true;
                     }
                     Key::Digit(_) => {}
-                    Key::Char(_) => {}
+                    Key::Char(_) | Key::Qr => {}
                 }
                 continue;
             }
@@ -959,8 +955,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             seed_may_change: false,
         }
     }
-    /// For one opened from a main-menu tile: back to the menu, cursor still on the tile.
-    fn home(run: fn(&mut Act<'_, '_>)) -> Action {
+    /// Back to whichever menu opened it, cursor still on the row it was on.
+    fn returns(run: fn(&mut Act<'_, '_>)) -> Action {
         Action {
             run,
             back: None,
@@ -1002,7 +998,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
-        Screen::AddressExplorer => home(|a| addresses(a.gate, a.login, a.ui)),
+        Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
             Screen::ExportMenu,
@@ -1094,10 +1090,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(feature = "board-q1")]
-        Screen::ScanQr => to(
-            |a| crate::qrscan::screen(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
+        // A main-menu tile on a blank device, and the QR key from any menu.
+        Screen::ScanQr => returns(|a| crate::qrscan::screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Multisig => to(
             |a| crate::msimport::manage(a.gate, a.login, a.ui),
@@ -1233,6 +1227,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Key::Digit(7) => Key::Cancel,
         k => k,
     };
+    // The QR key opens the scanner from any menu, and the scanner comes back to it.
+    #[cfg(feature = "board-q1")]
+    if key == Key::Qr && items_of(screen, no_seed).is_some() {
+        return Screen::ScanQr;
+    }
     match screen {
         // Dispatched by name rather than by cursor index, because this list reorders:
         // a device with no seed puts "New wallet" first. An index table silently points
@@ -1245,6 +1244,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             // nothing to explore.
             (Key::Confirm, Some("New")) => Screen::NewSeedMenu,
             (Key::Confirm, Some("Import")) => Screen::ImportSeed,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
@@ -1336,11 +1337,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::Main,
         },
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
-            // Off the main grid: its six cells are all about the wallet in force, and
-            // scanning a code is a way *in*, not one of them. Stock puts it on the Q1's
-            // QR key, which nothing here is wired to yet.
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
@@ -2196,6 +2192,9 @@ fn keypad_screen(
         None => {
             let _ = write!(l, "press any key");
         }
+        Some(Key::Qr) => {
+            let _ = write!(l, "last  QR");
+        }
         Some(Key::Char(c)) => {
             let _ = write!(l, "last  {}", c as char);
         }
@@ -2696,7 +2695,7 @@ fn offer_and_install<A>(
                 }
                 Key::Cancel => return,
                 Key::Digit(_) => {}
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
         display::idle(ui.panel);
@@ -3713,7 +3712,7 @@ pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
 /// so going from one to the next changes the caption and nothing else: the bar keeps
 /// moving from where it was.
 #[cfg(feature = "board-q1")]
-fn seed_wait(panel: &mut display::Panel, head: &str, note: &str) -> bool {
+pub(crate) fn seed_wait(panel: &mut display::Panel, head: &str, note: &str) -> bool {
     use catcard_ui::art::menuicons::READING_SEED as ART;
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::text::{centred, draw_text};
@@ -4713,6 +4712,7 @@ fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
                     }
                     // A keyboard's letters, which this field does not take. `put`
                     // refuses them; saying so beats a key that appears to do nothing.
+                    Key::Qr => {}
                     Key::Char(c) => {
                         if !input.put(*c as char) {
                             complaint = "digits only";
@@ -5858,7 +5858,7 @@ pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
                 Key::Confirm => return true,
                 Key::Cancel => return false,
                 Key::Digit(_) => {}
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
         display::idle(ui.panel);
@@ -6000,7 +6000,7 @@ fn key_mash(ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
                     pool.add(catcard_entropy::Source::UserKeypad, &[*d]);
                     pool.add_timing(catcard_hal::dwt::cycles());
                 }
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
     }
@@ -6107,7 +6107,7 @@ fn collect_rolls(
                         pool.add_timing(catcard_hal::dwt::cycles());
                     }
                 }
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
     }
@@ -6173,7 +6173,7 @@ fn add_user_entropy(ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
                     break;
                 }
                 Key::Digit(_) => {}
-                Key::Char(_) => {}
+                Key::Char(_) | Key::Qr => {}
             }
         }
         if done {
@@ -6628,6 +6628,7 @@ fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
                     }
                     // A letter, on a board with a keyboard. Typed straight in: the digit
                     // legend below is the numpad's way of reaching the same letters.
+                    Key::Qr => {}
                     Key::Char(c @ b'a'..=b'z') => {
                         armed = false;
                         let _ = typed.push(*c as char);
@@ -7541,7 +7542,7 @@ impl<'a> DocScreen<'a> {
             }
             Key::Cancel => DocFlow::Done(DocExit::Cancelled),
             Key::Digit(_) => DocFlow::Ignored,
-            Key::Char(_) => DocFlow::Ignored,
+            Key::Char(_) | Key::Qr => DocFlow::Ignored,
         }
     }
 }
@@ -7613,7 +7614,7 @@ fn page_through<S: catcard_ui::pager::LineSource + ?Sized>(
                         moved = true;
                     }
                     Key::Digit(_) => {}
-                    Key::Char(_) => {}
+                    Key::Char(_) | Key::Qr => {}
                 }
             }
             if moved {

@@ -36,13 +36,15 @@ const _: () = assert!(KEYS <= 64, "more positions than a mask can hold");
 
 /// What each matrix position means to the current screens, indexed `row * COLS + col`.
 ///
-/// Positions from the reference's decode table [C]: `kn3..6` are the arrows (left, up,
-/// down, right), `kn7` CANCEL, `kn8` ENTER, `kn10..19` the number row `1234567890`, and
+/// Positions from the reference's decode table [C]: `kn2` QR, `kn3..6` the arrows (left,
+/// up, down, right), `kn7` CANCEL, `kn8` ENTER, `kn10..19` the number row `1234567890`, and
 /// `kn54` DELETE. `kn9` and `kn55..59` are unused; letters, symbols and the modifiers
 /// have no meaning to a numpad screen and map to nothing.
 /// Source: gpio-peripherals.md §Q/Q1 "Key decode" [C]
 pub const LAYOUT: [Option<Key>; KEYS] = {
     let mut l = [None; KEYS];
+    // QR. Source: input.md §"Key decode", row 0 `NFC TAB QR ← ↑ ↓ → CANCEL ENTER` [C]
+    l[2] = Some(Key::Qr);
     l[3] = Some(Key::Digit(7)); // left
     l[4] = Some(Key::Digit(5)); // up
     l[5] = Some(Key::Digit(8)); // down
@@ -415,7 +417,8 @@ mod tests {
             ],
             "left, up, down, right take the numpad's arrow digits"
         );
-        for kn in [0, 1, 2, 9, 20, 29, 35, 49, 50, 51, 52, 53, 55, 59] {
+        assert_eq!(LAYOUT[2], Some(Key::Qr), "kn2 is QR");
+        for kn in [0, 1, 9, 20, 29, 35, 49, 50, 51, 52, 53, 55, 59] {
             assert_eq!(LAYOUT[kn], None, "kn{kn} has no meaning to a numpad screen");
         }
     }

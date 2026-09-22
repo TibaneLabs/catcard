@@ -118,6 +118,7 @@ fn draw_report<C: catcard_ui::canvas::Canvas + ?Sized>(
             Key::Digit(d) => [b'0' + d],
             Key::Cancel => *b"x",
             Key::Confirm => *b"y",
+            Key::Qr => *b"Q",
             Key::Char(c) => [c],
         };
         draw_text(

@@ -50,6 +50,8 @@ pub enum Key {
     /// numpad ignore it, which is why the Q1's letters did nothing for so long -- they
     /// were scanned and debounced, but had nowhere to go.
     Char(u8),
+    /// The Q1's QR key: open the scanner. No numpad has one.
+    Qr,
 }
 
 /// Which key sits at which matrix position, indexed `row * COLS + col`.
