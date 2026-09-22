@@ -1606,14 +1606,16 @@ impl MenuScreen {
 
 /// Whether this screen is drawn as the icon grid rather than as a list.
 ///
-/// The main menu only. Everything else is a list of words, where a grid would be a
-/// worse way to show fifteen settings than the list already is.
+/// The menus of *tools* -- Main, Derive, Utils -- where each entry is a place to go and
+/// has a picture. Everything else is a list of words, where a grid would be a worse way
+/// to show fifteen settings than the list already is.
 #[cfg(feature = "board-q1")]
 fn is_grid(screen: Screen) -> bool {
-    // Derive as well as Main: it is a short list of things a person picks *between*
-    // rather than reads, which is what the grid is for -- and it is reached from the
-    // grid, so a list there would be a change of shape for no reason.
-    matches!(screen, Screen::Main | Screen::KeyMenu)
+    // Derive and Utils as well as Main: short lists of things a person picks *between*
+    // rather than reads, which is what the grid is for -- and reached from the grid, so a
+    // list there would be a change of shape for no reason. Utils runs past six, so the
+    // grid pages.
+    matches!(screen, Screen::Main | Screen::KeyMenu | Screen::Utils)
 }
 
 /// Where a movement key takes the grid cursor.
@@ -1636,14 +1638,20 @@ fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
     next.min(last)
 }
 
-/// The main menu as a grid of icons.
+/// A menu as a grid of icons, six to a page.
+///
+/// The page is the one the cursor is on, so moving down off the bottom row turns to the
+/// next and up off the top row turns back -- the same keys, no new ones to learn. A menu
+/// longer than a page says which page it is on, under the middle column.
 #[cfg(feature = "board-q1")]
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
     use catcard_ui::art::menuicons as art;
     use catcard_ui::grid::{CELLS, Cell};
 
+    let first = cursor / CELLS * CELLS;
+    let pages = items.len().div_ceil(CELLS);
     let mut cells: heapless::Vec<Cell<'_>, CELLS> = heapless::Vec::new();
-    for label in items.iter().take(CELLS) {
+    for label in items.iter().skip(first).take(CELLS) {
         let icon = match *label {
             "Sign" => Some(&art::SIGN),
             "New" => Some(&art::NEW_PASSPHRASE),
@@ -1661,6 +1669,13 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "XOR split" => Some(&art::XOR_SPLIT),
             "XOR join" => Some(&art::XOR_JOIN),
             "Key vault" => Some(&art::KEY_VAULT),
+            // The Utils grid.
+            "Analyze RNG" => Some(&art::ANALYZE_RNG),
+            "USB Drive" => Some(&art::USB_DRIVE),
+            "Export wallet" => Some(&art::EXPORT_WALLET),
+            "Browse SD card" => Some(&art::MICROSD_BROWSE),
+            "Format SD card" => Some(&art::MICROSD_FORMAT),
+            "Games" => Some(&art::GAMES),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
@@ -1677,7 +1692,16 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
     //
     // The art's own palette, not the amber ramp: this screen is pictures.
     display::draw_with(panel, &art::PALETTE, |c| {
-        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
+        use catcard_ui::canvas::Canvas as _;
+        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor - first);
+        if pages > 1 {
+            let mut at: heapless::String<8> = heapless::String::new();
+            let _ = write!(at, "{}/{}", first / CELLS + 1, pages);
+            let f = display::LAYOUT.body;
+            let x = catcard_ui::text::centred(f, &at, c.width());
+            let y = c.height().saturating_sub(f.line_height());
+            catcard_ui::text::draw_text(c, f, x, y, &at);
+        }
     });
 }
 
@@ -2769,7 +2793,7 @@ fn offer_and_install<A>(
 /// irreversible -- at worst it leaves a short file behind.
 fn save_log_to_card(ui: &mut Ui<'_>) {
     crate::catlog!("sd: saving log");
-    message(ui.panel, "Saving log", "please wait", "");
+    card_wait(ui.panel, "Saving log", "writing to the card");
 
     // Snapshot the log before touching anything else, so what lands on the card is the
     // state at the moment it was asked for, not a log with this function's own steps in
@@ -3760,6 +3784,47 @@ pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
     blocking_screen(panel, head, "reading seed");
 }
 
+/// A page with one picture in the middle: `head` above it, `note` below, the bottom rows
+/// left clear for the sweep.
+#[cfg(feature = "board-q1")]
+fn icon_page(
+    panel: &mut display::Panel,
+    art: &catcard_ui::art::indexed::Indexed,
+    head: &str,
+    note: &str,
+) {
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::text::{centred, draw_text};
+
+    let (title, body) = (display::LAYOUT.title, display::LAYOUT.body);
+    display::draw_field_page(panel, |c| {
+        c.clear();
+        draw_text(c, title, centred(title, head, c.width()), 12, head);
+        // In the middle of what is left above the sweep, which takes the bottom rows.
+        let (w, h) = (art.width as usize, art.height as usize);
+        let room = c.height().saturating_sub(catcard_ui::sweep::H);
+        let x = c.width().saturating_sub(w) / 2;
+        let y = room.saturating_sub(h) / 2;
+        catcard_ui::art::indexed::draw_indexed(c, art, x, y);
+        draw_text(c, body, centred(body, note, c.width()), y + h + 10, note);
+    });
+}
+
+/// The screen while the microSD card is read or written: the cat with the card.
+///
+/// Drawn before the card is touched. On the mono panels, the plain message.
+pub(crate) fn card_wait(panel: &mut display::Panel, head: &str, note: &str) {
+    #[cfg(feature = "board-q1")]
+    icon_page(
+        panel,
+        &catcard_ui::art::menuicons::MICROSD_ACCESS,
+        head,
+        note,
+    );
+    #[cfg(not(feature = "board-q1"))]
+    message(panel, head, note, "");
+}
+
 /// The seed-wait page -- the reading cat, `head` above, `note` below -- and the sweep
 /// under it, carried on from the last one if the glass still shows it. False if the
 /// sweep could not start.
@@ -3769,23 +3834,8 @@ pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
 /// moving from where it was.
 #[cfg(feature = "board-q1")]
 pub(crate) fn seed_wait(panel: &mut display::Panel, head: &str, note: &str) -> bool {
-    use catcard_ui::art::menuicons::READING_SEED as ART;
-    use catcard_ui::canvas::Canvas as _;
-    use catcard_ui::text::{centred, draw_text};
-
-    let (title, body) = (display::LAYOUT.title, display::LAYOUT.body);
     display::keep_sweep();
-    display::draw_field_page(panel, |c| {
-        c.clear();
-        draw_text(c, title, centred(title, head, c.width()), 12, head);
-        // In the middle of what is left above the sweep, which takes the bottom rows.
-        let (w, h) = (ART.width as usize, ART.height as usize);
-        let room = c.height().saturating_sub(catcard_ui::sweep::H);
-        let x = c.width().saturating_sub(w) / 2;
-        let y = room.saturating_sub(h) / 2;
-        catcard_ui::art::indexed::draw_indexed(c, &ART, x, y);
-        draw_text(c, body, centred(body, note, c.width()), y + h + 10, note);
-    });
+    icon_page(panel, &catcard_ui::art::menuicons::READING_SEED, head, note);
     display::start_sweep(panel)
 }
 
@@ -4909,7 +4959,7 @@ fn offer_export(
 /// said the same way, because an export that fails differently each time is one nobody
 /// can help with.
 fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8], signer: Option<Signer>) {
-    message(ui.panel, head, "writing to SD card", "");
+    card_wait(ui.panel, head, "writing to the card");
     match write_card_export(path, body, signer) {
         Ok(name) => {
             crate::catlog!("export: wrote {} bytes to {}", body.len(), name.as_str());

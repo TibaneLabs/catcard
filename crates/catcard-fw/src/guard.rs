@@ -234,7 +234,7 @@ fn add_card(ui: &mut Ui<'_>, enrolled: &[[u8; 32]]) {
         menu::wait_for_any_key(ui);
         return;
     }
-    menu::blocking_screen(ui.panel, HEAD, "writing the card");
+    menu::card_wait(ui.panel, HEAD, "writing to the card");
     let written = menu::write_card_file(prelogin::SD2FA_FILE, &token);
     // Read back before enrolling: a card that did not keep the token would erase the seed
     // at the next login.

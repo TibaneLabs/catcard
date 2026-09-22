@@ -115,7 +115,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // megabyte is more than this device has anywhere to put.
     let settings = unsafe { core::slice::from_raw_parts(start as *const u8, len as usize) };
 
-    menu::blocking_screen(ui.panel, HEAD, "writing to the card");
+    menu::card_wait(ui.panel, HEAD, "writing to the card");
     let mut path: heapless::String<24> = heapless::String::new();
     let _ = write!(path, "/{a:02X}{b:02X}{c:02X}{d:02X}-STATE.BIN");
     let written = menu::write_card_parts(

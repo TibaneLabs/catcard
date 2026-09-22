@@ -391,6 +391,7 @@ pub(crate) fn import(
     };
 
     let mut file = [0u8; MAX_FILE];
+    menu::card_wait(ui.panel, "Import", "reading the card");
     let len = match crate::signtx::read_card_file(&path, &mut file) {
         Ok(n) => n,
         Err(why) => return say(ui, "Import", why),

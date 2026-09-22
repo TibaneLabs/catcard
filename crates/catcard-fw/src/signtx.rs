@@ -299,7 +299,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     let (buf, spare) = work.split();
 
-    menu::message(ui.panel, HEAD, "reading the card", "");
+    menu::card_wait(ui.panel, HEAD, "reading the card");
     let len = match read_card_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
         Ok(len) => len,
         Err(why) => {
@@ -443,7 +443,7 @@ pub(crate) fn review_and_sign(
         return;
     }
 
-    menu::message(ui.panel, HEAD, "writing to the card", "");
+    menu::card_wait(ui.panel, HEAD, "writing to the card");
     if let Err(why) = menu::write_card_file(SIGNED_NAME, &from[..at]) {
         crate::catlog!("sign: write failed: {}", why);
         menu::message(ui.panel, "Write failed", why, "any key to go back");

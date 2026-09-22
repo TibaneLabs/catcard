@@ -111,7 +111,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
          -----END BITCOIN SIGNED MESSAGE-----\n",
         addr.as_str()
     );
-    menu::message(ui.panel, HEAD, "writing to the card", "");
+    menu::card_wait(ui.panel, HEAD, "writing to the card");
     match menu::write_card_file(FILE_NAME, file.as_bytes()) {
         Ok(()) => {
             crate::catlog!("message: signed with {}", addr.as_str());
