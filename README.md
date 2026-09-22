@@ -5,13 +5,15 @@ Rust. Bitcoin first, but not Bitcoin-only — see [`docs/ROADMAP.md`](docs/ROADM
 
 MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 
-> **Status: pre-hardware.** The wallet crypto (BIP-32/39, addresses, Base58Check,
-> Bech32/Bech32m) is implemented and passes the official test vectors. The drivers
-> (SPI, SSD1306, keypad, SPI-NOR) and the settings store are written but have **never
-> run on a device** — see [`docs/VALIDATION.md`](docs/VALIDATION.md). There is no USB,
-> no PSBT and no signing yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status: runs on real hardware, not ready for funds.** Dev-signed images install and
+> run on mk4, mk5 and Q1: the device boots, logs in against the real secure element,
+> generates and stores a seed, reads a settings store that stock firmware wrote, and
+> takes its own firmware upgrades over USB. Signing, multisig and the Q1's QR
+> transports are written and covered by host tests against the standards' own vectors,
+> but have not been exercised end to end on a device.
 >
-> Do not put funds on a device running this.
+> Do not put funds on a device running this. Keep the words of any seed you let it
+> store, and expect to reinstall stock firmware.
 
 ## Why
 
@@ -36,48 +38,66 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   that has not earned its entropy refuses to produce a seed instead of carrying on.
   See [`docs/ENTROPY.md`](docs/ENTROPY.md).
 - **No MicroPython.** The whole firmware is Rust, compiled to native code: no
-  interpreter, no garbage collector and no heap. Private-key work runs with interrupts
-  masked, which the wallet crate enforces through its types, so a host cannot time a
-  derivation while it is running.
+  interpreter and no garbage collector. Private-key work runs with interrupts masked,
+  which the wallet crate enforces through its types, so a host cannot time a derivation
+  while it is running.
 - **Better keypad responsiveness.** The pad is scanned by native code on every pass of
   the loop rather than through an interpreter. Every key is debounced separately, a key
   held from the previous screen cannot skip the next one, and each press is timestamped
   at its electrical edge (where the board supports it) so the timing feeds the RNG.
-- **Improved UI.** Slow operations show a bar that keeps moving. On the OLED boards the
-  panel scrolls it by itself, so it moves even while the CPU is shut inside a
-  secure-element call. Addresses are shown in a large face and as a QR code, with the
-  full address beside it in blocks of four for checking against a wallet. Key hints use
-  what is printed on the keys, and one layout engine fits the 128×64 OLED and the Q1's
+- **Improved UI.** The Q1's main menus are icon grids; slow operations show a bar that
+  keeps moving, driven by DMA on the Q1 and by the panel itself on the OLED boards, so
+  it moves even while the CPU is shut inside a secure-element call. Addresses are shown
+  in a large face and as a QR code. One layout engine fits the 128×64 OLED and the Q1's
   320×240 colour screen alike.
+- **Login protections.** A scrambled number row and a login countdown, each switched on
+  only after it has proved itself on the device, plus Test login. Release builds add a
+  kill key and microSD 2FA; development builds leave those out, so a bench unit cannot
+  erase itself.
 - **Large SD cards.** Cards up to 2 TB (the SDXC ceiling) work, where stock stops at
   32 GB. Reading covers FAT12, FAT16, FAT32 and exFAT, the format most large cards come
   with, and Format writes FAT16, FAT32 or exFAT to suit the card's size, so a new card
   needs no reformatting on a computer first.
 - **Optional multichain support.** One firmware, no per-coin apps to install. Chains are
-  build options, so a Bitcoin-only image has the other chains' code *absent*, not just
-  hidden — a smaller attack surface, not only a smaller menu. The chain registry and
-  compile-time selection are in place; Ethereum and Solana are the next chains on
-  [`docs/ROADMAP.md`](docs/ROADMAP.md) and are not built yet.
-- **Games and cats.** Block Mine and Block Cutter live under Utils (and can be left out
-  of a build), and the device boots to a cat.
+  a build option, so a Bitcoin-only image has the other chains' code *absent*, not just
+  hidden — a smaller attack surface, not only a smaller menu. With `MULTICHAIN=1` the
+  registry covers Bitcoin, Ethereum, Solana, Litecoin, Bitcoin Cash, Dogecoin, Tron,
+  Monacoin, Namecoin and Electra Protocol, each with its own derivations and address
+  formats.
+- **Games and cats.** Block Mine, Block Cutter and (on the Q1) Flappy Cat live under
+  Utils and can be left out of a build, and the device boots to a cat.
 
-## What runs on the device today
+## What it does today
 
-Reset → cycle counter → 48 MHz clock → hardware TRNG → build an entropy pool from every
-noise source the board has → verify the pool meets its policy → bring up the panel →
-draw a selftest screen → scan the keypad and echo key presses.
+- **Login.** Two-part PIN against the bootloader's gate, anti-phishing words, nickname,
+  attempt counter; Test login, scrambled keys and a login countdown.
+- **Wallets.** Create a seed from the entropy pool (12 or 24 words) or import one;
+  passphrase; Seed XOR split and join; BIP-85 children (words, XPRV, WIF, password,
+  hex), where the words, XPRV and WIF children can be put in force; a key vault in
+  stock's own format, so keys saved by either firmware are readable by the other.
+- **Addresses.** An explorer over all four single-sig types, accounts and both chains,
+  with QR codes; Verify address; registered multisig wallets; the other chains' formats
+  on a multichain build.
+- **Signing.** PSBT signing for single-sig (P2PKH, P2SH-P2WPKH, P2WPKH and P2TR key
+  path) and registered multisig, with the fee shown and capped and change proven by
+  re-deriving it; legacy message signing.
+- **Transfer.** USB HID, microSD (browse, format, import, export), firmware upgrade from
+  either, and on the Q1 a QR scanner with BBQr and BC-UR.
+- **Storage.** An authenticated, power-fail-safe settings store, compatible with the one
+  stock writes: a device that has run stock keeps its settings, notes and seed vault.
+- **Danger zone.** View the words of the key in force, destroy the seed, or lock a
+  loaded key down as the stored one — each labelled at every step.
 
-That is the whole firmware. It is a real signed image that a Coldcard bootloader will
-accept and boot; it reports whether the device is healthy and proves the display and
-keypad work, and does nothing else yet.
+Stock feature by stock feature, with what is left: [`docs/PARITY.md`](docs/PARITY.md).
 
 ## Supported hardware
 
 | board | MCU | firmware base | status |
 |---|---|---|---|
-| `mk3` | STM32L496RG | `0x0800_8000` | builds; pin map from reference |
-| `mk4` | STM32L4S5xx | `0x0802_0000` | builds; pin map inferred |
-| `q1` | STM32L4S5xx | `0x0802_0000` | builds; keyboard/SE2/NFC pins mapped, drivers unwritten |
+| `mk3` | STM32L496RG | `0x0800_8000` | builds and boots; no settings medium wired (SPI-NOR) |
+| `mk4` | STM32L4S5xx | `0x0802_0000` | runs; installs over USB |
+| `mk5` | STM32L4S5xx | `0x0802_0000` | runs; same image as mk4, which the header claims for both |
+| `q1` | STM32L4S5xx | `0x0802_0000` | runs; colour screen, keyboard, QR scanner, PSRAM |
 
 The bootloader below our firmware is protected flash and cannot be replaced. CatCard
 builds against its fixed contract: image format, signature, and the callgate ABI for
@@ -85,18 +105,26 @@ PIN, secrets and secure-element entropy. The callgate entry point is read from t
 the bootloader publishes at `0x0800_0040` and validated before use — it moves between
 bootloader versions, so it must never be hardcoded.
 
+Bench units are locked at RDP=2, where a signed image that boots but hangs cannot be
+recovered. New low-level work therefore goes behind a Debug menu entry before it goes on
+the boot path; see [`docs/VALIDATION.md`](docs/VALIDATION.md).
+
 ## Build
 
 ```sh
-rustup target add thumbv7em-none-eabihf   # or just let rust-toolchain.toml do it
-
-cargo t                     # host tests for every portable crate
-cargo fw-mk4                # build the firmware
-cargo run -p catcard-image -- build \
-    target/thumbv7em-none-eabihf/release/catcard-fw \
-    --board mk4 --version 7.0.0 \
-    --bin out/catcard-mk4.bin --dfu out/catcard-mk4.dfu
+make                  # dev images for every board, into out/
+make q1               # just the Q1        -> out/catcard-q1.{bin,dfu}
+make mk4-mk5          # one image, both boards
+make q1 MULTICHAIN=1  # every chain the registry knows, not just Bitcoin
+make q1 SHIP=1        # a real release: the USB debug crutches stripped
+make test lint        # host tests / clippy, as CI runs them
 ```
+
+A default build carries the bench crutches — host key injection, and a peek/poke/jsr
+memory monitor — because that is how the device is driven while the firmware is being
+built out. **`SHIP=1` is what strips them**, and nothing else should ever be given to
+someone else: `usb-debug-mem` reads the seed and the PIN out of RAM and runs arbitrary
+code. See [`docs/USB.md`](docs/USB.md).
 
 `catcard-image` flattens the ELF, writes the 128-byte header at offset `0x3F80`, pads
 to a 512-byte multiple, signs the double-SHA256 digest with the published developer
@@ -115,19 +143,32 @@ crates/
   catcard-callgate   bootloader callgate ABI (PIN, secrets, SE entropy, DFU)
   catcard-entropy    entropy accumulator, SP 800-90B health tests, HMAC-DRBG
   catcard-wallet     mnemonics, HD derivation, encodings, addresses, transactions,
-                     and the chain registry -- one crate, six modules
+                     PSBT review, multisig, descriptors, and the chain registry
   catcard-sign       deterministic ECDSA (RFC 6979) and BIP-340 Schnorr
   catcard-pin        the login sequence over callgate 18
   catcard-upgrade    staging and validating a firmware image
   catcard-usb        HID transport framing, descriptors, control transfers
+  catcard-qr         the Q1's QR scanner protocol
+  catcard-bbqr       BBQr: a payload split across QR codes, as stock writes them
+  catcard-bcur       BC-UR: the same for the chains that are not Bitcoin
+  catcard-sd         SD card bring-up and block reads; FAT12/16/32 and exFAT
   catcard-flash      SPI-NOR driver
   catcard-settings   authenticated, power-fail-safe settings store
-  catcard-hal        STM32L4/L4+ register-level drivers (RNG, SPI, GPIO, DWT, clocks)
-  catcard-ui         framebuffer, SSD1306 driver, fonts, text, keypad scanner
+  catcard-alloc      a small heap that reports failure instead of panicking
+  catcard-kernel     a small preemptive kernel: real tasks, stacks, context switch
+  catcard-log        a ring of bytes that outlives whatever wrote it
+  catcard-hal        STM32L4/L4+ register-level drivers (RNG, SPI, DMA, GPIO, SDMMC,
+                     USART, clocks)
+  catcard-ui         framebuffers, SSD1306 and ST7789 drivers, fonts, text, art,
+                     menus, keypad and keyboard
   catcard-fw         the firmware binary
 tools/
   catcard-image      build, sign, verify and package images
+  artgen/            turn art into the indexed and deflated forms the firmware draws
+  fontgen/           turn fonts into the tables the renderer walks
   reference/         independent reference implementations used to cross-check crypto
+  emu/               the emulator harness, for what can be checked without a device
+  usbclient.py       drive a device over USB: install, unlock, read the log
 keys/
   dev-privkey.pem    the published Coldcard developer key (public by design)
 ```
@@ -143,16 +184,23 @@ correctness-critical logic lives.
 | [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) | licences that travel with the distribution |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | crate boundaries and the fixed-vs-ours split |
 | [`docs/ENTROPY.md`](docs/ENTROPY.md) | the seed RNG design and the bug it replaces |
-| [`docs/HARDWARE-OPEN-ITEMS.md`](docs/HARDWARE-OPEN-ITEMS.md) | unknowns blocking further work |
+| [`docs/SECRETS-AND-SETTINGS.md`](docs/SECRETS-AND-SETTINGS.md) | how secrets and settings are stored, and read back from stock |
+| [`docs/MENU.md`](docs/MENU.md) | our menu next to stock's, item by item |
+| [`docs/PARITY.md`](docs/PARITY.md) | every stock feature, whether CatCard has it, and the order the gaps close |
+| [`docs/HARDWARE-OPEN-ITEMS.md`](docs/HARDWARE-OPEN-ITEMS.md) | unknowns, and what would settle each |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | the hardware bring-up plan, in running order |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | what is next, in order |
-| [`docs/PARITY.md`](docs/PARITY.md) | every stock feature, whether CatCard has it, and the order the gaps close |
+| [`docs/KERNEL.md`](docs/KERNEL.md) | the task kernel and what runs under it |
+| [`docs/PSRAM.md`](docs/PSRAM.md) | the Q1's PSRAM: what owns it and the write rules |
+| [`docs/CALLGATE-DMA.md`](docs/CALLGATE-DMA.md) | driving the panel by DMA around a blocking callgate |
 | [`docs/FLASHING.md`](docs/FLASHING.md) | the three dev loops |
-| [`docs/USB.md`](docs/USB.md) | USB identity and transport decisions |
+| [`docs/USB.md`](docs/USB.md) | USB identity, transport, and the debug features a release strips |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | reproducible builds and release signing |
 
 ## Contributing
 
 Read `CLEANROOM.md` first — it is the constraint everything else follows from. New
 hardware facts must cite a source and carry a confidence tag; anything unconfirmed
-belongs in `docs/HARDWARE-OPEN-ITEMS.md` as well as in the code.
+belongs in `docs/HARDWARE-OPEN-ITEMS.md` as well as in the code. `make test lint` is
+what CI runs; a change to the boot path needs a word about how it was tried on a device
+that cannot be recovered if it hangs.
