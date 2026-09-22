@@ -55,6 +55,13 @@ pub struct Fonts<'a> {
     /// It lives here because it changes **layout**, not just appearance: the two arts are
     /// different sizes, so the text beside them starts in a different place.
     pub colour: bool,
+    /// How wide the scrollbar is, in pixels; `0` for none.
+    ///
+    /// A panel's choice rather than a screen's, for the same reason the fonts are: every
+    /// list on one device should say "there is more below" the same way. The Q1 can
+    /// afford a bar that is visible at arm's length; the OLED cannot spare more than a
+    /// few columns of a 128-pixel row, and on two colours a wide bar is a wall.
+    pub scrollbar: usize,
 }
 
 impl<'a> Fonts<'a> {
@@ -843,13 +850,69 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
         }
     }
 
-    // Scroll indicators, kept in the arrow gutter clear of everything else.
-    if view.off > 0 {
-        crate::text::draw_text(canvas, fonts.body, arrow_x, 0, "^");
+    scrollbar(canvas, view);
+}
+
+/// The dimmest level that still reads as something rather than as the background.
+///
+/// Index 4 of a sixteen-step ramp: on the Q1 that is a grey a little above the page, and
+/// on a panel of two colours everything below the middle is the page, so a track drawn
+/// in it does not exist -- which is why the mono track is dotted ink instead.
+const TRACK: Level = 4;
+
+/// The least a thumb may shrink to, in pixels. A thumb that shows the true proportion of
+/// a long document would be one pixel, which says "there is more" but not where you are.
+const THUMB_MIN: usize = 8;
+
+/// A bar down the right edge saying how much document there is and where in it this is.
+///
+/// Drawn only when there is something to scroll: a list that fits shows nothing, so the
+/// bar appearing is itself the message. It replaces the `^` and `v` that used to sit in
+/// the gutter -- those said only that a direction existed, and cost a glyph's width to
+/// say it.
+///
+/// **Two panels, one geometry.** The colour panel draws a dim track with a bright thumb
+/// on it, with the corners left off so the ends look rounded rather than chopped. The
+/// one-bit panel has no dim: a track drawn in any level below the middle is the page, so
+/// it dots the track instead -- ink every other pixel, which reads as a line at a glance
+/// and cannot be mistaken for the thumb beside it.
+fn scrollbar<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
+    let bar = view.fonts.scrollbar;
+    let h = view.height;
+    let (content, max_off) = (view.content_height(), view.max_off());
+    if bar == 0 || max_off == 0 || content == 0 || h == 0 {
+        return;
     }
-    if !view.at_end() {
-        let y = h.saturating_sub(fonts.body.line_height());
-        crate::text::draw_text(canvas, fonts.body, arrow_x, y, "v");
+    let w = canvas.width();
+    let x = w.saturating_sub(bar + 1);
+
+    // Proportion of the document on screen, with a floor so the thumb stays a handle.
+    let thumb = (h * h / content).clamp(THUMB_MIN.min(h), h);
+    let travel = h - thumb;
+    let top = travel * view.off.min(max_off) / max_off;
+
+    if view.fonts.colour {
+        canvas.fill_rect(x, 0, bar, h, TRACK);
+        canvas.fill_rect(x, top, bar, thumb, INK);
+        // The four corners of the thumb, back to the track: a two-pixel tell that turns
+        // a rectangle into a lozenge at this width.
+        if bar >= 3 && thumb >= 3 {
+            for (cx, cy) in [
+                (x, top),
+                (x + bar - 1, top),
+                (x, top + thumb - 1),
+                (x + bar - 1, top + thumb - 1),
+            ] {
+                canvas.fill_rect(cx, cy, 1, 1, TRACK);
+            }
+        }
+    } else {
+        let mut y = 0;
+        while y < h {
+            canvas.fill_rect(x + bar / 2, y, 1, 1, INK);
+            y += 2;
+        }
+        canvas.fill_rect(x, top, bar, thumb, INK);
     }
 }
 
@@ -867,6 +930,7 @@ mod tests {
             gap: 2,
             margin: 6,
             colour: true,
+            scrollbar: 6,
         }
     }
 
@@ -879,6 +943,7 @@ mod tests {
             gap: 1,
             margin: 2,
             colour: false,
+            scrollbar: 3,
         }
     }
 
@@ -1276,6 +1341,7 @@ mod tests {
             gap: 2,
             margin: 6,
             colour: true,
+            scrollbar: 6,
         };
         let doc = [
             Line::item("Bitcoin", 0).large().with_mark(Mark::Art {
@@ -1413,6 +1479,7 @@ mod tests {
             gap: 2,
             margin: 6,
             colour: true,
+            scrollbar: 6,
         };
         let doc = [
             Line::item("Bitcoin", 0).large().with_mark(Mark::Art {
@@ -1507,5 +1574,154 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Where the thumb is, as (top, height), read down the middle of the bar.
+    ///
+    /// The middle, because the thumb's corners are knocked back to the track to round
+    /// its ends -- a probe down the left column would miss its first and last row.
+    fn thumb_of(c: &Gray320x240, x: usize, h: usize) -> Option<(usize, usize)> {
+        let rows: Vec<usize> = (0..h)
+            .filter(|&y| crate::canvas::Canvas::get(c, x, y) == INK)
+            .collect();
+        Some((*rows.first()?, rows.len()))
+    }
+
+    #[test]
+    fn a_list_that_fits_has_no_scrollbar() {
+        // The bar appearing is the message, so a short document must not draw one.
+        let src = [Line::title("Short"), Line::item("one", 0)];
+        let v = ScrollView::build(&src, 320, 240, fonts());
+        let mut with = Gray320x240::new();
+        render(&mut with, &v);
+        // Against the same screen with the bar turned off: the selected row's bar
+        // reaches these columns too, so counting ink there proves nothing.
+        let plain_view = ScrollView::build(
+            &src,
+            320,
+            240,
+            Fonts {
+                scrollbar: 0,
+                ..fonts()
+            },
+        );
+        let mut plain = Gray320x240::new();
+        render(&mut plain, &plain_view);
+        for y in 0..240 {
+            for x in 0..320 {
+                assert_eq!(
+                    crate::canvas::Canvas::get(&with, x, y),
+                    crate::canvas::Canvas::get(&plain, x, y),
+                    "a document that fits drew something at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_thumb_says_where_in_the_document_the_window_is() {
+        let src: [Line; 40] = core::array::from_fn(|_| Line::body("line"));
+        let mut v = ScrollView::build(&src, 320, 240, fonts());
+        let x = 320 - fonts().scrollbar - 1 + fonts().scrollbar / 2;
+
+        let mut c = Gray320x240::new();
+        render(&mut c, &v);
+        let (top, thumb) = thumb_of(&c, x, 240).expect("a thumb at the top");
+        assert_eq!(
+            top, 0,
+            "at the top of the document the thumb is not at the top"
+        );
+        assert!(thumb >= THUMB_MIN, "the thumb shrank below its floor");
+        assert!(thumb < 240, "the thumb fills a track it should not");
+
+        // Half way: the thumb is somewhere in the middle, and the same size.
+        while v.off < v.max_off() / 2 {
+            v.scroll(true, v.line_step());
+        }
+        let mut c = Gray320x240::new();
+        render(&mut c, &v);
+        let (mid, mid_h) = thumb_of(&c, x, 240).expect("a thumb in the middle");
+        assert_eq!(mid_h, thumb, "the thumb changed size while scrolling");
+        assert!(
+            mid > 0 && mid + mid_h < 240,
+            "the thumb is not in the middle"
+        );
+
+        // At the end it is against the bottom, exactly.
+        while !v.at_end() {
+            v.scroll(true, v.line_step());
+        }
+        let mut c = Gray320x240::new();
+        render(&mut c, &v);
+        let (end, end_h) = thumb_of(&c, x, 240).expect("a thumb at the end");
+        assert_eq!(
+            end + end_h,
+            240,
+            "at the end of the document the thumb is not at the bottom"
+        );
+    }
+
+    #[test]
+    fn the_scrollbar_stays_out_of_the_text() {
+        // Long names, a full list: nothing the bar draws may land on a glyph, and
+        // nothing a glyph draws may land in the bar's columns.
+        let long = "a name long enough to run the whole way across the panel and on";
+        let src: [Line; 30] = core::array::from_fn(|i| Line::item(long, i as u32));
+        let v = ScrollView::build(&src, 320, 240, fonts());
+        let mut with = Gray320x240::new();
+        render(&mut with, &v);
+
+        let bar_x = 320 - fonts().scrollbar - 1;
+        let mut without = ScrollView::build(
+            &src,
+            320,
+            240,
+            Fonts {
+                scrollbar: 0,
+                ..fonts()
+            },
+        );
+        without.off = v.off;
+        let mut plain = Gray320x240::new();
+        render(&mut plain, &without);
+
+        for y in 0..240 {
+            for x in 0..bar_x {
+                assert_eq!(
+                    crate::canvas::Canvas::get(&with, x, y),
+                    crate::canvas::Canvas::get(&plain, x, y),
+                    "the bar changed a pixel at ({x}, {y}), left of its own columns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_one_bit_panel_keeps_its_bar_to_three_columns() {
+        // On 128 pixels the bar is a tax on every row, and on two colours a dim track
+        // does not exist -- so it is narrow, and dotted.
+        let fonts = compact_fonts();
+        assert!(fonts.scrollbar <= 3, "the mono bar grew past three columns");
+        let src: [Line; 30] = core::array::from_fn(|_| Line::body("line"));
+        let v = ScrollView::build(&src, 128, 64, fonts);
+        let mut c = crate::Mono128x64::new();
+        render(&mut c, &v);
+        let left_of_bar = 128 - fonts.scrollbar - 1;
+        let inked: Vec<(usize, usize)> = (0..64)
+            .flat_map(|y| (left_of_bar..128).map(move |x| (x, y)))
+            .filter(|&(x, y)| crate::canvas::Canvas::get(&c, x, y) == INK)
+            .collect();
+        assert!(!inked.is_empty(), "the mono panel drew no bar at all");
+        assert!(
+            inked.iter().all(|&(x, _)| x >= left_of_bar),
+            "the mono bar drew outside its columns"
+        );
+        // The track is dotted: in the rows below the thumb, every other one is blank.
+        let column = left_of_bar + fonts.scrollbar / 2;
+        let dots: Vec<usize> = (0..64)
+            .filter(|&y| crate::canvas::Canvas::get(&c, column, y) == INK)
+            .collect();
+        assert!(dots.len() > 8, "the dotted track is missing");
+        assert!(dots.len() < 64, "the track is solid, not dotted");
     }
 }

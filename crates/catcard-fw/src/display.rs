@@ -801,6 +801,9 @@ pub const FONTS: catcard_ui::scroll::Fonts<'static> = catcard_ui::scroll::Fonts 
     margin: 2,
     // One bit a pixel on the glass: a row's mark is drawn in its own one-bit art.
     colour: false,
+    // Three columns of a 128-wide row, which is as much as this panel can give up, and
+    // on two colours a wider bar is a wall. The track is dotted -- see `scroll`.
+    scrollbar: 3,
 };
 /// As above, for the Q1's colour panel: a 10x20 title and body over a 7x14 small face.
 #[cfg(feature = "board-q1")]
@@ -813,6 +816,9 @@ pub const FONTS: catcard_ui::scroll::Fonts<'static> = catcard_ui::scroll::Fonts 
     // The panel takes 16 bits a pixel, so a row's mark goes out in full colour past the
     // canvas -- see `draw_with_marks`.
     colour: true,
+    // Visible from across a desk and it costs a list nothing: six of 320 columns, in
+    // the gutter the scroll arrows used to sit in.
+    scrollbar: 6,
 };
 
 /// Panel height in pixels, for sizing a pager window against a layout at runtime (the
