@@ -247,9 +247,56 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
 /// The main menu, ordered for the device in front of you.
 fn main_items(no_seed: bool) -> &'static [&'static str] {
     if no_seed {
-        MAIN_ITEMS_BLANK
-    } else {
-        MAIN_ITEMS
+        return MAIN_ITEMS_BLANK;
+    }
+    #[cfg(not(feature = "board-q1"))]
+    if !crate::key::is_root() {
+        return main_items_with_key();
+    }
+    MAIN_ITEMS
+}
+
+/// [`MAIN_ITEMS`] with the wallet in force named at the top, as `[0123ABCD]`.
+///
+/// **For the boards with no status bar.** The Q1 says this along its top edge on every
+/// screen; mk4 and mk5 have sixty-four rows of monochrome and no room for a bar, so the
+/// only place to put it is the menu -- which is where stock puts it too, as a header
+/// item that selects the same thing this one does.
+///
+/// It matters more here than on the Q1, not less: without it there is nothing anywhere
+/// to distinguish a passphrase wallet from the one whose words are written down, and
+/// the first sign of being in the wrong one is an export that names a stranger.
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "XFP header item" [C]
+#[cfg(not(feature = "board-q1"))]
+fn main_items_with_key() -> &'static [&'static str] {
+    use core::fmt::Write as _;
+
+    /// The row's text, which has to outlive the call: a menu is a slice of `&'static`.
+    static mut ROW: heapless::String<12> = heapless::String::new();
+    /// The list handed back, rebuilt each time because the fingerprint can change.
+    static mut ITEMS: [&str; 1 + MAIN_ITEMS.len()] = [""; 1 + MAIN_ITEMS.len()];
+
+    // SAFETY: foreground only. The menu is redrawn from one place and holds no borrow
+    // of either across a rebuild.
+    unsafe {
+        let row = &mut *core::ptr::addr_of_mut!(ROW);
+        row.clear();
+        match crate::pubkeys::known_fingerprint() {
+            // Square brackets, as stock spells a wallet that is not the master.
+            Some([a, b, c, d]) => {
+                let _ = write!(row, "[{a:02X}{b:02X}{c:02X}{d:02X}]");
+            }
+            // Somewhere other than the root, but nothing has derived its fingerprint
+            // yet. Name the kind rather than invent a number.
+            None => {
+                let _ = write!(row, "[{}]", crate::key::label());
+            }
+        }
+        let items = &mut *core::ptr::addr_of_mut!(ITEMS);
+        items[0] = row.as_str();
+        items[1..].copy_from_slice(MAIN_ITEMS);
+        &items[..]
     }
 }
 
@@ -1431,38 +1478,6 @@ fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
     next.min(last)
 }
 
-/// The wallet in force, as `[0123ABCD]`, or nothing when it is the root.
-///
-/// Stock puts this at the top of the home menu and it earns the space: every tool below
-/// it -- the addresses, the exports, the signing -- works in whichever wallet this
-/// names, and there is otherwise no way to tell a passphrase wallet from the one whose
-/// words are written down until something has already been exported from the wrong one.
-///
-/// A line above the grid rather than a seventh cell: the grid is six, and six is what
-/// the menu has. `Derive` is the cell that changes it.
-///
-/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "XFP header item" [C]
-#[cfg(feature = "board-q1")]
-fn key_header() -> Option<heapless::String<12>> {
-    use core::fmt::Write as _;
-    if crate::key::is_root() {
-        return None;
-    }
-    let mut out: heapless::String<12> = heapless::String::new();
-    match crate::pubkeys::known_fingerprint() {
-        // Square brackets, as stock spells a wallet that is not the master.
-        Some([a, b, c, d]) => {
-            let _ = write!(out, "[{a:02X}{b:02X}{c:02X}{d:02X}]");
-        }
-        // In another wallet, but nothing has derived its fingerprint yet. Say which
-        // kind rather than a number that would have to be invented.
-        None => {
-            let _ = write!(out, "[{}]", crate::key::label());
-        }
-    }
-    Some(out)
-}
-
 /// The main menu as a grid of icons.
 #[cfg(feature = "board-q1")]
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
@@ -1480,9 +1495,7 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Utils" => Some(&art::UTILS),
             "Settings" => Some(&art::SETTINGS),
             "Scan QR" => Some(&art::SCAN_QR_CODE),
-            // No art of its own yet: the cell keeps its name and loses its picture,
-            // which is better than borrowing one that reads as something else.
-            "Derive" => None,
+            "Derive" => Some(&art::DERIVE_KEY),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
@@ -1491,29 +1504,15 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
         };
         let _ = cells.push(Cell { label, icon });
     }
-    let header = key_header();
+    // No header row here: the Q1 has a status bar, and it already names the wallet in
+    // force and shows its fingerprint. A second copy on the grid would be the same
+    // answer twice, in the screen with the least room for it.
+    //
+    // The boards with no bar put the row in the menu instead -- see `main_items`.
+    //
     // The art's own palette, not the amber ramp: this screen is pictures.
     display::draw_with(panel, &art::PALETTE, |c| {
-        use catcard_ui::canvas::Canvas as _;
-        let Some(head) = header.as_deref() else {
-            catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
-            return;
-        };
-        // The grid clears whatever canvas it is given, so the header is drawn on the
-        // rows the grid is not given.
-        let line = display::LAYOUT.body.line_height();
-        let (w, _) = (c.width(), c.height());
-        c.fill_rect(0, 0, w, line, catcard_ui::canvas::PAPER);
-        let _ = catcard_ui::text::draw_text_in(
-            c,
-            display::LAYOUT.body,
-            4,
-            0,
-            head,
-            catcard_ui::canvas::INK,
-        );
-        let mut below = catcard_ui::canvas::Inset::new(c, line);
-        catcard_ui::grid::render(&mut below, display::LAYOUT.body, &cells, cursor);
+        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
     });
 }
 
@@ -1642,11 +1641,10 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
     let mut note = Line::new();
     let title = match screen {
         Screen::Main => {
-            // A passphrase wallet looks exactly like the plain one otherwise, and the
-            // difference is which coins the device can spend. Say so where it is always
-            // visible.
-            if crate::passphrase::is_set() {
-                let _ = note.push_str("passphrase wallet");
+            // Another wallet looks exactly like the root otherwise, and the difference
+            // is which coins the device can spend. Say so where it is always visible.
+            if !crate::key::is_root() {
+                let _ = note.push_str(crate::key::label());
             }
             "CatCard"
         }

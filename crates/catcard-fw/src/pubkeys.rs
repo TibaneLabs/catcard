@@ -213,8 +213,8 @@ pub(crate) fn warm_fingerprint(
 /// stretch a seed to decorate itself would make the device unusable, and an empty space
 /// is the honest answer until a screen that needed the seed anyway has paid for it.
 ///
-/// Only the Q1 has a status bar to put it in.
-#[cfg(feature = "board-q1")]
+/// The Q1 paints it in the status bar; the boards without one name the wallet in the
+/// menu's own header row instead, and want the same "only if free" rule there.
 pub(crate) fn known_fingerprint() -> Option<[u8; 4]> {
     // SAFETY: foreground only; the read finishes within this statement.
     unsafe { *core::ptr::addr_of!(FINGERPRINT) }
