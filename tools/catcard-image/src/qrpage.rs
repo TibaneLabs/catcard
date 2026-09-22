@@ -42,8 +42,15 @@ const MAX_VERSION: u8 = 40;
 /// refusing. But when the sender is ours there is no reason to make it: every part lands
 /// as whole words and the medium is never read during the transfer at all.
 ///
-/// 1260 is the largest such size whose line still fits the device's scanner buffer.
-pub const DEFAULT_PART: usize = 1260;
+/// **Not the largest that fits.** 1260 was, and its symbol is 125 modules a side --
+/// dense enough that reading it off a screen is a struggle, and a part that cannot be
+/// read makes the transfer impossible rather than merely slow. 460 bytes is 77 modules,
+/// so each one is about 1.6x the size on the same display, at the cost of a longer
+/// animation. Fewer, denser codes is the wrong trade when a miss costs a whole loop.
+///
+/// The floor is BBQr's 1296 parts: below about 340 bytes a half-megabyte image no
+/// longer fits in a file, whatever the symbol looks like. `--part` covers the range.
+pub const DEFAULT_PART: usize = 460;
 
 /// Compress the image if that makes fewer codes, and say which was used.
 ///
@@ -64,8 +71,11 @@ fn best_encoding(image: &[u8]) -> (Encoding, Vec<u8>) {
     }
 }
 
-/// Build the page.
-pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
+/// Build the page, and say how big a symbol it came out as.
+///
+/// The module count is what decides whether this is readable at all, so it is reported
+/// rather than left for someone to measure off the screen.
+pub fn render(image: &[u8], part: usize, title: &str) -> Result<(String, usize)> {
     if part == 0 || !part.is_multiple_of(5) {
         bail!("part size must be a positive multiple of 5 (got {part})");
     }
@@ -125,7 +135,11 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<String> {
         frames.push((w, bits));
     }
 
-    Ok(page(&frames, total, image.len(), part, title, encoding))
+    let modules = frames.first().map(|(w, _)| *w).unwrap_or(0);
+    Ok((
+        page(&frames, total, image.len(), part, title, encoding),
+        modules,
+    ))
 }
 
 /// The HTML, with the frames as base64 bit-planes.
@@ -249,14 +263,17 @@ pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image".into());
-    let html = render(&image, part, &title)?;
+    let (html, modules) = render(&image, part, &title)?;
     std::fs::write(out, html).with_context(|| format!("writing {}", out.display()))?;
     let (encoding, body) = best_encoding(&image);
+    let parts = parts_needed(body.len(), part);
     println!(
-        "wrote         {} ({} parts of {} bytes, {})",
+        "wrote         {} ({} parts of {} bytes, {} modules, ~{}s a loop, {})",
         out.display(),
-        parts_needed(body.len(), part),
+        parts,
         part,
+        modules,
+        parts / 5,
         match encoding {
             Encoding::Zlib => format!(
                 "deflate: {} of {} bytes, {:.1}%",
@@ -292,7 +309,7 @@ mod tests {
     /// every part after the first at the wrong offset, and one that is not a whole
     /// number of words makes the device merge every part edge instead of writing it.
     #[test]
-    fn the_default_part_is_the_largest_that_fits() {
+    fn the_default_part_suits_both_formats_and_the_scanner() {
         assert_eq!(
             DEFAULT_PART % 5,
             0,
@@ -300,13 +317,12 @@ mod tests {
         );
         assert_eq!(DEFAULT_PART % 4, 0, "the device stages whole words");
         assert!(part_len(Encoding::Base32, DEFAULT_PART) <= SCANNER_BUFFER);
-        // The largest such size that fits: the next one up does not.
-        assert!(part_len(Encoding::Base32, DEFAULT_PART + 20) > SCANNER_BUFFER);
-        // And it is what base32 alone would allow, rounded down to a whole word.
-        assert_eq!(
-            fits(Encoding::Base32, SCANNER_BUFFER) / 20 * 20,
-            DEFAULT_PART
-        );
+        // Deliberately *not* the largest that fits: it is chosen for how big the symbol
+        // comes out, so there is room above it for a caller who finds the codes easy.
+        assert!(DEFAULT_PART < fits(Encoding::Base32, SCANNER_BUFFER));
+        // And room below: a half-megabyte image has to stay inside BBQr's 1296 parts,
+        // which is the real floor on how small a part can be.
+        assert!(parts_needed(512 * 1024, DEFAULT_PART) < 1296);
         // `Z` is base32 underneath, so the line arithmetic is the same either way.
         assert_eq!(
             part_len(Encoding::Zlib, DEFAULT_PART),
