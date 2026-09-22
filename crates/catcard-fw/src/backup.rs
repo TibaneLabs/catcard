@@ -371,7 +371,7 @@ pub(crate) fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut 
         }
     }
 
-    let Some(path) = menu::browse_sd(ui, "Pick a backup", Some("7z"), true) else {
+    let Some(path) = menu::browse_sd(ui, "Pick a backup", Some("7z"), menu::Browse::File) else {
         return;
     };
 

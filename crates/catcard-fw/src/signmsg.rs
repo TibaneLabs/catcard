@@ -145,7 +145,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign text file";
 
-    let Some(path) = menu::browse_sd(ui, "Pick a .txt", Some("txt"), true) else {
+    let Some(path) = menu::browse_sd(ui, "Pick a .txt", Some("txt"), menu::Browse::File) else {
         return;
     };
     let mut raw = [0u8; MAX_FILE];

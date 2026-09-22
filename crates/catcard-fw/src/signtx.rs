@@ -293,7 +293,8 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         // says which.
         Some(p) => p,
         None => {
-            let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), true) else {
+            let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), menu::Browse::File)
+            else {
                 return;
             };
             let mut path: heapless::String<PATH_MAX> = heapless::String::new();

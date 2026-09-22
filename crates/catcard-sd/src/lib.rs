@@ -655,3 +655,86 @@ impl AnyFile {
 
 #[cfg(test)]
 mod tests;
+
+/// Turning what somebody typed into a name a card will take.
+pub mod name {
+    /// The longest name this builds, extension included.
+    pub const MAX: usize = 40;
+
+    /// `typed` as a file name: the characters a FAT volume takes, an extension added
+    /// where none was given, and nothing that could climb out of the folder it goes in.
+    ///
+    /// A path separator is **dropped, not rejected**: the caller has already chosen the
+    /// folder, and someone typing `../secrets` means a file, not a place. What comes back
+    /// is a bare name -- never a path -- so a caller that joins it to a folder cannot be
+    /// talked into writing somewhere else.
+    ///
+    /// `None` when nothing usable is left: a name of slashes and dots is not a name.
+    pub fn from_typed(typed: &str, ext: &str) -> Option<heapless::String<MAX>> {
+        let mut out: heapless::String<MAX> = heapless::String::new();
+        for c in typed.chars() {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                let _ = out.push(c);
+            }
+        }
+        // A leading dot hides the file on the computer that reads the card next, and a
+        // trailing dot or space is a name Windows will not open.
+        while out.starts_with([' ', '.']) {
+            out.remove(0);
+        }
+        while out.ends_with([' ', '.']) {
+            out.pop();
+        }
+        if out.is_empty() {
+            return None;
+        }
+        if !out.contains('.') {
+            if out.len() + 1 + ext.len() > MAX {
+                while out.len() + 1 + ext.len() > MAX {
+                    out.pop();
+                }
+            }
+            let _ = out.push('.');
+            let _ = out.push_str(ext);
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_plain_name_gains_the_extension_it_lacks() {
+            assert_eq!(from_typed("notes", "txt").unwrap(), "notes.txt");
+            assert_eq!(from_typed("notes.md", "txt").unwrap(), "notes.md");
+        }
+
+        /// The one that matters: nothing typed can name a place, only a thing.
+        #[test]
+        fn a_name_cannot_climb_out_of_its_folder() {
+            for typed in ["../../secrets", "/etc/passwd", "..\\..\\x"] {
+                let name = from_typed(typed, "bin").unwrap();
+                assert!(!name.contains('/'), "{typed} -> {name}");
+                assert!(!name.contains('\\'), "{typed} -> {name}");
+                assert!(!name.starts_with('.'), "{typed} -> {name}");
+            }
+        }
+
+        #[test]
+        fn a_name_with_nothing_usable_in_it_is_refused() {
+            for typed in ["", "///", "...", "   ", "/../"] {
+                assert_eq!(from_typed(typed, "txt"), None, "{typed:?}");
+            }
+        }
+
+        /// Long input is cut to fit with its extension, rather than losing the extension
+        /// or overflowing the name.
+        #[test]
+        fn a_long_name_still_ends_in_its_extension() {
+            let name = from_typed(&"a".repeat(80), "psbt").unwrap();
+            assert!(name.len() <= MAX);
+            assert!(name.ends_with(".psbt"), "{name}");
+        }
+    }
+}

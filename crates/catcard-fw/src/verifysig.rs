@@ -38,7 +38,8 @@ const MAX_FILE: usize = 2048;
 pub(crate) fn screen(ui: &mut Ui<'_>) {
     const HEAD: &str = "Verify sig";
 
-    let Some(path) = menu::browse_sd(ui, "Pick a signed .txt", Some("txt"), true) else {
+    let Some(path) = menu::browse_sd(ui, "Pick a signed .txt", Some("txt"), menu::Browse::File)
+    else {
         return;
     };
     let mut raw = [0u8; MAX_FILE];

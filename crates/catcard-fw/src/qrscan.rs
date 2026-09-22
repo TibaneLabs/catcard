@@ -744,8 +744,21 @@ fn offer(
         let head = &lease.bytes()[at..at + len.min(16)];
         crate::catlog!("qr: {} bytes, not recognised; starts {:02x?}", len, head);
     }
+    // What this device can do with it, and -- for anything that is data rather than a
+    // wallet -- keeping it: a code scanned off a screen is often something the owner
+    // wants on the card, whether or not this firmware understands it. Not offered for a
+    // seed, which is never written to removable media, and not for an image, which is a
+    // quarter of a megabyte and cannot have arrived here.
     let (note, actions) = what.offer();
-    if actions.is_empty() {
+    let keep = matches!(what, Content::Psbt | Content::Text | Content::Unknown);
+    let mut rows: heapless::Vec<&str, 3> = heapless::Vec::new();
+    for a in actions {
+        let _ = rows.push(a);
+    }
+    if keep {
+        let _ = rows.push(SAVE_ROW);
+    }
+    if rows.is_empty() {
         // As above: the memory is handed back before anyone is asked to read anything.
         drop(lease);
         let mut said: heapless::String<32> = heapless::String::new();
@@ -755,7 +768,11 @@ fn offer(
         menu::wait_for_any_key(ui);
         return;
     }
-    if menu::choose(ui, head, note, actions).is_none() {
+    let Some(chosen) = menu::choose(ui, head, note, &rows) else {
+        return;
+    };
+    if rows[chosen] == SAVE_ROW {
+        save_to_card(ui, &lease.bytes()[at..at + len], what);
         return;
     }
 
@@ -770,6 +787,65 @@ fn offer(
         }
         Content::Unknown => {}
     }
+}
+
+/// The row that keeps what was scanned.
+const SAVE_ROW: &str = "Save to card";
+
+/// Write scanned bytes to the card: a folder the owner picks, under a name they type.
+///
+/// The name is theirs because the device has nothing better to call it -- a code carries
+/// no filename -- and the folder is theirs because a card that already holds someone's
+/// files should not gain ours at its root without being asked. What the device supplies
+/// is the extension, from what the bytes turned out to be, so the file opens as what it
+/// is on the computer that reads the card next.
+fn save_to_card(ui: &mut Ui<'_>, bytes: &[u8], what: Content) {
+    const HEAD: &str = "Save to card";
+    let ext = match what {
+        Content::Psbt => "psbt",
+        Content::Text => "txt",
+        _ => "bin",
+    };
+
+    let Some(folder) = menu::browse_sd(ui, "Where to save", None, menu::Browse::Folder) else {
+        return;
+    };
+    let Some(typed) = crate::passphrase::read(ui, "File name") else {
+        return;
+    };
+    let Some(name) = catcard_sd::name::from_typed(typed.as_str(), ext) else {
+        menu::message(
+            ui.panel,
+            HEAD,
+            "that name has no",
+            "characters a card takes",
+        );
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    let mut path: heapless::String<{ menu::BROWSE_PATH_MAX }> = heapless::String::new();
+    let _ = path.push_str(folder.as_str());
+    if !path.ends_with('/') {
+        let _ = path.push('/');
+    }
+    if path.push_str(&name).is_err() {
+        menu::message(ui.panel, HEAD, "that path is too long", "");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+
+    menu::card_wait(ui.panel, HEAD, "writing to the card");
+    match menu::write_card_file(&path, bytes) {
+        Ok(()) => {
+            crate::catlog!("qr: {} bytes saved as {}", bytes.len(), path.as_str());
+            menu::message(ui.panel, "Saved", &name, "on the card");
+        }
+        Err(why) => {
+            crate::catlog!("qr: save failed: {}", why);
+            menu::message(ui.panel, HEAD, why, "nothing was written");
+        }
+    }
+    menu::wait_for_any_key(ui);
 }
 
 /// Give the staging memory back with the first `len` bytes of it zeroed.

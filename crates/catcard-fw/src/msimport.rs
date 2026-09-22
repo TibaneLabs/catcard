@@ -386,7 +386,7 @@ pub(crate) fn import(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) {
-    let Some(path) = menu::browse_sd(ui, "Pick a descriptor", None, true) else {
+    let Some(path) = menu::browse_sd(ui, "Pick a descriptor", None, menu::Browse::File) else {
         return;
     };
 

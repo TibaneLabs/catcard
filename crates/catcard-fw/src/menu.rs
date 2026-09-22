@@ -1198,7 +1198,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::BrowseSd => to(
             |a| {
-                browse_sd(a.ui, "SD card", None, false);
+                browse_sd(a.ui, "SD card", None, Browse::View);
             },
             Screen::Utils,
         ),
@@ -2919,7 +2919,7 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
     // Pick the firmware from the card by browsing for a .dfu, rather than guessing at a
     // fixed name. Cancelling the browser cancels the install.
-    let chosen = browse_sd(ui, "Pick a .dfu", Some("dfu"), true);
+    let chosen = browse_sd(ui, "Pick a .dfu", Some("dfu"), Browse::File);
     let Some(chosen) = chosen else {
         return;
     };
@@ -3283,7 +3283,7 @@ const BROWSE_NAME_MAX: usize = 64;
 /// Most entries one directory shows; beyond this the listing stops (rare on a wallet card).
 const BROWSE_ENTRIES: usize = 48;
 /// Longest path the browser tracks as it descends.
-const BROWSE_PATH_MAX: usize = 160;
+pub(crate) const BROWSE_PATH_MAX: usize = 160;
 /// The id the "Parent" row carries; real entries carry their (small) index.
 const BROWSE_PARENT: u32 = u32::MAX;
 
@@ -3320,6 +3320,20 @@ enum FileChoice {
     /// anything is written.
     Delete,
 }
+
+/// What the browser is for.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Browse {
+    /// Look around. A file shows its details, and can be deleted from there.
+    View,
+    /// Choose a file, whose full path comes back.
+    File,
+    /// Choose a folder to put something in; the path that comes back is a directory.
+    Folder,
+}
+
+/// The id the "use this folder" row carries, out of the way of any entry's index.
+const BROWSE_USE_FOLDER: u32 = BROWSE_PARENT - 1;
 
 /// The id the "Delete file" row carries. The detail screen has exactly one selectable
 /// row, so any id would do; naming it keeps the match below readable.
@@ -3397,14 +3411,18 @@ fn delete_card_file(ui: &mut Ui<'_>, vol: &mut CardVolume, path: &str, name: &st
 /// is a viewer and returns `None`. `filter`, when set, hides files without that extension
 /// (folders always show), which is how the caller narrows to `.dfu`, `.psbt`, and so on.
 ///
+/// [`Browse::Folder`] picks a place rather than a thing: every listing gains a row that
+/// takes the folder it is showing, and the root counts as one.
+///
 /// A mount or read failure is reported with the step it stopped at, so a missing card, a
 /// filesystem it cannot mount (exFAT, today) and a read error tell themselves apart.
 pub(crate) fn browse_sd(
     ui: &mut Ui<'_>,
     title: &str,
     filter: Option<&str>,
-    pick: bool,
+    mode: Browse,
 ) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    let pick = matches!(mode, Browse::File);
     fn fail(ui: &mut Ui<'_>, why: &str) {
         message(ui.panel, "SD card", why, "any key to go back");
         wait_for_any_key(ui);
@@ -3493,6 +3511,14 @@ pub(crate) fn browse_sd(
                 let _ = lines
                     .push(DLine::item("Parent", BROWSE_PARENT).with_icon(&catcard_ui::icons::BACK));
             }
+            // First, so a folder chosen at a glance is one press: the row is about the
+            // listing on screen, not about anything in it.
+            if mode == Browse::Folder {
+                let _ = lines.push(
+                    DLine::item("Save here", BROWSE_USE_FOLDER)
+                        .with_icon(&catcard_ui::icons::FOLDER),
+                );
+            }
             if !listing_ok {
                 let _ = lines.push(DLine::body("(could not read)").centered());
             } else if entries.is_empty() {
@@ -3516,6 +3542,12 @@ pub(crate) fn browse_sd(
                     return None;
                 }
                 pop_segment(&mut path);
+            }
+            DocExit::Selected(BROWSE_USE_FOLDER) => {
+                // The root is a folder like any other, and it is spelled "/".
+                let mut here: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
+                let _ = here.push_str(if path.is_empty() { "/" } else { &path });
+                return Some(here);
             }
             DocExit::Selected(BROWSE_PARENT) => pop_segment(&mut path),
             DocExit::Selected(idx) => {
