@@ -361,3 +361,196 @@ fn impossible_numbering_is_refused_when_writing() {
         );
     }
 }
+
+// --- single-part URs ----------------------------------------------------------------
+
+/// A UR with no sequence field is the whole message, and reads as one fragment.
+///
+/// Most `crypto-hdkey` and `crypto-account` URs, and a PSBT small enough for one
+/// symbol, arrive this way; refusing them meant refusing most of what a wallet shows.
+#[test]
+fn a_single_part_ur_is_the_whole_message() {
+    let message = payload(120);
+    let mut line = vec![0u8; encode::single_len("crypto-psbt", message.len())];
+    let n = encode::single("crypto-psbt", &message, &mut line).expect("room");
+    let text = core::str::from_utf8(&line[..n]).expect("ascii");
+    assert!(!text.contains("1-1"), "no sequence field at all");
+
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    let p = c.accept(text, &mut scratch).expect("a UR");
+    assert_eq!(
+        (p.index, p.offset, p.len, p.total),
+        (0, 0, message.len(), 1)
+    );
+    assert_eq!(&scratch[p.at.clone()], &message[..]);
+    c.confirm(p);
+
+    assert!(c.complete(), "one fragment is all of them");
+    assert!(c.verify(&message));
+}
+
+/// A single-part UR is shorter than the same message as `1-1`, which is why it is
+/// worth writing rather than always numbering.
+#[test]
+fn a_single_part_ur_is_shorter_than_a_one_part_animation() {
+    let message = payload(120);
+    let single = encode::single_len("crypto-psbt", message.len());
+    let numbered = encode::encoded_len("crypto-psbt", message.len(), 1, 1);
+    assert!(single < numbered, "{single} vs {numbered}");
+}
+
+/// The last fragment of a multi-part message carries padding; a single-part one never
+/// does, because there is nothing to pad out to.
+#[test]
+fn a_single_part_ur_has_no_padding() {
+    for len in [1usize, 23, 24, 255, 256, 1000] {
+        let message = payload(len);
+        let mut line = vec![0u8; encode::single_len("bytes", len)];
+        let n = encode::single("bytes", &message, &mut line).unwrap();
+        let mut scratch = vec![0u8; 2048];
+        let mut c = Collector::new();
+        let p = c
+            .accept(core::str::from_utf8(&line[..n]).unwrap(), &mut scratch)
+            .unwrap();
+        assert_eq!(p.len, len, "{len} bytes");
+        assert_eq!(p.at.len(), len, "{len} bytes, no pad");
+    }
+}
+
+// --- the type is part of the message ------------------------------------------------
+
+/// The collector says what it is collecting, lower-cased whatever the line's case.
+#[test]
+fn the_type_is_reported() {
+    let message = payload(100);
+    let mut scratch = vec![0u8; 512];
+
+    let mut c = Collector::new();
+    assert_eq!(c.ur_type(), None, "nothing seen yet");
+    assert_eq!(c.kind(), None);
+
+    let line = part_line(&message, 2, 1).to_ascii_uppercase();
+    let p = c.accept(&line, &mut scratch).unwrap();
+    c.confirm(p);
+    assert_eq!(c.ur_type(), Some("crypto-psbt"));
+    assert_eq!(c.kind(), Some(registry::Kind::Psbt));
+}
+
+/// A type nobody has registered still assembles; it simply has no kind.
+///
+/// The transport does not care what it is carrying, and a device that refused an
+/// unknown type would refuse a payload it could still save to a card.
+#[test]
+fn an_unknown_type_still_collects() {
+    let message = payload(100);
+    let mut line = vec![0u8; 1024];
+    let n = encode::single("something-else", &message, &mut line).unwrap();
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    let p = c
+        .accept(core::str::from_utf8(&line[..n]).unwrap(), &mut scratch)
+        .expect("a UR");
+    c.confirm(p);
+    assert_eq!(c.ur_type(), Some("something-else"));
+    assert_eq!(c.kind(), None);
+}
+
+/// A part whose type is not the type the others had is a different message.
+///
+/// Two animations in front of the camera at once, of the same length and with the
+/// same checksum, would otherwise assemble into a document neither sender sent. The
+/// type is checked the same way the checksum is.
+#[test]
+fn a_type_that_changes_mid_message_is_refused() {
+    let message = payload(1000);
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+
+    let first = c.accept(&part_line(&message, 5, 1), &mut scratch).unwrap();
+    c.confirm(first);
+
+    // The very same part, relabelled. Everything the old reader looked at agrees.
+    let relabelled = part_line(&message, 5, 2).replace("crypto-psbt", "bytes");
+    assert_eq!(
+        c.accept(&relabelled, &mut scratch),
+        Err(Error::TypeMismatch)
+    );
+    assert_eq!(c.have(), 1, "and it is not counted");
+}
+
+/// `crypto-psbt` and `psbt` are the same registry item, but not the same animation:
+/// a sender uses one name throughout, so a change of name mid-message is still a
+/// second sender.
+#[test]
+fn even_two_names_for_one_kind_do_not_mix() {
+    let message = payload(1000);
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    let first = c.accept(&part_line(&message, 5, 1), &mut scratch).unwrap();
+    c.confirm(first);
+    let renamed = part_line(&message, 5, 2).replace("ur:crypto-psbt/", "ur:psbt/");
+    assert_eq!(c.accept(&renamed, &mut scratch), Err(Error::TypeMismatch));
+}
+
+/// A single-part UR cannot be mixed into a multi-part one, or the other way round.
+#[test]
+fn a_single_part_and_a_multi_part_do_not_mix() {
+    let message = payload(1000);
+    let mut scratch = vec![0u8; 2048];
+
+    let mut c = Collector::new();
+    let first = c.accept(&part_line(&message, 5, 1), &mut scratch).unwrap();
+    c.confirm(first);
+
+    let mut whole = vec![0u8; 4096];
+    let n = encode::single("crypto-psbt", &message, &mut whole).unwrap();
+    assert_eq!(
+        c.accept(core::str::from_utf8(&whole[..n]).unwrap(), &mut scratch),
+        Err(Error::Mismatch),
+        "one fragment against five"
+    );
+}
+
+/// A type longer than there is room to remember is refused, not truncated.
+///
+/// A truncated type would compare equal to a different one, which is the whole failure
+/// the type check exists to stop.
+#[test]
+fn a_type_too_long_is_refused() {
+    let long: String = core::iter::repeat_n('a', MAX_TYPE + 1).collect();
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    let line = format!("ur:{long}/aeadaolsrpdt");
+    assert_eq!(c.accept(&line, &mut scratch), Err(Error::TypeTooLong));
+    assert_eq!(c.ur_type(), None);
+}
+
+/// A part that is refused leaves an empty collector empty.
+///
+/// If the type were recorded before the part was believed, a bad line would lock the
+/// collector to a type the sender never used, and every real part after it would be a
+/// mismatch.
+#[test]
+fn a_refused_part_commits_nothing() {
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+
+    // A part numbered past `seq_len`: a fountain mixture, which is skipped.
+    let message = payload(200);
+    let mut cbor = vec![0x85];
+    cbor_uint(3, &mut cbor);
+    cbor_uint(2, &mut cbor);
+    cbor_uint(message.len() as u64, &mut cbor);
+    cbor_uint(crc32(&message) as u64, &mut cbor);
+    cbor_bytes(&[0u8; 100], &mut cbor);
+    let mixture = format!("ur:crypto-psbt/3-2/{}", encode_bytewords(&cbor));
+    assert!(c.accept(&mixture, &mut scratch).is_err());
+    assert_eq!(c.ur_type(), None);
+    assert_eq!(c.about(), None);
+
+    // And a real part is still taken afterwards.
+    let p = c.accept(&part_line(&message, 2, 1), &mut scratch).unwrap();
+    c.confirm(p);
+    assert_eq!(c.ur_type(), Some("crypto-psbt"));
+}

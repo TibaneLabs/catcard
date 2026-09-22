@@ -29,6 +29,38 @@ pub enum Error {
 /// The `ur:` prefix and the separators, without the type or the payload.
 const FRAME: usize = "UR:".len() + 2; // two '/' separators
 
+/// Characters a single-part UR of a `message`-byte message will occupy.
+pub const fn single_len(ty: &str, message: usize) -> usize {
+    // `UR:` + type + one '/' + the bytewords, which carry their own four-byte CRC.
+    "UR:".len() + ty.len() + 1 + bytewords::encoded_len(message, Style::Minimal)
+}
+
+/// Write the whole message as one UR, with no sequence field.
+///
+/// The shape a reader sees when a message fits in one code: the bytewords are the
+/// message itself, with no five-element wrapper, so it is shorter than the same
+/// message as `1-1`. Returns [`Error::TooLong`] when it will not fit `out` -- a caller
+/// that is sizing against a QR's capacity uses [`single_len`] first and falls back to
+/// [`part`].
+///
+/// Source: BCR-2020-005 §"Types" -- `ur:<type>/<bytewords>`. [C]
+pub fn single(ty: &str, message: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    let need = single_len(ty, message.len());
+    if need > out.len() {
+        return Err(Error::TooLong);
+    }
+    let head = 3 + ty.len() + 1;
+    out[..3].copy_from_slice(b"UR:");
+    out[3..3 + ty.len()].copy_from_slice(ty.as_bytes());
+    out[3 + ty.len()] = b'/';
+    let n = bytewords::encode_to_slice(message, Style::Minimal, &mut out[head..])
+        .map_err(|_| Error::TooLong)?;
+    // Upper case throughout, for the reason in this module's header: one lower-case
+    // letter drops the whole symbol out of QR's alphanumeric mode.
+    out[..head + n].make_ascii_uppercase();
+    Ok(head + n)
+}
+
 /// Characters a part's line will occupy.
 ///
 /// `fragment` is the payload bytes this part carries; `ty` is the UR type, and the

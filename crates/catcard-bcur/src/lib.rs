@@ -4,19 +4,38 @@
 //! types are Bitcoin artefacts -- a PSBT, a transaction. Anything else needs this, which
 //! is why it is not an alternative but a second requirement.
 //!
-//! A part looks like:
+//! A UR comes in two shapes. A whole message in one code:
+//!
+//! ```text
+//! ur:<type>/<bytewords>
+//! ```
+//!
+//! where the bytewords decode to the message itself; or one part of several:
 //!
 //! ```text
 //! ur:<type>/<seqNum>-<seqLen>/<bytewords>
 //! ```
 //!
-//! and the bytewords decode to CBOR:
+//! where they decode to CBOR:
 //!
 //! ```text
 //! [ seqNum, seqLen, messageLen, checksum, data ]
 //! ```
 //!
+//! [`Collector`] takes either, and a single-part UR is simply a message of one
+//! fragment -- same `Placed`, same `verify`, so a caller has one path. Most
+//! `crypto-hdkey` and `crypto-account` URs, and a small PSBT, arrive in the first
+//! shape, and refusing them would mean refusing most of what a wallet shows.
+//!
 //! Source: Blockchain Commons BCR-2020-005 and BCR-2024-001.
+//!
+//! # The type is carried
+//!
+//! The UR type says what the message *is* -- a PSBT, an account, opaque bytes -- and
+//! [`registry`] is what unwraps it. So the collector keeps the type it saw and refuses
+//! a part that disagrees: a different type is a different message, exactly as a
+//! different checksum is, and mixing two animations that happen to have the same shape
+//! would assemble a document neither sender sent.
 //!
 //! # What is read, and what is not
 //!
@@ -43,6 +62,7 @@
 #![no_std]
 
 pub mod encode;
+pub mod registry;
 
 mod cbor;
 
@@ -67,6 +87,12 @@ pub enum Error {
     Mixture { seq_num: u32, seq_len: u32 },
     /// This part disagrees with the ones already seen about which message it is.
     Mismatch,
+    /// This part's UR type is not the type the parts before it had.
+    TypeMismatch,
+    /// The UR type is longer than [`MAX_TYPE`]. Every registered type is far shorter;
+    /// this is refused rather than truncated, because a truncated type would compare
+    /// equal to a different one.
+    TypeTooLong,
     /// The part would not fit in the space the caller has.
     TooLong,
 }
@@ -89,6 +115,13 @@ impl From<CborError> for Error {
 /// track, and 1024 fragments at even a kilobyte each is a megabyte of payload -- past
 /// anything that can sensibly be waved at a camera.
 pub const MAX_PARTS: usize = 1024;
+
+/// The longest UR type this will hold on to.
+///
+/// The longest name in BCR-2020-006's registry is `account-descriptor`, at eighteen
+/// characters. Thirty-two is room for a type nobody has registered yet, and it is what
+/// a [`Collector`] costs in bytes for remembering what it is collecting.
+pub const MAX_TYPE: usize = 32;
 
 /// What a part said about itself.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -122,6 +155,8 @@ pub struct Placed {
 pub struct Collector {
     /// What the first part said. Every later part must agree.
     of: Option<Part>,
+    /// The UR type the first part carried, lower-cased. Every later part must agree.
+    ty: heapless::String<MAX_TYPE>,
     seen: [u64; MAX_PARTS / 64],
     count: u32,
 }
@@ -130,6 +165,7 @@ impl Collector {
     pub const fn new() -> Self {
         Collector {
             of: None,
+            ty: heapless::String::new(),
             seen: [0; MAX_PARTS / 64],
             count: 0,
         }
@@ -143,6 +179,24 @@ impl Collector {
     /// What is being collected, once a part has been seen.
     pub fn about(&self) -> Option<Part> {
         self.of
+    }
+
+    /// The UR type being collected, lower-cased, once a part has been seen.
+    ///
+    /// Lower case because that is how the specification writes a type and how a
+    /// registry lookup expects it; a QR carries the whole line upper-cased so the
+    /// symbol can stay in alphanumeric mode.
+    pub fn ur_type(&self) -> Option<&str> {
+        self.of.is_some().then_some(self.ty.as_str())
+    }
+
+    /// The registry item being collected, if it is one this device knows.
+    ///
+    /// `None` for a type outside [`registry::Kind`] -- the transport does not care what
+    /// it is carrying, so an unknown type still assembles; it simply arrives as bytes
+    /// nobody can name.
+    pub fn kind(&self) -> Option<registry::Kind> {
+        registry::Kind::from_ur_type(self.ur_type()?)
     }
 
     /// Fragments seen so far.
@@ -169,8 +223,28 @@ impl Collector {
         // field it carries is a claim the CBOR inside repeats -- parsing it here
         // rejects a malformed line early, and the CBOR is what is believed.
         let ur = Ur::parse(line).map_err(|_| Error::NotUr)?;
+        if ur.ur_type.len() > MAX_TYPE {
+            return Err(Error::TypeTooLong);
+        }
         let n = ur.decode_to_slice(scratch)?;
-        let (part, data) = cbor::part(&scratch[..n])?;
+
+        // A UR with no sequence field carries the whole message, and its bytewords are
+        // the message's own bytes -- there is no five-element part to read, and nothing
+        // is padded. It is the one-fragment case of everything below.
+        let (part, data) = if ur.sequence.is_none() {
+            let message = Part {
+                seq_num: 1,
+                seq_len: 1,
+                message_len: n as u32,
+                // Bytewords already proved this checksum over exactly these bytes, so
+                // it is not a second opinion -- it is what makes `verify` mean the same
+                // thing whichever shape the UR arrived in.
+                checksum: crc32(&scratch[..n]),
+            };
+            (message, 0..n)
+        } else {
+            cbor::part(&scratch[..n])?
+        };
 
         if part.seq_len == 0 || part.seq_len as usize > MAX_PARTS {
             return Err(Error::Numbering);
@@ -187,9 +261,14 @@ impl Collector {
             });
         }
 
+        // The type is checked before the numbers are believed, so that two animations
+        // that happen to share a shape cannot be assembled into one message.
         match self.of {
-            None => self.of = Some(part),
+            None => {}
             Some(seen) => {
+                if !self.ty.eq_ignore_ascii_case(ur.ur_type) {
+                    return Err(Error::TypeMismatch);
+                }
                 if (seen.seq_len, seen.message_len, seen.checksum)
                     != (part.seq_len, part.message_len, part.checksum)
                 {
@@ -208,6 +287,18 @@ impl Collector {
         let offset = fragment * index as usize;
         // The last fragment's tail is padding, and stops at the message's end.
         let len = fragment.min((part.message_len as usize).saturating_sub(offset));
+
+        // Recorded only now that the part is known good, so a refused line leaves an
+        // empty collector empty rather than committed to a type it never accepted.
+        if self.of.is_none() {
+            self.ty.clear();
+            for c in ur.ur_type.chars() {
+                self.ty
+                    .push(c.to_ascii_lowercase())
+                    .map_err(|_| Error::TypeTooLong)?;
+            }
+            self.of = Some(part);
+        }
 
         let bit = 1u64 << (index % 64);
         let fresh = self.seen[index as usize / 64] & bit == 0;
