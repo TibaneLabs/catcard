@@ -16,3 +16,6 @@ catcard.map
 .vscode/
 *.swp
 __pycache__/
+
+# agent worktrees and local session state
+/.claude/
