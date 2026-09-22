@@ -33,6 +33,14 @@
 //!
 //! They tell themselves apart by length: a legacy signature is exactly 65 bytes, and no
 //! witness stack this reads can be.
+//!
+//! # A verdict is about text someone can read
+//!
+//! A message this cannot show faithfully gets no verdict at all ([`Error::Unshowable`]).
+//! "Signature good" over a message the screen truncated, or one whose characters it drew
+//! as something else, is worse than no answer: it is an answer about a different string
+//! from the one the owner is looking at. The bound is the same one the signing side
+//! applies, so this device can always check what it wrote.
 
 use crate::address::{self, AddressKind};
 use crate::bip32::Network;
@@ -84,8 +92,25 @@ pub enum Error {
     Unsupported,
     /// The address is not one this can decode.
     BadAddress,
+    /// The message is not something this device will show faithfully: longer than
+    /// [`MAX_MESSAGE`], or not printable ASCII. No verdict is given about it at all.
+    Unshowable,
     /// Well formed, and not a signature this address made over this message.
     Invalid,
+}
+
+/// Longest message this will give a verdict about.
+pub const MAX_MESSAGE: usize = message::MAX_MESSAGE;
+
+/// Is this a message the screen can put in front of someone unchanged?
+fn showable(message: &str) -> Result<(), Error> {
+    if message.len() > MAX_MESSAGE {
+        return Err(Error::Unshowable);
+    }
+    if !message.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Err(Error::Unshowable);
+    }
+    Ok(())
 }
 
 /// The three fields of an armoured file, borrowed out of it.
@@ -182,6 +207,7 @@ fn compact(signature: &str, out: &mut [u8; MAX_SIG_TEXT]) -> Result<usize, Error
 /// interpreter for -- a P2WSH multisig -- is answered as "cannot check" whatever its
 /// signature looks like, rather than as a signature that failed to parse.
 pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
+    showable(file.message)?;
     let kind = address_kind(file.address)?;
 
     // A prefix names the variant outright; `smp` is the one implemented, and the other two
@@ -222,7 +248,8 @@ pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
 fn legacy_verify(file: &Armoured<'_>, sig: &[u8; message::SIG_LEN]) -> Result<(), Error> {
     let (pubkey, kind) = message::recover(file.message, sig).map_err(|e| match e {
         message::Error::UnsupportedKind => Error::Unsupported,
-        message::Error::NotPrintable | message::Error::TooLong { .. } => Error::Malformed,
+        // Already ruled out by `showable`, and kept here so the two never drift apart.
+        message::Error::NotPrintable | message::Error::TooLong { .. } => Error::Unshowable,
         _ => Error::Invalid,
     })?;
     // Both networks: the same key signs the same message either way, and which network an

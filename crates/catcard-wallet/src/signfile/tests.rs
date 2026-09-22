@@ -259,6 +259,54 @@ fn something_that_is_not_an_armoured_file_is_said_to_be_that() {
 }
 
 #[test]
+fn a_message_the_screen_cannot_show_gets_no_verdict() {
+    // A real signature over a message with a line break in it. The signature is sound and
+    // this still refuses: a device that answers about text it cannot put in front of
+    // someone is answering about a different string.
+    let kw = KeyWork::host();
+    let text = "two\nlines";
+    let sig = bip322::sign(text.as_bytes(), &SECRET, AddressKind::P2wpkh, &kw).unwrap();
+    let mut armour = [0u8; bip322::MAX_ARMOURED];
+    let n = sig.armour(&mut armour).unwrap();
+    let address = address_of(&SECRET, AddressKind::P2wpkh);
+    let script = challenge_of(&address).unwrap();
+    // Sound, as BIP-322 sees it...
+    assert_eq!(
+        bip322::verify(text.as_bytes(), script.as_slice(), sig.as_bytes()),
+        Ok(())
+    );
+
+    let mut file = String::new();
+    write(
+        &mut file,
+        text,
+        &address,
+        core::str::from_utf8(&armour[..n]).unwrap(),
+    )
+    .unwrap();
+    // ...and still no verdict here. The message runs past the separator line when it is
+    // parsed back, so what a reader would see is not what was signed either.
+    assert!(matches!(
+        parse(&file).map(|f| verify(&f)),
+        Ok(Err(Error::Unshowable)) | Err(_)
+    ));
+
+    // Longer than the screen shows, on one line: the same answer.
+    let long = "x".repeat(MAX_MESSAGE + 1);
+    let sig = bip322::sign(long.as_bytes(), &SECRET, AddressKind::P2wpkh, &kw).unwrap();
+    let n = sig.armour(&mut armour).unwrap();
+    let mut file = String::new();
+    write(
+        &mut file,
+        &long,
+        &address,
+        core::str::from_utf8(&armour[..n]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verify(&parse(&file).unwrap()), Err(Error::Unshowable));
+}
+
+#[test]
 fn an_address_this_cannot_decode_is_not_an_invalid_signature() {
     let mut file = String::new();
     write(

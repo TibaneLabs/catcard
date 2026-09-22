@@ -19,6 +19,10 @@
 //! "Cannot check this" is its own answer. A P2WSH multisig file, or one of BIP-322's other
 //! variants, is refused as unreadable rather than reported as a bad signature: a screen
 //! that renders "I have no script interpreter" as "forged" teaches people to ignore it.
+//!
+//! A message this screen cannot show faithfully gets no verdict either. "Signature good"
+//! above a message the panel truncated is an answer about a different string from the one
+//! being read.
 
 use catcard_wallet::signfile::{self, Scheme};
 
@@ -73,6 +77,7 @@ fn describe(e: signfile::Error) -> &'static str {
         signfile::Error::Malformed => "file is damaged",
         signfile::Error::Unsupported => "cannot check this kind",
         signfile::Error::BadAddress => "address not readable",
+        signfile::Error::Unshowable => "message not plain ASCII",
         signfile::Error::Invalid => "signature does NOT match",
     }
 }
