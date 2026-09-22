@@ -83,6 +83,39 @@ pub const GREYS: [u16; 16] = {
     p
 };
 
+/// The device's own ramp: the artwork's background up to white.
+///
+/// This is what an ordinary screen paints in. Index 0 is `#303030` -- the same grey the
+/// icons are drawn on, exactly, so a list and the icon grid are the same surface rather
+/// than two screens that happen to be next to each other. Index 15 is white, which is
+/// what text and a selected row's bar are drawn in.
+///
+/// Neutral all the way up, with no hue in it: the marks in a list carry the colour, and
+/// a ramp with a tint of its own would put a cast on every logo's anti-aliased edge,
+/// which is blended against these levels.
+///
+/// **This replaces the amber.** The bootloader hands over in amber and the stock
+/// firmware stays there, so painting in it was a parity claim: the device did not change
+/// colour between the loader and the firmware. That was worth keeping while the UI was
+/// text on a ramp. It is not worth keeping now that the screens carry pictures drawn on
+/// `#303030` -- amber behind them made every icon look pasted onto the wrong page.
+///
+/// So nothing in this firmware paints in [`AMBER`] any more. The constant stays because
+/// it is the reference's own sixteen values, which is a fact about the hardware worth
+/// keeping written down whether or not a screen uses it.
+pub const SLATE: [u16; 16] = {
+    let mut p = [0u16; 16];
+    let mut i = 0;
+    while i < 16 {
+        // 0x30 to 0xFF in sixteen steps, at each channel's own depth so index 0 is
+        // exactly `#303030` (0x3186) and index 15 is exactly white.
+        let v8 = 0x30 + (0xFF - 0x30) * i / 15;
+        p[i] = rgb565((v8 >> 3) as u8, (v8 >> 2) as u8, (v8 >> 3) as u8);
+        i += 1;
+    }
+    p
+};
+
 /// Black to the Coldcard amber: the hue the bootloader and the stock UI paint in.
 ///
 /// The top of the ramp is `COL_TEXT` = `0xFD60` = (31, 43, 0), and blue stays at zero the

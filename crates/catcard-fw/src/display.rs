@@ -329,7 +329,7 @@ pub fn draw_with_marks(
     f: impl FnOnce(&mut Surface<'_>),
 ) {
     use catcard_ui::art::rgba;
-    let palette = &catcard_ui::st7789::AMBER;
+    let palette = &catcard_ui::st7789::SLATE;
 
     // Exactly what this frame's marks need, and nothing for a list with none: every
     // document screen comes through here.
@@ -918,20 +918,20 @@ static DRAWING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// one. A flush that fails is not worth stopping for -- the device is still reachable over
 /// USB, and the next draw tries again.
 ///
-/// Every ordinary screen paints in [`AMBER`](catcard_ui::st7789::AMBER), the hue the
-/// bootloader hands over in, so the device does not change colour between the loader and
-/// the firmware. The splash and About screens are the exception: they draw through the
-/// artwork's own palette, where text is white so "CatCard" and the version stand off the
-/// cat rather than disappearing into it.
+/// Every ordinary screen paints in [`SLATE`](catcard_ui::st7789::SLATE): white on the
+/// `#303030` the icons are drawn on, so a list of rows and a grid of pictures are the
+/// same surface. The splash and About screens are the exception -- they draw through the
+/// artwork's own palette, which has that same background at index 0 and its own colours
+/// above it.
 pub fn draw(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
-    draw_with(panel, &catcard_ui::st7789::AMBER, f)
+    draw_with(panel, &catcard_ui::st7789::SLATE, f)
 }
 
 /// [`draw`], with the content drawn through a palette of the screen's choosing.
 ///
 /// The status bar keeps its own greys either way; this is the band below it. A screen
-/// full of pixel art needs the art's colours rather than the amber ramp text reads best
-/// in, and the two cannot be mixed on one scanline -- the canvas holds indices and the
+/// full of pixel art needs the art's colours rather than the ramp text reads best in,
+/// and the two cannot be mixed on one scanline -- the canvas holds indices and the
 /// palette is what they mean.
 pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
     // An ordinary frame carries no marks; whatever the last one had is not on this one.
