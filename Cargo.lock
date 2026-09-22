@@ -96,6 +96,15 @@ name = "catcard-alloc"
 version = "7.0.0"
 
 [[package]]
+name = "catcard-backup"
+version = "7.0.0"
+dependencies = [
+ "emjson",
+ "purecrypto",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-bbqr"
 version = "7.0.0"
 dependencies = [

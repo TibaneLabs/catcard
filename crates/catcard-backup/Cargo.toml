@@ -1,0 +1,18 @@
+[package]
+name = "catcard-backup"
+description = "Encrypted wallet backup: the plaintext body and the 7-Zip AES container around it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+emjson = { workspace = true }
+purecrypto = { workspace = true, features = ["hash", "cipher"] }
+zeroize = { workspace = true, features = ["derive"] }
