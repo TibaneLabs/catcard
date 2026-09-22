@@ -25,6 +25,18 @@ use outscript::bbqr::{deflate_len_bound, deflate_to_slice};
 /// line is longer is not read at all -- silently, since the scan just never completes.
 const SCANNER_BUFFER: usize = 2048;
 
+/// Milliseconds each code is shown for, unless the caller says otherwise.
+///
+/// **Match the reader, do not outrun it.** This was 200 ms, which is fine for a phone
+/// and wrong for this scanner: it takes about a second a code, so it caught roughly one
+/// frame in five and *which* one was a lottery. Collecting every part by random
+/// sampling is the coupon-collector problem -- about `n ln n` reads, so nine hundred
+/// parts needs some six thousand scans and takes hours.
+///
+/// Shown a little slower than the reader is, the same transfer is sequential: each code
+/// is read once, in order, and the whole file lands in one pass.
+pub const DEFAULT_MS: u32 = 1100;
+
 /// The largest symbol this will build. Version 40 is the largest there is; the encoder
 /// picks the smallest that fits, so this only sizes the buffers.
 const MAX_VERSION: u8 = 40;
@@ -75,7 +87,7 @@ fn best_encoding(image: &[u8]) -> (Encoding, Vec<u8>) {
 ///
 /// The module count is what decides whether this is readable at all, so it is reported
 /// rather than left for someone to measure off the screen.
-pub fn render(image: &[u8], part: usize, title: &str) -> Result<(String, usize)> {
+pub fn render(image: &[u8], part: usize, ms: u32, title: &str) -> Result<(String, usize)> {
     if part == 0 || !part.is_multiple_of(5) {
         bail!("part size must be a positive multiple of 5 (got {part})");
     }
@@ -137,7 +149,7 @@ pub fn render(image: &[u8], part: usize, title: &str) -> Result<(String, usize)>
 
     let modules = frames.first().map(|(w, _)| *w).unwrap_or(0);
     Ok((
-        page(&frames, total, image.len(), part, title, encoding),
+        page(&frames, total, image.len(), part, ms, title, encoding),
         modules,
     ))
 }
@@ -148,6 +160,7 @@ fn page(
     total: usize,
     bytes: usize,
     part: usize,
+    ms: u32,
     title: &str,
     encoding: Encoding,
 ) -> String {
@@ -189,7 +202,7 @@ fn page(
 <script>
 const FRAMES = [{data}];
 const c = document.getElementById('c'), g = c.getContext('2d');
-let i = 0, ms = 200, running = true, timer = null;
+let i = 0, ms = {ms}, running = true, timer = null;
 
 function draw() {{
   const [w, b64s] = FRAMES[i];
@@ -250,7 +263,7 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// Read an image and write its page.
-pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<()> {
+pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize, ms: u32) -> Result<()> {
     let image = std::fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
     if image.starts_with(b"DfuSe") {
         bail!(
@@ -263,17 +276,18 @@ pub fn run(bin: &std::path::Path, out: &std::path::Path, part: usize) -> Result<
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image".into());
-    let (html, modules) = render(&image, part, &title)?;
+    let (html, modules) = render(&image, part, ms, &title)?;
     std::fs::write(out, html).with_context(|| format!("writing {}", out.display()))?;
     let (encoding, body) = best_encoding(&image);
     let parts = parts_needed(body.len(), part);
     println!(
-        "wrote         {} ({} parts of {} bytes, {} modules, ~{}s a loop, {})",
+        "wrote         {} ({} parts of {} bytes, {} modules, {} ms each = ~{} min a pass, {})",
         out.display(),
         parts,
         part,
         modules,
-        parts / 5,
+        ms,
+        (parts as u32 * ms).div_ceil(60_000),
         match encoding {
             Encoding::Zlib => format!(
                 "deflate: {} of {} bytes, {:.1}%",
@@ -333,10 +347,10 @@ mod tests {
     #[test]
     fn a_part_size_the_format_cannot_carry_is_refused() {
         // Not a whole number of base32 groups.
-        assert!(render(&[0u8; 4096], 1024, "x").is_err());
-        assert!(render(&[0u8; 4096], 0, "x").is_err());
+        assert!(render(&[0u8; 4096], 1024, DEFAULT_MS, "x").is_err());
+        assert!(render(&[0u8; 4096], 0, DEFAULT_MS, "x").is_err());
         // Over the scanner's line buffer, so the device would never read one.
-        assert!(render(&[0u8; 4096], 2000, "x").is_err());
+        assert!(render(&[0u8; 4096], 2000, DEFAULT_MS, "x").is_err());
     }
 }
 

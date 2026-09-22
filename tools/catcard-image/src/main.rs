@@ -120,6 +120,13 @@ enum Cmd {
         /// read off a screen. Drop it if the device is slow to pick them up.
         #[arg(long, default_value_t = qrpage::DEFAULT_PART)]
         part: usize,
+        /// Milliseconds each code is shown for.
+        ///
+        /// **Match the reader.** Shown faster than it can read, the codes it catches
+        /// are a random sample and collecting them all takes `n ln n` reads instead of
+        /// `n` -- hours rather than minutes. The page's buttons tune it live.
+        #[arg(long, default_value_t = qrpage::DEFAULT_MS)]
+        ms: u32,
     },
 
     /// Unwrap a DfuSe container to the raw signed image inside it.
@@ -178,7 +185,7 @@ fn main() -> Result<()> {
         Cmd::Verify { bin, board } => cmd_verify(&bin, board.as_deref()),
         Cmd::Info { file } => cmd_info(&file),
         Cmd::Extract { dfu, out } => cmd_extract(&dfu, &out),
-        Cmd::Qr { bin, out, part } => qrpage::run(&bin, &out, part),
+        Cmd::Qr { bin, out, part, ms } => qrpage::run(&bin, &out, part, ms),
         Cmd::Dfuse {
             bin,
             board,
