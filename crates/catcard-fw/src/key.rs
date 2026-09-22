@@ -89,6 +89,27 @@ static mut TEMP_METHOD_PP: heapless::String<20> = heapless::String::new();
 /// The selection in force. Foreground only, single core.
 static mut SOURCE: Source = Source::Root;
 
+/// Whether the secure element's slot holds a wallet, once something has looked.
+///
+/// **The bootloader's `ZERO_SECRET` flag is not this.** Observed on a Q1 whose seed had
+/// been destroyed: the slot's seventy-two bytes are zero, and the login still reports the
+/// secret as in use -- the flag says a secret was *written*, not that one is there to
+/// work in. The menu asks this instead, so a device with nothing in it offers New and
+/// Import rather than Sign and Addresses. See docs/HARDWARE-OPEN-ITEMS.md.
+static mut STORED_SEED: Option<bool> = None;
+
+/// Record what the stored secret turned out to be. Called wherever one is read or written.
+pub(crate) fn note_stored_seed(present: bool) {
+    // SAFETY: foreground only; the borrow ends within this statement.
+    unsafe { *core::ptr::addr_of_mut!(STORED_SEED) = Some(present) };
+}
+
+/// Whether the stored slot is known to hold nothing. False while nothing has looked.
+pub(crate) fn stored_seed_missing() -> bool {
+    // SAFETY: as in `note_stored_seed`.
+    unsafe { *core::ptr::addr_of!(STORED_SEED) == Some(false) }
+}
+
 /// What the device is working in.
 pub(crate) fn in_force() -> Source {
     // SAFETY: foreground only; the menu is the sole writer and holds no borrow across it.

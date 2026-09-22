@@ -860,14 +860,14 @@ pub fn run(session: Session<'_>) -> ! {
             let sideways = is_grid(screen) && matches!(key, Key::Digit(7) | Key::Digit(9));
             #[cfg(not(feature = "board-q1"))]
             let sideways = false;
-            if let Some(items) = items_of(screen, v.no_seed)
+            if let Some(items) = items_of(screen, v.blank())
                 && (matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0)) || sideways)
             {
                 v.menu.key(&mut ui, screen, items, *key);
                 continue;
             }
 
-            let next = step(screen, *key, v.menu.cursor, v.no_seed);
+            let next = step(screen, *key, v.menu.cursor, v.blank());
             // Anything that takes over the panel is a row in the action table rather than
             // a branch here: which routine runs, where the menu lands afterwards, and
             // whether the secret slot has to be re-read. This was seventeen
@@ -1499,7 +1499,7 @@ struct View<'a> {
     rtc: RtcWatch,
     /// The kernel status screen's repaint pacer.
     kernel_pace: Pace,
-    /// No wallet stored yet, so the main menu leads with creating one.
+    /// The bootloader's answer at login: no secret has been written to the slot.
     no_seed: bool,
 }
 
@@ -1507,6 +1507,19 @@ impl View<'_> {
     /// A fresh scroll position for a new list: cursor at the top, view unscrolled.
     fn reset_menu(&mut self) {
         self.menu.reset();
+    }
+
+    /// Whether the menu should lead with making a wallet rather than using one.
+    ///
+    /// Two sources, and either saying "nothing here" is enough. The bootloader's flag
+    /// reports whether a secret was ever *written*; a seed destroyed since leaves the slot
+    /// zeroed with that flag still set, and a device in that state was offering Sign and
+    /// Addresses for a wallet it did not have. What the firmware has read out of the slot
+    /// settles it where it has looked.
+    ///
+    /// A key loaded for the session is a wallet either way, so neither applies then.
+    fn blank(&self) -> bool {
+        (self.no_seed || crate::key::stored_seed_missing()) && crate::key::loaded().is_none()
     }
 }
 
@@ -1894,7 +1907,7 @@ fn build_menu_view<'a>(
 /// Draw a menu screen: the larger font, the selected row an inverted bar, scrolled to the
 /// view's persisted offset.
 fn draw_menu(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
-    v.menu.draw(panel, screen, v.no_seed);
+    v.menu.draw(panel, screen, v.blank());
 }
 
 /// A titled screen of raw values, left-aligned, leaving on any key.
@@ -5198,6 +5211,7 @@ fn root_entropy(
     let mut ent = [0u8; 32];
     let len = match bip39_entropy(&secret) {
         Some(e) if e.len() <= ent.len() => {
+            crate::key::note_stored_seed(true);
             ent[..e.len()].copy_from_slice(e);
             e.len()
         }
@@ -5206,6 +5220,9 @@ fn root_entropy(
             // Say what is there instead: the type only, from the marker byte.
             let kind = classify_secret(&secret);
             secret.zeroize();
+            // Empty means the slot holds nothing to work in, whatever the login's flag
+            // said: a destroyed seed leaves zeros behind with the flag still set.
+            crate::key::note_stored_seed(!matches!(kind, SecretKind::Empty));
             crate::catlog!("wallet: secret is {:?}, not BIP-39", kind);
             return Err(match kind {
                 SecretKind::Empty => "no wallet stored",
@@ -7461,6 +7478,10 @@ fn wipe_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -
 
     let bytes_zeroed = login.verify_secret(&pin_gate, &empty).unwrap_or(false);
     empty.zeroize();
+    if bytes_zeroed {
+        // What the menu asks: the slot holds nothing now, whatever the flag below says.
+        crate::key::note_stored_seed(false);
+    }
 
     // Two different questions, and only the second is the device's own opinion.
     //
@@ -7484,13 +7505,14 @@ fn wipe_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -
 
     match (bytes_zeroed, flag_empty) {
         (true, true) => message(ui.panel, "Wallet erased", "no seed is stored", ""),
-        // The write was taken and the device still counts the slot as holding a
-        // secret. Whatever that means, it is not "erased".
+        // The write was taken and the slot still counts as used. That is what this
+        // bootloader does -- the flag records that a secret was written, not that one is
+        // there -- so the seed is gone and the device says so, with the difference named.
         (true, false) => message(
             ui.panel,
-            "Not confirmed",
-            "zeros were written",
-            "slot still reads used",
+            "Wallet erased",
+            "zeros were written; the",
+            "slot still counts as used",
         ),
         _ => message(ui.panel, "Not erased", "the slot did not", "take the write"),
     }

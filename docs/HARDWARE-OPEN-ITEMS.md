@@ -585,3 +585,30 @@ so none of it is guessed:
 3. How the duress wallet's data pages are written and read (which call, which offsets).
 4. Whether "get by PIN" needs the main-PIN login gate 22 requires, or can run from the
    prompt.
+
+## `PA_ZERO_SECRET` means "a secret was written", not "a secret is there" `[C]`
+
+Seen on the Q1 (2026-09-23), after Destroy seed: the login reports the secret slot **in
+use** while the slot's seventy-two bytes are all zero.
+
+```
+pin: attempt -> in, secret slot in use
+wallet: secret is Empty, not BIP-39
+```
+
+Destroy seed had already said as much at the time -- it writes zeros through `gate 18/3`,
+reads them back, and reports the bytes and the flag separately, which is why this was
+visible rather than mysterious. The flag is what `gate 18` returns in `state_flags`
+(`PA_ZERO_SECRET 0x10`); it is not cleared by writing zeros, and survives a reboot.
+
+So the two answers mean different things, and the firmware asks the right one for the
+question:
+
+- **Is there a wallet to work in?** The bytes. `crate::key::stored_seed_missing()` records
+  what the slot turned out to hold, and the menu leads with New and Import when it holds
+  nothing -- before this, such a device offered Sign and Addresses for a wallet it did not
+  have.
+- **Has a secret ever been written?** The flag, which is all it can tell us.
+
+Unknown: whether any call clears the flag short of a factory path, and whether stock reads
+it the same way. Neither blocks anything -- what a wallet needs is the bytes.
