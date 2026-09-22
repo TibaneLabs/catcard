@@ -108,6 +108,17 @@ provenance.
 
 ---
 
+## Unified sighash test vectors
+
+`crates/catcard-wallet/src/tx/unified/vectors.json` is Bitcoin Knots'
+`src/test/data/unified_sighash.json`, kept verbatim so what the tests check is the file
+the specification points at. Bitcoin Knots is MIT, © Bitcoin Core developers and
+contributors; the same licence text as above applies. Test data only: no code from that
+project is used here, and `crates/catcard-wallet/src/tx/unified/mod.rs` is written from
+`doc/unified-sighash.md`, which the file accompanies.
+
+---
+
 ## Coldcard developer signing key
 
 `keys/dev-privkey.pem` is the secp256k1 key Coinkite publishes so that anyone can build

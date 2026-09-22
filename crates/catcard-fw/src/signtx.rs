@@ -575,6 +575,17 @@ fn review(
     let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
     say(&mut texts, &mut small, &mut wrapped, line, true, false);
 
+    // An opted-in transaction is signed under the unified message, which only the chain
+    // that implements that rule verifies. Said here because it is the one thing about this
+    // transaction the owner cannot see from the amounts: everything else on this screen
+    // reads the same either way.
+    #[cfg(feature = "multichain")]
+    if summary.opted_in {
+        let mut line = Text::new();
+        let _ = write!(line, "OPT-IN sighash: fork only");
+        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+    }
+
     for d in shown {
         let mut amount = heapless::String::<24>::new();
         btc(d.amount, &mut amount);

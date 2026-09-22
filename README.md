@@ -63,7 +63,9 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   hidden — a smaller attack surface, not only a smaller menu. With `MULTICHAIN=1` the
   registry covers Bitcoin, Ethereum, Solana, Litecoin, Bitcoin Cash, Dogecoin, Tron,
   Monacoin, Namecoin and Electra Protocol, each with its own derivations and address
-  formats.
+  formats. A multichain build also signs the unified opt-in signature hash
+  (`SIGHASH_UNIFIED`, hash type bit `0x20`) where a host asks for it, checked against the
+  166 vectors its specification publishes.
 - **Games and cats.** Block Mine, Block Cutter and (on the Q1) Flappy Cat live under
   Utils and can be left out of a build, and the device boots to a cat.
 

@@ -56,6 +56,10 @@ pub enum Error {
     /// famously hashes to 1 rather than erroring; that behaviour is a bug being
     /// emulated, and a wallet must refuse rather than reproduce it.
     SingleWithoutOutput { index: usize },
+    /// The spent outputs handed in do not match the inputs one for one. The unified
+    /// message commits to every one of them, so a short list would sign a claim about a
+    /// different transaction from the one in hand.
+    SpentOutputCount { inputs: usize, given: usize },
 }
 
 /// Where an input spends from.
@@ -398,6 +402,9 @@ impl<'a> Transaction<'a> {
 }
 
 pub mod sighash;
+/// One fork's opt-in signature hash. Not Bitcoin's, hence the feature.
+#[cfg(feature = "multichain")]
+pub mod unified;
 
 #[cfg(test)]
 mod tests {

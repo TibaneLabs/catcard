@@ -445,3 +445,82 @@ fn a_fully_signed_transaction_finalises_and_extracts() {
     theirs.reverse();
     assert_eq!(tx.txid(), theirs);
 }
+
+/// A PSBT whose input opts in with `SIGHASH_ALL | SIGHASH_UNIFIED` is signed under the
+/// unified message, and the signature verifies against **our own** implementation of that
+/// message rather than against the one that produced it.
+///
+/// That is what this test is for: `outscript` computes the digest while signing, and this
+/// recomputes it from `tx::unified`, which is checked against the specification's 166
+/// published vectors. The two agreeing is what says the signature this device hands back
+/// commits to the message the fork defines.
+#[cfg(feature = "multichain")]
+#[test]
+fn an_opted_in_input_is_signed_under_the_unified_message() {
+    use crate::tx::unified::{self, Aggregates, SpentOutput};
+
+    let kw = KeyWork::host();
+    let mut buf = [0u8; 2048];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    // ALL | UNIFIED: the byte the signature commits to and the one it carries.
+    const OPTED_IN: u32 = 0x21;
+    let mut with_type = [0u8; 2048];
+    let n = Psbt::parse(&buf[..n])
+        .unwrap()
+        .set_sighash_type(0, OPTED_IN, &mut with_type)
+        .unwrap();
+    let psbt = Psbt::parse(&with_type[..n]).unwrap();
+
+    let master = master();
+    let mut out = [0u8; 4096];
+    let len = sign_input(&psbt, 0, &master, FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+
+    let pk = pubkey_at(&PATH);
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&pk)
+        .expect("signature");
+    assert_eq!(
+        *sig.last().unwrap(),
+        0x21,
+        "the hash type byte travels with the signature"
+    );
+
+    // The same transaction, through our own message.
+    let ours = crate::tx::Transaction::parse(psbt.unsigned_tx().bytes()).unwrap();
+    let mut spk = [0u8; 22];
+    spk[..2].copy_from_slice(&[0x00, 0x14]);
+    spk[2..].copy_from_slice(&hash160(&pk));
+    let spent = [SpentOutput {
+        value: 60_000,
+        script_pubkey: &spk,
+    }];
+    let script_code = crate::tx::sighash::p2wpkh_script_code(&hash160(&pk));
+    let aggregates = Aggregates::compute(&ours, &spent).unwrap();
+    let digest = unified::unified(
+        &ours,
+        &aggregates,
+        0,
+        &spent,
+        unified::Spend::SegwitV0 {
+            script_code: &script_code,
+        },
+        0x21,
+    )
+    .unwrap();
+
+    let key = SecpPublicKey::from_sec1(&pk).unwrap();
+    let (r, s) = outscript::crypto::secp256k1::parse_der_signature(&sig[..sig.len() - 1]).unwrap();
+    assert!(
+        key.verify(&digest, &r, &s),
+        "the signature does not commit to the unified message we computed"
+    );
+
+    // And it is a different message from the BIP-143 one for the same transaction, so the
+    // signature cannot be replayed onto a chain that reads the byte the old way.
+    let legacy = segwit_digest(&psbt, 0, &pk);
+    assert_ne!(digest, legacy);
+    assert!(!key.verify(&legacy, &r, &s));
+}

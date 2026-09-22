@@ -1276,3 +1276,72 @@ fn a_bip49_single_sig_input_is_not_an_unknown_multisig() {
         "the account is recorded as nested segwit"
     );
 }
+
+/// `SIGHASH_ALL | SIGHASH_UNIFIED` is read, and the summary says the transaction opted
+/// in -- it is valid only on a chain that implements that rule, which the screen says.
+#[cfg(feature = "multichain")]
+#[test]
+fn an_opted_in_input_is_read_and_flagged() {
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[Spend {
+            sighash: Some(0x21),
+            ..ours_spend(100_000)
+        }],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 99_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    let summary = summary_of(&buf[..n]).expect("an opted-in input is signable");
+    assert!(summary.opted_in);
+    assert_eq!(summary.sending, 99_000);
+}
+
+/// The opt-in bit does not excuse the types this review cannot price: NONE leaves the
+/// outputs unsigned whichever algorithm hashes them.
+#[cfg(feature = "multichain")]
+#[test]
+fn the_opt_in_bit_does_not_admit_none_or_single() {
+    for kind in [0x22, 0x23, 0xa1] {
+        let mut buf = vec![0u8; 8192];
+        let n = build(
+            &[Spend {
+                sighash: Some(kind),
+                ..ours_spend(100_000)
+            }],
+            &[Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 99_000,
+                claim_ours: false,
+            }],
+            &mut buf,
+        );
+        assert!(
+            matches!(summary_of(&buf[..n]), Err(Refusal::Sighash { .. })),
+            "{kind:#x} should be refused"
+        );
+    }
+}
+
+/// A plain transaction is not flagged, so the screen only says it where it is true.
+#[cfg(feature = "multichain")]
+#[test]
+fn a_plain_transaction_is_not_flagged_as_opted_in() {
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 99_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    assert!(!summary_of(&buf[..n]).unwrap().opted_in);
+}

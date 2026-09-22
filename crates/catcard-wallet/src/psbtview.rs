@@ -125,6 +125,11 @@ pub struct Summary {
     pub fee_percent: u32,
     /// True if the fee is above the policy's warning level but below its cap.
     pub fee_warn: bool,
+    /// True if any input opted in to the unified signature hash, which only a multichain
+    /// build signs. Such a transaction is valid on the chain that implements that rule and
+    /// on no other, so the review screen says so.
+    #[cfg(feature = "multichain")]
+    pub opted_in: bool,
 }
 
 /// Who this device is, for the purpose of reading a transaction.
@@ -169,6 +174,8 @@ pub fn summarise(
     // only call itself change if it belongs to one of them.
     let mut accounts = [Account::NONE; MAX_ACCOUNTS];
     let mut account_count = 0usize;
+    #[cfg(feature = "multichain")]
+    let mut opted_in = false;
     for index in 0..inputs {
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
@@ -227,6 +234,19 @@ pub fn summarise(
             match psbt.input(index).and_then(|i| i.sighash_type()) {
                 None => {}
                 Some(SIGHASH_ALL) => {}
+                // The unified opt-in hash, over the same outputs `SIGHASH_ALL` covers.
+                // Only the byte that means exactly ALL: NONE and SINGLE leave outputs this
+                // review cannot price, opt-in or not, and ANYONECANPAY leaves the inputs
+                // open -- the fee shown is then a fee anyone can raise afterwards.
+                #[cfg(feature = "multichain")]
+                Some(kind)
+                    if kind <= 0xff
+                        && kind & u32::from(crate::tx::unified::SIGHASH_UNIFIED) != 0
+                        && kind & crate::tx::sighash::SIGHASH_MASK == SIGHASH_ALL
+                        && kind & crate::tx::sighash::SIGHASH_ANYONECANPAY == 0 =>
+                {
+                    opted_in = true;
+                }
                 Some(kind) => return Err(Refusal::Sighash { input: index, kind }),
             }
         }
@@ -314,6 +334,8 @@ pub fn summarise(
         fee,
         fee_percent,
         fee_warn: fee_percent > policy.warn_fee_percent,
+        #[cfg(feature = "multichain")]
+        opted_in,
     })
 }
 
