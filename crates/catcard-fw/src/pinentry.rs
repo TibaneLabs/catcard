@@ -194,6 +194,142 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
     }
 }
 
+/// The PIN prompt on the Q1: two boxes, the words appearing in the first.
+///
+/// # Why one screen instead of three
+///
+/// The prompt used to be a field, then a separate screen for the anti-phishing words
+/// with its own confirm, then a second field. That is two presses of the accept key for
+/// one PIN, and the words -- the thing the owner is meant to *check* -- were on a screen
+/// that had gone by the time the half that matters was typed.
+///
+/// Here the first box holds the prefix, and the moment it is accepted the words take its
+/// place with the cursor in the second box. One press, and the words stay in front of
+/// the owner for as long as they are typing the half that would be given away if the
+/// device were not theirs.
+///
+/// # Laid out on the co-processor's grid
+///
+/// The digits sit on the GPU's own character cells ([`crate::gpu::CELL_W`] and friends),
+/// because the blinking cursor lands on that grid whatever the firmware drew. Putting
+/// the digits anywhere else would leave the cursor next to them rather than under them.
+///
+/// The grey is the main menu's, so the login does not look like a different device from
+/// the one behind it.
+#[cfg(feature = "board-q1")]
+fn screen_pin(
+    panel: &mut display::Panel,
+    prefix: usize,
+    words: Option<[&str; 2]>,
+    suffix: usize,
+    left: u32,
+) {
+    use crate::gpu::{CELL_H, CELL_LEFT, CELL_TOP, CELL_W, Cursor};
+    use catcard_ui::canvas::{Canvas as _, INK, PAPER};
+    use catcard_ui::text::{draw_text, width_of};
+
+    // Where each box's digits begin, in the co-processor's cells. Six wide, centred,
+    // and two rows apart so a box can be drawn round each without them touching.
+    const DIGITS: usize = MAX_PART_LEN;
+    const COL: usize = (crate::gpu::CELL_COLS - DIGITS) / 2;
+    const ROW_TOP: usize = 2;
+    const ROW_BOTTOM: usize = 5;
+    // The panel's own rows, which is what the canvas is addressed in. The status bar
+    // takes the top of the panel and the canvas starts below it.
+    let cell_y = |row: usize| (CELL_TOP + row * CELL_H).saturating_sub(display::BAR_H);
+    let cell_x = |col: usize| CELL_LEFT + col * CELL_W;
+
+    let f = display::LAYOUT.title;
+    let body = display::LAYOUT.body;
+    let filled = suffix > 0 || words.is_some();
+
+    // The art palette: index 0 is the menu's grey and 15 is white, so `PAPER` and `INK`
+    // mean exactly the background and the text this screen wants.
+    display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
+        c.clear();
+
+        let mut box_at = |row: usize, active: bool| {
+            let (x, y) = (cell_x(COL), cell_y(row));
+            let (w, h) = (DIGITS * CELL_W, CELL_H);
+            // An outline, brighter for the box being typed into: two boxes with nothing
+            // to tell them apart is a screen that does not say where the next key goes.
+            let pad = 4;
+            let edge = if active { INK } else { PAPER + 6 };
+            let (bx, by) = (x.saturating_sub(pad), y.saturating_sub(pad / 2));
+            let (bw, bh) = (w + 2 * pad, h + pad);
+            c.fill_rect(bx, by, bw, 1, edge);
+            c.fill_rect(bx, by + bh - 1, bw, 1, edge);
+            c.fill_rect(bx, by, 1, bh, edge);
+            c.fill_rect(bx + bw - 1, by, 1, bh, edge);
+        };
+        box_at(ROW_TOP, !filled);
+        box_at(ROW_BOTTOM, filled);
+
+        match words {
+            // The prefix, as one mark a cell: the same thing a row of stars said -- how
+            // many -- and nothing about which.
+            None => {
+                for i in 0..prefix {
+                    let (x, y) = (cell_x(COL + i), cell_y(ROW_TOP));
+                    c.fill_rect(x + CELL_W / 3, y + CELL_H / 2, CELL_W / 3, 3, INK);
+                }
+            }
+            // Accepted: the words take the box, and stay there while the second half is
+            // typed. That is the whole point of them.
+            Some([a, b]) => {
+                let y = cell_y(ROW_TOP) + (CELL_H.saturating_sub(f.line_height())) / 2;
+                let gap = 2 * f.advance(b' ');
+                let total = width_of(f, a) + gap + width_of(f, b);
+                let mut x = c.width().saturating_sub(total) / 2;
+                x = draw_text(c, f, x, y, a) + gap;
+                draw_text(c, f, x, y, b);
+            }
+        }
+        for i in 0..suffix {
+            let (x, y) = (cell_x(COL + i), cell_y(ROW_BOTTOM));
+            c.fill_rect(x + CELL_W / 3, y + CELL_H / 2, CELL_W / 3, 3, INK);
+        }
+
+        // What the two halves are, and what the keys do, in the space around them.
+        let head = if filled {
+            "these words must be yours"
+        } else {
+            "PIN prefix"
+        };
+        let hx = centred(body, head, c.width());
+        draw_text(
+            c,
+            body,
+            hx,
+            cell_y(ROW_TOP).saturating_sub(body.line_height() + 6),
+            head,
+        );
+
+        let typed = if filled { suffix } else { prefix };
+        let foot = if typed < MIN_PART_LEN {
+            "2 to 6 digits"
+        } else if filled {
+            "accept to log in"
+        } else {
+            "accept for the words"
+        };
+        let fx = centred(body, foot, c.width());
+        draw_text(c, body, fx, cell_y(ROW_BOTTOM) + CELL_H + 8, foot);
+        tries_left(c, left);
+    });
+
+    // The cursor last, and only then the bus: the co-processor draws while it owns it,
+    // and the next screen takes it back.
+    let (row, at) = if filled {
+        (ROW_BOTTOM, suffix)
+    } else {
+        (ROW_TOP, prefix)
+    };
+    if at < DIGITS && crate::gpu::cursor(COL + at, row, Cursor::Solid) {
+        display::give_bus_for_cursor();
+    }
+}
+
 fn screen_field(
     panel: &mut display::Panel,
     heading: &str,
@@ -753,8 +889,37 @@ pub fn unlock(
 
         if redraw {
             match login.step() {
+                // One screen for the whole PIN on the Q1: the prefix box, then the
+                // words in its place with the cursor in the second box. The words the
+                // owner is meant to check stay in front of them while the half that
+                // matters is typed, and it costs one press of the accept key rather
+                // than two.
+                #[cfg(feature = "board-q1")]
+                Step::Prefix => screen_pin(panel, field.len(), None, 0, login.attempts_left()),
+                // Not normally drawn: the accept key that submits the prefix also
+                // passes this step, because the screen it would show is the screen
+                // already on its way. Kept so a path that does stop here has a picture.
+                #[cfg(feature = "board-q1")]
+                Step::ConfirmWords(w) => screen_pin(
+                    panel,
+                    0,
+                    Some(anti_phishing_words(w)),
+                    0,
+                    login.attempts_left(),
+                ),
+                #[cfg(feature = "board-q1")]
+                Step::Suffix => screen_pin(
+                    panel,
+                    0,
+                    login.words().map(anti_phishing_words),
+                    field.len(),
+                    login.attempts_left(),
+                ),
+                #[cfg(not(feature = "board-q1"))]
                 Step::Prefix => screen_field(panel, "PIN prefix", &field, login.attempts_left()),
+                #[cfg(not(feature = "board-q1"))]
                 Step::ConfirmWords(w) => screen_words(panel, anti_phishing_words(w)),
+                #[cfg(not(feature = "board-q1"))]
                 Step::Suffix => screen_field(panel, "PIN suffix", &field, login.attempts_left()),
                 Step::Wrong { attempts_left, .. } => {
                     let mut n = [0u8; 3];
@@ -894,6 +1059,13 @@ pub fn unlock(
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         log_state(&login, "prefix");
                         field.clear();
+                        // On the Q1 the words take the prefix's own box on the next
+                        // redraw and stay there for the whole suffix, so a screen whose
+                        // only job is to show them has nothing left to say -- and the
+                        // owner presses accept once for a PIN instead of twice. A no-op
+                        // on any other step, so a gate that gave no words is unaffected.
+                        #[cfg(feature = "board-q1")]
+                        login.words_confirmed();
                     }
                 }
                 (Step::Suffix, Key::Confirm) => {

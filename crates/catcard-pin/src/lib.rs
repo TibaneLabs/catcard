@@ -166,9 +166,15 @@ pub struct Login {
     attempt: PinAttempt,
     prefix: [u8; MAX_PART_LEN],
     prefix_len: u8,
-    /// Set once the words have been computed, so a suffix cannot skip the check.
+    /// The anti-phishing words for the prefix in hand, once the gate has given them.
+    ///
+    /// `Some` is also "the words have been shown", which is what stops a suffix from
+    /// skipping the check. They are kept rather than only passed out in
+    /// [`Step::ConfirmWords`] because a screen may go on showing them while the suffix
+    /// is typed -- which is the point of them, and impossible if the only copy went by
+    /// in one state transition.
     #[zeroize(skip)]
-    words_shown: bool,
+    words: Option<words::Words>,
     #[zeroize(skip)]
     step: Step,
 }
@@ -189,7 +195,7 @@ impl Login {
             attempt,
             prefix: [0; MAX_PART_LEN],
             prefix_len: 0,
-            words_shown: false,
+            words: None,
             step,
         }
     }
@@ -197,6 +203,16 @@ impl Login {
     /// What the caller should do next.
     pub fn step(&self) -> Step {
         self.step
+    }
+
+    /// The anti-phishing words for the prefix in hand, if one has been submitted.
+    ///
+    /// The same words [`Step::ConfirmWords`] carried. A screen that keeps them up while
+    /// the suffix is typed needs them after that step has gone by, and re-deriving them
+    /// would mean holding the prefix at the screen -- which is the one place a PIN part
+    /// should not be kept a moment longer than the keys that made it.
+    pub fn words(&self) -> Option<words::Words> {
+        self.words
     }
 
     /// Attempts remaining before the device bricks itself, as the bootloader last
@@ -237,8 +253,9 @@ impl Login {
 
         self.step = match gate.anti_phishing(prefix) {
             Ok(bits) => {
-                self.words_shown = true;
-                Step::ConfirmWords(words::from_bits(bits))
+                let w = words::from_bits(bits);
+                self.words = Some(w);
+                Step::ConfirmWords(w)
             }
             Err(e) => classify(e),
         };
@@ -323,7 +340,7 @@ impl Login {
         if !part_len_ok(suffix) {
             return Err(BadPartLength);
         }
-        if !self.words_shown {
+        if self.words.is_none() {
             self.step = Step::Prefix;
             return Ok(self.step);
         }
@@ -425,7 +442,7 @@ impl Login {
             Err(e) => classify(e),
         };
         self.attempt.change_flags = 0;
-        self.words_shown = false;
+        self.words = None;
         Ok(self.step)
     }
 
@@ -485,7 +502,7 @@ impl Login {
             Err(e) => classify(e),
         };
         self.attempt.change_flags = 0;
-        self.words_shown = false;
+        self.words = None;
         Ok(self.step)
     }
 
@@ -541,7 +558,7 @@ impl Login {
             Err(e) => classify(e),
         };
         self.attempt.change_flags = 0;
-        self.words_shown = false;
+        self.words = None;
         Ok(self.step)
     }
 
