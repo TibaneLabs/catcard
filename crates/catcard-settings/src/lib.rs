@@ -22,6 +22,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
+pub mod chains;
 pub mod json;
 pub mod nvstore;
 pub mod store;
