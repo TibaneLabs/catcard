@@ -86,6 +86,16 @@ pub(crate) fn pressed_keys(
     if let Some(k) = crate::usbtask::take_injected_key() {
         let _ = out.push(k);
     }
+
+    // Any key at all restarts the idle timeout's quiet period. Here rather than in each
+    // screen because this is the single funnel every keypad read goes through, so there
+    // is no screen whose keys quietly fail to count as someone being present.
+    //
+    // A host-injected key counts too: a host driving the UI is a session in use, and a
+    // device that logged out underneath one would be a bench unit that cannot be driven.
+    if !out.is_empty() {
+        crate::idle::note_key();
+    }
 }
 
 /// Scan interval, matching the selftest loop: roughly 60 Hz at the reset-default clock.

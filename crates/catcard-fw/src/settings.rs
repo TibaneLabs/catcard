@@ -32,9 +32,14 @@ pub enum MountFailed {
 static mut WALLET_KEY: Option<catcard_settings::nvstore::Key> = None;
 
 /// Forget the cached settings key. Called whenever the wallet in force changes.
+///
+/// The preferences go with it: they belong to the wallet whose file they came out of, and
+/// the gap until [`open_wallet`] reads the new one is spent on the defaults rather than on
+/// a stranger's settings.
 pub(crate) fn forget_key() {
     // SAFETY: foreground only, single core; the write finishes within this statement.
     unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = None };
+    crate::prefs::forget();
 }
 
 /// The settings key of the wallet in force -- **its own file, not the master's**.
@@ -153,6 +158,11 @@ pub(crate) fn open_wallet(
 ) {
     use catcard_settings::json::Doc;
     use catcard_settings::store::{self, Error, SCRATCH};
+
+    // The new wallet's preferences first: this derives the key that everything below
+    // then reuses, and the idle timeout and the USB switch belong to the wallet in force
+    // from the moment it is in force -- not from the next time a screen asks.
+    crate::prefs::load(gate, login, panel, head);
 
     let label = crate::key::label();
     let key = match wallet_key(gate, login, panel, head) {

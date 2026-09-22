@@ -239,6 +239,27 @@ enum Screen {
     /// Release builds only: a login needs an enrolled microSD card.
     #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
     Sd2fa,
+    /// How long with no key before the device logs itself out.
+    #[cfg(not(feature = "board-mk3"))]
+    IdleTimeout,
+    /// BTC, mBTC, bits or sats, wherever an amount is shown.
+    #[cfg(not(feature = "board-mk3"))]
+    DisplayUnits,
+    /// The largest share of a transaction that may go to fees.
+    #[cfg(not(feature = "board-mk3"))]
+    MaxFee,
+    /// The submenu holding the two hardware switches.
+    #[cfg(not(feature = "board-mk3"))]
+    Hardware,
+    /// Whether the device presents itself to a host over USB at all.
+    #[cfg(not(feature = "board-mk3"))]
+    UsbPort,
+    /// Whether the device may re-enumerate as a USB disk.
+    #[cfg(not(feature = "board-mk3"))]
+    VirtualDisk,
+    /// Whether the menu cursor comes round at the ends of a list.
+    #[cfg(not(feature = "board-mk3"))]
+    MenuWrap,
     WipeSeed,
     /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
     FactoryReset,
@@ -385,6 +406,20 @@ const SETTINGS_ITEMS: &[&str] = &[
     // §SET "Multisig Wallets (has_secrets)" [C]
     #[cfg(not(feature = "board-mk3"))]
     "Multisig",
+    // The preferences, in stock's own order and under stock's own names, all of them
+    // kept in the wallet's own settings file -- which the mk3's medium is not wired up
+    // for, so on that board the rows are simply not there rather than being there and
+    // doing nothing. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Idle timeout",
+    #[cfg(not(feature = "board-mk3"))]
+    "Display units",
+    #[cfg(not(feature = "board-mk3"))]
+    "Max network fee",
+    #[cfg(not(feature = "board-mk3"))]
+    "Hardware On/Off",
+    #[cfg(not(feature = "board-mk3"))]
+    "Menu wrapping",
     "Danger zone",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
@@ -464,6 +499,17 @@ const LOGIN_ITEMS: &[&str] = &[
     #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
     "MicroSD 2FA",
 ];
+/// The hardware a preference can actually switch off.
+///
+/// **Only what the firmware really obeys.** Stock's own Hardware On/Off page lists the
+/// NFC tag and the front LED beside these two; ours does not, because nothing here would
+/// honour those rows yet and a switch that does nothing is worse than a missing one. Each
+/// row below names the code that answers it: `crate::usbtask::set_port` for the port, the
+/// USB Drive screen for the disk.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Hardware On/Off" [C]
+#[cfg(not(feature = "board-mk3"))]
+const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk"];
+
 /// How long a new seed should be.
 ///
 /// Twenty-four first, and under the cursor when the menu opens. Twelve is a sound
@@ -715,6 +761,17 @@ pub fn run(session: Session<'_>) -> ! {
     };
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+
+    // This wallet's own preferences, before the first frame: the idle timeout has to be
+    // armed without anyone asking for it, the USB switch has to be honoured before a host
+    // is answered, and menu wrapping decides how the very first keypress behaves.
+    //
+    // One key derivation, paid here while the owner is already waiting for the menu, and
+    // cached for the session -- so every per-wallet screen after this is free. Skipped on
+    // a device with no wallet, which has no file to read and no key to read it with.
+    if !no_seed {
+        crate::prefs::load(gate, login, ui.panel, "Settings");
+    }
 
     loop {
         if redraw && !showing_offer && receiving.is_none() {
@@ -1223,6 +1280,30 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::Sd2fa => to(|a| crate::guard::sd2fa_screen(a.ui), Screen::Login),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::IdleTimeout => to(
+            |a| idle_timeout_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::DisplayUnits => to(
+            |a| display_units_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::MaxFee => to(|a| max_fee_screen(a.gate, a.login, a.ui), Screen::Settings),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::UsbPort => to(|a| usb_port_screen(a.gate, a.login, a.ui), Screen::Hardware),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::VirtualDisk => to(
+            |a| virtual_disk_screen(a.gate, a.login, a.ui),
+            Screen::Hardware,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::MenuWrap => to(
+            |a| menu_wrap_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         #[cfg(feature = "board-q1")]
         Screen::SeedQrShow => to(
@@ -1414,8 +1495,25 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Idle timeout")) => Screen::IdleTimeout,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Display units")) => Screen::DisplayUnits,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Max network fee")) => Screen::MaxFee,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Hardware On/Off")) => Screen::Hardware,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
+        },
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("USB port")) => Screen::UsbPort,
+            (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
+            (Key::Cancel, _) => Screen::Settings,
+            _ => Screen::Hardware,
         },
         Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
@@ -1862,6 +1960,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::Hardware => Some(HARDWARE_ITEMS),
         Screen::DangerZone => Some(DANGER_ITEMS),
         Screen::SeedTools => Some(seed_tools_items()),
         Screen::KeyMenu => Some(key_items()),
@@ -1890,6 +1990,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::SeedTools
         | Screen::ExportMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::Hardware => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
@@ -1989,6 +2091,15 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SeedQrShow => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys | Screen::LoginCountdown => {}
+        // Handled in `run`: each asks its question through `pick_row` and drives the
+        // panel itself.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::IdleTimeout
+        | Screen::DisplayUnits
+        | Screen::MaxFee
+        | Screen::UsbPort
+        | Screen::VirtualDisk
+        | Screen::MenuWrap => {}
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::KillKey | Screen::Sd2fa => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
@@ -2038,6 +2149,11 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         }
         Screen::Settings => "Settings",
         Screen::Login => "Login",
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::Hardware => {
+            let _ = note.push_str("only what the firmware obeys");
+            "Hardware On/Off"
+        }
         Screen::DangerZone => {
             let _ = note.push_str("these show or change secrets");
             "Danger zone"
@@ -2071,6 +2187,10 @@ fn build_menu_view<'a>(
         let _ = lines.push(DLine::item(item, i as u32).wrapped());
     }
     let mut view = ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    // Menu wrapping, from the owner's settings. Set here rather than inside the scroll
+    // view's constructor because the preference is a property of this device, and
+    // `catcard-ui` is a library that knows nothing about settings.
+    view.set_wrap(crate::prefs::current().menu_wrap);
     view.set_off(off);
     view.select(cursor as u32);
     view
@@ -9026,6 +9146,382 @@ fn login_countdown_screen(ui: &mut Ui<'_>) {
     wait_for_any_key(ui);
 }
 
+/// Save one preference and say whether it took.
+///
+/// Every chooser below ends here, so "saved" and "could not save" read the same wherever
+/// they come from -- and so that no screen can put a value in force that did not reach
+/// the flash. [`crate::prefs::save`] applies `next` only on a successful write.
+#[cfg(not(feature = "board-mk3"))]
+fn save_pref(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    // The settings key and the text to store under it, together because neither is any
+    // use without the other and a pair is harder to transpose than two adjacent `&str`.
+    (key, value): (&str, &str),
+    next: crate::prefs::Prefs,
+    now: &str,
+) {
+    let raw = crate::prefs::quoted(value);
+    if crate::prefs::save(gate, login, ui, head, (key, raw.as_str()), next) {
+        message(ui.panel, head, now, "saved");
+    } else {
+        message(ui.panel, head, "could not save", "unchanged");
+    }
+    wait_for_any_key(ui);
+}
+
+/// The quiet periods offered, stock's own range.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Idle Timeout" [C]
+#[cfg(not(feature = "board-mk3"))]
+const IDLE_ROWS: &[&str] = &[
+    "Off",
+    "1 minute",
+    "2 minutes",
+    "5 minutes",
+    "15 minutes",
+    "30 minutes",
+    "60 minutes",
+];
+#[cfg(not(feature = "board-mk3"))]
+const IDLE_MINUTES: [u32; 7] = [0, 1, 2, 5, 15, 30, 60];
+#[cfg(not(feature = "board-mk3"))]
+const _: () = assert!(IDLE_ROWS.len() == IDLE_MINUTES.len());
+
+/// The same list for the battery, where the first row defers to the USB-power value
+/// rather than switching the timeout off. A device on its battery is the one most likely
+/// to be away from its owner, so "off on battery" is not something this offers: see
+/// [`catcard_settings::prefs::battery_idle_minutes`].
+#[cfg(feature = "board-q1")]
+const BATTERY_IDLE_ROWS: &[&str] = &[
+    "Same as USB power",
+    "1 minute",
+    "2 minutes",
+    "5 minutes",
+    "15 minutes",
+    "30 minutes",
+    "60 minutes",
+];
+#[cfg(feature = "board-q1")]
+const _: () = assert!(BATTERY_IDLE_ROWS.len() == IDLE_MINUTES.len());
+
+/// Settings → Idle timeout.
+///
+/// After this long with no key pressed -- from any screen, not just this menu -- the
+/// device hands back to the bootloader, which wipes SRAM and asks for the PIN again. The
+/// note says what is in force now, because "off" and "60 minutes" look identical on a
+/// device that has simply not been left alone yet.
+#[cfg(not(feature = "board-mk3"))]
+fn idle_timeout_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Idle timeout";
+    let now = crate::prefs::current();
+
+    // On a board with a battery, which of the two values is being set. Asked first, so
+    // the value list below is the same list either way.
+    #[cfg(feature = "board-q1")]
+    let on_battery = {
+        let mut note: Line = Line::new();
+        let _ = match (now.idle_minutes, now.battery_idle_minutes) {
+            (None, _) => write!(note, "now off"),
+            (Some(m), None) => write!(note, "now {m} min, both"),
+            (Some(m), Some(b)) => write!(note, "now {m} min, {b} on battery"),
+        };
+        match pick_row(ui, HEAD, &note, &["On USB power", "On battery"]) {
+            Some(row) => row == 1,
+            None => return,
+        }
+    };
+    #[cfg(not(feature = "board-q1"))]
+    let on_battery = false;
+
+    #[cfg(feature = "board-q1")]
+    let rows = if on_battery {
+        BATTERY_IDLE_ROWS
+    } else {
+        IDLE_ROWS
+    };
+    #[cfg(not(feature = "board-q1"))]
+    let rows = IDLE_ROWS;
+    let current = if on_battery {
+        now.battery_idle_minutes
+    } else {
+        now.idle_minutes
+    };
+
+    let mut note: Line = Line::new();
+    let _ = match current {
+        Some(m) => write!(note, "now {m} min"),
+        None if on_battery => write!(note, "now as USB power"),
+        None => write!(note, "now off"),
+    };
+    let Some(row) = pick_row(ui, HEAD, &note, rows) else {
+        return;
+    };
+    let minutes = IDLE_MINUTES[row];
+    let chosen = (minutes > 0).then_some(minutes);
+    if chosen == current {
+        message(ui.panel, HEAD, "unchanged", rows[row]);
+        wait_for_any_key(ui);
+        return;
+    }
+
+    // Stored as text either way: an empty string is "no value here", which reads back as
+    // off for the main timeout and as "follow the main one" for the battery. One shape,
+    // one reader, no second encoding to get wrong.
+    let mut value: heapless::String<8> = heapless::String::new();
+    if let Some(m) = chosen {
+        let _ = write!(value, "{m}");
+    }
+    let (key, next) = if on_battery {
+        (
+            catcard_settings::prefs::BATT_IDLE,
+            crate::prefs::Prefs {
+                battery_idle_minutes: chosen,
+                ..now
+            },
+        )
+    } else {
+        (
+            catcard_settings::prefs::IDLE,
+            crate::prefs::Prefs {
+                idle_minutes: chosen,
+                ..now
+            },
+        )
+    };
+    save_pref(gate, login, ui, HEAD, (key, &value), next, rows[row]);
+}
+
+/// Settings → Display units.
+///
+/// The rows show the same amount written four ways rather than naming the four units,
+/// because the question is what the signing screen will look like and the answer is on
+/// the row. Honoured by `crate::signtx::btc`, the only place in this firmware that turns
+/// satoshis into text.
+#[cfg(not(feature = "board-mk3"))]
+fn display_units_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_settings::prefs::Units;
+    const HEAD: &str = "Display units";
+    /// The sample the rows are drawn with: about an eighth of a bitcoin, so every unit
+    /// shows a whole part and a fraction rather than a row of zeroes.
+    const SAMPLE: u64 = 12_345_678;
+
+    let now = crate::prefs::current();
+    let mut texts: heapless::Vec<heapless::String<24>, 4> = heapless::Vec::new();
+    for u in Units::ALL {
+        let mut t: heapless::String<24> = heapless::String::new();
+        let _ = u.write(SAMPLE, &mut t);
+        let _ = texts.push(t);
+    }
+    let rows: heapless::Vec<&str, 4> = texts.iter().map(|t| t.as_str()).collect();
+
+    let mut note: Line = Line::new();
+    let _ = write!(note, "now {}", now.units.label());
+    let Some(row) = pick_row(ui, HEAD, &note, &rows) else {
+        return;
+    };
+    let chosen = Units::ALL[row];
+    if chosen == now.units {
+        message(ui.panel, HEAD, "unchanged", chosen.label());
+        wait_for_any_key(ui);
+        return;
+    }
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::UNITS, chosen.code()),
+        crate::prefs::Prefs {
+            units: chosen,
+            ..now
+        },
+        chosen.label(),
+    );
+}
+
+/// The caps offered, in the order [`catcard_settings::prefs::FeeCap::CHOICES`] lists them.
+#[cfg(not(feature = "board-mk3"))]
+const FEE_ROWS: &[&str] = &["10% (default)", "25%", "50%", "No cap"];
+
+/// Settings → Max network fee.
+///
+/// The cap the PSBT review already enforces: a transaction whose fee is a larger share of
+/// what it sends is refused outright, before anything is signed. Raising it is a
+/// preference; **removing it is a warned choice**, asked twice, because with no cap a
+/// transaction can pay its entire value to miners and the review will still sign it.
+#[cfg(not(feature = "board-mk3"))]
+fn max_fee_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_settings::prefs::FeeCap;
+    const HEAD: &str = "Max network fee";
+
+    let now = crate::prefs::current();
+    let mut note: Line = Line::new();
+    let _ = match now.fee_cap {
+        FeeCap::Percent(p) => write!(note, "now {p}% of the amount"),
+        FeeCap::None => write!(note, "now NO CAP"),
+    };
+    let Some(row) = pick_row(ui, HEAD, &note, FEE_ROWS) else {
+        return;
+    };
+    let chosen = FeeCap::CHOICES[row];
+    if chosen == now.fee_cap {
+        message(ui.panel, HEAD, "unchanged", FEE_ROWS[row]);
+        wait_for_any_key(ui);
+        return;
+    }
+    // Never a default, and never one press away: the only setting here that can cost its
+    // owner the whole of a transaction.
+    if chosen == FeeCap::None {
+        ask(
+            ui.panel,
+            HEAD,
+            "remove the fee cap?",
+            "no fee will be refused",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+        ask(
+            ui.panel,
+            "No cap",
+            "a transaction could pay",
+            "all of itself to miners",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    let value = catcard_settings::prefs::fee_cap_value(chosen);
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::FEE_CAP, &value),
+        crate::prefs::Prefs {
+            fee_cap: chosen,
+            ..now
+        },
+        FEE_ROWS[row],
+    );
+}
+
+/// On/Off for a hardware switch: what was chosen, or `None` if it was cancelled or is
+/// already what it is.
+#[cfg(not(feature = "board-mk3"))]
+fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool> {
+    let note = if on { "now on" } else { "now off" };
+    let want = pick_row(ui, head, note, &["On", "Off"])? == 0;
+    if want == on {
+        message(ui.panel, head, "unchanged", note);
+        wait_for_any_key(ui);
+        return None;
+    }
+    Some(want)
+}
+
+/// Settings → Hardware On/Off → USB port.
+///
+/// Off is a real soft-disconnect: the host sees the device unplug, and nothing is
+/// enumerated, answered or injected until it is switched back on. **It can only be
+/// switched off from this screen**, which is what makes it safe to offer -- the
+/// preference lives under the wallet's key, so it is not read until after the PIN, and a
+/// locked device always enumerates.
+#[cfg(not(feature = "board-mk3"))]
+fn usb_port_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "USB port";
+    let now = crate::prefs::current();
+    let Some(want) = pick_switch(ui, HEAD, now.usb_port) else {
+        return;
+    };
+    if !want {
+        ask(
+            ui.panel,
+            HEAD,
+            "no host can reach it",
+            "until this is back on",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (
+            catcard_settings::prefs::USB_PORT,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            usb_port: want,
+            ..now
+        },
+        if want { "on" } else { "off" },
+    );
+}
+
+/// Settings → Hardware On/Off → Virtual Disk.
+///
+/// Whether this device may ever present itself to a host as a USB disk. Honoured by the
+/// USB Drive screen under Utils, the one place that re-enumerates as mass storage: with
+/// this off that screen refuses to start, so the card is never exposed.
+#[cfg(not(feature = "board-mk3"))]
+fn virtual_disk_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Virtual Disk";
+    let now = crate::prefs::current();
+    let Some(want) = pick_switch(ui, HEAD, now.virtual_disk) else {
+        return;
+    };
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (
+            catcard_settings::prefs::VIRTUAL_DISK,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            virtual_disk: want,
+            ..now
+        },
+        if want { "on" } else { "off" },
+    );
+}
+
+/// Settings → Menu wrapping.
+///
+/// Whether the cursor comes round the other side at the ends of a list. Off is what every
+/// menu here did before the setting existed: pressing past the last item keeps scrolling
+/// to reveal the title.
+#[cfg(not(feature = "board-mk3"))]
+fn menu_wrap_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Menu wrapping";
+    let now = crate::prefs::current();
+    let Some(want) = pick_switch(ui, HEAD, now.menu_wrap) else {
+        return;
+    };
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (
+            catcard_settings::prefs::MENU_WRAP,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            menu_wrap: want,
+            ..now
+        },
+        if want { "on" } else { "off" },
+    );
+}
+
 /// Danger zone → Seed tools → Lock down seed: the key in force becomes the stored seed.
 ///
 /// **Irreversible.** The seed the secure element held is overwritten, and with it goes
@@ -9467,6 +9963,9 @@ impl<'a> DocScreen<'a> {
             view = view.with_scramble(catcard_ui::pager::Scramble::new(u32::from_le_bytes(b)));
         }
         let is_menu = view.is_menu();
+        // A document with selectable rows is a menu, and wraps like one; a reading screen
+        // has no cursor to bring round, so the setting cannot affect it.
+        view.set_wrap(is_menu && crate::prefs::current().menu_wrap);
         Self {
             view,
             is_menu,
@@ -9790,6 +10289,27 @@ fn wait_any_key(ui: &mut Ui<'_>) {
 /// PIN, so the card is never exposed on a locked device.
 fn usb_drive(ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Sdmmc;
+
+    // The two hardware switches, honoured here because this is the only place in the
+    // firmware that re-enumerates as mass storage. Off means the card is never put on the
+    // bus at all -- refused before the controller is even brought up, so there is no
+    // window in which the device is a disk.
+    //
+    // **The port is checked as well as the disk.** This screen re-attaches the core
+    // itself, so a device whose owner had switched USB off would otherwise come back onto
+    // the bus here -- as a disk, with the card on it, which is the last thing that switch
+    // was set for.
+    let prefs = crate::prefs::current();
+    if !prefs.virtual_disk || !prefs.usb_port {
+        let why = if prefs.usb_port {
+            "Virtual Disk is off"
+        } else {
+            "the USB port is off"
+        };
+        message(ui.panel, "USB Drive", why, "see Hardware On/Off");
+        wait_any_key(ui);
+        return;
+    }
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
     // and the menu waits for it to return before it can be chosen again.

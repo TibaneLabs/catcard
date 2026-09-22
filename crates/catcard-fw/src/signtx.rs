@@ -113,10 +113,27 @@ impl Workspace {
     }
 }
 
-/// Satoshis as a decimal BTC string, e.g. `0.00012345`.
-fn btc(sats: u64, out: &mut heapless::String<24>) {
-    use core::fmt::Write as _;
-    let _ = write!(out, "{}.{:08}", sats / 100_000_000, sats % 100_000_000);
+/// Characters an amount can take, unit included.
+///
+/// A PSBT can claim any `u64`, and the widest rendering of `u64::MAX` is bits or mBTC at
+/// 26 characters (18 whole digits, a point, two decimals, and ` bits`). Thirty-two leaves
+/// room and keeps every amount buffer in this file one named size.
+const AMOUNT_LEN: usize = 32;
+
+/// An amount, written the way the owner asked for it: e.g. `0.00012345 BTC`, or
+/// `12345 sats`.
+///
+/// **The only place in the firmware that turns satoshis into text**, which is what lets
+/// the Display units setting be one setting rather than a rule every screen has to
+/// remember. The unit's name comes out with the number, so a caller cannot print an
+/// amount in bits and label it BTC.
+///
+/// The buffer is [`AMOUNT_LEN`] wide, which is what the longest unit needs for the
+/// largest `u64` a PSBT can claim -- see the note there. A `write!` that ran out of room
+/// would leave a *truncated number* on a signing screen, which is the one kind of display
+/// bug that could cost someone their coins.
+fn btc(sats: u64, out: &mut heapless::String<AMOUNT_LEN>) {
+    let _ = crate::prefs::current().units.write(sats, out);
 }
 
 /// Mount the card and hand the volume to `f`.
@@ -363,7 +380,13 @@ pub(crate) fn review_and_sign(
             return;
         }
     };
-    let policy = Policy::default();
+    // The fee cap the owner set, or the ten-percent default. `Policy` still does the
+    // comparing: "no cap" is a limit no percentage can exceed rather than a check that
+    // gets skipped, so there is no path through this that forgets to look at the fee.
+    let policy = Policy {
+        max_fee_percent: crate::prefs::current().fee_cap.percent_limit(),
+        ..Policy::default()
+    };
     let summary = crate::keywork::run(|kw| psbtview::summarise(&psbt, &owner, &policy, kw));
     busy.tick(ui.panel);
     let summary = match summary {
@@ -560,13 +583,13 @@ fn review(
         }
     };
 
-    let mut amount = heapless::String::<24>::new();
+    let mut amount = heapless::String::<AMOUNT_LEN>::new();
     btc(summary.sending, &mut amount);
     let mut line = Text::new();
-    let _ = write!(line, "Sending {amount} BTC");
+    let _ = write!(line, "Sending {amount}");
     say(&mut texts, &mut small, &mut wrapped, line, false, false);
 
-    let mut amount = heapless::String::<24>::new();
+    let mut amount = heapless::String::<AMOUNT_LEN>::new();
     btc(summary.fee, &mut amount);
     let mut line = Text::new();
     let _ = write!(
@@ -593,12 +616,12 @@ fn review(
     }
 
     for d in shown {
-        let mut amount = heapless::String::<24>::new();
+        let mut amount = heapless::String::<AMOUNT_LEN>::new();
         btc(d.amount, &mut amount);
         let mut line = Text::new();
         let _ = write!(
             line,
-            "{}{} BTC{}",
+            "{}{}{}",
             if d.change { "change " } else { "to " },
             amount,
             if d.address_len == 0 {

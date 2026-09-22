@@ -42,9 +42,11 @@ Dependency first, then what a user needs to hold funds safely:
    under thirty-two zero bytes, and Debug → Secure notes reads the Notes & Passwords stock
    wrote. Saving is written and host-tested (`store::set`, one key changed in place, every
    other byte kept), with Settings → Nickname as its first user and Debug → Settings to SD
-   to take a copy of the region first. What is left is the mk3's SPI-NOR medium, the
-   re-key when the seed changes, and using the settings for the things that currently
-   forget: chain, account numbers, display units.
+   to take a copy of the region first. The device preferences are now kept there too --
+   idle timeout, display units, the fee cap, the USB and Virtual Disk switches, menu
+   wrapping -- each under our own `cat_*` key, read once at login and honoured by the code
+   named in `crate::prefs`. What is left is the mk3's SPI-NOR medium, the re-key when the
+   seed changes, and the settings for chain and account numbers.
 8. ~~**Multisig and descriptor import**~~ -- done; see §4. Untested on hardware.
 9. **Encrypted backup and restore**.
 10. ~~**Import paths** beyond words~~ -- mostly done: a stored secret that is an xprv
@@ -134,7 +136,7 @@ every multisig input is refused.
 |---|---|---|---|
 | Ready to Sign entry | ✅ | ✅ | the card's lone `.psbt`, or a picker |
 | Parse, review, sign, write back | ✅ | 🟡 | done; untested on hardware |
-| Change validation, fee limit, sighash policy | ✅ | ✅ | change re-derived, 10% cap, SIGHASH_ALL only |
+| Change validation, fee limit, sighash policy | ✅ | ✅ | change re-derived, SIGHASH_ALL only; the cap is Settings → Max network fee (10% default, 25/50/none) |
 | Finalise to a network transaction | ✅ | ✅ | FINAL.TXN, as hex |
 | Batch sign, Sign Text File, USB / NFC / QR entry | ✅ | 🟡 | `Sign` takes a PSBT from SD, from the Q1 scanner and from the NFC tag; batch and text files remain |
 | Multisig inputs, foreign inputs, coinjoin | ✅ | 🟡 | multisig: registered wallets only (§4); foreign inputs and coinjoin: step 2 |
@@ -156,7 +158,7 @@ every multisig input is refused.
 | Secure Notes, WIF store | ✅ | ❌ | after step 7 |
 | Wallet export presets | ✅ | 🟡 | descriptor file for the three single-sig accounts; presets that are not standards need a public format |
 | microSD | ✅ | ✅ | FAT12/16/32 and exFAT, cards to 2 TB, format |
-| Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card; no RAM disk |
+| Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card, and Settings → Hardware On/Off can refuse it; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
 | NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast, an address goes out as a `bitcoin:` URI, and a PSBT a phone writes to the tag comes in to the signing screen (`crate::nfc`); all of it untried on hardware, and file share remains |
 | QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, shows files as animated QR, and reads and writes SeedQR; NFC-side transfers remain |
@@ -171,7 +173,7 @@ every multisig input is refused.
 | Test Login | ✅ | ✅ | Settings → Login → Test login; refused below four tries left |
 | Brick after 13 attempts | ✅ | ✅ | the bootloader and SE enforce it |
 | Trick PINs (duress, brick, wipe, delta...) | ✅ | ❌ | step 12; needs the settings store |
-| Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | 🟡 | scrambled keypad, countdown and nickname ✅; kill key and SD 2FA ✅ in release builds only (`crate::guard`), untried on hardware; idle timeout ❌ |
+| Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | 🟡 | scrambled keypad, countdown and nickname ✅; idle timeout ✅ (`crate::idle`, off/1/2/5/15/30/60 min, a separate value on Q1 battery), untried on hardware; kill key and SD 2FA ✅ in release builds only (`crate::guard`), untried on hardware |
 | Calculator login (Q1) | ✅ | ❌ | |
 | HSM mode, Spending Policy, CCC | ✅ | ❌ | step 13 |
 | Hobbled mode | ✅ | ❌ | step 12 |
@@ -191,7 +193,7 @@ every multisig input is refused.
 | List / delete files, format SD | ✅ | 🟡 | browse and format ✅; delete ❌ |
 | Verify Sig File | ✅ | ❌ | with step 5 |
 | Selftest, Warm Reset, versions | ✅ | 🟡 | selftest in Debug, version and chip in About; no warm reset entry |
-| Preferences (units, timeouts, brightness, USB/NFC/VDisk toggles, testnet) | ✅ | ❌ | step 7 |
+| Preferences (units, timeouts, brightness, USB/NFC/VDisk toggles, testnet) | ✅ | 🟡 | Settings holds idle timeout, display units, max network fee, Hardware On/Off (USB port, Virtual Disk) and menu wrapping, all per wallet and untried on hardware; brightness, NFC and testnet remain. Only switches the firmware obeys are offered |
 
 ## 10. Chains
 

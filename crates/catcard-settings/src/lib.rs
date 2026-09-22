@@ -25,6 +25,7 @@
 pub mod chains;
 pub mod json;
 pub mod nvstore;
+pub mod prefs;
 pub mod prelogin;
 pub mod store;
 pub mod vault;

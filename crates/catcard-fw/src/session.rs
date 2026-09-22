@@ -107,6 +107,12 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // SAFETY: nothing else claims the power-button pin, and this runs once, in the boot
     // path, before any screen.
     unsafe { power::init(&gate) };
+    // The idle timeout uses the same gate, and needs the clock read while it is still
+    // being read here. Armed with nothing: only a wallet's own settings can turn it on,
+    // and those are not readable until the PIN is in.
+    //
+    // SAFETY: reads RCC; once, on the boot path, before any tick.
+    unsafe { crate::idle::init(&gate) };
     // Which pin reports the power source, and therefore what the status bar's icon says.
     // SAFETY: bring-up; nothing else drives the battery-sense pins.
     #[cfg(feature = "board-q1")]

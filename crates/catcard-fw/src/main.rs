@@ -44,6 +44,8 @@ mod gpu;
 mod guard;
 /// The heap: one region, lent out a block at a time.
 mod heap;
+/// Logging out after a while with nobody touching it.
+mod idle;
 mod key;
 mod keypad;
 mod keywork;
@@ -78,6 +80,8 @@ mod panic;
 mod passphrase;
 mod pinentry;
 mod power;
+/// The device preferences of the wallet in force, and what honours each of them.
+mod prefs;
 /// PSRAM, and who is using it. mk3 has none.
 #[cfg(not(feature = "board-mk3"))]
 mod psram;

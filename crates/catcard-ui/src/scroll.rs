@@ -353,6 +353,9 @@ pub struct ScrollView<'a> {
     scramble: Option<Scramble>,
     /// Horizontal marquee phase for the selected line, advanced by [`Self::tick_marquee`].
     marquee: usize,
+    /// Whether the cursor comes round the other side at the ends of a menu. Off unless a
+    /// caller asks, so a document keeps the scroll-past-the-end behaviour by default.
+    wrap_cursor: bool,
 }
 
 impl<'a> ScrollView<'a> {
@@ -369,6 +372,7 @@ impl<'a> ScrollView<'a> {
             cursor,
             scramble: None,
             marquee: 0,
+            wrap_cursor: false,
         };
         v.ensure_cursor_visible();
         v
@@ -383,6 +387,16 @@ impl<'a> ScrollView<'a> {
     pub fn with_scramble(mut self, scramble: Scramble) -> Self {
         self.scramble = Some(scramble);
         self
+    }
+
+    /// Let the cursor come round the other side at the ends of a menu.
+    ///
+    /// Off by default, which is what every document did before there was a preference:
+    /// pressing past the last item keeps scrolling to reveal the title rather than
+    /// jumping. On, the two ends of a list are one keypress apart -- which is the whole
+    /// point on a long menu, and a surprise on a short one, hence the setting.
+    pub fn set_wrap(&mut self, wrap: bool) {
+        self.wrap_cursor = wrap;
     }
 
     /// The height of line `i`'s slot: its face plus the inter-line gap.
@@ -572,6 +586,16 @@ impl<'a> ScrollView<'a> {
             (cur + 1..self.lines.len()).find(|&j| self.lines[j].menu_item.is_some())
         } else {
             (0..cur).rev().find(|&j| self.lines[j].menu_item.is_some())
+        };
+        // Nothing further that way. With wrapping on, the cursor comes round to the item
+        // at the other end -- the *first* selectable line going down, the last going up --
+        // rather than scrolling into the title. Searched from the far end rather than
+        // assumed to be index 0, because a document's first lines are a title and a note
+        // and carry no `menu_item`.
+        let next = match (next, self.wrap_cursor) {
+            (None, true) if down => self.lines.iter().position(|l| l.menu_item.is_some()),
+            (None, true) => self.lines.iter().rposition(|l| l.menu_item.is_some()),
+            (n, _) => n,
         };
         match next {
             Some(j) => {
@@ -975,6 +999,53 @@ mod tests {
         // Pressing up again has no earlier item, so it keeps scrolling to show the title.
         v.move_cursor(false);
         assert_eq!(v.off(), 0, "did not scroll up to reveal the title");
+    }
+
+    /// With wrapping on, the two ends of a list are one press apart -- and the cursor
+    /// lands on an *item*, never on the title row that carries no id.
+    #[test]
+    fn the_cursor_wraps_round_both_ends_when_asked() {
+        let src = a_menu();
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        v.set_wrap(true);
+        assert_eq!(v.selected(), Some(1));
+        // Up from the first item goes straight to the last.
+        v.move_cursor(false);
+        assert_eq!(v.selected(), Some(5));
+        // And down from the last comes back to the first, not into the title.
+        v.move_cursor(true);
+        assert_eq!(v.selected(), Some(1));
+        // A whole lap still ends where it started.
+        for _ in 0..5 {
+            v.move_cursor(true);
+        }
+        assert_eq!(v.selected(), Some(1));
+    }
+
+    /// Off -- the default -- the ends still scroll to reveal the title instead of jumping,
+    /// which is the behaviour every menu had before the preference existed.
+    #[test]
+    fn without_wrapping_the_ends_do_not_jump() {
+        let src = a_menu();
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        v.move_cursor(false);
+        assert_eq!(v.selected(), Some(1), "wrapped with the setting off");
+        for _ in 0..8 {
+            v.move_cursor(true);
+        }
+        assert_eq!(v.selected(), Some(5), "wrapped off the bottom");
+    }
+
+    /// A one-item menu has nowhere to wrap to, and must not lose its cursor trying.
+    #[test]
+    fn wrapping_a_single_item_stays_on_it() {
+        let src = [Line::title("Menu"), Line::item("only", 7)];
+        let mut v = ScrollView::build(&src, 128, 64, compact_fonts());
+        v.set_wrap(true);
+        v.move_cursor(true);
+        assert_eq!(v.selected(), Some(7));
+        v.move_cursor(false);
+        assert_eq!(v.selected(), Some(7));
     }
 
     #[test]

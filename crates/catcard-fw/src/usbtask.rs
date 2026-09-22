@@ -1115,7 +1115,7 @@ pub fn service() -> bool {
 }
 
 fn poll_once() -> bool {
-    let busy = if MSC_ACTIVE.load(Ordering::Relaxed) {
+    let busy = if MSC_ACTIVE.load(Ordering::Relaxed) || !PORT_ON.load(Ordering::Relaxed) {
         false
     } else {
         with_task(|t| {
@@ -1132,6 +1132,10 @@ fn poll_once() -> bool {
     // the one place that runs no matter which screen is up -- the PIN prompt and the seed
     // backup included.
     crate::power::tick();
+    // And the idle timeout for the same reason again: a timeout that only counted while
+    // the main menu happened to be up would be a timeout that never fires on the screen
+    // an unattended device is most likely to be left on.
+    crate::idle::tick();
     busy
 }
 
@@ -1226,11 +1230,47 @@ mod led {
 /// [`init`] brings the core up soft-disconnected; this presents it to the host. Call it
 /// only from a loop that then services USB by calling [`pump`] -- so the host's first
 /// enumeration is answered immediately rather than lost to a blocking callgate. Safe to
-/// call more than once. No-op if USB never came up.
+/// call more than once. No-op if USB never came up, or while the owner has the port
+/// switched off.
 pub fn attach() {
+    if !PORT_ON.load(Ordering::Relaxed) {
+        return;
+    }
     // SAFETY: the task owns OTG_FS for the life of the firmware; the lock excludes other
     // tasks and nothing runs in interrupt context.
     with_task(|t| unsafe { t.otg.attach() });
+}
+
+/// Whether the owner has the USB port switched on. On until a wallet's settings say
+/// otherwise; see [`crate::prefs`].
+static PORT_ON: AtomicBool = AtomicBool::new(true);
+
+/// Switch the USB port on or off, as the `Hardware On/Off` setting asks.
+///
+/// **Off is a real soft-disconnect, not a pretence.** The core drops off the bus, so the
+/// host sees the device unplug and there is nothing left to enumerate, answer or inject a
+/// keypress through; [`poll_once`] stops servicing it as well, so no report is read even
+/// if something did arrive. The peripheral stays initialised, because switching back on
+/// has to work without a reboot -- and because a device that could not re-attach would be
+/// a device whose owner had permanently removed its only remote channel.
+///
+/// The port comes up attached at boot and is only switched off once the wallet's settings
+/// have been read, which is after the PIN: a preference kept under a key derived from the
+/// seed cannot be consulted any earlier. So a locked device always enumerates, which is
+/// what keeps a unit with a dead screen reachable.
+pub fn set_port(on: bool) {
+    if PORT_ON.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    crate::catlog!("usb: port switched {}", if on { "on" } else { "off" });
+    // SAFETY: as in `attach` -- the task owns OTG_FS and the lock excludes other tasks.
+    with_task(|t| unsafe {
+        if on {
+            t.otg.attach();
+        } else {
+            t.otg.detach();
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

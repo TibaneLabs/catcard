@@ -52,6 +52,11 @@ out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can l
 to one. `make lint` still type-checks them through the release-shape clippy runs.
 | `Passphrase` | *(top level in stock)* | ❌ see above; also under Derive |
 | `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
+| `Idle timeout` | `Idle Timeout` (`idle_to`, `batt_to`, in seconds) | 🔀 own keys `cat_idle` / `cat_bidle`, in **minutes** -- a separate key rather than the same name in another unit; same off/1/2/5/15/30/60 range, with the Q1's battery value asked first. Honoured by `crate::idle`, which logs out through the same callgate as the power button |
+| `Display units` | `Display Units` (`rz`) | 🔀 own key `cat_units` (`btc`/`mbtc`/`bits`/`sats`) rather than stock's decimal count; the rows show the same amount written four ways. Honoured by `crate::signtx::btc`, the only place that turns satoshis into text |
+| `Max network fee` | `Max Network Fee` (`fee_limit`) | 🔀 own key `cat_fee` (percent, or `none`); 10% default, 25%, 50%, or no cap -- which is asked twice and warned, and which no unreadable value can ever become |
+| `Hardware On/Off` → `USB port`, `Virtual Disk` | `Hardware On/Off` (`du` = disable-USB, `vidsk`, plus NFC / keyboard-emu rows) | 🔀 own keys `cat_usb` / `cat_vdsk`, written as *enable* rather than stock's *disable*; **only the two switches this firmware really obeys** -- the port is a real soft-disconnect, the disk gates Utils → USB Drive (which also refuses while the port is off). NFC and keyboard emulation are not offered, because nothing here would honour them |
+| `Menu wrapping` | `Menu Wrapping` (`wa`) | 🔀 own key `cat_wrap`; the cursor comes round at the ends of a list (`catcard_ui::scroll`) |
 | `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |
 | `Danger zone` → `Seed tools` → `Destroy seed` | `… Seed Functions` → `Destroy Seed` | ✅ |
 | `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; words keys only -- an XPRV root is not usable here yet |
@@ -61,7 +66,14 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
 | `Debug` → `Warm Reset` | `I Am Developer.` → `Warm Reset`; `Danger Zone` → `Debug Functions` → `Warm Reset` | ✅ same drawer; ours asks first and says the PIN is asked for again |
-| — | `Hardware On/Off`, `Display Units`, `Max Network Fee`, `Idle Timeout`, `NFC Push Tx`, `Keyboard EMU`, `Buried Settings` | not implemented |
+| — | `NFC Push Tx`, `Keyboard EMU`, `Buried Settings` | not implemented |
+
+Every preference above is kept in the **wallet in force's own** settings file, under our
+own `cat_*` key rather than stock's -- the reference names stock's keys but not the shape
+of their values, and a value written in a shape stock misread could log a stock device out
+every minute or leave it with no fee cap. Each is read once at login (`crate::prefs`) and
+any unreadable or out-of-range value reads as the safe default. The mk3 has no settings
+store, so these rows are absent there rather than present and inert.
 
 ## Utils (stock: Advanced/Tools)
 
@@ -71,7 +83,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list, and the words, XPRV and WIF children can be put in force from it |
 | `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat. Selecting a file in the listing offers `Delete file` — asked first, and irreversible; the file picker used mid-signing does not offer it |
 | *(Sign → Message; Addresses → Verify an address)* | `File Management` → `Sign Text File`; `NFC Tools` → `Verify Address` | 🔀 message signing under the one Sign; verify sits with the addresses it checks, rather than in a tag drawer — the tag is reached from whichever screen has something to put on it |
-| `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer |
+| `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer -- but the switch is stock's: with `Virtual Disk` (or the USB port) off, this refuses to start |
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
 | `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
 | — | `Backup`, `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
