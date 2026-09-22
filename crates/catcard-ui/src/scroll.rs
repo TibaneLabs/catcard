@@ -72,6 +72,27 @@ pub fn text_cols(fonts: &Fonts<'_>, size: Size, width: usize) -> usize {
     width.saturating_sub(fonts.margin + gutter) / fonts.face(size).advance(b'0').max(1)
 }
 
+/// A picture at the head of a row, drawn at its own size -- unlike [`Line::icon`], which
+/// is a glyph scaled to the line's face.
+#[derive(Copy, Clone)]
+pub enum Mark<'a> {
+    /// Colour art, drawn through whatever palette the page is shown in. Keeps its own
+    /// colours on the selection bar.
+    Colour(&'a crate::art::indexed::Indexed),
+    /// One bit, drawn in the row's ink -- so it inverts with the text when selected.
+    Mono(&'a Bitmap),
+}
+
+impl Mark<'_> {
+    /// Its width and height, in pixels.
+    pub fn size(&self) -> (usize, usize) {
+        match self {
+            Mark::Colour(a) => (a.width as usize, a.height as usize),
+            Mark::Mono(b) => (b.width as usize, b.height as usize),
+        }
+    }
+}
+
 /// One line of a document, before wrapping.
 #[derive(Copy, Clone)]
 pub struct Line<'a> {
@@ -90,6 +111,8 @@ pub struct Line<'a> {
     /// the icon stays put when a selected, un-wrapped line marquees. Used by the file
     /// browser for folder/file/parent glyphs.
     pub icon: Option<&'a Bitmap>,
+    /// A picture at the left at its own size, ahead of any text. See [`Mark`].
+    pub mark: Option<Mark<'a>>,
 }
 
 impl<'a> Line<'a> {
@@ -103,6 +126,7 @@ impl<'a> Line<'a> {
             menu_item: None,
             wrap: false,
             icon: None,
+            mark: None,
         }
     }
 
@@ -116,6 +140,7 @@ impl<'a> Line<'a> {
             menu_item: None,
             wrap: false,
             icon: None,
+            mark: None,
         }
     }
 
@@ -129,6 +154,7 @@ impl<'a> Line<'a> {
             menu_item: Some(id),
             wrap: false,
             icon: None,
+            mark: None,
         }
     }
 
@@ -161,6 +187,18 @@ impl<'a> Line<'a> {
         self.icon = Some(icon);
         self
     }
+
+    /// Draw `mark` at the left of this line at its own size, ahead of the text.
+    pub const fn with_mark(mut self, mark: Mark<'a>) -> Self {
+        self.mark = Some(mark);
+        self
+    }
+
+    /// This line in the title face: a larger row, with room for a mark.
+    pub const fn large(mut self) -> Self {
+        self.size = Size::Title;
+        self
+    }
 }
 
 /// A line after wrapping: exactly what one row on screen draws.
@@ -172,6 +210,7 @@ pub struct VisualLine<'a> {
     pub sensitive: bool,
     pub menu_item: Option<u32>,
     pub icon: Option<&'a Bitmap>,
+    pub mark: Option<Mark<'a>>,
 }
 
 /// Most visual lines a document holds after wrapping. Enough for a 24-word seed with a
@@ -251,6 +290,7 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 sensitive: line.sensitive,
                 menu_item: line.menu_item,
                 icon: line.icon,
+                mark: line.mark,
             });
             if out.is_full() {
                 break;
@@ -271,6 +311,7 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 // selectable nor re-iconed.
                 menu_item: if first { line.menu_item } else { None },
                 icon: if first { line.icon } else { None },
+                mark: if first { line.mark } else { None },
             });
             first = false;
             rest = tail.trim_start_matches(' ');
@@ -405,6 +446,9 @@ impl<'a> ScrollView<'a> {
     /// or zero when it has no icon. The icon is scaled to about the line height, matching
     /// [`crate::icons`].
     fn icon_advance(&self, i: usize) -> usize {
+        if let Some(m) = self.lines[i].mark {
+            return m.size().0 + 4;
+        }
         match self.lines[i].icon {
             Some(bmp) => {
                 let lh = self.fonts.face(self.lines[i].size).line_height();
@@ -640,6 +684,21 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
             let scale = (lh / 7).max(1);
             draw_icon(canvas, bmp, fonts.margin, top, scale, ink, h);
             tx = fonts.margin + bmp.width as usize * scale + 2;
+        }
+        // A mark, at its own size, centred on the row. Only when the whole of it is on
+        // screen: half a logo at the edge of a scroll reads as a different logo.
+        if let (Some(mark), Align::Left) = (vl.mark, vl.align) {
+            let (mw, mh) = mark.size();
+            let my = top + (lh as isize - mh as isize) / 2;
+            if my >= 0 && my as usize + mh <= h {
+                match mark {
+                    Mark::Colour(art) => {
+                        crate::art::indexed::draw_indexed(canvas, art, fonts.margin, my as usize)
+                    }
+                    Mark::Mono(bmp) => draw_icon(canvas, bmp, fonts.margin, my, 1, ink, h),
+                }
+            }
+            tx = fonts.margin + mw + 4;
         }
 
         match vl.align {
@@ -1041,6 +1100,41 @@ mod tests {
             ink_count(&c) > 0,
             "a partially-scrolled line vanished entirely"
         );
+    }
+
+    #[test]
+    fn a_mark_is_drawn_at_its_own_size_and_indents_the_text() {
+        use crate::art::chainicons;
+        let fonts = Fonts {
+            title: &peep10x20::FONT,
+            body: &peep7x14::FONT,
+            small: &misc4x6::FONT,
+            gap: 2,
+            margin: 6,
+        };
+        let doc = [
+            Line::item("Bitcoin", 0)
+                .large()
+                .with_mark(Mark::Colour(&chainicons::BTC)),
+            Line::item("Ethereum", 1)
+                .large()
+                .with_mark(Mark::Mono(&chainicons::ETH_MONO)),
+        ];
+        let view = ScrollView::build(&doc, 320, 224, fonts);
+        let mut c = Gray320x240::new();
+        render(&mut c, &view);
+        // The colour mark's own indices land at the left margin, inside its 20x20.
+        let coloured = (0..20)
+            .flat_map(|y| (6..26).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let v = c.get(x, y);
+                v != PAPER && v != crate::canvas::INK
+            })
+            .count();
+        assert!(coloured > 0, "the colour mark is drawn in its own colours");
+        // Nothing of either row's text starts before the mark's width.
+        assert_eq!(view.text_left(0), 6 + 20 + 4);
+        assert_eq!(view.text_left(1), 6 + 12 + 4);
     }
 
     #[test]

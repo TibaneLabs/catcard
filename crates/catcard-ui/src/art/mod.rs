@@ -1,6 +1,7 @@
 //! Bitmap artwork.
 
 pub mod cat;
+pub mod chainicons;
 pub mod flappy;
 pub mod indexed;
 pub mod menuicons;
