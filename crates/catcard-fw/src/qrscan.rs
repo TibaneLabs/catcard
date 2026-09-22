@@ -704,14 +704,18 @@ fn offer(
     // A plain view of the same memory, for looking at what arrived. Reading it back is
     // fine now: every write is done, and it is only a run of writes that a read must not
     // be placed among.
+    //
+    // **At the area's base, not the lease's.** They are four megabytes apart: the scan
+    // wrote through the staging area, which lives in the upper half of the part.
+    let at = area.image_at();
     let mut lease = area.into_lease();
-    let what = sniff(&lease.bytes()[..len]);
+    let what = sniff(&lease.bytes()[at..at + len]);
     // What arrived, when it was nothing this device can use. The screen has room for a
     // length and a word, and the length alone has never been enough to say what went
     // wrong: a line with two stray bytes in it and a line that is genuinely not ours
     // look identical from there.
     if matches!(what, Content::Unknown) {
-        let head = &lease.bytes()[..len.min(16)];
+        let head = &lease.bytes()[at..at + len.min(16)];
         crate::catlog!("qr: {} bytes, not recognised; starts {:02x?}", len, head);
     }
     let (note, actions): (&str, &[&str]) = match what {
@@ -736,10 +740,10 @@ fn offer(
 
     match what {
         Content::Firmware => install(gate, login, ui, lease, len),
-        Content::Psbt => sign(gate, login, ui, lease, len),
+        Content::Psbt => sign(gate, login, ui, lease, at, len),
         Content::Text => {
             // Borrowed for the length of the screen; the lease is dropped after it.
-            let text = core::str::from_utf8(&lease.bytes()[..len]).unwrap_or("(not text)");
+            let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("(not text)");
             show(ui, text);
         }
         Content::Unknown => {}
@@ -773,12 +777,14 @@ fn sign(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     mut lease: crate::psram::Lease,
+    at: usize,
     len: usize,
 ) {
     // The same two alternating buffers the card path uses: each signature rewrites the
     // whole container. A word-aligned split, because everything writing this region
-    // writes whole words.
-    let all = lease.bytes();
+    // writes whole words -- and from `at`, which is where the scan actually put the
+    // transaction.
+    let all = &mut lease.bytes()[at..];
     let half = (all.len() / 2) & !3;
     let (buf, spare) = all.split_at_mut(half);
     let len = match crate::signtx::as_psbt_bytes(buf, len, spare) {

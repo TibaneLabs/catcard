@@ -93,8 +93,25 @@ impl Area {
     /// staging medium. An image goes the other way, back through [`area_from`].
     ///
     /// The lease is unchanged throughout, so nothing else can take the memory in the gap.
+    ///
+    /// **The slice does not start where the area does** -- see [`image_at`](Self::image_at).
     pub fn into_lease(self) -> crate::psram::Lease {
         self._lease
+    }
+
+    /// Where this area's offset zero sits inside a [`crate::psram::Lease`]'s slice.
+    ///
+    /// They are four megabytes apart and it is not obvious from either side. The area
+    /// stages into the **upper half** of the part, so its offset zero is `base + len/2`;
+    /// a lease hands out the whole region from `base`. Anything that writes through the
+    /// area and then reads through the lease has to add this.
+    ///
+    /// Getting it wrong is silent: a scan wrote its payload correctly and the screen
+    /// then read a stale firmware image out of the scratch half and called it "data this
+    /// cannot use", which is true of what it looked at and not of what had arrived.
+    pub fn image_at(&self) -> usize {
+        use catcard_upgrade::StagingArea as _;
+        self.image_offset() as usize
     }
 }
 
