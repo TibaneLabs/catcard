@@ -1049,8 +1049,18 @@ pub fn run(session: Session<'_>) -> ! {
                 // A wallet that now exists -- or no longer does -- reorders the main menu.
                 // Re-read the slot from the login rather than assuming the flow ran to
                 // completion: it can be declined or refused at several points.
+                //
+                // This is the weaker of the two answers: the flag is settled at login and
+                // a write does not clear it (see `key::no_stored_wallet`), so whatever the
+                // flow saw in the slot wins over it. Kept because it is the only answer
+                // for a flow that changed the slot without looking at it afterwards.
                 if action.seed_may_change {
                     v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
+                    if v.no_seed != crate::key::no_stored_wallet(v.no_seed) {
+                        crate::catlog!(
+                            "seed: the login flag still says none; the slot says otherwise"
+                        );
+                    }
                 }
                 if let Some(back) = action.back {
                     v.reset_menu();
@@ -1825,7 +1835,7 @@ impl View<'_> {
     ///
     /// A key loaded for the session is a wallet either way, so neither applies then.
     fn blank(&self) -> bool {
-        (self.no_seed || crate::key::stored_seed_missing()) && crate::key::loaded().is_none()
+        crate::key::no_stored_wallet(self.no_seed) && crate::key::loaded().is_none()
     }
 }
 

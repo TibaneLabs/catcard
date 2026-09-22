@@ -104,10 +104,31 @@ pub(crate) fn note_stored_seed(present: bool) {
     unsafe { *core::ptr::addr_of_mut!(STORED_SEED) = Some(present) };
 }
 
-/// Whether the stored slot is known to hold nothing. False while nothing has looked.
-pub(crate) fn stored_seed_missing() -> bool {
+/// What the firmware itself knows about the slot, if it has looked.
+fn stored_seed() -> Option<bool> {
     // SAFETY: as in `note_stored_seed`.
-    unsafe { *core::ptr::addr_of!(STORED_SEED) == Some(false) }
+    unsafe { *core::ptr::addr_of!(STORED_SEED) }
+}
+
+/// Whether there is no wallet in the slot, given what the login said.
+///
+/// **What this firmware has seen beats what the flag says.** The bootloader's
+/// `PA_ZERO_SECRET` answers "has a secret ever been written", and it is settled at
+/// login: writing one through `gate 18` does not clear it in the struct handed back, so
+/// a device that has just made a seed still reports the flag it booted with. That is
+/// why the main menu went on offering *New* and *Import* after a wallet existed, and
+/// why restarting appeared to fix it.
+///
+/// So the order is evidence first: the firmware has read the slot, or written one and
+/// read it back ([`note_stored_seed`]), and either of those is a look at the thing
+/// itself. The flag decides only where it has never looked.
+///
+/// Source: observed on a Q1, 2026-09-23 -- see docs/HARDWARE-OPEN-ITEMS.md.
+pub(crate) fn no_stored_wallet(login_said_none: bool) -> bool {
+    match stored_seed() {
+        Some(present) => !present,
+        None => login_said_none,
+    }
 }
 
 /// Whether there is a stored wallet to lose -- what a screen about to overwrite the slot
@@ -119,7 +140,10 @@ pub(crate) fn stored_seed_missing() -> bool {
 /// [`note_stored_seed`]). A device in that state was warning that a new seed would
 /// destroy the one stored -- when there was nothing there to destroy.
 pub(crate) fn stored_wallet(login: &catcard_pin::Login) -> bool {
-    matches!(login.step(), catcard_pin::Step::In { zero_secret: false }) && !stored_seed_missing()
+    !no_stored_wallet(!matches!(
+        login.step(),
+        catcard_pin::Step::In { zero_secret: false }
+    ))
 }
 
 /// What the device is working in.

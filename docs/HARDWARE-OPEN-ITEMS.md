@@ -604,11 +604,27 @@ visible rather than mysterious. The flag is what `gate 18` returns in `state_fla
 So the two answers mean different things, and the firmware asks the right one for the
 question:
 
-- **Is there a wallet to work in?** The bytes. `crate::key::stored_seed_missing()` records
-  what the slot turned out to hold, and the menu leads with New and Import when it holds
-  nothing -- before this, such a device offered Sign and Addresses for a wallet it did not
-  have.
+- **Is there a wallet to work in?** The bytes. `crate::key::no_stored_wallet()` answers
+  from what the slot turned out to hold, and the menu leads with New and Import when it
+  holds nothing -- before this, such a device offered Sign and Addresses for a wallet it
+  did not have.
 - **Has a secret ever been written?** The flag, which is all it can tell us.
+
+### The flag is settled at login, and a write does not clear it `[C]`
+
+Same Q1, same day, the other way round: after **creating** a seed the main menu went on
+offering New and Import, and a restart put it right.
+
+`set_secret` refreshes the step from the struct the gate hands back
+(`attempt.has_zero_secret()`), so the firmware is reading the flag after the write, not
+before it -- and it still says no secret. Restarting fixes it because login recomputes
+the flag; the change call does not. The flag is therefore a statement about the state at
+login, and the only thing that can contradict it during a session is the slot itself.
+
+That is what the firmware does now: what it has read out of the slot, or written into it
+and read back, outranks the flag, and the flag decides only where it has never looked. A
+disagreement is logged (`seed: the login flag still says none; the slot says otherwise`),
+so a bootloader that does clear it will show up in a device log rather than go unnoticed.
 
 Unknown: whether any call clears the flag short of a factory path, and whether stock reads
 it the same way. Neither blocks anything -- what a wallet needs is the bytes.
