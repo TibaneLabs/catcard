@@ -1487,7 +1487,10 @@ impl MenuScreen {
 /// worse way to show fifteen settings than the list already is.
 #[cfg(feature = "board-q1")]
 fn is_grid(screen: Screen) -> bool {
-    screen == Screen::Main
+    // Derive as well as Main: it is a short list of things a person picks *between*
+    // rather than reads, which is what the grid is for -- and it is reached from the
+    // grid, so a list there would be a change of shape for no reason.
+    matches!(screen, Screen::Main | Screen::KeyMenu)
 }
 
 /// Where a movement key takes the grid cursor.
@@ -1528,6 +1531,10 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Settings" => Some(&art::SETTINGS),
             "Scan QR" => Some(&art::SCAN_QR_CODE),
             "Derive" => Some(&art::DERIVE_KEY),
+            // The Derive grid.
+            "Back to root" => Some(&art::RETURN_ROOT_KEY),
+            "Passphrase" => Some(&art::DERIVE_PASSPHRASE),
+            "BIP-85 key" => Some(&art::DERIVE_BIP85_INDEX),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
