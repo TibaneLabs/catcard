@@ -1989,14 +1989,12 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Browse SD card" => Some(&art::MICROSD_BROWSE),
             "Format SD card" => Some(&art::MICROSD_FORMAT),
             "Games" => Some(&art::GAMES),
+            "Backup" => Some(&art::BACKUP),
+            "Upgrade Firmware" => Some(&art::FIRMWARE_UPGRADE),
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
             // rather than borrowing one that would read as the wrong thing.
-            //
-            // `Upgrade Firmware` is the one that lands here today, and deliberately: the
-            // microSD icon beside it would say "a card" where what is being chosen is
-            // "replace the firmware on this device".
             _ => None,
         };
         let _ = cells.push(Cell { label, icon });
