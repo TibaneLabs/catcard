@@ -83,6 +83,9 @@ mod qrscan;
 #[cfg(feature = "board-q1")]
 mod qrshow;
 mod recovery;
+/// Debug: write a settings image staged by the memory monitor back over the region.
+#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+mod restore;
 mod sdupgrade;
 mod seedxor;
 mod selftest;

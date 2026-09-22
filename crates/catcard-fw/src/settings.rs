@@ -373,7 +373,7 @@ impl Files {
     }
 
     /// The path of slot `index`, as stock writes it: `settings/%03x.aes`.
-    fn path(index: u32, out: &mut heapless::String<24>) {
+    pub(crate) fn path(index: u32, out: &mut heapless::String<24>) {
         use core::fmt::Write as _;
         let _ = write!(out, "/settings/{index:03x}.aes");
     }

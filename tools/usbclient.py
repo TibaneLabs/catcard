@@ -957,6 +957,61 @@ def main(path, image=None):
         print(f"whose own firmware fails to verify. Region: start={start:#x} len={total}.")
         return 0
 
+    if "--stage-settings" in sys.argv:
+        # Put a state dump's settings region into PSRAM for Debug -> Restore settings.
+        # Staging only: the device checks it (length, SHA-256, that it is a volume, that
+        # it is *this* device's) and writes the flash only when the owner says yes on the
+        # device itself. Nothing this command does touches flash.
+        a = arg_after("--stage-settings")
+        if not a:
+            print("usage: --stage-settings <XXXXXXXX-STATE.BIN>")
+            return 1
+        st, body = request(s, IDENTIFY)
+        if not capabilities(body) & CAP_DEBUG_MEM:
+            print("stage     this build has no memory monitor (needs usb-debug-mem)")
+            return 1
+        import hashlib
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import statedump
+        _manifest, sections = statedump.read(a[0])
+        img = sections.get("settings")
+        if not img:
+            print("stage     that dump has no settings section")
+            return 1
+        at = PSRAM_IMAGE          # restore::staged_at(): the upper half of the PSRAM
+        header = 64               # restore::HEADER
+
+        # Unmark first, so a half-finished staging can never look like a finished one.
+        poke(s, at, b"\0" * 8)
+
+        t0 = time.time()
+        per = ((56 - 5) // 4) * 4
+        done = 0
+        while done < len(img):
+            chunk = img[done : done + per]
+            poke(s, at + header + done, chunk)
+            done += len(chunk)
+            if done % (per * 400) == 0 or done >= len(img):
+                rate = done / max(time.time() - t0, 1e-6) / 1024
+                print(f"\rstage     {done}/{len(img)} ({100 * done // len(img)}%) "
+                      f"{rate:.0f} KB/s", end="", flush=True)
+        print()
+        for off in (0, len(img) // 3, 2 * len(img) // 3, len(img) - 64):
+            off &= ~3
+            got = peek(s, at + header + off, 16, 4)
+            if got != img[off : off + len(got)]:
+                print(f"stage     read-back differs at +{off:#x}; not marked")
+                return 1
+
+        # The header, and the magic last within it -- its second word before its first.
+        digest = hashlib.sha256(img).digest()
+        poke(s, at + 8, struct.pack("<II", len(img), 0) + digest + b"\0" * 16)
+        poke(s, at + 4, b"TOR1")
+        poke(s, at, b"CCRS")
+        print(f"stage     {len(img)} bytes staged, sha256 {digest[:4].hex()}..., marked")
+        print("stage     now: Debug -> Restore settings, on the device")
+        return 0
+
     if "--find-attempt" in sys.argv:
         for at, flags, left in find_attempt(s):
             mark = "LOGGED IN" if flags & STATE_SUCCESSFUL else "not logged in"

@@ -49,6 +49,8 @@ pub enum Use {
     AnimatedQr = 3,
     /// The Debug soak test is exercising it.
     Soak = 4,
+    /// A settings image staged by the host is being checked and written back.
+    Restore = 5,
 }
 
 impl Use {
@@ -59,6 +61,7 @@ impl Use {
             Use::Signing => "signing a transaction",
             Use::AnimatedQr => "reading a QR",
             Use::Soak => "the memory test",
+            Use::Restore => "restoring settings",
         }
     }
 
@@ -68,6 +71,7 @@ impl Use {
             2 => Use::Signing,
             3 => Use::AnimatedQr,
             4 => Use::Soak,
+            5 => Use::Restore,
             _ => return None,
         })
     }
@@ -95,6 +99,7 @@ impl Unavailable {
             Unavailable::Busy(Use::Signing) => "busy: signing a transaction",
             Unavailable::Busy(Use::AnimatedQr) => "busy: reading a QR",
             Unavailable::Busy(Use::Soak) => "busy: the memory test",
+            Unavailable::Busy(Use::Restore) => "busy: restoring settings",
         }
     }
 }

@@ -69,6 +69,9 @@ enum Screen {
     /// Debug: the settings volume and the seed, to a card, in the clear.
     #[cfg(not(feature = "board-mk3"))]
     DumpState,
+    /// Debug: a settings image the host staged in PSRAM, written back over the region.
+    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+    RestoreSettings,
     /// Debug: what the scanner answers, per rate, in raw bytes.
     #[cfg(feature = "board-q1")]
     QrProbe,
@@ -531,6 +534,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
     #[cfg(not(feature = "board-mk3"))]
     "Dump state",
+    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+    "Restore settings",
     #[cfg(feature = "board-q1")]
     "QR probe",
     "USB",
@@ -963,6 +968,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::statedump::screen(a.gate, a.login, a.ui),
             Screen::Debug,
         ),
+        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+        Screen::RestoreSettings => to(
+            |a| crate::restore::screen(a.gate, a.login, a.ui),
+            Screen::Debug,
+        ),
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => to(|a| crate::qrscan::probe(a.ui), Screen::Debug),
         Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
@@ -1344,6 +1354,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
+            #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+            (Key::Confirm, Some("Restore settings")) => Screen::RestoreSettings,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("QR probe")) => Screen::QrProbe,
             (Key::Confirm, Some("USB")) => Screen::Usb,
@@ -1706,6 +1718,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::KeyVault => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => {}
+        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
+        Screen::RestoreSettings => {}
         #[cfg(feature = "board-q1")]
         Screen::QrProbe => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
