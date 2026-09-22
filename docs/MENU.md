@@ -17,7 +17,7 @@ question for each item is only whether it is *reachable where a stock user would
 
 | Ours | Stock | |
 |---|---|---|
-| `Sign` | `Ready To Sign` | 🔀 shorter, to fit a tile |
+| `Sign` | `Ready To Sign` | 🔀 shorter, to fit a tile; asks Transaction or Message first, so message signing is here rather than a second "Sign" among the tools |
 | `Addresses` | `Address Explorer` | 🔀 shorter, to fit a tile |
 | `Notes` (Q1) | `Secure Notes & Passwords` (Q1, `secnap`) | 🔀 shorter; stock also gates on the `secnap` setting, which we do not read yet |
 | `Utils` | `Advanced/Tools` | ❌ different word for the same drawer |
@@ -68,9 +68,9 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Export wallet` | `Export Wallet` | 🔀 Generic JSON and the six vendors that read it, plus Descriptor, Key Expression, Export XPUB, Dump Summary. Still to write: Bitcoin Core (B), Electrum + Blue Wallet (C), Wasabi (D), Unchained (E), and the account-numbered descriptor variants — Bull Bitcoin, Zeus, Samourai pre/post-mix (F) |
 | *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list, and the words, XPRV and WIF children can be put in force from it |
 | `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat |
-| `Sign message`, `Verify address` | `File Management` → `Sign Text File`; `NFC Tools` → `Verify Address` | ❌ flat here, nested there |
+| *(Sign → Message; Addresses → Verify an address)* | `File Management` → `Sign Text File`; `NFC Tools` → `Verify Address` | 🔀 message signing under the one Sign; verify with the addresses it checks, as we have no NFC |
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer |
-| `Analyze RNG`, `View TRNG Words`, `Games` | — | 🔀 ours alone |
+| `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
 | — | `Backup`, `Upgrade Firmware`, `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
 
 `Upgrade Firmware` is worth noting: stock has it under Advanced/Tools, ours is

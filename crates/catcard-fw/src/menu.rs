@@ -141,10 +141,6 @@ enum Screen {
     GenericJson(u8),
     /// Every account's first few addresses, to check against a watch-only wallet.
     DumpSummary,
-    /// Ask whether a typed address belongs to this wallet.
-    VerifyAddress,
-    /// Sign a typed message with one of this wallet's keys.
-    SignMessage,
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
@@ -448,9 +444,6 @@ const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
-    "View TRNG Words",
-    "Verify address",
-    "Sign message",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -460,9 +453,6 @@ const UTILS_ITEMS: &[&str] = &[
 const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
-    "View TRNG Words",
-    "Verify address",
-    "Sign message",
     "Export wallet",
     "Browse SD card",
     "Format SD card",
@@ -568,6 +558,8 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     "Install from SD",
+    // The TRNG's raw output as words: for checking the generator, not for keeping.
+    "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
     "Dump state",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -1021,7 +1013,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
-        Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
+        Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
@@ -1044,14 +1036,6 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| export_generic_json(a.gate, a.login, a.ui, a.words),
             Screen::ExportMenu,
         ),
-        Screen::VerifyAddress => to(
-            |a| crate::verify::screen(a.gate, a.login, a.ui),
-            Screen::Utils,
-        ),
-        Screen::SignMessage => to(
-            |a| crate::signmsg::screen(a.gate, a.login, a.ui),
-            Screen::Utils,
-        ),
         Screen::BrowseSd => to(
             |a| {
                 browse_sd(a.ui, "SD card", None, false);
@@ -1059,10 +1043,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
-        Screen::SignPsbt => to(
-            |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
+        Screen::SignPsbt => to(|a| sign(a.gate, a.login, a.ui), Screen::Main),
         Screen::Passphrase => to(
             |a| crate::passphrase::screen(a.gate, a.login, a.ui),
             Screen::Settings,
@@ -1389,9 +1370,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
-            (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
-            (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
-            (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
@@ -1413,6 +1391,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // top), and an index table would silently point at the wrong entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
+            (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -1784,8 +1763,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::DumpSummary
         | Screen::Xpub(_)
         | Screen::GenericJson(_)
-        | Screen::VerifyAddress
-        | Screen::SignMessage
         | Screen::Passphrase
         | Screen::KeyPassphrase => {}
         // Handled in `run`: it lists the SD card and drives its own loop.
@@ -5375,33 +5352,119 @@ pub(crate) fn with_seed<T>(
     })
 }
 
-/// Addresses: on a multichain build, which chain first; then that chain's addresses.
+/// The main menu's Sign: a transaction or a message.
+///
+/// One entry for both, asked first, because two entries both called "Sign" -- one here and
+/// one among the tools -- that did different things were two places to look for one thing.
+fn sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    match pick_row(ui, "Sign", "", &["Transaction", "Message"]) {
+        Some(0) => crate::signtx::sign_psbt(gate, login, ui),
+        Some(_) => crate::signmsg::screen(gate, login, ui),
+        None => {}
+    }
+}
+
+/// Addresses: a list first -- the chains on a multichain build, "Browse addresses" on a
+/// Bitcoin-only one -- and "Verify an address" last. Then that chain's addresses, or the
+/// question.
 ///
 /// Bitcoin keeps its own explorer, registered multisig wallets and all. Every other chain
 /// gets [`chain_explorer`], which walks the formats its registry entry lists. Leaving an
-/// explorer comes back to the picker, and leaving the picker leaves -- unless there is
-/// only one chain to pick, when there is no picker to come back to.
+/// explorer comes back to the list, and leaving the list leaves.
+///
+/// Verify sits here rather than among the tools: it answers "is this address mine?",
+/// which is the question someone is asking when they open Addresses. Stock has it only
+/// under NFC Tools (hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV [C]), which this
+/// firmware does not have.
 fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     if crate::key::loaded() == Some(crate::key::Loaded::Wif) {
         return wif_addresses(gate, login, ui);
     }
-    #[cfg(feature = "multichain")]
     loop {
-        let offered = crate::chains::enabled(gate, login, ui).len();
-        let Some(chain) = pick_chain(gate, login, ui) else {
-            return;
-        };
-        if chain.id == catcard_wallet::chain::ChainId::Bitcoin {
-            address_explorer(gate, login, ui);
-        } else {
-            chain_explorer(gate, login, ui, chain);
-        }
-        if offered <= 1 {
-            return;
+        match pick_addresses(gate, login, ui) {
+            None => return,
+            Some(AddressPick::Verify) => crate::verify::screen(gate, login, ui),
+            #[cfg(feature = "multichain")]
+            Some(AddressPick::Chain(chain))
+                if chain.id != catcard_wallet::chain::ChainId::Bitcoin =>
+            {
+                chain_explorer(gate, login, ui, chain)
+            }
+            Some(AddressPick::Chain(_)) => address_explorer(gate, login, ui),
         }
     }
+}
+
+/// What the Addresses list chose.
+enum AddressPick {
+    // Read only where there is more than Bitcoin to tell apart.
+    Chain(
+        #[cfg_attr(not(feature = "multichain"), allow(dead_code))]
+        &'static catcard_wallet::chain::Chain,
+    ),
+    Verify,
+}
+
+/// Most chains the Addresses list shows.
+const CHAINS_LISTED: usize = 16;
+#[cfg(feature = "multichain")]
+const _: () = assert!(CHAINS_LISTED >= crate::chains::MAX);
+
+/// The id the "Verify an address" row carries: past any chain's index.
+const VERIFY_ROW: u32 = 1000;
+
+/// The Addresses list: the chains, or Bitcoin alone, then "Verify an address".
+fn pick_addresses(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<AddressPick> {
+    use catcard_ui::scroll::Line as DLine;
+
+    #[cfg(feature = "multichain")]
+    let chains = crate::chains::enabled(gate, login, ui);
     #[cfg(not(feature = "multichain"))]
-    address_explorer(gate, login, ui)
+    let chains: &[&'static catcard_wallet::chain::Chain] = {
+        let _ = (gate, login);
+        &[&catcard_wallet::chain::BITCOIN]
+    };
+    // The title, every chain a build can list, and the verify row.
+    let mut lines: heapless::Vec<DLine, { CHAINS_LISTED + 2 }> = heapless::Vec::new();
+    let _ = lines.push(DLine::title("Addresses"));
+    #[cfg(feature = "multichain")]
+    for (i, c) in chains.iter().enumerate() {
+        let _ = lines.push(chain_row(c, i as u32));
+    }
+    #[cfg(not(feature = "multichain"))]
+    let _ = lines.push(DLine::item("Browse addresses", 0).large());
+    let _ = lines.push(DLine::item("Verify an address", VERIFY_ROW).large());
+    match show_doc(ui, &lines, false, false) {
+        DocExit::Selected(VERIFY_ROW) => Some(AddressPick::Verify),
+        DocExit::Selected(i) => chains.get(i as usize).map(|c| AddressPick::Chain(c)),
+        _ => None,
+    }
+}
+
+/// One chain's row: its mark and its name. The logo in full colour on the Q1, written to
+/// the panel past the canvas; the one-bit mark on the OLED.
+#[cfg(feature = "multichain")]
+fn chain_row(c: &catcard_wallet::chain::Chain, id: u32) -> catcard_ui::scroll::Line<'static> {
+    use catcard_ui::art::chainicons;
+    use catcard_ui::scroll::{Line as DLine, Mark};
+    let mut line = DLine::item(c.name, id).large();
+    if let Some((colour, mono)) = chainicons::mark(c.ticker) {
+        #[cfg(feature = "board-q1")]
+        {
+            let _ = mono;
+            line = line.with_mark(Mark::Full(colour));
+        }
+        #[cfg(not(feature = "board-q1"))]
+        {
+            let _ = colour;
+            line = line.with_mark(Mark::Mono(mono));
+        }
+    }
+    line
 }
 
 /// Addresses for a loaded WIF key: one key, so one address per format -- no accounts, no
@@ -5495,18 +5558,15 @@ fn single_key_addresses(
     }
 }
 
-/// Which chain, from the wallet in force's list: its mark and its name, a row each.
-///
-/// The logos in full colour on the Q1, written to the panel past the canvas; one-bit
-/// marks on the OLED. With only one chain on the list there is nothing to ask.
+/// Which chain, from the wallet in force's list, a row each: for a WIF key's addresses,
+/// which have no verify row. With only one chain on the list there is nothing to ask.
 #[cfg(feature = "multichain")]
 fn pick_chain(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) -> Option<&'static catcard_wallet::chain::Chain> {
-    use catcard_ui::art::chainicons;
-    use catcard_ui::scroll::{Line as DLine, Mark};
+    use catcard_ui::scroll::Line as DLine;
 
     let chains = crate::chains::enabled(gate, login, ui);
     if chains.len() <= 1 {
@@ -5515,20 +5575,7 @@ fn pick_chain(
     let mut lines: heapless::Vec<DLine, { crate::chains::MAX + 1 }> = heapless::Vec::new();
     let _ = lines.push(DLine::title("Addresses"));
     for (i, c) in chains.iter().enumerate() {
-        let mut line = DLine::item(c.name, i as u32).large();
-        if let Some((colour, mono)) = chainicons::mark(c.ticker) {
-            #[cfg(feature = "board-q1")]
-            {
-                let _ = mono;
-                line = line.with_mark(Mark::Full(colour));
-            }
-            #[cfg(not(feature = "board-q1"))]
-            {
-                let _ = colour;
-                line = line.with_mark(Mark::Mono(mono));
-            }
-        }
-        let _ = lines.push(line);
+        let _ = lines.push(chain_row(c, i as u32));
     }
     match show_doc(ui, &lines, false, false) {
         DocExit::Selected(i) => chains.get(i as usize).copied(),
