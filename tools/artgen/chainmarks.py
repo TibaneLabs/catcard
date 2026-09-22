@@ -15,8 +15,8 @@ colour logo thresholded to one bit reads worse than that at twelve pixels.
 **The palette is the picker page's**, not the icons' own: index 0 is the list's
 background and 15 its ink (amber, as every other list on the device), because the list's
 rows and its selection bar are drawn in those two and the icons share the canvas with
-them. Slots 1 to 14 are the icons' colours, in the order they are first met -- so at most
-fourteen colours across every mark, which a real set of logos has to respect too.
+them. Slots 1 to 14 are the icons' colours: when the marks bring more than fourteen between
+them, which real logos do, they are quantized together to fourteen (`quantize`).
 """
 
 import argparse
@@ -98,11 +98,82 @@ def placeholder(letter, colour):
     return px
 
 
+# Below this alpha a pixel is page; at or above it, it is the logo's own colour.
+#
+# A hard edge, not a blend. Blending a downscaled logo's rim onto the page black made
+# dozens of dark in-between shades, which the fourteen shared slots could not hold: they
+# were mapped to whatever dark slot was nearest -- blue and teal specks round an orange
+# coin -- and spent slots a logo's real colours needed. At twenty pixels a clean edge
+# reads better than a smooth one drawn in the wrong colours.
+ALPHA_CUT = 128
+
+
 def load(path):
     im = Image.open(path).convert("RGBA")
     if im.size != (SIZE, SIZE):
         sys.exit(f"{path.name} is {im.size[0]}x{im.size[1]}, want {SIZE}x{SIZE}")
-    return [None if a < 128 else (r, g, b) for r, g, b, a in im.get_flattened_data()]
+    return [None if a < ALPHA_CUT else (r, g, b) for r, g, b, a in im.get_flattened_data()]
+
+
+def quantize(marks, colours=14, per=3):
+    """Bring every mark's colours down to `colours` shared ones.
+
+    The marks share one page palette with fourteen free slots, and real logos -- a
+    gradient, a coin's shading -- bring far more than that between them.
+
+    **Per logo first, then together.** One median cut over every pixel spends the slots
+    by pixel count, so a logo drawn in thin strokes -- Solana's three bars -- loses its
+    signature colour to the big discs around it. So each logo is cut to its own `per`
+    colours first, and only then are the closest of those merged, weighted by how many
+    pixels use them, until `colours` remain: every logo keeps its dominant colours, and
+    what is merged away is what two logos nearly shared anyway.
+    """
+
+    def cut(pixels, n):
+        strip = Image.new("RGB", (len(pixels), 1))
+        strip.putdata(pixels)
+        q = strip.quantize(colors=n, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        pal = q.getpalette()
+        counts = {}
+        for i in q.get_flattened_data():
+            counts[i] = counts.get(i, 0) + 1
+        return [(tuple(pal[i * 3 : i * 3 + 3]), k) for i, k in counts.items()]
+
+    if len({c for px in marks for c in px if c is not None}) <= colours:
+        return marks
+
+    # White is pinned: most of these logos draw their glyph in it, and merged with a
+    # neighbour's cream it turns every one of them faintly yellow.
+    def snap(c):
+        return WHITE if min(c) >= 225 else c
+
+    marks = [[None if c is None else snap(c) for c in px] for px in marks]
+
+    picks = [[WHITE, 1]]  # [colour, weight]; white first, never merged
+    for px in marks:
+        opaque = [c for c in px if c is not None and c != WHITE]
+        if opaque:
+            picks += [[c, k] for c, k in cut(opaque, per)]
+
+    def dist(a, b):
+        return sum((x - y) ** 2 for x, y in zip(a, b))
+
+    while len(picks) > colours:
+        i, j = min(
+            ((i, j) for i in range(1, len(picks)) for j in range(i + 1, len(picks))),
+            key=lambda ij: dist(picks[ij[0]][0], picks[ij[1]][0]),
+        )
+        (a, wa), (b, wb) = picks[i], picks[j]
+        merged = tuple((x * wa + y * wb) // (wa + wb) for x, y in zip(a, b))
+        picks[i] = [merged, wa + wb]
+        del picks[j]
+
+    table = [c for c, _ in picks]
+
+    def nearest(c):
+        return min(table, key=lambda t: dist(t, c))
+
+    return [[None if c is None else nearest(c) for c in px] for px in marks]
 
 
 def mono(letter):
@@ -124,11 +195,16 @@ def main():
     ap.add_argument("out", type=pathlib.Path)
     a = ap.parse_args()
 
-    slots = {}  # colour -> palette index 1..=14
-    marks = []
+    sources = []
     for ticker, letter, colour in CHAINS:
         png = a.src / f"{ticker}.png"
-        px = load(png) if png.exists() else placeholder(letter, colour)
+        sources.append(load(png) if png.exists() else placeholder(letter, colour))
+    sources = quantize(sources)
+
+    slots = {}  # colour -> palette index 1..=14
+    marks = []
+    for (ticker, letter, colour), px in zip(CHAINS, sources):
+        png = a.src / f"{ticker}.png"
         for c in px:
             if c is not None and c not in slots:
                 if len(slots) == 14:
