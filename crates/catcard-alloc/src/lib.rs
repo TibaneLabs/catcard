@@ -161,22 +161,42 @@ impl Heap {
     /// `start` must point to `len` bytes that are writable, and that nothing else uses
     /// for as long as this heap does. Call once.
     pub unsafe fn init(&mut self, start: *mut u8, len: usize) {
+        // SAFETY: the caller's contract is this one's, and an empty heap has no region
+        // for a new one to overlap.
+        unsafe { self.add_region(start, len) };
+    }
+
+    /// Give the heap **another** region, somewhere else in memory.
+    ///
+    /// The free list is ordered by address and merges only blocks that physically
+    /// touch, so regions that are not adjacent simply stay separate: a request is
+    /// served out of whichever one has a block for it, and nothing ever spans the gap
+    /// between them.
+    ///
+    /// What this is for is memory that is real but not linked -- on the L4+ boards the
+    /// SRAM banks above SRAM1, which the image does not place anything in and which
+    /// would otherwise sit unused for the device's whole life. Keeping it a second
+    /// region rather than one big one is deliberate: the linked region is the one the
+    /// boot path has already proven by running out of it, so the primary heap is never
+    /// the memory we are less sure of.
+    ///
+    /// # Safety
+    /// `start` must point to `len` bytes that are writable, that nothing else uses for
+    /// as long as this heap does, and that do not overlap a region already added.
+    pub unsafe fn add_region(&mut self, start: *mut u8, len: usize) {
         let base = align_up(start as usize, ALIGN);
         let end = (start as usize).saturating_add(len);
         if end <= base || end - base < MIN_BLOCK {
-            // Too small to hold even one free block. Left empty rather than rounded up
+            // Too small to hold even one free block. Left out rather than rounded up
             // into something that would be handed out.
             return;
         }
         let size = (end - base) & !(ALIGN - 1);
         // SAFETY: `base` is inside the caller's region, aligned, and the region is at
-        // least `MIN_BLOCK` long, so a `Free` fits.
-        unsafe {
-            let node = base as *mut Free;
-            node.write(Free { size, next: None });
-            self.head = Some(NonNull::new_unchecked(node));
-        }
-        self.size = size;
+        // least `MIN_BLOCK` long, so a `Free` fits. The caller's contract is that these
+        // bytes belong to this heap and are on no list yet.
+        unsafe { self.insert(base, size) };
+        self.size += size;
     }
 
     /// Bytes currently handed out, including headers and padding.

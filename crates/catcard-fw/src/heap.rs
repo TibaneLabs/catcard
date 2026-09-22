@@ -135,8 +135,128 @@ impl Drop for Block {
 /// memory-mapped PSRAM, where only aligned word stores are issued correctly.
 pub fn take(len: usize) -> Option<Block> {
     let layout = Layout::from_size_align(len, 4).ok()?;
-    let ptr = with(|heap| heap.try_alloc(layout))?;
+    let ptr = alloc_from_anywhere(layout)?;
     Some(Block { ptr, len })
+}
+
+/// Allocate out of the linked heap, and out of the spare bank if the linked heap cannot.
+///
+/// The one place that decides to reach for the spare RAM, so `take` and the global
+/// allocator behave the same and neither has to know the bank exists.
+fn alloc_from_anywhere(layout: Layout) -> Option<NonNull<u8>> {
+    if let Some(p) = with(|heap| heap.try_alloc(layout)) {
+        return Some(p);
+    }
+    if !claim_spare() {
+        return None;
+    }
+    with(|heap| heap.try_alloc(layout))
+}
+
+/// Whether the spare bank has been looked at, and what came of it.
+///
+/// Foreground only, like the rest of this module; the claim itself runs with interrupts
+/// masked inside [`with`].
+static mut SPARE: Spare = Spare::Untried;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Spare {
+    /// Not looked at yet. Nothing has needed more than the linked heap.
+    Untried,
+    /// In the heap, and counted in its size.
+    Added,
+    /// The board has none, or what is there did not behave like memory.
+    None,
+}
+
+/// Give the heap the RAM the image does not link, the first time something needs it.
+///
+/// Returns whether the heap grew.
+///
+/// # Why this is not done at boot
+///
+/// Because the bank is memory this firmware has never used. The linked region is proven
+/// by the device starting at all; SRAM2/SRAM3 are proven only by a table in the hardware
+/// reference, and the way an address that is not memory announces itself on a Cortex-M4
+/// is a bus fault -- which on the boot path means a device that stops before USB exists,
+/// on units at RDP=2 where there is no other way in. Waiting until something asks for a
+/// big block puts that risk inside one screen: the worst case is a screen that dies and
+/// a power cycle, not a wallet nobody can reach.
+///
+/// Source: hw-reference/platform.md §"Mk4/Mk5/Q flash & SRAM map" [C] -- SRAM1/2/3 are
+/// one contiguous 640 KB from 0x2000_0000 on the L4+ boards, of which the image links
+/// the first 192 KB and the bootloader reserves the top 8 KB.
+fn claim_spare() -> bool {
+    // SAFETY: foreground, single core; `with` masks interrupts around the mutation.
+    match unsafe { *core::ptr::addr_of!(SPARE) } {
+        Spare::Added => return true,
+        Spare::None => return false,
+        Spare::Untried => {}
+    }
+    let outcome = match catcard_board::BOARD.memory.spare_ram {
+        Some(spare) if looks_like_memory(spare) => {
+            with(|heap| {
+                // SAFETY: the bank is real (just checked), word-aligned, outside every
+                // linked section, below what the bootloader reserves, and added once --
+                // `SPARE` makes sure of the last part.
+                unsafe { heap.add_region(spare.base as *mut u8, spare.len as usize) };
+            });
+            crate::catlog!(
+                "heap: +{} bytes of spare RAM at {:#010x}",
+                spare.len,
+                spare.base
+            );
+            Spare::Added
+        }
+        Some(spare) => {
+            crate::catlog!("heap: spare RAM at {:#010x} did not answer", spare.base);
+            Spare::None
+        }
+        None => Spare::None,
+    };
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of_mut!(SPARE) = outcome };
+    outcome == Spare::Added
+}
+
+/// Whether a bank really holds what is written to it, before any of it is handed out.
+///
+/// A bus fault is not what this catches -- nothing in software can. What it catches is
+/// the quieter failure: a bank smaller than the table says, or one that aliases another,
+/// where stores land somewhere and reads return something. So the check writes a value
+/// derived from each address it visits and only then reads them all back: an alias makes
+/// two probes collide, and the second pass sees a word it did not write. The last word
+/// of the bank is always one of them, because a short bank is the case that would
+/// otherwise corrupt whatever it wraps onto.
+fn looks_like_memory(spare: catcard_board::memory::SpareRam) -> bool {
+    /// Far enough apart to land in different banks and different 64 KiB pages, and few
+    /// enough that the whole check is a few dozen instructions.
+    const STEP: u32 = 32 * 1024;
+    let last = spare.end() - 4;
+    let probe = |at: u32| -> u32 { at ^ 0xA5A5_5A5A };
+
+    let mut at = spare.base;
+    loop {
+        // SAFETY: inside the bank the board table describes, word-aligned, and nothing
+        // else can be using it -- it is in no section this image links.
+        unsafe { core::ptr::write_volatile(at as *mut u32, probe(at)) };
+        if at == last {
+            break;
+        }
+        at = (at + STEP).min(last);
+    }
+    let mut at = spare.base;
+    loop {
+        // SAFETY: as above.
+        let got = unsafe { core::ptr::read_volatile(at as *const u32) };
+        if got != probe(at) {
+            return false;
+        }
+        if at == last {
+            return true;
+        }
+        at = (at + STEP).min(last);
+    }
 }
 
 /// The global allocator, so `alloc` collections work.
@@ -150,7 +270,7 @@ struct Global;
 // SAFETY: every entry point locks the heap, and the pointers handed out come from it.
 unsafe impl GlobalAlloc for Global {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        with(|heap| heap.try_alloc(layout)).map_or(core::ptr::null_mut(), |p| p.as_ptr())
+        alloc_from_anywhere(layout).map_or(core::ptr::null_mut(), |p| p.as_ptr())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {

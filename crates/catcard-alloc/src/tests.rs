@@ -498,3 +498,130 @@ fn the_heap_is_large_enough_for_the_worst_case() {
     );
     assert_eq!(o.heap.used(), 0);
 }
+
+/// The gap left between the two regions, and never given to the heap.
+///
+/// Two separate host allocations would not do: they can come back adjacent, and then
+/// merging them is right rather than wrong, so the test would be measuring the host's
+/// allocator. One backing with a hole in the middle is a gap by construction.
+const GAP: usize = 16 * 1024;
+
+/// A heap over two regions that are nowhere near each other, as the firmware's are: the
+/// linked SRAM and a bank above it that the image places nothing in.
+struct TwoRegions {
+    heap: Heap,
+    backing: Vec<u64>,
+    /// Where the untouchable hole begins, as an offset into `backing`.
+    gap_at: usize,
+}
+
+impl TwoRegions {
+    fn new(first: usize, second: usize) -> Self {
+        let total = first + GAP + second;
+        let mut backing = vec![0u64; total.div_ceil(8)];
+        let base = backing.as_mut_ptr().cast::<u8>();
+        let mut heap = Heap::empty();
+        // SAFETY: the backing outlives the heap, nothing else touches it, and the two
+        // extents are disjoint parts of it -- `GAP` bytes apart, so they cannot merge.
+        unsafe {
+            heap.init(base, first);
+            heap.add_region(base.add(first + GAP), second);
+        }
+        TwoRegions {
+            heap,
+            backing,
+            gap_at: first,
+        }
+    }
+
+    /// Whether the hole between the regions is still untouched.
+    fn gap_is_pristine(&self) -> bool {
+        // SAFETY: the backing is `self`'s own live allocation, read as bytes.
+        let bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(self.backing.as_ptr().cast(), self.backing.len() * 8)
+        };
+        bytes[self.gap_at..self.gap_at + GAP].iter().all(|&b| b == 0)
+    }
+}
+
+#[test]
+fn a_second_region_is_handed_out_too() {
+    // Small first region, large second: the big request can only come from the second.
+    let mut t = TwoRegions::new(4 * 1024, 64 * 1024);
+    assert_eq!(t.heap.size(), 68 * 1024);
+
+    let small = t.heap.try_alloc(layout(1024, 8)).expect("out of the first");
+    let big = t
+        .heap
+        .try_alloc(layout(48 * 1024, 8))
+        .expect("out of the second");
+    paint(small, 1024, 0x11);
+    paint(big, 48 * 1024, 0x22);
+    assert!(check(small, 1024, 0x11), "the big block overwrote it");
+    assert!(check(big, 48 * 1024, 0x22));
+
+    // SAFETY: both from this heap, each freed once.
+    unsafe {
+        t.heap.dealloc(small);
+        t.heap.dealloc(big);
+    }
+    assert_eq!(t.heap.used(), 0);
+}
+
+/// Nothing is ever served across the gap between two regions.
+///
+/// The free list merges blocks that touch, and two regions do not touch. If they were
+/// ever merged, a request larger than either region would be satisfied -- with an
+/// extent running through whatever lies between them, which is not ours.
+#[test]
+fn no_allocation_spans_the_gap_between_regions() {
+    let mut t = TwoRegions::new(16 * 1024, 16 * 1024);
+    assert_eq!(t.heap.size(), 32 * 1024);
+    // Half the total, which neither region can hold on its own.
+    assert!(
+        t.heap.try_alloc(layout(24 * 1024, 8)).is_none(),
+        "a block was handed out spanning two regions"
+    );
+    // And the largest single block is one region's worth, not the sum.
+    assert!(t.heap.largest_free() <= 16 * 1024);
+    assert!(t.heap.largest_free() > 15 * 1024);
+
+    // Both regions filled to the brim, and the hole between them still untouched.
+    let a = t.heap.try_alloc(layout(15 * 1024, 8)).expect("the first");
+    let b = t.heap.try_alloc(layout(15 * 1024, 8)).expect("the second");
+    paint(a, 15 * 1024, 0xAA);
+    paint(b, 15 * 1024, 0xBB);
+    assert!(t.gap_is_pristine(), "something wrote into the gap");
+    // SAFETY: both from this heap, each freed once.
+    unsafe {
+        t.heap.dealloc(a);
+        t.heap.dealloc(b);
+    }
+}
+
+/// Freeing into one region leaves it whole again, and does not disturb the other.
+#[test]
+fn each_region_coalesces_on_its_own() {
+    let mut t = TwoRegions::new(16 * 1024, 64 * 1024);
+    let whole = t.heap.largest_free();
+    let mut held = Vec::new();
+    for i in 0..8 {
+        let p = t.heap.try_alloc(layout(4 * 1024, 8)).expect("room");
+        paint(p, 4 * 1024, i as u8);
+        held.push(p);
+    }
+    for (i, p) in held.iter().enumerate() {
+        assert!(check(*p, 4 * 1024, i as u8), "block {i} was overwritten");
+    }
+    // Freed out of order: coalescing has to work in both directions in each region.
+    for i in [1, 0, 3, 2, 5, 4, 7, 6] {
+        // SAFETY: from this heap, freed once each.
+        unsafe { t.heap.dealloc(held[i]) };
+    }
+    assert_eq!(t.heap.used(), 0);
+    assert_eq!(
+        t.heap.largest_free(),
+        whole,
+        "a region did not come back whole"
+    );
+}

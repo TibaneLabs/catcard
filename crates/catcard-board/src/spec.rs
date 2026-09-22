@@ -4,7 +4,7 @@
 //! **[C]** confirmed, **[I]** inferred, **[?]** unconfirmed — the `[?]` items are
 //! collected in `docs/HARDWARE-OPEN-ITEMS.md`.
 
-use crate::memory::MemoryMap;
+use crate::memory::{MemoryMap, SpareRam};
 use crate::pin::{MaybePin, Pin, pa, pb, pc, pd, pe};
 
 /// Which silicon a board carries. Drives register-map differences in `catcard-hal`
@@ -471,6 +471,10 @@ pub const MK3: BoardSpec = BoardSpec {
         // SRAM2 alias window at 0x1000_0000. Outside our linked region either way.
         bl_sram_base: 0x1000_6000,
         bl_sram_len: 0x1c00,
+        // SRAM2 here is a 32 KB alias window at 0x1000_0000 rather than a continuation
+        // of SRAM1, its size is reported inconsistently (see HARDWARE-OPEN-ITEMS), and
+        // the bootloader lives in it. SRAM1's own 256 KB has room to spare regardless.
+        spare_ram: None,
     },
     hw_compat_bit: 0x04, // MK_3_OK
     display: Display::Ssd1306 {
@@ -570,8 +574,19 @@ pub const MK4: BoardSpec = BoardSpec {
         // for now — and the callgate requires its buffer in SRAM1 regardless.
         sram1_base: 0x2000_0000,
         sram1_len: 192 * 1024,
-        bl_sram_base: 0x1000_6000,
-        bl_sram_len: 0x1c00,
+        // **Not the mk3's alias window.** On these parts SRAM1/2/3 are one contiguous
+        // 640 KB from 0x2000_0000 and there is no 0x1000_0000 alias at all; what the
+        // bootloader reserves is the top 8 KB of SRAM3.
+        // Source: platform.md §"Mk4/Mk5/Q flash & SRAM map" [C]
+        bl_sram_base: 0x2009_e000,
+        bl_sram_len: 8 * 1024,
+        // Everything above the linked 192 KB, stopping where the bootloader's 8 KB
+        // begins: 0x2003_0000..0x2009_e000, which is 440 KiB of SRAM2+SRAM3 that no
+        // section is placed in. Source: platform.md §"Mk4/Mk5/Q flash & SRAM map" [C]
+        spare_ram: Some(SpareRam {
+            base: 0x2003_0000,
+            len: 0x2009_e000 - 0x2003_0000,
+        }),
     },
     hw_compat_bit: 0x08, // MK_4_OK
     // "Same OLED 128x64" as mk3, in a section whose header reads `[C unless noted]`

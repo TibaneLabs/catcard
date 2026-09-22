@@ -96,6 +96,38 @@ pub struct MemoryMap {
     /// `BL_SRAM_BASE`/`BL_SRAM_SIZE`. Source: platform.md §2 [C]
     pub bl_sram_base: u32,
     pub bl_sram_len: u32,
+
+    /// RAM that exists on the part, is not linked, and nothing else owns.
+    ///
+    /// The image places `.data`, `.bss` and the stack in SRAM1 alone -- the callgate
+    /// insists on SRAM1 for its buffer, and keeping the linked region to the bank the
+    /// boot path has always run out of means a mistake here cannot stop the device
+    /// starting. On the L4+ boards that leaves the banks above SRAM1 entirely unused,
+    /// which on a device that has counted bytes against a 32 KiB heap is worth
+    /// reclaiming. The firmware hands this to the allocator as a second region at boot,
+    /// after checking it is really there, and only when something asks for more than
+    /// the linked heap can serve.
+    ///
+    /// `None` where there is nothing to add: mk3's SRAM2 is a separate 32 KB alias
+    /// window with the bootloader living inside it, and SRAM1 there has room to spare
+    /// anyway.
+    pub spare_ram: Option<SpareRam>,
+}
+
+/// A bank of RAM that is real but unlinked, to be given to the allocator at runtime.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SpareRam {
+    /// First byte. Word-aligned, and above everything the image links.
+    pub base: u32,
+    /// How many bytes, stopping short of anything the bootloader reserves.
+    pub len: u32,
+}
+
+impl SpareRam {
+    /// One past the last byte.
+    pub const fn end(&self) -> u32 {
+        self.base + self.len
+    }
 }
 
 impl MemoryMap {
