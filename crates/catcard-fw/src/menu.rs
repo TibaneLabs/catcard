@@ -144,8 +144,12 @@ enum Screen {
     BrowseSd,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
+    /// Where a transaction or a message to sign comes from.
+    SignMenu,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
     SignPsbt,
+    /// Sign a typed message with one of this wallet's keys.
+    SignMessage,
     /// Type a BIP-39 passphrase, opening a second wallet from the same words.
     Passphrase,
     /// Debug: exercise the settings store on internal flash.
@@ -500,6 +504,15 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
     ("Fully Noded", "/fully noded-export.json"),
     ("Theya", "/theya-export.json"),
     ("Bitcoin Safe", "/bitcoin safe-export.json"),
+];
+
+/// Where the thing to sign comes from. The scanner is the Q1's; the mono boards have no
+/// camera, so they have no row for one.
+const SIGN_ITEMS: &[&str] = &[
+    #[cfg(feature = "board-q1")]
+    "Scan",
+    "From SD",
+    "Message",
 ];
 
 /// Ways to change the wallet in force, from the root.
@@ -1045,7 +1058,14 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
-        Screen::SignPsbt => to(|a| sign(a.gate, a.login, a.ui), Screen::Main),
+        Screen::SignPsbt => to(
+            |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
+            Screen::SignMenu,
+        ),
+        Screen::SignMessage => to(
+            |a| crate::signmsg::screen(a.gate, a.login, a.ui),
+            Screen::SignMenu,
+        ),
         Screen::Passphrase => to(
             |a| crate::passphrase::screen(a.gate, a.login, a.ui),
             Screen::Settings,
@@ -1255,7 +1275,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // reach by falling through was Reboot.
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
             // A wallet is present: the first cell signs a transaction from the SD card.
-            (Key::Confirm, Some("Sign")) => Screen::SignPsbt,
+            (Key::Confirm, Some("Sign")) => Screen::SignMenu,
             // The first two cells on a blank device, where there is nothing to sign and
             // nothing to explore.
             (Key::Confirm, Some("New")) => Screen::NewSeedMenu,
@@ -1319,6 +1339,14 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::KeyMenu,
+        },
+        Screen::SignMenu => match (key, SIGN_ITEMS.get(cursor).copied()) {
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Scan")) => Screen::ScanQr,
+            (Key::Confirm, Some("From SD")) => Screen::SignPsbt,
+            (Key::Confirm, Some("Message")) => Screen::SignMessage,
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::SignMenu,
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
         Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
@@ -1609,7 +1637,10 @@ fn is_grid(screen: Screen) -> bool {
     // rather than reads, which is what the grid is for -- and reached from the grid, so a
     // list there would be a change of shape for no reason. Utils runs past six, so the
     // grid pages.
-    matches!(screen, Screen::Main | Screen::KeyMenu | Screen::Utils)
+    matches!(
+        screen,
+        Screen::Main | Screen::KeyMenu | Screen::Utils | Screen::SignMenu
+    )
 }
 
 /// Where a movement key takes the grid cursor.
@@ -1665,6 +1696,12 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "XOR join" => Some(&art::XOR_JOIN),
             "Key vault" => Some(&art::KEY_VAULT),
             // The Utils grid.
+            // The Sign grid.
+            #[cfg(feature = "board-q1")]
+            "Scan" => Some(&art::SIGN_QR),
+            "From SD" => Some(&art::SIGN_SD),
+            "Message" => Some(&art::SIGN_TEXT),
+            // The Utils grid.
             "Analyze RNG" => Some(&art::ANALYZE_RNG),
             "USB Drive" => Some(&art::USB_DRIVE),
             "Export wallet" => Some(&art::EXPORT_WALLET),
@@ -1706,6 +1743,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Main => Some(main_items(no_seed)),
         Screen::Debug => Some(DEBUG_ITEMS),
         Screen::Utils => Some(UTILS_ITEMS),
+        Screen::SignMenu => Some(SIGN_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
@@ -1728,6 +1766,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Main
         | Screen::KeyMenu
         | Screen::Utils
+        | Screen::SignMenu
         | Screen::NewSeedMenu
         | Screen::Debug
         | Screen::Settings
@@ -1786,7 +1825,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
-        Screen::SignPsbt => {}
+        Screen::SignPsbt | Screen::SignMessage => {}
         // Handled in `run`: it zeroizes the login and calls the bootloader; never drawn.
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
@@ -1866,6 +1905,10 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::XpubMenu => {
             let _ = note.push_str("one account key, as text");
             "Export XPUB"
+        }
+        Screen::SignMenu => {
+            let _ = note.push_str("what to sign, and from where");
+            "Sign"
         }
         Screen::Settings => "Settings",
         Screen::Login => "Login",
@@ -5591,18 +5634,6 @@ fn stretch_words<T>(
             out.ok_or("key derivation failed")
         })
     })
-}
-
-/// The main menu's Sign: a transaction or a message.
-///
-/// One entry for both, asked first, because two entries both called "Sign" -- one here and
-/// one among the tools -- that did different things were two places to look for one thing.
-fn sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    match pick_row(ui, "Sign", "", &["Transaction", "Message"]) {
-        Some(0) => crate::signtx::sign_psbt(gate, login, ui),
-        Some(_) => crate::signmsg::screen(gate, login, ui),
-        None => {}
-    }
 }
 
 /// Addresses: a list first -- the chains on a multichain build, "Browse addresses" on a

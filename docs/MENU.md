@@ -17,7 +17,7 @@ question for each item is only whether it is *reachable where a stock user would
 
 | Ours | Stock | |
 |---|---|---|
-| `Sign` | `Ready To Sign` | 🔀 shorter, to fit a tile; asks Transaction or Message first, so message signing is here rather than a second "Sign" among the tools |
+| `Sign` → `Scan` (Q1), `From SD`, `Message` | `Ready To Sign`; `NFC Tools` → `Sign PSBT`; `File Management` → `Sign Text File` | 🔀 one entry for everything signable, asking where it comes from; stock scatters the three |
 | `Addresses` | `Address Explorer` | 🔀 shorter, to fit a tile |
 | `Notes` (Q1) | `Secure Notes & Passwords` (Q1, `secnap`) | 🔀 shorter; stock also gates on the `secnap` setting, which we do not read yet |
 | `Utils` | `Advanced/Tools` | ❌ different word for the same drawer |
