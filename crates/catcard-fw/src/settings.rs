@@ -202,24 +202,7 @@ pub(crate) fn open_wallet(
                 c.heads,
                 c.opened
             );
-            // The same read through the writable mount, which the vault's own read uses
-            // and which found the root's file. If this one finds it and the read-only
-            // one did not, the difference is the mount and not the key.
-            drop(files);
-            // SAFETY: as `mount`; nothing is written here, only read.
-            match unsafe { Files::mount() } {
-                Ok(mut rw) => {
-                    let c = store::census(&mut rw, &key, buf);
-                    crate::catlog!(
-                        "settings: rw mount: {} files, {} errors, {} heads, {} open",
-                        c.files,
-                        c.errors,
-                        c.heads,
-                        c.opened
-                    );
-                }
-                Err(e) => crate::catlog!("settings: rw mount failed: {:?}", e),
-            }
+            files.log_listing();
         }
         Err(e) => crate::catlog!("settings: {} file unreadable: {:?}", label, e),
     }
@@ -393,6 +376,42 @@ impl Files {
     fn path(index: u32, out: &mut heapless::String<24>) {
         use core::fmt::Write as _;
         let _ = write!(out, "/settings/{index:03x}.aes");
+    }
+}
+
+impl Files {
+    /// Log what `/settings` holds, name and size, as this volume sees it.
+    ///
+    /// For telling "the file is not on the flash" from "the file is there and cannot be
+    /// opened", which a failed `open_file` cannot do on its own.
+    pub fn log_listing(&mut self) {
+        let dir = match self.vol.open_dir("/settings") {
+            Ok(d) => d,
+            Err(e) => {
+                crate::catlog!("settings: /settings will not open: {:?}", e);
+                return;
+            }
+        };
+        let mut it = self.vol.iter_dir(dir);
+        let mut n = 0u32;
+        loop {
+            match it.next() {
+                Ok(Some(entry)) => {
+                    n += 1;
+                    crate::catlog!(
+                        "settings:   {} {} B",
+                        entry.name_str().unwrap_or("?"),
+                        entry.len()
+                    );
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    crate::catlog!("settings:   listing stopped: {:?}", e);
+                    break;
+                }
+            }
+        }
+        crate::catlog!("settings: /settings lists {} entries", n);
     }
 }
 

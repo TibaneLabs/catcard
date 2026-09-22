@@ -493,8 +493,11 @@ fn read_doc(
     use catcard_settings::store;
 
     let key = crate::settings::wallet_key(gate, login, panel, HEAD)?;
-    // SAFETY: foreground only; the caller holds the display while this runs.
-    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
+    // Read-only: a read has no business with a mount that can write, and a writable
+    // mount is under suspicion of having removed slot files on a Q1.
+    // SAFETY: the region is mapped and readable; nothing is written.
+    let mut files =
+        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
     Ok(store::read(&mut files, &key, buf).unwrap_or(0))
 }
 

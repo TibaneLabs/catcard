@@ -106,8 +106,10 @@ fn load<'a>(
     // The wallet in force has its own settings file, so a registration made under a
     // BIP-85 child or a temporary seed belongs to that wallet and not to the root's.
     let key = crate::settings::wallet_key(gate, login, panel, "Multisig")?;
-    // SAFETY: foreground only; the caller holds the display while this runs.
-    let mut files = unsafe { crate::settings::Files::mount() }.map_err(|_| "no settings store")?;
+    // Read-only, as every read should be: see `vault::read_doc`.
+    // SAFETY: the region is mapped and readable; nothing is written.
+    let mut files =
+        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
 
     let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
     let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
