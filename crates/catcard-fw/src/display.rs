@@ -271,17 +271,6 @@ pub fn scroll_busy_bar(_panel: &mut Panel) {
     }
 }
 
-/// Hand the bus to the co-processor so a cursor it has been given can be drawn.
-///
-/// The same handover the activity bar uses, without asking for the bar: the cursor
-/// command turns the bar off, and both are drawn only while the GPU owns the bus. The
-/// next [`draw`] takes it back, which is what stops the blink.
-#[cfg(feature = "board-q1")]
-pub fn give_bus_for_cursor() {
-    // SAFETY: foreground only; not inside a draw, which never calls this.
-    unsafe { give_bus() };
-}
-
 /// Wait for the start of the panel's next tear pulse, so a change made now lands between
 /// two refreshes rather than across one. False if no pulse came within 50 ms -- three
 /// frames at the ~61 Hz the tear line runs at on this panel (measured: 360 edges in 3 s).

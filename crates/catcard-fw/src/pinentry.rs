@@ -204,7 +204,7 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
 /// that had gone by the time the half that matters was typed.
 ///
 /// Here the top half holds the prefix, and the moment it is accepted the words take its
-/// place with the cursor in the bottom half. One press, and the words stay in front of
+/// place with the caret in the bottom half. One press, and the words stay in front of
 /// the owner for as long as they are typing the half that would be given away if the
 /// device were not theirs.
 ///
@@ -220,63 +220,52 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
 /// scale 3 -- in black, because the field is white. It gives away exactly what a row of
 /// stars did, how many, and nothing about which.
 ///
-/// # The caret blinks because the co-processor covers it
+/// # The caret is ours, not the co-processor's
 ///
-/// The blink is [`crate::gpu::cursor`], which draws a filled character cell in the
-/// co-processor's own colour and toggles it every 32 frames. On a white field that may
-/// be invisible, so the firmware draws a black caret *inside* that one cell and lets the
-/// co-processor paint over it: whatever colour it uses, the caret disappears and comes
-/// back at the blink rate, which is the thing wanted.
+/// `caret` says whether to draw it; the caller toggles that on a timer, so the blink is
+/// this firmware's. The co-processor can blink a cursor by itself, which is tempting
+/// because it keeps blinking while the CPU is inside a callgate -- but it draws a filled
+/// character cell from its own grid, 9 by 22, in a colour we do not choose. On a white
+/// field that is a flashing block of the wrong size and possibly of the wrong colour.
+/// A hairline is what a text caret looks like, so it is drawn here with everything else.
 ///
-/// That is also why the halves are three grid rows tall. A trail is 51 pixels and a row
-/// is 22, so three rows hold one with the middle row left for a cursor that sits among
-/// the prints rather than above or below them.
+/// The field's geometry is therefore free of that grid. It was laid out on 9x22 cells
+/// only so the co-processor's cursor would land among the prints.
 #[cfg(feature = "board-q1")]
 fn screen_pin(
     panel: &mut display::Panel,
     prefix: usize,
     words: Option<[&str; 2]>,
     suffix: usize,
+    caret: bool,
     left: u32,
 ) {
-    use crate::gpu::{CELL_COLS, CELL_H, CELL_LEFT, CELL_TOP, CELL_W, Cursor};
     use catcard_ui::canvas::{Canvas as _, INK, Level};
     use catcard_ui::icons::{draw_paw_trail_in, paw_trail_size};
     use catcard_ui::text::{draw_text, draw_text_in, width_of};
 
     /// The cat, at the size every other PIN field on this panel draws it.
     const SCALE: usize = 3;
-    /// Co-processor rows one half is tall. Three: a trail is 51 pixels and a row is 22,
-    /// so three rows hold it with the middle one left for the cursor.
-    const ROWS: usize = 3;
-    /// The row the field starts on, leaving a line above it for the heading.
-    const TOP: usize = 2;
-    /// Space either side of the trail, inside the frame. Wide enough that the two
-    /// longest words in the BIP-39 list still sit inside it.
-    const PAD: usize = 20;
     /// The icon palette is not a grey ramp -- see [`catcard_ui::art::menuicons`] -- so
     /// what is drawn on the white field is a named index, not an offset from `PAPER`.
     /// Index 1 is the palette's black.
     const MARK: Level = 1;
-    /// Width of the caret, inside its character cell.
-    const CARET: usize = 3;
+    /// Space either side of the trail, inside the field. Wide enough that the two
+    /// longest words in the BIP-39 list still sit inside it.
+    const PAD: usize = 20;
+    /// Space above and below a trail, which is what makes a half taller than one.
+    const LEAD: usize = 8;
+    /// Where the field starts, leaving a line above it for the heading.
+    const TOP_Y: usize = 42;
 
     let f = display::LAYOUT.title;
     let body = display::LAYOUT.body;
     // The words are only in hand once the prefix has been accepted, so their presence
     // is also "the bottom half is the live one".
     let filled = words.is_some();
-    // Where the caret goes: the half being typed into, at the print not yet made. The
-    // middle row of that half, which is the row the trail leaves clear.
-    let (row, at) = if filled {
-        (TOP + ROWS + 1, suffix)
-    } else {
-        (TOP + 1, prefix)
-    };
+    // Where the caret goes: the half being typed into, at the print not yet made.
+    let at = if filled { suffix } else { prefix };
 
-    // The co-processor's grid, in the canvas's own rows: the status bar takes the top of
-    // the panel and the canvas starts below it.
-    let cell_y = |row: usize| (CELL_TOP + row * CELL_H).saturating_sub(display::BAR_H);
     let (trail_w, trail_h) = paw_trail_size(MAX_PART_LEN, SCALE);
     // One print's width and the gait's stride, from the same function that sized the
     // trail, so nothing here has to know the step the icons crate chose.
@@ -286,26 +275,21 @@ fn screen_pin(
     let box_w = trail_w + 2 * PAD;
     let box_x = display::SCREEN_W.saturating_sub(box_w) / 2;
     let trail_x = box_x + PAD;
-    let half_h = ROWS * CELL_H;
-    let (top_y, mid_y, bot_y) = (cell_y(TOP), cell_y(TOP + ROWS), cell_y(TOP + 2 * ROWS));
-    let trail_dy = half_h.saturating_sub(trail_h) / 2;
-    // The character cell holding the centre of print number `i` -- where the caret is
-    // drawn and where the co-processor is told to blink, so the two are the same cell
-    // by construction rather than by two calculations agreeing.
-    let caret_col = |i: usize| (trail_x + i * step + paw_w / 2).saturating_sub(CELL_LEFT) / CELL_W;
+    let half_h = trail_h + 2 * LEAD;
+    let (top_y, mid_y, bot_y) = (TOP_Y, TOP_Y + half_h, TOP_Y + 2 * half_h);
 
     // The art palette: index 0 is the menu's grey, so the login does not look like a
-    // different device from the one behind it, and 15 is the white the text draws in.
+    // different device from the one behind it, and 15 is the white this field is.
     display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
         c.clear();
 
         // The field: white, both halves, with a line across the middle. Paper, and the
         // cat walks on it.
-        c.fill_rect(box_x, top_y, box_w, bot_y - top_y + 1, INK);
+        c.fill_rect(box_x, top_y, box_w, bot_y - top_y, INK);
         c.fill_rect(box_x, mid_y, box_w, 1, MARK);
 
         match words {
-            None => draw_paw_trail_in(c, prefix, trail_x, top_y + trail_dy, SCALE, MARK),
+            None => draw_paw_trail_in(c, prefix, trail_x, top_y + LEAD, SCALE, MARK),
             // Accepted: the words take the top half and stay there while the second
             // half is typed. That is the whole point of them.
             Some([a, b]) => {
@@ -317,12 +301,12 @@ fn screen_pin(
                 draw_text_in(c, f, x, y, b, MARK);
             }
         }
-        draw_paw_trail_in(c, suffix, trail_x, mid_y + trail_dy, SCALE, MARK);
+        draw_paw_trail_in(c, suffix, trail_x, mid_y + LEAD, SCALE, MARK);
 
-        // The caret, filling the character cell the co-processor will blink over.
-        if at < MAX_PART_LEN {
-            let x = CELL_LEFT + caret_col(at) * CELL_W + (CELL_W - CARET) / 2;
-            c.fill_rect(x, cell_y(row), CARET, CELL_H, MARK);
+        // A hairline where the next print will land, as tall as the trail it sits in.
+        if caret && at < MAX_PART_LEN {
+            let y = if filled { mid_y } else { top_y } + LEAD;
+            c.fill_rect(trail_x + at * step, y, 1, trail_h, MARK);
         }
 
         // What the two halves are, and what the keys do, in the space around them.
@@ -352,15 +336,6 @@ fn screen_pin(
         draw_text(c, body, fx, bot_y + 6, foot);
         tries_left(c, left);
     });
-
-    // The cursor last, and only then the bus: the co-processor draws while it owns it,
-    // and the next screen takes it back.
-    if at < MAX_PART_LEN {
-        let col = caret_col(at);
-        if col < CELL_COLS && crate::gpu::cursor(col, row, Cursor::Solid) {
-            display::give_bus_for_cursor();
-        }
-    }
 }
 
 fn screen_field(
@@ -916,19 +891,42 @@ pub fn unlock(
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     let mut redraw = true;
 
+    // The caret blinks from here rather than from the co-processor: half a second on,
+    // half a second off, toggled below. A redraw for each toggle is affordable because
+    // the panel is flushed row by row against what it already shows, so what reaches
+    // the wire is the few rows the caret sits in.
+    #[cfg(feature = "board-q1")]
+    let (mut caret, mut caret_at) = (true, catcard_hal::dwt::cycles());
+    // SAFETY: reads RCC only.
+    #[cfg(feature = "board-q1")]
+    let blink = (unsafe { catcard_hal::clock::hclk_hz() } / 2).max(1);
+
     loop {
         // A host driving this device needs to know which screen it is looking at.
         crate::usbtask::set_blank(matches!(login.step(), Step::Blank));
 
+        // Only where there is a caret to blink: anywhere else this would repaint a
+        // static screen twice a second for nothing.
+        #[cfg(feature = "board-q1")]
+        if matches!(login.step(), Step::Prefix | Step::Suffix) {
+            let now = catcard_hal::dwt::cycles();
+            if now.wrapping_sub(caret_at) >= blink {
+                caret_at = now;
+                caret = !caret;
+                redraw = true;
+            }
+        }
+
         if redraw {
             match login.step() {
-                // One screen for the whole PIN on the Q1: the prefix box, then the
-                // words in its place with the cursor in the second box. The words the
-                // owner is meant to check stay in front of them while the half that
-                // matters is typed, and it costs one press of the accept key rather
-                // than two.
+                // One screen for the whole PIN on the Q1: the prefix half, then the
+                // words in its place with the caret in the second. The words the owner
+                // is meant to check stay in front of them while the half that matters
+                // is typed, and it costs one press of the accept key rather than two.
                 #[cfg(feature = "board-q1")]
-                Step::Prefix => screen_pin(panel, field.len(), None, 0, login.attempts_left()),
+                Step::Prefix => {
+                    screen_pin(panel, field.len(), None, 0, caret, login.attempts_left())
+                }
                 // Not normally drawn: the accept key that submits the prefix also
                 // passes this step, because the screen it would show is the screen
                 // already on its way. Kept so a path that does stop here has a picture.
@@ -938,6 +936,7 @@ pub fn unlock(
                     0,
                     Some(anti_phishing_words(w)),
                     0,
+                    caret,
                     login.attempts_left(),
                 ),
                 #[cfg(feature = "board-q1")]
@@ -946,6 +945,7 @@ pub fn unlock(
                     0,
                     login.words().map(anti_phishing_words),
                     field.len(),
+                    caret,
                     login.attempts_left(),
                 ),
                 #[cfg(not(feature = "board-q1"))]
@@ -1040,6 +1040,13 @@ pub fn unlock(
         }
 
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        // Solid again from the moment a key goes in: a caret that happened to be
+        // blinked out as a digit landed reads as a key the device did not take.
+        #[cfg(feature = "board-q1")]
+        if !keys.is_empty() {
+            caret = true;
+            caret_at = catcard_hal::dwt::cycles();
+        }
         for key in keys.iter() {
             redraw = true;
             match (login.step(), key) {
