@@ -883,8 +883,10 @@ pub fn run(session: Session<'_>) -> ! {
                 if action.seed_may_change {
                     v.no_seed = matches!(login.step(), catcard_pin::Step::In { zero_secret: true });
                 }
-                v.reset_menu();
-                screen = action.back;
+                if let Some(back) = action.back {
+                    v.reset_menu();
+                    screen = back;
+                }
                 break;
             }
             if next != screen {
@@ -939,8 +941,9 @@ struct Act<'a, 'u> {
 struct Action {
     /// Runs it.
     run: fn(&mut Act<'_, '_>),
-    /// Where the menu lands when it returns.
-    back: Screen,
+    /// Where the menu lands when it returns. `None` for an action more than one menu
+    /// offers: it goes back to whichever opened it, cursor still on the row chosen.
+    back: Option<Screen>,
     /// Re-read the secret slot afterwards: this action can create or destroy a wallet,
     /// and that reorders the main menu.
     seed_may_change: bool,
@@ -954,7 +957,15 @@ fn action_for(screen: Screen) -> Option<Action> {
     fn to(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
         Action {
             run,
-            back,
+            back: Some(back),
+            seed_may_change: false,
+        }
+    }
+    /// For one reached from more than one menu, which returns to where it was opened.
+    fn from_either(run: fn(&mut Act<'_, '_>)) -> Action {
+        Action {
+            run,
+            back: None,
             seed_may_change: false,
         }
     }
@@ -962,7 +973,7 @@ fn action_for(screen: Screen) -> Option<Action> {
     fn reseeds(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
         Action {
             run,
-            back,
+            back: Some(back),
             seed_may_change: true,
         }
     }
@@ -993,7 +1004,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
-        Screen::AddressExplorer => to(|a| addresses(a.gate, a.login, a.ui), Screen::Utils),
+        // "Addresses" on the main menu and "Address Explorer" under Utils.
+        Screen::AddressExplorer => from_either(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
             Screen::ExportMenu,
