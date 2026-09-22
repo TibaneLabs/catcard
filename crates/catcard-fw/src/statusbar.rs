@@ -69,7 +69,8 @@ pub(crate) fn status() -> Status {
         shift: mods & SHIFT != 0,
         symbol: mods & SYMBOL != 0,
         caps: mods & CAPS != 0,
-        passphrase: crate::passphrase::is_set(),
+        key: crate::key::label(),
+        key_set: !crate::key::is_root(),
         // Only if a screen has already derived it. Never an unlock from here.
         fingerprint: crate::pubkeys::known_fingerprint(),
         power: crate::battery::source().map(|s| match s {

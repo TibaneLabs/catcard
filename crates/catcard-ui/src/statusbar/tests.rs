@@ -67,7 +67,8 @@ fn each_indicator_answers_only_to_its_own_state() {
         (
             "passphrase",
             Status {
-                passphrase: true,
+                key: "PASSPHRASE",
+                key_set: true,
                 ..Status::default()
             },
         ),
@@ -154,7 +155,8 @@ fn the_bar_stays_within_its_own_rows() {
         shift: true,
         symbol: true,
         caps: true,
-        passphrase: true,
+        key: "PASSPHRASE",
+        key_set: true,
         fingerprint: Some([0xFF; 4]),
         power: Some(Power::Battery),
     });
@@ -173,7 +175,8 @@ fn the_two_groups_do_not_collide() {
         shift: true,
         symbol: true,
         caps: true,
-        passphrase: true,
+        key: "PASSPHRASE",
+        key_set: true,
         fingerprint: Some([0x59, 0xDA, 0x84, 0xB8]),
         power: Some(Power::External),
     });

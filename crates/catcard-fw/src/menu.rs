@@ -108,6 +108,10 @@ enum Screen {
     /// Core, Electrum, Wasabi, Unchained or a single-signature descriptor. By its row in
     /// [`EXPORT_ITEMS`], which [`ONE_OFFS`] turns into a format and a filename.
     ExportOne(u8),
+    /// Which wallet the device works in: the root, a passphrase, a BIP-85 child.
+    KeyMenu,
+    /// Acting on one row of [`KEY_ITEMS`].
+    KeyPick(u8),
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
     /// Which account level to export a plain xpub from.
@@ -209,14 +213,16 @@ const MAIN_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Notes",
     "Utils",
+    // Which wallet the device is working in -- the root, a passphrase, a BIP-85 child.
+    // Stock reaches the same thing through Settings; it is a cell of its own here
+    // because everything else on this screen is *about* whichever key it selects, and
+    // a person switching wallets should not have to go looking in a settings list.
+    "Derive",
     "Settings",
-    // The scanner is the Q1's, and so is the absence of a logout: stock gates Secure
-    // Logout on `not has_battery`, because a device with a power button does not need a
-    // menu entry to stop. The USB-powered boards keep theirs -- pulling the cable is
-    // their only other way to end a session.
+    // Stock gates Secure Logout on `not has_battery`: a device with a power button does
+    // not need a menu entry to stop, and the USB-powered boards have no other way to end
+    // a session than pulling the cable.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
-    #[cfg(feature = "board-q1")]
-    "Scan QR",
     #[cfg(not(feature = "board-q1"))]
     "Logout",
 ];
@@ -302,6 +308,8 @@ const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
 #[cfg(feature = "games")]
 const UTILS_ITEMS: &[&str] = &[
+    #[cfg(feature = "board-q1")]
+    "Scan QR",
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
@@ -316,6 +324,8 @@ const UTILS_ITEMS: &[&str] = &[
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
+    #[cfg(feature = "board-q1")]
+    "Scan QR",
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
@@ -370,6 +380,18 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
     ("Fully Noded", "/fully noded-export.json"),
     ("Theya", "/theya-export.json"),
     ("Bitcoin Safe", "/bitcoin safe-export.json"),
+];
+
+/// Ways to change the wallet in force.
+///
+/// `Back to root` is first and is always there, even when the device is already in the
+/// root: an owner who is not sure which wallet they are in wants one keypress that
+/// answers it, not a menu that hides the answer when it happens to be "the root".
+const KEY_ITEMS: &[&str] = &[
+    "Back to root",
+    "Passphrase",
+    "BIP-85 24 words",
+    "BIP-85 12 words",
 ];
 
 /// Which level to export a plain xpub from, in stock's order.
@@ -862,6 +884,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| export_key_expression(a.gate, a.login, a.ui),
             Screen::ExportMenu,
         ),
+        Screen::KeyPick(_) => to(
+            |a| choose_key(a.gate, a.login, a.ui, a.words),
+            Screen::KeyMenu,
+        ),
         Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
         Screen::Xpub(_) => to(
             |a| export_xpub(a.gate, a.login, a.ui, a.words),
@@ -1075,9 +1101,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
+            (Key::Confirm, Some("Derive")) => Screen::KeyMenu,
+            // The first row when a wallet other than the root is in force: it names the
+            // one you are in, and selecting it is how you leave.
+            (Key::Confirm, Some(name)) if name.starts_with('[') => Screen::KeyMenu,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
             (Key::Confirm, Some("Logout")) => Screen::SecureLogout,
@@ -1111,6 +1139,13 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // The export drawer. Its rows were briefly handled inside `Utils`, where none of
         // them can ever be selected -- so Confirm fell through to the catch-all and put
         // people in the Debug menu.
+        Screen::KeyMenu => match (key, KEY_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
+            (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::KeyMenu,
+        },
+        Screen::KeyPick(_) => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
                 Screen::GenericJson(cursor as u8)
@@ -1147,6 +1182,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::Main,
         },
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
+            // Off the main grid: its six cells are all about the wallet in force, and
+            // scanning a code is a way *in*, not one of them. Stock puts it on the Q1's
+            // QR key, which nothing here is wired to yet.
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
@@ -1391,6 +1431,38 @@ fn grid_move(cursor: usize, len: usize, k: Key) -> usize {
     next.min(last)
 }
 
+/// The wallet in force, as `[0123ABCD]`, or nothing when it is the root.
+///
+/// Stock puts this at the top of the home menu and it earns the space: every tool below
+/// it -- the addresses, the exports, the signing -- works in whichever wallet this
+/// names, and there is otherwise no way to tell a passphrase wallet from the one whose
+/// words are written down until something has already been exported from the wrong one.
+///
+/// A line above the grid rather than a seventh cell: the grid is six, and six is what
+/// the menu has. `Derive` is the cell that changes it.
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "XFP header item" [C]
+#[cfg(feature = "board-q1")]
+fn key_header() -> Option<heapless::String<12>> {
+    use core::fmt::Write as _;
+    if crate::key::is_root() {
+        return None;
+    }
+    let mut out: heapless::String<12> = heapless::String::new();
+    match crate::pubkeys::known_fingerprint() {
+        // Square brackets, as stock spells a wallet that is not the master.
+        Some([a, b, c, d]) => {
+            let _ = write!(out, "[{a:02X}{b:02X}{c:02X}{d:02X}]");
+        }
+        // In another wallet, but nothing has derived its fingerprint yet. Say which
+        // kind rather than a number that would have to be invented.
+        None => {
+            let _ = write!(out, "[{}]", crate::key::label());
+        }
+    }
+    Some(out)
+}
+
 /// The main menu as a grid of icons.
 #[cfg(feature = "board-q1")]
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
@@ -1408,6 +1480,9 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
             "Utils" => Some(&art::UTILS),
             "Settings" => Some(&art::SETTINGS),
             "Scan QR" => Some(&art::SCAN_QR_CODE),
+            // No art of its own yet: the cell keeps its name and loses its picture,
+            // which is better than borrowing one that reads as something else.
+            "Derive" => None,
             // Only the boards with no power button still offer this.
             "Logout" => Some(&art::LOGOUT),
             // A cell whose art has not been drawn keeps its name and loses its picture,
@@ -1416,9 +1491,29 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize) {
         };
         let _ = cells.push(Cell { label, icon });
     }
+    let header = key_header();
     // The art's own palette, not the amber ramp: this screen is pictures.
     display::draw_with(panel, &art::PALETTE, |c| {
-        catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
+        use catcard_ui::canvas::Canvas as _;
+        let Some(head) = header.as_deref() else {
+            catcard_ui::grid::render(c, display::LAYOUT.body, &cells, cursor);
+            return;
+        };
+        // The grid clears whatever canvas it is given, so the header is drawn on the
+        // rows the grid is not given.
+        let line = display::LAYOUT.body.line_height();
+        let (w, _) = (c.width(), c.height());
+        c.fill_rect(0, 0, w, line, catcard_ui::canvas::PAPER);
+        let _ = catcard_ui::text::draw_text_in(
+            c,
+            display::LAYOUT.body,
+            4,
+            0,
+            head,
+            catcard_ui::canvas::INK,
+        );
+        let mut below = catcard_ui::canvas::Inset::new(c, line);
+        catcard_ui::grid::render(&mut below, display::LAYOUT.body, &cells, cursor);
     });
 }
 
@@ -1432,6 +1527,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DeriveMenu => Some(DERIVE_ITEMS),
+        Screen::KeyMenu => Some(KEY_ITEMS),
         Screen::ExportMenu => Some(EXPORT_ITEMS),
         Screen::XpubMenu => Some(XPUB_ITEMS),
         #[cfg(feature = "games")]
@@ -1446,6 +1542,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Every list screen renders the same way; the title and note come from
         // `menu_head`, the single place they are defined.
         Screen::Main
+        | Screen::KeyMenu
         | Screen::Utils
         | Screen::NewSeedMenu
         | Screen::Debug
@@ -1511,6 +1608,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SecureLogout => {}
         // Handled in `run`: it needs the keypad, which the drawing half does not have.
         Screen::SdInstall => {}
+        // Handled in `run`: it derives, which needs the login struct.
+        Screen::KeyPick(_) => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => {}
         #[cfg(feature = "board-q1")]
@@ -1560,6 +1659,14 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::DeriveMenu => {
             let _ = note.push_str("children of this seed");
             "Derive child"
+        }
+        Screen::KeyMenu => {
+            let _ = note.push_str(if crate::key::is_root() {
+                "working in the root wallet"
+            } else {
+                crate::key::label()
+            });
+            "Derive"
         }
         Screen::ExportMenu => {
             let _ = note.push_str("the same keys, several shapes");
@@ -4155,6 +4262,87 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
     );
 }
 
+/// Act on one row of [`KEY_ITEMS`]: change the wallet the device works in.
+///
+/// The new wallet's fingerprint is shown before anything else uses it. That is the
+/// whole safety property of this screen: every passphrase and every BIP-85 index gives
+/// a *valid* wallet, so there is nothing for the device to reject and a mistyped index
+/// is not an error -- it is a different, empty wallet that behaves perfectly normally.
+/// Naming the one you landed in is the only defence there is.
+fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, which: u8) {
+    use crate::key::Source;
+
+    const HEAD: &str = "Derive";
+    let Some(row) = KEY_ITEMS.get(which as usize).copied() else {
+        return;
+    };
+
+    let chosen = match row {
+        "Back to root" => Source::Root,
+        "BIP-85 24 words" | "BIP-85 12 words" => {
+            let kind = if row.ends_with("12 words") {
+                crate::derive::Kind::Words12
+            } else {
+                crate::derive::Kind::Words24
+            };
+            // The index picks which child, and there are two billion of them. Stock
+            // prompts for it; so does this, defaulting to the one most people mean.
+            let Some(index) = ask_index(ui, HEAD) else {
+                return;
+            };
+            Source::Bip85 { kind, index }
+        }
+        _ => return,
+    };
+
+    let was = crate::key::in_force();
+    if chosen == Source::Root {
+        crate::key::to_root();
+    } else {
+        crate::key::set(chosen);
+    }
+
+    // Derive it now, so the fingerprint on screen is this wallet's and not a promise.
+    // A failure puts the old selection back rather than leaving the device somewhere
+    // neither the owner nor the status bar can name.
+    match master_quietly(gate, login, ui.panel, HEAD) {
+        Ok(master) => {
+            let [a, b, c, d] = crate::keywork::run(|kw| master.fingerprint(kw));
+            drop(master);
+            let mut said: heapless::String<24> = heapless::String::new();
+            let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
+            crate::catlog!("key: now {} ({})", said.as_str(), crate::key::label());
+            message(ui.panel, HEAD, &said, crate::key::label());
+        }
+        Err(why) => {
+            crate::key::set(was);
+            message(ui.panel, HEAD, why, "unchanged");
+        }
+    }
+    wait_for_any_key(ui);
+}
+
+/// Ask for a BIP-85 index.
+///
+/// A short list rather than a number pad: the index picks which of two billion children
+/// this is, and typing one wrong lands silently in another perfectly valid wallet. Four
+/// is enough to be useful and few enough to read back before committing.
+#[cfg(feature = "board-q1")]
+fn ask_index(ui: &mut Ui<'_>, head: &str) -> Option<u32> {
+    const CHOICES: &[&str] = &["index 0", "index 1", "index 2", "index 3"];
+    choose(ui, head, "which child", CHOICES).map(|n| n as u32)
+}
+
+/// Index zero, which is the child everybody means.
+///
+/// mk3 and mk4 have no in-action chooser and this is not worth a screen of their own
+/// yet: the wallet a person wants from BIP-85 is almost always the first one, and the
+/// fingerprint is shown before anything uses it either way.
+#[cfg(not(feature = "board-q1"))]
+fn ask_index(_ui: &mut Ui<'_>, _head: &str) -> Option<u32> {
+    Some(0)
+}
+
 /// Ask which of `items` to use, or `None` if the user backs out.
 ///
 /// A small list with a cursor, for a choice made **inside** an action rather than by
@@ -4469,7 +4657,8 @@ pub(crate) fn master_quietly(
     // only a BIP-39 wallet has one, and an empty slot or an imported xprv is not
     // something this can enumerate.
     let mut ent = [0u8; 32];
-    let ent_len = match bip39_entropy(&secret) {
+    #[allow(unused_mut)]
+    let mut ent_len = match bip39_entropy(&secret) {
         Some(e) if e.len() <= ent.len() => {
             ent[..e.len()].copy_from_slice(e);
             e.len()
@@ -4491,6 +4680,48 @@ pub(crate) fn master_quietly(
         }
     };
     secret.zeroize();
+
+    // The wallet in force may not be the one the secure element holds: a BIP-85 child
+    // is a separate seed derived from the same backup, and every screen has to land in
+    // the same one. So the selection is applied here, once, where the seed already is
+    // -- rather than at each screen, where they would disagree.
+    //
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
+    if let crate::key::Source::Bip85 { kind, index } = crate::key::in_force() {
+        let words = match kind {
+            crate::derive::Kind::Words12 => 12u32,
+            _ => 24,
+        };
+        // The child is derived from the root's master **without** the passphrase: the
+        // passphrase belongs to the wallet that is finally in force, not to the path
+        // taken to reach it. Applying it twice would give a wallet nothing else agrees
+        // with.
+        let mut busy = Working::new(panel, head, "deriving the key");
+        let child = crate::keywork::run(|kw| {
+            let root =
+                Mnemonic::from_entropy(&ent[..ent_len], kw).map_err(|_| "seed did not decode")?;
+            let mut seed = [0u8; SEED_LEN];
+            root.to_seed("", &mut seed, kw)
+                .map_err(|_| "key derivation failed")?;
+            let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw)
+                .map_err(|_| "key derivation failed");
+            seed.zeroize();
+            let master = master?;
+            let (child, len) = catcard_wallet::bip85::words_entropy(&master, words, index, kw)
+                .map_err(|_| "that child does not derive")?;
+            ent.zeroize();
+            ent[..len].copy_from_slice(&child.as_bytes()[..len]);
+            Ok::<usize, &'static str>(len)
+        });
+        busy.tick(panel);
+        match child {
+            Ok(len) => ent_len = len,
+            Err(why) => {
+                ent.zeroize();
+                return Err(why);
+            }
+        }
+    }
 
     // Seed -> master, through whatever passphrase is in force (none, normally).
     // Done once, then the seed material is gone and only the master remains.

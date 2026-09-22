@@ -45,8 +45,14 @@ pub struct Status {
     pub symbol: bool,
     /// CAPS latches rather than being held, so this can be on with no key down.
     pub caps: bool,
-    /// Whether a BIP-39 passphrase is in force.
-    pub passphrase: bool,
+    /// One word for the wallet in force: the root, a passphrase, a BIP-85 child.
+    ///
+    /// A word rather than a flag, because "passphrase: off" says nothing about whether
+    /// the device is somewhere other than the wallet whose words are written down --
+    /// and that is the only question this space is worth spending on.
+    pub key: &'static str,
+    /// Whether that word means something other than the root, and should stand out.
+    pub key_set: bool,
     /// The master fingerprint, if it is already known.
     ///
     /// `None` leaves the space empty. The bar must never be the reason a seed is
@@ -59,7 +65,7 @@ pub struct Status {
 
 /// Space between the modifier words.
 const GAP: usize = 6;
-/// Space before `PASSPHRASE`, which is a separate group.
+/// Space before the key word, which is a separate group.
 const GROUP_GAP: usize = 14;
 /// Space either side of the bar's contents.
 const MARGIN: usize = 4;
@@ -101,8 +107,8 @@ pub fn render<C: Canvas + ?Sized, F: Face + ?Sized>(canvas: &mut C, font: &F, st
         font,
         x + GROUP_GAP - GAP,
         y,
-        "PASSPHRASE",
-        level(status.passphrase),
+        status.key,
+        level(status.key_set),
     );
 
     // The right-hand group, laid out from the edge inwards so it stays put as the left

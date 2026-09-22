@@ -38,6 +38,7 @@ mod game;
 mod gpu;
 /// The heap: one region, lent out a block at a time.
 mod heap;
+mod key;
 mod keypad;
 mod keywork;
 #[macro_use]

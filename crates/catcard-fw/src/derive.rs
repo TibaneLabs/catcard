@@ -19,7 +19,7 @@ use crate::menu;
 use crate::ui::Ui;
 
 /// What can be derived, in the order the menu lists them.
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     Words24,
     Words12,
