@@ -96,6 +96,7 @@ pub enum ChainId {
     Monacoin = 7,
     ElectraProtocol = 8,
     Tron = 9,
+    Namecoin = 10,
 }
 
 impl ChainId {
@@ -115,6 +116,7 @@ impl ChainId {
             7 => Some(ChainId::Monacoin),
             8 => Some(ChainId::ElectraProtocol),
             9 => Some(ChainId::Tron),
+            10 => Some(ChainId::Namecoin),
             _ => None,
         }
     }
@@ -358,6 +360,18 @@ pub const MONACOIN: Chain = Chain {
     formats: SEGWIT_FORMATS,
 };
 
+/// Namecoin. Segwit (`nc1`), no taproot.
+#[cfg(feature = "multichain")]
+pub const NAMECOIN: Chain = Chain {
+    id: ChainId::Namecoin,
+    name: "Namecoin",
+    ticker: "NMC",
+    scheme: Scheme::Bip32,
+    coin_type: 7,
+    network: "namecoin",
+    formats: SEGWIT_FORMATS,
+};
+
 /// Electra Protocol. Segwit, no taproot.
 #[cfg(feature = "multichain")]
 pub const ELECTRA_PROTOCOL: Chain = Chain {
@@ -389,7 +403,7 @@ pub const TRON: Chain = Chain {
 /// Chains compiled into this firmware, in the order a new owner sees them.
 ///
 /// Coin types from SLIP-44 (satoshilabs/slips `slip-0044.md`, checked 2026-09-22) [C]:
-/// BTC 0, LTC 2, DOGE 3, MONA 22, ETH 60, BCH 145, TRX 195, SOL 501, XEP 597.
+/// BTC 0, LTC 2, DOGE 3, NMC 7, MONA 22, ETH 60, BCH 145, TRX 195, SOL 501, XEP 597.
 pub const SUPPORTED: &[Chain] = &[
     BITCOIN,
     #[cfg(feature = "multichain")]
@@ -406,6 +420,8 @@ pub const SUPPORTED: &[Chain] = &[
     TRON,
     #[cfg(feature = "multichain")]
     MONACOIN,
+    #[cfg(feature = "multichain")]
+    NAMECOIN,
     #[cfg(feature = "multichain")]
     ELECTRA_PROTOCOL,
 ];
@@ -429,6 +445,7 @@ pub const KNOWN: &[ChainId] = &[
     ChainId::Monacoin,
     ChainId::ElectraProtocol,
     ChainId::Tron,
+    ChainId::Namecoin,
 ];
 
 /// Look up a chain by wire identifier.
@@ -465,6 +482,7 @@ pub fn build_tag(out: &mut [u8]) -> usize {
             ChainId::Monacoin => b"mona",
             ChainId::ElectraProtocol => b"xep",
             ChainId::Tron => b"trx",
+            ChainId::Namecoin => b"nmc",
         };
         if i > 0 {
             if at == out.len() {
@@ -506,6 +524,7 @@ mod tests {
         assert_eq!(ChainId::Monacoin.as_u16(), 7);
         assert_eq!(ChainId::ElectraProtocol.as_u16(), 8);
         assert_eq!(ChainId::Tron.as_u16(), 9);
+        assert_eq!(ChainId::Namecoin.as_u16(), 10);
         for id in KNOWN {
             assert_eq!(ChainId::from_u16(id.as_u16()), Some(*id));
         }
@@ -540,6 +559,7 @@ mod tests {
                 ChainId::Monacoin => 22,
                 ChainId::ElectraProtocol => 597,
                 ChainId::Tron => 195,
+                ChainId::Namecoin => 7,
             };
             assert_eq!(c.coin_type, expect, "{}", c.name);
         }
@@ -820,6 +840,7 @@ mod tests {
                 ChainId::Monacoin => "mona",
                 ChainId::ElectraProtocol => "xep",
                 ChainId::Tron => "trx",
+                ChainId::Namecoin => "nmc",
             };
             assert!(tag.contains(expect), "{tag} missing {expect}");
         }

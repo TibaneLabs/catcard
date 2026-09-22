@@ -307,7 +307,7 @@ pub fn draw_with_marks(
     let need: usize = view
         .marks_shown()
         .take(MARKS_MAX)
-        .map(|m| m.art.width as usize * m.art.height as usize * 2)
+        .map(|m| m.art.width as usize * m.rows * 2)
         .sum();
     let marks = (need > 0)
         .then(|| crate::heap::take(need))
@@ -322,7 +322,8 @@ pub fn draw_with_marks(
             };
             let mut next = 0usize;
             for shown in view.marks_shown() {
-                let (w, h) = (shown.art.width as usize, shown.art.height as usize);
+                // Only the rows on screen: a mark half scrolled off keeps its visible half.
+                let (w, h) = (shown.art.width as usize, shown.rows);
                 if w > MARK_SIDE || h > MARK_SIDE || at.is_full() {
                     continue;
                 }
@@ -335,7 +336,12 @@ pub fn draw_with_marks(
                     break;
                 };
                 slot.fill(bg);
-                let _ = rgba::decode(shown.art, |x, y, p| slot[y * w + x] = rgba::over(p, bg));
+                let skip = shown.skip;
+                let _ = rgba::decode(shown.art, |x, y, p| {
+                    if let Some(row) = y.checked_sub(skip).filter(|&r| r < h) {
+                        slot[row * w + x] = rgba::over(p, bg);
+                    }
+                });
                 let _ = at.push((shown.x, shown.y + BAR_H, w, h, next));
                 next += w * h;
             }
@@ -346,7 +352,7 @@ pub fn draw_with_marks(
     draw_keeping_marks(panel, palette, f);
 }
 
-/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar./// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
+/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
 ///
 /// Watched working on the Q1 from Debug -> Scroll test before this was turned on: a PIN
 /// check is on the boot path, and this board has no recovery.

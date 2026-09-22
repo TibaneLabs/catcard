@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn every_chain_mark_decodes() {
         for t in [
-            "BTC", "ETH", "SOL", "LTC", "BCH", "DOGE", "TRX", "MONA", "XEP",
+            "BTC", "ETH", "SOL", "LTC", "BCH", "DOGE", "TRX", "MONA", "NMC", "XEP",
         ] {
             let (art, _) = crate::art::chainicons::mark(t).unwrap();
             let mut n = 0;

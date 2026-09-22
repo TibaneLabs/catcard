@@ -234,6 +234,28 @@ mod tests {
             );
         }
 
+        /// Namecoin in its own version bytes and prefix. No published vector for this
+        /// mnemonic that I could check, so this pins what distinguishes it from Bitcoin:
+        /// `N`/`M` legacy (version `0x34`), `nc1q` native segwit.
+        #[test]
+        fn namecoin_writes_its_own_prefixes() {
+            let legacy = addr(
+                &NAMECOIN,
+                Encoding::Utxo(AddressKind::P2pkh),
+                "m/44'/7'/0'/0/0",
+            );
+            assert!(
+                legacy.starts_with('N') || legacy.starts_with('M'),
+                "{legacy}"
+            );
+            let native = addr(
+                &NAMECOIN,
+                Encoding::Utxo(AddressKind::P2wpkh),
+                "m/84'/7'/0'/0/0",
+            );
+            assert!(native.starts_with("nc1q"), "{native}");
+        }
+
         /// No segwit on Bitcoin Cash, whatever a caller asks for.
         #[test]
         fn bitcoin_cash_refuses_segwit() {

@@ -7338,6 +7338,11 @@ fn glide_view(
         for f in 1..frames {
             let off = (a + (b - a) * f / frames).max(0) as usize;
             view.set_off(off);
+            // With its marks: drawn plain, every glide frame would drop the logos and
+            // the list would scroll with blank holes where they belong.
+            #[cfg(feature = "board-q1")]
+            display::draw_with_marks(panel, view, |c| catcard_ui::scroll::render(c, view));
+            #[cfg(not(feature = "board-q1"))]
             display::draw(panel, |c| catcard_ui::scroll::render(c, view));
             let _ = usbtask::pump();
             catcard_hal::dwt::delay_cycles(display::GLIDE_PAUSE_CYCLES);

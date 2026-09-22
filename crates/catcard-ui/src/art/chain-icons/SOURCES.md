@@ -2,8 +2,8 @@
 
 Each `<TICKER>.png` here is its project's logo, downscaled to 20x20 from the 250x250
 image CoinGecko serves for the coin (`api.coingecko.com/api/v3/coins/<id>`, field
-`image.large`), fetched 2026-09-22. `tools/artgen/chainmarks.py` quantizes the set to
-the chain picker's shared palette. Tron's, served as a square with no transparency, was
+`image.large`), fetched 2026-09-22. `tools/artgen/chainmarks.py` stores them in full
+colour with alpha; nothing is quantized. Tron's, served as a square with no transparency, was
 cut to a circle like the rest.
 
 The logos are their projects' trademarks, used here only to identify each chain in the
@@ -19,6 +19,7 @@ picker.
 | DOGE | dogecoin | `coins/images/5/large/dogecoin.png` |
 | TRX | tron | `coins/images/1094/large/photo_2026-04-13_09-59-16.png` |
 | MONA | monacoin | `coins/images/99/large/monacoin.png` |
+| NMC | namecoin | `coins/images/8/large/namecoin.png` |
 | XEP | electra-protocol | `coins/images/13589/large/Apple-iPhone-Icon-Retina.png` |
 
 To replace one, drop a new 20x20 RGBA PNG here under the same name and re-run the

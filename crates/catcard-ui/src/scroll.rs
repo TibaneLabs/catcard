@@ -98,9 +98,14 @@ impl Mark<'_> {
 /// is the selected one -- which decides what it is blended onto.
 pub struct Shown<'a> {
     pub x: usize,
+    /// The first row of it on screen.
     pub y: usize,
     pub art: &'a crate::art::rgba::Rgba,
     pub selected: bool,
+    /// Rows of the art cut off above the top of the view, and how many are on screen:
+    /// a mark half scrolled off shows its visible half, as the text beside it does.
+    pub skip: usize,
+    pub rows: usize,
 }
 
 /// One line of a document, before wrapping.
@@ -468,10 +473,11 @@ impl<'a> ScrollView<'a> {
         }
     }
 
-    /// The full-colour marks [`render`] left room for, where they go -- only those wholly
-    /// on screen, as `render` draws a one-bit mark.
+    /// The full-colour marks [`render`] left room for, where they go -- clipped to the
+    /// view, so one sliding in or out at an edge during a scroll shows the part that is
+    /// on screen rather than popping in whole.
     pub fn marks_shown(&self) -> impl Iterator<Item = Shown<'a>> + '_ {
-        let h = self.height;
+        let h = self.height as isize;
         self.lines.iter().enumerate().filter_map(move |(i, vl)| {
             let (Some(Mark::Full(art)), Align::Left) = (vl.mark, vl.align) else {
                 return None;
@@ -480,11 +486,15 @@ impl<'a> ScrollView<'a> {
             let top = self.top(i) as isize - self.off as isize;
             let (_, mh) = Mark::Full(art).size();
             let my = top + (lh as isize - mh as isize) / 2;
-            (my >= 0 && my as usize + mh <= h).then_some(Shown {
+            let first = my.max(0);
+            let last = (my + mh as isize).min(h);
+            (last > first).then(|| Shown {
                 x: self.fonts.margin,
-                y: my as usize,
+                y: first as usize,
                 art,
                 selected: self.cursor == Some(i),
+                skip: (first - my) as usize,
+                rows: (last - first) as usize,
             })
         })
     }
@@ -1158,6 +1168,11 @@ mod tests {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].x, 6);
         assert!(shown[0].selected);
+        assert_eq!(
+            (shown[0].skip, shown[0].rows),
+            (0, 20),
+            "all of it, on screen"
+        );
         let (x, y) = (shown[0].x, shown[0].y);
         let inked = (y..y + 20)
             .flat_map(|yy| (x..x + 20).map(move |xx| (xx, yy)))
@@ -1167,6 +1182,36 @@ mod tests {
         // Nothing of either row's text starts before the mark's width.
         assert_eq!(view.text_left(0), 6 + 20 + 4);
         assert_eq!(view.text_left(1), 6 + 12 + 4);
+    }
+
+    /// A mark scrolled half off the top reports the half still on screen.
+    #[test]
+    fn a_mark_at_the_edge_is_clipped_not_dropped() {
+        use crate::art::chainicons;
+        let fonts = Fonts {
+            title: &peep10x20::FONT,
+            body: &peep7x14::FONT,
+            small: &misc4x6::FONT,
+            gap: 2,
+            margin: 6,
+        };
+        let doc = [
+            Line::item("Bitcoin", 0)
+                .large()
+                .with_mark(Mark::Full(&chainicons::BTC)),
+            Line::item("Two", 1).large(),
+            Line::item("Three", 2).large(),
+            Line::item("Four", 3).large(),
+        ];
+        let mut view = ScrollView::build(&doc, 320, 30, fonts);
+        view.set_off(10);
+        assert_eq!(view.off(), 10, "the document is taller than the view");
+        let shown: Vec<_> = view.marks_shown().collect();
+        assert_eq!(shown.len(), 1);
+        let m = &shown[0];
+        assert_eq!(m.y, 0);
+        assert!(m.skip > 0 && m.skip < 20, "cut at the top: {}", m.skip);
+        assert_eq!(m.skip + m.rows, 20);
     }
 
     #[test]
