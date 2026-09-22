@@ -111,6 +111,8 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         // so the bar gets it without a second stretch.
         #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some(fingerprint));
+        #[cfg(not(feature = "board-mk3"))]
+        crate::settings::open_wallet(gate, login, ui.panel, HEAD, fingerprint);
         menu::message(ui.panel, HEAD, "in force", "until reboot");
     } else {
         clear();

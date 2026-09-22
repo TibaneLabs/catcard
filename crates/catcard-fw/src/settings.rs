@@ -132,6 +132,71 @@ pub(crate) fn wallet_key(
     Ok(key)
 }
 
+/// Open the wallet in force's own settings file, as a key switch should, and say what
+/// was found.
+///
+/// Stock moves its settings with the key: the moment a different wallet is in force, it
+/// is that wallet's file that is open. Here every per-wallet screen asks
+/// [`wallet_key`] when it needs one, so nothing *has* to happen at the switch -- but
+/// doing it here means the key is worked out once, while the switch is already showing
+/// a progress screen, and that the log records whether this wallet has a file at all and
+/// whether the fingerprint inside it is this wallet's.
+///
+/// Read-only, and nothing about it can fail the switch: a wallet with no file yet is the
+/// normal case for one that has never saved a setting.
+pub(crate) fn open_wallet(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    head: &str,
+    fp: [u8; 4],
+) {
+    use catcard_settings::json::Doc;
+    use catcard_settings::store::{self, Error, SCRATCH};
+
+    let label = crate::key::label();
+    let key = match wallet_key(gate, login, panel, head) {
+        Ok(k) => k,
+        Err(why) => {
+            crate::catlog!("settings: no key for {}: {}", label, why);
+            return;
+        }
+    };
+    let Some(mut held) = crate::heap::take(SCRATCH) else {
+        crate::catlog!("settings: no memory to open {}'s file", label);
+        return;
+    };
+    let buf = held.bytes();
+    // SAFETY: the region is mapped and readable; nothing is written.
+    let mut files = match unsafe { Files::mount_read_only() } {
+        Ok(f) => f,
+        Err(e) => {
+            crate::catlog!("settings: mount failed: {:?}", e);
+            return;
+        }
+    };
+    match store::read(&mut files, &key, buf) {
+        Ok(n) => {
+            let doc = Doc::parse(&buf[..n]).unwrap_or_default();
+            let mine = u64::from(u32::from_le_bytes(fp));
+            let whose = match doc.get_u64("xfp") {
+                Some(x) if x == mine => "xfp matches",
+                Some(_) => "xfp MISMATCH",
+                None => "no xfp in it",
+            };
+            crate::catlog!(
+                "settings: {} file found, {} B, {} keys, {}",
+                label,
+                n,
+                doc.len(),
+                whose
+            );
+        }
+        Err(Error::Absent) => crate::catlog!("settings: {} has no file yet", label),
+        Err(e) => crate::catlog!("settings: {} file unreadable: {:?}", label, e),
+    }
+}
+
 /// Save `(name, raw)` into the wallet in force's own settings file.
 ///
 /// `raw` is the value as JSON text. Every per-wallet write goes through here, so the file

@@ -4398,6 +4398,8 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
             crate::catlog!("key: now {} ({})", said.as_str(), crate::key::label());
+            #[cfg(not(feature = "board-mk3"))]
+            crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
             message(ui.panel, HEAD, &said, crate::key::label());
         }
         Err(why) => {

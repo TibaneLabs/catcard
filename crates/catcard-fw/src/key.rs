@@ -66,6 +66,10 @@ static mut TEMP_LEN: usize = 0;
 /// of the key itself.
 static mut TEMP_METHOD: heapless::String<16> = heapless::String::new();
 
+/// The method with `+PP` after it, for the bar when a passphrase is on top. Built once
+/// with the method, because [`label`] runs on every frame and hands out `&'static str`.
+static mut TEMP_METHOD_PP: heapless::String<20> = heapless::String::new();
+
 /// The selection in force. Foreground only, single core.
 static mut SOURCE: Source = Source::Root;
 
@@ -115,6 +119,10 @@ pub(crate) fn set_temporary(entropy: &[u8], method: &str) -> bool {
         let m = &mut *core::ptr::addr_of_mut!(TEMP_METHOD);
         m.clear();
         let _ = m.push_str(&method[..method.len().min(m.capacity())]);
+        let pp = &mut *core::ptr::addr_of_mut!(TEMP_METHOD_PP);
+        pp.clear();
+        let _ = pp.push_str(m.as_str());
+        let _ = pp.push_str("+PP");
     }
     set(Source::Temporary);
     true
@@ -122,9 +130,6 @@ pub(crate) fn set_temporary(entropy: &[u8], method: &str) -> bool {
 
 /// How the wallet in force came to be, as the Seed Vault records it.
 ///
-/// The mk3 has no settings store and so no vault; the string is still defined there
-/// rather than cfg'd away, because what a key *is* does not depend on the panel.
-#[cfg_attr(feature = "board-mk3", allow(dead_code))]
 pub(crate) fn method() -> &'static str {
     match in_force() {
         // Nothing here made the stored seed, and nothing here can ask. It is also the
@@ -172,15 +177,28 @@ pub(crate) fn to_root() {
 
 /// The word the status bar shows for what is in force.
 ///
-/// One word, because the bar has room for one. It names the *strongest* thing about the
+/// Short, because the bar has room for little. It names the *strongest* thing about the
 /// current key: a BIP-85 child with a passphrase on top is still, first, a child.
+///
+/// A temporary seed is named by **how it was made** -- `TRNG Words`, `XOR`, `BIP85` --
+/// rather than by being temporary. "TEMP" told the owner the one thing they already knew
+/// from having just loaded it, and not the thing that tells two loaded keys apart.
 pub(crate) fn label() -> &'static str {
     match (in_force(), crate::passphrase::is_set()) {
         (Source::Root, false) => "MASTER",
         (Source::Root, true) => "PASSPHRASE",
         (Source::Bip85 { .. }, false) => "BIP85",
         (Source::Bip85 { .. }, true) => "BIP85+PP",
-        (Source::Temporary, false) => "TEMP",
-        (Source::Temporary, true) => "TEMP+PP",
+        (Source::Temporary, false) => method(),
+        (Source::Temporary, true) => {
+            // SAFETY: as in `temporary`; the only writer is `set_temporary`.
+            let pp: &'static heapless::String<20> =
+                unsafe { &*core::ptr::addr_of!(TEMP_METHOD_PP) };
+            if pp.is_empty() {
+                "TEMP+PP"
+            } else {
+                pp.as_str()
+            }
+        }
     }
 }
