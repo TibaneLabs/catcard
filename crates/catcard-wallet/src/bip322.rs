@@ -182,7 +182,11 @@ fn to_sign<'a>(inputs: &'a [RawTxIn<'a>], outputs: &'a [RawTxOut<'a>]) -> RawTx<
 /// BIP-143 with the amount at zero -- `to_spend`'s output is worth nothing -- and
 /// `SIGHASH_ALL`, which BIP-322 requires. The scriptCode is the implied P2PKH script,
 /// as it is for any P2WPKH spend.
-fn p2wpkh_sighash(message: &[u8], challenge: &[u8], key_hash: &[u8; 20]) -> Result<[u8; 32], Error> {
+fn p2wpkh_sighash(
+    message: &[u8],
+    challenge: &[u8],
+    key_hash: &[u8; 20],
+) -> Result<[u8; 32], Error> {
     let prev = to_spend_txid(message, challenge);
     let inputs = [to_sign_input(&prev)];
     let outputs = [RawTxOut {
@@ -334,11 +338,7 @@ fn classify(script: &[u8]) -> Result<Challenge<'_>, Error> {
 
 /// The scriptPubKey an address of `kind` for `pubkey` pays to, which is
 /// `message_challenge`.
-pub fn challenge(
-    kind: AddressKind,
-    pubkey: &[u8; 33],
-    out: &mut [u8],
-) -> Result<usize, Error> {
+pub fn challenge(kind: AddressKind, pubkey: &[u8; 33], out: &mut [u8]) -> Result<usize, Error> {
     match kind {
         AddressKind::P2wpkh | AddressKind::P2tr => {}
         // Not "unsupported address": these two have messages of their own. See the module
@@ -399,8 +399,12 @@ pub fn sign(
 /// claim made by the signature itself: the key comes out of the witness and has to hash
 /// or tweak to the program the address commits to before its signature is even checked.
 pub fn verify(message: &[u8], challenge_script: &[u8], witness: &[u8]) -> Result<(), Error> {
+    // The script first, and the witness only once there is something it could satisfy: a
+    // stack this cannot read is a different answer from a script this cannot check, and a
+    // P2WSH file would otherwise be reported as a malformed signature.
+    let challenge = classify(challenge_script)?;
     let stack = decode_witness(witness)?;
-    match classify(challenge_script)? {
+    match challenge {
         Challenge::P2wpkh(key_hash) => {
             if stack.count != 2 {
                 return Err(Error::Malformed);
@@ -491,6 +495,7 @@ pub fn dearmour(text: &str, out: &mut [u8]) -> Result<usize, Error> {
 
 /// Check an armoured *simple* signature against a message and a scriptPubKey.
 pub fn verify_armoured(message: &[u8], challenge_script: &[u8], text: &str) -> Result<(), Error> {
+    classify(challenge_script)?;
     let mut witness = [0u8; MAX_WITNESS];
     let n = dearmour(text, &mut witness)?;
     verify(message, challenge_script, &witness[..n])

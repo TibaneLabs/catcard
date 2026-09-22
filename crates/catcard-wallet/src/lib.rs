@@ -73,6 +73,7 @@ pub mod psbtview;
 pub mod seedqr;
 pub mod seedxor;
 pub mod signer;
+pub mod signfile;
 #[cfg(feature = "multichain")]
 pub mod slip10;
 pub mod tx;
