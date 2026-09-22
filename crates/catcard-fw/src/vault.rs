@@ -53,6 +53,8 @@ enum Then {
         raw: [u8; RAW_MAX],
         len: usize,
         method: heapless::String<16>,
+        /// What the entry says the wallet's fingerprint is, to check what loads against.
+        xfp: Xfp,
     },
     Rename(Xfp),
     Forget(Xfp),
@@ -65,9 +67,14 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         match next {
             Then::Leave => return,
             Then::Store => store_current(gate, login, ui),
-            Then::Use { raw, len, method } => {
+            Then::Use {
+                raw,
+                len,
+                method,
+                xfp,
+            } => {
                 let mut raw = raw;
-                use_seed(gate, login, ui, &raw[..len], &method);
+                use_seed(gate, login, ui, &raw[..len], &method, &xfp);
                 raw.zeroize();
                 // The key changed under them; going back to a list that says "store the
                 // current key" about a key that is now in it would be a lie.
@@ -114,6 +121,25 @@ fn list_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     let offer_store = mine
         .as_ref()
         .is_some_and(|x| !vault::holds(&seeds[..have], x));
+    // Rows in the document against rows read: a difference is entries this firmware
+    // skipped, which stay in the file but are not offered.
+    let rows = doc
+        .get(vault::KEY)
+        .and_then(|raw| catcard_settings::json::elements(raw).ok())
+        .map_or(0, |it| it.count());
+    crate::catlog!(
+        "vault: {} of {} rows read, doc {} B, key {} {}",
+        have,
+        rows,
+        n,
+        crate::key::label(),
+        match (&mine, offer_store) {
+            (Some(_), true) => "can be kept",
+            (Some(_), false) => "already kept",
+            (None, _) if storable => "fingerprint unknown",
+            (None, _) => "not storable",
+        }
+    );
 
     let mut labels: heapless::Vec<heapless::String<40>, MAX_SEEDS> = heapless::Vec::new();
     for s in &seeds[..have] {
@@ -175,6 +201,7 @@ fn what_with(ui: &mut Ui<'_>, s: &Seed<'_>) -> Then {
                 raw,
                 len,
                 method: method_owned,
+                xfp,
             }
         }
         1 => Then::Rename(xfp),
@@ -189,11 +216,17 @@ fn use_seed(
     ui: &mut Ui<'_>,
     raw: &[u8],
     method: &str,
+    expected: &str,
 ) {
     // The marker says what the rest is. Only a BIP-39 wallet has entropy this can put in
     // force; an xprv entry is somebody else's firmware's, and saying so beats deriving
     // something that is not the wallet the entry names.
     let Some(entropy) = bip39_part(raw) else {
+        crate::catlog!(
+            "vault: {} has marker {:02x}, not words",
+            expected,
+            raw.first().copied().unwrap_or(0)
+        );
         return drop(say(ui, "not a words wallet"));
     };
     let was = crate::key::in_force();
@@ -206,12 +239,34 @@ fn use_seed(
             drop(master);
             let mut said: Xfp = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("vault: now in {} ({})", said.as_str(), crate::key::label());
+            // The entry names its wallet. A load that lands somewhere else is a decode
+            // gone wrong, and working in it would be working in a wallet nobody chose --
+            // so it is refused, and the previous key goes back.
+            if !said.eq_ignore_ascii_case(expected) {
+                crate::catlog!(
+                    "vault: MISMATCH entry {} derived {} ({} bytes, {}); refused",
+                    expected,
+                    said.as_str(),
+                    raw.len(),
+                    method
+                );
+                crate::key::set(was);
+                menu::message(ui.panel, "Wrong wallet", &said, "not what the entry says");
+                menu::wait_for_any_key(ui);
+                return;
+            }
+            crate::catlog!(
+                "vault: now in {} ({}, {}), matches its entry",
+                said.as_str(),
+                crate::key::label(),
+                method
+            );
             #[cfg(feature = "board-q1")]
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             menu::message(ui.panel, HEAD, &said, "in force until reboot");
         }
         Err(why) => {
+            crate::catlog!("vault: load of {} failed: {}", expected, why);
             crate::key::set(was);
             menu::message(ui.panel, HEAD, why, "unchanged");
         }
@@ -293,7 +348,10 @@ fn store_current(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
             crate::catlog!("vault: kept {} as {}", xfp.as_str(), method);
             menu::message(ui.panel, HEAD, &label, "kept");
         }
-        Err(why) => menu::message(ui.panel, HEAD, why, "nothing kept"),
+        Err(why) => {
+            crate::catlog!("vault: keeping {} failed: {}", xfp.as_str(), why);
+            menu::message(ui.panel, HEAD, why, "nothing kept")
+        }
     }
     menu::wait_for_any_key(ui);
 }

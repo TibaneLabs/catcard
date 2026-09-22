@@ -82,6 +82,13 @@ pub(crate) fn wallet_key(
         return Ok(key);
     }
 
+    let kind = if crate::key::is_root() {
+        "stored stash"
+    } else if crate::passphrase::is_set() {
+        "xprv stash"
+    } else {
+        "words stash"
+    };
     let key = if crate::key::is_root() {
         // The stored wallet: the stash exactly as the secure element returns it, which
         // is what stock hashes and what every settings file this device already has was
@@ -110,6 +117,16 @@ pub(crate) fn wallet_key(
         stash.zeroize();
         key
     };
+    // Which file, by the first bytes of its key: enough to tell two wallets' files apart
+    // in a log, and useless for opening either.
+    let k = key.as_bytes();
+    crate::catlog!(
+        "settings: {} key for {}, id {:02x}{:02x}",
+        kind,
+        crate::key::label(),
+        k[0],
+        k[1]
+    );
     // SAFETY: as above.
     unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key.clone()) };
     Ok(key)
@@ -149,6 +166,12 @@ pub(crate) fn save_wallet(
     let known = Doc::parse(&doc[..n])
         .ok()
         .is_some_and(|d| d.get("xfp").is_some());
+    crate::catlog!(
+        "settings: saving {} into a {} B file{}",
+        name,
+        n,
+        if known { "" } else { ", adding its identity" }
+    );
 
     let mut xfp_text: heapless::String<12> = heapless::String::new();
     let mut words_text: heapless::String<4> = heapless::String::new();
@@ -180,8 +203,21 @@ pub(crate) fn save_wallet(
     let _ = pairs.push((name, raw));
 
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
-    store::set_many(&mut files, &key, &pairs, choose, doc, seal).map_err(|_| "could not save")?;
-    Ok(())
+    match store::set_many(&mut files, &key, &pairs, choose, doc, seal) {
+        Ok(slot) => {
+            crate::catlog!(
+                "settings: {} saved to {:03x}.aes, {} keys",
+                name,
+                slot,
+                pairs.len()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            crate::catlog!("settings: saving {} failed: {:?}", name, e);
+            Err("could not save")
+        }
+    }
 }
 
 /// The wallet in force's fingerprint, word count and master xpub, as JSON text.
