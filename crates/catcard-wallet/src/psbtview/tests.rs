@@ -94,13 +94,28 @@ struct Pay {
     claim_ours: bool,
 }
 
-/// Build a PSBT with these inputs and outputs. `buf` holds the result.
+/// Build a PSBT whose inputs are all BIP-84 `wpkh` scripts.
 fn build(spends: &[Spend], pays: &[Pay], buf: &mut [u8]) -> usize {
+    let kinds = vec![AddressKind::P2wpkh; spends.len()];
+    build_as(spends, &kinds, pays, buf)
+}
+
+/// The script an input's previous output pays to, from the key it is derived at.
+fn script_of(kind: AddressKind, pubkey: &[u8; 33]) -> Vec<u8> {
+    let mut s = [0u8; 34];
+    let n = address::script_pubkey(kind, pubkey, &mut s).unwrap();
+    s[..n].to_vec()
+}
+
+/// Build a PSBT, `kinds` saying which script kind each input's previous output pays to --
+/// so a test can spend a BIP-49 `sh(wpkh(...))` input as well as a native one.
+fn build_as(spends: &[Spend], kinds: &[AddressKind], pays: &[Pay], buf: &mut [u8]) -> usize {
     // A previous transaction per input, paying `amount` at its output 0, whose txid the
     // input then spends.
-    let prev_scripts: Vec<[u8; 22]> = spends
+    let prev_scripts: Vec<Vec<u8>> = spends
         .iter()
-        .map(|s| p2wpkh_script(&pubkey_at(s.phrase, &s.steps)))
+        .zip(kinds)
+        .map(|(s, kind)| script_of(*kind, &pubkey_at(s.phrase, &s.steps)))
         .collect();
     let built: Vec<(Vec<u8>, [u8; 32])> = spends
         .iter()
@@ -116,7 +131,7 @@ fn build(spends: &[Spend], pays: &[Pay], buf: &mut [u8]) -> usize {
             }];
             let outs = [RawTxOut {
                 amount: s.amount,
-                script: spk,
+                script: spk.as_slice(),
             }];
             let tx = RawTx {
                 version: 2,
@@ -175,7 +190,7 @@ fn build(spends: &[Spend], pays: &[Pay], buf: &mut [u8]) -> usize {
     }
     for (i, s) in spends.iter().enumerate() {
         let pk = pubkey_at(s.phrase, &s.steps);
-        let spk = p2wpkh_script(&pk);
+        let spk = script_of(kinds[i], &pk);
         let claimed = s.declared.unwrap_or(s.amount);
         step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(i, claimed, &spk, out));
         if !s.no_prev_tx {
@@ -1225,5 +1240,39 @@ fn a_registered_multisig_input_signs() {
     assert!(
         signed.input(0).unwrap().partial_sig(&theirs).is_none(),
         "this device signed for a key it does not hold"
+    );
+}
+
+/// A BIP-49 single-signature input: `sh(wpkh(...))`, whose scriptPubKey is a script hash
+/// like a multisig one's. It was refused as an unregistered multisig wallet, which made
+/// the account this device offers unspendable (issue #13).
+#[test]
+fn a_bip49_single_sig_input_is_not_an_unknown_multisig() {
+    const NESTED: [u32; 5] = [49 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
+    let spend = Spend {
+        steps: NESTED,
+        ..ours_spend(100_000)
+    };
+    let mut buf = vec![0u8; 8192];
+    let n = build_as(
+        &[spend],
+        &[AddressKind::P2shP2wpkh],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 99_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    let summary = summary_of(&buf[..n]).expect("a BIP-49 input of ours must be spendable");
+    assert_eq!(summary.sending, 99_000);
+    assert_eq!(
+        summary.accounts[..summary.account_count]
+            .iter()
+            .map(|a| a.kind)
+            .collect::<Vec<_>>(),
+        vec![AddressKind::P2shP2wpkh],
+        "the account is recorded as nested segwit"
     );
 }

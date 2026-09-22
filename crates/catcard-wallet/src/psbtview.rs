@@ -173,15 +173,41 @@ pub fn summarise(
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
         let mut mine = false;
+        // Whether the script being spent is one *our own key makes on its own* -- a
+        // single-signature input. It decides the multisig question below: P2SH is the
+        // scriptPubKey of a BIP-49 single-sig address as much as of a multisig one, and
+        // only rebuilding the script from our key tells them apart.
+        let mut single_sig = false;
         for request in keys[..found].iter() {
             let Ok(signer) = signer::match_key(master, request, kw) else {
                 continue;
             };
             mine = true;
-            // Which account, and in which form. The kind is settled by rebuilding the
-            // script from our own key and matching it against the output being spent --
-            // which `utxo` has already checked against the previous transaction's txid,
-            // so it is the chain's answer rather than the host's.
+            // In which form. The kind is settled by rebuilding the script from our own key
+            // and matching it against the output being spent -- which `utxo` has already
+            // checked against the previous transaction's txid, so it is the chain's answer
+            // rather than the host's.
+            let Ok(spent) = psbt.utxo(index) else {
+                continue;
+            };
+            let pubkey = signer.public_key_bytes();
+            let form = [
+                AddressKind::P2wpkh,
+                AddressKind::P2shP2wpkh,
+                AddressKind::P2pkh,
+                AddressKind::P2tr,
+            ]
+            .into_iter()
+            .find(|kind| {
+                let mut built = [0u8; 34];
+                matches!(address::script_pubkey(*kind, &pubkey, &mut built),
+                    Ok(n) if built[..n] == *spent.script)
+            });
+            let Some(kind) = form else {
+                continue;
+            };
+            single_sig = true;
+            // And which account, where the path has one to name and there is room left.
             let steps = request.steps();
             if steps.len() != CHANGE_DEPTH || account_count == MAX_ACCOUNTS {
                 continue;
@@ -190,25 +216,8 @@ pub fn summarise(
             if accounts[..account_count].iter().any(|a| a.prefix == prefix) {
                 continue;
             }
-            let Ok(spent) = psbt.utxo(index) else {
-                continue;
-            };
-            let pubkey = signer.public_key_bytes();
-            for kind in [
-                AddressKind::P2wpkh,
-                AddressKind::P2shP2wpkh,
-                AddressKind::P2pkh,
-                AddressKind::P2tr,
-            ] {
-                let mut built = [0u8; 34];
-                if let Ok(n) = address::script_pubkey(kind, &pubkey, &mut built)
-                    && built[..n] == *spent.script
-                {
-                    accounts[account_count] = Account { prefix, kind };
-                    account_count += 1;
-                    break;
-                }
-            }
+            accounts[account_count] = Account { prefix, kind };
+            account_count += 1;
         }
         if mine {
             ours += 1;
@@ -233,12 +242,16 @@ pub fn summarise(
             .utxo(index)
             .map_err(|_| Refusal::UnknownAmount { input: index })?;
 
-        // A script-hash input is a multisig one. The chain pins *which* script it is --
-        // the witness or redeem script has to hash to this scriptPubKey -- but not whose
-        // wallet it belongs to, and that is what a registration says. An input no
-        // registered wallet produces is refused rather than signed on the host's word
-        // that the other cosigners are who it claims.
-        if multisig::is_script_hash(utxo.script) {
+        // A script-hash input that is not one of ours is a multisig one. The chain pins
+        // *which* script it is -- the witness or redeem script has to hash to this
+        // scriptPubKey -- but not whose wallet it belongs to, and that is what a
+        // registration says. An input no registered wallet produces is refused rather than
+        // signed on the host's word that the other cosigners are who it claims.
+        //
+        // `single_sig` is what keeps BIP-49 out of this: `sh(wpkh(...))` is a script hash
+        // too, and gating it on a multisig registration refused an account this device
+        // offers -- our own key rebuilt the script, so no registration can be wanted.
+        if !single_sig && multisig::is_script_hash(utxo.script) {
             let Some((branch, at)) = ours_address(psbt, index, fingerprint) else {
                 return Err(Refusal::UnknownMultisig { input: index });
             };

@@ -73,7 +73,9 @@ pub struct Cosigner {
 /// requires the key it reaches to be the one the descriptor names.
 ///
 /// [`Error::ForgedOrigin`] means a cosigner claimed this device's fingerprint and did not
-/// derive to its own key, which is the case worth refusing rather than displaying.
+/// derive to its own key, which is the case worth refusing rather than displaying. The
+/// first claim decides: a file where one cosigner's claim on this device is false is
+/// refused whole, rather than sifted for the claims that happen to hold.
 pub fn our_cosigner(
     wallet: &Multisig,
     master: &ExtendedPrivKey,
@@ -100,7 +102,14 @@ pub fn our_cosigner(
                 }
             }
         }
-        if reached && key.to_extended_pub(kw) == c.xpub {
+        // The key material only: the public key and the chain code are what prove the
+        // cosigner is this device's. An extended key also carries depth, parent
+        // fingerprint and child number, which are description rather than proof -- some
+        // wallets normalise them when they export -- and an attacker can write whatever
+        // it likes there regardless. Comparing them would refuse honest imports without
+        // refusing a single forgery.
+        let ours = key.to_extended_pub(kw);
+        if reached && (ours.public_key, ours.chain_code) == (c.xpub.public_key, c.xpub.chain_code) {
             return Ok(Some(i));
         }
         return Err(Error::ForgedOrigin { at: i });

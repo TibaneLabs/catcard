@@ -480,3 +480,27 @@ fn a_key_claiming_our_fingerprint_without_our_key_is_refused() {
         "a claim on our fingerprint that does not derive to our key must be refused"
     );
 }
+
+/// A cosigner whose xpub carries different depth or parent fingerprint -- as some wallets
+/// write them -- is still ours: the key material is what proves it, and metadata is not
+/// something a forger is short of.
+#[test]
+fn our_cosigner_ignores_the_metadata_around_the_key() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true);
+    let mut wallet = parse(&text).unwrap();
+    let ours = master_of(SEEDS[0]);
+    let mine = our_cosigner(&wallet, &ours, &kw())
+        .unwrap()
+        .expect("we own one");
+
+    let mut xpub = wallet.cosigners()[mine].xpub;
+    xpub.depth = xpub.depth.wrapping_add(1);
+    xpub.parent_fingerprint = [0; 4];
+    xpub.child_number = crate::bip32::ChildNumber::ZERO;
+    wallet.cosigners[mine] = Cosigner {
+        xpub,
+        ..wallet.cosigners()[mine]
+    };
+
+    assert_eq!(our_cosigner(&wallet, &ours, &kw()), Ok(Some(mine)));
+}
