@@ -67,11 +67,84 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
     animate(ui, head, payload, filetype)
 }
 
-/// Show `payload` as an animated BC-UR, as `ur:bytes`.
+/// Show an opaque payload as `ur:bytes`.
 ///
-/// Less dense, and the one to use where BBQr has no file type for what is being sent --
-/// which is everything that is not Bitcoin.
-pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
+/// **The payload is wrapped, not sent bare.** A UR's body is the registry item's CBOR,
+/// and the `bytes` item is a CBOR byte string -- so a reader takes the header off
+/// before it sees the first character of what was exported. [C] BCR-2020-006
+/// §"Registry". Handing the raw bytes over instead produced a UR that decoded to
+/// something no reader could make sense of, which is why this exists rather than the
+/// caller passing its buffer straight through.
+pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
+    use catcard_bcur::registry::{Kind, bytestring};
+
+    let Some(mut mem) = crate::heap::take(bytestring::encoded_len(payload.len())) else {
+        menu::message(ui.panel, head, "not enough memory", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    let Ok(n) = bytestring::encode(payload, mem.bytes()) else {
+        menu::message(ui.panel, head, "could not encode", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    let message = &mem.bytes()[..n];
+    animate_bcur(ui, head, Kind::Bytes.written_as(), message);
+}
+
+/// Show a signed transaction as `ur:crypto-psbt`.
+///
+/// # Which format, and when
+///
+/// BBQr is the default everywhere and stays the default here: base32 is five bits a
+/// character against bytewords' four, so the same transaction is about a quarter fewer
+/// codes, and `FileType::PSBT` says exactly what it is. BC-UR is the one to pick when
+/// the thing holding the camera reads URs and not BBQr, which is most software that is
+/// not Coldcard-aware. So both are offered and neither is guessed at: the owner knows
+/// which wallet they are pointing at the screen, and this device does not.
+///
+/// # Why `crypto-psbt` and not `bytes`
+///
+/// `ur:bytes` is an opaque payload: a receiver has to guess what is inside, and most
+/// simply refuse. `crypto-psbt` says what it is, and is the type BCR-2020-006 defines
+/// for exactly this. [C] BCR-2020-006 §"Partially Signed Bitcoin Transaction (PSBT)"
+///
+/// The wrapper is a CBOR byte string around the transaction, which is what `scratch`
+/// is for: a few bytes longer than the PSBT, and the signer already holds a
+/// same-sized second buffer.
+pub(crate) fn animate_psbt_ur(ui: &mut Ui<'_>, head: &str, psbt: &[u8], scratch: &mut [u8]) {
+    use catcard_bcur::registry::{Kind, bytestring};
+
+    if bytestring::encoded_len(psbt.len()) > scratch.len() {
+        menu::message(ui.panel, head, "no room to wrap it", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    let Ok(n) = bytestring::encode(psbt, scratch) else {
+        menu::message(ui.panel, head, "could not encode", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    animate_bcur(ui, head, Kind::Psbt.written_as(), &scratch[..n]);
+}
+
+/// Show `message` as an animated BC-UR of type `ty`.
+///
+/// `message` is the registry item's CBOR, not the payload inside it: what the wrapper
+/// is depends on the type, so the caller wraps. For an opaque payload that is
+/// [`catcard_bcur::registry::Kind::Bytes`] and a byte string; for a transaction it is
+/// `crypto-psbt`, which [`animate_psbt_ur`] does.
+///
+/// Less dense than BBQr, and the one to use where BBQr has no file type for what is
+/// being sent -- which is everything that is not Bitcoin, and anything whose receiver
+/// speaks URs.
+///
+/// A message small enough for one symbol is shown as a **single-part** UR,
+/// `ur:<type>/<bytewords>`, with no sequence field at all. Not a nicety: a static code
+/// is read at a glance rather than waited on through an animation, and it is shorter
+/// than the same message numbered `1-1`, because the five-element part header and its
+/// padding are gone. [C] BCR-2020-005 §"Types"
+pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_bcur::encode as ur;
 
@@ -80,20 +153,26 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
         None => unreachable!(),
     };
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
-    const TYPE: &str = "bytes";
+
+    // One symbol, if the whole message fits in one symbol.
+    let lone = ur::single_len(ty, message.len()) <= CHARS;
 
     // The fragment size depends on how many parts there are, and the number of parts
     // depends on the fragment size. Two passes settle it: guess from a one-part header,
     // then re-solve knowing how wide the sequence numbers will be.
-    let mut per = ur::fits(TYPE, CHARS, 1);
-    let mut total = payload.len().div_ceil(per.max(1)) as u32;
-    per = ur::fits(TYPE, CHARS, total.max(1));
-    if per == 0 {
+    let mut per = ur::fits(ty, CHARS, 1);
+    let mut total = message.len().div_ceil(per.max(1)) as u32;
+    per = ur::fits(ty, CHARS, total.max(1));
+    if !lone && per == 0 {
         menu::message(ui.panel, head, "too large to show", "any key to go back");
         menu::wait_for_any_key(ui);
         return;
     }
-    total = payload.len().div_ceil(per) as u32;
+    total = if lone {
+        1
+    } else {
+        message.len().div_ceil(per) as u32
+    };
 
     let (Some(mut line_mem), Some(mut scratch_mem), Some(mut store_mem)) = (
         crate::heap::take(CHARS + 64),
@@ -108,7 +187,12 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
     let encoder = QrEncoder::new();
     let mut at = 1u32;
     loop {
-        let Ok(n) = ur::part(TYPE, payload, at, total, line_mem.bytes()) else {
+        let written = if lone {
+            ur::single(ty, message, line_mem.bytes())
+        } else {
+            ur::part(ty, message, at, total, line_mem.bytes())
+        };
+        let Ok(n) = written else {
             menu::message(ui.panel, head, "could not encode", "any key to go back");
             menu::wait_for_any_key(ui);
             return;
@@ -121,6 +205,13 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
             return;
         };
         show(ui, grid.width(), |x, y| grid.get(x, y), at, total);
+        if lone {
+            // Nothing to animate. Redrawing the one code four times a second would
+            // only make it flicker at the camera trying to read it -- but the wait
+            // still goes through `key_within`, which is what keeps USB pumped.
+            while !key_within(ui, FRAME_MS) {}
+            return;
+        }
         if key_within(ui, FRAME_MS) {
             return;
         }

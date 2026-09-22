@@ -690,7 +690,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     } else {
         got.len
     };
-    offer(gate, login, ui, HEAD, area, len);
+    offer(gate, login, ui, HEAD, area, len, got.kind);
 }
 
 /// Say what arrived and offer what can be done with it.
@@ -701,6 +701,7 @@ fn offer(
     head: &str,
     area: crate::staging::Area,
     len: usize,
+    kind: Option<catcard_bcur::registry::Kind>,
 ) {
     // A plain view of the same memory, for looking at what arrived. Reading it back is
     // fine now: every write is done, and it is only a run of writes that a read must not
@@ -708,9 +709,23 @@ fn offer(
     //
     // **At the area's base, not the lease's.** They are four megabytes apart: the scan
     // wrote through the staging area, which lives in the upper half of the part.
-    let at = area.image_at();
+    let base = area.image_at();
     let mut lease = area.into_lease();
-    let what = crate::sniff::sniff(&lease.bytes()[at..at + len]);
+
+    // What the UR said, if it said anything, and otherwise what the bytes look like. A
+    // registry item is CBOR, so the payload starts a few bytes into the message --
+    // `skip` is that header, and `base` stays where the scan wrote, because the
+    // staging area is addressed from there.
+    let arrival = crate::sniff::from_ur(&lease.bytes()[base..base + len], kind);
+    let (what, skip, len) = match arrival {
+        Some(a) => (a.what, a.skip, a.len),
+        None => (
+            crate::sniff::sniff(&lease.bytes()[base..base + len]),
+            0,
+            len,
+        ),
+    };
+    let at = base + skip;
 
     // A whole wallet arrived. It is taken out and the memory it came through is wiped
     // before anybody is asked anything: the screens that follow can stand there for as
@@ -765,7 +780,7 @@ fn offer(
 
     match what {
         Content::Firmware => install(gate, login, ui, lease, len),
-        Content::Psbt => sign(gate, login, ui, lease, at, len),
+        Content::Psbt => sign(gate, login, ui, lease, base, skip, len),
         Content::Seed(_) => {}
         Content::Text => {
             // Borrowed for the length of the screen; the lease is dropped after it.
@@ -824,6 +839,7 @@ fn sign(
     ui: &mut Ui<'_>,
     mut lease: crate::psram::Lease,
     at: usize,
+    skip: usize,
     len: usize,
 ) {
     // The same two alternating buffers the card path uses: each signature rewrites the
@@ -833,6 +849,19 @@ fn sign(
     let all = &mut lease.bytes()[at..];
     let half = (all.len() / 2) & !3;
     let (buf, spare) = all.split_at_mut(half);
+    // A `crypto-psbt` arrived wrapped in a CBOR byte string, and the few header bytes
+    // in front of it are not part of the transaction. They come off by moving the
+    // transaction to the front rather than by signing from an offset: the split above
+    // is word-aligned because every write into this region is, and a base a byte or
+    // two off would be one rule for this one path.
+    if skip > 0 {
+        if skip + len > buf.len() {
+            menu::message(ui.panel, "Sign", "too large to sign", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+        buf.copy_within(skip..skip + len, 0);
+    }
     let len = match crate::signtx::as_psbt_bytes(buf, len, spare) {
         Ok(n) => n,
         Err(why) => {

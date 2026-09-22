@@ -140,6 +140,73 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
     }
 }
 
+/// What a UR turned out to hold, and where inside the message it starts.
+///
+/// Q1 only, with [`from_ur`]: the scanner is the one path that learns a UR type, and
+/// the NFC tag on an mk4 or mk5 holds NDEF records, which say what they are their own
+/// way. A guess is all [`sniff`] has there, and all it needs.
+///
+/// A registry item is CBOR: a `crypto-psbt` message is the transaction wrapped in a
+/// byte string, so the bytes that arrive begin `58 a7 70 73 62 74 ff ...` and not
+/// `psbt\xff`. [C] BCR-2020-006 §"Partially Signed Bitcoin Transaction (PSBT)". The
+/// header is a few bytes at the front, so nothing has to be moved: `skip` says where
+/// the payload begins and `len` how much of it there is.
+#[cfg(feature = "board-q1")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Arrival {
+    pub what: Content,
+    /// Bytes of CBOR header in front of the payload.
+    pub skip: usize,
+    /// The payload's length, after the header.
+    pub len: usize,
+}
+
+/// What arrived, when the code said what it was.
+///
+/// A UR carries its type, and a type beats a guess: a transaction labelled
+/// `crypto-psbt` is a transaction even if it will not parse, and saying so gets the
+/// owner "not a PSBT" from the signer rather than "data this device cannot read" from
+/// a screen that never tried.
+///
+/// `None` when there is nothing better to say than [`sniff`] would say -- no type, a
+/// type this does not unwrap, a message that is not the item its type claims, or a
+/// payload that could only be used from the front of the staging area.
+#[cfg(feature = "board-q1")]
+pub(crate) fn from_ur(
+    message: &[u8],
+    kind: Option<catcard_bcur::registry::Kind>,
+) -> Option<Arrival> {
+    use catcard_bcur::registry::{Kind, bytestring};
+
+    let kind = kind?;
+    let body = match kind {
+        // The two items that are one CBOR byte string. Everything else in the registry
+        // is a map this has no screen for; it is saved as it arrived.
+        Kind::Psbt | Kind::Bytes => bytestring::decode(message).ok()?,
+        _ => return None,
+    };
+    let what = match kind {
+        Kind::Psbt => Content::Psbt,
+        // `bytes` says nothing about what is inside, so the guess still runs -- but
+        // over the payload, with the CBOR header off the front, which is the whole
+        // difference between a PSBT and unrecognised data.
+        _ => sniff(body),
+    };
+    // Only two things can be done with a payload that does not begin at the staging
+    // area's base: signed, or shown. An image is installed from the base, so one
+    // wrapped in a UR is not offered for installation -- it is saved, and installed
+    // from the card. Which costs nothing anyone will notice: an image is 700 kB, and
+    // nobody sends that as three thousand QR codes.
+    if !matches!(what, Content::Psbt | Content::Text) {
+        return None;
+    }
+    Some(Arrival {
+        what,
+        skip: message.len() - body.len(),
+        len: body.len(),
+    })
+}
+
 /// Write scanned bytes to the card: a folder the owner picks, under a name they type.
 ///
 /// The name is theirs because the device has nothing better to call it -- a code carries

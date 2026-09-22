@@ -5584,7 +5584,7 @@ fn offer_export(
         }
         Some(2) => {
             drop(signer);
-            crate::qrshow::animate_bcur(ui, head, body);
+            crate::qrshow::animate_bytes_ur(ui, head, body);
         }
         _ => drop(signer),
     }

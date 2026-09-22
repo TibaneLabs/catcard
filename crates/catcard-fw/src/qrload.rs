@@ -58,6 +58,13 @@ pub(crate) struct Received {
     pub len: usize,
     /// Whether they are a deflate stream rather than the payload itself.
     pub compressed: bool,
+    /// What the UR said it was carrying, for a transfer that came in as one.
+    ///
+    /// `None` for BBQr, which says what *file type* a payload is rather than what
+    /// registry item, and for a lone code that announced nothing. The caller uses it
+    /// to beat the byte-level guess: a `crypto-psbt` is a transaction whether or not
+    /// its first five bytes look like one, and the CBOR wrapper means they do not.
+    pub kind: Option<catcard_bcur::registry::Kind>,
 }
 
 /// What one code turned out to be worth.
@@ -193,10 +200,18 @@ pub(crate) fn collect_any(
     if let Some(why) = failure {
         return Err(Some(why));
     }
+    // Read after the scan rather than carried through it: the type cannot change
+    // part way -- the collector refuses a part that disagrees with the ones before it
+    // -- so there is one answer and the end of the scan is when it is wanted.
+    let kind = match &which {
+        Which::Bcur(collector) => collector.kind(),
+        _ => None,
+    };
     match outcome {
         Ok(()) if done > 0 => Ok(Received {
             len: done,
             compressed,
+            kind,
         }),
         Ok(()) => Err(None),
         Err(qrscan::Fault::Cancelled) => Err(None),

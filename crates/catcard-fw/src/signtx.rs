@@ -468,13 +468,26 @@ pub(crate) fn review_and_sign(
     }
 
     menu::card_wait(ui.panel, HEAD, "writing to the card");
-    if let Err(why) = menu::write_card_file(SIGNED_NAME, &from[..at]) {
-        crate::catlog!("sign: write failed: {}", why);
-        menu::message(ui.panel, "Write failed", why, "any key to go back");
-        menu::wait_for_any_key(ui);
+    let written = menu::write_card_file(SIGNED_NAME, &from[..at]);
+    match &written {
+        Ok(()) => crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at),
+        Err(why) => {
+            crate::catlog!("sign: write failed: {}", why);
+            menu::message(ui.panel, "Write failed", why, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
+    }
+    // The signature exists whether or not the card took it, and a Q1 has a camera's
+    // worth of screen to hand it back through. Offered on both paths on purpose: no
+    // card is exactly the case where a QR is the only way out, and a signed
+    // transaction that cannot leave the device is a signature nobody can use.
+    //
+    // `into` is the second buffer, free until `finalise` below wants it.
+    #[cfg(feature = "board-q1")]
+    offer_signed_qr(ui, &from[..at], &mut into[..]);
+    if written.is_err() {
         return;
     }
-    crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at);
 
     // If every input is now signed, the transaction can be finished here and the result is
     // ready to broadcast -- no other software needed. A transaction still waiting on a
@@ -507,6 +520,37 @@ pub(crate) fn review_and_sign(
         }
     }
     menu::wait_for_any_key(ui);
+}
+
+/// Offer to hand the signed transaction back as animated QR.
+///
+/// # Which of the two, and why it is asked rather than decided
+///
+/// **BBQr is first, because it is denser.** Base32 is five bits a character against
+/// bytewords' four, so the same transaction is about a quarter fewer codes and a
+/// quarter less waiting -- and `FileType::PSBT` tells the reader exactly what it has.
+/// That is the right default for anything Bitcoin, and it is what this device uses
+/// everywhere else.
+///
+/// **BC-UR is second, because more software reads it.** A wallet that is not
+/// Coldcard-aware very likely speaks URs and not BBQr, and `crypto-psbt` is the type
+/// BCR-2020-006 registers for a transaction. [C] So it is offered rather than chosen
+/// for: which one works is a fact about the phone being held up, which this device
+/// cannot see and its owner can.
+///
+/// Cancel is a third answer, and the common one: the card already has the file.
+#[cfg(feature = "board-q1")]
+fn offer_signed_qr(ui: &mut Ui<'_>, psbt: &[u8], scratch: &mut [u8]) {
+    const HEAD: &str = "Signed";
+    const WAYS: &[&str] = &["BBQr", "BC-UR"];
+
+    let Some(pick) = menu::choose(ui, HEAD, "show it as QR", WAYS) else {
+        return;
+    };
+    match pick {
+        0 => crate::qrshow::animate_bbqr(ui, HEAD, psbt, catcard_bbqr::FileType::PSBT),
+        _ => crate::qrshow::animate_psbt_ur(ui, HEAD, psbt, scratch),
+    }
 }
 
 /// Finish a fully-signed PSBT and write the network transaction into `out`.
