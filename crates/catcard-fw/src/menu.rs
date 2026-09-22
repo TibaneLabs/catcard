@@ -401,7 +401,6 @@ const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
-    "Address Explorer",
     "Verify address",
     "Sign message",
     "Derive child",
@@ -417,7 +416,6 @@ const UTILS_ITEMS: &[&str] = &[
     "Analyze RNG",
     "USB Drive",
     "View TRNG Words",
-    "Address Explorer",
     "Verify address",
     "Sign message",
     "Derive child",
@@ -941,8 +939,8 @@ struct Act<'a, 'u> {
 struct Action {
     /// Runs it.
     run: fn(&mut Act<'_, '_>),
-    /// Where the menu lands when it returns. `None` for an action more than one menu
-    /// offers: it goes back to whichever opened it, cursor still on the row chosen.
+    /// Where the menu lands when it returns, cursor at the top. `None` goes back to the
+    /// menu it was opened from with the cursor left on the row that opened it.
     back: Option<Screen>,
     /// Re-read the secret slot afterwards: this action can create or destroy a wallet,
     /// and that reorders the main menu.
@@ -961,8 +959,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             seed_may_change: false,
         }
     }
-    /// For one reached from more than one menu, which returns to where it was opened.
-    fn from_either(run: fn(&mut Act<'_, '_>)) -> Action {
+    /// For one opened from a main-menu tile: back to the menu, cursor still on the tile.
+    fn home(run: fn(&mut Act<'_, '_>)) -> Action {
         Action {
             run,
             back: None,
@@ -1004,8 +1002,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
-        // "Addresses" on the main menu and "Address Explorer" under Utils.
-        Screen::AddressExplorer => from_either(|a| addresses(a.gate, a.login, a.ui)),
+        Screen::AddressExplorer => home(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
             Screen::ExportMenu,
@@ -1347,7 +1344,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
-            (Key::Confirm, Some("Address Explorer")) => Screen::AddressExplorer,
             (Key::Confirm, Some("Verify address")) => Screen::VerifyAddress,
             (Key::Confirm, Some("Sign message")) => Screen::SignMessage,
             (Key::Confirm, Some("Derive child")) => Screen::DeriveMenu,

@@ -105,7 +105,7 @@ Everything below now needs hardware rather than more specification.
       wallet. Needs a normalisation table, or a decision to restrict passphrases.
 - [x] BIP-32 derivation over secp256k1 (constant-time; audit the crate choice)
 - [x] Address derivation and display: P2PKH, P2WPKH, P2SH-P2WPKH, P2TR all encode in
-      `catcard-wallet`; the on-device Address Explorer (Utils) walks the BIP-84 receive
+      `catcard-wallet`; the on-device Address Explorer (main menu, `Addresses`) walks the BIP-84 receive
       chain, and seed import/restore reconstructs a wallet from a typed phrase
 - [x] Transaction parsing (borrowed, allocation-free) and BIP-143 segwit v0 sighash
 - [ ] BIP-341 taproot sighash
