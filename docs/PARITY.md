@@ -85,9 +85,9 @@ Dependency first, then what a user needs to hold funds safely:
 |---|---|---|---|
 | New seed, 12/24 words | ✅ | ✅ | two SEs + MCU TRNG through `EntropyPool` |
 | Mandatory user entropy | ✅ | ➖ | offered, never required (`SECRETS-AND-SETTINGS.md`) |
-| Dice / coin / key-mash input | ✅ | ❌ | optional extra source; after step 7 |
+| Dice / coin / key-mash input | ✅ | ✅ | stock's `sha256(ASCII rolls)` convention, but mixed into the pool rather than replacing it |
 | View TRNG Words | ✅ | ✅ | Utils |
-| Dice-only seed | ✅ | ❌ | |
+| Dice-only seed | ✅ | ❌ | deliberate: user entropy adds to the TRNGs, never replaces them (`ENTROPY.md`) |
 | Import words (12/18/24) | ✅ | ✅ | |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | 🟡 | xprv and raw master: stored ones are read and worked in, and Derive → Import key types either in for the session; backup, clone, TAPSIGNER and QR remain (steps 9-11) |
 | Seed XOR split and join | ✅ | ✅ | Derive; the published examples are host tests |

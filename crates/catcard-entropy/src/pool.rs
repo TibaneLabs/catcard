@@ -64,19 +64,21 @@ pub enum Source {
     /// Timing jitter from user interaction (DWT cycle counts at keypress edges).
     /// Real but low-rate entropy; credited conservatively.
     UserTiming,
-    /// The digit a user chose while key-mashing -- the value, as a die's face is, not the
-    /// timing. A keypad digit is one of about ten symbols, so it is credited 3 bits per
-    /// byte (one digit), a conservative log2(10). Runs no health test -- it is not a
-    /// noise source, and a human legitimately repeats keys -- and counts toward the bit
-    /// total but never as a hardware source, so it stays additive, never a precondition.
+    /// The digits a user chose while key-mashing -- the values, as a die's faces are, not
+    /// the timing.
+    ///
+    /// Credited **nothing per byte**: a run of user symbols is counted as a whole, by
+    /// [`EntropyPool::add_user`], which is where the length and frequency gate lives. A
+    /// bare `add` of typed digits mixes them and counts zero, so there is no way to get
+    /// an ungated run counted. Runs no health test either -- it is not a noise source and
+    /// a human legitimately repeats keys -- and never counts as a hardware source, so it
+    /// stays additive and can never be a precondition.
     UserKeypad,
-    /// A die face (1..6) a user rolled and entered. Six symbols is log2(6) ≈ 2.585 bits;
-    /// credited 2 a byte (one roll), the conservative floor. Like [`Source::UserKeypad`]
-    /// it is additive, never a hardware source, and runs no health test -- the caller
-    /// enforces a minimum count and a maximum face frequency before crediting it.
+    /// Die faces (1..6) a user rolled and entered. Same footing as [`Source::UserKeypad`]:
+    /// credited only as a gated run through [`EntropyPool::add_user`], never as a
+    /// hardware source. See [`crate::user`] for the digest convention.
     UserDice,
-    /// A coin flip (0/1) a user entered. Two symbols is one bit; credited 1 a byte. Same
-    /// footing as [`Source::UserDice`], with the caller's frequency gate.
+    /// Coin flips (0/1) a user entered. Same footing as [`Source::UserDice`].
     UserCoin,
     /// Anything else worth mixing but not worth trusting: uptime, SD card serial,
     /// uninitialised RAM patterns. Credited **zero**.
@@ -105,9 +107,10 @@ impl Source {
             Source::BootloaderTrng | Source::Se1TrngUnauthenticated => 0,
             // A keypress timestamp is a handful of unpredictable low bits at best.
             Source::UserTiming => 1,
-            Source::UserKeypad => 3,
-            Source::UserDice => 2,
-            Source::UserCoin => 1,
+            // Typed symbols are credited per *run*, by `add_user`, not per byte. Zero
+            // here means a raw `add` of somebody's rolls mixes them without counting
+            // them, and the gate cannot be walked around.
+            Source::UserKeypad | Source::UserDice | Source::UserCoin => 0,
             Source::Auxiliary | Source::NonSecret => 0,
         }
     }
@@ -274,6 +277,41 @@ impl EntropyPool {
     /// Absorb a single timing observation (e.g. `DWT_CYCCNT` at a keypress edge).
     pub fn add_timing(&mut self, cycles: u32) {
         self.add(Source::UserTiming, &cycles.to_le_bytes());
+    }
+
+    /// Absorb a run of symbols the owner typed -- dice, coin flips, a keypad mash -- and
+    /// credit it by keyspace. Returns the bits credited.
+    ///
+    /// The run goes in as SHA-256 over its ASCII digits, the public dice convention (see
+    /// [`crate::user`]), so an owner can recompute off the device what their rolls should
+    /// have contributed.
+    ///
+    /// Three properties together are what make this safe to offer at all:
+    ///
+    /// - **It adds.** The digest is absorbed like any other contribution, into the same
+    ///   chain the TRNGs went into. It cannot replace them, and there is no API here that
+    ///   would let it: a seed made with 10 rolls is the one that would have been made
+    ///   without them, stirred further. The stock firmware *replaces* the seed with
+    ///   `sha256(rolls)`, which is why a short run there is a weak wallet.
+    /// - **A weak run counts zero, but is still mixed.** Mixing cannot subtract, so
+    ///   there is nothing to gain by discarding a short or lopsided run -- only by
+    ///   refusing to count it. `run.weakness()` says which way it fell short.
+    /// - **It is never a hardware source.** No amount of typing satisfies a policy's
+    ///   two-TRNG bar, so a device whose TRNGs are unhealthy cannot be talked into a
+    ///   wallet by hand.
+    pub fn add_user(&mut self, run: &crate::user::UserSymbols) -> u32 {
+        let source = run.alphabet().source();
+        let mut digest = run.digest();
+        self.absorb(source, &digest);
+        digest.zeroize();
+
+        let bits = run.credited_bits();
+        self.credited_bits = self.credited_bits.saturating_add(bits);
+        // Count the symbols, not the digest's 32 bytes: the report should say how many
+        // times the owner rolled.
+        self.bytes_from[source.index()] =
+            self.bytes_from[source.index()].saturating_add(run.count());
+        bits
     }
 
     fn absorb(&mut self, source: Source, data: &[u8]) {
@@ -635,22 +673,181 @@ mod tests {
         let _ = p.draw(&mut out);
     }
 
-    #[test]
-    fn keypad_credits_the_value_and_is_not_hardware() {
-        let mut p = EntropyPool::new(Policy::STRICT);
-        // A human mashing, repeating one key -- which a real user does.
-        for _ in 0..100 {
-            p.add(Source::UserKeypad, &[5]);
+    // ---- user-supplied entropy -------------------------------------------------
+    //
+    // The property under test throughout is the one that decides whether offering dice
+    // at all is safe: **user input adds, it never replaces**. A wallet made with rolls
+    // must be at least as strong as the same wallet made without them, and no run of
+    // typing may stand in for a hardware source.
+
+    use crate::user::{Alphabet, UserSymbols};
+
+    /// `n` rolls that use every face evenly -- what a real die gives.
+    fn rolls(n: u32) -> UserSymbols {
+        let mut u = UserSymbols::new(Alphabet::Dice);
+        for i in 0..n {
+            u.push(b'1' + (i % 6) as u8).unwrap();
         }
-        // Three bits a digit, like a die's face: a hundred taps is a few hundred bits,
-        // past the 256-bit bar's worth.
-        assert_eq!(p.credited_bits(), 300);
-        // But it is not a hardware source, so it cannot satisfy the two-TRNG bar on its
-        // own -- and a keypad value runs no health test, so repeats are never a problem.
+        u
+    }
+
+    #[test]
+    fn ten_dice_rolls_leave_a_seed_no_weaker_than_none() {
+        // The headline property. Take a pool that has already met its policy, hand it a
+        // run far too short to be credited, and nothing about its standing may go
+        // backwards: not the credited bits, not the hardware sources, not the verdict.
+        let before = full_pool();
+        let mut after = full_pool();
+        let credited = after.add_user(&rolls(10));
+
+        assert_eq!(credited, 0, "ten rolls must not be counted");
+        assert!(after.credited_bits() >= before.credited_bits());
+        assert_eq!(after.hardware_sources(), before.hardware_sources());
+        assert!(
+            after.check().is_ok(),
+            "a short user run took a good pool below its policy"
+        );
+
+        // And it did land: the seed is a different one, stirred by the rolls rather than
+        // replaced by them.
+        let mut a = full_pool();
+        let mut b = full_pool();
+        b.add_user(&rolls(10));
+        assert_ne!(a.draw_seed().unwrap(), b.draw_seed().unwrap());
+    }
+
+    #[test]
+    fn no_run_of_any_length_can_weaken_a_pool() {
+        // The same statement over the whole range, including the lopsided run that is
+        // credited nothing and the long one that is capped.
+        let mut lopsided = UserSymbols::new(Alphabet::Dice);
+        for _ in 0..200 {
+            lopsided.push(b'6').unwrap();
+        }
+        let base = full_pool();
+        for run in [rolls(0), rolls(1), rolls(49), rolls(50), rolls(400)] {
+            let mut p = full_pool();
+            p.add_user(&run);
+            assert!(p.credited_bits() >= base.credited_bits());
+            assert_eq!(p.hardware_sources(), base.hardware_sources());
+            assert!(p.check().is_ok());
+        }
+        let mut p = full_pool();
+        p.add_user(&lopsided);
+        assert_eq!(p.credited_bits(), base.credited_bits());
+        assert!(p.check().is_ok());
+    }
+
+    #[test]
+    fn user_input_can_never_replace_the_pool() {
+        // A thousand rolls into a pool with no hardware behind it still produces
+        // nothing. This is the difference from the stock firmware, where the seed *is*
+        // sha256(rolls) and a device with a dead TRNG happily makes a wallet.
+        let mut p = EntropyPool::new(Policy::single_trng());
+        p.add_user(&rolls(500));
+        assert!(p.credited_bits() >= 256, "the rolls were credited");
+        assert_eq!(p.hardware_sources(), 0);
+        assert!(matches!(
+            p.draw_seed(),
+            Err(Insufficient::HardwareSources { have: 0, need: 1 })
+        ));
+
+        // Nor can it rescue a board whose second element is dead under STRICT.
+        let mut q = EntropyPool::new(Policy::STRICT);
+        q.add(Source::Stm32Trng, &noise(1, 64));
+        q.add(Source::Se1Trng, &[0u8; 32]);
+        q.add_user(&rolls(500));
+        assert!(matches!(
+            q.draw_seed(),
+            Err(Insufficient::HardwareSources { have: 1, need: 2 })
+        ));
+    }
+
+    #[test]
+    fn fifty_fair_rolls_are_credited_129_bits() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        assert_eq!(p.add_user(&rolls(50)), 129);
+        assert_eq!(p.credited_bits(), 129);
+        // Long runs are capped at what one 32-byte digest can carry.
+        let mut q = EntropyPool::new(Policy::STRICT);
+        assert_eq!(q.add_user(&rolls(400)), 256);
+    }
+
+    #[test]
+    fn typed_symbols_are_only_ever_counted_through_the_gate() {
+        // The gate lives in `add_user`. Handing the same digits to `add` -- the way a
+        // future caller might, reaching for the obvious function -- mixes them and
+        // credits nothing, so there is no path that counts an ungated run.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::UserDice, b"123456123456123456");
+        p.add(Source::UserKeypad, &[5; 200]);
+        p.add(Source::UserCoin, b"0101010101");
+        assert_eq!(p.credited_bits(), 0);
+        assert_eq!(p.hardware_sources(), 0);
+    }
+
+    #[test]
+    fn the_three_user_alphabets_are_domain_separated() {
+        // The same typed string as dice and as a keypad mash must not produce the same
+        // pool, or one channel could stand in for another.
+        let mut dice = UserSymbols::new(Alphabet::Dice);
+        let mut mash = UserSymbols::new(Alphabet::Keypad);
+        for i in 0..60u32 {
+            dice.push(b'1' + (i % 6) as u8).unwrap();
+            mash.push(b'1' + (i % 6) as u8).unwrap();
+        }
+        assert_eq!(dice.digest(), mash.digest(), "same symbols, same digest");
+
+        let mut a = full_pool();
+        a.add_user(&dice);
+        let mut b = full_pool();
+        b.add_user(&mash);
+        assert_ne!(a.draw_seed().unwrap(), b.draw_seed().unwrap());
+    }
+
+    #[test]
+    fn a_dice_run_reaches_the_pool_as_its_published_digest() {
+        // What the pool absorbs is exactly sha256 of the ASCII rolls, so the owner's own
+        // check of their written-down rolls describes what the device actually did.
+        let run = rolls(60);
+        let mut a = full_pool();
+        a.add_user(&run);
+
+        let mut b = full_pool();
+        b.add(Source::UserDice, &run.digest());
+        assert_eq!(
+            a.draw_seed().unwrap(),
+            b.draw_seed().unwrap(),
+            "the run is absorbed as something other than its digest"
+        );
+    }
+
+    #[test]
+    fn keypad_taps_count_by_keyspace_and_are_not_hardware() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        let mut mash = UserSymbols::new(Alphabet::Keypad);
+        for i in 0..100u32 {
+            mash.push(b'0' + (i % 10) as u8).unwrap();
+        }
+        // log2(10) * 100 = 332 bits of keyspace, capped at the 256 a digest can carry.
+        assert_eq!(p.add_user(&mash), 256);
+        // ...but it is not a hardware source, so it cannot satisfy the two-TRNG bar.
         assert_eq!(p.hardware_sources(), 0);
         assert!(matches!(
             p.check(),
             Err(Insufficient::HardwareSources { .. })
         ));
+    }
+
+    #[test]
+    fn a_mash_of_one_key_is_not_counted() {
+        // A human leaning on the 5 key is not 300 bits of anything.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        let mut mash = UserSymbols::new(Alphabet::Keypad);
+        for _ in 0..100 {
+            mash.push(b'5').unwrap();
+        }
+        assert_eq!(p.add_user(&mash), 0);
+        assert_eq!(p.credited_bits(), 0);
     }
 }

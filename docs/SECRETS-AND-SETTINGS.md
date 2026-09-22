@@ -98,8 +98,10 @@ secret exists. E needs no flash driver at all.
 1. Wrap `gate 18/3` with `change::SECRET` in `catcard-pin` (the ABI constant exists;
    nothing calls it).
 2. `EntropyPool::draw_seed()` → 32 B, already policy-gated and health-tested.
-3. Optional user entropy as a first-class `Source` with its own credit rate — dice (`123456`),
-   coin (`10`), key-mash timed off DWT. Additive; never a precondition.
+3. Optional user entropy through `UserSymbols` + `EntropyPool::add_user` — dice (`123456`),
+   coin (`01`), key-mash, each absorbed as `sha256` of its ASCII symbols and credited by
+   keyspace behind a length/frequency gate, with DWT timing mixed at every press.
+   Additive; never a precondition.
 4. Encode SecretStash: `marker = 0x80 | ((L/8) - 2)` then L bytes of entropy, L ∈ {16,24,32}
    (`secret-stash-format.md`).
 5. Write it, then re-read via `gate 18/4` and compare before telling the user the wallet
