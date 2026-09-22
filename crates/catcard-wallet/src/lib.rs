@@ -68,5 +68,6 @@ pub mod encoding;
 pub mod message;
 pub mod multisig;
 pub mod psbtview;
+pub mod seedxor;
 pub mod signer;
 pub mod tx;
