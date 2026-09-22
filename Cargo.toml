@@ -13,6 +13,7 @@ members = [
     "crates/catcard-pin",
     "crates/catcard-hal",
     "crates/catcard-kernel",
+    "crates/catcard-nfc",
     "crates/catcard-ui",
     "crates/catcard-fw",
     "crates/catcard-settings",
@@ -43,6 +44,7 @@ default-members = [
     "crates/catcard-sign",
     "crates/catcard-wallet",
     "tools/catcard-image",
+    "crates/catcard-nfc",
 ]
 
 [workspace.package]

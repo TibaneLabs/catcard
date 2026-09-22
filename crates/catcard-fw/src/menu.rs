@@ -110,6 +110,9 @@ enum Screen {
     AnalyzeRng,
     UsbDrive,
     ViewTrngWords,
+    /// Debug: write a fixed URL to the NFC tag and hold the screen.
+    #[cfg(not(feature = "board-mk3"))]
+    NfcTest,
     AddressExplorer,
     /// One of the exports that is neither the generic JSON nor a plain key: Bitcoin
     /// Core, Electrum, Wasabi, Unchained or a single-signature descriptor. By its row in
@@ -576,6 +579,8 @@ const DEBUG_ITEMS: &[&str] = &[
     // The TRNG's raw output as words: for checking the generator, not for keeping.
     "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
+    "NFC test",
+    #[cfg(not(feature = "board-mk3"))]
     "Dump state",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     "Restore settings",
@@ -1029,6 +1034,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTest => to(|a| crate::nfc::probe_screen(a.ui), Screen::Debug),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
@@ -1423,6 +1430,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Install from SD")) => Screen::SdInstall,
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
             (Key::Confirm, Some("Restore settings")) => Screen::RestoreSettings,
@@ -1811,6 +1820,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it takes over USB and needs the keypad to leave.
         Screen::UsbDrive => {}
         Screen::ViewTrngWords => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTest => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         Screen::AddressExplorer
         | Screen::ExportOne(_)

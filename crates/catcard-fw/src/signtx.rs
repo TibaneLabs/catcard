@@ -471,6 +471,12 @@ pub(crate) fn review_and_sign(
             };
             crate::catlog!("sign: finalised, {} bytes of hex", hex_len);
             menu::message(ui.panel, "Signed", &FINAL_NAME[1..], "ready to broadcast");
+            menu::wait_for_any_key(ui);
+            // Nothing here has a network. What this offers is to put the transaction on
+            // the NFC tag as a link, so a phone that taps the device can send it.
+            #[cfg(not(feature = "board-mk3"))]
+            crate::nfc::offer_broadcast(ui, &into[..len]);
+            return;
         }
         None => {
             menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());

@@ -87,7 +87,9 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   path) and registered multisig, with the fee shown and capped and change proven by
   re-deriving it; legacy message signing.
 - **Transfer.** USB HID, microSD (browse, format, import, export), firmware upgrade from
-  either, and on the Q1 a QR scanner with BBQr and BC-UR.
+  either, and on the Q1 a QR scanner with BBQr and BC-UR. A fully signed transaction can
+  go out by NFC: the device writes it to its tag as a link, and a phone that taps the
+  device is what sends it -- this hardware has no network of its own.
 - **Storage.** An authenticated, power-fail-safe settings store, compatible with the one
   stock writes: a device that has run stock keeps its settings, notes and seed vault.
 - **Danger zone.** View the words of the key in force, destroy the seed, or lock a

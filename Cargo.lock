@@ -150,6 +150,7 @@ dependencies = [
  "catcard-hal",
  "catcard-kernel",
  "catcard-log",
+ "catcard-nfc",
  "catcard-pin",
  "catcard-qr",
  "catcard-sd",
@@ -210,6 +211,10 @@ dependencies = [
 
 [[package]]
 name = "catcard-log"
+version = "7.0.0"
+
+[[package]]
+name = "catcard-nfc"
 version = "7.0.0"
 
 [[package]]

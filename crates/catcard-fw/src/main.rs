@@ -61,6 +61,9 @@ mod msc_drive;
 /// Registering a multisig wallet from a descriptor on the card.
 #[cfg(not(feature = "board-mk3"))]
 mod msimport;
+/// The NFC tag, where a board has one: handing a phone a URL by tap.
+#[cfg(not(feature = "board-mk3"))]
+mod nfc;
 mod nor;
 /// Secure Notes & Passwords, read out of the settings blob.
 ///

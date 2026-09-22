@@ -612,3 +612,26 @@ question:
 
 Unknown: whether any call clears the flag short of a factory path, and whether stock reads
 it the same way. Neither blocks anything -- what a wallet needs is the bytes.
+
+## The broadcast URL's chain segment `[?]`
+
+`crate::nfc` writes `https://www.blockexplorer.com/<chain>/broadcast?tx=<hex>` to the tag,
+with `<chain>` as `btc`. The host and the path are the explorer's, given with the request;
+the segment for Bitcoin is a guess, and nothing on the device can check it.
+
+A wrong segment is a page that does not know the transaction, not a wrong broadcast: the
+transaction is in the query either way, and the phone's owner sees the address before
+anything is sent. Settled by tapping a phone on a written tag once.
+
+Both are one `const` each at the top of `crates/catcard-fw/src/nfc.rs`.
+
+## Writing the NFC tag has not been tried on hardware
+
+The driver follows the datasheet -- device select `0xA6`, two address bytes, one 16-byte
+row per write, `tW` waited out afterwards -- but no tag has answered it yet. It is off the
+boot path: Debug → NFC test writes a fixed URL and says whether the tag answered, and the
+broadcast offer only appears after a transaction is fully signed.
+
+Unknown until then: whether the factory capability container differs from the one written
+here, whether a phone reads the image back as a URL, and whether the co-processor sharing
+this bus needs to be quiet during the write.

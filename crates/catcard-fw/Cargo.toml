@@ -52,6 +52,7 @@ catcard-alloc.workspace = true
 catcard-bbqr.workspace = true
 catcard-bcur.workspace = true
 catcard-board.workspace = true
+catcard-nfc = { path = "../catcard-nfc" }
 catcard-callgate.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
 catcard-fwhdr = { workspace = true, default-features = false }
