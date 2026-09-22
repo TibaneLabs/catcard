@@ -112,7 +112,7 @@ zeroize = { version = "1.9.0", default-features = false }
 # written as** (`raw_value`, zero copy), so a key this firmware has never heard of
 # survives a save byte-identically; and `edit::apply` changes one value in place by
 # moving the document's tail once, rather than re-rendering the object around it.
-emjson = { version = "0.1.0", default-features = false }
+emjson = { version = "0.1.1", default-features = false }
 
 # --- shared ---
 bitflags = { version = "2.13.1", default-features = false }

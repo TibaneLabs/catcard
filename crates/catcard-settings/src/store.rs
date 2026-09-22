@@ -513,9 +513,15 @@ mod save_tests {
             }
             assert_eq!(after.get(e.key), Some(e.raw), "{} changed", e.key);
         }
+        // The keys that were there keep the order they were written in -- including
+        // `rz` after `tp`, which is not sorted and is not ours to tidy. The new key
+        // lands where the writer puts it, which is in sorted position rather than at
+        // the end; what matters is that nothing already in the blob moved past
+        // anything else.
         let order: Vec<&str> = after.entries().iter().map(|e| e.key).collect();
-        assert_eq!(&order[..5], &["_age", "chain", "multisig", "tp", "rz"]);
-        // And the new one, at the end.
+        let kept: Vec<&str> = order.iter().copied().filter(|k| *k != "nick").collect();
+        assert_eq!(kept, ["_age", "chain", "multisig", "tp", "rz"]);
+        assert!(order.contains(&"nick"), "the new key is gone: {order:?}");
         assert_eq!(after.get_str("nick"), Some("kitty"));
         // `_age` went up, so this copy wins over the old one.
         assert_eq!(after.get_u64("_age"), Some(8));
