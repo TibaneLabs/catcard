@@ -4384,88 +4384,161 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
     wait_for_any_key(ui);
 }
 
-/// Every word count BIP-39 defines. 12 and 24 are what most tools offer.
-#[cfg(feature = "board-q1")]
+/// Every word count BIP-39 defines, as the rows of a list.
+///
+/// The BIP names 12, 18 and 24; 15 and 21 derive by the same rule and are offered
+/// because the rule does not stop at three -- with the caveat, on the screen that
+/// derives them, that fewer wallets will reproduce them.
+const BIP85_WORD_ROWS: &[&str] = &["12 words", "15 words", "18 words", "21 words", "24 words"];
 const BIP85_WORDS: [u32; 5] = [12, 15, 18, 21, 24];
+const _: () = assert!(BIP85_WORDS.len() == BIP85_WORD_ROWS.len());
+
+/// A one-question list, returning the row chosen.
+///
+/// For a choice made *inside* an action, where turning it into another `Screen` would
+/// mean unwinding and redoing whatever the action has already derived. Works on every
+/// board, unlike [`choose`], because a document renders at whatever size the panel is.
+pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
+    use catcard_ui::scroll::Line as DLine;
+    let mut lines: heapless::Vec<DLine, 10> = heapless::Vec::new();
+    let _ = lines.push(DLine::title(head));
+    if !note.is_empty() {
+        let _ = lines.push(DLine::body(note).small());
+    }
+    for (i, s) in items.iter().enumerate() {
+        let _ = lines.push(DLine::item(s, i as u32));
+    }
+    match show_doc(ui, &lines, false, false) {
+        DocExit::Selected(i) => Some(i as usize),
+        _ => None,
+    }
+}
 
 /// Pick the two things that identify a BIP-85 child: how many words, and which one.
 ///
-/// **One screen, not two.** They are a pair -- a child is `words` *and* `index`, and
-/// the path contains both -- so choosing them apart invites getting back to the first
-/// and finding it already committed. Up and down move between the two fields, left and
-/// right change the one selected, Confirm derives it.
+/// **A list, then a typed number.** The index used to be nudged one at a time with two
+/// arrow keys, which is fine for child 3 and useless for the birthday or the year people
+/// actually use -- and the arrows on this board are the digit keys, so a field that took
+/// both could not tell them apart. So the word count, which has five values, is a list;
+/// and the index, which has two billion, is typed.
 ///
-/// `None` if the owner backs out.
-#[cfg(feature = "board-q1")]
+/// Cancel on an empty index goes back to the word count rather than out of the screen:
+/// they are a pair, a child is *both*, and getting the second one wrong should not cost
+/// the first.
 fn ask_bip85(ui: &mut Ui<'_>, head: &str) -> Option<(u32, u32)> {
-    use core::fmt::Write as _;
-
-    let (mut at, mut words, mut index) = (0usize, 24u32, 0u32);
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
-        let mut rows: heapless::Vec<Line, 4> = heapless::Vec::new();
-        let mut a = Line::new();
-        let _ = write!(a, "{} words  {}", words, if at == 0 { "<" } else { " " });
-        let mut b = Line::new();
-        let _ = write!(b, "index {}  {}", index, if at == 1 { "<" } else { " " });
-        let _ = rows.push(a);
-        let _ = rows.push(b);
-        display::draw(ui.panel, |c| {
-            catcard_ui::widgets::info(c, &display::LAYOUT, head, &rows);
-        });
-        wait_for_release(ui);
-        loop {
-            let _ = usbtask::pump();
-            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-            let mut moved = false;
-            for k in keys.iter() {
-                match k {
-                    Key::Confirm => return Some((words, index)),
-                    Key::Cancel => return None,
-                    // Between the fields.
-                    Key::Digit(8) | Key::Digit(5) => {
-                        at = 1 - at;
-                        moved = true;
-                    }
-                    // Within one.
-                    Key::Digit(9) | Key::Digit(7) => {
-                        let up = matches!(k, Key::Digit(9));
-                        if at == 0 {
-                            let i = BIP85_WORDS.iter().position(|w| *w == words).unwrap_or(4);
-                            let i = if up {
-                                (i + 1) % BIP85_WORDS.len()
-                            } else {
-                                (i + BIP85_WORDS.len() - 1) % BIP85_WORDS.len()
-                            };
-                            words = BIP85_WORDS[i];
-                        } else if up {
-                            // Hardened, so the top of the range is 2^31 - 1.
-                            index = index.saturating_add(1).min(0x7FFF_FFFF);
-                        } else {
-                            index = index.saturating_sub(1);
-                        }
-                        moved = true;
-                    }
-                    _ => {}
-                }
-            }
-            if moved {
-                break;
-            }
-            display::idle(ui.panel);
+        let row = pick_row(ui, head, "how many words", BIP85_WORD_ROWS)?;
+        let words = BIP85_WORDS[row];
+        if let Some(index) = ask_index(ui, head, words) {
+            return Some((words, index));
         }
     }
 }
 
-/// Twenty-four words at index zero, which is the child almost everyone means.
+/// The index of a BIP-85 child, typed.
 ///
-/// mk3 and mk4 have four rows of monochrome and no cursor keys to spare for a
-/// two-field screen. The fingerprint is shown before anything uses the key either way,
-/// so a wrong guess here is visible rather than silent.
-#[cfg(not(feature = "board-q1"))]
-fn ask_bip85(_ui: &mut Ui<'_>, _head: &str) -> Option<(u32, u32)> {
-    Some((24, 0))
+/// Both halves of the choice are on screen: the word count as a row that is not live,
+/// the index under it with the caret. An empty field is index zero, which is the child
+/// almost everyone means, so the common case is one press of the accept key.
+fn ask_index(ui: &mut Ui<'_>, head: &str, words: u32) -> Option<u32> {
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::field::{self, Accept, Field, Input};
+    use catcard_ui::text::{centred, draw_text};
+
+    /// The path's last element is hardened, so the range is 0 to 2^31 - 1: ten digits.
+    const MAX_DIGITS: usize = 10;
+    const LIMIT: u32 = 0x7FFF_FFFF;
+    let top_y = display::FIELD_TOP;
+
+    let mut input = Input::<MAX_DIGITS>::new(Accept::Digits, MAX_DIGITS);
+    let mut count: heapless::String<12> = heapless::String::new();
+    let _ = write!(count, "{words}");
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    // Said only once it has happened, so the screen is not shouting a rule at someone
+    // who has not broken it.
+    let mut complaint = "";
+
+    loop {
+        let fields = [
+            Field::text("words", count.as_str()),
+            Field::text("index", input.as_str()).live(true),
+        ];
+        let body = display::LAYOUT.body;
+        let foot = if complaint.is_empty() {
+            "digits, then accept"
+        } else {
+            complaint
+        };
+        display::draw_field_page(ui.panel, |c| {
+            c.clear();
+            let hx = centred(body, head, c.width());
+            draw_text(
+                c,
+                body,
+                hx,
+                top_y.saturating_sub(body.line_height() + 6),
+                head,
+            );
+            let below = field::stack(
+                c,
+                &display::LAYOUT,
+                top_y,
+                &fields,
+                display::FIELD_SKIN,
+                true,
+            );
+            let fx = centred(body, foot, c.width());
+            draw_text(c, body, fx, below + 6, foot);
+        });
+        wait_for_release(ui);
+
+        let mut redraw = false;
+        while !redraw {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    // Nothing typed is index zero: the child almost everyone means.
+                    Key::Confirm => match (input.is_empty(), input.value()) {
+                        (true, _) => return Some(0),
+                        (_, Some(v)) if v <= LIMIT => return Some(v),
+                        // Out of range, or more digits than a u32 holds. Refused rather
+                        // than clamped: a clamped index is a different wallet, and the
+                        // only person who finds out is the one who lost theirs.
+                        _ => {
+                            complaint = "too big: max 2147483647";
+                            redraw = true;
+                        }
+                    },
+                    Key::Cancel => {
+                        if !input.backspace() {
+                            return None;
+                        }
+                        complaint = "";
+                        redraw = true;
+                    }
+                    Key::Digit(d) => {
+                        if !input.put((b'0' + d) as char) {
+                            complaint = "ten digits is the most";
+                        }
+                        redraw = true;
+                    }
+                    // A keyboard's letters, which this field does not take. `put`
+                    // refuses them; saying so beats a key that appears to do nothing.
+                    Key::Char(c) => {
+                        if !input.put(*c as char) {
+                            complaint = "digits only";
+                        }
+                        redraw = true;
+                    }
+                }
+            }
+            if !redraw {
+                display::idle(ui.panel);
+            }
+        }
+    }
 }
 
 /// Ask which of `items` to use, or `None` if the user backs out.

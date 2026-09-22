@@ -177,34 +177,73 @@ pub(crate) fn read(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
 }
 
 /// The typing screen: what has been typed, and what the keys do.
+///
+/// The same card every other typing screen on this device draws
+/// ([`catcard_ui::field`]), given three lines: a passphrase is long, and the widget
+/// keeps the *end* of it on screen, which is where the typing is.
+///
+/// **Shown, not masked.** Whoever holds the device is the one typing, and a passphrase
+/// typed blind on a keypad is a passphrase lost -- there is nothing to check it against
+/// and no second entry to catch a slip. A wrong one silently opens a different wallet.
 fn draw(ui: &mut Ui<'_>, head: &str, entry: &Entry) {
-    use catcard_ui::scroll::{Line, ScrollView, render};
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::field::{self, Field};
+    use catcard_ui::text::{centred, draw_text};
 
-    let mut hint = heapless::String::<48>::new();
-    let _ = write!(
-        hint,
-        "{} done   {} back",
-        display::CONFIRM_KEY,
-        display::CANCEL_KEY
-    );
+    /// Lines of the passphrase kept on screen at once.
+    const LINES: usize = 3;
+    let top_y = display::FIELD_TOP;
     let mut count = heapless::String::<24>::new();
     let _ = write!(count, "{} of {} characters", entry.len(), MAX_LEN);
 
-    let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
-    let _ = doc.push(Line::title(head));
-    // The text itself, wrapped: a passphrase is shown, not masked. Whoever holds the device
-    // is typing it, and a passphrase typed blind on a keypad is a passphrase lost.
-    let _ = doc.push(Line::body(entry.as_str()).wrapped());
-    let _ = doc.push(Line::body(count.as_str()).small());
-    #[cfg(not(feature = "board-q1"))]
-    {
-        let _ = doc.push(Line::body("2abc 3def 4ghi 5jkl").small());
-        let _ = doc.push(Line::body("6mno 7pqrs 8tuv 9wxyz").small());
-        let _ = doc.push(Line::body("0 space  1 symbols").small());
-        let _ = doc.push(Line::body("same key again to cycle").small());
-    }
-    let _ = doc.push(Line::body(hint.as_str()).small());
+    let body = display::LAYOUT.body;
+    let fields = [Field::text("", entry.as_str()).lines(LINES).live(true)];
 
-    let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    display::draw(ui.panel, |c| render(c, &view));
+    display::draw_field_page(ui.panel, |c| {
+        c.clear();
+        let hx = centred(body, head, c.width());
+        draw_text(
+            c,
+            body,
+            hx,
+            top_y.saturating_sub(body.line_height() + 4),
+            head,
+        );
+        let mut y = field::stack(
+            c,
+            &display::LAYOUT,
+            top_y,
+            &fields,
+            display::FIELD_SKIN,
+            true,
+        ) + 4;
+        // What is on the keys, where the keys do not say. Only the numeric pad needs
+        // it: the Q1 has the letters printed on it.
+        #[cfg(not(feature = "board-q1"))]
+        for line in [
+            "2abc 3def 4ghi 5jkl",
+            "6mno 7pqrs 8tuv 9wxyz",
+            "0 space 1 symbols",
+        ] {
+            draw_text(c, body, centred(body, line, c.width()), y, line);
+            y += body.line_height();
+        }
+        // The OLED has room for the legend or the count, not both, and someone typing
+        // blind on a numeric keypad needs the legend.
+        #[cfg(feature = "board-q1")]
+        {
+            draw_text(c, body, centred(body, &count, c.width()), y, &count);
+            y += body.line_height();
+        }
+        #[cfg(not(feature = "board-q1"))]
+        let _ = &count;
+        let mut hint = heapless::String::<48>::new();
+        let _ = write!(
+            hint,
+            "{} done   {} back",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+        draw_text(c, body, centred(body, &hint, c.width()), y, &hint);
+    });
 }

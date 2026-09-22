@@ -208,29 +208,15 @@ fn tries_left<C: Canvas + ?Sized>(c: &mut C, left: u32) {
 /// the owner for as long as they are typing the half that would be given away if the
 /// device were not theirs.
 ///
-/// # The two halves share an edge
+/// # It is the same card every other typing screen draws
 ///
-/// One white field with a line across it, not two boxes with air between them: they are
-/// two halves of one PIN rather than two questions, and the space that would have gone
-/// between them goes into the prints instead.
+/// Two rows of [`catcard_ui::field`], sharing an edge: marks for the digits, text for
+/// the words. This screen used to lay out its own boxes, its own prints and its own
+/// caret, and then the passphrase and the BIP-85 index each invented something else. The
+/// geometry lives in the widget now, and what is left here is which rows there are.
 ///
-/// # Paw prints, at the size the mk boards draw them
-///
-/// One print per digit, the same trail every other PIN field on the device draws, at
-/// scale 3 -- in black, because the field is white. It gives away exactly what a row of
-/// stars did, how many, and nothing about which.
-///
-/// # The caret is ours, not the co-processor's
-///
-/// `caret` says whether to draw it; the caller toggles that on a timer, so the blink is
-/// this firmware's. The co-processor can blink a cursor by itself, which is tempting
-/// because it keeps blinking while the CPU is inside a callgate -- but it draws a filled
-/// character cell from its own grid, 9 by 22, in a colour we do not choose. On a white
-/// field that is a flashing block of the wrong size and possibly of the wrong colour.
-/// A hairline is what a text caret looks like, so it is drawn here with everything else.
-///
-/// The field's geometry is therefore free of that grid. It was laid out on 9x22 cells
-/// only so the co-processor's cursor would land among the prints.
+/// `caret` is the blink, which belongs to the loop that polls the keypad -- see
+/// [`unlock`].
 #[cfg(feature = "board-q1")]
 fn screen_pin(
     panel: &mut display::Panel,
@@ -240,74 +226,40 @@ fn screen_pin(
     caret: bool,
     left: u32,
 ) {
-    use catcard_ui::canvas::{Canvas as _, INK, Level};
-    use catcard_ui::icons::{draw_paw_trail_in, paw_trail_size};
-    use catcard_ui::text::{draw_text, draw_text_in, width_of};
+    use catcard_ui::canvas::Canvas as _;
+    use catcard_ui::field::{self, Field};
 
-    /// The cat, at the size every other PIN field on this panel draws it.
-    const SCALE: usize = 3;
-    /// The icon palette is not a grey ramp -- see [`catcard_ui::art::menuicons`] -- so
-    /// what is drawn on the white field is a named index, not an offset from `PAPER`.
-    /// Index 1 is the palette's black.
-    const MARK: Level = 1;
-    /// Space either side of the trail, inside the field. Wide enough that the two
-    /// longest words in the BIP-39 list still sit inside it.
-    const PAD: usize = 20;
-    /// Space above and below a trail, which is what makes a half taller than one.
-    const LEAD: usize = 8;
-    /// Where the field starts, leaving a line above it for the heading.
-    const TOP_Y: usize = 42;
+    /// Stand-ins for the digits: the widget draws one print per character and never
+    /// looks at them, so the marks row is handed a count and not a PIN.
+    const PLACEHOLDER: &str = "......";
 
-    let f = display::LAYOUT.title;
     let body = display::LAYOUT.body;
-    // The words are only in hand once the prefix has been accepted, so their presence
-    // is also "the bottom half is the live one".
     let filled = words.is_some();
-    // Where the caret goes: the half being typed into, at the print not yet made.
-    let at = if filled { suffix } else { prefix };
 
-    let (trail_w, trail_h) = paw_trail_size(MAX_PART_LEN, SCALE);
-    // One print's width and the gait's stride, from the same function that sized the
-    // trail, so nothing here has to know the step the icons crate chose.
-    let paw_w = paw_trail_size(1, SCALE).0;
-    let step = paw_trail_size(2, SCALE).0 - paw_w;
+    // The two words as one line, for the row that replaces the prefix.
+    let mut said: heapless::String<24> = heapless::String::new();
+    if let Some([a, b]) = words {
+        let _ = core::fmt::Write::write_fmt(&mut said, format_args!("{a}  {b}"));
+    }
 
-    let box_w = trail_w + 2 * PAD;
-    let box_x = display::SCREEN_W.saturating_sub(box_w) / 2;
-    let trail_x = box_x + PAD;
-    let half_h = trail_h + 2 * LEAD;
-    let (top_y, mid_y, bot_y) = (TOP_Y, TOP_Y + half_h, TOP_Y + 2 * half_h);
+    let top = if filled {
+        Field::text("", said.as_str()).centred()
+    } else {
+        Field::marks(&PLACEHOLDER[..prefix.min(MAX_PART_LEN)], MAX_PART_LEN).live(true)
+    };
+    let bottom = Field::marks(&PLACEHOLDER[..suffix.min(MAX_PART_LEN)], MAX_PART_LEN).live(filled);
+    let fields = [top, bottom];
 
-    // The art palette: index 0 is the menu's grey, so the login does not look like a
-    // different device from the one behind it, and 15 is the white this field is.
-    display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
+    display::draw_field_page(panel, |c| {
         c.clear();
-
-        // The field: white, both halves, with a line across the middle. Paper, and the
-        // cat walks on it.
-        c.fill_rect(box_x, top_y, box_w, bot_y - top_y, INK);
-        c.fill_rect(box_x, mid_y, box_w, 1, MARK);
-
-        match words {
-            None => draw_paw_trail_in(c, prefix, trail_x, top_y + LEAD, SCALE, MARK),
-            // Accepted: the words take the top half and stay there while the second
-            // half is typed. That is the whole point of them.
-            Some([a, b]) => {
-                let y = top_y + half_h.saturating_sub(f.line_height()) / 2;
-                let gap = 2 * f.advance(b' ');
-                let total = width_of(f, a) + gap + width_of(f, b);
-                let mut x = c.width().saturating_sub(total) / 2;
-                x = draw_text_in(c, f, x, y, a, MARK) + gap;
-                draw_text_in(c, f, x, y, b, MARK);
-            }
-        }
-        draw_paw_trail_in(c, suffix, trail_x, mid_y + LEAD, SCALE, MARK);
-
-        // A hairline where the next print will land, as tall as the trail it sits in.
-        if caret && at < MAX_PART_LEN {
-            let y = if filled { mid_y } else { top_y } + LEAD;
-            c.fill_rect(trail_x + at * step, y, 1, trail_h, MARK);
-        }
+        let below = field::stack(
+            c,
+            &display::LAYOUT,
+            display::FIELD_TOP,
+            &fields,
+            display::FIELD_SKIN,
+            caret,
+        );
 
         // What the two halves are, and what the keys do, in the space around them.
         let head = if filled {
@@ -320,7 +272,7 @@ fn screen_pin(
             c,
             body,
             hx,
-            top_y.saturating_sub(body.line_height() + 6),
+            display::FIELD_TOP.saturating_sub(body.line_height() + 6),
             head,
         );
 
@@ -333,7 +285,7 @@ fn screen_pin(
             "accept for the words"
         };
         let fx = centred(body, foot, c.width());
-        draw_text(c, body, fx, bot_y + 6, foot);
+        draw_text(c, body, fx, below + 6, foot);
         tries_left(c, left);
     });
 }

@@ -618,6 +618,38 @@ pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Sur
     DRAWING.store(false, Ordering::SeqCst);
 }
 
+/// How a card of input fields is drawn on this board.
+///
+/// The colour panel gets paper: a white card on the menu's grey, with black content. The
+/// OLED gets an outline -- a filled card on 128x64 would be a lamp held at arm's length,
+/// and the panel has no grey to put it on.
+#[cfg(feature = "board-q1")]
+pub const FIELD_SKIN: catcard_ui::field::Skin = catcard_ui::field::Skin::Paper;
+/// How a card of input fields is drawn on this board. See the Q1's.
+#[cfg(not(feature = "board-q1"))]
+pub const FIELD_SKIN: catcard_ui::field::Skin = catcard_ui::field::Skin::Outline;
+
+/// Where a card of input fields starts, leaving a line above it for the heading.
+///
+/// Per board rather than per screen: every typing screen puts its card in the same
+/// place, which is most of what makes them look like one device.
+#[cfg(feature = "board-q1")]
+pub const FIELD_TOP: usize = 42;
+/// Where a card of input fields starts. See the Q1's.
+#[cfg(not(feature = "board-q1"))]
+pub const FIELD_TOP: usize = 12;
+
+/// Draw a screen that takes typing: the menu's grey page, so every one of them looks
+/// like the same device, and white text over it.
+///
+/// On the OLED there is one palette and this is [`draw`].
+pub fn draw_field_page(panel: &mut Panel, f: impl FnOnce(&mut Surface<'_>)) {
+    #[cfg(feature = "board-q1")]
+    draw_with(panel, &catcard_ui::art::menuicons::PALETTE, f);
+    #[cfg(not(feature = "board-q1"))]
+    draw(panel, f);
+}
+
 /// The pause a screen takes between keypad polls while it waits for a key.
 ///
 /// The status bar is refreshed here rather than only when a frame is drawn, because the

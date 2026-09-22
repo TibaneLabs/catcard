@@ -28,7 +28,7 @@ use catcard_wallet::seedxor::{MAX_PARTS, MIN_PARTS, Parts};
 use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
-use crate::menu::{self, DocExit};
+use crate::menu::{self, pick_row};
 use crate::ui::Ui;
 
 const SPLIT: &str = "XOR split";
@@ -40,21 +40,6 @@ const _: () = assert!(COUNTS.len() == MAX_PARTS - MIN_PARTS + 1);
 
 /// Where the parts come from.
 const SOURCES: &[&str] = &["Deterministic", "From the TRNGs"];
-
-/// A one-question list, returning the row chosen.
-fn pick(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
-    use catcard_ui::scroll::Line as DLine;
-    let mut lines: heapless::Vec<DLine, 8> = heapless::Vec::new();
-    let _ = lines.push(DLine::title(head));
-    let _ = lines.push(DLine::body(note).small());
-    for (i, s) in items.iter().enumerate() {
-        let _ = lines.push(DLine::item(s, i as u32));
-    }
-    match menu::show_doc(ui, &lines, false, false) {
-        DocExit::Selected(i) => Some(i as usize),
-        _ => None,
-    }
-}
 
 /// Split the wallet in force into parts, and show each one's words.
 pub(crate) fn split(
@@ -90,10 +75,10 @@ pub(crate) fn split(
         }
     }
 
-    let Some(count) = pick(ui, SPLIT, "how many parts", COUNTS).map(|i| i + MIN_PARTS) else {
+    let Some(count) = pick_row(ui, SPLIT, "how many parts", COUNTS).map(|i| i + MIN_PARTS) else {
         return;
     };
-    let Some(source) = pick(ui, SPLIT, "where the parts come from", SOURCES) else {
+    let Some(source) = pick_row(ui, SPLIT, "where the parts come from", SOURCES) else {
         return;
     };
 
@@ -190,7 +175,7 @@ fn from_trngs(
 
 /// Type in the parts, XOR them, and work in what comes out.
 pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    let Some(count) = pick(ui, JOIN, "how many parts", COUNTS).map(|i| i + MIN_PARTS) else {
+    let Some(count) = pick_row(ui, JOIN, "how many parts", COUNTS).map(|i| i + MIN_PARTS) else {
         return;
     };
 
