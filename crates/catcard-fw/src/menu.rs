@@ -198,6 +198,13 @@ enum Screen {
     Settings,
     /// Login settings, currently just changing the main PIN.
     Login,
+    /// Settings that show or change secrets, apart from the rest so none is one press
+    /// away by accident.
+    DangerZone,
+    /// Danger zone: tools that work on the seed itself.
+    SeedTools,
+    /// Show the key in force: its words, or its XPRV or WIF.
+    ViewWords,
     /// Changing the main PIN.
     ChangePin,
     WipeSeed,
@@ -345,6 +352,7 @@ const SETTINGS_ITEMS: &[&str] = &[
     // §SET "Multisig Wallets (has_secrets)" [C]
     #[cfg(not(feature = "board-mk3"))]
     "Multisig",
+    "Danger zone",
     "Destroy seed",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
@@ -367,6 +375,12 @@ fn settings_items(no_seed: bool) -> &'static [&'static str] {
         SETTINGS_ITEMS
     }
 }
+
+/// Settings that show or change secrets. Stock calls it the same, and keeps its seed
+/// functions there. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
+const DANGER_ITEMS: &[&str] = &["Seed tools"];
+/// Tools that work on the seed itself.
+const SEED_TOOLS_ITEMS: &[&str] = &["View words"];
 
 /// Login settings. Just the PIN today; a place for login-related settings to grow.
 /// Login settings.
@@ -1085,6 +1099,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
+        Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::FactoryReset => to(
             |a| factory_reset_screen(a.gate, a.login, a.ui),
             Screen::Debug,
@@ -1237,8 +1252,19 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
+            (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
+        },
+        Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
+            (Key::Cancel, _) => Screen::Settings,
+            _ => Screen::DangerZone,
+        },
+        Screen::SeedTools => match (key, SEED_TOOLS_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("View words")) => Screen::ViewWords,
+            (Key::Cancel, _) => Screen::DangerZone,
+            _ => Screen::SeedTools,
         },
         // The export drawer. Its rows were briefly handled inside `Utils`, where none of
         // them can ever be selected -- so Confirm fell through to the catch-all and put
@@ -1596,6 +1622,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
+        Screen::DangerZone => Some(DANGER_ITEMS),
+        Screen::SeedTools => Some(SEED_TOOLS_ITEMS),
         Screen::KeyMenu => Some(key_items()),
         Screen::ExportMenu => Some(EXPORT_ITEMS),
         Screen::XpubMenu => Some(XPUB_ITEMS),
@@ -1617,6 +1645,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
+        | Screen::DangerZone
+        | Screen::SeedTools
         | Screen::ExportMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
@@ -1706,6 +1736,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FlappyCat => {}
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
+        Screen::ViewWords => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
     }
@@ -1749,6 +1780,11 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         }
         Screen::Settings => "Settings",
         Screen::Login => "Login",
+        Screen::DangerZone => {
+            let _ = note.push_str("these show or change secrets");
+            "Danger zone"
+        }
+        Screen::SeedTools => "Seed tools",
         #[cfg(feature = "games")]
         Screen::Games => "Games",
         _ => "",
@@ -7304,7 +7340,92 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
     }
 }
 
-/// Show the words. The only time they are ever displayed.
+/// Danger zone → Seed tools → View words: the key in force, as its backup is written.
+///
+/// Words for a words wallet -- the root, a BIP-85 child, a loaded or joined seed -- paged
+/// as when it was made. A loaded XPRV or WIF key has no words, so it is shown as what it
+/// is, the xprv or WIF string. Asked first, because the whole point of the screen is to
+/// put the secret on the glass, and anyone looking over a shoulder gets it too.
+fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use crate::key::Loaded;
+    use catcard_ui::scroll::Line as DLine;
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "View words";
+
+    ask(ui.panel, HEAD, "shows your secret", "check nobody can see");
+    if !confirmed(ui) {
+        return;
+    }
+
+    match crate::key::loaded() {
+        Some(kind @ (Loaded::Xprv | Loaded::Wif)) => {
+            // At most an xprv: 111 characters.
+            let mut buf = [0u8; 120];
+            let written = if kind == Loaded::Xprv {
+                let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+                    return;
+                };
+                crate::keywork::run(|kw| master.write_base58(&mut buf, kw).ok())
+            } else {
+                crate::key::temporary_wif()
+                    .and_then(|key| catcard_wallet::bip85::encode_wif(key, &mut buf).ok())
+            };
+            let Some(n) = written else {
+                buf.zeroize();
+                message(ui.panel, HEAD, "could not write it", "any key to go back");
+                wait_for_any_key(ui);
+                return;
+            };
+            let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+            let (title, note) = if kind == Loaded::Xprv {
+                ("XPRV", "no words: this is the key")
+            } else {
+                ("WIF key", "no words: this is the key")
+            };
+            let lines = [
+                DLine::title(title),
+                DLine::body(note).small(),
+                DLine::body(text).secret().wrapped(),
+            ];
+            show_doc(ui, &lines, true, true);
+            buf.zeroize();
+        }
+        _ => {
+            let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
+                Ok(got) => got,
+                Err(why) => {
+                    message(ui.panel, HEAD, why, "any key to go back");
+                    wait_for_any_key(ui);
+                    return;
+                }
+            };
+            let words = crate::keywork::run(|kw| {
+                catcard_wallet::bip39::Mnemonic::from_entropy(&ent[..len], kw)
+            });
+            ent.zeroize();
+            let Ok(words) = words else {
+                message(ui.panel, HEAD, "seed did not decode", "any key to go back");
+                wait_for_any_key(ui);
+                return;
+            };
+            crate::catlog!("view words: {} words shown", words.words().count());
+            show_words(ui, &words);
+            // The words are half of a passphrase wallet. Said after, so it is the last
+            // thing on screen rather than scrolled past.
+            if crate::passphrase::is_set() {
+                message(
+                    ui.panel,
+                    HEAD,
+                    "and your passphrase:",
+                    "it is not in the words",
+                );
+                wait_for_any_key(ui);
+            }
+        }
+    }
+}
+
+/// Show the words: when a wallet is made, and from Danger zone → Seed tools.
 ///
 /// Paged rather than flashed past: ENTER moves forward and only means "done" once the
 /// last word has been on screen. The previous version advanced on *any* key, which is
