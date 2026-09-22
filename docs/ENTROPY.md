@@ -34,7 +34,8 @@ rather than only in principle.
 
 ## The design
 
-Two components, deliberately unable to substitute for each other.
+Two components, deliberately unable to substitute for each other, plus a third that can
+only ever add to the first.
 
 ### `EntropyPool` — seed material only
 
@@ -74,6 +75,53 @@ mk3 needs 64 bytes from the chip TRNG to clear the bar. mk4 needs two chips to b
 
 **Ratcheting.** Every draw advances the pool, so the state that produced a seed is gone
 afterwards and a later compromise cannot reconstruct it.
+
+### `UserSymbols` — dice, coins, a keypad mash
+
+An owner who does not trust the device's silicon can add material it could not have
+predicted. Offered as a choice once the hardware collection is done — *this device's
+entropy, or this device's combined with yours* — and never a precondition.
+
+```rust
+let mut run = UserSymbols::new(Alphabet::Dice);
+run.push(b'4')?;                     // ASCII, one die face
+// ...
+if run.weakness().is_none() {        // long enough, not lopsided
+    let bits = pool.add_user(&run);  // 50 rolls -> 129
+}
+```
+
+**The digest convention is stock's, so a run is checkable.** A run enters the pool as
+SHA-256 over the ASCII digits — `printf '%s' 4316... | sha256sum` off the device produces
+the same 32 bytes, and the screen shows the first eight of them after mixing, so an owner
+can confirm the device used *their* rolls.
+Source: <https://coldcard.com/docs/verifying-dice-roll-math/> [C]
+
+**What is deliberately not stock's is the replacement.** There the digest *is* the seed:
+`BIP39(sha256(rolls))`, so a wallet made from ten rolls has 26 bits behind it and nothing
+else, and an owner who verifies their rolls on a compromised computer has handed over the
+wallet. Here it is one more contribution to the same SHA-512 chain the TRNGs went into.
+That is why there is no "dice-only seed": it is not a missing feature, it is the property.
+
+**Credited by keyspace, behind a gate.** log2 of the alphabet, truncated to a thousandth
+of a bit: 2.584 a d6 face, 1 a coin flip, 3.321 a keypad digit. Three limits:
+
+| | dice | coin | keypad |
+|---|---|---|---|
+| minimum run | 50 | 128 | 32 |
+| max share of one symbol | 30% | 65% | 40% |
+| bits per symbol | 2.584 | 1 | 3.321 |
+
+- A run below its minimum, or dominated by one symbol, is **credited nothing** — and
+  still mixed, because mixing cannot subtract. A die stuck on one face is a pattern.
+- A run is absorbed as one 32-byte digest, so it can never be worth more than **256
+  bits** however long it runs.
+- None of these is a hardware source, so no amount of typing satisfies the two-TRNG bar.
+
+`Source::UserDice`, `UserCoin` and `UserKeypad` are credited **zero per byte**: a run
+counts only through `add_user`, which is where the gate lives, so there is no second path
+that could count an ungated one. The cycle counter at each press still goes in through
+`UserTiming` regardless of whether the run is ever credited.
 
 ### `HmacDrbg` — everything else
 
@@ -154,6 +202,21 @@ rather than as coverage:
 - `ui_randomness_does_not_disturb_the_seed_pool`
 - `below_is_not_modulo_biased`
 
+For user-supplied entropy the statement under test is always the same one — *it adds, it
+never replaces*:
+
+- `ten_dice_rolls_leave_a_seed_no_weaker_than_none` and
+  `no_run_of_any_length_can_weaken_a_pool` — bits, hardware sources and the verdict never
+  go backwards, for a run of any length or shape
+- `user_input_can_never_replace_the_pool` — 500 rolls into a pool with no healthy
+  hardware behind it still refuses
+- `typed_symbols_are_only_ever_counted_through_the_gate` — `add` of raw digits credits
+  nothing
+- `a_dice_run_reaches_the_pool_as_its_published_digest`,
+  `the_digest_is_sha256_over_the_ascii_digits` (pinned to `sha256("123456")`)
+- `fifty_fair_rolls_are_credited_129_bits`, `a_run_cannot_be_worth_more_than_its_digest`
+- `a_die_stuck_on_one_face_is_not_credited`, `a_mash_of_one_key_is_not_counted`
+
 The DRBG is pinned to vectors cross-checked against an independent implementation of
 SP 800-90A written separately from the spec text
 ([`tools/reference/drbg_ref.py`](../tools/reference/drbg_ref.py)). That catches a
@@ -166,15 +229,6 @@ standard rather than against the standard itself — importing the NIST CAVP
 - **Entropy accounting is a policy, not a measurement.** The credit rates are chosen
   conservatively; they are not derived from an SP 800-90B entropy estimate of these
   specific sources. Doing that properly needs long raw captures from real hardware.
-- **User-supplied entropy.** User input is a first-class source now, offered after the
-  hardware collection during seed generation and never a precondition -- it can carry the
-  256-bit bar but not the two-hardware-TRNG one. Three forms, credited by keyspace:
-  `UserKeypad` at 3 bits/byte (a conservative log2 of the ~ten keys), `UserDice` at 2
-  (one of six faces), `UserCoin` at 1 (one of two sides). The cycle counter is mixed at
-  every press (`UserTiming`) regardless. Dice and coin runs are credited their values
-  only when the run is long enough (>=50 rolls, >=128 flips) and no one symbol dominates
-  (30% dice, 65% coin); a short or lopsided run contributes only its timing. None of
-  these are hardware sources, so they run no health test and only ever add.
 - **Startup health test.** SP 800-90B also specifies an on-demand test at boot, over a
   larger sample than the continuous tests see.
 - **Reseed on wake.** No sleep support yet, so nothing to reseed after.

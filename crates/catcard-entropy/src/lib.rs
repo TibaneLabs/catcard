@@ -8,6 +8,10 @@
 //! - [`HmacDrbg`] — a deterministic generator for **everything else**: nonces, UI
 //!   shuffles, keypad scan randomisation, padding.
 //!
+//! [`UserSymbols`] is the third, smallest piece: dice rolls, coin flips or a keypad mash
+//! the owner typed, folded into the pool as one gated contribution. It can only ever add
+//! to what the hardware collected — see [`user`].
+//!
 //! The stock firmware's seed generator is a known-weak software PRNG, and one of the
 //! things that made it enumerable was that ordinary UI operations advanced the same
 //! generator the seed came from. Nothing in this crate lets that happen: `EntropyPool`
@@ -20,10 +24,12 @@
 pub mod drbg;
 pub mod health;
 pub mod pool;
+pub mod user;
 
 pub use drbg::{DrbgStats, HmacDrbg};
 pub use health::{ContinuousTest, HealthError};
 pub use pool::{EntropyPool, Insufficient, Policy, Source};
+pub use user::{Alphabet, Rejected, UserSymbols, Weak};
 
 /// Personalization strings for [`HmacDrbg`] instances.
 ///
