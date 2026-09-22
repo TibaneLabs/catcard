@@ -24,22 +24,71 @@ pub(crate) enum Content {
     Unknown,
 }
 
+/// One thing that can be done with what arrived.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Act {
+    /// What this firmware understands it to be: install it, sign it, read it.
+    Use,
+    /// Keep the bytes, whatever they are: a folder and a name, on the card.
+    Save,
+}
+
+/// What a screen offers for some content: the rows, and what each one means.
+pub(crate) type Choices = heapless::Vec<(&'static str, Act), 2>;
+
 impl Content {
-    /// The few words a screen has for it, and what it offers to do.
-    ///
-    /// An empty action list is "nothing can be done with this", which the caller shows as
-    /// a message rather than as a question.
-    pub(crate) fn offer(self) -> (&'static str, &'static [&'static str]) {
+    /// The few words a screen has for it.
+    pub(crate) fn note(self) -> &'static str {
         match self {
-            Content::Firmware => ("a firmware image", &["Install it"]),
-            Content::Psbt => ("a transaction", &["Sign it"]),
-            // No action here on purpose. A seed is loaded only where the payload can be
-            // copied out and the memory it arrived through wiped before any screen goes
-            // up, which the scanner does for itself; a tag that holds one is named and
-            // left alone.
-            Content::Seed(_) => ("a seed backup", &[]),
-            Content::Text => ("text", &["Show it"]),
-            Content::Unknown => ("data this cannot use", &[]),
+            Content::Firmware => "a firmware image",
+            Content::Psbt => "a transaction",
+            Content::Seed(_) => "a seed backup",
+            Content::Text => "text",
+            Content::Unknown => "data this device cannot read",
+        }
+    }
+
+    /// Everything worth doing with it, in the order a screen should offer them.
+    ///
+    /// **Whatever arrived can be kept.** A code or a tag often carries something its
+    /// owner wants on the card whether or not this firmware understands it, so `Save`
+    /// is offered for every kind but one -- and where nothing else can be done with the
+    /// bytes, it is the only row rather than a dead end.
+    ///
+    /// The exception is a seed. It is never written to removable media, and it is not
+    /// chosen from a list either: the payload is copied out and the memory it arrived
+    /// through is wiped before any screen goes up, so the caller answers that one before
+    /// asking anything (see `Content::is_seed`).
+    pub(crate) fn choices(self) -> Choices {
+        let mut out = Choices::new();
+        let primary = match self {
+            Content::Firmware => Some("Install it"),
+            Content::Psbt => Some("Sign it"),
+            Content::Text => Some("Show it"),
+            Content::Seed(_) | Content::Unknown => None,
+        };
+        if let Some(p) = primary {
+            let _ = out.push((p, Act::Use));
+        }
+        if !self.is_seed() {
+            let _ = out.push(("Save to card", Act::Save));
+        }
+        out
+    }
+
+    /// Whether this is a whole wallet, which every path handles before it asks anything.
+    pub(crate) fn is_seed(self) -> bool {
+        matches!(self, Content::Seed(_))
+    }
+
+    /// The extension a saved copy takes, from what the bytes turned out to be -- so the
+    /// file opens as what it is on the computer that reads the card next.
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Content::Firmware => "bin",
+            Content::Psbt => "psbt",
+            Content::Text => "txt",
+            Content::Seed(_) | Content::Unknown => "dat",
         }
     }
 }
@@ -89,4 +138,58 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
         Some(_) => Content::Text,
         None => Content::Unknown,
     }
+}
+
+/// Write scanned bytes to the card: a folder the owner picks, under a name they type.
+///
+/// The name is theirs because the device has nothing better to call it -- a code carries
+/// no filename -- and the folder is theirs because a card that already holds someone's
+/// files should not gain ours at its root without being asked. What the device supplies
+/// is the extension, from what the bytes turned out to be, so the file opens as what it
+/// is on the computer that reads the card next.
+pub(crate) fn save_to_card(ui: &mut crate::ui::Ui<'_>, bytes: &[u8], what: Content) {
+    const HEAD: &str = "Save to card";
+    let ext = what.extension();
+
+    let Some(folder) =
+        crate::menu::browse_sd(ui, "Where to save", None, crate::menu::Browse::Folder)
+    else {
+        return;
+    };
+    let Some(typed) = crate::passphrase::read(ui, "File name") else {
+        return;
+    };
+    let Some(name) = catcard_sd::name::from_typed(typed.as_str(), ext) else {
+        crate::menu::message(
+            ui.panel,
+            HEAD,
+            "that name has no",
+            "characters a card takes",
+        );
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let mut path: heapless::String<{ crate::menu::BROWSE_PATH_MAX }> = heapless::String::new();
+    let _ = path.push_str(folder.as_str());
+    if !path.ends_with('/') {
+        let _ = path.push('/');
+    }
+    if path.push_str(&name).is_err() {
+        crate::menu::message(ui.panel, HEAD, "that path is too long", "");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    }
+
+    crate::menu::card_wait(ui.panel, HEAD, "writing to the card");
+    match crate::menu::write_card_file(&path, bytes) {
+        Ok(()) => {
+            crate::catlog!("qr: {} bytes saved as {}", bytes.len(), path.as_str());
+            crate::menu::message(ui.panel, "Saved", &name, "on the card");
+        }
+        Err(why) => {
+            crate::catlog!("qr: save failed: {}", why);
+            crate::menu::message(ui.panel, HEAD, why, "nothing was written");
+        }
+    }
+    crate::menu::wait_for_any_key(ui);
 }

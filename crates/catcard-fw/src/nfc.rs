@@ -571,14 +571,24 @@ fn offer(
     len: usize,
     what: Content,
 ) {
-    let (note, actions) = what.offer();
-    if actions.is_empty() {
+    // The same list the scanner offers, from the same place: what this firmware makes of
+    // the bytes, and keeping them whatever they are.
+    let choices = what.choices();
+    if choices.is_empty() {
         drop(held);
-        menu::message(ui.panel, head, note, "any key to go back");
+        menu::message(ui.panel, head, what.note(), "any key to go back");
         menu::wait_for_any_key(ui);
         return;
     }
-    if menu::choose(ui, head, note, actions).is_none() {
+    let mut rows: heapless::Vec<&str, 2> = heapless::Vec::new();
+    for (label, _) in &choices {
+        let _ = rows.push(label);
+    }
+    let Some(chosen) = menu::choose(ui, head, what.note(), &rows) else {
+        return;
+    };
+    if choices[chosen].1 == crate::sniff::Act::Save {
+        crate::sniff::save_to_card(ui, &held.bytes()[at..at + len], what);
         return;
     }
     match what {
