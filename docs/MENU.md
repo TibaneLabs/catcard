@@ -56,7 +56,8 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Danger zone` → `Seed tools` → `Destroy seed` | `… Seed Functions` → `Destroy Seed` | ✅ |
 | `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; words keys only -- an XPRV root is not usable here yet |
 | Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet |
-| — | `… Seed Functions` → `Export SeedQR`; the rest of `Danger Zone` | not implemented |
+| `Danger zone` → `Seed tools` → `SeedQR` | `… Seed Functions` → `Export SeedQR` | ✅ Q1 only; both shapes, Standard and Compact, and the scanner reads either back |
+| — | the rest of `Danger Zone` | not implemented |
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
 | `Debug` → `Warm Reset` | `I Am Developer.` → `Warm Reset`; `Danger Zone` → `Debug Functions` → `Warm Reset` | ✅ same drawer; ours asks first and says the PIN is asked for again |

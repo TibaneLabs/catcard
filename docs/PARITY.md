@@ -94,7 +94,7 @@ Dependency first, then what a user needs to hold funds safely:
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
 | Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ✅ | Derive → Import key and Key vault (stock's `seeds` format); Danger zone → Seed tools → Lock down seed, for words and a loaded XPRV |
-| View seed words, SeedQR | ✅ | 🟡 | Danger zone → Seed tools → View words, behind a warning; shows the xprv where a wallet has no words. SeedQR ❌ |
+| View seed words, SeedQR | ✅ | ✅ | Danger zone → Seed tools → View words, behind a warning; shows the xprv where a wallet has no words. SeedQR beside it on the Q1: Standard and Compact out, either one back in through the scanner, both shapes' published vectors host-tested |
 | Destroy seed | ✅ | ✅ | Settings |
 
 ## 3. Addresses
@@ -156,7 +156,7 @@ every multisig input is refused.
 | Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
 | NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast (`crate::nfc`), untried on hardware; sharing addresses, taking a PSBT in and file share remain |
-| QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, and shows files as animated QR; SeedQR and NFC-side transfers remain |
+| QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, shows files as animated QR, and reads and writes SeedQR; NFC-side transfers remain |
 | PushTx, Key Teleport | ✅ | ❌ | after step 11 |
 
 ## 8. Security features

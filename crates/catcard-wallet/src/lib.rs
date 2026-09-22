@@ -68,6 +68,7 @@ pub mod encoding;
 pub mod message;
 pub mod multisig;
 pub mod psbtview;
+pub mod seedqr;
 pub mod seedxor;
 pub mod signer;
 #[cfg(feature = "multichain")]

@@ -212,6 +212,9 @@ enum Screen {
     SeedTools,
     /// Show the key in force: its words, or its XPRV or WIF.
     ViewWords,
+    /// Show the key in force as a SeedQR, for a camera to read.
+    #[cfg(feature = "board-q1")]
+    SeedQrShow,
     /// Store the key in force as the device's seed, replacing the one it held.
     LockDown,
     /// Changing the main PIN.
@@ -405,10 +408,24 @@ const DANGER_ITEMS: &[&str] = &["Seed tools"];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Seed Functions" [C]
-const SEED_TOOLS_ITEMS: &[&str] = &["View words", "Destroy seed"];
+const SEED_TOOLS_ITEMS: &[&str] = &[
+    "View words",
+    // Beside the words and behind the same warning, because it is the same secret in a
+    // different alphabet. Q1 only: it is the board with a camera-readable panel and the
+    // scanner that reads one back.
+    #[cfg(feature = "board-q1")]
+    "SeedQR",
+    "Destroy seed",
+];
 /// The same while some other key is in force, which can be locked down in its place.
 /// Stock gates the row the same way (`is_tmp`).
-const SEED_TOOLS_ITEMS_LOADED: &[&str] = &["View words", "Destroy seed", "Lock down seed"];
+const SEED_TOOLS_ITEMS_LOADED: &[&str] = &[
+    "View words",
+    #[cfg(feature = "board-q1")]
+    "SeedQR",
+    "Destroy seed",
+    "Lock down seed",
+];
 
 fn seed_tools_items() -> &'static [&'static str] {
     if crate::key::in_force() == crate::key::Source::Root {
@@ -1186,6 +1203,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::Sd2fa => to(|a| crate::guard::sd2fa_screen(a.ui), Screen::Login),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
+        #[cfg(feature = "board-q1")]
+        Screen::SeedQrShow => to(
+            |a| crate::seedqr::export(a.gate, a.login, a.ui),
+            Screen::SeedTools,
+        ),
         Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
         Screen::FactoryReset => to(
             |a| factory_reset_screen(a.gate, a.login, a.ui),
@@ -1381,6 +1403,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::SeedTools => match (key, seed_tools_items().get(cursor).copied()) {
             (Key::Confirm, Some("View words")) => Screen::ViewWords,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("SeedQR")) => Screen::SeedQrShow,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Lock down seed")) => Screen::LockDown,
             (Key::Cancel, _) => Screen::DangerZone,
@@ -1932,6 +1956,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it asks twice and drives the panel itself.
         Screen::WipeSeed => {}
         Screen::ViewWords | Screen::LockDown | Screen::TestLogin => {}
+        // Handled in `run`: it asks, picks a shape and draws a symbol full-screen.
+        #[cfg(feature = "board-q1")]
+        Screen::SeedQrShow => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys | Screen::LoginCountdown => {}
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
@@ -4124,6 +4151,21 @@ fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
 /// The drawing half of [`address_qr_of`], for a payload that is not a Bitcoin URI: every
 /// other chain's address goes in as it is written, which is what its wallets scan.
 pub(crate) fn qr_screen(ui: &mut Ui<'_>, payload: &str, shown: &str) {
+    qr_screen_bytes(ui, payload.as_bytes(), shown);
+}
+
+/// The same, for a payload that is not text.
+///
+/// A QR symbol carries bytes; only the *mode* it picks to carry them cares whether they
+/// are characters. `anyd` chooses that mode from the bytes -- numeric for all-digits,
+/// byte mode for anything else -- which is exactly what the two SeedQR shapes need, and
+/// what a `&str` signature cannot express: Compact SeedQR is raw entropy, and entropy is
+/// not UTF-8.
+///
+/// An empty `shown` draws the symbol alone, as large as the panel allows. That is the
+/// right choice for a secret: the text column beside an address is there for a person to
+/// read back, and a seed is not something to put on the glass twice.
+pub(crate) fn qr_screen_bytes(ui: &mut Ui<'_>, payload: &[u8], shown: &str) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 
     const MAX_VERSION: Version = match Version::new(8) {
@@ -4139,7 +4181,7 @@ pub(crate) fn qr_screen(ui: &mut Ui<'_>, payload: &str, shown: &str) {
     // Scoped so the two buffers are reused rather than held twice over.
     let pixels = |level, scratch: &mut [u8; BUF], storage: &mut [u8; BUF]| {
         encoder
-            .encode_text_into(payload.as_bytes(), level, scratch, storage)
+            .encode_text_into(payload, level, scratch, storage)
             .ok()
             .and_then(|(grid, _)| {
                 catcard_ui::widgets::qr_text_fit(
@@ -4161,10 +4203,12 @@ pub(crate) fn qr_screen(ui: &mut Ui<'_>, payload: &str, shown: &str) {
         EcLevel::L
     };
 
-    let Ok((grid, _meta)) =
-        encoder.encode_text_into(payload.as_bytes(), level, &mut scratch, &mut storage)
+    let Ok((grid, _meta)) = encoder.encode_text_into(payload, level, &mut scratch, &mut storage)
     else {
-        message(ui.panel, "QR", "address too long", "");
+        // Whatever it was -- an address, a key expression, a seed -- it did not fit the
+        // largest symbol these buffers hold. Naming the caller's payload here would be a
+        // guess: this function is shown more than addresses now.
+        message(ui.panel, "QR", "too long to encode", "");
         wait_for_any_key(ui);
         return;
     };
@@ -7521,8 +7565,6 @@ pub(crate) fn read_phrase(ui: &mut Ui<'_>) -> Option<catcard_wallet::bip39::Mnem
 /// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
 /// reason: a slot that did not keep the words must be reported, not assumed.
 fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use zeroize::Zeroize;
-
     fn cancelled(ui: &mut Ui<'_>) {
         message(ui.panel, "Import cancelled", "nothing was", "stored");
         wait_for_any_key(ui);
@@ -7562,25 +7604,53 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
         return;
     }
 
-    let Ok(mut secret) = catcard_callgate::pin::encode_bip39(mnemonic.entropy()) else {
+    if !store_seed(gate, login, ui, mnemonic.entropy()) {
+        return;
+    }
+
+    crate::catlog!("seed: restored, {} words", mnemonic.word_count());
+    message(ui.panel, "Wallet restored", "your seed is", "now stored");
+    wait_for_any_key(ui);
+}
+
+/// Write `entropy` into the secure element as the device's seed, and check it stuck.
+///
+/// The committing half of every restore -- typed words, a joined split, a scanned SeedQR
+/// -- so that they cannot drift apart in the one place where drifting apart loses a
+/// wallet. Returns whether the slot now holds this seed; it has already said why if not.
+///
+/// **Write, read back, then claim.** A slot that did not keep what was written has to be
+/// reported rather than assumed: the owner is about to put the device in a drawer and
+/// the paper in a safe, and "stored" is the last thing they will be told before that.
+///
+/// The caller says what it was -- restored, joined, scanned -- since only it knows.
+pub(crate) fn store_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    entropy: &[u8],
+) -> bool {
+    use zeroize::Zeroize as _;
+
+    let Ok(mut secret) = catcard_callgate::pin::encode_bip39(entropy) else {
         message(ui.panel, "Failed", "could not encode", "that seed");
         wait_for_any_key(ui);
-        return;
+        return false;
     };
 
     message(ui.panel, "Applying", "do not disconnect", "");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     if let Err(f) = login.set_secret(&pin_gate, &secret) {
         secret.zeroize();
-        crate::catlog!("seed: restore store failed");
+        crate::catlog!("seed: store failed");
         message(ui.panel, "Not stored", why_failed(f), "any key to go back");
         wait_for_any_key(ui);
-        return;
+        return false;
     }
     let kept = login.verify_secret(&pin_gate, &secret).unwrap_or(false);
     secret.zeroize();
     if !kept {
-        crate::catlog!("seed: restore read-back mismatch");
+        crate::catlog!("seed: store read-back mismatch");
         message(
             ui.panel,
             "Not stored",
@@ -7588,12 +7658,11 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
             "what was written",
         );
         wait_for_any_key(ui);
-        return;
+        return false;
     }
-
-    crate::catlog!("seed: restored, {} words", mnemonic.word_count());
-    message(ui.panel, "Wallet restored", "your seed is", "now stored");
-    wait_for_any_key(ui);
+    // The stored slot holds a wallet now, whatever the menu last believed.
+    crate::key::note_stored_seed(true);
+    true
 }
 
 /// Ask for some of the words back, before anything is committed.

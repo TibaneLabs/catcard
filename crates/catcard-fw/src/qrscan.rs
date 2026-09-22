@@ -24,6 +24,7 @@
 
 use catcard_hal::usart::Usart;
 use catcard_qr::{cmd, wrap};
+use zeroize::Zeroize as _;
 
 use catcard_callgate::Callgate;
 
@@ -483,19 +484,26 @@ fn collect(
     let Some(mut line_mem) = crate::heap::take(MAX_TEXT) else {
         return Err(Fault::TooLong);
     };
-    loop {
+    let outcome = loop {
         let line = line_mem.bytes();
         match read_code(port, ui, line) {
             Ok(n) => {
                 if on_code(ui, &line_mem.bytes()[..n]) == Next::Done {
-                    return Ok(());
+                    break Ok(());
                 }
             }
             // One badly caught frame. The animation loops, so it comes round again.
             Err(Fault::TooLong) => {}
-            Err(why) => return Err(why),
+            Err(why) => break Err(why),
         }
-    }
+    };
+    // **Wiped before the block goes back.** A scanned code can be a whole wallet -- a
+    // SeedQR is one -- and the heap's own rule is that nothing keeps key material in a
+    // freed block, where it sits in memory nobody is tracking until some later screen
+    // happens to be handed the same bytes. Every scan pays a two-kilobyte memset for it,
+    // which is nothing against the two seconds this screen already spends on the module.
+    line_mem.bytes().zeroize();
+    outcome
 }
 
 /// Debug: ask the module for its version at each rate and report exactly what came back.
@@ -682,6 +690,8 @@ enum Content {
     Firmware,
     /// A PSBT, binary or base64.
     Psbt,
+    /// A SeedQR: a whole wallet, in one of its two shapes.
+    Seed(catcard_wallet::seedqr::Kind),
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -711,9 +721,27 @@ fn sniff(bytes: &[u8]) -> Content {
     if bytes.starts_with(b"cHNidP") {
         return Content::Psbt;
     }
-    match core::str::from_utf8(bytes) {
-        Ok(_) => Content::Text,
-        Err(_) => Content::Unknown,
+    // A SeedQR, in either shape. Before the text case, because a Standard one *is* text
+    // -- 48 to 96 digits -- and showing a seed on the glass as "here is what you
+    // scanned" is not what someone holding their backup up to the camera asked for.
+    //
+    // The two shapes are sniffed differently on purpose. Standard is claimed on its own
+    // terms: nothing else this device reads is exactly that many characters of nothing
+    // but digits. Compact is 16 to 32 arbitrary bytes and has no shape at all, so it is
+    // claimed only where the alternative reading was `Unknown` -- a payload of that
+    // length that is valid text stays text, and a Compact code whose entropy happens to
+    // be printable is a case this loses to a rule that keeps every text scan working.
+    let text = core::str::from_utf8(bytes).ok();
+    match catcard_wallet::seedqr::kind_of(bytes) {
+        Some(kind @ catcard_wallet::seedqr::Kind::Standard) => return Content::Seed(kind),
+        Some(kind @ catcard_wallet::seedqr::Kind::Compact) if text.is_none() => {
+            return Content::Seed(kind);
+        }
+        _ => {}
+    }
+    match text {
+        Some(_) => Content::Text,
+        None => Content::Unknown,
     }
 }
 
@@ -735,6 +763,31 @@ fn offer(
     let at = area.image_at();
     let mut lease = area.into_lease();
     let what = sniff(&lease.bytes()[at..at + len]);
+
+    // A whole wallet arrived. It is taken out and the memory it came through is wiped
+    // before anybody is asked anything: the screens that follow can stand there for as
+    // long as nobody is in the room, and the lease is handed back when this returns --
+    // to a firmware upload, a soak test, or the next scan, none of which should find a
+    // seed lying in it. A SeedQR payload is at most 96 bytes, so the copy is a stack
+    // buffer that wipes itself.
+    if let Content::Seed(kind) = what {
+        use catcard_wallet::seedqr::MAX_DIGITS;
+        use core::fmt::Write as _;
+
+        let mut payload = zeroize::Zeroizing::new([0u8; MAX_DIGITS]);
+        let len = len.min(MAX_DIGITS);
+        payload[..len].copy_from_slice(&lease.bytes()[at..at + len]);
+        wipe(lease, len);
+        // Which shape it was, because the two differ in what a misread costs: a Standard
+        // code that was read wrong is refused by its checksum, and a Compact one cannot
+        // be.
+        let mut note: heapless::String<32> = heapless::String::new();
+        let _ = write!(note, "a seed backup, {}", kind.name());
+        if menu::choose(ui, head, &note, &["Load it"]).is_some() {
+            crate::seedqr::received(gate, login, ui, &payload[..len], kind);
+        }
+        return;
+    }
     // What arrived, when it was nothing this device can use. The screen has room for a
     // length and a word, and the length alone has never been enough to say what went
     // wrong: a line with two stray bytes in it and a line that is genuinely not ours
@@ -746,6 +799,8 @@ fn offer(
     let (note, actions): (&str, &[&str]) = match what {
         Content::Firmware => ("a firmware image", &["Install it"]),
         Content::Psbt => ("a transaction", &["Sign it"]),
+        // Handled above, where the payload is copied out before any screen goes up.
+        Content::Seed(_) => return,
         Content::Text => ("text", &["Show it"]),
         Content::Unknown => ("data this cannot use", &[]),
     };
@@ -766,6 +821,7 @@ fn offer(
     match what {
         Content::Firmware => install(gate, login, ui, lease, len),
         Content::Psbt => sign(gate, login, ui, lease, at, len),
+        Content::Seed(_) => {}
         Content::Text => {
             // Borrowed for the length of the screen; the lease is dropped after it.
             let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("(not text)");
@@ -773,6 +829,26 @@ fn offer(
         }
         Content::Unknown => {}
     }
+}
+
+/// Give the staging memory back with the first `len` bytes of it zeroed.
+///
+/// For the one payload that must not outlive the screen that read it. The zeros go in
+/// through the staging driver rather than through the lease's slice, because a byte
+/// store into this part is not reliable -- a wipe written the easy way is a wipe that
+/// may not have happened, which is the worst of both.
+///
+/// A failure to claim the area is a wipe that did not happen and there is nothing to be
+/// done about it here; the lease is dropped either way, which is what stops a refused
+/// scan from holding the memory against the next USB upgrade.
+fn wipe(lease: crate::psram::Lease, len: usize) {
+    use catcard_upgrade::StagingArea as _;
+
+    let Ok(mut area) = crate::staging::area_from(lease) else {
+        return;
+    };
+    let zeros = [0u8; catcard_wallet::seedqr::MAX_DIGITS];
+    let _ = area.write(0, &zeros[..len.min(zeros.len())]);
 }
 
 /// Hand a staged image to the installer.
