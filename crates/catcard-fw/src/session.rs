@@ -47,9 +47,22 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 
     // Put the QR module into a known state before anything can ask it for anything --
     // the lamp key works from any screen, including the PIN prompt. Two seconds, once.
+    //
+    // Two seconds is long enough to look like a device that has stopped, so it says what
+    // it is waiting on, with the scanner's own icon.
+    #[cfg(feature = "board-q1")]
+    let mut panel = panel;
+    #[cfg(feature = "board-q1")]
+    if let Some(p) = panel.as_mut() {
+        menu::icon_page(
+            p,
+            &catcard_ui::art::menuicons::SCAN_QR_CODE,
+            "QR scanner",
+            "starting up",
+        );
+    }
     #[cfg(feature = "board-q1")]
     crate::qrscan::boot_bringup();
-
     // The scan-order shuffle draws from the UI domain, never from the seed pool.
     let drbg = report
         .pool

@@ -3834,7 +3834,7 @@ pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
 /// A page with one picture in the middle: `head` above it, `note` below, the bottom rows
 /// left clear for the sweep.
 #[cfg(feature = "board-q1")]
-fn icon_page(
+pub(crate) fn icon_page(
     panel: &mut display::Panel,
     art: &catcard_ui::art::indexed::Indexed,
     head: &str,
