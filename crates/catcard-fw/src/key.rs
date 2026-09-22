@@ -26,8 +26,6 @@
 //!
 //! Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3, §S1 [C]
 
-use crate::derive::Kind;
-
 /// Where the wallet in force comes from.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Source {
@@ -35,9 +33,11 @@ pub(crate) enum Source {
     Root,
     /// A BIP-85 child of it -- a separate seed, from the same backup, at this index.
     ///
-    /// `kind` is what the child is: twelve or twenty-four words. Only the word kinds can
-    /// become a wallet; an XPRV or a password child is something to read, not to be in.
-    Bip85 { kind: Kind, index: u32 },
+    /// `words` is how many the child has: any length BIP-39 defines. A word count
+    /// rather than a menu row's kind, because the menu offers five and `derive::Kind`
+    /// can only say two -- and what identifies this wallet is the number in the
+    /// derivation path, not which row was pressed to get here.
+    Bip85 { words: u32, index: u32 },
 }
 
 /// The selection in force. Foreground only, single core.

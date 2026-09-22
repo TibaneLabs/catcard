@@ -429,17 +429,23 @@ const GENERIC_JSON_NAMES: &[(&str, &str)] = &[
     ("Bitcoin Safe", "/bitcoin safe-export.json"),
 ];
 
-/// Ways to change the wallet in force.
+/// Ways to change the wallet in force, from the root.
+const KEY_ITEMS_ROOT: &[&str] = &["Passphrase", "BIP-85 key"];
+/// The same, from anywhere else: there is now somewhere to go back to.
+const KEY_ITEMS_DERIVED: &[&str] = &["Back to root", "Passphrase", "BIP-85 key"];
+
+/// The rows this menu has, which depend on where the device already is.
 ///
-/// `Back to root` is first and is always there, even when the device is already in the
-/// root: an owner who is not sure which wallet they are in wants one keypress that
-/// answers it, not a menu that hides the answer when it happens to be "the root".
-const KEY_ITEMS: &[&str] = &[
-    "Back to root",
-    "Passphrase",
-    "BIP-85 24 words",
-    "BIP-85 12 words",
-];
+/// `Back to root` appears only when it would do something. A row that is always there
+/// and sometimes inert teaches an owner to ignore it, and this is the row that says
+/// which wallet they are in.
+fn key_items() -> &'static [&'static str] {
+    if crate::key::is_root() {
+        KEY_ITEMS_ROOT
+    } else {
+        KEY_ITEMS_DERIVED
+    }
+}
 
 /// Which level to export a plain xpub from, in stock's order.
 const XPUB_ITEMS: &[&str] = &[
@@ -1186,7 +1192,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // The export drawer. Its rows were briefly handled inside `Utils`, where none of
         // them can ever be selected -- so Confirm fell through to the catch-all and put
         // people in the Debug menu.
-        Screen::KeyMenu => match (key, KEY_ITEMS.get(cursor).copied()) {
+        Screen::KeyMenu => match (key, key_items().get(cursor).copied()) {
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
@@ -1526,7 +1532,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         Screen::DeriveMenu => Some(DERIVE_ITEMS),
-        Screen::KeyMenu => Some(KEY_ITEMS),
+        Screen::KeyMenu => Some(key_items()),
         Screen::ExportMenu => Some(EXPORT_ITEMS),
         Screen::XpubMenu => Some(XPUB_ITEMS),
         #[cfg(feature = "games")]
@@ -4271,24 +4277,17 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
     use crate::key::Source;
 
     const HEAD: &str = "Derive";
-    let Some(row) = KEY_ITEMS.get(which as usize).copied() else {
+    let Some(row) = key_items().get(which as usize).copied() else {
         return;
     };
 
     let chosen = match row {
         "Back to root" => Source::Root,
-        "BIP-85 24 words" | "BIP-85 12 words" => {
-            let kind = if row.ends_with("12 words") {
-                crate::derive::Kind::Words12
-            } else {
-                crate::derive::Kind::Words24
-            };
-            // The index picks which child, and there are two billion of them. Stock
-            // prompts for it; so does this, defaulting to the one most people mean.
-            let Some(index) = ask_index(ui, HEAD) else {
+        "BIP-85 key" => {
+            let Some((words, index)) = ask_bip85(ui, HEAD) else {
                 return;
             };
-            Source::Bip85 { kind, index }
+            Source::Bip85 { words, index }
         }
         _ => return,
     };
@@ -4320,25 +4319,88 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
     wait_for_any_key(ui);
 }
 
-/// Ask for a BIP-85 index.
-///
-/// A short list rather than a number pad: the index picks which of two billion children
-/// this is, and typing one wrong lands silently in another perfectly valid wallet. Four
-/// is enough to be useful and few enough to read back before committing.
+/// Every word count BIP-39 defines. 12 and 24 are what most tools offer.
 #[cfg(feature = "board-q1")]
-fn ask_index(ui: &mut Ui<'_>, head: &str) -> Option<u32> {
-    const CHOICES: &[&str] = &["index 0", "index 1", "index 2", "index 3"];
-    choose(ui, head, "which child", CHOICES).map(|n| n as u32)
+const BIP85_WORDS: [u32; 5] = [12, 15, 18, 21, 24];
+
+/// Pick the two things that identify a BIP-85 child: how many words, and which one.
+///
+/// **One screen, not two.** They are a pair -- a child is `words` *and* `index`, and
+/// the path contains both -- so choosing them apart invites getting back to the first
+/// and finding it already committed. Up and down move between the two fields, left and
+/// right change the one selected, Confirm derives it.
+///
+/// `None` if the owner backs out.
+#[cfg(feature = "board-q1")]
+fn ask_bip85(ui: &mut Ui<'_>, head: &str) -> Option<(u32, u32)> {
+    use core::fmt::Write as _;
+
+    let (mut at, mut words, mut index) = (0usize, 24u32, 0u32);
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let mut rows: heapless::Vec<Line, 4> = heapless::Vec::new();
+        let mut a = Line::new();
+        let _ = write!(a, "{} words  {}", words, if at == 0 { "<" } else { " " });
+        let mut b = Line::new();
+        let _ = write!(b, "index {}  {}", index, if at == 1 { "<" } else { " " });
+        let _ = rows.push(a);
+        let _ = rows.push(b);
+        display::draw(ui.panel, |c| {
+            catcard_ui::widgets::info(c, &display::LAYOUT, head, &rows);
+        });
+        wait_for_release(ui);
+        loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            let mut moved = false;
+            for k in keys.iter() {
+                match k {
+                    Key::Confirm => return Some((words, index)),
+                    Key::Cancel => return None,
+                    // Between the fields.
+                    Key::Digit(8) | Key::Digit(5) => {
+                        at = 1 - at;
+                        moved = true;
+                    }
+                    // Within one.
+                    Key::Digit(9) | Key::Digit(7) => {
+                        let up = matches!(k, Key::Digit(9));
+                        if at == 0 {
+                            let i = BIP85_WORDS.iter().position(|w| *w == words).unwrap_or(4);
+                            let i = if up {
+                                (i + 1) % BIP85_WORDS.len()
+                            } else {
+                                (i + BIP85_WORDS.len() - 1) % BIP85_WORDS.len()
+                            };
+                            words = BIP85_WORDS[i];
+                        } else if up {
+                            // Hardened, so the top of the range is 2^31 - 1.
+                            index = index.saturating_add(1).min(0x7FFF_FFFF);
+                        } else {
+                            index = index.saturating_sub(1);
+                        }
+                        moved = true;
+                    }
+                    _ => {}
+                }
+            }
+            if moved {
+                break;
+            }
+            display::idle(ui.panel);
+        }
+    }
 }
 
-/// Index zero, which is the child everybody means.
+/// Twenty-four words at index zero, which is the child almost everyone means.
 ///
-/// mk3 and mk4 have no in-action chooser and this is not worth a screen of their own
-/// yet: the wallet a person wants from BIP-85 is almost always the first one, and the
-/// fingerprint is shown before anything uses it either way.
+/// mk3 and mk4 have four rows of monochrome and no cursor keys to spare for a
+/// two-field screen. The fingerprint is shown before anything uses the key either way,
+/// so a wrong guess here is visible rather than silent.
 #[cfg(not(feature = "board-q1"))]
-fn ask_index(_ui: &mut Ui<'_>, _head: &str) -> Option<u32> {
-    Some(0)
+fn ask_bip85(_ui: &mut Ui<'_>, _head: &str) -> Option<(u32, u32)> {
+    Some((24, 0))
 }
 
 /// Ask which of `items` to use, or `None` if the user backs out.
@@ -4685,11 +4747,7 @@ pub(crate) fn master_quietly(
     // -- rather than at each screen, where they would disagree.
     //
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
-    if let crate::key::Source::Bip85 { kind, index } = crate::key::in_force() {
-        let words = match kind {
-            crate::derive::Kind::Words12 => 12u32,
-            _ => 24,
-        };
+    if let crate::key::Source::Bip85 { words, index } = crate::key::in_force() {
         // The child is derived from the root's master **without** the passphrase: the
         // passphrase belongs to the wallet that is finally in force, not to the path
         // taken to reach it. Applying it twice would give a wallet nothing else agrees

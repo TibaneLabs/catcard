@@ -104,9 +104,28 @@ pub fn words_entropy(
     index: u32,
     kw: &KeyWork,
 ) -> Result<(Entropy, usize), Error> {
+    // Every length BIP-39 defines, not only the three the application's text names.
+    //
+    // BIP-85 spells out 12, 18 and 24, but the derivation is mechanical: the word count
+    // goes in the path and the entropy is the first `ENT/8` bytes of the HMAC, so 15 and
+    // 21 follow without inventing anything and any implementation that accepts them
+    // reproduces the same words.
+    //
+    // **They are less portable all the same.** Most wallets offer the three the spec
+    // names, so a 15- or 21-word child may be awkward to reproduce elsewhere -- which
+    // matters for a key whose only backup is the path to it.
+    //
+    // **The secret stash cannot hold all five.** Its marker byte spells 16, 24 and 32
+    // bytes only (`catcard_callgate::pin::BIP39_ENTROPY_LENS`), so a 15- or 21-word
+    // child can be *worked in* -- derived afresh each time from the root and the path --
+    // but not written to the secure element as a seed of its own.
+    //
+    // Source: BIP-85 §"BIP39" [C]; the lengths from BIP-39 §"Generating the mnemonic" [C]
     let len = match words {
         12 => 16,
+        15 => 20,
         18 => 24,
+        21 => 28,
         24 => 32,
         _ => return Err(Error::BadParameter),
     };
@@ -277,9 +296,11 @@ mod tests {
             let n = m.render(&mut out);
             assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), phrase);
         }
-        // A word count the format cannot hold is refused rather than rounded.
+        // 15 and 21 derive too -- see `words_entropy`. What is refused is a count
+        // BIP-39 does not define, rather than one this crate merely did not offer.
+        assert!(words_entropy(&root(), 15, 0, &kw).is_ok());
         assert_eq!(
-            words_entropy(&root(), 15, 0, &kw).err(),
+            words_entropy(&root(), 13, 0, &kw).err(),
             Some(Error::BadParameter)
         );
     }
@@ -366,5 +387,38 @@ mod tests {
         let other = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &kw).unwrap();
         let d = entropy(&other, &[app::HEX, 32, 0], &kw).unwrap();
         assert_ne!(a.as_bytes(), d.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod words_len_tests {
+    use super::*;
+    use crate::bip39::{Mnemonic, words_for_entropy};
+
+    /// Every word count BIP-39 defines derives, and gives that many words.
+    ///
+    /// The spec's own text names 12, 18 and 24; the other two fall out of the same
+    /// arithmetic and are worth having rather than refusing.
+    #[test]
+    fn the_five_bip39_lengths_all_derive() {
+        let kw = crate::KeyWork::host();
+        let master = crate::bip32::ExtendedPrivKey::from_seed(
+            &[7u8; 32],
+            crate::bip32::Network::Mainnet,
+            &kw,
+        )
+        .unwrap();
+        for (words, ent) in [(12, 16), (15, 20), (18, 24), (21, 28), (24, 32)] {
+            let (e, len) = words_entropy(&master, words, 0, &kw).expect("derives");
+            assert_eq!(len, ent, "{words} words");
+            assert_eq!(words_for_entropy(len), Some(words as usize));
+            // And it is a mnemonic, not just bytes of the right length.
+            let m = Mnemonic::from_entropy(&e.as_bytes()[..len], &kw).expect("a mnemonic");
+            assert_eq!(m.entropy().len(), ent);
+        }
+        // Anything else is refused rather than rounded to a neighbour.
+        for bad in [0u32, 11, 13, 16, 23, 25, 48] {
+            assert!(words_entropy(&master, bad, 0, &kw).is_err(), "{bad}");
+        }
     }
 }
