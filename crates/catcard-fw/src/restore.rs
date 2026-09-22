@@ -43,10 +43,18 @@ pub const MAGIC: [u8; 8] = *b"CCRSTOR1";
 /// The header's size: magic, length, a reserved word, the SHA-256, and padding.
 pub const HEADER: usize = 64;
 
-/// Where in the PSRAM the host stages it: the upper half, which is the upgrade image's
-/// area and which nothing else keeps anything in between uses.
+/// Where in the PSRAM the host stages it: one megabyte in, in the **lower** half.
+///
+/// Never the upper half. That is where a firmware image stages, and an offered upgrade
+/// sits there waiting for the owner's yes: the first settings restore was poked over one,
+/// and the yes that followed asked the bootloader to install half a megabyte of settings.
+/// It refused, as it should -- but the two must not share a byte. The lower half is only
+/// used while a screen holds it (signing, an animated QR, the memory test), and this
+/// screen takes the same lease, so what the host staged is still there when it looks.
+pub const STAGED_AT: usize = 0x0010_0000;
+
 fn staged_at() -> usize {
-    catcard_board::BOARD.psram.map_or(0, |p| p.len as usize / 2)
+    STAGED_AT
 }
 
 /// The LittleFS block size the settings volume is formatted with.

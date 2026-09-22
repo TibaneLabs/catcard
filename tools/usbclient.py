@@ -978,7 +978,10 @@ def main(path, image=None):
         if not img:
             print("stage     that dump has no settings section")
             return 1
-        at = PSRAM_IMAGE          # restore::staged_at(): the upper half of the PSRAM
+        # restore::STAGED_AT: one megabyte into the *lower* half. Never the upper half,
+        # where an offered firmware image waits for the owner's yes -- staging over one
+        # made the next approval hand the bootloader settings data as firmware.
+        at = PSRAM_BASE + 0x0010_0000
         header = 64               # restore::HEADER
 
         # Unmark first, so a half-finished staging can never look like a finished one.
