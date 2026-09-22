@@ -6,12 +6,11 @@ Rust. Bitcoin first, but not Bitcoin-only — see [`docs/ROADMAP.md`](docs/ROADM
 MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 
 > **Status: runs on real hardware, not ready for funds.** Dev-signed images install and
-> run on every board -- mk3, mk4, mk5 and Q1: the device boots, logs in against the real
-> secure element,
-> generates and stores a seed, reads a settings store that stock firmware wrote, and
-> takes its own firmware upgrades over USB. Signing, multisig and the Q1's QR
-> transports are written and covered by host tests against the standards' own vectors,
-> but have not been exercised end to end on a device.
+> run on every board -- mk3, mk4, mk5 and Q1. The device boots, logs in against the real
+> secure element, generates and stores a seed, reads a settings store that stock firmware
+> wrote, and takes its own firmware upgrades over USB. Signing, multisig and the Q1's QR
+> and NFC transports are written and covered by host tests against the standards' own
+> vectors, but have not been exercised end to end on a device.
 >
 > Do not put funds on a device running this. Keep the words of any seed you let it
 > store, and expect to reinstall stock firmware.
