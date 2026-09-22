@@ -7,6 +7,7 @@
 #   make                 # dev images for every board
 #   make mk4-mk5         # just the mk4/mk5 image  -> out/catcard-mk4-mk5.{bin,dfu}
 #   make mk4-mk5 SHIP=1  # same file, stripped of the debug crutches for a real release
+#   make q1 MULTICHAIN=1 # every chain the registry knows, not just Bitcoin
 #   make test lint       # host tests / firmware clippy
 #   make clean
 #
@@ -47,6 +48,9 @@ VERSION ?=
 VER      = $(if $(VERSION),--version $(VERSION),)
 SHIP    ?=
 NODEF    = $(if $(SHIP),--no-default-features,)
+MULTICHAIN ?=
+comma   := ,
+CHAINS   = $(if $(MULTICHAIN),$(comma)multichain,)
 
 # The firmware ELF has one path, so a build must be packaged before the next overwrites it.
 .NOTPARALLEL:
@@ -55,18 +59,18 @@ NODEF    = $(if $(SHIP),--no-default-features,)
 all: mk3 mk4-mk5 q1
 
 mk3:
-	$(FW) $(NODEF) --features board-mk3
+	$(FW) $(NODEF) --features board-mk3$(CHAINS)
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk3 $(VER) --bin $(OUT)/catcard-mk3.bin --dfu $(OUT)/catcard-mk3.dfu
 
 mk4-mk5:
-	$(FW) $(NODEF) --features board-mk5
+	$(FW) $(NODEF) --features board-mk5$(CHAINS)
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk5 $(VER) --hw-compat mk4,mk5 \
 	  --bin $(OUT)/catcard-mk4-mk5.bin --dfu $(OUT)/catcard-mk4-mk5.dfu
 
 q1:
-	$(FW) $(NODEF) --features board-q1
+	$(FW) $(NODEF) --features board-q1$(CHAINS)
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board q1 $(VER) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 

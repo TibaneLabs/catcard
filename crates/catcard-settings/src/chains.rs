@@ -1,7 +1,7 @@
 //! Which chains the owner wants to see, in the order they want them.
 //!
 //! A multichain build carries every chain it knows; an owner who holds two of them should
-//! not have to scroll past seven. So the root wallet's settings keep a list:
+//! not have to scroll past seven. So a wallet's settings keep a list:
 //!
 //! ```json
 //! "chains": ["BTC", "ETH", "SOL"]
@@ -12,8 +12,8 @@
 //! carry is skipped when read and kept when written back, so a list made by a build with
 //! more chains survives a trip through one with fewer.
 //!
-//! It lives in the **root** wallet's file, not the file of whatever key is in force: it
-//! is about the device's owner, not about one of the wallets they reach from it.
+//! Each wallet has its own, in its own file -- the root's, a BIP-85 child's, a vault
+//! key's -- since what one key is for is not what the next is for.
 
 use crate::json::{Doc, elements};
 

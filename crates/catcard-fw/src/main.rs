@@ -26,6 +26,9 @@ use cortex_m_rt::entry;
 #[cfg(feature = "board-q1")]
 mod battery;
 mod boot;
+/// Which chains the owner sees, from the root wallet's settings.
+#[cfg(feature = "multichain")]
+mod chains;
 mod derive;
 mod display;
 /// Wallet-export file formats.

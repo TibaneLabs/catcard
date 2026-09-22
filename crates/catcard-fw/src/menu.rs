@@ -993,7 +993,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Utils),
-        Screen::AddressExplorer => to(|a| address_explorer(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::AddressExplorer => to(|a| addresses(a.gate, a.login, a.ui), Screen::Utils),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
             Screen::ExportMenu,
@@ -3821,14 +3821,7 @@ fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::Add
 
 /// As [`address_qr`], for an address with no single-signature kind to name it by.
 fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
-    use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_wallet::address;
-
-    const MAX_VERSION: Version = match Version::new(8) {
-        Some(v) => v,
-        None => unreachable!(),
-    };
-    const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
     let mut payload = [0u8; address::MAX_QR_PAYLOAD];
     let Some(payload) = address::qr_payload_of(address, bech32, &mut payload) else {
@@ -3837,6 +3830,21 @@ fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
         return;
     };
     let shown = address::qr_address(payload);
+    qr_screen(ui, payload, shown);
+}
+
+/// A QR of `payload` beside `shown` in blocks of four, until a key is pressed.
+///
+/// The drawing half of [`address_qr_of`], for a payload that is not a Bitcoin URI: every
+/// other chain's address goes in as it is written, which is what its wallets scan.
+pub(crate) fn qr_screen(ui: &mut Ui<'_>, payload: &str, shown: &str) {
+    use anyd::codes::qr::{EcLevel, QrEncoder, Version};
+
+    const MAX_VERSION: Version = match Version::new(8) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+    const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
     let mut scratch = [0u8; BUF];
     let mut storage = [0u8; BUF];
@@ -5114,18 +5122,36 @@ pub(crate) fn master_quietly(
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    with_seed(gate, login, panel, head, |seed, kw| {
+        ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
+    })
+}
+
+/// Run `then` on the wallet in force's BIP-39 seed -- the 64 bytes the words and the
+/// passphrase stretch to -- inside the masked region, and return what it returns.
+///
+/// The seed never leaves: `then` runs in the same `keywork::run` that finishes the
+/// stretch, and the seed is wiped before it returns. Every key there is comes from these
+/// 64 bytes, and most of them from the BIP-32 master ([`master_quietly`]); SLIP-0010
+/// chains such as Solana start again from the seed itself, which is why this exists.
+pub(crate) fn with_seed<T>(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut display::Panel,
+    head: &str,
+    then: impl FnOnce(&[u8; catcard_wallet::bip39::SEED_LEN], &catcard_wallet::KeyWork) -> Option<T>,
+) -> Result<T, &'static str> {
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
     let (mut ent, ent_len) = seed_entropy(gate, login, panel, head)?;
 
-    // Seed -> master, through whatever passphrase is in force (none, normally).
-    // Done once, then the seed material is gone and only the master remains.
+    // Seed -> whatever `then` makes of it, through the passphrase in force (none,
+    // normally). Done once, then the seed material is gone.
     //
     // Turning the words into a seed is PBKDF2-HMAC-SHA512 run 2048 times -- about a second
-    // of hashing by design -- and the key derivation adds elliptic-curve work on top. That
-    // is far too long to hold one frame, so it runs in slices with the busy bar stepped
-    // between them: masked while a slice is in flight, repainting in the gaps.
+    // of hashing by design. That is far too long to hold one frame, so it runs in slices:
+    // masked while a slice is in flight, the sweep moving underneath.
     let mut busy = Working::seed(panel, head, "stretching the seed");
     let stretch = crate::keywork::run(|kw| {
         let mnemonic = Mnemonic::from_entropy(&ent[..ent_len], kw);
@@ -5134,25 +5160,330 @@ pub(crate) fn master_quietly(
             return Err("seed did not decode");
         };
         // The BIP-39 passphrase in force, if any: it is part of the seed, so every screen
-        // that derives from the master follows it without asking.
+        // that derives from it follows it without asking.
         Stretch::begin(&mnemonic, crate::passphrase::active(), kw)
             .map_err(|_| "key derivation failed")
     });
     stretch.and_then(|mut stretch| {
-        // The 2048 PBKDF2 rounds run a slice at a time so the bar can move between them.
-        // The slices end at round counts fixed here, never at anything derived from the
-        // seed, so what a watching host can see is the iteration count BIP-39 publishes.
+        // The 2048 PBKDF2 rounds run a slice at a time. The slices end at round counts
+        // fixed here, never at anything derived from the seed, so what a watching host can
+        // see is the iteration count BIP-39 publishes.
         while !crate::keywork::run(|kw| stretch.step(STRETCH_SLICE, kw)) {
             busy.tick(panel);
         }
         crate::keywork::run(|kw| {
             let mut seed = [0u8; SEED_LEN];
             stretch.finish(&mut seed, kw);
-            let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw).ok();
+            let out = then(&seed, kw);
             seed.zeroize();
-            master.ok_or("key derivation failed")
+            out.ok_or("key derivation failed")
         })
     })
+}
+
+/// Addresses: on a multichain build, which chain first; then that chain's addresses.
+///
+/// Bitcoin keeps its own explorer, registered multisig wallets and all. Every other chain
+/// gets [`chain_explorer`], which walks the formats its registry entry lists. Leaving an
+/// explorer comes back to the picker, and leaving the picker leaves -- unless there is
+/// only one chain to pick, when there is no picker to come back to.
+fn addresses(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    #[cfg(feature = "multichain")]
+    loop {
+        let offered = crate::chains::enabled(gate, login, ui).len();
+        let Some(chain) = pick_chain(gate, login, ui) else {
+            return;
+        };
+        if chain.id == catcard_wallet::chain::ChainId::Bitcoin {
+            address_explorer(gate, login, ui);
+        } else {
+            chain_explorer(gate, login, ui, chain);
+        }
+        if offered <= 1 {
+            return;
+        }
+    }
+    #[cfg(not(feature = "multichain"))]
+    address_explorer(gate, login, ui)
+}
+
+/// Which chain, from the wallet in force's list: its mark and its name, a row each.
+///
+/// Colour marks on the Q1, drawn through the marks' own page palette; one-bit ones on
+/// the OLED. With only one chain on the list there is nothing to ask.
+#[cfg(feature = "multichain")]
+fn pick_chain(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<&'static catcard_wallet::chain::Chain> {
+    use catcard_ui::art::chainicons;
+    use catcard_ui::scroll::{Line as DLine, Mark};
+
+    let chains = crate::chains::enabled(gate, login, ui);
+    if chains.len() <= 1 {
+        return chains.first().copied();
+    }
+    let mut lines: heapless::Vec<DLine, { crate::chains::MAX + 1 }> = heapless::Vec::new();
+    let _ = lines.push(DLine::title("Addresses"));
+    for (i, c) in chains.iter().enumerate() {
+        let mut line = DLine::item(c.name, i as u32).large();
+        if let Some((colour, mono)) = chainicons::mark(c.ticker) {
+            #[cfg(feature = "board-q1")]
+            {
+                let _ = mono;
+                line = line.with_mark(Mark::Colour(colour));
+            }
+            #[cfg(not(feature = "board-q1"))]
+            {
+                let _ = colour;
+                line = line.with_mark(Mark::Mono(mono));
+            }
+        }
+        let _ = lines.push(line);
+    }
+    #[cfg(feature = "board-q1")]
+    let palette = &chainicons::PALETTE;
+    #[cfg(not(feature = "board-q1"))]
+    let palette = &catcard_ui::st7789::AMBER;
+    match show_doc_in(ui, &lines, false, false, palette) {
+        DocExit::Selected(i) => chains.get(i as usize).copied(),
+        _ => None,
+    }
+}
+
+/// Solana addresses derived per seed stretch. SLIP-0010 has no public derivation, so
+/// every address needs the seed; eight at a time makes paging through them cost one
+/// stretch per eight rather than one per step.
+#[cfg(feature = "multichain")]
+const SOLANA_BATCH: usize = 8;
+
+/// The ed25519 public keys of Solana accounts `first..first + SOLANA_BATCH`, at
+/// `m/44'/501'/{i}'/0'` -- the path Phantom and Solflare use.
+#[cfg(feature = "multichain")]
+fn solana_batch(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    coin: u32,
+    first: u32,
+) -> Option<[[u8; 32]; SOLANA_BATCH]> {
+    let got = with_seed(gate, login, ui.panel, "Addresses", |seed, kw| {
+        let mut out = [[0u8; 32]; SOLANA_BATCH];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let node = catcard_wallet::slip10::derive(seed, &[44, coin, first + i as u32, 0], kw)?;
+            *slot = node.public_key(kw);
+        }
+        Some(out)
+    });
+    match got {
+        Ok(keys) => Some(keys),
+        Err(why) => {
+            message(ui.panel, "Addresses", why, "any key to go back");
+            wait_for_any_key(ui);
+            None
+        }
+    }
+}
+
+/// One chain's addresses, other than Bitcoin's: its formats, accounts and indices.
+///
+/// The same screen and keys as Bitcoin's explorer, with the axes a chain does not have
+/// left out: no change chain for account-model chains (Ethereum, Tron, Solana), and no
+/// account axis for Solana, whose account *is* the index.
+#[cfg(feature = "multichain")]
+fn chain_explorer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    chain: &'static catcard_wallet::chain::Chain,
+) {
+    use catcard_wallet::bip32::{ChildNumber, ExtendedPubKey};
+    use catcard_wallet::chain::{Encoding, address as caddr};
+
+    let formats = chain.formats;
+    let cols = catcard_ui::scroll::text_cols(
+        &display::FONTS,
+        catcard_ui::scroll::Size::Body,
+        display::SCREEN_W,
+    );
+    let (mut fmt, mut account, mut change, mut index) = (0usize, 0u32, 0u32, 0u32);
+    let mut cached: Option<(usize, u32, u32, ExtendedPubKey)> = None;
+    let mut refused_at: Option<(usize, u32)> = None;
+    let mut sol: Option<(u32, [[u8; 32]; SOLANA_BATCH])> = None;
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+
+    loop {
+        let f = formats[fmt.min(formats.len() - 1)];
+        let mut buf = [0u8; caddr::MAX_LEN];
+        let mut path = Line::new();
+        let addr: Option<usize> = match f.encoding {
+            Encoding::Solana => {
+                let _ = write!(path, "m/44h/{}h/{index}h/0h", chain.coin_type);
+                let first = index - index % SOLANA_BATCH as u32;
+                if !matches!(sol, Some((at, _)) if at == first) {
+                    sol = solana_batch(gate, login, ui, chain.coin_type, first).map(|k| (first, k));
+                    if sol.is_none() {
+                        return;
+                    }
+                }
+                sol.as_ref().and_then(|(at, keys)| {
+                    caddr::from_ed25519(chain, &keys[(index - at) as usize], &mut buf).ok()
+                })
+            }
+            _ => {
+                // The account key once, from this session or the seed; then the public
+                // steps, which need no key material and no masking.
+                if !matches!(cached, Some((a, b, c, _)) if (a, b, c) == (fmt, account, change)) {
+                    let acct = (refused_at != Some((fmt, account)))
+                        .then(|| {
+                            crate::pubkeys::account_key_at(
+                                gate,
+                                login,
+                                ui,
+                                "Addresses",
+                                f.purpose,
+                                chain.coin_type,
+                                account,
+                            )
+                        })
+                        .flatten();
+                    refused_at = acct.is_none().then_some((fmt, account));
+                    cached = acct
+                        .and_then(|k| {
+                            ChildNumber::normal(change)
+                                .ok()
+                                .and_then(|c| k.derive_child(c).ok())
+                        })
+                        .map(|k| (fmt, account, change, k));
+                }
+                let _ = write!(
+                    path,
+                    "m/{}h/{}h/{account}h/{change}/{index}",
+                    f.purpose, chain.coin_type
+                );
+                cached.as_ref().map(|(_, _, _, k)| *k).and_then(|k| {
+                    ChildNumber::normal(index)
+                        .ok()
+                        .and_then(|c| k.derive_child(c).ok())
+                        .and_then(|k| {
+                            caddr::from_secp256k1(chain, f.encoding, &k.public_key, &mut buf).ok()
+                        })
+                })
+            }
+        };
+
+        let mut shown = Line::new();
+        match addr {
+            Some(n) => ellipsize_middle(
+                core::str::from_utf8(&buf[..n]).unwrap_or(""),
+                cols,
+                &mut shown,
+            ),
+            None => {
+                let _ = shown.push_str("(no address)");
+            }
+        }
+        let utxo = matches!(f.encoding, Encoding::Utxo(_));
+        let solana = f.encoding == Encoding::Solana;
+        let mut key_hint = Line::new();
+        let _ = write!(
+            key_hint,
+            "{} QR   {} back",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+        let axes = match (utxo, solana) {
+            (true, _) => {
+                if change == 0 {
+                    "1/3 account  0 change chain"
+                } else {
+                    "1/3 account  0 receive chain"
+                }
+            }
+            (false, true) => "",
+            (false, false) => "1/3 account",
+        };
+
+        let mut doc: heapless::Vec<catcard_ui::scroll::Line, 8> = heapless::Vec::new();
+        let _ = doc.push(catcard_ui::scroll::Line::title(chain.name));
+        if formats.len() > 1 {
+            let _ = doc.push(catcard_ui::scroll::Line::body(f.label).small());
+        }
+        let _ = doc.push(catcard_ui::scroll::Line::body(path.as_str()).small());
+        let _ = doc.push(catcard_ui::scroll::Line::body(shown.as_str()));
+        let _ = doc.push(catcard_ui::scroll::Line::body("up/down address").small());
+        if formats.len() > 1 {
+            let _ = doc.push(catcard_ui::scroll::Line::body("left/right type").small());
+        }
+        if !axes.is_empty() {
+            let _ = doc.push(catcard_ui::scroll::Line::body(axes).small());
+        }
+        let _ = doc.push(catcard_ui::scroll::Line::body(key_hint.as_str()).small());
+        let view = catcard_ui::scroll::ScrollView::build(
+            &doc,
+            display::SCREEN_W,
+            display::SCREEN_H,
+            display::FONTS,
+        );
+        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &view));
+
+        wait_for_release(ui);
+        'wait: loop {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            for k in keys.iter() {
+                match k {
+                    Key::Cancel => return,
+                    // The address as it is written, which is what that chain's wallets
+                    // scan: no URI scheme is invented for it.
+                    Key::Confirm => {
+                        if let Some(n) = addr {
+                            let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                            qr_screen(ui, text, text);
+                        }
+                        break 'wait;
+                    }
+                    Key::Digit(8) => {
+                        index = index.saturating_add(1);
+                        break 'wait;
+                    }
+                    Key::Digit(5) => {
+                        index = index.saturating_sub(1);
+                        break 'wait;
+                    }
+                    Key::Digit(9) if formats.len() > 1 => {
+                        fmt = (fmt + 1) % formats.len();
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(7) if formats.len() > 1 => {
+                        fmt = (fmt + formats.len() - 1) % formats.len();
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(3) if !solana => {
+                        account = account.saturating_add(1);
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(1) if !solana => {
+                        account = account.saturating_sub(1);
+                        index = 0;
+                        break 'wait;
+                    }
+                    Key::Digit(0) if utxo => {
+                        change = 1 - change;
+                        index = 0;
+                        break 'wait;
+                    }
+                    _ => {}
+                }
+            }
+            display::idle(ui.panel);
+        }
+    }
 }
 
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
@@ -7032,7 +7363,20 @@ pub(crate) fn show_doc(
     scramble: bool,
     require_end: bool,
 ) -> DocExit {
+    show_doc_in(ui, lines, scramble, require_end, &catcard_ui::st7789::AMBER)
+}
+
+/// [`show_doc`], drawn through `palette` -- for a document whose rows carry colour marks,
+/// which need the marks' colours where the amber ramp has its middle greys.
+pub(crate) fn show_doc_in(
+    ui: &mut Ui<'_>,
+    lines: &[catcard_ui::scroll::Line<'_>],
+    scramble: bool,
+    require_end: bool,
+    palette: &'static [u16; 16],
+) -> DocExit {
     let mut screen = DocScreen::new(ui, lines, scramble, require_end);
+    screen.palette = palette;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
@@ -7083,6 +7427,8 @@ pub(crate) fn show_doc(
 /// plumbing.
 struct DocScreen<'a> {
     view: catcard_ui::scroll::ScrollView<'a>,
+    /// What the page is drawn through: the amber ramp, unless the rows carry colour.
+    palette: &'static [u16; 16],
     /// Some line is selectable, so `5`/`8` move a cursor instead of scrolling.
     is_menu: bool,
     /// Refuse Confirm until the last line has been on screen: the seed backup's gate.
@@ -7123,13 +7469,16 @@ impl<'a> DocScreen<'a> {
         let is_menu = view.is_menu();
         Self {
             view,
+            palette: &catcard_ui::st7789::AMBER,
             is_menu,
             require_end,
         }
     }
 
     fn draw(&self, ui: &mut Ui<'_>) {
-        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
+        display::draw_with(ui.panel, self.palette, |c| {
+            catcard_ui::scroll::render(c, &self.view)
+        });
     }
 
     fn needs_marquee(&self) -> bool {

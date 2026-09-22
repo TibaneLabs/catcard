@@ -1,0 +1,96 @@
+//! Which chains the wallet in force shows, and in what order.
+//!
+//! The list is `"chains"` in **that wallet's own** settings file
+//! ([`catcard_settings::chains`]) -- each key its own list, as each key has its own vault:
+//! a BIP-85 child kept for one coin should not offer eight others. Read once per key and
+//! kept until the key changes ([`forget`]). Absent means every chain the build carries,
+//! in the build's order. A ticker this build does not carry is skipped.
+//! A list that names none of this build's chains is treated as absent: a picker with
+//! nothing in it would be a dead end with no way out but the back key.
+//!
+//! The mk3 has no settings store, so it shows every chain.
+
+use catcard_wallet::chain::{self, Chain};
+
+use crate::ui::Ui;
+
+/// Chains held at once. More than any build carries.
+pub const MAX: usize = 16;
+
+/// The list, once read for the key in force. Foreground only, single core.
+static mut ENABLED: Option<heapless::Vec<&'static Chain, MAX>> = None;
+
+/// Forget the list: the key changed, and its list is in a different file.
+pub(crate) fn forget() {
+    // SAFETY: foreground only, single core.
+    unsafe { *core::ptr::addr_of_mut!(ENABLED) = None };
+}
+
+/// The chains to offer, in order.
+pub(crate) fn enabled(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> heapless::Vec<&'static Chain, MAX> {
+    // SAFETY: foreground only; the borrow ends within this statement.
+    if let Some(list) = unsafe { (*core::ptr::addr_of!(ENABLED)).clone() } {
+        return list;
+    }
+    let list = read(gate, login, ui).unwrap_or_else(all);
+    crate::catlog!("chains: {} offered", list.len());
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of_mut!(ENABLED) = Some(list.clone()) };
+    list
+}
+
+/// Every chain the build carries.
+fn all() -> heapless::Vec<&'static Chain, MAX> {
+    chain::SUPPORTED.iter().take(MAX).collect()
+}
+
+/// The owner's list, or `None` for "all of them".
+#[cfg(not(feature = "board-mk3"))]
+fn read(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<heapless::Vec<&'static Chain, MAX>> {
+    use catcard_settings::json::Doc;
+    use catcard_settings::store::{self, SCRATCH};
+
+    let key = match crate::settings::wallet_key(gate, login, ui.panel, "Addresses") {
+        Ok(k) => k,
+        Err(why) => {
+            crate::catlog!("chains: no settings key: {}", why);
+            return None;
+        }
+    };
+    let mut held = crate::heap::take(SCRATCH)?;
+    let buf = held.bytes();
+    // SAFETY: the region is mapped and readable; nothing is written.
+    let mut files = unsafe { crate::settings::Files::mount_read_only() }.ok()?;
+    let n = store::read(&mut files, &key, buf).ok()?;
+    let doc = Doc::parse(&buf[..n]).ok()?;
+    let mut tickers = [""; catcard_settings::chains::MAX];
+    let count = catcard_settings::chains::list(&doc, &mut tickers)?;
+    let mut out: heapless::Vec<&'static Chain, MAX> = heapless::Vec::new();
+    for t in &tickers[..count] {
+        match chain::by_ticker(t) {
+            Some(c) if !out.iter().any(|o| o.id == c.id) => {
+                let _ = out.push(c);
+            }
+            Some(_) => {}
+            None => crate::catlog!("chains: {} is not in this build", t),
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+#[cfg(feature = "board-mk3")]
+fn read(
+    _gate: &catcard_callgate::Callgate,
+    _login: &mut catcard_pin::Login,
+    _ui: &mut Ui<'_>,
+) -> Option<heapless::Vec<&'static Chain, MAX>> {
+    None
+}

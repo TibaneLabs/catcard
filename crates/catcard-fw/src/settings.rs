@@ -90,19 +90,7 @@ pub(crate) fn wallet_key(
         "words stash"
     };
     let key = if crate::key::is_root() {
-        // The stored wallet: the stash exactly as the secure element returns it, which
-        // is what stock hashes and what every settings file this device already has was
-        // written under.
-        // A second and a half inside the bootloader: say so, rather than holding
-        // whatever was on screen still.
-        crate::menu::reading_seed(panel, head);
-        let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-        let mut secret = login
-            .fetch_secret(&pin_gate)
-            .map_err(|_| "could not read the secret")?;
-        let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
-        secret.zeroize();
-        key
+        root_key(gate, login, panel, head)?
     } else if crate::passphrase::is_set() {
         let master = crate::menu::master_quietly(gate, login, panel, head)?;
         let mut stash =
@@ -209,6 +197,32 @@ pub(crate) fn open_wallet(
         }
         Err(e) => crate::catlog!("settings: {} file unreadable: {:?}", label, e),
     }
+}
+
+/// The settings key of the **stored** wallet, whatever key is in force.
+///
+/// The stash exactly as the secure element returns it, which is what stock hashes and
+/// what every settings file this device already has was written under. For the settings
+/// that belong to the device's owner rather than to one wallet -- which chains to show.
+pub(crate) fn root_key(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    head: &str,
+) -> Result<catcard_settings::nvstore::Key, &'static str> {
+    use catcard_settings::nvstore;
+    use zeroize::Zeroize as _;
+
+    // A second and a half inside the bootloader: say so, rather than holding whatever
+    // was on screen still.
+    crate::menu::reading_seed(panel, head);
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let mut secret = login
+        .fetch_secret(&pin_gate)
+        .map_err(|_| "could not read the secret")?;
+    let key = crate::keywork::run(|_| nvstore::hash_key(&secret));
+    secret.zeroize();
+    Ok(key)
 }
 
 /// Save `(name, raw)` into the wallet in force's own settings file.

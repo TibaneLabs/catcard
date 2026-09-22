@@ -35,6 +35,11 @@ impl Node {
         &self.chain_code
     }
 
+    /// The ed25519 public key for this node's key.
+    pub fn public_key(&self, _kw: &crate::KeyWork) -> [u8; 32] {
+        outscript::crypto::ed25519::public_from_seed(&self.key)
+    }
+
     fn from_mac(mac: HmacSha512) -> Self {
         let mut out = mac.finalize();
         let bytes = out.as_slice();

@@ -75,10 +75,13 @@ use crate::ui::Ui;
 /// would have happened anyway.
 const MAX: usize = 8;
 
-/// One account key and the path it sits at.
+/// One account key and the path it sits at: `m/{purpose}h/{coin}h/{account}h`.
 #[derive(Clone, Copy)]
 struct Cached {
     purpose: u32,
+    /// The SLIP-44 coin type -- 0 for Bitcoin. Part of the key: Litecoin's account 0
+    /// under purpose 84 is not Bitcoin's.
+    coin: u32,
     account: u32,
     key: ExtendedPubKey,
 }
@@ -100,17 +103,17 @@ pub(crate) fn forget() {
     }
 }
 
-/// The cached account key at `m/{purpose}h/0h/{account}h`, if this session has it.
-fn cached(purpose: u32, account: u32) -> Option<ExtendedPubKey> {
+/// The cached account key at `m/{purpose}h/{coin}h/{account}h`, if this session has it.
+fn cached(purpose: u32, coin: u32, account: u32) -> Option<ExtendedPubKey> {
     // SAFETY: as in `forget`.
     let all = unsafe { &*core::ptr::addr_of!(ACCOUNTS) };
     all.iter()
-        .find(|c| c.purpose == purpose && c.account == account)
+        .find(|c| (c.purpose, c.coin, c.account) == (purpose, coin, account))
         .map(|c| c.key)
 }
 
 /// Remember an account key, evicting the oldest if there is no room.
-fn remember(purpose: u32, account: u32, key: ExtendedPubKey) {
+fn remember(purpose: u32, coin: u32, account: u32, key: ExtendedPubKey) {
     // SAFETY: as in `forget`.
     let all = unsafe { &mut *core::ptr::addr_of_mut!(ACCOUNTS) };
     if all.is_full() {
@@ -118,16 +121,14 @@ fn remember(purpose: u32, account: u32, key: ExtendedPubKey) {
     }
     let _ = all.push(Cached {
         purpose,
+        coin,
         account,
         key,
     });
 }
 
-/// The account key at `m/{purpose}h/0h/{account}h` for `kind`, from this session or the
-/// seed.
-///
-/// A hit costs nothing. A miss unlocks the seed, which shows its own screens and may be
-/// refused -- `None` once the owner has been told why.
+/// The Bitcoin account key at `m/{purpose}h/0h/{account}h` for `kind`, from this session
+/// or the seed. See [`account_key_at`].
 pub(crate) fn account_key(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -136,8 +137,24 @@ pub(crate) fn account_key(
     kind: AddressKind,
     account: u32,
 ) -> Option<ExtendedPubKey> {
-    let purpose = kind.bip44_purpose();
-    if let Some(key) = cached(purpose, account) {
+    account_key_at(gate, login, ui, head, kind.bip44_purpose(), 0, account)
+}
+
+/// The account key at `m/{purpose}h/{coin}h/{account}h`, from this session or the seed --
+/// any secp256k1 chain, by its SLIP-44 coin type.
+///
+/// A hit costs nothing. A miss unlocks the seed, which shows its own screens and may be
+/// refused -- `None` once the owner has been told why.
+pub(crate) fn account_key_at(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    purpose: u32,
+    coin: u32,
+    account: u32,
+) -> Option<ExtendedPubKey> {
+    if let Some(key) = cached(purpose, coin, account) {
         return Some(key);
     }
 
@@ -149,14 +166,14 @@ pub(crate) fn account_key(
 
     let steps = [
         ChildNumber::hardened(purpose).ok()?,
-        ChildNumber::hardened(0).ok()?,
+        ChildNumber::hardened(coin).ok()?,
         ChildNumber::hardened(account).ok()?,
     ];
     let mut busy = menu::Working::new(ui.panel, head, "deriving account");
     let key = menu::public_at(&master, &steps, &mut busy, ui.panel);
     drop(master);
     let key = key?;
-    remember(purpose, account, key);
+    remember(purpose, coin, account, key);
     Some(key)
 }
 

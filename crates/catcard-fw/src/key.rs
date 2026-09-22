@@ -163,6 +163,9 @@ pub(crate) fn set(source: Source) {
     crate::pubkeys::forget();
     #[cfg(not(feature = "board-mk3"))]
     crate::settings::forget_key();
+    // And the chains it shows, which are that wallet's too.
+    #[cfg(feature = "multichain")]
+    crate::chains::forget();
 }
 
 /// Go back to the root wallet, dropping any passphrase with it.
