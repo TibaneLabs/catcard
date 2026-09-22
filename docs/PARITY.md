@@ -28,8 +28,9 @@ Dependency first, then what a user needs to hold funds safely:
 4. ~~**Address Explorer and Verify Address**~~ -- written, untested on hardware: all four
    types, accounts and both chains in the explorer; Verify address types an address and
    searches this wallet's own derivations for it.
-5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Utils → Sign
-   message, armoured to SIGNED.TXT. BIP-322 still to do.
+5. **Message signing** -- legacy (BIP-137) written, untested on hardware: Sign → Message,
+   armoured to SIGNED.TXT. BIP-322, Verify Sig File and signing a message from a file
+   still to do.
 6. ~~**BIP-85**~~ -- written, untested on hardware: Derive → BIP-85, with 12 to 24 words,
    XPRV, WIF, a base64 password and 32 bytes of hex, all against the BIP's own vectors.
    Words, XPRV and WIF children can be put in force; a WIF key is a single-key wallet
@@ -88,12 +89,12 @@ Dependency first, then what a user needs to hold funds safely:
 | View TRNG Words | ✅ | ✅ | Utils |
 | Dice-only seed | ✅ | ❌ | |
 | Import words (12/18/24) | ✅ | ✅ | |
-| Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ❌ | steps 9-11 |
+| Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | 🟡 | xprv and raw master: stored ones are read and worked in, and Derive → Import key types either in for the session; backup, clone, TAPSIGNER and QR remain (steps 9-11) |
 | Seed XOR split and join | ✅ | ✅ | Derive; the published examples are host tests |
 | BIP-85 | ✅ | 🟡 | words, WIF, XPRV, hex, password; the BIP's vectors pass |
 | BIP-39 passphrase | ✅ | 🟡 | Settings → Passphrase, RAM only; untested on hardware |
-| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | 🟡 | temporary seed + Seed Vault (Derive → Key vault), stock's `seeds` format; no lock-down |
-| View seed words, SeedQR | ✅ | ❌ | words at creation only; needs a guarded view |
+| Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ✅ | Derive → Import key and Key vault (stock's `seeds` format); Danger zone → Seed tools → Lock down seed, for words and a loaded XPRV |
+| View seed words, SeedQR | ✅ | 🟡 | Danger zone → Seed tools → View words, behind a warning; shows the xprv where a wallet has no words. SeedQR ❌ |
 | Destroy seed | ✅ | ✅ | Settings |
 
 ## 3. Addresses
@@ -154,8 +155,8 @@ every multisig input is refused.
 | microSD | ✅ | ✅ | FAT12/16/32 and exFAT, cards to 2 TB, format |
 | Virtual Disk | ✅ | 🟡 | USB Drive serves the SD card; no RAM disk |
 | USB | ✅ | ➖ | our own HID protocol (`USB.md`): upgrade, logs, status; no signing yet |
-| NFC | ✅ | ❌ | step 11 |
-| QR / BBQr | ✅ | ❌ | step 11 (address QR display exists) |
+| NFC | ✅ | 🟡 | a signed transaction goes out as a tag a phone taps to broadcast (`crate::nfc`), untried on hardware; sharing addresses, taking a PSBT in and file share remain |
+| QR / BBQr | ✅ | 🟡 | the Q1 scans BBQr and BC-UR and signs a PSBT it catches, and shows files as animated QR; SeedQR and NFC-side transfers remain |
 | PushTx, Key Teleport | ✅ | ❌ | after step 11 |
 
 ## 8. Security features
@@ -164,10 +165,10 @@ every multisig input is refused.
 |---|---|---|---|
 | Two-part PIN with anti-phishing words | ✅ | ✅ | parts limited to 2-6 digits, as stock requires |
 | Set PIN, change PIN | ✅ | ✅ | |
-| Test Login | ✅ | ❌ | |
+| Test Login | ✅ | ✅ | Settings → Login → Test login; refused below four tries left |
 | Brick after 13 attempts | ✅ | ✅ | the bootloader and SE enforce it |
 | Trick PINs (duress, brick, wipe, delta...) | ✅ | ❌ | step 12; needs the settings store |
-| Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | ❌ | step 12 |
+| Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | 🟡 | scrambled keypad, countdown and nickname ✅; kill key and SD 2FA ✅ in release builds only (`crate::guard`), untried on hardware; idle timeout ❌ |
 | Calculator login (Q1) | ✅ | ❌ | |
 | HSM mode, Spending Policy, CCC | ✅ | ❌ | step 13 |
 | Hobbled mode | ✅ | ❌ | step 12 |
