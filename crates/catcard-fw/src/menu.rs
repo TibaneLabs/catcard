@@ -3553,12 +3553,13 @@ pub(crate) fn browse_sd(
                 let _ = lines.push(DLine::body("(empty)").centered());
             }
             for (i, e) in entries.iter().enumerate() {
-                let icon = if e.is_dir {
-                    &catcard_ui::icons::FOLDER
-                } else {
-                    &catcard_ui::icons::FILE
-                };
-                let _ = lines.push(DLine::item(&e.name, i as u32).with_icon(icon));
+                // What the name says it is, as a picture: in colour where the panel can
+                // show one, as a 12x12 silhouette where it cannot. A row is easier to
+                // find by shape than by reading the end of its name.
+                use catcard_ui::art::fileicons::{Kind, mark};
+                let _ = lines.push(
+                    DLine::item(&e.name, i as u32).with_mark(mark(Kind::of(&e.name, e.is_dir))),
+                );
             }
             show_doc(ui, &lines, false, false)
         };

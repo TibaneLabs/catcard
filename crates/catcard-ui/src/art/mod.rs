@@ -2,6 +2,7 @@
 
 pub mod cat;
 pub mod chainicons;
+pub mod fileicons;
 pub mod flappy;
 pub mod indexed;
 pub mod menuicons;
