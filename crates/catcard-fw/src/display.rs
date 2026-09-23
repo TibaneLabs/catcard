@@ -490,7 +490,9 @@ pub fn draw_with_marks(
                 };
                 slot.fill(bg);
                 let skip = shown.skip;
-                let _ = rgba::decode(shown.art, |x, y, p| {
+                // Through the cache: the same pixels every frame, and a list being
+                // scrolled asks for them sixty times a second.
+                crate::artcache::pixels(shown.art, |x, y, p| {
                     if let Some(row) = y.checked_sub(skip).filter(|&r| r < h) {
                         slot[row * w + x] = rgba::over(p, bg);
                     }

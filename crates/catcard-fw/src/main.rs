@@ -28,6 +28,9 @@ use cortex_m_rt::entry;
 // module docs there, and `Vec::try_reserve_exact` at the call sites.
 extern crate alloc;
 
+/// Decoded colour icons, kept between frames.
+#[cfg(feature = "board-q1")]
+mod artcache;
 mod backup;
 /// Battery sensing exists only on the Q1; the other boards are USB-powered.
 #[cfg(feature = "board-q1")]
