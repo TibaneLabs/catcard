@@ -77,14 +77,54 @@ pub fn cell_rect(i: usize, w: usize, h: usize) -> Rect {
     }
 }
 
-/// How many pages a set of cells needs. Never zero: an empty menu is one empty page.
-pub fn pages(len: usize) -> usize {
-    len.div_ceil(CELLS).max(1)
+/// How many columns a set of cells needs. Never zero: an empty menu is one empty column.
+pub fn columns(len: usize) -> usize {
+    len.div_ceil(ROWS).max(1)
 }
 
-/// Where a cell sits in the strip: which page, and which cell of it.
+/// How many windows' worth of columns there are, for the dots along the bottom.
+pub fn pages(len: usize) -> usize {
+    columns(len).div_ceil(COLS).max(1)
+}
+
+/// Which of the window's cells a visible index occupies, left to right, top to bottom.
+///
+/// The window is filled down each column in turn, as the strip is; `cell_rect` counts
+/// across. This is the one place the two orders meet.
+pub const fn slot(i: usize) -> usize {
+    (i % ROWS) * COLS + i / ROWS
+}
+
+/// Where a cell sits in the strip: which column, and which row of it.
+///
+/// **Column-major**, which is what makes the strip continuous. A grid that filled left
+/// to right would have to know how many columns there are in total before it could place
+/// anything, so adding one item would move every other -- and the window could then only
+/// move a whole page at a time, because a partial page would be laid out differently
+/// from a full one. Filling downwards first means a cell's place never depends on what
+/// is visible, which is what lets the window move one column at a time.
 pub const fn place(i: usize) -> (usize, usize) {
-    (i / CELLS, i % CELLS)
+    (i / ROWS, i % ROWS)
+}
+
+/// The leftmost column to show, given where the cursor is and where the window was.
+///
+/// **Moves as little as it can**, which is what the list does vertically: the cursor
+/// travels inside the window until it reaches an edge, and only then does the window
+/// follow it by one column. A grid that jumped a whole page on every crossing would move
+/// the picture further than the key asked for, and the eye would lose the cell it was
+/// following.
+pub fn window(cursor: usize, len: usize, off: usize) -> usize {
+    let last = columns(len) - 1;
+    let (col, _) = place(cursor.min(len.saturating_sub(1)));
+    let off = off.min(last.saturating_sub(COLS - 1).min(off));
+    if col < off {
+        return col;
+    }
+    if col >= off + COLS {
+        return col + 1 - COLS;
+    }
+    off
 }
 
 /// A movement key, as the grid understands it.
@@ -98,34 +138,29 @@ pub enum Dir {
     Home,
 }
 
-/// Where a movement takes the cursor, over a strip of pages laid side by side.
+/// Where a movement takes the cursor, over one strip of columns.
 ///
-/// **Sideways crosses pages; up and down do not.** The pages are beside each other, so
-/// leaving one downwards would slide the picture sideways for a key that pointed down --
-/// the cursor would arrive somewhere the eye did not follow. Off the right of a page
-/// lands on the same row at the left of the next, which is where the eye already is when
-/// the page slides in.
+/// **Sideways moves one column; up and down stay in the one they are in.** The strip is
+/// continuous, so there is no page to leave -- right is the next column, whatever is on
+/// screen at the time, and the window follows only as far as it must.
 ///
-/// Nothing wraps: from the last page, right stays put. A grid is small enough to see
-/// whole, and wrapping in something you can see whole is a cursor that jumps.
+/// Nothing wraps: at the last column, right stays put. A cursor that jumped back to the
+/// start would be a movement nobody asked for, in a direction they did not press.
 pub fn step(cursor: usize, len: usize, dir: Dir) -> usize {
     if len == 0 {
         return 0;
     }
     let last = len - 1;
-    let (page, within) = place(cursor.min(last));
-    let (row, col) = (within / COLS, within % COLS);
+    let (col, row) = place(cursor.min(last));
     // A cell that does not exist is not somewhere the cursor may land, so every landing
-    // is clamped to the last one -- which is the bottom-right of the final page.
-    let at = |page: usize, row: usize, col: usize| (page * CELLS + row * COLS + col).min(last);
+    // is clamped to the last one.
+    let at = |col: usize, row: usize| (col * ROWS + row).min(last);
     match dir {
         Dir::Home => 0,
-        Dir::Down if row + 1 < ROWS => at(page, row + 1, col),
-        Dir::Up if row > 0 => at(page, row - 1, col),
-        Dir::Right if col + 1 < COLS => at(page, row, col + 1),
-        Dir::Right if (page + 1) * CELLS <= last => at(page + 1, row, 0),
-        Dir::Left if col > 0 => at(page, row, col - 1),
-        Dir::Left if page > 0 => at(page - 1, row, COLS - 1),
+        Dir::Down if row + 1 < ROWS => at(col, row + 1),
+        Dir::Up if row > 0 => at(col, row - 1),
+        Dir::Right if (col + 1) * ROWS <= last => at(col + 1, row),
+        Dir::Left if col > 0 => at(col - 1, row),
         _ => cursor.min(last),
     }
 }
@@ -141,7 +176,7 @@ pub fn render<C: Canvas + ?Sized>(
     cells: &[Cell<'_>],
     selected: usize,
 ) {
-    render_page(canvas, font, small, cells, selected, 0, 1);
+    render_page(canvas, font, small, cells, selected, 0, cells.len());
 }
 
 /// Draw one page of a strip of pages: the cells given, plus what says there are others.
@@ -163,32 +198,38 @@ pub fn render_page<C: Canvas + ?Sized>(
     small: &dyn Face,
     cells: &[Cell<'_>],
     selected: usize,
-    page: usize,
-    pages: usize,
+    off: usize,
+    len: usize,
 ) {
     let (w, h) = (canvas.width(), canvas.height());
     canvas.fill_rect(0, 0, w, h, PAPER);
+    let columns = columns(len);
+    let more = columns > COLS;
     // The dots get a strip of their own rather than being laid over the bottom row's
     // labels: a caption with a dot in it is not a caption.
-    let body = if pages > 1 { h - DOTS_H.min(h) } else { h };
+    let body = if more { h - DOTS_H.min(h) } else { h };
+    // `cells` is the window: the columns from `off`, laid out down each one in turn,
+    // which is the order they are numbered in.
     for (i, cell) in cells.iter().enumerate().take(CELLS) {
         draw_cell(
             canvas,
             font,
             small,
-            &cell_rect(i, w, body),
+            &cell_rect(slot(i), w, body),
             cell,
             i == selected,
         );
     }
-    if pages > 1 {
-        if page > 0 {
+    if more {
+        if off > 0 {
             edge_hint(canvas, body, false);
         }
-        if page + 1 < pages {
+        if off + COLS < columns {
             edge_hint(canvas, body, true);
         }
-        dots(canvas, page, pages);
+        // The dots say how far along the strip the window is, in windows' worth --
+        // which is what a person counts, rather than columns they cannot see.
+        dots(canvas, off / COLS, pages(len));
     }
 }
 

@@ -8,7 +8,11 @@ use crate::font::peep10x20::FONT;
 
 /// The Q1's main menu area: the panel less the status bar.
 const W: usize = 320;
-const H: usize = 224;
+/// The canvas's own height. It used to be 224 -- the panel's content area under the
+/// status bar -- while the canvas under test was 240, so every rect this file computed
+/// was eight pixels out from the one the renderer drew into. Nothing caught it while the
+/// cells being checked happened to sit where the error did not show.
+const H: usize = 240;
 
 /// Every pixel belongs to exactly one cell: no overlap, no gutter nobody chose.
 ///
@@ -18,7 +22,7 @@ const H: usize = 224;
 fn the_cells_tile_the_canvas_exactly() {
     let mut covered = vec![0u8; W * H];
     for i in 0..CELLS {
-        let r = cell_rect(i, W, H);
+        let r = cell_rect(slot(i), W, H);
         for y in r.y..r.y + r.h {
             for x in r.x..r.x + r.w {
                 covered[y * W + x] += 1;
@@ -96,7 +100,7 @@ fn the_selection_marks_one_cell_and_does_not_leak() {
     render(&mut picked, &FONT, &peep7x14::FONT, &cells, 4);
 
     for i in 0..CELLS {
-        let r = cell_rect(i, W, H);
+        let r = cell_rect(slot(i), W, H);
         let before = ink(&plain, &r);
         let after = ink(&picked, &r);
         if i == 4 {
@@ -139,7 +143,7 @@ fn a_cell_with_no_icon_still_says_what_it_is() {
     let mut c = Gray320x240::new();
     render(&mut c, &FONT, &peep7x14::FONT, &cells, 0);
     for i in 0..CELLS {
-        let r = cell_rect(i, W, H);
+        let r = cell_rect(slot(i), W, H);
         assert!(ink(&c, &r) > 0, "cell {i} drew nothing at all");
     }
 }
@@ -152,12 +156,14 @@ fn the_grid_stays_within_the_canvas_it_was_given() {
         label: "Addresses",
         icon: None,
     }; CELLS];
+    /// The rows the status bar keeps, which the grid is drawn below.
+    const BAR: usize = 16;
     let mut c = Gray320x240::new();
     {
-        let mut view = crate::canvas::Inset::new(&mut c, 240 - H);
+        let mut view = crate::canvas::Inset::new(&mut c, BAR);
         render(&mut view, &FONT, &peep7x14::FONT, &cells, 0);
     }
-    for y in 0..240 - H {
+    for y in 0..BAR {
         for x in 0..320 {
             assert_eq!(c.get(x, y), PAPER, "the grid drew at ({x}, {y})");
         }
@@ -206,7 +212,7 @@ fn a_label_never_reaches_its_neighbours_cell() {
     ];
     let mut c = Gray320x240::new();
     render(&mut c, &FONT, &peep7x14::FONT, &cells, usize::MAX);
-    let middle = cell_rect(1, W, H);
+    let middle = cell_rect(slot(1), W, H);
     for y in 0..H {
         for x in 0..W {
             if crate::canvas::Canvas::get(&c, x, y) != PAPER {
@@ -237,8 +243,18 @@ fn the_edge_hints_point_only_where_there_is_more() {
 
     // No cursor anywhere (`usize::MAX`): the selection frame is inset three pixels and
     // would put its own ink in the columns this is measuring.
+    // A strip of nine columns -- three windows' worth -- with the window in the middle.
+    const LONG: usize = CELLS * 3;
     let mut mid = Gray320x240::new();
-    render_page(&mut mid, &FONT, &peep7x14::FONT, &cells, usize::MAX, 1, 3);
+    render_page(
+        &mut mid,
+        &FONT,
+        &peep7x14::FONT,
+        &cells,
+        usize::MAX,
+        3,
+        LONG,
+    );
     assert!(ink_in(&mid, 0, HINT_W + CHEVRON) > 0, "no hint to the left");
     assert!(
         ink_in(&mid, W - HINT_W - CHEVRON, W) > 0,
@@ -247,16 +263,32 @@ fn the_edge_hints_point_only_where_there_is_more() {
 
     // The first page of three: nothing on the left.
     let mut first = Gray320x240::new();
-    render_page(&mut first, &FONT, &peep7x14::FONT, &cells, usize::MAX, 0, 3);
+    render_page(
+        &mut first,
+        &FONT,
+        &peep7x14::FONT,
+        &cells,
+        usize::MAX,
+        0,
+        LONG,
+    );
     assert_eq!(
         ink_in(&first, 0, HINT_W),
         0,
         "the first page points back to a page that is not there"
     );
 
-    // A single page: neither, and no dots.
+    // A strip that fits the window: neither hint, and no dots.
     let mut only = Gray320x240::new();
-    render_page(&mut only, &FONT, &peep7x14::FONT, &cells, usize::MAX, 0, 1);
+    render_page(
+        &mut only,
+        &FONT,
+        &peep7x14::FONT,
+        &cells,
+        usize::MAX,
+        0,
+        CELLS,
+    );
     assert_eq!(ink_in(&only, 0, HINT_W), 0);
     assert_eq!(ink_in(&only, W - HINT_W, W), 0);
     assert_eq!(
@@ -266,32 +298,25 @@ fn the_edge_hints_point_only_where_there_is_more() {
     );
 }
 
-/// Sideways moves cross pages; up and down stay on the one you can see.
+/// Sideways moves the cursor a column; up and down stay in it.
 #[test]
 fn the_cursor_walks_the_strip_the_way_the_eye_does() {
-    // Two full pages and one cell of a third: thirteen.
+    // Thirteen cells: seven columns of two, the last of them half empty.
     let len = 13;
-    // Right along the top row of page one, then onto page two's top-left.
-    assert_eq!(step(0, len, Dir::Right), 1);
-    assert_eq!(
-        step(2, len, Dir::Right),
-        CELLS,
-        "right did not cross a page"
-    );
-    // ...and back again, to the right-hand end of the row it came from.
-    assert_eq!(step(CELLS, len, Dir::Left), 2, "left did not come back");
+    // Right is the next column, at the same row, wherever the window happens to be.
+    assert_eq!(step(0, len, Dir::Right), ROWS);
+    assert_eq!(step(1, len, Dir::Right), ROWS + 1);
+    // ...and back again, to the row it came from.
+    assert_eq!(step(ROWS, len, Dir::Left), 0, "left did not come back");
     assert_eq!(step(0, len, Dir::Left), 0, "the first cell moved left");
 
-    // Down and up stay within the page.
-    assert_eq!(step(0, len, Dir::Down), COLS);
-    assert_eq!(step(COLS, len, Dir::Up), 0);
-    assert_eq!(step(COLS, len, Dir::Down), COLS, "down left the page");
+    // Down and up stay in the column they are in.
+    assert_eq!(step(0, len, Dir::Down), 1);
+    assert_eq!(step(1, len, Dir::Up), 0);
+    assert_eq!(step(1, len, Dir::Down), 1, "down left its column");
     assert_eq!(step(0, len, Dir::Up), 0);
 
-    // The bottom row crosses to the next page's bottom row, not its top.
-    assert_eq!(step(5, len, Dir::Right), CELLS + COLS);
-
-    // The last page is short: every landing clamps to a cell that exists.
+    // Every landing is a cell that exists.
     for from in 0..len {
         for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right, Dir::Home] {
             let to = step(from, len, dir);
@@ -305,12 +330,55 @@ fn the_cursor_walks_the_strip_the_way_the_eye_does() {
     assert_eq!(step(0, 0, Dir::Right), 0);
 }
 
-/// Pages are counted, not guessed.
+/// The strip is columns, and a cell's place in it never moves.
 #[test]
 fn the_strip_is_as_long_as_the_menu() {
-    assert_eq!(pages(0), 1);
-    assert_eq!(pages(1), 1);
+    assert_eq!(columns(0), 1);
+    assert_eq!(columns(1), 1);
+    assert_eq!(columns(ROWS), 1);
+    assert_eq!(columns(ROWS + 1), 2);
     assert_eq!(pages(CELLS), 1);
     assert_eq!(pages(CELLS + 1), 2);
-    assert_eq!(place(CELLS + 2), (1, 2));
+    // Column-major: the first two cells fill one column, the next two the next.
+    assert_eq!(place(0), (0, 0));
+    assert_eq!(place(1), (0, 1));
+    assert_eq!(place(2), (1, 0));
+    // And a cell's place does not depend on how many there are, which is what lets the
+    // window move a column at a time.
+    assert_eq!(place(7), (3, 1));
+}
+
+/// The window follows the cursor by as little as it can.
+///
+/// The rule the list follows going down, sideways: the cursor travels inside the window
+/// until it reaches an edge, and only then does the window move -- by one column, not by
+/// a page.
+#[test]
+fn the_window_moves_only_as_far_as_it_must() {
+    // Ten cells: five columns, of which three are on screen.
+    let len = 10;
+    assert_eq!(columns(len), 5);
+
+    // Inside the window, nothing moves.
+    let mut off = 0;
+    for cursor in 0..COLS * ROWS {
+        off = window(cursor, len, off);
+        assert_eq!(off, 0, "cursor {cursor} moved a window it was inside");
+    }
+    // The fourth column is one past the edge, so the window follows by one.
+    off = window(COLS * ROWS, len, off);
+    assert_eq!(off, 1);
+    // And the fifth by one more.
+    off = window((COLS + 1) * ROWS, len, off);
+    assert_eq!(off, 2);
+    // Coming back leaves it where it is until the cursor passes the left edge.
+    off = window((COLS + 1) * ROWS - 1, len, off);
+    assert_eq!(off, 2, "the window moved for a cursor still inside it");
+    off = window(2, len, off);
+    assert_eq!(off, 1, "the window did not follow the cursor left");
+    off = window(0, len, off);
+    assert_eq!(off, 0);
+
+    // A menu that fits needs no window at all, whatever it is told.
+    assert_eq!(window(0, 4, 3), 0);
 }
