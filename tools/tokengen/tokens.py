@@ -20,6 +20,11 @@ So two rules, both enforced here rather than trusted:
    than guessed at, because guessing it wrong applies one chain's labels to another's
    contracts.
 
+**Addresses are written as hex and stored as bytes.** `literal::address` converts at
+compile time, so the generated table costs twenty bytes a row and can still be read
+against this source list by eye -- and an address that is not an address stops the build
+rather than becoming a row nobody looked at.
+
 The firmware shows the address on screen whatever this says. The table names it; it never
 replaces it.
 """
@@ -114,13 +119,14 @@ def main():
         "    pub decimals: u8,",
         "}",
         "",
+        "use crate::literal::address;",
+        "",
         "/// `(chain_id, address, symbol, decimals)`, sorted so it can be searched.",
         "#[rustfmt::skip]",
         f"static TOKENS: [(u64, [u8; 20], &str, u8); {len(baked)}] = [",
     ]
     for chain, addr, sym, dec in baked:
-        body = ", ".join(f"0x{b:02X}" for b in addr)
-        lines.append(f'    ({chain}, [{body}], "{sym}", {dec}),')
+        lines.append(f'    ({chain}, address("0x{addr.hex()}"), "{sym}", {dec}),')
     lines += [
         "];",
         "",
@@ -143,6 +149,17 @@ def main():
         "/// leaving a person to wonder whether the table was consulted.",
         "pub fn knows_chain(chain_id: u64) -> bool {",
         "    TOKENS.iter().any(|(c, _, _, _)| *c == chain_id)",
+        "}",
+        "",
+        "/// How many rows this build carries.",
+        "pub fn known() -> usize {",
+        "    TOKENS.len()",
+        "}",
+        "",
+        "/// Row `i`, for the test that checks every baked address finds itself.",
+        "#[cfg(test)]",
+        "pub(crate) fn at(i: usize) -> Option<(u64, [u8; 20], &'static str)> {",
+        "    TOKENS.get(i).map(|(c, a, s, _)| (*c, *a, *s))",
         "}",
         "",
     ]

@@ -34,6 +34,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod literal;
 pub mod rlp;
 pub mod summary;
 pub mod tokens;

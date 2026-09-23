@@ -107,7 +107,9 @@ fn an_spl_transfer_is_read_with_its_owner() {
             amount,
             decimals,
             mint,
+            named,
         } => {
+            assert!(named.is_none(), "an unnamed mint cannot be named");
             assert_eq!(from, Some(source));
             assert_eq!(to, Some(dest));
             assert_eq!(o, Some(owner));
@@ -166,7 +168,10 @@ fn a_checked_spl_transfer_carries_its_mint_and_decimals() {
             amount,
             decimals,
             mint: m,
+            named,
         } => {
+            // A mint nobody listed stays unnamed: `key(5)` is not a real mint.
+            assert!(named.is_none());
             assert_eq!(from, Some(source));
             assert_eq!(
                 to,
@@ -311,4 +316,112 @@ fn an_address_is_shown_in_base58() {
         text.bytes().all(|b| b.is_ascii_alphanumeric()),
         "base58 has no punctuation: {text}"
     );
+}
+
+/// A checked transfer of a mint the table carries is named, with its decimals.
+///
+/// The end of the chain the whole table exists for: 12,500,000 of
+/// `EPjFWdd5…` is "12.5 USDC", and the raw number is not an answer to what somebody is
+/// about to approve.
+#[test]
+fn a_known_mint_is_named() {
+    let usdc = SolanaKey(crate::literal::mint(
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    ));
+    let (source, dest, owner) = (key(3), key(4), key(1));
+    let mut data = std::vec![12u8];
+    data.extend_from_slice(&12_500_000u64.to_le_bytes());
+    data.push(6);
+    let ix = SolanaInstruction {
+        program_id: outscript::solana::token_program(),
+        accounts: std::vec![
+            SolanaAccountMeta {
+                pubkey: source,
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: usdc,
+                is_signer: false,
+                is_writable: false
+            },
+            SolanaAccountMeta {
+                pubkey: dest,
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: owner,
+                is_signer: true,
+                is_writable: false
+            },
+        ],
+        data,
+    };
+    let raw = build(owner, std::vec![ix]);
+    let tx = parse(&raw).expect("a transaction");
+    let action = tx.action(0).expect("an action");
+    match action {
+        Action::TransferToken {
+            named,
+            decimals,
+            amount,
+            ..
+        } => {
+            let mint = named.expect("the table carries USDC");
+            assert_eq!(mint.symbol, "USDC");
+            assert_eq!(mint.decimals, 6);
+            assert_eq!(decimals, Some(6));
+            assert_eq!(amount, 12_500_000);
+        }
+        other => panic!("read as {other:?}"),
+    }
+    assert!(
+        !action.decimals_disagree(),
+        "the instruction and the table agree about USDC"
+    );
+}
+
+/// When the instruction's decimals and the table's disagree, that is reported.
+///
+/// Both describe the same mint and the program enforces its own copy, so a disagreement
+/// means this firmware's row is wrong -- and the amount on screen would be out by a
+/// power of ten. Better said than silently resolved in favour of either.
+#[test]
+fn decimals_that_disagree_are_reported() {
+    let usdc = SolanaKey(crate::literal::mint(
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    ));
+    let mut data = std::vec![12u8];
+    data.extend_from_slice(&1u64.to_le_bytes());
+    data.push(9); // the table says six
+    let ix = SolanaInstruction {
+        program_id: outscript::solana::token_program(),
+        accounts: std::vec![
+            SolanaAccountMeta {
+                pubkey: key(3),
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: usdc,
+                is_signer: false,
+                is_writable: false
+            },
+            SolanaAccountMeta {
+                pubkey: key(4),
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: key(1),
+                is_signer: true,
+                is_writable: false
+            },
+        ],
+        data,
+    };
+    let raw = build(key(1), std::vec![ix]);
+    let tx = parse(&raw).expect("a transaction");
+    assert!(tx.action(0).expect("an action").decimals_disagree());
 }

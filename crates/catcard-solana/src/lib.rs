@@ -35,6 +35,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod literal;
+pub mod mints;
+
 #[cfg(test)]
 mod tests;
 
@@ -312,6 +315,8 @@ pub enum Action {
         amount: u64,
         decimals: Option<u8>,
         mint: Option<SolanaKey>,
+        /// What the mint table calls it, when it carries that mint.
+        named: Option<mints::Mint>,
     },
     /// A delegation: somebody else may move this many tokens.
     ApproveToken {
@@ -333,6 +338,27 @@ pub enum Action {
         accounts: usize,
         data_len: usize,
     },
+}
+
+impl Action {
+    /// Whether a checked transfer's decimals disagree with the mint this build knows.
+    ///
+    /// Both numbers describe the same mint and the program enforces that its own copy is
+    /// right, so a disagreement means **this firmware's table is wrong about that mint**
+    /// -- stale, or naming an address that is not what it was when the row was written.
+    /// Either way the amount on screen would be scaled by the wrong power of ten, which
+    /// is the difference between sending one token and a thousand. Worth its own answer
+    /// rather than a silent preference for one source.
+    pub fn decimals_disagree(&self) -> bool {
+        match self {
+            Action::TransferToken {
+                decimals: Some(d),
+                named: Some(m),
+                ..
+            } => *d != m.decimals,
+            _ => false,
+        }
+    }
 }
 
 /// SPL Token instruction tags, from the program's own layout.
@@ -374,20 +400,28 @@ fn decode(
                 to: account(1),
                 owner: account(2),
                 amount: u64_le(&data[1..9]),
+                // The unchecked form names no mint, so there is nothing to look up:
+                // the amount stays in whatever the smallest unit of an unnamed token
+                // is, which is the whole of what anybody off-chain knows about it.
                 decimals: None,
                 mint: None,
+                named: None,
             },
             // transferChecked: tag, amount, decimals. Accounts: source, mint,
             // destination, owner -- the mint is in the middle, which is the whole point
             // of the checked form.
-            Some(TOKEN_TRANSFER_CHECKED) if data.len() == 10 => Action::TransferToken {
-                from: account(0),
-                to: account(2),
-                owner: account(3),
-                amount: u64_le(&data[1..9]),
-                decimals: Some(data[9]),
-                mint: account(1),
-            },
+            Some(TOKEN_TRANSFER_CHECKED) if data.len() == 10 => {
+                let mint = account(1);
+                Action::TransferToken {
+                    from: account(0),
+                    to: account(2),
+                    owner: account(3),
+                    amount: u64_le(&data[1..9]),
+                    decimals: Some(data[9]),
+                    mint,
+                    named: mint.and_then(|m| mints::lookup(&m.0)),
+                }
+            }
             // approve: tag, amount. Accounts: source, delegate, owner.
             Some(TOKEN_APPROVE) if data.len() == 9 => Action::ApproveToken {
                 account: account(0),
