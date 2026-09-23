@@ -227,6 +227,20 @@ const SHAPES: usize = 2;
 /// Solana's coin type, from SLIP-0044. [C]
 const COIN: u32 = 501;
 
+/// Which of this device's keys to try.
+#[derive(Copy, Clone)]
+enum Which {
+    /// The first [`ACCOUNTS`] accounts, in both shapes. What a bare transaction gets:
+    /// it names a public key and nothing else, so the key has to be found.
+    Sweep,
+    /// One account number, in both shapes. What somebody typed after the sweep came up
+    /// empty -- an account kept further out than the sweep looks.
+    Account(u32),
+    /// Exactly this path. What a `sol-sign-request` names, where there is nothing to
+    /// search for and guessing would answer a question nobody asked.
+    Path([u32; 4]),
+}
+
 /// The slot this device can fill, and the signature for it.
 ///
 /// `Ok(None)` is the ordinary answer to "not ours": a transaction can perfectly well ask
@@ -237,9 +251,9 @@ fn sign_it(
     login: &mut catcard_pin::Login,
     ui: &mut crate::ui::Ui<'_>,
     tx: &catcard_solana::Tx<'_>,
-    path: Option<[u32; 4]>,
+    which: Which,
 ) -> Result<Option<(usize, [u8; 64])>, &'static str> {
-    if let Some(path) = path {
+    if let Which::Path(path) = which {
         // A request that named a key. Nothing to search: that path, or nothing.
         let message = tx.message();
         return crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
@@ -255,6 +269,13 @@ fn sign_it(
         });
     }
     let message = tx.message();
+    // One stretch covers whatever is asked for here. A sweep that comes up empty and a
+    // number typed afterwards are two calls and therefore two stretches -- a second of
+    // hashing each -- which is why the sweep is not one account wide.
+    let accounts = match which {
+        Which::Account(n) => n..n + 1,
+        _ => 0..ACCOUNTS,
+    };
     crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
         // Account 0 in both shapes, then account 1 in both, and so on: the first account
         // is the overwhelmingly common one, and this ends on it.
@@ -269,7 +290,7 @@ fn sign_it(
         // masking is really for -- the seed, and everything derived from it -- is
         // unchanged.
         let mut found = None;
-        'search: for account in 0..ACCOUNTS {
+        'search: for account in accounts {
             for shape in 0..SHAPES {
                 let path: &[u32] = match shape {
                     0 => &[44, COIN, account, 0],
@@ -411,34 +432,59 @@ fn review_and_sign(
         return;
     }
 
-    let signed = match sign_it(gate, login, ui, &tx, path) {
-        Ok(Some(found)) => found,
-        Ok(None) => {
-            // Name the key it wanted. "Not ours" on its own leaves a person guessing
-            // between a wrong device, a wrong account and a wrong passphrase; the
-            // address says which, because they can compare it to one this device shows.
-            let mut wanted: heapless::String<64> = heapless::String::new();
-            let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
-            match tx.key(0) {
-                Some(k) => {
-                    let _ = write!(
-                        wanted,
-                        "it wants {}",
-                        catcard_solana::address(&k, &mut addr)
-                    );
+    // The sweep first. What it does not find, the owner can name: an account kept
+    // further out than the sweep looks is a perfectly ordinary thing to have, and the
+    // device has no way to know about it except by being told.
+    //
+    // A request that named a path is not asked about. It said which key it wants, and
+    // the answer to "that key is not here" is not "try another one" -- it is that the
+    // asker and this device disagree about whose signature this is.
+    let mut which = path.map_or(Which::Sweep, Which::Path);
+    let signed = loop {
+        match sign_it(gate, login, ui, &tx, which) {
+            Ok(Some(found)) => break found,
+            Ok(None) => {
+                // Name the key it wanted. "Not ours" on its own leaves a person guessing
+                // between a wrong device, a wrong account and a wrong passphrase; the
+                // address says which, because they can compare it to one this device
+                // shows.
+                let mut wanted: heapless::String<64> = heapless::String::new();
+                let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
+                match tx.key(0) {
+                    Some(k) => {
+                        let _ = write!(
+                            wanted,
+                            "it wants {}",
+                            catcard_solana::address(&k, &mut addr)
+                        );
+                    }
+                    None => {
+                        let _ = wanted.push_str("any key to go back");
+                    }
                 }
-                None => {
-                    let _ = wanted.push_str("any key to go back");
+                crate::menu::message(ui.panel, HEAD, "no key of this device signs it", &wanted);
+                crate::menu::wait_for_any_key(ui);
+                if path.is_some() {
+                    return;
                 }
+                // Typed, not stepped: an account is a number somebody knows, and the
+                // one they know may be 37. Cancelling here is the way out.
+                let Some(n) = crate::menu::ask_number(
+                    ui,
+                    HEAD,
+                    None,
+                    "account",
+                    "try an account number, or cancel",
+                ) else {
+                    return;
+                };
+                which = Which::Account(n);
             }
-            crate::menu::message(ui.panel, HEAD, "no key of this device signs it", &wanted);
-            crate::menu::wait_for_any_key(ui);
-            return;
-        }
-        Err(why) => {
-            crate::menu::message(ui.panel, HEAD, why, "any key to go back");
-            crate::menu::wait_for_any_key(ui);
-            return;
+            Err(why) => {
+                crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+                crate::menu::wait_for_any_key(ui);
+                return;
+            }
         }
     };
     let (slot, signature) = signed;
