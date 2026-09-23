@@ -271,7 +271,13 @@ impl UsbTask {
     /// a host writes to it tells its owner nothing about what is happening.
     pub fn receiving(&self) -> Option<(u32, u32)> {
         match &self.stage {
-            Stage::Receiving(staged) => Some((staged.received(), staged.length())),
+            // Both ways an image arrives. A compressed one counts in *image* bytes
+            // rather than wire bytes: what somebody is watching is the thing being
+            // installed, and a bar that stopped at seventy per cent because the image
+            // deflated well would be measuring the wrong thing.
+            Stage::Receiving(staged) | Stage::Unpacking { staged, .. } => {
+                Some((staged.received(), staged.length()))
+            }
             _ => None,
         }
     }
@@ -282,7 +288,7 @@ impl UsbTask {
     /// finds out when its next frame is refused, which is the honest order -- the owner
     /// said no before the host finished asking.
     pub fn abandon(&mut self) {
-        if matches!(self.stage, Stage::Receiving(_)) {
+        if matches!(self.stage, Stage::Receiving(_) | Stage::Unpacking { .. }) {
             crate::catlog!("upgrade: transfer cancelled at the screen");
             self.stage = Stage::Idle;
             self.frames.reset();
