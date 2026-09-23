@@ -35,8 +35,10 @@ CHAIN_IDS = {
     "optimism": 10,
     "bnb": 56,
     "polygon": 137,
-    "base": 8453,
+    "hyperevm": 999,
     "mantle": 5000,
+    "base": 8453,
+    "plasma": 9745,
     "arbitrum": 42161,
     "linea": 59144,
 }

@@ -545,17 +545,20 @@ mod the_token_table {
             0xA0, 0xB8, 0x69, 0x91, 0xC6, 0x21, 0x8B, 0x36, 0xC1, 0xD1, 0x9D, 0x4A, 0x2E, 0x9E,
             0xB0, 0xCE, 0x36, 0x06, 0xEB, 0x48,
         ];
+        // `u64::MAX` rather than some plausible number: this test used 999 until 999
+        // turned out to be HyperEVM, and what it means to check is a chain the table
+        // cannot ever carry -- not one it happens not to carry today.
         assert!(
-            tokens::lookup(999, &usdc).is_none(),
-            "chain 999 is not baked"
+            tokens::lookup(u64::MAX, &usdc).is_none(),
+            "mainnet's USDC was named on a chain that does not exist"
         );
-        assert!(!tokens::knows_chain(999));
+        assert!(!tokens::knows_chain(u64::MAX));
     }
 
     /// An address nothing listed is not named, on any chain.
     #[test]
     fn an_unlisted_address_is_never_named() {
-        for chain in [1, 10, 56, 137, 5000, 8453, 42161, 59144] {
+        for chain in [1, 10, 56, 137, 999, 5000, 8453, 9745, 42161, 59144] {
             assert!(tokens::lookup(chain, &[0x42; 20]).is_none());
         }
     }
