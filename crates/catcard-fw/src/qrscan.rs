@@ -888,18 +888,8 @@ fn offer(
             menu::wait_for_any_key(ui);
         }
         #[cfg(feature = "multichain")]
-        Content::SolanaTx { .. } => {
-            let bytes = &lease.bytes()[at..at + len];
-            let mut said: heapless::String<80> = heapless::String::new();
-            match catcard_solana::parse(bytes) {
-                Ok(tx) => crate::solanatx::headline(&tx, &mut said),
-                Err(e) => {
-                    use core::fmt::Write as _;
-                    let _ = write!(said, "{}", e.why());
-                }
-            }
-            menu::message(ui.panel, "Solana transaction", &said, "any key to go back");
-            menu::wait_for_any_key(ui);
+        Content::SolanaTx { base64 } => {
+            crate::solanatx::screen(ui, &lease.bytes()[at..at + len], base64);
         }
         Content::Seed(_) => {}
         Content::Text => {

@@ -35,6 +35,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod link;
 pub mod literal;
 pub mod mints;
 

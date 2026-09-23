@@ -21,9 +21,13 @@ pub(crate) enum Content {
     /// An EVM transaction, with the chain it names.
     #[cfg(feature = "multichain")]
     EvmTx { chain_id: Option<u64> },
-    /// A Solana transaction, and how far through signing it is.
+    /// A Solana transaction: the bytes themselves, or written down as base64.
+    ///
+    /// `base64` is the character range of that base64 within the payload, for the one
+    /// that arrived written down -- a broadcast link, or what a wallet's "copy
+    /// transaction" gives. `None` means the payload is the transaction.
     #[cfg(feature = "multichain")]
-    SolanaTx { required: usize, present: usize },
+    SolanaTx { base64: Option<(usize, usize)> },
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -111,6 +115,20 @@ impl Content {
     }
 }
 
+/// Whether `bytes` are a Solana transaction, whole and entire.
+///
+/// There is no magic number, so what makes these bytes one is that all of them read as
+/// one: every length fits, every account index names a key the message carries, and
+/// nothing is left over at the end. The two extra conditions are against the empty
+/// shapes that technically parse -- a message with no instructions does nothing, and one
+/// requiring no signature is not something to offer to sign.
+#[cfg(feature = "multichain")]
+fn is_solana(bytes: &[u8]) -> bool {
+    catcard_solana::parse(bytes)
+        .map(|tx| tx.instruction_count() > 0 && tx.signing().required > 0)
+        .unwrap_or(false)
+}
+
 /// Decide what arrived.
 ///
 /// Cheap checks in the order that a false positive matters least. The firmware magic is
@@ -138,15 +156,8 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
     // Tried before the EVM case because it is the stricter test: an EVM transaction is
     // RLP, and RLP is a shape a great many things fall into.
     #[cfg(feature = "multichain")]
-    if let Ok(tx) = catcard_solana::parse(bytes)
-        && tx.instruction_count() > 0
-        && tx.signing().required > 0
-    {
-        let signing = tx.signing();
-        return Content::SolanaTx {
-            required: signing.required,
-            present: signing.present,
-        };
+    if is_solana(bytes) {
+        return Content::SolanaTx { base64: None };
     }
     // An EVM transaction: RLP, or an EIP-2718 envelope. Tried before the text case
     // because a transaction is bytes and a failed parse costs one pass over them.
@@ -179,6 +190,29 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
     // length that is valid text stays text, and a Compact code whose entropy happens to
     // be printable is a case this loses to a rule that keeps every text scan working.
     let text = core::str::from_utf8(bytes).ok();
+    // A Solana transaction written down: a broadcast link, or the base64 on its own.
+    //
+    // This one has to be *decoded* before it can be claimed, because base64 of a
+    // transaction has no prefix the way base64 of a PSBT does -- `cHNidP` is the PSBT
+    // magic showing through, and Solana has no magic. So the text is decoded into a
+    // borrowed block and parsed, and a claim is made only if the whole of it reads as a
+    // transaction. The work is bounded by the network's own packet size: anything longer
+    // than 1232 bytes is not a transaction anybody could send, and is not decoded.
+    //
+    // Before the SeedQR and text cases, because base64 is text and a transaction shown
+    // as gibberish is a transaction nobody can sign.
+    #[cfg(feature = "multichain")]
+    if let Some(text) = text
+        && let Some(body) = catcard_solana::link::body_of(text)
+        && let Some(mut block) = crate::heap::take(catcard_solana::link::PACKET_MAX)
+        && let Ok(n) = outscript::base64::decode_to_slice(body, block.bytes())
+        && is_solana(&block.bytes()[..n])
+    {
+        let at = body.as_ptr() as usize - bytes.as_ptr() as usize;
+        return Content::SolanaTx {
+            base64: Some((at, body.len())),
+        };
+    }
     match catcard_wallet::seedqr::kind_of(bytes) {
         Some(kind @ catcard_wallet::seedqr::Kind::Standard) => return Content::Seed(kind),
         Some(kind @ catcard_wallet::seedqr::Kind::Compact) if text.is_none() => {

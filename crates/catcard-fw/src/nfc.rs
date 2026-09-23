@@ -255,6 +255,109 @@ fn build(out: &mut [u8], raw: &[u8]) -> Result<usize, &'static str> {
     catcard_nfc::finish(out, at).map_err(|_| "too big for the tag")
 }
 
+/// Offer to put a Solana transaction on the tag as a link, and hold the screen while a
+/// phone reads it.
+///
+/// The same tap as [`offer_broadcast`], and a different bargain. That one puts the
+/// transaction in a URL's *query*, so the host it names sees it the moment the phone
+/// opens the link. This one puts it after a `#`, and a fragment is never sent: the phone
+/// opens a page, the page reads the transaction out of its own address bar, and nothing
+/// leaves the phone until somebody there says to send it. `raw` is the transaction
+/// exactly as it would be submitted.
+///
+/// A transaction still waiting for signatures is worth passing on too -- that is how it
+/// reaches whoever signs next -- so this offers either way and says which it is.
+#[cfg(feature = "multichain")]
+pub(crate) fn offer_solana_link(ui: &mut Ui<'_>, raw: &[u8], missing: usize) {
+    use catcard_solana::link;
+
+    const HEAD: &str = "Link";
+    if BOARD.nfc.is_none() {
+        return;
+    }
+    if raw.len() > link::PACKET_MAX || catcard_nfc::image_len(link::link_len(raw.len())) > AREA {
+        crate::catlog!("nfc: {} bytes is too big for the tag", raw.len());
+        return;
+    }
+    menu::ask(
+        ui.panel,
+        "Hand it to a phone?",
+        "a phone that taps this",
+        if missing == 0 {
+            "can send the transaction"
+        } else {
+            "gets it to sign"
+        },
+    );
+    if !menu::confirmed(ui) {
+        return;
+    }
+    if !present() {
+        menu::message(ui.panel, HEAD, "no tag answered", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+
+    // Sized to this link rather than to the tag: the transaction that arrived is still
+    // in memory while this runs, and a whole second copy of the user area on top of it
+    // is how a screen runs out of heap for no reason.
+    let Some(mut held) = crate::heap::take(catcard_nfc::image_len(link::link_len(raw.len())))
+    else {
+        menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    let out = held.bytes();
+    let n = match build_solana_link(out, raw) {
+        Ok(n) => n,
+        Err(why) => {
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    menu::blocking_screen(ui.panel, HEAD, "writing the tag");
+    match write_user_memory(&out[..n]) {
+        Ok(()) => {
+            crate::catlog!("nfc: {} bytes on the tag", n);
+            drop(held);
+            menu::message(
+                ui.panel,
+                "Tap your phone",
+                "to take it",
+                "any key when done",
+            );
+            menu::wait_for_any_key(ui);
+            clear();
+        }
+        Err(why) => {
+            crate::catlog!("nfc: write failed: {}", why);
+            drop(held);
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
+    }
+}
+
+/// Build the tag image for `raw`: the studio link, with the transaction base64'd in its
+/// fragment.
+#[cfg(feature = "multichain")]
+fn build_solana_link(out: &mut [u8], raw: &[u8]) -> Result<usize, &'static str> {
+    use catcard_solana::link;
+
+    // `https://www.` is one byte in an NDEF URI, so the text starts at the host -- which
+    // is where [`link::write_link`] starts too.
+    let mut at = catcard_nfc::begin(
+        out,
+        AREA,
+        link::link_len(raw.len()),
+        catcard_nfc::prefix::HTTPS_WWW,
+    )
+    .map_err(|_| "too big for the tag")?;
+    at += link::write_link(raw, &mut out[at..]).ok_or("too big for the tag")?;
+    catcard_nfc::finish(out, at).map_err(|_| "too big for the tag")
+}
+
 // ---------------------------------------------------------------------------
 // Sharing an address
 // ---------------------------------------------------------------------------
@@ -537,9 +640,11 @@ fn first_usable(image: &[u8]) -> Option<(Content, usize, usize)> {
             (Some(READY_TEXT), _) => continue,
             (Some(text), _) => text.as_bytes(),
             (_, Some(("", tail))) => tail.as_bytes(),
-            // An abbreviated URI is a link, never a payload: joining the two halves would
-            // need a buffer, and nothing this device signs arrives as `https://`.
-            (_, Some(_)) => continue,
+            // An abbreviated URI keeps its scheme in one byte of the record, and the
+            // two halves are never joined -- that would need a buffer. The tail alone is
+            // enough for the one link this device reads: a transaction lives after the
+            // `#`, so what identifies it is in the half the record spells out.
+            (_, Some((_, tail))) => tail.as_bytes(),
             _ => record.payload,
         };
         if bytes.is_empty() {
@@ -605,18 +710,8 @@ fn offer(
             menu::wait_for_any_key(ui);
         }
         #[cfg(feature = "multichain")]
-        Content::SolanaTx { .. } => {
-            let bytes = &held.bytes()[at..at + len];
-            let mut said: heapless::String<80> = heapless::String::new();
-            match catcard_solana::parse(bytes) {
-                Ok(tx) => crate::solanatx::headline(&tx, &mut said),
-                Err(e) => {
-                    use core::fmt::Write as _;
-                    let _ = write!(said, "{}", e.why());
-                }
-            }
-            menu::message(ui.panel, "Solana transaction", &said, "any key to go back");
-            menu::wait_for_any_key(ui);
+        Content::SolanaTx { base64 } => {
+            crate::solanatx::screen(ui, &held.bytes()[at..at + len], base64);
         }
         Content::Text => {
             let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("(not text)");

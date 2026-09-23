@@ -63,3 +63,64 @@ pub(crate) fn headline(tx: &Tx<'_>, out: &mut heapless::String<80>) {
         let _ = write!(out, "; {} accounts not shown", w + r);
     }
 }
+
+/// Show what a transaction does, and offer to hand it on.
+///
+/// `payload` is what arrived and `base64` says where the transaction is inside it: a
+/// range when it came written down -- a broadcast link, or the base64 on its own -- and
+/// `None` when the payload is the transaction itself. Both the scanner and the tag come
+/// through here, because what a person needs to see does not depend on which way it
+/// arrived.
+///
+/// The review screen that lays a transaction out line by line, and the signing behind
+/// it, are the next pieces. What this can already do is the other half of the journey:
+/// put the transaction back on the tag as a link, which is how it reaches a phone that
+/// can send it -- or the next signer, when it is still short of signatures.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn screen(ui: &mut crate::ui::Ui<'_>, payload: &[u8], base64: Option<(usize, usize)>) {
+    use catcard_solana::link;
+
+    const HEAD: &str = "Solana transaction";
+
+    // Held here so that a decoded transaction outlives the borrow taken from it, and so
+    // that a transaction which arrived as bytes costs no memory at all.
+    let mut block;
+    let raw: &[u8] = match base64 {
+        None => payload,
+        Some((at, len)) => {
+            let Some(text) = payload
+                .get(at..at + len)
+                .and_then(|b| core::str::from_utf8(b).ok())
+            else {
+                return;
+            };
+            let Some(got) = crate::heap::take(link::PACKET_MAX) else {
+                crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
+                crate::menu::wait_for_any_key(ui);
+                return;
+            };
+            block = got;
+            let Ok(n) = outscript::base64::decode_to_slice(text, block.bytes()) else {
+                return;
+            };
+            &block.bytes()[..n]
+        }
+    };
+
+    let Ok(tx) = catcard_solana::parse(raw) else {
+        crate::menu::message(
+            ui.panel,
+            HEAD,
+            "this is not a transaction",
+            "any key to go back",
+        );
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let mut said: heapless::String<80> = heapless::String::new();
+    headline(&tx, &mut said);
+    let missing = tx.signing().missing();
+    crate::menu::message(ui.panel, HEAD, &said, "any key to go back");
+    crate::menu::wait_for_any_key(ui);
+    crate::nfc::offer_solana_link(ui, raw, missing);
+}
