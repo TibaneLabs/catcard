@@ -349,17 +349,62 @@ fn fits_is_a_size_that_fits() {
 }
 
 /// Numbering that cannot describe a message is refused.
+///
+/// A part *past* `seq_len` is not in that category any more: it is a fountain mixture,
+/// which is what an animation emits once it has shown every pure part once.
 #[test]
 fn impossible_numbering_is_refused_when_writing() {
     let message = payload(100);
     let mut line = vec![0u8; 4096];
-    for (num, len) in [(0u32, 3u32), (4, 3), (1, 0)] {
+    for (num, len) in [(0u32, 3u32), (1, 0)] {
         assert_eq!(
             encode::part("bytes", &message, num, len, &mut line),
             Err(encode::Error::Numbering),
             "{num} of {len}"
         );
     }
+    assert!(encode::part("bytes", &message, 4, 3, &mut line).is_ok());
+}
+
+/// What this writes past the end of the pure parts, its own reader reads back.
+///
+/// The encoder and the decoder choose fragments with the same function, so this is not
+/// two implementations agreeing -- it is one, used from both ends. What the test proves
+/// is the other half: that the XOR the encoder does is the XOR the decoder undoes, and
+/// that a receiver which sees *only* mixtures still gets the message. That is what a
+/// camera pointed at an animation already in progress sees.
+#[test]
+fn a_mixture_this_writes_is_a_mixture_this_reads() {
+    let message = payload(400);
+    let seq_len = 5u32;
+    let fragment = message.len().div_ceil(seq_len as usize);
+    let mut known = vec![0u8; fragment * seq_len as usize];
+    let mut scratch = vec![0u8; 1024];
+    let mut line = vec![0u8; 4096];
+    let mut c = Collector::new();
+
+    let mut seq = seq_len + 1;
+    while !c.complete() {
+        assert!(
+            seq < seq_len + 200,
+            "gave up after {} mixtures",
+            seq - seq_len
+        );
+        let n = encode::part("crypto-psbt", &message, seq, seq_len, &mut line).expect("written");
+        let text = core::str::from_utf8(&line[..n]).expect("ascii");
+        seq += 1;
+        let Ok(p) = c.accept_mixing(text, &mut scratch, Some(&known)) else {
+            continue;
+        };
+        if p.fresh {
+            let from = p.index as usize * fragment;
+            known[from..from + fragment]
+                .copy_from_slice(&scratch[p.at.start..p.at.start + fragment]);
+        }
+        c.confirm(p);
+    }
+    assert_eq!(&known[..message.len()], &message[..]);
+    assert!(c.verify(&known[..message.len()]));
 }
 
 // --- single-part URs ----------------------------------------------------------------

@@ -87,15 +87,24 @@ const fn digits(mut n: u32) -> usize {
     d
 }
 
+/// The widest sequence number a part's line is sized for.
+///
+/// An animation does not stop at `seq_len`: past it the parts are fountain mixtures,
+/// numbered upwards for as long as the screen is shown, so the number in the header
+/// keeps growing. Sized for a hundred thousand parts, which at four a second is seven
+/// hours of somebody holding a phone up to the panel -- and costing the fragment a few
+/// bytes against that is better than a line that outgrows its symbol mid-animation.
+const SEQ_WIDEST: u32 = 99_999;
+
 /// The bytes a fragment should carry if a part's line must fit `chars` characters.
 ///
 /// Solved by trying, because the header's size depends on the numbers in it and the
 /// numbers do not depend on the fragment: a few steps, once, when a screen is opened.
 pub fn fits(ty: &str, chars: usize, seq_len: u32) -> usize {
     let mut best = 0;
-    // The widest sequence number is the last one, so size against that.
+    // Against the widest number the animation can reach, not the last pure part's.
     for fragment in 1..chars {
-        if encoded_len(ty, fragment, seq_len, seq_len) <= chars {
+        if encoded_len(ty, fragment, SEQ_WIDEST.max(seq_len), seq_len) <= chars {
             best = fragment;
         } else {
             break;
@@ -116,16 +125,27 @@ pub fn part(
     seq_len: u32,
     out: &mut [u8],
 ) -> Result<usize, Error> {
-    if seq_len == 0 || seq_num == 0 || seq_num > seq_len {
+    if seq_len == 0 || seq_num == 0 {
         return Err(Error::Numbering);
     }
     let fragment = message.len().div_ceil(seq_len as usize);
-    let at = (seq_num - 1) as usize * fragment;
 
     // The CBOR body, built into the tail of `out` so there is one buffer rather than
     // two: bytewords doubles the length, so the second half is always free at this
     // point and is overwritten from the front as the words are written.
     let checksum = outscript::bcur::crc32(message);
+    // **Past `seq_len` this is a fountain mixture**, not a repeat of a pure part.
+    //
+    // An encoder that looped 1, 2, 3, 1, 2, 3 makes a receiver wait for whichever part
+    // it missed to come round again; a fountain lets any later part fill any gap, which
+    // is the whole reason the format has them. The set is chosen by the same function
+    // the decoder uses, so the two agree by construction rather than by two people
+    // reading the same specification.
+    //
+    // A message that fits one symbol never comes through here: that is `single`, and a
+    // static code is read at a glance rather than waited on.
+    let set = crate::fountain::choose_fragments(seq_num, seq_len as usize, checksum)
+        .ok_or(Error::Numbering)?;
     let mut body: heapless::Vec<u8, 1024> = heapless::Vec::new();
     let _ = body.push(0x85); // array of five
     uint(seq_num as u64, &mut body);
@@ -134,8 +154,15 @@ pub fn part(
     uint(checksum as u64, &mut body);
     bytes_header(fragment, &mut body);
     for i in 0..fragment {
-        // Past the end of the message is padding, which the reader discards.
-        let _ = body.push(message.get(at + i).copied().unwrap_or(0));
+        // Every fragment in the set, XORed. For a pure part the set holds one, so this
+        // is a copy; past the end of the message is padding, which the reader discards.
+        let mut b = 0u8;
+        for f in 0..seq_len as usize {
+            if set.has(f) {
+                b ^= message.get(f * fragment + i).copied().unwrap_or(0);
+            }
+        }
+        let _ = body.push(b);
     }
 
     let head = {

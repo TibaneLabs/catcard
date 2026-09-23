@@ -215,7 +215,11 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
         if key_within(ui, FRAME_MS) {
             return;
         }
-        at = if at >= total { 1 } else { at + 1 };
+        // **Onwards, not back to one.** Past `total` the parts are fountain mixtures,
+        // and a reader that missed one fills the gap from the next mixture that covers
+        // it rather than waiting for the cycle to come round. Looping would make every
+        // missed part cost a whole animation.
+        at = at.checked_add(1).unwrap_or(1);
     }
 }
 
