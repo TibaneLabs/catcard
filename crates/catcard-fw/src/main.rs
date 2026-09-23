@@ -126,8 +126,8 @@ mod signtx;
 /// What arrived, when the device did not ask for anything in particular.
 #[cfg(not(feature = "board-mk3"))]
 mod sniff;
-/// Solana transactions, in the words a screen uses.
-#[cfg(feature = "multichain")]
+/// Solana transactions: read out, signed, and handed back.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod solanatx;
 mod splash;
 mod staging;

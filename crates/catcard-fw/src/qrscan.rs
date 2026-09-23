@@ -806,6 +806,16 @@ fn offer(
     let base = area.image_at();
     let mut lease = area.into_lease();
 
+    // A request for a Solana signature is answered where it lands, rather than being
+    // turned into a `Content` first. It is not only a payload: it carries the key that
+    // is wanted and the handle the answer has to quote, and flattening it into "some
+    // bytes that look like a transaction" would throw both away.
+    #[cfg(feature = "multichain")]
+    if kind == Some(catcard_bcur::registry::Kind::SolSignRequest) {
+        crate::solanatx::sign_request(gate, login, ui, &lease.bytes()[base..base + len]);
+        return;
+    }
+
     // What the UR said, if it said anything, and otherwise what the bytes look like. A
     // registry item is CBOR, so the payload starts a few bytes into the message --
     // `skip` is that header, and `base` stays where the scan wrote, because the
@@ -889,7 +899,7 @@ fn offer(
         }
         #[cfg(feature = "multichain")]
         Content::SolanaTx { base64 } => {
-            crate::solanatx::screen(ui, &lease.bytes()[at..at + len], base64);
+            crate::solanatx::screen(gate, login, ui, &lease.bytes()[at..at + len], base64);
         }
         Content::Seed(_) => {}
         Content::Text => {

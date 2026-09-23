@@ -711,7 +711,7 @@ fn offer(
         }
         #[cfg(feature = "multichain")]
         Content::SolanaTx { base64 } => {
-            crate::solanatx::screen(ui, &held.bytes()[at..at + len], base64);
+            crate::solanatx::screen(gate, login, ui, &held.bytes()[at..at + len], base64);
         }
         Content::Text => {
             let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("(not text)");
