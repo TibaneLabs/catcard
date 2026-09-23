@@ -209,7 +209,13 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
             menu::wait_for_any_key(ui);
             return;
         };
-        show(ui, grid.width(), |x, y| grid.get(x, y), at, total);
+        // **No bar.** Past the pure parts these are fountain mixtures, numbered upwards
+        // for as long as the screen is shown, so there is nothing for a fraction to be
+        // of: the animation does not end and does not come round. A bar that filled and
+        // then sat full -- or worse, kept filling -- would be answering "how far through
+        // is this?" with a number that means nothing. What a reader has caught is on the
+        // reader's screen, which is where that question belongs.
+        show(ui, grid.width(), |x, y| grid.get(x, y), None);
         if lone {
             // Nothing to animate. Redrawing the one code four times a second would
             // only make it flicker at the camera trying to read it -- but the wait
@@ -290,12 +296,13 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
             return;
         };
 
+        // BBQr keeps the bar: its parts are numbered and the animation cycles, so the
+        // bar says where in the cycle this frame is and it comes round again.
         show(
             ui,
             grid.width(),
             |x, y| grid.get(x, y),
-            at as u32 + 1,
-            total as u32,
+            Some((at as u32 + 1, total as u32)),
         );
 
         // A key leaves, checked while this frame is up rather than between cycles.
@@ -319,7 +326,12 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
 /// goes in the margin the square symbol leaves on a wide screen, so it costs nothing --
 /// and it answers the only question anyone has while holding a phone at the screen,
 /// which is whether this is going anywhere at all.
-fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, at: u32, total: u32) {
+fn show(
+    ui: &mut Ui<'_>,
+    modules: usize,
+    get: impl Fn(usize, usize) -> bool,
+    progress: Option<(u32, u32)>,
+) {
     use catcard_ui::canvas::{Canvas, INK, PAPER};
 
     display::draw_with(ui.panel, &catcard_ui::st7789::GREYS, |c| {
@@ -328,10 +340,14 @@ fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, at:
         // The symbol is square and centred, so on a 320-wide panel showing 224 rows it
         // leaves about fifty pixels each side. The bar lives in the right-hand one and
         // never touches the code.
+        // Only where there is something to be a fraction of.
+        let Some((at, total)) = progress.filter(|&(_, total)| total > 0) else {
+            return;
+        };
         let (w, h) = (c.width(), c.height());
         let side = h.min(w);
         let gutter = w.saturating_sub(side) / 2;
-        if gutter < 8 || total == 0 {
+        if gutter < 8 {
             return;
         }
         let bar_w = (gutter / 3).clamp(3, 10);
@@ -341,7 +357,7 @@ fn show(ui: &mut Ui<'_>, modules: usize, get: impl Fn(usize, usize) -> bool, at:
         // The whole track faintly, then the part done brightly: an empty bar and a
         // missing bar look the same, and only one of them means something is wrong.
         c.fill_rect(x, top, bar_w, span, PAPER + 4);
-        let done = (span * at as usize / total as usize).max(1);
+        let done = (span * at as usize / total as usize).clamp(1, span);
         c.fill_rect(x, top, bar_w, done, INK);
     });
 }
