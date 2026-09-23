@@ -151,6 +151,8 @@ enum Screen {
     /// This device's account keys as one `ur:crypto-account` code.
     #[cfg(feature = "board-q1")]
     AccountUr,
+    /// Every enabled chain's account as one `ur:crypto-multi-accounts` code.
+    Keystone,
     /// A run of one account's receive addresses, written to the card as CSV.
     AddressCsv,
     BrowseSd,
@@ -608,6 +610,11 @@ const EXPORT_ITEMS: &[&str] = &[
     // the software that reads one is pointing a camera rather than reading a card.
     #[cfg(feature = "board-q1")]
     "Account (UR)",
+    // Every enabled chain at once, as a wallet's "sync with your hardware wallet"
+    // expects it. The Bitcoin exports above are one chain each; this is the multichain
+    // answer, and the only one that gets somebody's Solana and Ethereum accounts across
+    // in the same scan.
+    "Keystone",
     "Dump Summary",
     // Addresses rather than keys: the file a watch-only wallet's owner checks against, or
     // hands to whoever is paying them, without either side needing an xpub.
@@ -1211,6 +1218,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::KeyMenu,
         ),
         Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::Keystone => to(
+            |a| export_keystone(a.gate, a.login, a.ui),
+            Screen::ExportMenu,
+        ),
         #[cfg(feature = "board-q1")]
         Screen::AccountUr => to(
             |a| export_account_ur(a.gate, a.login, a.ui),
@@ -1647,6 +1658,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Account (UR)")) => Screen::AccountUr,
+            (Key::Confirm, Some("Keystone")) => Screen::Keystone,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Address CSV")) => Screen::AddressCsv,
             (Key::Cancel, _) => Screen::Utils,
@@ -2165,6 +2177,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
+        Screen::Keystone => {}
         #[cfg(feature = "board-q1")]
         Screen::AccountUr => {}
         Screen::AddressExplorer
@@ -5186,6 +5199,196 @@ fn build_account_ur(
         enc.push(d.script, &d.key).ok()?;
     }
     enc.finish().ok()
+}
+
+/// Every enabled chain's account, as one `crypto-multi-accounts` code.
+///
+/// What a wallet reads when it offers to "sync with your hardware wallet". One code, one
+/// key per chain, so somebody sets up Ethereum and Solana and Bitcoin in one scan
+/// instead of three -- which is the difference between a device people use for
+/// everything and one they use for the chain they set up first.
+///
+/// # Which key each chain gets
+///
+/// The node a wallet can derive addresses under, and the level of it depends on what
+/// kind of chain it is:
+///
+/// - **Account-model** (EVM, Tron): `m/44'/coin'/0'/0`, the change node, because that is
+///   what those wallets derive `/0`, `/1`, `/2` under.
+/// - **UTXO** (Bitcoin and its family): `m/44'/coin'/0'`, the account node, under which a
+///   wallet derives both the receive and change chains itself.
+/// - **ed25519** (Solana): the account key itself at `m/44'/coin'/0'/0'`. SLIP-0010 has
+///   no public derivation, so there is no node to hand over -- the key *is* the account,
+///   and the wallet base58s it into the address.
+///
+/// A chain whose scheme this cannot express is left out rather than approximated, and
+/// the screen says how many went in.
+fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_bcur::registry::{Kind, hdkey, multi};
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::chain::{Encoding, Scheme};
+
+    const HEAD: &str = "Keystone";
+
+    // Every chain the owner has enabled, which on a build with one chain is that one.
+    let order = crate::chains::enabled(gate, login, ui);
+    let mut keys: heapless::Vec<hdkey::HdKey, { crate::chains::MAX }> = heapless::Vec::new();
+
+    // The secp256k1 chains, from the BIP-32 master. Derived a level at a time with the
+    // bar moving between steps, which is what keeps a dozen accounts from looking like a
+    // device that has stopped.
+    let Some(master) = unlock_master(gate, login, ui, HEAD) else {
+        return;
+    };
+    let fingerprint = u32::from_be_bytes(crate::keywork::run(|kw| master.fingerprint(kw)));
+    {
+        let mut busy = Working::new(ui.panel, HEAD, "deriving accounts");
+        for chain in order.iter() {
+            if chain.scheme != Scheme::Bip32 {
+                continue;
+            }
+            // An account-model chain's wallet derives under the change node; a UTXO
+            // wallet derives both chains under the account node.
+            let account_model = chain
+                .formats
+                .first()
+                .is_some_and(|f| matches!(f.encoding, Encoding::Evm | Encoding::Tron));
+            let mut steps: heapless::Vec<ChildNumber, 4> = heapless::Vec::new();
+            let Ok(purpose) = ChildNumber::hardened(44) else {
+                continue;
+            };
+            let Ok(coin) = ChildNumber::hardened(chain.coin_type) else {
+                continue;
+            };
+            let Ok(account) = ChildNumber::hardened(0) else {
+                continue;
+            };
+            let _ = steps.push(purpose);
+            let _ = steps.push(coin);
+            let _ = steps.push(account);
+            if account_model {
+                let Ok(change) = ChildNumber::normal(0) else {
+                    continue;
+                };
+                let _ = steps.push(change);
+            }
+            let Some(xpub) = public_at(&master, &steps, &mut busy, ui.panel) else {
+                continue;
+            };
+            let Some(key) = hdkey_for(chain, &steps, fingerprint, &xpub) else {
+                continue;
+            };
+            let _ = keys.push(key);
+        }
+    }
+    // The private key goes before anything else happens: what follows is a screen that
+    // stands there until somebody walks up to it.
+    drop(master);
+
+    // The ed25519 chains, which need the seed rather than the BIP-32 master. One more
+    // stretch, and only if any such chain is enabled -- which on a Bitcoin-only build is
+    // never, and there the derivation is not compiled at all.
+    #[cfg(feature = "multichain")]
+    let wants_ed = order.iter().any(|c| c.scheme == Scheme::Slip10Ed25519);
+    #[cfg(not(feature = "multichain"))]
+    let wants_ed = false;
+    #[cfg(feature = "multichain")]
+    if wants_ed {
+        let got = with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+            let mut out: heapless::Vec<hdkey::HdKey, { crate::chains::MAX }> = heapless::Vec::new();
+            for chain in order.iter() {
+                if chain.scheme != Scheme::Slip10Ed25519 {
+                    continue;
+                }
+                let path = [44, chain.coin_type, 0, 0];
+                let Some(node) = catcard_wallet::slip10::derive(seed, &path, kw) else {
+                    continue;
+                };
+                let Some(key) = ed25519_hdkey(chain, &path, fingerprint, &node.public_key(kw))
+                else {
+                    continue;
+                };
+                let _ = out.push(key);
+            }
+            Some(out)
+        });
+        if let Ok(more) = got {
+            for key in more {
+                let _ = keys.push(key);
+            }
+        }
+    }
+    let _ = wants_ed;
+
+    if keys.is_empty() {
+        message(ui.panel, HEAD, "no chain to export", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    }
+
+    const DEVICE: &str = "CatCard";
+    let Some(mut mem) = crate::heap::take(multi::encoded_len(keys.len(), DEVICE.len())) else {
+        message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    let Ok(len) = multi::encode(fingerprint, &keys, DEVICE, mem.bytes()) else {
+        message(ui.panel, HEAD, "could not encode", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    crate::catlog!("keystone: {} accounts, {} bytes", keys.len(), len);
+    let body = &mem.bytes()[..len];
+    crate::qrshow::animate_bcur(ui, HEAD, Kind::MultiAccounts.written_as(), body);
+}
+
+/// One secp256k1 chain's entry: the node, its path, and what to call it.
+fn hdkey_for(
+    chain: &catcard_wallet::chain::Chain,
+    steps: &[catcard_wallet::bip32::ChildNumber],
+    fingerprint: u32,
+    xpub: &catcard_wallet::bip32::ExtendedPubKey,
+) -> Option<catcard_bcur::registry::hdkey::HdKey> {
+    use catcard_bcur::registry::hdkey::{Component, HdKey, KeyPath};
+
+    let mut key = HdKey::of(&xpub.public_key).ok()?;
+    key.chain_code = Some(xpub.chain_code);
+    // Big-endian, as BIP-32 numbers a fingerprint and as the BCR's vectors encode one.
+    key.parent_fingerprint = Some(u32::from_be_bytes(xpub.parent_fingerprint));
+    let mut path: heapless::Vec<Component, 8> = heapless::Vec::new();
+    for step in steps {
+        let _ = path.push(if step.is_hardened() {
+            Component::hardened(step.index())
+        } else {
+            Component::normal(step.index())
+        });
+    }
+    key.origin = KeyPath::new(fingerprint, &path).ok();
+    key.name = heapless::String::try_from(chain.name).ok();
+    Some(key)
+}
+
+/// One ed25519 chain's entry: the account key itself, and the hardened path it is at.
+#[cfg(feature = "multichain")]
+fn ed25519_hdkey(
+    chain: &catcard_wallet::chain::Chain,
+    path: &[u32],
+    fingerprint: u32,
+    public: &[u8; 32],
+) -> Option<catcard_bcur::registry::hdkey::HdKey> {
+    use catcard_bcur::registry::hdkey::{Component, HdKey, KeyPath};
+
+    let mut key = HdKey::of(public).ok()?;
+    // No chain code: SLIP-0010 over ed25519 has no public derivation, so there is
+    // nothing a holder of this key could derive from it, and saying otherwise would
+    // invite a wallet to try.
+    let mut steps: heapless::Vec<Component, 8> = heapless::Vec::new();
+    for &index in path {
+        let _ = steps.push(Component::hardened(index));
+    }
+    key.origin = KeyPath::new(fingerprint, &steps).ok();
+    key.name = heapless::String::try_from(chain.name).ok();
+    Some(key)
 }
 
 /// The BIP-48 cosigner keys on their own.

@@ -37,7 +37,10 @@ mod backup;
 mod battery;
 mod boot;
 /// Which chains the owner sees, from the root wallet's settings.
-#[cfg(feature = "multichain")]
+///
+/// Present on a Bitcoin-only build too, where the answer is short but still the answer:
+/// the Keystone export asks it what to put in a code, and that question has a sensible
+/// reply on every build.
 mod chains;
 mod derive;
 mod display;
@@ -108,7 +111,6 @@ mod qrload;
 #[cfg(feature = "board-q1")]
 mod qrscan;
 /// Showing a file as animated QR.
-#[cfg(feature = "board-q1")]
 mod qrshow;
 mod recovery;
 /// Debug: write a settings image staged by the memory monitor back over the region.

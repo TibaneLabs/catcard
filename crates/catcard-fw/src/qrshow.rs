@@ -14,6 +14,7 @@
 //! from the largest symbol that still gets three pixels a module, and
 //! [`catcard_bbqr::encode::fits`] turns that back into bytes.
 
+#[cfg(feature = "board-q1")]
 use catcard_bbqr::{Encoding, FileType, Header};
 
 use catcard_ui::keypad::{Event, KEYS, Key};
@@ -47,6 +48,7 @@ const CHARS: usize = 224;
 /// fifth fewer codes and every character still sits in QR's alphanumeric mode. `Z` would
 /// be denser still, but the device on the other side cannot inflate a stream it is
 /// staging in place -- see [`catcard_bbqr::Error::Compressed`].
+#[cfg(feature = "board-q1")]
 const ENCODING: Encoding = Encoding::Base32;
 
 /// Milliseconds each part is shown for.
@@ -63,6 +65,7 @@ const FRAME_MS: u32 = 250;
 /// `filetype` is not decoration. A reader dispatches on it to decide what it has been
 /// handed, and sending a wallet export as `BINARY` gets it refused by software that
 /// would have taken the same bytes as `JSON`.
+#[cfg(feature = "board-q1")]
 pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     animate(ui, head, payload, filetype)
 }
@@ -75,6 +78,7 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
 /// §"Registry". Handing the raw bytes over instead produced a UR that decoded to
 /// something no reader could make sense of, which is why this exists rather than the
 /// caller passing its buffer straight through.
+#[cfg(feature = "board-q1")]
 pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
     use catcard_bcur::registry::{Kind, bytestring};
 
@@ -112,6 +116,7 @@ pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
 /// The wrapper is a CBOR byte string around the transaction, which is what `scratch`
 /// is for: a few bytes longer than the PSBT, and the signer already holds a
 /// same-sized second buffer.
+#[cfg(feature = "board-q1")]
 pub(crate) fn animate_psbt_ur(ui: &mut Ui<'_>, head: &str, psbt: &[u8], scratch: &mut [u8]) {
     use catcard_bcur::registry::{Kind, bytestring};
 
@@ -227,6 +232,7 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
 ///
 /// Returns when the user leaves. There is nothing to report: a QR that was shown may or
 /// may not have been read, and only the thing reading it knows.
+#[cfg(feature = "board-q1")]
 fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 

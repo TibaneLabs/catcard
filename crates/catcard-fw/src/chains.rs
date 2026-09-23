@@ -21,6 +21,7 @@ pub const MAX: usize = 16;
 static mut ENABLED: Option<heapless::Vec<&'static Chain, MAX>> = None;
 
 /// Forget the list: the key changed, and its list is in a different file.
+#[cfg(feature = "multichain")]
 pub(crate) fn forget() {
     // SAFETY: foreground only, single core.
     unsafe { *core::ptr::addr_of_mut!(ENABLED) = None };
