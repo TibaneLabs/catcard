@@ -425,3 +425,51 @@ fn decimals_that_disagree_are_reported() {
     let tx = parse(&raw).expect("a transaction");
     assert!(tx.action(0).expect("an action").decimals_disagree());
 }
+
+/// Bytes after the end of a transaction mean these are not one.
+///
+/// Which is also what makes the parse usable as a test of "is this a Solana
+/// transaction": a reader that stopped at the last instruction would accept anything
+/// that merely began like one.
+#[test]
+fn trailing_bytes_are_refused() {
+    let mut raw = build(key(1), std::vec![transfer_instruction(key(1), key(2), 1)]);
+    assert!(parse(&raw).is_ok());
+    raw.push(0);
+    assert_eq!(parse(&raw).err(), Some(Error::NotATransaction));
+}
+
+/// A versioned transaction's lookup tables are read, and counted as what cannot be seen.
+#[test]
+fn a_versioned_transaction_reports_what_it_hides() {
+    use outscript::solana::{SolanaAddressTableLookup, new_solana_tx_v0};
+
+    let payer = key(1);
+    let ix = transfer_instruction(payer, key(2), 5);
+    // Two tables: one lending two writable accounts, one lending three read-only ones.
+    let lookups = std::vec![
+        SolanaAddressTableLookup {
+            account_key: key(8),
+            writable_indexes: std::vec![1, 2],
+            readonly_indexes: std::vec![],
+        },
+        SolanaAddressTableLookup {
+            account_key: key(9),
+            writable_indexes: std::vec![],
+            readonly_indexes: std::vec![3, 4, 5],
+        },
+    ];
+    let tx = new_solana_tx_v0(payer, SolanaKey([7; 32]), lookups, &[ix]).expect("builds");
+    let raw = tx.to_bytes().expect("serialises");
+
+    let read = parse(&raw).expect("a transaction");
+    assert_eq!(read.version(), Version::V0);
+    // Five accounts this device cannot see, from two tables -- which is the number a
+    // screen has to say out loud rather than showing a complete-looking list that is
+    // not the whole list.
+    assert_eq!(read.lookups(), (2, 5));
+    match read.action(0).expect("an action") {
+        Action::TransferSol { lamports, .. } => assert_eq!(lamports, 5),
+        other => panic!("read as {other:?}"),
+    }
+}

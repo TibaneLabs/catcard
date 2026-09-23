@@ -132,6 +132,8 @@ pub struct Tx<'a> {
     /// The instruction region, walked on demand.
     instructions: &'a [u8],
     instruction_count: usize,
+    lookup_tables: usize,
+    lookup_accounts: usize,
 }
 
 /// A cursor with the bounds checks in one place.
@@ -210,6 +212,35 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
     }
     let instructions = &bytes[from..c.at];
 
+    // The address table lookups, which only a versioned message has.
+    //
+    // **Read, not skipped.** They are part of the message and therefore part of what a
+    // signature covers, so a reader that stopped before them would be reporting on less
+    // than it signs. They also say something worth showing: each index is an account the
+    // instructions use and this device cannot see, because it lives in a table on-chain.
+    let mut lookup_tables = 0;
+    let mut lookup_accounts = 0;
+    if matches!(version, Version::V0) {
+        lookup_tables = c.len()?;
+        for _ in 0..lookup_tables {
+            let _table = c.take(32)?;
+            let writable = c.len()?;
+            let _ = c.take(writable)?;
+            let readonly = c.len()?;
+            let _ = c.take(readonly)?;
+            lookup_accounts += writable + readonly;
+        }
+    }
+
+    // Nothing left over. A transaction is a whole object, and bytes after the end of one
+    // mean this is not a transaction -- or is one with something appended, which is the
+    // same thing for a device deciding what it is about to sign. It is also what makes
+    // the parse usable as a test of "are these bytes a Solana transaction at all":
+    // without it, anything that merely *starts* like one would pass.
+    if c.at != bytes.len() {
+        return Err(Error::NotATransaction);
+    }
+
     Ok(Tx {
         version,
         signatures,
@@ -217,6 +248,8 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
         keys,
         instructions,
         instruction_count,
+        lookup_tables,
+        lookup_accounts,
     })
 }
 
@@ -269,6 +302,18 @@ impl<'a> Tx<'a> {
     /// How many instructions it will run.
     pub fn instruction_count(&self) -> usize {
         self.instruction_count
+    }
+
+    /// How many address lookup tables it draws accounts from, and how many accounts
+    /// those are.
+    ///
+    /// Both are zero for a legacy transaction, which carries every account it uses. For a
+    /// versioned one they are the size of what this device **cannot see**: the accounts
+    /// live in a table on-chain, the transaction names them by index, and a screen that
+    /// did not say so would be showing a complete-looking list of accounts that is not
+    /// the whole list.
+    pub fn lookups(&self) -> (usize, usize) {
+        (self.lookup_tables, self.lookup_accounts)
     }
 
     /// What instruction `i` does.

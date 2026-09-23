@@ -604,6 +604,20 @@ fn offer(
             menu::message(ui.panel, "EVM transaction", what, "any key to go back");
             menu::wait_for_any_key(ui);
         }
+        #[cfg(feature = "multichain")]
+        Content::SolanaTx { .. } => {
+            let bytes = &held.bytes()[at..at + len];
+            let mut said: heapless::String<80> = heapless::String::new();
+            match catcard_solana::parse(bytes) {
+                Ok(tx) => crate::solanatx::headline(&tx, &mut said),
+                Err(e) => {
+                    use core::fmt::Write as _;
+                    let _ = write!(said, "{}", e.why());
+                }
+            }
+            menu::message(ui.panel, "Solana transaction", &said, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
         Content::Text => {
             let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("(not text)");
             let mut rows: heapless::Vec<catcard_ui::scroll::Line, 4> = heapless::Vec::new();

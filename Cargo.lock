@@ -182,6 +182,7 @@ dependencies = [
  "catcard-qr",
  "catcard-sd",
  "catcard-settings",
+ "catcard-solana",
  "catcard-ui",
  "catcard-upgrade",
  "catcard-usb",

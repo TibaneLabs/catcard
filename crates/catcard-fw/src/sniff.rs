@@ -21,6 +21,9 @@ pub(crate) enum Content {
     /// An EVM transaction, with the chain it names.
     #[cfg(feature = "multichain")]
     EvmTx { chain_id: Option<u64> },
+    /// A Solana transaction, and how far through signing it is.
+    #[cfg(feature = "multichain")]
+    SolanaTx { required: usize, present: usize },
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -45,6 +48,8 @@ impl Content {
         match self {
             #[cfg(feature = "multichain")]
             Content::EvmTx { .. } => "an EVM transaction",
+            #[cfg(feature = "multichain")]
+            Content::SolanaTx { .. } => "a Solana transaction",
             Content::Firmware => "a firmware image",
             Content::Psbt => "a transaction",
             Content::Seed(_) => "a seed backup",
@@ -69,6 +74,8 @@ impl Content {
         let primary = match self {
             #[cfg(feature = "multichain")]
             Content::EvmTx { .. } => Some("Sign it"),
+            #[cfg(feature = "multichain")]
+            Content::SolanaTx { .. } => Some("Sign it"),
             Content::Firmware => Some("Install it"),
             Content::Psbt => Some("Sign it"),
             Content::Text => Some("Show it"),
@@ -94,6 +101,8 @@ impl Content {
         match self {
             #[cfg(feature = "multichain")]
             Content::EvmTx { .. } => "tx",
+            #[cfg(feature = "multichain")]
+            Content::SolanaTx { .. } => "tx",
             Content::Firmware => "bin",
             Content::Psbt => "psbt",
             Content::Text => "txt",
@@ -119,6 +128,25 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
             == catcard_fwhdr::MAGIC
     {
         return Content::Firmware;
+    }
+    // A Solana transaction. As with the EVM case there is no magic number, so what
+    // makes these bytes one is that the whole of them read as one: every length fits,
+    // every account index names a key the message carries, and nothing is left over at
+    // the end. That last part is what keeps this from claiming anything that merely
+    // starts like a transaction.
+    //
+    // Tried before the EVM case because it is the stricter test: an EVM transaction is
+    // RLP, and RLP is a shape a great many things fall into.
+    #[cfg(feature = "multichain")]
+    if let Ok(tx) = catcard_solana::parse(bytes)
+        && tx.instruction_count() > 0
+        && tx.signing().required > 0
+    {
+        let signing = tx.signing();
+        return Content::SolanaTx {
+            required: signing.required,
+            present: signing.present,
+        };
     }
     // An EVM transaction: RLP, or an EIP-2718 envelope. Tried before the text case
     // because a transaction is bytes and a failed parse costs one pass over them.
