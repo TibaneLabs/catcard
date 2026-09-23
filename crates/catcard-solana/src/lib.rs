@@ -60,6 +60,10 @@ pub enum Error {
     /// the end of the key array. Refused rather than shown with a gap, because every
     /// account in an instruction is part of what it does.
     BadAccountIndex,
+    /// The signature slots and the header disagree about how many signatures this
+    /// takes, or the header asks for more signers than there are accounts to be
+    /// signers.
+    SignatureCount,
     /// A message version this build has not been written against.
     UnsupportedVersion(u8),
 }
@@ -70,6 +74,7 @@ impl Error {
         match self {
             Error::NotATransaction => "this is not a Solana transaction",
             Error::BadAccountIndex => "it refers to accounts it does not carry",
+            Error::SignatureCount => "its signature count does not match its header",
             Error::UnsupportedVersion(_) => "a message version this firmware cannot read",
         }
     }
@@ -214,6 +219,28 @@ fn walk<'a>(mut c: Cursor<'a>, signatures: &'a [u8], message: &'a [u8]) -> Resul
 
     let header = [c.byte()?, c.byte()?, c.byte()?];
     let key_count = c.len()?;
+
+    // **The header and the slots have to agree.** A transaction carries exactly as many
+    // signature slots as its header requires -- empty ones included, which is what a
+    // partly signed transaction is -- so a count that disagrees is not a transaction
+    // with a miscount in it, it is bytes that are not a transaction.
+    //
+    // This is what tells a *message* apart from a transaction when a message happens to
+    // parse as one. A message opens with the same `numRequiredSignatures` byte that a
+    // transaction's compact-u16 slot count sits at, so reading a message as a
+    // transaction consumes the header and the first key as a "signature" and then finds
+    // a header somewhere in the middle of the account list. Everything after that is
+    // plausible nonsense: the screen showed "1 of 40 signed" for a transaction that
+    // needs one signature.
+    if !signatures.is_empty() && signatures.len() != header[0] as usize * 64 {
+        return Err(Error::SignatureCount);
+    }
+    // And a signer has to be one of the accounts: the first `numRequiredSignatures` keys
+    // are the signers, so asking for more of them than the message carries is the same
+    // kind of impossibility.
+    if header[0] as usize > key_count {
+        return Err(Error::SignatureCount);
+    }
     let keys = c.take(key_count.checked_mul(32).ok_or(Error::NotATransaction)?)?;
     // The recent blockhash: read past, because what it commits to is freshness rather
     // than anything a person checks.

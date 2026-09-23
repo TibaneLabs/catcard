@@ -798,3 +798,46 @@ fn an_unread_system_instruction_says_which_one_it_is() {
         other => panic!("read as {other:?}"),
     }
 }
+
+/// A message is not a transaction, even when it would parse as one.
+///
+/// This is the bug that reached the screen: a transaction opens with a compact-u16 count
+/// of signature slots, and a message opens with `numRequiredSignatures`. Both are a small
+/// number in the same place, so reading a message as a transaction eats its header and
+/// its first account key as a "signature" and then finds a header in the middle of the
+/// account list. Every length after that can still add up, and the device showed "1 of 40
+/// signed" for a transaction needing one signature -- and would have signed the wrong
+/// bytes, since the message it thought it was signing started 65 bytes into the real one.
+///
+/// What tells them apart is the rule a transaction must obey: it carries exactly as many
+/// slots as its header asks for, empty ones included.
+#[test]
+fn a_message_is_not_read_as_a_transaction() {
+    let payer = key(1);
+    let raw = build(payer, std::vec![transfer_instruction(payer, key(2), 1)]);
+    // The message inside it: everything past the one empty slot.
+    let message = &raw[1 + 64..];
+
+    let tx = parse_message(message).expect("a message");
+    assert_eq!(tx.signing().required, 1);
+    // And not a transaction, by the rule above.
+    assert!(parse(message).is_err());
+}
+
+/// A header that asks for more signatures than the transaction has room for.
+#[test]
+fn slots_and_header_must_agree() {
+    let payer = key(1);
+    let mut raw = build(payer, std::vec![transfer_instruction(payer, key(2), 1)]);
+    assert!(parse(&raw).is_ok());
+
+    // One slot, a header asking for two.
+    raw[1 + 64] = 2;
+    assert_eq!(parse(&raw).err(), Some(Error::SignatureCount));
+
+    // And a header asking for more signers than there are accounts at all. Under 0x80,
+    // because the top bit of that byte is what marks a versioned message -- above it
+    // this is a version number rather than a count, and a different refusal.
+    raw[1 + 64] = 100;
+    assert_eq!(parse(&raw).err(), Some(Error::SignatureCount));
+}
