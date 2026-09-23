@@ -227,6 +227,9 @@ enum Screen {
     /// Settings that show or change secrets, apart from the rest so none is one press
     /// away by accident.
     DangerZone,
+    /// Which chains this wallet offers, and in what order.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    ChainSettings,
     /// Danger zone: tools that work on the seed itself.
     SeedTools,
     /// Show the key in force: its words, or its XPRV or WIF.
@@ -433,6 +436,10 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Hardware On/Off",
     #[cfg(not(feature = "board-mk3"))]
     "Menu wrapping",
+    // Which chains this wallet offers, and in what order. Only where there is more than
+    // one chain to order, and only where there is a settings file to keep the answer in.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    "Chains",
     "Danger zone",
     // About and Debug sit here rather than on the main menu: both answer "what is this
     // device", which is a question about the device and not one of the six things a
@@ -1162,6 +1169,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         // belongs to the way in.
         Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Utils),
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
         #[cfg(not(feature = "board-mk3"))]
         Screen::DumpState => to(
             |a| crate::statedump::screen(a.gate, a.login, a.ui),
@@ -1561,6 +1570,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            (Key::Confirm, Some("Chains")) => Screen::ChainSettings,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Idle timeout")) => Screen::IdleTimeout,
             #[cfg(not(feature = "board-mk3"))]
@@ -2183,6 +2194,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SdInstall => {}
         // Handled in `run`: it asks, then calls the bootloader; never drawn.
         Screen::WarmReset => {}
+        // Handled in `run`: it drives its own screen, because moving a row is a key the
+        // list screens do not have.
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        Screen::ChainSettings => {}
         // Handled in `run`: it derives, which needs the login struct.
         Screen::KeyPick(_) => {}
         // Handled in `run`: both drive their own screens from the keypad.
@@ -6478,6 +6493,128 @@ fn pick_addresses(
         DocExit::Selected(CUSTOM_PATH_ROW) => Some(AddressPick::Custom),
         DocExit::Selected(i) => chains.get(i as usize).map(|c| AddressPick::Chain(c)),
         _ => None,
+    }
+}
+
+/// Which chains this wallet offers, and in what order.
+///
+/// One screen doing two jobs, because they are the same decision: a chain that is off is
+/// simply not in the list, and where a chain sits decides where it appears in every
+/// picker afterwards. So the list on screen *is* the stored list, with the chains that
+/// are off shown underneath it rather than hidden -- turning one on has to be possible
+/// from the same place.
+///
+/// `OK` turns the row under the cursor on or off, `7` and `9` move it, and `X` saves and
+/// leaves. Saving on the way out rather than per keypress is deliberate: reordering a
+/// list is several presses that only mean something together, and a write per press
+/// would put five versions of a half-finished order through the settings store.
+///
+/// **The one refusal is an empty list.** A stored list naming nothing reads back as
+/// "absent", which means *every* chain -- so turning them all off would silently turn
+/// them all on at the next read.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_ui::scroll::Line as DLine;
+
+    let mut order = crate::chains::order(gate, login, ui);
+    let start = order.clone();
+    let mut cursor = 0usize;
+    let mut off = 0usize;
+
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        // The rows, rebuilt each frame: the labels borrow these, so they have to outlive
+        // the view and the view is rebuilt whenever anything moves.
+        let mut labels: heapless::Vec<heapless::String<24>, { crate::chains::MAX }> =
+            heapless::Vec::new();
+        for (c, on) in order.iter() {
+            let mut row: heapless::String<24> = heapless::String::new();
+            let _ = row.push_str(c.name);
+            // A row says what it is, not what pressing OK would do: "off" under the
+            // cursor must not read as an invitation to turn something off that is
+            // already off.
+            let _ = row.push_str(if *on { "" } else { "  (off)" });
+            let _ = labels.push(row);
+        }
+
+        {
+            let mut lines: heapless::Vec<DLine, { crate::chains::MAX + 3 }> = heapless::Vec::new();
+            let _ = lines.push(DLine::title("Chains"));
+            let _ = lines.push(DLine::body("OK on/off   7 9 move").small().centered());
+            for (i, (c, _)) in order.iter().enumerate() {
+                let mut line = DLine::item(&labels[i], i as u32).large();
+                if let Some(mark) = catcard_ui::art::chainicons::mark(c.ticker) {
+                    line = line.with_mark(mark);
+                }
+                let _ = lines.push(line);
+            }
+            let mut view = catcard_ui::scroll::ScrollView::build(
+                &lines,
+                display::SCREEN_W,
+                display::SCREEN_H,
+                display::FONTS,
+            );
+            view.set_off(off);
+            view.select(cursor as u32);
+            // The same one-pass path every list takes, so a chain's logo reaches the
+            // panel inside the frame rather than after it.
+            #[cfg(feature = "board-q1")]
+            display::draw_with_marks(ui.panel, &view, |c| catcard_ui::scroll::render(c, &view));
+            #[cfg(not(feature = "board-q1"))]
+            display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &view));
+            off = view.off();
+        }
+
+        wait_for_release(ui);
+        let mut moved = false;
+        while !moved {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            if keys.is_empty() {
+                display::idle(ui.panel);
+                continue;
+            }
+            let last = order.len().saturating_sub(1);
+            match keys[0] {
+                Key::Digit(5) => cursor = cursor.saturating_sub(1),
+                Key::Digit(8) => cursor = (cursor + 1).min(last),
+                // Move the row itself, and follow it with the cursor: the thing being
+                // dragged should stay under the finger doing the dragging.
+                Key::Digit(7) if cursor > 0 => {
+                    order.swap(cursor, cursor - 1);
+                    cursor -= 1;
+                }
+                Key::Digit(9) if cursor < last => {
+                    order.swap(cursor, cursor + 1);
+                    cursor += 1;
+                }
+                Key::Confirm => {
+                    if let Some(row) = order.get_mut(cursor) {
+                        row.1 = !row.1;
+                    }
+                }
+                Key::Cancel => {
+                    let changed = order.len() != start.len()
+                        || order
+                            .iter()
+                            .zip(start.iter())
+                            .any(|((a, x), (b, y))| a.id != b.id || x != y);
+                    if !changed {
+                        return;
+                    }
+                    match crate::chains::save(gate, login, ui, &order) {
+                        Ok(()) => return,
+                        Err(why) => {
+                            message(ui.panel, "Chains", why, "nothing was saved");
+                            wait_for_any_key(ui);
+                        }
+                    }
+                }
+                _ => continue,
+            }
+            moved = true;
+        }
     }
 }
 

@@ -94,3 +94,73 @@ fn read(
 ) -> Option<heapless::Vec<&'static Chain, MAX>> {
     None
 }
+
+/// Save the list, and make it the one in force.
+///
+/// The order is the order shown, and only the enabled chains are written: a list is what
+/// a wallet *offers*, so leaving a chain out is how it is turned off. An empty list would
+/// read back as "absent" and mean every chain (see the module note), so the one thing
+/// this refuses is turning them all off.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+pub(crate) fn save(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    order: &[(&'static Chain, bool)],
+) -> Result<(), &'static str> {
+    use catcard_settings::store::SCRATCH;
+
+    let mut tickers: heapless::Vec<&str, MAX> = heapless::Vec::new();
+    for (c, _) in order.iter().filter(|(_, on)| *on) {
+        let _ = tickers.push(c.ticker);
+    }
+    if tickers.is_empty() {
+        return Err("at least one chain has to stay on");
+    }
+
+    let mut json = [0u8; 8 + MAX * 10];
+    let n = catcard_settings::chains::render(&tickers, &mut json).ok_or("too many chains")?;
+    let raw = core::str::from_utf8(&json[..n]).map_err(|_| "bad list")?;
+
+    crate::menu::blocking_screen(ui.panel, "Chains", "saving");
+    let (Some(mut doc), Some(mut seal)) = (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
+    else {
+        return Err("not enough memory to save");
+    };
+    crate::settings::save_wallet(
+        gate,
+        login,
+        ui,
+        "Chains",
+        (catcard_settings::chains::KEY, raw),
+        doc.bytes(),
+        seal.bytes(),
+    )?;
+    // What is in force now is what was just written, so the cached copy is stale.
+    forget();
+    Ok(())
+}
+
+/// Every chain the build carries, with the ones in force first and in their own order.
+///
+/// The editor's starting state. The stored list names only what is offered, so anything
+/// missing from it is a chain that is off -- and those follow in the registry's order, so
+/// turning one on puts it somewhere predictable.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+pub(crate) fn order(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> heapless::Vec<(&'static Chain, bool), MAX> {
+    let on = enabled(gate, login, ui);
+    let mut out: heapless::Vec<(&'static Chain, bool), MAX> = heapless::Vec::new();
+    for c in on.iter() {
+        let _ = out.push((c, true));
+    }
+    for c in chain::SUPPORTED.iter() {
+        if !out.iter().any(|(k, _)| k.id == c.id) {
+            let _ = out.push((c, false));
+        }
+    }
+    out
+}
