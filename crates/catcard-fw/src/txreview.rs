@@ -61,6 +61,12 @@ const LABEL: usize = 16;
 /// does not offer to sign.
 const MAX_ROWS: usize = 256;
 
+/// How many assets a summary can name.
+///
+/// A transaction that moves more kinds of thing than this is one whose summary would not
+/// fit a screen anyway; what does not fit is said, rather than dropped quietly.
+const EFFECTS: usize = 6;
+
 /// Where the action rows' ids start, clear of the elements'.
 const ACTION: u32 = 1_000;
 
@@ -83,6 +89,12 @@ struct Row {
 
 /// A transaction, in the rows a screen shows.
 pub(crate) struct Review {
+    /// What signing changes, per asset. Shown at the top, before anything has to be
+    /// opened -- it is the answer to the question somebody actually has.
+    effects: heapless::Vec<heapless::String<LINE>, EFFECTS>,
+    /// Set when there were more assets than there is room for, so a total that is not
+    /// the whole total never reads as one.
+    effects_lost: bool,
     rows: alloc::vec::Vec<Row>,
     /// Rows that did not fit. Stops the screen offering to sign, for the reason the
     /// module header gives: nothing is signed that was not shown.
@@ -97,6 +109,8 @@ impl Review {
         let mut rows = alloc::vec::Vec::new();
         rows.try_reserve_exact(MAX_ROWS).ok()?;
         Some(Review {
+            effects: heapless::Vec::new(),
+            effects_lost: false,
             rows,
             dropped: 0,
             alarms: 0,
@@ -163,6 +177,19 @@ impl Review {
         self.push(Role::Field, label, format_args!("{grouped}"));
     }
 
+    /// One line of what signing changes: an asset and how much of it moves.
+    ///
+    /// Written by the chain, because only the chain can add up its own amounts -- what
+    /// counts as "the same asset" is a mint on Solana and a contract on an EVM chain.
+    /// What this side guarantees is where it appears: at the top, before anything has to
+    /// be opened.
+    pub(crate) fn effect(&mut self, args: core::fmt::Arguments<'_>) {
+        let mut text: heapless::String<LINE> = heapless::String::new();
+        if text.write_fmt(args).is_err() || self.effects.push(text).is_err() {
+            self.effects_lost = true;
+        }
+    }
+
     /// A line of explanation inside the element above.
     pub(crate) fn note(&mut self, args: core::fmt::Arguments<'_>) {
         self.push(Role::Note, "", args);
@@ -208,7 +235,7 @@ impl Review {
     fn list(&self, ui: &mut Ui<'_>, title: &str, actions: &[&str]) -> Option<u32> {
         let mut lines: alloc::vec::Vec<Line<'_>> = alloc::vec::Vec::new();
         if lines
-            .try_reserve_exact(self.rows.len() + actions.len() + 4)
+            .try_reserve_exact(self.rows.len() + actions.len() + self.effects.len() + 6)
             .is_err()
         {
             menu::message(ui.panel, title, "not enough memory", "any key to go back");
@@ -216,6 +243,16 @@ impl Review {
             return None;
         }
         lines.push(Line::title(title));
+        // What it comes to, first. Everything below is how it got there.
+        if !self.effects.is_empty() {
+            lines.push(Line::body("Signing this will:").small());
+            for effect in &self.effects {
+                lines.push(Line::body(effect).large());
+            }
+        }
+        if self.effects_lost {
+            lines.push(Line::body("and more than fits here").small());
+        }
         for (i, row) in self.rows.iter().enumerate() {
             let Role::Element { kind, .. } = row.role else {
                 continue;

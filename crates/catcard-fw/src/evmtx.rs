@@ -65,6 +65,25 @@ fn token_row(out: &mut Review, lead: &str, amount: &Amount) {
     out.address("token", address(&amount.contract, &mut addr));
 }
 
+/// One line of what signing changes, for an amount of a token.
+fn effect_of(out: &mut Review, lead: &str, amount: &Amount) {
+    let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
+    match amount.token {
+        Some(t) if amount.unlimited() => out.effect(format_args!("{lead}every {}", t.symbol)),
+        Some(t) => {
+            let n = scaled(&amount.raw, t.decimals, &mut num);
+            out.effect(format_args!("{lead}{n} {}", t.symbol));
+        }
+        None if amount.unlimited() => {
+            out.effect(format_args!("{lead}every unit of a token"));
+        }
+        None => {
+            let n = scaled(&amount.raw, 0, &mut num);
+            out.effect(format_args!("{lead}{n} raw units of a token"));
+        }
+    }
+}
+
 /// Lay a transaction out: which chain, what it costs, and what it does.
 pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
     let mut addr = [0u8; ADDRESS];
@@ -96,25 +115,39 @@ pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
     }
     if carry == 0 {
         out.field("gas up to", format_args!("{}", scaled(&fee, 18, &mut num)));
+        // Gas is spent whatever the call does, so it belongs in the total. Everything
+        // that leaves here leaves the account that signs, which is this device -- there
+        // is one sender on an EVM transaction and it is whoever signs it, so unlike
+        // Solana there is nothing to attribute.
+        out.effect(format_args!(
+            "-{} in gas at most",
+            scaled(&fee, 18, &mut num)
+        ));
     }
 
     match catcard_evm::summary::summarise(tx) {
         Action::Send { to, wei } => {
+            out.effect(format_args!("-{}", scaled(&wei, 18, &mut num)));
             out.element(false, format_args!("Send {}", scaled(&wei, 18, &mut num)));
             out.note(format_args!("of the chain's own coin"));
             out.address("to", address(&to, &mut addr));
         }
         Action::TokenSend { to, amount } => {
+            effect_of(out, "-", &amount);
             token_row(out, "Send", &amount);
             out.address("to", address(&to, &mut addr));
         }
         Action::TokenSendFrom { from, to, amount } => {
+            // Out of `from`, which is only this device's account if it gave the
+            // allowance being used. Said as a movement rather than as a loss.
+            effect_of(out, "moves ", &amount);
             token_row(out, "Move", &amount);
             out.address("from", address(&from, &mut addr));
             out.address("to", address(&to, &mut addr));
             out.note(format_args!("under an allowance already given"));
         }
         Action::Approve { spender, amount } => {
+            effect_of(out, "lets somebody take ", &amount);
             token_row(out, "Approve", &amount);
             out.address("to", address(&spender, &mut addr));
             out.note(format_args!("an approval outlives this transaction"));
