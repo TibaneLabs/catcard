@@ -702,12 +702,7 @@ fn offer(
         // whole of it out -- and the signing behind that -- are not built yet.
         #[cfg(feature = "multichain")]
         Content::EvmTx { .. } => {
-            let bytes = &held.bytes()[at..at + len];
-            let what = catcard_evm::parse(bytes)
-                .map(|tx| crate::evmtx::headline(&catcard_evm::summary::summarise(&tx)))
-                .unwrap_or("this is not a transaction");
-            menu::message(ui.panel, "EVM transaction", what, "any key to go back");
-            menu::wait_for_any_key(ui);
+            crate::evmtx::screen(ui, &held.bytes()[at..at + len]);
         }
         #[cfg(feature = "multichain")]
         Content::SolanaTx { base64 } => {

@@ -39,8 +39,8 @@ mod chains;
 mod derive;
 mod display;
 /// Wallet-export file formats.
-/// EVM transactions, in the words a screen uses.
-#[cfg(feature = "multichain")]
+/// EVM transactions: read out and laid on the screen.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod evmtx;
 mod export;
 #[cfg(all(feature = "games", feature = "board-q1"))]
@@ -142,6 +142,9 @@ mod statusbar;
 #[cfg(feature = "board-q1")]
 mod torch;
 mod trng;
+/// Laying a transaction out for the person deciding about it, whichever chain it is on.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+mod txreview;
 mod ui;
 /// Deflated firmware images arriving over USB.
 mod unpack;

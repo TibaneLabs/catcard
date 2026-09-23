@@ -130,6 +130,33 @@ def main():
     lines += [
         "];",
         "",
+        "/// What each chain is called, for a screen that would otherwise say \"chain 42161\".",
+        "///",
+        "/// The names are the source list's own slugs, capitalised -- the same rows the",
+        "/// addresses above came from, so a chain cannot be named here and unknown there.",
+        "#[rustfmt::skip]",
+        f"static NAMES: [(u64, &str); {len(chains)}] = [",
+    ]
+    slug_of = {v: k for k, v in CHAIN_IDS.items()}
+    for c in chains:
+        name = slug_of[c]
+        pretty = {"bnb": "BNB Chain", "hyperevm": "HyperEVM"}.get(name, name.capitalize())
+        lines.append(f'    ({c}, "{pretty}"),')
+    lines += [
+        "];",
+        "",
+        "/// What `chain_id` is called, if this build knows it.",
+        "///",
+        "/// A miss is shown as the number, which is what the transaction actually carries",
+        "/// and what somebody can look up. A wrong name would be worse than no name: it is",
+        "/// the one field that says which network the money is on.",
+        "pub fn chain_name(chain_id: u64) -> Option<&'static str> {",
+        "    NAMES",
+        "        .iter()",
+        "        .find(|(c, _)| *c == chain_id)",
+        "        .map(|(_, n)| *n)",
+        "}",
+        "",
         "/// The token at `address` on `chain_id`, if this build knows it.",
         "///",
         "/// A miss is the ordinary case, not an error: the table is a few dozen well-known",

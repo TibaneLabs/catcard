@@ -10840,3 +10840,27 @@ pub(crate) fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) 
         catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
     });
 }
+
+/// The same screen, in red, for the one kind of thing that is not a notification.
+///
+/// **A whole screen rather than a red word.** Text colour on this panel is a level
+/// through a ramp, so a single red line among grey ones would fringe every glyph edge
+/// with whatever that ramp's middle happened to be -- and a warning nobody notices is
+/// worse than no warning, because it was counted as having been given. A screen with its
+/// own ramp is unmissable and anti-aliases correctly, and it costs one palette.
+///
+/// On a board without colour this is [`message`], which is the honest degradation: the
+/// words are the warning there, and they are the same words.
+///
+/// Built only where something raises one: a transaction review, which is a multichain
+/// build. A Bitcoin PSBT's refusals are reasons rather than alarms -- it says which rule
+/// stopped it and that rule is the same every time.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+pub(crate) fn alarm(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
+    #[cfg(feature = "board-q1")]
+    display::draw_with(panel, &catcard_ui::st7789::ALARM, |c| {
+        catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
+    });
+    #[cfg(not(feature = "board-q1"))]
+    message(panel, head, a, b);
+}

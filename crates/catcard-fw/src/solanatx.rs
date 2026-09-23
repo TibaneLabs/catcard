@@ -1,117 +1,15 @@
-//! What a Solana transaction says, in the words a screen uses.
+//! What a Solana transaction says, in the words and shapes a screen uses.
 //!
-//! The reading is [`catcard_solana`]; this is the firmware's side of it. For now that is
-//! one line -- what the transaction mostly does, and how far through signing it is --
-//! the same honest placeholder the EVM path carries in [`crate::evmtx`], until the
-//! screen that lays the whole of it out and the signing behind it are built.
+//! The reading is [`catcard_solana`] and the screen is [`crate::txreview`]; this is what
+//! joins them -- one card per instruction, in order, with the addresses and amounts
+//! under it -- and the signing that follows if the owner says so.
+//!
+//! The same three steps as [`crate::evmtx`], which shares the screen: read, lay out,
+//! sign. What differs between the two chains is only what the cards say.
 
+use crate::txreview::Review;
 use catcard_callgate::Callgate;
-use catcard_solana::{Action, Tx};
 use core::fmt::Write as _;
-
-/// One line for what a transaction does.
-///
-/// A Solana transaction is a list of instructions rather than one call, so there is no
-/// single thing it "is". What gets named here is the first instruction that is about
-/// value: a compute-budget setting is a price, not an act, and a transaction that led
-/// with "sets a compute limit" would tell a person nothing about what they are signing.
-/// The count that follows says how much else is in there.
-fn what_it_does(tx: &Tx<'_>) -> &'static str {
-    let mut fallback = "does nothing this build can name";
-    for i in 0..tx.instruction_count() {
-        let Some(action) = tx.action(i) else {
-            continue;
-        };
-        match action {
-            Action::TransferSol { .. } => return "sends SOL",
-            Action::TransferToken { .. } => return "sends a token",
-            Action::ApproveToken { .. } => return "approves spending",
-            Action::CreateTokenAccount { .. } => return "opens a token account",
-            // Neither of these is the point of a transaction, but an unnamed program is
-            // worth saying if it turns out to be all there is.
-            Action::ComputeBudget(_) => {}
-            Action::Unknown { .. } => fallback = "calls a program this build cannot name",
-        }
-    }
-    fallback
-}
-
-/// The line a review screen shows before anything else.
-///
-/// Three things, in the order they change a decision: what it does, how many
-/// instructions that was one of, and whether somebody has already signed. The last
-/// matters most -- a partly signed transaction is one this device is being asked to
-/// join, not one it is starting.
-///
-pub(crate) fn headline(tx: &Tx<'_>, out: &mut heapless::String<80>) {
-    let signing = tx.signing();
-    let n = tx.instruction_count();
-    let _ = write!(out, "{}", what_it_does(tx));
-    if n > 1 {
-        let _ = write!(out, ", 1 of {n} instructions");
-    }
-    if signing.present > 0 {
-        let _ = write!(out, "; {} of {} signed", signing.present, signing.required);
-    }
-    // What a lookup table lends is named here rather than left out: those accounts are
-    // fetched from the chain at execution and this device never sees them, so an
-    // instruction touching one is an instruction it cannot fully read.
-    let (w, r) = tx.lookups();
-    if w + r > 0 {
-        let _ = write!(out, "; {} accounts not shown", w + r);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Reading one out, line by line
-// ---------------------------------------------------------------------------
-
-/// How long a described line can be, and how many there can be.
-///
-/// A line holds `fee payer ` and a 44-character address with room to spare. The count is
-/// a ceiling rather than a budget: a transaction that needs more than this is one this
-/// device cannot show in full, and [`Lines::dropped`] is how that becomes a refusal
-/// rather than a silence.
-const LINE: usize = 64;
-/// The most lines a description can run to. Heap, not stack -- 256 of these is sixteen
-/// kilobytes, which is a heap block and would be most of a task's stack.
-const MAX_LINES: usize = 256;
-
-/// The description as it is built: the lines, and how many did not fit.
-///
-/// `dropped` is the point of the type. A screen that quietly stopped after twenty lines
-/// would be asking somebody to sign a transaction whose tail it decided not to mention,
-/// and that is the one failure a signing device must not have.
-struct Lines {
-    rows: alloc::vec::Vec<heapless::String<LINE>>,
-    dropped: usize,
-}
-
-impl Lines {
-    /// Room for a description, or `None` if the heap has nothing to spare.
-    fn new() -> Option<Self> {
-        let mut rows = alloc::vec::Vec::new();
-        rows.try_reserve_exact(MAX_LINES).ok()?;
-        Some(Lines { rows, dropped: 0 })
-    }
-
-    /// Add a line, or count it as one that did not fit.
-    fn say(&mut self, args: core::fmt::Arguments<'_>) {
-        if self.rows.len() == self.rows.capacity() {
-            self.dropped += 1;
-            return;
-        }
-        let mut s: heapless::String<LINE> = heapless::String::new();
-        // A line too long for the buffer is truncated by `write_fmt`, which would hide
-        // the tail of an address. Counted as dropped so the screen refuses rather than
-        // showing half a key.
-        if s.write_fmt(args).is_err() {
-            self.dropped += 1;
-            return;
-        }
-        self.rows.push(s);
-    }
-}
 
 /// A lamport or token amount as people write it.
 ///
@@ -134,62 +32,57 @@ fn sol(lamports: u64, out: &mut [u8; catcard_evm::summary::DECIMAL_MAX]) -> &str
     )
 }
 
-/// Describe the whole transaction into `lines`: who pays, what it costs, who must sign,
-/// and every instruction in order.
+/// Lay the whole transaction out as cards: who pays, what it costs, who must sign, and
+/// every instruction in order.
 ///
 /// **An address is never replaced by a name.** A mint this build knows is written as its
 /// ticker *and* its address, because the table is a claim about which address that
 /// ticker belongs to, and the address is the part the chain agrees with.
-fn describe(tx: &catcard_solana::Tx<'_>, lines: &mut Lines) {
+fn describe(tx: &catcard_solana::Tx<'_>, out: &mut Review) {
     use catcard_solana::{ADDRESS_MAX, Action, Budget, address};
+    use catcard_ui::art::txicons::Kind;
 
     let mut addr = [0u8; ADDRESS_MAX];
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
 
     // Who pays, and how much. The fee payer is account zero and pays whatever the
-    // budget below says, so both belong above the instructions rather than after them.
-    if let Some(payer) = tx.fee_payer() {
-        lines.say(format_args!("fee payer {}", address(&payer, &mut addr)));
-    }
+    // budget instructions below say, so both belong above them rather than after.
     let fee = tx.fee();
     match (fee.priority, fee.priority_unknown) {
-        (_, true) => {
-            lines.say(format_args!(
-                "fee {} SOL plus a priority",
-                sol(fee.base, &mut num)
-            ));
-            lines.say(format_args!("this device cannot work out"));
-        }
-        (Some(0), _) => lines.say(format_args!("fee {} SOL", sol(fee.base, &mut num))),
-        (Some(p), _) => {
-            lines.say(format_args!(
-                "fee up to {} SOL",
+        (Some(0), _) => out.card(
+            Kind::Payer,
+            format_args!("Pays {} SOL", sol(fee.base, &mut num)),
+        ),
+        (Some(p), _) => out.card(
+            Kind::Payer,
+            format_args!(
+                "Pays up to {} SOL",
                 sol(fee.base.saturating_add(p), &mut num)
-            ));
+            ),
+        ),
+        (None, _) => {
+            out.card(
+                Kind::Payer,
+                format_args!("Pays {} SOL and a priority fee", sol(fee.base, &mut num)),
+            );
+            out.detail(format_args!("the priority is not set out in this"));
+            out.detail(format_args!("transaction, so it cannot be totalled"));
         }
-        (None, _) => {}
     }
-
-    // Who must sign. One signer is the ordinary case and is the fee payer already named;
-    // more than one means this transaction is not finished by this device alone.
-    let signing = tx.signing();
-    if signing.required > 1 {
-        lines.say(format_args!("{} signatures needed", signing.required));
-        for i in 0..signing.required {
-            if let Some(k) = tx.key(i) {
-                let mark = if tx.signed(i) { "signed" } else { "waiting" };
-                lines.say(format_args!("{mark} {}", address(&k, &mut addr)));
-            }
-        }
+    if let Some(payer) = tx.fee_payer() {
+        out.detail(format_args!("{}", address(&payer, &mut addr)));
     }
 
     for i in 0..tx.instruction_count() {
         let Some(action) = tx.action(i) else { continue };
         match action {
             Action::TransferSol { to, lamports, .. } => {
-                lines.say(format_args!("send {} SOL", sol(lamports, &mut num)));
+                out.card(
+                    Kind::Send,
+                    format_args!("Send {} SOL", sol(lamports, &mut num)),
+                );
                 if let Some(to) = to {
-                    lines.say(format_args!("to {}", address(&to, &mut addr)));
+                    out.detail(format_args!("to {}", address(&to, &mut addr)));
                 }
             }
             Action::TransferToken {
@@ -206,22 +99,26 @@ fn describe(tx: &catcard_solana::Tx<'_>, lines: &mut Lines) {
                 match (decimals.or(named.map(|m| m.decimals)), named) {
                     (Some(d), Some(m)) => {
                         let n = amount(raw, d, &mut num);
-                        lines.say(format_args!("send {n} {}", m.symbol));
+                        out.card(Kind::Token, format_args!("Send {n} {}", m.symbol));
                     }
                     (Some(d), None) => {
                         let n = amount(raw, d, &mut num);
-                        lines.say(format_args!("send {n} of a token"));
+                        out.card(Kind::Token, format_args!("Send {n} of a token"));
                     }
-                    _ => lines.say(format_args!("send {raw} raw units")),
+                    _ => out.card(Kind::Token, format_args!("Send {raw} raw units")),
                 }
                 if let Some(mint) = mint {
-                    lines.say(format_args!("mint {}", address(&mint, &mut addr)));
+                    out.detail(format_args!("mint {}", address(&mint, &mut addr)));
                 }
                 if let Some(to) = to {
-                    lines.say(format_args!("to {}", address(&to, &mut addr)));
+                    out.detail(format_args!("to {}", address(&to, &mut addr)));
                 }
+                // The one place a number on this screen could be wrong by a power of
+                // ten, so it is a red card rather than a footnote.
                 if action.decimals_disagree() {
-                    lines.say(format_args!("!! decimals disagree with this build"));
+                    out.cannot_read(format_args!("This amount may be wrong"));
+                    out.detail(format_args!("the instruction and this build disagree"));
+                    out.detail(format_args!("about the mint's decimal places"));
                 }
             }
             Action::ApproveToken {
@@ -229,51 +126,101 @@ fn describe(tx: &catcard_solana::Tx<'_>, lines: &mut Lines) {
                 amount: raw,
                 ..
             } => {
-                lines.say(format_args!("approve {raw} raw units"));
+                out.card(Kind::Approve, format_args!("Approve {raw} raw units"));
+                out.detail(format_args!("this outlives the transaction"));
                 if let Some(d) = delegate {
-                    lines.say(format_args!("to {}", address(&d, &mut addr)));
+                    out.detail(format_args!("to {}", address(&d, &mut addr)));
                 }
             }
             Action::CreateTokenAccount { mint, .. } => {
-                lines.say(format_args!("open a token account"));
+                out.card(Kind::Account, format_args!("Open a token account"));
                 if let Some(mint) = mint {
-                    lines.say(format_args!("for {}", address(&mint, &mut addr)));
+                    out.detail(format_args!("for {}", address(&mint, &mut addr)));
+                }
+            }
+            Action::AdvanceNonce {
+                account, authority, ..
+            } => {
+                out.card(Kind::Nonce, format_args!("Spend a durable nonce"));
+                out.detail(format_args!("what lets this be signed later"));
+                if let Some(a) = account {
+                    out.detail(format_args!("account {}", address(&a, &mut addr)));
+                }
+                if let Some(a) = authority {
+                    out.detail(format_args!("authority {}", address(&a, &mut addr)));
                 }
             }
             // The numbers, not the word. These two decide the priority fee, and a
             // transaction can ask its payer for an arbitrary amount through them.
             Action::ComputeBudget(Budget::Limit { units }) => {
-                lines.say(format_args!("compute limit {units} units"));
+                out.card(Kind::Budget, format_args!("Compute limit {units} units"));
             }
             Action::ComputeBudget(Budget::Price { micro_lamports }) => {
-                lines.say(format_args!("price {micro_lamports} micro-lamports a unit"));
+                out.card(
+                    Kind::Budget,
+                    format_args!("Price {micro_lamports} per unit"),
+                );
+                out.detail(format_args!("millionths of a lamport"));
             }
             Action::ComputeBudget(Budget::Heap { bytes }) => {
-                lines.say(format_args!("heap {bytes} bytes"));
+                out.card(Kind::Budget, format_args!("Heap {bytes} bytes"));
             }
             Action::ComputeBudget(Budget::DataSize { bytes }) => {
-                lines.say(format_args!("account data limit {bytes} bytes"));
+                out.card(
+                    Kind::Budget,
+                    format_args!("Account data limit {bytes} bytes"),
+                );
             }
             Action::ComputeBudget(Budget::Other) => {
-                lines.say(format_args!("a compute budget setting, not decoded"));
+                out.cannot_read(format_args!("A compute budget setting"));
+                out.detail(format_args!("not one of the four this build reads"));
             }
             Action::Unknown {
                 program,
+                named,
+                tag,
                 accounts,
                 data_len,
             } => {
-                lines.say(format_args!("call {}", address(&program, &mut addr)));
-                lines.say(format_args!(
-                    "{accounts} accounts, {data_len} bytes -- not decoded"
-                ));
+                match named {
+                    Some(name) => out.cannot_read(format_args!("Cannot read a {name} instruction")),
+                    None => out.cannot_read(format_args!("Cannot read this instruction")),
+                }
+                if let Some(tag) = tag {
+                    out.detail(format_args!("instruction {tag}, {accounts} accounts"));
+                } else {
+                    out.detail(format_args!("{accounts} accounts"));
+                }
+                out.detail(format_args!("{data_len} bytes of data"));
+                out.detail(format_args!("{}", address(&program, &mut addr)));
             }
         }
     }
 
+    // Accounts lent by an on-chain table. Red, because they are precisely what this
+    // device cannot see: the instructions above touch accounts whose addresses are not
+    // in these bytes at all, and are fetched when the transaction runs.
     let (w, r) = tx.lookups();
     if w + r > 0 {
-        lines.say(format_args!("{} accounts come from tables", w + r));
-        lines.say(format_args!("and are not shown here"));
+        out.cannot_read(format_args!("{} accounts are not here", w + r));
+        out.detail(format_args!("they come from on-chain tables,"));
+        out.detail(format_args!("so this device cannot show them"));
+    }
+
+    // Who must sign. One signer is the ordinary case and was named as the payer; more
+    // than one means this transaction is not finished by this device alone.
+    let signing = tx.signing();
+    if signing.required > 1 {
+        out.card(
+            Kind::Signer,
+            format_args!("{} of {} signed", signing.present, signing.required),
+        );
+        for i in 0..signing.required {
+            if let Some(k) = tx.key(i) {
+                let mark = if tx.signed(i) { "signed " } else { "waiting" };
+                out.detail(format_args!("{mark} {}", address(&k, &mut addr)));
+            }
+        }
     }
 }
 
@@ -480,8 +427,6 @@ fn review_and_sign(
     request_id: Option<&[u8]>,
     path: Option<[u32; 4]>,
 ) {
-    use catcard_ui::scroll::Line;
-
     // A transaction first, then a message: the transaction reading is the stricter one,
     // and a message that happened to parse as a transaction would be reported with
     // signatures it does not have.
@@ -494,47 +439,13 @@ fn review_and_sign(
         }
     };
 
-    let Some(mut lines) = Lines::new() else {
+    let Some(mut review) = Review::new() else {
         crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
         crate::menu::wait_for_any_key(ui);
         return;
     };
-    describe(&tx, &mut lines);
-    let mut said: heapless::String<80> = heapless::String::new();
-    headline(&tx, &mut said);
-
-    // **Nothing is signed that was not shown.** A description that did not fit is a
-    // transaction this device cannot put in front of somebody, and the honest answer is
-    // to say so rather than to offer a signature over a tail nobody read.
-    let shown_in_full = lines.dropped == 0;
-    let mut rows: alloc::vec::Vec<Line<'_>> = alloc::vec::Vec::new();
-    if rows.try_reserve_exact(lines.rows.len() + 4).is_err() {
-        crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
-        crate::menu::wait_for_any_key(ui);
-        return;
-    }
-    rows.push(Line::title("Solana transaction"));
-    rows.push(Line::body(&said).small());
-    for line in &lines.rows {
-        rows.push(Line::body(line).small());
-    }
-    let mut complaint: heapless::String<64> = heapless::String::new();
-    if shown_in_full {
-        rows.push(Line::item("Sign it", 1));
-    } else {
-        let _ = write!(
-            complaint,
-            "{} more lines than this screen holds",
-            lines.dropped
-        );
-        rows.push(Line::body(&complaint).small());
-        rows.push(Line::body("not signed: it cannot all be shown").small());
-    }
-
-    if !matches!(
-        crate::menu::show_doc(ui, &rows, false, false),
-        crate::menu::DocExit::Selected(1)
-    ) {
+    describe(&tx, &mut review);
+    if !review.show(ui, "Solana transaction", "Sign it") {
         return;
     }
 

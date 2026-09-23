@@ -138,6 +138,31 @@ pub const AMBER: [u16; 16] = [
     0xBC00, 0xDCC0, 0xED00, 0xFD60,
 ];
 
+/// Black to a warning red: the one screen that is not asking, it is telling.
+///
+/// A whole palette rather than a red line on a grey screen, because text colour on this
+/// panel is a *level* through a ramp -- an anti-aliased glyph edge lands at level 7, so a
+/// mixed palette would fringe every letter with whatever level 7 happened to be. Giving
+/// the screen its own ramp keeps the anti-aliasing correct and makes the warning
+/// unmissable at the same time: the background goes red, not one word of it.
+///
+/// Built like [`GREYS`] but with green and blue held down, so the ramp is one hue the
+/// whole way up rather than a wash toward white.
+pub const ALARM: [u16; 16] = {
+    let mut p = [0u16; 16];
+    let mut i = 0;
+    while i < 16 {
+        // Red climbs its full range; the other two rise to about a third of theirs, which
+        // is what keeps the top of the ramp a bright red rather than pink.
+        let r = 31 * i / 15;
+        let g = 20 * i / 15;
+        let b = 16 * i / 15;
+        p[i] = rgb565(r as u8, g as u8, b as u8);
+        i += 1;
+    }
+    p
+};
+
 /// Height of one colour-chart band: six of them fill the panel.
 const BAND: usize = HEIGHT / 6;
 

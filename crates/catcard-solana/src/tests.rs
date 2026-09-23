@@ -229,6 +229,7 @@ fn an_unknown_program_is_named_and_counted() {
             program: p,
             accounts,
             data_len,
+            ..
         } => {
             assert_eq!(p, program);
             assert_eq!(accounts, 2);
@@ -711,4 +712,89 @@ fn the_priority_fee_is_read_from_the_budget() {
         parse(&raw).expect("a transaction").action(0),
         Some(Action::ComputeBudget(Budget::Other))
     );
+}
+
+/// A durable nonce is read, not warned about.
+///
+/// A nonce is how a transaction stays valid long enough to be carried to an air-gapped
+/// device and back: instead of a blockhash that expires in about a minute, the message
+/// commits to a nonce held in an account, and the first instruction spends it. So it is
+/// exactly what this device sees most often -- and calling it "a program this build
+/// cannot read" would have put a warning on the mechanism that waited for us.
+#[test]
+fn a_durable_nonce_is_read_rather_than_warned_about() {
+    let (nonce, authority, to) = (key(9), key(1), key(2));
+    // AdvanceNonceAccount: tag 4, no parameters. Accounts are the nonce account, the
+    // recent-blockhashes sysvar, and the authority.
+    let advance = SolanaInstruction {
+        program_id: SolanaKey([0u8; 32]),
+        accounts: std::vec![
+            SolanaAccountMeta {
+                pubkey: nonce,
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: key(7),
+                is_signer: false,
+                is_writable: false
+            },
+            SolanaAccountMeta {
+                pubkey: authority,
+                is_signer: true,
+                is_writable: false
+            },
+        ],
+        data: std::vec![4, 0, 0, 0],
+    };
+    let raw = build(
+        authority,
+        std::vec![advance, transfer_instruction(authority, to, 100_000_000)],
+    );
+    let tx = parse(&raw).expect("a transaction");
+
+    assert_eq!(
+        tx.action(0),
+        Some(Action::AdvanceNonce {
+            account: Some(nonce),
+            authority: Some(authority),
+        })
+    );
+    match tx.action(1).expect("the transfer") {
+        Action::TransferSol { lamports, .. } => assert_eq!(lamports, 100_000_000),
+        other => panic!("read as {other:?}"),
+    }
+}
+
+/// A System instruction this build has no reader for is named and numbered.
+///
+/// Not decoded -- the screens say so -- but "System instruction 8" is something a person
+/// can look up, and "a program this build cannot name" is not.
+#[test]
+fn an_unread_system_instruction_says_which_one_it_is() {
+    let allocate = SolanaInstruction {
+        program_id: SolanaKey([0u8; 32]),
+        accounts: std::vec![SolanaAccountMeta {
+            pubkey: key(1),
+            is_signer: true,
+            is_writable: true
+        }],
+        // Allocate: tag 8, then a u64 of space.
+        data: std::vec![8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+    };
+    let raw = build(key(1), std::vec![allocate]);
+    let tx = parse(&raw).expect("a transaction");
+    match tx.action(0).expect("an action") {
+        Action::Unknown {
+            named,
+            tag,
+            accounts,
+            ..
+        } => {
+            assert_eq!(named, Some("System"));
+            assert_eq!(tag, Some(8));
+            assert_eq!(accounts, 1);
+        }
+        other => panic!("read as {other:?}"),
+    }
 }

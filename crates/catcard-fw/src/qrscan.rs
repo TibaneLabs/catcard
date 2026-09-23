@@ -895,12 +895,7 @@ fn offer(
         // returning to the menu would read as a device that did not understand.
         #[cfg(feature = "multichain")]
         Content::EvmTx { .. } => {
-            let bytes = &lease.bytes()[at..at + len];
-            let what = catcard_evm::parse(bytes)
-                .map(|tx| crate::evmtx::headline(&catcard_evm::summary::summarise(&tx)))
-                .unwrap_or("this is not a transaction");
-            menu::message(ui.panel, "EVM transaction", what, "any key to go back");
-            menu::wait_for_any_key(ui);
+            crate::evmtx::screen(ui, &lease.bytes()[at..at + len]);
         }
         #[cfg(feature = "multichain")]
         Content::SolanaTx { base64 } => {

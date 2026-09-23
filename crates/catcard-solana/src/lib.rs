@@ -591,9 +591,27 @@ pub enum Action {
     /// payer pays whatever it says. A price nobody looked at is the one number in a
     /// transaction that can empty an account without a transfer in sight.
     ComputeBudget(Budget),
+    /// A durable nonce being consumed and replaced.
+    ///
+    /// What makes a transaction that will be signed later still valid: instead of a
+    /// blockhash that expires in about a minute, the message commits to a nonce held in
+    /// an account, and advancing it is what spends that nonce. An air-gapped signature
+    /// is the reason anybody uses one, so a device that called it "a program this build
+    /// cannot read" would be warning about the very thing that waited for it.
+    AdvanceNonce {
+        account: Option<SolanaKey>,
+        authority: Option<SolanaKey>,
+    },
     /// A program this build does not decode, named and counted.
     Unknown {
         program: SolanaKey,
+        /// What the program is called, where the address is one this build knows. A
+        /// name is not a decoding: it says whose instruction this is, not what it does.
+        named: Option<&'static str>,
+        /// The instruction's number, for a program whose instructions are numbered.
+        /// Shown so that an instruction nobody here has written a reader for can at
+        /// least be looked up by somebody who has.
+        tag: Option<u32>,
         accounts: usize,
         data_len: usize,
     },
@@ -624,31 +642,62 @@ impl Action {
 const TOKEN_TRANSFER: u8 = 3;
 const TOKEN_APPROVE: u8 = 4;
 const TOKEN_TRANSFER_CHECKED: u8 = 12;
-/// The System program's instruction tags are four bytes, little-endian.
-const SYSTEM_TRANSFER: [u8; 4] = [2, 0, 0, 0];
-
 fn decode(
     program: SolanaKey,
     data: &[u8],
     accounts: usize,
     account: &dyn Fn(usize) -> Option<SolanaKey>,
 ) -> Action {
+    // The fallback, for a program this build has no reader for. Named where the address
+    // is one it knows, and carrying the instruction's number where the program numbers
+    // them -- neither of which is a decoding, and the screens say so.
+    let named = if program == token_program() {
+        Some("SPL Token")
+    } else if program == ata_program() {
+        Some("Associated Token Account")
+    } else if program == compute_budget_program() {
+        Some("Compute Budget")
+    } else {
+        None
+    };
     let unknown = Action::Unknown {
         program,
+        named,
+        tag: data.first().map(|&b| u32::from(b)),
         accounts,
         data_len: data.len(),
     };
 
     if program == system_program() {
-        // transfer: a four-byte tag and a little-endian `u64`.
-        if data.len() == 12 && data[..4] == SYSTEM_TRANSFER {
-            return Action::TransferSol {
-                from: account(0),
-                to: account(1),
-                lamports: u64_le(&data[4..12]),
-            };
+        // Every System instruction opens with a little-endian `u32` discriminant.
+        // [C] `solana-sdk`, `system-interface`: `SystemInstruction`.
+        let tag = (data.len() >= 4).then(|| u32_le(&data[..4]));
+        match (tag, data.len()) {
+            // Transfer: the tag and a little-endian `u64` of lamports.
+            (Some(2), 12) => {
+                return Action::TransferSol {
+                    from: account(0),
+                    to: account(1),
+                    lamports: u64_le(&data[4..12]),
+                };
+            }
+            // AdvanceNonceAccount: no parameters at all. The accounts are the nonce
+            // account, the recent-blockhashes sysvar, and the authority that signs.
+            (Some(4), 4) => {
+                return Action::AdvanceNonce {
+                    account: account(0),
+                    authority: account(2),
+                };
+            }
+            _ => {}
         }
-        return unknown;
+        return Action::Unknown {
+            program,
+            named: Some("System"),
+            tag,
+            accounts,
+            data_len: data.len(),
+        };
     }
 
     if program == token_program() {

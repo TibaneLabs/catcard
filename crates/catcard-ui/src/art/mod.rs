@@ -8,6 +8,8 @@ pub mod indexed;
 pub mod menuicons;
 pub mod rgba;
 pub mod tibane;
+/// Marks for a transaction review: what each line of one is about.
+pub mod txicons;
 
 pub use indexed::{Indexed, draw_indexed};
 

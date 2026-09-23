@@ -211,6 +211,33 @@ static TOKENS: [(u64, [u8; 20], &str, u8); 181] = [
     (59144, address("0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f"), "WETH", 18),
 ];
 
+/// What each chain is called, for a screen that would otherwise say "chain 42161".
+///
+/// The names are the source list's own slugs, capitalised -- the same rows the
+/// addresses above came from, so a chain cannot be named here and unknown there.
+#[rustfmt::skip]
+static NAMES: [(u64, &str); 10] = [
+    (1, "Ethereum"),
+    (10, "Optimism"),
+    (56, "BNB Chain"),
+    (137, "Polygon"),
+    (999, "HyperEVM"),
+    (5000, "Mantle"),
+    (8453, "Base"),
+    (9745, "Plasma"),
+    (42161, "Arbitrum"),
+    (59144, "Linea"),
+];
+
+/// What `chain_id` is called, if this build knows it.
+///
+/// A miss is shown as the number, which is what the transaction actually carries
+/// and what somebody can look up. A wrong name would be worse than no name: it is
+/// the one field that says which network the money is on.
+pub fn chain_name(chain_id: u64) -> Option<&'static str> {
+    NAMES.iter().find(|(c, _)| *c == chain_id).map(|(_, n)| *n)
+}
+
 /// The token at `address` on `chain_id`, if this build knows it.
 ///
 /// A miss is the ordinary case, not an error: the table is a few dozen well-known
