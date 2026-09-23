@@ -36,6 +36,7 @@
 
 pub mod literal;
 pub mod rlp;
+pub mod sign;
 pub mod summary;
 pub mod tokens;
 
@@ -325,6 +326,13 @@ impl<'a> Tx<'a> {
     pub fn signing_hash(&self, scratch: &'a mut [u8]) -> Result<[u8; 32], Error> {
         let bytes = self.signing_bytes(scratch)?;
         Ok(outscript::hash::keccak256_once(bytes))
+    }
+
+    /// The bytes this was parsed from: the whole RLP list, without a type byte.
+    ///
+    /// For the signer, which appends to them rather than rebuilding them.
+    pub fn raw(&self) -> &'a [u8] {
+        self.raw
     }
 
     /// Whether this arrived already signed.

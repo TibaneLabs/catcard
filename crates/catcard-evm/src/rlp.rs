@@ -217,14 +217,26 @@ fn write_header(out: &mut [u8], len: usize, list: bool, short: bool) -> Option<&
 /// bytes exactly as they arrived -- but a caller that has to build a transaction, and
 /// every test that has to build one to read back, does.
 pub fn list_of<'o>(items: &[&[u8]], out: &'o mut [u8]) -> Option<&'o [u8]> {
+    list_from(&[], items, out)
+}
+
+/// Build an RLP list whose payload is `prefix` verbatim, then `items` as byte strings.
+///
+/// `prefix` is already-encoded items, copied rather than re-encoded. That is what makes
+/// signing a transaction safe: the fields this build never decoded -- an access list, a
+/// blob's versioned hashes -- go back out exactly as they arrived, and only the three
+/// signature items are written. A signer that rebuilt a transaction from the fields it
+/// understood would be signing a different transaction from the one it was shown.
+pub fn list_from<'o>(prefix: &[u8], items: &[&[u8]], out: &'o mut [u8]) -> Option<&'o [u8]> {
     // Two passes: the payload's length decides the header's length.
-    let payload: usize = items
-        .iter()
-        .map(|i| {
-            let small = i.len() == 1 && i[0] < 0x80;
-            header_len(i.len(), small) + i.len()
-        })
-        .sum();
+    let payload: usize = prefix.len()
+        + items
+            .iter()
+            .map(|i| {
+                let small = i.len() == 1 && i[0] < 0x80;
+                header_len(i.len(), small) + i.len()
+            })
+            .sum::<usize>();
     let total = header_len(payload, false) + payload;
     if out.len() < total {
         return None;
@@ -232,6 +244,9 @@ pub fn list_of<'o>(items: &[&[u8]], out: &'o mut [u8]) -> Option<&'o [u8]> {
     let (whole, _) = out.split_at_mut(total);
     let mut rest: &mut [u8] = whole;
     rest = write_header(rest, payload, true, false)?;
+    let (head, tail) = rest.split_at_mut_checked(prefix.len())?;
+    head.copy_from_slice(prefix);
+    rest = tail;
     for i in items {
         let small = i.len() == 1 && i[0] < 0x80;
         rest = write_header(rest, i.len(), false, small)?;

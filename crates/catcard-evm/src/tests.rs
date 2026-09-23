@@ -575,3 +575,113 @@ mod the_token_table {
         }
     }
 }
+
+/// EIP-155's own worked example, from the unsigned bytes to the signed ones.
+///
+/// The one vector everything on this path can be checked against at once: the signing
+/// hash, the deterministic signature, the `v` that folds in the chain id, and the RLP of
+/// the result. All four are published, so agreeing with them is agreement with Ethereum
+/// rather than with ourselves.
+///
+/// Source: EIP-155, §Example. [C]
+#[test]
+fn the_published_eip155_example_signs_byte_for_byte() {
+    use outscript::crypto::secp256k1::SecpPrivateKey;
+
+    const UNSIGNED: &str = "ec098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a764000080018080";
+    const HASH: &str = "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53";
+    const SIGNED: &str = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
+
+    let unsigned = hex(UNSIGNED);
+    let tx = parse(&unsigned).expect("a transaction");
+    assert_eq!(tx.chain_id, Some(1));
+    assert_eq!(tx.nonce, 9);
+    assert!(!tx.signed());
+
+    let mut scratch = std::vec![0u8; unsigned.len() + 1];
+    let hash = tx.signing_hash(&mut scratch).expect("a hash");
+    assert_eq!(hash.to_vec(), hex(HASH));
+
+    let key = SecpPrivateKey::from_bytes(&[0x46; 32]).expect("a key");
+    let (r, s, recid) = key.sign_recoverable(&hash);
+
+    let mut out = std::vec![0u8; unsigned.len() + crate::sign::OVERHEAD];
+    let n = crate::sign::encode_signed(&tx, &r, &s, recid, &mut out).expect("room");
+    assert_eq!(out[..n].to_vec(), hex(SIGNED));
+
+    // And the result reads back as the same transaction, now carrying `v = 37`.
+    let back = parse(&out[..n]).expect("still a transaction");
+    assert_eq!(back.chain_id, Some(1));
+    assert_eq!(back.to, tx.to);
+    assert_eq!(back.value, tx.value);
+    assert_eq!(back.signature.expect("signed").v, 37);
+}
+
+/// A typed transaction keeps the fields this build never decoded.
+///
+/// The access list is counted and not read, so signing one is where "rebuild it from
+/// what I understood" would quietly drop it -- and the signature would then be over a
+/// transaction nobody was shown. Signing appends rather than rebuilds, so what comes out
+/// holds what went in.
+#[test]
+fn signing_a_typed_transaction_keeps_its_access_list() {
+    use outscript::crypto::secp256k1::SecpPrivateKey;
+
+    /// One byte string, encoded.
+    fn string(b: &[u8]) -> Vec<u8> {
+        let mut buf = std::vec![0u8; b.len() + 16];
+        let list = crate::rlp::list_of(&[b], &mut buf).expect("room");
+        crate::rlp::item(list).expect("a list").payload.to_vec()
+    }
+    /// A list of already-encoded items.
+    fn list(items: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for i in items {
+            payload.extend_from_slice(i);
+        }
+        let mut buf = std::vec![0u8; payload.len() + 16];
+        crate::rlp::list_from(&payload, &[], &mut buf)
+            .expect("room")
+            .to_vec()
+    }
+
+    // One access-list entry: a contract and one storage key. [C] EIP-2930
+    let keys = list(&[string(&[0x22u8; 32])]);
+    let entry = list(&[string(&[0x11u8; 20]), keys]);
+    let access = list(&[entry]);
+
+    // chainId, nonce, maxPriority, maxFee, gas, to, value, data, accessList.
+    let fields = [
+        string(&[0x01]),
+        string(&[0x02]),
+        string(&[0x03]),
+        string(&[0x04]),
+        string(&[0x52, 0x08]),
+        string(&[0x33u8; 20]),
+        string(&[0x05]),
+        string(&[]),
+        access,
+    ];
+    let mut body = std::vec![0x02u8];
+    body.extend_from_slice(&list(&fields));
+
+    let tx = parse(&body).expect("a 1559 transaction");
+    assert_eq!(tx.access_list_len, 1);
+    assert!(!tx.signed());
+
+    let mut scratch = std::vec![0u8; body.len() + 1];
+    let hash = tx.signing_hash(&mut scratch).expect("a hash");
+    let key = SecpPrivateKey::from_bytes(&[0x46; 32]).expect("a key");
+    let (r, s, recid) = key.sign_recoverable(&hash);
+    let mut out = std::vec![0u8; body.len() + crate::sign::OVERHEAD];
+    let n = crate::sign::encode_signed(&tx, &r, &s, recid, &mut out).expect("room");
+
+    let back = parse(&out[..n]).expect("still a transaction");
+    assert_eq!(back.access_list_len, 1, "the access list survived");
+    assert_eq!(back.chain_id, Some(1));
+    assert_eq!(back.to, tx.to);
+    assert_eq!(back.signature.expect("signed").r, r);
+    assert_eq!(&out[..1], &[0x02], "still type 2");
+    // yParity is 0 or 1 on a typed transaction, never 27 or a folded chain id.
+    assert!(back.signature.expect("signed").v <= 1);
+}
