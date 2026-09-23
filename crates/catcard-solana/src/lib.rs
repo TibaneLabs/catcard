@@ -127,6 +127,8 @@ pub struct Tx<'a> {
     version: Version,
     /// The signature slots, 64 bytes each.
     signatures: &'a [u8],
+    /// Everything a signature is over: the message, which is the rest of the bytes.
+    message: &'a [u8],
     header: [u8; 3],
     /// The account keys, 32 bytes each.
     keys: &'a [u8],
@@ -172,6 +174,10 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
     let mut c = Cursor { data: bytes, at: 0 };
     let sig_count = c.len()?;
     let signatures = c.take(sig_count.checked_mul(64).ok_or(Error::NotATransaction)?)?;
+    // What a signature is over starts here -- at the version byte, for a message that
+    // has one. The end is the end of the transaction, which the check at the bottom of
+    // this function is what makes true.
+    let message = &bytes[c.at..];
 
     // A versioned message opens with a byte that cannot be a header: the top bit is set,
     // and a legacy header's first byte is a signature count that never reaches 0x80.
@@ -245,6 +251,7 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
     Ok(Tx {
         version,
         signatures,
+        message,
         header,
         keys,
         instructions,
@@ -254,7 +261,63 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
     })
 }
 
+/// Put `signature` in slot `index` of the transaction in `bytes`.
+///
+/// Separate from [`Tx`] because a transaction is read through a shared borrow and signed
+/// through an exclusive one, and because this is the one operation that changes the
+/// bytes: keeping it apart means every other path is visibly read-only.
+///
+/// **The message is not touched, and cannot be.** Only a 64-byte slot is written, so
+/// signatures already in the transaction stay valid -- which is the whole reason a
+/// partly signed transaction can be passed from signer to signer. `false` means nothing
+/// was written: not a transaction, or a slot it does not have.
+pub fn place_signature(bytes: &mut [u8], index: usize, signature: &[u8; 64]) -> bool {
+    let mut at = 0;
+    let Ok(count) = decode_compact_u16(bytes, &mut at) else {
+        return false;
+    };
+    if index >= count {
+        return false;
+    }
+    let from = at + index * 64;
+    let Some(slot) = bytes.get_mut(from..from + 64) else {
+        return false;
+    };
+    slot.copy_from_slice(signature);
+    true
+}
+
 impl<'a> Tx<'a> {
+    /// The bytes a signature is over.
+    ///
+    /// The message: the header, the account keys, the blockhash, the instructions and --
+    /// for a versioned transaction -- the version byte in front and the address table
+    /// lookups behind. Everything except the signature slots, which is why signing one
+    /// never invalidates another.
+    pub fn message(&self) -> &'a [u8] {
+        self.message
+    }
+
+    /// Which slot `key` signs, if it signs at all.
+    ///
+    /// The signers are the first `required` account keys, in order, and slot `i` belongs
+    /// to key `i`. A key further down the list is an account the transaction touches
+    /// rather than one that authorises it, and gets `None` -- a device that signed for
+    /// one of those would be producing a signature the network has no slot for.
+    pub fn signer_index(&self, key: &[u8; 32]) -> Option<usize> {
+        (0..self.signing().required).find(|&i| self.keys.get(i * 32..i * 32 + 32) == Some(&key[..]))
+    }
+
+    /// Whether slot `i` has been filled.
+    ///
+    /// An empty slot is sixty-four zeros, which is what an unsigned transaction carries
+    /// and what no real signature is.
+    pub fn signed(&self, i: usize) -> bool {
+        self.signatures
+            .get(i * 64..i * 64 + 64)
+            .is_some_and(|s| s.iter().any(|&b| b != 0))
+    }
+
     /// Which format it arrived in.
     pub fn version(&self) -> Version {
         self.version

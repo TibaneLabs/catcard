@@ -473,3 +473,78 @@ fn a_versioned_transaction_reports_what_it_hides() {
         other => panic!("read as {other:?}"),
     }
 }
+
+/// Signing one transaction, all the way round.
+///
+/// The point of the test is that the four pieces agree with each other: the message this
+/// reader hands out is the message the network's own rule says is signed, the slot it
+/// names for a key is the slot that key's signature belongs in, and the transaction that
+/// comes out the far side still parses -- now with one more signature on it than it had.
+///
+/// A real ed25519 key, and the signature verified with a verifier this crate does not
+/// otherwise use, because "we signed something" is not the claim. The claim is that what
+/// we signed is what a validator will check.
+#[test]
+fn a_transaction_signed_here_verifies_there() {
+    use outscript::crypto::ed25519;
+
+    let seed = [9u8; 32];
+    let public = ed25519::public_from_seed(&seed);
+    let payer = SolanaKey(public);
+    let mut raw = build(
+        payer,
+        std::vec![transfer_instruction(payer, key(2), 5_000_000)],
+    );
+
+    let tx = parse(&raw).expect("a transaction");
+    assert_eq!(
+        tx.signing(),
+        Signing {
+            required: 1,
+            present: 0
+        }
+    );
+    let slot = tx.signer_index(&public).expect("our key signs this");
+    assert_eq!(slot, 0);
+    assert!(!tx.signed(slot));
+    // The message is everything except the signature slots, and for a legacy
+    // transaction that is one compact-u16 and one empty slot.
+    assert_eq!(tx.message(), &raw[1 + 64..]);
+
+    let signature = ed25519::sign(&seed, tx.message());
+    assert!(ed25519::verify(&public, tx.message(), &signature));
+
+    assert!(place_signature(&mut raw, slot, &signature));
+    let tx = parse(&raw).expect("still a transaction");
+    assert_eq!(
+        tx.signing(),
+        Signing {
+            required: 1,
+            present: 1
+        }
+    );
+    assert!(tx.signed(0));
+    // And the message did not move: a signature goes in a slot, never into the message,
+    // which is what lets a second signer add theirs without breaking the first.
+    assert!(ed25519::verify(&public, tx.message(), &signature));
+}
+
+/// A key that is not a signer gets no slot, and a slot that does not exist gets nothing.
+#[test]
+fn only_a_signer_is_given_a_slot() {
+    let payer = key(1);
+    let raw = build(payer, std::vec![transfer_instruction(payer, key(2), 1)]);
+    let tx = parse(&raw).expect("a transaction");
+
+    // The recipient is in the account list and authorises nothing.
+    assert_eq!(tx.signer_index(&[2; 32]), None);
+    // A key the transaction never mentions.
+    assert_eq!(tx.signer_index(&[42; 32]), None);
+    assert_eq!(tx.signer_index(&payer.0), Some(0));
+
+    let mut raw = raw;
+    assert!(!place_signature(&mut raw, 1, &[7; 64]));
+    assert!(!place_signature(&mut [], 0, &[7; 64]));
+    // And nothing was written on the way to saying no.
+    assert_eq!(parse(&raw).expect("unchanged").signing().present, 0);
+}
