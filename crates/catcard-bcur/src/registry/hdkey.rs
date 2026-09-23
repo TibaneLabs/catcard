@@ -398,8 +398,17 @@ pub struct HdKey {
     pub is_master: bool,
     /// Whether `key_data` is a private key. Defaults to false. [C]
     pub is_private: bool,
-    /// 33 bytes: a compressed public key, or `0x00` followed by a 32-byte secret. [C]
-    pub key_data: [u8; 33],
+    /// The key itself.
+    ///
+    /// Thirty-three bytes for the curve the specification was written around: a
+    /// compressed public key, or `0x00` followed by a 32-byte secret. [C]
+    ///
+    /// **Thirty-two for an ed25519 key**, which is what Keystone writes for Solana and
+    /// what the wallets on the other side base58 to get an address `[C]`
+    /// (`@keystonehq/sol-keyring`: `bs58.encode(each.getKey())`). Outside BCR-2020-007,
+    /// which knows one curve -- but it is what the format is used for in practice, and a
+    /// reader that insisted on 33 would refuse every Solana account anybody exports.
+    pub key_data: heapless::Vec<u8, 33>,
     /// 32 bytes. Absent means no further key may be derived from this one. [C]
     pub chain_code: Option<[u8; 32]>,
     /// What the key is for. Absent means mainnet Bitcoin. [C]
@@ -410,7 +419,16 @@ pub struct HdKey {
     pub children: Option<KeyPath>,
     /// The fingerprint of the direct ancestor, per BIP-32. Never zero. [C]
     pub parent_fingerprint: Option<u32>,
+    /// What to call this key on the screen of whatever imports it. [C] BCR-2020-007
+    /// `name`; read by every wallet that shows a list of imported accounts.
+    pub name: Option<heapless::String<NAME_MAX>>,
 }
+
+/// How long a key's name may be here.
+///
+/// Long enough for a chain's name and an account number, which is what this device puts
+/// in one.
+pub const NAME_MAX: usize = 24;
 
 impl HdKey {
     // Map keys. Source: BCR-2020-007 §"CDDL for HDKey" [C]
@@ -422,18 +440,34 @@ impl HdKey {
     const ORIGIN: u64 = 6;
     const CHILDREN: u64 = 7;
     const PARENT_FINGERPRINT: u64 = 8;
+    const NAME: u64 = 9;
+
+    /// A derived public key, from the bytes it is.
+    ///
+    /// Thirty-three bytes for secp256k1, thirty-two for ed25519; anything else is not a
+    /// key this format carries.
+    pub fn of(key_data: &[u8]) -> Result<Self, Error> {
+        if key_data.len() != 33 && key_data.len() != 32 {
+            return Err(Error::Size(key_data.len()));
+        }
+        Ok(HdKey {
+            key_data: heapless::Vec::from_slice(key_data).map_err(|_| Error::TooMany)?,
+            ..Self::derived([0u8; 33])
+        })
+    }
 
     /// An empty derived public key, to be filled in.
-    pub const fn derived(key_data: [u8; 33]) -> Self {
+    pub fn derived(key_data: [u8; 33]) -> Self {
         HdKey {
             is_master: false,
             is_private: false,
-            key_data,
+            key_data: heapless::Vec::from_slice(&key_data).unwrap_or_default(),
             chain_code: None,
             use_info: None,
             origin: None,
             children: None,
             parent_fingerprint: None,
+            name: None,
         }
     }
 
@@ -457,7 +491,12 @@ impl HdKey {
                 Self::IS_MASTER => key.is_master = r.bool()?,
                 Self::IS_PRIVATE => key.is_private = r.bool()?,
                 Self::KEY_DATA => {
-                    key.key_data = fixed(r.bytes()?)?;
+                    let data = r.bytes()?;
+                    if data.len() != 33 && data.len() != 32 {
+                        return Err(Error::Size(data.len()));
+                    }
+                    key.key_data =
+                        heapless::Vec::from_slice(data).map_err(|_| Error::Size(data.len()))?;
                     seen_key_data = true;
                 }
                 Self::CHAIN_CODE => key.chain_code = Some(fixed(r.bytes()?)?),
@@ -465,6 +504,10 @@ impl HdKey {
                 Self::ORIGIN => key.origin = Some(KeyPath::read(r)?),
                 Self::CHILDREN => key.children = Some(KeyPath::read(r)?),
                 Self::PARENT_FINGERPRINT => key.parent_fingerprint = Some(r.u32()?),
+                Self::NAME => {
+                    let text = r.text()?;
+                    key.name = heapless::String::try_from(text).ok();
+                }
                 // `name` and `note`, and anything a later revision adds.
                 _ => r.skip()?,
             }
@@ -499,7 +542,8 @@ impl HdKey {
             + u64::from(use_info.is_some())
             + u64::from(self.origin.is_some())
             + u64::from(self.children.is_some())
-            + u64::from(parent.is_some());
+            + u64::from(parent.is_some())
+            + u64::from(self.name.is_some());
         w.map(fields)?;
 
         // Ascending key order, as every published vector writes it.
@@ -535,6 +579,10 @@ impl HdKey {
         if let Some(fp) = parent {
             w.uint(Self::PARENT_FINGERPRINT)?;
             w.uint(fp as u64)?;
+        }
+        if let Some(name) = &self.name {
+            w.uint(Self::NAME)?;
+            w.text(name)?;
         }
         Ok(())
     }

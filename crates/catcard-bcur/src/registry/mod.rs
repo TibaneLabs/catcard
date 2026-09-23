@@ -37,6 +37,7 @@ use crate::cbor;
 pub mod account;
 pub mod bytestring;
 pub mod hdkey;
+pub mod multi;
 pub mod solsign;
 
 pub use account::{Account, Descriptor, Script};
@@ -130,6 +131,9 @@ pub enum Kind {
     SolSignRequest,
     /// The answer to one, `sol-signature`. [C] `@keystonehq/bc-ur-registry-sol`
     SolSignature,
+    /// Every account a device holds, `crypto-multi-accounts`. Keystone's extension.
+    /// [C] `@keystonehq/bc-ur-registry`
+    MultiAccounts,
 }
 
 impl Kind {
@@ -158,6 +162,7 @@ impl Kind {
             ("output-descriptor", Kind::Output),
             ("sol-sign-request", Kind::SolSignRequest),
             ("sol-signature", Kind::SolSignature),
+            ("crypto-multi-accounts", Kind::MultiAccounts),
         ];
         TABLE
             .iter()
@@ -180,6 +185,7 @@ impl Kind {
             Kind::Output => "crypto-output",
             Kind::SolSignRequest => "sol-sign-request",
             Kind::SolSignature => "sol-signature",
+            Kind::MultiAccounts => "crypto-multi-accounts",
         }
     }
 }

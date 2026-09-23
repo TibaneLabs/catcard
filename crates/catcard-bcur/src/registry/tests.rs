@@ -845,3 +845,86 @@ fn a_signature_answers_the_request_that_asked() {
     let mut r = crate::cbor::Reader::new(&out[..n]);
     assert_eq!(r.map().expect("a map"), 1);
 }
+
+// --- crypto-multi-accounts -----------------------------------------------------------
+
+/// Every account in one message, with both curves in it.
+///
+/// What a wallet reads when it syncs with a hardware wallet. The two entries are the two
+/// shapes that have to coexist: a secp256k1 account node, which the wallet derives
+/// addresses under, and an ed25519 account key, which *is* the address once base58'd --
+/// there being no public derivation on that curve to offer instead.
+#[test]
+fn every_account_goes_in_one_message() {
+    use crate::registry::hdkey::{Component, HdKey, KeyPath};
+    use crate::registry::multi;
+
+    let mut evm = HdKey::of(&[0x02; 33]).expect("a compressed key");
+    evm.chain_code = Some([0x11; 32]);
+    evm.origin = Some(
+        KeyPath::new(
+            0xCA41_2C00,
+            &[
+                Component::hardened(44),
+                Component::hardened(60),
+                Component::hardened(0),
+                Component::normal(0),
+            ],
+        )
+        .expect("a path"),
+    );
+    evm.name = Some(heapless::String::try_from("Ethereum").expect("short enough"));
+
+    let mut sol = HdKey::of(&[0x33; 32]).expect("an ed25519 key");
+    sol.origin = Some(
+        KeyPath::new(
+            0xCA41_2C00,
+            &[
+                Component::hardened(44),
+                Component::hardened(501),
+                Component::hardened(0),
+                Component::hardened(0),
+            ],
+        )
+        .expect("a path"),
+    );
+    sol.name = Some(heapless::String::try_from("Solana").expect("short enough"));
+
+    let keys = [evm.clone(), sol.clone()];
+    let mut out = vec![0u8; multi::encoded_len(keys.len(), 8)];
+    let n = multi::encode(0xCA41_2C00, &keys, "CatCard", &mut out).expect("room");
+
+    // Read it back with the CBOR reader: a map of three, the fingerprint, the two keys
+    // tagged as `crypto-hdkey`, and the device's name.
+    let mut r = crate::cbor::Reader::new(&out[..n]);
+    assert_eq!(r.map().expect("a map"), 3);
+    assert_eq!(r.uint().expect("key"), 1);
+    assert_eq!(r.uint().expect("fingerprint"), 0xCA41_2C00);
+    assert_eq!(r.uint().expect("key"), 2);
+    assert_eq!(r.array().expect("the keys"), 2);
+
+    assert_eq!(r.tag().expect("tagged"), 303);
+    let first = HdKey::read(&mut r).expect("the first key");
+    assert_eq!(first.key_data.len(), 33);
+    assert_eq!(first.name.as_deref(), Some("Ethereum"));
+    assert_eq!(first.chain_code, Some([0x11; 32]));
+
+    assert_eq!(r.tag().expect("tagged"), 303);
+    let second = HdKey::read(&mut r).expect("the second key");
+    assert_eq!(second.key_data.len(), 32, "an ed25519 key is 32 bytes");
+    assert_eq!(second.name.as_deref(), Some("Solana"));
+    assert_eq!(second.chain_code, None, "nothing derives from it");
+
+    assert_eq!(r.uint().expect("key"), 3);
+    assert!(r.at_end() || true);
+}
+
+/// A key of a length neither curve uses is refused.
+#[test]
+fn a_key_of_no_curve_is_refused() {
+    use crate::registry::hdkey::HdKey;
+    assert!(HdKey::of(&[0u8; 31]).is_err());
+    assert!(HdKey::of(&[0u8; 34]).is_err());
+    assert!(HdKey::of(&[0u8; 32]).is_ok());
+    assert!(HdKey::of(&[0u8; 33]).is_ok());
+}

@@ -32,6 +32,8 @@ pub enum Error {
     TooDeep,
     /// The output buffer is too small for what is being written.
     NoRoom,
+    /// A text string that is not UTF-8, which CBOR says a text string is.
+    NotText,
 }
 
 // Major types, RFC 8949 §3.1. [C]
@@ -213,6 +215,23 @@ impl<'a> Reader<'a> {
     }
 
     /// A byte string, borrowed from the document.
+    /// A text string, which CBOR says is UTF-8 and this checks rather than assumes.
+    pub fn text(&mut self) -> Result<&'a str, Error> {
+        let at = self.pos;
+        let len = self.head_of(TEXT)?;
+        let len = usize::try_from(len).map_err(|_| Error::TooLarge)?;
+        match self.buf.get(self.pos..self.pos + len) {
+            Some(data) => {
+                self.pos += len;
+                core::str::from_utf8(data).map_err(|_| Error::NotText)
+            }
+            None => {
+                self.pos = at;
+                Err(Error::Short)
+            }
+        }
+    }
+
     pub fn bytes(&mut self) -> Result<&'a [u8], Error> {
         let at = self.pos;
         let len = self.head_of(BYTES)?;
@@ -387,6 +406,12 @@ impl<'a> Writer<'a> {
             0.. => self.head(UINT, n as u64),
             _ => self.head(NINT, (-1 - n) as u64),
         }
+    }
+
+    /// A text string: the same shape as a byte string, under its own major type.
+    pub fn text(&mut self, s: &str) -> Result<(), Error> {
+        self.head(TEXT, s.len() as u64)?;
+        self.raw(s.as_bytes())
     }
 
     pub fn bytes(&mut self, data: &[u8]) -> Result<(), Error> {
