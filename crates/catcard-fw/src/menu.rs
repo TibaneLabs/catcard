@@ -10959,6 +10959,7 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
         E::Peripheral => "peripheral",
         E::ReadOnly => "read only",
         E::Busy => "card stayed busy",
+        E::Unsupported => "not done here",
     }
 }
 

@@ -140,7 +140,8 @@ const STA_TXUNDERR: u32 = 1 << 4;
 /// and drops words -- the write mirror of the receive-drain bug.
 const STA_TXFIFOHE: u32 = 1 << 14;
 
-/// `DCTRL`: enable, card-to-host direction, and a block size of 2^9 = 512.
+/// `DCTRL`: enable and card-to-host direction. The block size is an exponent written by
+/// `arm_data` from the length it is given.
 /// The command's own flags in `ICR`: response CRC, response timeout, response received,
 /// command sent. Same four bits on both IPs.
 ///
@@ -152,7 +153,6 @@ const ICR_CMD: u32 = STA_CCRCFAIL | STA_CTIMEOUT | STA_CMDREND | STA_CMDSENT;
 
 const DCTRL_DTEN: u32 = 1 << 0;
 const DCTRL_DTDIR_CARD_TO_HOST: u32 = 1 << 1;
-const DCTRL_BLOCK_512: u32 = 9 << 4;
 
 /// Polls before a command is called lost.
 ///
@@ -244,6 +244,11 @@ pub struct Sdmmc {
     /// `DCTRL.DTEN` must stay clear or the DPSM starts early (before the command) and the
     /// read never happens. The older controller has no `CMDTRANS` and needs `DTEN`.
     new_ip: bool,
+    /// Whether a data phase has been armed for the next command.
+    ///
+    /// Set by the `arm_*` calls and cleared by the command that consumes it, which is
+    /// what tells `command` to raise `CMDTRANS` on the controller that needs it.
+    armed: bool,
     bits: Bits,
 }
 
@@ -302,6 +307,7 @@ impl Sdmmc {
         }
 
         Ok(Self {
+            armed: false,
             base: b,
             present: card_detect(spec, slot),
             wide: false,
@@ -338,14 +344,13 @@ impl Transport for Sdmmc {
                 Response::Short => 0b01 << bits.waitresp_shift,
                 Response::Long => 0b11 << bits.waitresp_shift,
             };
-            // CMD17 and CMD24 are the commands here followed by a data phase, and their
-            // data path is armed before this call. `cmdtrans` is 0 on the L4, which starts
-            // the data path from `DCTRL.DTEN` instead.
-            let trans = if cmd == 17 || cmd == 24 {
-                bits.cmdtrans
-            } else {
-                0
-            };
+            // A command with a data phase has had that phase armed before this call, and
+            // `armed` is how this knows. It used to be a list of command numbers -- 17
+            // and 24 -- which was true while those were the only two and silently wrong
+            // for the third. `cmdtrans` is 0 on the L4, which starts the data path from
+            // `DCTRL.DTEN` instead.
+            let trans = if self.armed { bits.cmdtrans } else { 0 };
+            self.armed = false;
             reg::write(b + CMD, u32::from(cmd) | wait | trans | bits.cpsmen);
 
             // Done is either "response arrived" or, for a command with no response,
@@ -389,6 +394,20 @@ impl Transport for Sdmmc {
     }
 
     fn read_data(&mut self, out: &mut [u8; BLOCK_LEN]) -> Result<(), Error> {
+        self.read_short(out)
+    }
+
+    fn write_data(&mut self, data: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+        self.write_short(data)
+    }
+
+    /// The reader, over however many bytes were armed.
+    ///
+    /// The length is the caller's slice rather than a constant, so the one loop serves a
+    /// 512-byte block and an eighteen-byte lock structure alike. What it must match is
+    /// what `arm_data` put in `DLEN`; a mismatch is a data path that never closes.
+    fn read_short(&mut self, out: &mut [u8]) -> Result<(), Error> {
+        let want = out.len();
         let b = self.base;
         // SAFETY: as above.
         unsafe {
@@ -405,13 +424,13 @@ impl Transport for Sdmmc {
                 // flag on the L4+ IP: `RXDAVL`/`RXFIFOHF` leave a block's last few words
                 // unread there, and the undrained FIFO then wedges the data path with
                 // `DCOUNT` stuck short of zero -- which is what a partial read looked like.
-                while reg::read(b + STA) & STA_RXFIFOE == 0 && at < BLOCK_LEN {
+                while reg::read(b + STA) & STA_RXFIFOE == 0 && at < want {
                     let w = reg::read(b + FIFO).to_le_bytes();
-                    let n = w.len().min(BLOCK_LEN - at);
+                    let n = w.len().min(want - at);
                     out[at..at + n].copy_from_slice(&w[..n]);
                     at += n;
                 }
-                if at >= BLOCK_LEN {
+                if at >= want {
                     // The bytes are all here, but the controller may not be: `DATAEND` says
                     // the data path has closed. Returning while it is still running lets it
                     // run into the next command, and a word left in the FIFO is then read as
@@ -459,18 +478,27 @@ impl Transport for Sdmmc {
         Ok(())
     }
 
-    fn write_data(&mut self, data: &[u8; BLOCK_LEN]) -> Result<(), Error> {
+    /// The writer, over however many bytes were armed.
+    ///
+    /// As `read_short`: one loop for a block and for a lock structure. Four bytes at a
+    /// time, so a payload that is not a multiple of four is refused rather than padded --
+    /// padding would send the card bytes the caller did not write.
+    fn write_short(&mut self, data: &[u8]) -> Result<(), Error> {
+        let want = data.len();
+        if !want.is_multiple_of(4) {
+            return Err(Error::Unsupported);
+        }
         let b = self.base;
         // SAFETY: this type owns SDMMC1 for its lifetime.
         unsafe {
             let mut at = 0usize;
             let mut tries = 0u32;
             // Feed the FIFO an eight-word burst at a time, only when `TXFIFOHE` says there
-            // is room for one. `BLOCK_LEN` is a multiple of 32, so the bursts divide it
+            // is room for one. a block is a multiple of 32, so the bursts divide it
             // evenly. Writing per word against `TXFIFOF` instead races on the L4+ IP: the
             // "full" flag lags a word behind, the extra write is dropped, and the transfer
             // then stalls with `DCOUNT` short of zero -- exactly what a partial write was.
-            while at < BLOCK_LEN {
+            while at < want {
                 let sta = reg::read(b + STA);
                 if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
                     last_failure::record(
@@ -483,7 +511,7 @@ impl Transport for Sdmmc {
                 }
                 if sta & STA_TXFIFOHE != 0 {
                     let mut n = 0;
-                    while n < 8 && at < BLOCK_LEN {
+                    while n < 8 && at < want {
                         let w = [data[at], data[at + 1], data[at + 2], data[at + 3]];
                         reg::write(b + FIFO, u32::from_le_bytes(w));
                         at += 4;
@@ -567,11 +595,19 @@ impl Transport for Sdmmc {
         // the data path from the command's `CMDTRANS`, so setting `DTEN` there would run
         // the DPSM before the command and the read would never happen.
         unsafe { arm_block_read(self.base, !self.new_ip) }
+        self.armed = true;
     }
 
     fn arm_block_write(&mut self) {
         // SAFETY: as in `arm_block_read`.
         unsafe { arm_block_write(self.base, !self.new_ip) }
+        self.armed = true;
+    }
+
+    fn arm_data(&mut self, len: usize, to_host: bool) {
+        // SAFETY: as in `arm_block_read`.
+        unsafe { arm_data(self.base, !self.new_ip, len, to_host) }
+        self.armed = true;
     }
 }
 
@@ -584,10 +620,28 @@ impl Transport for Sdmmc {
 /// Caller owns SDMMC1.
 pub unsafe fn arm_block_read(b: u32, dten: bool) {
     // SAFETY: as documented.
+    unsafe { arm_data(b, dten, BLOCK_LEN, true) }
+}
+
+/// Arm the data path for one transfer of `len` bytes.
+///
+/// **`len` must be a power of two.** `DCTRL.DBLOCKSIZE` is an exponent, not a length --
+/// the controller can move 1, 2, 4 ... 16384 bytes and nothing between. That is not a
+/// limit anybody meets reading blocks, which are 512, but it decides how a lock/unlock
+/// payload has to be shaped: the structure is two bytes plus the password, so a password
+/// of six or fourteen bytes gives a transfer the controller can express and one of
+/// sixteen does not.
+///
+/// # Safety
+/// Caller owns SDMMC1.
+pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) {
+    let exponent = len.trailing_zeros();
+    // SAFETY: as documented.
     unsafe {
-        reg::write(b + DLEN, BLOCK_LEN as u32);
+        reg::write(b + DLEN, len as u32);
         let en = if dten { DCTRL_DTEN } else { 0 };
-        reg::write(b + DCTRL, en | DCTRL_DTDIR_CARD_TO_HOST | DCTRL_BLOCK_512);
+        let dir = if to_host { DCTRL_DTDIR_CARD_TO_HOST } else { 0 };
+        reg::write(b + DCTRL, en | dir | (exponent << 4));
     }
 }
 
@@ -601,11 +655,7 @@ pub unsafe fn arm_block_read(b: u32, dten: bool) {
 /// Caller owns SDMMC1.
 pub unsafe fn arm_block_write(b: u32, dten: bool) {
     // SAFETY: as documented.
-    unsafe {
-        reg::write(b + DLEN, BLOCK_LEN as u32);
-        let en = if dten { DCTRL_DTEN } else { 0 };
-        reg::write(b + DCTRL, en | DCTRL_BLOCK_512);
-    }
+    unsafe { arm_data(b, dten, BLOCK_LEN, false) }
 }
 
 /// Steer the board's slot multiplexer to `slot`. Nothing to do on a single-slot board.

@@ -44,6 +44,9 @@ pub enum Error {
     /// nothing written to it, and a firmware that cannot write the card cannot corrupt
     /// someone's files either.
     ReadOnly,
+    /// Something this transport does not do at all -- a short transfer on a transport
+    /// that only models blocks, for instance.
+    Unsupported,
 }
 
 /// Which response shape a command expects, since that decides how long to wait and how
@@ -94,6 +97,32 @@ pub trait Transport {
     /// been asked for it drops the first words on the floor. Split out so the sequence
     /// lives here, where it is tested, rather than in the driver.
     fn arm_block_read(&mut self) {}
+
+    /// Arm the data path for a transfer of `len` bytes, before the command is sent.
+    ///
+    /// The general form of the two calls above, for the commands whose payload is not a
+    /// block: a lock/unlock structure, a card's SCR, a status register. `len` must be a
+    /// power of two -- the controller's block size is an exponent, not a length -- which
+    /// is a real constraint on what a caller may ask for and not a detail of this
+    /// driver.
+    ///
+    /// Defaults to doing nothing, like the block arms: a transport that models a fake
+    /// card has nothing to arm.
+    fn arm_data(&mut self, len: usize, to_host: bool) {
+        let _ = (len, to_host);
+    }
+
+    /// Read a short payload, having already armed and issued its command.
+    fn read_short(&mut self, out: &mut [u8]) -> Result<(), Error> {
+        let _ = out;
+        Err(Error::Unsupported)
+    }
+
+    /// Write a short payload, having already armed and issued its command.
+    fn write_short(&mut self, data: &[u8]) -> Result<(), Error> {
+        let _ = data;
+        Err(Error::ReadOnly)
+    }
 
     /// Arm the data path for one outgoing block, before the write command is sent.
     ///
