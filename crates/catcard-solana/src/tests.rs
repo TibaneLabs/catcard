@@ -896,20 +896,10 @@ fn every_shape_rebuilds_into_something_that_parses() {
     assert_eq!(back.message(), message);
 }
 
-/// A real USDC send, as a wallet built it and a device read it back.
-///
-/// Four instructions: a durable nonce, 0.1 SOL, an associated-account create, and an
-/// **unchecked** SPL transfer -- which is what wallets actually emit, and which names no
-/// mint. The device showed "1000000 raw units" for what a person had just sent as 1
-/// USDC, and that is the case this fixture holds down.
-///
-/// The mint is not taken from the create instruction sitting next to it. It is derived:
-/// the source account is the associated token account of the signer for USDC, which is a
-/// program-derived address anybody can work out, so the match is arithmetic rather than
-/// a claim the transaction made about itself.
-#[test]
-fn a_real_usdc_send_is_named_without_being_told() {
-    const SIGNED: &[u8] = &[
+/// A real USDC send, as a wallet built it: a durable nonce, 0.1 SOL, an associated
+/// account created, and an unchecked SPL transfer of 1 USDC. Signed.
+#[rustfmt::skip]
+const USDC_SEND: &[u8] = &[
         0x01, 0x13, 0x2a, 0xfe, 0x46, 0x25, 0x6c, 0x6e, 0x12, 0x7e, 0xde, 0xbb, 0xbf, 0xdc, 0x6b,
         0x1a, 0x2d, 0x6a, 0x90, 0x49, 0x99, 0x20, 0x74, 0x6f, 0x93, 0xe0, 0xf0, 0x1f, 0xab, 0x2b,
         0x38, 0x46, 0x4d, 0xd7, 0x68, 0x8e, 0xcd, 0xe3, 0x08, 0xad, 0xb2, 0x14, 0x6c, 0x60, 0x26,
@@ -938,7 +928,22 @@ fn a_real_usdc_send_is_named_without_being_told() {
         0x00, 0x00, 0x00, 0xe1, 0xf5, 0x05, 0x00, 0x00, 0x00, 0x00, 0x04, 0x06, 0x00, 0x01, 0x00,
         0x05, 0x03, 0x07, 0x01, 0x01, 0x07, 0x03, 0x01, 0x01, 0x00, 0x09, 0x03, 0x40, 0x42, 0x0f,
         0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
+];
+
+/// A real USDC send, as a wallet built it and a device read it back.
+///
+/// Four instructions: a durable nonce, 0.1 SOL, an associated-account create, and an
+/// **unchecked** SPL transfer -- which is what wallets actually emit, and which names no
+/// mint. The device showed "1000000 raw units" for what a person had just sent as 1
+/// USDC, and that is the case this fixture holds down.
+///
+/// The mint is not taken from the create instruction sitting next to it. It is derived:
+/// the source account is the associated token account of the signer for USDC, which is a
+/// program-derived address anybody can work out, so the match is arithmetic rather than
+/// a claim the transaction made about itself.
+#[test]
+fn a_real_usdc_send_is_named_without_being_told() {
+    const SIGNED: &[u8] = USDC_SEND;
 
     let tx = parse(SIGNED).expect("a transaction");
     assert_eq!(
@@ -988,4 +993,67 @@ fn a_real_usdc_send_is_named_without_being_told() {
         }
         other => panic!("read as {other:?}"),
     }
+}
+
+/// The real USDC send, added up: everything in it comes back, so only the fee is spent.
+///
+/// Both transfers in that transaction have the same account on each side -- the SOL goes
+/// from the signer to the signer, and the USDC from the signer's token account to the
+/// signer's token account. Read one instruction at a time it looks like 0.1 SOL and
+/// 1 USDC leaving. Added up it is neither: the only thing that actually moves is the
+/// five thousand lamports of signature fee.
+///
+/// This is the case a total exists for, and the one it would be worst to get wrong: a
+/// screen that said "-0.1 SOL, -1 USDC" about a transaction that moves nothing would be
+/// wrong in the direction that stops somebody signing something harmless -- and the same
+/// arithmetic, one sign out, would wave through something that is not.
+#[test]
+fn a_round_trip_costs_only_the_fee() {
+    let tx = parse(USDC_SEND).expect("a transaction");
+    let signer = tx.key(0).expect("the fee payer").0;
+    let effects = crate::effects::of(&tx, &[signer]);
+
+    // Nothing that moves except the fee.
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1, "more than the fee moved: {moving:?}");
+    assert_eq!(moving[0].mint, None, "and it is SOL");
+    assert_eq!(moving[0].delta, -(LAMPORTS_PER_SIGNATURE as i128));
+    assert!(!effects.lost());
+
+    // The USDC is in the totals and nets to nothing, which is a different statement from
+    // not being there at all.
+    let usdc = effects
+        .entries()
+        .iter()
+        .find(|e| e.mint.is_some())
+        .expect("the token was counted");
+    assert_eq!(usdc.delta, 0);
+    assert_eq!(usdc.named.expect("named").symbol, "USDC");
+
+    // And for somebody else's keys, none of it is theirs -- not even the fee.
+    let stranger = crate::effects::of(&tx, &[[9u8; 32]]);
+    assert_eq!(stranger.moving().count(), 0);
+}
+
+/// One side ours and the other not: that is a real movement, and it is signed.
+#[test]
+fn a_send_to_somebody_else_is_counted() {
+    let payer = key(1);
+    let raw = build(
+        payer,
+        std::vec![transfer_instruction(payer, key(2), 250_000_000)],
+    );
+    let tx = parse(&raw).expect("a transaction");
+    let effects = crate::effects::of(&tx, &[payer.0]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1);
+    assert_eq!(
+        moving[0].delta,
+        -(250_000_000 + LAMPORTS_PER_SIGNATURE as i128)
+    );
+
+    // From the recipient's side it is the amount and no fee: they are not paying it.
+    let theirs = crate::effects::of(&tx, &[key(2).0]);
+    assert_eq!(theirs.moving().count(), 1);
+    assert_eq!(theirs.moving().next().expect("one").delta, 250_000_000);
 }

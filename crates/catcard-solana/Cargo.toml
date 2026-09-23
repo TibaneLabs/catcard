@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+heapless.workspace = true
 # The transaction format itself -- messages, signatures, compact-u16, the well-known
 # program addresses -- is `outscript`'s, which is ours and already carries it. What is
 # here is the layer above: what a transaction *does*, in the terms a person signing it

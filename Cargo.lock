@@ -294,6 +294,7 @@ dependencies = [
 name = "catcard-solana"
 version = "7.0.0"
 dependencies = [
+ "heapless",
  "outscript",
 ]
 

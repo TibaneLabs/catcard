@@ -9,8 +9,6 @@
 
 use crate::txreview::{Review, short};
 
-/// SOL's decimal places, which is what a lamport is a billionth of.
-const SOL_DECIMALS: u8 = 9;
 use catcard_callgate::Callgate;
 use core::fmt::Write as _;
 
@@ -35,121 +33,43 @@ fn sol(lamports: u64, out: &mut [u8; catcard_evm::summary::DECIMAL_MAX]) -> &str
     )
 }
 
-/// What a transaction comes to, per asset, for the accounts this device holds.
+/// Write out what signing comes to, per asset.
 ///
-/// The question a person actually has -- "what does signing this cost me?" -- which no
-/// single instruction answers: a transaction can take SOL in one and give some back in
-/// another, and the fee is not an instruction at all. So the amounts are added up here,
-/// in the one place that knows which accounts are ours.
-///
-/// **Only what can be attributed is counted.** A token account this device cannot tie to
-/// a key of its own is somebody else's as far as this is concerned, and an amount
-/// arriving there is not added to a total that says "yours". Under-counting is visible
-/// on the rows below; over-counting would be a number that is simply wrong.
-#[derive(Default)]
-struct Ledger {
-    entries: heapless::Vec<Entry, 6>,
-    /// More assets than there is room for. Said out loud rather than dropped, because a
-    /// total that is not the whole total must not read as one.
-    lost: bool,
-}
-
-struct Entry {
-    /// `None` is SOL itself.
-    mint: Option<[u8; 32]>,
-    symbol: Option<&'static str>,
-    decimals: Option<u8>,
-    /// Signed, because a transaction can move the same asset both ways.
-    delta: i128,
-}
-
-impl Ledger {
-    fn add(
-        &mut self,
-        mint: Option<[u8; 32]>,
-        symbol: Option<&'static str>,
-        decimals: Option<u8>,
-        delta: i128,
-    ) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.mint == mint) {
-            e.delta += delta;
-            // A later instruction may name the mint where an earlier one could not.
-            e.symbol = e.symbol.or(symbol);
-            e.decimals = e.decimals.or(decimals);
-            return;
-        }
-        if self
-            .entries
-            .push(Entry {
-                mint,
-                symbol,
-                decimals,
-                delta,
-            })
-            .is_err()
-        {
-            self.lost = true;
+/// The adding up is [`catcard_solana::effects`], where it is arithmetic over a parsed
+/// transaction and can be tested against real ones -- including the case that makes a
+/// total worth having, where the same account is on both sides and a per-instruction
+/// reading says something moved when nothing did. This is only the words.
+fn say_effects(effects: &catcard_solana::effects::Effects, out: &mut Review) {
+    let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
+    let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
+    let mut brief: heapless::String<64> = heapless::String::new();
+    for e in effects.moving() {
+        let sign = if e.delta < 0 { "-" } else { "+" };
+        let magnitude = e.delta.unsigned_abs().min(u64::MAX as u128) as u64;
+        match (e.decimals(), e.named, e.mint) {
+            (Some(d), Some(m), _) => {
+                let n = amount(magnitude, d, &mut num);
+                out.effect(format_args!("{sign}{n} {}", m.symbol));
+            }
+            (Some(d), None, None) => {
+                let n = amount(magnitude, d, &mut num);
+                out.effect(format_args!("{sign}{n} SOL"));
+            }
+            // A mint whose decimals this build does not know: the raw number and the
+            // address, since scaling by a guess would be inventing the amount.
+            (_, _, Some(mint)) => {
+                let text = catcard_solana::address(&mint, &mut addr);
+                out.effect(format_args!(
+                    "{sign}{magnitude} of {}",
+                    short(text, &mut brief)
+                ));
+            }
+            (None, _, None) => out.effect(format_args!("{sign}{magnitude} lamports")),
         }
     }
-
-    /// Write the totals out, largest first is not worth the sort: they are read as a
-    /// list of assets, and there are at most six.
-    fn say(&self, out: &mut Review) {
-        let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
-        let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
-        let mut brief: heapless::String<64> = heapless::String::new();
-        for e in &self.entries {
-            if e.delta == 0 {
-                continue;
-            }
-            let sign = if e.delta < 0 { "-" } else { "+" };
-            let magnitude = e.delta.unsigned_abs().min(u64::MAX as u128) as u64;
-            match (e.symbol, e.decimals, e.mint) {
-                (Some(symbol), Some(d), _) => {
-                    let n = amount(magnitude, d, &mut num);
-                    out.effect(format_args!("{sign}{n} {symbol}"));
-                }
-                (None, Some(d), _) => {
-                    let n = amount(magnitude, d, &mut num);
-                    out.effect(format_args!("{sign}{n} SOL"));
-                }
-                // A mint this build cannot name: the raw number and the address, since
-                // scaling by a guessed decimal count would be inventing the amount.
-                (_, None, Some(mint)) => {
-                    let key = catcard_solana::SolanaKey(mint);
-                    let text = catcard_solana::address(&key, &mut addr);
-                    out.effect(format_args!(
-                        "{sign}{magnitude} of {}",
-                        short(text, &mut brief)
-                    ));
-                }
-                (_, None, None) => out.effect(format_args!("{sign}{magnitude} lamports")),
-            }
-        }
-        if self.lost {
-            out.effect(format_args!("and more assets than fit here"));
-        }
+    if effects.lost() {
+        out.effect(format_args!("and more assets than fit here"));
     }
-}
-
-/// Whether `account` is the associated token account of one of our keys for `mint`.
-///
-/// The addresses inside an SPL transfer are token accounts, not wallets, so "is this
-/// mine?" cannot be answered by comparing against our own keys. It is answered by
-/// deriving what our token account for that mint *would* be -- which is public key
-/// arithmetic and needs no seed.
-fn ours_token_account(
-    account: Option<catcard_solana::SolanaKey>,
-    mint: Option<catcard_solana::SolanaKey>,
-    mine: &[[u8; 32]],
-) -> bool {
-    let (Some(account), Some(mint)) = (account, mint) else {
-        return false;
-    };
-    mine.iter().any(|k| {
-        outscript::solana::associated_token_address(catcard_solana::SolanaKey(*k), mint)
-            .is_ok_and(|ata| ata == account)
-    })
 }
 
 /// Whether `key` is one of this device's.
@@ -173,7 +93,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
     let mut addr = [0u8; ADDRESS_MAX];
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
     let mut brief: heapless::String<64> = heapless::String::new();
-    let mut ledger = Ledger::default();
+    say_effects(&catcard_solana::effects::of(tx, mine), out);
 
     // What it costs, and who pays. The fee payer is account zero and pays whatever the
     // budget instructions say, so the two belong on one row.
@@ -203,10 +123,6 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
     if let Some(payer) = payer {
         out.address("paid by", address(&payer, &mut addr));
     }
-    if is_mine(payer, mine) {
-        let paid = fee.base.saturating_add(fee.priority.unwrap_or(0));
-        ledger.add(None, None, Some(SOL_DECIMALS), -(paid as i128));
-    }
 
     for i in 0..tx.instruction_count() {
         let Some(action) = tx.action(i) else { continue };
@@ -228,12 +144,6 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 }
                 if let Some(to) = to {
                     out.address("to", address(&to, &mut addr));
-                }
-                if is_mine(from, mine) {
-                    ledger.add(None, None, Some(SOL_DECIMALS), -(lamports as i128));
-                }
-                if is_mine(to, mine) {
-                    ledger.add(None, None, Some(SOL_DECIMALS), lamports as i128);
                 }
             }
             Action::TransferToken {
@@ -271,17 +181,6 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 }
                 if let Some(mint) = mint {
                     out.address("mint", address(&mint, &mut addr));
-                }
-                // Out when the authority is ours, or the account it leaves is; in when
-                // the account it arrives at is the one our key owns for that mint.
-                let d = decimals.or(named.map(|m| m.decimals));
-                let symbol = named.map(|m| m.symbol);
-                let mint_bytes = mint.map(|m| m.0);
-                if is_mine(owner, mine) || ours_token_account(from, mint, mine) {
-                    ledger.add(mint_bytes, symbol, d, -(raw as i128));
-                }
-                if ours_token_account(to, mint, mine) {
-                    ledger.add(mint_bytes, symbol, d, raw as i128);
                 }
                 // The one place a number here could be wrong by a power of ten.
                 if action.decimals_disagree() {
@@ -405,8 +304,6 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
         out.note(format_args!("they come from on-chain tables,"));
         out.note(format_args!("so this device cannot show them"));
     }
-
-    ledger.say(out);
 
     // Who must sign, when it is more than just us.
     let signing = tx.signing();
