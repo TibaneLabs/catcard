@@ -1,0 +1,22 @@
+[package]
+name = "catcard-solana"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The transaction format itself -- messages, signatures, compact-u16, the well-known
+# program addresses -- is `outscript`'s, which is ours and already carries it. What is
+# here is the layer above: what a transaction *does*, in the terms a person signing it
+# uses. Writing a second parser would mean two implementations of the thing that decides
+# what gets signed, and the wrong one would be the one nobody tested.
+outscript = { workspace = true, features = ["solana"] }
+
+[dev-dependencies]
+# The encoder half, for fixtures. `alloc` drags `serde_json` in, which is why the
+# firmware does not have it -- on a host building test transactions it costs nothing,
+# and it means what this crate reads is checked against bytes it did not write.
+outscript = { workspace = true, features = ["solana", "alloc", "std"] }

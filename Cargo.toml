@@ -14,6 +14,7 @@ members = [
     "crates/catcard-pin",
     "crates/catcard-png",
     "crates/catcard-evm",
+    "crates/catcard-solana",
     "crates/catcard-hal",
     "crates/catcard-kernel",
     "crates/catcard-nfc",
@@ -44,6 +45,7 @@ default-members = [
     "crates/catcard-pin",
     "crates/catcard-png",
     "crates/catcard-evm",
+    "crates/catcard-solana",
     "crates/catcard-settings",
     "crates/catcard-upgrade",
     "crates/catcard-usb",
@@ -80,6 +82,7 @@ catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
 catcard-usb = { path = "crates/catcard-usb", default-features = false }
 catcard-qr = { path = "crates/catcard-qr", default-features = false }
 catcard-png = { path = "crates/catcard-png", default-features = false }
+catcard-solana = { path = "crates/catcard-solana", default-features = false }
 # The small signature table by default; a board with flash to spare can add
 # `catcard-evm/full-signatures` to its own feature list.
 catcard-evm = { path = "crates/catcard-evm", default-features = false, features = [
