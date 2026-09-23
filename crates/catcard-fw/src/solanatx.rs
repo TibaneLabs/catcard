@@ -201,10 +201,28 @@ fn describe(tx: &catcard_solana::Tx<'_>, arena: &mut Arena) {
 
 /// How many accounts are tried when nothing says which key is wanted.
 ///
-/// `m/44'/501'/0'/0'` through `7'`, the path Phantom and Solflare use. A transaction
-/// arriving bare does not name a key -- it names the *public* key that must sign, and
-/// finding which of ours that is means deriving ours and comparing.
+/// A transaction arriving bare names no path. It names the *public key* that must sign,
+/// so finding which of this device's keys that is means deriving them and comparing --
+/// and the only question is how far to look.
+///
+/// Eight, which is what the address browser already derives for one page. That is the
+/// honest bound: the same work this device visibly does when somebody pages through
+/// their Solana addresses, so it is known to be tolerable rather than guessed to be.
+///
+/// It is still a window, and an account past it gets "no key of this device signs it".
+/// That screen names the address the transaction wanted, so the answer to a key kept
+/// further out is legible rather than mysterious -- and a wallet that says which path it
+/// wants, which is what `sol-sign-request` is for, never comes through here at all.
 const ACCOUNTS: u32 = 8;
+
+/// The two shapes a Solana path is written in.
+///
+/// `m/44'/501'/i'/0'` is Phantom's and Solflare's; `m/44'/501'/i'` is what Ledger and
+/// older Solflare produce, and they give different keys for the same account number.
+/// Both are tried, in that order, because a device that only knew one would tell half
+/// its users it does not hold their key. [C] SLIP-0044 coin 501; the two conventions are
+/// the ones those wallets ship.
+const SHAPES: usize = 2;
 
 /// Solana's coin type, from SLIP-0044. [C]
 const COIN: u32 = 501;
@@ -221,32 +239,53 @@ fn sign_it(
     tx: &catcard_solana::Tx<'_>,
     path: Option<[u32; 4]>,
 ) -> Result<Option<(usize, [u8; 64])>, &'static str> {
-    let message = tx.message();
-    crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
-        // **Every account is derived, whichever one matches.** Stopping at the first hit
-        // would make the work depend on which of this device's accounts the transaction
-        // wants, and how long the masked region lasts is the one thing a host can still
-        // measure. Eight derivations are a few HMACs; the seed stretch above them cost a
-        // second.
-        let mut found = None;
-        let wanted: [[u32; 4]; ACCOUNTS as usize] =
-            core::array::from_fn(|i| [44, COIN, i as u32, 0]);
-        let paths: &[[u32; 4]] = match path {
-            Some(ref p) => core::slice::from_ref(p),
-            None => &wanted,
-        };
-        for p in paths {
-            let Some(node) = catcard_wallet::slip10::derive(seed, p, kw) else {
-                continue;
-            };
+    if let Some(path) = path {
+        // A request that named a key. Nothing to search: that path, or nothing.
+        let message = tx.message();
+        return crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+            let node = catcard_wallet::slip10::derive(seed, &path, kw)?;
             let public = node.public_key(kw);
-            if let Some(slot) = tx.signer_index(&public)
-                && found.is_none()
-            {
-                found = Some((
+            let found = tx.signer_index(&public).map(|slot| {
+                (
                     slot,
                     outscript::crypto::ed25519::sign(node.secret(), message),
-                ));
+                )
+            });
+            Some(found)
+        });
+    }
+    let message = tx.message();
+    crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+        // Account 0 in both shapes, then account 1 in both, and so on: the first account
+        // is the overwhelmingly common one, and this ends on it.
+        //
+        // **It stops at the first match.** An earlier version derived every candidate
+        // whatever happened, on the grounds that how long the masked region lasts is
+        // something a host can measure. That reasoning does not survive contact with
+        // what is actually secret here: the key being asked for is written in the
+        // transaction the asker sent, so a duration that varies with which of our
+        // accounts holds it tells them an index they could have worked out anyway.
+        // Paying for every account on every signature bought almost nothing. What the
+        // masking is really for -- the seed, and everything derived from it -- is
+        // unchanged.
+        let mut found = None;
+        'search: for account in 0..ACCOUNTS {
+            for shape in 0..SHAPES {
+                let path: &[u32] = match shape {
+                    0 => &[44, COIN, account, 0],
+                    _ => &[44, COIN, account],
+                };
+                let Some(node) = catcard_wallet::slip10::derive(seed, path, kw) else {
+                    continue;
+                };
+                let public = node.public_key(kw);
+                if let Some(slot) = tx.signer_index(&public) {
+                    found = Some((
+                        slot,
+                        outscript::crypto::ed25519::sign(node.secret(), message),
+                    ));
+                    break 'search;
+                }
             }
         }
         Some(found)
@@ -375,12 +414,24 @@ fn review_and_sign(
     let signed = match sign_it(gate, login, ui, &tx, path) {
         Ok(Some(found)) => found,
         Ok(None) => {
-            crate::menu::message(
-                ui.panel,
-                HEAD,
-                "no key of this device signs it",
-                "any key to go back",
-            );
+            // Name the key it wanted. "Not ours" on its own leaves a person guessing
+            // between a wrong device, a wrong account and a wrong passphrase; the
+            // address says which, because they can compare it to one this device shows.
+            let mut wanted: heapless::String<64> = heapless::String::new();
+            let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
+            match tx.key(0) {
+                Some(k) => {
+                    let _ = write!(
+                        wanted,
+                        "it wants {}",
+                        catcard_solana::address(&k, &mut addr)
+                    );
+                }
+                None => {
+                    let _ = wanted.push_str("any key to go back");
+                }
+            }
+            crate::menu::message(ui.panel, HEAD, "no key of this device signs it", &wanted);
             crate::menu::wait_for_any_key(ui);
             return;
         }
