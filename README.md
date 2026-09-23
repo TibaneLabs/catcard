@@ -15,6 +15,11 @@ MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 > Do not put funds on a device running this. Keep the words of any seed you let it
 > store, and expect to reinstall stock firmware.
 
+**Want to try it?** Every push builds a signed image for every board:
+[latest builds](https://github.com/TibaneLabs/catcard/actions/workflows/ci.yml?query=branch%3Amaster+is%3Asuccess)
+— open the newest green run and take a `.dfu` from **Artifacts**. Details and what the
+names mean: [Images built for you](#images-built-for-you).
+
 ## Why
 
 The stock Coldcard firmware derives its BIP-39 wallet seed from two chained software
@@ -146,6 +151,37 @@ loadable by anyone; it also means the device boots it with a 25-second warning a
 red "not genuine" light, and that no dev-signed image is attributable to any author.
 
 Getting it onto hardware: [`docs/FLASHING.md`](docs/FLASHING.md).
+
+### Images built for you
+
+You do not have to build anything to try this. CI builds **every shape on every push**
+and attaches the signed `.dfu` files to the run:
+
+**[Latest builds →](https://github.com/TibaneLabs/catcard/actions/workflows/ci.yml?query=branch%3Amaster+is%3Asuccess)**
+— open the newest green run and scroll to **Artifacts** at the bottom of the summary
+page. Each one downloads as a zip holding one `.dfu`.
+
+Twelve of them, named `catcard-<board>-<chains>[-games]`:
+
+| | |
+|---|---|
+| board | `mk3`, `mk4-mk5` (one image serves both), `q1` |
+| chains | `bitcoin`, or `multichain` for every chain the registry knows |
+| `-games` | the same image with Flappy Cat in it |
+
+So `catcard-q1-multichain` is the Q1 build most people want, and `catcard-mk4-mk5-bitcoin`
+is a Bitcoin-only mk4 or mk5.
+
+Two things to know before flashing one:
+
+- **They are signed with the published developer key**, so the device boots them with a
+  red "not genuine" light and a 25-second warning. That is what lets anyone load them;
+  it also means no dev-signed image is attributable to any author.
+- **They carry no debug monitor and no key injection**, unlike a local `make` build. CI
+  checks that rather than assuming it, because these are downloadable by anyone.
+
+Artifacts expire after GitHub's retention window, so an old run may list none. Build it
+yourself, or use a newer run.
 
 ## Layout
 
