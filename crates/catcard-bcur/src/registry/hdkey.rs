@@ -11,7 +11,7 @@
 
 use super::{
     Error, TAG_COININFO_V1, TAG_COININFO_V2, TAG_HDKEY_V1, TAG_HDKEY_V2, TAG_KEYPATH_V1,
-    TAG_KEYPATH_V2, optional_tag,
+    TAG_KEYPATH_V2, bounded, optional_tag,
 };
 use crate::cbor::{self, Reader, Writer};
 
@@ -543,18 +543,4 @@ impl HdKey {
 /// A byte string that must be exactly `N` bytes -- a key, a chain code.
 fn fixed<const N: usize>(data: &[u8]) -> Result<[u8; N], Error> {
     <[u8; N]>::try_from(data).map_err(|_| Error::Size(data.len()))
-}
-
-/// A map or array length a bounded loop may run to.
-///
-/// A three-byte header can claim four billion entries; refusing rather than iterating
-/// is what stops a scan turning into a hang.
-fn bounded(count: u64) -> Result<usize, Error> {
-    // Nothing in this registry has more entries than a keypath has components plus its
-    // two scalars, with headroom for fields a later revision adds.
-    const LIMIT: u64 = 64;
-    if count > LIMIT {
-        return Err(Error::Cbor(cbor::Error::TooDeep));
-    }
-    Ok(count as usize)
 }

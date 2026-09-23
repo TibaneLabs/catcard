@@ -175,9 +175,27 @@ pub fn parse(bytes: &[u8]) -> Result<Tx<'_>, Error> {
     let sig_count = c.len()?;
     let signatures = c.take(sig_count.checked_mul(64).ok_or(Error::NotATransaction)?)?;
     // What a signature is over starts here -- at the version byte, for a message that
-    // has one. The end is the end of the transaction, which the check at the bottom of
-    // this function is what makes true.
+    // has one. The end is the end of the transaction, which the full-consumption check
+    // at the bottom of `walk` is what makes true.
     let message = &bytes[c.at..];
+    walk(c, signatures, message)
+}
+
+/// Parse a message on its own: a transaction with its signature slots taken off.
+///
+/// This is what an air-gapped signing request carries -- `sol-sign-request` asks for a
+/// signature over exactly these bytes -- and it is the same object as a transaction in
+/// every way that matters to a person reading it. What comes back reports no signatures,
+/// because a message has nowhere to keep one, and [`Tx::to_transaction`] is how it
+/// becomes something that can hold them.
+pub fn parse_message(bytes: &[u8]) -> Result<Tx<'_>, Error> {
+    let c = Cursor { data: bytes, at: 0 };
+    walk(c, &[], bytes)
+}
+
+/// The message walk, shared by both entry points.
+fn walk<'a>(mut c: Cursor<'a>, signatures: &'a [u8], message: &'a [u8]) -> Result<Tx<'a>, Error> {
+    let bytes = c.data;
 
     // A versioned message opens with a byte that cannot be a header: the top bit is set,
     // and a legacy header's first byte is a signature count that never reaches 0x80.
@@ -306,6 +324,50 @@ impl<'a> Tx<'a> {
     /// one of those would be producing a signature the network has no slot for.
     pub fn signer_index(&self, key: &[u8; 32]) -> Option<usize> {
         (0..self.signing().required).find(|&i| self.keys.get(i * 32..i * 32 + 32) == Some(&key[..]))
+    }
+
+    /// Write this out as a transaction: the signature slots, then the message.
+    ///
+    /// For the one that arrived as a message alone. A signing request carries no slots,
+    /// and a transaction cannot be broadcast without them, so they are put in front --
+    /// empty, in the number the header says are required, ready for
+    /// [`place_signature`].
+    ///
+    /// A transaction that arrived as one is written back as it came, signatures and all.
+    /// `None` means `out` is too small; nothing is written in that case.
+    pub fn to_transaction(&self, out: &mut [u8]) -> Option<usize> {
+        let count = if self.signatures.is_empty() {
+            self.signing().required
+        } else {
+            self.signatures.len() / 64
+        };
+        // A compact-u16: seven bits a byte, high bit meaning "another follows". The same
+        // encoding every count in the format uses, and a signature count never needs
+        // more than two bytes because an account index is a byte.
+        let mut head = [0u8; 2];
+        let head = if count < 0x80 {
+            head[0] = count as u8;
+            &head[..1]
+        } else {
+            head[0] = (count as u8 & 0x7f) | 0x80;
+            head[1] = (count >> 7) as u8;
+            &head[..2]
+        };
+        let slots = count * 64;
+        let total = head.len() + slots + self.message.len();
+        if out.len() < total || count > 0x3fff {
+            return None;
+        }
+        out[..head.len()].copy_from_slice(head);
+        let mut at = head.len();
+        if self.signatures.is_empty() {
+            out[at..at + slots].fill(0);
+        } else {
+            out[at..at + slots].copy_from_slice(self.signatures);
+        }
+        at += slots;
+        out[at..at + self.message.len()].copy_from_slice(self.message);
+        Some(total)
     }
 
     /// Whether slot `i` has been filled.

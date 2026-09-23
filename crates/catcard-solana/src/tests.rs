@@ -548,3 +548,87 @@ fn only_a_signer_is_given_a_slot() {
     // And nothing was written on the way to saying no.
     assert_eq!(parse(&raw).expect("unchanged").signing().present, 0);
 }
+
+/// The message inside a real signing request, read as a transaction would be.
+///
+/// The bytes are the `signData` of the `sol-sign-request` in Keystone's own test for
+/// that registry item -- a message, not a transaction, which is the thing worth pinning
+/// down: a reader that expected signature slots in front would find a header where the
+/// count should be and refuse the request every wallet actually sends.
+const KEYSTONE_MESSAGE: &[u8] = &[
+    0x01, 0x00, 0x01, 0x03, 0xc8, 0xd8, 0x42, 0xa2, 0xf1, 0x7f, 0xd7, 0xaa, 0xb6, 0x08, 0xce, 0x2e,
+    0xa5, 0x35, 0xa6, 0xe9, 0x58, 0xdf, 0xfa, 0x20, 0xca, 0xf6, 0x69, 0xb3, 0x47, 0xb9, 0x11, 0xc4,
+    0x17, 0x19, 0x65, 0x53, 0x0f, 0x95, 0x76, 0x20, 0xb2, 0x28, 0xba, 0xe2, 0xb9, 0x4c, 0x82, 0xdd,
+    0xd4, 0xc0, 0x93, 0x98, 0x3a, 0x67, 0x36, 0x55, 0x55, 0xb7, 0x37, 0xec, 0x7d, 0xdc, 0x11, 0x17,
+    0xe6, 0x1c, 0x72, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x10, 0x29, 0x5c, 0xc2, 0xf1, 0xf3, 0x9f, 0x36, 0x04, 0x71, 0x84, 0x96,
+    0xea, 0x00, 0x67, 0x6d, 0x6a, 0x72, 0xec, 0x66, 0xad, 0x09, 0xd9, 0x26, 0xe3, 0xec, 0xe3, 0x4f,
+    0x56, 0x5f, 0x18, 0xd2, 0x01, 0x02, 0x02, 0x00, 0x01, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x00, 0xe1,
+    0xf5, 0x05, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn a_signing_request_carries_a_message_not_a_transaction() {
+    // A message does not parse as a transaction: the first byte is a signature count of
+    // one, and what follows is a header rather than sixty-four bytes of signature.
+    assert!(parse(KEYSTONE_MESSAGE).is_err());
+
+    let tx = parse_message(KEYSTONE_MESSAGE).expect("a message");
+    assert_eq!(tx.version(), Version::Legacy);
+    assert_eq!(tx.key_count(), 3);
+    assert_eq!(
+        tx.signing(),
+        Signing {
+            required: 1,
+            present: 0
+        }
+    );
+    // The whole of it is what a signature covers.
+    assert_eq!(tx.message(), KEYSTONE_MESSAGE);
+    match tx.action(0).expect("an action") {
+        Action::TransferSol { lamports, .. } => assert_eq!(lamports, 100_000_000),
+        other => panic!("a SOL transfer read as {other:?}"),
+    }
+}
+
+/// A message becomes a transaction by growing the slots it was missing.
+#[test]
+fn a_message_becomes_a_transaction_that_can_hold_signatures() {
+    let tx = parse_message(KEYSTONE_MESSAGE).expect("a message");
+    let mut out = [0u8; 512];
+    let n = tx.to_transaction(&mut out).expect("room");
+    assert_eq!(n, 1 + 64 + KEYSTONE_MESSAGE.len());
+
+    let built = parse(&out[..n]).expect("a transaction now");
+    assert_eq!(built.message(), KEYSTONE_MESSAGE);
+    assert_eq!(
+        built.signing(),
+        Signing {
+            required: 1,
+            present: 0
+        }
+    );
+
+    // And it holds one: the slot fills, the message does not move.
+    assert!(place_signature(&mut out[..n], 0, &[3; 64]));
+    let signed = parse(&out[..n]).expect("still a transaction");
+    assert_eq!(signed.signing().present, 1);
+    assert_eq!(signed.message(), KEYSTONE_MESSAGE);
+
+    // A buffer one byte short is refused rather than filled part way.
+    assert_eq!(tx.to_transaction(&mut out[..n - 1]), None);
+}
+
+/// A transaction written back out is the transaction that came in.
+#[test]
+fn a_transaction_round_trips_through_to_transaction() {
+    let payer = key(1);
+    let mut raw = build(payer, std::vec![transfer_instruction(payer, key(2), 9)]);
+    assert!(place_signature(&mut raw, 0, &[5; 64]));
+
+    let tx = parse(&raw).expect("a transaction");
+    let mut out = [0u8; 512];
+    let n = tx.to_transaction(&mut out).expect("room");
+    assert_eq!(&out[..n], &raw[..]);
+}

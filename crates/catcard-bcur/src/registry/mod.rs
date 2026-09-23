@@ -37,6 +37,7 @@ use crate::cbor;
 pub mod account;
 pub mod bytestring;
 pub mod hdkey;
+pub mod solsign;
 
 pub use account::{Account, Descriptor, Script};
 pub use hdkey::{CoinInfo, Component, HdKey, KeyPath, Tags};
@@ -97,6 +98,8 @@ pub const TAG_OUTPUT_V2: u64 = 40308;
 pub const TAG_PSBT_V1: u64 = 310;
 /// `psbt`, BCR-2020-006. [C]
 pub const TAG_PSBT_V2: u64 = 40310;
+/// A UUID, RFC 8949's own tag, which is what a request id is wrapped in. [C] RFC 9562
+pub const TAG_UUID: u64 = 37;
 /// `crypto-account`, BCR-2020-015. [C]
 pub const TAG_ACCOUNT_V1: u64 = 311;
 /// `account-descriptor`, BCR-2023-019 -- a different body, refused. [C]
@@ -122,6 +125,11 @@ pub enum Kind {
     Account,
     /// An output descriptor, `crypto-output` / `output-descriptor`. BCR-2020-010. [C]
     Output,
+    /// A request for a Solana signature, `sol-sign-request`. Keystone's extension rather
+    /// than a BCR. [C] `@keystonehq/bc-ur-registry-sol`
+    SolSignRequest,
+    /// The answer to one, `sol-signature`. [C] `@keystonehq/bc-ur-registry-sol`
+    SolSignature,
 }
 
 impl Kind {
@@ -148,6 +156,8 @@ impl Kind {
             ("account-descriptor", Kind::Account),
             ("crypto-output", Kind::Output),
             ("output-descriptor", Kind::Output),
+            ("sol-sign-request", Kind::SolSignRequest),
+            ("sol-signature", Kind::SolSignature),
         ];
         TABLE
             .iter()
@@ -168,6 +178,8 @@ impl Kind {
             Kind::CoinInfo => "crypto-coin-info",
             Kind::Account => "crypto-account",
             Kind::Output => "crypto-output",
+            Kind::SolSignRequest => "sol-sign-request",
+            Kind::SolSignature => "sol-signature",
         }
     }
 }
@@ -186,6 +198,20 @@ pub(crate) fn optional_tag(r: &mut cbor::Reader<'_>, allowed: [u64; 2]) -> Resul
         }
     }
     Ok(())
+}
+
+/// A map or array length a bounded loop may run to.
+///
+/// A three-byte header can claim four billion entries; refusing rather than iterating
+/// is what stops a scan turning into a hang.
+pub(crate) fn bounded(count: u64) -> Result<usize, Error> {
+    // Nothing in this registry has more entries than a keypath has components plus its
+    // two scalars, with headroom for fields a later revision adds.
+    const LIMIT: u64 = 64;
+    if count > LIMIT {
+        return Err(Error::Cbor(cbor::Error::TooDeep));
+    }
+    Ok(count as usize)
 }
 
 #[cfg(test)]

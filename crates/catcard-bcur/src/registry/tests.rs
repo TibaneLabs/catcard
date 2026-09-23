@@ -762,3 +762,86 @@ fn the_published_account_is_reached_from_its_own_seed() {
     let n = enc.finish().expect("all seven");
     assert_eq!(to_hex(&out[..n]), ACCOUNT_CBOR);
 }
+
+// --- sol-sign-request, sol-signature -------------------------------------------------
+
+/// Keystone's own example, read as a UR and then as a request.
+///
+/// The string is copied from the test in `@keystonehq/bc-ur-registry-sol` that produces
+/// it, so this checks interoperability with the thing wallets actually talk to rather
+/// than with our own idea of the format. Everything in it is asserted, because each
+/// field is a different way of signing the wrong thing: the wrong bytes, with the wrong
+/// key, answered to the wrong question.
+#[test]
+fn keystones_own_sign_request_is_read() {
+    use crate::registry::hdkey::Component;
+    use crate::registry::solsign::{self, SignType};
+
+    const LINE: &str = "ur:sol-sign-request/onadtpdagdndcawmgtfrkigrpmndutdnbtkgfssbjnaohdmtadaeadaxsptpfwoewnlbtspkrpaytodmonecolwlhdurzscxsgyninqdflrhbysschcfihgubsmdkocxprderdvorhgslfuttyrtmumkftioengogorlemwpkiuobychvacejpvtaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaebedthhsawnwfneenaajslrmtwdaeiojnimjpwpiypmastadsvlwpvlgwhfhecstdadaoaoaeadbnaoaeaeaeaevyykahaeaeaeaeaxtaaddyoeadlocsdwykcfadykykaeykaeykaocybgeehfksahisjkjljziyjzhsjpihamadkkgseofg";
+
+    let mut scratch = vec![0u8; 2048];
+    let mut c = crate::Collector::new();
+    let placed = c.accept(LINE, &mut scratch).expect("a single-part UR");
+    let message = scratch[placed.at.start..placed.at.start + placed.len].to_vec();
+    c.confirm(placed);
+    assert!(c.complete());
+    assert_eq!(c.kind(), Some(Kind::SolSignRequest));
+
+    let req = solsign::decode(&message).expect("a sign request");
+    assert_eq!(req.sign_type, SignType::Transaction);
+    // m/44'/501'/0'/0', under the master whose fingerprint is 12345678.
+    assert_eq!(req.path.source_fingerprint, Some(0x1234_5678));
+    assert_eq!(
+        req.path.components.as_slice(),
+        &[
+            Component::hardened(44),
+            Component::hardened(501),
+            Component::hardened(0),
+            Component::hardened(0),
+        ]
+    );
+    // The UUID 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d, as sixteen bytes.
+    assert_eq!(
+        req.request_id,
+        Some(
+            &[
+                0x9b, 0x1d, 0xeb, 0x4d, 0x3b, 0x7d, 0x4b, 0xad, 0x9b, 0xdd, 0x2b, 0x0d, 0x7b, 0x3d,
+                0xcb, 0x6d
+            ][..]
+        )
+    );
+    // And what it asks to have signed is a message: a header, three keys, a blockhash
+    // and one instruction. 150 bytes, opening with the header rather than with a
+    // signature count.
+    assert_eq!(req.sign_data.len(), 150);
+    assert_eq!(&req.sign_data[..4], &[0x01, 0x00, 0x01, 0x03]);
+}
+
+/// The answer is a signature and the handle it answers, and nothing else.
+#[test]
+fn a_signature_answers_the_request_that_asked() {
+    use crate::registry::solsign;
+
+    let id = [0x9bu8; 16];
+    let signature = [0x42u8; 64];
+    let mut out = vec![0u8; solsign::signature_len(id.len())];
+    let n = solsign::encode_signature(&signature, Some(&id), &mut out).expect("room");
+    assert!(n <= out.len());
+
+    // Read back with the CBOR reader, since there is no decoder for the answer -- this
+    // device writes it and never receives one.
+    let mut r = crate::cbor::Reader::new(&out[..n]);
+    assert_eq!(r.map().expect("a map"), 2);
+    assert_eq!(r.uint().expect("key"), 1);
+    assert_eq!(r.tag().expect("uuid tag"), 37);
+    assert_eq!(r.bytes().expect("id"), &id[..]);
+    assert_eq!(r.uint().expect("key"), 2);
+    assert_eq!(r.bytes().expect("signature"), &signature[..]);
+    assert!(r.at_end());
+
+    // Without a handle it is one pair, and still fits what the sizer said.
+    let mut out = vec![0u8; solsign::signature_len(0)];
+    let n = solsign::encode_signature(&signature, None, &mut out).expect("room");
+    let mut r = crate::cbor::Reader::new(&out[..n]);
+    assert_eq!(r.map().expect("a map"), 1);
+}
