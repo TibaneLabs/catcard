@@ -185,16 +185,20 @@ fn ask(port: &mut Usart, body: &[u8], reply: &mut [u8; 64]) -> Option<usize> {
 /// Source: hw-reference/qr.md §6, §7 [C]
 fn stop(port: &mut Usart) {
     for _ in 0..STOP_TRIES {
-        // Talk over whatever it is saying, then say it.
+        // Talk over whatever it is saying, then say it -- and **listen for the answer**.
+        //
+        // This used to drain, send, drain again and then require silence. The second
+        // drain gives up after `GAP_MS` of quiet, which is five milliseconds, and the
+        // module takes tens to answer: so the drain ended before the acknowledgement
+        // arrived, and then the acknowledgement -- the proof that the stop had worked --
+        // was the byte that made `quiet` report it had not. Every scan ended in the
+        // blind shutdown, on hardware doing exactly as it was told.
+        //
+        // So the ack is read for what it is, the way every other command here is read,
+        // and silence is kept only as the second way to believe it: a module that never
+        // acked but has gone quiet has also stopped.
         port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
-        let mut out = [0u8; 64];
-        if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, cmd::SCAN_STOP, &mut out) {
-            let _ = port.write(frame, ms_cycles(WIRE_MS));
-        }
-        // Whatever was already on its way, plus the reply, and then -- if it worked --
-        // nothing.
-        port.drain(DRAIN_LIMIT, ms_cycles(GAP_MS));
-        if quiet(port) {
+        if command(port, cmd::SCAN_STOP) || quiet(port) {
             let _ = command(port, cmd::TORCH_OFF);
             sleep(port);
             return;
