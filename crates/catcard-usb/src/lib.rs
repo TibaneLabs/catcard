@@ -131,6 +131,19 @@ pub enum Opcode {
     /// terse `[u8 phase][u32 sta][u32 dcount]`. **Bring-up only** (`usb-debug-mem`) --
     /// it is a diagnostic for the SD data path, reachable when the panel is not.
     DebugSd = 0x0033,
+    /// Send one raw command to the microSD card and hand back what it said.
+    ///
+    /// The request is `[u8 cmd][u8 flags][u16 len][u32 arg]` and, when `flags` says the
+    /// data goes to the card, `len` bytes after it. `flags` bits 0-1 are the response
+    /// shape (0 none, 1 short, 2 long), bit 2 means a data phase card-to-host and bit 3
+    /// host-to-card. The reply is `[u8 status][u8 reserved][u16 len][u32 resp0..3]` and
+    /// then `len` bytes for a read.
+    ///
+    /// **Bring-up only** (`usb-debug-mem`), and for good reason: this is the whole card
+    /// protocol, which includes erasing it and locking it with a password nobody knows.
+    /// It exists to find out what real cards do -- which of them answer CMD42, what
+    /// their CID says -- on a device kept for that, not on anybody's.
+    DebugSdRaw = 0x0034,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -170,6 +183,7 @@ impl Opcode {
             0x0031 => Opcode::DebugPoke,
             0x0032 => Opcode::DebugJsr,
             0x0033 => Opcode::DebugSd,
+            0x0034 => Opcode::DebugSdRaw,
             _ => return None,
         })
     }

@@ -700,8 +700,22 @@ impl UsbTask {
                 body[5..9].copy_from_slice(&dcount.to_le_bytes());
                 self.begin_reply(Status::Ok, &body);
             }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugSdRaw) => {
+                let mut body = [0u8; REPLY_MAX];
+                match sd_raw(progress.payload, &mut body) {
+                    Some(n) => self.begin_reply(Status::Ok, &body[..n]),
+                    None => self.begin_reply(Status::BadRequest, &[]),
+                }
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
-            Some(Opcode::DebugPeek | Opcode::DebugPoke | Opcode::DebugJsr | Opcode::DebugSd) => {
+            Some(
+                Opcode::DebugPeek
+                | Opcode::DebugPoke
+                | Opcode::DebugJsr
+                | Opcode::DebugSd
+                | Opcode::DebugSdRaw,
+            ) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);
             }
             Some(Opcode::Ping) => {
@@ -1420,6 +1434,101 @@ pub fn msc_take_reset() -> bool {
     } else {
         with_task(|t| t.otg.take_msc_reset()).unwrap_or(false)
     }
+}
+
+/// The card the raw bridge is talking to, kept between commands.
+///
+/// **Kept, because the card's state is the point.** `CMD16` sets a block length that the
+/// next command relies on; `CMD7` leaves the card selected; a lock/unlock sequence is
+/// three commands that only mean something in order. Initialising per request would
+/// reset all of that and the bridge could only ever ask one-command questions.
+#[cfg(feature = "usb-debug-mem")]
+static mut BRIDGE: Option<(catcard_hal::sdmmc::Sdmmc, catcard_sd::Card)> = None;
+
+/// Run one raw command against the card, and write the reply into `out`.
+///
+/// Request: `[u8 cmd][u8 flags][u16 len][u32 arg]` then the outgoing data, if any.
+/// Reply: `[u8 status][u8 reserved][u16 len][u32 resp0..3]` then the incoming data.
+///
+/// `status` is 0 for a command the card answered and 1 for one it did not; a card that
+/// answers with an error in its response word is still an answer, and reporting it as a
+/// transport failure would hide exactly what a probe is looking for.
+#[cfg(feature = "usb-debug-mem")]
+fn sd_raw(req: &[u8], out: &mut [u8]) -> Option<usize> {
+    use catcard_board::BOARD;
+    use catcard_sd::{Response, Transport};
+
+    let head = req.first_chunk::<8>()?;
+    let cmd = head[0];
+    let flags = head[1];
+    let len = u16::from_le_bytes([head[2], head[3]]) as usize;
+    let arg = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+    let resp = match flags & 0b11 {
+        0 => Response::None,
+        1 => Response::Short,
+        _ => Response::Long,
+    };
+    let to_host = flags & 0b100 != 0;
+    let to_card = flags & 0b1000 != 0;
+    // A transfer's length is an exponent in the controller, so only powers of two can be
+    // asked for, and the reply carries twelve bytes of header inside one message. 256 is
+    // the largest power of two that leaves room -- enough for every register a probe
+    // wants (a CID is in the response words, an SD status is 64 bytes, a lock structure
+    // is 16). A whole 512-byte block is what the drive and `DebugSd` are for.
+    const DATA_MAX: usize = 256;
+    if (to_host || to_card) && (len == 0 || !len.is_power_of_two() || len > DATA_MAX) {
+        return None;
+    }
+    if to_card && req.len() < 8 + len {
+        return None;
+    }
+
+    // SAFETY: foreground only, single core. The bridge owns SDMMC1 for as long as it is
+    // open, and nothing else on a bring-up build touches the slot.
+    let held = unsafe { &mut *core::ptr::addr_of_mut!(BRIDGE) };
+    if held.is_none() {
+        // SAFETY: as above.
+        let mut dev = unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) }.ok()?;
+        let card = catcard_sd::init(&mut dev).ok()?;
+        crate::catlog!("sdraw: card up, {} blocks, wide={}", card.blocks, card.wide);
+        *held = Some((dev, card));
+    }
+    let (dev, _card) = held.as_mut()?;
+
+    if to_host {
+        dev.arm_data(len, true);
+    } else if to_card {
+        dev.arm_data(len, false);
+    }
+    let answer = dev.command(cmd, arg, resp);
+    let (status, words) = match answer {
+        Ok(words) => (0u8, words),
+        Err(_) => (1u8, [0u32; 4]),
+    };
+
+    let mut data = 0usize;
+    if status == 0 && to_card {
+        if dev.write_short(&req[8..8 + len]).is_err() {
+            return None;
+        }
+    } else if status == 0 && to_host {
+        let room = out.get_mut(12..12 + len)?;
+        if dev.read_short(room).is_err() {
+            return None;
+        }
+        data = len;
+    }
+
+    let head = out.get_mut(..12)?;
+    head[0] = status;
+    head[1] = 0;
+    head[2..4].copy_from_slice(&(data as u16).to_le_bytes());
+    for (i, w) in words.iter().enumerate() {
+        head[4 + i * 4..8 + i * 4].copy_from_slice(&w.to_le_bytes());
+    }
+    // Only the first response word is meaningful for a short response, and all four for
+    // a long one; the host knows which it asked for.
+    Some(12 + data)
 }
 
 /// Bring-up SD read probe: init the card and read block 0, logging every step so the SD

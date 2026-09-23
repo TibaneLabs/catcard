@@ -8,6 +8,12 @@ is that what is verified against the emulator is what runs against hardware:
     tools/usbclient.py hid ...              a real device, found by VID:PID
     tools/usbclient.py /dev/hidraw3 ...     a real device, named outright
 
+The microSD bridge, on a bring-up build:
+
+    tools/usbclient.py hid --sd-cid                 the card's identity, decoded
+    tools/usbclient.py hid --sd 13 0x1234 --resp=short      one command, by number
+    tools/usbclient.py hid --sd 42 0 --write=0001...        one with data to the card
+
 Reading and writing /dev/hidraw* usually needs root or a udev rule -- see docs/USB.md.
 
 `ccemu --usb-hid PATH` hands the device's report pipe to whatever connects: one whole
@@ -26,6 +32,7 @@ KIND_START, KIND_CONT = 1, 2
 START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
 
 PING, IDENTIFY, UPGRADE_OFFER, UPGRADE_COMMIT = 0x0001, 0x0002, 0x0010, 0x0011
+SD_RAW = 0x0034
 UPGRADE_PACKED = 0x0013
 INJECT_KEY = 0x0020
 UNLOCK_PIN = 0x0021
@@ -174,6 +181,86 @@ def offer(sock, blob, caps):
             print("offer     device has no room to decompress; resending uncompressed")
     st, body = request(sock, UPGRADE_OFFER, blob)
     return st, body, len(blob)
+
+
+
+# --- the raw SD bridge ---------------------------------------------------------------
+#
+# One command to the card, and what it said back. The device only serves these on a
+# bring-up build (`usb-debug-mem`), because between them these cover the whole card
+# protocol -- including erasing it and locking it with a password nobody knows.
+
+SD_NONE, SD_SHORT, SD_LONG = 0, 1, 2
+
+
+def sd_raw(s, cmd, arg=0, resp=SD_SHORT, read=0, write=None):
+    """Send one SD command. Returns (status, [r0, r1, r2, r3], data)."""
+    flags = resp & 3
+    length = 0
+    if read:
+        flags |= 4
+        length = read
+    if write is not None:
+        flags |= 8
+        length = len(write)
+    body = struct.pack("<BBHI", cmd, flags, length, arg)
+    if write is not None:
+        body += bytes(write)
+    st, reply = request(s, SD_RAW, body)
+    if st != 0:
+        raise SystemExit(f"sd: device refused the request ({STATUS.get(st, st)})")
+    status, _, n = struct.unpack("<BBH", reply[:4])
+    words = list(struct.unpack("<4I", reply[4:20]))
+    return status, words, reply[20:20 + n]
+
+
+def sd_bits(words):
+    """The 128 bits of a long response, most significant first, as bytes.
+
+    A long response holds a CID or a CSD. The controller gives four words with the
+    register's low bits in `RESP4`, and the bit numbering in the spec counts from the
+    other end -- so this puts them back in the order the tables are written in.
+    """
+    out = b""
+    for w in words:
+        out += w.to_bytes(4, "big")
+    return out
+
+
+def sd_cid(s):
+    """Read the card's CID, with the card first put back in identification mode.
+
+    `CMD10 SEND_CID` is addressed, so it needs the card's RCA -- which the bridge learned
+    at init and does not tell us. `CMD2 ALL_SEND_CID` answers from any card on the bus,
+    but only before one is selected. So this deselects first, which is what makes the
+    question askable at all without knowing the address.
+    """
+    sd_raw(s, 7, 0, SD_NONE)  # CMD7 with RCA 0: deselect
+    status, words, _ = sd_raw(s, 2, 0, SD_LONG)
+    if status != 0:
+        raise SystemExit("sd: the card did not answer CMD2")
+    return sd_bits(words)
+
+
+def decode_cid(raw):
+    """The CID's fields, as the SD specification lays them out. [C] SD Part 1 §5.2"""
+    # The controller drops the register's CRC byte, so the 128 bits here are the
+    # register's top 120 with the low byte reading as zero.
+    mid = raw[0]
+    oid = raw[1:3].decode("ascii", "replace")
+    pnm = raw[3:8].decode("ascii", "replace")
+    prv = f"{raw[8] >> 4}.{raw[8] & 15}"
+    psn = int.from_bytes(raw[9:13], "big")
+    mdt = int.from_bytes(raw[13:15], "big") & 0xFFF
+    year, month = 2000 + (mdt >> 4), mdt & 15
+    return {
+        "manufacturer": mid,
+        "oem": oid,
+        "product": pnm,
+        "revision": prv,
+        "serial": psn,
+        "made": f"{year}-{month:02d}",
+    }
 
 
 def frames(opcode, payload):
@@ -1068,6 +1155,32 @@ def main(path, image=None):
             print("Re-run with --yes to go ahead.")
             return 1
         gate_install(s, start, total, attempt, thunk_at)
+        return 0
+
+    if "--sd-cid" in sys.argv:
+        raw = sd_cid(s)
+        print(f"cid       {raw.hex()}")
+        for k, v in decode_cid(raw).items():
+            print(f"  {k:<13}{v}")
+        return 0
+
+    if "--sd" in sys.argv:
+        a = arg_after("--sd")
+        cmd = int(a[0], 0)
+        arg = int(a[1], 0) if len(a) > 1 else 0
+        resp = {"none": SD_NONE, "short": SD_SHORT, "long": SD_LONG}[
+            next((x.split("=")[1] for x in sys.argv if x.startswith("--resp=")), "short")
+        ]
+        read = int(next((x.split("=")[1] for x in sys.argv if x.startswith("--read=")), "0"), 0)
+        write = next((x.split("=")[1] for x in sys.argv if x.startswith("--write=")), None)
+        write = bytes.fromhex(write) if write else None
+        status, words, data = sd_raw(s, cmd, arg, resp, read, write)
+        answered = "answered" if status == 0 else "did not answer"
+        print(f"cmd{cmd:<3}   {answered}")
+        if status == 0:
+            print("  resp         " + " ".join(f"{w:08x}" for w in words))
+            if data:
+                print(f"  data         {data.hex()}")
         return 0
 
     if "--log" in sys.argv:
