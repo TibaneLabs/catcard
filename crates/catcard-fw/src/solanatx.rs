@@ -649,13 +649,33 @@ fn review_and_sign(
     // A transaction first, then a message: the transaction reading is the stricter one,
     // and a message that happened to parse as a transaction would be reported with
     // signatures it does not have.
-    let tx = match catcard_solana::parse(bytes).or_else(|_| catcard_solana::parse_message(bytes)) {
-        Ok(tx) => tx,
-        Err(why) => {
-            crate::menu::message(ui.panel, HEAD, why.why(), "any key to go back");
-            crate::menu::wait_for_any_key(ui);
-            return;
+    let tx = match catcard_solana::parse(bytes) {
+        Ok(tx) => {
+            crate::catlog!(
+                "solana: {} bytes, a transaction, {} of {} signed",
+                bytes.len(),
+                tx.signing().present,
+                tx.signing().required
+            );
+            tx
         }
+        Err(first) => match catcard_solana::parse_message(bytes) {
+            Ok(tx) => {
+                crate::catlog!(
+                    "solana: {} bytes, a message ({:?} as a transaction), {} signers",
+                    bytes.len(),
+                    first,
+                    tx.signing().required
+                );
+                tx
+            }
+            Err(why) => {
+                crate::catlog!("solana: {} bytes, neither: {:?}", bytes.len(), why);
+                crate::menu::message(ui.panel, HEAD, why.why(), "any key to go back");
+                crate::menu::wait_for_any_key(ui);
+                return;
+            }
+        },
     };
 
     // Our own addresses, before anything is shown. **This is a seed stretch spent on a
@@ -707,10 +727,20 @@ fn review_and_sign(
         // Parsed afresh each time round, so a second signature is looked for against the
         // slots as they now stand: whichever key filled one is not offered it again.
         let outcome = {
-            let Ok(current) = catcard_solana::parse(&block.bytes()[..n]) else {
-                crate::menu::message(ui.panel, HEAD, "it stopped parsing", "any key to go back");
-                crate::menu::wait_for_any_key(ui);
-                return;
+            let current = match catcard_solana::parse(&block.bytes()[..n]) {
+                Ok(current) => current,
+                Err(why) => {
+                    let head = &block.bytes()[..n.min(8)];
+                    crate::catlog!(
+                        "solana: rebuilt {} bytes and {:?}; starts {:02x?}",
+                        n,
+                        why,
+                        head
+                    );
+                    crate::menu::message(ui.panel, HEAD, why.why(), "any key to go back");
+                    crate::menu::wait_for_any_key(ui);
+                    return;
+                }
             };
             sign_it(gate, login, ui, &current, which)
         };

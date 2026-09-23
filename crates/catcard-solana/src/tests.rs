@@ -841,3 +841,57 @@ fn slots_and_header_must_agree() {
     raw[1 + 64] = 100;
     assert_eq!(parse(&raw).err(), Some(Error::SignatureCount));
 }
+
+/// Whatever came in, what goes out is a transaction that parses.
+///
+/// The rebuild is what a signature is placed into, so a shape that survives the review
+/// and then fails to parse is a device that says "it stopped parsing" *after* somebody
+/// has agreed to sign. Both readings are covered: a transaction rebuilt from itself, and
+/// a message grown the slots it never had -- legacy and versioned, since a versioned
+/// message keeps a byte in front of its header and that byte is part of what is copied.
+#[test]
+fn every_shape_rebuilds_into_something_that_parses() {
+    let payer = key(1);
+    let mut out = [0u8; 1232];
+
+    // A transaction, signed and unsigned.
+    let mut raw = build(payer, std::vec![transfer_instruction(payer, key(2), 7)]);
+    for signed in [false, true] {
+        if signed {
+            assert!(place_signature(&mut raw, 0, &[9; 64]));
+        }
+        let tx = parse(&raw).expect("a transaction");
+        let n = tx.to_transaction(&mut out).expect("room");
+        let back = parse(&out[..n]).expect("rebuilt, and still a transaction");
+        assert_eq!(back.message(), tx.message());
+        assert_eq!(back.signing().required, tx.signing().required);
+    }
+
+    // The message inside it, which is what a signing request carries.
+    let message = &raw[1 + 64..];
+    let tx = parse_message(message).expect("a message");
+    let n = tx.to_transaction(&mut out).expect("room");
+    let back = parse(&out[..n]).expect("a message rebuilds into a transaction");
+    assert_eq!(back.message(), message);
+    assert_eq!(back.signing().present, 0);
+
+    // And a versioned message, whose first byte is the version marker rather than the
+    // header -- the one shape where "copy the message" and "count the signers" read
+    // different bytes.
+    let v0 = outscript::solana::new_solana_tx_v0(
+        payer,
+        SolanaKey([7; 32]),
+        Vec::new(),
+        &[transfer_instruction(payer, key(2), 7)],
+    )
+    .expect("builds")
+    .to_bytes()
+    .expect("serialises");
+    let message = &v0[1 + 64..];
+    assert_eq!(message[0] & 0x80, 0x80, "the version marker is there");
+    let tx = parse_message(message).expect("a versioned message");
+    let n = tx.to_transaction(&mut out).expect("room");
+    let back = parse(&out[..n]).expect("a versioned message rebuilds too");
+    assert_eq!(back.version(), Version::V0);
+    assert_eq!(back.message(), message);
+}

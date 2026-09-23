@@ -124,8 +124,16 @@ impl Content {
 /// requiring no signature is not something to offer to sign.
 #[cfg(feature = "multichain")]
 fn is_solana(bytes: &[u8]) -> bool {
-    catcard_solana::parse(bytes)
-        .map(|tx| tx.instruction_count() > 0 && tx.signing().required > 0)
+    // A transaction, or the message inside one. **Both arrive in the wild**: a wallet
+    // asking for a signature often sends the message alone, because the signature slots
+    // are its own to fill in afterwards -- that is what `sol-sign-request` carries, and
+    // some senders wrap the same bytes in `ur:bytes` instead.
+    //
+    // The transaction reading is tried first and is the stricter one: it requires the
+    // signature slots to match the header, which is what stops a message being read as a
+    // transaction whose header is somewhere in the middle of its account list.
+    let read = catcard_solana::parse(bytes).or_else(|_| catcard_solana::parse_message(bytes));
+    read.map(|tx| tx.instruction_count() > 0 && tx.signing().required > 0)
         .unwrap_or(false)
 }
 
