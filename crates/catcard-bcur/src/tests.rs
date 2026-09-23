@@ -526,31 +526,150 @@ fn a_type_too_long_is_refused() {
     assert_eq!(c.ur_type(), None);
 }
 
-/// A part that is refused leaves an empty collector empty.
+/// What a refused line commits to, and what it does not.
 ///
-/// If the type were recorded before the part was believed, a bad line would lock the
-/// collector to a type the sender never used, and every real part after it would be a
-/// mismatch.
+/// A line that is **malformed** must leave the collector empty: if the type were
+/// recorded before the line was believed, a bad one would lock the collector to a type
+/// the sender never used and every real part after it would be a mismatch.
+///
+/// A **mixture** is a different thing and now commits the collector's identity. It is a
+/// well-formed part of the same message -- intact by its own checksum, agreeing with
+/// whatever came before -- and it is refused only because there is nothing yet to reduce
+/// it against. Committing on one is what lets a caller learn the message's size from a
+/// stream that is nothing but mixtures, which is the stream that needs a buffer
+/// allocated before anything can be reduced at all.
 #[test]
-fn a_refused_part_commits_nothing() {
+fn a_malformed_part_commits_nothing_but_a_mixture_commits_the_message() {
     let mut scratch = vec![0u8; 512];
-    let mut c = Collector::new();
-
-    // A part numbered past `seq_len`: a fountain mixture, which is skipped.
     let message = payload(200);
+
+    // Malformed: a type longer than this will hold.
+    let mut c = Collector::new();
+    let long = "a".repeat(crate::MAX_TYPE + 1);
     let mut cbor = vec![0x85];
-    cbor_uint(3, &mut cbor);
+    cbor_uint(1, &mut cbor);
     cbor_uint(2, &mut cbor);
     cbor_uint(message.len() as u64, &mut cbor);
     cbor_uint(crc32(&message) as u64, &mut cbor);
     cbor_bytes(&[0u8; 100], &mut cbor);
-    let mixture = format!("ur:crypto-psbt/3-2/{}", encode_bytewords(&cbor));
-    assert!(c.accept(&mixture, &mut scratch).is_err());
+    let line = format!("ur:{long}/1-2/{}", encode_bytewords(&cbor));
+    assert!(c.accept(&line, &mut scratch).is_err());
     assert_eq!(c.ur_type(), None);
     assert_eq!(c.about(), None);
+
+    // A mixture: refused, and the message it belongs to is now known.
+    let mut c = Collector::new();
+    let mixture = mixed_line(&message, 2, 3);
+    assert!(matches!(
+        c.accept(&mixture, &mut scratch),
+        Err(Error::Mixture { .. })
+    ));
+    assert_eq!(c.ur_type(), Some("crypto-psbt"));
+    assert_eq!(c.about().map(|p| p.message_len), Some(message.len() as u32));
+    assert_eq!(c.have(), 0);
 
     // And a real part is still taken afterwards.
     let p = c.accept(&part_line(&message, 2, 1), &mut scratch).unwrap();
     c.confirm(p);
-    assert_eq!(c.ur_type(), Some("crypto-psbt"));
+}
+
+/// A mixed part, built the way the reference encoder builds one.
+///
+/// Fragments chosen by the same rule the decoder uses, XORed together, and wrapped in
+/// the same five-element part. Written from the fountain module's own chooser rather
+/// than from a second copy of it -- what is being tested here is the XOR and the
+/// bookkeeping around it, and the chooser has its own test against the published table.
+fn mixed_line(message: &[u8], seq_len: u32, seq_num: u32) -> String {
+    let fragment = message.len().div_ceil(seq_len as usize);
+    let set = crate::fountain::choose_fragments(seq_num, seq_len as usize, crc32(message))
+        .expect("in range");
+    let mut data = vec![0u8; fragment];
+    for i in 0..seq_len as usize {
+        if !set.has(i) {
+            continue;
+        }
+        let at = i * fragment;
+        let end = (at + fragment).min(message.len());
+        for (d, s) in data.iter_mut().zip(&message[at.min(message.len())..end]) {
+            *d ^= *s;
+        }
+    }
+
+    let mut cbor = vec![0x85];
+    cbor_uint(seq_num as u64, &mut cbor);
+    cbor_uint(seq_len as u64, &mut cbor);
+    cbor_uint(message.len() as u64, &mut cbor);
+    cbor_uint(crc32(message) as u64, &mut cbor);
+    cbor_bytes(&data, &mut cbor);
+    format!(
+        "ur:crypto-psbt/{seq_num}-{seq_len}/{}",
+        encode_bytewords(&cbor)
+    )
+}
+
+/// The failure this whole module exists for: a sender whose animation has run past its
+/// own part count, so every part on screen is a mixture.
+///
+/// The reference encoder's `nextPart()` increments for ever and never wraps, so a wallet
+/// page shows parts 1..n once and then mixtures until it is closed. A camera pointed at
+/// one a few seconds late sees nothing but mixtures -- and this used to refuse every
+/// one of them, which on the device looked like a scanner that had stopped working.
+///
+/// So: skip the pure parts entirely, feed only parts numbered past the end, and require
+/// the message back.
+#[test]
+fn a_message_reassembles_from_mixtures_alone() {
+    let message = payload(400);
+    let n = 5u32;
+    let fragment = message.len().div_ceil(n as usize);
+    // Fragment-indexed, which is what `accept_mixing` reads: the last fragment's padding
+    // is part of the layout even though it is not part of the message.
+    let mut known = vec![0u8; fragment * n as usize];
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+
+    let mut seq = n + 1;
+    while !c.complete() {
+        assert!(seq < n + 200, "gave up after {} mixtures", seq - n);
+        let line = mixed_line(&message, n, seq);
+        seq += 1;
+        let Ok(p) = c.accept_mixing(&line, &mut scratch, Some(&known)) else {
+            continue;
+        };
+        if p.fresh {
+            let from = p.index as usize * fragment;
+            known[from..from + fragment]
+                .copy_from_slice(&scratch[p.at.start..p.at.start + fragment]);
+        }
+        c.confirm(p);
+    }
+
+    assert_eq!(&known[..message.len()], &message[..]);
+    assert!(c.verify(&known[..message.len()]));
+}
+
+/// Without the message-so-far, a mixture is still refused rather than misread.
+///
+/// The firmware-image case: there is nowhere to keep a copy for XORing, and a part that
+/// cannot be reduced must not be written somewhere as if it were a fragment.
+#[test]
+fn a_mixture_with_nothing_to_reduce_against_is_refused() {
+    let message = payload(400);
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    // One pure part first, so the collector knows what is being collected.
+    let p = c.accept(&part_line(&message, 5, 1), &mut scratch).unwrap();
+    c.confirm(p);
+
+    assert!(matches!(
+        c.accept(&mixed_line(&message, 5, 9), &mut scratch),
+        Err(Error::Mixture { .. })
+    ));
+    // And with a buffer, the same part is usable only when one fragment is missing from
+    // it -- four still are, so this one is refused too.
+    let known = vec![0u8; 80 * 5];
+    assert!(matches!(
+        c.accept_mixing(&mixed_line(&message, 5, 9), &mut scratch, Some(&known)),
+        Err(Error::Mixture { .. })
+    ));
 }

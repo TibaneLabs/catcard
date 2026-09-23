@@ -125,6 +125,9 @@ pub(crate) fn collect_any(
         return Err(Some("not enough memory"));
     };
     let mut plain_len: Option<usize> = None;
+    // Taken when a part says how big the message is, and only for one small enough to
+    // hold: see `room_to_unmix`.
+    let mut known: Option<crate::heap::Block> = None;
 
     let outcome = qrscan::scan_many(ui, head, &mut |ui, line| {
         let scratch = scratch_mem.bytes();
@@ -165,7 +168,7 @@ pub(crate) fn collect_any(
         let Some(text) = as_text(line) else {
             return Next::More;
         };
-        match read_one(&mut which, &mut told, text, scratch, sink) {
+        match read_one(&mut which, &mut told, text, scratch, &mut known, sink) {
             Ok(Some(landed)) => {
                 compressed = landed.compressed;
                 if (landed.have, landed.total) != shown {
@@ -219,6 +222,37 @@ pub(crate) fn collect_any(
     }
 }
 
+/// The most of a message this will hold a second copy of, to reduce mixtures against.
+///
+/// Sixteen kilobytes covers every transaction and key this device is asked to sign, out
+/// of a 32 KiB heap that the scan screen is otherwise nearly alone in. Past it -- a
+/// firmware image being staged into PSRAM -- there is nowhere to keep a copy, so pure
+/// parts only, and a sender of something that big can be expected to loop.
+const UNMIX_MAX: usize = 16 * 1024;
+
+/// Take the room to reduce mixtures, once the message's size is known.
+///
+/// Fragment-indexed and therefore a little larger than the message: the last fragment is
+/// padded, and the padding is part of what the sender XORed.
+fn room_to_unmix(collector: &catcard_bcur::Collector, known: &mut Option<crate::heap::Block>) {
+    if known.is_some() {
+        return;
+    }
+    let Some(about) = collector.about() else {
+        return;
+    };
+    let fragment = (about.message_len as usize).div_ceil(about.seq_len.max(1) as usize);
+    let need = fragment * about.seq_len as usize;
+    if need == 0 || need > UNMIX_MAX {
+        return;
+    }
+    *known = crate::heap::take(need);
+    if let Some(block) = known.as_mut() {
+        block.bytes().fill(0);
+        crate::catlog!("bcur: {} bytes to unmix with", need);
+    }
+}
+
 /// Handle one decoded line.
 ///
 /// `Ok(None)` means the line was not usable and the scan should carry on. `Err` is
@@ -228,6 +262,7 @@ fn read_one(
     told: &mut bool,
     line: &str,
     scratch: &mut [u8],
+    known: &mut Option<crate::heap::Block>,
     sink: &mut dyn Sink,
 ) -> Result<Option<Landed>, &'static str> {
     // The first line that parses decides the format. `starts_with` rather than a full
@@ -280,9 +315,26 @@ fn read_one(
             }))
         }
         Which::Bcur(collector) => {
-            let Ok(placed) = collector.accept(line, scratch) else {
-                return Ok(None);
-            };
+            let placed =
+                match collector.accept_mixing(line, scratch, known.as_mut().map(|b| &*b.bytes())) {
+                    Ok(placed) => placed,
+                    Err(why) => {
+                        // A mixture that could not be reduced is the ordinary case early on,
+                        // not a fault: it needs fragments this device does not have yet, and
+                        // the next part is a cheaper way to them than keeping it. Logged so
+                        // that "it is talking and I am refusing all of it" is visible, which
+                        // is what a sender whose animation has run past its own part count
+                        // looks like from here.
+                        crate::catlog!("bcur: refused a part: {:?}", why);
+                        // The room to reduce the next one. Sized from what the part itself
+                        // said, which is why this happens after a refusal as well as after a
+                        // success -- a stream that is nothing but mixtures would otherwise
+                        // never get the buffer that makes its mixtures usable.
+                        room_to_unmix(collector, known);
+                        return Ok(None);
+                    }
+                };
+            room_to_unmix(collector, known);
             let (offset, total) = (placed.offset, placed.total);
             // Exact from the first fragment: the message length is in every header.
             if let Some(about) = collector.about() {
@@ -297,6 +349,20 @@ fn read_one(
                     .get(from..from + placed.len)
                     .ok_or("a fragment was too long")?;
                 sink.place(offset, bytes)?;
+                // And a second copy, padding included, where a mixture can be XORed
+                // against it. Fragment-indexed rather than message-indexed, because the
+                // last fragment's padding is part of what was mixed.
+                if let Some(block) = known.as_mut()
+                    && let Some(about) = collector.about()
+                {
+                    let fragment =
+                        (about.message_len as usize).div_ceil(about.seq_len.max(1) as usize);
+                    let at = placed.index as usize * fragment;
+                    let room = block.bytes();
+                    if at + fragment <= room.len() && from + fragment <= scratch.len() {
+                        room[at..at + fragment].copy_from_slice(&scratch[from..from + fragment]);
+                    }
+                }
             }
             let placed = collector.confirm(placed);
             let have = placed.have;

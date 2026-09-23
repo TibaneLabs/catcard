@@ -62,6 +62,7 @@
 #![no_std]
 
 pub mod encode;
+pub mod fountain;
 pub mod registry;
 
 mod cbor;
@@ -218,6 +219,29 @@ impl Collector {
     /// Does **not** count the part. [`confirm`](Self::confirm) does, once the caller has
     /// stored it.
     pub fn accept(&mut self, line: &str, scratch: &mut [u8]) -> Result<Placed, Error> {
+        self.accept_mixing(line, scratch, None)
+    }
+
+    /// As [`accept`](Self::accept), with the message-so-far for reducing mixtures.
+    ///
+    /// `known` is every fragment received, laid out by index -- fragment `i` at
+    /// `i * fragment_len` -- which is exactly the buffer a caller assembling the message
+    /// already has. Given it, a part numbered past `seq_len` is no longer refused: the
+    /// fragments it mixes are worked out, the ones already held are XORed back out of
+    /// it, and if that leaves a single fragment then that fragment has just been
+    /// recovered. Without it, behaviour is what it was -- pure parts only.
+    ///
+    /// Optional because the caller with a 700 kB firmware image being staged into PSRAM
+    /// has nowhere to keep a copy for XORing, and pure parts are enough for a sender
+    /// that loops. It is the sender that does not loop -- which is the reference
+    /// encoder, and so most wallets -- that makes this necessary for everything small
+    /// enough to hold.
+    pub fn accept_mixing(
+        &mut self,
+        line: &str,
+        scratch: &mut [u8],
+        known: Option<&[u8]>,
+    ) -> Result<Placed, Error> {
         // Either case: a UR meant for a QR is upper-cased whole, prefix and type
         // included, so that the symbol can use its alphanumeric mode. The sequence
         // field it carries is a claim the CBOR inside repeats -- parsing it here
@@ -252,15 +276,6 @@ impl Collector {
         if part.seq_num == 0 {
             return Err(Error::Numbering);
         }
-        // Past `seq_len` is a fountain mixture: several fragments combined. Skipped,
-        // not failed -- the pure ones come round again.
-        if part.seq_num > part.seq_len {
-            return Err(Error::Mixture {
-                seq_num: part.seq_num,
-                seq_len: part.seq_len,
-            });
-        }
-
         // The type is checked before the numbers are believed, so that two animations
         // that happen to share a shape cannot be assembled into one message.
         match self.of {
@@ -283,13 +298,13 @@ impl Collector {
         if data.len() != fragment {
             return Err(Error::Mismatch);
         }
-        let index = part.seq_num - 1;
-        let offset = fragment * index as usize;
-        // The last fragment's tail is padding, and stops at the message's end.
-        let len = fragment.min((part.message_len as usize).saturating_sub(offset));
-
-        // Recorded only now that the part is known good, so a refused line leaves an
-        // empty collector empty rather than committed to a type it never accepted.
+        // Recorded once the line is known to be a well-formed part of a message: intact
+        // by its own checksum, a type this collector is willing to hold, and agreeing
+        // with whatever came before it. **A mixture counts.** It is a part of the same
+        // message and says so truthfully, and committing on one is what lets a caller
+        // learn the message's size from a stream that is nothing but mixtures -- which
+        // is exactly the stream that needs a buffer allocated before anything can be
+        // reduced.
         if self.of.is_none() {
             self.ty.clear();
             for c in ur.ur_type.chars() {
@@ -299,6 +314,18 @@ impl Collector {
             }
             self.of = Some(part);
         }
+
+        // Past `seq_len` is a fountain mixture: several fragments XORed together, the
+        // set chosen by a PRNG both sides seed identically. What can be done with one
+        // depends on how much is already held.
+        let index = if part.seq_num > part.seq_len {
+            self.unmix(&part, fragment, data.clone(), scratch, known)?
+        } else {
+            part.seq_num - 1
+        };
+        let offset = fragment * index as usize;
+        // The last fragment's tail is padding, and stops at the message's end.
+        let len = fragment.min((part.message_len as usize).saturating_sub(offset));
 
         let bit = 1u64 << (index % 64);
         let fresh = self.seen[index as usize / 64] & bit == 0;
@@ -311,6 +338,63 @@ impl Collector {
             have: self.count,
             total: part.seq_len,
         })
+    }
+
+    /// Whether fragment `i` has been stored.
+    fn has(&self, i: usize) -> bool {
+        i < MAX_PARTS && self.seen[i / 64] & (1u64 << (i % 64)) != 0
+    }
+
+    /// Turn a mixture into the one fragment it can still be, in place.
+    ///
+    /// The fragments it mixes are worked out from the part number and the checksum, the
+    /// ones already held are XORed back out of `scratch`, and what is left is a single
+    /// fragment -- returned by index, with its bytes now sitting where the mixture's
+    /// were.
+    ///
+    /// Refused, not failed, when more than one of its fragments is still missing: it
+    /// carries real information, but not information this can use without keeping
+    /// mixtures around and solving across them, and the next part is a cheaper way to
+    /// the same place. A stream of them reduces as fragments accumulate.
+    fn unmix(
+        &self,
+        part: &Part,
+        fragment: usize,
+        at: core::ops::Range<usize>,
+        scratch: &mut [u8],
+        known: Option<&[u8]>,
+    ) -> Result<u32, Error> {
+        let refused = Error::Mixture {
+            seq_num: part.seq_num,
+            seq_len: part.seq_len,
+        };
+        let Some(known) = known else {
+            return Err(refused);
+        };
+        let seq_len = part.seq_len as usize;
+        let Some(set) = fountain::choose_fragments(part.seq_num, seq_len, part.checksum) else {
+            return Err(Error::Numbering);
+        };
+        let mut missing = set;
+        for i in 0..seq_len {
+            if self.has(i) {
+                missing.clear(i);
+            }
+        }
+        let Some(target) = missing.only() else {
+            return Err(refused);
+        };
+        for i in 0..seq_len {
+            if i == target || !set.has(i) {
+                continue;
+            }
+            let from = i * fragment;
+            let src = known.get(from..from + fragment).ok_or(refused)?;
+            for (d, s) in scratch[at.clone()].iter_mut().zip(src) {
+                *d ^= s;
+            }
+        }
+        Ok(target as u32)
     }
 
     /// Record that a fragment has been stored.
