@@ -141,6 +141,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-evm"
+version = "7.0.0"
+dependencies = [
+ "evmabiless",
+ "outscript",
+]
+
+[[package]]
 name = "catcard-flash"
 version = "7.0.0"
 
@@ -411,6 +419,12 @@ name = "emjson"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "185f8882d8ba300a0184c6a97b2ff46f990253d6b3f8deb8a031e79a20827ea2"
+
+[[package]]
+name = "evmabiless"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0cb3afb8148bdc8c6cec2dd589e57405d92bf691b83d2d05bb121e9da77da7"
 
 [[package]]
 name = "fstool"

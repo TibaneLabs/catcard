@@ -1,0 +1,15 @@
+[package]
+name = "catcard-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Selector -> ABI, and calldata -> parameters. `no_std`, no alloc, and the table is the
+# reason this crate can say what a transaction *does* rather than how long its data is.
+evmabiless = { workspace = true }
+# Keccak-256, for the hash a signature is made over.
+outscript = { workspace = true }
