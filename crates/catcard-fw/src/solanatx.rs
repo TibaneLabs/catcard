@@ -199,22 +199,18 @@ fn describe(tx: &catcard_solana::Tx<'_>, arena: &mut Arena) {
 // Signing one
 // ---------------------------------------------------------------------------
 
-/// How many accounts are tried when nothing says which key is wanted.
+/// What is tried without being asked: **account zero, and nothing else.**
 ///
 /// A transaction arriving bare names no path. It names the *public key* that must sign,
 /// so finding which of this device's keys that is means deriving them and comparing --
-/// and the only question is how far to look.
+/// and any number of accounts past the first is a guess about how somebody organises
+/// their wallet.
 ///
-/// Eight, which is what the address browser already derives for one page. That is the
-/// honest bound: the same work this device visibly does when somebody pages through
-/// their Solana addresses, so it is known to be tolerable rather than guessed to be.
-///
-/// It is still a window, and an account past it gets "no key of this device signs it".
-/// That screen names the address the transaction wanted, so the answer to a key kept
-/// further out is legible rather than mysterious -- and a wallet that says which path it
-/// wants, which is what `sol-sign-request` is for, never comes through here at all.
-const ACCOUNTS: u32 = 8;
-
+/// Zero is the one worth guessing. It is what every wallet opens with and what almost
+/// every transaction will want. Past it, a sweep would be this device inventing a range
+/// nobody gave it, spending a seed stretch on each miss and still stopping short of the
+/// account somebody actually keeps -- so past it, the owner says which, which they know
+/// and this device cannot.
 /// The two shapes a Solana path is written in.
 ///
 /// `m/44'/501'/i'/0'` is Phantom's and Solflare's; `m/44'/501'/i'` is what Ledger and
@@ -230,11 +226,11 @@ const COIN: u32 = 501;
 /// Which of this device's keys to try.
 #[derive(Copy, Clone)]
 enum Which {
-    /// The first [`ACCOUNTS`] accounts, in both shapes. What a bare transaction gets:
-    /// it names a public key and nothing else, so the key has to be found.
-    Sweep,
-    /// One account number, in both shapes. What somebody typed after the sweep came up
-    /// empty -- an account kept further out than the sweep looks.
+    /// Account zero, in both shapes. What a bare transaction gets, because a bare
+    /// transaction names a public key and nothing else.
+    Zero,
+    /// One account number, in both shapes: the one the owner picked or typed after zero
+    /// turned out not to be theirs.
     Account(u32),
     /// Exactly this path. What a `sol-sign-request` names, where there is nothing to
     /// search for and guessing would answer a question nobody asked.
@@ -269,44 +265,39 @@ fn sign_it(
         });
     }
     let message = tx.message();
-    // One stretch covers whatever is asked for here. A sweep that comes up empty and a
-    // number typed afterwards are two calls and therefore two stretches -- a second of
-    // hashing each -- which is why the sweep is not one account wide.
-    let accounts = match which {
-        Which::Account(n) => n..n + 1,
-        _ => 0..ACCOUNTS,
+    // One account, two shapes, one seed stretch. Every account tried after the first is
+    // another stretch -- a second of hashing -- which is the price of asking rather than
+    // sweeping, and the reason the question is a list and a field rather than a walk.
+    let account = match which {
+        Which::Account(n) => n,
+        _ => 0,
     };
     crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
-        // Account 0 in both shapes, then account 1 in both, and so on: the first account
-        // is the overwhelmingly common one, and this ends on it.
+        // Both path shapes for the one account, and it stops at the first that fits.
         //
-        // **It stops at the first match.** An earlier version derived every candidate
-        // whatever happened, on the grounds that how long the masked region lasts is
-        // something a host can measure. That reasoning does not survive contact with
-        // what is actually secret here: the key being asked for is written in the
-        // transaction the asker sent, so a duration that varies with which of our
-        // accounts holds it tells them an index they could have worked out anyway.
-        // Paying for every account on every signature bought almost nothing. What the
-        // masking is really for -- the seed, and everything derived from it -- is
-        // unchanged.
+        // An earlier version derived every candidate whatever happened, on the grounds
+        // that how long the masked region lasts is something a host can measure. That
+        // reasoning does not survive contact with what is actually secret here: the key
+        // being asked for is written in the transaction the asker sent, so a duration
+        // that varies with which shape holds it tells them something they could have
+        // worked out anyway. What the masking is really for -- the seed, and everything
+        // derived from it -- is unchanged.
         let mut found = None;
-        'search: for account in accounts {
-            for shape in 0..SHAPES {
-                let path: &[u32] = match shape {
-                    0 => &[44, COIN, account, 0],
-                    _ => &[44, COIN, account],
-                };
-                let Some(node) = catcard_wallet::slip10::derive(seed, path, kw) else {
-                    continue;
-                };
-                let public = node.public_key(kw);
-                if let Some(slot) = tx.signer_index(&public) {
-                    found = Some((
-                        slot,
-                        outscript::crypto::ed25519::sign(node.secret(), message),
-                    ));
-                    break 'search;
-                }
+        for shape in 0..SHAPES {
+            let path: &[u32] = match shape {
+                0 => &[44, COIN, account, 0],
+                _ => &[44, COIN, account],
+            };
+            let Some(node) = catcard_wallet::slip10::derive(seed, path, kw) else {
+                continue;
+            };
+            let public = node.public_key(kw);
+            if let Some(slot) = tx.signer_index(&public) {
+                found = Some((
+                    slot,
+                    outscript::crypto::ed25519::sign(node.secret(), message),
+                ));
+                break;
             }
         }
         Some(found)
@@ -432,14 +423,14 @@ fn review_and_sign(
         return;
     }
 
-    // The sweep first. What it does not find, the owner can name: an account kept
-    // further out than the sweep looks is a perfectly ordinary thing to have, and the
-    // device has no way to know about it except by being told.
+    // Account zero first, then the owner says. A wallet kept at another account number
+    // is an ordinary thing to have, and the only place that number exists is in the head
+    // of the person holding the device.
     //
     // A request that named a path is not asked about. It said which key it wants, and
     // the answer to "that key is not here" is not "try another one" -- it is that the
     // asker and this device disagree about whose signature this is.
-    let mut which = path.map_or(Which::Sweep, Which::Path);
+    let mut which = path.map_or(Which::Zero, Which::Path);
     let signed = loop {
         match sign_it(gate, login, ui, &tx, which) {
             Ok(Some(found)) => break found,
@@ -467,18 +458,34 @@ fn review_and_sign(
                 if path.is_some() {
                     return;
                 }
-                // Typed, not stepped: an account is a number somebody knows, and the
-                // one they know may be 37. Cancelling here is the way out.
-                let Some(n) = crate::menu::ask_number(
-                    ui,
-                    HEAD,
-                    None,
-                    "account",
-                    "try an account number, or cancel",
-                ) else {
+                // The next few by name, and any of them by number. Most people who
+                // have a second account have exactly that -- a second one -- and typing
+                // is there because the number somebody knows may be 37, and nudging an
+                // arrow thirty-seven times is not a design.
+                const PICK: [&str; 8] = [
+                    "Account 1",
+                    "Account 2",
+                    "Account 3",
+                    "Account 4",
+                    "Account 5",
+                    "Account 6",
+                    "Account 7",
+                    "Type a number",
+                ];
+                let Some(chosen) = crate::menu::choose(ui, HEAD, "try another account", &PICK)
+                else {
                     return;
                 };
-                which = Which::Account(n);
+                which = if chosen + 1 < PICK.len() {
+                    Which::Account(chosen as u32 + 1)
+                } else {
+                    let Some(n) =
+                        crate::menu::ask_number(ui, HEAD, None, "account", "digits, then accept")
+                    else {
+                        return;
+                    };
+                    Which::Account(n)
+                };
             }
             Err(why) => {
                 crate::menu::message(ui.panel, HEAD, why, "any key to go back");
