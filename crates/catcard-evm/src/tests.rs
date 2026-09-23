@@ -517,3 +517,46 @@ mod what_it_does {
         assert!(text.contains('.'));
     }
 }
+
+mod the_token_table {
+    use crate::tokens;
+
+    /// Mainnet is in the table, and its entries carry the decimals they are quoted with.
+    ///
+    /// The address here is copied from the generated table, which the generator copied
+    /// from the source list -- it is not written from memory anywhere along that path,
+    /// which is the property the whole table depends on.
+    #[test]
+    fn a_mainnet_token_resolves() {
+        let usdc = [
+            0xA0, 0xB8, 0x69, 0x91, 0xC6, 0x21, 0x8B, 0x36, 0xC1, 0xD1, 0x9D, 0x4A, 0x2E, 0x9E,
+            0xB0, 0xCE, 0x36, 0x06, 0xEB, 0x48,
+        ];
+        let token = tokens::lookup(1, &usdc).expect("mainnet USDC is in the table");
+        assert_eq!(token.symbol, "USDC");
+        assert_eq!(token.decimals, 6);
+        assert!(tokens::knows_chain(1));
+    }
+
+    /// The same address on a chain the table does not carry resolves to nothing.
+    #[test]
+    fn an_address_is_only_named_on_the_chain_it_was_listed_for() {
+        let usdc = [
+            0xA0, 0xB8, 0x69, 0x91, 0xC6, 0x21, 0x8B, 0x36, 0xC1, 0xD1, 0x9D, 0x4A, 0x2E, 0x9E,
+            0xB0, 0xCE, 0x36, 0x06, 0xEB, 0x48,
+        ];
+        assert!(
+            tokens::lookup(999, &usdc).is_none(),
+            "chain 999 is not baked"
+        );
+        assert!(!tokens::knows_chain(999));
+    }
+
+    /// An address nothing listed is not named, on any chain.
+    #[test]
+    fn an_unlisted_address_is_never_named() {
+        for chain in [1, 10, 56, 137, 5000, 8453, 42161, 59144] {
+            assert!(tokens::lookup(chain, &[0x42; 20]).is_none());
+        }
+    }
+}

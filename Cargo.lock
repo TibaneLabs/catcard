@@ -164,6 +164,7 @@ dependencies = [
  "catcard-board",
  "catcard-callgate",
  "catcard-entropy",
+ "catcard-evm",
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-hal",

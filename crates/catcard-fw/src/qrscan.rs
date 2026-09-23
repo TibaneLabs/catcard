@@ -875,6 +875,18 @@ fn offer(
     match what {
         Content::Firmware => install(gate, login, ui, lease, len),
         Content::Psbt => sign(gate, login, ui, lease, base, skip, len),
+        // Read, named and offered -- but the screen that shows what it does and the
+        // signing behind it are not built yet. Saying so is the honest state; silently
+        // returning to the menu would read as a device that did not understand.
+        #[cfg(feature = "multichain")]
+        Content::EvmTx { .. } => {
+            let bytes = &lease.bytes()[at..at + len];
+            let what = catcard_evm::parse(bytes)
+                .map(|tx| crate::evmtx::headline(&catcard_evm::summary::summarise(&tx)))
+                .unwrap_or("this is not a transaction");
+            menu::message(ui.panel, "EVM transaction", what, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
         Content::Seed(_) => {}
         Content::Text => {
             // Borrowed for the length of the screen; the lease is dropped after it.

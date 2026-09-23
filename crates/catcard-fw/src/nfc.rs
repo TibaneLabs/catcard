@@ -593,6 +593,17 @@ fn offer(
     }
     match what {
         Content::Psbt => sign(gate, login, ui, held, at, len),
+        // As on the scanner: read and named, and honest that the screen which lays the
+        // whole of it out -- and the signing behind that -- are not built yet.
+        #[cfg(feature = "multichain")]
+        Content::EvmTx { .. } => {
+            let bytes = &held.bytes()[at..at + len];
+            let what = catcard_evm::parse(bytes)
+                .map(|tx| crate::evmtx::headline(&catcard_evm::summary::summarise(&tx)))
+                .unwrap_or("this is not a transaction");
+            menu::message(ui.panel, "EVM transaction", what, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
         Content::Text => {
             let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("(not text)");
             let mut rows: heapless::Vec<catcard_ui::scroll::Line, 4> = heapless::Vec::new();

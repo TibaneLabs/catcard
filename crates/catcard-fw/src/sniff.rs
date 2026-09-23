@@ -18,6 +18,9 @@ pub(crate) enum Content {
     Psbt,
     /// A SeedQR: a whole wallet, in one of its two shapes.
     Seed(catcard_wallet::seedqr::Kind),
+    /// An EVM transaction, with the chain it names.
+    #[cfg(feature = "multichain")]
+    EvmTx { chain_id: Option<u64> },
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -40,6 +43,8 @@ impl Content {
     /// The few words a screen has for it.
     pub(crate) fn note(self) -> &'static str {
         match self {
+            #[cfg(feature = "multichain")]
+            Content::EvmTx { .. } => "an EVM transaction",
             Content::Firmware => "a firmware image",
             Content::Psbt => "a transaction",
             Content::Seed(_) => "a seed backup",
@@ -62,6 +67,8 @@ impl Content {
     pub(crate) fn choices(self) -> Choices {
         let mut out = Choices::new();
         let primary = match self {
+            #[cfg(feature = "multichain")]
+            Content::EvmTx { .. } => Some("Sign it"),
             Content::Firmware => Some("Install it"),
             Content::Psbt => Some("Sign it"),
             Content::Text => Some("Show it"),
@@ -85,6 +92,8 @@ impl Content {
     /// file opens as what it is on the computer that reads the card next.
     pub(crate) fn extension(self) -> &'static str {
         match self {
+            #[cfg(feature = "multichain")]
+            Content::EvmTx { .. } => "tx",
             Content::Firmware => "bin",
             Content::Psbt => "psbt",
             Content::Text => "txt",
@@ -110,6 +119,21 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
             == catcard_fwhdr::MAGIC
     {
         return Content::Firmware;
+    }
+    // An EVM transaction: RLP, or an EIP-2718 envelope. Tried before the text case
+    // because a transaction is bytes and a failed parse costs one pass over them.
+    //
+    // The check is the parse itself -- nothing about RLP is a magic number, so what
+    // makes these bytes a transaction is that every field reads as one and nothing is
+    // left over. A chain id is required as well: a transaction naming no chain is
+    // valid, but it is also what random bytes look like when they happen to parse.
+    #[cfg(feature = "multichain")]
+    if let Ok(tx) = catcard_evm::parse(bytes)
+        && tx.chain_id.is_some()
+    {
+        return Content::EvmTx {
+            chain_id: tx.chain_id,
+        };
     }
     // Base64 of a PSBT, as a `.psbt` written as text is. Checked before the general text
     // case so it is offered for signing rather than shown as gibberish.

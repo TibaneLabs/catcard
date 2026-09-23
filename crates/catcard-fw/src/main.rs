@@ -39,6 +39,9 @@ mod chains;
 mod derive;
 mod display;
 /// Wallet-export file formats.
+/// EVM transactions, in the words a screen uses.
+#[cfg(feature = "multichain")]
+mod evmtx;
 mod export;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;

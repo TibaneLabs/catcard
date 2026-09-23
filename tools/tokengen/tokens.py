@@ -33,13 +33,12 @@ import sys
 CHAIN_IDS = {
     "ethereum": 1,
     "optimism": 10,
+    "bnb": 56,
     "polygon": 137,
+    "base": 8453,
     "mantle": 5000,
     "arbitrum": 42161,
-    "base": 8453,
-    "bsc": 56,
-    "avalanche": 43114,
-    "gnosis": 100,
+    "linea": 59144,
 }
 
 ENTRY = re.compile(
