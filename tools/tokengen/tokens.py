@@ -130,18 +130,21 @@ def main():
     lines += [
         "];",
         "",
-        "/// What each chain is called, for a screen that would otherwise say \"chain 42161\".",
+        "/// What each chain is called, and the word an explorer's URL uses for it.",
         "///",
-        "/// The names are the source list's own slugs, capitalised -- the same rows the",
-        "/// addresses above came from, so a chain cannot be named here and unknown there.",
+        "/// Both come from the source list's own slug -- the same rows the addresses above",
+        "/// came from -- so a chain cannot be named here and unknown there. The slug is what",
+        "/// a broadcast link puts in its path `[?]`: nothing here can check that an explorer",
+        "/// spells a chain the same way, and a wrong one gives a page that does not know the",
+        "/// transaction rather than a wrong broadcast.",
         "#[rustfmt::skip]",
-        f"static NAMES: [(u64, &str); {len(chains)}] = [",
+        f"static NAMES: [(u64, &str, &str); {len(chains)}] = [",
     ]
     slug_of = {v: k for k, v in CHAIN_IDS.items()}
     for c in chains:
         name = slug_of[c]
         pretty = {"bnb": "BNB Chain", "hyperevm": "HyperEVM"}.get(name, name.capitalize())
-        lines.append(f'    ({c}, "{pretty}"),')
+        lines.append(f'    ({c}, "{pretty}", "{name}"),')
     lines += [
         "];",
         "",
@@ -153,8 +156,19 @@ def main():
         "pub fn chain_name(chain_id: u64) -> Option<&'static str> {",
         "    NAMES",
         "        .iter()",
-        "        .find(|(c, _)| *c == chain_id)",
-        "        .map(|(_, n)| *n)",
+        "        .find(|(c, _, _)| *c == chain_id)",
+        "        .map(|(_, n, _)| *n)",
+        "}",
+        "",
+        "/// The word an explorer's URL uses for `chain_id`, if this build knows it.",
+        "///",
+        "/// For a broadcast link. `None` means no link is offered rather than one built",
+        "/// around a guess.",
+        "pub fn chain_slug(chain_id: u64) -> Option<&'static str> {",
+        "    NAMES",
+        "        .iter()",
+        "        .find(|(c, _, _)| *c == chain_id)",
+        "        .map(|(_, _, s)| *s)",
         "}",
         "",
         "/// The token at `address` on `chain_id`, if this build knows it.",

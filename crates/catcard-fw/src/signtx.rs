@@ -512,7 +512,7 @@ pub(crate) fn review_and_sign(
             // Nothing here has a network. What this offers is to put the transaction on
             // the NFC tag as a link, so a phone that taps the device can send it.
             #[cfg(not(feature = "board-mk3"))]
-            crate::nfc::offer_broadcast(ui, &into[..len]);
+            crate::nfc::offer_broadcast(ui, crate::nfc::CHAIN, &into[..len]);
             return;
         }
         None => {

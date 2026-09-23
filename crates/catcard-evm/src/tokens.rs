@@ -211,22 +211,25 @@ static TOKENS: [(u64, [u8; 20], &str, u8); 181] = [
     (59144, address("0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f"), "WETH", 18),
 ];
 
-/// What each chain is called, for a screen that would otherwise say "chain 42161".
+/// What each chain is called, and the word an explorer's URL uses for it.
 ///
-/// The names are the source list's own slugs, capitalised -- the same rows the
-/// addresses above came from, so a chain cannot be named here and unknown there.
+/// Both come from the source list's own slug -- the same rows the addresses above
+/// came from -- so a chain cannot be named here and unknown there. The slug is what
+/// a broadcast link puts in its path `[?]`: nothing here can check that an explorer
+/// spells a chain the same way, and a wrong one gives a page that does not know the
+/// transaction rather than a wrong broadcast.
 #[rustfmt::skip]
-static NAMES: [(u64, &str); 10] = [
-    (1, "Ethereum"),
-    (10, "Optimism"),
-    (56, "BNB Chain"),
-    (137, "Polygon"),
-    (999, "HyperEVM"),
-    (5000, "Mantle"),
-    (8453, "Base"),
-    (9745, "Plasma"),
-    (42161, "Arbitrum"),
-    (59144, "Linea"),
+static NAMES: [(u64, &str, &str); 10] = [
+    (1, "Ethereum", "ethereum"),
+    (10, "Optimism", "optimism"),
+    (56, "BNB Chain", "bnb"),
+    (137, "Polygon", "polygon"),
+    (999, "HyperEVM", "hyperevm"),
+    (5000, "Mantle", "mantle"),
+    (8453, "Base", "base"),
+    (9745, "Plasma", "plasma"),
+    (42161, "Arbitrum", "arbitrum"),
+    (59144, "Linea", "linea"),
 ];
 
 /// What `chain_id` is called, if this build knows it.
@@ -235,7 +238,21 @@ static NAMES: [(u64, &str); 10] = [
 /// and what somebody can look up. A wrong name would be worse than no name: it is
 /// the one field that says which network the money is on.
 pub fn chain_name(chain_id: u64) -> Option<&'static str> {
-    NAMES.iter().find(|(c, _)| *c == chain_id).map(|(_, n)| *n)
+    NAMES
+        .iter()
+        .find(|(c, _, _)| *c == chain_id)
+        .map(|(_, n, _)| *n)
+}
+
+/// The word an explorer's URL uses for `chain_id`, if this build knows it.
+///
+/// For a broadcast link. `None` means no link is offered rather than one built
+/// around a guess.
+pub fn chain_slug(chain_id: u64) -> Option<&'static str> {
+    NAMES
+        .iter()
+        .find(|(c, _, _)| *c == chain_id)
+        .map(|(_, _, s)| *s)
 }
 
 /// The token at `address` on `chain_id`, if this build knows it.

@@ -151,15 +151,18 @@ fn clear() {
 /// the one it uses for Bitcoin `[?]` -- nothing here can check it, and a wrong segment
 /// gives a page that does not know the transaction rather than a wrong broadcast.
 const HOST_AND_PATH: &str = "blockexplorer.com";
-/// The chain segment for what this device signs.
-const CHAIN: &str = "btc";
+/// The chain segment Bitcoin goes out under.
+pub(crate) const CHAIN: &str = "btc";
 
 /// The most a transaction can be and still fit the tag, in bytes.
 ///
 /// Every byte becomes two of hex inside the URL, and the rest of the image is the
 /// container, the record and the address around it.
 pub(crate) fn max_transaction() -> usize {
-    let around = catcard_nfc::image_len(HOST_AND_PATH.len() + CHAIN.len() + 24);
+    // The longest chain segment this build writes, so the answer does not depend on
+    // which chain is asking.
+    const SEGMENT: usize = 12;
+    let around = catcard_nfc::image_len(HOST_AND_PATH.len() + SEGMENT + 24);
     (USER_MEMORY - around) / 2
 }
 
@@ -169,7 +172,7 @@ pub(crate) fn max_transaction() -> usize {
 /// Asked rather than done: the URL carries the whole transaction, so tapping a phone to
 /// this hands it to whoever that phone talks to. A device that wrote it unasked would be
 /// publishing a transaction its owner had only signed.
-pub(crate) fn offer_broadcast(ui: &mut Ui<'_>, raw: &[u8]) {
+pub(crate) fn offer_broadcast(ui: &mut Ui<'_>, chain: &str, raw: &[u8]) {
     const HEAD: &str = "Broadcast";
     if BOARD.nfc.is_none() {
         return;
@@ -201,7 +204,7 @@ pub(crate) fn offer_broadcast(ui: &mut Ui<'_>, raw: &[u8]) {
         return;
     };
     let out = held.bytes();
-    let n = match build(out, raw) {
+    let n = match build(out, chain, raw) {
         Ok(n) => n,
         Err(why) => {
             menu::message(ui.panel, HEAD, why, "any key to go back");
@@ -233,10 +236,10 @@ pub(crate) fn offer_broadcast(ui: &mut Ui<'_>, raw: &[u8]) {
 }
 
 /// Build the tag image for `raw`: the URL, with the transaction as hex in its query.
-fn build(out: &mut [u8], raw: &[u8]) -> Result<usize, &'static str> {
+fn build(out: &mut [u8], chain: &str, raw: &[u8]) -> Result<usize, &'static str> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     // `https://www.` is one byte in an NDEF URI, so the text starts at the host.
-    let text_len = HOST_AND_PATH.len() + 1 + CHAIN.len() + "/broadcast?tx=".len() + raw.len() * 2;
+    let text_len = HOST_AND_PATH.len() + 1 + chain.len() + "/broadcast?tx=".len() + raw.len() * 2;
     let mut at = catcard_nfc::begin(out, AREA, text_len, catcard_nfc::prefix::HTTPS_WWW)
         .map_err(|_| "too big for the tag")?;
     let mut put = |s: &[u8], at: &mut usize| {
@@ -245,7 +248,7 @@ fn build(out: &mut [u8], raw: &[u8]) -> Result<usize, &'static str> {
     };
     put(HOST_AND_PATH.as_bytes(), &mut at);
     put(b"/", &mut at);
-    put(CHAIN.as_bytes(), &mut at);
+    put(chain.as_bytes(), &mut at);
     put(b"/broadcast?tx=", &mut at);
     for b in raw {
         out[at] = HEX[(b >> 4) as usize];

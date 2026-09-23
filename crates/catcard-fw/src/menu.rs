@@ -6541,7 +6541,11 @@ fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
         {
             let mut lines: heapless::Vec<DLine, { crate::chains::MAX + 3 }> = heapless::Vec::new();
             let _ = lines.push(DLine::title("Chains"));
-            let _ = lines.push(DLine::body("OK on/off   7 9 move").small().centered());
+            // **Named by what is printed on the key, not by what it decodes to.** Both
+            // boards send `Digit(7)` and `Digit(9)` here -- the Q1 from its arrow keys,
+            // the numpad boards from 7 and 9 -- and both have arrows printed on those
+            // keys. So the hint says the arrows, which is what somebody is looking at.
+            let _ = lines.push(DLine::body("OK on/off   < > move").small().centered());
             for (i, (c, _)) in order.iter().enumerate() {
                 let mut line = DLine::item(&labels[i], i as u32).large();
                 if let Some(mark) = catcard_ui::art::chainicons::mark(c.ticker) {
