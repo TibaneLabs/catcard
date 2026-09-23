@@ -40,11 +40,13 @@ const WIRE_MS: u32 = 20;
 /// How long the reset line is held low: 10 ms, per the reference.
 const RESET_MS: u32 = 10;
 /// And how long the module needs afterwards before it will answer: two seconds.
+///
+/// Only the Debug probe waits this out blindly, because its question is "what does this
+/// module say when asked cold" and an answer that arrived because we kept asking would
+/// be a different measurement. Everything else polls to [`CONTACT_MS`] instead and
+/// carries on the moment the module speaks.
 const RECOVERY_MS: u32 = 2_000;
 
-/// Attempts at finding the baud rate. Stock uses five; past that the module is not
-/// there, and trying forever would be a screen that never comes back.
-const PROBE_TRIES: usize = 5;
 /// Attempts at the configuration sequence, as stock bounds it.
 const SETUP_TRIES: usize = 3;
 /// How long to wait for the *first* byte of a reply.
@@ -70,6 +72,56 @@ const STOP_TRIES: usize = 3;
 /// Bytes the drain will throw away before it gives up on the line going quiet. A
 /// version-40 code is 4350, so this is a code and a bit.
 const DRAIN_LIMIT: usize = 5_000;
+
+/// How long to keep asking after a reset before calling the module absent.
+///
+/// The reference says it needs "a full ~2 seconds after a reset pulse before it will
+/// talk", and that is a schedule rather than a measurement: waiting it out blindly cost
+/// two seconds of every boot and of every scan. So it is a **bound** now. The probe asks
+/// from the moment the line is released and stops the instant it gets an answer, which
+/// on real hardware is long before this.
+///
+/// Source: hw-reference/qr.md §2 [C]
+const CONTACT_MS: u32 = 2_500;
+
+/// A point in the future, in cycles, for a wait that ends when something happens.
+#[derive(Copy, Clone)]
+struct Deadline {
+    at: u32,
+}
+
+impl Deadline {
+    fn after(ms: u32) -> Self {
+        Deadline {
+            at: catcard_hal::dwt::cycles().wrapping_add(ms_cycles(ms)),
+        }
+    }
+
+    /// Whether it has arrived. Wrapping arithmetic, so the DWT counter rolling over
+    /// mid-wait is not a two-minute stall: the comparison is on the *difference*, which
+    /// stays small, and spans here are milliseconds against a counter that wraps every
+    /// 35 seconds at 120 MHz.
+    fn passed(&self) -> bool {
+        catcard_hal::dwt::cycles().wrapping_sub(self.at) < u32::MAX / 2
+    }
+}
+
+/// Whether the module has been configured since this boot.
+///
+/// Cleared whenever the recovery path runs, which is the reference's own rule: a blind
+/// shutdown is followed by a re-initialisation on the next use rather than by carrying
+/// on as though the module were still set up. Source: hw-reference/qr.md §2, §6 [C]
+static mut CONFIGURED: bool = false;
+
+fn configured() -> bool {
+    // SAFETY: foreground only; the borrow ends within this statement.
+    unsafe { *core::ptr::addr_of!(CONFIGURED) }
+}
+
+fn note_configured(yes: bool) {
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of_mut!(CONFIGURED) = yes };
+}
 
 /// The longest decoded QR this will hand back.
 ///
@@ -194,6 +246,9 @@ fn blind_stop(port: &mut Usart) {
 /// Source: hw-reference/qr.md §7, which spells the recovery out as both bauds getting
 /// `S_CMD_020D`, `S_CMD_03L0`, then `SRDF0050` twice. [C]
 fn blind_shutdown(port: &mut Usart) {
+    // Whatever state it is in after this, it is not the configured one. The next use
+    // pulses reset and starts again, which is the reference's own recovery.
+    note_configured(false);
     blind_stop(port);
     // Twice, 150 ms apart, for the module's two sleep layers -- and at both rates,
     // since not knowing the rate is the reason to be here.
@@ -251,8 +306,18 @@ fn sleep(port: &mut Usart) {
 /// right there working. Quieten it first: the stop goes out blind at both rates, because
 /// the whole point is that we do not yet know which one it is listening at.
 fn find(port: &mut Usart) -> Result<(), Fault> {
+    find_until(port, Deadline::after(CONTACT_MS))
+}
+
+/// As [`find`], but keeping at it until `deadline`.
+///
+/// The rounds are not counted, they are timed: what matters is how long the module has
+/// had since its reset, not how many times it has been asked. A module that is ready in
+/// a quarter of a second answers the first round and the rest of the budget is never
+/// spent.
+fn find_until(port: &mut Usart, deadline: Deadline) -> Result<(), Fault> {
     blind_stop(port);
-    for _ in 0..PROBE_TRIES {
+    loop {
         for rate in catcard_qr::BAUDS {
             port.set_baud(rate);
             // The version query answers with a *version*, not an acknowledgement, so
@@ -280,12 +345,46 @@ fn find(port: &mut Usart) -> Result<(), Fault> {
                 return Ok(());
             }
         }
+        if deadline.passed() {
+            break;
+        }
     }
     // Nothing answered. Leave it stopped rather than however it was found: the commonest
     // reason to be here is a module that was left scanning, and walking away from it
     // still scanning is what made this screen fail the *next* time too.
     blind_shutdown(port);
     Err(Fault::NotFound)
+}
+
+/// Have a configured module, resetting it first only if this boot has not done so.
+///
+/// **The reset is not per scan.** It was: every scan pulsed the line and then waited the
+/// full recovery before saying a word, which is two seconds a person stands there for on
+/// a screen that has already told them to point the camera. The reference's idle state is
+/// *asleep, reset released, configuration retained* -- so a scan on a configured module
+/// is a wake and nothing more, and the reset belongs to the paths that have lost track of
+/// it: the first use after boot, and anything that has been through a blind shutdown.
+///
+/// Source: hw-reference/qr.md §2 "configure-once -> sleep -> wake-per-scan -> sleep" [C]
+fn ensure(port: &mut Usart, scanner: catcard_board::spec::QrScanner) -> Result<(), Fault> {
+    if configured() {
+        wake(port);
+        return Ok(());
+    }
+    // SAFETY: the board table's scanner reset pin, which only this module drives.
+    unsafe { catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS)) };
+    let deadline = Deadline::after(CONTACT_MS);
+    port.set_baud(catcard_qr::BAUDS[0]);
+    // Woken at both rates first: a module left asleep by the previous session answers
+    // nothing until it is told to wake, and a reset pulse does not change that.
+    for rate in catcard_qr::BAUDS {
+        port.set_baud(rate);
+        wake(port);
+    }
+    find_until(port, deadline)?;
+    setup(port)?;
+    note_configured(true);
+    Ok(())
 }
 
 /// Put the module into a known state.
@@ -377,11 +476,7 @@ pub(crate) fn boot_bringup() {
         return;
     };
     // SAFETY: bring-up, before any screen exists; nothing else has these pins or USART2.
-    let mut port = unsafe {
-        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
-        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
-        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
-    };
+    let mut port = unsafe { Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0]) };
     // Asleep either way: a module that answered but would not configure is still a
     // module that should not sit there drawing current. This is the idle state the
     // reference describes -- asleep, reset released, configuration retained -- and on a
@@ -391,21 +486,7 @@ pub(crate) fn boot_bringup() {
     // configured module is at 57600 and can be told; one that never answered has to be
     // told at every rate, which is the case that was getting a sleep sent at the rate
     // the probe gave up on and leaving the aimer lit for the whole session.
-    // Wake it first, at both rates, because the state we leave it in is **asleep** and
-    // an MCU reset does not change that. The reset line is pulsed above, but a module
-    // left asleep by the previous session answers nothing until it is told to wake, so
-    // probing it reads as "no scanner" on hardware that is sitting right there working.
-    //
-    // That is exactly what the boot log had been saying -- `not configured at boot:
-    // NotFound` -- on a device whose lamp worked perfectly. The lamp works because it
-    // wakes at each rate before it speaks; this did not, and the asymmetry was the bug.
-    // The scan path already woke before probing, which is why only boot was affected.
-    for rate in catcard_qr::BAUDS {
-        port.set_baud(rate);
-        wake(&mut port);
-    }
-
-    match find(&mut port).and_then(|()| setup(&mut port)) {
+    match ensure(&mut port, scanner) {
         Ok(()) => {
             crate::catlog!("qr: configured, sleeping");
             sleep(&mut port);
@@ -460,11 +541,16 @@ pub(crate) fn scan_many(
     );
     // SAFETY: the board table's scanner pins, and USART2, belong to this screen: nothing
     // else in the firmware touches either, and the menu waits for this to return.
-    let mut port = unsafe {
-        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
-        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
-        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
-    };
+    // SAFETY: the board table's scanner pins, and USART2, belong to this screen:
+    // nothing else in the firmware touches either, and the menu waits for this to
+    // return.
+    let mut port = unsafe { Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0]) };
+    // Configured already? Then this is a wake and nothing else. Only a module this boot
+    // has never set up -- or one a fault has been through -- pays for a reset here.
+    if let Err(why) = ensure(&mut port, scanner) {
+        blind_shutdown(&mut port);
+        return Err(why);
+    }
 
     let outcome = collect(&mut port, ui, head, on_code);
     // Every path out stops the module, for the reason `scan` gives at length.
@@ -546,6 +632,10 @@ pub(crate) fn probe(ui: &mut Ui<'_>) {
     menu::blocking_screen(ui.panel, HEAD, "resetting the module");
     // SAFETY: as `scan_many` -- the board table's scanner pins and USART2 belong to this
     // screen, and the menu waits for it to return.
+    // The one screen that always resets: its whole job is to answer "does this module
+    // say anything at all", from whatever state it is in. Which also means whatever
+    // this boot had configured is gone.
+    note_configured(false);
     let mut port = unsafe {
         catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
         catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
