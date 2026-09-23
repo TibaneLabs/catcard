@@ -278,12 +278,22 @@ pub(crate) fn from_ur(
         // difference between a PSBT and unrecognised data.
         _ => sniff(body),
     };
-    // Only two things can be done with a payload that does not begin at the staging
-    // area's base: signed, or shown. An image is installed from the base, so one
-    // wrapped in a UR is not offered for installation -- it is saved, and installed
-    // from the card. Which costs nothing anyone will notice: an image is 700 kB, and
-    // nobody sends that as three thousand QR codes.
-    if !matches!(what, Content::Psbt | Content::Text) {
+    // **Refused by what cannot be done, not by what can.**
+    //
+    // The one restriction is real: a payload inside a UR does not begin at the staging
+    // area's base, and an image is installed from the base -- so an image wrapped in a
+    // UR is saved and installed from the card instead. Which costs nothing anyone will
+    // notice: an image is 700 kB, and nobody sends that as three thousand QR codes.
+    //
+    // This used to be written the other way round, as a list of what was allowed:
+    // `Psbt | Text`. That list was correct when those were the only two things this
+    // device could read, and it silently stopped being correct every time another was
+    // added -- an EVM transaction, then a Solana one -- because a payload that failed it
+    // fell back to sniffing the CBOR wrapper, which is not a transaction. The device
+    // then said "data this device cannot read" about a transaction it could read
+    // perfectly well, three lines further down. Written this way, a new kind of content
+    // works by default and only a genuine restriction has to be stated.
+    if matches!(what, Content::Firmware) {
         return None;
     }
     Some(Arrival {

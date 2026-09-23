@@ -862,6 +862,11 @@ fn offer(
     if matches!(what, Content::Unknown) {
         let head = &lease.bytes()[at..at + len.min(16)];
         crate::catlog!("qr: {} bytes, not recognised; starts {:02x?}", len, head);
+    } else {
+        // What it turned out to be, and whether a UR wrapper came off on the way. The
+        // log had the failures and not the successes, which is the wrong way round when
+        // the question is "it read something, but not the something I sent".
+        crate::catlog!("qr: {} bytes at +{}, {}", len, skip, what.note());
     }
     // Everything worth doing with it, as a list: what this firmware makes of the bytes,
     // and keeping them whatever they are. `choices` is shared with the tag, so a code and
