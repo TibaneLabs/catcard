@@ -149,9 +149,10 @@ enum Screen {
     /// Every account's first few addresses, to check against a watch-only wallet.
     DumpSummary,
     /// This device's account keys as one `ur:crypto-account` code.
-    #[cfg(feature = "board-q1")]
+    #[cfg(all(feature = "board-q1", feature = "multichain"))]
     AccountUr,
     /// Every enabled chain's account as one `ur:crypto-multi-accounts` code.
+    #[cfg(feature = "multichain")]
     Keystone,
     /// A run of one account's receive addresses, written to the card as CSV.
     AddressCsv,
@@ -608,12 +609,13 @@ const EXPORT_ITEMS: &[&str] = &[
     "Export XPUB",
     // The BC-UR account structure, as one code. Not a file: a UR is a QR format, and
     // the software that reads one is pointing a camera rather than reading a card.
-    #[cfg(feature = "board-q1")]
+    #[cfg(all(feature = "board-q1", feature = "multichain"))]
     "Account (UR)",
     // Every enabled chain at once, as a wallet's "sync with your hardware wallet"
     // expects it. The Bitcoin exports above are one chain each; this is the multichain
     // answer, and the only one that gets somebody's Solana and Ethereum accounts across
     // in the same scan.
+    #[cfg(feature = "multichain")]
     "Keystone",
     "Dump Summary",
     // Addresses rather than keys: the file a watch-only wallet's owner checks against, or
@@ -1218,11 +1220,12 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::KeyMenu,
         ),
         Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        #[cfg(feature = "multichain")]
         Screen::Keystone => to(
             |a| export_keystone(a.gate, a.login, a.ui),
             Screen::ExportMenu,
         ),
-        #[cfg(feature = "board-q1")]
+        #[cfg(all(feature = "board-q1", feature = "multichain"))]
         Screen::AccountUr => to(
             |a| export_account_ur(a.gate, a.login, a.ui),
             Screen::ExportMenu,
@@ -1656,8 +1659,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             }
             (Key::Confirm, Some("Key Expression")) => Screen::ExportKeyExpr,
             (Key::Confirm, Some("Export XPUB")) => Screen::XpubMenu,
-            #[cfg(feature = "board-q1")]
+            #[cfg(all(feature = "board-q1", feature = "multichain"))]
             (Key::Confirm, Some("Account (UR)")) => Screen::AccountUr,
+            #[cfg(feature = "multichain")]
             (Key::Confirm, Some("Keystone")) => Screen::Keystone,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Address CSV")) => Screen::AddressCsv,
@@ -2190,8 +2194,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
+        #[cfg(feature = "multichain")]
         Screen::Keystone => {}
-        #[cfg(feature = "board-q1")]
+        #[cfg(all(feature = "board-q1", feature = "multichain"))]
         Screen::AccountUr => {}
         Screen::AddressExplorer
         | Screen::ExportOne(_)
@@ -5136,6 +5141,7 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
 /// write: the bytes are CBOR, which no wallet reads off a card, and the text form is
 /// the code itself. The mono boards have no screen to draw it on.
 #[cfg(feature = "board-q1")]
+#[cfg(feature = "multichain")]
 fn export_account_ur(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_bcur::registry::Kind;
 
@@ -5178,6 +5184,7 @@ fn export_account_ur(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 /// Split out so the key is dropped at one place in the caller rather than at each of
 /// the half-dozen ways this can fail.
 #[cfg(feature = "board-q1")]
+#[cfg(feature = "multichain")]
 fn build_account_ur(
     master: &catcard_wallet::bip32::ExtendedPrivKey,
     fingerprint: u32,
@@ -5236,6 +5243,7 @@ fn build_account_ur(
 ///
 /// A chain whose scheme this cannot express is left out rather than approximated, and
 /// the screen says how many went in.
+#[cfg(feature = "multichain")]
 fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_bcur::registry::{Kind, hdkey, multi};
     use catcard_wallet::bip32::ChildNumber;
@@ -5356,6 +5364,7 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
 }
 
 /// One secp256k1 chain's entry: the node, its path, and what to call it.
+#[cfg(feature = "multichain")]
 fn hdkey_for(
     chain: &catcard_wallet::chain::Chain,
     steps: &[catcard_wallet::bip32::ChildNumber],
@@ -5382,6 +5391,7 @@ fn hdkey_for(
 }
 
 /// One ed25519 chain's entry: the account key itself, and the hardened path it is at.
+#[cfg(feature = "multichain")]
 #[cfg(feature = "multichain")]
 fn ed25519_hdkey(
     chain: &catcard_wallet::chain::Chain,
@@ -6056,6 +6066,7 @@ fn offer_export(
             drop(signer);
             crate::qrshow::animate_bbqr(ui, head, body, kind);
         }
+        #[cfg(feature = "multichain")]
         Some(2) => {
             drop(signer);
             crate::qrshow::animate_bytes_ur(ui, head, body);

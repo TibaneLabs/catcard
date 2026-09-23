@@ -38,9 +38,8 @@ mod battery;
 mod boot;
 /// Which chains the owner sees, from the root wallet's settings.
 ///
-/// Present on a Bitcoin-only build too, where the answer is short but still the answer:
-/// the Keystone export asks it what to put in a code, and that question has a sensible
-/// reply on every build.
+/// A multichain question: the one build that carries a single chain has nothing to ask.
+#[cfg(feature = "multichain")]
 mod chains;
 mod derive;
 mod display;
@@ -111,6 +110,9 @@ mod qrload;
 #[cfg(feature = "board-q1")]
 mod qrscan;
 /// Showing a file as animated QR.
+/// Showing a payload as QR: BBQr where there is a scanner to answer it, BC-UR where the
+/// chains that speak it are built in. A build with neither has nothing to show this way.
+#[cfg(any(feature = "board-q1", feature = "multichain"))]
 mod qrshow;
 mod recovery;
 /// Debug: write a settings image staged by the memory monitor back over the region.

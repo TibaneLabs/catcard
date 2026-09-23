@@ -245,7 +245,7 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
 /// `psbt\xff`. [C] BCR-2020-006 §"Partially Signed Bitcoin Transaction (PSBT)". The
 /// header is a few bytes at the front, so nothing has to be moved: `skip` says where
 /// the payload begins and `len` how much of it there is.
-#[cfg(feature = "board-q1")]
+#[cfg(all(feature = "board-q1", feature = "multichain"))]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Arrival {
     pub what: Content,
@@ -265,7 +265,7 @@ pub(crate) struct Arrival {
 /// `None` when there is nothing better to say than [`sniff`] would say -- no type, a
 /// type this does not unwrap, a message that is not the item its type claims, or a
 /// payload that could only be used from the front of the staging area.
-#[cfg(feature = "board-q1")]
+#[cfg(all(feature = "board-q1", feature = "multichain"))]
 pub(crate) fn from_ur(
     message: &[u8],
     kind: Option<catcard_bcur::registry::Kind>,

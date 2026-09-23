@@ -542,14 +542,24 @@ pub(crate) fn review_and_sign(
 #[cfg(feature = "board-q1")]
 fn offer_signed_qr(ui: &mut Ui<'_>, psbt: &[u8], scratch: &mut [u8]) {
     const HEAD: &str = "Signed";
+    // Both where this build speaks both. BBQr alone is not a lesser screen -- it is the
+    // denser of the two and the right default for a PSBT -- so a Bitcoin-only build
+    // shows it without asking a question that has one answer.
+    #[cfg(feature = "multichain")]
     const WAYS: &[&str] = &["BBQr", "BC-UR"];
+    #[cfg(not(feature = "multichain"))]
+    const WAYS: &[&str] = &["BBQr"];
 
     let Some(pick) = menu::choose(ui, HEAD, "show it as QR", WAYS) else {
         return;
     };
+    let _ = scratch;
     match pick {
         0 => crate::qrshow::animate_bbqr(ui, HEAD, psbt, catcard_bbqr::FileType::PSBT),
+        #[cfg(feature = "multichain")]
         _ => crate::qrshow::animate_psbt_ur(ui, HEAD, psbt, scratch),
+        #[cfg(not(feature = "multichain"))]
+        _ => {}
     }
 }
 

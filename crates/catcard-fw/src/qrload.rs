@@ -64,6 +64,7 @@ pub(crate) struct Received {
     /// registry item, and for a lone code that announced nothing. The caller uses it
     /// to beat the byte-level guess: a `crypto-psbt` is a transaction whether or not
     /// its first five bytes look like one, and the CBOR wrapper means they do not.
+    #[cfg(feature = "multichain")]
     pub kind: Option<catcard_bcur::registry::Kind>,
 }
 
@@ -82,6 +83,7 @@ struct Landed {
 enum Which {
     Unknown,
     Bbqr(catcard_bbqr::Collector),
+    #[cfg(feature = "multichain")]
     Bcur(catcard_bcur::Collector),
 }
 
@@ -206,6 +208,7 @@ pub(crate) fn collect_any(
     // Read after the scan rather than carried through it: the type cannot change
     // part way -- the collector refuses a part that disagrees with the ones before it
     // -- so there is one answer and the end of the scan is when it is wanted.
+    #[cfg(feature = "multichain")]
     let kind = match &which {
         Which::Bcur(collector) => collector.kind(),
         _ => None,
@@ -214,6 +217,7 @@ pub(crate) fn collect_any(
         Ok(()) if done > 0 => Ok(Received {
             len: done,
             compressed,
+            #[cfg(feature = "multichain")]
             kind,
         }),
         Ok(()) => Err(None),
@@ -228,12 +232,14 @@ pub(crate) fn collect_any(
 /// of a 32 KiB heap that the scan screen is otherwise nearly alone in. Past it -- a
 /// firmware image being staged into PSRAM -- there is nowhere to keep a copy, so pure
 /// parts only, and a sender of something that big can be expected to loop.
+#[cfg(feature = "multichain")]
 const UNMIX_MAX: usize = 16 * 1024;
 
 /// Take the room to reduce mixtures, once the message's size is known.
 ///
 /// Fragment-indexed and therefore a little larger than the message: the last fragment is
 /// padded, and the padding is part of what the sender XORed.
+#[cfg(feature = "multichain")]
 fn room_to_unmix(collector: &catcard_bcur::Collector, known: &mut Option<crate::heap::Block>) {
     if known.is_some() {
         return;
@@ -262,7 +268,9 @@ fn read_one(
     told: &mut bool,
     line: &str,
     scratch: &mut [u8],
-    known: &mut Option<crate::heap::Block>,
+    #[cfg_attr(not(feature = "multichain"), allow(unused_variables))] known: &mut Option<
+        crate::heap::Block,
+    >,
     sink: &mut dyn Sink,
 ) -> Result<Option<Landed>, &'static str> {
     // The first line that parses decides the format. `starts_with` rather than a full
@@ -271,10 +279,18 @@ fn read_one(
     if matches!(which, Which::Unknown) {
         if line.as_bytes().starts_with(b"B$") {
             *which = Which::Bbqr(catcard_bbqr::Collector::new());
-        } else if starts_with_ur(line.as_bytes()) {
-            *which = Which::Bcur(catcard_bcur::Collector::new());
         } else {
-            return Ok(None);
+            #[cfg(feature = "multichain")]
+            if starts_with_ur(line.as_bytes()) {
+                *which = Which::Bcur(catcard_bcur::Collector::new());
+            }
+            // A UR on a build with no BC-UR in it is a code this device cannot read,
+            // which is what it says: BBQr carries everything a Bitcoin-only build is
+            // asked to carry, and pretending otherwise would be a screen that waits for
+            // parts that will never be understood.
+            if matches!(which, Which::Unknown) {
+                return Ok(None);
+            }
         }
     }
 
@@ -314,6 +330,7 @@ fn read_one(
                 compressed: collector.compressed(),
             }))
         }
+        #[cfg(feature = "multichain")]
         Which::Bcur(collector) => {
             let placed =
                 match collector.accept_mixing(line, scratch, known.as_mut().map(|b| &*b.bytes())) {
@@ -395,6 +412,7 @@ fn as_text(line: &[u8]) -> Option<&str> {
 }
 
 /// Whether a line announces itself as a UR, in either case.
+#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
 ///
 /// Upper case is the one that matters: a UR meant for a QR is upper-cased so the symbol
 /// stays in alphanumeric mode, which is how every UR this will ever be shown arrives.

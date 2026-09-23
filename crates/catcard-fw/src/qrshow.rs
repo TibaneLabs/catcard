@@ -20,6 +20,7 @@ use catcard_bbqr::{Encoding, FileType, Header};
 use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::display;
+#[cfg_attr(not(feature = "multichain"), allow(unused_imports))]
 use crate::menu;
 use crate::ui::Ui;
 
@@ -79,6 +80,7 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
 /// something no reader could make sense of, which is why this exists rather than the
 /// caller passing its buffer straight through.
 #[cfg(feature = "board-q1")]
+#[cfg(feature = "multichain")]
 pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
     use catcard_bcur::registry::{Kind, bytestring};
 
@@ -117,6 +119,7 @@ pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
 /// is for: a few bytes longer than the PSBT, and the signer already holds a
 /// same-sized second buffer.
 #[cfg(feature = "board-q1")]
+#[cfg(feature = "multichain")]
 pub(crate) fn animate_psbt_ur(ui: &mut Ui<'_>, head: &str, psbt: &[u8], scratch: &mut [u8]) {
     use catcard_bcur::registry::{Kind, bytestring};
 
@@ -149,6 +152,7 @@ pub(crate) fn animate_psbt_ur(ui: &mut Ui<'_>, head: &str, psbt: &[u8], scratch:
 /// is read at a glance rather than waited on through an animation, and it is shorter
 /// than the same message numbered `1-1`, because the five-element part header and its
 /// padding are gone. [C] BCR-2020-005 §"Types"
+#[cfg(feature = "multichain")]
 pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_bcur::encode as ur;

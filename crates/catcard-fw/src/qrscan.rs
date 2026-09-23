@@ -784,10 +784,18 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     } else {
         got.len
     };
-    offer(gate, login, ui, HEAD, area, len, got.kind);
+    #[cfg(feature = "multichain")]
+    let kind = got.kind;
+    #[cfg(not(feature = "multichain"))]
+    let kind = ();
+    offer(gate, login, ui, HEAD, area, len, kind);
 }
 
 /// Say what arrived and offer what can be done with it.
+///
+/// `kind` is what the UR said it was, where this build reads URs at all. On a build with
+/// no BC-UR there is nothing a scan could have been wrapped in, so it carries nothing --
+/// which keeps one function rather than two that have to be kept in step.
 fn offer(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -795,7 +803,8 @@ fn offer(
     head: &str,
     area: crate::staging::Area,
     len: usize,
-    kind: Option<catcard_bcur::registry::Kind>,
+    #[cfg(feature = "multichain")] kind: Option<catcard_bcur::registry::Kind>,
+    #[cfg(not(feature = "multichain"))] _kind: (),
 ) {
     // A plain view of the same memory, for looking at what arrived. Reading it back is
     // fine now: every write is done, and it is only a run of writes that a read must not
@@ -820,9 +829,16 @@ fn offer(
     // registry item is CBOR, so the payload starts a few bytes into the message --
     // `skip` is that header, and `base` stays where the scan wrote, because the
     // staging area is addressed from there.
+    #[cfg(feature = "multichain")]
     let arrival = crate::sniff::from_ur(&lease.bytes()[base..base + len], kind);
+    // Nothing arrives wrapped on a build with no BC-UR: what a scan holds is what was
+    // scanned, so there is no header to step over.
+    #[cfg(not(feature = "multichain"))]
+    let arrival: Option<(Content, usize, usize)> = None;
+    #[cfg(feature = "multichain")]
+    let arrival = arrival.map(|a| (a.what, a.skip, a.len));
     let (what, skip, len) = match arrival {
-        Some(a) => (a.what, a.skip, a.len),
+        Some(a) => a,
         None => (
             crate::sniff::sniff(&lease.bytes()[base..base + len]),
             0,

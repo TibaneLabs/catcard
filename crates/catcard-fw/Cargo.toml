@@ -36,7 +36,15 @@ games = []
 # Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
 # Bitcoin-only build is the one whose image carries no other chain's parser at all --
 # that is the point of it being a build rather than a menu.
-multichain = ["catcard-wallet/multichain", "dep:catcard-evm", "dep:catcard-solana"]
+multichain = [
+    "catcard-wallet/multichain",
+    "dep:catcard-evm",
+    "dep:catcard-solana",
+    # BC-UR travels with the chains that need it: `crypto-psbt` has BBQr beside it for
+    # Bitcoin, and everything else a UR carries here -- an account, a signing request, a
+    # signature -- is something only a multichain build has to say.
+    "dep:catcard-bcur",
+]
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]
@@ -62,7 +70,7 @@ catcard-bbqr.workspace = true
 catcard-png = { workspace = true, optional = true }
 catcard-evm = { workspace = true, optional = true }
 catcard-solana = { workspace = true, optional = true }
-catcard-bcur.workspace = true
+catcard-bcur = { workspace = true, optional = true }
 catcard-board.workspace = true
 catcard-nfc = { path = "../catcard-nfc" }
 catcard-callgate.workspace = true
