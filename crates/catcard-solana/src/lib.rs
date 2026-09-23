@@ -370,6 +370,51 @@ impl<'a> Tx<'a> {
         Some(total)
     }
 
+    /// What this transaction will cost its fee payer.
+    ///
+    /// Two parts, and the device can be sure of only one. The signature fee is the
+    /// network's rate times the signatures required, and is a few thousand lamports. The
+    /// priority fee is the compute limit times the price per unit, both set by
+    /// instructions in the transaction -- so a transaction can ask its payer for an
+    /// arbitrary amount without a transfer anywhere in it, which is worth a line on a
+    /// screen rather than a shrug.
+    ///
+    /// A price set without a limit is reported as unknown rather than estimated: the
+    /// runtime's default depends on the instructions, and a number this device made up
+    /// would be read as one the transaction contained.
+    pub fn fee(&self) -> Fee {
+        let mut limit = None;
+        let mut price = None;
+        for i in 0..self.instruction_count() {
+            if let Some(Action::ComputeBudget(b)) = self.action(i) {
+                match b {
+                    Budget::Limit { units } => limit = Some(u64::from(units)),
+                    Budget::Price { micro_lamports } => price = Some(micro_lamports),
+                    _ => {}
+                }
+            }
+        }
+        let base = LAMPORTS_PER_SIGNATURE.saturating_mul(self.signing().required as u64);
+        match (limit, price) {
+            // Rounded up, because the fee is: a fraction of a lamport is charged as one.
+            (Some(l), Some(p)) => Fee {
+                base,
+                priority: Some(l.saturating_mul(p).div_ceil(1_000_000)),
+                priority_unknown: false,
+            },
+            (None, Some(_)) => Fee {
+                base,
+                priority: None,
+                priority_unknown: true,
+            },
+            _ => Fee {
+                base,
+                priority: Some(0),
+                priority_unknown: false,
+            },
+        }
+    }
+
     /// Whether slot `i` has been filled.
     ///
     /// An empty slot is sixty-four zeros, which is what an unsigned transaction carries
@@ -464,6 +509,45 @@ impl<'a> Tx<'a> {
     }
 }
 
+/// One setting from the compute budget program.
+///
+/// Discriminants and their little-endian payloads. [C] `solana-sdk`,
+/// `compute-budget-interface`: `ComputeBudgetInstruction`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Budget {
+    /// A heap size for every program in the transaction, in bytes. Discriminant 1.
+    Heap { bytes: u32 },
+    /// The compute units this transaction may use. Discriminant 2.
+    Limit { units: u32 },
+    /// What each of those units costs, in millionths of a lamport. Discriminant 3. The
+    /// priority fee is this times the limit, which is why neither number means much
+    /// without the other.
+    Price { micro_lamports: u64 },
+    /// A cap on the account data this transaction may load, in bytes. Discriminant 4.
+    DataSize { bytes: u32 },
+    /// A setting this build does not decode, or one whose payload is the wrong length.
+    Other,
+}
+
+/// What a transaction will cost its fee payer, in lamports.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Fee {
+    /// The signature fee: the network's rate times the signatures required.
+    pub base: u64,
+    /// The priority fee, when the transaction sets both numbers that decide it.
+    pub priority: Option<u64>,
+    /// A price was set with no limit beside it. The runtime then applies a default that
+    /// depends on the instructions, and this build does not compute it -- so the fee is
+    /// higher than [`Fee::base`] by an amount named nowhere in these bytes.
+    pub priority_unknown: bool,
+}
+
+/// Lamports per signature, the rate every cluster has run at.
+///
+/// A cluster's fee governor could in principle set another, so this is the default
+/// rather than a promise. [C] `solana-sdk`: `DEFAULT_LAMPORTS_PER_SIGNATURE`.
+pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
+
 /// What one instruction amounts to.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -501,8 +585,12 @@ pub enum Action {
         owner: Option<SolanaKey>,
         mint: Option<SolanaKey>,
     },
-    /// A compute-budget setting: what it costs, not what it does.
-    ComputeBudget,
+    /// A compute-budget setting: what the transaction costs, not what it does.
+    ///
+    /// Worth decoding rather than naming, because the priority fee is set here and the
+    /// payer pays whatever it says. A price nobody looked at is the one number in a
+    /// transaction that can empty an account without a transfer in sight.
+    ComputeBudget(Budget),
     /// A program this build does not decode, named and counted.
     Unknown {
         program: SolanaKey,
@@ -613,10 +701,30 @@ fn decode(
     }
 
     if program == compute_budget_program() {
-        return Action::ComputeBudget;
+        return Action::ComputeBudget(match (data.first(), data.len()) {
+            (Some(1), 5) => Budget::Heap {
+                bytes: u32_le(&data[1..]),
+            },
+            (Some(2), 5) => Budget::Limit {
+                units: u32_le(&data[1..]),
+            },
+            (Some(3), 9) => Budget::Price {
+                micro_lamports: u64_le(&data[1..]),
+            },
+            (Some(4), 5) => Budget::DataSize {
+                bytes: u32_le(&data[1..]),
+            },
+            _ => Budget::Other,
+        });
     }
 
     unknown
+}
+
+fn u32_le(b: &[u8]) -> u32 {
+    let mut v = [0u8; 4];
+    v.copy_from_slice(&b[..4]);
+    u32::from_le_bytes(v)
 }
 
 fn u64_le(b: &[u8]) -> u64 {

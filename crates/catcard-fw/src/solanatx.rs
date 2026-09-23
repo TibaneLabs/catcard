@@ -29,7 +29,7 @@ fn what_it_does(tx: &Tx<'_>) -> &'static str {
             Action::CreateTokenAccount { .. } => return "opens a token account",
             // Neither of these is the point of a transaction, but an unnamed program is
             // worth saying if it turns out to be all there is.
-            Action::ComputeBudget => {}
+            Action::ComputeBudget(_) => {}
             Action::Unknown { .. } => fallback = "calls a program this build cannot name",
         }
     }
@@ -66,23 +66,51 @@ pub(crate) fn headline(tx: &Tx<'_>, out: &mut heapless::String<80>) {
 // Reading one out, line by line
 // ---------------------------------------------------------------------------
 
-/// How many lines of description a transaction gets, and how long each is.
+/// How long a described line can be, and how many there can be.
 ///
-/// Stack, on the board where stack is the scarce thing, so both are counted rather than
-/// generous: eight instructions described is more than a person will read, and a line
-/// wider than this does not fit the panel anyway.
-const LINES: usize = 20;
-const LINE: usize = 56;
-type Arena = heapless::Vec<heapless::String<LINE>, LINES>;
+/// A line holds `fee payer ` and a 44-character address with room to spare. The count is
+/// a ceiling rather than a budget: a transaction that needs more than this is one this
+/// device cannot show in full, and [`Lines::dropped`] is how that becomes a refusal
+/// rather than a silence.
+const LINE: usize = 64;
+/// The most lines a description can run to. Heap, not stack -- 256 of these is sixteen
+/// kilobytes, which is a heap block and would be most of a task's stack.
+const MAX_LINES: usize = 256;
 
-/// Add one line to the arena, or silently stop at the last.
+/// The description as it is built: the lines, and how many did not fit.
 ///
-/// Silently, because a transaction with more instructions than there are lines is
-/// reported by the count at the end rather than by half a sentence.
-fn say(arena: &mut Arena, args: core::fmt::Arguments<'_>) {
-    let mut s: heapless::String<LINE> = heapless::String::new();
-    let _ = s.write_fmt(args);
-    let _ = arena.push(s);
+/// `dropped` is the point of the type. A screen that quietly stopped after twenty lines
+/// would be asking somebody to sign a transaction whose tail it decided not to mention,
+/// and that is the one failure a signing device must not have.
+struct Lines {
+    rows: alloc::vec::Vec<heapless::String<LINE>>,
+    dropped: usize,
+}
+
+impl Lines {
+    /// Room for a description, or `None` if the heap has nothing to spare.
+    fn new() -> Option<Self> {
+        let mut rows = alloc::vec::Vec::new();
+        rows.try_reserve_exact(MAX_LINES).ok()?;
+        Some(Lines { rows, dropped: 0 })
+    }
+
+    /// Add a line, or count it as one that did not fit.
+    fn say(&mut self, args: core::fmt::Arguments<'_>) {
+        if self.rows.len() == self.rows.capacity() {
+            self.dropped += 1;
+            return;
+        }
+        let mut s: heapless::String<LINE> = heapless::String::new();
+        // A line too long for the buffer is truncated by `write_fmt`, which would hide
+        // the tail of an address. Counted as dropped so the screen refuses rather than
+        // showing half a key.
+        if s.write_fmt(args).is_err() {
+            self.dropped += 1;
+            return;
+        }
+        self.rows.push(s);
+    }
 }
 
 /// A lamport or token amount as people write it.
@@ -97,25 +125,71 @@ fn amount(raw: u64, decimals: u8, out: &mut [u8; catcard_evm::summary::DECIMAL_M
     catcard_evm::summary::decimal(&wide, decimals, out)
 }
 
-/// Describe every instruction, in order, into `arena`.
+/// Lamports, written in SOL.
+fn sol(lamports: u64, out: &mut [u8; catcard_evm::summary::DECIMAL_MAX]) -> &str {
+    amount(
+        lamports,
+        catcard_solana::LAMPORTS_PER_SOL.ilog10() as u8,
+        out,
+    )
+}
+
+/// Describe the whole transaction into `lines`: who pays, what it costs, who must sign,
+/// and every instruction in order.
 ///
 /// **An address is never replaced by a name.** A mint this build knows is written as its
 /// ticker *and* its address, because the table is a claim about which address that
 /// ticker belongs to, and the address is the part the chain agrees with.
-fn describe(tx: &catcard_solana::Tx<'_>, arena: &mut Arena) {
-    use catcard_solana::{ADDRESS_MAX, Action, LAMPORTS_PER_SOL, address};
+fn describe(tx: &catcard_solana::Tx<'_>, lines: &mut Lines) {
+    use catcard_solana::{ADDRESS_MAX, Action, Budget, address};
 
     let mut addr = [0u8; ADDRESS_MAX];
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
+
+    // Who pays, and how much. The fee payer is account zero and pays whatever the
+    // budget below says, so both belong above the instructions rather than after them.
+    if let Some(payer) = tx.fee_payer() {
+        lines.say(format_args!("fee payer {}", address(&payer, &mut addr)));
+    }
+    let fee = tx.fee();
+    match (fee.priority, fee.priority_unknown) {
+        (_, true) => {
+            lines.say(format_args!(
+                "fee {} SOL plus a priority",
+                sol(fee.base, &mut num)
+            ));
+            lines.say(format_args!("this device cannot work out"));
+        }
+        (Some(0), _) => lines.say(format_args!("fee {} SOL", sol(fee.base, &mut num))),
+        (Some(p), _) => {
+            lines.say(format_args!(
+                "fee up to {} SOL",
+                sol(fee.base.saturating_add(p), &mut num)
+            ));
+        }
+        (None, _) => {}
+    }
+
+    // Who must sign. One signer is the ordinary case and is the fee payer already named;
+    // more than one means this transaction is not finished by this device alone.
+    let signing = tx.signing();
+    if signing.required > 1 {
+        lines.say(format_args!("{} signatures needed", signing.required));
+        for i in 0..signing.required {
+            if let Some(k) = tx.key(i) {
+                let mark = if tx.signed(i) { "signed" } else { "waiting" };
+                lines.say(format_args!("{mark} {}", address(&k, &mut addr)));
+            }
+        }
+    }
 
     for i in 0..tx.instruction_count() {
         let Some(action) = tx.action(i) else { continue };
         match action {
             Action::TransferSol { to, lamports, .. } => {
-                let n = amount(lamports, LAMPORTS_PER_SOL.ilog10() as u8, &mut num);
-                say(arena, format_args!("send {n} SOL"));
+                lines.say(format_args!("send {} SOL", sol(lamports, &mut num)));
                 if let Some(to) = to {
-                    say(arena, format_args!("to {}", address(&to, &mut addr)));
+                    lines.say(format_args!("to {}", address(&to, &mut addr)));
                 }
             }
             Action::TransferToken {
@@ -132,22 +206,22 @@ fn describe(tx: &catcard_solana::Tx<'_>, arena: &mut Arena) {
                 match (decimals.or(named.map(|m| m.decimals)), named) {
                     (Some(d), Some(m)) => {
                         let n = amount(raw, d, &mut num);
-                        say(arena, format_args!("send {n} {}", m.symbol));
+                        lines.say(format_args!("send {n} {}", m.symbol));
                     }
                     (Some(d), None) => {
                         let n = amount(raw, d, &mut num);
-                        say(arena, format_args!("send {n} of a token"));
+                        lines.say(format_args!("send {n} of a token"));
                     }
-                    _ => say(arena, format_args!("send {raw} raw units")),
+                    _ => lines.say(format_args!("send {raw} raw units")),
                 }
                 if let Some(mint) = mint {
-                    say(arena, format_args!("mint {}", address(&mint, &mut addr)));
+                    lines.say(format_args!("mint {}", address(&mint, &mut addr)));
                 }
                 if let Some(to) = to {
-                    say(arena, format_args!("to {}", address(&to, &mut addr)));
+                    lines.say(format_args!("to {}", address(&to, &mut addr)));
                 }
                 if action.decimals_disagree() {
-                    say(arena, format_args!("!! decimals disagree with this build"));
+                    lines.say(format_args!("!! decimals disagree with this build"));
                 }
             }
             Action::ApproveToken {
@@ -155,43 +229,51 @@ fn describe(tx: &catcard_solana::Tx<'_>, arena: &mut Arena) {
                 amount: raw,
                 ..
             } => {
-                say(arena, format_args!("approve {raw} raw units"));
+                lines.say(format_args!("approve {raw} raw units"));
                 if let Some(d) = delegate {
-                    say(arena, format_args!("to {}", address(&d, &mut addr)));
+                    lines.say(format_args!("to {}", address(&d, &mut addr)));
                 }
             }
             Action::CreateTokenAccount { mint, .. } => {
-                say(arena, format_args!("open a token account"));
+                lines.say(format_args!("open a token account"));
                 if let Some(mint) = mint {
-                    say(arena, format_args!("for {}", address(&mint, &mut addr)));
+                    lines.say(format_args!("for {}", address(&mint, &mut addr)));
                 }
             }
-            Action::ComputeBudget => say(arena, format_args!("set the compute budget")),
+            // The numbers, not the word. These two decide the priority fee, and a
+            // transaction can ask its payer for an arbitrary amount through them.
+            Action::ComputeBudget(Budget::Limit { units }) => {
+                lines.say(format_args!("compute limit {units} units"));
+            }
+            Action::ComputeBudget(Budget::Price { micro_lamports }) => {
+                lines.say(format_args!("price {micro_lamports} micro-lamports a unit"));
+            }
+            Action::ComputeBudget(Budget::Heap { bytes }) => {
+                lines.say(format_args!("heap {bytes} bytes"));
+            }
+            Action::ComputeBudget(Budget::DataSize { bytes }) => {
+                lines.say(format_args!("account data limit {bytes} bytes"));
+            }
+            Action::ComputeBudget(Budget::Other) => {
+                lines.say(format_args!("a compute budget setting, not decoded"));
+            }
             Action::Unknown {
                 program,
                 accounts,
                 data_len,
             } => {
-                say(arena, format_args!("call {}", address(&program, &mut addr)));
-                say(
-                    arena,
-                    format_args!("{accounts} accounts, {data_len} bytes -- not decoded"),
-                );
+                lines.say(format_args!("call {}", address(&program, &mut addr)));
+                lines.say(format_args!(
+                    "{accounts} accounts, {data_len} bytes -- not decoded"
+                ));
             }
         }
     }
 
     let (w, r) = tx.lookups();
     if w + r > 0 {
-        say(arena, format_args!("{} accounts come from tables", w + r));
-        say(arena, format_args!("and are not shown here"));
-    }
-    let signing = tx.signing();
-    if signing.present > 0 {
-        say(
-            arena,
-            format_args!("{} of {} already signed", signing.present, signing.required),
-        );
+        lines.say(format_args!("{} accounts come from tables", w + r));
+        lines.say(format_args!("and are not shown here"));
     }
 }
 
@@ -292,7 +374,10 @@ fn sign_it(
                 continue;
             };
             let public = node.public_key(kw);
-            if let Some(slot) = tx.signer_index(&public) {
+            // A slot already filled is not signed again: the same signature would go
+            // back in, and a second pass over a transaction is there to add somebody
+            // else's key, not to redo this one's.
+            if let Some(slot) = tx.signer_index(&public).filter(|&slot| !tx.signed(slot)) {
                 found = Some((
                     slot,
                     outscript::crypto::ed25519::sign(node.secret(), message),
@@ -320,7 +405,7 @@ fn hand_back(
     transaction: &[u8],
     signature: &[u8; 64],
     request_id: Option<&[u8]>,
-) {
+) -> bool {
     let missing = catcard_solana::parse(transaction)
         .map(|t| t.signing().missing())
         .unwrap_or(0);
@@ -333,19 +418,25 @@ fn hand_back(
         // The QR is a Q1 row. Not because the other boards cannot draw one, but because
         // the only asker who wants a bare signature is one that sent a sign request, and
         // a sign request arrives by camera -- which is the board that has one.
+        let mut rows: heapless::Vec<&str, 4> = heapless::Vec::new();
         #[cfg(feature = "board-q1")]
-        let rows = ["Signature as QR", "Tap a phone", "Done"];
-        #[cfg(not(feature = "board-q1"))]
-        let rows = ["Tap a phone", "Done"];
-        #[cfg(feature = "board-q1")]
-        let tap = 1;
-        #[cfg(not(feature = "board-q1"))]
-        let tap = 0;
-        match crate::menu::choose(ui, HEAD, note, &rows) {
+        let _ = rows.push("Signature as QR");
+        let _ = rows.push("Tap a phone");
+        // Only where somebody else still has to sign, and only because that somebody
+        // might be this device under another account.
+        if missing > 0 {
+            let _ = rows.push("Sign with another account");
+        }
+        let _ = rows.push("Done");
+        let Some(chosen) = crate::menu::choose(ui, HEAD, note, &rows) else {
+            return false;
+        };
+        match rows[chosen] {
             #[cfg(feature = "board-q1")]
-            Some(0) => signature_qr(ui, signature, request_id),
-            Some(n) if n == tap => crate::nfc::offer_solana_link(ui, transaction, missing),
-            _ => return,
+            "Signature as QR" => signature_qr(ui, signature, request_id),
+            "Tap a phone" => crate::nfc::offer_solana_link(ui, transaction, missing),
+            "Sign with another account" => return true,
+            _ => return false,
         }
     }
 }
@@ -403,18 +494,42 @@ fn review_and_sign(
         }
     };
 
-    let mut arena: Arena = heapless::Vec::new();
-    describe(&tx, &mut arena);
+    let Some(mut lines) = Lines::new() else {
+        crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    describe(&tx, &mut lines);
     let mut said: heapless::String<80> = heapless::String::new();
     headline(&tx, &mut said);
 
-    let mut rows: heapless::Vec<Line<'_>, { LINES + 4 }> = heapless::Vec::new();
-    let _ = rows.push(Line::title("Solana transaction"));
-    let _ = rows.push(Line::body(&said).small());
-    for line in &arena {
-        let _ = rows.push(Line::body(line).small());
+    // **Nothing is signed that was not shown.** A description that did not fit is a
+    // transaction this device cannot put in front of somebody, and the honest answer is
+    // to say so rather than to offer a signature over a tail nobody read.
+    let shown_in_full = lines.dropped == 0;
+    let mut rows: alloc::vec::Vec<Line<'_>> = alloc::vec::Vec::new();
+    if rows.try_reserve_exact(lines.rows.len() + 4).is_err() {
+        crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        return;
     }
-    let _ = rows.push(Line::item("Sign it", 1));
+    rows.push(Line::title("Solana transaction"));
+    rows.push(Line::body(&said).small());
+    for line in &lines.rows {
+        rows.push(Line::body(line).small());
+    }
+    let mut complaint: heapless::String<64> = heapless::String::new();
+    if shown_in_full {
+        rows.push(Line::item("Sign it", 1));
+    } else {
+        let _ = write!(
+            complaint,
+            "{} more lines than this screen holds",
+            lines.dropped
+        );
+        rows.push(Line::body(&complaint).small());
+        rows.push(Line::body("not signed: it cannot all be shown").small());
+    }
 
     if !matches!(
         crate::menu::show_doc(ui, &rows, false, false),
@@ -422,6 +537,20 @@ fn review_and_sign(
     ) {
         return;
     }
+
+    // The buffer everything from here works on: what arrived, if a transaction arrived,
+    // and the message with its empty slots in front if one did not. Signatures are
+    // placed into it, so it is also what a second one is added to.
+    let Some(mut block) = crate::heap::take(catcard_solana::link::PACKET_MAX) else {
+        crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let Some(n) = tx.to_transaction(block.bytes()) else {
+        crate::menu::message(ui.panel, HEAD, "too big to send", "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
 
     // Account zero first, then the owner says. A wallet kept at another account number
     // is an ordinary thing to have, and the only place that number exists is in the head
@@ -431,17 +560,35 @@ fn review_and_sign(
     // the answer to "that key is not here" is not "try another one" -- it is that the
     // asker and this device disagree about whose signature this is.
     let mut which = path.map_or(Which::Zero, Which::Path);
-    let signed = loop {
-        match sign_it(gate, login, ui, &tx, which) {
-            Ok(Some(found)) => break found,
+    loop {
+        // Parsed afresh each time round, so a second signature is looked for against the
+        // slots as they now stand: whichever key filled one is not offered it again.
+        let outcome = {
+            let Ok(current) = catcard_solana::parse(&block.bytes()[..n]) else {
+                crate::menu::message(ui.panel, HEAD, "it stopped parsing", "any key to go back");
+                crate::menu::wait_for_any_key(ui);
+                return;
+            };
+            sign_it(gate, login, ui, &current, which)
+        };
+        let (slot, signature) = match outcome {
+            Ok(Some(found)) => found,
             Ok(None) => {
-                // Name the key it wanted. "Not ours" on its own leaves a person guessing
-                // between a wrong device, a wrong account and a wrong passphrase; the
-                // address says which, because they can compare it to one this device
-                // shows.
+                // Name a key it is still waiting on. "Not ours" on its own leaves a
+                // person guessing between a wrong device, a wrong account and a wrong
+                // passphrase; the address says which, because they can compare it to one
+                // this device shows.
                 let mut wanted: heapless::String<64> = heapless::String::new();
                 let mut addr = [0u8; catcard_solana::ADDRESS_MAX];
-                match tx.key(0) {
+                match catcard_solana::parse(&block.bytes()[..n])
+                    .ok()
+                    .and_then(|t| {
+                        (0..t.signing().required)
+                            .find(|&i| !t.signed(i))
+                            .map(|i| (t, i))
+                    })
+                    .and_then(|(t, i)| t.key(i))
+                {
                     Some(k) => {
                         let _ = write!(
                             wanted,
@@ -479,43 +626,37 @@ fn review_and_sign(
                 which = if chosen + 1 < PICK.len() {
                     Which::Account(chosen as u32 + 1)
                 } else {
-                    let Some(n) =
+                    let Some(typed) =
                         crate::menu::ask_number(ui, HEAD, None, "account", "digits, then accept")
                     else {
                         return;
                     };
-                    Which::Account(n)
+                    Which::Account(typed)
                 };
+                continue;
             }
             Err(why) => {
                 crate::menu::message(ui.panel, HEAD, why, "any key to go back");
                 crate::menu::wait_for_any_key(ui);
                 return;
             }
-        }
-    };
-    let (slot, signature) = signed;
+        };
 
-    // The transaction to hand back: what arrived, if a transaction arrived, and the
-    // message with its empty slots in front if one did not.
-    let Some(mut block) = crate::heap::take(catcard_solana::link::PACKET_MAX) else {
-        crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
-        crate::menu::wait_for_any_key(ui);
-        return;
-    };
-    let Some(n) = tx.to_transaction(block.bytes()) else {
-        crate::menu::message(ui.panel, HEAD, "too big to send", "any key to go back");
-        crate::menu::wait_for_any_key(ui);
-        return;
-    };
-    if !catcard_solana::place_signature(&mut block.bytes()[..n], slot, &signature) {
-        crate::menu::message(ui.panel, HEAD, "no slot for it", "any key to go back");
-        crate::menu::wait_for_any_key(ui);
-        return;
+        if !catcard_solana::place_signature(&mut block.bytes()[..n], slot, &signature) {
+            crate::menu::message(ui.panel, HEAD, "no slot for it", "any key to go back");
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+        crate::catlog!("solana: signed slot {} of {} bytes", slot, n);
+
+        let (transaction, _) = block.bytes().split_at(n);
+        if !hand_back(ui, transaction, &signature, request_id) {
+            return;
+        }
+        // Another key of this device's, for a transaction that needs more than one. The
+        // search starts at zero again and skips whatever is already filled.
+        which = Which::Zero;
     }
-    crate::catlog!("solana: signed slot {} of {} bytes", slot, n);
-    let (transaction, _) = block.bytes().split_at(n);
-    hand_back(ui, transaction, &signature, request_id);
 }
 
 /// A transaction that arrived on its own: scanned, or read off the tag.

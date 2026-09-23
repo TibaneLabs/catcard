@@ -632,3 +632,83 @@ fn a_transaction_round_trips_through_to_transaction() {
     let n = tx.to_transaction(&mut out).expect("room");
     assert_eq!(&out[..n], &raw[..]);
 }
+
+/// The compute budget is where a transaction says what it will cost.
+///
+/// Both numbers, and the fee they make together. The case that matters is the third
+/// one: a price with no limit beside it is a fee this device cannot work out, and
+/// reporting it as unknown is the difference between a screen that is silent about a
+/// cost and one that quietly says zero.
+#[test]
+fn the_priority_fee_is_read_from_the_budget() {
+    fn budget(tag: u8, payload: &[u8]) -> SolanaInstruction {
+        let mut data = std::vec![tag];
+        data.extend_from_slice(payload);
+        SolanaInstruction {
+            program_id: SolanaKey(crate::literal::mint(
+                "ComputeBudget111111111111111111111111111111",
+            )),
+            accounts: std::vec![],
+            data,
+        }
+    }
+
+    // 200_000 units at 3_000 micro-lamports: 600_000_000 millionths, so 600 lamports.
+    let raw = build(
+        key(1),
+        std::vec![
+            budget(2, &200_000u32.to_le_bytes()),
+            budget(3, &3_000u64.to_le_bytes()),
+            transfer_instruction(key(1), key(2), 1),
+        ],
+    );
+    let tx = parse(&raw).expect("a transaction");
+    assert_eq!(
+        tx.action(0),
+        Some(Action::ComputeBudget(Budget::Limit { units: 200_000 }))
+    );
+    assert_eq!(
+        tx.action(1),
+        Some(Action::ComputeBudget(Budget::Price {
+            micro_lamports: 3_000
+        }))
+    );
+    assert_eq!(
+        tx.fee(),
+        Fee {
+            base: LAMPORTS_PER_SIGNATURE,
+            priority: Some(600),
+            priority_unknown: false,
+        }
+    );
+
+    // No budget at all: the signature fee, and nothing on top.
+    let raw = build(key(1), std::vec![transfer_instruction(key(1), key(2), 1)]);
+    assert_eq!(
+        parse(&raw).expect("a transaction").fee(),
+        Fee {
+            base: LAMPORTS_PER_SIGNATURE,
+            priority: Some(0),
+            priority_unknown: false,
+        }
+    );
+
+    // A price with no limit: the runtime picks the limit, so the fee is not in here.
+    let raw = build(
+        key(1),
+        std::vec![
+            budget(3, &1_000_000u64.to_le_bytes()),
+            transfer_instruction(key(1), key(2), 1),
+        ],
+    );
+    let fee = parse(&raw).expect("a transaction").fee();
+    assert_eq!(fee.priority, None);
+    assert!(fee.priority_unknown);
+
+    // A payload of the wrong length is not decoded into a number.
+    let raw = build(key(1), std::vec![budget(2, &[1, 2])]);
+    assert_eq!(
+        parse(&raw).expect("a transaction").action(0),
+        Some(Action::ComputeBudget(Budget::Other))
+    );
+}
