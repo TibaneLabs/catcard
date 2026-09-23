@@ -14,7 +14,6 @@
 //! somewhere*: a named selector is shown as a name, and everything else is a red card.
 
 use catcard_evm::summary::{Action, Amount};
-use catcard_ui::art::txicons::Kind;
 
 use crate::txreview::Review;
 
@@ -42,57 +41,52 @@ fn scaled<'o>(
     catcard_evm::summary::decimal(raw, decimals, out)
 }
 
-/// A token amount, with its ticker when the table has one.
-fn token_card(out: &mut Review, lead: &str, amount: &Amount) {
+/// A token amount as one row, with its ticker when the table has one.
+fn token_row(out: &mut Review, lead: &str, amount: &Amount) {
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
-    let mut addr = [0u8; ADDRESS];
     match amount.token {
         Some(t) if amount.unlimited() => {
-            out.card(Kind::Approve, format_args!("{lead} unlimited {}", t.symbol));
+            out.element(false, format_args!("{lead} unlimited {}", t.symbol));
         }
         Some(t) => {
             let n = scaled(&amount.raw, t.decimals, &mut num);
-            out.card(Kind::Token, format_args!("{lead} {n} {}", t.symbol));
+            out.element(false, format_args!("{lead} {n} {}", t.symbol));
         }
-        // Unnamed: the raw number and the contract, which is everything that is actually
-        // known. Scaling it by a guessed decimal count would be inventing the amount.
-        None if amount.unlimited() => {
-            out.card(Kind::Approve, format_args!("{lead} unlimited"));
-        }
+        // Unnamed: the raw number and the contract, which is everything actually known.
+        // Scaling it by a guessed decimal count would be inventing the amount.
+        None if amount.unlimited() => out.element(false, format_args!("{lead} unlimited")),
         None => {
             let n = scaled(&amount.raw, 0, &mut num);
-            out.card(Kind::Token, format_args!("{lead} {n} raw units"));
-            out.detail(format_args!("of a token this build cannot name"));
+            out.element(false, format_args!("{lead} {n} raw units"));
+            out.note(format_args!("of a token this build cannot name"));
         }
     }
-    out.detail(format_args!(
-        "token {}",
-        address(&amount.contract, &mut addr)
-    ));
+    let mut addr = [0u8; ADDRESS];
+    out.address("token", address(&amount.contract, &mut addr));
 }
 
-/// Lay a transaction out as cards: which chain, what it costs, and what it does.
+/// Lay a transaction out: which chain, what it costs, and what it does.
 pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
     let mut addr = [0u8; ADDRESS];
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
 
     // Which chain, first. The same calldata on the wrong chain is a different
-    // transaction, and a transaction naming no chain at all is valid on every one of
-    // them at once -- which is worth a red card rather than a blank.
+    // transaction, and one naming no chain is valid on every chain at once -- which is a
+    // red row rather than a blank.
     match tx.chain_id {
         Some(id) => match catcard_evm::tokens::chain_name(id) {
-            Some(name) => out.card(Kind::Payer, format_args!("On {name}")),
-            None => out.card(Kind::Payer, format_args!("On chain {id}")),
+            Some(name) => out.element(false, format_args!("On {name}")),
+            None => out.element(false, format_args!("On chain {id}")),
         },
         None => {
             out.cannot_read(format_args!("This names no chain"));
-            out.detail(format_args!("so it is valid on every chain at once"));
+            out.note(format_args!("so it is valid on every chain at once"));
         }
     }
-    out.detail(format_args!("nonce {}", tx.nonce));
+    out.field("nonce", format_args!("{}", tx.nonce));
 
-    // What the gas can cost at most: the limit times the price, which is the number the
-    // sender is committing to rather than the one they will probably pay.
+    // What the gas can cost at most: the limit times the price, which is what the sender
+    // is committing to rather than what they will probably pay.
     let mut fee = [0u8; 32];
     let mut carry = 0u128;
     for i in (0..32).rev() {
@@ -101,32 +95,29 @@ pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
         carry = v >> 8;
     }
     if carry == 0 {
-        out.detail(format_args!("gas up to {}", scaled(&fee, 18, &mut num)));
+        out.field("gas up to", format_args!("{}", scaled(&fee, 18, &mut num)));
     }
 
     match catcard_evm::summary::summarise(tx) {
         Action::Send { to, wei } => {
-            out.card(
-                Kind::Send,
-                format_args!("Send {}", scaled(&wei, 18, &mut num)),
-            );
-            out.detail(format_args!("of the chain's own coin"));
-            out.detail(format_args!("to {}", address(&to, &mut addr)));
+            out.element(false, format_args!("Send {}", scaled(&wei, 18, &mut num)));
+            out.note(format_args!("of the chain's own coin"));
+            out.address("to", address(&to, &mut addr));
         }
         Action::TokenSend { to, amount } => {
-            token_card(out, "Send", &amount);
-            out.detail(format_args!("to {}", address(&to, &mut addr)));
+            token_row(out, "Send", &amount);
+            out.address("to", address(&to, &mut addr));
         }
         Action::TokenSendFrom { from, to, amount } => {
-            token_card(out, "Move", &amount);
-            out.detail(format_args!("from {}", address(&from, &mut addr)));
-            out.detail(format_args!("to {}", address(&to, &mut addr)));
-            out.detail(format_args!("under an allowance already given"));
+            token_row(out, "Move", &amount);
+            out.address("from", address(&from, &mut addr));
+            out.address("to", address(&to, &mut addr));
+            out.note(format_args!("under an allowance already given"));
         }
         Action::Approve { spender, amount } => {
-            token_card(out, "Approve", &amount);
-            out.detail(format_args!("to {}", address(&spender, &mut addr)));
-            out.detail(format_args!("this outlives the transaction"));
+            token_row(out, "Approve", &amount);
+            out.address("to", address(&spender, &mut addr));
+            out.note(format_args!("an approval outlives this transaction"));
         }
         // A selector this build can name. Named is not decoded: what the arguments say
         // is not read, so the amount inside a swap is not on this screen.
@@ -137,11 +128,11 @@ pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
             wei,
         } => {
             out.cannot_read(format_args!("Calls {method}"));
-            out.detail(format_args!("the name is known, the arguments are not"));
-            out.detail(format_args!("{data_len} bytes of them"));
-            out.detail(format_args!("at {}", address(&to, &mut addr)));
+            out.note(format_args!("the name is known, the arguments are not"));
+            out.field("calldata", format_args!("{data_len} bytes"));
+            out.address("contract", address(&to, &mut addr));
             if wei.iter().any(|&b| b != 0) {
-                out.detail(format_args!("sending {}", scaled(&wei, 18, &mut num)));
+                out.field("sending", format_args!("{}", scaled(&wei, 18, &mut num)));
             }
         }
         Action::UnknownCall {
@@ -151,29 +142,36 @@ pub(crate) fn describe(tx: &catcard_evm::Tx<'_>, out: &mut Review) {
             wei,
         } => {
             out.cannot_read(format_args!("Calls a contract"));
-            out.detail(format_args!(
-                "selector {:02x}{:02x}{:02x}{:02x}, {data_len} bytes",
-                selector[0], selector[1], selector[2], selector[3]
-            ));
-            out.detail(format_args!("at {}", address(&to, &mut addr)));
+            out.field(
+                "selector",
+                format_args!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    selector[0], selector[1], selector[2], selector[3]
+                ),
+            );
+            out.field("calldata", format_args!("{data_len} bytes"));
+            out.address("contract", address(&to, &mut addr));
             if wei.iter().any(|&b| b != 0) {
-                out.detail(format_args!("sending {}", scaled(&wei, 18, &mut num)));
+                out.field("sending", format_args!("{}", scaled(&wei, 18, &mut num)));
             }
         }
         Action::CreateContract { data_len, wei } => {
             out.cannot_read(format_args!("Deploys a contract"));
-            out.detail(format_args!("{data_len} bytes of code"));
+            out.field("code", format_args!("{data_len} bytes"));
             if wei.iter().any(|&b| b != 0) {
-                out.detail(format_args!("with {}", scaled(&wei, 18, &mut num)));
+                out.field("with", format_args!("{}", scaled(&wei, 18, &mut num)));
             }
         }
     }
 
     if tx.access_list_len > 0 {
-        out.detail(format_args!("{} access list entries", tx.access_list_len));
+        out.field(
+            "access list",
+            format_args!("{} entries", tx.access_list_len),
+        );
     }
     if tx.signature.is_some() {
-        out.detail(format_args!("this already carries a signature"));
+        out.note(format_args!("this already carries a signature"));
     }
 }
 
@@ -202,5 +200,5 @@ pub(crate) fn screen(ui: &mut crate::ui::Ui<'_>, bytes: &[u8]) {
         return;
     };
     describe(&tx, &mut review);
-    review.show(ui, HEAD, "Signing is not built yet");
+    review.show(ui, HEAD, &["Signing is not built yet"]);
 }

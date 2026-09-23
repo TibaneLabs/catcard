@@ -42,9 +42,10 @@ pub mod mints;
 #[cfg(test)]
 mod tests;
 
+pub use outscript::solana::SolanaKey;
+
 use outscript::solana::{
-    SolanaKey, ata_program, compute_budget_program, decode_compact_u16, system_program,
-    token_program,
+    ata_program, compute_budget_program, decode_compact_u16, system_program, token_program,
 };
 
 /// How many lamports make one SOL.

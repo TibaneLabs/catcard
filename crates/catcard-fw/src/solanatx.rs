@@ -7,7 +7,7 @@
 //! The same three steps as [`crate::evmtx`], which shares the screen: read, lay out,
 //! sign. What differs between the two chains is only what the cards say.
 
-use crate::txreview::Review;
+use crate::txreview::{Review, short};
 use catcard_callgate::Callgate;
 use core::fmt::Write as _;
 
@@ -32,148 +32,184 @@ fn sol(lamports: u64, out: &mut [u8; catcard_evm::summary::DECIMAL_MAX]) -> &str
     )
 }
 
-/// Lay the whole transaction out as cards: who pays, what it costs, who must sign, and
-/// every instruction in order.
+/// Whether `key` is one of this device's.
+fn is_mine(key: Option<catcard_solana::SolanaKey>, mine: &[[u8; 32]]) -> bool {
+    key.is_some_and(|k| mine.contains(&k.0))
+}
+
+/// Lay the transaction out: one row per part, with the detail behind each row.
+///
+/// `mine` is the public keys this device holds, which is what lets a row say "yours" --
+/// the question underneath every other question, and one a person cannot answer by
+/// eye against 44 characters of base58.
 ///
 /// **An address is never replaced by a name.** A mint this build knows is written as its
-/// ticker *and* its address, because the table is a claim about which address that
-/// ticker belongs to, and the address is the part the chain agrees with.
-fn describe(tx: &catcard_solana::Tx<'_>, out: &mut Review) {
+/// ticker on the row *and* as its address in the detail, because the table is a claim
+/// about which address that ticker belongs to and the address is the part the chain
+/// agrees with.
+fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
     use catcard_solana::{ADDRESS_MAX, Action, Budget, address};
-    use catcard_ui::art::txicons::Kind;
 
     let mut addr = [0u8; ADDRESS_MAX];
     let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
+    let mut brief: heapless::String<64> = heapless::String::new();
 
-    // Who pays, and how much. The fee payer is account zero and pays whatever the
-    // budget instructions below say, so both belong above them rather than after.
+    // What it costs, and who pays. The fee payer is account zero and pays whatever the
+    // budget instructions say, so the two belong on one row.
     let fee = tx.fee();
+    let payer = tx.fee_payer();
     match (fee.priority, fee.priority_unknown) {
-        (Some(0), _) => out.card(
-            Kind::Payer,
-            format_args!("Pays {} SOL", sol(fee.base, &mut num)),
+        (Some(0), _) => out.element(
+            is_mine(payer, mine),
+            format_args!("Fee {} SOL", sol(fee.base, &mut num)),
         ),
-        (Some(p), _) => out.card(
-            Kind::Payer,
+        (Some(p), _) => out.element(
+            is_mine(payer, mine),
             format_args!(
-                "Pays up to {} SOL",
+                "Fee up to {} SOL",
                 sol(fee.base.saturating_add(p), &mut num)
             ),
         ),
         (None, _) => {
-            out.card(
-                Kind::Payer,
-                format_args!("Pays {} SOL and a priority fee", sol(fee.base, &mut num)),
+            out.element(
+                is_mine(payer, mine),
+                format_args!("Fee {} SOL plus a priority", sol(fee.base, &mut num)),
             );
-            out.detail(format_args!("the priority is not set out in this"));
-            out.detail(format_args!("transaction, so it cannot be totalled"));
+            out.note(format_args!("the priority is not set out here,"));
+            out.note(format_args!("so it cannot be totalled"));
         }
     }
-    if let Some(payer) = tx.fee_payer() {
-        out.detail(format_args!("{}", address(&payer, &mut addr)));
+    if let Some(payer) = payer {
+        out.address("paid by", address(&payer, &mut addr));
     }
 
     for i in 0..tx.instruction_count() {
         let Some(action) = tx.action(i) else { continue };
         match action {
-            Action::TransferSol { to, lamports, .. } => {
-                out.card(
-                    Kind::Send,
-                    format_args!("Send {} SOL", sol(lamports, &mut num)),
-                );
+            Action::TransferSol { from, to, lamports } => {
+                let amount = sol(lamports, &mut num);
+                match to {
+                    Some(to) => {
+                        let text = address(&to, &mut addr);
+                        out.element(
+                            is_mine(from, mine) || is_mine(Some(to), mine),
+                            format_args!("Send {amount} SOL to {}", short(text, &mut brief)),
+                        );
+                    }
+                    None => out.element(is_mine(from, mine), format_args!("Send {amount} SOL")),
+                }
+                if let Some(from) = from {
+                    out.address("from", address(&from, &mut addr));
+                }
                 if let Some(to) = to {
-                    out.detail(format_args!("to {}", address(&to, &mut addr)));
+                    out.address("to", address(&to, &mut addr));
                 }
             }
             Action::TransferToken {
+                from,
                 to,
+                owner,
                 amount: raw,
                 decimals,
                 mint,
                 named,
-                ..
             } => {
-                // Scaled only where the instruction itself carried the decimals, or the
-                // mint is one this build knows. An unchecked transfer of an unknown mint
-                // gives a raw number, and saying so beats scaling it by a guess.
+                // Scaled only where the instruction carried the decimals, or the mint is
+                // one this build knows. An unchecked transfer of an unknown mint gives a
+                // raw number, and saying so beats scaling it by a guess.
+                let ours = is_mine(owner, mine) || is_mine(from, mine) || is_mine(to, mine);
                 match (decimals.or(named.map(|m| m.decimals)), named) {
                     (Some(d), Some(m)) => {
                         let n = amount(raw, d, &mut num);
-                        out.card(Kind::Token, format_args!("Send {n} {}", m.symbol));
+                        out.element(ours, format_args!("Send {n} {}", m.symbol));
                     }
                     (Some(d), None) => {
                         let n = amount(raw, d, &mut num);
-                        out.card(Kind::Token, format_args!("Send {n} of a token"));
+                        out.element(ours, format_args!("Send {n} of a token"));
                     }
-                    _ => out.card(Kind::Token, format_args!("Send {raw} raw units")),
+                    _ => out.element(ours, format_args!("Send {raw} raw units")),
                 }
-                if let Some(mint) = mint {
-                    out.detail(format_args!("mint {}", address(&mint, &mut addr)));
+                if let Some(owner) = owner {
+                    out.address("owner", address(&owner, &mut addr));
+                }
+                if let Some(from) = from {
+                    out.address("from account", address(&from, &mut addr));
                 }
                 if let Some(to) = to {
-                    out.detail(format_args!("to {}", address(&to, &mut addr)));
+                    out.address("to account", address(&to, &mut addr));
                 }
-                // The one place a number on this screen could be wrong by a power of
-                // ten, so it is a red card rather than a footnote.
+                if let Some(mint) = mint {
+                    out.address("mint", address(&mint, &mut addr));
+                }
+                // The one place a number here could be wrong by a power of ten.
                 if action.decimals_disagree() {
                     out.cannot_read(format_args!("This amount may be wrong"));
-                    out.detail(format_args!("the instruction and this build disagree"));
-                    out.detail(format_args!("about the mint's decimal places"));
+                    out.note(format_args!("the instruction and this build disagree"));
+                    out.note(format_args!("about the mint's decimal places"));
                 }
             }
             Action::ApproveToken {
+                account,
                 delegate,
+                owner,
                 amount: raw,
-                ..
             } => {
-                out.card(Kind::Approve, format_args!("Approve {raw} raw units"));
-                out.detail(format_args!("this outlives the transaction"));
+                out.element(
+                    is_mine(owner, mine) || is_mine(account, mine),
+                    format_args!("Approve {raw} raw units"),
+                );
+                out.note(format_args!("an approval outlives this transaction"));
                 if let Some(d) = delegate {
-                    out.detail(format_args!("to {}", address(&d, &mut addr)));
+                    out.address("to", address(&d, &mut addr));
                 }
-            }
-            Action::CreateTokenAccount { mint, .. } => {
-                out.card(Kind::Account, format_args!("Open a token account"));
-                if let Some(mint) = mint {
-                    out.detail(format_args!("for {}", address(&mint, &mut addr)));
-                }
-            }
-            Action::AdvanceNonce {
-                account, authority, ..
-            } => {
-                out.card(Kind::Nonce, format_args!("Spend a durable nonce"));
-                out.detail(format_args!("what lets this be signed later"));
                 if let Some(a) = account {
-                    out.detail(format_args!("account {}", address(&a, &mut addr)));
+                    out.address("from account", address(&a, &mut addr));
+                }
+                if let Some(o) = owner {
+                    out.address("owner", address(&o, &mut addr));
+                }
+            }
+            Action::CreateTokenAccount { owner, mint } => {
+                out.element(is_mine(owner, mine), format_args!("Open a token account"));
+                if let Some(o) = owner {
+                    out.address("owner", address(&o, &mut addr));
+                }
+                if let Some(mint) = mint {
+                    out.address("mint", address(&mint, &mut addr));
+                }
+            }
+            Action::AdvanceNonce { account, authority } => {
+                out.element(
+                    is_mine(authority, mine),
+                    format_args!("Spend a durable nonce"),
+                );
+                out.note(format_args!("what lets this be signed later"));
+                if let Some(a) = account {
+                    out.address("nonce account", address(&a, &mut addr));
                 }
                 if let Some(a) = authority {
-                    out.detail(format_args!("authority {}", address(&a, &mut addr)));
+                    out.address("authority", address(&a, &mut addr));
                 }
             }
-            // The numbers, not the word. These two decide the priority fee, and a
+            // The numbers, not the word. These decide the priority fee, and a
             // transaction can ask its payer for an arbitrary amount through them.
             Action::ComputeBudget(Budget::Limit { units }) => {
-                out.card(Kind::Budget, format_args!("Compute limit {units} units"));
+                out.element(false, format_args!("Compute limit {units}"));
+                out.note(format_args!("units this transaction may use"));
             }
             Action::ComputeBudget(Budget::Price { micro_lamports }) => {
-                out.card(
-                    Kind::Budget,
-                    format_args!("Price {micro_lamports} per unit"),
-                );
-                out.detail(format_args!("millionths of a lamport"));
+                out.element(false, format_args!("Priority {micro_lamports} per unit"));
+                out.note(format_args!("in millionths of a lamport"));
             }
             Action::ComputeBudget(Budget::Heap { bytes }) => {
-                out.card(Kind::Budget, format_args!("Heap {bytes} bytes"));
+                out.element(false, format_args!("Heap {bytes} bytes"));
             }
             Action::ComputeBudget(Budget::DataSize { bytes }) => {
-                out.card(
-                    Kind::Budget,
-                    format_args!("Account data limit {bytes} bytes"),
-                );
+                out.element(false, format_args!("Account data limit {bytes}"));
             }
             Action::ComputeBudget(Budget::Other) => {
                 out.cannot_read(format_args!("A compute budget setting"));
-                out.detail(format_args!("not one of the four this build reads"));
+                out.note(format_args!("not one of the four this build reads"));
             }
             Action::Unknown {
                 program,
@@ -182,43 +218,45 @@ fn describe(tx: &catcard_solana::Tx<'_>, out: &mut Review) {
                 accounts,
                 data_len,
             } => {
-                match named {
-                    Some(name) => out.cannot_read(format_args!("Cannot read a {name} instruction")),
-                    None => out.cannot_read(format_args!("Cannot read this instruction")),
+                match (named, tag) {
+                    (Some(name), Some(tag)) => {
+                        out.cannot_read(format_args!("Cannot read {name} {tag}"));
+                    }
+                    (Some(name), None) => {
+                        out.cannot_read(format_args!("Cannot read a {name} call"))
+                    }
+                    _ => {
+                        let text = address(&program, &mut addr);
+                        out.cannot_read(format_args!("Cannot read {}", short(text, &mut brief)));
+                    }
                 }
-                if let Some(tag) = tag {
-                    out.detail(format_args!("instruction {tag}, {accounts} accounts"));
-                } else {
-                    out.detail(format_args!("{accounts} accounts"));
-                }
-                out.detail(format_args!("{data_len} bytes of data"));
-                out.detail(format_args!("{}", address(&program, &mut addr)));
+                out.field("touches", format_args!("{accounts} accounts"));
+                out.field("carries", format_args!("{data_len} bytes of data"));
+                out.address("program", address(&program, &mut addr));
             }
         }
     }
 
-    // Accounts lent by an on-chain table. Red, because they are precisely what this
-    // device cannot see: the instructions above touch accounts whose addresses are not
-    // in these bytes at all, and are fetched when the transaction runs.
+    // Accounts lent by an on-chain table: precisely what this device cannot see, since
+    // the instructions above touch accounts whose addresses are not in these bytes.
     let (w, r) = tx.lookups();
     if w + r > 0 {
         out.cannot_read(format_args!("{} accounts are not here", w + r));
-        out.detail(format_args!("they come from on-chain tables,"));
-        out.detail(format_args!("so this device cannot show them"));
+        out.note(format_args!("they come from on-chain tables,"));
+        out.note(format_args!("so this device cannot show them"));
     }
 
-    // Who must sign. One signer is the ordinary case and was named as the payer; more
-    // than one means this transaction is not finished by this device alone.
+    // Who must sign, when it is more than just us.
     let signing = tx.signing();
     if signing.required > 1 {
-        out.card(
-            Kind::Signer,
+        out.element(
+            false,
             format_args!("{} of {} signed", signing.present, signing.required),
         );
         for i in 0..signing.required {
             if let Some(k) = tx.key(i) {
-                let mark = if tx.signed(i) { "signed " } else { "waiting" };
-                out.detail(format_args!("{mark} {}", address(&k, &mut addr)));
+                let mark = if tx.signed(i) { "signed" } else { "waiting" };
+                out.address(mark, address(&k, &mut addr));
             }
         }
     }
@@ -264,6 +302,36 @@ enum Which {
     /// Exactly this path. What a `sol-sign-request` names, where there is nothing to
     /// search for and guessing would answer a question nobody asked.
     Path([u32; 4]),
+}
+
+/// The public keys at `paths`, for marking the rows that are this device's own.
+///
+/// Public keys only: nothing here is secret, and nothing secret outlives the closure
+/// that derives them. A failure is not an error -- it means no row gets marked, and a
+/// review with nothing marked is still a true review.
+fn our_keys(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    paths: &[[u32; 4]],
+) -> heapless::Vec<[u8; 32], 4> {
+    let got = crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+        let mut out: heapless::Vec<[u8; 32], 4> = heapless::Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            // The two shapes wallets write a Solana path in, for the sweep's own two
+            // candidates; a request that named a path gets exactly that one.
+            let node = if paths.len() > 1 && i == 1 {
+                catcard_wallet::slip10::derive(seed, &path[..3], kw)
+            } else {
+                catcard_wallet::slip10::derive(seed, path, kw)
+            };
+            if let Some(node) = node {
+                let _ = out.push(node.public_key(kw));
+            }
+        }
+        Some(out)
+    });
+    got.unwrap_or_default()
 }
 
 /// The slot this device can fill, and the signature for it.
@@ -342,40 +410,44 @@ fn sign_it(
 
 /// What to do with a signature, until the owner is done with it.
 ///
-/// Two ways out, because two kinds of asker. A wallet that sent a `sol-sign-request`
-/// wants the signature alone -- it still has the transaction, and sixty-four bytes fit
-/// one QR code, which a kilobyte of transaction never would. A phone that is going to
-/// *send* the transaction wants the whole thing, which is the tap.
+/// **The same component as the review**, with different rows at the bottom. What
+/// somebody wants here -- look at it again, hand it to a phone, sign with another
+/// account -- is a list of actions over a transaction, which is what that screen already
+/// is. A second hand-rolled menu would have been a second set of rows to keep in step
+/// with the first, and a different shape to learn for no reason.
+///
+/// Returns whether another signature was asked for.
 #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))]
 fn hand_back(
     ui: &mut crate::ui::Ui<'_>,
     transaction: &[u8],
+    mine: &[[u8; 32]],
     signature: &[u8; 64],
     request_id: Option<&[u8]>,
 ) -> bool {
-    let missing = catcard_solana::parse(transaction)
-        .map(|t| t.signing().missing())
-        .unwrap_or(0);
-    let note: &str = if missing == 0 {
-        "signed and complete"
-    } else {
-        "signed, others still to go"
+    let Ok(tx) = catcard_solana::parse(transaction) else {
+        return false;
     };
+    let missing = tx.signing().missing();
+    let Some(mut review) = Review::new() else {
+        return false;
+    };
+    describe(&tx, mine, &mut review);
+
+    // The rows are built here so that the board and the transaction decide them: the QR
+    // is a Q1 row because the only asker who wants a bare signature sent one by camera,
+    // and another signature is only worth offering while one is still missing.
+    let mut rows: heapless::Vec<&str, 4> = heapless::Vec::new();
+    #[cfg(feature = "board-q1")]
+    let _ = rows.push("Signature as QR");
+    let _ = rows.push("Tap a phone");
+    if missing > 0 {
+        let _ = rows.push("Sign with another account");
+    }
+    let _ = rows.push("Done");
+
     loop {
-        // The QR is a Q1 row. Not because the other boards cannot draw one, but because
-        // the only asker who wants a bare signature is one that sent a sign request, and
-        // a sign request arrives by camera -- which is the board that has one.
-        let mut rows: heapless::Vec<&str, 4> = heapless::Vec::new();
-        #[cfg(feature = "board-q1")]
-        let _ = rows.push("Signature as QR");
-        let _ = rows.push("Tap a phone");
-        // Only where somebody else still has to sign, and only because that somebody
-        // might be this device under another account.
-        if missing > 0 {
-            let _ = rows.push("Sign with another account");
-        }
-        let _ = rows.push("Done");
-        let Some(chosen) = crate::menu::choose(ui, HEAD, note, &rows) else {
+        let Some(chosen) = review.show(ui, "Signed", &rows) else {
             return false;
         };
         match rows[chosen] {
@@ -439,13 +511,26 @@ fn review_and_sign(
         }
     };
 
+    // Our own addresses, before anything is shown. **This is a seed stretch spent on a
+    // question nobody asked**, and it is worth it: "is this my account?" is what a
+    // person is really asking of every address on the screen, and it is the one question
+    // they cannot answer themselves -- 44 characters of base58 do not get compared by
+    // eye. The keys are public, so nothing secret outlives the closure.
+    let mine = match path {
+        Some(p) => our_keys(gate, login, ui, &[p]),
+        None => our_keys(gate, login, ui, &[[44, COIN, 0, 0], [44, COIN, 0, 0]]),
+    };
+
     let Some(mut review) = Review::new() else {
         crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
         crate::menu::wait_for_any_key(ui);
         return;
     };
-    describe(&tx, &mut review);
-    if !review.show(ui, "Solana transaction", "Sign it") {
+    describe(&tx, &mine, &mut review);
+    if review
+        .show(ui, "Solana transaction", &["Sign it"])
+        .is_none()
+    {
         return;
     }
 
@@ -561,7 +646,7 @@ fn review_and_sign(
         crate::catlog!("solana: signed slot {} of {} bytes", slot, n);
 
         let (transaction, _) = block.bytes().split_at(n);
-        if !hand_back(ui, transaction, &signature, request_id) {
+        if !hand_back(ui, transaction, &mine, &signature, request_id) {
             return;
         }
         // Another key of this device's, for a transaction that needs more than one. The
