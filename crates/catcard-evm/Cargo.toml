@@ -7,6 +7,22 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Which signature table `evmabiless` bakes in, and it is one or the other.
+#
+# `common-signatures` is thirteen entries: approve, permit, transfer, transferFrom,
+# setApprovalForAll, the safeTransferFrom overloads, the allowance adjustments, and
+# WETH's deposit/withdraw. That is the set a person is at risk from -- an unlimited
+# approval is how a wallet is emptied -- and it costs a few kilobytes.
+#
+# `full-signatures` is all 647, which additionally names routers, swaps and the rest of
+# what a DeFi call looks like. It costs about 146 KB of flash, measured, and what it
+# buys is a name for a call nobody can verify anyway. Available for the boards with room
+# to spend it, off by default.
+default = ["common-signatures"]
+common-signatures = ["evmabiless/common-signatures"]
+full-signatures = ["evmabiless/signatures"]
+
 [dependencies]
 # Selector -> ABI, and calldata -> parameters. `no_std`, no alloc, and the table is the
 # reason this crate can say what a transaction *does* rather than how long its data is.

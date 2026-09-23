@@ -127,10 +127,10 @@ pub fn summarise(tx: &Tx<'_>) -> Action {
             to: word_address(args, 1),
             amount: named(to, word(args, 2)),
         },
-        _ => match evmabiless::lookup_abi(evmabiless::MethodPrefix(selector)) {
-            Some(abi) => Action::Call {
+        _ => match lookup(selector) {
+            Some(method) => Action::Call {
                 to,
-                method: abi.compact,
+                method,
                 data_len: tx.data.len(),
                 wei: tx.value,
             },
@@ -142,6 +142,20 @@ pub fn summarise(tx: &Tx<'_>) -> Action {
             },
         },
     }
+}
+
+/// The signature for a selector, from whichever table this build carries.
+///
+/// A build may carry none at all, and then nothing is ever named -- which is a smaller
+/// firmware that says "a call this build cannot name" more often, not one that guesses.
+#[cfg(any(feature = "common-signatures", feature = "full-signatures"))]
+fn lookup(selector: [u8; 4]) -> Option<&'static str> {
+    evmabiless::lookup_abi(evmabiless::MethodPrefix(selector)).map(|abi| abi.compact)
+}
+
+#[cfg(not(any(feature = "common-signatures", feature = "full-signatures")))]
+fn lookup(_selector: [u8; 4]) -> Option<&'static str> {
+    None
 }
 
 /// Word `n` of the arguments, as 256 bits. Short arguments read as zero, which only

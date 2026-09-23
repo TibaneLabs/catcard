@@ -80,10 +80,21 @@ catcard-upgrade = { path = "crates/catcard-upgrade", default-features = false }
 catcard-usb = { path = "crates/catcard-usb", default-features = false }
 catcard-qr = { path = "crates/catcard-qr", default-features = false }
 catcard-png = { path = "crates/catcard-png", default-features = false }
-catcard-evm = { path = "crates/catcard-evm", default-features = false }
+# The small signature table by default; a board with flash to spare can add
+# `catcard-evm/full-signatures` to its own feature list.
+catcard-evm = { path = "crates/catcard-evm", default-features = false, features = [
+    "common-signatures",
+] }
 # Selector -> ABI and calldata -> parameters, for saying what an EVM transaction does.
-# `no_std`, no alloc; 647 signatures in a table sorted by selector.
-evmabiless = { version = "0.1.16", default-features = false, features = ["abi", "decode"] }
+# `no_std`, no alloc.
+#
+# **The table is chosen by `catcard-evm`, not here.** 0.1.17 splits it in two:
+# `signatures` is all 647 and costs about 146 KB of flash, `common-signatures` is the
+# thirteen that move money. Which one a build carries is a board decision, so it is
+# forwarded rather than fixed (see that crate's features). `scan` -- recovering an ABI
+# from deployed bytecode -- is for a machine with the bytecode to hand, which a wallet
+# holding a transaction is not.
+evmabiless = { version = "0.1.17", default-features = false, features = ["decode"] }
 
 # --- minizlib: deflate for the USB upgrade transport, no_std and no alloc ---
 #

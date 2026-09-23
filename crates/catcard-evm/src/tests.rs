@@ -444,16 +444,28 @@ mod what_it_does {
     /// A selector the table knows is named; one it does not is shown as a selector.
     #[test]
     fn calldata_is_named_where_it_can_be_and_never_guessed() {
-        // `balanceOf(address)` -- in `evmabiless`, not one of the three handled here.
-        let mut data = hex("70a08231");
-        data.extend_from_slice(&[0u8; 32]);
+        // `setApprovalForAll(address,bool)` -- named by the table rather than decoded
+        // here, and in the small table as well as the big one, because handing an
+        // operator every token in a collection is one of the two ways a wallet is
+        // emptied by a signature its owner read as harmless.
+        //
+        // A build with no table at all names nothing, and the assertion below says so
+        // rather than being switched off: "this build cannot name it" is a behaviour
+        // worth pinning, not an absence of one.
+        let mut data = hex("a22cb465");
+        data.extend_from_slice(&[0u8; 64]);
         let raw = fee_market(&data, Some([0xAB; 20]), 0);
         let tx = parse(&raw).expect("a transaction");
         match summary::summarise(&tx) {
+            #[cfg(any(feature = "common-signatures", feature = "full-signatures"))]
             Action::Call { method, .. } => assert!(
-                method.starts_with("balanceOf("),
-                "expected balanceOf, got {method}"
+                method.starts_with("setApprovalForAll("),
+                "expected setApprovalForAll, got {method}"
             ),
+            #[cfg(not(any(feature = "common-signatures", feature = "full-signatures")))]
+            Action::UnknownCall { selector, .. } => {
+                assert_eq!(selector, [0xa2, 0x2c, 0xb4, 0x65]);
+            }
             other => panic!("a known selector read as {other:?}"),
         }
 
