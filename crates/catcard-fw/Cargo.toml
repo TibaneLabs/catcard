@@ -43,6 +43,13 @@ multichain = [
     # BC-UR travels with the chains that need it: `crypto-psbt` has BBQr beside it for
     # Bitcoin, and everything else a UR carries here -- an account, a signing request, a
     # signature -- is something only a multichain build has to say.
+    #
+    # **It is about 9 kB**, measured from symbol sizes in the Q1 image: 7 kB of registry
+    # and collector, 2 kB of bytewords and fountain. The commit that made it optional
+    # quoted 200 kB, which was the whole multichain-to-Bitcoin difference -- the review
+    # screens, the chain tables, the decoders and their artwork -- attributed to the one
+    # dependency being removed at the time. Dropping it is right because a build should
+    # not carry a format it never uses, not because it is large.
     "dep:catcard-bcur",
 ]
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
