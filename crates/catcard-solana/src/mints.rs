@@ -77,8 +77,11 @@ pub fn known() -> usize {
     MINTS.len()
 }
 
-/// Row `i`, for the test that checks every baked address spells itself.
-#[cfg(test)]
-pub(crate) fn at(i: usize) -> Option<([u8; 32], &'static str)> {
-    MINTS.get(i).map(|(m, s, _)| (*m, *s))
+/// Row `i`: the mint's address and what it is.
+///
+/// For a walk over every mint this build knows -- which is how an amount in a
+/// token account gets a name when the instruction moving it did not carry one.
+pub fn at(i: usize) -> Option<([u8; 32], Mint)> {
+    let (address, symbol, decimals) = *MINTS.get(i)?;
+    Some((address, Mint { symbol, decimals }))
 }

@@ -131,7 +131,8 @@ mod tests {
     #[test]
     fn every_baked_mint_spells_itself() {
         for i in 0..crate::mints::known() {
-            let (raw, symbol) = crate::mints::at(i).expect("in range");
+            let (raw, mint) = crate::mints::at(i).expect("in range");
+            let symbol = mint.symbol;
             let text = base58(&raw);
             assert_eq!(
                 crate::mints::lookup(&raw).map(|m| m.symbol),

@@ -607,6 +607,12 @@ pub enum Action {
         delegate: Option<SolanaKey>,
         owner: Option<SolanaKey>,
         amount: u64,
+        /// Which mint the allowance is over, where it could be worked out. The
+        /// instruction does not say -- see [`mint_of`] -- and an allowance is the one
+        /// number on the screen that outlives the transaction, so it is worth knowing
+        /// whether it is five dollars or five thousand.
+        mint: Option<SolanaKey>,
+        named: Option<mints::Mint>,
     },
     /// Creating the associated token account for a wallet and mint.
     CreateTokenAccount {
@@ -664,6 +670,40 @@ impl Action {
             _ => false,
         }
     }
+}
+
+/// Which mint a token account holds, where that can be worked out rather than guessed.
+///
+/// An unchecked SPL transfer says "move this many of whatever is in that account". The
+/// account is a token account, not a wallet, so nothing in the instruction says what is
+/// in it -- and an amount shown without its token is a number with no unit.
+///
+/// **Derived, not believed.** The usual token account is the *associated* one, whose
+/// address is a program-derived address of the owner, the token program and the mint. So
+/// for each mint this build knows, this works out what that owner's account for it would
+/// be and compares. A match is arithmetic rather than a claim: nothing in the
+/// transaction was trusted to say what the account holds.
+///
+/// A miss is the ordinary case for anything else -- a mint this build does not carry, an
+/// account that is not the associated one -- and leaves the amount in raw units, which
+/// is what an unchecked transfer really tells anybody off-chain.
+fn mint_of(
+    source: Option<SolanaKey>,
+    owner: Option<SolanaKey>,
+) -> (Option<SolanaKey>, Option<mints::Mint>) {
+    let (Some(source), Some(owner)) = (source, owner) else {
+        return (None, None);
+    };
+    for i in 0..mints::known() {
+        let Some((raw, mint)) = mints::at(i) else {
+            break;
+        };
+        let key = SolanaKey(raw);
+        if outscript::solana::associated_token_address(owner, key).is_ok_and(|a| a == source) {
+            return (Some(key), Some(mint));
+        }
+    }
+    (None, None)
 }
 
 /// SPL Token instruction tags, from the program's own layout.
@@ -731,18 +771,24 @@ fn decode(
     if program == token_program() {
         return match data.first().copied() {
             // transfer: tag, amount. Accounts: source, destination, owner.
-            Some(TOKEN_TRANSFER) if data.len() == 9 => Action::TransferToken {
-                from: account(0),
-                to: account(1),
-                owner: account(2),
-                amount: u64_le(&data[1..9]),
-                // The unchecked form names no mint, so there is nothing to look up:
-                // the amount stays in whatever the smallest unit of an unnamed token
-                // is, which is the whole of what anybody off-chain knows about it.
-                decimals: None,
-                mint: None,
-                named: None,
-            },
+            Some(TOKEN_TRANSFER) if data.len() == 9 => {
+                // The unchecked form names no mint. It does name the account the tokens
+                // leave and who authorises it, and for the ordinary case that is enough
+                // to work the mint out rather than guess it -- see `mint_of`.
+                let (mint, named) = mint_of(account(0), account(2));
+                Action::TransferToken {
+                    from: account(0),
+                    to: account(1),
+                    owner: account(2),
+                    amount: u64_le(&data[1..9]),
+                    // Still none: the *instruction* did not carry them. What the mint
+                    // table says is in `named`, and a screen that scales by it is
+                    // scaling by this build's claim rather than by the transaction's.
+                    decimals: None,
+                    mint,
+                    named,
+                }
+            }
             // transferChecked: tag, amount, decimals. Accounts: source, mint,
             // destination, owner -- the mint is in the middle, which is the whole point
             // of the checked form.
@@ -759,12 +805,17 @@ fn decode(
                 }
             }
             // approve: tag, amount. Accounts: source, delegate, owner.
-            Some(TOKEN_APPROVE) if data.len() == 9 => Action::ApproveToken {
-                account: account(0),
-                delegate: account(1),
-                owner: account(2),
-                amount: u64_le(&data[1..9]),
-            },
+            Some(TOKEN_APPROVE) if data.len() == 9 => {
+                let (mint, named) = mint_of(account(0), account(2));
+                Action::ApproveToken {
+                    account: account(0),
+                    delegate: account(1),
+                    owner: account(2),
+                    amount: u64_le(&data[1..9]),
+                    mint,
+                    named,
+                }
+            }
             _ => unknown,
         };
     }

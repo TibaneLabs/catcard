@@ -295,14 +295,26 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 delegate,
                 owner,
                 amount: raw,
+                mint,
+                named,
             } => {
-                out.element(
-                    is_mine(owner, mine) || is_mine(account, mine),
-                    format_args!("Approve {raw} raw units"),
-                );
+                let ours = is_mine(owner, mine) || is_mine(account, mine);
+                match named {
+                    Some(m) => {
+                        let n = amount(raw, m.decimals, &mut num);
+                        out.element(ours, format_args!("Approve {n} {}", m.symbol));
+                    }
+                    None => out.element(ours, format_args!("Approve {raw} raw units")),
+                }
                 out.note(format_args!("an approval outlives this transaction"));
-                if is_mine(owner, mine) || ours_token_account(account, None, mine) {
-                    out.effect(format_args!("{raw} raw units may be taken later"));
+                if ours {
+                    match named {
+                        Some(m) => {
+                            let n = amount(raw, m.decimals, &mut num);
+                            out.effect(format_args!("{n} {} may be taken later", m.symbol));
+                        }
+                        None => out.effect(format_args!("{raw} raw units may be taken later")),
+                    }
                 }
                 if let Some(d) = delegate {
                     out.address("to", address(&d, &mut addr));
@@ -312,6 +324,9 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 }
                 if let Some(o) = owner {
                     out.address("owner", address(&o, &mut addr));
+                }
+                if let Some(mint) = mint {
+                    out.address("mint", address(&mint, &mut addr));
                 }
             }
             Action::CreateTokenAccount { owner, mint } => {
