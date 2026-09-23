@@ -35,6 +35,8 @@
 #![forbid(unsafe_code)]
 
 pub mod rlp;
+pub mod summary;
+pub mod tokens;
 
 #[cfg(test)]
 mod tests;

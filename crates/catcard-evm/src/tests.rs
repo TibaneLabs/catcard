@@ -330,3 +330,190 @@ fn the_writer_and_the_reader_agree() {
     }
     assert!(l.done());
 }
+
+mod what_it_does {
+    use super::*;
+    use crate::summary::{self, Action};
+
+    /// Polygon's USDC, from the baked table -- six decimals.
+    const USDC_POLYGON: [u8; 20] = [
+        0x3C, 0x49, 0x9C, 0x54, 0x2C, 0xEF, 0x5E, 0x38, 0x11, 0xE1, 0x19, 0x2C, 0xE7, 0x0D, 0x8C,
+        0xC0, 0x3D, 0x5C, 0x33, 0x59,
+    ];
+
+    /// Calldata for a one-argument-address, one-argument-uint call.
+    fn call2(selector: [u8; 4], addr: [u8; 20], amount: u64) -> Vec<u8> {
+        let mut out = selector.to_vec();
+        out.extend_from_slice(&[0u8; 12]);
+        out.extend_from_slice(&addr);
+        out.extend_from_slice(&[0u8; 24]);
+        out.extend_from_slice(&amount.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn a_plain_send_is_a_send() {
+        let bytes = hex(EIP155_SIGNING);
+        let tx = parse(&bytes).expect("a transaction");
+        match summary::summarise(&tx) {
+            Action::Send { to, wei } => {
+                assert_eq!(to, [0x35; 20]);
+                let mut out = [0u8; summary::DECIMAL_MAX];
+                assert_eq!(summary::decimal(&wei, 18, &mut out), "1");
+            }
+            other => panic!("a transfer of ether read as {other:?}"),
+        }
+    }
+
+    /// A token transfer is named, with its decimals applied.
+    ///
+    /// This is the sentence the whole crate exists for: 12,500,000 units of
+    /// `0x3c49…3359` on chain 137 is "12.5 USDC", and saying the first is not an
+    /// answer to the question somebody is asking before they sign.
+    #[test]
+    fn a_token_transfer_is_named_and_scaled() {
+        let to = [0x77; 20];
+        let raw = fee_market(
+            &call2(summary::TRANSFER, to, 12_500_000),
+            Some(USDC_POLYGON),
+            0,
+        );
+        let tx = parse(&raw).expect("a transaction");
+        assert_eq!(tx.chain_id, Some(137));
+        match summary::summarise(&tx) {
+            Action::TokenSend { to: dest, amount } => {
+                assert_eq!(dest, to);
+                assert_eq!(amount.contract, USDC_POLYGON);
+                let token = amount.token.expect("the table knows this one");
+                assert_eq!(token.symbol, "USDC");
+                assert_eq!(token.decimals, 6);
+                let mut out = [0u8; summary::DECIMAL_MAX];
+                assert_eq!(
+                    summary::decimal(&amount.raw, token.decimals, &mut out),
+                    "12.5"
+                );
+                assert!(!amount.unlimited());
+            }
+            other => panic!("a token transfer read as {other:?}"),
+        }
+    }
+
+    /// The same contract on a chain the table does not cover stays unnamed.
+    ///
+    /// Not a failure -- the right answer. A label from the wrong chain would be a
+    /// familiar name on a stranger's contract.
+    #[test]
+    fn a_token_on_another_chain_is_not_borrowed() {
+        let mut raw = fee_market(
+            &call2(summary::TRANSFER, [0x77; 20], 1),
+            Some(USDC_POLYGON),
+            0,
+        );
+        // Chain 137 -> 138, one byte, everything else identical.
+        let at = raw.iter().position(|&b| b == 0x89).expect("the chain id");
+        raw[at] = 0x8a;
+        let tx = parse(&raw).expect("a transaction");
+        assert_eq!(tx.chain_id, Some(138));
+        match summary::summarise(&tx) {
+            Action::TokenSend { amount, .. } => assert!(
+                amount.token.is_none(),
+                "a chain-137 label was applied to chain 138"
+            ),
+            other => panic!("read as {other:?}"),
+        }
+    }
+
+    /// An unlimited approval is called what it is.
+    #[test]
+    fn an_unlimited_approval_says_so() {
+        let mut data = summary::APPROVE.to_vec();
+        data.extend_from_slice(&[0u8; 12]);
+        data.extend_from_slice(&[0x99; 20]);
+        data.extend_from_slice(&[0xFF; 32]);
+        let raw = fee_market(&data, Some(USDC_POLYGON), 0);
+        let tx = parse(&raw).expect("a transaction");
+        match summary::summarise(&tx) {
+            Action::Approve { spender, amount } => {
+                assert_eq!(spender, [0x99; 20]);
+                assert!(amount.unlimited(), "2^256-1 is the infinite allowance");
+            }
+            other => panic!("an approval read as {other:?}"),
+        }
+    }
+
+    /// A selector the table knows is named; one it does not is shown as a selector.
+    #[test]
+    fn calldata_is_named_where_it_can_be_and_never_guessed() {
+        // `balanceOf(address)` -- in `evmabiless`, not one of the three handled here.
+        let mut data = hex("70a08231");
+        data.extend_from_slice(&[0u8; 32]);
+        let raw = fee_market(&data, Some([0xAB; 20]), 0);
+        let tx = parse(&raw).expect("a transaction");
+        match summary::summarise(&tx) {
+            Action::Call { method, .. } => assert!(
+                method.starts_with("balanceOf("),
+                "expected balanceOf, got {method}"
+            ),
+            other => panic!("a known selector read as {other:?}"),
+        }
+
+        // A selector nothing knows stays a selector.
+        let mut data = hex("deadbe01");
+        data.extend_from_slice(&[0u8; 32]);
+        let raw = fee_market(&data, Some([0xAB; 20]), 0);
+        let tx = parse(&raw).expect("a transaction");
+        match summary::summarise(&tx) {
+            Action::UnknownCall {
+                selector, data_len, ..
+            } => {
+                assert_eq!(selector, [0xde, 0xad, 0xbe, 0x01]);
+                assert_eq!(data_len, 36);
+            }
+            other => panic!("an unknown selector read as {other:?}"),
+        }
+    }
+
+    /// Calldata too short for the arguments it claims is not read as those arguments.
+    #[test]
+    fn a_truncated_transfer_is_not_read_as_a_transfer() {
+        let mut data = summary::TRANSFER.to_vec();
+        data.extend_from_slice(&[0u8; 40]); // one word and a bit, not two
+        let raw = fee_market(&data, Some(USDC_POLYGON), 0);
+        let tx = parse(&raw).expect("a transaction");
+        assert!(
+            !matches!(summary::summarise(&tx), Action::TokenSend { .. }),
+            "half a transfer was read as a transfer"
+        );
+    }
+
+    /// The decimal formatter, at the sizes money actually comes in.
+    #[test]
+    fn amounts_read_the_way_people_write_them() {
+        let cases: [(u128, u8, &str); 8] = [
+            (0, 18, "0"),
+            (1, 18, "0.000000000000000001"),
+            (1_000_000_000_000_000_000, 18, "1"),
+            (1_500_000_000_000_000_000, 18, "1.5"),
+            (12_500_000, 6, "12.5"),
+            (1, 6, "0.000001"),
+            (1_000_000, 6, "1"),
+            (123_456_789, 0, "123456789"),
+        ];
+        for (v, decimals, want) in cases {
+            let mut raw = [0u8; 32];
+            raw[16..].copy_from_slice(&v.to_be_bytes());
+            let mut out = [0u8; summary::DECIMAL_MAX];
+            assert_eq!(
+                summary::decimal(&raw, decimals, &mut out),
+                want,
+                "{v} at {decimals}"
+            );
+        }
+
+        // The largest value there is, at 18 decimals: 78 digits, and it must not be cut.
+        let mut out = [0u8; summary::DECIMAL_MAX];
+        let text = summary::decimal(&[0xFF; 32], 18, &mut out);
+        assert!(text.starts_with("115792089237316195423570985008687907853269984665640564039457"));
+        assert!(text.contains('.'));
+    }
+}
