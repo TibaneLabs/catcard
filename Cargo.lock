@@ -135,6 +135,7 @@ name = "catcard-callgate"
 version = "7.0.0"
 dependencies = [
  "catcard-board",
+ "catcard-hal",
  "zeroize",
 ]
 

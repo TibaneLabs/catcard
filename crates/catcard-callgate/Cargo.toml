@@ -10,4 +10,8 @@ authors.workspace = true
 
 [dependencies]
 catcard-board.workspace = true
+# Only for `mpu::fence_armed()`: the one flag the gate wrapper reads to decide whether the
+# stack fence is live and must be dropped across the call. The driver is inert until the
+# firmware arms it, so this adds no register work to the boot or the normal gate path.
+catcard-hal.workspace = true
 zeroize = { workspace = true, features = ["derive"] }
