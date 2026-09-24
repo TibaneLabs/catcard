@@ -293,9 +293,7 @@ pub fn run(gate: &Callgate, ui: &mut crate::ui::Ui<'_>) {
     // existing as a context, so nothing else will use them.
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
     // SAFETY: every task is spawned and none of their entries returns.
-    // A tripped stack guard (Debug -> Stack guard, switch checks) lands in the same
-    // wipe-and-reset a fault does: PendSV is handler mode, where gate 3 is not proven.
-    unsafe { catcard_kernel::start(&mut cp.SYST, hclk, crate::panic::wipe_and_reset) }
+    unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
 }
 
 /// Say no if the scheduler is already running, and report whether it did.
@@ -464,9 +462,7 @@ pub fn start_menu(
     // SAFETY: stealing the core peripherals to arm SysTick.
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
     // SAFETY: every task is spawned and no entry returns.
-    // A tripped stack guard (Debug -> Stack guard, switch checks) lands in the same
-    // wipe-and-reset a fault does: PendSV is handler mode, where gate 3 is not proven.
-    unsafe { catcard_kernel::start(&mut cp.SYST, hclk, crate::panic::wipe_and_reset) }
+    unsafe { catcard_kernel::start(&mut cp.SYST, hclk) }
 }
 
 /// Services USB -- and with it the activity light and the power button -- every
