@@ -846,6 +846,37 @@ fn a_signature_answers_the_request_that_asked() {
     assert_eq!(r.map().expect("a map"), 1);
 }
 
+/// A field this does not read is stepped over, and stepping over an array means adding
+/// its claimed length to a count. The length is whatever the head says, up to
+/// `u64::MAX`, and adding *that* is an overflow -- which with overflow checks on and
+/// `panic = "abort"` was a device reset from one scanned code. It is an error now, and
+/// it is the same error for every shape the arithmetic can be made to fail in.
+#[test]
+fn an_absurd_length_in_a_skipped_field_is_refused_not_overflowed() {
+    use crate::registry::solsign;
+
+    // {5: [array of 2^64-1 elements]}: key 5 is `origin`, which is skipped. The outer
+    // array adds 2 to the pending count; the inner one adds u64::MAX to that.
+    let overflow = hex("a1 05 82 9b ffffffffffffffff");
+    assert!(matches!(
+        solsign::decode(&overflow),
+        Err(Error::Cbor(CborError::TooDeep))
+    ));
+    // The map counterpart: 2^63 pairs, which doubles to more than a u64 holds.
+    let map_overflow = hex("a1 05 82 bb 8000000000000000");
+    assert!(matches!(
+        solsign::decode(&map_overflow),
+        Err(Error::Cbor(CborError::TooDeep))
+    ));
+    // And a length that fits the arithmetic but not the walk: refused the same way,
+    // before a single element is looked at.
+    let too_many = hex("a1 05 9a ffffffff");
+    assert!(matches!(
+        solsign::decode(&too_many),
+        Err(Error::Cbor(CborError::TooDeep))
+    ));
+}
+
 // --- crypto-multi-accounts -----------------------------------------------------------
 
 /// Every account in one message, with both curves in it.

@@ -324,15 +324,34 @@ impl<'a> Reader<'a> {
                     }
                     self.pos += len;
                 }
-                ARRAY => pending += arg,
+                // `arg` is whatever the head claimed, up to `u64::MAX`, and adding it
+                // to the count unchecked is an overflow -- which, with overflow checks
+                // on and `panic = "abort"`, is a device reset from one scanned code. So
+                // the sum is checked and bounded in the same step: anything past the
+                // limit would be refused at the top of the loop anyway, and refusing it
+                // here means the arithmetic never has to hold it.
+                ARRAY => pending = bounded_add(pending, arg)?,
                 // A map's pairs are two items each.
-                MAP => pending += arg.checked_mul(2).ok_or(Error::TooDeep)?,
-                // A tag is followed by exactly the one item it tags.
+                MAP => pending = bounded_add(pending, arg.checked_mul(2).ok_or(Error::TooDeep)?)?,
+                // A tag is followed by exactly the one item it tags. `pending` is at
+                // most `SKIP_LIMIT` here, so this cannot overflow.
                 _ => pending += 1,
             }
         }
         Ok(())
     }
+}
+
+/// `pending + claimed`, refused rather than wrapped, and refused past [`SKIP_LIMIT`].
+///
+/// The bound is checked here as well as at the top of [`Reader::skip`]'s loop so that
+/// the count never has to hold a value it is about to refuse: a claim of `u64::MAX`
+/// elements is not a large number to count down, it is an addition that does not fit.
+fn bounded_add(pending: u64, claimed: u64) -> Result<u64, Error> {
+    pending
+        .checked_add(claimed)
+        .filter(|&p| p <= SKIP_LIMIT as u64)
+        .ok_or(Error::TooDeep)
 }
 
 // --- writing a registry item --------------------------------------------------------
