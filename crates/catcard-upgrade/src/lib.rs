@@ -2,16 +2,24 @@
 //!
 //! # Why this is written defensively
 //!
-//! The bootloader **installs first and verifies afterwards**. A staged image is copied
-//! over the running firmware on the next boot, and only then is its signature checked.
-//! A bad image therefore does not fail safely: it destroys the working firmware and
-//! lands on the bootloader's corrupt-firmware screen, which offers DFU — and DFU is
-//! refused on an RDP=2 unit. On a locked production device that is the end of the story.
+//! On mk4 and later the bootloader **verifies the staged image in RAM before it installs
+//! anything**: `gate 18/7` runs `verify_firmware_in_ram` over the staged region (header,
+//! downgrade, double-SHA256 signature) and returns `-112 AUTH_FAIL` with no flash
+//! changed if that fails. Source: `hw-reference/install-and-usb-transport.md §2b` [C].
+//! So a bad image on those boards does not destroy the running firmware; it costs a
+//! reboot and a refusal with no diagnosis. **mk3 is not confirmed either way.** Its
+//! `sf_firmware_upgrade()` installs "a validly-signed image" from SPI-NOR on every boot
+//! (`hw-reference/storage.md §mk3 firmware staging` [C]), but whether the signature is
+//! checked before the copy into main flash or only after it is not stated, and this
+//! crate does not assume the safe answer.
 //!
-//! So everything checkable is checked *before* the reboot, and the digest is taken over
-//! the image **as stored** rather than as received, because those two differ exactly
-//! when the staging memory is faulty — the case a check on the incoming bytes would
-//! agree with the host about and be wrong.
+//! Either way the bootloader's verdict arrives after the reboot, as a number, on a
+//! device that may have no host attached. So everything checkable is checked *here*,
+//! before anything is published, and a refusal comes with a reason a person can read.
+//! [`Staged::inspect`] verifies against the digest taken as the bytes arrived, which
+//! costs no second pass over a slow memory; when that fails the image is read back and
+//! digested again, because "a medium that lost bytes" and "an image that was never
+//! signed" want opposite fixes and the two digests are what tell them apart.
 //!
 //! # What cannot be checked
 //!
