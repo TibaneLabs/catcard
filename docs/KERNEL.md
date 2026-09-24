@@ -78,6 +78,12 @@ enabled, so there was no stray source to park the CPU in `DefaultHandler`.
 For the kernel this is a precondition, not a side issue: SysTick and PendSV are
 configurable-priority exceptions and PRIMASK masks both.
 
+The same applies in the other direction. The NVIC sweep before `cpsie i` does not reach
+SysTick or PendSV, which are core exceptions: a loader that left `SYST_CSR.TICKINT` set, or
+a pend bit latched in `ICSR`, would run this image's PendSV through a PSP nothing has set.
+So `main` also writes `SYST_CSR = 0` and clears both pend bits before opening the mask, and
+logs what it found alongside the NVIC state. On a healthy boot both were already clear.
+
 ### 5. A stack overflow must not be silent
 
 Each stack is painted, with a guard word beneath it, and the high-water mark and guard are
