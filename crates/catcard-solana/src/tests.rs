@@ -1057,3 +1057,91 @@ fn a_send_to_somebody_else_is_counted() {
     assert_eq!(theirs.moving().count(), 1);
     assert_eq!(theirs.moving().next().expect("one").delta, 250_000_000);
 }
+
+/// A v0 message, written out by hand, whose one transfer sends to an address a lookup
+/// table lends.
+///
+/// Hand-built rather than from outscript's encoder, which folds every account an
+/// instruction names into the static keys and so cannot write an instruction that reaches
+/// into a table. Two static keys -- the payer and the System program -- then one table
+/// lending one writable address and one read-only one. The combined list is therefore
+/// `[payer, system, lent-writable, lent-readonly]`, and index 2 is the first lent one.
+/// [C] `solana-sdk`, `message/versions/v0`: `MessageAddressTableLookup`, `LoadedAddresses`.
+fn v0_message_with_lent_accounts(to: u8, program: u8, lamports: u64) -> Vec<u8> {
+    let mut m = std::vec![0x80u8]; // version 0
+    m.extend_from_slice(&[1, 0, 1]); // one signer; the program is read-only, unsigned
+    m.push(2); // static keys: the payer, the System program
+    m.extend_from_slice(&[1u8; 32]);
+    m.extend_from_slice(&[0u8; 32]);
+    m.extend_from_slice(&[7u8; 32]); // blockhash
+    m.push(1); // one instruction
+    m.push(program);
+    m.extend_from_slice(&[2, 0, to]); // two accounts: from, to
+    m.push(12); // Transfer: tag 2, then the lamports
+    m.extend_from_slice(&2u32.to_le_bytes());
+    m.extend_from_slice(&lamports.to_le_bytes());
+    m.push(1); // one lookup table
+    m.extend_from_slice(&[8u8; 32]); // the table's address
+    m.extend_from_slice(&[1, 5]); // one writable address, row 5 of the table
+    m.extend_from_slice(&[1, 9]); // one read-only address, row 9
+    m
+}
+
+/// An instruction may name an account a lookup table lends, and the device says it
+/// cannot see it rather than refusing the message.
+///
+/// The first version refused every v0 message that used a table, which is most of what
+/// a modern wallet builds: the account list an instruction indexes into is the static
+/// keys and then the lent addresses, so an index past the static keys is ordinary. What
+/// the device cannot do is *show* such an address, and `None` is how it says so.
+#[test]
+fn an_account_lent_by_a_table_is_unseen_not_refused() {
+    let raw = v0_message_with_lent_accounts(2, 1, 40_000);
+    let tx = parse_message(&raw).expect("a v0 message using a lookup table");
+    assert_eq!(tx.version(), Version::V0);
+    assert_eq!(tx.key_count(), 2);
+    assert_eq!(tx.lookups(), (1, 2));
+    // The lent address is real and unknown, in that order.
+    assert_eq!(tx.key(2), None);
+    match tx.action(0).expect("the transfer") {
+        Action::TransferSol { from, to, lamports } => {
+            assert_eq!(from, Some(key(1)));
+            assert_eq!(to, None, "an address from a lookup table is not shown");
+            assert_eq!(lamports, 40_000);
+        }
+        other => panic!("read as {other:?}"),
+    }
+
+    // The payer loses the lamports and the fee. Nothing is credited to the lent address:
+    // the device does not know whose it is, and "unknown" is never "mine".
+    let effects = crate::effects::of(&tx, &[[1u8; 32]]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1);
+    assert_eq!(moving[0].delta, -(40_000 + LAMPORTS_PER_SIGNATURE as i128));
+    // And for a key that is not the payer, nothing at all -- not even for keys that
+    // happen to equal the table's row numbers, which are indices and not addresses.
+    assert_eq!(crate::effects::of(&tx, &[[5u8; 32]]).moving().count(), 0);
+    assert_eq!(crate::effects::of(&tx, &[[9u8; 32]]).moving().count(), 0);
+
+    // The read-only lent address is reachable too: it is the last of the four.
+    assert!(parse_message(&v0_message_with_lent_accounts(3, 1, 1)).is_ok());
+}
+
+/// Past the lent addresses is still past the end.
+#[test]
+fn an_index_beyond_the_lent_accounts_is_refused() {
+    // Two static keys and two lent: four accounts, so index 4 names nothing.
+    assert_eq!(
+        parse_message(&v0_message_with_lent_accounts(4, 1, 1)).err(),
+        Some(Error::BadAccountIndex)
+    );
+}
+
+/// A program cannot be lent by a table, so a program index is held to the static keys.
+#[test]
+fn a_program_is_never_taken_from_a_table() {
+    assert_eq!(
+        parse_message(&v0_message_with_lent_accounts(0, 2, 1)).err(),
+        Some(Error::BadAccountIndex)
+    );
+}

@@ -77,6 +77,31 @@ fn is_mine(key: Option<catcard_solana::SolanaKey>, mine: &[[u8; 32]]) -> bool {
     key.is_some_and(|k| mine.contains(&k.0))
 }
 
+/// An account of an instruction, as a field: its address, or where the address is when
+/// these bytes do not carry it.
+///
+/// A v0 message may name an account by its row in a lookup table that lives on-chain,
+/// and [`catcard_solana::Tx::key`] gives `None` for one of those. The field says so
+/// rather than going missing: a row that silently lacked its "to" would read as a
+/// transfer with no destination, and the truth is that it has one this device cannot
+/// see. A legacy message lends nothing, so a `None` there is an instruction that listed
+/// fewer accounts than its program takes -- also worth a line, and a different one.
+fn account_field(
+    out: &mut Review,
+    tx: &catcard_solana::Tx<'_>,
+    label: &str,
+    key: Option<catcard_solana::SolanaKey>,
+    addr: &mut [u8; catcard_solana::ADDRESS_MAX],
+) {
+    match key {
+        Some(k) => out.address(label, catcard_solana::address(&k, addr)),
+        None if tx.lookups().1 > 0 => {
+            out.field(label, format_args!("an address from a lookup table"))
+        }
+        None => out.field(label, format_args!("not named by the instruction")),
+    }
+}
+
 /// Lay the transaction out: one row per part, with the detail behind each row.
 ///
 /// `mine` is the public keys this device holds, which is what lets a row say "yours" --
@@ -120,9 +145,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
             out.note(format_args!("so it cannot be totalled"));
         }
     }
-    if let Some(payer) = payer {
-        out.address("paid by", address(&payer, &mut addr));
-    }
+    account_field(out, tx, "paid by", payer, &mut addr);
 
     for i in 0..tx.instruction_count() {
         let Some(action) = tx.action(i) else { continue };
@@ -139,12 +162,8 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                     }
                     None => out.element(is_mine(from, mine), format_args!("Send {amount} SOL")),
                 }
-                if let Some(from) = from {
-                    out.address("from", address(&from, &mut addr));
-                }
-                if let Some(to) = to {
-                    out.address("to", address(&to, &mut addr));
-                }
+                account_field(out, tx, "from", from, &mut addr);
+                account_field(out, tx, "to", to, &mut addr);
             }
             Action::TransferToken {
                 from,
@@ -170,15 +189,11 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                     }
                     _ => out.element(ours, format_args!("Send {raw} raw units")),
                 }
-                if let Some(owner) = owner {
-                    out.address("owner", address(&owner, &mut addr));
-                }
-                if let Some(from) = from {
-                    out.address("from account", address(&from, &mut addr));
-                }
-                if let Some(to) = to {
-                    out.address("to account", address(&to, &mut addr));
-                }
+                account_field(out, tx, "owner", owner, &mut addr);
+                account_field(out, tx, "from account", from, &mut addr);
+                account_field(out, tx, "to account", to, &mut addr);
+                // The mint is worked out for the unchecked form rather than indexed, so
+                // its absence means "not worked out", and nothing is said for it.
                 if let Some(mint) = mint {
                     out.address("mint", address(&mint, &mut addr));
                 }
@@ -215,27 +230,17 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                         None => out.effect(format_args!("{raw} raw units may be taken later")),
                     }
                 }
-                if let Some(d) = delegate {
-                    out.address("to", address(&d, &mut addr));
-                }
-                if let Some(a) = account {
-                    out.address("from account", address(&a, &mut addr));
-                }
-                if let Some(o) = owner {
-                    out.address("owner", address(&o, &mut addr));
-                }
+                account_field(out, tx, "to", delegate, &mut addr);
+                account_field(out, tx, "from account", account, &mut addr);
+                account_field(out, tx, "owner", owner, &mut addr);
                 if let Some(mint) = mint {
                     out.address("mint", address(&mint, &mut addr));
                 }
             }
             Action::CreateTokenAccount { owner, mint } => {
                 out.element(is_mine(owner, mine), format_args!("Open a token account"));
-                if let Some(o) = owner {
-                    out.address("owner", address(&o, &mut addr));
-                }
-                if let Some(mint) = mint {
-                    out.address("mint", address(&mint, &mut addr));
-                }
+                account_field(out, tx, "owner", owner, &mut addr);
+                account_field(out, tx, "mint", mint, &mut addr);
             }
             Action::AdvanceNonce { account, authority } => {
                 out.element(
@@ -243,12 +248,8 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                     format_args!("Spend a durable nonce"),
                 );
                 out.note(format_args!("what lets this be signed later"));
-                if let Some(a) = account {
-                    out.address("nonce account", address(&a, &mut addr));
-                }
-                if let Some(a) = authority {
-                    out.address("authority", address(&a, &mut addr));
-                }
+                account_field(out, tx, "nonce account", account, &mut addr);
+                account_field(out, tx, "authority", authority, &mut addr);
             }
             // The numbers, not the word. These decide the priority fee, and a
             // transaction can ask its payer for an arbitrary amount through them.

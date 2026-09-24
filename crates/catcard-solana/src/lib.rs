@@ -57,9 +57,11 @@ pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 pub enum Error {
     /// The bytes are not a Solana transaction.
     NotATransaction,
-    /// It parsed, but its message refers to accounts it does not carry -- an index past
-    /// the end of the key array. Refused rather than shown with a gap, because every
-    /// account in an instruction is part of what it does.
+    /// It parsed, but its message refers to accounts it neither carries nor loads -- an
+    /// index past the static keys and, for a v0 message, past the addresses its lookup
+    /// tables lend as well. Refused rather than shown with a gap, because every account
+    /// in an instruction is part of what it does. A program index is held to the static
+    /// keys alone: a program cannot come from a table.
     BadAccountIndex,
     /// The signature slots and the header disagree about how many signatures this
     /// takes, or the header asks for more signers than there are accounts to be
@@ -250,6 +252,12 @@ fn walk<'a>(mut c: Cursor<'a>, signatures: &'a [u8], message: &'a [u8]) -> Resul
     let instruction_count = c.len()?;
     let from = c.at;
     // Walk them once here so every later read is inside bytes already checked.
+    //
+    // The program has to be a static key -- a program cannot be lent by a table -- so
+    // that is checked here. An *account* index may reach past the static keys into the
+    // addresses the lookup tables lend, and how many of those there are is written after
+    // the instructions, so the highest index is kept and judged once the tables are read.
+    let mut highest_account: Option<u8> = None;
     for _ in 0..instruction_count {
         let program = c.byte()?;
         if program as usize >= key_count {
@@ -257,9 +265,7 @@ fn walk<'a>(mut c: Cursor<'a>, signatures: &'a [u8], message: &'a [u8]) -> Resul
         }
         let accounts = c.len()?;
         for &a in c.take(accounts)? {
-            if a as usize >= key_count {
-                return Err(Error::BadAccountIndex);
-            }
+            highest_account = highest_account.max(Some(a));
         }
         let data = c.len()?;
         let _ = c.take(data)?;
@@ -284,6 +290,18 @@ fn walk<'a>(mut c: Cursor<'a>, signatures: &'a [u8], message: &'a [u8]) -> Resul
             let _ = c.take(readonly)?;
             lookup_accounts += writable + readonly;
         }
+    }
+
+    // The account list an instruction indexes into is the static keys followed by every
+    // address the tables lend -- the writable ones from each table in order, then the
+    // read-only ones. [C] `solana-sdk`, `message/versions/v0`: `LoadedAddresses`, and
+    // `Message::account_keys` for how a v0 message is resolved. A legacy message lends
+    // nothing, so its indices stay inside the keys it carries. This device cannot see a
+    // lent address -- [`Tx::key`] gives `None` for it -- but it is a legitimate account,
+    // and refusing the message would refuse every transaction a modern wallet builds.
+    let reach = key_count + lookup_accounts;
+    if highest_account.is_some_and(|a| a as usize >= reach) {
+        return Err(Error::BadAccountIndex);
     }
 
     // Nothing left over. A transaction is a whole object, and bytes after the end of one
