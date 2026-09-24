@@ -5787,11 +5787,8 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
         let [a, b, c, d] = [id[0], id[1], id[2], id[3]];
         let mut said: heapless::String<24> = heapless::String::new();
         let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-        crate::catlog!(
-            "key: now WIF key {} ({})",
-            said.as_str(),
-            crate::key::label()
-        );
+        // The label, never the fingerprint: the log is readable by any host.
+        crate::catlog!("key: now WIF ({})", crate::key::label());
         #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
         message(ui.panel, HEAD, &said, crate::key::label());
@@ -5808,7 +5805,7 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("key: now {} ({})", said.as_str(), crate::key::label());
+            crate::catlog!("key: now ({})", crate::key::label());
             #[cfg(not(feature = "board-mk3"))]
             crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
             message(ui.panel, HEAD, &said, crate::key::label());
@@ -6144,7 +6141,9 @@ fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8], signer: Op
     card_wait(ui.panel, head, "writing to the card");
     match write_card_export(path, body, signer) {
         Ok(name) => {
-            crate::catlog!("export: wrote {} bytes to {}", body.len(), name.as_str());
+            // The kind and the size, not the name: one export's name carries the
+            // fingerprint, and the log is readable by any host.
+            crate::catlog!("export: wrote {} bytes ({})", body.len(), head);
             message(ui.panel, "Exported", &name[1..], "any key to go back");
         }
         Err(why) => {
@@ -10410,7 +10409,7 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
             crate::key::to_root();
             #[cfg(feature = "board-q1")]
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
-            crate::catlog!("lockdown: {} is the stored seed", said.as_str());
+            crate::catlog!("lockdown: the loaded key is the stored seed");
             message(ui.panel, "Locked down", &said, "is the stored seed");
         }
         Ok(_) => {

@@ -122,7 +122,9 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     let mut head = heapless::String::<32>::new();
     let _ = write!(head, "{a:02X}{b:02X}{c:02X}{d:02X}");
     let shown = address.as_deref().unwrap_or("(no address)");
-    crate::catlog!("passphrase: set, fingerprint {}", head.as_str());
+    // The event, never the fingerprint: the log is readable by any host, and a
+    // fingerprint would let one match this passphrase wallet against PSBTs later.
+    crate::catlog!("passphrase: set");
 
     menu::ask(ui.panel, head.as_str(), shown, "use this wallet?");
     if menu::confirmed(ui) {

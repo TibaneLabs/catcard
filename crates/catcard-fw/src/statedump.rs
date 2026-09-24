@@ -140,7 +140,8 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
     match written {
         Ok(name) => {
-            crate::catlog!("state: dumped to {}", name.as_str());
+            // The file name carries the fingerprint, so it stays off the log.
+            crate::catlog!("state: dumped {} KB to the card", (len as usize) / 1024);
             let mut note: heapless::String<32> = heapless::String::new();
             let _ = write!(note, "{} KB, seed in the clear", (len as usize) / 1024);
             menu::message(ui.panel, "Dumped", &name[1..], &note);

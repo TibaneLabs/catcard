@@ -259,7 +259,7 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("xor: joined {} words -> {}", count_of_words, said.as_str());
+            crate::catlog!("xor: joined {} words", count_of_words);
             #[cfg(not(feature = "board-mk3"))]
             crate::settings::open_wallet(gate, login, ui.panel, JOIN, [a, b, c, d]);
             menu::message(ui.panel, "Joined", &said, "in force until reboot");

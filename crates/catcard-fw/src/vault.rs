@@ -382,11 +382,11 @@ fn store_current(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     hex.zeroize();
     match saved {
         Ok(()) => {
-            crate::catlog!("vault: kept {} as {}", xfp.as_str(), method);
+            crate::catlog!("vault: kept a key as {}", method);
             menu::message(ui.panel, HEAD, &label, "kept");
         }
         Err(why) => {
-            crate::catlog!("vault: keeping {} failed: {}", xfp.as_str(), why);
+            crate::catlog!("vault: keeping a key failed: {}", why);
             menu::message(ui.panel, HEAD, why, "nothing kept")
         }
     }
@@ -437,7 +437,7 @@ fn forget(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, xfp:
     let saved = save(gate, login, ui, Change::Forget(xfp));
     match saved {
         Ok(()) => {
-            crate::catlog!("vault: forgot {}", xfp);
+            crate::catlog!("vault: forgot a key");
             menu::message(ui.panel, HEAD, xfp, "forgotten");
         }
         Err(why) => menu::message(ui.panel, HEAD, why, "unchanged"),

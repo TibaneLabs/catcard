@@ -202,7 +202,7 @@ pub(crate) fn received(
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("seedqr: scanned {} words -> {}", words, said.as_str());
+            crate::catlog!("seedqr: scanned {} words", words);
             crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
             menu::message(ui.panel, "Loaded", &said, "in force until reboot");
             menu::wait_for_any_key(ui);

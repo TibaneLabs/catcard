@@ -13,6 +13,21 @@
 //! including a host that has not proved it knows the PIN, and it outlives a logout. The
 //! rule for a line is that it must be safe to read aloud to a stranger holding the
 //! device: no PIN digits, no seed, no secret material, no anti-phishing words.
+//!
+//! **Banned from every line**, because a host can read the log with no PIN and no
+//! confirmation:
+//!
+//! - PIN digits, prefixes or suffixes, and the anti-phishing words.
+//! - Seed words, entropy, private keys, and anything that names a wallet to the outside
+//!   world: xprv/xpub, addresses, and **master fingerprints (XFPs)** in any encoding. A
+//!   fingerprint tells a host that a passphrase or temporary wallet exists and lets it
+//!   match the device against PSBTs it sees later. Log the event ("passphrase: set",
+//!   "key: now WIF (label)"), never the value.
+//! - File names that embed any of the above (a `<XFP>-STATE.BIN` dump or an
+//!   `unchained-<XFP>.json` export is named on the screen, not here).
+//!
+//! Non-secret metadata is fine: word counts, key labels, byte counts, image versions and
+//! digests, register values, error codes.
 
 use core::fmt::{self, Write};
 
