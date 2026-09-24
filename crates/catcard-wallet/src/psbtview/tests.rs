@@ -279,6 +279,7 @@ fn the_fee_change_and_destination_come_out_of_the_transaction() {
         &owner(&master, &[]),
         Network::Mainnet,
         &accounts_of(&psbt, &master),
+        &[],
         &mut dests,
         &kw(),
     );
@@ -685,6 +686,7 @@ fn change_is_still_found_behind_a_few_decoy_records() {
         &script,
         &owner(&master, &[]),
         &accounts_of(&psbt, &master),
+        &[],
         &kw()
     ));
 }
@@ -703,6 +705,7 @@ fn an_output_cannot_ask_for_unbounded_derivation() {
         &script,
         &owner(&master, &[]),
         &accounts_of(&psbt, &master),
+        &[],
         &kw()
     ));
 }
@@ -732,6 +735,7 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
         &owner(&master, &[]),
         Network::Mainnet,
         &accounts_of(&psbt, &master),
+        &[],
         &mut dests,
         &kw(),
     );
@@ -1150,6 +1154,125 @@ fn change_to_a_registered_multisig_wallet_is_recognised() {
     assert_eq!(summary.fee, 1_000);
 }
 
+/// A single-signature spend of ours paying the registered wallet's change address, with
+/// the output described exactly as change would be: our derivation record at `.../1/0`.
+fn single_sig_spend_to_multisig(wallet: &crate::multisig::Multisig, buf: &mut [u8]) -> usize {
+    let pk = pubkey_at(OURS, &RECEIVE);
+    let spk = script_of(AddressKind::P2wpkh, &pk);
+
+    let prev_ins = [RawTxIn {
+        txid: [0xD0; 32],
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    }];
+    let prev_outs = [RawTxOut {
+        amount: 100_000,
+        script: &spk,
+    }];
+    let prev = RawTx {
+        version: 2,
+        inputs: &prev_ins,
+        outputs: &prev_outs,
+        locktime: 0,
+    };
+    let mut prev_raw = vec![0u8; prev.serialized_len()];
+    let n = prev.serialize_to_slice(&mut prev_raw).unwrap();
+    prev_raw.truncate(n);
+
+    let ins = [RawTxIn {
+        txid: prev.txid(),
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    }];
+    let mut to_wallet = [0u8; 34];
+    let to_len = wallet.script_pubkey(1, 0, &mut to_wallet).unwrap();
+    let outs = [RawTxOut {
+        amount: 99_000,
+        script: &to_wallet[..to_len],
+    }];
+    let tx = RawTx {
+        version: 2,
+        inputs: &ins,
+        outputs: &outs,
+        locktime: 0,
+    };
+
+    let mut a = vec![0u8; 8192];
+    let mut b = vec![0u8; 8192];
+    let mut n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    macro_rules! step {
+        ($f:expr) => {{
+            let psbt = Psbt::parse(&a[..n]).unwrap();
+            let m = $f(&psbt, &mut b).unwrap();
+            a[..m].copy_from_slice(&b[..m]);
+            n = m;
+        }};
+    }
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_witness_utxo(0, 100_000, &spk, out));
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p.set_non_witness_utxo(0, &prev_raw, out));
+    step!(
+        |p: &Psbt<'_>, out: &mut [u8]| p.add_input_bip32_derivation(0, &pk, OUR_FP, &RECEIVE, out)
+    );
+    let (ms_pk, ms_steps) = ms_key(1, 0);
+    step!(|p: &Psbt<'_>, out: &mut [u8]| p
+        .add_output_bip32_derivation(0, &ms_pk, OUR_FP, &ms_steps, out));
+    buf[..n].copy_from_slice(&a[..n]);
+    n
+}
+
+/// Paying a registered multisig wallet from a single-signature input is *sending* to it,
+/// not change: the wallet is registered here and one of its keys is ours, but this spend
+/// is not from it. Labelling it change would show a transfer of the whole balance into
+/// the multisig as a fee-only transaction.
+#[test]
+fn a_single_sig_spend_to_a_registered_multisig_wallet_is_not_change() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = single_sig_spend_to_multisig(&wallet, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    let wallets = [wallet];
+    let me = owner(&master, &wallets);
+
+    let summary = summarise(&psbt, &me, &Policy::default(), &kw()).expect("our own spend");
+    assert_eq!(
+        summary.wallet_count, 0,
+        "no input is from the multisig wallet"
+    );
+    assert_eq!(
+        summary.change, 0,
+        "a payment into another wallet was folded into change"
+    );
+    assert_eq!(summary.sending, 99_000);
+    assert_eq!(summary.fee, 1_000);
+
+    let mut dests = [Destination {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; address::MAX_ADDRESS_LEN],
+        address_len: 0,
+    }; 2];
+    let found = destinations(
+        &psbt,
+        &me,
+        Network::Mainnet,
+        &summary.accounts[..summary.account_count],
+        &summary.wallets[..summary.wallet_count],
+        &mut dests,
+        &kw(),
+    );
+    assert_eq!(found, 1);
+    assert!(
+        !dests[0].change,
+        "the screen would have hidden the destination"
+    );
+}
+
 /// Without the registration, that output is money leaving -- if the spend is shown at all.
 ///
 /// This is the shape that matters: "looks like our multisig" is not a reason to subtract an
@@ -1176,6 +1299,7 @@ fn an_unregistered_multisig_output_is_not_change() {
             &spk[..len],
             &owner(&master_of(OURS), &[]),
             &accounts,
+            &[],
             &kw()
         ),
         "an unregistered wallet's output was subtracted from the amount sent"

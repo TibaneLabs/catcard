@@ -110,6 +110,13 @@ pub struct Summary {
     pub accounts: [Account; MAX_ACCOUNTS],
     /// How many of [`Self::accounts`] are real.
     pub account_count: usize,
+    /// The registered multisig wallets the inputs draw on, as indices into
+    /// [`Owner::wallets`]. The multisig counterpart of [`Self::accounts`]: an output paying
+    /// a registered wallet is change only when this spend is *from* that wallet. Otherwise
+    /// it is money moving between wallets, which the owner should see as leaving.
+    pub wallets: [usize; MAX_SPENT_WALLETS],
+    /// How many of [`Self::wallets`] are real.
+    pub wallet_count: usize,
     /// Inputs in total, and how many this wallet can sign.
     pub inputs: usize,
     pub ours: usize,
@@ -174,6 +181,9 @@ pub fn summarise(
     // only call itself change if it belongs to one of them.
     let mut accounts = [Account::NONE; MAX_ACCOUNTS];
     let mut account_count = 0usize;
+    // Likewise the registered multisig wallets it draws on.
+    let mut spent_wallets = [usize::MAX; MAX_SPENT_WALLETS];
+    let mut wallet_count = 0usize;
     #[cfg(feature = "multichain")]
     let mut opted_in = false;
     for index in 0..inputs {
@@ -275,8 +285,17 @@ pub fn summarise(
             let Some((branch, at)) = ours_address(psbt, index, fingerprint) else {
                 return Err(Refusal::UnknownMultisig { input: index });
             };
-            if multisig::match_script(wallets, utxo.script, branch, at).is_none() {
+            let Some(found) = multisig::match_script(wallets, utxo.script, branch, at) else {
                 return Err(Refusal::UnknownMultisig { input: index });
+            };
+            // Remember which wallet, so an output paying it back can call itself change.
+            // Past the cap the wallet is still spent from, but its change shows as leaving,
+            // which overstates the spend rather than hiding any of it.
+            if !spent_wallets[..wallet_count].contains(&found.wallet)
+                && wallet_count < MAX_SPENT_WALLETS
+            {
+                spent_wallets[wallet_count] = found.wallet;
+                wallet_count += 1;
             }
         }
         total_in = total_in.saturating_add(utxo.amount);
@@ -295,6 +314,7 @@ pub fn summarise(
             out.script,
             owner,
             &accounts[..account_count],
+            &spent_wallets[..wallet_count],
             kw,
         ) {
             change = change.saturating_add(out.amount);
@@ -324,6 +344,8 @@ pub fn summarise(
     Ok(Summary {
         accounts,
         account_count,
+        wallets: spent_wallets,
+        wallet_count,
         inputs,
         ours,
         outputs,
@@ -366,6 +388,10 @@ impl Account {
 /// Four is more than a single-sig spend has any business using; past that the extra
 /// accounts simply cannot claim change, which shows their outputs as leaving.
 pub const MAX_ACCOUNTS: usize = 4;
+
+/// Registered multisig wallets one transaction may spend from before this stops counting
+/// them; the same bound as [`MAX_ACCOUNTS`], for the same reason.
+pub const MAX_SPENT_WALLETS: usize = MAX_ACCOUNTS;
 
 /// Levels a change path has: `purpose'/coin'/account'/branch/index`.
 pub const CHANGE_DEPTH: usize = 5;
@@ -461,6 +487,11 @@ fn account_for(steps: &[u32], accounts: &[Account]) -> Option<Account> {
 /// output's script is rebuilt from it. Only a byte-for-byte match counts. A host that
 /// mislabels a stranger's output as change is trying to hide where the money goes.
 ///
+/// `accounts` are the single-signature accounts the inputs spend from, and `wallets` the
+/// registered multisig wallets they spend from, as indices into [`Owner::wallets`]; both
+/// come from [`summarise`]. An output has to belong to one of them: a registered wallet
+/// this spend is not drawing on is another wallet, and paying it is money leaving this one.
+///
 /// At most [`MAX_CHANGE_KEYS`] records are followed: this runs with interrupts masked.
 pub fn is_change(
     psbt: &Psbt<'_>,
@@ -468,6 +499,7 @@ pub fn is_change(
     script: &[u8],
     owner: &Owner<'_>,
     accounts: &[Account],
+    wallets: &[usize],
     kw: &KeyWork,
 ) -> bool {
     let (master, fingerprint) = (owner.master, owner.fingerprint);
@@ -478,11 +510,14 @@ pub fn is_change(
     // Change back to a registered multisig wallet, proven the same way an input is: the
     // script is rebuilt from the wallet's own record and has to equal this output's. The
     // shape rules that bound a single-signature change path apply here too -- an address
-    // no recovery will scan to is not change, whoever co-signs it.
+    // no recovery will scan to is not change, whoever co-signs it. And it has to be a
+    // wallet the inputs spend from: a single-signature spend paying a registered multisig
+    // wallet is sending to it, however many of its keys are ours.
     if multisig::is_script_hash(script)
         && let Some((branch, at)) = output_address(psbt, index, fingerprint)
         && (branch <= 1 && at <= MAX_CHANGE_INDEX)
-        && multisig::match_script(owner.wallets, script, branch, at).is_some()
+        && multisig::match_script(owner.wallets, script, branch, at)
+            .is_some_and(|found| wallets.contains(&found.wallet))
     {
         return true;
     }
@@ -526,11 +561,15 @@ pub fn is_change(
 }
 
 /// The destinations of `psbt`, written into `out`; returns how many were filled.
+///
+/// `accounts` and `wallets` are what [`summarise`] worked out from the inputs, as for
+/// [`is_change`].
 pub fn destinations(
     psbt: &Psbt<'_>,
     owner: &Owner<'_>,
     network: Network,
     accounts: &[Account],
+    wallets: &[usize],
     out: &mut [Destination],
     kw: &KeyWork,
 ) -> usize {
@@ -544,7 +583,7 @@ pub fn destinations(
         out[n] = Destination {
             index,
             amount: txout.amount,
-            change: is_change(psbt, index, txout.script, owner, accounts, kw),
+            change: is_change(psbt, index, txout.script, owner, accounts, wallets, kw),
             address,
             address_len,
         };

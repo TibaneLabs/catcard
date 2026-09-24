@@ -419,6 +419,8 @@ pub(crate) fn review_and_sign(
             // change only if it belongs to one of them, and deriving them twice would be
             // twice the elliptic-curve work for the same answer.
             &summary.accounts[..summary.account_count],
+            // And the registered multisig wallets it spends from, for the same reason.
+            &summary.wallets[..summary.wallet_count],
             &mut shown,
             kw,
         )
