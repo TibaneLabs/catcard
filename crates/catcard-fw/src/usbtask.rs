@@ -316,6 +316,14 @@ impl UsbTask {
             self.stage = Stage::Idle;
         }
     }
+
+    /// Take the transfer in flight out of the task, leaving it idle -- or `None`, leaving
+    /// the stage untouched, when what it holds is not a transfer. See
+    /// [`drop_transfer`](Self::drop_transfer) for why the distinction matters.
+    fn take_transfer(&mut self) -> Option<Stage> {
+        self.transferring()
+            .then(|| core::mem::replace(&mut self.stage, Stage::Idle))
+    }
     pub fn pending(&self) -> Option<&Approval> {
         match &self.stage {
             Stage::Offered { approval, .. } => Some(approval),
@@ -613,6 +621,16 @@ impl UsbTask {
                         }
                     }
                 }
+                Some(_) if msg.total as usize > catcard_usb::START_PAYLOAD => {
+                    // Only an image spans frames; every other request fits its START
+                    // frame. A longer one would complete with no opcode in hand and
+                    // fall into the offer path, which is not where it belongs, so it is
+                    // refused here, on its first frame, and the reassembler is cleared
+                    // so the rest of it is `NoMessage` errors rather than an image.
+                    self.frames.reset();
+                    self.begin_reply(Status::BadRequest, &[]);
+                    return;
+                }
                 Some(_) => {}
                 None => {
                     self.frames.reset();
@@ -809,11 +827,16 @@ impl UsbTask {
         // the transfer was compressed. `finish` is what refuses a transfer that stopped
         // short -- the staging area's tail would otherwise be whatever the last upload
         // left in it, and that is what would be installed.
-        if let Stage::Unpacking { staged, unpack } =
-            core::mem::replace(&mut self.stage, Stage::Idle)
-        {
+        //
+        // Only a transfer is taken out of the stage here. Replacing the stage
+        // unconditionally meant a completed message that was not a transfer -- a
+        // multi-frame Ping, before one was refused on its first frame -- threw away an
+        // offer waiting on the screen, or an approval whose marker was already
+        // published.
+        let mut transfer = self.take_transfer();
+        if let Some(Stage::Unpacking { staged, unpack }) = transfer {
             match unpack.finish() {
-                Ok(()) => self.stage = Stage::Receiving(staged),
+                Ok(()) => transfer = Some(Stage::Receiving(staged)),
                 Err(r) => {
                     self.refuse(r);
                     return;
@@ -821,7 +844,7 @@ impl UsbTask {
             }
         }
 
-        let Stage::Receiving(mut staged) = core::mem::replace(&mut self.stage, Stage::Idle) else {
+        let Some(Stage::Receiving(mut staged)) = transfer else {
             return;
         };
         let running = crate::own_header();

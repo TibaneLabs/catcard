@@ -350,6 +350,11 @@ upload is the same holder coming back.
 twice while the first offer is on the screen fails cleanly rather than restarting the
 upload.
 
+Every other opcode fits one frame. A START frame for anything but an upgrade that
+declares more payload than one frame carries is refused with `BadRequest` and its frames
+reset, rather than being reassembled into something the device would then treat as an
+image.
+
 ### Enumeration is not gated by the PIN; upgrades are
 
 The peripheral comes up during bring-up, before the PIN prompt, because a host presents
