@@ -4657,8 +4657,10 @@ pub(crate) fn qr_screen_bytes(ui: &mut Ui<'_>, payload: &[u8], shown: &str) {
     };
     const BUF: usize = QrEncoder::buffer_len(MAX_VERSION);
 
-    let mut scratch = [0u8; BUF];
-    let mut storage = [0u8; BUF];
+    // Wiped on every way out: for a SeedQR these hold the seed's digits and its symbol,
+    // and this frame is reused by whatever screen comes next.
+    let mut scratch = zeroize::Zeroizing::new([0u8; BUF]);
+    let mut storage = zeroize::Zeroizing::new([0u8; BUF]);
     let encoder = QrEncoder::new();
     // Pixels per module this level would get, or 0 if it does not encode or does not fit.
     // Scoped so the two buffers are reused rather than held twice over.
@@ -4686,7 +4688,7 @@ pub(crate) fn qr_screen_bytes(ui: &mut Ui<'_>, payload: &[u8], shown: &str) {
         EcLevel::L
     };
 
-    let Ok((grid, _meta)) = encoder.encode_text_into(payload, level, &mut scratch, &mut storage)
+    let Ok((grid, _meta)) = encoder.encode_text_into(payload, level, &mut *scratch, &mut *storage)
     else {
         // Whatever it was -- an address, a key expression, a seed -- it did not fit the
         // largest symbol these buffers hold. Naming the caller's payload here would be a
