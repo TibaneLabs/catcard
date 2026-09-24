@@ -137,9 +137,6 @@ mod sniff;
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod solanatx;
 mod splash;
-/// Debug: the MPU fence under the main stack and the kernel's per-switch canary checks,
-/// both off at boot, armed and probed from a screen.
-mod stackguard;
 mod staging;
 /// Debug: everything this device keeps, the seed in the clear, written to a card in one
 /// file. Bench builds only: it is a diagnostic, not a backup, and it must not ship.
