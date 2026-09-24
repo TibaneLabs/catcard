@@ -234,9 +234,9 @@ fn main() -> ! {
     // Before opening the global mask, close every NVIC line, whatever the bootloader left
     // enabled or pending. Our own code enables exactly the lines it services later -- the
     // keypad's column EXTIs during bring-up, OTG only for mass storage -- and
-    // `DefaultHandler` wipes and resets on any IRQ it does not recognise. So a line the
-    // loader left enabled would fire the moment the mask opened and the device would never
-    // finish booting, which on an RDP=2 unit is a brick. On the Q1 the loader turned out to leave none; that was
+    // `DefaultHandler` parks the CPU on any IRQ it does not recognise. So a line the loader
+    // left enabled would fire the moment the mask opened and hang the boot, which on an
+    // RDP=2 unit is a brick. On the Q1 the loader turned out to leave none; that was
     // learned by booting, which is not a method to repeat on a board with a seed on it.
     // Clearing them makes the question irrelevant on every board.
     //
@@ -259,46 +259,14 @@ fn main() -> ! {
         left
     };
 
-    // SysTick and PendSV are core exceptions, not NVIC lines, so the sweep above does not
-    // reach them. A loader that handed off with `SYST_CSR.TICKINT` set, or with a PendSV or
-    // SysTick pend bit latched in `ICSR`, would run this image's handlers the moment the
-    // mask opens -- and the kernel's PendSV switches stacks through a PSP nothing has set
-    // yet. So: stop SysTick outright, and drop both pend bits. The kernel arms SysTick
-    // itself when it is started, so on a healthy boot both registers were already clear
-    // and this changes nothing.
-    //
-    // `SYST_CSR` at 0xE000_E010: bit 1 `TICKINT`, bit 0 `ENABLE`; writing 0 disables both.
-    // `ICSR` at 0xE000_ED04: bit 28 `PENDSVSET` and bit 26 `PENDSTSET` read the latches,
-    // bit 27 `PENDSVCLR` and bit 25 `PENDSTCLR` are write-one-to-clear, and writing 0 to
-    // any other bit has no effect.
-    // Source: ARMv7-M ARM §B3.3.3 (SysTick Control and Status) and §B3.2.4 (ICSR) [C].
-    const ICSR_PENDSTCLR: u32 = 1 << 25;
-    const ICSR_PENDSTSET: u32 = 1 << 26;
-    const ICSR_PENDSVCLR: u32 = 1 << 27;
-    const ICSR_PENDSVSET: u32 = 1 << 28;
-    // SAFETY: the reset path, before the kernel exists; SysTick is not in use by anything
-    // in this image until `catcard_kernel::start`, and the two clear bits only undo a pend.
-    let (loader_syst, loader_pend) = unsafe {
-        let syst = &*cortex_m::peripheral::SYST::PTR;
-        let scb = &*cortex_m::peripheral::SCB::PTR;
-        let csr = syst.csr.read();
-        let pend = scb.icsr.read() & (ICSR_PENDSVSET | ICSR_PENDSTSET);
-        syst.csr.write(0);
-        scb.icsr.write(ICSR_PENDSVCLR | ICSR_PENDSTCLR);
-        (csr, pend)
-    };
-
-    // SAFETY: the reset path, with every NVIC line now disabled and un-pended, SysTick off
-    // and no core exception pending, so this opens the core's global mask without enabling
-    // any source.
+    // SAFETY: the reset path, with every NVIC line now disabled and un-pended, so this opens
+    // the core's global mask without enabling any source.
     unsafe { cortex_m::interrupt::enable() };
     crate::catlog!(
-        "boot: loader left NVIC {:#010x} {:#010x} {:#010x} SYST_CSR {:#x} pend {:#x}; cleared, interrupts on",
+        "boot: loader left NVIC {:#010x} {:#010x} {:#010x}; cleared, interrupts on",
         loader_iser[0],
         loader_iser[1],
-        loader_iser[2],
-        loader_syst,
-        loader_pend
+        loader_iser[2]
     );
 
     // SAFETY: this is the reset path; nothing else has touched these peripherals. The
