@@ -97,17 +97,55 @@ pub fn wipe_and_reset() -> ! {
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// Zero `.data` and `.bss`.
+/// Zero `.data`, `.bss`, and the spare RAM bank if the heap had claimed it.
 ///
 /// Does **not** clear the stack: we are running on it. That gap is the reason the
 /// callgate path above is preferred — anything spilled to the stack survives this.
+///
+/// # What gate 3 is asserted to wipe, and why this still matters
+///
+/// `show_logout` "wipe[s] all SRAM, then lock[s] up" -- every bank, the bootloader's own
+/// 8 KB included, from code that does not run out of any of it.
+/// Source: hw-reference/bootloader-callgate-abi.md §"Method table", method 3, and
+/// hw-reference/power.md §"Power-off / shutdown (Q1)" ("It wipes all SRAM") [C]. This function is the
+/// fallback for when that gate is unreachable or not known to be callable (handler mode),
+/// so it has to cover the same ground as far as it can: the linked statics, and the
+/// unlinked bank above SRAM1 that the allocator hands out on the L4+ boards
+/// (`BOARD.memory.spare_ram`, 0x2003_0000..0x2009_E000), which holds whatever any heap
+/// block held. It stops where the bootloader's window begins (`bl_sram_base`), which
+/// the callgate wipes itself on every entry and exit (docs/CALLGATE-DMA.md §5), and
+/// which is not this firmware's to write.
+///
+/// The bank is only zeroed if the heap claimed it. Claiming is what proved it is memory
+/// (`heap::claim_spare`), and this runs from the hard fault handler: a bus fault here
+/// would be a fault inside the fault handler, a lockup with nothing wiped. On mk3 there
+/// is no bank and nothing extra is done.
 fn local_wipe() {
+    // Ask before the statics go: the flag lives in `.bss`.
+    let spare = if crate::heap::spare_claimed() {
+        BOARD.memory.spare_ram
+    } else {
+        None
+    };
     // SAFETY: the linker symbols bound the statics region, and interrupts are masked,
     // so nothing else observes these while they are being cleared. Volatile writes stop
     // the compiler from eliding stores to memory it can prove is never read again.
     unsafe {
         zero_range(&raw mut __sdata, &raw mut __edata);
         zero_range(&raw mut __sbss, &raw mut __ebss);
+    }
+    if let Some(bank) = spare {
+        // Never into the bootloader's window, however the table is edited later: the
+        // board test asserts the two are disjoint, and this clamps regardless.
+        let end = if bank.base < BOARD.memory.bl_sram_base {
+            bank.end().min(BOARD.memory.bl_sram_base)
+        } else {
+            bank.end()
+        };
+        // SAFETY: the bank was probed and handed to the allocator, so it is real,
+        // word-aligned RAM that no linked section lives in; interrupts are masked and
+        // nothing allocates again on this path.
+        unsafe { zero_range(bank.base as *mut u32, end as *mut u32) };
     }
     compiler_fence(Ordering::SeqCst);
 }

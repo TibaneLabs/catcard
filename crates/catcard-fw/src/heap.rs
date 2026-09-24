@@ -209,6 +209,18 @@ enum Spare {
     None,
 }
 
+/// Whether the spare bank is in the heap -- and so may hold anything the heap ever held.
+///
+/// For the wipe paths: the bank is zeroed on a panic or a fault only if it was claimed,
+/// because claiming is also what proved it is memory. Touching an unclaimed bank from a
+/// fault handler could fault again, and a fault inside the hard fault handler is a
+/// lockup with nothing wiped at all. Reads one static; safe from handler mode.
+pub fn spare_claimed() -> bool {
+    // SAFETY: a single aligned read of a plain enum; the only writer runs in the
+    // foreground under `with`, and this is called with interrupts masked.
+    unsafe { *core::ptr::addr_of!(SPARE) == Spare::Added }
+}
+
 /// Give the heap the RAM the image does not link, the first time something needs it.
 ///
 /// Returns whether the heap grew.

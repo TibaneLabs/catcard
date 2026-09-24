@@ -999,6 +999,27 @@ mod tests {
         }
     }
 
+    /// The spare bank is handed to the allocator and zeroed by the local wipe, so it must
+    /// sit above everything the image links and stop before the bootloader's window --
+    /// the wipe must never write into what the callgate owns.
+    #[test]
+    fn spare_ram_is_above_linked_ram_and_below_the_bootloader_window() {
+        for b in ALL {
+            let m = &b.memory;
+            let Some(spare) = m.spare_ram else {
+                continue;
+            };
+            assert_eq!(spare.base % 4, 0, "{}", b.name);
+            assert_eq!(spare.len % 4, 0, "{}", b.name);
+            assert!(spare.base >= m.sram1_end(), "{}", b.name);
+            assert!(
+                spare.end() <= m.bl_sram_base || spare.base >= m.bl_sram_base + m.bl_sram_len,
+                "{}: spare RAM overlaps the bootloader's SRAM reservation",
+                b.name
+            );
+        }
+    }
+
     #[test]
     fn hw_compat_bits_are_within_the_defined_mask() {
         // MK_1_OK..MK_5_OK. Source: firmware-signing.md §1 [C]
