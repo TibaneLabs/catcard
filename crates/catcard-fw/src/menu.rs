@@ -6523,6 +6523,7 @@ pub(crate) fn master_quietly(
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
     use crate::key::{Loaded, Source};
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use zeroize::Zeroize as _;
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
             let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
@@ -6554,15 +6555,24 @@ pub(crate) fn master_quietly(
                     ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
                 })
             }
-            Stored::Xprv { chain_code, key } => Ok(ExtendedPrivKey::root_from_parts(
-                Network::Mainnet,
-                chain_code,
-                key,
-            )),
-            Stored::Raw { bytes, len } => crate::keywork::run(|kw| {
-                ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
-            })
-            .map_err(|_| "key derivation failed"),
+            // The arrays are `Copy`, so these bindings are copies of the secret that
+            // `Stored`'s Drop never sees; each is wiped once the node has been made.
+            Stored::Xprv {
+                mut chain_code,
+                mut key,
+            } => {
+                let node = ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key);
+                chain_code.zeroize();
+                key.zeroize();
+                Ok(node)
+            }
+            Stored::Raw { mut bytes, len } => {
+                let node = crate::keywork::run(|kw| {
+                    ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
+                });
+                bytes.zeroize();
+                node.map_err(|_| "key derivation failed")
+            }
         };
     }
     with_seed(gate, login, panel, head, |seed, kw| {
@@ -9091,7 +9101,8 @@ fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
     use catcard_ui::scroll::Line as DLine;
     use catcard_wallet::bip39::wordlist::ENGLISH;
 
-    let mut texts: heapless::Vec<Line, 24> = heapless::Vec::new();
+    // The words themselves, as text: wiped when the screen leaves, whichever way.
+    let mut texts = zeroize::Zeroizing::new(heapless::Vec::<Line, 24>::new());
     for (pos, &i) in idx.iter().enumerate() {
         let mut s = Line::new();
         let _ = write!(s, "{:2}  {}", pos + 1, ENGLISH[i as usize]);
@@ -9126,7 +9137,9 @@ fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
 pub(crate) fn read_phrase(ui: &mut Ui<'_>) -> Option<catcard_wallet::bip39::Mnemonic> {
     use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
 
-    let mut idx: heapless::Vec<u16, 24> = heapless::Vec::new();
+    // The phrase as word indices -- the seed, in another spelling. Zeroizing, so every way
+    // out of this function wipes the whole buffer, a popped word's slot included.
+    let mut idx = zeroize::Zeroizing::new(heapless::Vec::<u16, 24>::new());
 
     // Enter words until the owner signals the end. `Back` steps to the previous word;
     // backing off the first word abandons the restore.
