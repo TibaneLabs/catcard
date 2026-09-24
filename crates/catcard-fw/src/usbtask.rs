@@ -378,7 +378,11 @@ impl UsbTask {
                     if !matches!(self.stage, Stage::Approved) {
                         self.stage = Stage::Idle;
                     }
+                    // And the frame already staged for the wire. The reply it belongs to
+                    // is gone; sending its one frame into the new session would hand the
+                    // host a START frame for a message it never asked for.
                     self.reply = None;
+                    self.outbox_len = 0;
                 }
                 Event::Report => {
                     self.rx_count = self.rx_count.saturating_add(1);
