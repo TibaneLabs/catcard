@@ -18,16 +18,30 @@
 //! means the panic handler, which means a wiped device. Anything large, anything
 //! optional, and anything on a path that can report a failure should call [`take`].
 //!
+//! # What a block leaves behind
+//!
+//! Nothing. A [`Block`] is wiped before its extent goes back on the free list, so the
+//! next [`take`] never hands out what the last holder left in it -- and what the last
+//! holder left in it is usually a decrypted settings file: the Seed Vault, the notes and
+//! their passwords, the 2FA card list. Thirty-two kilobytes of volatile stores on the
+//! rare occasion a block is dropped is nothing against handing a wallet's secrets to
+//! whichever screen asks for a buffer next.
+//!
+//! That guarantee is for blocks. A `Vec` freed through the global allocator is not
+//! wiped, which is one more reason large or sensitive buffers come from [`take`].
+//!
 //! # What must not come from here
 //!
-//! Key material and signing. Those sizes are known in advance, they belong on the
-//! stack, and a seed that lives in a freed block is a seed sitting in memory nobody is
-//! tracking. `keywork::run` is where that work goes.
+//! Key material and signing. Those sizes are known in advance and they belong on the
+//! stack, where `keywork::run` masks interrupts around them. The wipe above is a
+//! backstop for a block that held a secret by way of a settings file, not a licence to
+//! put one there on purpose.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
 use catcard_alloc::Heap;
+use zeroize::Zeroize as _;
 
 /// The heap, in bytes.
 ///
@@ -143,6 +157,10 @@ impl Block {
 
 impl Drop for Block {
     fn drop(&mut self) {
+        // Wiped before it is free, not after: once it is on the free list another task
+        // can be handed it. Volatile stores, so the compiler cannot decide a buffer
+        // that is about to be freed is dead and skip the writes.
+        self.bytes().zeroize();
         with(|heap| {
             // SAFETY: `ptr` came from this heap and is freed exactly once — `Block` is
             // not `Copy` and this is its only drop.
