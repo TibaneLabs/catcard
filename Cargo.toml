@@ -128,7 +128,9 @@ catcard-ui = { path = "crates/catcard-ui" }
 cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
-heapless = "0.9.3"
+# `zeroize`: an in-place wipe of a `String` or `Vec`'s whole buffer, for the passphrase
+# and text-entry fields. Without it the only wipe is of a moved-out copy.
+heapless = { version = "0.9.3", features = ["zeroize"] }
 
 # --- crypto: purecrypto, our own pure-Rust no_std/no-alloc toolkit ---
 # One stack for hashing, HMAC, secp256k1 (ECDSA + BIP340 Schnorr + point ops) and

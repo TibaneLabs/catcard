@@ -120,9 +120,10 @@ impl Entry {
     pub fn clear(&mut self) {
         self.pending = None;
         // Wipe the whole buffer, not just the part in use: the tail still holds what was
-        // typed before a backspace.
-        let mut bytes = core::mem::take(&mut self.text).into_bytes();
-        bytes.zeroize();
+        // typed before a backspace. In place, on the field itself -- taking the string out
+        // would leave the wipe to a moved copy while this buffer kept the text.
+        self.text.zeroize();
+        self.text.clear();
     }
 
     fn replace_last(&mut self, c: char) {

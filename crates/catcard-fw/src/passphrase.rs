@@ -55,9 +55,13 @@ pub(crate) fn clear() {
 }
 
 /// Empty a string and wipe the bytes it held, tail included.
+///
+/// In place: `heapless::String::zeroize` writes the whole backing buffer and the length.
+/// Taking the string out first would leave the wipe to a moved copy while the slot --
+/// a static, here -- kept whatever the compiler chose not to overwrite.
 fn wipe(s: &mut heapless::String<MAX_LEN>) {
-    let mut bytes = core::mem::take(s).into_bytes();
-    bytes.zeroize();
+    s.zeroize();
+    s.clear();
 }
 
 /// Type a passphrase, see which wallet it opens, and apply it.
