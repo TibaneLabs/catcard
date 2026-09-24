@@ -7,7 +7,7 @@
 
 use catcard_board::BOARD;
 use catcard_callgate::Callgate;
-use catcard_entropy::EntropyPool;
+use catcard_entropy::{EntropyPool, Source};
 use catcard_hal::{dwt, uid};
 
 use crate::{BootReport, display, entropy_policy, splash};
@@ -75,11 +75,15 @@ pub fn bring_up(
     feed_secure_elements(&mut pool);
     step(&mut panel, 80);
 
-    // A little startup timing jitter. Credited 1 bit per byte, so this cannot
-    // meaningfully substitute for a TRNG -- it only ever tops up.
+    // A little startup timing jitter, credited **nothing**. These are cycle counts on a
+    // fixed instruction path before anyone has touched the device: the same boot on the
+    // same board lands within a few cycles of the same values, which is a pattern, not
+    // entropy. They go in as `Auxiliary` -- mixed, so two boots differ where they do
+    // differ, and counted zero, like every other value nobody chose. `UserTiming` and
+    // its credit are for keypress edges, where a human decides the moment.
     if dwt_running {
         for _ in 0..16 {
-            pool.add_timing(dwt::cycles());
+            pool.add(Source::Auxiliary, &dwt::cycles().to_le_bytes());
             dwt::delay_cycles(97);
         }
     }

@@ -476,6 +476,35 @@ mod tests {
     }
 
     #[test]
+    fn boot_timing_on_a_fixed_path_is_credited_nothing() {
+        // What boot does with its cycle-counter samples: sixteen reads of `DWT_CYCCNT`
+        // on a straight-line path before any human input. Those land near the same
+        // values every boot, so they go in as `Auxiliary` -- and the counter must not
+        // move, or a board whose TRNG had failed could be talked a few bits closer to
+        // its policy by rebooting.
+        let mut p = EntropyPool::new(Policy::single_trng());
+        for i in 0..16u32 {
+            p.add(Source::Auxiliary, &(1_000 + i * 97).to_le_bytes());
+        }
+        assert_eq!(p.credited_bits(), 0);
+        assert_eq!(p.hardware_sources(), 0);
+        // And the boards' policies are met without them: mk3 on the chip TRNG alone ...
+        p.add(Source::Stm32Trng, &noise(1, 64));
+        assert_eq!(p.credited_bits(), 256);
+        assert!(p.draw_seed().is_ok());
+        // ... mk4 and Q1 on the chip plus the two secure elements.
+        let mut strict = EntropyPool::new(Policy::STRICT);
+        for i in 0..16u32 {
+            strict.add(Source::Auxiliary, &(1_000 + i * 97).to_le_bytes());
+        }
+        strict.add(Source::Stm32Trng, &noise(1, 64));
+        strict.add(Source::Se1Trng, &noise(2, 64));
+        strict.add(Source::Se2Trng, &noise(3, 64));
+        assert_eq!(strict.credited_bits(), 768);
+        assert!(strict.draw_seed().is_ok());
+    }
+
+    #[test]
     fn user_timing_alone_cannot_unlock_a_seed() {
         let mut p = EntropyPool::new(Policy::single_trng());
         for i in 0..10_000u32 {
