@@ -154,9 +154,17 @@ pub(crate) fn switch(sp: u32) -> u32 {
         return sp;
     }
 
+    // With the checks on, both guard words are read at every switch: the outgoing task's
+    // before its pointer is saved, the incoming one's before its is restored. Either way
+    // an overflow is caught by the next switch after it happened, whichever task it was.
+    let checks = crate::guard_checks();
+
     if cur != usize::MAX
         && let Some(t) = tasks[cur].as_mut()
     {
+        if checks && !guard_intact(t) {
+            crate::overflow();
+        }
         t.sp = sp;
         // The switch pushed r4-r11 then EXC_RETURN, so EXC_RETURN sits eight words above
         // `sp` whether or not FP registers were stacked beneath it. Bit 4 clear means
@@ -179,11 +187,47 @@ pub(crate) fn switch(sp: u32) -> u32 {
     unsafe { *(core::ptr::addr_of_mut!(CURRENT)) = next };
     crate::count_switch();
     match &tasks[next] {
-        Some(t) => t.sp,
+        Some(t) => {
+            if checks && !guard_intact(t) {
+                crate::overflow();
+            }
+            t.sp
+        }
         // Cannot happen: ids below `count` are always populated. Returning the incoming
         // pointer keeps the current task running rather than jumping somewhere unknown.
         None => sp,
     }
+}
+
+/// One volatile read of the guard word: still what `spawn` wrote, or not.
+#[inline(always)]
+fn guard_intact(t: &Tcb) -> bool {
+    // SAFETY: `lo` is the first word of a stack the task owns for the life of the
+    // program, and this only reads it.
+    unsafe { t.lo.read_volatile() == GUARD }
+}
+
+/// **Test hook.** Overwrite the running task's own guard word, so the next switch with
+/// [`crate::guard_checks`] on trips as if the stack had overflowed.
+///
+/// Exists so *Debug -> Stack guard* can prove, on real hardware, that a tripped guard
+/// ends in the overflow hook and not in a task quietly carrying on. Nothing else calls
+/// it, and nothing should: after it the task's stack reports `OVERFLOW` for good.
+///
+/// Does nothing before the scheduler has a current task.
+pub fn corrupt_own_guard_for_test() {
+    crate::critical(|| {
+        // SAFETY: interrupts are masked, so no switch is reading the table or moving
+        // `CURRENT` underneath this; the guard word is the bottom of a stack the task
+        // owns and nothing lives in it.
+        unsafe {
+            let cur = *core::ptr::addr_of!(CURRENT);
+            let tasks = &*core::ptr::addr_of!(TASKS);
+            if let Some(t) = tasks.get(cur).and_then(|t| t.as_ref()) {
+                t.lo.write_volatile(!GUARD);
+            }
+        }
+    })
 }
 
 /// Deepest the task's stack has ever been, in words.
