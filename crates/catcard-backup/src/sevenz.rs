@@ -379,6 +379,14 @@ fn parse_unpack_info(r: &mut Reader<'_>) -> Result<FolderInfo, Error> {
         } else {
             (1, 1)
         };
+        // Stream counts are bounded before they are summed. They come straight out of
+        // the file, and two coders each declaring 2^63 streams would otherwise add up to
+        // an overflow -- which on the device is a panic, and a panic is a wiped device,
+        // from nothing more than a crafted `.7z` on a card. No coder has more streams
+        // than there are coders in the archives this reads.
+        if n_in > MAX_CODERS as u64 || n_out > MAX_CODERS as u64 {
+            return Err(Error::BadArchive);
+        }
         total_in += n_in;
         total_out += n_out;
         let props = if flags & 0x20 != 0 {
@@ -1006,6 +1014,30 @@ mod tests {
         let mut held = sealed.clone();
         let s = only_file(&held);
         assert_eq!(decrypt_in_place(&mut held, &s, &key).unwrap(), body);
+    }
+
+    /// Two coders each declaring 2^63 streams once added up to an overflow -- on the
+    /// device a panic, and so a wipe, from nothing but a crafted file on a card. The
+    /// counts are bounded before they are summed.
+    #[test]
+    fn absurd_stream_counts_are_refused_before_they_are_summed() {
+        fn num(out: &mut Vec<u8>, v: u64) {
+            write_number(v, |b| out.push(b));
+        }
+        let mut folder = Vec::new();
+        folder.push(K_FOLDER);
+        num(&mut folder, 1); // one folder
+        folder.push(0); // not external
+        num(&mut folder, 2); // two coders, within MAX_CODERS
+        for _ in 0..2 {
+            // "complex" coder: a one-byte id (Copy), then its stream counts.
+            folder.push(0x10 | 1);
+            folder.push(COPY_CODER_ID[0]);
+            num(&mut folder, 1 << 63);
+            num(&mut folder, 1 << 63);
+        }
+        let mut r = Reader::new(&folder);
+        assert!(matches!(parse_unpack_info(&mut r), Err(Error::BadArchive)));
     }
 
     #[test]
