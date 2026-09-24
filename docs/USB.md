@@ -329,6 +329,27 @@ and from the host that is indistinguishable from a device that died mid-operatio
 So the poll that handles a report also drains the reply. The host's timeout can then be
 short enough to be diagnostic — a late reply means stopped, not busy.
 
+### One offer at a time, and the host cannot withdraw it
+
+An offer that passed inspection is on the device's screen waiting for a person, and a
+second `UpgradeOffer` / `UpgradePacked` while it waits is answered `NotNow` on its first
+frame -- the same answer a premature `UpgradeCommit` gets, meaning the same thing: wait
+for the device. Likewise once the person has approved and the recovery marker is
+published, right up to the reboot. It used to be that a new offer silently replaced the
+one on the screen, which let any host clear a question it is not entitled to answer, and
+pull an approved image out from under the marker that names it.
+
+What a host must do: offer once, then wait. The outcome arrives on its own -- a
+`Declined` frame if the person refuses, or the device dropping off the bus as it reboots
+to install. There is no opcode to withdraw an offer; unplugging (a bus reset) is the
+only way a host can take one back, and that is deliberate. A transfer that is still
+*arriving* is different: a new offer replaces it, because a host restarting a failed
+upload is the same holder coming back.
+
+`tools/usbclient.py` offers once per run and prints a hint on `NotNow`, so running it
+twice while the first offer is on the screen fails cleanly rather than restarting the
+upload.
+
 ### Enumeration is not gated by the PIN; upgrades are
 
 The peripheral comes up during bring-up, before the PIN prompt, because a host presents

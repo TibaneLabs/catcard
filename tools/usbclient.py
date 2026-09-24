@@ -160,8 +160,20 @@ def pack_image(blob):
     return b"".join(out)
 
 
+# Why an offer comes back NotNow. Two states, and a host cannot change either one from
+# the cable: the device is locked, or an earlier offer is still on its screen waiting to
+# be approved or declined (or has been approved and is about to reboot). The device does
+# not let a second offer replace a question the person at it has not answered yet.
+NOT_NOW_HINT = ("offer     the device is locked, or an earlier offer is waiting for an "
+                "answer at the device; answer it there (or unplug) before offering again")
+
+
 def offer(sock, blob, caps):
     """Offer an image, compressed if the device says it can take one that way.
+
+    Sends once. If an offer is already waiting for an answer at the device, this one is
+    refused with NotNow rather than replacing it -- so a client that wants to offer
+    again has to wait for the person at the device to answer the first.
 
     Returns `(status, body, sent)` -- `sent` being the bytes that actually crossed the
     wire, which is the number worth printing next to the time.
@@ -1333,6 +1345,8 @@ def main(path, image=None):
                         print(f"install   device came back running {back} (was {was})")
             else:
                 print(f"offer     status={STATUS.get(st, st)}")
+                if st == 2:
+                    print(NOT_NOW_HINT)
                 ok = False
         print("OK" if ok else "FAILED")
         return 0 if ok else 1
@@ -1403,6 +1417,8 @@ def main(path, image=None):
         else:
             why = REJECT.get(body[0], body[0]) if body else "?"
             print(f"offer     status={STATUS.get(st, st)} reason={why}")
+            if st == 2:
+                print(NOT_NOW_HINT)
             ok = False
 
     print("OK" if ok else "FAILED")

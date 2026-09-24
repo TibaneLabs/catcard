@@ -288,13 +288,34 @@ impl UsbTask {
     /// finds out when its next frame is refused, which is the honest order -- the owner
     /// said no before the host finished asking.
     pub fn abandon(&mut self) {
-        if matches!(self.stage, Stage::Receiving(_) | Stage::Unpacking { .. }) {
+        if self.transferring() {
             crate::catlog!("upgrade: transfer cancelled at the screen");
-            self.stage = Stage::Idle;
+            self.drop_transfer();
             self.frames.reset();
         }
     }
 
+    /// Whether an image is still arriving.
+    fn transferring(&self) -> bool {
+        matches!(self.stage, Stage::Receiving(_) | Stage::Unpacking { .. })
+    }
+
+    /// Whether an image is waiting for the person at the device, or has been approved
+    /// and its marker published. Neither is the host's to replace.
+    fn answer_pending(&self) -> bool {
+        matches!(self.stage, Stage::Offered { .. } | Stage::Approved)
+    }
+
+    /// Drop a transfer in flight, if that is what the task holds, releasing the staging
+    /// medium. **Only a transfer.** An offer waiting for its answer and a published
+    /// approval stay exactly where they are: every path that used to write
+    /// `Stage::Idle` unconditionally let a host clear the approval screen by starting
+    /// a new message, or pull a staged image out from under the marker that names it.
+    fn drop_transfer(&mut self) {
+        if self.transferring() {
+            self.stage = Stage::Idle;
+        }
+    }
     pub fn pending(&self) -> Option<&Approval> {
         match &self.stage {
             Stage::Offered { approval, .. } => Some(approval),
@@ -309,6 +330,11 @@ impl UsbTask {
     /// firmware. It does not itself reboot: the caller does that, so the last act is
     /// visible where the decision was made.
     pub fn approve(&mut self) -> Result<catcard_upgrade::Region, Reject> {
+        // Take the offer only if that is what is here. Replacing whatever was here
+        // would turn a second Confirm into an idle task with the marker still published.
+        if !matches!(self.stage, Stage::Offered { .. }) {
+            return Err(Reject::Incomplete { have: 0, want: 0 });
+        }
         let stage = core::mem::replace(&mut self.stage, Stage::Idle);
         let Stage::Offered { staged, approval } = stage else {
             return Err(Reject::Incomplete { have: 0, want: 0 });
@@ -456,12 +482,12 @@ impl UsbTask {
             Ok(p) => p,
             Err(e) => {
                 // Framing is broken, so nothing that follows can be trusted. Drop any
-                // partial image rather than trying to resynchronise onto it.
+                // partial image rather than trying to resynchronise onto it. Only a
+                // partial one: an offer already on the screen was whole when it got
+                // there, and a bad frame from the host is not an answer to it.
                 self.frames.reset();
                 self.frame_errors = self.frame_errors.saturating_add(1);
-                if !matches!(self.stage, Stage::Approved) {
-                    self.stage = Stage::Idle;
-                }
+                self.drop_transfer();
                 self.begin_reply(
                     Status::BadRequest,
                     &[matches!(e, FrameError::OutOfSequence { .. }) as u8],
@@ -486,15 +512,29 @@ impl UsbTask {
                     self.begin_reply(Status::NotNow, &[]);
                     return;
                 }
+                Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) if self.answer_pending() => {
+                    // An image is already on the screen waiting for the person at the
+                    // device, or has been approved and its marker published. A second
+                    // offer replaces neither: the first would let a host clear a question
+                    // it is not entitled to answer, the second would pull the image out
+                    // from under the marker that names it. `NotNow` is the same answer a
+                    // commit gets before approval, and it means the same thing -- wait
+                    // for the device. The answer arrives as `Declined`, or as the reboot
+                    // that installs.
+                    self.frames.reset();
+                    crate::catlog!("upgrade: offer refused, one is already waiting for an answer");
+                    self.begin_reply(Status::NotNow, &[]);
+                    return;
+                }
                 Some(Opcode::UpgradeOffer) => {
                     // Claim the board's staging area (PSRAM on mk4/mk5/Q1, SPI-NOR on mk3).
                     // `None` -- no medium, or the SPI-NOR did not answer -- is refused on
                     // this first frame rather than after 256 KB have crossed the wire.
-                    // Drop whatever this task was holding first: a host re-offering after
-                    // a failed attempt is the same holder coming back, not a second one.
-                    // Anything *else* holding the medium -- a card image waiting on the
-                    // approval screen -- is refused, which is the point.
-                    self.stage = Stage::Idle;
+                    // Drop a transfer this task was still receiving first: a host
+                    // re-offering after a failed attempt is the same holder coming back,
+                    // not a second one. Anything *else* holding the medium -- a card image
+                    // waiting on the approval screen -- is refused, which is the point.
+                    self.drop_transfer();
                     let area = match staging::area() {
                         Ok(a) => a,
                         Err(why) => {
@@ -521,7 +561,7 @@ impl UsbTask {
                     // of payload after the header, and an image is thousands of frames,
                     // so the only way to split an eight-byte prefix across two of them is
                     // to be sending something that is not an image.
-                    self.stage = Stage::Idle;
+                    self.drop_transfer();
                     let Some(head) = payload.first_chunk::<8>() else {
                         self.frames.reset();
                         self.begin_reply(Status::BadRequest, &[]);

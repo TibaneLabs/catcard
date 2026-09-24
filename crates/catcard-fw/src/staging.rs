@@ -146,9 +146,12 @@ pub fn has_staging() -> bool {
 /// a person: one is "this board cannot", the other is "not while that is happening".
 pub fn area() -> Result<Area, Unavailable> {
     // Taken before the medium is brought up: a second holder must be told no rather than
-    // handed a fresh view of the same bytes. This is what stops a USB offer overwriting an
-    // image while the screen is still asking about it -- and, on a PSRAM board, what stops
-    // it landing on a transaction somebody is signing.
+    // handed a fresh view of the same bytes. This is what stops a USB offer overwriting a
+    // *card* image while the screen is still asking about it -- and, on a PSRAM board,
+    // what stops it landing on a transaction somebody is signing. It does not protect the
+    // USB task's own offer from a second USB offer: that is the same holder, and the task
+    // guards its own screen by refusing a new offer while one waits for an answer
+    // (`UsbTask::answer_pending`).
     #[cfg(not(feature = "board-mk3"))]
     {
         let lease = crate::psram::take(crate::psram::Use::Upgrade).map_err(|why| match why {
