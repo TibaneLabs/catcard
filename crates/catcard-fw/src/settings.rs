@@ -468,9 +468,17 @@ impl Slots for Files {
     fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, MediumError> {
         let mut path = heapless::String::new();
         Self::path(index, &mut path);
-        // A slot that is not there is not an error: most of the hundred never are.
-        let Ok(mut file) = self.vol.open_file(&path) else {
-            return Ok(None);
+        // A slot that is not there is not an error: most of the hundred never are. A
+        // slot that *is* there and will not open is another matter -- it may be the
+        // only copy of some wallet's settings, and reporting it as empty would hand it
+        // to the writer as free space. Only "not found" is empty; the rest is the medium's.
+        let mut file = match self.vol.open_file(&path) {
+            Ok(f) => f,
+            Err(e) if e.is_not_found() => return Ok(None),
+            Err(e) => {
+                crate::catlog!("settings: slot {} would not open: {:?}", index, e);
+                return Err(MediumError);
+            }
         };
         let len = (file.len() as usize).min(buf.len());
         let mut got = 0;
