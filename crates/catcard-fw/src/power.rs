@@ -111,8 +111,15 @@ pub unsafe fn init(gate: &Callgate) {
 /// main menu would be a button that does not work.
 pub fn tick() {
     let Some(pin) = BOARD.pwr_btn else { return };
-    // SAFETY: the foreground is single-threaded and every caller is the foreground poll;
-    // each read finishes within this statement.
+    // One poller at a time is what keeps these statics sound. Before the kernel starts,
+    // `usbtask::pump` polls from the menu's waiting loops; `start_service` then makes
+    // every `pump` a no-op *before* the scheduler runs, and from there only the USB
+    // task's `service` reaches here. The two never overlap, and `init` -- the only other
+    // writer -- ran on the boot path before either. Nothing on the UI task writes them,
+    // which is the difference from `idle`, whose counters a keypress resets.
+    //
+    // SAFETY: the single poller described above; each read finishes within this
+    // statement.
     let (hold, gate, continuity) = unsafe {
         (
             *addr_of_mut!(HOLD_CYCLES),
@@ -131,7 +138,7 @@ pub fn tick() {
 
     // The button that turned the device on is still down. Until it has been released
     // once, there is no press here to measure -- only the one that is still ending.
-    // SAFETY: foreground only, and the borrow ends with this statement.
+    // SAFETY: the single poller, as above, and the borrow ends with this statement.
     let seen_up = unsafe { &mut *addr_of_mut!(SEEN_UP) };
     if !*seen_up {
         if !pressed {
@@ -140,7 +147,7 @@ pub fn tick() {
         }
         return;
     }
-    // SAFETY: as above -- foreground only, and the borrow ends with this function.
+    // SAFETY: as above -- the single poller, and the borrow ends with this function.
     let since = unsafe { &mut *addr_of_mut!(HELD_SINCE) };
     // SAFETY: as above.
     let last = unsafe { &mut *addr_of_mut!(LAST_POLL) };

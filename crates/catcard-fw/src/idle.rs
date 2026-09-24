@@ -26,6 +26,17 @@
 //! length is not known. **Under-counting is the safe direction**: the device logs out a
 //! little late rather than in the middle of the very operation that caused the gap.
 //!
+//! # Two tasks, one counter
+//!
+//! Under the kernel [`note_key`] runs on the UI task and [`tick`] on the USB task,
+//! preempted at any instruction, so everything the two of them touch is an atomic.
+//! `Relaxed` is enough: on one core every store is visible in program order across a
+//! context switch, and there is nothing else to order it against. What a race can cost
+//! is bounded and in the safe direction -- a tick that read `LAST_TICK` just before a
+//! keypress reset it adds one gap, at most [`MAX_GAP_MS`], to a `QUIET_MS` that was just
+//! zeroed. A second, against a timeout measured in minutes, and a reset is never lost:
+//! the add is a read-modify-write, so a zero stored on either side of it survives it.
+//!
 //! # It can land anywhere a key wait can
 //!
 //! Exactly like the power button, which already powers a device down mid-anything. The
@@ -34,7 +45,8 @@
 //! timeout that politely declined to fire while something was in progress would be a
 //! timeout an attacker could hold open.
 
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of, addr_of_mut};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use catcard_callgate::{Callgate, abi::LogoutMode};
 use catcard_hal::dwt;
@@ -46,26 +58,37 @@ use catcard_hal::dwt;
 const MAX_GAP_MS: u32 = 1_000;
 
 /// The callgate, so a tick with no arguments can still reach the bootloader.
+///
+/// Written once by [`init`] on the boot path, before any task exists, and only read
+/// after -- which is why it and [`CYCLES_PER_MS`] can stay plain statics while the
+/// counters below cannot.
 static mut GATE: Option<Callgate> = None;
 /// CPU cycles in a millisecond, worked out at init. Zero means init never ran, which
-/// leaves the timeout inert rather than guessing at the clock.
+/// leaves the timeout inert rather than guessing at the clock. Written once, like
+/// [`GATE`].
 static mut CYCLES_PER_MS: u32 = 0;
 /// The timeout while on external power, in milliseconds; zero is off.
-static mut LIMIT_MS: u32 = 0;
+static LIMIT_MS: AtomicU32 = AtomicU32::new(0);
 /// The timeout while on the battery, in milliseconds; zero means [`LIMIT_MS`] applies
 /// there too.
-static mut BATTERY_LIMIT_MS: u32 = 0;
+static BATTERY_LIMIT_MS: AtomicU32 = AtomicU32::new(0);
 /// Milliseconds since the last keypress, as the ticks have added them up.
-static mut QUIET_MS: u32 = 0;
-/// Cycle count at the previous tick, or `None` when the count is starting fresh.
-static mut LAST_TICK: Option<u32> = None;
+static QUIET_MS: AtomicU32 = AtomicU32::new(0);
+/// Cycle count at the previous tick, or [`NO_TICK`] when the count is starting fresh.
+static LAST_TICK: AtomicU32 = AtomicU32::new(NO_TICK);
+/// The [`LAST_TICK`] value that means "no reading yet". A real reading that happens to
+/// equal it is taken as none, which restarts the measurement one tick late -- once in
+/// 2^32 ticks, and in the under-counting direction.
+const NO_TICK: u32 = u32::MAX;
 
 /// Remember how to log out, and how fast this board's clock runs.
 ///
 /// # Safety
-/// Reads RCC. Call once, from the boot path, after the clocks are up.
+/// Reads RCC. Call once, from the boot path, after the clocks are up and before the
+/// kernel starts.
 pub unsafe fn init(gate: &Callgate) {
-    // SAFETY: single-threaded boot path; this is the only writer and no tick has run.
+    // SAFETY: the boot path, before any task exists: this is the only writer these two
+    // statics ever have, and no tick has run.
     unsafe {
         *addr_of_mut!(CYCLES_PER_MS) = (catcard_hal::clock::hclk_hz() / 1_000).max(1);
         *addr_of_mut!(GATE) = Some(*gate);
@@ -78,13 +101,13 @@ pub unsafe fn init(gate: &Callgate) {
 /// just after login -- so nothing is armed until a wallet's own settings have said so.
 pub fn arm(minutes: Option<u32>, battery_minutes: Option<u32>) {
     let ms = |m: Option<u32>| m.unwrap_or(0).saturating_mul(60_000);
-    // SAFETY: foreground only, single core; the writes finish within this block.
-    unsafe {
-        *addr_of_mut!(LIMIT_MS) = ms(minutes);
-        *addr_of_mut!(BATTERY_LIMIT_MS) = ms(battery_minutes);
-        *addr_of_mut!(QUIET_MS) = 0;
-        *addr_of_mut!(LAST_TICK) = None;
-    }
+    // Four separate stores, and a tick on the USB task can land between any two of
+    // them; the worst it sees is the old limit against a fresh zero, which fires
+    // nothing. See "Two tasks, one counter" above.
+    LIMIT_MS.store(ms(minutes), Ordering::Relaxed);
+    BATTERY_LIMIT_MS.store(ms(battery_minutes), Ordering::Relaxed);
+    QUIET_MS.store(0, Ordering::Relaxed);
+    LAST_TICK.store(NO_TICK, Ordering::Relaxed);
     match minutes {
         Some(m) => crate::catlog!(
             "idle: logout after {} min ({:?} on battery)",
@@ -96,12 +119,13 @@ pub fn arm(minutes: Option<u32>, battery_minutes: Option<u32>) {
 }
 
 /// A key was pressed: the quiet period starts again.
+///
+/// Called on the UI task while [`tick`] runs on the USB task. Two relaxed stores: a tick
+/// between them measures from the new reading against the old total or the reverse, and
+/// either way what it adds is one gap, bounded by [`MAX_GAP_MS`].
 pub fn note_key() {
-    // SAFETY: foreground only, single core; the writes finish within this block.
-    unsafe {
-        *addr_of_mut!(QUIET_MS) = 0;
-        *addr_of_mut!(LAST_TICK) = Some(dwt::cycles());
-    }
+    QUIET_MS.store(0, Ordering::Relaxed);
+    LAST_TICK.store(dwt::cycles(), Ordering::Relaxed);
 }
 
 /// The timeout that applies right now, in milliseconds; zero is off.
@@ -110,8 +134,8 @@ pub fn note_key() {
 /// running from it -- which is the state where it is most likely to be away from a desk.
 /// With no battery value set, the one timeout covers both.
 fn limit_ms() -> u32 {
-    // SAFETY: foreground only; the reads finish within this statement.
-    let (mains, battery) = unsafe { (*addr_of_mut!(LIMIT_MS), *addr_of_mut!(BATTERY_LIMIT_MS)) };
+    let mains = LIMIT_MS.load(Ordering::Relaxed);
+    let battery = BATTERY_LIMIT_MS.load(Ordering::Relaxed);
     #[cfg(feature = "board-q1")]
     if battery > 0 && crate::battery::source() == Some(crate::battery::Source::Battery) {
         return battery;
@@ -125,36 +149,39 @@ fn limit_ms() -> u32 {
 ///
 /// Never returns if it fires: the bootloader takes the CPU.
 pub fn tick() {
-    // SAFETY: foreground only; the read finishes within this statement.
-    let per_ms = unsafe { *addr_of_mut!(CYCLES_PER_MS) };
+    // SAFETY: written once by `init` before any task existed, and only read since.
+    let per_ms = unsafe { *addr_of!(CYCLES_PER_MS) };
     let limit = limit_ms();
     if per_ms == 0 || limit == 0 {
         return;
     }
-    // SAFETY: foreground only, single core; the borrows end with this function.
-    let last = unsafe { &mut *addr_of_mut!(LAST_TICK) };
-    let quiet = unsafe { &mut *addr_of_mut!(QUIET_MS) };
 
     let now = dwt::cycles();
-    let Some(prev) = *last else {
+    let prev = LAST_TICK.swap(now, Ordering::Relaxed);
+    if prev == NO_TICK {
         // First tick since the timeout was armed or a key was pressed: this reading is
         // the start of the measurement, not a gap to be counted.
-        *last = Some(now);
         return;
-    };
-    *last = Some(now);
+    }
     // `wrapping_sub` because DWT_CYCCNT wraps; a gap long enough to have wrapped is
     // indistinguishable from a short one, which is what the clamp is for.
     let gap_ms = (now.wrapping_sub(prev) / per_ms).min(MAX_GAP_MS);
-    *quiet = quiet.saturating_add(gap_ms);
-    if *quiet < limit {
+    // A read-modify-write, so a keypress's zero on either side of it is kept: stored
+    // before, the total is this one gap; stored after, it is zero. Saturating, because
+    // a timeout set to the largest value the preferences allow must not wrap to nothing.
+    let before = QUIET_MS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
+            Some(q.saturating_add(gap_ms))
+        })
+        .unwrap_or_else(|q| q);
+    if before.saturating_add(gap_ms) < limit {
         return;
     }
     // Do not fire again while the callgate is unreachable: without it nothing here can
     // log out, and re-deciding every tick would fill the log with the same line.
-    *quiet = 0;
-    // SAFETY: foreground only; the read finishes within this statement.
-    let Some(gate) = (unsafe { *addr_of_mut!(GATE) }) else {
+    QUIET_MS.store(0, Ordering::Relaxed);
+    // SAFETY: written once by `init` before any task existed, and only read since.
+    let Some(gate) = (unsafe { *addr_of!(GATE) }) else {
         return;
     };
     crate::catlog!("idle: {} ms quiet, logging out", limit);
