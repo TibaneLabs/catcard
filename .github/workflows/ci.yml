@@ -16,7 +16,7 @@ jobs:
     name: Host tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -42,7 +42,7 @@ jobs:
         chains: [bitcoin, multichain]
         games: [true, false]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
@@ -157,7 +157,7 @@ jobs:
       matrix:
         chains: [bitcoin, multichain]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -187,7 +187,7 @@ jobs:
     name: Reproducible build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
@@ -236,7 +236,7 @@ jobs:
     name: Clean-room boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The original firmware is not part of this repository and must not become part
       # of it. This is a cheap tripwire, not a proof.
       - name: No original-firmware artefacts in the tree
