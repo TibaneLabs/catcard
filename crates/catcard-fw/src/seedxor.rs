@@ -296,23 +296,17 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
 /// Once it is stored it *is* the root, so keeping the temporary selection in force would
 /// mean the device claimed a temporary seed while working from the stored one -- the same
 /// wallet under two names, which is exactly the confusion the status bar exists to stop.
+///
+/// The write goes through [`menu::store_seed`], as the scanned SeedQR's does: write, read
+/// back, then claim. "Stored" is the last thing the owner hears before the shares go
+/// back in their envelopes, so it is said only once the slot has been seen to hold it.
 fn store(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, entropy: &[u8]) {
-    let Ok(mut secret) = catcard_callgate::pin::encode_bip39(entropy) else {
-        menu::message(ui.panel, JOIN, "could not encode", "that seed");
-        menu::wait_for_any_key(ui);
+    if !menu::store_seed(gate, login, ui, entropy) {
+        // It has already said why.
         return;
-    };
-    menu::message(ui.panel, "Storing", "do not disconnect", "");
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let stored = login.set_secret(&pin_gate, &secret);
-    secret.zeroize();
-    match stored {
-        Ok(_) => {
-            crate::key::to_root();
-            crate::catlog!("xor: joined seed stored");
-            menu::message(ui.panel, "Stored", "this is the wallet", "now");
-        }
-        Err(_) => menu::message(ui.panel, JOIN, "the secure element", "refused it"),
     }
+    crate::key::to_root();
+    crate::catlog!("xor: joined seed stored");
+    menu::message(ui.panel, "Stored", "this is the wallet", "now");
     menu::wait_for_any_key(ui);
 }
