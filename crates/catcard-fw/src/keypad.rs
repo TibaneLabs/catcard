@@ -173,6 +173,27 @@ impl GpioMatrix {
     /// # Safety
     /// Call once; takes exclusive ownership of the keypad pins.
     pub unsafe fn init() -> Option<Self> {
+        // SAFETY: same bring-up contract; `init_pins` claims the keypad pins.
+        let mut this = unsafe { Self::init_pins() }?;
+        // SAFETY: the column pins are configured as inputs and belong to the keypad; this
+        // wires their EXTI lines and enables the NVIC entries, done once from the boot path.
+        unsafe { this.init_edge_detect() };
+        Some(this)
+    }
+
+    /// Configure the matrix GPIOs and refuse a shorted matrix, **without** wiring the
+    /// keypress edge interrupt.
+    ///
+    /// [`init`](Self::init) is this plus [`init_edge_detect`](Self::init_edge_detect). A
+    /// purely polled reader that must not touch EXTI/NVIC -- the boot failsafe's held-key
+    /// check, which runs before the rest of the system is up -- uses this directly and
+    /// scans with [`Keypad::scan`](catcard_ui::keypad::Keypad::scan), which drives and
+    /// reads the pins and nothing else. The ordinary boot re-initialises the matrix
+    /// through `init` afterwards, wiring the edge path then.
+    ///
+    /// # Safety
+    /// Claims the keypad pins; call from single-threaded bring-up.
+    pub unsafe fn init_pins() -> Option<Self> {
         let (rows, cols) = match BOARD.input {
             #[cfg(not(feature = "board-q1"))]
             Input::Numpad4x3 { rows, cols } => (rows, cols),
@@ -215,15 +236,11 @@ impl GpioMatrix {
         }
 
         let edge_mask = cols.iter().fold(0u16, |m, &c| m | (1 << exti::line_of(c)));
-        let mut this = Self {
+        Some(Self {
             rows,
             cols,
             edge_mask,
-        };
-        // SAFETY: the column pins are configured as inputs and belong to the keypad; this
-        // wires their EXTI lines and enables the NVIC entries, done once from the boot path.
-        unsafe { this.init_edge_detect() };
-        Some(this)
+        })
     }
 
     /// One-time EXTI/NVIC setup for exact-edge keypress timing, then arm the lines for the
