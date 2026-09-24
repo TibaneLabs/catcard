@@ -96,28 +96,8 @@ unsafe fn DefaultHandler(irqn: i16) {
         crate::keypad::on_key_edge();
         return;
     }
-    // An interrupt we never enabled fired. Returning would resume a state nothing
-    // understands, and parking -- the old answer -- left the seed in SRAM on a device
-    // sitting on a desk. Same path as a fault: wipe what can be reached, then reset.
-    crate::panic::wipe_and_reset()
-}
-
-/// A hard fault: a bus fault, an escalated MemManage or UsageFault, or the `bkpt` a task
-/// that returned lands on when no debugger is attached.
-///
-/// Without this, cortex-m-rt's default is `loop {}`: the device halts with whatever was in
-/// RAM at the time -- a seed, a signing scalar -- still there, while a *panic* wipes. A
-/// fault must not be the softer failure. The frame is deliberately not read, formatted or
-/// stored: it is a snapshot of the registers at the fault, which can be key material.
-///
-/// The callgate is not used from here; see [`panic::wipe_and_reset`](crate::panic::wipe_and_reset).
-///
-/// `#[exception]` with the trampoline (the default) requires exactly this signature,
-/// `unsafe fn(&ExceptionFrame) -> !`, on cortex-m-rt 0.7.6 (its `exception` docs, "HardFault
-/// handler"). The release profile's `panic = "abort"` means no unwinding ever meets a
-/// diverging handler.
-// cortex-m-rt requires the handler be `unsafe`; the body itself does nothing unsafe.
-#[cortex_m_rt::exception]
-unsafe fn HardFault(_frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    crate::panic::wipe_and_reset()
+    // An interrupt we never enabled fired: park rather than return to a corrupt state.
+    loop {
+        cortex_m::asm::nop();
+    }
 }
