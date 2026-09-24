@@ -923,12 +923,17 @@ pub(crate) fn inspect(
     use zeroize::Zeroize as _;
 
     // The decrypted blob outlives the document that borrows its values, so it is declared
-    // first: the rows below point into it rather than copying it.
-    let mut buf = [0u8; SCRATCH];
+    // first: the rows below point into it rather than copying it. And it is wiped on
+    // every way out of this function -- it is the wallet's whole settings file, Seed
+    // Vault and notes included, and there is more than one early return below.
+    let mut buf = zeroize::Zeroizing::new([0u8; SCRATCH]);
 
     type Note = heapless::String<64>;
     // Owned text the document borrows: the summary lines, which have to be formatted.
     let mut notes: heapless::Vec<Note, 6> = heapless::Vec::new();
+    // What stands in for the two values this screen never prints; see below.
+    let mut seeds_len = Note::new();
+    let mut notes_len = Note::new();
     let mut rows: heapless::Vec<Row, 48> = heapless::Vec::new();
 
     // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
@@ -951,7 +956,7 @@ pub(crate) fn inspect(
     // still says something. Only its age and nickname are carried out, because the buffer
     // is needed again for the wallet blob.
     let mut pre = Note::new();
-    match store::read(&mut files, &nvstore::prelogin_key(), &mut buf) {
+    match store::read(&mut files, &nvstore::prelogin_key(), &mut buf[..]) {
         Ok(n) => {
             let doc = Doc::parse(&buf[..n]).ok();
             let age = doc.as_ref().and_then(|d| d.get_u64("_age")).unwrap_or(0);
@@ -995,7 +1000,7 @@ pub(crate) fn inspect(
     secret.zeroize();
 
     let mut wallet = Note::new();
-    let found = store::read(&mut files, &key, &mut buf);
+    let found = store::read(&mut files, &key, &mut buf[..]);
     match found {
         Ok(n) => {
             let _ = write!(wallet, "wallet: {n} bytes");
@@ -1015,9 +1020,26 @@ pub(crate) fn inspect(
     }
     if let Ok(n) = found {
         if let Ok(doc) = Doc::parse(&buf[..n]) {
+            // Two values are never printed: the Seed Vault, which is other wallets'
+            // seeds, and the notes, which hold passwords. Their length is enough to
+            // say the decryption came out right, which is all this screen is for.
+            let hidden = |key: &str, line: &mut Note| {
+                let _ = write!(
+                    line,
+                    "[{} bytes, not shown]",
+                    doc.get(key).map_or(0, str::len)
+                );
+            };
+            hidden(catcard_settings::vault::KEY, &mut seeds_len);
+            hidden("notes", &mut notes_len);
             for e in doc.entries() {
                 let _ = rows.push(Row::body(e.key).small());
-                let _ = rows.push(Row::body(e.raw));
+                let shown = match e.key {
+                    k if k == catcard_settings::vault::KEY => seeds_len.as_str(),
+                    "notes" => notes_len.as_str(),
+                    _ => e.raw,
+                };
+                let _ = rows.push(Row::body(shown));
             }
         } else {
             let _ = rows.push(Row::body("the blob decrypted but is not JSON"));
