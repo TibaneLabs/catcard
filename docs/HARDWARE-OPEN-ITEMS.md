@@ -629,15 +629,29 @@ so a bootloader that does clear it will show up in a device log rather than go u
 Unknown: whether any call clears the flag short of a factory path, and whether stock reads
 it the same way. Neither blocks anything -- what a wallet needs is the bytes.
 
-## The broadcast URL's chain segment `[?]`
+## The broadcast URL: host and chain segment `[?]`
 
 `crate::nfc` writes `https://www.blockexplorer.com/<chain>/broadcast?tx=<hex>` to the tag,
-with `<chain>` as `btc`. The host and the path are the explorer's, given with the request;
-the segment for Bitcoin is a guess, and nothing on the device can check it.
+with `<chain>` as `btc`. Neither half is confirmed:
 
-A wrong segment is a page that does not know the transaction, not a wrong broadcast: the
-transaction is in the query either way, and the phone's owner sees the address before
-anything is sent. Settled by tapping a phone on a written tag once.
+- **The host** (`HOST_AND_PATH`) is the explorer named with the request. That it serves a
+  `/<chain>/broadcast?tx=` page at all, and that this is the host the owner wants a phone
+  sent to, has not been checked -- no tag has been tapped yet. It is the one string in
+  the firmware that names a third party.
+- **The chain segment** (`CHAIN`) is a guess at what that explorer uses for Bitcoin.
+
+What depends on them: the NFC broadcast offer after a signed transaction, and nothing
+else. Signing, the card and the USB paths do not touch either.
+
+A wrong host or segment is a page that does not know the transaction, not a wrong
+broadcast: the transaction is in the query either way, and the phone's owner sees the
+address before anything is sent. Settled by tapping a phone on a written tag once.
+
+**Privacy.** A tap is a web request from the phone: the host learns the signed
+transaction and the phone's IP address, together, before the owner has decided to
+broadcast. That is inherent to sending a phone to any explorer, and it is why the offer
+is opt-in per transaction and never the only way out. A device that should not tell
+anyone anything broadcasts from the card or over USB instead.
 
 Both are one `const` each at the top of `crates/catcard-fw/src/nfc.rs`.
 

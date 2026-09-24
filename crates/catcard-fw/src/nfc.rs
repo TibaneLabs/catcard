@@ -147,9 +147,12 @@ fn clear() {
     }
 }
 
-/// Where a tapped phone is sent. The path is the explorer's own, and the chain segment is
-/// the one it uses for Bitcoin `[?]` -- nothing here can check it, and a wrong segment
-/// gives a page that does not know the transaction rather than a wrong broadcast.
+/// Where a tapped phone is sent `[?]`. The host is the one given with the request and the
+/// chain segment is the one it uses for Bitcoin, and nothing here can check either: no
+/// tag has been tapped yet. A wrong host or segment gives a page that does not know the
+/// transaction rather than a wrong broadcast. The phone's owner sees the address before
+/// anything is sent, and the tap tells that host the transaction and the phone's IP --
+/// see `docs/HARDWARE-OPEN-ITEMS.md` §"The broadcast URL".
 const HOST_AND_PATH: &str = "blockexplorer.com";
 /// The chain segment Bitcoin goes out under.
 pub(crate) const CHAIN: &str = "btc";
