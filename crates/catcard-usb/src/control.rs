@@ -307,6 +307,10 @@ fn endpoint_exists(index: u16) -> bool {
     matches!(index, 0x0000 | 0x0080) || is_data_endpoint(index)
 }
 
+/// EP0's max packet size, taken from the device descriptor rather than restated.
+const EP0_PACKET: usize = descriptor::DEVICE[7] as usize;
+const _: () = assert!(EP0_PACKET == crate::msc::DEVICE[7] as usize);
+
 fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'a> {
     let what = (setup.wValue >> 8) as u8;
     let index = setup.wValue as u8;
@@ -390,8 +394,16 @@ fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'
         // A control-pipe GET_REPORT is answered with an empty report rather than a
         // stall: some hosts probe it during enumeration, and real traffic goes over the
         // interrupt endpoints.
+        //
+        // Never a whole packet. The HAL sends a data stage as one packet, and a data
+        // stage shorter than `wLength` has to end in a short one -- a full 64-byte packet
+        // against a longer `wLength` is a transfer still in progress, and the host waits
+        // its timeout out for the rest. One byte under the packet size is short whatever
+        // was asked for.
         hid_request::GET_REPORT => {
-            let n = (setup.wLength as usize).min(scratch.len());
+            let n = (setup.wLength as usize)
+                .min(EP0_PACKET - 1)
+                .min(scratch.len());
             scratch[..n].fill(0);
             Action::Data(&scratch[..n])
         }
@@ -734,6 +746,34 @@ mod tests {
                 let want = if ours { Action::Ack } else { Action::Stall };
                 assert_eq!(set, want, "set {index:#06x} in {mode:?}");
             }
+        }
+    }
+
+    #[test]
+    fn get_report_never_fills_a_whole_packet() {
+        // A data stage shorter than wLength must end in a short packet, and the HAL
+        // sends exactly one packet. So the empty report is always under 64 bytes: a
+        // host asking for more would otherwise wait out its timeout for a second packet
+        // that never comes.
+        let mut d = dev();
+        let mut s = [0u8; 64];
+        for want in [1u16, 8, 63, 64, 65, 255, 4096, 0xFFFF] {
+            let a = handle(
+                &mut d,
+                &setup(0xA1, hid_request::GET_REPORT, 0x0100, 0, want),
+                &mut s,
+            );
+            let Action::Data(b) = a else { panic!("{a:?}") };
+            assert!(
+                b.len() < 64,
+                "wLength {want}: {} bytes is a full packet",
+                b.len()
+            );
+            assert!(
+                b.len() <= want as usize,
+                "wLength {want}: sent more than asked"
+            );
+            assert!(b.iter().all(|&x| x == 0));
         }
     }
 
