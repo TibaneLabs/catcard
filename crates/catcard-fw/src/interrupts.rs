@@ -101,3 +101,22 @@ unsafe fn DefaultHandler(irqn: i16) {
         cortex_m::asm::nop();
     }
 }
+
+/// A MemManage fault: the main stack reached the MPU fence under it (`stackguard`), or
+/// something read the fenced 32 bytes on purpose -- the self-test's probe does exactly
+/// that.
+///
+/// Only reachable with the fence armed, which only the Debug self-tests do; the MPU is off
+/// on every boot, and `stackguard::arm` is what sets `SHCSR.MEMFAULTENA` so this handler
+/// is even taken. Installing it therefore changes nothing on the boot path -- with the bit
+/// clear no MemManage fault is ever routed here. Same ending as a wipe: what the stack
+/// holds at the moment it overflows is the reason the fence exists, and the only safe
+/// thing to do with it is wipe and reset. `HFNMIENA` is left clear, so an escalated fault
+/// runs with the MPU bypassed and cannot trip the fence itself.
+///
+/// Source for the escalation and priority rules: ARMv7-M ARM §B1.5.4, §B3.5.3 [C].
+// cortex-m-rt requires the handler be `unsafe`; the body itself does nothing unsafe.
+#[cortex_m_rt::exception]
+unsafe fn MemoryManagement() -> ! {
+    crate::panic::wipe_and_reset()
+}

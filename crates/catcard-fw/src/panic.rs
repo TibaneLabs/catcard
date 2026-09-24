@@ -69,6 +69,45 @@ pub fn wipe_and_stop() -> ! {
     }
 }
 
+/// Clear what we can reach, then reset the core: the path for **handler mode**.
+///
+/// A `MemoryManagement` fault (the armed stack fence, `stackguard`) arrives with the CPU
+/// in handler mode. The callgate is only known to work from thread mode: every documented
+/// call is made from the firmware's foreground with interrupts masked, and the reference
+/// says nothing about entering the firewall from an exception
+/// (hw-reference/bootloader-callgate-abi.md §0 describes the entry; nothing describes it
+/// from a handler). A branch into it from a fault handler could close the firewall and
+/// reset the CPU with SRAM intact, which is the outcome this exists to prevent. So gate 3
+/// is **not** called here.
+///
+/// Instead: mask, drop the MPU fence, wipe `.data`, `.bss` and the claimed spare bank,
+/// then `SYSRESETREQ`. The reset runs the bootloader's own start-up path -- the one a
+/// power cycle runs -- and the seed is asked for again through the PIN. What the local
+/// wipe cannot reach is the stack, and the fault frame on it; the frame is never formatted
+/// or stored, and a reset is the surest way to stop anything reading it.
+///
+/// This is the hook the kernel's switch checks call on a tripped guard word, and the
+/// handler for the fence's MemManage fault. Nothing arms either on the boot path.
+///
+/// `SYSRESETREQ` is `AIRCR` bit 2, written with `VECTKEY`. Source: ARMv7-M ARM §B3.2.6 [C];
+/// `cortex_m::peripheral::SCB::sys_reset` does exactly that write and spins.
+pub fn wipe_and_reset() -> ! {
+    // SAFETY: interrupts off first, so nothing runs on a half-wiped heap. Already the case
+    // at a fault's own priority, but this is also reached from the kernel's overflow hook.
+    unsafe {
+        core::arch::asm!("cpsid i", options(nomem, nostack, preserves_flags));
+    }
+    // The MPU fence under the main stack (`stackguard`) comes down before anything else:
+    // this may *be* the fence's fault, with the stack already at the floor, and a wipe
+    // that pushed one frame further would fault again inside the fault handler -- the loop
+    // that ends with nothing wiped. Off, the wipe and the reset cannot trip it. Inert when
+    // no fence is armed, which is every boot.
+    // SAFETY: one store to `MPU_CTRL`; nothing can fault from unfencing memory.
+    unsafe { catcard_hal::mpu::disarm() };
+    local_wipe();
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
 /// Zero `.data`, `.bss`, and the spare RAM bank if the heap had claimed it.
 ///
 /// Does **not** clear the stack: we are running on it. That gap is the reason the
