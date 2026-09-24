@@ -604,10 +604,11 @@ impl Transport for Sdmmc {
         self.armed = true;
     }
 
-    fn arm_data(&mut self, len: usize, to_host: bool) {
-        // SAFETY: as in `arm_block_read`.
-        unsafe { arm_data(self.base, !self.new_ip, len, to_host) }
+    fn arm_data(&mut self, len: usize, to_host: bool) -> Result<(), Error> {
+        // SAFETY: as in `arm_block_read`. A refused length writes nothing.
+        unsafe { arm_data(self.base, !self.new_ip, len, to_host)? };
         self.armed = true;
+        Ok(())
     }
 }
 
@@ -619,8 +620,11 @@ impl Transport for Sdmmc {
 /// # Safety
 /// Caller owns SDMMC1.
 pub unsafe fn arm_block_read(b: u32, dten: bool) {
+    // A block is a length the controller can always express, so the result is settled at
+    // compile time and dropped here rather than threaded through every block read.
+    const { assert!(BLOCK_LEN.is_power_of_two() && BLOCK_LEN <= MAX_TRANSFER_LEN) };
     // SAFETY: as documented.
-    unsafe { arm_data(b, dten, BLOCK_LEN, true) }
+    let _ = unsafe { arm_data(b, dten, BLOCK_LEN, true) };
 }
 
 /// Arm the data path for one transfer of `len` bytes.
@@ -632,9 +636,16 @@ pub unsafe fn arm_block_read(b: u32, dten: bool) {
 /// of six or fourteen bytes gives a transfer the controller can express and one of
 /// sixteen does not.
 ///
+/// A length the controller cannot express is refused before any register is written --
+/// `trailing_zeros` of a non-power-of-two names a *smaller* block than `DLEN` says, and
+/// zero has thirty-two of them, which lands a stray bit in `DCTRL`.
+///
 /// # Safety
 /// Caller owns SDMMC1.
-pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) {
+pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) -> Result<(), Error> {
+    if len == 0 || !len.is_power_of_two() || len > MAX_TRANSFER_LEN {
+        return Err(Error::Unsupported);
+    }
     let exponent = len.trailing_zeros();
     // SAFETY: as documented.
     unsafe {
@@ -643,7 +654,12 @@ pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) {
         let dir = if to_host { DCTRL_DTDIR_CARD_TO_HOST } else { 0 };
         reg::write(b + DCTRL, en | dir | (exponent << 4));
     }
+    Ok(())
 }
+
+/// The largest block `DCTRL.DBLOCKSIZE` can name: the field is four bits of exponent, so
+/// 2^14. Source: RM0432 §SDMMC data control register, `DBLOCKSIZE` [C].
+const MAX_TRANSFER_LEN: usize = 1 << 14;
 
 /// Arm the data path for one outgoing block, before the write command goes out.
 ///
@@ -654,8 +670,10 @@ pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) {
 /// # Safety
 /// Caller owns SDMMC1.
 pub unsafe fn arm_block_write(b: u32, dten: bool) {
+    // As in `arm_block_read`: a block length is always expressible.
+    const { assert!(BLOCK_LEN.is_power_of_two() && BLOCK_LEN <= MAX_TRANSFER_LEN) };
     // SAFETY: as documented.
-    unsafe { arm_data(b, dten, BLOCK_LEN, false) }
+    let _ = unsafe { arm_data(b, dten, BLOCK_LEN, false) };
 }
 
 /// Steer the board's slot multiplexer to `slot`. Nothing to do on a single-slot board.

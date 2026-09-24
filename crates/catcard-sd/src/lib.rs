@@ -106,10 +106,16 @@ pub trait Transport {
     /// is a real constraint on what a caller may ask for and not a detail of this
     /// driver.
     ///
-    /// Defaults to doing nothing, like the block arms: a transport that models a fake
-    /// card has nothing to arm.
-    fn arm_data(&mut self, len: usize, to_host: bool) {
-        let _ = (len, to_host);
+    /// A length that is not a power of two, or zero, is refused with
+    /// [`Error::Unsupported`] and nothing is armed. The default does only that check --
+    /// a transport that models a fake card has nothing to arm, but it should refuse what
+    /// the real controller refuses, so a caller is told the same thing on both.
+    fn arm_data(&mut self, len: usize, to_host: bool) -> Result<(), Error> {
+        let _ = to_host;
+        if len == 0 || !len.is_power_of_two() {
+            return Err(Error::Unsupported);
+        }
+        Ok(())
     }
 
     /// Read a short payload, having already armed and issued its command.

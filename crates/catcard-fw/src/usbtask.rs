@@ -1595,12 +1595,17 @@ fn sd_raw(req: &[u8], out: &mut [u8]) -> Option<usize> {
     }
     let (dev, _card) = held.as_mut()?;
 
-    if to_host {
-        dev.arm_data(len, true);
+    // A length the controller cannot express is refused before the command goes out, and
+    // reported the way a failed command is: the host asked for a transfer that cannot
+    // happen, so no command is sent either.
+    let armed = if to_host {
+        dev.arm_data(len, true)
     } else if to_card {
-        dev.arm_data(len, false);
-    }
-    let answer = dev.command(cmd, arg, resp);
+        dev.arm_data(len, false)
+    } else {
+        Ok(())
+    };
+    let answer = armed.and_then(|()| dev.command(cmd, arg, resp));
     let (status, words) = match answer {
         Ok(words) => (0u8, words),
         Err(_) => (1u8, [0u32; 4]),
