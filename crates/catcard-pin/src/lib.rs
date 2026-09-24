@@ -668,13 +668,22 @@ impl Login {
     /// Belongs immediately after [`Self::set_secret`]. A write the gate accepted but the
     /// secure element did not keep would otherwise surface at the *next* unlock — by
     /// which point the words have been shown, written down, and trusted.
+    ///
+    /// The comparison is constant-time: every one of the [`SECRET_LEN`] bytes is
+    /// touched whether or not it matches, so how long it takes says nothing about
+    /// *where* the two differ. A plain `==` stops at the first differing byte, and a
+    /// host timing the call could place a mismatch one byte at a time. Masking hides
+    /// the inside and not the total, so a firmware caller should also run this where it
+    /// runs everything else that handles the secret: inside its masked key-work section
+    /// (`keywork::run`), where no USB reply can be timed against it.
     pub fn verify_secret<G: PinGate>(
         &mut self,
         gate: &G,
         expected: &[u8; SECRET_LEN],
     ) -> Result<bool, Failure> {
+        use purecrypto::ct::ConstantTimeEq;
         let mut got = self.fetch_secret(gate)?;
-        let same = got == *expected;
+        let same: bool = got[..].ct_eq(&expected[..]).into();
         got.zeroize();
         Ok(same)
     }

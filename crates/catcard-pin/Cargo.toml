@@ -14,6 +14,9 @@ std = []
 
 [dependencies]
 catcard-callgate.workspace = true
+# Only for `ct::ConstantTimeEq`: the read-back compare must not stop at the first
+# differing byte. No crypto feature is enabled; the PIN gate does none of its own.
+purecrypto.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
