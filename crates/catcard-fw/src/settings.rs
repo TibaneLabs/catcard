@@ -122,15 +122,19 @@ pub(crate) fn wallet_key(
         stash.zeroize();
         key
     };
-    // Which file, by the first bytes of its key: enough to tell two wallets' files apart
-    // in a log, and useless for opening either.
-    let k = key.as_bytes();
+    // Which file, by two bytes of the key's SHA-256: enough to tell two wallets' files
+    // apart in a log, and nothing of the key itself -- two bytes of *that* would be two
+    // bytes a reader of the log no longer has to guess.
+    let id = {
+        use purecrypto::hash::{Digest as _, Sha256};
+        Sha256::digest(key.as_bytes())
+    };
     crate::catlog!(
         "settings: {} key for {}, id {:02x}{:02x}",
         kind,
         crate::key::label(),
-        k[0],
-        k[1]
+        id[0],
+        id[1]
     );
     // SAFETY: as above.
     unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key.clone()) };
