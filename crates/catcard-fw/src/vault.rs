@@ -32,7 +32,7 @@ use catcard_callgate::Callgate;
 use catcard_settings::store::SCRATCH;
 use catcard_settings::vault::{self, MAX_SEEDS, Seed};
 use core::fmt::Write as _;
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::menu;
 use crate::ui::Ui;
@@ -55,7 +55,9 @@ enum Then {
     Leave,
     Store,
     Use {
-        raw: [u8; RAW_MAX],
+        /// Wiped with the enum, wherever it is dropped -- a screen that decoded a
+        /// secret and then went another way leaves nothing behind either.
+        raw: Zeroizing<[u8; RAW_MAX]>,
         len: usize,
         method: heapless::String<16>,
         /// What the entry says the wallet's fingerprint is, to check what loads against.
@@ -78,11 +80,10 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
                 method,
                 xfp,
             } => {
-                let mut raw = raw;
                 use_seed(gate, login, ui, &raw[..len], &method, &xfp);
-                raw.zeroize();
-                // The key changed under them; going back to a list that says "store the
-                // current key" about a key that is now in it would be a lie.
+                // `raw` is wiped as it goes out of scope here. And the key changed under
+                // them: going back to a list that says "store the current key" about a
+                // key that is now in it would be a lie.
                 return;
             }
             Then::Rename(xfp) => rename(gate, login, ui, &xfp),
@@ -196,8 +197,8 @@ fn what_with(ui: &mut Ui<'_>, s: &Seed<'_>) -> Then {
     let _ = xfp.push_str(s.xfp);
     match row {
         0 => {
-            let mut raw = [0u8; RAW_MAX];
-            let Some(len) = vault::decode_secret(s.secret, &mut raw) else {
+            let mut raw = Zeroizing::new([0u8; RAW_MAX]);
+            let Some(len) = vault::decode_secret(s.secret, &mut raw[..]) else {
                 return say(ui, "that entry is damaged");
             };
             let mut method_owned: heapless::String<16> = heapless::String::new();
@@ -480,7 +481,9 @@ fn save(
     // The new list is rendered into its own buffer before the document is touched: the
     // entries borrow the document, so the rendering has to finish before the editor
     // starts moving it about.
-    let mut out_buf = [0u8; 1024];
+    // Wiped on the way out, whichever way that is: it is the whole vault, rendered --
+    // every kept seed, in hex.
+    let mut out_buf = Zeroizing::new([0u8; 1024]);
     let len = {
         let doc = catcard_settings::json::Doc::parse(&doc_buf[..n]).unwrap_or_default();
         let mut seeds = [Seed::default(); MAX_SEEDS];
@@ -500,7 +503,7 @@ fn save(
             }
             Change::Forget(xfp) => vault::without(&seeds[..have], xfp, &mut next),
         };
-        vault::render(&next[..kept], &mut out_buf).map_err(|_| "could not write the list")?
+        vault::render(&next[..kept], &mut out_buf[..]).map_err(|_| "could not write the list")?
     };
     let text = core::str::from_utf8(&out_buf[..len]).map_err(|_| "not text")?;
 
