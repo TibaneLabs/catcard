@@ -759,11 +759,10 @@ pub fn wait_tear() -> bool {
             Pull::None,
             Speed::Low,
         );
-        // Fifty milliseconds, bounded by poll count as well as by the cycle counter so a
-        // stopped counter cannot turn a panel with no tear signal into a hang.
-        let mut deadline = catcard_hal::dwt::Deadline::after(catcard_hal::clock::hclk_hz() / 20);
+        let limit = catcard_hal::clock::hclk_hz() / 20;
+        let start = catcard_hal::dwt::cycles();
         let mut was_high = gpio::read(tear);
-        while !deadline.expired() {
+        while catcard_hal::dwt::cycles().wrapping_sub(start) < limit {
             let high = gpio::read(tear);
             if high && !was_high {
                 return true;

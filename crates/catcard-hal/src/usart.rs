@@ -173,7 +173,7 @@ impl Usart {
 
     /// Send one byte, waiting up to `cycles` for room in the transmit register.
     pub fn write_byte(&mut self, b: u8, cycles: u32) -> Result<(), Error> {
-        let mut deadline = crate::dwt::Deadline::after(cycles);
+        let until = crate::dwt::cycles().wrapping_add(cycles);
         loop {
             // SAFETY: our own peripheral.
             if unsafe { crate::reg::read(ISR) } & ISR_TXE != 0 {
@@ -181,7 +181,7 @@ impl Usart {
                 unsafe { crate::reg::write(TDR, b as u32) };
                 return Ok(());
             }
-            if deadline.expired() {
+            if crate::dwt::cycles().wrapping_sub(until) < u32::MAX / 2 {
                 return Err(Error::Timeout);
             }
         }
@@ -196,13 +196,13 @@ impl Usart {
         for &b in bytes {
             self.write_byte(b, cycles)?;
         }
-        let mut deadline = crate::dwt::Deadline::after(cycles);
+        let until = crate::dwt::cycles().wrapping_add(cycles);
         loop {
             // SAFETY: our own peripheral.
             if unsafe { crate::reg::read(ISR) } & ISR_TC != 0 {
                 return Ok(());
             }
-            if deadline.expired() {
+            if crate::dwt::cycles().wrapping_sub(until) < u32::MAX / 2 {
                 return Err(Error::Timeout);
             }
         }
@@ -214,11 +214,8 @@ impl Usart {
     /// is not a unit anybody can reason about: how long it waited depended on the core
     /// clock and on what the optimiser did with the loop, so nobody could say whether a
     /// budget covered a byte at 9600 or not. Cycles are what the caller actually means.
-    ///
-    /// The deadline carries its own poll budget, so a stopped cycle counter turns this
-    /// into a long wait rather than an endless one.
     pub fn read_byte(&mut self, cycles: u32) -> Result<u8, Error> {
-        let mut deadline = crate::dwt::Deadline::after(cycles);
+        let until = crate::dwt::cycles().wrapping_add(cycles);
         loop {
             // SAFETY: our own peripheral.
             let isr = unsafe { crate::reg::read(ISR) };
@@ -239,7 +236,7 @@ impl Usart {
                 // SAFETY: as above.
                 return Ok(unsafe { crate::reg::read(RDR) } as u8);
             }
-            if deadline.expired() {
+            if crate::dwt::cycles().wrapping_sub(until) < u32::MAX / 2 {
                 return Err(Error::Timeout);
             }
         }

@@ -49,88 +49,11 @@ pub fn is_running() -> bool {
     cycles() != a
 }
 
-/// Whether `DWT_CTRL.CYCCNTENA` is set: one register read, against [`is_running`]'s
-/// sixty-four-turn spin. Cheap enough to ask on every wait.
-#[inline]
-fn counting() -> bool {
-    // SAFETY: DWT_CTRL is readable at any time; reading it has no side effects.
-    unsafe { reg::read(fixed::DWT_CTRL) & DWT_CTRL_CYCCNTENA != 0 }
-}
-
-/// Fewest cycles one turn of a polling loop can cost, for sizing a turn budget.
-///
-/// A load, a compare and a branch is more than this on a Cortex-M4, and every wait here
-/// has a peripheral read in the loop as well. So `cycles / CYCLES_PER_TURN` turns is
-/// never *shorter* than `cycles` of real time, which is what a wait that has lost its
-/// clock needs: it still ends, and not early.
-const CYCLES_PER_TURN: u32 = 4;
-
 /// Busy-wait for a number of CPU cycles.
-///
-/// **Bounded whatever the counter does.** With `CYCCNTENA` clear the counter reads a
-/// constant and the cycle comparison never becomes true; the wait then spins a counted
-/// number of turns instead. And even with the bit set a counter can stand still (`TRCENA`
-/// dropped, a debugger holding the core's trace unit), so the cycle loop also carries a
-/// turn budget of `n`: each turn is at least one cycle, so a counter that *is* running
-/// always ends the wait first, and a stopped one ends it after `n` turns. On a healthy
-/// board neither fallback is ever taken.
 pub fn delay_cycles(n: u32) {
-    if !counting() {
-        for _ in 0..n / CYCLES_PER_TURN {
-            core::hint::spin_loop();
-        }
-        return;
-    }
     let start = cycles();
-    let mut turns = n;
     while cycles().wrapping_sub(start) < n {
-        if turns == 0 {
-            return;
-        }
-        turns -= 1;
         core::hint::spin_loop();
-    }
-}
-
-/// A bounded wait: a point on the cycle counter, plus a poll budget that ends the wait
-/// even if the counter has stopped.
-///
-/// Drivers poll a status register until it says ready or the deadline passes. Written
-/// against `cycles()` alone, that loop never ends on a stopped counter -- a dead panel or
-/// a dead scanner module then holds the CPU forever instead of reporting a timeout. The
-/// budget is the same guard [`delay_cycles`] carries: one poll of the budget per
-/// [`expired`](Self::expired), sized so a running counter always fires first.
-pub struct Deadline {
-    until: u32,
-    polls: u32,
-}
-
-impl Deadline {
-    /// A deadline `cycles` from now.
-    pub fn after(cycles_from_now: u32) -> Self {
-        // With the counter running, the caller's loop costs more than one cycle a turn,
-        // so `cycles_from_now` polls outlast the cycle deadline and never cut it short.
-        // Without it, the polls are the whole clock, and each is at least
-        // `CYCLES_PER_TURN` long.
-        let polls = if counting() {
-            cycles_from_now
-        } else {
-            cycles_from_now / CYCLES_PER_TURN
-        };
-        Deadline {
-            until: cycles().wrapping_add(cycles_from_now),
-            polls: polls.max(1),
-        }
-    }
-
-    /// Whether the wait is over. Ask once per turn of the polling loop: every call spends
-    /// one poll of the budget.
-    pub fn expired(&mut self) -> bool {
-        if self.polls == 0 {
-            return true;
-        }
-        self.polls -= 1;
-        cycles().wrapping_sub(self.until) < u32::MAX / 2
     }
 }
 
