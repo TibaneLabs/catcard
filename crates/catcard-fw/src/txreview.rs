@@ -39,6 +39,14 @@
 //!   in front of the list saying how many there are. A transaction that calls a program
 //!   this build has no reader for is normal on Solana, so refusing to sign those would
 //!   make the device useless and saying nothing would make it dangerous.
+//!
+//! # A total that is short of something says so
+//!
+//! "Signing this will:" is the number somebody reads instead of the rows. It is added up
+//! from the parts that were decoded, so a part that was not -- or one whose amount is not
+//! written in the bytes, like the rent a closed account returns -- leaves it short. The
+//! summary then ends with a line saying so, because a total that is silently partial
+//! reads as a whole one, and that is worse than no total.
 
 use catcard_ui::art::txicons::Kind;
 use catcard_ui::scroll::Line;
@@ -101,6 +109,8 @@ pub(crate) struct Review {
     dropped: usize,
     /// Parts that could not be read.
     alarms: usize,
+    /// Parts that move an amount the bytes do not give, so the total is short of it.
+    unwritten: usize,
 }
 
 impl Review {
@@ -114,7 +124,14 @@ impl Review {
             rows,
             dropped: 0,
             alarms: 0,
+            unwritten: 0,
         })
+    }
+
+    /// Whether the summary at the top is short of something: a part it could not read,
+    /// or an amount the bytes do not carry.
+    fn incomplete(&self) -> bool {
+        self.alarms > 0 || self.unwritten > 0
     }
 
     fn push(&mut self, role: Role, label: &str, args: core::fmt::Arguments<'_>) {
@@ -158,6 +175,16 @@ impl Review {
             "",
             args,
         );
+    }
+
+    /// Say that the element above moves an amount these bytes do not give.
+    ///
+    /// Closing a token account returns its rent to somebody, and how much is in the
+    /// account's balance on-chain rather than in the instruction. The row is ordinary;
+    /// what this changes is the summary, which is now short of a number it cannot
+    /// know, and says so.
+    pub(crate) fn unwritten(&mut self) {
+        self.unwritten += 1;
     }
 
     /// A labelled field of the element above: shown when it is opened.
@@ -243,8 +270,11 @@ impl Review {
             return None;
         }
         lines.push(Line::title(title));
-        // What it comes to, first. Everything below is how it got there.
-        if !self.effects.is_empty() {
+        // What it comes to, first. Everything below is how it got there. A summary that
+        // is short of something ends by saying so -- and is shown even when it has no
+        // number in it at all, since "whatever the unread parts do" is then the whole
+        // answer to what signing will do.
+        if !self.effects.is_empty() || self.incomplete() {
             lines.push(Line::body("Signing this will:").small());
             for effect in &self.effects {
                 lines.push(Line::body(effect).large());
@@ -252,6 +282,16 @@ impl Review {
         }
         if self.effects_lost {
             lines.push(Line::body("and more than fits here").small());
+        }
+        if self.incomplete() {
+            let joined = !self.effects.is_empty() || self.effects_lost;
+            let said = match (self.alarms > 0, joined) {
+                (true, true) => "and whatever the unread parts do",
+                (true, false) => "whatever the unread parts do",
+                (false, true) => "and amounts these bytes do not give",
+                (false, false) => "move amounts these bytes do not give",
+            };
+            lines.push(Line::body(said).small());
         }
         for (i, row) in self.rows.iter().enumerate() {
             let Role::Element { kind, .. } = row.role else {

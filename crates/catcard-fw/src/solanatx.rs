@@ -155,6 +155,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
             );
             out.note(format_args!("the priority is not set out here,"));
             out.note(format_args!("so it cannot be totalled"));
+            out.unwritten();
         }
     }
     account_field(out, tx, "paid by", payer, &mut addr);
