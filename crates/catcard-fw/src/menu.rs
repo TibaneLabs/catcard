@@ -942,31 +942,57 @@ pub fn run(session: Session<'_>) -> ! {
             }
             if showing_offer {
                 match key {
-                    Key::Confirm => match usbtask::approve() {
-                        Ok(region) => {
-                            message(ui.panel, "Installing", "do not disconnect", "");
-                            crate::staging::install(gate, login, ui.panel, region);
-                            // `install` only returns when the install did *not* happen,
-                            // and what it painted says why. Redrawing the menu over it
-                            // without waiting threw that away, which is how a refusal
-                            // came to look like a device that had simply stopped.
-                            wait_for_any_key(&mut ui);
-                            showing_offer = false;
-                            redraw = true;
-                        }
-                        Err(why) => {
-                            crate::catlog!("install: commit refused: {:?}", why);
-                            message(
+                    Key::Confirm => {
+                        // An image that sets the anti-downgrade mark is asked about
+                        // twice, as Destroy seed is: the first yes was on a screen that
+                        // also said the version and the key, and one question is what
+                        // people press through. The offer is re-read after the answer
+                        // and must still be the one that was shown -- a host can replace
+                        // it while the question is up, and a yes to this question is a
+                        // yes to *that* image, not to whatever arrived since.
+                        if let Some(a) = usbtask::pending()
+                            && crate::session::sets_high_water(&a)
+                        {
+                            ask(
                                 ui.panel,
-                                "Not installed",
-                                crate::sdupgrade::describe(why),
-                                "any key to go back",
+                                "Really install?",
+                                "sets anti-downgrade",
+                                "mark: no way back",
                             );
-                            wait_for_any_key(&mut ui);
-                            showing_offer = false;
-                            redraw = true;
+                            if !confirmed(&mut ui) || usbtask::pending().as_ref() != Some(&a) {
+                                usbtask::decline();
+                                showing_offer = false;
+                                redraw = true;
+                                continue;
+                            }
                         }
-                    },
+                        match usbtask::approve() {
+                            Ok(region) => {
+                                message(ui.panel, "Installing", "do not disconnect", "");
+                                crate::staging::install(gate, login, ui.panel, region);
+                                // `install` only returns when the install did *not*
+                                // happen, and what it painted says why. Redrawing the
+                                // menu over it without waiting threw that away, which is
+                                // how a refusal came to look like a device that had
+                                // simply stopped.
+                                wait_for_any_key(&mut ui);
+                                showing_offer = false;
+                                redraw = true;
+                            }
+                            Err(why) => {
+                                crate::catlog!("install: commit refused: {:?}", why);
+                                message(
+                                    ui.panel,
+                                    "Not installed",
+                                    crate::sdupgrade::describe(why),
+                                    "any key to go back",
+                                );
+                                wait_for_any_key(&mut ui);
+                                showing_offer = false;
+                                redraw = true;
+                            }
+                        }
+                    }
                     Key::Cancel => {
                         usbtask::decline();
                         showing_offer = false;
@@ -3212,6 +3238,20 @@ fn offer_and_install<A>(
         for k in keys.iter() {
             match k {
                 Key::Confirm => {
+                    // The same second question the USB path asks, for the same image
+                    // property; see there. Here the approval is ours by value, so there
+                    // is nothing to re-check after the answer.
+                    if crate::session::sets_high_water(&approval) {
+                        ask(
+                            ui.panel,
+                            "Really install?",
+                            "sets anti-downgrade",
+                            "mark: no way back",
+                        );
+                        if !confirmed(ui) {
+                            return;
+                        }
+                    }
                     // `commit` publishes the recovery header and can refuse for a reason
                     // worth naming -- this device losing the bytes rather than a bad
                     // image being the one that matters.

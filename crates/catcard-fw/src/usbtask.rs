@@ -790,10 +790,11 @@ impl UsbTask {
                 let mut body = [0u8; 64];
                 let n = describe(&approval, &mut body);
                 crate::catlog!(
-                    "usb: offered {} bytes, verified {}, older {}",
+                    "usb: offered {} bytes, verified {}, older {}, high-water {}",
                     approval.length,
                     approval.is_verified(),
-                    approval.older_than_running
+                    approval.older_than_running,
+                    crate::session::sets_high_water(&approval)
                 );
                 self.stage = Stage::Offered { staged, approval };
                 self.begin_reply(Status::Ok, &body[..n]);

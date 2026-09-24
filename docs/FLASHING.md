@@ -73,9 +73,10 @@ mk3, PSRAM on mk4 and later, which has no SPI-NOR at all.
 image over HID, stages it, and installs it after someone approves it at the device. That
 includes the stock firmware, so the route back exists without the DFU button or an
 unlocked bootloader — an older image is warned about, not refused, because returning to
-stock is a legitimate thing to want. The bootloader's OTP high-water mark still has the
-final say; see [`--high-water`](#--high-water) for the one way to lose that route
-permanently.
+stock is a legitimate thing to want: the offer screen adds the line `older than running`
+and leaves the decision to the person at the keys. The bootloader's OTP high-water mark
+still has the final say; see [`--high-water`](#--high-water) for the one way to lose
+that route permanently.
 
 **Still: do not install this on a device you rely on.** The upgrade path is verified in
 the emulator, not yet on hardware.
@@ -452,3 +453,11 @@ Off by default, and should stay off for anything but a release. Setting it makes
 install record a new anti-downgrade high-water mark on the device — **irreversibly**.
 Every image with an older timestamp, including the stock firmware you might want to go
 back to, stops being accepted.
+
+The device says so at every layer it can. `catcard-image build` prints `high_water SET`
+and `info`/`verify` show `(HIGH_WATER)` on the flags line. On the device, the offer
+screen carries two extra lines, `SETS ANTI-DOWNGRADE MARK` / `irreversible: no way
+back`, and a yes to it is followed by a second question, `Really install?`, exactly as
+*Destroy seed* asks twice — whether the image came over USB, from a card or by QR. A
+`no` to either declines the offer. The USB log line for the offer records
+`high-water true`, which is what the headless Q1 recovery path has instead of a screen.

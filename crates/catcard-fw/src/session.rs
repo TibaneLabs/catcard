@@ -249,11 +249,12 @@ fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::Hmac
 
 /// Ask about a staged firmware image.
 ///
-/// Says whether the signature was checked, in those words. "Unverified" here does not
-/// mean "bad" -- the five factory keys are not published, so an official image cannot be
-/// checked on-device at all -- but it is the difference between a claim we can stand
-/// behind and one we cannot, and the person about to overwrite their firmware is the one
-/// who should weigh it.
+/// Everything the approval knows that a person would want before saying yes: which
+/// build, which key signed it, whether it is older than what is running, and -- the one
+/// line that must never be missing -- whether installing it sets the bootloader's OTP
+/// anti-downgrade mark. That mark is the only irreversible thing an install can do:
+/// after it, stock firmware and every earlier CatCard are refused forever. It gets its
+/// own two lines here and a second question in the menu, the way destroying a seed does.
 pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
     use core::fmt::Write as _;
 
@@ -269,17 +270,38 @@ pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approv
         a.header.version_str().unwrap_or("unknown version"),
         core::str::from_utf8(&stamp).unwrap_or("")
     );
-    // State whose key signed the image. Every image that reaches this screen has a
-    // signature that *verified* -- a bad one is refused outright before here -- so the
-    // question is which key, and what that key means. We deliberately do not warn about a
-    // downgrade: going back to older or stock firmware is a legitimate thing to want, and
-    // the bootloader holds the final say through its OTP high-water mark.
-    message(
-        panel,
-        "Install firmware?",
-        line.as_str(),
-        signature_status(a),
-    );
+
+    // Whose key signed the image. Every image that reaches this screen has a signature
+    // that *verified* -- a bad one is refused before here -- so the question is which
+    // key, and what that key means.
+    //
+    // A downgrade is reported, not refused: going back to older or stock firmware is a
+    // legitimate thing to want, and the bootloader holds the final say through its OTP
+    // high-water mark. But "reported" has to mean on this screen, not only in the USB
+    // reply, or the person at the keys is the one party not told.
+    let mut lines: heapless::Vec<&str, 5> = heapless::Vec::new();
+    let _ = lines.push(line.as_str());
+    let _ = lines.push(signature_status(a));
+    if a.older_than_running {
+        let _ = lines.push("older than running");
+    }
+    if sets_high_water(a) {
+        let _ = lines.push("SETS ANTI-DOWNGRADE MARK");
+        let _ = lines.push("irreversible: no way back");
+    }
+    display::draw(panel, |c| {
+        catcard_ui::widgets::info(c, &display::LAYOUT, "Install firmware?", &lines);
+    });
+}
+
+/// Whether installing this image records a new anti-downgrade high-water mark.
+///
+/// `install_flags & HIGH_WATER` (firmware-signing.md §1 [C]): the bootloader writes the
+/// image's timestamp to OTP, and from then on refuses anything older -- stock firmware
+/// included. Irreversible, so every layer that can see it names it: this screen, the
+/// second question in the menu, and the log.
+pub(crate) fn sets_high_water(a: &catcard_upgrade::Approval) -> bool {
+    a.header.install_flags & catcard_fwhdr::install_flags::HIGH_WATER != 0
 }
 
 /// A short line naming which key signed an image, for the offer screen and the log.
@@ -314,11 +336,4 @@ fn serial() -> &'static str {
         }
         core::str::from_utf8(out).unwrap_or("CATCARD")
     }
-}
-
-/// Draw up to three lines and return.
-fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
-    display::draw(panel, |c| {
-        catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
-    });
 }
