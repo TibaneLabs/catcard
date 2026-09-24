@@ -348,6 +348,7 @@ struct UiHandles {
     panel: *mut display::Panel,
     matrix: *mut crate::keypad::GpioMatrix,
     drbg: *mut catcard_entropy::HmacDrbg,
+    protocol: *mut catcard_entropy::HmacDrbg,
     report: *const crate::BootReport,
     pool: Option<*mut catcard_entropy::EntropyPool>,
 }
@@ -388,7 +389,16 @@ pub fn run_ui(
     // from choosing this item as a brand-new press on the main menu.
     crate::menu::wait_for_release(ui);
     crate::catlog!("ktest: the menu as a kernel task");
-    start_menu(gate, login, ui.panel, ui.matrix, ui.drbg, report, pool)
+    start_menu(
+        gate,
+        login,
+        ui.panel,
+        ui.matrix,
+        ui.drbg,
+        ui.protocol,
+        report,
+        pool,
+    )
 }
 
 /// Start the kernel with the menu, USB and a heartbeat as its tasks. Never returns.
@@ -396,12 +406,18 @@ pub fn run_ui(
 /// Boot calls this once the PIN is in; Debug -> Kernel UI calls it from a running menu.
 /// Either way the caller's frame is abandoned, not unwound -- see [`run_ui`] for why the
 /// handed-over objects stay valid.
+///
+/// Eight arguments, one per object handed over: the two generators travel separately
+/// because they are separate on purpose (see `Ui::protocol`), and a struct here would be
+/// `menu::Session` minus the field this computes itself.
+#[allow(clippy::too_many_arguments)]
 pub fn start_menu(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,
     matrix: &mut crate::keypad::GpioMatrix,
     drbg: &mut catcard_entropy::HmacDrbg,
+    protocol: &mut catcard_entropy::HmacDrbg,
     report: &crate::BootReport,
     pool: Option<&mut catcard_entropy::EntropyPool>,
 ) -> ! {
@@ -417,6 +433,7 @@ pub fn start_menu(
             panel: core::ptr::from_mut(panel),
             matrix: core::ptr::from_mut(matrix),
             drbg: core::ptr::from_mut(drbg),
+            protocol: core::ptr::from_mut(protocol),
             report: core::ptr::from_ref(report),
             pool: pool.map(core::ptr::from_mut),
         });
@@ -482,6 +499,7 @@ extern "C" fn ui_task() -> ! {
             panel: &mut *h.panel,
             matrix: &mut *h.matrix,
             drbg: &mut *h.drbg,
+            protocol: &mut *h.protocol,
             report: &*h.report,
             no_seed,
             pool: h.pool.map(|p| &mut *p),

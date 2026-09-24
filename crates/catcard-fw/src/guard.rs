@@ -226,10 +226,12 @@ fn add_card(ui: &mut Ui<'_>, enrolled: &[[u8; 32]]) {
         }
     }
 
-    // A secret token, so from the DRBG the pool seeded -- the one source of randomness
-    // for anything that is not a seed. Refusing is the answer if it will not give one.
+    // A secret token, so from the protocol DRBG -- the pool-seeded generator whose
+    // outputs stay secret, not the UI one whose outputs (the keypad's scramble order)
+    // are on the screen for anyone to watch. Refusing is the answer if it will not give
+    // one.
     let mut token = [0u8; prelogin::SD2FA_TOKEN_LEN];
-    if ui.drbg.generate(&mut token).is_err() {
+    if ui.protocol.generate(&mut token).is_err() {
         menu::message(ui.panel, HEAD, "no randomness", "nothing enrolled");
         menu::wait_for_any_key(ui);
         return;

@@ -30,5 +30,13 @@ pub(crate) struct Ui<'a> {
     pub pad: &'a mut Keypad,
     pub matrix: &'a mut GpioMatrix,
     /// The UI DRBG, used to shuffle the scan order. Never the seed pool.
+    ///
+    /// Its outputs are on the screen: the scramble order is what the keypad shows. So
+    /// nothing that has to stay secret draws from it -- that is what `protocol` is for.
     pub drbg: &'a mut HmacDrbg,
+    /// The protocol DRBG (`domain::PROTOCOL`), for random values that leave the device
+    /// and must not be guessable: the microSD 2FA token, a backup's password words and
+    /// its IV. Seeded from its own pool draw, so a generator whose outputs are visible
+    /// and one whose outputs are kept never share a state.
+    pub protocol: &'a mut HmacDrbg,
 }

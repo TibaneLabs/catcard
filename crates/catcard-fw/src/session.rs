@@ -54,6 +54,15 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         .pool
         .as_mut()
         .and_then(|pool| spawn_drbg(pool, domain::UI, &[]).ok());
+    // A second generator for values that leave the device and have to stay secret -- the
+    // microSD 2FA token, a backup's password words and IV. The UI one's outputs are on
+    // the screen (the keypad's scramble order), and a generator whose outputs are shown
+    // must not be the one whose outputs are kept: one instance per purpose, each from
+    // its own pool draw. A local, like the UI one, so it costs the Q1's .bss nothing.
+    let protocol = report
+        .pool
+        .as_mut()
+        .and_then(|pool| spawn_drbg(pool, domain::PROTOCOL, &[]).ok());
 
     // SAFETY: we are running on BOARD; `discover` validates the published entry address
     // before anything can branch to it.
@@ -114,7 +123,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     let Some(mut panel) = panel else {
         crate::recovery::run(report, None, gate)
     };
-    let (Some(mut matrix), Some(mut drbg)) = (matrix, drbg) else {
+    let (Some(mut matrix), Some(mut drbg), Some(mut protocol)) = (matrix, drbg, protocol) else {
         crate::recovery::run(report, Some(panel), gate)
     };
 
@@ -192,6 +201,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
             panel: &mut panel,
             matrix: &mut matrix,
             drbg: &mut drbg,
+            protocol: &mut protocol,
             report: &report,
             no_seed,
             pool: pool.as_mut(),
@@ -204,6 +214,7 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         &mut panel,
         &mut matrix,
         &mut drbg,
+        &mut protocol,
         &report,
         pool.as_mut(),
     )

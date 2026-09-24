@@ -152,13 +152,17 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     menu::wait_for_any_key(ui);
 }
 
-/// Twelve words from the UI DRBG.
+/// Twelve words from the protocol DRBG.
+///
+/// The protocol one, not the UI one: these words are the key to the backup, and the UI
+/// generator's outputs are on the screen as the keypad's scramble order. One instance
+/// per purpose, so the two never share a state.
 ///
 /// Refusing is the answer if the DRBG will not give them: a backup password from a
 /// generator that cannot say it is healthy is worse than no backup.
 fn draw_words(ui: &mut Ui<'_>) -> Option<Mnemonic> {
     let mut entropy = [0u8; WORD_ENTROPY];
-    if ui.drbg.generate(&mut entropy).is_err() {
+    if ui.protocol.generate(&mut entropy).is_err() {
         entropy.zeroize();
         menu::message(
             ui.panel,
@@ -210,9 +214,9 @@ fn write_archive(
     }
 
     // A fresh IV per archive: reusing one under the same key would let two backups be
-    // compared block for block.
+    // compared block for block. From the protocol DRBG, with the words it goes with.
     let mut iv = [0u8; 16];
-    ui.drbg.generate(&mut iv).map_err(|_| "no random IV")?;
+    ui.protocol.generate(&mut iv).map_err(|_| "no random IV")?;
 
     // The body is the seed in plaintext and it sits here for the whole derivation,
     // which is the better part of a minute. Unavoidable with one buffer, and the

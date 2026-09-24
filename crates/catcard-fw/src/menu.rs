@@ -772,6 +772,7 @@ pub fn run(session: Session<'_>) -> ! {
         panel,
         matrix,
         drbg,
+        protocol,
         report,
         no_seed,
         mut pool,
@@ -810,6 +811,7 @@ pub fn run(session: Session<'_>) -> ! {
         pad: &mut pad,
         matrix,
         drbg,
+        protocol,
     };
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -1831,6 +1833,8 @@ pub struct Session<'a> {
     pub panel: &'a mut display::Panel,
     pub matrix: &'a mut GpioMatrix,
     pub drbg: &'a mut HmacDrbg,
+    /// The protocol DRBG, for secrets that leave the device. See [`Ui::protocol`].
+    pub protocol: &'a mut HmacDrbg,
     pub report: &'a BootReport,
     /// Whether the secret slot is still empty, as the bootloader reported it at login.
     pub no_seed: bool,

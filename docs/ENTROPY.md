@@ -135,6 +135,15 @@ The keypad shuffle draws from `domain::UI`. It cannot move the seed generator, b
 exactly this — 500 shuffles, then the pool produces the same seed it would have
 produced untouched.
 
+**Two instances run in a session, and what draws from which is decided by whether the
+output is shown.** `domain::UI` feeds the keypad scramble, the games and the PRNG-status
+screen — values that are on the screen. `domain::PROTOCOL` feeds the microSD 2FA token
+and a backup's password words and IV — values that leave the device and must not be
+guessable. The firmware carries both in its `Ui` bundle (`drbg` and `protocol`), each
+seeded from its own pool draw, so a generator whose outputs anyone can watch never
+shares state with one whose outputs are kept. Both are stack locals of the session, not
+statics, since the Q1's boot stack is the scarce resource.
+
 **The UI DRBG is topped up from keypress timing.** Every physical keypress reseeds the
 `domain::UI` generator with the DWT cycle counter and the three RTC registers sampled at
 the moment of the press. To make "the moment of the press" mean the electrical edge
