@@ -46,11 +46,89 @@ mod tests;
 pub use outscript::solana::SolanaKey;
 
 use outscript::solana::{
-    ata_program, compute_budget_program, decode_compact_u16, system_program, token_program,
+    ata_program, compute_budget_program, decode_compact_u16, find_program_address, system_program,
+    token_program,
 };
 
 /// How many lamports make one SOL.
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+
+/// The Token-2022 program: the SPL Token program's successor, with extensions.
+///
+/// The address every Token-2022 mint is owned by. [C] `spl-token-2022`:
+/// `declare_id!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")`.
+pub fn token_2022_program() -> SolanaKey {
+    SolanaKey(literal::mint("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"))
+}
+
+/// Which of the two token programs an instruction is for.
+///
+/// Two programs, one instruction layout for everything this build decodes: Token-2022
+/// kept the SPL Token program's numbering and byte layout for the instructions it
+/// inherited, and added its own after them. [C] `spl-token-2022`, `instruction.rs`:
+/// `TokenInstruction` tags 0..=24 match `spl-token`'s. What differs -- and why this is
+/// carried rather than dropped once the bytes are read -- is the *accounts*: an
+/// associated token account is derived with the token program in its seeds, so an
+/// account under one program is a different address from the same owner's account under
+/// the other. Attributing a Token-2022 account by deriving with the wrong program would
+/// simply never match, and a total that quietly missed a whole program's worth of
+/// transfers is the kind of undercount nobody notices.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TokenProgram {
+    /// `TokenkegQ…`: the original SPL Token program.
+    Spl,
+    /// `TokenzQd…`: Token-2022.
+    Token2022,
+}
+
+impl TokenProgram {
+    /// Which token program `key` is, if it is one.
+    pub fn of(key: SolanaKey) -> Option<Self> {
+        if key == token_program() {
+            Some(TokenProgram::Spl)
+        } else if key == token_2022_program() {
+            Some(TokenProgram::Token2022)
+        } else {
+            None
+        }
+    }
+
+    /// The program's address.
+    pub fn id(self) -> SolanaKey {
+        match self {
+            TokenProgram::Spl => token_program(),
+            TokenProgram::Token2022 => token_2022_program(),
+        }
+    }
+
+    /// What a screen calls it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            TokenProgram::Spl => "SPL Token",
+            TokenProgram::Token2022 => "Token-2022",
+        }
+    }
+}
+
+/// The associated token account of `owner` for `mint` under `program`.
+///
+/// A program-derived address under the Associated Token Account program with the
+/// owner, the token program and the mint as its seeds, in that order. [C]
+/// `spl-associated-token-account`: `get_associated_token_address_with_program_id`.
+/// The token program is a seed, which is why [`TokenProgram`] travels with every token
+/// action: the same owner and mint give a different account under Token-2022.
+pub fn associated_account(
+    owner: SolanaKey,
+    program: TokenProgram,
+    mint: SolanaKey,
+) -> Option<SolanaKey> {
+    find_program_address(
+        &[&owner.0[..], &program.id().0[..], &mint.0[..]],
+        ata_program(),
+    )
+    .ok()
+    .map(|(address, _bump)| address)
+}
 
 /// Why a transaction could not be read.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -611,6 +689,9 @@ pub enum Action {
     /// for. The unchecked form gives a raw number and the token account it comes from,
     /// and that is all anybody off-chain can know about it.
     TransferToken {
+        /// Which token program the instruction is for. Part of what the accounts are,
+        /// not decoration: see [`TokenProgram`].
+        program: TokenProgram,
         from: Option<SolanaKey>,
         to: Option<SolanaKey>,
         owner: Option<SolanaKey>,
@@ -622,6 +703,7 @@ pub enum Action {
     },
     /// A delegation: somebody else may move this many tokens.
     ApproveToken {
+        program: TokenProgram,
         account: Option<SolanaKey>,
         delegate: Option<SolanaKey>,
         owner: Option<SolanaKey>,
@@ -709,6 +791,7 @@ impl Action {
 fn mint_of(
     source: Option<SolanaKey>,
     owner: Option<SolanaKey>,
+    program: TokenProgram,
 ) -> (Option<SolanaKey>, Option<mints::Mint>) {
     let (Some(source), Some(owner)) = (source, owner) else {
         return (None, None);
@@ -718,7 +801,7 @@ fn mint_of(
             break;
         };
         let key = SolanaKey(raw);
-        if outscript::solana::associated_token_address(owner, key).is_ok_and(|a| a == source) {
+        if associated_account(owner, program, key) == Some(source) {
             return (Some(key), Some(mint));
         }
     }
@@ -738,8 +821,9 @@ fn decode(
     // The fallback, for a program this build has no reader for. Named where the address
     // is one it knows, and carrying the instruction's number where the program numbers
     // them -- neither of which is a decoding, and the screens say so.
-    let named = if program == token_program() {
-        Some("SPL Token")
+    let token = TokenProgram::of(program);
+    let named = if let Some(t) = token {
+        Some(t.name())
     } else if program == ata_program() {
         Some("Associated Token Account")
     } else if program == compute_budget_program() {
@@ -787,15 +871,18 @@ fn decode(
         };
     }
 
-    if program == token_program() {
+    // Either token program: the same tags, the same bytes, and the program kept for the
+    // account derivation -- see `TokenProgram`.
+    if let Some(program) = token {
         return match data.first().copied() {
             // transfer: tag, amount. Accounts: source, destination, owner.
             Some(TOKEN_TRANSFER) if data.len() == 9 => {
                 // The unchecked form names no mint. It does name the account the tokens
                 // leave and who authorises it, and for the ordinary case that is enough
                 // to work the mint out rather than guess it -- see `mint_of`.
-                let (mint, named) = mint_of(account(0), account(2));
+                let (mint, named) = mint_of(account(0), account(2), program);
                 Action::TransferToken {
+                    program,
                     from: account(0),
                     to: account(1),
                     owner: account(2),
@@ -814,6 +901,7 @@ fn decode(
             Some(TOKEN_TRANSFER_CHECKED) if data.len() == 10 => {
                 let mint = account(1);
                 Action::TransferToken {
+                    program,
                     from: account(0),
                     to: account(2),
                     owner: account(3),
@@ -825,8 +913,9 @@ fn decode(
             }
             // approve: tag, amount. Accounts: source, delegate, owner.
             Some(TOKEN_APPROVE) if data.len() == 9 => {
-                let (mint, named) = mint_of(account(0), account(2));
+                let (mint, named) = mint_of(account(0), account(2), program);
                 Action::ApproveToken {
+                    program,
                     account: account(0),
                     delegate: account(1),
                     owner: account(2),

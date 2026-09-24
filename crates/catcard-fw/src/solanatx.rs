@@ -102,6 +102,18 @@ fn account_field(
     }
 }
 
+/// Which token program a token row went through, where it is not the usual one.
+///
+/// Said only for Token-2022. The SPL Token program is what "a token" means on every
+/// other row, and a field that repeated it would be the decoration the screen's header
+/// warns against; Token-2022 is worth a line because its accounts are different
+/// addresses from the same owner's SPL ones.
+fn program_field(out: &mut Review, program: catcard_solana::TokenProgram) {
+    if program == catcard_solana::TokenProgram::Token2022 {
+        out.field("program", format_args!("{}", program.name()));
+    }
+}
+
 /// Lay the transaction out: one row per part, with the detail behind each row.
 ///
 /// `mine` is the public keys this device holds, which is what lets a row say "yours" --
@@ -166,6 +178,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 account_field(out, tx, "to", to, &mut addr);
             }
             Action::TransferToken {
+                program,
                 from,
                 to,
                 owner,
@@ -197,6 +210,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 if let Some(mint) = mint {
                     out.address("mint", address(&mint, &mut addr));
                 }
+                program_field(out, program);
                 // The one place a number here could be wrong by a power of ten.
                 if action.decimals_disagree() {
                     out.cannot_read(format_args!("This amount may be wrong"));
@@ -205,6 +219,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 }
             }
             Action::ApproveToken {
+                program,
                 account,
                 delegate,
                 owner,
@@ -236,6 +251,7 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 if let Some(mint) = mint {
                     out.address("mint", address(&mint, &mut addr));
                 }
+                program_field(out, program);
             }
             Action::CreateTokenAccount { owner, mint } => {
                 out.element(is_mine(owner, mine), format_args!("Open a token account"));

@@ -26,6 +26,28 @@ fn build(payer: SolanaKey, instructions: Vec<SolanaInstruction>) -> Vec<u8> {
     tx.to_bytes().expect("serialises")
 }
 
+/// An instruction for `program` over `accounts`, with exactly these `data` bytes.
+///
+/// The bytes are written by hand in each test -- the point is the layout -- and the
+/// last account is the one that signs, which is where every token instruction here puts
+/// its authority.
+fn instruction(program: SolanaKey, accounts: &[SolanaKey], data: Vec<u8>) -> SolanaInstruction {
+    let last = accounts.len().saturating_sub(1);
+    SolanaInstruction {
+        program_id: program,
+        accounts: accounts
+            .iter()
+            .enumerate()
+            .map(|(i, &pubkey)| SolanaAccountMeta {
+                pubkey,
+                is_signer: i == last,
+                is_writable: i != last,
+            })
+            .collect(),
+        data,
+    }
+}
+
 #[test]
 fn a_sol_transfer_is_read_as_one() {
     let (from, to) = (key(1), key(2));
@@ -101,6 +123,7 @@ fn an_spl_transfer_is_read_with_its_owner() {
     let tx = parse(&raw).expect("a transaction");
     match tx.action(0).expect("an action") {
         Action::TransferToken {
+            program,
             from,
             to,
             owner: o,
@@ -109,6 +132,7 @@ fn an_spl_transfer_is_read_with_its_owner() {
             mint,
             named,
         } => {
+            assert_eq!(program, TokenProgram::Spl);
             assert!(named.is_none(), "an unnamed mint cannot be named");
             assert_eq!(from, Some(source));
             assert_eq!(to, Some(dest));
@@ -162,6 +186,7 @@ fn a_checked_spl_transfer_carries_its_mint_and_decimals() {
     let tx = parse(&raw).expect("a transaction");
     match tx.action(0).expect("an action") {
         Action::TransferToken {
+            program,
             from,
             to,
             owner: o,
@@ -170,6 +195,7 @@ fn a_checked_spl_transfer_carries_its_mint_and_decimals() {
             mint: m,
             named,
         } => {
+            assert_eq!(program, TokenProgram::Spl);
             // A mint nobody listed stays unnamed: `key(5)` is not a real mint.
             assert!(named.is_none());
             assert_eq!(from, Some(source));
@@ -1144,4 +1170,124 @@ fn a_program_is_never_taken_from_a_table() {
         parse_message(&v0_message_with_lent_accounts(0, 2, 1)).err(),
         Some(Error::BadAccountIndex)
     );
+}
+
+/// The checked transfer's bytes: tag 12, the amount, the decimals.
+fn transfer_checked(amount: u64, decimals: u8) -> Vec<u8> {
+    let mut data = std::vec![12u8];
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.push(decimals);
+    data
+}
+
+/// Token-2022 is read with the SPL Token program's layouts, and named as itself.
+///
+/// The same bytes under the other program id decode to the same action, with the
+/// program carried; an instruction this build does not decode is named "Token-2022"
+/// rather than left as an address.
+#[test]
+fn token_2022_is_read_like_the_token_program_and_named_as_itself() {
+    let (source, mint, dest, owner) = (key(3), key(5), key(4), key(1));
+    let accounts = [source, mint, dest, owner];
+    for (program, expected) in [
+        (outscript::solana::token_program(), TokenProgram::Spl),
+        (token_2022_program(), TokenProgram::Token2022),
+    ] {
+        let raw = build(
+            owner,
+            std::vec![instruction(
+                program,
+                &accounts,
+                transfer_checked(250_000, 6)
+            )],
+        );
+        let tx = parse(&raw).expect("a transaction");
+        match tx.action(0).expect("an action") {
+            Action::TransferToken {
+                program,
+                from,
+                to,
+                owner: o,
+                amount,
+                decimals,
+                mint: m,
+                ..
+            } => {
+                assert_eq!(program, expected);
+                assert_eq!((from, to, o), (Some(source), Some(dest), Some(owner)));
+                assert_eq!((amount, decimals, m), (250_000, Some(6), Some(mint)));
+            }
+            other => panic!("read as {other:?}"),
+        }
+    }
+
+    // MintTo, tag 7: not decoded, and said to be Token-2022's.
+    let mut mint_to = std::vec![7u8];
+    mint_to.extend_from_slice(&1u64.to_le_bytes());
+    let raw = build(
+        owner,
+        std::vec![instruction(
+            token_2022_program(),
+            &[mint, dest, owner],
+            mint_to
+        )],
+    );
+    match parse(&raw).expect("a transaction").action(0) {
+        Some(Action::Unknown { named, tag, .. }) => {
+            assert_eq!(named, Some("Token-2022"));
+            assert_eq!(tag, Some(7));
+        }
+        other => panic!("read as {other:?}"),
+    }
+}
+
+/// An associated account is derived with its token program in the seeds, so the same
+/// owner and mint have a different account under Token-2022 -- and a transfer into it
+/// is credited only when derived with the right program.
+#[test]
+fn a_token_2022_account_is_attributed_with_its_own_derivation() {
+    let owner = key(1);
+    let usdc = SolanaKey(crate::literal::mint(
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    ));
+    let spl = associated_account(owner, TokenProgram::Spl, usdc).expect("derives");
+    let t22 = associated_account(owner, TokenProgram::Token2022, usdc).expect("derives");
+    assert_ne!(spl, t22);
+    // The SPL derivation is the one outscript already does.
+    assert_eq!(
+        Some(spl),
+        outscript::solana::associated_token_address(owner, usdc).ok()
+    );
+
+    // A stranger sends us 2.5 "USDC" through Token-2022: our Token-2022 account gains
+    // it, and nothing lands on the SPL account of the same name.
+    let stranger = key(9);
+    let from = key(3);
+    let raw = build(
+        stranger,
+        std::vec![instruction(
+            token_2022_program(),
+            &[from, usdc, t22, stranger],
+            transfer_checked(2_500_000, 6)
+        )],
+    );
+    let tx = parse(&raw).expect("a transaction");
+    let effects = crate::effects::of(&tx, &[owner.0]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1);
+    assert_eq!(moving[0].mint, Some(usdc));
+    assert_eq!(moving[0].delta, 2_500_000);
+
+    // The same transfer aimed at our *SPL* account, but through Token-2022, is aimed
+    // at an address that program would never have made for us: not ours.
+    let raw = build(
+        stranger,
+        std::vec![instruction(
+            token_2022_program(),
+            &[from, usdc, spl, stranger],
+            transfer_checked(2_500_000, 6)
+        )],
+    );
+    let tx = parse(&raw).expect("a transaction");
+    assert_eq!(crate::effects::of(&tx, &[owner.0]).moving().count(), 0);
 }

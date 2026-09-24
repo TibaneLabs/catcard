@@ -18,7 +18,7 @@
 //! added to a total that says "yours". Under-counting shows up as rows that do not add to
 //! the total; over-counting would be a number that is simply wrong.
 
-use crate::{Action, LAMPORTS_PER_SOL, SolanaKey, Tx, mints};
+use crate::{Action, LAMPORTS_PER_SOL, SolanaKey, TokenProgram, Tx, associated_account, mints};
 
 /// How many assets a total can name.
 ///
@@ -118,6 +118,7 @@ pub fn of(tx: &Tx<'_>, mine: &[[u8; 32]]) -> Effects {
                 }
             }
             Some(Action::TransferToken {
+                program,
                 from,
                 to,
                 owner,
@@ -129,11 +130,11 @@ pub fn of(tx: &Tx<'_>, mine: &[[u8; 32]]) -> Effects {
                 // Out when the authority is ours or the account it leaves is; in when
                 // the account it arrives at is one of ours. Again both, for the same
                 // reason.
-                if is_mine(owner, mine) || ours(from, mint, mine) {
-                    out.add(mint.map(|m| m.0).map(SolanaKey), named, -(amount as i128));
+                if is_mine(owner, mine) || ours(from, mint, program, mine) {
+                    out.add(mint, named, -(amount as i128));
                 }
-                if ours(to, mint, mine) {
-                    out.add(mint.map(|m| m.0).map(SolanaKey), named, amount as i128);
+                if ours(to, mint, program, mine) {
+                    out.add(mint, named, amount as i128);
                 }
             }
             _ => {}
@@ -147,17 +148,24 @@ fn is_mine(key: Option<SolanaKey>, mine: &[[u8; 32]]) -> bool {
     key.is_some_and(|k| mine.contains(&k.0))
 }
 
-/// Whether `account` is the associated token account of one of our keys for `mint`.
+/// Whether `account` is the associated token account of one of our keys for `mint`
+/// under `program`.
 ///
 /// The addresses inside an SPL transfer are token accounts, not wallets, so "is this
 /// mine?" cannot be answered by comparing against our own keys. It is answered by
 /// deriving what our account for that mint *would* be, which is arithmetic over public
-/// keys and needs no seed and no trust.
-pub fn ours(account: Option<SolanaKey>, mint: Option<SolanaKey>, mine: &[[u8; 32]]) -> bool {
+/// keys and needs no seed and no trust. The token program is one of the seeds, so it has
+/// to be the one the instruction called: deriving a Token-2022 account with the SPL
+/// Token program's id gives an address that is nobody's.
+pub fn ours(
+    account: Option<SolanaKey>,
+    mint: Option<SolanaKey>,
+    program: TokenProgram,
+    mine: &[[u8; 32]],
+) -> bool {
     let (Some(account), Some(mint)) = (account, mint) else {
         return false;
     };
-    mine.iter().any(|k| {
-        outscript::solana::associated_token_address(SolanaKey(*k), mint).is_ok_and(|a| a == account)
-    })
+    mine.iter()
+        .any(|k| associated_account(SolanaKey(*k), program, mint) == Some(account))
 }
