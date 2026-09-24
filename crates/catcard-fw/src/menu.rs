@@ -107,6 +107,10 @@ enum Screen {
     Kernel,
     /// Restart this menu as a kernel task, beside a heartbeat.
     KernelUi,
+    /// Deliberate fault injections that prove the low-level defences (`selftests`). Off at
+    /// boot; each defence is armed and probed by hand.
+    #[cfg(feature = "usb-debug-mem")]
+    SelfTests,
     ScrollTest,
     Colours,
     Logs,
@@ -733,6 +737,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "Kernel",
     "Kernel test",
     "Kernel UI",
+    #[cfg(feature = "usb-debug-mem")]
+    "Self-tests",
     "Scroll test",
     "PSRAM",
     "SPI-NOR",
@@ -1339,6 +1345,8 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::ktest::run_ui(a.gate, a.login, a.ui, a.report, a.pool.take()),
             Screen::Debug,
         ),
+        #[cfg(feature = "usb-debug-mem")]
+        Screen::SelfTests => to(|a| crate::selftests::screen(a.ui), Screen::Debug),
         Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore => to(
@@ -1777,6 +1785,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Kernel")) => Screen::Kernel,
             (Key::Confirm, Some("Kernel test")) => Screen::KernelTest,
             (Key::Confirm, Some("Kernel UI")) => Screen::KernelUi,
+            #[cfg(feature = "usb-debug-mem")]
+            (Key::Confirm, Some("Self-tests")) => Screen::SelfTests,
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
@@ -2200,8 +2210,11 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen, v.raw_kn, v.raw_held),
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
         Screen::Rtc => rtc_screen(panel, &v.rtc),
-        // Handled in `run`: it takes the CPU and never returns.
+        // Handled in `run`: it takes the CPU and never returns (or, for the self-tests
+        // and the scroll test, owns the panel until it hands back).
         Screen::KernelTest | Screen::KernelUi | Screen::ScrollTest => {}
+        #[cfg(feature = "usb-debug-mem")]
+        Screen::SelfTests => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore
         | Screen::Nickname
@@ -2905,12 +2918,18 @@ fn kernel_screen(panel: &mut display::Panel) {
     );
     let _ = lines.push(l);
 
+    // `chk` is the per-switch guard check (Debug -> Self-tests); off on every boot.
     let mut l = Line::new();
     let _ = write!(
         l,
-        "rec {} fp {}",
+        "rec {} fp {} chk {}",
         catcard_kernel::recovered(),
-        catcard_kernel::fp_saves()
+        catcard_kernel::fp_saves(),
+        if catcard_kernel::guard_checks() {
+            "on"
+        } else {
+            "off"
+        }
     );
     let _ = lines.push(l);
 

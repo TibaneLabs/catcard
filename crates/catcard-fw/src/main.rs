@@ -126,6 +126,11 @@ mod sdupgrade;
 mod seedqr;
 mod seedxor;
 mod selftest;
+/// Debug: the *Self-tests* harness -- deliberate fault injections that prove the
+/// low-level defences (the stack guard, and whatever risky feature comes next). Bench
+/// builds only.
+#[cfg(feature = "usb-debug-mem")]
+mod selftests;
 mod session;
 /// The settings store itself: slots, keys, and the screen that reads them.
 #[cfg(not(feature = "board-mk3"))]
@@ -139,6 +144,10 @@ mod sniff;
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod solanatx;
 mod splash;
+/// Debug: the MPU fence under the main stack and the kernel's per-switch canary checks,
+/// both off at boot, armed and probed from the Self-tests harness. Bench builds only.
+#[cfg(feature = "usb-debug-mem")]
+mod stackguard;
 mod staging;
 /// Debug: everything this device keeps, the seed in the clear, written to a card in one
 /// file. Bench builds only: it is a diagnostic, not a backup, and it must not ship.
