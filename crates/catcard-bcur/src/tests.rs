@@ -54,6 +54,13 @@ fn cbor_bytes(data: &[u8], out: &mut Vec<u8>) {
 
 /// One part of `message`, as a conforming encoder writes it.
 fn part_line(message: &[u8], seq_len: u32, seq_num: u32) -> String {
+    part_line_claiming(message, seq_len, seq_num, crc32(message))
+}
+
+/// One part of `message`, with the checksum the header claims chosen by the caller --
+/// so a sender whose parts agree with each other and not with the message can be
+/// written.
+fn part_line_claiming(message: &[u8], seq_len: u32, seq_num: u32, checksum: u32) -> String {
     let fragment = message.len().div_ceil(seq_len as usize);
     let at = (seq_num - 1) as usize * fragment;
     // Every fragment is the same length; the last is padded with zeroes.
@@ -67,7 +74,7 @@ fn part_line(message: &[u8], seq_len: u32, seq_num: u32) -> String {
     cbor_uint(seq_num as u64, &mut cbor);
     cbor_uint(seq_len as u64, &mut cbor);
     cbor_uint(message.len() as u64, &mut cbor);
-    cbor_uint(crc32(message) as u64, &mut cbor);
+    cbor_uint(checksum as u64, &mut cbor);
     cbor_bytes(&data, &mut cbor);
 
     format!(
@@ -210,6 +217,34 @@ fn the_message_checksum_is_checked_separately() {
     assert!(c.verify(&out));
     out[500] ^= 1;
     assert!(!c.verify(&out), "a flipped bit in the assembled message");
+}
+
+/// `complete` counts fragments and nothing else. Parts that agree with each other about
+/// a checksum that is not the assembled message's fill every slot and complete the
+/// count -- and only `verify` says the result is not the message the headers named. A
+/// caller that stops at `complete` has accepted whatever landed.
+#[test]
+fn complete_is_not_verified() {
+    let message = payload(1000);
+    let n = 5u32;
+    let wrong = crc32(&message) ^ 0x8000_0001;
+    let mut out = vec![0u8; message.len()];
+    let mut scratch = vec![0u8; 512];
+    let mut c = Collector::new();
+    for i in 1..=n {
+        let line = part_line_claiming(&message, n, i, wrong);
+        let p = c.accept(&line, &mut scratch).expect("a part");
+        out[p.offset..p.offset + p.len].copy_from_slice(&scratch[p.at.start..p.at.start + p.len]);
+        c.confirm(p);
+    }
+    assert!(c.complete(), "every fragment was placed");
+    assert_eq!(out, message, "and the bytes are what the parts carried");
+    assert_eq!(c.about().map(|p| p.checksum), Some(wrong));
+    assert!(
+        !c.verify(&out),
+        "but the headers' checksum is not this message's, and only verify knows"
+    );
+    assert_ne!(crc32(&out), wrong);
 }
 
 #[test]

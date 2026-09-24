@@ -788,24 +788,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     let kind = got.kind;
     #[cfg(not(feature = "multichain"))]
     let kind = ();
-    offer(gate, login, ui, HEAD, area, len, kind);
-}
 
-/// Say what arrived and offer what can be done with it.
-///
-/// `kind` is what the UR said it was, where this build reads URs at all. On a build with
-/// no BC-UR there is nothing a scan could have been wrapped in, so it carries nothing --
-/// which keeps one function rather than two that have to be kept in step.
-fn offer(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-    head: &str,
-    area: crate::staging::Area,
-    len: usize,
-    #[cfg(feature = "multichain")] kind: Option<catcard_bcur::registry::Kind>,
-    #[cfg(not(feature = "multichain"))] _kind: (),
-) {
     // A plain view of the same memory, for looking at what arrived. Reading it back is
     // fine now: every write is done, and it is only a run of writes that a read must not
     // be placed among.
@@ -813,7 +796,55 @@ fn offer(
     // **At the area's base, not the lease's.** They are four megabytes apart: the scan
     // wrote through the staging area, which lives in the upper half of the part.
     let base = area.image_at();
+    // Mutable for the checksum below, which reads the slice; a build with no BC-UR has
+    // nothing to check and hands it on as it is.
+    #[cfg_attr(not(feature = "multichain"), allow(unused_mut))]
     let mut lease = area.into_lease();
+
+    // Every part of a UR carried the CRC-32 of the whole message. Counting fragments
+    // says every slot was filled; only this says they were filled with the message the
+    // headers named, and a message that fails it is not the one that was sent, however
+    // many parts it took. BC-UR has no compressed form, so `len` is still the message's
+    // own length here and the bytes are the ones the parts carried.
+    #[cfg(feature = "multichain")]
+    if let Some(expected) = got.checksum
+        && catcard_bcur::crc32(&lease.bytes()[base..base + len]) != expected
+    {
+        crate::catlog!("qr: the UR checksum does not match the assembled message");
+        // As above: the memory goes back before the message goes up.
+        drop(lease);
+        menu::message(
+            ui.panel,
+            HEAD,
+            "the parts did not add up",
+            "any key to go back",
+        );
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    offer(gate, login, ui, HEAD, lease, base..base + len, kind);
+}
+
+/// Say what arrived and offer what can be done with it.
+///
+/// `kind` is what the UR said it was, where this build reads URs at all. On a build with
+/// no BC-UR there is nothing a scan could have been wrapped in, so it carries nothing --
+/// which keeps one function rather than two that have to be kept in step.
+///
+/// `lease` is the staging memory as a plain slice, and `payload` is where the bytes sit
+/// in it -- starting at the area's offset zero, which is not the lease's. The caller has
+/// already checked what it can about those bytes; this only says what they are.
+fn offer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    mut lease: crate::psram::Lease,
+    payload: core::ops::Range<usize>,
+    #[cfg(feature = "multichain")] kind: Option<catcard_bcur::registry::Kind>,
+    #[cfg(not(feature = "multichain"))] _kind: (),
+) {
+    let (base, len) = (payload.start, payload.len());
 
     // A request for a Solana signature is answered where it lands, rather than being
     // turned into a `Content` first. It is not only a payload: it carries the key that

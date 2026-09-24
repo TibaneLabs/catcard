@@ -66,6 +66,16 @@ pub(crate) struct Received {
     /// its first five bytes look like one, and the CBOR wrapper means they do not.
     #[cfg(feature = "multichain")]
     pub kind: Option<catcard_bcur::registry::Kind>,
+    /// The CRC-32 every part's header claimed for the whole message, for a transfer
+    /// that came in as a UR.
+    ///
+    /// `None` for BBQr, which carries no such claim. The collector only counts
+    /// fragments; whether what landed in the sink *is* the message the headers named
+    /// is this against a CRC over the assembled bytes, and the caller is the one who
+    /// can read those back. Not checked in here, because a sink may be a staging area
+    /// this function has no view of.
+    #[cfg(feature = "multichain")]
+    pub checksum: Option<u32>,
 }
 
 /// What one code turned out to be worth.
@@ -209,9 +219,9 @@ pub(crate) fn collect_any(
     // part way -- the collector refuses a part that disagrees with the ones before it
     // -- so there is one answer and the end of the scan is when it is wanted.
     #[cfg(feature = "multichain")]
-    let kind = match &which {
-        Which::Bcur(collector) => collector.kind(),
-        _ => None,
+    let (kind, checksum) = match &which {
+        Which::Bcur(collector) => (collector.kind(), collector.about().map(|p| p.checksum)),
+        _ => (None, None),
     };
     match outcome {
         Ok(()) if done > 0 => Ok(Received {
@@ -219,6 +229,8 @@ pub(crate) fn collect_any(
             compressed,
             #[cfg(feature = "multichain")]
             kind,
+            #[cfg(feature = "multichain")]
+            checksum,
         }),
         Ok(()) => Err(None),
         Err(qrscan::Fault::Cancelled) => Err(None),
