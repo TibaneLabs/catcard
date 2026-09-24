@@ -209,6 +209,17 @@ struct ReplyState {
 /// Largest reply body. Enough for a useful peek without making the task struct heavy.
 const REPLY_MAX: usize = 512;
 
+/// Longest board name or version string an `Identify` reply carries; longer ones are cut.
+const IDENTIFY_STRING_MAX: usize = 31;
+
+/// Bytes an `Identify` body can need: the four fixed bytes, then two length-prefixed
+/// strings. `identify` writes into a buffer of exactly this size, so it cannot overrun
+/// it whatever the strings are.
+const IDENTIFY_MAX: usize = 4 + 2 * (1 + IDENTIFY_STRING_MAX);
+
+// The body has to fit the reply buffer, or `begin_reply` would silently cut it.
+const _: () = assert!(IDENTIFY_MAX <= REPLY_MAX);
+
 impl UsbTask {
     /// Bring USB up.
     ///
@@ -945,7 +956,12 @@ impl UsbTask {
         //   [3]    capabilities, see `catcard_usb::caps`
         //   [4..]  board name length, then the name
         //   then   version string length, then the version
-        let mut body = [0u8; 64];
+        //
+        // Sized for the layout, not to a round number: four fixed bytes and two strings
+        // of up to `IDENTIFY_STRING_MAX` each with their length byte is 68, and a 64-byte
+        // body with a long version and board name wrote four bytes past its end. A reply
+        // can span frames, so the extra frame costs nothing.
+        let mut body = [0u8; IDENTIFY_MAX];
         let mut at = 0;
         body[at..at + 2].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         at += 2;
@@ -982,7 +998,7 @@ impl UsbTask {
         at += 1;
         for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
-            let n = b.len().min(31);
+            let n = b.len().min(IDENTIFY_STRING_MAX);
             body[at] = n as u8;
             body[at + 1..at + 1 + n].copy_from_slice(&b[..n]);
             at += 1 + n;
