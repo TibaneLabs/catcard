@@ -627,14 +627,22 @@ impl Otg {
             let bytes = ((sts >> 4) & 0x7FF) as usize;
             let kind = (sts >> 17) & 0x0F;
 
+            // A packet larger than the buffer it is read into is taken up to the
+            // buffer and the rest is popped and dropped. The status word said how many
+            // bytes the FIFO holds for this packet, and every one of them has to leave
+            // it: whatever is left behind is read as the front of the next packet, and
+            // from then on every SETUP or report is misaligned by that much.
             match kind {
                 pktsts::SETUP_DATA => {
-                    read_fifo(&mut self.setup[..bytes.min(Setup::LEN)]);
+                    let n = bytes.min(Setup::LEN);
+                    read_fifo(&mut self.setup[..n]);
+                    discard_fifo(bytes - n);
                     None
                 }
                 pktsts::OUT_DATA if ep == EP_OUT_NUM => {
                     let n = bytes.min(REPORT_LEN);
                     read_fifo(&mut self.rx[..n]);
+                    discard_fifo(bytes - n);
                     self.rx_len = n;
                     None
                 }
@@ -969,6 +977,12 @@ unsafe fn read_fifo(out: &mut [u8]) {
 ///
 /// Not optional: the core stops delivering anything at all if a packet is left in the
 /// FIFO, so an unhandled packet still has to be read out and thrown away.
+///
+/// Word-granular, like [`read_fifo`]: the FIFO pops whole words, so this is also how the
+/// tail of a packet is dropped after a partial read of `n` bytes -- `n` is a multiple of
+/// four whenever it is short of `bytes`, so `discard_fifo(bytes - n)` pops exactly the
+/// words `read_fifo` left. Zero bytes pops nothing.
+/// Source: RM0432 §OTG_FS data FIFO access [C].
 ///
 /// # Safety
 /// As [`read_fifo`].
