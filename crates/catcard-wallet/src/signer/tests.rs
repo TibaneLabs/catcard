@@ -524,3 +524,67 @@ fn an_opted_in_input_is_signed_under_the_unified_message() {
     assert_ne!(digest, legacy);
     assert!(!key.verify(&legacy, &r, &s));
 }
+
+/// The sighash policy is one function, shared by the review and the signer: `SIGHASH_ALL`,
+/// and nothing that leaves outputs or inputs unsigned.
+#[test]
+fn only_sighash_all_is_allowed() {
+    assert!(sighash_allowed(0x01));
+    for kind in [0x00, 0x02, 0x03, 0x81, 0x82, 0x83, 0x41, 0x101, u32::MAX] {
+        assert!(!sighash_allowed(kind), "{kind:#x} was allowed");
+    }
+    // The unified opt-in byte that means exactly ALL, in the build that signs it, and no
+    // other combination carrying that bit in either build.
+    assert_eq!(sighash_allowed(0x21), cfg!(feature = "multichain"));
+    for kind in [0x20, 0x22, 0x23, 0x61, 0xa1] {
+        assert!(!sighash_allowed(kind), "{kind:#x} was allowed");
+    }
+}
+
+/// An input asking for a type the policy refuses is refused by the signer itself, without
+/// relying on the review having run -- on a taproot input especially, where `outscript`
+/// would otherwise sign whatever byte the host chose.
+#[test]
+fn the_signer_refuses_a_sighash_type_of_the_hosts_choosing() {
+    let kw = KeyWork::host();
+    let steps = [86 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
+    for kind in [0x02u32, 0x03, 0x81, 0x83] {
+        let mut buf = vec![0u8; 4096];
+        let n = psbt_for_kind(AddressKind::P2tr, &steps, &mut buf);
+        let mut typed = vec![0u8; 4096];
+        let n = Psbt::parse(&buf[..n])
+            .unwrap()
+            .set_sighash_type(0, kind, &mut typed)
+            .unwrap();
+        let psbt = Psbt::parse(&typed[..n]).unwrap();
+        let mut out = vec![0u8; 8192];
+        assert_eq!(
+            sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw),
+            Err(Error::Sighash { kind }),
+            "{kind:#x} was signed on a taproot input"
+        );
+        assert!(
+            out.iter().all(|&b| b == 0),
+            "a refused input still wrote a PSBT"
+        );
+    }
+
+    // The same on an ECDSA input, and SIGHASH_ALL stated explicitly still signs.
+    let mut buf = [0u8; 2048];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    for (kind, allowed) in [(0x82u32, false), (0x01, true)] {
+        let mut typed = [0u8; 2048];
+        let m = Psbt::parse(&buf[..n])
+            .unwrap()
+            .set_sighash_type(0, kind, &mut typed)
+            .unwrap();
+        let psbt = Psbt::parse(&typed[..m]).unwrap();
+        let mut out = [0u8; 4096];
+        let got = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw);
+        if allowed {
+            assert!(got.is_ok(), "{kind:#x} was refused");
+        } else {
+            assert_eq!(got, Err(Error::Sighash { kind }), "{kind:#x} was signed");
+        }
+    }
+}

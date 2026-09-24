@@ -241,21 +241,21 @@ pub fn summarise(
             // A sighash type we will not produce stops the whole transaction: signing the
             // other inputs would hand back a PSBT that looks half-signed for no stated
             // reason.
+            //
+            // The policy itself is `signer::sighash_allowed`, shared with the signature so
+            // the two cannot disagree. Anything allowed other than `SIGHASH_ALL` is the
+            // unified opt-in hash, over the same outputs `SIGHASH_ALL` covers: NONE and
+            // SINGLE leave outputs this review cannot price, opt-in or not, and
+            // ANYONECANPAY leaves the inputs open -- the fee shown is then a fee anyone
+            // can raise afterwards.
             match psbt.input(index).and_then(|i| i.sighash_type()) {
                 None => {}
-                Some(SIGHASH_ALL) => {}
-                // The unified opt-in hash, over the same outputs `SIGHASH_ALL` covers.
-                // Only the byte that means exactly ALL: NONE and SINGLE leave outputs this
-                // review cannot price, opt-in or not, and ANYONECANPAY leaves the inputs
-                // open -- the fee shown is then a fee anyone can raise afterwards.
-                #[cfg(feature = "multichain")]
-                Some(kind)
-                    if kind <= 0xff
-                        && kind & u32::from(crate::tx::unified::SIGHASH_UNIFIED) != 0
-                        && kind & crate::tx::sighash::SIGHASH_MASK == SIGHASH_ALL
-                        && kind & crate::tx::sighash::SIGHASH_ANYONECANPAY == 0 =>
+                Some(kind) if signer::sighash_allowed(kind) =>
                 {
-                    opted_in = true;
+                    #[cfg(feature = "multichain")]
+                    if kind != SIGHASH_ALL {
+                        opted_in = true;
+                    }
                 }
                 Some(kind) => return Err(Refusal::Sighash { input: index, kind }),
             }

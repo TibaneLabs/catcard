@@ -27,6 +27,33 @@ use zeroize::Zeroize;
 
 use crate::KeyWork;
 use crate::bip32::{ChildNumber, ExtendedPrivKey, FINGERPRINT_LEN};
+use crate::tx::sighash::SIGHASH_ALL;
+
+/// Whether `kind` is a sighash type this device will produce.
+///
+/// `SIGHASH_ALL` alone: every other type leaves part of the transaction unsigned --
+/// NONE and SINGLE the outputs, ANYONECANPAY the other inputs -- which is a thing to offer
+/// deliberately with its own warning, not to produce because a PSBT asked. A multichain
+/// build also takes the one unified opt-in byte that means exactly ALL
+/// (`SIGHASH_ALL | SIGHASH_UNIFIED`), which covers the same outputs under the fork's hash.
+///
+/// One answer for the review and the signature: [`crate::psbtview::summarise`] refuses
+/// the transaction on it, and [`sign_input`] refuses the input on it, so a PSBT that
+/// reaches the signer by some other path meets the same policy. `outscript` itself signs
+/// whatever type the input carries.
+///
+/// Source: BIP-174 "If a sighash type is not provided, the signer should sign using
+/// SIGHASH_ALL" [C]
+pub fn sighash_allowed(kind: u32) -> bool {
+    if kind == SIGHASH_ALL {
+        return true;
+    }
+    #[cfg(feature = "multichain")]
+    if kind == SIGHASH_ALL | u32::from(crate::tx::unified::SIGHASH_UNIFIED) {
+        return true;
+    }
+    false
+}
 
 /// Longest derivation path this will follow.
 ///
@@ -78,6 +105,8 @@ pub enum Error {
     KeyMismatch,
     /// Deriving the key failed.
     Derivation,
+    /// The input asks for a sighash type this will not produce; see [`sighash_allowed`].
+    Sighash { kind: u32 },
     /// `outscript` refused the input: a script it does not sign, a UTXO that does not
     /// match, a hash that does not check out.
     Psbt(outscript::Error),
@@ -318,6 +347,10 @@ impl PsbtSigner for Signer {
 ///
 /// One input at a time, because each write produces a whole new PSBT: the caller
 /// alternates between two buffers, and can move the screen between inputs.
+///
+/// The sighash policy is checked here as well as at review ([`sighash_allowed`]): the
+/// review refuses the whole transaction, this refuses the input, and neither trusts the
+/// other to have run. Absent a type the signature is `SIGHASH_ALL`, which is allowed.
 pub fn sign_input(
     psbt: &Psbt<'_>,
     index: usize,
@@ -326,6 +359,11 @@ pub fn sign_input(
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
+    if let Some(kind) = psbt.input(index).and_then(|i| i.sighash_type())
+        && !sighash_allowed(kind)
+    {
+        return Err(Error::Sighash { kind });
+    }
     let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
     let found = key_requests(psbt, index, fingerprint, &mut keys)?;
     let mut last = Error::NotOurs;
