@@ -35,8 +35,9 @@ const SIGNED_NAME: &str = "/SIGNED.PSB";
 /// broadcast: `bitcoin-cli sendrawtransaction <the file's contents>`.
 const FINAL_NAME: &str = "/FINAL.TXN";
 
-/// Most destinations shown. Beyond this the screen says how many more there are; the
-/// summary's totals still cover every one of them.
+/// Most outputs the review can hold, change included. A transaction with more is refused
+/// rather than shown in part: an output the owner cannot see is one they cannot refuse,
+/// so every output is on the screen or the screen has no Sign key.
 const MAX_SHOWN: usize = 8;
 
 /// Most inputs signed in one pass.
@@ -422,6 +423,24 @@ pub(crate) fn review_and_sign(
             kw,
         )
     });
+    // Every output or none. `destinations` stops at the buffer, so an output past it would
+    // be summed into the totals and never shown -- a ninth output to an attacker, invisible
+    // behind "+N more". Refused here, before the owner is asked anything.
+    if summary.outputs > count {
+        crate::catlog!(
+            "sign: refused: {} outputs, {} shown",
+            summary.outputs,
+            count
+        );
+        menu::message(
+            ui.panel,
+            HEAD,
+            "too many outputs to review",
+            "any key to go back",
+        );
+        menu::wait_for_any_key(ui);
+        return;
+    }
     let mut ours = [0usize; MAX_INPUTS];
     let signable =
         crate::keywork::run(|kw| psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw));
@@ -621,8 +640,8 @@ fn review(
     use catcard_ui::scroll::{Line, ScrollView};
     use core::fmt::Write as _;
 
-    /// Lines the review can hold: the totals, two per destination, the overflow note and
-    /// the key hint.
+    /// Lines the review can hold: the totals, two per output, the opt-in note and the
+    /// key hint.
     const LINES: usize = 4 + 2 * MAX_SHOWN;
     type Text = heapless::String<72>;
 
@@ -695,10 +714,11 @@ fn review(
             say(&mut texts, &mut small, &mut wrapped, line, true, true);
         }
     }
+    // The caller has already refused a transaction with more outputs than `shown` holds.
+    // Said again here so that no caller can put the Sign key under a partial list: a
+    // screen that cannot show every output does not offer to sign any of them.
     if summary.outputs > shown.len() {
-        let mut line = Text::new();
-        let _ = write!(line, "+{} more outputs", summary.outputs - shown.len());
-        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        return false;
     }
     let mut line = Text::new();
     let _ = write!(
