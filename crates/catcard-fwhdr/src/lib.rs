@@ -441,15 +441,25 @@ impl DigestStream {
     }
 
     /// Feed the next bytes of the image, in order.
+    ///
+    /// At most two hash updates per call: the part before the signature window and the
+    /// part after it. This used to hash one byte at a time -- a megabyte of image was a
+    /// million `Sha256::update` calls, most of them on a slow bus with a screen waiting.
     pub fn update(&mut self, bytes: &[u8]) {
-        let mut off = self.at;
-        for chunk in bytes.chunks(1) {
-            if !(SIG_START..SIG_END).contains(&off) {
-                self.inner.update(chunk);
-            }
-            off += 1;
+        let start = self.at;
+        let end = start + bytes.len();
+        // Whatever lies before the window.
+        if start < SIG_START {
+            let to = end.min(SIG_START);
+            self.inner.update(&bytes[..to - start]);
         }
-        self.at = off;
+        // Whatever lies after it. A chunk that straddles the whole window contributes
+        // both pieces; one inside it contributes nothing.
+        if end > SIG_END {
+            let from = start.max(SIG_END);
+            self.inner.update(&bytes[from - start..]);
+        }
+        self.at = end;
     }
 
     /// How many bytes have been fed.
@@ -862,7 +872,9 @@ mod stream_tests {
     fn streaming_matches_the_one_shot_digest_at_every_chunk_size() {
         let mut image = alloc_image(0x1_2000);
         let want = signed_digest(&image).unwrap();
-        for chunk in [1usize, 3, 7, 64, 100, 256, 512, 1000, 4096] {
+        // The whole image in one call puts the window strictly inside a chunk, which is
+        // the case where both sides of it have to come out of the same slice.
+        for chunk in [1usize, 3, 7, 64, 100, 256, 512, 1000, 4096, image.len()] {
             let mut stream = DigestStream::new();
             for part in image.chunks(chunk) {
                 stream.update(part);
