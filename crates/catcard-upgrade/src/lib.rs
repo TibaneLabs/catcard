@@ -229,6 +229,15 @@ pub trait StagingArea {
     /// **Irreversible in effect**: the next boot overwrites the running firmware. Called
     /// only from [`Staged::commit`], which will not reach it without a full validation.
     fn publish(&mut self, len: u32) -> Result<(), Self::Error>;
+
+    /// Take the marker back, so the next boot installs nothing.
+    ///
+    /// The inverse of [`publish`](Self::publish), for the one case where a published
+    /// marker must not stand: the bootloader was asked to install the region it names
+    /// and refused. Without this the marker outlives the refusal, and the next boot --
+    /// or the next `gate 18/7` -- finds an image nobody is expecting any more. A no-op
+    /// when nothing is published.
+    fn retract(&mut self) -> Result<(), Self::Error>;
 }
 
 /// An image being received into a staging area.

@@ -363,6 +363,21 @@ impl UsbTask {
         Ok(region)
     }
 
+    /// The bootloader refused the approved image, and its marker has been retracted.
+    ///
+    /// Nothing is staged any more, so the task goes back to idle. Left in `Approved` it
+    /// would refuse every later offer with `NotNow` for the rest of the session, waiting
+    /// for a reboot that is not coming. Only `Approved` is touched: anything else here
+    /// is not this install's.
+    ///
+    /// Not on mk3, whose install is a reboot and never returns to refuse anything.
+    #[cfg(not(feature = "board-mk3"))]
+    pub fn install_refused(&mut self) {
+        if matches!(self.stage, Stage::Approved) {
+            self.stage = Stage::Idle;
+        }
+    }
+
     /// The user declined. The staged image is dropped without being marked.
     pub fn decline(&mut self) {
         self.stage = Stage::Idle;
@@ -1840,6 +1855,13 @@ pub fn abandon() {
 
 pub fn decline() {
     with_task(|t| t.decline());
+}
+
+/// The approved install was refused by the bootloader and its marker retracted; the
+/// task may take offers again.
+#[cfg(not(feature = "board-mk3"))]
+pub fn install_refused() {
+    with_task(|t| t.install_refused());
 }
 
 /// Counters mirrored into RAM, where a dump can read them.

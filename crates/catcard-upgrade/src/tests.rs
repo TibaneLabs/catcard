@@ -78,6 +78,11 @@ impl StagingArea for Mem {
         self.header = Some((0, len));
         Ok(())
     }
+
+    fn retract(&mut self) -> Result<(), MemError> {
+        self.header = None;
+        Ok(())
+    }
 }
 
 /// Build a signed image the way `catcard-image` does, so these tests exercise the real
@@ -481,6 +486,9 @@ fn a_marker_that_does_not_read_back_stops_the_install() {
         }
         /// Accepts the write and keeps nothing, which is what a bad mapping looks like.
         fn publish(&mut self, _: u32) -> Result<(), DeafError> {
+            Err(DeafError)
+        }
+        fn retract(&mut self) -> Result<(), DeafError> {
             Err(DeafError)
         }
     }

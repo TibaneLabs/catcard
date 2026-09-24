@@ -38,6 +38,8 @@ pub struct NorArea<B: SpiDevice> {
     capacity: u32,
     /// Everything below this offset has been erased.
     erased_to: u32,
+    /// Where the trailing header was written by `publish`, so `retract` can find it.
+    published_at: Option<u32>,
 }
 
 /// Why a SPI-NOR staging operation failed.
@@ -63,6 +65,7 @@ impl<B: SpiDevice> NorArea<B> {
             nor,
             capacity: NVSTORE_BASE - HEADER_LEN as u32,
             erased_to: 0,
+            published_at: None,
         }
     }
 
@@ -140,6 +143,29 @@ impl<B: SpiDevice> StagingArea for NorArea<B> {
         if back != hdr {
             return Err(NorError::MarkerNotVerified);
         }
+        self.published_at = Some(len);
+        Ok(())
+    }
+
+    /// Zero the trailing header `publish` wrote, so the bootloader finds no image.
+    ///
+    /// NOR programs only clear bits, so zeros go over the header without an erase, and
+    /// a header with no magic in it is exactly "nothing staged" -- the same property
+    /// the header being written last gives `publish`. Read back, for the same reason
+    /// `publish` reads back. Nothing to do if nothing was published.
+    fn retract(&mut self) -> Result<(), Self::Error> {
+        let Some(at) = self.published_at else {
+            return Ok(());
+        };
+        self.nor
+            .write(at, &[0u8; HEADER_LEN])
+            .map_err(NorError::Flash)?;
+        let mut back = [0xFFu8; HEADER_LEN];
+        self.nor.read(at, &mut back).map_err(NorError::Flash)?;
+        if back != [0u8; HEADER_LEN] {
+            return Err(NorError::MarkerNotVerified);
+        }
+        self.published_at = None;
         Ok(())
     }
 }
@@ -262,6 +288,32 @@ mod tests {
             trailing, primary,
             "trailing header is not a copy of the primary"
         );
+    }
+
+    #[test]
+    fn retracting_zeroes_the_trailing_header_and_nothing_else() {
+        let len = 300 * 1024;
+        let img = fake_image(len);
+        let mut a = area();
+        for (i, chunk) in img.chunks(64).enumerate() {
+            a.write(i as u32 * 64, chunk).unwrap();
+        }
+        // Nothing published yet: retracting is a no-op, not an error.
+        a.retract().unwrap();
+
+        a.publish(len as u32).unwrap();
+        a.retract().unwrap();
+
+        // The marker the bootloader would act on is gone...
+        let mut trailing = [0xFFu8; HEADER_LEN];
+        a.read(len as u32, &mut trailing).unwrap();
+        assert_eq!(trailing, [0u8; HEADER_LEN], "trailing header still there");
+        // ...and the image itself, primary header included, is untouched.
+        let mut back = vec![0u8; len];
+        a.read(0, &mut back).unwrap();
+        assert_eq!(back, img, "retract touched the staged image");
+        // Retracting twice is still a no-op.
+        a.retract().unwrap();
     }
 
     #[test]

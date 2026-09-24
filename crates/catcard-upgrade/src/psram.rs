@@ -520,6 +520,54 @@ impl StagingArea for PsramArea {
         }
         Ok(())
     }
+
+    /// Clear the recovery header, `magic1` first.
+    ///
+    /// The mirror of [`publish`](Self::publish), with the same reasoning run backwards:
+    /// the bootloader needs both magics, so once `magic1` is zero -- the first store --
+    /// every later state of these sixteen bytes reads as "no image staged". The rest are
+    /// zeroed too so nothing of the region description is left to be misread. Same
+    /// discipline as every other write into this part: aligned word stores, a recovery
+    /// delay after each, and the bus turned round first (`docs/PSRAM.md` §1, §2).
+    fn retract(&mut self) -> Result<(), OutOfRange> {
+        if self.way == Way::Reading {
+            burst_gap(self.gap);
+            self.burst.turned();
+        }
+        self.way = Way::Writing;
+        let at = self.header_at as *mut u32;
+        // SAFETY: as in `publish` -- the same four words, inside the region claimed in
+        // `claim`. The fence keeps `magic1`'s store from sinking below the others.
+        unsafe {
+            core::ptr::write_volatile(at, 0);
+            recover();
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+            core::ptr::write_volatile(at.add(3), 0);
+            recover();
+            core::ptr::write_volatile(at.add(1), 0);
+            recover();
+            core::ptr::write_volatile(at.add(2), 0);
+            recover();
+        }
+        burst_gap(self.gap);
+
+        // Read it back, as `publish` does: the point of retracting is that the next
+        // boot installs nothing, and a store that did not land would leave a header
+        // that still says otherwise.
+        // SAFETY: as above.
+        let seen = unsafe {
+            [
+                core::ptr::read_volatile(at as *const u32),
+                core::ptr::read_volatile(at.add(1) as *const u32),
+                core::ptr::read_volatile(at.add(2) as *const u32),
+                core::ptr::read_volatile(at.add(3) as *const u32),
+            ]
+        };
+        if seen != [0; 4] {
+            return Err(OutOfRange);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

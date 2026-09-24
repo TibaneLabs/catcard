@@ -79,6 +79,10 @@ impl StagingArea for Area {
     fn publish(&mut self, len: u32) -> Result<(), Self::Error> {
         self.medium.publish(len)
     }
+
+    fn retract(&mut self) -> Result<(), Self::Error> {
+        self.medium.retract()
+    }
 }
 
 /// Q1 only, because the scanner is the only thing that claims this memory before it
@@ -250,6 +254,40 @@ pub fn install(
         // The panel may be the broken thing, so this goes in the log too -- the only place
         // a dark device can put it.
         crate::catlog!("install: NOT INSTALLED: {}", why);
+        not_installed();
         crate::menu::message(panel, "Not installed", why, "any key to go back");
     }
+}
+
+/// The bootloader refused an approved image: take its marker back and let go of it.
+///
+/// `commit` published the recovery header before `gate 18/7` was asked, and the gate
+/// refusing does not unpublish it -- the header still names a region the next boot
+/// would install, and PSRAM keeps it until power is lost. So the marker is retracted
+/// here. The lease `commit` held went with the `Staged` it consumed, which is why the
+/// area is taken afresh rather than handed in.
+///
+/// The USB task is told too: after `approve` it sits in its approved state refusing every
+/// new offer with `NotNow`, which is right while a reboot is coming and wrong once it is
+/// not. If the image came off a card instead, that call finds nothing to do.
+///
+/// mk3 has no counterpart because its `install` never returns: the reboot is the install.
+#[cfg(not(feature = "board-mk3"))]
+pub fn not_installed() {
+    match area() {
+        Ok(mut area) => match area.retract() {
+            Ok(()) => crate::catlog!("install: marker retracted, nothing is staged"),
+            // Said loudly, because the consequence is the one thing this exists to
+            // prevent: a reboot that installs an image the bootloader already refused.
+            Err(_) => crate::catlog!(
+                "install: MARKER NOT RETRACTED: the header did not clear, \
+                 the next boot may still find the refused image"
+            ),
+        },
+        Err(why) => crate::catlog!(
+            "install: MARKER NOT RETRACTED: staging area unavailable ({:?})",
+            why
+        ),
+    }
+    crate::usbtask::install_refused();
 }

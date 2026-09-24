@@ -227,7 +227,12 @@ fn install(
     );
     match login.authorize_firmware(g, region.start, region.len) {
         Ok(never) => match never {},
-        Err(f) => crate::catlog!("upgrade: NOT installed: {}", failure_name(f)),
+        Err(f) => {
+            crate::catlog!("upgrade: NOT installed: {}", failure_name(f));
+            // The marker `commit` published still names the refused region; take it
+            // back, and let the USB task accept offers again.
+            crate::staging::not_installed();
+        }
     }
 }
 
