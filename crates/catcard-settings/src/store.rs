@@ -49,6 +49,17 @@ pub trait Slots {
 
     /// Empty slot `index`.
     fn clear(&mut self, index: u32) -> Result<(), MediumError>;
+
+    /// The slot most recently emptied by [`clear`](Self::clear), if the medium remembers.
+    ///
+    /// [`write`] will not put the next copy there. A slot is sealed under a counter fixed
+    /// by its position, so settings that leave a slot and come straight back to it are a
+    /// second plaintext under the same keystream, and two images of the flash give away
+    /// the XOR of the two. A medium that cannot remember -- across a power cycle, say --
+    /// answers `None`, and the save is steered by `choose` alone.
+    fn last_cleared(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Why the settings could not be read or written.
@@ -180,11 +191,18 @@ pub fn write<S: Slots>(
     //
     // `choose` is a random number from the caller's DRBG, so repeated saves spread across
     // the free slots rather than wearing one out -- the whole reason there are a hundred.
+    //
+    // And never the slot the last save emptied, when the medium remembers which. The
+    // counter a slot is sealed under is fixed by its position, so this key's settings
+    // written back into the slot they just left are a second plaintext under the same
+    // keystream. The old copy is gone from the file system; it is not necessarily gone
+    // from the flash underneath.
     let count = slots.count();
+    let avoid = slots.last_cleared();
     let mut target = None;
     for step in 0..count {
         let index = (choose.wrapping_add(step)) % count;
-        if Some(index) == live {
+        if Some(index) == live || Some(index) == avoid {
             continue;
         }
         match slots.read(index, scratch) {
@@ -335,12 +353,14 @@ mod tests {
     /// writes replace, clears empty.
     pub(super) struct Ram {
         slots: [Option<(usize, [u8; SLOT_LEN])>; 8],
+        last_cleared: Option<u32>,
     }
 
     impl Ram {
         pub(super) fn new() -> Self {
             Self {
                 slots: [None; 8].map(|_: Option<(usize, [u8; SLOT_LEN])>| None),
+                last_cleared: None,
             }
         }
     }
@@ -369,7 +389,11 @@ mod tests {
         }
         fn clear(&mut self, index: u32) -> Result<(), MediumError> {
             self.slots[index as usize] = None;
+            self.last_cleared = Some(index);
             Ok(())
+        }
+        fn last_cleared(&self) -> Option<u32> {
+            self.last_cleared
         }
     }
 
@@ -653,6 +677,36 @@ mod save_tests {
         // And ours is the latest.
         let len = read(&mut slots, &mine, &mut doc).unwrap();
         assert_eq!(Doc::parse(&doc[..len]).unwrap().get_u64("n"), Some(5));
+    }
+
+    /// A slot is sealed under a counter fixed by its position, so writing this key's
+    /// settings back into the slot they just left would run one keystream over two
+    /// plaintexts. The next save is steered away from the slot the last one emptied,
+    /// however hard `choose` points at it.
+    #[test]
+    fn the_slot_just_emptied_is_not_the_next_one_written() {
+        let mut ram = Ram::new();
+        let k = key();
+        let mut scratch = [0u8; SCRATCH];
+        assert_eq!(
+            write(&mut ram, &k, br#"{"_age":1}"#, 2, &mut scratch),
+            Ok(2)
+        );
+        // Steered at 5: written there, and slot 2 emptied.
+        assert_eq!(
+            write(&mut ram, &k, br#"{"_age":2}"#, 5, &mut scratch),
+            Ok(5)
+        );
+        assert_eq!(ram.read(2, &mut scratch), Ok(None));
+        assert_eq!(ram.last_cleared(), Some(2));
+        // Steered straight back at 2. Slot 2 held this key one save ago, and 5 is live.
+        let third = write(&mut ram, &k, br#"{"_age":3}"#, 2, &mut scratch).unwrap();
+        assert_ne!(third, 2, "the slot just emptied was written again");
+        assert_ne!(third, 5);
+        // Nothing lost along the way.
+        let mut buf = [0u8; SLOT_LEN];
+        let n = read(&mut ram, &k, &mut buf).unwrap();
+        assert_eq!(Doc::parse(&buf[..n]).unwrap().get_u64("_age"), Some(3));
     }
 
     /// With every slot taken by other wallets there is nowhere to write, and the answer

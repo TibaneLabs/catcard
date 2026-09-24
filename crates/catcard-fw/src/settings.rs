@@ -510,12 +510,24 @@ impl Slots for Files {
         let mut path = heapless::String::new();
         Self::path(index, &mut path);
         // Already gone is the outcome asked for.
-        match self.vol.remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(_) => Ok(()),
-        }
+        let _ = self.vol.remove_file(&path);
+        // Remembered, so the next save is steered away from it: see `Slots::last_cleared`.
+        // SAFETY: foreground only -- every settings user is a screen, the volume is
+        // mounted per operation, and the menu waits for each to finish.
+        unsafe { *core::ptr::addr_of_mut!(LAST_CLEARED) = Some(index) };
+        Ok(())
+    }
+
+    fn last_cleared(&self) -> Option<u32> {
+        // SAFETY: as in `clear`.
+        unsafe { *core::ptr::addr_of!(LAST_CLEARED) }
     }
 }
+
+/// The slot a save last emptied, so the next save does not put this key's settings
+/// straight back into it under the same keystream. Forgotten at power-off, which is the
+/// gap `Slots::last_cleared` documents.
+static mut LAST_CLEARED: Option<u32> = None;
 
 /// Longest nickname kept.
 ///
