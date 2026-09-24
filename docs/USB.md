@@ -222,7 +222,14 @@ It is loud rather than hidden, which is the actual safety property here:
 - Every access is logged (`peek`/`poke`/`jsr` lines), and a `jsr` is logged *before* the
   call, so if it never returns the log still records what ran.
 
-None of that belongs in a shipping build, and `fw-<board>` compiles all of it out.
+None of that belongs in a shipping build, and `fw-<board>-ship` compiles all of it out.
+
+Two Debug screens ride on the same feature, because they are the two ends of one
+bench workflow: **Dump state** (`statedump.rs`) writes the settings region and the seed
+**in the clear** to `XXXXXXXX-STATE.BIN` on the card, and **Restore settings**
+(`restore.rs`) writes a dump's settings section, staged by `--stage-settings`, back over
+the region. A shipping image has neither; a card that holds the wallet with no PIN on it
+is a diagnostic for a device under test, not something a menu should offer an owner.
 
 Peek reads span several frames — a request returns up to 512 bytes — so a range comes
 back in one round trip rather than one byte at a time. Poke is paged one frame per

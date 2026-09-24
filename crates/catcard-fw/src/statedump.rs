@@ -17,6 +17,13 @@
 //! A backup is the same bytes under a key the owner keeps, which is a different feature
 //! and wants a decryption tool to go with it.
 //!
+//! # Bench builds only
+//!
+//! Compiled in only with `usb-debug-mem`, like [`crate::restore`], which reads what this
+//! writes. A shipping image (`fw-<board>-ship`) has neither: a screen that puts the seed
+//! on a card in the clear behind one yes/no is a diagnostic for a device under test,
+//! not a feature of a wallet, and CI checks the ship image for its file name.
+//!
 //! # What is in it
 //!
 //! | section | what |

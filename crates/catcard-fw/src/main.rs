@@ -138,8 +138,9 @@ mod sniff;
 mod solanatx;
 mod splash;
 mod staging;
-/// Everything this device keeps, written to a card in one file.
-#[cfg(not(feature = "board-mk3"))]
+/// Debug: everything this device keeps, the seed in the clear, written to a card in one
+/// file. Bench builds only: it is a diagnostic, not a backup, and it must not ship.
+#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 mod statedump;
 /// The Q1's status bar has no counterpart on the mono boards, whose 64 rows cannot spare
 /// any and whose keypad has no modifiers to report.

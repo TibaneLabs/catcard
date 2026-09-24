@@ -70,8 +70,9 @@ enum Screen {
     SdInstall,
     /// Debug: restart the device through the bootloader, after asking.
     WarmReset,
-    /// Debug: the settings volume and the seed, to a card, in the clear.
-    #[cfg(not(feature = "board-mk3"))]
+    /// Debug: the settings volume and the seed, to a card, in the clear. Bench builds
+    /// only, like the restore it pairs with.
+    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     DumpState,
     /// Debug: a settings image the host staged in PSRAM, written back over the region.
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -718,7 +719,7 @@ const DEBUG_ITEMS: &[&str] = &[
     "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
     "NFC test",
-    #[cfg(not(feature = "board-mk3"))]
+    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     "Dump state",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     "Restore settings",
@@ -1206,7 +1207,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
         Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
-        #[cfg(not(feature = "board-mk3"))]
+        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::DumpState => to(
             |a| crate::statedump::screen(a.gate, a.login, a.ui),
             Screen::Debug,
@@ -1760,7 +1761,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
-            #[cfg(not(feature = "board-mk3"))]
+            #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
             (Key::Confirm, Some("Restore settings")) => Screen::RestoreSettings,
@@ -2261,7 +2262,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::XorSplit | Screen::XorJoin => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::KeyVault => {}
-        #[cfg(not(feature = "board-mk3"))]
+        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::DumpState => {}
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::RestoreSettings => {}
@@ -6241,8 +6242,9 @@ fn unused_name(
 /// itself rather than through a copy this device has nowhere to put.
 ///
 /// Not mk3: its settings are raw SPI-NOR slots, not a region that can be sliced, and
-/// [`crate::statedump`] is compiled out there for the same reason.
-#[cfg(not(feature = "board-mk3"))]
+/// the state dump is compiled out there for the same reason. Bench builds only, with
+/// the dump: it is the only caller.
+#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 pub(crate) fn write_card_parts(
     path: &str,
     parts: &[&[u8]],
