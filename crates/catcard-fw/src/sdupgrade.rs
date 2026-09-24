@@ -60,6 +60,9 @@ pub(crate) fn describe(why: catcard_upgrade::Reject) -> &'static str {
         // Only the scattered path can produce this, and only from a sender whose parts
         // are not a multiple of four bytes.
         R::Unaligned { .. } => "parts are misaligned",
+        // A chunk after inspection passed. Not reachable from a card, which is read
+        // once; a USB host that keeps sending after its offer was accepted is.
+        R::Sealed => "image already inspected",
     }
 }
 

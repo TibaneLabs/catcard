@@ -498,6 +498,61 @@ fn a_marker_that_does_not_read_back_stops_the_install() {
     );
 }
 
+/// A passed inspection seals the image: nothing more is taken.
+///
+/// The `Approval` is the claim that inspection passed on the bytes `commit` publishes.
+/// Accepting a chunk after it would make that a claim about some other image -- the
+/// sequential path could not even reach that (the counter is full), but the scattered
+/// path could re-place any part -- so both refuse, by name.
+#[test]
+fn nothing_is_accepted_after_inspection_passes() {
+    let image = image_for(&MK4, NEWER, 0);
+    let mut s = staged_with(&image);
+    let a = s.inspect(Some(&running(OLDER))).expect("a good image");
+    let len = image.len() as u32;
+
+    assert_eq!(s.write(len, &[0u8; 4]), Err(Reject::Sealed));
+    assert_eq!(s.write(0, &image[..64]), Err(Reject::Sealed));
+    assert_eq!(s.place(0, &[0u8; 64]), Err(Reject::Sealed));
+    assert_eq!(s.place(len - 64, &[0u8; 64]), Err(Reject::Sealed));
+    // The bytes are as inspected, and the approval still commits them.
+    assert_eq!(s.verify_stored(), Ok(()));
+    s.commit(a).expect("the inspected bytes commit");
+}
+
+/// The scattered path is the one that could actually re-place a part after inspection.
+#[test]
+fn a_placed_image_is_sealed_by_inspection_too() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+    for (i, part) in image.chunks(2684).enumerate() {
+        s.place((i * 2684) as u32, part).expect("a part");
+    }
+    s.placed_all();
+    let a = s.inspect(None).expect("it verifies");
+    assert_eq!(s.place(0, &[0u8; 2684]), Err(Reject::Sealed));
+    assert_eq!(s.write(0, &[0u8; 4]), Err(Reject::Sealed));
+    s.commit(a).expect("still commits");
+}
+
+/// A refused inspection seals nothing: the image is still being received.
+///
+/// `Incomplete` is the ordinary case -- a transport that asks too early -- and the
+/// remaining chunks must still be taken, or every such transport would stall.
+#[test]
+fn a_failed_inspection_does_not_seal() {
+    let image = image_for(&MK4, NEWER, 0);
+    let area = Mem::new(image.len() + 4096);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+    let half = image.len() / 2;
+    s.write(0, &image[..half]).unwrap();
+    assert!(matches!(s.inspect(None), Err(Reject::Incomplete { .. })));
+    s.write(half as u32, &image[half..])
+        .expect("the rest is still taken");
+    s.inspect(None).expect("and then it verifies");
+}
+
 #[test]
 fn inspect_never_publishes_anything() {
     // Inspection has to be safe to call and safe to refuse after. If it left a marker

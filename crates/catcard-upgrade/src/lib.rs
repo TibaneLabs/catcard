@@ -104,6 +104,13 @@ pub enum Reject {
     /// there is only one staging area. Handing out a second view of the same bytes is how
     /// an approved image gets replaced by a different one before it installs.
     StagingBusy,
+    /// A write arrived after [`inspect`](Staged::inspect) passed.
+    ///
+    /// An [`Approval`] is the claim that inspection passed on the bytes `commit` will
+    /// publish. A byte accepted after that would make it a claim about a different
+    /// image, so once an image has passed it is sealed: nothing more is taken, and the
+    /// only ways forward are `commit` or dropping the whole thing.
+    Sealed,
 }
 
 impl From<catcard_fwhdr::Error> for Reject {
@@ -142,7 +149,9 @@ pub enum Signature {
 /// What a user is being asked to approve.
 ///
 /// Assembled before anything irreversible happens, so a screen can state what will be
-/// installed and on what evidence.
+/// installed and on what evidence. Holding one is proof that [`Staged::inspect`] passed
+/// on the bytes [`Staged::commit`] will publish: a passed inspection seals the staging
+/// area, so no later `write` or `place` can change what was inspected.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Approval {
     pub header: FirmwareHeader,
@@ -223,6 +232,9 @@ pub struct Staged<'a, A: StagingArea> {
     /// Set by [`place`](Self::place): the image arrived out of order, so the digest
     /// taken as it arrived means nothing and has to come from the medium instead.
     scattered: bool,
+    /// Set once [`inspect`](Self::inspect) has passed. From then on `write` and `place`
+    /// refuse, so an [`Approval`] keeps describing the bytes it was issued for.
+    sealed: bool,
     /// Bytes accepted but not yet pushed to the area: fewer than four, always the tail of
     /// what has been received. See [`Self::write`].
     carry: [u8; 4],
@@ -262,6 +274,7 @@ impl<'a, A: StagingArea> Staged<'a, A> {
             length,
             received: 0,
             scattered: false,
+            sealed: false,
             carry: [0; 4],
             carry_len: 0,
             stream: DigestStream::new(),
@@ -309,6 +322,9 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     where
         A::Error: Into<StorageError>,
     {
+        if self.sealed {
+            return Err(Reject::Sealed);
+        }
         let end = offset
             .checked_add(data.len() as u32)
             .ok_or(Reject::PastEnd {
@@ -357,6 +373,9 @@ impl<'a, A: StagingArea> Staged<'a, A> {
     where
         A::Error: Into<StorageError>,
     {
+        if self.sealed {
+            return Err(Reject::Sealed);
+        }
         if offset != self.received {
             return Err(Reject::OutOfOrder {
                 expected: self.received,
@@ -581,6 +600,10 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         }
         let signature = classify(self.board, slot);
 
+        // From here the Approval below is the description of these bytes, and no more
+        // may arrive: see `Reject::Sealed`.
+        self.sealed = true;
+
         Ok(Approval {
             header,
             signature,
@@ -660,10 +683,11 @@ impl<'a, A: StagingArea> Staged<'a, A> {
 
     /// **Tell the bootloader to install this image on the next boot.**
     ///
-    /// Irreversible: the running firmware is overwritten before it is verified. Takes an
+    /// Irreversible in effect: the next boot replaces the running firmware. Takes an
     /// [`Approval`] by value rather than re-deriving one, so this cannot be reached
     /// without [`inspect`](Self::inspect) having passed, and a caller cannot skip the
-    /// screen that showed it.
+    /// screen that showed it. Inspection sealed the area, so the bytes published here
+    /// are the bytes the approval describes.
     ///
     /// Does not reboot. That is the caller's, so the last irreversible step is not
     /// buried in a function that also does bookkeeping.

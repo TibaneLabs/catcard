@@ -117,7 +117,7 @@ REJECT = {1: "Length", 2: "TooBigToStage", 3: "OutOfOrder", 4: "PastEnd",
           5: "Incomplete", 6: "NotAnImage", 7: "BadHeader", 8: "WrongBoard",
           9: "Downgrade", 10: "BadSignature", 11: "StorageFault",
           12: "NoStagingArea", 13: "StagingBusy", 14: "RamStoreFailed",
-          15: "Unpackable", 16: "Unaligned"}
+          15: "Unpackable", 16: "Unaligned", 17: "Sealed"}
 
 # Capability bits, matching `catcard_usb::caps`.
 CAP_KEY_INJECTION = 1 << 0

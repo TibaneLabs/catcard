@@ -1020,6 +1020,7 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
         Reject::StagingBusy => 13,
         Reject::Unpackable(_) => 15,
         Reject::Unaligned { .. } => 16,
+        Reject::Sealed => 17,
     };
     1
 }
