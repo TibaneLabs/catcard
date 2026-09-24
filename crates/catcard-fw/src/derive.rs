@@ -184,7 +184,10 @@ fn derive(
             let Chosen::Wif { key } = &chosen else {
                 return Err(BAD);
             };
-            (bip85::encode_wif(key, out).map_err(|_| BAD)?, Some(chosen))
+            (
+                bip85::encode_wif(key, out, kw).map_err(|_| BAD)?,
+                Some(chosen),
+            )
         }
         Kind::Password => (
             bip85::password(master, 21, index, out, kw).map_err(|_| BAD)?,

@@ -180,13 +180,16 @@ pub fn wif(
     kw: &KeyWork,
 ) -> Result<usize, Error> {
     let mut secret = wif_secret(master, index, kw)?;
-    let n = encode_wif(&secret, out);
+    let n = encode_wif(&secret, out, kw);
     secret.zeroize();
     n
 }
 
 /// A mainnet private key, used compressed, as WIF. Returns the length written.
-pub fn encode_wif(secret: &[u8; 32], out: &mut [u8]) -> Result<usize, Error> {
+///
+/// Base58 over the key itself, so it is private-key work like the `xprv` encoding: the
+/// digits it divides through are the scalar's, and it runs inside the masked region.
+pub fn encode_wif(secret: &[u8; 32], out: &mut [u8], _kw: &KeyWork) -> Result<usize, Error> {
     let mut payload = [0u8; 34];
     payload[0] = 0x80; // mainnet private key
     payload[1..33].copy_from_slice(secret);
@@ -345,7 +348,7 @@ mod tests {
         let kw = KeyWork::host();
         let secret = wif_secret(&root(), 0, &kw).unwrap();
         let mut out = [0u8; 64];
-        let n = encode_wif(&secret, &mut out).unwrap();
+        let n = encode_wif(&secret, &mut out, &kw).unwrap();
         assert_eq!(
             core::str::from_utf8(&out[..n]).unwrap(),
             "Kzyv4uF39d4Jrw2W7UryTHwZr1zQVNk4dAFyqE6BuMrMh1Za7uhp"

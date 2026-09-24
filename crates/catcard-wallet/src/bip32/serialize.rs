@@ -153,8 +153,9 @@ fn read_common(raw: &[u8]) -> Result<Common, Error> {
 }
 
 impl ExtendedPrivKey {
-    /// The raw 78-byte form. It carries the scalar, so it wipes itself when dropped.
-    pub fn to_raw(&self) -> Zeroizing<[u8; RAW_LEN]> {
+    /// The raw 78-byte form. It carries the scalar, so it wipes itself when dropped, and
+    /// like every other copy of the scalar it is made inside the masked region.
+    pub fn to_raw(&self, _kw: &crate::KeyWork) -> Zeroizing<[u8; RAW_LEN]> {
         let mut out = Zeroizing::new([0u8; RAW_LEN]);
         write_common(
             &mut out,
@@ -185,18 +186,20 @@ impl ExtendedPrivKey {
     ///
     /// Base58 is repeated big-integer division, whose running time depends on the digits --
     /// here, the private key's.
-    pub fn write_base58(&self, out: &mut [u8], _kw: &crate::KeyWork) -> Result<usize, Error> {
-        Ok(base58::encode_check(&self.to_raw()[..], out)?)
+    pub fn write_base58(&self, out: &mut [u8], kw: &crate::KeyWork) -> Result<usize, Error> {
+        Ok(base58::encode_check(&self.to_raw(kw)[..], out)?)
     }
 
     /// Parse an `xprv`/`tprv` string.
-    pub fn from_base58(text: &str, _kw: &crate::KeyWork) -> Result<Self, Error> {
+    pub fn from_base58(text: &str, kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut raw = Zeroizing::new([0u8; base58::MAX_DECODED]);
         let n = base58::decode_check(text, &mut raw[..])?;
-        Self::from_raw(&raw[..n])
+        Self::from_raw(&raw[..n], kw)
     }
 
-    pub fn from_raw(raw: &[u8]) -> Result<Self, Error> {
+    /// Parse the raw 78-byte form. Private-key work: the bytes are the scalar, and the
+    /// range check on it is arithmetic over it.
+    pub fn from_raw(raw: &[u8], _kw: &crate::KeyWork) -> Result<Self, Error> {
         // `c` and `secret` both hold the scalar, and both are wiped on every exit path,
         // the refusals below included.
         let c = read_common(raw)?;
@@ -362,7 +365,7 @@ mod tests {
     fn serialised_length_is_78() {
         let k = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        assert_eq!(k.to_raw().len(), RAW_LEN);
+        assert_eq!(k.to_raw(&crate::KeyWork::host()).len(), RAW_LEN);
         assert_eq!(
             k.to_extended_pub(&crate::KeyWork::host()).to_raw().len(),
             RAW_LEN
@@ -440,10 +443,10 @@ mod tests {
     fn a_private_key_field_must_be_zero_padded() {
         let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        let mut raw = m.to_raw();
+        let mut raw = m.to_raw(&crate::KeyWork::host());
         raw[45] = 0x01;
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw[..]),
+            ExtendedPrivKey::from_raw(&raw[..], &crate::KeyWork::host()),
             Err(Error::BadPrivatePrefix)
         );
     }
@@ -452,18 +455,21 @@ mod tests {
     fn unknown_version_bytes_are_rejected() {
         let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        let mut raw = m.to_raw();
+        let mut raw = m.to_raw(&crate::KeyWork::host());
         raw[0..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(ExtendedPrivKey::from_raw(&raw[..]), Err(Error::BadVersion));
+        assert_eq!(
+            ExtendedPrivKey::from_raw(&raw[..], &crate::KeyWork::host()),
+            Err(Error::BadVersion)
+        );
     }
 
     #[test]
     fn wrong_length_is_rejected() {
         let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        let raw = m.to_raw();
+        let raw = m.to_raw(&crate::KeyWork::host());
         assert!(matches!(
-            ExtendedPrivKey::from_raw(&raw[..77]),
+            ExtendedPrivKey::from_raw(&raw[..77], &crate::KeyWork::host()),
             Err(Error::BadLength { len: 77 })
         ));
     }
@@ -473,9 +479,12 @@ mod tests {
         // Not reachable by derivation, but reachable by a crafted xprv.
         let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        let mut raw = m.to_raw();
+        let mut raw = m.to_raw(&crate::KeyWork::host());
         raw[46..78].fill(0);
-        assert_eq!(ExtendedPrivKey::from_raw(&raw[..]), Err(Error::InvalidKey));
+        assert_eq!(
+            ExtendedPrivKey::from_raw(&raw[..], &crate::KeyWork::host()),
+            Err(Error::InvalidKey)
+        );
     }
 
     #[test]
@@ -493,17 +502,17 @@ mod tests {
     fn depth_zero_must_have_no_parent() {
         let m = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &crate::KeyWork::host())
             .unwrap();
-        let mut raw = m.to_raw();
+        let mut raw = m.to_raw(&crate::KeyWork::host());
         raw[5..9].copy_from_slice(&[1, 2, 3, 4]);
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw[..]),
+            ExtendedPrivKey::from_raw(&raw[..], &crate::KeyWork::host()),
             Err(Error::InconsistentDepth)
         );
 
-        let mut raw = m.to_raw();
+        let mut raw = m.to_raw(&crate::KeyWork::host());
         raw[9..13].copy_from_slice(&[0, 0, 0, 1]);
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw[..]),
+            ExtendedPrivKey::from_raw(&raw[..], &crate::KeyWork::host()),
             Err(Error::InconsistentDepth)
         );
     }

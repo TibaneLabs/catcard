@@ -207,6 +207,12 @@ impl Mnemonic {
     }
 
     /// The words, in order.
+    ///
+    /// Deliberately without a [`KeyWork`](crate::KeyWork): this feeds the screen, which
+    /// paints between key presses with interrupts on, and it cannot run masked without
+    /// masking the whole of a view-words screen. The work is a table lookup per word --
+    /// fixed-index reads of the wordlist, no arithmetic over the entropy -- and the
+    /// [`Mnemonic`] it reads from was itself made inside the masked region.
     pub fn words(&self) -> impl Iterator<Item = &'static str> + '_ {
         let mut idx = [0u16; MAX_WORDS];
         let n = self.word_indices(&mut idx);

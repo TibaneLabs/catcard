@@ -9653,8 +9653,12 @@ fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
                 };
                 crate::keywork::run(|kw| master.write_base58(&mut buf, kw).ok())
             } else {
-                crate::key::temporary_wif()
-                    .and_then(|key| catcard_wallet::bip85::encode_wif(key, &mut buf).ok())
+                // Base58 over the key itself: private-key work, masked like the xprv
+                // above, so nothing runs in the middle of it.
+                crate::keywork::run(|kw| {
+                    crate::key::temporary_wif()
+                        .and_then(|key| catcard_wallet::bip85::encode_wif(key, &mut buf, kw).ok())
+                })
             };
             let Some(n) = written else {
                 buf.zeroize();

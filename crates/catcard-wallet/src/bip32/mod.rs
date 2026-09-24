@@ -427,8 +427,8 @@ mod public_key_cache_tests {
             .unwrap();
 
         // Rebuild both from their serialised parts: same keys, empty caches.
-        let fresh_master = ExtendedPrivKey::from_raw(&master.to_raw()[..]).unwrap();
-        let fresh_child = ExtendedPrivKey::from_raw(&child.to_raw()[..]).unwrap();
+        let fresh_master = ExtendedPrivKey::from_raw(&master.to_raw(&kw)[..], &kw).unwrap();
+        let fresh_child = ExtendedPrivKey::from_raw(&child.to_raw(&kw)[..], &kw).unwrap();
         assert_eq!(master.public_key(&kw), fresh_master.public_key(&kw));
         assert_eq!(child.public_key(&kw), fresh_child.public_key(&kw));
 
