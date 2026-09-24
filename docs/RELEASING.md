@@ -56,13 +56,33 @@ firmware, stops being accepted from then on.
 Do not set it on any build users might install while CatCard is incomplete — it would
 strand them on a firmware that is not yet a wallet.
 
+The device names it: the offer screen adds `SETS ANTI-DOWNGRADE MARK` / `irreversible:
+no way back`, and a yes is followed by a second question, as *Destroy seed* asks twice.
+See [`FLASHING.md`](FLASHING.md#--high-water).
+
 ## Checklist
 
 1. `cargo t` and `cargo clippy --workspace --all-targets` clean
-2. `cargo fw-<board>` for every board
-3. Build with `SOURCE_DATE_EPOCH` set; record the digest
-4. `catcard-image verify --board <board>` on each artefact
-5. Reproduce the build on a second machine; digests must match
-6. Sign the artefacts with the project key
-7. Publish `.bin`, `.dfu`, digests, project signatures, and the `SOURCE_DATE_EPOCH` used
-8. Release notes state plainly that the image is dev-signed and shows the warning screen
+2. `cargo fw-<board>-ship` (or `make <board> SHIP=1`) for every board. **Not** the plain
+   `cargo fw-<board>`: that is the bench build, whose default features include key
+   injection (a host can press the keys, including the one that approves an install) and
+   the memory monitor (a host can read the seed out of RAM). The `-ship` aliases pass
+   `--no-default-features`, leaving only the board.
+3. Prove the crutches are absent from what step 2 produced, three ways, because the
+   feature list is the thing being checked and cannot vouch for itself:
+   - `strings -a target/thumbv7em-none-eabihf/release/catcard-fw | grep -niE
+     'debug_mem|inject_key|injected|debug memory monitor is enabled'` prints nothing.
+     This is the check CI's *No debug monitor, no key injection* step runs
+     (`.github/workflows/ci.yml`); a bench build trips it by a couple of dozen lines.
+   - Booted, the selftest screen's continue line carries no `[USB KEYS]` and no
+     `[KEYS MEM]` marker (`crates/catcard-fw/src/selftest.rs`).
+   - Over USB, `Identify`'s capability byte (`tools/usbclient.py hid`) has none of
+     `KEY_INJECTION`, `UNLOCK_PIN` or `DEBUG_MEM` set (`catcard_usb::caps`); `UPGRADE`
+     and `UPGRADE_PACKED` are the only bits a release should show.
+4. Build with `SOURCE_DATE_EPOCH` set; record the digest
+5. `catcard-image verify --board <board>` on each artefact; the `install_flags` line
+   shows `(HIGH_WATER)` only if [`--high-water`](#--high-water) was meant
+6. Reproduce the build on a second machine; digests must match
+7. Sign the artefacts with the project key
+8. Publish `.bin`, `.dfu`, digests, project signatures, and the `SOURCE_DATE_EPOCH` used
+9. Release notes state plainly that the image is dev-signed and shows the warning screen

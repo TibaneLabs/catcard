@@ -968,8 +968,11 @@ def main(path, image=None):
             ok = False
         else:
             proto, unlocked, blank, board, ver = info
+            # The caps byte is printed raw as well as named: a release must show none of
+            # the bench bits, and "none" is easier to trust as 0x02/0x12 than as a
+            # sentence. See docs/RELEASING.md, checklist step 3.
             print(f"identify  status=Ok protocol={proto} board={board} version={ver} "
-                  f"unlocked={unlocked} blank={blank}")
+                  f"unlocked={unlocked} blank={blank} caps={caps:#04x}")
     else:
         print(f"identify  status={STATUS.get(st, st)}")
         ok = False
