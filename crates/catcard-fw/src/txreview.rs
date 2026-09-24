@@ -38,7 +38,9 @@
 //! - **Unreadable.** A part this build could not decode, in red, with a whole red screen
 //!   in front of the list saying how many there are. A transaction that calls a program
 //!   this build has no reader for is normal on Solana, so refusing to sign those would
-//!   make the device useless and saying nothing would make it dangerous.
+//!   make the device useless and saying nothing would make it dangerous. A part that
+//!   *was* read and changes who controls an account gets the same red and the same
+//!   screen, for the same reason: it is the one row that must not be skimmed.
 //!
 //! # A total that is short of something says so
 //!
@@ -109,6 +111,8 @@ pub(crate) struct Review {
     dropped: usize,
     /// Parts that could not be read.
     alarms: usize,
+    /// Parts that were read, and change who is in control of something.
+    dangers: usize,
     /// Parts that move an amount the bytes do not give, so the total is short of it.
     unwritten: usize,
 }
@@ -124,14 +128,15 @@ impl Review {
             rows,
             dropped: 0,
             alarms: 0,
+            dangers: 0,
             unwritten: 0,
         })
     }
 
     /// Whether the summary at the top is short of something: a part it could not read,
-    /// or an amount the bytes do not carry.
+    /// a part in red that no number stands in for, or an amount the bytes do not carry.
     fn incomplete(&self) -> bool {
-        self.alarms > 0 || self.unwritten > 0
+        self.alarms > 0 || self.dangers > 0 || self.unwritten > 0
     }
 
     fn push(&mut self, role: Role, label: &str, args: core::fmt::Arguments<'_>) {
@@ -171,6 +176,25 @@ impl Review {
             Role::Element {
                 kind: Some(Kind::Warning),
                 mine: false,
+            },
+            "",
+            args,
+        );
+    }
+
+    /// Open an element for something this device *did* read, and which changes who is
+    /// in control of something -- an account handed to a new authority, say.
+    ///
+    /// Red, like a part that could not be read, and with the same screen in front of
+    /// the list: no amount on the summary stands in for it, and it is the one row that
+    /// must not be skimmed past. What differs is the words on that screen, which say
+    /// what was read rather than that nothing was.
+    pub(crate) fn danger(&mut self, mine: bool, args: core::fmt::Arguments<'_>) {
+        self.dangers += 1;
+        self.push(
+            Role::Element {
+                kind: Some(Kind::Warning),
+                mine,
             },
             "",
             args,
@@ -239,12 +263,14 @@ impl Review {
     pub(crate) fn show(&self, ui: &mut Ui<'_>, title: &str, actions: &[&str]) -> Option<usize> {
         // The red screen first. Before the list, because somebody scrolling a list is
         // reading it, and this has to interrupt rather than wait its turn.
-        if self.alarms > 0 {
+        if self.alarms > 0 || self.dangers > 0 {
             let mut said: heapless::String<48> = heapless::String::new();
-            let _ = if self.alarms == 1 {
-                write!(said, "one part cannot be read")
-            } else {
-                write!(said, "{} parts cannot be read", self.alarms)
+            let _ = match (self.alarms, self.dangers) {
+                (1, 0) => write!(said, "one part cannot be read"),
+                (n, 0) => write!(said, "{n} parts cannot be read"),
+                (0, 1) => write!(said, "one part changes who is in control"),
+                (0, n) => write!(said, "{n} parts change who is in control"),
+                (a, d) => write!(said, "{} parts need a close look", a + d),
             };
             menu::alarm(ui.panel, title, &said, "they are marked in red");
             menu::wait_for_any_key(ui);
@@ -272,7 +298,7 @@ impl Review {
         lines.push(Line::title(title));
         // What it comes to, first. Everything below is how it got there. A summary that
         // is short of something ends by saying so -- and is shown even when it has no
-        // number in it at all, since "whatever the unread parts do" is then the whole
+        // number in it at all, since "whatever the parts in red do" is then the whole
         // answer to what signing will do.
         if !self.effects.is_empty() || self.incomplete() {
             lines.push(Line::body("Signing this will:").small());
@@ -285,9 +311,9 @@ impl Review {
         }
         if self.incomplete() {
             let joined = !self.effects.is_empty() || self.effects_lost;
-            let said = match (self.alarms > 0, joined) {
-                (true, true) => "and whatever the unread parts do",
-                (true, false) => "whatever the unread parts do",
+            let said = match (self.alarms > 0 || self.dangers > 0, joined) {
+                (true, true) => "and whatever the parts in red do",
+                (true, false) => "whatever the parts in red do",
                 (false, true) => "and amounts these bytes do not give",
                 (false, false) => "move amounts these bytes do not give",
             };

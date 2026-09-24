@@ -137,6 +137,36 @@ pub fn of(tx: &Tx<'_>, mine: &[[u8; 32]]) -> Effects {
                     out.add(mint, named, amount as i128);
                 }
             }
+            Some(Action::TransferSolWithSeed {
+                base, to, lamports, ..
+            }) => {
+                // Out when the base key is ours: the address the lamports leave is
+                // derived from it and never a wallet key, so the base is the only side
+                // of it this device can recognise. In when the destination is ours.
+                if is_mine(base, mine) {
+                    out.add(None, None, -(lamports as i128));
+                }
+                if is_mine(to, mine) {
+                    out.add(None, None, lamports as i128);
+                }
+            }
+            Some(Action::BurnToken {
+                program,
+                account,
+                mint,
+                owner,
+                amount,
+                named,
+            }) => {
+                // An outflow with no inflow anywhere: the tokens stop existing.
+                if is_mine(owner, mine) || ours(account, mint, program, mine) {
+                    out.add(mint, named, -(amount as i128));
+                }
+            }
+            // Closing an account returns its rent, which is a balance on-chain and not
+            // a number in these bytes. Nothing is added: a total made of the numbers
+            // here is short of it, and the screen says so rather than guessing.
+            Some(Action::CloseTokenAccount { .. }) => {}
             _ => {}
         }
     }

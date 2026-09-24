@@ -1291,3 +1291,322 @@ fn a_token_2022_account_is_attributed_with_its_own_derivation() {
     let tx = parse(&raw).expect("a transaction");
     assert_eq!(crate::effects::of(&tx, &[owner.0]).moving().count(), 0);
 }
+
+/// The USDC mint, the one the table names, for tests that want a named token.
+fn usdc() -> SolanaKey {
+    SolanaKey(crate::literal::mint(
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    ))
+}
+
+/// Parse a one-instruction transaction and hand back that instruction's action.
+fn only_action(payer: SolanaKey, ix: SolanaInstruction) -> Action {
+    let raw = build(payer, std::vec![ix]);
+    parse(&raw)
+        .expect("a transaction")
+        .action(0)
+        .expect("an action")
+}
+
+/// TransferWithSeed: read for what it moves, with the base key as the side that is ours.
+///
+/// The bytes are bincode's: a `u32` tag of 11, the lamports, the seed as a `u64` length
+/// and its bytes, then the owning program's key. The derived address the SOL leaves is
+/// never a wallet key, so it is the *base* that decides whether the outflow is this
+/// device's.
+#[test]
+fn a_seeded_transfer_is_read_and_charged_to_its_base() {
+    let (derived, base, to) = (key(6), key(1), key(2));
+    let mut data = 11u32.to_le_bytes().to_vec();
+    data.extend_from_slice(&750_000u64.to_le_bytes());
+    data.extend_from_slice(&5u64.to_le_bytes());
+    data.extend_from_slice(b"stake");
+    data.extend_from_slice(&[0u8; 32]); // owned by the System program
+    assert_eq!(data.len(), 52 + 5);
+    // The base signs, and it is the middle account -- not where `instruction` puts
+    // the signer -- so the metas are written out.
+    let ix = |data: Vec<u8>| SolanaInstruction {
+        program_id: SolanaKey([0u8; 32]),
+        accounts: std::vec![
+            SolanaAccountMeta {
+                pubkey: derived,
+                is_signer: false,
+                is_writable: true
+            },
+            SolanaAccountMeta {
+                pubkey: base,
+                is_signer: true,
+                is_writable: false
+            },
+            SolanaAccountMeta {
+                pubkey: to,
+                is_signer: false,
+                is_writable: true
+            },
+        ],
+        data,
+    };
+
+    let action = only_action(base, ix(data.clone()));
+    assert_eq!(
+        action,
+        Action::TransferSolWithSeed {
+            from: Some(derived),
+            base: Some(base),
+            to: Some(to),
+            lamports: 750_000,
+        }
+    );
+
+    // The base pays: the lamports and the fee, as the payer.
+    let raw = build(base, std::vec![ix(data.clone())]);
+    let tx = parse(&raw).expect("a transaction");
+    let effects = crate::effects::of(&tx, &[base.0]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1);
+    assert_eq!(moving[0].mint, None);
+    assert_eq!(moving[0].delta, -(750_000 + LAMPORTS_PER_SIGNATURE as i128));
+    // The recipient gains it; the derived address is nobody's key.
+    assert_eq!(
+        crate::effects::of(&tx, &[to.0])
+            .moving()
+            .next()
+            .expect("one")
+            .delta,
+        750_000
+    );
+    assert_eq!(crate::effects::of(&tx, &[derived.0]).moving().count(), 0);
+
+    // A seed length that does not land the owner on the end is not this instruction.
+    let mut short = data.clone();
+    short[12] = 4;
+    assert!(matches!(
+        only_action(base, ix(short)),
+        Action::Unknown {
+            named: Some("System"),
+            tag: Some(11),
+            ..
+        }
+    ));
+    let mut long = data;
+    long.push(0);
+    assert!(matches!(
+        only_action(base, ix(long)),
+        Action::Unknown { tag: Some(11), .. }
+    ));
+}
+
+/// Burn: tag 8 and an amount; the mint is named by the instruction, so the table can
+/// name the token. It subtracts, under either program.
+#[test]
+fn a_burn_is_read_and_subtracted() {
+    let (account, owner) = (key(3), key(1));
+    let mut data = std::vec![8u8];
+    data.extend_from_slice(&3_000_000u64.to_le_bytes());
+
+    for program in [outscript::solana::token_program(), token_2022_program()] {
+        let raw = build(
+            owner,
+            std::vec![instruction(
+                program,
+                &[account, usdc(), owner],
+                data.clone()
+            )],
+        );
+        let tx = parse(&raw).expect("a transaction");
+        match tx.action(0).expect("an action") {
+            Action::BurnToken {
+                program: p,
+                account: a,
+                mint,
+                owner: o,
+                amount,
+                named,
+            } => {
+                assert_eq!(p, TokenProgram::of(program).expect("a token program"));
+                assert_eq!((a, mint, o), (Some(account), Some(usdc()), Some(owner)));
+                assert_eq!(amount, 3_000_000);
+                assert_eq!(named.expect("USDC is in the table").symbol, "USDC");
+            }
+            other => panic!("read as {other:?}"),
+        }
+
+        // Three USDC gone, and the fee, for the owner who signs it.
+        let effects = crate::effects::of(&tx, &[owner.0]);
+        let usdc_entry = effects
+            .entries()
+            .iter()
+            .find(|e| e.mint == Some(usdc()))
+            .expect("the token was counted");
+        assert_eq!(usdc_entry.delta, -3_000_000);
+        assert_eq!(usdc_entry.named.expect("named").symbol, "USDC");
+        // And nothing for anybody else: a burn has no receiving side.
+        assert_eq!(crate::effects::of(&tx, &[[9u8; 32]]).moving().count(), 0);
+    }
+
+    // A burn from our associated account, signed by somebody else -- a delegate --
+    // still leaves our account: it is attributed by derivation, under the program the
+    // instruction called.
+    let delegate = key(9);
+    let ours = associated_account(owner, TokenProgram::Token2022, usdc()).expect("derives");
+    let raw = build(
+        delegate,
+        std::vec![instruction(
+            token_2022_program(),
+            &[ours, usdc(), delegate],
+            data.clone()
+        )],
+    );
+    let tx = parse(&raw).expect("a transaction");
+    let effects = crate::effects::of(&tx, &[owner.0]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(moving.len(), 1, "the delegate pays the fee, not us");
+    assert_eq!(moving[0].delta, -3_000_000);
+
+    // The wrong length is not a burn.
+    data.push(0);
+    assert!(matches!(
+        only_action(
+            owner,
+            instruction(
+                outscript::solana::token_program(),
+                &[account, usdc(), owner],
+                data
+            )
+        ),
+        Action::Unknown { tag: Some(8), .. }
+    ));
+}
+
+/// CloseAccount: the tag alone, three accounts, and no amount anywhere in the bytes --
+/// so it adds nothing to a total, which is a different statement from moving nothing.
+#[test]
+fn closing_an_account_is_read_and_adds_no_amount() {
+    let (account, destination, owner) = (key(3), key(2), key(1));
+    let ix = instruction(
+        outscript::solana::token_program(),
+        &[account, destination, owner],
+        std::vec![9u8],
+    );
+    assert_eq!(
+        only_action(owner, ix.clone()),
+        Action::CloseTokenAccount {
+            program: TokenProgram::Spl,
+            account: Some(account),
+            destination: Some(destination),
+            owner: Some(owner),
+        }
+    );
+    let raw = build(owner, std::vec![ix]);
+    let tx = parse(&raw).expect("a transaction");
+    let effects = crate::effects::of(&tx, &[owner.0]);
+    let moving: std::vec::Vec<_> = effects.moving().collect();
+    assert_eq!(
+        moving.len(),
+        1,
+        "only the fee: the rent is not in these bytes"
+    );
+    assert_eq!(moving[0].delta, -(LAMPORTS_PER_SIGNATURE as i128));
+    assert_eq!(
+        crate::effects::of(&tx, &[destination.0]).moving().count(),
+        0,
+        "the rent's size is unknown, so nothing is credited"
+    );
+
+    // Data past the tag is not a close.
+    assert!(matches!(
+        only_action(
+            owner,
+            instruction(
+                outscript::solana::token_program(),
+                &[account, destination, owner],
+                std::vec![9u8, 0]
+            )
+        ),
+        Action::Unknown { tag: Some(9), .. }
+    ));
+}
+
+/// Revoke: the tag alone, two accounts.
+#[test]
+fn a_revoke_is_read() {
+    let (account, owner) = (key(3), key(1));
+    assert_eq!(
+        only_action(
+            owner,
+            instruction(token_2022_program(), &[account, owner], std::vec![5u8])
+        ),
+        Action::RevokeToken {
+            program: TokenProgram::Token2022,
+            account: Some(account),
+            owner: Some(owner),
+        }
+    );
+}
+
+/// SetAuthority: the authority type, then a `COption<Pubkey>` -- one byte saying
+/// whether a key follows. Exactly three bytes or exactly thirty-five.
+#[test]
+fn an_authority_change_is_read_with_or_without_a_new_holder() {
+    let (account, authority, new) = (key(3), key(1), key(4));
+    let program = outscript::solana::token_program();
+
+    // To a new owner.
+    let mut data = std::vec![6u8, 2, 1];
+    data.extend_from_slice(&new.0);
+    assert_eq!(
+        only_action(
+            authority,
+            instruction(program, &[account, authority], data.clone())
+        ),
+        Action::SetTokenAuthority {
+            program: TokenProgram::Spl,
+            account: Some(account),
+            authority: Some(authority),
+            authority_type: 2,
+            new_authority: Some(new),
+        }
+    );
+    assert_eq!(authority_name(2), Some("own the account"));
+
+    // Given up: the close authority set to nobody.
+    assert_eq!(
+        only_action(
+            authority,
+            instruction(program, &[account, authority], std::vec![6u8, 3, 0])
+        ),
+        Action::SetTokenAuthority {
+            program: TokenProgram::Spl,
+            account: Some(account),
+            authority: Some(authority),
+            authority_type: 3,
+            new_authority: None,
+        }
+    );
+    // A Token-2022 type this build does not name is carried as its number.
+    assert_eq!(authority_name(8), None);
+
+    // "A key follows" with no key, or a key with "none follows", is not this
+    // instruction, and neither is a key cut short.
+    for bad in [
+        std::vec![6u8, 2, 1],
+        {
+            let mut d = std::vec![6u8, 2, 0];
+            d.extend_from_slice(&new.0);
+            d
+        },
+        {
+            let mut d = std::vec![6u8, 2, 1];
+            d.extend_from_slice(&new.0[..31]);
+            d
+        },
+    ] {
+        assert!(
+            matches!(
+                only_action(authority, instruction(program, &[account, authority], bad)),
+                Action::Unknown { tag: Some(6), .. }
+            ),
+            "a malformed SetAuthority was decoded"
+        );
+    }
+}

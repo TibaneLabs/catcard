@@ -23,9 +23,11 @@
 //! # What is decoded, and what is only named
 //!
 //! Decoded, because the instruction is fixed-shape and the program is identified by an
-//! address this build carries: the System program's transfer, the SPL Token program's
-//! transfer, checked transfer and approve, an associated-token-account creation, and the
-//! compute-budget settings that ride along with almost everything.
+//! address this build carries: the System program's transfer, seeded transfer and nonce
+//! advance; the token programs' transfer, checked transfer, approve, revoke, burn, close
+//! and set-authority -- SPL Token and Token-2022 alike, which share those layouts; an
+//! associated-token-account creation; and the compute-budget settings that ride along
+//! with almost everything.
 //!
 //! Everything else is **named and counted, never guessed**: the program's address, how
 //! many accounts it touches and how many bytes of data it carries. A program this build
@@ -737,6 +739,61 @@ pub enum Action {
         account: Option<SolanaKey>,
         authority: Option<SolanaKey>,
     },
+    /// The System program moving SOL out of an address derived from a key and a seed.
+    ///
+    /// `from` is the derived address and holds the lamports; `base` is the key whose
+    /// signature authorises it, and the one that makes this *ours* -- a derived address
+    /// is never a wallet key, so matching `from` against this device's keys would never
+    /// fire. The seed and the owning program are read past: they only fix which address
+    /// `from` is, and `from` is on the screen.
+    TransferSolWithSeed {
+        from: Option<SolanaKey>,
+        base: Option<SolanaKey>,
+        to: Option<SolanaKey>,
+        lamports: u64,
+    },
+    /// Tokens destroyed: an outflow with nobody on the other side.
+    BurnToken {
+        program: TokenProgram,
+        account: Option<SolanaKey>,
+        /// Named by the instruction, unlike an unchecked transfer's.
+        mint: Option<SolanaKey>,
+        owner: Option<SolanaKey>,
+        amount: u64,
+        named: Option<mints::Mint>,
+    },
+    /// A token account closed, its rent going to `destination`.
+    ///
+    /// How much rent is the account's balance on-chain, and is in none of these bytes:
+    /// a total cannot include it, and a screen has to say the total is short of it.
+    CloseTokenAccount {
+        program: TokenProgram,
+        account: Option<SolanaKey>,
+        destination: Option<SolanaKey>,
+        owner: Option<SolanaKey>,
+    },
+    /// A delegation withdrawn: whoever was approved may no longer move the tokens.
+    RevokeToken {
+        program: TokenProgram,
+        account: Option<SolanaKey>,
+        owner: Option<SolanaKey>,
+    },
+    /// An account or mint handed to a new authority.
+    ///
+    /// The one instruction here that changes who is in control rather than what moves:
+    /// after it, `new_authority` is who may do what `authority_type` names -- own the
+    /// account, close it, mint the token, freeze its accounts. **`new_authority` is from
+    /// the instruction's data, not an account index**, so `None` means what the
+    /// instruction meant: nobody, the authority given up for good.
+    SetTokenAuthority {
+        program: TokenProgram,
+        account: Option<SolanaKey>,
+        /// Who holds the authority now, and signs this.
+        authority: Option<SolanaKey>,
+        /// Which authority changes hands: see [`authority_name`].
+        authority_type: u8,
+        new_authority: Option<SolanaKey>,
+    },
     /// A program this build does not decode, named and counted.
     Unknown {
         program: SolanaKey,
@@ -770,6 +827,23 @@ impl Action {
             } => *d != m.decimals,
             _ => false,
         }
+    }
+}
+
+/// What an authority type lets its holder do, for a screen: "change who may …".
+///
+/// The four the SPL Token program defines. [C] `spl-token`, `instruction.rs`:
+/// `AuthorityType` -- 0 mint tokens, 1 freeze accounts, 2 account owner, 3 close
+/// account. Token-2022 numbers more after these (transfer fee config, close mint,
+/// permanent delegate, ...) and those come back `None`, so a screen shows the number
+/// rather than a name this build has not been written against.
+pub const fn authority_name(authority_type: u8) -> Option<&'static str> {
+    match authority_type {
+        0 => Some("mint the token"),
+        1 => Some("freeze its accounts"),
+        2 => Some("own the account"),
+        3 => Some("close the account"),
+        _ => None,
     }
 }
 
@@ -808,9 +882,15 @@ fn mint_of(
     (None, None)
 }
 
-/// SPL Token instruction tags, from the program's own layout.
+/// SPL Token instruction tags, from the program's own layout. Token-2022 uses the same
+/// numbers for these. [C] `spl-token` and `spl-token-2022`, `instruction.rs`:
+/// `TokenInstruction`.
 const TOKEN_TRANSFER: u8 = 3;
 const TOKEN_APPROVE: u8 = 4;
+const TOKEN_REVOKE: u8 = 5;
+const TOKEN_SET_AUTHORITY: u8 = 6;
+const TOKEN_BURN: u8 = 8;
+const TOKEN_CLOSE_ACCOUNT: u8 = 9;
 const TOKEN_TRANSFER_CHECKED: u8 = 12;
 fn decode(
     program: SolanaKey,
@@ -859,6 +939,24 @@ fn decode(
                     account: account(0),
                     authority: account(2),
                 };
+            }
+            // TransferWithSeed: the tag, a `u64` of lamports, the seed as bincode
+            // writes a `String` -- a `u64` length and then the bytes -- and the owning
+            // program's key. Held to exactly that: a seed length that does not land
+            // the owner's 32 bytes on the end is not this instruction. Accounts: the
+            // derived address the lamports leave, the base key that signs, the
+            // destination. [C] `solana-sdk`, `system-interface`:
+            // `SystemInstruction::TransferWithSeed`, `transfer_with_seed()`.
+            (Some(11), n) if n >= 52 => {
+                let seed_len = u64_le(&data[12..20]);
+                if seed_len == (n - 52) as u64 {
+                    return Action::TransferSolWithSeed {
+                        from: account(0),
+                        base: account(1),
+                        to: account(2),
+                        lamports: u64_le(&data[4..12]),
+                    };
+                }
             }
             _ => {}
         }
@@ -924,6 +1022,61 @@ fn decode(
                     named,
                 }
             }
+            // revoke: the tag alone. Accounts: source, owner. [C] `spl-token`:
+            // `TokenInstruction::Revoke`, `revoke()`.
+            Some(TOKEN_REVOKE) if data.len() == 1 => Action::RevokeToken {
+                program,
+                account: account(0),
+                owner: account(1),
+            },
+            // setAuthority: tag, the authority type, then a `COption<Pubkey>` -- one
+            // byte saying whether a key follows, and if so the key. Exactly three bytes
+            // or exactly thirty-five, and nothing in between is this instruction.
+            // Accounts: the account or mint, its current authority. [C] `spl-token`:
+            // `TokenInstruction::SetAuthority`, `unpack_pubkey_option`,
+            // `set_authority()`.
+            Some(TOKEN_SET_AUTHORITY) if data.len() == 3 && data[2] == 0 => {
+                Action::SetTokenAuthority {
+                    program,
+                    account: account(0),
+                    authority: account(1),
+                    authority_type: data[1],
+                    new_authority: None,
+                }
+            }
+            Some(TOKEN_SET_AUTHORITY) if data.len() == 35 && data[2] == 1 => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&data[3..35]);
+                Action::SetTokenAuthority {
+                    program,
+                    account: account(0),
+                    authority: account(1),
+                    authority_type: data[1],
+                    new_authority: Some(SolanaKey(key)),
+                }
+            }
+            // burn: tag, amount. Accounts: account, mint, owner. The mint is named,
+            // so the table can name the token without deriving anything. [C]
+            // `spl-token`: `TokenInstruction::Burn`, `burn()`.
+            Some(TOKEN_BURN) if data.len() == 9 => {
+                let mint = account(1);
+                Action::BurnToken {
+                    program,
+                    account: account(0),
+                    mint,
+                    owner: account(2),
+                    amount: u64_le(&data[1..9]),
+                    named: mint.and_then(|m| mints::lookup(&m.0)),
+                }
+            }
+            // closeAccount: the tag alone. Accounts: account, destination, owner. [C]
+            // `spl-token`: `TokenInstruction::CloseAccount`, `close_account()`.
+            Some(TOKEN_CLOSE_ACCOUNT) if data.len() == 1 => Action::CloseTokenAccount {
+                program,
+                account: account(0),
+                destination: account(1),
+                owner: account(2),
+            },
             _ => unknown,
         };
     }

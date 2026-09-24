@@ -268,6 +268,115 @@ fn describe(tx: &catcard_solana::Tx<'_>, mine: &[[u8; 32]], out: &mut Review) {
                 account_field(out, tx, "nonce account", account, &mut addr);
                 account_field(out, tx, "authority", authority, &mut addr);
             }
+            Action::TransferSolWithSeed {
+                from,
+                base,
+                to,
+                lamports,
+            } => {
+                // Ours when the key that signs for it is, or the destination: the
+                // address the SOL leaves is derived and never a wallet key.
+                let amount = sol(lamports, &mut num);
+                let ours = is_mine(base, mine) || is_mine(to, mine);
+                match to {
+                    Some(to) => {
+                        let text = address(&to, &mut addr);
+                        out.element(
+                            ours,
+                            format_args!("Send {amount} SOL to {}", short(text, &mut brief)),
+                        );
+                    }
+                    None => out.element(ours, format_args!("Send {amount} SOL")),
+                }
+                out.note(format_args!("from an address derived from a seed"));
+                account_field(out, tx, "from", from, &mut addr);
+                account_field(out, tx, "authority", base, &mut addr);
+                account_field(out, tx, "to", to, &mut addr);
+            }
+            Action::BurnToken {
+                program,
+                account,
+                mint,
+                owner,
+                amount: raw,
+                named,
+            } => {
+                let ours = is_mine(owner, mine) || is_mine(account, mine);
+                match named {
+                    Some(m) => {
+                        let n = amount(raw, m.decimals, &mut num);
+                        out.element(ours, format_args!("Burn {n} {}", m.symbol));
+                    }
+                    None => out.element(ours, format_args!("Burn {raw} raw units")),
+                }
+                out.note(format_args!("the tokens stop existing"));
+                account_field(out, tx, "from account", account, &mut addr);
+                account_field(out, tx, "mint", mint, &mut addr);
+                account_field(out, tx, "owner", owner, &mut addr);
+                program_field(out, program);
+            }
+            Action::CloseTokenAccount {
+                program,
+                account,
+                destination,
+                owner,
+            } => {
+                let ours = is_mine(owner, mine) || is_mine(destination, mine);
+                out.element(ours, format_args!("Close a token account"));
+                out.note(format_args!("its rent goes to the account below,"));
+                out.note(format_args!("and how much is not written here"));
+                // The rent is a balance on-chain, not a number in these bytes: the
+                // summary is short of it, and says so.
+                out.unwritten();
+                account_field(out, tx, "account", account, &mut addr);
+                account_field(out, tx, "rent to", destination, &mut addr);
+                account_field(out, tx, "owner", owner, &mut addr);
+                program_field(out, program);
+            }
+            Action::RevokeToken {
+                program,
+                account,
+                owner,
+            } => {
+                let ours = is_mine(owner, mine) || is_mine(account, mine);
+                out.element(ours, format_args!("Revoke a delegation"));
+                out.note(format_args!("whoever was approved may no longer"));
+                out.note(format_args!("move tokens from this account"));
+                account_field(out, tx, "account", account, &mut addr);
+                account_field(out, tx, "owner", owner, &mut addr);
+                program_field(out, program);
+            }
+            Action::SetTokenAuthority {
+                program,
+                account,
+                authority,
+                authority_type,
+                new_authority,
+            } => {
+                // Red: this is the one card that changes who is in control rather than
+                // what moves, and no number on the summary stands in for it.
+                let ours = is_mine(authority, mine) || is_mine(account, mine);
+                match (
+                    authority_type,
+                    catcard_solana::authority_name(authority_type),
+                ) {
+                    (2, _) => out.danger(ours, format_args!("Hand an account to a new owner")),
+                    (_, Some(what)) => {
+                        out.danger(ours, format_args!("Change who may {what}"));
+                    }
+                    (n, None) => out.danger(ours, format_args!("Change authority type {n}")),
+                }
+                account_field(out, tx, "account", account, &mut addr);
+                account_field(out, tx, "authority now", authority, &mut addr);
+                // From the data, not an index: `None` is the instruction saying nobody.
+                match new_authority {
+                    Some(k) => out.address("new authority", address(&k, &mut addr)),
+                    None => {
+                        out.field("new authority", format_args!("nobody: it is given up"));
+                    }
+                }
+                program_field(out, program);
+            }
             // The numbers, not the word. These decide the priority fee, and a
             // transaction can ask its payer for an arbitrary amount through them.
             Action::ComputeBudget(Budget::Limit { units }) => {
