@@ -93,6 +93,12 @@ pub fn wipe_and_reset() -> ! {
     unsafe {
         core::arch::asm!("cpsid i", options(nomem, nostack, preserves_flags));
     }
+    // The MPU fence under the main stack (`stackguard`) comes down before anything else:
+    // this may *be* the fence's fault, with the stack already at the floor, and a wipe
+    // that pushed one frame further would fault again inside the fault handler -- the
+    // loop that ends with nothing wiped. Off, the wipe and the reset cannot trip it.
+    // SAFETY: one store to `MPU_CTRL`; nothing can fault from unfencing memory.
+    unsafe { catcard_hal::mpu::disarm() };
     local_wipe();
     cortex_m::peripheral::SCB::sys_reset()
 }
