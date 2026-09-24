@@ -557,6 +557,7 @@ fn review_and_sign(
     bytes: &[u8],
     request_id: Option<&[u8]>,
     path: Option<[u32; 4]>,
+    expected: Option<&[u8]>,
 ) {
     // A transaction first, then a message: the transaction reading is the stricter one,
     // and a message that happened to parse as a transaction would be reported with
@@ -599,6 +600,26 @@ fn review_and_sign(
         Some(p) => our_keys(gate, login, ui, &[p]),
         None => our_keys(gate, login, ui, &[[44, COIN, 0, 0], [44, COIN, 0, 0]]),
     };
+
+    // A request that named a path may also say what address it expects at it, and that
+    // is compared before anything is shown. If the key here is not the key the asker
+    // has, one of the two sides is wrong about whose signature this is, and reviewing
+    // the transaction would be reviewing the wrong question. The key is public and was
+    // derived above for the marking, so this costs nothing more; and a key that could
+    // not be derived at all is refused too, because "unchecked" is not "checked".
+    if let Some(expected) = expected {
+        let why = match mine.first() {
+            Some(key) if key[..] == *expected => None,
+            Some(_) => Some("not the key this request names"),
+            None => Some("could not check the key it names"),
+        };
+        if let Some(why) = why {
+            crate::catlog!("solana: refused a sign request: {}", why);
+            crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+    }
 
     let Some(mut review) = Review::new() else {
         crate::menu::message(ui.panel, HEAD, "not enough memory", "any key to go back");
@@ -782,7 +803,7 @@ pub(crate) fn screen(
             &block.bytes()[..n]
         }
     };
-    review_and_sign(gate, login, ui, raw, None, None);
+    review_and_sign(gate, login, ui, raw, None, None, None);
 }
 
 /// A `sol-sign-request`: a wallet asking this device for one signature.
@@ -851,5 +872,15 @@ pub(crate) fn sign_request(
         return;
     }
 
-    review_and_sign(gate, login, ui, req.sign_data, req.request_id, Some(path));
+    // The address the asker expects at that path travels with it, and is compared once
+    // the key has been derived -- see `review_and_sign`.
+    review_and_sign(
+        gate,
+        login,
+        ui,
+        req.sign_data,
+        req.request_id,
+        Some(path),
+        req.address,
+    );
 }
