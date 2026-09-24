@@ -4,9 +4,10 @@
 //! SHA-256 of that file: `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`
 //!
 //! Two properties the standard guarantees, both asserted by tests here because the
-//! implementation relies on them: the list is sorted (so lookup is a binary search),
-//! and no two words share the same first four letters (so a word can be identified from
-//! a four-letter prefix, which matters for recovery UX on a numeric keypad).
+//! implementation relies on them: the list is sorted (so a word's index is its position
+//! in the published file, which is what the checksum arithmetic assumes), and no two
+//! words share the same first four letters (so a word can be identified from a
+//! four-letter prefix, which matters for recovery UX on a numeric keypad).
 //!
 //! Note the second property is about *prefixes being distinct*, not about every word
 //! being four letters or longer: 2048-word lists contain three-letter words like `add`,
@@ -296,10 +297,42 @@ pub static ENGLISH: [&str; WORD_COUNT] = [
 
 /// Index of a word, or `None` if it is not in the list.
 ///
-/// Binary search over the sorted list: no allocation, and time depends only on the
-/// list length, not on which word was supplied.
+/// A full scan with a fixed-length compare: every one of the 2048 words is looked at, and
+/// each compare touches all [`MAX_WORD_LEN`] bytes whatever the word, so the time does
+/// not depend on which word was supplied or where in the list it sits. A binary search
+/// would take a path through the list that *is* the answer, and the answer is eleven
+/// bits of the seed. The scan costs 2048 eight-byte compares, nothing next to the seed
+/// stretch that follows it; it runs inside the masked region like the rest of parsing,
+/// which hides the interior, and this keeps the total from saying anything either.
+///
+/// A word longer than any in the list is refused up front, which reveals only that
+/// length -- a property of what was typed, not of the seed.
 pub fn index_of(word: &str) -> Option<u16> {
-    ENGLISH.binary_search(&word).ok().map(|i| i as u16)
+    let bytes = word.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_WORD_LEN {
+        return None;
+    }
+    // Both sides zero-padded to the fixed width. No word contains a NUL, so two words of
+    // different lengths cannot pad to the same bytes.
+    let mut wanted = [0u8; MAX_WORD_LEN];
+    wanted[..bytes.len()].copy_from_slice(bytes);
+
+    let mut found = u16::MAX;
+    for (i, w) in ENGLISH.iter().enumerate() {
+        let mut this = [0u8; MAX_WORD_LEN];
+        this[..w.len()].copy_from_slice(w.as_bytes());
+        let mut diff = 0u8;
+        for (a, b) in this.iter().zip(&wanted) {
+            diff |= a ^ b;
+        }
+        // `mask` is all ones when `diff` is zero and all zeros otherwise, by arithmetic
+        // rather than a branch: `d | -d` has its top bit set exactly when `d != 0`.
+        let d = u16::from(diff);
+        let nonzero = (d | d.wrapping_neg()) >> 15;
+        let mask = nonzero.wrapping_sub(1);
+        found = (found & !mask) | ((i as u16) & mask);
+    }
+    (found != u16::MAX).then_some(found)
 }
 
 #[cfg(test)]
@@ -314,7 +347,10 @@ mod tests {
 
     #[test]
     fn list_is_sorted() {
-        // `index_of` is a binary search; an unsorted list would silently fail lookups.
+        // The published list is sorted, and a word's index is its position in it; a list
+        // out of order here would give every phrase a different meaning from everywhere
+        // else. (`index_of` no longer depends on the order -- it scans -- but the indices
+        // it returns do.)
         for pair in ENGLISH.windows(2) {
             assert!(pair[0] < pair[1], "not sorted at {:?}", pair);
         }
