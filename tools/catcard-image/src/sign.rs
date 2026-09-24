@@ -14,6 +14,7 @@ use purecrypto::hash::Sha256;
 /// firmware also reads it from, so the host tool and the device cannot disagree about
 /// which key slot 0 is.
 pub use catcard_fwhdr::DEV_PUBKEY;
+use catcard_fwhdr::{APPROVED_PUBKEYS, NUM_PUBKEYS};
 
 /// The dev key, embedded so a clean checkout can build a loadable image with no setup.
 /// It is public by design — see `keys/README.md`.
@@ -71,16 +72,18 @@ pub fn verify_digest(pubkey: &[u8; 64], digest: &[u8; 32], signature: &[u8; 64])
     Ok(vk.verify_prehash(digest, &sig).is_ok())
 }
 
-/// The public key for a bootloader key slot, where we know it.
+/// The public key for a bootloader key slot.
+///
+/// All six are known: the public halves of the five Coinkite production keys are in
+/// `hw-reference/firmware-keys`, the same table the device verifies against. So a
+/// production-signed image is checked here exactly as the bootloader checks it, rather
+/// than reported as "not checkable" -- which used to leave the one artefact worth
+/// checking, a stock image on its way back onto a device, unchecked.
 pub fn pubkey_for_slot(slot: u32) -> Result<[u8; 64]> {
-    match slot {
-        0 => Ok(DEV_PUBKEY),
-        1..=5 => bail!(
-            "pubkey_num {slot} is a Coinkite production key; its public key is not \
-             published, so this image cannot be verified here (the device still can)"
-        ),
-        _ => bail!("pubkey_num {slot} is out of range (bootloader has 6 key slots)"),
+    if slot >= NUM_PUBKEYS {
+        bail!("pubkey_num {slot} is out of range (bootloader has {NUM_PUBKEYS} key slots)");
     }
+    Ok(APPROVED_PUBKEYS[slot as usize])
 }
 
 #[cfg(test)]
@@ -146,10 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn production_slots_report_why_they_cannot_be_checked() {
-        assert!(pubkey_for_slot(0).is_ok());
-        let err = pubkey_for_slot(3).unwrap_err().to_string();
-        assert!(err.contains("not published"), "{err}");
-        assert!(pubkey_for_slot(6).is_err());
+    fn every_bootloader_slot_has_a_key_and_nothing_past_them_does() {
+        assert_eq!(pubkey_for_slot(0).unwrap(), DEV_PUBKEY);
+        for slot in 1..NUM_PUBKEYS {
+            let pk = pubkey_for_slot(slot).unwrap();
+            assert_eq!(pk, APPROVED_PUBKEYS[slot as usize]);
+            assert_ne!(pk, DEV_PUBKEY, "slot {slot} aliases the dev key");
+        }
+        assert!(pubkey_for_slot(NUM_PUBKEYS).is_err());
     }
 }

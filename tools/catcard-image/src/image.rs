@@ -134,8 +134,10 @@ pub fn sign_image(image: &mut [u8], pem: &str, pubkey_num: u32) -> Result<[u8; 3
 pub struct Report {
     pub header: FirmwareHeader,
     pub digest: [u8; 32],
-    pub signature_ok: Option<bool>,
-    pub signature_note: Option<String>,
+    /// The signature verifies against `APPROVED_PUBKEYS[pubkey_num]` -- the exact key the
+    /// bootloader would use. Never "unknown": every slot `validate` lets through has a
+    /// published public half, so the answer is always yes or no.
+    pub signature_ok: bool,
 }
 
 /// Re-run every check the bootloader makes that we are able to reproduce.
@@ -147,19 +149,15 @@ pub fn verify(image: &[u8]) -> Result<Report> {
         .context("header failed the checks the bootloader makes before verifying")?;
     let digest = signed_digest(image).map_err(|e| anyhow::anyhow!(e))?;
 
-    let (signature_ok, signature_note) = match sign::pubkey_for_slot(header.pubkey_num) {
-        Ok(pk) => (
-            Some(sign::verify_digest(&pk, &digest, &header.signature)?),
-            None,
-        ),
-        Err(e) => (None, Some(e.to_string())),
-    };
+    // `validate` already refused `pubkey_num >= NUM_PUBKEYS`, so this cannot fail on
+    // range; the `?` is for the type, not a path an image can take.
+    let pk = sign::pubkey_for_slot(header.pubkey_num)?;
+    let signature_ok = sign::verify_digest(&pk, &digest, &header.signature)?;
 
     Ok(Report {
         header,
         digest,
         signature_ok,
-        signature_note,
     })
 }
 
@@ -299,6 +297,16 @@ pub fn ensure_installable(board: &BoardSpec, image: &[u8]) -> Result<()> {
             board.hw_compat_bit
         );
     }
+    // Key slot 5 is compiled out of the mk3 bootloader (`#if 0`) and enabled on every
+    // mk4-class board, so a slot-5 signature is valid and still refused there. The device
+    // reports the same case as `Signature::UntrustedSlot`. Source:
+    // hw-reference/firmware-keys/README.md [C].
+    if header.pubkey_num == 5 && board.hw_compat_bit == hw_compat::MK_3 {
+        bail!(
+            "pubkey_num 5 is disabled in the mk3 bootloader; board {} will refuse this image",
+            board.name
+        );
+    }
     Ok(())
 }
 
@@ -390,7 +398,7 @@ mod tests {
 
         let r = verify(&img).unwrap();
         assert_eq!(r.digest, digest);
-        assert_eq!(r.signature_ok, Some(true));
+        assert!(r.signature_ok);
         assert_eq!(r.header.pubkey_num, 0);
     }
 
@@ -399,7 +407,7 @@ mod tests {
         let mut img = assemble(fake_flash(0x5000), &opts(&MK3)).unwrap();
         sign_image(&mut img, sign::DEV_PRIVKEY_PEM, 0).unwrap();
         img[0x5000 - 1] ^= 0x01;
-        assert_eq!(verify(&img).unwrap().signature_ok, Some(false));
+        assert!(!verify(&img).unwrap().signature_ok);
     }
 
     #[test]
@@ -411,7 +419,7 @@ mod tests {
         let mut h = FirmwareHeader::from_image(&img).unwrap();
         h.hw_compat = hw_compat::MK_4;
         place_header(&mut img, &h).unwrap();
-        assert_eq!(verify(&img).unwrap().signature_ok, Some(false));
+        assert!(!verify(&img).unwrap().signature_ok);
     }
 
     #[test]
@@ -422,18 +430,32 @@ mod tests {
         let d1 = sign_image(&mut a, sign::DEV_PRIVKEY_PEM, 0).unwrap();
         let d2 = sign_image(&mut a, sign::DEV_PRIVKEY_PEM, 0).unwrap();
         assert_eq!(d1, d2, "digest changed on re-sign");
-        assert_eq!(verify(&a).unwrap().signature_ok, Some(true));
+        assert!(verify(&a).unwrap().signature_ok);
     }
 
     #[test]
-    fn claiming_a_production_slot_with_the_dev_key_is_reported_not_silently_wrong() {
+    fn claiming_a_production_slot_with_the_dev_key_fails_as_it_does_on_the_device() {
         let mut img = assemble(fake_flash(0x5000), &opts(&MK3)).unwrap();
-        // Signing as slot 3 with the dev key produces an image the device rejects.
-        // We cannot verify it here, and `verify` must say so rather than claim OK.
+        // Signing as slot 3 with the dev key produces an image the device rejects: the
+        // signature is checked against production key 3, which it does not match. The
+        // host holds that key too, so it says BAD here rather than "not checkable".
         sign_image(&mut img, sign::DEV_PRIVKEY_PEM, 3).unwrap();
         let r = verify(&img).unwrap();
-        assert_eq!(r.signature_ok, None);
-        assert!(r.signature_note.unwrap().contains("not published"));
+        assert!(!r.signature_ok);
+    }
+
+    #[test]
+    fn slot_5_is_refused_for_mk3_and_accepted_for_mk4() {
+        // Not a signature question -- no test can produce a production signature -- but a
+        // header one: the mk3 bootloader has slot 5 compiled out.
+        let mut img = assemble(fake_flash(0x5000), &opts(&MK3)).unwrap();
+        let mut h = FirmwareHeader::from_image(&img).unwrap();
+        h.pubkey_num = 5;
+        h.hw_compat = hw_compat::ANY;
+        place_header(&mut img, &h).unwrap();
+        let err = ensure_installable(&MK3, &img).unwrap_err().to_string();
+        assert!(err.contains("pubkey_num 5"), "{err}");
+        assert!(ensure_installable(&MK4, &img).is_ok());
     }
 
     #[test]

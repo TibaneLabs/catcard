@@ -425,18 +425,26 @@ device:
 cargo run -p catcard-image -- verify out/catcard-mk4.bin --board mk4
 ```
 
-It checks the header magic, `pubkey_num` range, 512-alignment, that `firmware_length`
-matches the file, that the timestamp is valid BCD, that the signature verifies against
-the dev public key, and that `hw_compat` permits the board.
+It checks what the device checks: the header magic, `pubkey_num` range, 512-alignment,
+that `firmware_length` matches the file, that the timestamp is valid BCD, that
+`install_flags` sets only the two defined bits, and that the signature verifies against
+`APPROVED_PUBKEYS[pubkey_num]` — the same six-key table the firmware carries in
+`crates/catcard-fwhdr`. So a Coinkite-signed stock image reports `OK` against its
+production key, exactly as the device accepts it, and a dev-signed image whose header
+claims a production slot reports `BAD`, exactly as the device refuses it. With `--board`
+it also checks that `hw_compat` permits the board, that the image fits that board's
+flash, and, for mk3, that the image is not signed with key slot 5, which the mk3
+bootloader has compiled out. `hw_compat` bits the reference does not define are warned
+about rather than refused, on the host and on the device alike.
 
-It cannot check two things:
+`dfuse` packages only an image whose signature verifies. It used to accept one it merely
+could not fault, back when slots 1–5 were "not checkable".
+
+It cannot check one thing:
 
 - **Downgrade.** The bootloader compares the header timestamp against an OTP high-water
   mark that only the device knows. If a previous install set `HIGH_WATER`, older images
   are refused permanently.
-- **Production signatures.** Slots 1–5 are Coinkite keys whose public halves are not
-  published, so an image claiming one of those slots reports "not checkable" rather than
-  "OK".
 
 ## `--high-water`
 

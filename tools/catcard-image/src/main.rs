@@ -402,16 +402,19 @@ fn cmd_verify(bin: &Path, board: Option<&str>) -> Result<()> {
     print_header(&r.header);
     warn_unknown_hw_compat(&r.header);
     println!("digest        {}", hex::encode(r.digest));
-    match r.signature_ok {
-        Some(true) => println!("signature     OK"),
-        Some(false) => {
-            println!("signature     BAD");
-            bail!("signature does not verify; the device would refuse this image");
-        }
-        None => println!(
-            "signature     not checkable — {}",
-            r.signature_note.unwrap_or_default()
-        ),
+    if r.signature_ok {
+        println!(
+            "signature     OK, against key slot {}{}",
+            r.header.pubkey_num,
+            if r.header.is_factory_signed() {
+                " (Coinkite production key)"
+            } else {
+                " (published dev key: anyone can produce this)"
+            }
+        );
+    } else {
+        println!("signature     BAD");
+        bail!("signature does not verify; the device would refuse this image");
     }
     if let Some(name) = board {
         let b = find_board(name)?;
@@ -529,8 +532,10 @@ fn cmd_dfuse(
 
     // Refuse to package something the device will reject; the SD-card round trip is
     // slow enough that catching it here matters.
+    // A positive answer, not merely the absence of a negative one: every slot is
+    // checkable now, so "could not tell" is no longer a state an image can be in.
     let r = image::verify(&img)?;
-    if r.signature_ok == Some(false) {
+    if !r.signature_ok {
         bail!("{} is not correctly signed; sign it first", bin.display());
     }
     warn_unknown_hw_compat(&r.header);
