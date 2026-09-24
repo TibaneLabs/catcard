@@ -53,6 +53,21 @@ static mut PARSED: heapless::Vec<Multisig, { wallets::MAX_WALLETS }> = heapless:
 ///
 /// A descriptor that no longer parses is skipped rather than failing the list: one entry
 /// written by a version that stores more must not hide the wallets beside it.
+///
+/// # The slice is borrowed from a static this clears
+///
+/// The `'static` lifetime is a convenience, not a promise: the wallets live in
+/// [`PARSED`], and the next call empties it and parses afresh. So a slice from one call
+/// is stale -- and, since it aliases memory being rewritten, unsound to read -- the
+/// moment another call is made. The rule for a caller is:
+///
+/// - **foreground only**, one screen at a time, like everything else in this module;
+/// - **never hold the slice across another `registered()`**. Take it, use it, and let
+///   it go before anything that might read the registered wallets again runs.
+///
+/// Both callers do: the signing screen reads it once per transaction and drops it with
+/// the review, and the address explorer reads it once on entry and holds it for a loop
+/// that calls nothing in this module.
 pub(crate) fn registered(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
