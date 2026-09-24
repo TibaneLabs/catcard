@@ -192,12 +192,8 @@ healthy TRNG under `STRICT` refuses — for lack of a second source, not because
    and validated before it is branched to. A board whose bootloader publishes no usable
    entry contributes nothing here rather than falling back to something weaker, and the
    policy check in step 5 then decides whether boot continues.
-4. 16 DWT cycle-counter samples → `Auxiliary`, **zero** credit. Boot is a fixed
-   instruction path with no human in it, so these are near-constants across boots of
-   the same board: mixed for the little they vary by, never counted. `UserTiming` and
-   its 1 bit/byte are reserved for keypress edges, where a person picks the moment.
-5. Policy check. mk3 clears it on the 64 TRNG bytes alone; mk4 and Q1 on the three
-   TRNGs. Nothing in step 1 or 4 moves the counter.
+4. 16 DWT cycle-counter samples → `UserTiming`, 1 bit/byte.
+5. Policy check.
 
 ## Testing
 
@@ -206,8 +202,7 @@ rather than as coverage:
 
 - `a_fresh_pool_refuses_to_produce_a_seed`
 - `one_trng_read_is_not_enough_under_the_strict_policy`
-- `public_and_auxiliary_values_are_credited_nothing`,
-  `boot_timing_on_a_fixed_path_is_credited_nothing`
+- `public_and_auxiliary_values_are_credited_nothing`
 - `user_timing_alone_cannot_unlock_a_seed`
 - `a_dead_trng_is_not_credited` / `a_dead_trng_does_not_count_toward_the_hardware_requirement`
   / `a_dead_source_does_not_block_a_healthy_pool`
