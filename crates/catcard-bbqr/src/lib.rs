@@ -143,6 +143,20 @@ impl Collector {
     /// written it.
     pub fn accept(&mut self, line: &str) -> Result<Placed, Error> {
         let (header, body) = Header::parse(line)?;
+        // A body of a length that cannot decode is refused here, before anything is
+        // learned from it. `decoded_len_bound` floors, so a body one character long
+        // still yields a length -- and a length committed as `part_len` from a part
+        // that then fails to decode is a measure no correct part will ever match. The
+        // scan would refuse every one of them as `Mismatch` and never complete, from
+        // one damaged frame. The rule is the codec's: hex is whole pairs, and base32
+        // without padding has no group of 1, 3 or 6 characters.
+        let decodable = match header.encoding {
+            Encoding::Hex => body.len().is_multiple_of(2),
+            Encoding::Base32 | Encoding::Zlib => !matches!(body.len() % 8, 1 | 3 | 6),
+        };
+        if !decodable {
+            return Err(Error::Codec(outscript::bbqr::Error::InvalidEncoding));
+        }
         let len = decoded_len_bound(header.encoding, body.len());
         let is_last = header.index + 1 == header.num_parts;
 

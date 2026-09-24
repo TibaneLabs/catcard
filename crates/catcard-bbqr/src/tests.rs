@@ -263,6 +263,51 @@ fn hex_works_too() {
     assert_eq!(out, file);
 }
 
+/// A body whose length cannot decode -- a character added to or clipped from a base32
+/// group, an odd count of hex digits -- is refused before the collector learns anything
+/// from it.
+///
+/// It used to commit the part length from the floored bound first and only then fail
+/// the decode. Every correct part after that measured differently, was refused as
+/// another file's, and the scan never completed: one damaged frame, and the animation
+/// could loop forever.
+#[test]
+fn a_body_that_cannot_decode_commits_nothing() {
+    let file = firmwareish(120);
+    // Forty bytes are 64 base32 characters or 80 hex digits; the tail makes each one a
+    // length the codec refuses.
+    for (encoding, tail) in [
+        (Encoding::Base32, "A"),      // 65: 1 mod 8
+        (Encoding::Base32, "AAA"),    // 67: 3 mod 8
+        (Encoding::Base32, "AAAAAA"), // 70: 6 mod 8
+        (Encoding::Hex, "0"),         // 81: odd
+    ] {
+        let parts: Vec<String> = (0..3u16)
+            .map(|i| {
+                let at = i as usize * 40;
+                part_with(encoding, &file[at..at + 40], 3, i)
+            })
+            .collect();
+        let mut damaged = parts[0].clone();
+        damaged.push_str(tail);
+
+        let mut out = vec![0u8; file.len()];
+        let mut c = Collector::new();
+        assert!(
+            matches!(c.accept(&damaged), Err(Error::Codec(_))),
+            "{encoding:?} plus {tail:?} must be refused"
+        );
+        assert_eq!(c.have(), 0, "a refused part must not count");
+        assert!(c.header().is_none(), "a refused part must teach nothing");
+        for line in &parts {
+            c.take(line, &mut out)
+                .expect("a correct part after a damaged one");
+        }
+        assert!(c.complete(), "{encoding:?}: the file must still complete");
+        assert_eq!(out, file);
+    }
+}
+
 /// `Z` deflates the whole file before cutting it, so the parts place like any others
 /// and what they reassemble into is the compressed stream. The collector says so and
 /// leaves the expanding to whoever knows where the bytes went.
