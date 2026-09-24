@@ -71,7 +71,8 @@ const PREIMAGE_MAX: usize = TAG.len() + MAX_ENTROPY_LEN + 16;
 pub enum Error {
     /// Fewer than [`MIN_PARTS`] or more than [`MAX_PARTS`].
     PartCount,
-    /// Not a BIP-39 entropy length, so there is no phrase of that size.
+    /// Not a BIP-39 entropy length, so there is no phrase of that size; or, for a random
+    /// split, a noise slice with fewer bytes than the secret.
     Length,
     /// The parts are not all the same length. Seed XOR is only defined between phrases
     /// of equal length -- a 12-word part and a 24-word part combine to nothing.
@@ -158,9 +159,15 @@ impl Parts {
     ///
     /// The noise is hashed, not used raw: a part is always `SHA-256(SHA-256(x))`, so a
     /// TRNG with a bias cannot put that bias straight into a phrase someone stamps into
-    /// metal. Give it as many bytes as the secret has, or more.
+    /// metal. Each slice must have at least as many bytes as the secret: shorter noise is
+    /// refused with [`Error::Length`], since hashing stretches nothing -- a part made from
+    /// four bytes of noise has sixteen bits of entropy however long the hash is, and every
+    /// other part is then as weak as the secret XOR that one.
     pub fn from_noise(secret: &[u8], noise: &[&[u8]], kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut this = Self::blank(secret, noise.len() + 1)?;
+        if noise.iter().any(|n| n.len() < secret.len()) {
+            return Err(Error::Length);
+        }
         for (i, n) in noise.iter().enumerate() {
             let mut part = [0u8; MAX_ENTROPY_LEN];
             hash_into(n, &mut part[..this.len]);
@@ -424,6 +431,29 @@ mod tests {
         let mut back = [0u8; MAX_ENTROPY_LEN];
         let n = parts.recombine(&mut back, &kw());
         assert_eq!(&back[..n], &secret[..]);
+    }
+
+    /// Noise shorter than the secret is refused, not hashed up to size: the hash makes a
+    /// part the right length out of anything, and a part from too little noise is a part
+    /// with too little in it.
+    #[test]
+    fn noise_shorter_than_the_secret_is_refused() {
+        let secret = [0x22u8; 32];
+        let short = [0x33u8; 31];
+        let enough = [0x44u8; 32];
+        assert_eq!(
+            Parts::from_noise(&secret, &[&short], &kw()).err(),
+            Some(Error::Length)
+        );
+        // One short slice among enough ones is still a refusal.
+        assert_eq!(
+            Parts::from_noise(&secret, &[&enough, &short], &kw()).err(),
+            Some(Error::Length)
+        );
+        assert!(Parts::from_noise(&secret, &[&enough, &enough], &kw()).is_ok());
+        // Longer than the secret is fine: more noise, not less.
+        let long = [0x55u8; 64];
+        assert!(Parts::from_noise(&secret, &[&long], &kw()).is_ok());
     }
 
     #[test]
