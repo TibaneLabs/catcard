@@ -143,7 +143,7 @@ jobs:
       # Signed with the published developer key, so these boot with a red genuine light
       # and a 25-second warning: they are not releases. They do carry no debug monitor
       # and no key injection, which is checked above rather than assumed.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.shape.outputs.name }}
           path: out/${{ steps.shape.outputs.name }}.dfu
