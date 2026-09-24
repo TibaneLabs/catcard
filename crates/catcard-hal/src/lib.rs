@@ -25,6 +25,7 @@ pub mod dwt;
 pub mod exti;
 pub mod gpio;
 pub mod iflash;
+pub mod mpu;
 pub mod otg;
 pub mod reg;
 pub mod rng;
