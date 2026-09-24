@@ -19,7 +19,7 @@
 //! Source: BIP-85, including its test vectors -- a public standard [C].
 
 use purecrypto::hash::HmacSha512;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::KeyWork;
 use crate::bip32::{ChildNumber, ExtendedPrivKey};
@@ -88,9 +88,10 @@ pub fn entropy(master: &ExtendedPrivKey, steps: &[u32], kw: &KeyWork) -> Result<
     }
     let mut mac = HmacSha512::new(HMAC_KEY);
     mac.update(here.secret_bytes());
-    let full = mac.finalize();
+    // The HMAC output *is* the child secret; the copy left here is wiped on drop.
+    let full = Zeroizing::new(mac.finalize());
     let mut out = [0u8; 64];
-    out.copy_from_slice(&full);
+    out.copy_from_slice(&full[..]);
     Ok(Entropy(out))
 }
 

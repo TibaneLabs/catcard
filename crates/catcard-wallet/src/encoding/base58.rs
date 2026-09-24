@@ -7,6 +7,10 @@
 //! address payload 21.
 
 use purecrypto::hash::{Digest, Sha256};
+use zeroize::Zeroizing;
+
+// Every scratch buffer below is `Zeroizing`: this encodes `xprv` and WIF strings as well
+// as addresses, so the digits it works through may be a private key's.
 
 /// Bitcoin's Base58 alphabet. Deliberately omits `0`, `O`, `I` and `l`.
 pub const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -56,7 +60,7 @@ pub fn encode(data: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     let zeros = data.iter().take_while(|&&b| b == 0).count();
 
     // Repeated division of a big-endian bignum by 58.
-    let mut buf = [0u8; MAX_ENCODED];
+    let mut buf = Zeroizing::new([0u8; MAX_ENCODED]);
     let mut written = 0usize;
     for &byte in &data[zeros..] {
         let mut carry = byte as u32;
@@ -99,7 +103,7 @@ pub fn decode(text: &str, out: &mut [u8]) -> Result<usize, Error> {
 
     let zeros = bytes.iter().take_while(|&&c| c == ALPHABET[0]).count();
 
-    let mut buf = [0u8; MAX_DECODED];
+    let mut buf = Zeroizing::new([0u8; MAX_DECODED]);
     let mut written = 0usize;
     for (position, &c) in bytes.iter().enumerate().skip(zeros) {
         let digit = digit_of(c).ok_or(Error::BadCharacter { position })? as u32;
@@ -150,7 +154,7 @@ pub fn encode_check(payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     if payload.len() + CHECKSUM_LEN > MAX_DECODED {
         return Err(Error::TooLong { len: payload.len() });
     }
-    let mut buf = [0u8; MAX_DECODED];
+    let mut buf = Zeroizing::new([0u8; MAX_DECODED]);
     buf[..payload.len()].copy_from_slice(payload);
     buf[payload.len()..payload.len() + CHECKSUM_LEN].copy_from_slice(&checksum(payload));
     encode(&buf[..payload.len() + CHECKSUM_LEN], out)
@@ -158,8 +162,8 @@ pub fn encode_check(payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
 
 /// Decode and verify a Base58Check string. Returns the payload length written to `out`.
 pub fn decode_check(text: &str, out: &mut [u8]) -> Result<usize, Error> {
-    let mut buf = [0u8; MAX_DECODED];
-    let n = decode(text, &mut buf)?;
+    let mut buf = Zeroizing::new([0u8; MAX_DECODED]);
+    let n = decode(text, &mut buf[..])?;
     if n < CHECKSUM_LEN {
         return Err(Error::TooShort { len: n });
     }

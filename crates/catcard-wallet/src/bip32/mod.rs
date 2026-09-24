@@ -25,7 +25,7 @@ mod test_vectors;
 
 use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
 use purecrypto::hash::{Digest, HmacSha512, Ripemd160, Sha256};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub use path::{ChildNumber, DerivationPath, HARDENED_OFFSET, MAX_PATH_DEPTH};
 pub use serialize::Network;
@@ -159,11 +159,13 @@ impl ExtendedPrivKey {
         }
         let mut mac = HmacSha512::new(MASTER_KEY_SALT);
         mac.update(seed);
-        let i = mac.finalize();
+        // `I` is the whole key; it and the halves cut from it are wiped on every exit,
+        // the refusal below included.
+        let i = Zeroizing::new(mac.finalize());
 
-        let mut secret = [0u8; PRIVKEY_LEN];
+        let mut secret = Zeroizing::new([0u8; PRIVKEY_LEN]);
         secret.copy_from_slice(&i[..32]);
-        let mut chain_code = [0u8; CHAIN_CODE_LEN];
+        let mut chain_code = Zeroizing::new([0u8; CHAIN_CODE_LEN]);
         chain_code.copy_from_slice(&i[32..]);
 
         // A master key outside the curve order is astronomically unlikely but must be
@@ -177,8 +179,8 @@ impl ExtendedPrivKey {
             depth: 0,
             parent_fingerprint: [0; FINGERPRINT_LEN],
             child_number: ChildNumber::ZERO,
-            chain_code,
-            secret,
+            chain_code: *chain_code,
+            secret: *secret,
             public_key_cache: core::cell::OnceCell::new(),
         })
     }
@@ -262,9 +264,13 @@ impl ExtendedPrivKey {
             mac.update(&self.public_key(kw));
         }
         mac.update(&child.to_bytes());
-        let i = mac.finalize();
+        // Every intermediate here is key material -- `I`, its left half, the tweak, the
+        // parent scalar and the sum -- and each is wiped on every exit path, the two
+        // refusals included. The byte buffers by `Zeroizing`; the scalars by
+        // `purecrypto`'s `Scalar`, which wipes its limbs on drop.
+        let i = Zeroizing::new(mac.finalize());
 
-        let mut il = [0u8; 32];
+        let mut il = Zeroizing::new([0u8; 32]);
         il.copy_from_slice(&i[..32]);
 
         // k_i = parse256(I_L) + k_par (mod n); invalid if I_L >= n or k_i == 0.
@@ -275,19 +281,17 @@ impl ExtendedPrivKey {
             return Err(Error::UnusableChild { index: child.0 });
         }
 
-        let mut secret = [0u8; PRIVKEY_LEN];
-        secret.copy_from_slice(&derived.to_bytes_be());
-        let mut chain_code = [0u8; CHAIN_CODE_LEN];
+        let secret = Zeroizing::new(derived.to_bytes_be());
+        let mut chain_code = Zeroizing::new([0u8; CHAIN_CODE_LEN]);
         chain_code.copy_from_slice(&i[32..]);
-        il.zeroize();
 
         Ok(Self {
             network: self.network,
             depth: self.depth + 1,
             parent_fingerprint: self.fingerprint(kw),
             child_number: child,
-            chain_code,
-            secret,
+            chain_code: *chain_code,
+            secret: *secret,
             public_key_cache: core::cell::OnceCell::new(),
         })
     }
@@ -423,8 +427,8 @@ mod public_key_cache_tests {
             .unwrap();
 
         // Rebuild both from their serialised parts: same keys, empty caches.
-        let fresh_master = ExtendedPrivKey::from_raw(&master.to_raw()).unwrap();
-        let fresh_child = ExtendedPrivKey::from_raw(&child.to_raw()).unwrap();
+        let fresh_master = ExtendedPrivKey::from_raw(&master.to_raw()[..]).unwrap();
+        let fresh_child = ExtendedPrivKey::from_raw(&child.to_raw()[..]).unwrap();
         assert_eq!(master.public_key(&kw), fresh_master.public_key(&kw));
         assert_eq!(child.public_key(&kw), fresh_child.public_key(&kw));
 

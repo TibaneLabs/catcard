@@ -9,6 +9,8 @@
 //! the compressed point. The leading zero byte is what makes both 33 wide, so the two
 //! forms are the same length and only the version prefix distinguishes them.
 
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
 use crate::encoding::base58;
 
 use super::{
@@ -100,11 +102,18 @@ fn write_common(
 }
 
 /// Fields shared by both key kinds, as read back off the wire.
+///
+/// For a private key `key` holds the scalar, so the whole thing is wiped on drop --
+/// including when `from_raw` refuses what it read.
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct Common {
+    #[zeroize(skip)]
     network: Network,
+    #[zeroize(skip)]
     is_private: bool,
     depth: u8,
     parent_fingerprint: [u8; FINGERPRINT_LEN],
+    #[zeroize(skip)]
     child_number: ChildNumber,
     chain_code: [u8; CHAIN_CODE_LEN],
     key: [u8; PUBKEY_LEN],
@@ -144,9 +153,9 @@ fn read_common(raw: &[u8]) -> Result<Common, Error> {
 }
 
 impl ExtendedPrivKey {
-    /// The raw 78-byte form.
-    pub fn to_raw(&self) -> [u8; RAW_LEN] {
-        let mut out = [0u8; RAW_LEN];
+    /// The raw 78-byte form. It carries the scalar, so it wipes itself when dropped.
+    pub fn to_raw(&self) -> Zeroizing<[u8; RAW_LEN]> {
+        let mut out = Zeroizing::new([0u8; RAW_LEN]);
         write_common(
             &mut out,
             self.network.private_version(),
@@ -163,9 +172,9 @@ impl ExtendedPrivKey {
     /// The `xprv`/`tprv` string.
     #[cfg(feature = "std")]
     pub fn to_base58(&self, kw: &crate::KeyWork) -> alloc_string::String {
-        let mut buf = [0u8; MAX_BASE58_LEN];
+        let mut buf = Zeroizing::new([0u8; MAX_BASE58_LEN]);
         let n = self
-            .write_base58(&mut buf, kw)
+            .write_base58(&mut buf[..], kw)
             .expect("buffer is large enough");
         core::str::from_utf8(&buf[..n])
             .expect("Base58 output is ASCII")
@@ -177,17 +186,19 @@ impl ExtendedPrivKey {
     /// Base58 is repeated big-integer division, whose running time depends on the digits --
     /// here, the private key's.
     pub fn write_base58(&self, out: &mut [u8], _kw: &crate::KeyWork) -> Result<usize, Error> {
-        Ok(base58::encode_check(&self.to_raw(), out)?)
+        Ok(base58::encode_check(&self.to_raw()[..], out)?)
     }
 
     /// Parse an `xprv`/`tprv` string.
     pub fn from_base58(text: &str, _kw: &crate::KeyWork) -> Result<Self, Error> {
-        let mut raw = [0u8; base58::MAX_DECODED];
-        let n = base58::decode_check(text, &mut raw)?;
+        let mut raw = Zeroizing::new([0u8; base58::MAX_DECODED]);
+        let n = base58::decode_check(text, &mut raw[..])?;
         Self::from_raw(&raw[..n])
     }
 
     pub fn from_raw(raw: &[u8]) -> Result<Self, Error> {
+        // `c` and `secret` both hold the scalar, and both are wiped on every exit path,
+        // the refusals below included.
         let c = read_common(raw)?;
         if !c.is_private {
             return Err(Error::BadVersion);
@@ -195,7 +206,7 @@ impl ExtendedPrivKey {
         if c.key[0] != 0x00 {
             return Err(Error::BadPrivatePrefix);
         }
-        let mut secret = [0u8; PRIVKEY_LEN];
+        let mut secret = Zeroizing::new([0u8; PRIVKEY_LEN]);
         secret.copy_from_slice(&c.key[1..]);
         // Reject zero and out-of-range scalars rather than carrying an unusable key.
         if super::scalar_from_bytes(&secret).is_none() {
@@ -207,7 +218,7 @@ impl ExtendedPrivKey {
             c.parent_fingerprint,
             c.child_number,
             c.chain_code,
-            secret,
+            *secret,
         ))
     }
 }
@@ -432,7 +443,7 @@ mod tests {
         let mut raw = m.to_raw();
         raw[45] = 0x01;
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw),
+            ExtendedPrivKey::from_raw(&raw[..]),
             Err(Error::BadPrivatePrefix)
         );
     }
@@ -443,7 +454,7 @@ mod tests {
             .unwrap();
         let mut raw = m.to_raw();
         raw[0..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(ExtendedPrivKey::from_raw(&raw), Err(Error::BadVersion));
+        assert_eq!(ExtendedPrivKey::from_raw(&raw[..]), Err(Error::BadVersion));
     }
 
     #[test]
@@ -464,7 +475,7 @@ mod tests {
             .unwrap();
         let mut raw = m.to_raw();
         raw[46..78].fill(0);
-        assert_eq!(ExtendedPrivKey::from_raw(&raw), Err(Error::InvalidKey));
+        assert_eq!(ExtendedPrivKey::from_raw(&raw[..]), Err(Error::InvalidKey));
     }
 
     #[test]
@@ -475,7 +486,7 @@ mod tests {
         // Valid prefix, x coordinate that is not on the curve.
         raw[45] = 0x02;
         raw[46..78].fill(0xff);
-        assert_eq!(ExtendedPubKey::from_raw(&raw), Err(Error::InvalidKey));
+        assert_eq!(ExtendedPubKey::from_raw(&raw[..]), Err(Error::InvalidKey));
     }
 
     #[test]
@@ -485,14 +496,14 @@ mod tests {
         let mut raw = m.to_raw();
         raw[5..9].copy_from_slice(&[1, 2, 3, 4]);
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw),
+            ExtendedPrivKey::from_raw(&raw[..]),
             Err(Error::InconsistentDepth)
         );
 
         let mut raw = m.to_raw();
         raw[9..13].copy_from_slice(&[0, 0, 0, 1]);
         assert_eq!(
-            ExtendedPrivKey::from_raw(&raw),
+            ExtendedPrivKey::from_raw(&raw[..]),
             Err(Error::InconsistentDepth)
         );
     }
