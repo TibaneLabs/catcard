@@ -122,9 +122,20 @@ impl Blocks {
         (self.page_size / BLOCK) as u32
     }
 
-    /// The offset of `block` within the region.
-    fn offset(&self, block: u32) -> u32 {
-        block * BLOCK as u32
+    /// The offset of byte `off` of `block` within the region.
+    ///
+    /// `block` comes from on-flash filesystem metadata, which nobody has checked before
+    /// this runs -- the pre-login read happens before the PIN prompt. A block number that
+    /// multiplies past `u32` is a refusal here, not an arithmetic panic there: the flash
+    /// driver's own bounds check then never sees it, so it is reported as the address
+    /// error it would have been.
+    fn offset(&self, block: u32, off: u32) -> Result<u32, iflash::Error> {
+        block
+            .checked_mul(BLOCK as u32)
+            .and_then(|at| at.checked_add(off))
+            .ok_or(iflash::Error::Address {
+                addr: block.saturating_mul(BLOCK as u32),
+            })
     }
 }
 
@@ -146,20 +157,24 @@ impl FlashDriver for Blocks {
     }
 
     fn read(&mut self, block: u32, off: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
+        let at = self.offset(block, off)?;
         // SAFETY: bounds are checked inside, and flash is memory-mapped for reads.
-        unsafe { self.flash.read(self.offset(block) + off, buf) }
+        unsafe { self.flash.read(at, buf) }
     }
 
     fn prog(&mut self, block: u32, off: u32, data: &[u8]) -> Result<(), Self::Error> {
+        let at = self.offset(block, off)?;
         // Erased storage, per the trait: program it straight.
         // SAFETY: as in `open`.
-        unsafe { self.flash.program(self.offset(block) + off, data) }
+        unsafe { self.flash.program(at, data) }
     }
 
     fn erase(&mut self, block: u32) -> Result<(), Self::Error> {
         let per_page = self.per_page();
         let page = block / per_page;
-        let page_off = page * self.page_size as u32;
+        // The page's first block is at most `block`, so if this overflows so would any
+        // read of `block` itself; either way it is refused, not computed.
+        let page_off = self.offset(page * per_page, 0)?;
         let within = (block % per_page) as usize * BLOCK;
         let page_size = self.page_size;
 

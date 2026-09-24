@@ -76,8 +76,15 @@ impl FlashDriver for Staged<'_> {
         BLOCK as u32
     }
     fn read(&mut self, block: u32, off: u32, buf: &mut [u8]) -> Result<(), ()> {
-        let at = block as usize * BLOCK + off as usize;
-        let src = self.0.get(at..at + buf.len()).ok_or(())?;
+        // The block number is the staged image's own metadata, checked by nobody yet;
+        // an offset that overflows is a read that fails, not a panic before the owner
+        // has been asked anything.
+        let at = (block as usize)
+            .checked_mul(BLOCK)
+            .and_then(|at| at.checked_add(off as usize))
+            .ok_or(())?;
+        let end = at.checked_add(buf.len()).ok_or(())?;
+        let src = self.0.get(at..end).ok_or(())?;
         buf.copy_from_slice(src);
         Ok(())
     }
