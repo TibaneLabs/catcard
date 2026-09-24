@@ -122,6 +122,14 @@ pub enum Error {
     },
     /// Timestamp is not valid packed BCD.
     BadTimestamp,
+    /// `install_flags` has a bit set that the format does not define.
+    ///
+    /// Only `HIGH_WATER` and `BEST_TS` exist. An unknown bit is either a corrupt header
+    /// or a claim about the bootloader that nothing here can check -- and since the flags
+    /// are what make an install irreversible, "unknown" is not a thing to wave through.
+    UndefinedInstallFlags {
+        found: u32,
+    },
     /// `firmware_length` is outside the bounds the bootloader enforces. Rejected before
     /// any signature work, so a too-small image fails with no clue about its contents.
     LengthOutOfBounds {
@@ -160,6 +168,11 @@ impl std::fmt::Display for Error {
                 )
             }
             Error::BadTimestamp => write!(f, "timestamp is not valid BCD"),
+            Error::UndefinedInstallFlags { found } => write!(
+                f,
+                "install_flags {found:#x} sets bits outside the defined {:#x}",
+                install_flags::DEFINED
+            ),
             Error::LengthOutOfBounds { found, min, max } => match max {
                 Some(max) => write!(
                     f,
@@ -306,6 +319,15 @@ impl FirmwareHeader {
         }
         if !is_bcd(&self.timestamp) {
             return Err(Error::BadTimestamp);
+        }
+        // Undefined install bits are refused on both sides of the cable. `hw_compat` is
+        // deliberately not held to the same rule: an unknown board bit is a permit for
+        // hardware this code has not heard of, which is harmless to a board it names, so
+        // the host tool warns about it and the device ignores it.
+        if self.install_flags & !install_flags::DEFINED != 0 {
+            return Err(Error::UndefinedInstallFlags {
+                found: self.install_flags,
+            });
         }
         Ok(())
     }
@@ -748,6 +770,19 @@ mod tests {
         let mut h = ok.clone();
         h.timestamp = [0xff; 8];
         assert!(matches!(h.validate(len), Err(Error::BadTimestamp)));
+
+        // Every defined install bit passes; any other is refused. Shipped stock images
+        // carry `install_flags = 0` (firmware-signing.md §1), so this refuses nothing
+        // that exists.
+        let mut h = ok.clone();
+        h.install_flags = install_flags::HIGH_WATER | install_flags::BEST_TS;
+        assert!(h.validate(len).is_ok());
+        let mut h = ok.clone();
+        h.install_flags = 0x04;
+        assert!(matches!(
+            h.validate(len),
+            Err(Error::UndefinedInstallFlags { found: 0x04 })
+        ));
 
         assert!(matches!(
             ok.validate(len + 512),

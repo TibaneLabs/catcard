@@ -400,6 +400,7 @@ fn cmd_verify(bin: &Path, board: Option<&str>) -> Result<()> {
     };
     let r = image::verify(&img)?;
     print_header(&r.header);
+    warn_unknown_hw_compat(&r.header);
     println!("digest        {}", hex::encode(r.digest));
     match r.signature_ok {
         Some(true) => println!("signature     OK"),
@@ -471,6 +472,22 @@ fn cmd_info(file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Say so when `hw_compat` names a board this tool does not know.
+///
+/// A warning, not a refusal, and only on the host: an unknown bit is a permit for
+/// hardware that may exist by now, and refusing it would reject a valid image for a
+/// newer board. The device ignores such bits for the same reason. `install_flags` is the
+/// field that gets refused, in `validate`, because its bits change what an install does.
+fn warn_unknown_hw_compat(h: &catcard_fwhdr::FirmwareHeader) {
+    let unknown = h.hw_compat & !catcard_fwhdr::hw_compat::DEFINED;
+    if unknown != 0 {
+        eprintln!(
+            "warning: hw_compat sets undefined bits {unknown:#x}; this tool cannot say \
+             which hardware they permit"
+        );
+    }
+}
+
 fn print_header(h: &catcard_fwhdr::FirmwareHeader) {
     println!("magic         {:#010x}", h.magic);
     println!("version       {}", h.version_str().unwrap_or("<non-ascii>"));
@@ -516,6 +533,7 @@ fn cmd_dfuse(
     if r.signature_ok == Some(false) {
         bail!("{} is not correctly signed; sign it first", bin.display());
     }
+    warn_unknown_hw_compat(&r.header);
     image::ensure_installable(board, &img)?;
 
     let file = dfuse::pack(
