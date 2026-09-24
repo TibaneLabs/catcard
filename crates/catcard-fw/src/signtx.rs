@@ -190,8 +190,11 @@ fn lone_psbt() -> Option<heapless::String<{ PATH_MAX }>> {
                 return;
             }
             let lower = name.trim();
-            let is_psbt = lower.len() > 5
-                && lower[lower.len() - 5..].eq_ignore_ascii_case(".psbt")
+            // Split at the last dot rather than slice at a byte count: a long name is
+            // UTF-8, and a byte offset can land inside a character, which panics.
+            let is_psbt = lower
+                .rsplit_once('.')
+                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("psbt"))
                 && !lower.eq_ignore_ascii_case(&SIGNED_NAME[1..]);
             if !is_psbt {
                 return;
