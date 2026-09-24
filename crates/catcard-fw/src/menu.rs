@@ -6475,12 +6475,13 @@ pub(crate) fn root_master(
     let mut busy = Working::seed(panel, head, "deriving the key");
     let master = crate::keywork::run(|kw| match &stored {
         Stored::Words { entropy, len } => plain_master(&entropy[..*len], kw),
-        // The node is the master already: no stretch, and nothing to derive it from.
-        Stored::Xprv { chain_code, key } => Ok(ExtendedPrivKey::root_from_parts(
-            Network::Mainnet,
-            *chain_code,
-            *key,
-        )),
+        // The node is the master already: no stretch, and nothing to derive it from. The
+        // scalar is still checked: a stash that reads back as no usable key is reported,
+        // not carried to the first derivation to abort there.
+        Stored::Xprv { chain_code, key } => {
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+                .map_err(|_| "the stored key is not usable")
+        }
         Stored::Raw { bytes, len } => {
             ExtendedPrivKey::from_seed(&bytes[..*len], Network::Mainnet, kw)
                 .map_err(|_| "key derivation failed")
@@ -6527,11 +6528,10 @@ pub(crate) fn master_quietly(
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
             let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
-            return Ok(ExtendedPrivKey::root_from_parts(
-                Network::Mainnet,
-                *chain_code,
-                *key,
-            ));
+            return crate::keywork::run(|kw| {
+                ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+            })
+            .map_err(|_| "the loaded key is not usable");
         }
         Some(Loaded::Wif) => return Err("a WIF key is not HD"),
         _ => {}
@@ -6561,10 +6561,12 @@ pub(crate) fn master_quietly(
                 mut chain_code,
                 mut key,
             } => {
-                let node = ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key);
+                let node = crate::keywork::run(|kw| {
+                    ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key, kw)
+                });
                 chain_code.zeroize();
                 key.zeroize();
-                Ok(node)
+                node.map_err(|_| "the stored key is not usable")
             }
             Stored::Raw { mut bytes, len } => {
                 let node = crate::keywork::run(|kw| {
@@ -10285,10 +10287,14 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         // A node stores as a node: the stash has a shape for it, and this firmware now
         // comes up in one (`root_stored`).
         use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+        // A node whose key is no usable scalar has nothing to store: it falls through to
+        // "could not encode", the same as a stash the callgate cannot spell.
         let fp = crate::keywork::run(|kw| {
-            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key).fingerprint(kw)
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+                .ok()
+                .map(|m| m.fingerprint(kw))
         });
-        Some((catcard_callgate::pin::encode_xprv(chain_code, key), fp))
+        fp.map(|fp| (catcard_callgate::pin::encode_xprv(chain_code, key), fp))
     } else {
         let (mut ent, len) = match seed_entropy(gate, login, ui.panel, HEAD) {
             Ok(got) => got,

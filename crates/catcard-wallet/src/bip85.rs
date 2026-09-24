@@ -151,9 +151,9 @@ pub fn xprv(master: &ExtendedPrivKey, index: u32, kw: &KeyWork) -> Result<Extend
         secret.zeroize();
         return Err(Error::Derivation);
     }
-    let child = ExtendedPrivKey::root_from_parts(master.network, chain_code, secret);
+    let child = ExtendedPrivKey::root_from_parts(master.network, chain_code, secret, kw);
     secret.zeroize();
-    Ok(child)
+    child.map_err(|_| Error::Derivation)
 }
 
 /// The private key at `m/83696968'/2'/{index}'`, as bytes: the most significant 32 of the
@@ -353,7 +353,8 @@ mod tests {
             core::str::from_utf8(&out[..n]).unwrap(),
             "Kzyv4uF39d4Jrw2W7UryTHwZr1zQVNk4dAFyqE6BuMrMh1Za7uhp"
         );
-        let as_xprv = ExtendedPrivKey::root_from_parts(Network::Mainnet, [7; 32], secret);
+        let as_xprv =
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, [7; 32], secret, &kw).unwrap();
         assert_eq!(
             crate::bip32::public_key_of(&secret, &kw),
             Some(as_xprv.public_key(&kw))

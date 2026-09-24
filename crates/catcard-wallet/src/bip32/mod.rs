@@ -185,25 +185,37 @@ impl ExtendedPrivKey {
         })
     }
 
-    /// Assemble from already-validated parts. Used by deserialisation.
     /// A root key straight from a chain code and a secret, as BIP-85's `XPRV` application
-    /// produces: depth, child number and parent fingerprint are all zero, so what comes out
-    /// is a master key in its own right rather than a child of anything.
+    /// produces and as the secure element stores one: depth, child number and parent
+    /// fingerprint are all zero, so what comes out is a master key in its own right rather
+    /// than a child of anything.
+    ///
+    /// The secret is checked to be a usable scalar -- not zero, below the curve order --
+    /// and refused with [`Error::InvalidKey`] otherwise. Every other constructor checks
+    /// this, and [`Self::public_key`] relies on it: a key that got past here unchecked
+    /// would not fail to derive, it would abort the firmware the first time it was used,
+    /// which for a corrupt stash is at login. The check is arithmetic over the key, hence
+    /// the token.
     pub fn root_from_parts(
         network: Network,
         chain_code: [u8; CHAIN_CODE_LEN],
         secret: [u8; PRIVKEY_LEN],
-    ) -> Self {
-        Self::from_parts(
+        _kw: &crate::KeyWork,
+    ) -> Result<Self, Error> {
+        if scalar_from_bytes(&secret).is_none() {
+            return Err(Error::InvalidKey);
+        }
+        Ok(Self::from_parts(
             network,
             0,
             [0; FINGERPRINT_LEN],
             ChildNumber::ZERO,
             chain_code,
             secret,
-        )
+        ))
     }
 
+    /// Assemble from already-validated parts. Every caller has run the scalar check.
     pub(crate) fn from_parts(
         network: Network,
         depth: u8,
@@ -416,6 +428,43 @@ mod public_key_cache_tests {
 
     /// The cache must be invisible: the key it returns is the key a fresh computation
     /// returns, for the parent that fed a derivation and for the child it produced.
+    /// A root assembled from stored parts is checked like every other key: zero and
+    /// anything at or past the curve order are refused, rather than kept and hit later by
+    /// `public_key`'s "validated at construction".
+    #[test]
+    fn a_root_from_parts_refuses_an_unusable_scalar() {
+        let kw = crate::KeyWork::host();
+        let chain_code = [0x11u8; CHAIN_CODE_LEN];
+        assert_eq!(
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, [0; 32], &kw).err(),
+            Some(Error::InvalidKey),
+            "a zero key was accepted"
+        );
+        // The curve order itself, and everything above it.
+        let order: [u8; 32] = [
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c,
+            0xd0, 0x36, 0x41, 0x41,
+        ];
+        assert_eq!(
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, order, &kw).err(),
+            Some(Error::InvalidKey),
+            "the curve order was accepted"
+        );
+        assert_eq!(
+            ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, [0xff; 32], &kw).err(),
+            Some(Error::InvalidKey),
+            "a key past the curve order was accepted"
+        );
+        // n - 1 is the largest usable scalar, and it must still derive a public key.
+        let mut last = order;
+        last[31] -= 1;
+        let key = ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, last, &kw)
+            .expect("n - 1 is a valid key");
+        assert_eq!(key.depth, 0);
+        assert_eq!(key.public_key(&kw)[0] & 0xfe, 0x02);
+    }
+
     #[test]
     fn a_cached_public_key_is_the_computed_one() {
         let kw = crate::KeyWork::host();

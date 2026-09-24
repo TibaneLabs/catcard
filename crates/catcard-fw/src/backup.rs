@@ -262,11 +262,8 @@ fn build_body(
             phrase.zeroize();
             master = menu::plain_master(entropy, kw).ok();
         } else if let Some((chain_code, key)) = xprv_parts(secret) {
-            master = Some(ExtendedPrivKey::root_from_parts(
-                Network::Mainnet,
-                *chain_code,
-                *key,
-            ));
+            // No usable key means no xprv/xpub lines; the raw stash below still goes out.
+            master = ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw).ok();
         } else if let Some(raw) = catcard_callgate::pin::raw_master(secret) {
             master = ExtendedPrivKey::from_seed(raw, Network::Mainnet, kw).ok();
         }
