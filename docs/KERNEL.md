@@ -85,6 +85,101 @@ both reportable. This is not tidiness: what lies below a task stack on this devi
 seed material, and a stack that quietly walks into it is the worst failure this design can
 produce.
 
+Reportable was where it stopped for a while, and two audit findings said why that is not
+enough. The **main (MSP) stack** -- boot, the menu before Kernel UI, every exception
+handler -- starts at the top of linked RAM and grows down into `.bss` with nothing between
+them: no region, no canary, no fault. It has overflowed once already, into the kernel's
+task table (`heap.rs`). And a **task stack's** guard word was read only when the heartbeat
+asked (`stack_ok`), never by the switch, so a task that had walked off its stack kept
+running until someone looked.
+
+#### What exists now
+
+Two defences, **both off at boot, on every board**, armed from *Debug -> Self-tests* (a
+harness of deliberate fault injections, `catcard-fw/src/selftests.rs`, compiled out of a
+ship build behind `usb-debug-mem`):
+
+- **The MPU fence.** `catcard_hal::mpu` programs one PMSAv7 region -- 32 bytes, no access
+  at either privilege level, execute-never -- at the main stack's floor, then enables the
+  MPU with `PRIVDEFENA` so every other address keeps the default map. The floor is
+  computed at run time from cortex-m-rt's `__ebss` and `__euninit` (the higher, rounded up
+  to 32) and never hardcoded; on the Q1 map at the time of writing that is `0x2002_9540`
+  under `_stack_start = 0x2003_0000`, about 27 KB of main stack. A push that reaches the
+  fence raises a MemManage fault, whose handler is `panic::wipe_and_reset`. `HFNMIENA` is
+  left clear so an escalated fault runs with the MPU bypassed, and `wipe_and_reset` turns
+  the MPU off before it touches anything, so a wipe can never fault on the fence it is
+  cleaning up after.
+
+  The callgate has to know: gate 3, the install gates and power-off make the *bootloader*
+  write all of SRAM, fenced bytes included, from inside the firewall. So the one wrapper
+  every gate call goes through (`entry::with_interrupts_masked`) saves `MPU_CTRL`, writes
+  zero if the MPU was on, and restores it after the call. That work is gated on
+  `mpu::fence_armed()`, an `AtomicBool` set true only when the fence is live: **false on
+  every boot**, and while it is false the wrapper reads no MPU register at all -- it is byte
+  for byte what it was before the fence existed. This is the fix for the earlier version,
+  which did the register work on *every* gate call including the boot path and bricked a
+  locked unit; nothing about the boot or the ordinary gate call changes unless the fence
+  is armed.
+
+- **Per-switch canary checks.** `catcard_kernel::set_guard_checks(true)` makes the switch
+  read both guard words on every context switch: the outgoing task's before its stack
+  pointer is saved, the incoming task's before its is restored. A wrong word goes to the
+  hook `start` now takes -- the firmware passes `panic::wipe_and_reset` -- and never to
+  `panic!`, because PendSV is handler mode and the panic handler calls gate 3, which is not
+  proven from there. The flag shows as `chk on/off` on *Debug -> Kernel*.
+
+The fence self-test also paints the free main stack on request and, on later visits,
+reports the deepest word touched since -- the MSP high-water mark that the kernel's task
+stacks already had and the main stack did not. Cost of all of it: one `AtomicBool` in the
+firmware, one in the MPU driver, one in the kernel and the hook pointer; the paint lives in
+the free stack and the armed state is read back from `MPU_CTRL`.
+
+#### Proving it on hardware
+
+Nothing here is trusted until the owner has watched it fire. Each defence is a row under
+*Debug -> Self-tests*, with a deliberate-trip probe behind a "device will wipe and reset"
+question in the Destroy-seed style.
+
+**The MPU fence** (row *Stack fence*). From the normal boot (no kernel):
+
+1. Read the screen: `floor`, `msp`, `hd` (headroom, MSP minus floor -- expect tens of KB),
+   `mpu 8` (the region count; `0` means there is nothing to arm), `armed no`.
+2. Press `1`. The line becomes `armed yes`. A USB `ReadLog` now shows
+   `stackguard: MPU fence armed at 0x2002_9540` (or this build's floor).
+3. Press `4`, answer yes.
+
+*Pass:* the device goes dark at once and comes back at the PIN screen, as after a power
+cycle. A `ReadLog` after it shows nothing from before -- the log was in the RAM that was
+wiped. *Fail:* the screen says `FAIL / fence did not fire`; press `6` to disarm and treat
+the board's MPU as unproven.
+
+**The canary** (row *Switch canary*). Start *Debug -> Kernel UI* first, then open
+*Debug -> Self-tests -> Switch canary* from the menu that comes back (it is now a task, on
+PSP):
+
+1. Press `2`. `checks on`; *Debug -> Kernel* shows `chk on`. The device should keep running
+   normally -- switching twice a tick, USB answering -- which is itself the first half of the
+   test: the checks do not trip on healthy stacks.
+2. Press `5`, answer yes. The running task's guard word is overwritten
+   (`corrupt_own_guard_for_test`, the kernel's marked test hook) and a switch is asked for.
+
+*Pass:* the device resets to the PIN screen before the screen can redraw. *Fail:* `FAIL /
+canary did not fire` -- power cycle.
+
+Both tests end with the device at the PIN screen and the seed asked for again through the
+PIN; neither touches flash or the secure element, and neither is reachable from a boot
+where the screen was never opened, or from a ship build at all.
+
+#### The rule
+
+Both stay **off at boot until each has passed this procedure on every board** -- mk3, mk4,
+mk5 and Q1 -- and the arm remains a Debug action until then. The reasoning is the same as
+for the kernel itself: every bench unit is RDP=2 with no recovery, and a fence one
+region-size wrong or a check that trips on a healthy stack is an image that faults before
+USB exists. From a screen, a failure costs a power cycle; from the boot path, it costs the
+unit. When they do move to the boot path, the fence goes first (it defends the stack that
+runs the boot) and the callgate wrapper's save/restore is already in place for it.
+
 ## Floating point
 
 All Coldcard MCUs are Cortex-M4F with the FPU present, and the firmware does use `f32`
