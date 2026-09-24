@@ -10586,7 +10586,30 @@ pub(crate) fn show_doc(
     scramble: bool,
     require_end: bool,
 ) -> DocExit {
-    let mut screen = DocScreen::new(ui, lines, scramble, require_end);
+    run_doc(ui, lines, scramble, require_end, true)
+}
+
+/// [`show_doc`] for a list whose last rows are actions: the cursor never wraps.
+///
+/// With the menu-wrapping preference on, up from the first row lands on the last
+/// selectable one. On a transaction review that row is "Sign it", one key from the top
+/// of a list the owner has not read. A review list is not a menu to be crossed quickly,
+/// so it ignores the preference and stops at both ends.
+#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+pub(crate) fn show_doc_nowrap(ui: &mut Ui<'_>, lines: &[catcard_ui::scroll::Line<'_>]) -> DocExit {
+    run_doc(ui, lines, false, false, false)
+}
+
+/// The document loop behind [`show_doc`] and [`show_doc_nowrap`]. `wrap` is whether the
+/// menu-wrapping preference is allowed to apply at all.
+fn run_doc(
+    ui: &mut Ui<'_>,
+    lines: &[catcard_ui::scroll::Line<'_>],
+    scramble: bool,
+    require_end: bool,
+    wrap: bool,
+) -> DocExit {
+    let mut screen = DocScreen::new(ui, lines, scramble, require_end, wrap);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
@@ -10662,6 +10685,7 @@ impl<'a> DocScreen<'a> {
         lines: &'a [catcard_ui::scroll::Line<'a>],
         scramble: bool,
         require_end: bool,
+        wrap: bool,
     ) -> Self {
         let mut view = catcard_ui::scroll::ScrollView::build(
             lines,
@@ -10676,8 +10700,9 @@ impl<'a> DocScreen<'a> {
         }
         let is_menu = view.is_menu();
         // A document with selectable rows is a menu, and wraps like one; a reading screen
-        // has no cursor to bring round, so the setting cannot affect it.
-        view.set_wrap(is_menu && crate::prefs::current().menu_wrap);
+        // has no cursor to bring round, so the setting cannot affect it. A caller that
+        // refuses wrapping (`wrap` false) has action rows at the bottom; see `show_doc_nowrap`.
+        view.set_wrap(wrap && is_menu && crate::prefs::current().menu_wrap);
         Self {
             view,
             is_menu,

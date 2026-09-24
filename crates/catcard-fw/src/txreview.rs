@@ -275,7 +275,9 @@ impl Review {
             lines.push(Line::body(&complaint).small());
         }
 
-        match menu::show_doc(ui, &lines, false, false) {
+        // No cursor wrap: the action rows are last, and up from the top must not land on
+        // "Sign it" before the list has been read.
+        match menu::show_doc_nowrap(ui, &lines) {
             menu::DocExit::Selected(id) => Some(id),
             _ => None,
         }
