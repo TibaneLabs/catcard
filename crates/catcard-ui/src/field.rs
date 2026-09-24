@@ -385,11 +385,22 @@ fn row_text<C: Canvas + ?Sized>(
     let avail = right.saturating_sub(left);
     // Break on width, not on words: a passphrase has no words, and a wrap that hunted for
     // a space would move half of one onto the next line as it was being typed.
+    //
+    // Line starts are char boundaries, found the way `grid::fit_text` finds them: the
+    // faces draw bytes, but the slices below are of a `str`, and a start in the middle
+    // of a multi-byte character is a panic. Typing only ever puts ASCII in a field; a
+    // string preloaded into one can be anything.
     let mut starts: heapless::Vec<usize, 16> = heapless::Vec::new();
     let _ = starts.push(0);
     let mut used = 0;
-    for (i, b) in text.bytes().enumerate() {
-        let adv = l.body.advance(b);
+    for (i, c) in text.char_indices() {
+        let mut buf = [0u8; 4];
+        let adv: usize = c
+            .encode_utf8(&mut buf)
+            .as_bytes()
+            .iter()
+            .map(|&b| l.body.advance(b))
+            .sum();
         if used + adv > avail && i > 0 {
             if starts.push(i).is_err() {
                 // More lines than the buffer holds: keep the last ones, which is what
@@ -601,6 +612,35 @@ mod tests {
         assert!(ink_count(&c3, MARK) > single);
         // And a taller row is taller.
         assert!(height(240, &roomy(), &three) > height(240, &roomy(), &one));
+    }
+
+    /// Typing only puts ASCII in a field, but a string preloaded into one can be
+    /// anything. Wrapping used to count bytes and slice the text at those offsets, so a
+    /// multi-byte character straddling a line break was a panic. Now it breaks on
+    /// character boundaries, on every panel and for every line count.
+    #[test]
+    fn wrapping_a_multibyte_string_breaks_on_character_boundaries() {
+        let text = "héllo wörld ünïcödé ñandú café crème brûlée déjà vu naïve façade résumé";
+        for lines in [1usize, 2, 3, 8] {
+            let mut c = Gray320x240::new();
+            c.clear();
+            let mut f = Field::text("", text).live(true);
+            f.show = Show::Text { lines };
+            stack(&mut c, &roomy(), 40, &[f], Skin::Paper, true);
+
+            let mut m = Mono128x64::new();
+            m.clear();
+            let mut f = Field::text("", text).live(true);
+            f.show = Show::Text { lines };
+            stack(&mut m, &Layout::compact(), 4, &[f], Skin::Outline, true);
+        }
+        // And a field of nothing but multi-byte characters, wider than any line.
+        let wide = "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé";
+        let mut c = Gray320x240::new();
+        c.clear();
+        let mut f = Field::text("", wide);
+        f.show = Show::Text { lines: 2 };
+        stack(&mut c, &roomy(), 40, &[f], Skin::Paper, false);
     }
 
     /// The mono panel gets an outline, not a lamp: the inside stays the page.
