@@ -189,10 +189,23 @@ pub unsafe fn invoke(_dest: u32, _method: i32, _buf: *mut u8, _len: u32, _arg2: 
 /// Restores rather than unconditionally enabling, so calling this from a context that
 /// already had interrupts masked does not silently enable them.
 ///
+/// **The MPU is turned off across the call, and put back as found.** Several gates make
+/// the bootloader write all of SRAM -- logout (3) wipes it, the install gates and
+/// power-off do too -- and that includes the 32 bytes the firmware may have fenced under
+/// its main stack (`catcard_hal::mpu`, armed from Debug -> Stack guard). A fence live
+/// across the call would fault inside firewall code. Two stores on a path that already
+/// masks interrupts, and nothing at all when the MPU was off.
+///
 /// # Safety
 /// `f` must not depend on interrupts being enabled.
 #[cfg(target_arch = "arm")]
 pub unsafe fn with_interrupts_masked<R>(f: impl FnOnce() -> R) -> R {
+    /// `MPU_CTRL`, `ENABLE` in bit 0. Source: ARMv7-M ARM (DDI 0403E) §B3.5.4 Table
+    /// B3-10, §B3.5.6 [C]. A core register, present on every ARMv7-M with an MPU; on one
+    /// without, it reads as zero and is never written.
+    const MPU_CTRL: u32 = 0xE000_ED94;
+    const MPU_CTRL_ENABLE: u32 = 1;
+
     let primask: u32;
     // SAFETY: reading PRIMASK and masking interrupts.
     unsafe {
@@ -200,7 +213,20 @@ pub unsafe fn with_interrupts_masked<R>(f: impl FnOnce() -> R) -> R {
         core::arch::asm!("cpsid i", options(nomem, nostack, preserves_flags));
     }
 
+    // SAFETY: a volatile read of a core register; interrupts are masked, so nothing
+    // else changes it between here and the restore below.
+    let mpu_ctrl = unsafe { core::ptr::read_volatile(MPU_CTRL as *const u32) };
+    if mpu_ctrl & MPU_CTRL_ENABLE != 0 {
+        // SAFETY: as above; the write is the whole point, and the value is restored.
+        unsafe { write_mpu_ctrl(0) };
+    }
+
     let r = f();
+
+    if mpu_ctrl & MPU_CTRL_ENABLE != 0 {
+        // SAFETY: restoring what was read above, still with interrupts masked.
+        unsafe { write_mpu_ctrl(mpu_ctrl) };
+    }
 
     // PRIMASK bit 0 set means interrupts were already masked on entry; leave them so.
     if primask & 1 == 0 {
@@ -212,7 +238,22 @@ pub unsafe fn with_interrupts_masked<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// Non-ARM stub: there are no interrupts to mask on the host.
+/// Write `MPU_CTRL`, then `DSB; ISB` so the new map is in force before the next
+/// instruction -- the branch into the gate, or the return to code that expects the fence
+/// back. Source: ARMv7-M ARM §B3.5.2 [C]
+///
+/// # Safety
+/// `v` must be a value read from the register or zero, with interrupts masked.
+#[cfg(target_arch = "arm")]
+unsafe fn write_mpu_ctrl(v: u32) {
+    // SAFETY: the caller's contract; the barriers only order.
+    unsafe {
+        core::ptr::write_volatile(0xE000_ED94 as *mut u32, v);
+        core::arch::asm!("dsb", "isb", options(nostack, preserves_flags));
+    }
+}
+
+/// Non-ARM stub: there are no interrupts to mask on the host, and no MPU.
 ///
 /// # Safety
 /// Same contract as the ARM implementation.
