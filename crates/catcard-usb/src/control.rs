@@ -266,13 +266,45 @@ fn standard<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Actio
         // that is how a host recovers a desynced pipe, and a bare ack leaves the toggle
         // wrong so every packet after mismatches. Setting halt is acknowledged and
         // ignored: this device never wants a pipe held halted.
-        (request::CLEAR_FEATURE, recipient::ENDPOINT) if setup.wValue == 0 => {
+        //
+        // Only for an endpoint this device has. The HAL indexes `DIEPCTL`/`DOEPCTL` by
+        // whatever number it is handed and OTG_FS has six of each, so a `wIndex` naming
+        // a seventh would land on whatever register sits past them. A request naming an
+        // endpoint that does not exist is a Request Error, and that is a stall
+        // (USB 2.0 §9.4.1).
+        (request::CLEAR_FEATURE, recipient::ENDPOINT)
+            if setup.wValue == 0 && is_data_endpoint(setup.wIndex) =>
+        {
             Action::AckThenClearHalt(setup.wIndex as u8)
         }
-        (request::CLEAR_FEATURE | request::SET_FEATURE, recipient::ENDPOINT) => Action::Ack,
+        // The control endpoint has no toggle to put back: every SETUP starts it at
+        // DATA0. So clearing its halt is a plain acknowledgement, with nothing to touch.
+        (request::CLEAR_FEATURE | request::SET_FEATURE, recipient::ENDPOINT)
+            if endpoint_exists(setup.wIndex) =>
+        {
+            Action::Ack
+        }
 
         _ => Action::Stall,
     }
+}
+
+// The data endpoints have the same addresses under both identities, which is what lets
+// the checks below ignore the mode. If that ever changes, they have to stop.
+const _: () =
+    assert!(descriptor::EP_IN == crate::msc::EP_IN && descriptor::EP_OUT == crate::msc::EP_OUT);
+
+/// Whether `wIndex` names one of the two data endpoints, as an endpoint-recipient
+/// request spells it: the address, direction bit included, in the low byte and zero in
+/// the high byte (USB 2.0 §9.3.4).
+fn is_data_endpoint(index: u16) -> bool {
+    index == descriptor::EP_IN as u16 || index == descriptor::EP_OUT as u16
+}
+
+/// Whether `wIndex` names any endpoint this device has: the two data endpoints, or the
+/// control endpoint in either direction.
+fn endpoint_exists(index: u16) -> bool {
+    matches!(index, 0x0000 | 0x0080) || is_data_endpoint(index)
 }
 
 fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'a> {
@@ -652,6 +684,57 @@ mod tests {
             ),
             Action::Ack
         );
+        // The control endpoint, either direction: nothing to reset, plain ack.
+        for ep0 in [0x0000, 0x0080] {
+            assert_eq!(
+                handle(
+                    &mut d,
+                    &setup(0x02, request::CLEAR_FEATURE, 0, ep0, 0),
+                    &mut s
+                ),
+                Action::Ack,
+                "wIndex {ep0:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_feature_request_for_an_endpoint_we_do_not_have_stalls() {
+        // The HAL indexes the endpoint control registers by the number it is handed.
+        // OTG_FS has endpoints 0..5 and this device uses 0 and 1, so every other
+        // `wIndex` -- another number, a direction bit on the wrong one, anything in the
+        // high byte -- must stall rather than turn into a register write past the
+        // endpoint block. Every value, both requests, both modes.
+        let mut s = [0u8; 64];
+        for mode in [DeviceMode::Hid, DeviceMode::Msc] {
+            let mut d = dev();
+            d.set_mode(mode);
+            for index in 0..=0xFFFFu16 {
+                let ours = matches!(index, 0x0000 | 0x0080 | 0x0001 | 0x0081);
+                let clear = handle(
+                    &mut d,
+                    &setup(0x02, request::CLEAR_FEATURE, 0, index, 0),
+                    &mut s,
+                );
+                if ours {
+                    assert_ne!(clear, Action::Stall, "clear {index:#06x} in {mode:?}");
+                } else {
+                    assert_eq!(clear, Action::Stall, "clear {index:#06x} in {mode:?}");
+                }
+                // And whatever the answer, the toggle reset never names a number the
+                // HAL does not have a register for.
+                if let Action::AckThenClearHalt(ep) = clear {
+                    assert!(ep == 0x81 || ep == 0x01, "clear-halt on {ep:#04x}");
+                }
+                let set = handle(
+                    &mut d,
+                    &setup(0x02, request::SET_FEATURE, 0, index, 0),
+                    &mut s,
+                );
+                let want = if ours { Action::Ack } else { Action::Stall };
+                assert_eq!(set, want, "set {index:#06x} in {mode:?}");
+            }
+        }
     }
 
     #[test]
