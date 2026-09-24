@@ -35,7 +35,10 @@
 mod switch;
 mod task;
 
-pub use task::{SpawnError, TaskId, count, high_water, name, spawn, stack_len, stack_ok};
+pub use task::{
+    SpawnError, TaskId, corrupt_own_guard_for_test, count, high_water, name, spawn, stack_len,
+    stack_ok,
+};
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -93,6 +96,51 @@ static FP_SAVES: AtomicU32 = AtomicU32::new(0);
 /// Set once [`start`] has armed the scheduler. There is no way to stop it, so this never
 /// clears -- which is what makes it safe to refuse a second start on.
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Whether every context switch reads both guard words -- the outgoing task's before its
+/// stack pointer is saved, the incoming task's before its is restored -- and hands an
+/// overflow to [`overflow`] instead of switching.
+///
+/// **Off by default, and off on every boot.** The guard words are otherwise read only
+/// when the heartbeat asks (`stack_ok`), which is a report, not a defence: a task that has
+/// walked off its stack keeps running until someone looks. Checking at the switch is two
+/// volatile loads per switch, but it is also a new way for the scheduler to end the
+/// program, and every bench unit is RDP=2 with no recovery. So it is turned on from the
+/// Debug self-tests, proven by its probe there, and stays a Debug action until it has been
+/// proven on every board (docs/KERNEL.md §5).
+static GUARD_CHECKS: AtomicBool = AtomicBool::new(false);
+
+/// Turn the per-switch guard checks on or off. Takes effect at the next switch.
+pub fn set_guard_checks(on: bool) {
+    GUARD_CHECKS.store(on, Ordering::Relaxed);
+}
+
+/// Whether the per-switch guard checks are on.
+pub fn guard_checks() -> bool {
+    GUARD_CHECKS.load(Ordering::Relaxed)
+}
+
+/// Where a tripped guard goes. Given to [`start`] by the firmware -- its wipe-and-reset --
+/// so this crate never has to know how the device is cleared, and so nothing here calls
+/// `panic!` from PendSV: the panic handler calls bootloader gate 3, which is not proven
+/// from handler mode.
+static mut ON_OVERFLOW: Option<fn() -> !> = None;
+
+/// A task's stack has walked over its guard word. Never returns.
+///
+/// Runs inside PendSV, at the lowest priority in the system, with whatever the stack
+/// held still in RAM -- the hook's job is to make sure it does not stay there.
+pub(crate) fn overflow() -> ! {
+    // SAFETY: written once in `start`, before the first switch; this is the only reader.
+    match unsafe { *core::ptr::addr_of!(ON_OVERFLOW) } {
+        Some(hook) => hook(),
+        // Unreachable -- `start` sets the hook before it arms anything -- but a switch
+        // that has found an overflow must not resume either task. A reset without a wipe
+        // is the weakest answer, and still better than running on a stack that has
+        // already written over something else.
+        None => cortex_m::peripheral::SCB::sys_reset(),
+    }
+}
 
 /// Whether the scheduler is running. Starting it twice would re-arm SysTick and run the
 /// bootstrap again underneath live tasks.
@@ -224,11 +272,22 @@ pub fn critical<R>(f: impl FnOnce() -> R) -> R {
 
 /// Begin scheduling. Never returns; the first task takes the CPU.
 ///
+/// `on_overflow` is where a switch goes when [`guard_checks`] are on and a guard word is
+/// wrong. It runs in PendSV and must not return; the firmware passes its wipe-and-reset.
+///
 /// # Safety
 /// Call once, from the reset path, after every task is spawned. Nothing may rely on
 /// running on the main stack afterwards -- tasks run on their own.
-pub unsafe fn start(syst: &mut cortex_m::peripheral::SYST, hclk_hz: u32) -> ! {
+pub unsafe fn start(
+    syst: &mut cortex_m::peripheral::SYST,
+    hclk_hz: u32,
+    on_overflow: fn() -> !,
+) -> ! {
     use cortex_m::peripheral::syst::SystClkSource;
+
+    // Before anything is armed, so no switch can ever find it unset.
+    // SAFETY: the only write, before the first switch and with nothing else running.
+    unsafe { *core::ptr::addr_of_mut!(ON_OVERFLOW) = Some(on_overflow) };
 
     // SAFETY: setting the priority of two core exceptions, before either can fire.
     unsafe {
