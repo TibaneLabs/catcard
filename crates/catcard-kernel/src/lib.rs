@@ -35,7 +35,7 @@
 mod switch;
 mod task;
 
-pub use task::{Full, TaskId, count, high_water, name, spawn, stack_len, stack_ok};
+pub use task::{SpawnError, TaskId, count, high_water, name, spawn, stack_len, stack_ok};
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

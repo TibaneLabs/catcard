@@ -6,9 +6,16 @@ use crate::MAX_TASKS;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct TaskId(pub usize);
 
-/// The table is full.
-#[derive(Copy, Clone, Debug)]
-pub struct Full;
+/// Why a task could not be added.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SpawnError {
+    /// The table is full.
+    Full,
+    /// The scheduler is already running. `switch` reads the table from PendSV, and a
+    /// spawn would rewrite it underneath a live switch; every task is spawned before
+    /// `start`, and there is no way to stop the scheduler once it has started.
+    Running,
+}
 
 /// Written to the lowest word of every stack. If it is ever anything else, the task ran
 /// off the bottom -- and on this device what lies below a stack may be seed material, so
@@ -43,6 +50,9 @@ static mut CURRENT: usize = usize::MAX;
 /// `stack` is the caller's, so its size is visible where the task is created rather than
 /// hidden in the kernel, and the linker places it.
 ///
+/// Refused once the scheduler is running: the table is then read by the switch from
+/// PendSV, and nothing here could write it safely underneath.
+///
 /// # Safety
 /// `stack` must be exclusively this task's for the life of the program, and `entry` must
 /// never return -- there is nowhere for it to go.
@@ -50,17 +60,24 @@ pub unsafe fn spawn(
     name: &'static str,
     stack: &'static mut [u32],
     entry: extern "C" fn() -> !,
-) -> Result<TaskId, Full> {
+) -> Result<TaskId, SpawnError> {
     assert!(
         stack.len() > FRAME_WORDS + 8,
         "stack too small for a context"
     );
 
-    // SAFETY: spawning happens on the boot path, before `start`, so nothing is scheduling.
+    // Before the table is touched. `RUNNING` is set by `start` before the first switch
+    // and never clears, so a spawn that sees it clear runs with nothing scheduling.
+    if crate::running() {
+        return Err(SpawnError::Running);
+    }
+
+    // SAFETY: spawning happens before `start` -- checked just above -- so nothing is
+    // scheduling and no switch can be reading the table.
     let tasks = unsafe { &mut *(core::ptr::addr_of_mut!(TASKS)) };
     let count = unsafe { &mut *(core::ptr::addr_of_mut!(COUNT)) };
     if *count == MAX_TASKS {
-        return Err(Full);
+        return Err(SpawnError::Full);
     }
 
     // Paint the whole stack, then plant the guard under it.
