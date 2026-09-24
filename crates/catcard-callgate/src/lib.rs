@@ -304,8 +304,15 @@ impl Callgate {
         let mut buf = [0u8; pin::MAX_PIN_LEN];
         buf[..prefix.len()].copy_from_slice(prefix);
         // SAFETY: `arg2` is the prefix length, as documented; the buffer is MAX_PIN_LEN.
-        unsafe { self.call(Method::AntiPhishingWords, &mut buf, prefix.len() as u32)? };
-        Ok(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
+        let outcome =
+            unsafe { self.call(Method::AntiPhishingWords, &mut buf, prefix.len() as u32) };
+        let words = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        // The gate writes its four bytes over the front of the buffer and leaves the rest
+        // as it found it -- which is the PIN prefix. Wiped before this returns, whichever
+        // way the call went, so the prefix does not outlive the call in a dead frame.
+        buf.zeroize();
+        outcome?;
+        Ok(words)
     }
 
     /// Callgate 3: wipe every byte of SRAM, then lock up or reboot.
