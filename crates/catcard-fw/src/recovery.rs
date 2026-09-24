@@ -46,7 +46,7 @@ pub fn run(report: BootReport, panel: Option<display::Panel>, gate: Callgate) ->
 }
 
 #[cfg(feature = "usb-key-injection")]
-fn headless(gate: Callgate) -> ! {
+pub(crate) fn headless(gate: Callgate) -> ! {
     use catcard_hal::sdmmc::Slot;
     use catcard_ui::keypad::Key;
 

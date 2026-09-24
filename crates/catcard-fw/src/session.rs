@@ -333,7 +333,7 @@ pub(crate) fn signature_status(a: &catcard_upgrade::Approval) -> &'static str {
 }
 
 /// The device's USB serial number: its unique ID, in hex.
-fn serial() -> &'static str {
+pub(crate) fn serial() -> &'static str {
     static mut SERIAL: [u8; catcard_board::memory::fixed::UNIQUE_ID_LEN * 2] = [b'0'; 24];
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     // SAFETY: written once, before USB is initialised, from the only caller; the boot

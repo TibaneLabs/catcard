@@ -48,6 +48,8 @@ mod display;
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod evmtx;
 mod export;
+#[cfg(all(feature = "dev", feature = "usb-key-injection"))]
+mod failsafe;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;
 #[cfg(feature = "games")]
@@ -273,6 +275,16 @@ fn main() -> ! {
     // core comes up first because the panel's reset pulse is timed with the cycle
     // counter.
     let hal = unsafe { catcard_hal::init_core() };
+
+    // A dev build whose normal boot is broken can be reflashed without opening the case:
+    // hold CANCEL at power-on and drop into the USB recovery loop before entropy, the
+    // secure elements or the display are touched -- the point a validly-signed-but-broken
+    // image hangs, and where a locked unit otherwise has no way back. Not held: the
+    // ordinary boot below, re-initialising the matrix this read touched.
+    #[cfg(all(feature = "dev", feature = "usb-key-injection"))]
+    if failsafe::cancel_held_at_boot() {
+        failsafe::run();
+    }
 
     // SAFETY: bring-up is single-threaded and nothing else has claimed the panel.
     let mut panel = unsafe { display::init() };
