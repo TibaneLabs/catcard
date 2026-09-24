@@ -401,8 +401,11 @@ fn a_length_the_bootloader_would_refuse_is_refused_before_any_transfer() {
         Err(Reject::Length { len }) if len == short
     ));
 
+    // Just past the image ceiling: still inside the raw flash length on an mk4, but into
+    // the settings volume, which is the bound that matters.
     let area = Mem::new(4 * 1024 * 1024);
-    let too_big = MK4.memory.firmware_flash_len + 512;
+    let too_big = MK4.image_ceiling() + 512;
+    assert!(too_big <= MK4.memory.firmware_flash_len);
     assert!(matches!(
         Staged::begin(area, &MK4, too_big),
         Err(Reject::Length { len }) if len == too_big

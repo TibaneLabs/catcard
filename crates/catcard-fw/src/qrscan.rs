@@ -768,7 +768,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // instant, and a screen that has stopped changing reads as a device that has hung.
     let len = if got.compressed {
         menu::blocking_screen(ui.panel, HEAD, "expanding");
-        let max = catcard_board::BOARD.memory.firmware_flash_len;
+        let max = catcard_board::BOARD.image_ceiling();
         match crate::inflate::staged(&mut area, got.len as u32, max) {
             Ok(n) => {
                 crate::catlog!("qr: expanded to {} bytes", n);

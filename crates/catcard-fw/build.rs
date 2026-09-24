@@ -32,7 +32,8 @@ fn main() {
          MEMORY\n\
          {{\n\
          \x20 /* Installed firmware region. Below {base:#X} is the bootloader, which is\n\
-         \x20    protected flash and unreplaceable at RDP=2. */\n\
+         \x20    protected flash and unreplaceable at RDP=2. The length stops short of\n\
+         \x20    the settings volume where the board keeps one in internal flash. */\n\
          \x20 FLASH : ORIGIN = {base:#X}, LENGTH = {flash}\n\
          \n\
          \x20 /* SRAM1 only. The bootloader callgate requires its I/O buffer to be in\n\
@@ -49,7 +50,7 @@ fn main() {
          _bootloader_sram_end   = {bl_end:#X};\n",
         name = board.name,
         base = m.firmware_base,
-        flash = m.firmware_flash_len,
+        flash = board.image_ceiling(),
         ram = m.sram1_base,
         ram_len = m.sram1_len,
         hdr_size = FW_HEADER_SIZE,

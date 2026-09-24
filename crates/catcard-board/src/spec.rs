@@ -419,6 +419,32 @@ impl BoardSpec {
     pub fn by_name(name: &str) -> Option<&'static BoardSpec> {
         ALL.iter().find(|b| b.name == name)
     }
+
+    /// The most bytes a firmware image may occupy, from `firmware_base`.
+    ///
+    /// `memory.firmware_flash_len` is the flash above the bootloader, and on mk4, mk5 and
+    /// Q1 it runs all the way to the end of the part -- straight through the 512 KB
+    /// LittleFS settings volume at `0x0818_0000`, which this firmware page-erases. So the
+    /// linker, the packaging tool and the upgrade path all bound the image by *this*: the
+    /// flash length, or the distance to the settings area, whichever ends first. On mk3
+    /// the settings live in SPI-NOR and the two are the same number.
+    ///
+    /// Source: hw-reference/platform.md §"Mk4/Mk5/Q flash & SRAM map" [C] -- "~1.98 MB
+    /// total from `0x08020000` to the FS", the FS being the LittleFS at `0x08180000`.
+    pub const fn image_ceiling(&self) -> u32 {
+        let flash = self.memory.firmware_flash_len;
+        match self.settings {
+            SettingsArea::InternalFlash { start, .. } => {
+                let to_settings = start.saturating_sub(self.memory.firmware_base);
+                if to_settings < flash {
+                    to_settings
+                } else {
+                    flash
+                }
+            }
+            SettingsArea::SpiNor { .. } => flash,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +928,50 @@ mod tests {
             // The header must land inside the region we hand to the linker.
             assert!(FW_HEADER_OFFSET + 128 < m.firmware_flash_len, "{}", b.name);
         }
+    }
+
+    /// The image ceiling is what the linker, `catcard-image` and the upgrade path bound
+    /// an image by, so it has to stop short of the settings volume on every board that
+    /// keeps one in internal flash -- `nvram.rs` page-erases that volume, and an image
+    /// reaching into it would be erased from underneath.
+    #[test]
+    fn firmware_image_and_settings_area_are_disjoint() {
+        for b in ALL {
+            let m = &b.memory;
+            let ceiling = b.image_ceiling();
+            assert!(ceiling <= m.firmware_flash_len, "{}", b.name);
+            assert!(FW_HEADER_OFFSET + 128 < ceiling, "{}", b.name);
+            assert_eq!(
+                ceiling % m.flash_page_len,
+                0,
+                "{}: image ceiling is not a whole number of flash pages",
+                b.name
+            );
+            match b.settings {
+                SettingsArea::InternalFlash { start, len } => {
+                    assert!(
+                        m.firmware_base + ceiling <= start,
+                        "{}: image ceiling {:#x} reaches the settings area at {:#x}",
+                        b.name,
+                        m.firmware_base + ceiling,
+                        start
+                    );
+                    assert!(
+                        start + len <= fixed::FLASH_BASE + m.total_flash_len,
+                        "{}: settings area overruns flash",
+                        b.name
+                    );
+                    assert_eq!(start % m.flash_page_len, 0, "{}", b.name);
+                }
+                SettingsArea::SpiNor { .. } => {
+                    assert_eq!(ceiling, m.firmware_flash_len, "{}", b.name);
+                }
+            }
+        }
+        // The number the L4+ boards actually get: 0x0818_0000 - 0x0802_0000.
+        assert_eq!(MK4.image_ceiling(), 0x0016_0000);
+        assert_eq!(Q1.image_ceiling(), 0x0016_0000);
+        assert_eq!(MK5.image_ceiling(), 0x0016_0000);
     }
 
     #[test]

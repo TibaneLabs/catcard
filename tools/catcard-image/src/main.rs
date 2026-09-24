@@ -566,9 +566,10 @@ fn cmd_boards() -> Result<()> {
     for b in catcard_board::spec::ALL {
         println!("{:<5} {:?}", b.name, b.mcu);
         println!(
-            "      flash {:#010x} + {} KB   ram {:#010x} + {} KB",
+            "      flash {:#010x} + {} KB (image ceiling {} KB)   ram {:#010x} + {} KB",
             b.memory.firmware_base,
             b.memory.firmware_flash_len / 1024,
+            b.image_ceiling() / 1024,
             b.memory.sram1_base,
             b.memory.sram1_len / 1024,
         );

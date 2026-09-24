@@ -59,12 +59,15 @@ pub fn assemble(mut image: Vec<u8>, opts: &BuildOptions<'_>) -> Result<Vec<u8>> 
     let aligned = image.len().next_multiple_of(LENGTH_ALIGN as usize);
     image.resize(aligned, FILL);
 
+    // Bounded by the image ceiling, not the raw flash length: on the L4+ boards the flash
+    // above the bootloader runs through the settings volume, and an image that reached
+    // it would be page-erased from underneath by the firmware's own settings writes.
     ensure!(
-        image.len() as u32 <= board.memory.firmware_flash_len,
-        "image is {} bytes but {} has only {} bytes of firmware flash",
+        image.len() as u32 <= board.image_ceiling(),
+        "image is {} bytes but {} has only {} bytes of firmware flash below its settings area",
         image.len(),
         board.name,
-        board.memory.firmware_flash_len
+        board.image_ceiling()
     );
 
     let mut version = [0u8; 8];
@@ -287,7 +290,7 @@ pub const SFLASH_STAGING_OFFSET: u32 = 0;
 pub fn ensure_installable(board: &BoardSpec, image: &[u8]) -> Result<()> {
     let header = FirmwareHeader::from_image(image).map_err(|e| anyhow::anyhow!(e))?;
     header
-        .check_max_length(board.memory.firmware_flash_len)
+        .check_max_length(board.image_ceiling())
         .map_err(|e| anyhow::anyhow!(e))?;
     if header.hw_compat != hw_compat::ANY && header.hw_compat & board.hw_compat_bit == 0 {
         bail!(
@@ -375,6 +378,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("firmware flash"), "{err}");
+    }
+
+    /// On the L4+ boards the flash above the bootloader continues through the settings
+    /// volume. An image that fits the raw flash length but crosses into that volume is
+    /// refused, both when assembling and when checking an already-built image.
+    #[test]
+    fn assemble_rejects_an_image_that_reaches_the_settings_area() {
+        let ceiling = MK4.image_ceiling() as usize;
+        assert!(ceiling < MK4.memory.firmware_flash_len as usize);
+        let over = ceiling + 512;
+        let err = assemble(fake_flash(over), &opts(&MK4))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("settings area"), "{err}");
+
+        // The same bound at verify time: build an image right at the ceiling, then lie
+        // about its length in the header and see the check refuse it.
+        let img = assemble(fake_flash(0x4100), &opts(&MK4)).unwrap();
+        ensure_installable(&MK4, &img).unwrap();
+        let mut forged = img.clone();
+        let mut h = FirmwareHeader::from_image(&forged).unwrap();
+        h.firmware_length = MK4.image_ceiling() + 512;
+        forged[HEADER_OFFSET..HEADER_OFFSET + HEADER_LEN].copy_from_slice(&h.to_bytes());
+        assert!(ensure_installable(&MK4, &forged).is_err());
     }
 
     #[test]

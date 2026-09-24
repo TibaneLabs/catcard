@@ -271,11 +271,12 @@ pub struct Staged<'a, A: StagingArea> {
 impl<'a, A: StagingArea> Staged<'a, A> {
     /// Begin receiving an image of exactly `length` bytes.
     ///
-    /// The length is checked against the bootloader's floor, the board's flash and the
-    /// staging area before a single byte is accepted, so a host that is obviously wrong
-    /// is told immediately rather than after transferring a quarter of a megabyte.
+    /// The length is checked against the bootloader's floor, the board's image ceiling
+    /// (the flash below its settings volume) and the staging area before a single byte is
+    /// accepted, so a host that is obviously wrong is told immediately rather than after
+    /// transferring a quarter of a megabyte.
     pub fn begin(area: A, board: &'a BoardSpec, length: u32) -> Result<Self, Reject> {
-        if length < MIN_FIRMWARE_LENGTH || length > board.memory.firmware_flash_len {
+        if length < MIN_FIRMWARE_LENGTH || length > board.image_ceiling() {
             return Err(Reject::Length { len: length });
         }
         let capacity = area.capacity();
