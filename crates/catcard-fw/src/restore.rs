@@ -14,9 +14,14 @@
 //!   the host put in the header must match what arrived -- a transfer that dropped a
 //!   frame does not get written to flash;
 //! - the image must mount as a LittleFS volume;
-//! - and it must hold **this device's** settings: the root's file has to open under the
+//! - it must hold **this device's** settings: the root's file has to open under the
 //!   key of the secret this device's secure element holds. A dump of some other device
-//!   would replace every wallet's settings here with settings nobody here can read.
+//!   would replace every wallet's settings here with settings nobody here can read;
+//! - and its **pre-login policy must be what is in force now**. That slot is under a
+//!   key of thirty-two zero bytes and needs no login to forge, and it carries the kill
+//!   key, the microSD 2FA card list and the login countdown -- so an image with a
+//!   doctored one would arm a seed-erasing policy the owner never set, on a digit they
+//!   type every day. A restore puts settings back; it does not get to set policy.
 //!
 //! Only then is the owner asked, on the device -- never from the host. A write that a
 //! USB command could trigger would be a write anyone holding the cable could trigger.
@@ -212,6 +217,19 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         files
     );
 
+    // The pre-login slot needs no key to write and is what the next boot enforces, so
+    // its policy is compared against what is in force -- see the module docs. Any
+    // difference refuses the whole image, and the screen says which policy it was.
+    if let Some(which) = policy_differs(&mut slots, buf) {
+        crate::catlog!(
+            "restore: the image's {} is not what is in force; refused",
+            which
+        );
+        let mut why: heapless::String<40> = heapless::String::new();
+        let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{which} differs"));
+        return say(ui, &why);
+    }
+
     // Asked on the device. Every wallet's settings on this device become the image's.
     let mut note: heapless::String<32> = heapless::String::new();
     let _ =
@@ -233,6 +251,36 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // SAFETY: an aligned word inside the lease this function holds.
     unsafe { core::ptr::write_volatile(lease.bytes()[at..].as_mut_ptr() as *mut u32, 0) };
     menu::wait_for_any_key(ui);
+}
+
+/// The first pre-login policy the staged image would change, if it would change any.
+///
+/// Compared against the values the boot path loaded, which are what this session is
+/// enforcing, not against the flash. An image with no pre-login slot reads as every
+/// policy off -- which is exactly what the boot path would read from it once written.
+fn policy_differs(slots: &mut StagedSlots<'_>, buf: &mut [u8]) -> Option<&'static str> {
+    use catcard_settings::json::Doc;
+    use catcard_settings::{nvstore, prelogin};
+
+    let n = store::read(slots, &nvstore::prelogin_key(), buf).unwrap_or(0);
+    let doc = Doc::parse(&buf[..n]).unwrap_or_default();
+    if prelogin::kill_key(&doc) != crate::settings::kill_key() {
+        return Some("kill key");
+    }
+    if prelogin::countdown_minutes(&doc) != crate::settings::login_countdown() {
+        return Some("login countdown");
+    }
+    let mut cards = [[0u8; 32]; prelogin::SD2FA_MAX];
+    let state = prelogin::sd2fa(&doc, &mut cards);
+    let (now, now_cards) = crate::settings::sd2fa();
+    let same_cards = match state {
+        prelogin::Sd2fa::Cards(n) => cards[..n] == now_cards[..n],
+        _ => true,
+    };
+    if state != now || !same_cards {
+        return Some("microSD 2FA");
+    }
+    None
 }
 
 /// Erase and program the region from `image`, a page at a time, reading each back.
