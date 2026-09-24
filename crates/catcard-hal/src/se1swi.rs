@@ -412,9 +412,15 @@ impl Se1Swi {
     fn receive(&mut self, out: &mut [u8]) -> usize {
         // SAFETY: reads RCC only.
         let per_ms = (unsafe { crate::clock::hclk_hz() } / 1000).max(1);
-        let start = dwt::cycles();
+        // Checked on every turn, the byte-carrying ones included: a line that never goes
+        // quiet must not hold the CPU past the deadline, and the deadline itself is
+        // bounded by poll count should the cycle counter have stopped.
+        let mut deadline = dwt::Deadline::after(LISTEN_MS.saturating_mul(per_ms));
         let mut n = 0;
         loop {
+            if deadline.expired() {
+                break;
+            }
             // SAFETY: UART4 is ours for the life of `self`.
             let isr = unsafe { reg::read(ISR) };
             if isr & ISR_RXNE != 0 {
@@ -435,7 +441,7 @@ impl Se1Swi {
                     break;
                 }
             }
-            if n == out.len() || dwt::cycles().wrapping_sub(start) > LISTEN_MS * per_ms {
+            if n == out.len() {
                 break;
             }
         }
