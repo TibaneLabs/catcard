@@ -9,6 +9,8 @@
 //! Source: `hw-reference/platform.md §2-3` [C] for the base address, ST RM0351 §24
 //! (RM0432 §26 on L4+) for the bit definitions.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use catcard_board::memory::fixed;
 
 use crate::reg;
@@ -58,13 +60,25 @@ pub enum Error {
     SeedError,
 }
 
-/// Exclusive handle to the RNG peripheral.
+/// Whether [`Rng::init`] has brought the peripheral up already, so a later call hands
+/// out a handle to the running generator instead of enabling it again.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Handle to the RNG peripheral.
 pub struct Rng {
     _private: (),
 }
 
 impl Rng {
-    /// Enable and start the RNG.
+    /// Enable and start the RNG, or attach to it if it is already running.
+    ///
+    /// **Idempotent.** The first call enables the clock and the generator and throws
+    /// away the first word, as the reference manual asks. Every later call finds the
+    /// generator running, draws one word to prove it still answers, and returns another
+    /// handle. Firmware calls this once at boot and again from every screen that reads
+    /// the generator directly, and that is the intended use. A call that fails clears
+    /// the flag, so the next one starts from the enable sequence again -- a boot whose
+    /// 48 MHz clock was not up yet is the case that wants a retry.
     ///
     /// # The 48 MHz clock
     ///
@@ -75,27 +89,35 @@ impl Rng {
     ///
     /// # Safety
     ///
-    /// Must be called at most once; there is no hardware interlock preventing two
-    /// handles from racing on `RNG_DR`, and two readers would each get half the
-    /// words.
+    /// Handles must not read from two tasks at once. There is no hardware interlock on
+    /// `RNG_DR`: two readers interleaved word by word would each see the other's `DRDY`
+    /// and one of them would read a word that was not ready. One reader at a time keeps
+    /// that true, and every reader in the firmware is on the UI task -- boot's handle is
+    /// dropped before the menu makes its own.
     pub unsafe fn init() -> Result<Self, Error> {
-        unsafe {
-            reg::set_bits(RCC_AHB2ENR, AHB2ENR_RNGEN);
-            // Read back: the RCC needs a cycle for the clock to actually gate on, and
-            // reading the register is the documented way to insert that delay.
-            let _ = reg::read(RCC_AHB2ENR);
+        if !ENABLED.swap(true, Ordering::AcqRel) {
+            // SAFETY: first bring-up; the caller vouches that no other reader exists.
+            unsafe {
+                reg::set_bits(RCC_AHB2ENR, AHB2ENR_RNGEN);
+                // Read back: the RCC needs a cycle for the clock to actually gate on, and
+                // reading the register is the documented way to insert that delay.
+                let _ = reg::read(RCC_AHB2ENR);
 
-            // Clear any latched error from a previous boot, leave CED clear so clock
-            // errors are reported, then enable.
-            reg::write(SR, 0);
-            reg::modify(CR, CR_CED, CR_RNGEN);
+                // Clear any latched error from a previous boot, leave CED clear so clock
+                // errors are reported, then enable.
+                reg::write(SR, 0);
+                reg::modify(CR, CR_CED, CR_RNGEN);
+            }
         }
 
         let this = Self { _private: () };
         // Draw and discard one word: the first sample after enabling is the one the
         // reference manual says to throw away, and it also proves the peripheral is
-        // alive before anything depends on it.
-        this.word()?;
+        // alive before anything depends on it. On a repeat call it is only the proof.
+        if let Err(e) = this.word() {
+            ENABLED.store(false, Ordering::Release);
+            return Err(e);
+        }
         Ok(this)
     }
 

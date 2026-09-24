@@ -89,8 +89,9 @@ impl<'a> Trngs<'a> {
     pub fn new(gate: Option<&'a Callgate>) -> Self {
         Self {
             gate,
-            // SAFETY: the RNG peripheral belongs to this firmware; init only enables its
-            // clock and the generator, and is safe to repeat.
+            // SAFETY: `Rng::init` is idempotent -- after boot's call it only attaches to
+            // the running generator -- and this is the one reader: it is made on the UI
+            // task, for one screen, after boot's own handle has been dropped.
             chip: unsafe { catcard_hal::rng::Rng::init() }.ok(),
         }
     }
