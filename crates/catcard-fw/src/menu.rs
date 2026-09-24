@@ -8172,12 +8172,14 @@ pub(crate) fn wait_for_release(ui: &mut Ui<'_>) {
     }
 }
 
-/// Block until something is pressed. Used only by screens that have already said so.
 /// Show a scrolling document and wait for a decision: true on confirm, false on cancel.
 ///
 /// Up and down scroll it, as they do everywhere else. For a screen whose content may not
 /// fit -- a transaction's destinations -- where the answer must not be given before the
-/// whole of it can be read.
+/// whole of it can be read: until the bottom of the document has been on screen, confirm
+/// pages down instead of answering, the rule [`DocScreen`] applies with `require_end`.
+/// A host that put the output it wanted signed below the fold would otherwise have it
+/// signed by an owner who confirmed what they could see. Cancel is taken at any position.
 pub(crate) fn scroll_choice(
     ui: &mut Ui<'_>,
     view: &mut catcard_ui::scroll::ScrollView<'_>,
@@ -8191,17 +8193,19 @@ pub(crate) fn scroll_choice(
             let _ = usbtask::pump();
             crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
             for k in keys.iter() {
-                let down = match k {
-                    Key::Confirm => return true,
+                let (down, step) = match k {
+                    Key::Confirm if view.at_end() => return true,
+                    // Not read to the end yet: a page forward, never an answer.
+                    Key::Confirm => (true, view.line_step()),
                     Key::Cancel => return false,
-                    Key::Digit(8) => true,
-                    Key::Digit(5) => false,
+                    Key::Digit(8) => (true, 1),
+                    Key::Digit(5) => (false, 1),
                     // An unused key. Keep waiting rather than repainting the same frame,
                     // as `show_doc` does with `DocFlow::Ignored`.
                     _ => continue,
                 };
                 let before = view.off();
-                view.scroll(down, 1);
+                view.scroll(down, step);
                 // Only a view that actually moved is worth a frame. At either end of the
                 // document the key changes nothing, and repainting would also re-run
                 // `wait_for_release` for no reason.
