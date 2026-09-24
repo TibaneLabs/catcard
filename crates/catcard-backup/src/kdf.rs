@@ -110,6 +110,15 @@ impl Drop for KeyDerivation {
     fn drop(&mut self) {
         self.pw.zeroize();
         self.salt.zeroize();
+        // The hash state is the key in progress: after the last round it *is* the key,
+        // one finalisation away. `purecrypto`'s `Sha256` implements neither `Zeroize`
+        // nor `Drop`, and this crate denies `unsafe`, so there is no volatile store to
+        // reach for. A fresh context is written over it instead, and `black_box`
+        // insists the result is observed, which is what stops the compiler treating a
+        // write to a value about to go away as dead. Not the guarantee `zeroize` gives,
+        // but the state is gone in every build this has been looked at in.
+        self.sha = Sha256::new();
+        core::hint::black_box(&self.sha);
     }
 }
 
