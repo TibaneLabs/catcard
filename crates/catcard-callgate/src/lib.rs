@@ -93,7 +93,24 @@ pub fn check_buffer(sram1_base: u32, window: u32, addr: u32, len: usize) -> Resu
 /// Only ever touched between masking and unmasking interrupts, inside [`Callgate::call`],
 /// so there is no second reference to alias. Wiped before that call returns, so a secret
 /// the caller's own type zeroizes does not outlive it here.
-static mut GATE_BUF: [u8; MAX_BUF_LEN] = [0; MAX_BUF_LEN];
+///
+/// **Pinned to the base of SRAM1** through a dedicated `.gate_buf` linker section (placed
+/// first in RAM by `catcard-fw/build.rs`), so it stays inside the mk3 bootloader's 96 KB
+/// callgate window (`0x2000_0000`–`0x2001_8000`) no matter how much `.bss` grows above it.
+/// It used to be an ordinary `.bss` static, and once `.bss` drifted past 96 KB the mk3 gate
+/// began refusing every call — the device could not be logged in at all.
+/// Source: hw-reference/bootloader-callgate-abi.md §0.1 [C].
+///
+/// `MaybeUninit` because that section is `(NOLOAD)`: the bootloader hands off by a plain
+/// jump and cortex-m-rt only clears `.bss`, so nothing zero-initialises this. That is sound
+/// — the caller's `len` bytes are always copied in before anything is read back (never past
+/// that `len`), and the buffer is zeroized after every call.
+///
+/// The `link_section` is applied only for the bare-metal target: a Mach-O/ELF host build
+/// (the crate's own tests) would reject the section name, and there the placement does not
+/// matter.
+#[cfg_attr(target_os = "none", unsafe(link_section = ".gate_buf"))]
+static mut GATE_BUF: core::mem::MaybeUninit<[u8; MAX_BUF_LEN]> = core::mem::MaybeUninit::uninit();
 
 /// A bound callgate: a validated entry address, the bootloader's protocol version, and
 /// the SRAM1 window to validate buffers against.
