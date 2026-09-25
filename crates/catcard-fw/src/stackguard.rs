@@ -421,9 +421,14 @@ fn draw_canary(panel: &mut display::Panel) {
     );
     let _ = lines.push(l);
 
-    let mut l = Line::new();
-    let _ = l.push_str("start Kernel UI first,");
-    let _ = lines.push(l);
+    // Only a real precondition, not a permanent caption: with the kernel running this
+    // line vanishes, so "2 toggle checks" is not sitting under a standing "start Kernel
+    // UI first" that reads like a refusal.
+    if !catcard_kernel::running() {
+        let mut l = Line::new();
+        let _ = l.push_str("start Kernel UI first");
+        let _ = lines.push(l);
+    }
     let mut l = Line::new();
     let _ = l.push_str("2 toggle checks");
     let _ = lines.push(l);
