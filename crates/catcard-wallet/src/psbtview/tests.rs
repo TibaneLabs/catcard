@@ -36,6 +36,7 @@ fn owner<'a>(master: &'a ExtendedPrivKey, wallets: &'a [crate::multisig::Multisi
         master,
         fingerprint: OUR_FP,
         wallets,
+        bare_keys: &[],
     }
 }
 
@@ -377,6 +378,59 @@ fn a_transaction_with_nothing_of_ours_is_refused() {
         &mut buf,
     );
     assert_eq!(summary_of(&buf[..n]), Err(Refusal::NothingOfOurs));
+}
+
+#[test]
+fn a_wif_store_key_makes_its_input_ours_in_the_review() {
+    // The very transaction the previous test refuses: it spends a key the seed does not
+    // own, so with no WIF store it is "nothing of ours". Add that key's public key to the
+    // store and the same input is ours -- which is what lets a swept paper wallet be
+    // reviewed and signed.
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[Spend {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 50_000,
+            claim: fingerprint_of(STRANGER),
+            sighash: None,
+            no_prev_tx: false,
+            declared: None,
+        }],
+        &[Pay {
+            phrase: STRANGER,
+            steps: CHANGE,
+            amount: 49_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    let bare = [pubkey_at(STRANGER, &RECEIVE)];
+
+    // Without the store: refused.
+    assert_eq!(
+        summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()),
+        Err(Refusal::NothingOfOurs)
+    );
+
+    // With the store: the input is ours, and no change account is invented for it -- the
+    // output paying STRANGER's own change key is money leaving, not change.
+    let owner = Owner {
+        master: &master,
+        fingerprint: OUR_FP,
+        wallets: &[],
+        bare_keys: &bare,
+    };
+    let s = summarise(&psbt, &owner, &Policy::default(), &kw()).unwrap();
+    assert_eq!((s.inputs, s.ours), (1, 1));
+    assert_eq!(s.change, 0, "a WIF key's receive is not change of this wallet");
+
+    // And the WIF-input finder agrees on which input it is.
+    let mut hits = [0usize; 4];
+    assert_eq!(wif_inputs(&psbt, &bare[0], &mut hits), 1);
+    assert_eq!(hits[0], 0);
 }
 
 #[test]

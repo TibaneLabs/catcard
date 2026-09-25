@@ -154,6 +154,14 @@ pub struct Owner<'a> {
     /// Multisig wallets the owner has registered on this device. Empty means this device
     /// signs no multisig input at all, which is the correct answer before any import.
     pub wallets: &'a [Multisig],
+    /// Compressed public keys of the WIF store: standalone keys, not derived from the
+    /// seed, that can each sign an input paying their own single-signature address. Empty
+    /// on a device with no WIF store (every mono board, and any wallet that has stored
+    /// none). An input paying one of these counts as ours in the review, so a spend of a
+    /// stored key is not refused as "nothing of ours"; it adds no *change* account,
+    /// because a WIF key names no derivation, so change paid back to one shows as leaving
+    /// -- which overstates the spend rather than hiding it.
+    pub bare_keys: &'a [[u8; address::PUBKEY_LEN]],
 }
 
 /// Examine `psbt` against this wallet and `policy`.
@@ -235,6 +243,20 @@ pub fn summarise(
             }
             accounts[account_count] = Account { prefix, kind };
             account_count += 1;
+        }
+        // A WIF-store key pays no derivation path, so it names no account and cannot be a
+        // BIP-32 record; it is recognised only by the script the input actually pays. An
+        // input paying one is ours and single-signature (so the script-hash branch below
+        // does not mistake a WIF P2SH-P2WPKH for multisig), but it contributes no change
+        // account -- a WIF key's own receive is not change of this wallet.
+        if !mine
+            && owner
+                .bare_keys
+                .iter()
+                .any(|pk| signer::input_pays_key(psbt, index, pk))
+        {
+            mine = true;
+            single_sig = true;
         }
         if mine {
             ours += 1;
@@ -611,6 +633,25 @@ pub fn our_inputs(
             .iter()
             .any(|r| signer::match_key(master, r, kw).is_ok())
         {
+            out[n] = index;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Inputs of `psbt` that a WIF-store key `pubkey` (compressed) can sign, as indices,
+/// written into `out`; returns how many.
+///
+/// Public work -- it is only the key's addresses against the scripts the inputs pay -- so
+/// it needs no [`KeyWork`]; the signature that follows does.
+pub fn wif_inputs(psbt: &Psbt<'_>, pubkey: &[u8; address::PUBKEY_LEN], out: &mut [usize]) -> usize {
+    let mut n = 0;
+    for index in 0..psbt.unsigned_tx().input_count() {
+        if n == out.len() {
+            break;
+        }
+        if signer::input_pays_key(psbt, index, pubkey) {
             out[n] = index;
             n += 1;
         }

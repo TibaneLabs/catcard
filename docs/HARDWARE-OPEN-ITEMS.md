@@ -722,3 +722,21 @@ dark panel is one the owner cannot see to turn back up.
 active level. Then `set_backlight` scales `percent` to a `TIMx_CCRn` duty; nothing else
 changes — the setting, its storage, the menu row and the apply path are already in place.
 Until then this is `[?]` and the feature is on/off, not dimming.
+## Stock's WIF-store settings key and layout are unknown `[?]`
+
+The WIF store (`crates/catcard-fw/src/wifstore.rs`, backed by
+`catcard_settings::wifs`) keeps its keys under our own settings key `ccwif`, as a JSON
+array of `{"n": <label>, "w": <wif>}` objects. Stock also keeps a WIF store, but the
+settings-format document does not pin the key it lives under or the shape of an entry, so
+this does not read or write stock's -- inventing its key would risk overwriting the store
+of anyone whose device has been stock, exactly as the multisig registrations under `ccms`
+avoid stock's `multisig`.
+
+Consequence of being wrong: none to safety. A device that has been stock and then this
+keeps two independent stores; neither firmware loses the other's keys. Only cross-firmware
+interoperability of the WIF store is affected, and it is affected the same safe way the
+multisig store already is.
+
+The 30-key cap and the "can sign matching inputs" behaviour are confirmed from
+`hw-reference/firmware-features.md` §7 and §11 `[C]`; only stock's on-disk key and JSON
+shape are the open `[?]`.

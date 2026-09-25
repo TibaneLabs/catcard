@@ -192,6 +192,10 @@ enum Screen {
     /// The registered multisig wallets: what is stored, and importing or removing one.
     #[cfg(not(feature = "board-mk3"))]
     Multisig,
+    /// The WIF store: individual private keys, listed, viewed, generated, imported and
+    /// deleted, each able to sign a matching input. Needs the settings store.
+    #[cfg(not(feature = "board-mk3"))]
+    WifStore,
     /// Typing the nickname shown before the PIN prompt.
     #[cfg(not(feature = "board-mk3"))]
     Nickname,
@@ -583,6 +587,10 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Format SD card",
     "Games",
+    // Individual private keys, kept in the settings; needs the store, so not on the mk3.
+    // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "WIF Store",
     "Upgrade Firmware",
 ];
 #[cfg(not(feature = "games"))]
@@ -595,6 +603,10 @@ const UTILS_ITEMS: &[&str] = &[
     "Backup",
     "Browse SD card",
     "Format SD card",
+    // Individual private keys, kept in the settings; needs the store, so not on the mk3.
+    // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "WIF Store",
     "Upgrade Firmware",
 ];
 
@@ -1384,6 +1396,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         #[cfg(not(feature = "board-mk3"))]
+        Screen::WifStore => to(
+            |a| crate::wifstore::manage(a.gate, a.login, a.ui),
+            Screen::Utils,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NickPreview => to(
@@ -1778,6 +1795,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("WIF Store")) => Screen::WifStore,
             (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
@@ -2253,6 +2272,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Nickname
         | Screen::SettingsToSd
         | Screen::Multisig
+        | Screen::WifStore
         | Screen::NickPreview => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes | Screen::ScanQr => {}

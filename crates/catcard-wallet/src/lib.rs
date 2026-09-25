@@ -77,3 +77,4 @@ pub mod signfile;
 #[cfg(feature = "multichain")]
 pub mod slip10;
 pub mod tx;
+pub mod wif;

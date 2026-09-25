@@ -318,6 +318,15 @@ impl Signer {
         })
     }
 
+    /// A signer for a bare private key -- a WIF-store key with no derivation path.
+    ///
+    /// `outscript` decides which script an input pays and whether this key is involved, so
+    /// this does not carry a taproot flag: it can produce either signature, and the input's
+    /// script settles which. `None` for bytes that are not a usable scalar.
+    pub fn from_secret(secret: &[u8; 32], _kw: &KeyWork) -> Option<Self> {
+        Self::new(secret, false)
+    }
+
     /// Whether this key signs the taproot key path.
     pub fn is_taproot(&self) -> bool {
         self.taproot
@@ -374,6 +383,58 @@ pub fn sign_input(
         }
     }
     Err(last)
+}
+
+/// Sign input `index` with a bare private key -- a WIF-store key -- writing the updated
+/// PSBT into `out`.
+///
+/// Unlike [`sign_input`], which asks the input which of our derived keys it names, this key
+/// has no derivation and no fingerprint: `outscript` matches its public key against the
+/// script the input actually pays and signs only if it is involved, returning
+/// [`Error::Psbt`] wrapping `KeyNotInvolved` otherwise. The same sighash policy applies as
+/// for a seed key: a WIF spend is refused on a type this device will not produce, so the
+/// signature and the review cannot disagree.
+///
+/// The scalar is elliptic-curve work, so this takes a [`KeyWork`] and runs masked.
+pub fn sign_input_with_secret(
+    psbt: &Psbt<'_>,
+    index: usize,
+    secret: &[u8; 32],
+    out: &mut [u8],
+    kw: &KeyWork,
+) -> Result<usize, Error> {
+    if let Some(kind) = psbt.input(index).and_then(|i| i.sighash_type())
+        && !sighash_allowed(kind)
+    {
+        return Err(Error::Sighash { kind });
+    }
+    let signer = Signer::from_secret(secret, kw).ok_or(Error::Derivation)?;
+    Ok(psbt.sign_input_to_slice(index, &signer, out)?)
+}
+
+/// Whether input `index` pays a single-signature address of `pubkey` (compressed).
+///
+/// The chain pins which script the input spends -- [`Psbt::utxo`] checks the previous
+/// transaction's txid against this outpoint -- so this rebuilds the four single-sig
+/// scripts our key could produce and compares. Public work: it is only the public key and
+/// hashes, no scalar, so it needs no [`KeyWork`]. Used to recognise a WIF-store input in
+/// the review and to list which inputs a WIF key can sign, ahead of the signature itself.
+pub fn input_pays_key(psbt: &Psbt<'_>, index: usize, pubkey: &[u8; 33]) -> bool {
+    use crate::address::{self, AddressKind};
+    let Ok(spent) = psbt.utxo(index) else {
+        return false;
+    };
+    [
+        AddressKind::P2wpkh,
+        AddressKind::P2shP2wpkh,
+        AddressKind::P2pkh,
+        AddressKind::P2tr,
+    ]
+    .into_iter()
+    .any(|kind| {
+        let mut built = [0u8; 34];
+        matches!(address::script_pubkey(kind, pubkey, &mut built), Ok(n) if built[..n] == *spent.script)
+    })
 }
 
 #[cfg(test)]

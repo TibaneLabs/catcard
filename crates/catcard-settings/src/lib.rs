@@ -30,6 +30,7 @@ pub mod prelogin;
 pub mod store;
 pub mod vault;
 pub mod wallets;
+pub mod wifs;
 
 use purecrypto::ct::ConstantTimeEq;
 use purecrypto::hash::HmacSha256;

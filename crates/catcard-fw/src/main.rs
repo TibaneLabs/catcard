@@ -175,6 +175,10 @@ mod vault;
 mod verify;
 /// Checking a signed-message file from the card, which needs no key.
 mod verifysig;
+/// The WIF store: individual private keys, kept in the settings, each able to sign a
+/// matching input. Needs the settings store, so absent on the mk3.
+#[cfg(not(feature = "board-mk3"))]
+mod wifstore;
 
 /// Board this image was built for, from `build.rs`.
 /// The board this was *built* for, from the selected feature.

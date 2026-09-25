@@ -588,3 +588,66 @@ fn the_signer_refuses_a_sighash_type_of_the_hosts_choosing() {
         }
     }
 }
+
+/// A P2WPKH input paying `pk` directly, with no BIP-32 derivation record: a WIF-store key
+/// is standalone, so an input it can spend carries only the witness UTXO.
+fn wif_psbt(pk: &[u8; 33], buf: &mut [u8]) -> usize {
+    let mut spk = [0u8; 22];
+    spk[..2].copy_from_slice(&[0x00, 0x14]);
+    spk[2..].copy_from_slice(&hash160(pk));
+    let input = RawTxIn {
+        txid: [0x33; 32],
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    };
+    let mut pay = [0u8; 25];
+    pay[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    pay[3..23].copy_from_slice(&[0x44; 20]);
+    pay[23..].copy_from_slice(&[0x88, 0xac]);
+    let tx = RawTx {
+        version: 2,
+        inputs: &[input],
+        outputs: &[RawTxOut {
+            amount: 40_000,
+            script: &pay,
+        }],
+        locktime: 0,
+    };
+    let mut a = [0u8; 2048];
+    let n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    Psbt::parse(&a[..n])
+        .unwrap()
+        .set_witness_utxo(0, 50_000, &spk, buf)
+        .unwrap()
+}
+
+#[test]
+fn a_wif_key_signs_the_input_paying_its_own_address() {
+    use crate::wif::WifKey;
+    let kw = KeyWork::host();
+    let wif = WifKey::decode("KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn", &kw).unwrap();
+    let pk = wif.public_key(&kw).unwrap();
+
+    let mut buf = [0u8; 2048];
+    let n = wif_psbt(&pk, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    // The input pays this key, and none other.
+    assert!(input_pays_key(&psbt, 0, &pk));
+    let other = pubkey_at(&PATH);
+    assert!(!input_pays_key(&psbt, 0, &other));
+
+    let mut out = [0u8; 4096];
+    let len = sign_input_with_secret(&psbt, 0, wif.secret(), &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let sig = signed.input(0).unwrap().partial_sig(&pk).expect("signature");
+    assert_eq!(*sig.last().unwrap(), 0x01, "SIGHASH_ALL");
+
+    // A key that does not pay the input is not involved, rather than signing a stranger's.
+    let stranger = derive(&PATH);
+    let mut out2 = [0u8; 4096];
+    let got = sign_input_with_secret(&psbt, 0, stranger.secret_bytes(), &mut out2, &kw);
+    assert!(matches!(got, Err(Error::Psbt(_))), "a foreign key signed");
+}

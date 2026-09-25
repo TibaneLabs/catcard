@@ -367,10 +367,39 @@ pub(crate) fn review_and_sign(
     // alternative is signing for a wallet this device was never shown.
     #[cfg(feature = "board-mk3")]
     let wallets: &[catcard_wallet::multisig::Multisig] = &[];
+
+    // The WIF store, read once like the multisig registrations: standalone keys, not
+    // derived from the seed, each able to sign an input that pays its own address. Their
+    // public keys go into the review so a spend of a stored key is recognised as ours
+    // rather than refused as "nothing of ours"; the keys themselves sign in the pass
+    // below. Empty on the mk3, which has no settings store.
+    #[cfg(not(feature = "board-mk3"))]
+    let mut wif_keys: heapless::Vec<
+        catcard_wallet::wif::WifKey,
+        { catcard_settings::wifs::MAX_KEYS },
+    > = heapless::Vec::new();
+    #[cfg(not(feature = "board-mk3"))]
+    crate::wifstore::load_keys(gate, login, ui.panel, &mut wif_keys);
+    #[cfg(not(feature = "board-mk3"))]
+    let mut bare_keys: heapless::Vec<[u8; 33], { catcard_settings::wifs::MAX_KEYS }> =
+        heapless::Vec::new();
+    #[cfg(not(feature = "board-mk3"))]
+    crate::keywork::run(|kw| {
+        for k in &wif_keys {
+            if let Some(pk) = k.public_key(kw) {
+                let _ = bare_keys.push(pk);
+            }
+        }
+    });
+
     let owner = psbtview::Owner {
         master: &master,
         fingerprint,
         wallets,
+        #[cfg(not(feature = "board-mk3"))]
+        bare_keys: &bare_keys,
+        #[cfg(feature = "board-mk3")]
+        bare_keys: &[],
     };
 
     // The review. Every judgement here derives a key per input and per claimed change
@@ -444,8 +473,26 @@ pub(crate) fn review_and_sign(
         return;
     }
     let mut ours = [0usize; MAX_INPUTS];
-    let signable =
+    // `mut` because the WIF pass below extends the set; on the mk3 that pass is compiled
+    // out, so nothing there mutates it.
+    #[cfg_attr(feature = "board-mk3", allow(unused_mut))]
+    let mut signable =
         crate::keywork::run(|kw| psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw));
+
+    // Inputs a stored WIF key can sign, added to the set the review reports and the loop
+    // signs. Only those a seed key does not already cover: an input both can sign is signed
+    // once, by the seed. Matching a key to a script is public work, so no masking here.
+    #[cfg(not(feature = "board-mk3"))]
+    for k in &bare_keys {
+        let mut hits = [0usize; MAX_INPUTS];
+        let m = psbtview::wif_inputs(&psbt, k, &mut hits);
+        for &i in &hits[..m] {
+            if signable < ours.len() && !ours[..signable].contains(&i) {
+                ours[signable] = i;
+                signable += 1;
+            }
+        }
+    }
 
     if !review(ui, &summary, &shown[..count], signable) {
         menu::message(ui.panel, HEAD, "not signed", "any key to go back");
@@ -464,6 +511,7 @@ pub(crate) fn review_and_sign(
             Ok(p) => p,
             Err(_) => break,
         };
+        let mut done = false;
         match crate::keywork::run(|kw| {
             signer::sign_input(&psbt, index, &master, fingerprint, into, kw)
         }) {
@@ -471,14 +519,45 @@ pub(crate) fn review_and_sign(
                 core::mem::swap(&mut from, &mut into);
                 at = n;
                 signed += 1;
+                done = true;
             }
             Err(e) => {
-                crate::catlog!("sign: input {} refused: {:?}", index, e);
+                crate::catlog!("sign: input {} not a seed key: {:?}", index, e);
             }
+        }
+        // A stored WIF key next, if the seed did not sign this input. Each key signs only
+        // the input paying its own address -- `sign_input_with_secret` returns
+        // `KeyNotInvolved` otherwise -- so this tries them in turn and stops at the first
+        // that takes. The scalar is masked like every other signature.
+        #[cfg(not(feature = "board-mk3"))]
+        if !done {
+            for k in &wif_keys {
+                let psbt = match Psbt::parse(&from[..at]) {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                match crate::keywork::run(|kw| {
+                    signer::sign_input_with_secret(&psbt, index, k.secret(), into, kw)
+                }) {
+                    Ok(n) => {
+                        core::mem::swap(&mut from, &mut into);
+                        at = n;
+                        signed += 1;
+                        done = true;
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+        if !done {
+            crate::catlog!("sign: input {} refused by every key", index);
         }
         busy.tick(ui.panel);
     }
     drop(master);
+    #[cfg(not(feature = "board-mk3"))]
+    drop(wif_keys);
 
     if signed == 0 {
         menu::message(
