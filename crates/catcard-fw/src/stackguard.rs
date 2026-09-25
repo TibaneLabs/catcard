@@ -1,4 +1,5 @@
-//! Two stack-overflow defences, armed and proven from *Debug -> Self-tests*.
+//! Two stack-overflow defences: armed on the normal boot-into-menu path, and proven from
+//! *Debug -> Self-tests*.
 //!
 //! # What is being defended
 //!
@@ -19,27 +20,36 @@
 //!    switch (`catcard_kernel::set_guard_checks`), and a wrong one goes to the same
 //!    wipe-and-reset.
 //!
-//! # Why neither is on at boot
+//! # Where they are armed
 //!
-//! Every bench unit is RDP=2 with no recovery. A fence programmed one region-size wrong
-//! faults on the first push after it; a check that trips on a healthy stack ends the
-//! program at the first switch. Either, on the boot path, is a device that never reaches
-//! USB again. So both start **off**, are armed from the self-test screen, and are cured by
-//! a power cycle; the screen also carries a deliberate-trip probe for each, so the owner
-//! can see it fire -- the device wipes and resets -- before anything is trusted to it. They
-//! stay Debug actions until proven on every board.
+//! Both are turned on by [`session::run`](crate::session) on the normal boot-into-menu
+//! path, immediately before the kernel menu starts -- which is strictly *after* the
+//! failsafe CANCEL check in `main`. Holding CANCEL at power-on therefore always reaches the
+//! USB recovery reflash before the fence or the canary is live, so a bad interaction with
+//! either stays recoverable on a dev unit. Arming is best-effort: if the fence cannot be
+//! programmed (no MPU, or the stack already sits within [`ARM_MARGIN`] of the floor) the
+//! boot logs it and continues rather than blocking or panicking.
 //!
-//! This whole module is compiled out of a ship build (it lives behind `usb-debug-mem`, the
-//! same gate the peek/poke tools use): nothing here is reachable unless the debug USB
-//! surface is present.
-
-use core::sync::atomic::{AtomicBool, Ordering};
+//! This was reversed from an earlier design where both stayed off at boot on every board,
+//! armed only from the self-test screen: the defences are proven on hardware now (mk4,
+//! mk5, Q1), so they default on. The floor/arm machinery is compiled into every build,
+//! including a `--no-default-features` ship build; only the Debug *Self-tests* screens and
+//! the deliberate-trip probes below live behind `usb-debug-mem`, the same gate the
+//! peek/poke tools use.
 
 use catcard_hal::mpu;
+
+#[cfg(feature = "usb-debug-mem")]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "usb-debug-mem")]
 use catcard_ui::keypad::{Event, KEYS, Key};
 
+#[cfg(feature = "usb-debug-mem")]
 use crate::display;
+#[cfg(feature = "usb-debug-mem")]
 use crate::menu::{ask, confirmed, message, wait_for_any_key};
+#[cfg(feature = "usb-debug-mem")]
 use crate::ui::Ui;
 
 unsafe extern "C" {
@@ -58,13 +68,16 @@ const ARM_MARGIN: u32 = 256;
 /// Bytes under the current MSP left unpainted: room for an exception frame with FP state
 /// (104 bytes) is not needed -- a handler runs to completion before the paint loop
 /// resumes -- but the margin keeps the loop clear of anything this frame itself spills.
+#[cfg(feature = "usb-debug-mem")]
 const PAINT_MARGIN: u32 = 64;
 
 /// What the free stack is painted with. Not the kernel's `0xAAAA_AAAA`, so a main-stack
 /// word cannot be mistaken for task-stack paint in a memory dump.
+#[cfg(feature = "usb-debug-mem")]
 const PAINT: u32 = 0x5AFE_57AC;
 
 /// Whether [`paint`] has run. The only state this module keeps.
+#[cfg(feature = "usb-debug-mem")]
 static PAINTED: AtomicBool = AtomicBool::new(false);
 
 /// The main stack's floor: the higher section end, rounded up to the fence size.
@@ -127,6 +140,10 @@ pub fn arm() -> Result<(), ArmError> {
 }
 
 /// Turn the MPU off. The fence does nothing until [`arm`] is called again.
+///
+/// Only the Debug fence screen disarms; kept always-compiled so the fence machinery is
+/// one module, but a ship build never calls it.
+#[cfg_attr(not(feature = "usb-debug-mem"), allow(dead_code))]
 pub fn disarm() {
     // SAFETY: one store to `MPU_CTRL`; unfencing memory cannot fault.
     unsafe { mpu::disarm() };
@@ -134,6 +151,10 @@ pub fn disarm() {
 
 /// Whether the fence is armed. Read from the hardware, so it is right even if the
 /// callgate wrapper has just restored it.
+///
+/// Only the Debug fence screen reads it; kept always-compiled with [`disarm`], and a ship
+/// build never calls it.
+#[cfg_attr(not(feature = "usb-debug-mem"), allow(dead_code))]
 pub fn is_armed() -> bool {
     mpu::is_enabled()
 }
@@ -146,6 +167,7 @@ pub fn is_armed() -> bool {
 ///
 /// Skips the fenced 32 bytes whether or not the fence is armed, so painting and scanning
 /// never touch a region that may fault.
+#[cfg(feature = "usb-debug-mem")]
 pub fn paint() -> Option<u32> {
     let bottom = floor().saturating_add(mpu::GUARD_BYTES);
     let top = msp().saturating_sub(PAINT_MARGIN) & !3;
@@ -171,6 +193,7 @@ pub fn paint() -> Option<u32> {
 
 /// The deepest address the main stack has reached since [`paint`], and the bytes still
 /// unpainted above the fence at that point. `None` until something has been painted.
+#[cfg(feature = "usb-debug-mem")]
 pub fn high_water() -> Option<(u32, u32)> {
     if !PAINTED.load(Ordering::Relaxed) {
         return None;
@@ -192,6 +215,7 @@ pub fn high_water() -> Option<(u32, u32)> {
 /// With the fence armed this never returns: the load faults, `MemoryManagement` wipes
 /// and resets. Returning at all is the failure the screen reports. The word read is
 /// returned so nothing can decide the load was unneeded.
+#[cfg(feature = "usb-debug-mem")]
 pub fn probe_mpu() -> u32 {
     let floor = floor();
     // SAFETY: `floor` is linked RAM just above the last static; reading it is harmless
@@ -204,6 +228,7 @@ pub fn probe_mpu() -> u32 {
 /// With the kernel running and the checks on, the switch finds the wrong word and never
 /// comes back. Returning is the failure the screen reports. The wait after the yield is
 /// bounded: a few ticks, in case the switch was deferred under a preemption lock.
+#[cfg(feature = "usb-debug-mem")]
 pub fn probe_canary() {
     catcard_kernel::corrupt_own_guard_for_test();
     catcard_kernel::yield_now();
@@ -215,6 +240,7 @@ pub fn probe_canary() {
     }
 }
 
+#[cfg(feature = "usb-debug-mem")]
 type Line = heapless::String<48>;
 
 /// **Self-test.** The MPU stack fence: arm it, watch the numbers, and trip it on demand.
@@ -222,6 +248,7 @@ type Line = heapless::String<48>;
 /// Every action is logged before it happens, so a `ReadLog` taken *before* a probe shows
 /// the arm; after a successful probe the log is gone with the rest of RAM, which is what
 /// a pass looks like from the host.
+#[cfg(feature = "usb-debug-mem")]
 pub(crate) fn fence_test(ui: &mut Ui<'_>) {
     loop {
         draw_fence(ui.panel);
@@ -284,6 +311,7 @@ pub(crate) fn fence_test(ui: &mut Ui<'_>) {
 
 /// **Self-test.** The kernel's per-switch guard-word check: turn it on, confirm the device
 /// keeps running on healthy stacks, and trip it on demand.
+#[cfg(feature = "usb-debug-mem")]
 pub(crate) fn canary_test(ui: &mut Ui<'_>) {
     loop {
         draw_canary(ui.panel);
@@ -340,6 +368,7 @@ pub(crate) fn canary_test(ui: &mut Ui<'_>) {
 }
 
 /// Six lines for the MPU fence test, so it fits the 128x64 panels as well as the Q1's.
+#[cfg(feature = "usb-debug-mem")]
 fn draw_fence(panel: &mut display::Panel) {
     use core::fmt::Write as _;
 
@@ -399,6 +428,7 @@ fn draw_fence(panel: &mut display::Panel) {
 }
 
 /// The switch-canary test screen.
+#[cfg(feature = "usb-debug-mem")]
 fn draw_canary(panel: &mut display::Panel) {
     use core::fmt::Write as _;
 
@@ -441,6 +471,7 @@ fn draw_canary(panel: &mut display::Panel) {
 
 /// Block until a key is pressed, servicing USB meanwhile. Cancel wins over anything
 /// pressed with it.
+#[cfg(feature = "usb-debug-mem")]
 fn wait_key(ui: &mut Ui<'_>) -> Key {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

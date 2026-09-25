@@ -144,9 +144,10 @@ mod sniff;
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod solanatx;
 mod splash;
-/// Debug: the MPU fence under the main stack and the kernel's per-switch canary checks,
-/// both off at boot, armed and probed from the Self-tests harness. Bench builds only.
-#[cfg(feature = "usb-debug-mem")]
+/// The MPU fence under the main stack and the kernel's per-switch canary checks. Both are
+/// armed on the normal boot-into-menu path (after the failsafe CANCEL check), so the
+/// floor/arm machinery is always compiled; only the Debug *Self-tests* screens and
+/// deliberate-trip probes are behind `usb-debug-mem`.
 mod stackguard;
 mod staging;
 /// Debug: everything this device keeps, the seed in the clear, written to a card in one
