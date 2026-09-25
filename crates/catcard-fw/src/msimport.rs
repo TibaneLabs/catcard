@@ -29,13 +29,19 @@ use crate::ui::Ui;
 /// something that might still parse.
 const MAX_FILE: usize = 4096;
 
-/// Three full-slot buffers: the settings as they are, the rendered list, and the seal.
-///
-/// Static, because a screen has an 8 KB stack and a settings slot is four kilobytes. Only
-/// one settings screen is ever open, so importing and reading back share these.
-static mut DOC: [u8; SCRATCH] = [0; SCRATCH];
-static mut LIST: [u8; SCRATCH] = [0; SCRATCH];
-static mut SEAL: [u8; SCRATCH] = [0; SCRATCH];
+// The scratch these screens need -- the settings as they are, the rendered list, and the
+// seal -- comes from `crate::heap`, a full slot (`SCRATCH`) at a time.
+//
+// It used to be three resident statics, twelve kilobytes reserved for the device's whole
+// life to serve a screen that is open for a few seconds during an import. They are leased
+// now: taken when the import or the management screen starts, dropped (and wiped) when it
+// ends, so the RAM is the modal screen's for the moment it runs and nobody else's after. A
+// slot is four kilobytes and the stacks are eight, so these never went on the stack; the
+// heap is where a buffer this size that is only sometimes needed belongs.
+//
+// `crate::heap::take` can say no, and then the screen says so and returns rather than
+// reserving the space against the chance. The parsed wallets below are the one thing that
+// stays resident: a slice of them outlives the call that made it.
 
 /// The parsed wallets, kept between calls so a slice of them can outlive [`registered`].
 ///
@@ -78,12 +84,19 @@ pub(crate) fn registered(
         unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
     parsed.clear();
 
+    // A leased slot to read the stored records into. If the heap cannot spare one, an
+    // empty list is the safe answer -- the same one a store that will not mount gives --
+    // so every multisig input refuses rather than being signed on the host's word.
+    let Some(mut doc) = crate::heap::take(SCRATCH) else {
+        crate::catlog!("multisig: no scratch, so no registered wallets");
+        return parsed;
+    };
+    let doc_buf = doc.bytes();
+
     let mut list = [Wallet {
         name: "",
         descriptor: "",
     }; wallets::MAX_WALLETS];
-    // SAFETY: foreground only, and the signing screen holds the display while this runs.
-    let doc_buf = unsafe { doc_scratch() };
     let have = match load(gate, login, panel, doc_buf, &mut list) {
         Ok(n) => n,
         Err(why) => {
@@ -107,12 +120,13 @@ pub(crate) fn registered(
 ///
 /// The records borrow `doc_buf`, which is also the scratch a later write needs, so a
 /// caller that goes on to store something must let that borrow end first -- which is why
-/// the buffer is passed in rather than taken from [`DOC`] here.
+/// the buffer is passed in (leased from [`crate::heap`] by the caller) rather than taken
+/// here.
 fn load<'a>(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut crate::display::Panel,
-    doc_buf: &'a mut [u8; SCRATCH],
+    doc_buf: &'a mut [u8],
     out: &mut [Wallet<'a>],
 ) -> Result<usize, &'static str> {
     use catcard_settings::json::Doc;
@@ -129,16 +143,6 @@ fn load<'a>(
     let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
     let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
     Ok(wallets::list(&doc, out))
-}
-
-/// The DOC scratch buffer.
-///
-/// # Safety
-/// Foreground only, one settings screen at a time, and the returned borrow must end
-/// before another call.
-unsafe fn doc_scratch() -> &'static mut [u8; SCRATCH] {
-    // SAFETY: the caller's contract.
-    unsafe { &mut *core::ptr::addr_of_mut!(DOC) }
 }
 
 /// The Multisig screen: what is registered, and what can be done about it.
@@ -169,8 +173,12 @@ pub(crate) fn manage(
         // Scoped: the wallet records borrow the settings buffer, and deleting one reads
         // the settings afresh.
         let next = {
-            // SAFETY: foreground only; the menu waits for this screen.
-            let doc_buf = unsafe { doc_scratch() };
+            // A leased slot for the read; dropped (and wiped) when this scope ends, before
+            // any import or delete acts on the choice.
+            let Some(mut doc) = crate::heap::take(SCRATCH) else {
+                return say(ui, "Multisig", "not enough memory");
+            };
+            let doc_buf = doc.bytes();
             let mut list = [Wallet {
                 name: "",
                 descriptor: "",
@@ -342,8 +350,17 @@ fn remove(
     sum: &str,
 ) -> Result<(), &'static str> {
     menu::blocking_screen(ui.panel, "Multisig", "saving");
-    // SAFETY: foreground only; the menu waits for this screen.
-    let doc_buf = unsafe { doc_scratch() };
+    // Three leased slots: the settings scratch, the rendered list, and the seal the write
+    // needs. All wiped on drop at the end of this call.
+    let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
+        crate::heap::take(SCRATCH),
+        crate::heap::take(SCRATCH),
+        crate::heap::take(SCRATCH),
+    ) else {
+        return Err("not enough memory");
+    };
+    let doc_buf = doc.bytes();
+    let list_buf = list_blk.bytes();
     // Scoped: the records borrow `doc_buf`, which the write below reuses as scratch.
     let len = {
         let mut list = [Wallet {
@@ -359,30 +376,26 @@ fn remove(
         if n == have {
             return Err("no such wallet");
         }
-        // SAFETY: as above.
-        let list_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
         wallets::render(&left[..n], list_buf).map_err(|_| "too long")?
     };
-    store_list(gate, login, ui, doc_buf, len)
+    store_list(gate, login, ui, doc_buf, &list_buf[..len], seal.bytes())
 }
 
-/// Write the wallet list rendered into [`LIST`] into the settings.
+/// Write the rendered wallet list `list_text` into the settings.
 ///
-/// `doc_buf` is the scratch the edit needs, and it must no longer be lent to any wallet
-/// record by the time this is called -- which is what the scopes above are for.
+/// `doc_buf` and `seal_buf` are the leased scratch the edit needs; `doc_buf` must no
+/// longer be lent to any wallet record by the time this is called -- which is what the
+/// scopes above are for.
 fn store_list(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-    doc_buf: &mut [u8; SCRATCH],
-    len: usize,
+    doc_buf: &mut [u8],
+    list_text: &[u8],
+    seal_buf: &mut [u8],
 ) -> Result<(), &'static str> {
-    // SAFETY: foreground only; one settings screen at a time.
-    let list_buf: &[u8; SCRATCH] = unsafe { &*core::ptr::addr_of!(LIST) };
-    let text = core::str::from_utf8(&list_buf[..len]).map_err(|_| "not text")?;
+    let text = core::str::from_utf8(list_text).map_err(|_| "not text")?;
 
-    // SAFETY: as above.
-    let seal: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(SEAL) };
     // Into the wallet in force's own file, as the read was.
     crate::settings::save_wallet(
         gate,
@@ -391,7 +404,7 @@ fn store_list(
         "Multisig",
         (wallets::KEY, text),
         doc_buf,
-        seal,
+        seal_buf,
     )
 }
 
@@ -580,9 +593,17 @@ fn save(
     descriptor: &str,
 ) -> Result<(), &'static str> {
     menu::blocking_screen(ui.panel, "Register wallet", "saving");
-    // SAFETY: foreground only; the menu waits for this screen, and nothing else touches
-    // the settings region.
-    let doc_buf = unsafe { doc_scratch() };
+    // Three leased slots: the settings scratch, the rendered list, and the seal the write
+    // needs. All wiped on drop at the end of this call.
+    let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
+        crate::heap::take(SCRATCH),
+        crate::heap::take(SCRATCH),
+        crate::heap::take(SCRATCH),
+    ) else {
+        return Err("not enough memory");
+    };
+    let doc_buf = doc.bytes();
+    let list_buf = list_blk.bytes();
 
     // Scoped: the records read here borrow `doc_buf`, and the write below reuses it as
     // scratch, so the borrow has to end first.
@@ -605,11 +626,9 @@ fn save(
             wallets::Error::Overflow => "too long",
         })?;
         crate::catlog!("multisig: registering, {} wallet(s) after this", added);
-        // SAFETY: as above.
-        let list_buf: &mut [u8; SCRATCH] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
         wallets::render(&next[..added], list_buf).map_err(|_| "too long")?
     };
-    store_list(gate, login, ui, doc_buf, len)
+    store_list(gate, login, ui, doc_buf, &list_buf[..len], seal.bytes())
 }
 
 /// Why a descriptor was refused, in words rather than a variant name.
