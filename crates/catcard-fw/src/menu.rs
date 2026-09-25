@@ -288,6 +288,9 @@ enum Screen {
     /// Whether the menu cursor comes round at the ends of a list.
     #[cfg(not(feature = "board-mk3"))]
     MenuWrap,
+    /// The Q1 LCD backlight level. Q1-only: the mono boards have no backlight to dim.
+    #[cfg(feature = "board-q1")]
+    Brightness,
     WipeSeed,
     /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
     FactoryReset,
@@ -448,6 +451,10 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Hardware On/Off",
     #[cfg(not(feature = "board-mk3"))]
     "Menu wrapping",
+    // The colour panel's backlight level. Q1-only: the mono boards have no backlight PWM.
+    // Source: hw-reference/firmware-features.md §9 "LCD brightness on battery" [C]
+    #[cfg(feature = "board-q1")]
+    "LCD brightness",
     // Which chains this wallet offers, and in what order. Only where there is more than
     // one chain to order, and only where there is a settings file to keep the answer in.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
@@ -1447,6 +1454,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| testnet_mode_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
         ),
+        #[cfg(feature = "board-q1")]
+        Screen::Brightness => to(
+            |a| brightness_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         #[cfg(feature = "board-q1")]
         Screen::SeedQrShow => to(
@@ -1650,6 +1662,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Hardware On/Off")) => Screen::Hardware,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
@@ -2338,6 +2352,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::VirtualDisk
         | Screen::MenuWrap
         | Screen::TestnetMode => {}
+        // Handled in `run`: picks a level through `pick_row` and drives the panel itself.
+        #[cfg(feature = "board-q1")]
+        Screen::Brightness => {}
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::KillKey | Screen::Sd2fa => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
@@ -10505,6 +10522,55 @@ fn testnet_mode_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
         (catcard_settings::prefs::CHAIN, chosen.ticker()),
         crate::prefs::Prefs { net: chosen, ..now },
         chosen.long_name(),
+    );
+}
+
+/// The backlight levels offered, brightest first. Values are percentages stored under
+/// [`catcard_settings::prefs::BACKLIGHT`]; the labels double as the rows.
+#[cfg(feature = "board-q1")]
+const BRIGHTNESS_ROWS: &[&str] = &["100% (default)", "75%", "50%", "25%"];
+/// The percent each [`BRIGHTNESS_ROWS`] row stores, in the same order.
+#[cfg(feature = "board-q1")]
+const BRIGHTNESS_LEVELS: [u8; 4] = [100, 75, 50, 25];
+
+/// Settings → LCD brightness (Q1).
+///
+/// The colour panel's backlight level. Persisted per wallet and applied through
+/// [`crate::prefs`], which drives [`crate::display::set_backlight`] on save and again on
+/// the next login. Full brightness is the default.
+///
+/// **Variable dimming is limited by an open hardware item:** the PWM timer/channel behind
+/// `BL_ENABLE=PE3` is not established from the sanctioned references, so today the panel is
+/// simply lit for any chosen level and the value is stored for when that mapping is
+/// confirmed. See `docs/HARDWARE-OPEN-ITEMS.md` and [`crate::display::set_backlight`]. No
+/// zero/off row is offered: a dark panel is one the owner cannot see to turn back up.
+#[cfg(feature = "board-q1")]
+fn brightness_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "LCD brightness";
+    let now = crate::prefs::current();
+    let mut note: Line = Line::new();
+    let _ = write!(note, "now {}%", now.backlight_percent);
+    let Some(row) = pick_row(ui, HEAD, &note, BRIGHTNESS_ROWS) else {
+        return;
+    };
+    let chosen = BRIGHTNESS_LEVELS[row];
+    if chosen == now.backlight_percent {
+        message(ui.panel, HEAD, "unchanged", BRIGHTNESS_ROWS[row]);
+        wait_for_any_key(ui);
+        return;
+    }
+    let value = catcard_settings::prefs::backlight_value(chosen);
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::BACKLIGHT, &value),
+        crate::prefs::Prefs {
+            backlight_percent: chosen,
+            ..now
+        },
+        BRIGHTNESS_ROWS[row],
     );
 }
 

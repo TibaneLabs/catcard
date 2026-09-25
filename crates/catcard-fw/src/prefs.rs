@@ -13,6 +13,7 @@
 //! | USB port | [`crate::usbtask::set_port`] |
 //! | Virtual Disk | the USB Drive screen, which refuses to start when it is off |
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
+//! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
 //!
 //! # Why a cache
 //!
@@ -52,6 +53,10 @@ pub(crate) struct Prefs {
     pub menu_wrap: bool,
     /// Which Bitcoin network every address, xpub and default path is built for.
     pub net: Chain,
+    /// The Q1 LCD backlight level, `1..=100` percent. Honoured by
+    /// [`crate::display::set_backlight`] on the Q1; the mono boards keep the default and
+    /// have no backlight to drive.
+    pub backlight_percent: u8,
 }
 
 impl Prefs {
@@ -66,7 +71,6 @@ impl Prefs {
             Chain::Regtest => Network::Regtest,
         }
     }
-}
 
 impl Default for Prefs {
     /// What a device with no settings file behaves like: no timeout, BTC, the ten-percent
@@ -81,6 +85,7 @@ impl Default for Prefs {
             virtual_disk: true,
             menu_wrap: false,
             net: Chain::Mainnet,
+            backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
         }
     }
 }
@@ -95,6 +100,7 @@ static mut CURRENT: Prefs = Prefs {
     virtual_disk: true,
     menu_wrap: false,
     net: Chain::Mainnet,
+    backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
 };
 
 /// What the wallet in force is set to.
@@ -123,6 +129,10 @@ fn apply(next: Prefs) {
     unsafe { *core::ptr::addr_of_mut!(CURRENT) = next };
     crate::idle::arm(next.idle_minutes, next.battery_idle_minutes);
     crate::usbtask::set_port(next.usb_port);
+    // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
+    // and there is nothing to apply.
+    #[cfg(feature = "board-q1")]
+    crate::display::set_backlight(next.backlight_percent);
 }
 
 /// Forget this wallet's preferences and go back to the defaults.
@@ -195,6 +205,7 @@ pub(crate) fn load(
         virtual_disk: prefs::virtual_disk(&doc),
         menu_wrap: prefs::menu_wrap(&doc),
         net: prefs::network(&doc),
+        backlight_percent: prefs::backlight_percent(&doc),
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}, net {}",

@@ -696,3 +696,29 @@ ST's own RF commands (§4.5, Table 15), and the `RF_WRITE` bit of `IT_STS_Dyn` i
 reported once it is enabled in the `GPO1` *system* register, which needs the I²C security
 session open (Table 31, Table 37, §5.4.5). Both would mean writing configuration registers
 on a part nobody here has tried.
+
+## The Q1 backlight PWM timer/channel behind `BL_ENABLE=PE3` `[?]`
+
+`hw-reference/gpio.md` §"LCD backlight" and `display.md` §Q1 both give the pin — backlight
+is **`BL_ENABLE=PE3`** on the Q1 `[C]` — and say its **brightness** is set the way stock
+sets it: "backlight enable / brightness via `pyb.LED(1)`", i.e. PE3 is driven as a
+MicroPython `pyb.LED`, whose `intensity()` is a **timer PWM duty**. So variable brightness
+means a timer channel on PE3, not a plain GPIO.
+
+**What is unknown:** *which* timer and channel are wired to PE3, and the polarity/period
+the panel's backlight driver expects. `gpio.md` and `display.md` name the pin and the
+`pyb.LED(1)` fact but not the timer behind it, and the sanctioned references stop there.
+Guessing a `TIMx_CCRn` would be exactly the "plausible register" `CLAUDE.md` forbids.
+
+**What ships in the meantime.** `crate::display::set_backlight` drives the one confirmed
+control — the GPIO enable — so a non-zero level lights the panel and zero blanks it. The
+"LCD brightness" setting (Q1 Settings menu) is persisted at full percent resolution and
+applied on save and on the next login, so the chosen level is *stored* correctly; today
+every non-zero level simply lights the panel. The menu offers no off/zero row, because a
+dark panel is one the owner cannot see to turn back up.
+
+**How to resolve it.** On real Q1 hardware, find PE3's alternate-function timer mapping
+(STM32L4+ AF table, RM0432) and confirm the backlight driver's expected PWM frequency and
+active level. Then `set_backlight` scales `percent` to a `TIMx_CCRn` duty; nothing else
+changes — the setting, its storage, the menu row and the apply path are already in place.
+Until then this is `[?]` and the feature is on/off, not dimming.

@@ -1401,6 +1401,45 @@ pub unsafe fn init() -> Option<Panel> {
     Some(panel)
 }
 
+/// Apply the stored LCD backlight level (Q1).
+///
+/// The backlight is `BL_ENABLE=PE3`, and stock varies its *brightness* with a PWM duty --
+/// "backlight enable / brightness via `pyb.LED(1)`", i.e. PE3 driven as a timer-PWM LED.
+/// Source: hw-reference/gpio.md §"LCD backlight" and display.md §Q1 [C].
+///
+/// **Which timer and channel drive PE3 for that PWM is not established from the sanctioned
+/// references `[?]`** — see `docs/HARDWARE-OPEN-ITEMS.md`. This project never guesses a
+/// register, so until that mapping is confirmed the only backlight control we can make is
+/// the confirmed GPIO enable: a non-zero level lights the panel, a zero level blanks it.
+/// The percent is still persisted at full resolution (`prefs`), so turning it into a real
+/// PWM duty later is a change to the body of this one function and nothing else.
+///
+/// `percent` is `1..=100` in normal use; `prefs` reads a doubtful or zero value as full,
+/// so this is never asked to blank a panel the owner cannot see to fix.
+#[cfg(feature = "board-q1")]
+pub fn set_backlight(percent: u8) {
+    let Display::St77xx {
+        backlight: Some(bl),
+        ..
+    } = BOARD.display
+    else {
+        return;
+    };
+    // SAFETY: foreground only, single core; `BL_ENABLE` belongs to the panel alone and is
+    // already an output from `init`. Re-configuring it is idempotent.
+    unsafe {
+        gpio::enable_port(bl.port);
+        gpio::configure(
+            bl,
+            Mode::Output,
+            OutputType::PushPull,
+            Pull::None,
+            Speed::Low,
+        );
+        gpio::write(bl, percent > 0);
+    }
+}
+
 /// Take SPI1 from the display co-processor: raise `request`, then wait for `busy` low.
 ///
 /// `request` is open-drain with a pull-up and `busy` has a pull-down, as the reference

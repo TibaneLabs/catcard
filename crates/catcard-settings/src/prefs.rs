@@ -77,6 +77,20 @@ pub const MENU_WRAP: &str = "cat_wrap";
 /// A device that ran stock in testnet mode keeps that choice, and one this firmware writes
 /// is understood by stock.
 pub const CHAIN: &str = "chain";
+/// The Q1 LCD backlight level, as a decimal percent string `"1"`..`"100"`. Absent, zero,
+/// or out of range reads as [`BACKLIGHT_DEFAULT`]. Q1-only; the mono boards have no
+/// backlight to dim. Our own key: stock keeps an on-battery brightness under a different
+/// name and shape, which we do not read. Source: hw-reference/firmware-features.md §9
+/// "LCD brightness on battery" [C]
+pub const BACKLIGHT: &str = "cat_bl";
+
+/// Full brightness — the level a device with no setting runs at.
+///
+/// Doubt reads as full, never dim and never off: a dark panel is an unusable device, and
+/// on the Q1 the panel is the only way to drive the menu that would turn it back up. So an
+/// absent, zero or unparseable value lights the screen fully rather than leaving someone
+/// unable to see how to fix it.
+pub const BACKLIGHT_DEFAULT: u8 = 100;
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -118,6 +132,26 @@ pub fn battery_idle_minutes(doc: &Doc<'_>) -> Option<u32> {
 /// Whether the menu cursor wraps past the ends of a list.
 pub fn menu_wrap(doc: &Doc<'_>) -> bool {
     text(doc, MENU_WRAP) == Some("1")
+}
+
+/// The Q1 LCD backlight level, as a percent in `1..=100`.
+///
+/// Doubt reads as [`BACKLIGHT_DEFAULT`] (full): absent, a bare number rather than a
+/// string, zero, or anything over 100 all light the panel fully rather than risk a dark
+/// or blank screen the owner cannot see to correct.
+pub fn backlight_percent(doc: &Doc<'_>) -> u8 {
+    match text(doc, BACKLIGHT).and_then(|t| digits(t, 3)) {
+        Some(p) if (1..=100).contains(&p) => p as u8,
+        _ => BACKLIGHT_DEFAULT,
+    }
+}
+
+/// The text a backlight percent is stored as.
+pub fn backlight_value(percent: u8) -> heapless::String<4> {
+    use core::fmt::Write as _;
+    let mut s: heapless::String<4> = heapless::String::new();
+    let _ = write!(s, "{percent}");
+    s
 }
 
 /// Whether the USB port is switched on. Only a literal `"0"` switches it off.
@@ -590,5 +624,36 @@ mod tests {
             let json = format!(r#"{{"cat_fee":"{v}"}}"#);
             assert_eq!(fee_cap(&doc(&json)), cap, "{v}");
         }
+    }
+
+    /// A stored backlight level round-trips, and an in-range value reads back exactly.
+    #[test]
+    fn backlight_round_trips() {
+        for p in [1u8, 25, 50, 75, 100] {
+            let v = backlight_value(p);
+            let json = format!(r#"{{"cat_bl":"{v}"}}"#);
+            assert_eq!(backlight_percent(&doc(&json)), p, "{v}");
+        }
+    }
+
+    /// Doubt is full brightness, never dim or off: a dark panel is a device the owner
+    /// cannot see to fix. Absent, zero, over-range, a bare number, or garbage all read
+    /// as [`BACKLIGHT_DEFAULT`].
+    #[test]
+    fn a_doubtful_backlight_is_full() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_bl":""}"#,
+            r#"{"cat_bl":"0"}"#,
+            r#"{"cat_bl":"101"}"#,
+            r#"{"cat_bl":"999"}"#,
+            r#"{"cat_bl":50}"#,
+            r#"{"cat_bl":"-5"}"#,
+            r#"{"cat_bl":"half"}"#,
+        ] {
+            assert_eq!(backlight_percent(&doc(json)), BACKLIGHT_DEFAULT, "{json}");
+        }
+        assert_eq!(backlight_percent(&doc(r#"{"cat_bl":"1"}"#)), 1);
+        assert_eq!(backlight_percent(&doc(r#"{"cat_bl":"100"}"#)), 100);
     }
 }
