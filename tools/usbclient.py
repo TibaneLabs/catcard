@@ -27,6 +27,8 @@ import zlib
 import select
 import socket, struct, sys, time
 
+import ncry  # the encrypted-channel primitives, alongside this file in tools/
+
 REPORT = 64
 KIND_START, KIND_CONT = 1, 2
 START_PAYLOAD, CONT_PAYLOAD = REPORT - 8, REPORT - 2
@@ -36,7 +38,33 @@ SD_RAW = 0x0034
 UPGRADE_PACKED = 0x0013
 INJECT_KEY = 0x0020
 UNLOCK_PIN = 0x0021
+NCRY_START, NCRY_MSG = 0x0040, 0x0041
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
+
+# Capability bit for the encrypted channel, matching `catcard_usb::caps::NCRY`.
+CAP_NCRY = 1 << 5
+
+
+def ncry_handshake(sock):
+    """Negotiate an encrypted channel and return the host `ncry.Session`.
+
+    One round trip: send a fresh ephemeral public key, receive the device's, derive.
+    """
+    priv = os.urandom(ncry.KEY_LEN)
+    st, body = request(sock, NCRY_START, ncry.public_key(priv))
+    if st != 0 or len(body) != ncry.KEY_LEN:
+        raise ValueError(f"ncry: device refused the handshake (status {st}, {len(body)} B)")
+    return ncry.Session.initiator(priv, bytes(body))
+
+
+def ncry_request(sock, session, opcode, payload=b""):
+    """Run one command inside the channel; returns its (inner status, inner payload)."""
+    sealed = session.seal(struct.pack("<H", opcode) + payload)
+    st, body = request(sock, NCRY_MSG, sealed)
+    if st != 0:
+        raise ValueError(f"ncry: outer status {st}")
+    inner = session.open(bytes(body))
+    return struct.unpack("<H", inner[:2])[0], inner[2:]
 
 
 def key_byte(k):
@@ -1202,6 +1230,35 @@ def main(path, image=None):
         # The whole point of the log: a device whose screen cannot be read can still say
         # what happened to it.
         print_log(s)
+        return 0
+
+    if "--ncry" in sys.argv:
+        # Prove the encrypted channel end to end: negotiate a session, then run Identify,
+        # a log page and a Ping through it. Nothing here crosses the wire in the clear.
+        caps = capabilities(request(s, IDENTIFY)[1])
+        if not caps & CAP_NCRY:
+            print("ncry: device does not advertise the channel (no NCRY cap)")
+            return 1
+        session = ncry_handshake(s)
+        print("ncry: session established")
+
+        st, body = ncry_request(s, session, IDENTIFY)
+        info = identify(body)
+        print(f"ncry identify   status={STATUS.get(st, st)} {info[3] if info else '?'} "
+              f"{info[4] if info else '?'} unlocked={info[1] if info else '?'}")
+
+        st, body = ncry_request(s, session, PING, b"through the tunnel")
+        print(f"ncry ping       status={STATUS.get(st, st)} echo={body!r}")
+
+        st, body = ncry_request(s, session, 0x0012, struct.pack("<I", 0))  # ReadLog
+        total = struct.unpack("<I", body[:4])[0] if len(body) >= 4 else 0
+        print(f"ncry log page   status={STATUS.get(st, st)} total={total} first={body[5:60]!r}")
+
+        # A tampered record must be rejected: flip a byte of a fresh sealed request.
+        bad = bytearray(session.seal(struct.pack("<H", PING) + b"x"))
+        bad[0] ^= 1
+        st, _ = request(s, NCRY_MSG, bytes(bad))
+        print(f"ncry tamper     rejected={st != 0} (status {STATUS.get(st, st)})")
         return 0
 
     if "--unlock" in sys.argv:

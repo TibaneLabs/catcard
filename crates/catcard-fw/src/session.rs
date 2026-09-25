@@ -81,6 +81,16 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // SAFETY: nothing else has claimed OTG_FS or the USB pins, and HSI48 was started
     // during bring-up.
     unsafe { usbtask::init(serial()) };
+    // The encrypted USB channel's ephemeral-key source: its own pool draw and domain, so
+    // a session key never coincides with the UI or 2FA generators' output. If the pool
+    // cannot spare a draw the channel is simply not offered -- USB still enumerates.
+    if let Some(usb_drbg) = report
+        .pool
+        .as_mut()
+        .and_then(|pool| spawn_drbg(pool, domain::USB, &[]).ok())
+    {
+        usbtask::install_drbg(usb_drbg);
+    }
     crate::catlog!(
         "usb: {}",
         if usbtask::init_fault().is_empty() {

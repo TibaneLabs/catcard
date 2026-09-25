@@ -43,6 +43,7 @@
 pub mod control;
 pub mod descriptor;
 pub mod msc;
+pub mod ncry;
 
 /// Every report is exactly this long, in both directions.
 pub const REPORT_LEN: usize = 64;
@@ -162,6 +163,19 @@ pub enum Opcode {
     ///
     /// Carries nothing secret: see `logbuf`.
     ReadLog = 0x0012,
+    /// Open an encrypted channel. Payload is the host's 32-byte ephemeral X25519 public
+    /// key; the reply carries the device's. See [`ncry`] — both sides derive a session
+    /// from the shared secret, after which sensitive commands travel inside
+    /// [`Opcode::NcryMsg`]. Reported by [`caps::NCRY`].
+    NcryStart = 0x0040,
+    /// A command (or its reply) sealed for the channel opened by [`Opcode::NcryStart`].
+    ///
+    /// The payload is `[ciphertext][16-byte tag]`; the plaintext inside is an ordinary
+    /// message — `[u16 opcode][payload]` on the way in, `[u16 status][payload]` on the
+    /// way out — dispatched exactly as if it had arrived in the clear. The bulk upgrade
+    /// opcodes are not accepted here: the image is public and signed, and it streams to
+    /// staging without being buffered whole.
+    NcryMsg = 0x0041,
 }
 
 impl Opcode {
@@ -177,6 +191,8 @@ impl Opcode {
             0x0011 => Opcode::UpgradeCommit,
             0x0013 => Opcode::UpgradePacked,
             0x0012 => Opcode::ReadLog,
+            0x0040 => Opcode::NcryStart,
+            0x0041 => Opcode::NcryMsg,
             0x0020 => Opcode::InjectKey,
             0x0021 => Opcode::UnlockPin,
             0x0030 => Opcode::DebugPeek,
@@ -235,6 +251,11 @@ pub mod caps {
     /// reached through a smaller wire, so a device that cannot install cannot install a
     /// compressed one either.
     pub const UPGRADE_PACKED: u8 = 1 << 4;
+    /// This build accepts [`Opcode::NcryStart`](super::Opcode::NcryStart), the encrypted
+    /// channel. A host that sees this bit may negotiate a session and send sensitive
+    /// commands inside [`Opcode::NcryMsg`](super::Opcode::NcryMsg) instead of in the
+    /// clear.
+    pub const NCRY: u8 = 1 << 5;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.

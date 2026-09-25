@@ -29,7 +29,11 @@ use catcard_hal::otg::{Event, Otg};
 use catcard_upgrade::{Approval, Reject, Staged};
 
 use crate::staging;
-use catcard_usb::{FrameError, Opcode, PROTOCOL_VERSION, REPORT_LEN, Reassembler, Status, Writer};
+use catcard_entropy::HmacDrbg;
+use catcard_usb::{
+    FrameError, Opcode, PROTOCOL_VERSION, REPORT_LEN, Reassembler, Status, Writer, ncry,
+};
+use zeroize::Zeroize;
 
 use crate::VERSION;
 #[cfg(feature = "usb-debug-mem")]
@@ -112,6 +116,13 @@ pub struct UsbTask {
     /// Bulk-OUT packets the OTG interrupt has received in mass-storage mode, waiting for
     /// the transport loop to consume them. Empty and idle in polled HID mode.
     msc_rx: MscRx,
+    /// The encrypted channel, once a host has negotiated one with [`Opcode::NcryStart`].
+    /// `None` until then, and torn down on any authentication failure.
+    session: Option<ncry::Session>,
+    /// Ephemeral-key source for the channel handshake, installed from the entropy pool at
+    /// boot ([`install_drbg`]). `None` in recovery, where the pool never came up and the
+    /// channel is simply not offered.
+    drbg: Option<HmacDrbg>,
 }
 
 /// A single-producer/single-consumer ring of received bulk-OUT packets: the OTG interrupt
@@ -261,6 +272,8 @@ impl UsbTask {
             outbox_len: 0,
             reply: None,
             msc_rx: MscRx::new(),
+            session: None,
+            drbg: None,
         })
     }
 
@@ -703,30 +716,9 @@ impl UsbTask {
             // One page of the log. The upgrade state goes in as a line rather than as a
             // field, so there is one place to look rather than two.
             Some(Opcode::ReadLog) => {
-                let offset = if progress.payload.len() >= 4 {
-                    u32::from_le_bytes([
-                        progress.payload[0],
-                        progress.payload[1],
-                        progress.payload[2],
-                        progress.payload[3],
-                    ]) as usize
-                } else {
-                    0
-                };
                 let mut body = [0u8; 64];
-                body[..4].copy_from_slice(&(crate::logbuf::len() as u32).to_le_bytes());
-                body[4] = if crate::logbuf::wrapped() {
-                    catcard_usb::log_flags::WRAPPED
-                } else {
-                    0
-                };
-                // A page has to fit one frame: a reply's first frame carries
-                // `START_PAYLOAD` bytes, and anything past that is dropped by the writer
-                // while the header still promises it -- which reads as a device that
-                // stopped answering.
-                let end = catcard_usb::START_PAYLOAD.min(body.len());
-                let n = crate::logbuf::read(offset, &mut body[5..end]);
-                self.begin_reply(Status::Ok, &body[..5 + n]);
+                let n = Self::readlog_body(progress.payload, &mut body);
+                self.begin_reply(Status::Ok, &body[..n]);
             }
             #[cfg(feature = "usb-debug-mem")]
             Some(Opcode::DebugPeek) => {
@@ -846,8 +838,144 @@ impl UsbTask {
                 // the screen; until then this is simply not the time.
                 self.begin_reply(Status::NotNow, &[]);
             }
+            Some(Opcode::NcryStart) => self.begin_ncry(progress.payload),
+            Some(Opcode::NcryMsg) => self.handle_ncry_msg(progress.payload),
             Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) | None => self.finish_offer(),
         }
+    }
+
+    /// Open the encrypted channel: the payload is the host's ephemeral public key.
+    fn begin_ncry(&mut self, payload: &[u8]) {
+        let Some(host_pub) = payload.first_chunk::<{ ncry::KEY_LEN }>() else {
+            self.begin_reply(Status::BadRequest, &[]);
+            return;
+        };
+        // No entropy source means no channel -- recovery, where the pool never came up.
+        let Some(drbg) = self.drbg.as_mut() else {
+            self.begin_reply(Status::NotNow, &[]);
+            return;
+        };
+        // The ephemeral scalar is protocol randomness from the HMAC-DRBG, never the raw
+        // pool and never anything key-derived. A DRBG that cannot produce is a dead
+        // channel, not a weak one: refuse rather than fall back to a lesser source.
+        let mut scalar = [0u8; ncry::KEY_LEN];
+        if drbg.generate(&mut scalar).is_err() {
+            self.begin_reply(Status::BadRequest, &[]);
+            return;
+        }
+        let result = ncry::Session::responder(&scalar, host_pub);
+        scalar.zeroize();
+        match result {
+            Ok((dev_pub, session)) => {
+                // A fresh handshake replaces any prior session outright, so a host that
+                // lost its keys can always start over.
+                self.session = Some(session);
+                self.begin_reply(Status::Ok, &dev_pub);
+            }
+            Err(_) => {
+                self.session = None;
+                self.begin_reply(Status::BadRequest, &[]);
+            }
+        }
+    }
+
+    /// Open a sealed request, dispatch the command inside it, and seal the reply.
+    ///
+    /// Any authentication failure tears the session down: a channel that has seen one
+    /// forged or corrupt record is not one to keep trusting, and the host can renegotiate.
+    fn handle_ncry_msg(&mut self, payload: &[u8]) {
+        if self.session.is_none() {
+            // No channel to open it with. `NotNow`, not `BadRequest`: the host has to
+            // send `NcryStart` first, and this says so without looking like a framing bug.
+            self.begin_reply(Status::NotNow, &[]);
+            return;
+        }
+        // A record is ciphertext (which for a single-frame request is at most
+        // `START_PAYLOAD - TAG_LEN` bytes) followed by the tag. The inner plaintext needs
+        // at least a two-byte opcode.
+        if payload.len() < ncry::OVERHEAD + 2 || payload.len() > catcard_usb::START_PAYLOAD {
+            self.session = None;
+            self.begin_reply(Status::BadRequest, &[]);
+            return;
+        }
+        let ct_len = payload.len() - ncry::OVERHEAD;
+        let mut buf = [0u8; catcard_usb::START_PAYLOAD];
+        buf[..ct_len].copy_from_slice(&payload[..ct_len]);
+        let mut tag = [0u8; ncry::TAG_LEN];
+        tag.copy_from_slice(&payload[ct_len..]);
+
+        {
+            let session = self.session.as_mut().expect("checked above");
+            if session.open(&mut buf[..ct_len], &tag).is_err() {
+                self.session = None;
+                self.begin_reply(Status::BadRequest, &[]);
+                return;
+            }
+        }
+
+        // The plaintext is an ordinary request: `[u16 opcode][payload]`.
+        let inner_op = u16::from_le_bytes([buf[0], buf[1]]);
+        // Build the reply straight into the seal buffer: two bytes of status, then the
+        // body written in place, so no second full-size buffer sits on the USB stack.
+        let mut sealed = [0u8; 2 + REPLY_MAX + ncry::TAG_LEN];
+        let (status, n) =
+            self.inner_dispatch(inner_op, &buf[2..ct_len], &mut sealed[2..2 + REPLY_MAX]);
+        buf.zeroize();
+        sealed[..2].copy_from_slice(&(status as u16).to_le_bytes());
+        let plain_len = 2 + n;
+
+        let session = self.session.as_mut().expect("still open");
+        match session.seal(&mut sealed[..plain_len]) {
+            Ok(t) => {
+                sealed[plain_len..plain_len + ncry::TAG_LEN].copy_from_slice(&t);
+                self.begin_reply(Status::Ok, &sealed[..plain_len + ncry::TAG_LEN]);
+            }
+            Err(_) => {
+                self.session = None;
+                self.begin_reply(Status::BadRequest, &[]);
+            }
+        }
+    }
+
+    /// Handle a command that arrived inside the encrypted channel, writing its reply body
+    /// into `out` and returning `(inner status, length)`.
+    ///
+    /// A deliberately narrow set: the commands whose payloads are worth hiding, plus a
+    /// round-trip check. The bulk upgrade opcodes and the bench debug ones are not
+    /// reachable here -- an upgrade streams and is public, and the debug monitor is a
+    /// bring-up crutch that gains nothing from a channel.
+    fn inner_dispatch(&self, opcode: u16, payload: &[u8], out: &mut [u8]) -> (Status, usize) {
+        match Opcode::from_u16(opcode) {
+            Some(Opcode::Ping) => {
+                let n = payload.len().min(out.len());
+                out[..n].copy_from_slice(&payload[..n]);
+                (Status::Ok, n)
+            }
+            Some(Opcode::Identify) => (Status::Ok, self.identify_body(out)),
+            Some(Opcode::ReadLog) => (Status::Ok, Self::readlog_body(payload, out)),
+            _ => (Status::UnknownOpcode, 0),
+        }
+    }
+
+    /// One page of the log: `[u32 total][u8 flags][bytes]`, at most a frame's worth.
+    fn readlog_body(req: &[u8], body: &mut [u8]) -> usize {
+        let offset = if req.len() >= 4 {
+            u32::from_le_bytes([req[0], req[1], req[2], req[3]]) as usize
+        } else {
+            0
+        };
+        body[..4].copy_from_slice(&(crate::logbuf::len() as u32).to_le_bytes());
+        body[4] = if crate::logbuf::wrapped() {
+            catcard_usb::log_flags::WRAPPED
+        } else {
+            0
+        };
+        // A page has to fit one frame: a reply's first frame carries `START_PAYLOAD`
+        // bytes, and anything past that is dropped by the writer while the header still
+        // promises it -- which reads as a device that stopped answering.
+        let end = catcard_usb::START_PAYLOAD.min(body.len());
+        let n = crate::logbuf::read(offset, &mut body[5..end]);
+        5 + n
     }
 
     /// The image is fully staged: inspect it and tell the host what we found.
@@ -965,6 +1093,15 @@ impl UsbTask {
     }
 
     fn identify(&mut self) {
+        let mut body = [0u8; IDENTIFY_MAX];
+        let at = self.identify_body(&mut body);
+        self.begin_reply(Status::Ok, &body[..at]);
+    }
+
+    /// Write the `Identify` reply body into `body` and return its length. Shared by the
+    /// plaintext handler and the encrypted channel, so the two never disagree on what the
+    /// device says it is.
+    fn identify_body(&self, body: &mut [u8]) -> usize {
         // Fixed layout rather than a text blob, so a host does not have to parse prose:
         //   [0..2] protocol version
         //   [2]    device state, see `catcard_usb::state`
@@ -976,7 +1113,6 @@ impl UsbTask {
         // of up to `IDENTIFY_STRING_MAX` each with their length byte is 68, and a 64-byte
         // body with a long version and board name wrote four bytes past its end. A reply
         // can span frames, so the extra frame costs nothing.
-        let mut body = [0u8; IDENTIFY_MAX];
         let mut at = 0;
         body[at..at + 2].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         at += 2;
@@ -1009,7 +1145,7 @@ impl UsbTask {
             catcard_usb::caps::DEBUG_MEM
         } else {
             0
-        };
+        } | catcard_usb::caps::NCRY;
         at += 1;
         for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
@@ -1018,7 +1154,7 @@ impl UsbTask {
             body[at + 1..at + 1 + n].copy_from_slice(&b[..n]);
             at += 1 + n;
         }
-        self.begin_reply(Status::Ok, &body[..at]);
+        at
     }
 
     fn refuse(&mut self, reason: Reject) {
@@ -1826,6 +1962,14 @@ pub fn set_blank(blank: bool) {
 /// Let the host offer upgrades, now that the PIN has been entered.
 pub fn unlocked() {
     with_task(|t| t.set_unlocked());
+}
+
+/// Install the ephemeral-key source for the encrypted channel.
+///
+/// Called once from the boot sequence with a DRBG spawned from the entropy pool under its
+/// own domain. Until then, and in recovery where no pool exists, `NcryStart` is refused.
+pub fn install_drbg(drbg: HmacDrbg) {
+    with_task(|t| t.drbg = Some(drbg));
 }
 
 /// An upgrade waiting to be approved at the screen.

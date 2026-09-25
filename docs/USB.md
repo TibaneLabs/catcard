@@ -163,6 +163,50 @@ it is the signature.
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 | `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][u32 block size][deflate streams]` |
+| `0x0040` | `NcryStart` | open an encrypted channel; payload is the host's ephemeral X25519 public key, reply is the device's |
+| `0x0041` | `NcryMsg` | a command or reply sealed for that channel |
+
+### The encrypted channel (`ncry`)
+
+The framing above is in the clear, so a passive observer on the wire — a USB analyser, a
+logging hub — can read every opcode and payload. Anything that should not be seen travels
+instead inside `NcryMsg`, once a session has been negotiated.
+
+The handshake is one round trip, ephemeral on both sides (the Noise `NN` pattern):
+
+```text
+host   → device   NcryStart, payload = host ephemeral X25519 public key (32 B)
+device → host     Ok,        payload = device ephemeral X25519 public key (32 B)
+```
+
+Each side computes the X25519 shared secret and runs it through
+`HKDF-SHA256(salt = host_pub‖device_pub, ikm = shared, info = "catcard-ncry-v1")` to two
+directional keys. The device's ephemeral scalar comes from the HMAC-DRBG under its own
+domain (`catcard/drbg/usb/v1`), never the raw entropy pool and never anything key-derived.
+
+After the handshake, each direction is a ChaCha20-Poly1305 stream keyed separately, with a
+per-direction message counter as the nonce — used once, never reused. The receiver derives
+the nonce from the count it expects next, so a replayed or reordered record authenticates
+against the wrong nonce and is refused; any authentication failure tears the session down.
+A sealed record is `[ciphertext][16-byte tag]`, and the plaintext inside is an ordinary
+message: `[u16 opcode][payload]` in, `[u16 status][payload]` out, dispatched as if it had
+arrived in the clear.
+
+**What it defends.** Both keys are ephemeral and neither party is authenticated, so this
+stops a *passive* eavesdropper reading the protocol. It does **not** stop an *active*
+man-in-the-middle that relays the handshake: with no static device identity to bind, the
+two ends cannot tell a relay from the wire. Device authentication — a static device key and
+an on-screen session fingerprint — is a later, version-bumped step; the `info` string
+carries the version so an authenticated `v2` cannot be confused for this `v1`.
+
+The bulk upgrade opcodes are deliberately left in the clear and are not accepted inside the
+channel: the image is public and signed, its integrity already guaranteed, and it streams
+to staging without being buffered whole, which a per-message seal would break.
+
+`tools/usbclient.py hid <image> --ncry` negotiates a session and runs `Identify`, a log
+page and a `Ping` through it, then checks that a tampered record is rejected.
+`tools/ncry.py --selftest` checks the host crypto against a vector baked into the firmware
+unit tests, so the two implementations cannot silently diverge.
 
 ### The log, which is the only diagnostic that does not need a screen
 

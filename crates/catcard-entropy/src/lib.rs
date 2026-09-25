@@ -41,6 +41,10 @@ pub mod domain {
     pub const UI: &[u8] = b"catcard/drbg/ui/v1";
     /// Protocol nonces, session keys, padding.
     pub const PROTOCOL: &[u8] = b"catcard/drbg/protocol/v1";
+    /// Ephemeral keys for the encrypted USB channel (`usbtask`/`catcard_usb::ncry`). Its
+    /// own domain so a channel key can never coincide with a value drawn for another
+    /// purpose, even though both are "protocol" randomness.
+    pub const USB: &[u8] = b"catcard/drbg/usb/v1";
     /// Deterministic-signing auxiliary randomness (RFC 6979 extra entropy).
     pub const SIGNING: &[u8] = b"catcard/drbg/signing/v1";
 }
