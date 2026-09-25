@@ -91,6 +91,11 @@ pub const BACKLIGHT: &str = "cat_bl";
 /// absent, zero or unparseable value lights the screen fully rather than leaving someone
 /// unable to see how to fix it.
 pub const BACKLIGHT_DEFAULT: u8 = 100;
+/// The multisig PSBT trust policy: `verify`, `offer` or `trust`. Anything else, or absent,
+/// is [`MultisigTrust::VerifyOnly`]. Our own key, prefixed `cat_`, as the rest are: stock's
+/// own multisig-policy key has a shape this firmware has not confirmed, and writing a value
+/// stock misreads could relax a device's policy without its owner asking.
+pub const MULTISIG_TRUST: &str = "cat_mstrust";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -395,6 +400,76 @@ pub fn fee_cap_value(cap: FeeCap) -> heapless::String<8> {
     s
 }
 
+/// What to do with the cosigner keys a PSBT carries for a multisig wallet this device has
+/// not registered.
+///
+/// A multisig spend is only signable against a wallet definition -- who the cosigners are,
+/// in which script form, sorted or not. Normally that comes from a registration the owner
+/// made deliberately ([`crate::wallets`]). A PSBT can also carry the definition inside it
+/// (its global xpubs and per-input scripts), and this setting says how far to trust that:
+///
+/// Source: hw-reference/firmware-features.md §4 "A trust policy governs xpubs seen in
+/// PSBTs (verify-only / offer-to-import / trust)." [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum MultisigTrust {
+    /// **The default, and the safe one.** A multisig input is signed only against a wallet
+    /// already registered on this device; a definition that lives only in the PSBT is not
+    /// enough, and such an input is refused. Doubt reads as this.
+    #[default]
+    VerifyOnly,
+    /// Reconstruct the wallet from the PSBT and, once it is shown and its address proven to
+    /// rebuild from those keys, offer to register it. The owner is asked, per wallet, before
+    /// anything is signed or stored.
+    OfferImport,
+    /// Trust the definition in the PSBT: reconstruct the wallet, prove its address, and sign
+    /// against it without asking and without storing it. The least cautious of the three.
+    TrustPsbt,
+}
+
+impl MultisigTrust {
+    /// How the value is stored in a settings file.
+    pub const fn code(self) -> &'static str {
+        match self {
+            MultisigTrust::VerifyOnly => "verify",
+            MultisigTrust::OfferImport => "offer",
+            MultisigTrust::TrustPsbt => "trust",
+        }
+    }
+
+    /// The name shown on the chooser, as stock spells them.
+    /// Source: hw-reference/firmware-features.md §4 [C]
+    pub const fn label(self) -> &'static str {
+        match self {
+            MultisigTrust::VerifyOnly => "Verify Only",
+            MultisigTrust::OfferImport => "Offer Import",
+            MultisigTrust::TrustPsbt => "Trust PSBT",
+        }
+    }
+
+    /// Every policy this firmware offers, in the order the chooser lists them -- the safest
+    /// first, matching the default.
+    pub const ALL: [MultisigTrust; 3] = [
+        MultisigTrust::VerifyOnly,
+        MultisigTrust::OfferImport,
+        MultisigTrust::TrustPsbt,
+    ];
+}
+
+/// The multisig PSBT trust policy this wallet is set to.
+///
+/// **Doubt reads as [`MultisigTrust::VerifyOnly`]**, never as a form that would sign for a
+/// wallet the owner never registered: only the exact words `offer` and `trust` relax the
+/// policy. An unreadable slot leaves the device refusing an unregistered multisig, which
+/// is the direction that cannot sign a stranger's script on the host's say-so -- the same
+/// safety argument the fee cap follows.
+pub fn multisig_trust(doc: &Doc<'_>) -> MultisigTrust {
+    match text(doc, MULTISIG_TRUST) {
+        Some("offer") => MultisigTrust::OfferImport,
+        Some("trust") => MultisigTrust::TrustPsbt,
+        _ => MultisigTrust::VerifyOnly,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +528,50 @@ mod tests {
             assert_eq!(battery_idle_minutes(&doc(json)), None, "{json}");
         }
         assert_eq!(idle_minutes(&doc(r#"{"cat_idle":"1440"}"#)), Some(1440));
+    }
+
+    /// The trust policy reads back what was written.
+    #[test]
+    fn multisig_trust_reads_back() {
+        assert_eq!(
+            multisig_trust(&doc(r#"{"cat_mstrust":"verify"}"#)),
+            MultisigTrust::VerifyOnly
+        );
+        assert_eq!(
+            multisig_trust(&doc(r#"{"cat_mstrust":"offer"}"#)),
+            MultisigTrust::OfferImport
+        );
+        assert_eq!(
+            multisig_trust(&doc(r#"{"cat_mstrust":"trust"}"#)),
+            MultisigTrust::TrustPsbt
+        );
+    }
+
+    /// **The one that matters here.** Nothing unreadable may relax the policy: absent,
+    /// garbage, the wrong case, a bare value, or stock's own key all read as
+    /// "verify only", which refuses an unregistered multisig rather than signing it on the
+    /// host's word about who the cosigners are.
+    #[test]
+    fn a_doubtful_trust_policy_is_verify_only() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_mstrust":""}"#,
+            r#"{"cat_mstrust":"Trust"}"#,
+            r#"{"cat_mstrust":"TRUST"}"#,
+            r#"{"cat_mstrust":"offer "}"#,
+            r#"{"cat_mstrust":"2"}"#,
+            r#"{"cat_mstrust":2}"#,
+            r#"{"cat_mstrust":"yes"}"#,
+            // Stock's own key, whatever it holds, is not one we read.
+            r#"{"multisig_policy":"2"}"#,
+        ] {
+            assert_eq!(
+                multisig_trust(&doc(json)),
+                MultisigTrust::VerifyOnly,
+                "{json}"
+            );
+        }
+        assert_eq!(MultisigTrust::default(), MultisigTrust::VerifyOnly);
     }
 
     /// **The one that matters.** Nothing unreadable may ever become "no cap": a slot that

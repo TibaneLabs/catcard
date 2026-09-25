@@ -166,6 +166,39 @@ pub enum Error {
 }
 
 impl Multisig {
+    /// Build a wallet from its parts, validating the threshold and cosigners the way
+    /// [`parse`] does.
+    ///
+    /// For reconstructing a wallet whose definition arrived somewhere other than a
+    /// descriptor -- from the keys inside a PSBT ([`crate::psbtview::reconstruct_for_input`]).
+    /// The same rules apply: at least one cosigner and no more than [`MAX_COSIGNERS`], a
+    /// threshold in `1..=n`, and no two cosigners sharing an extended key.
+    pub fn new(m: u8, cosigners: &[Cosigner], kind: Kind, sorted: bool) -> Result<Multisig, Error> {
+        let n = cosigners.len();
+        if n == 0 || n > MAX_COSIGNERS {
+            return Err(Error::CosignerCount { n });
+        }
+        if m == 0 || m as usize > n {
+            return Err(Error::BadThreshold);
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if cosigners[i].xpub == cosigners[j].xpub {
+                    return Err(Error::DuplicateKey);
+                }
+            }
+        }
+        let mut slots = [cosigners[0]; MAX_COSIGNERS];
+        slots[..n].copy_from_slice(cosigners);
+        Ok(Multisig {
+            m,
+            cosigners: slots,
+            n,
+            kind,
+            sorted,
+        })
+    }
+
     /// The cosigners, in descriptor order.
     pub fn cosigners(&self) -> &[Cosigner] {
         &self.cosigners[..self.n]
@@ -232,6 +265,76 @@ impl Multisig {
                 write_p2sh(&hash, out)
             }
         }
+    }
+
+    /// Write this wallet as an output descriptor, checksum included, into `out`.
+    ///
+    /// The inverse of [`parse`]: `sh(...)`, `wsh(...)` or `sh(wsh(...))` around
+    /// `multi(m,...)` or `sortedmulti(m,...)`, each key written with its origin and the
+    /// `/0/*` receive suffix -- `[fingerprint/path]xpub/0/*`. Round-trips through [`parse`],
+    /// which is what lets a wallet reconstructed from a PSBT be stored and read back as the
+    /// same agreement. Hardened origin steps are written `h`.
+    ///
+    /// A fifteen-cosigner descriptor is close to two kilobytes; `out` has to hold it, and
+    /// [`Error::Overflow`] says when it does not.
+    pub fn write_descriptor(&self, out: &mut [u8]) -> Result<usize, Error> {
+        use crate::bip32::serialize::MAX_BASE58_LEN;
+        use core::fmt::Write as _;
+
+        let (open, close) = match self.kind {
+            Kind::P2sh => ("sh(", ")"),
+            Kind::P2wsh => ("wsh(", ")"),
+            Kind::P2shP2wsh => ("sh(wsh(", "))"),
+        };
+        let func = if self.sorted { "sortedmulti" } else { "multi" };
+
+        let mut buf = Buf { out, len: 0 };
+        buf.write_str(open).map_err(|_| Error::Overflow)?;
+        write!(buf, "{}({}", func, self.m).map_err(|_| Error::Overflow)?;
+        for c in self.cosigners() {
+            let [a, b, cc, d] = c.fingerprint;
+            write!(buf, ",[{a:02x}{b:02x}{cc:02x}{d:02x}").map_err(|_| Error::Overflow)?;
+            for &step in c.origin() {
+                if step & HARDENED_OFFSET != 0 {
+                    write!(buf, "/{}h", step & !HARDENED_OFFSET).map_err(|_| Error::Overflow)?;
+                } else {
+                    write!(buf, "/{step}").map_err(|_| Error::Overflow)?;
+                }
+            }
+            let mut key = [0u8; MAX_BASE58_LEN];
+            let n = c.xpub.write_base58(&mut key).map_err(|_| Error::Overflow)?;
+            let key = core::str::from_utf8(&key[..n]).map_err(|_| Error::Overflow)?;
+            write!(buf, "]{key}/0/*").map_err(|_| Error::Overflow)?;
+        }
+        // Close the `multi(...)`/`sortedmulti(...)` itself, then the script wrapper(s).
+        buf.write_str(")").map_err(|_| Error::Overflow)?;
+        buf.write_str(close).map_err(|_| Error::Overflow)?;
+
+        let len = buf.len;
+        let body = core::str::from_utf8(&buf.out[..len]).map_err(|_| Error::Overflow)?;
+        let sum = crate::descriptor::checksum(body).ok_or(Error::Overflow)?;
+        buf.write_char('#').map_err(|_| Error::Overflow)?;
+        let sum = core::str::from_utf8(&sum).map_err(|_| Error::Overflow)?;
+        buf.write_str(sum).map_err(|_| Error::Overflow)?;
+        Ok(buf.len)
+    }
+}
+
+/// A `core::fmt::Write` over a fixed byte buffer, for [`Multisig::write_descriptor`].
+struct Buf<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl core::fmt::Write for Buf<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len + s.len();
+        self.out
+            .get_mut(self.len..end)
+            .ok_or(core::fmt::Error)?
+            .copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 

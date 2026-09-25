@@ -30,7 +30,7 @@
 //! or write. [`current`] still exists there and still answers -- with the defaults -- so
 //! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
 
-use catcard_settings::prefs::{Chain, FeeCap, Units};
+use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, Units};
 use catcard_wallet::bip32::Network;
 
 /// Everything the preference screens set, as the firmware reads it.
@@ -57,6 +57,9 @@ pub(crate) struct Prefs {
     /// [`crate::display::set_backlight`] on the Q1; the mono boards keep the default and
     /// have no backlight to drive.
     pub backlight_percent: u8,
+    /// What to do with a multisig wallet a PSBT describes but this device has not registered.
+    /// Honoured by [`crate::signtx`], through [`crate::msimport::trust_from_psbt`].
+    pub multisig_trust: MultisigTrust,
 }
 
 impl Prefs {
@@ -74,7 +77,7 @@ impl Prefs {
 
 impl Default for Prefs {
     /// What a device with no settings file behaves like: no timeout, BTC, the ten-percent
-    /// fee cap, both hardware switches on, no wrapping.
+    /// fee cap, both hardware switches on, no wrapping, and unregistered multisig refused.
     fn default() -> Self {
         Self {
             idle_minutes: None,
@@ -86,6 +89,7 @@ impl Default for Prefs {
             menu_wrap: false,
             net: Chain::Mainnet,
             backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
+            multisig_trust: MultisigTrust::VerifyOnly,
         }
     }
 }
@@ -101,6 +105,7 @@ static mut CURRENT: Prefs = Prefs {
     menu_wrap: false,
     net: Chain::Mainnet,
     backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
+    multisig_trust: MultisigTrust::VerifyOnly,
 };
 
 /// What the wallet in force is set to.
@@ -206,9 +211,10 @@ pub(crate) fn load(
         menu_wrap: prefs::menu_wrap(&doc),
         net: prefs::network(&doc),
         backlight_percent: prefs::backlight_percent(&doc),
+        multisig_trust: prefs::multisig_trust(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}, net {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}, net {}, mstrust {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -216,7 +222,8 @@ pub(crate) fn load(
         next.usb_port,
         next.virtual_disk,
         next.menu_wrap,
-        next.net.ticker()
+        next.net.ticker(),
+        next.multisig_trust.code()
     );
     apply(next);
 }

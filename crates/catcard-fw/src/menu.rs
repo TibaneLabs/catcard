@@ -174,6 +174,8 @@ enum Screen {
     SignMenu,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
     SignPsbt,
+    /// Sign every PSBT on the card in one pass, writing a signed file per source.
+    BatchSign,
     /// Take a transaction in through the NFC tag: mark it, wait for a phone to write, and
     /// offer whatever arrived.
     #[cfg(not(feature = "board-mk3"))]
@@ -686,6 +688,8 @@ const SIGN_ITEMS: &[&str] = &[
     #[cfg(feature = "board-q1")]
     "Scan",
     "From SD",
+    // Signing every transaction on the card in one pass, each still reviewed on its own.
+    "Batch sign",
     #[cfg(not(feature = "board-mk3"))]
     "By NFC",
     "Message",
@@ -1328,6 +1332,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::SignMenu,
         ),
+        Screen::BatchSign => to(
+            |a| crate::signtx::batch_sign(a.gate, a.login, a.ui),
+            Screen::SignMenu,
+        ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SignNfc => to(
             |a| crate::nfc::receive_screen(a.gate, a.login, a.ui),
@@ -1724,6 +1732,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Scan")) => Screen::ScanQr,
             (Key::Confirm, Some("From SD")) => Screen::SignPsbt,
+            (Key::Confirm, Some("Batch sign")) => Screen::BatchSign,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("By NFC")) => Screen::SignNfc,
             (Key::Confirm, Some("Message")) => Screen::SignMessage,
@@ -2132,6 +2141,8 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         // The Sign grid.
         "Scan" => &art::SIGN_QR,
         "From SD" => &art::SIGN_SD,
+        // Batch reuses the SD icon: it is the same source, done for every file at once.
+        "Batch sign" => &art::SIGN_SD,
         "By NFC" => &art::SIGN_NFC,
         "Message" => &art::SIGN_TEXT,
         "Text file" => &art::SIGN_TEXT_FILE,
@@ -2312,7 +2323,11 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
-        Screen::SignPsbt | Screen::SignMessage | Screen::SignTextFile | Screen::VerifySig => {}
+        Screen::SignPsbt
+        | Screen::BatchSign
+        | Screen::SignMessage
+        | Screen::SignTextFile
+        | Screen::VerifySig => {}
         // Handled in `run`: it drives the tag and the panel itself.
         #[cfg(not(feature = "board-mk3"))]
         Screen::SignNfc => {}

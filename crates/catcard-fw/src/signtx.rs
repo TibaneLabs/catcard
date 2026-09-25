@@ -35,6 +35,33 @@ const SIGNED_NAME: &str = "/SIGNED.PSB";
 /// broadcast: `bitcoin-cli sendrawtransaction <the file's contents>`.
 const FINAL_NAME: &str = "/FINAL.TXN";
 
+/// Where a signed transaction and its finalised form are written, and whether to offer the
+/// on-device transports afterwards.
+///
+/// A single PSBT off the card writes the two fixed names ([`SIGNED_NAME`], [`FINAL_NAME`])
+/// and, on a Q1, offers the signed bytes back as a QR -- the whole point being to hand one
+/// transaction back through whatever the owner has. A batch writes one signed file *per
+/// source* so the results do not overwrite each other, and skips the per-file QR and NFC
+/// offers: a queue of them, one interrupting the next, is not what "sign all of these"
+/// asks for.
+pub(crate) struct SignDest<'a> {
+    /// Where the signed PSBT is written, and what the screen calls it.
+    pub signed_name: &'a str,
+    /// Where a fully-signed transaction is written, as broadcast-ready hex.
+    pub final_name: &'a str,
+    /// Whether to offer the signed transaction back over QR (Q1) and NFC.
+    pub offer_transports: bool,
+}
+
+impl SignDest<'static> {
+    /// The single-PSBT destination: the two fixed names, transports offered.
+    pub(crate) const SINGLE: SignDest<'static> = SignDest {
+        signed_name: SIGNED_NAME,
+        final_name: FINAL_NAME,
+        offer_transports: true,
+    };
+}
+
 /// Most outputs the review can hold, change included. A transaction with more is refused
 /// rather than shown in part: an output the owner cannot see is one they cannot refuse,
 /// so every output is on the screen or the screen has no Sign key.
@@ -333,7 +360,145 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     crate::catlog!("sign: {} bytes from {}", len, path.as_str());
 
-    review_and_sign(gate, login, ui, buf, spare, len);
+    review_and_sign(gate, login, ui, buf, spare, len, &SignDest::SINGLE);
+}
+
+/// A path without its leading `/`, for a screen that names a file the card writes.
+fn strip_slash(name: &str) -> &str {
+    name.strip_prefix('/').unwrap_or(name)
+}
+
+/// Transactions a batch may hold in one pass. A card with more than this is signed up to
+/// the cap and the summary says there are more, rather than a longer list going on the
+/// stack: this whole screen is foreground, and the list sits beside the two PSBT buffers.
+const MAX_BATCH: usize = 8;
+
+/// The `.psbt` files on the card a batch should sign, as full `/name` paths.
+///
+/// Result files a previous signing wrote (`*-signed.psbt`, `SIGNED.PSB`) are skipped by
+/// [`catcard_wallet::psbtfile::is_batch_source`], so running a batch twice does not sign its
+/// own output. `Ok(true)` when every source fit `out`; `Ok(false)` when there were more than
+/// [`MAX_BATCH`] and the list was capped.
+fn enumerate_psbts(
+    out: &mut heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH>,
+) -> Result<bool, &'static str> {
+    let mut capped = false;
+    with_card(|vol| {
+        let _ = vol.enumerate("", |name, is_dir, _| {
+            if is_dir || !catcard_wallet::psbtfile::is_batch_source(name) {
+                return;
+            }
+            if out.is_full() {
+                capped = true;
+                return;
+            }
+            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+            if path.push('/').is_ok() && path.push_str(name).is_ok() {
+                let _ = out.push(path);
+            }
+        });
+        Ok(())
+    })?;
+    Ok(!capped)
+}
+
+/// Sign every transaction on the card, one signed file per source.
+///
+/// The convenience over signing each from the picker is only that: the file is not chosen
+/// one at a time. **Every transaction still gets the whole review** -- its amounts, its
+/// destinations, its fee, and the Sign key gated on all of it -- because a batch that signed
+/// without showing what it signed would be exactly the screen this device exists to avoid.
+/// The owner can refuse any one of them and the batch moves on to the next.
+///
+/// Each result is written next to its source as `NAME-signed.psbt` (and `NAME-final.txn` if
+/// it finalises), so the files do not overwrite one another. The per-file QR and NFC offers
+/// are skipped: a queue of them is not what "sign all of these" asks for.
+pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use core::fmt::Write as _;
+    const HEAD: &str = "Batch sign";
+
+    // Gathered before the workspace is taken, so browsing the card does not hold the staging
+    // area against a USB upload.
+    let mut list: heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH> = heapless::Vec::new();
+    let all = match enumerate_psbts(&mut list) {
+        Ok(all) => all,
+        Err(why) => {
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    if list.is_empty() {
+        menu::message(ui.panel, HEAD, "no PSBT on the card", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    crate::catlog!("batch: {} transaction(s) to sign", list.len());
+
+    let mut work = match Workspace::take() {
+        Ok(w) => w,
+        Err(why) => {
+            menu::message(ui.panel, HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    let (buf, spare) = work.split();
+
+    let total = list.len();
+    let mut reviewed = 0usize;
+    for (i, path) in list.iter().enumerate() {
+        let mut note: heapless::String<24> = heapless::String::new();
+        let _ = write!(note, "file {} of {}", i + 1, total);
+        menu::card_wait(ui.panel, HEAD, &note);
+
+        let len = match read_card_file(path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+            Ok(len) => len,
+            Err(why) => {
+                crate::catlog!("batch: {}: {}", path.as_str(), why);
+                menu::message(ui.panel, strip_slash(path), why, "any key to skip it");
+                menu::wait_for_any_key(ui);
+                continue;
+            }
+        };
+
+        // Per-source result names, so one signed file does not overwrite the next. A name
+        // too long for the buffer is skipped rather than written somewhere it would collide.
+        let src = strip_slash(path);
+        let mut sbuf = [0u8; PATH_MAX];
+        let mut fbuf = [0u8; PATH_MAX];
+        let (Some(sn), Some(fnl)) = (
+            catcard_wallet::psbtfile::signed_name(src, &mut sbuf),
+            catcard_wallet::psbtfile::final_name(src, &mut fbuf),
+        ) else {
+            menu::message(ui.panel, strip_slash(path), "name too long", "any key to skip it");
+            menu::wait_for_any_key(ui);
+            continue;
+        };
+        let (Ok(signed), Ok(final_name)) = (
+            core::str::from_utf8(&sbuf[..sn]),
+            core::str::from_utf8(&fbuf[..fnl]),
+        ) else {
+            continue;
+        };
+        let dest = SignDest {
+            signed_name: signed,
+            final_name,
+            offer_transports: false,
+        };
+        review_and_sign(gate, login, ui, buf, spare, len, &dest);
+        reviewed += 1;
+    }
+
+    let mut note: heapless::String<40> = heapless::String::new();
+    let _ = write!(
+        note,
+        "reviewed {reviewed} of {total}{}",
+        if all { "" } else { ", more on card" }
+    );
+    crate::catlog!("batch: {}", note.as_str());
+    menu::message(ui.panel, HEAD, "batch complete", &note);
+    menu::wait_for_any_key(ui);
 }
 
 /// Review a PSBT already sitting in `buf`, and sign it if the owner approves.
@@ -349,6 +514,7 @@ pub(crate) fn review_and_sign(
     buf: &mut [u8],
     spare: &mut [u8],
     len: usize,
+    dest: &SignDest<'_>,
 ) {
     const HEAD: &str = "Sign";
 
@@ -357,11 +523,35 @@ pub(crate) fn review_and_sign(
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
 
-    // The registered multisig wallets, read once. Without them a script-hash input is
-    // refused: the chain says which script the coin is locked to, but only a registration
-    // says whose wallet that script belongs to.
+    // Parsed before the multisig wallets are worked out: the trust policy below may
+    // reconstruct a wallet the PSBT itself carries, which needs the parsed container.
+    let psbt = match Psbt::parse(&buf[..len]) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::catlog!("sign: psbt refused: {:?}", e);
+            menu::message(ui.panel, HEAD, "not a valid PSBT", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+
+    // The multisig wallets a script-hash input may be checked against. The registered ones
+    // come first: the chain says which script the coin is locked to, but only a
+    // registration says whose wallet that script belongs to. On top of those, the trust
+    // policy may add wallets the PSBT itself proves -- [`MultisigTrust::VerifyOnly`], the
+    // default, adds nothing, so an unregistered multisig stays refused; the other two add a
+    // wallet whose keys rebuild this coin's script and that this device provably co-signs.
     #[cfg(not(feature = "board-mk3"))]
-    let wallets = crate::msimport::registered(gate, login, ui.panel);
+    let wallets: &[catcard_wallet::multisig::Multisig] = {
+        let registered = crate::msimport::registered(gate, login, ui.panel);
+        let trust = crate::prefs::current().multisig_trust;
+        if trust == catcard_settings::prefs::MultisigTrust::VerifyOnly {
+            registered
+        } else {
+            // `registered` has just filled the store the trust step appends to.
+            crate::msimport::trust_from_psbt(gate, login, ui, &psbt, &master, fingerprint, trust)
+        }
+    };
     // The mk3 has no settings store yet, so nothing can be registered on it and every
     // multisig input is refused. That is the safe direction, and the honest one: the
     // alternative is signing for a wallet this device was never shown.
@@ -405,15 +595,6 @@ pub(crate) fn review_and_sign(
     // The review. Every judgement here derives a key per input and per claimed change
     // output, so it runs masked, with the screen saying what it is doing.
     let mut busy = menu::Working::new(ui.panel, HEAD, "checking the transaction");
-    let psbt = match Psbt::parse(&buf[..len]) {
-        Ok(p) => p,
-        Err(e) => {
-            crate::catlog!("sign: psbt refused: {:?}", e);
-            menu::message(ui.panel, HEAD, "not a valid PSBT", "any key to go back");
-            menu::wait_for_any_key(ui);
-            return;
-        }
-    };
     // The fee cap the owner set, or the ten-percent default. `Policy` still does the
     // comparing: "no cap" is a limit no percentage can exceed rather than a check that
     // gets skipped, so there is no path through this that forgets to look at the fee.
@@ -571,7 +752,7 @@ pub(crate) fn review_and_sign(
     }
 
     menu::card_wait(ui.panel, HEAD, "writing to the card");
-    let written = menu::write_card_file(SIGNED_NAME, &from[..at]);
+    let written = menu::write_card_file(dest.signed_name, &from[..at]);
     match &written {
         Ok(()) => crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at),
         Err(why) => {
@@ -583,11 +764,19 @@ pub(crate) fn review_and_sign(
     // The signature exists whether or not the card took it, and a Q1 has a camera's
     // worth of screen to hand it back through. Offered on both paths on purpose: no
     // card is exactly the case where a QR is the only way out, and a signed
-    // transaction that cannot leave the device is a signature nobody can use.
+    // transaction that cannot leave the device is a signature nobody can use. A batch
+    // skips this -- a queue of QR prompts, one per file, is not what it asks for.
     //
     // `into` is the second buffer, free until `finalise` below wants it.
+    //
+    // The mk3 has neither a camera nor an NFC tag, so there is no transport to offer and the
+    // flag is unused there; naming it keeps the field honest rather than dead.
+    #[cfg(feature = "board-mk3")]
+    let _ = dest.offer_transports;
     #[cfg(feature = "board-q1")]
-    offer_signed_qr(ui, &from[..at], &mut into[..]);
+    if dest.offer_transports {
+        offer_signed_qr(ui, &from[..at], &mut into[..]);
+    }
     if written.is_err() {
         return;
     }
@@ -600,26 +789,28 @@ pub(crate) fn review_and_sign(
     let _ = write!(note, "{signed} of {signable} inputs");
     match finalise(&from[..at], into) {
         Some(len) => {
-            let hex_len = match write_hex_file(FINAL_NAME, &into[..len], from) {
+            let hex_len = match write_hex_file(dest.final_name, &into[..len], from) {
                 Ok(n) => n,
                 Err(why) => {
                     crate::catlog!("sign: final tx not written: {}", why);
-                    menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
+                    menu::message(ui.panel, "Signed", strip_slash(dest.signed_name), note.as_str());
                     menu::wait_for_any_key(ui);
                     return;
                 }
             };
             crate::catlog!("sign: finalised, {} bytes of hex", hex_len);
-            menu::message(ui.panel, "Signed", &FINAL_NAME[1..], "ready to broadcast");
+            menu::message(ui.panel, "Signed", strip_slash(dest.final_name), "ready to broadcast");
             menu::wait_for_any_key(ui);
             // Nothing here has a network. What this offers is to put the transaction on
             // the NFC tag as a link, so a phone that taps the device can send it.
             #[cfg(not(feature = "board-mk3"))]
-            crate::nfc::offer_broadcast(ui, crate::nfc::CHAIN, &into[..len]);
+            if dest.offer_transports {
+                crate::nfc::offer_broadcast(ui, crate::nfc::CHAIN, &into[..len]);
+            }
             return;
         }
         None => {
-            menu::message(ui.panel, "Signed", &SIGNED_NAME[1..], note.as_str());
+            menu::message(ui.panel, "Signed", strip_slash(dest.signed_name), note.as_str());
         }
     }
     menu::wait_for_any_key(ui);

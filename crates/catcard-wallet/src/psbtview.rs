@@ -21,12 +21,12 @@
 //! this will not produce, stops the signing rather than being shown as a warning nobody
 //! reads.
 
-use outscript::psbt::{Psbt, input as in_key, output as out_key};
+use outscript::psbt::{Psbt, global, input as in_key, output as out_key};
 
 use crate::KeyWork;
 use crate::address::{self, AddressKind};
-use crate::bip32::{ExtendedPrivKey, FINGERPRINT_LEN, Network};
-use crate::multisig::{self, Multisig};
+use crate::bip32::{ExtendedPrivKey, ExtendedPubKey, FINGERPRINT_LEN, Network};
+use crate::multisig::{self, Cosigner, Kind, MAX_COSIGNERS, MAX_ORIGIN, Multisig};
 use crate::signer::{self, KeyRequest, MAX_KEYS_PER_INPUT};
 
 /// Sighash types this will sign.
@@ -687,6 +687,151 @@ pub fn already_signed(
     }
     let _ = in_key::PARTIAL_SIG;
     false
+}
+
+/// Reconstruct the multisig wallet an input spends from, out of the definition the PSBT
+/// carries, or `None` when it cannot be trusted to.
+///
+/// This is the machinery behind the multisig PSBT trust policy
+/// ([`catcard_settings::prefs::MultisigTrust`]): a wallet the owner never registered may
+/// still be signed for if -- and only if -- the PSBT itself proves what it is. `None` is
+/// returned, and the input left to the ordinary "unregistered multisig" refusal, whenever
+/// any of that proof is missing:
+///
+/// - the input is not a script-hash (multisig) output, or is one a `wallets` entry already
+///   accounts for, so there is nothing to reconstruct;
+/// - the PSBT does not name this device's own key on the input, so we cannot even place the
+///   address, let alone tell whether the wallet is ours;
+/// - the global xpubs, the redeem/witness script or the script form are missing or
+///   malformed;
+/// - **the rebuilt address does not equal the coin's scriptPubKey** -- the one check that
+///   matters, since the global xpubs are the host's word until the script they produce is
+///   the script the chain locked the coin to;
+/// - the reconstructed wallet does not involve this device.
+///
+/// Public-key work only: the cosigners' account keys come straight from the PSBT and the
+/// address is rebuilt by public derivation, so this needs no [`KeyWork`]. Proving that our
+/// key is genuinely a cosigner (not merely a claimed fingerprint) is the caller's job,
+/// through [`multisig::our_cosigner`], which does touch the seed.
+pub fn reconstruct_for_input(
+    psbt: &Psbt<'_>,
+    index: usize,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    wallets: &[Multisig],
+) -> Option<Multisig> {
+    let utxo = psbt.utxo(index).ok()?;
+    if !multisig::is_script_hash(utxo.script) {
+        return None;
+    }
+    // Our own record says which address this is. Without it the wallet cannot be placed,
+    // and the rebuilt script cannot be checked against this coin's.
+    let (branch, at) = ours_address(psbt, index, fingerprint)?;
+    // Already one of the wallets in hand: nothing to reconstruct, and the normal path signs
+    // it.
+    if multisig::match_script(wallets, utxo.script, branch, at).is_some() {
+        return None;
+    }
+
+    let inp = psbt.input(index)?;
+    let (kind, ms_script) = script_form(utxo.script, inp.redeem_script(), inp.witness_script())?;
+    // `OP_M` is `0x50 + M`; anything below `OP_1` is not a multisig script.
+    let m = ms_script.first()?.checked_sub(0x50)?;
+
+    // The cosigners are the PSBT's global xpubs -- account-level keys, each with the origin
+    // that names its master. Collected as parsed; the count is what `N` must be, and the
+    // rebuilt address is what proves it.
+    let mut parsed: [Option<Cosigner>; MAX_COSIGNERS] = [None; MAX_COSIGNERS];
+    let mut n = 0usize;
+    for rec in psbt.global().records_of(global::XPUB) {
+        if n == MAX_COSIGNERS {
+            return None;
+        }
+        let Some(c) = cosigner_from_global(rec.key_data(), rec.value) else {
+            continue;
+        };
+        parsed[n] = Some(c);
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let mut cosigners = [parsed[0]?; MAX_COSIGNERS];
+    for (slot, got) in cosigners.iter_mut().zip(parsed.iter()).take(n) {
+        *slot = (*got)?;
+    }
+    let cosigners = &cosigners[..n];
+
+    // Sorted first, because it is the default and by far the common case; then unsorted,
+    // since `multi` and `sortedmulti` over the same keys are different wallets with
+    // different addresses. Whichever rebuilds this exact scriptPubKey at this address is the
+    // wallet; if neither does, the PSBT's keys do not describe this coin and it is refused.
+    for sorted in [true, false] {
+        let Ok(candidate) = Multisig::new(m, cosigners, kind, sorted) else {
+            continue;
+        };
+        let mut built = [0u8; 34];
+        let matches = matches!(
+            candidate.script_pubkey(branch, at, &mut built),
+            Ok(len) if built[..len] == *utxo.script
+        );
+        if matches && candidate.involves(fingerprint) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The script form of a script-hash output, and the multisig script to read `M` and `N`
+/// from, settled by the scriptPubKey's shape and -- for P2SH -- its redeem script.
+fn script_form<'a>(
+    spk: &[u8],
+    redeem: Option<&'a [u8]>,
+    witness: Option<&'a [u8]>,
+) -> Option<(Kind, &'a [u8])> {
+    // Native P2WSH: `OP_0 <32-byte sha256(witnessScript)>`.
+    if spk.len() == 34 && spk[0] == 0x00 && spk[1] == 32 {
+        return Some((Kind::P2wsh, witness?));
+    }
+    // P2SH: `OP_HASH160 <20> OP_EQUAL`. The redeem script tells P2SH-wrapped segwit
+    // (`sh(wsh(...))`, whose redeem script is a P2WSH program) from legacy `sh(...)`.
+    if spk.len() == 23 && spk[0] == 0xA9 && spk[1] == 0x14 && spk[22] == 0x87 {
+        let rs = redeem?;
+        if rs.len() == 34 && rs[0] == 0x00 && rs[1] == 32 {
+            return Some((Kind::P2shP2wsh, witness?));
+        }
+        return Some((Kind::P2sh, rs));
+    }
+    None
+}
+
+/// One cosigner from a global-xpub record: its 78-byte key data and its derivation-path
+/// value (a master fingerprint followed by little-endian steps).
+fn cosigner_from_global(key_data: &[u8], value: &[u8]) -> Option<Cosigner> {
+    let xpub = ExtendedPubKey::from_raw(key_data).ok()?;
+    // A derivation path is the fingerprint and whole 4-byte steps; BIP-174 already frames
+    // it so, but this reads defensively.
+    if value.len() < 4 || !value.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut fingerprint = [0u8; FINGERPRINT_LEN];
+    fingerprint.copy_from_slice(&value[..4]);
+    let steps = &value[4..];
+    let count = steps.len() / 4;
+    if count > MAX_ORIGIN {
+        return None;
+    }
+    let mut origin = [0u32; MAX_ORIGIN];
+    // `value.len()` was checked to be a multiple of four above, so there is no remainder.
+    let (steps, _) = steps.as_chunks::<4>();
+    for (slot, chunk) in origin.iter_mut().zip(steps) {
+        *slot = u32::from_le_bytes(*chunk);
+    }
+    Some(Cosigner {
+        fingerprint,
+        origin,
+        origin_len: count,
+        xpub,
+    })
 }
 
 #[cfg(test)]

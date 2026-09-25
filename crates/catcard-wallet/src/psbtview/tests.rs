@@ -1003,6 +1003,40 @@ fn two_of_two(sorted: bool) -> crate::multisig::Multisig {
     crate::multisig::parse(&text).unwrap()
 }
 
+/// A third seed, for a wallet that is ours but is not the coin's wallet.
+const THIRD: &str =
+    "letter advice cage absurd amount doctor acoustic avoid letter advice cage above";
+
+/// A sorted 2-of-2 P2WSH wallet of `OURS` and `partner`, at `m/48h/0h/0h/2h`.
+///
+/// The same shape as [`two_of_two`] but with a chosen second cosigner, so a test can build
+/// a wallet this device co-signs whose addresses are nonetheless not a given coin's.
+fn two_of_two_with(partner: &str) -> crate::multisig::Multisig {
+    let mut keys: Vec<String> = Vec::new();
+    for phrase in [OURS, partner] {
+        let master = master_of(phrase);
+        let fp = master.fingerprint(&kw());
+        let mut key = master;
+        for step in [48u32, 0, 0, 2] {
+            key = key
+                .derive_child(ChildNumber::hardened(step).unwrap(), &kw())
+                .unwrap();
+        }
+        keys.push(format!(
+            "[{:02x}{:02x}{:02x}{:02x}/48h/0h/0h/2h]{}/0/*",
+            fp[0],
+            fp[1],
+            fp[2],
+            fp[3],
+            key.to_extended_pub(&kw()).to_base58()
+        ));
+    }
+    let body = format!("wsh(sortedmulti(2,{},{}))", keys[0], keys[1]);
+    let sum = crate::descriptor::checksum(&body).unwrap();
+    let text = format!("{body}#{}", core::str::from_utf8(&sum).unwrap());
+    crate::multisig::parse(&text).unwrap()
+}
+
 /// Our key inside that wallet, at `branch`/`index`.
 fn ms_key(branch: u32, index: u32) -> ([u8; 33], [u32; 6]) {
     use crate::bip32::ChildNumber;
@@ -1155,6 +1189,109 @@ fn a_multisig_input_from_a_registered_wallet_is_read() {
     assert_eq!(summary.total_in, 100_000);
     assert_eq!(summary.sending, 99_000);
     assert_eq!(summary.fee, 1_000);
+}
+
+/// Add a global-xpub record for every cosigner of `wallet` to the PSBT in `buf` (length
+/// `n`), the way a real multisig PSBT carries its wallet definition. Returns the new length.
+///
+/// The key is `0x01` followed by the 78-byte account xpub; the value is the cosigner's
+/// master fingerprint and its origin path as little-endian steps -- exactly what
+/// [`reconstruct_for_input`] reads back.
+fn add_globals(wallet: &crate::multisig::Multisig, buf: &mut [u8], n: usize) -> usize {
+    let mut len = n;
+    let mut scratch = vec![0u8; buf.len()];
+    for c in wallet.cosigners() {
+        let mut key = vec![0x01u8];
+        key.extend_from_slice(&c.xpub.to_raw());
+        let mut value = c.fingerprint.to_vec();
+        for &step in c.origin() {
+            value.extend_from_slice(&step.to_le_bytes());
+        }
+        let psbt = Psbt::parse(&buf[..len]).unwrap();
+        let m = psbt.set_global_record(&key, &value, &mut scratch).unwrap();
+        buf[..m].copy_from_slice(&scratch[..m]);
+        len = m;
+    }
+    len
+}
+
+/// With the wallet definition inside the PSBT, an unregistered input can be reconstructed
+/// -- and the reconstruction is the wallet it spends from.
+#[test]
+fn an_unregistered_multisig_is_reconstructed_from_the_psbt() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let n = add_globals(&wallet, &mut buf, n);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let got = reconstruct_for_input(&psbt, 0, OUR_FP, &[])
+        .expect("the PSBT carries the wallet definition");
+    assert_eq!(got.m, wallet.m);
+    assert_eq!(got.n(), wallet.n());
+    assert_eq!(got.kind, wallet.kind);
+    assert_eq!(got.sorted, wallet.sorted);
+    assert!(got.involves(OUR_FP));
+
+    // And it produces the very script the input is locked to.
+    let mut a = [0u8; 34];
+    let mut b = [0u8; 34];
+    let la = got.script_pubkey(0, 0, &mut a).unwrap();
+    let lb = wallet.script_pubkey(0, 0, &mut b).unwrap();
+    assert_eq!(a[..la], b[..lb]);
+}
+
+/// Reconstruction refuses without the global xpubs: the definition simply is not there.
+#[test]
+fn reconstruction_needs_the_psbt_to_carry_the_definition() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    assert_eq!(
+        reconstruct_for_input(&psbt, 0, OUR_FP, &[]),
+        None,
+        "reconstructed a wallet the PSBT never described"
+    );
+}
+
+/// A registered input is not reconstructed: there is nothing to trust when the wallet is
+/// already held, so the ordinary signing path handles it.
+#[test]
+fn a_registered_input_is_not_reconstructed() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let n = add_globals(&wallet, &mut buf, n);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    assert_eq!(
+        reconstruct_for_input(&psbt, 0, OUR_FP, core::slice::from_ref(&wallet)),
+        None
+    );
+}
+
+/// The rebuilt address is the proof. A PSBT that describes a wallet whose keys do not lock
+/// this coin -- even one this device is a cosigner of -- is refused, because the script
+/// those keys build is not the script the chain locked the coin to.
+#[test]
+fn reconstruction_refuses_when_the_rebuilt_address_does_not_match() {
+    // The coin is locked to [OURS, STRANGER].
+    let coin = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&coin, false, &mut buf);
+
+    // Attach globals for a *different* wallet: [OURS, a third party]. Our key is in it, so
+    // the `involves` gate passes, but its address at 0/0 is not this coin's.
+    let other = two_of_two_with(THIRD);
+    assert!(other.involves(OUR_FP));
+    let n = add_globals(&other, &mut buf, n);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    assert_eq!(
+        reconstruct_for_input(&psbt, 0, OUR_FP, &[]),
+        None,
+        "keys that do not rebuild this coin's script were trusted"
+    );
 }
 
 /// A *different* registered wallet does not vouch for this input.

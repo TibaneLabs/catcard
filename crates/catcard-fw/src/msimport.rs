@@ -15,9 +15,13 @@
 //!   device is not part of can still be registered -- watching one is legitimate -- but a
 //!   person who thought they were registering *their* wallet should see that it is not.
 
+use catcard_settings::prefs::MultisigTrust;
 use catcard_settings::store::SCRATCH;
 use catcard_settings::wallets::{self, Wallet};
+use catcard_wallet::bip32::ExtendedPrivKey;
 use catcard_wallet::multisig::{self, Kind, Multisig};
+use catcard_wallet::psbtview;
+use outscript::psbt::Psbt;
 
 use crate::menu;
 use crate::ui::Ui;
@@ -116,6 +120,145 @@ pub(crate) fn registered(
     parsed
 }
 
+/// Augment the registered wallets with any this PSBT itself describes, as far as the trust
+/// `policy` allows, and return the combined set.
+///
+/// Called straight after [`registered`], which has just filled [`PARSED`]; this appends to
+/// the same store, so the slice it returns is the registered wallets plus whichever ones the
+/// PSBT vouched for. The multisig PSBT trust policy in one place:
+///
+/// - [`MultisigTrust::VerifyOnly`]: nothing is added -- an unregistered multisig stays
+///   refused. (The caller does not call here in that case, but it is honoured anyway.)
+/// - [`MultisigTrust::TrustPsbt`]: a wallet the PSBT proves (its keys rebuild the input's
+///   script) and that this device provably co-signs is added for this signing, silently and
+///   without storing it.
+/// - [`MultisigTrust::OfferImport`]: the same, but the wallet is shown and the owner asked
+///   first; on yes it is also stored permanently, on no it is left unregistered and its
+///   input refused.
+///
+/// The proof is [`psbtview::reconstruct_for_input`] -- the rebuilt address has to equal the
+/// coin's -- and [`multisig::our_cosigner`], which derives our key down the claimed origin
+/// so a mere fingerprint claim does not qualify. Nothing here is signed on the host's word
+/// alone.
+///
+/// # The slice is borrowed from [`PARSED`], which the next call rewrites
+///
+/// Exactly as [`registered`]: foreground only, and the caller must not hold the returned
+/// slice across another call into this module.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn trust_from_psbt(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    psbt: &Psbt<'_>,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; 4],
+    policy: MultisigTrust,
+) -> &'static [Multisig] {
+    // SAFETY: foreground only; one signing screen at a time. `registered` filled this on
+    // the call just before ours.
+    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
+        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
+    if policy == MultisigTrust::VerifyOnly {
+        return parsed;
+    }
+
+    let inputs = psbt.unsigned_tx().input_count();
+    for index in 0..inputs {
+        if parsed.is_full() {
+            break;
+        }
+        // Reconstruct against everything held so far -- registered wallets and ones already
+        // trusted from this PSBT -- so an input matched by those is left alone.
+        let Some(candidate) = psbtview::reconstruct_for_input(psbt, index, fingerprint, parsed)
+        else {
+            continue;
+        };
+        if parsed.contains(&candidate) {
+            continue;
+        }
+        // The address proof says the keys build this coin; this says one of those keys is
+        // genuinely ours, derived down the claimed origin. Only then is the wallet worth
+        // trusting or storing.
+        let ours = crate::keywork::run(|kw| multisig::our_cosigner(&candidate, master, kw));
+        let Ok(Some(mine)) = ours else {
+            crate::catlog!("multisig: PSBT wallet at input {} is not ours; not trusting", index);
+            continue;
+        };
+
+        let take = match policy {
+            MultisigTrust::TrustPsbt => {
+                crate::catlog!(
+                    "multisig: trusting a {}-of-{} wallet from the PSBT",
+                    candidate.m,
+                    candidate.n()
+                );
+                true
+            }
+            // Show it and ask; on yes, also store it permanently.
+            MultisigTrust::OfferImport => offer_from_psbt(gate, login, ui, &candidate, mine),
+            MultisigTrust::VerifyOnly => false,
+        };
+        if take {
+            let _ = parsed.push(candidate);
+        }
+    }
+    parsed
+}
+
+/// Show a wallet reconstructed from the PSBT and ask whether to import it. On yes it is
+/// stored (so it needs no re-approval next time) and this returns `true` to trust it for the
+/// signing in hand; on no, `false`, and the input it came from stays refused.
+///
+/// Storing needs the wallet as descriptor text, which [`Multisig::write_descriptor`]
+/// produces. A store that cannot find memory still trusts the wallet for this one signing --
+/// the owner has just approved it on screen -- and says so in the log, rather than throwing
+/// away an approval over a transient shortage.
+#[cfg(not(feature = "board-mk3"))]
+fn offer_from_psbt(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    wallet: &Multisig,
+    ours: usize,
+) -> bool {
+    let Some(mut held) = crate::heap::take(SCRATCH) else {
+        crate::catlog!("multisig: no memory to render the PSBT wallet; not offering");
+        return false;
+    };
+    let buf = held.bytes();
+    let len = match wallet.write_descriptor(buf) {
+        Ok(n) => n,
+        Err(why) => {
+            crate::catlog!("multisig: cannot render PSBT wallet: {:?}", why);
+            return false;
+        }
+    };
+    let Ok(descriptor) = core::str::from_utf8(&buf[..len]) else {
+        return false;
+    };
+
+    menu::ask(
+        ui.panel,
+        "Multisig in PSBT",
+        "an unregistered wallet",
+        "review and import it?",
+    );
+    if !menu::confirmed(ui) {
+        return false;
+    }
+    // The full review, with our own cosigner marked -- the index proven by the caller.
+    if !confirm(ui, wallet, descriptor, Some(ours)) {
+        return false;
+    }
+    match save(gate, login, ui, "", descriptor) {
+        Ok(()) => crate::catlog!("multisig: PSBT wallet imported and trusted"),
+        // Approved, but could not be stored: honour the approval for this signing anyway.
+        Err(why) => crate::catlog!("multisig: PSBT wallet trusted but not stored: {}", why),
+    }
+    true
+}
+
 /// The stored wallet records, read into `doc_buf`. Returns how many `out` received.
 ///
 /// The records borrow `doc_buf`, which is also the scratch a later write needs, so a
@@ -159,12 +302,17 @@ pub(crate) fn manage(
 
     /// The "Import from SD" row, numbered past any wallet.
     const IMPORT: u32 = 1000;
+    /// The "Trust policy" row, numbered past the import row.
+    #[cfg(not(feature = "board-mk3"))]
+    const TRUST: u32 = 1001;
 
     /// What the list screen came back with. Nothing here borrows the settings buffer, so
     /// acting on it can read and write the settings again.
     enum Then {
         Leave,
         Import,
+        #[cfg(not(feature = "board-mk3"))]
+        Trust,
         Delete(heapless::String<8>),
     }
 
@@ -196,8 +344,23 @@ pub(crate) fn manage(
                 let _ = labels.push(label(w));
             }
 
+            // The policy line, so a person can see at a glance whether this device will
+            // sign a multisig it was never shown. Only where there is a settings store to
+            // keep the answer in.
+            #[cfg(not(feature = "board-mk3"))]
+            let mut trust_row: heapless::String<40> = heapless::String::new();
+            #[cfg(not(feature = "board-mk3"))]
+            {
+                use core::fmt::Write as _;
+                let _ = write!(
+                    trust_row,
+                    "Trust policy: {}",
+                    crate::prefs::current().multisig_trust.label()
+                );
+            }
+
             let exit = {
-                let mut rows: heapless::Vec<Row, { wallets::MAX_WALLETS + 3 }> =
+                let mut rows: heapless::Vec<Row, { wallets::MAX_WALLETS + 4 }> =
                     heapless::Vec::new();
                 let _ = rows.push(Row::title("Multisig"));
                 if have == 0 {
@@ -207,11 +370,15 @@ pub(crate) fn manage(
                     let _ = rows.push(Row::item(l.as_str(), i as u32));
                 }
                 let _ = rows.push(Row::item("Import from SD", IMPORT));
+                #[cfg(not(feature = "board-mk3"))]
+                let _ = rows.push(Row::item(trust_row.as_str(), TRUST));
                 menu::show_doc(ui, &rows, false, false)
             };
 
             match exit {
                 menu::DocExit::Selected(IMPORT) => Then::Import,
+                #[cfg(not(feature = "board-mk3"))]
+                menu::DocExit::Selected(TRUST) => Then::Trust,
                 menu::DocExit::Selected(i) if (i as usize) < have => {
                     let w = &list[i as usize];
                     let mut sum: heapless::String<8> = heapless::String::new();
@@ -229,12 +396,80 @@ pub(crate) fn manage(
         match next {
             Then::Leave => return,
             Then::Import => import(gate, login, ui),
+            #[cfg(not(feature = "board-mk3"))]
+            Then::Trust => trust_policy_screen(gate, login, ui),
             Then::Delete(sum) => match remove(gate, login, ui, &sum) {
                 Ok(()) => say(ui, "Multisig", "the wallet is gone"),
                 Err(why) => say(ui, "Multisig", why),
             },
         }
     }
+}
+
+/// Settings → Multisig → Trust policy: how far to trust a multisig wallet a PSBT describes
+/// but this device has not registered.
+///
+/// The safe policy is the default and the first choice; the other two relax it, and
+/// "Trust PSBT" -- which signs against keys the PSBT alone vouches for -- is asked twice,
+/// because it is the one that will sign for a wallet nobody imported.
+#[cfg(not(feature = "board-mk3"))]
+fn trust_policy_screen(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    use catcard_settings::prefs::{MULTISIG_TRUST, MultisigTrust};
+    use core::fmt::Write as _;
+    const HEAD: &str = "Trust policy";
+
+    let now = crate::prefs::current();
+    let labels = MultisigTrust::ALL.map(|p| p.label());
+    let mut note: heapless::String<48> = heapless::String::new();
+    let _ = write!(note, "now {}", now.multisig_trust.label());
+
+    let Some(row) = menu::choose(ui, HEAD, &note, &labels) else {
+        return;
+    };
+    let chosen = MultisigTrust::ALL[row];
+    if chosen == now.multisig_trust {
+        menu::message(ui.panel, HEAD, "unchanged", labels[row]);
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    // Trusting the PSBT means signing against a wallet definition the host supplied and the
+    // owner never registered. Real, and useful for airgapped setups, but never a default and
+    // never one press away.
+    if chosen == MultisigTrust::TrustPsbt {
+        menu::ask(
+            ui.panel,
+            HEAD,
+            "trust wallet keys",
+            "found inside a PSBT?",
+        );
+        if !menu::confirmed(ui) {
+            return;
+        }
+        menu::ask(
+            ui.panel,
+            "Trust PSBT",
+            "this device will sign a",
+            "multisig it never imported",
+        );
+        if !menu::confirmed(ui) {
+            return;
+        }
+    }
+    let value = crate::prefs::quoted(chosen.code());
+    let next = crate::prefs::Prefs {
+        multisig_trust: chosen,
+        ..now
+    };
+    if crate::prefs::save(gate, login, ui, HEAD, (MULTISIG_TRUST, &value), next) {
+        menu::message(ui.panel, HEAD, "saved", chosen.label());
+    } else {
+        menu::message(ui.panel, HEAD, "could not save", "nothing changed");
+    }
+    menu::wait_for_any_key(ui);
 }
 
 /// One line for the list: the owner's name for the wallet, or its shape, plus the checksum.

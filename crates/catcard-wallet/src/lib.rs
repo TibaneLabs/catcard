@@ -69,6 +69,7 @@ pub mod descriptor;
 pub mod encoding;
 pub mod message;
 pub mod multisig;
+pub mod psbtfile;
 pub mod psbtview;
 pub mod seedqr;
 pub mod seedxor;

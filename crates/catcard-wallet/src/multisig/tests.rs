@@ -85,6 +85,59 @@ fn a_descriptor_round_trips_into_the_wallet_it_describes() {
     assert!(!wallet.involves([0, 0, 0, 0]));
 }
 
+/// A wallet writes back out to a descriptor that parses to the same agreement, for every
+/// script form and both orderings. This is what lets a wallet reconstructed from a PSBT be
+/// stored as text and read back unchanged.
+#[test]
+fn a_wallet_writes_a_descriptor_that_round_trips() {
+    for kind in ["sh", "wsh", "sh-wsh"] {
+        for sorted in [true, false] {
+            let text = descriptor_for(2, &SEEDS, kind, sorted);
+            let wallet = parse(&text).expect(kind);
+
+            let mut out = [0u8; 4096];
+            let n = wallet.write_descriptor(&mut out).expect("room for it");
+            let written = core::str::from_utf8(&out[..n]).unwrap();
+            assert!(descriptor::verify(written), "{written}");
+
+            let again = parse(written).expect("our own output");
+            assert_eq!(again.m, wallet.m);
+            assert_eq!(again.n(), wallet.n());
+            assert_eq!(again.kind, wallet.kind);
+            assert_eq!(again.sorted, wallet.sorted);
+            assert_eq!(again.cosigners(), wallet.cosigners());
+        }
+    }
+}
+
+/// [`Multisig::new`] holds the same threshold and duplicate rules [`parse`] does.
+#[test]
+fn new_validates_the_threshold_and_cosigners() {
+    let wallet = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    let cosigners: Vec<_> = wallet.cosigners().to_vec();
+
+    let rebuilt = Multisig::new(2, &cosigners, Kind::P2wsh, true).expect("valid");
+    assert_eq!(rebuilt.cosigners(), wallet.cosigners());
+
+    assert_eq!(
+        Multisig::new(0, &cosigners, Kind::P2wsh, true),
+        Err(Error::BadThreshold)
+    );
+    assert_eq!(
+        Multisig::new(4, &cosigners, Kind::P2wsh, true),
+        Err(Error::BadThreshold)
+    );
+    assert_eq!(
+        Multisig::new(1, &[], Kind::P2wsh, true),
+        Err(Error::CosignerCount { n: 0 })
+    );
+    let dup = [cosigners[0], cosigners[0]];
+    assert_eq!(
+        Multisig::new(2, &dup, Kind::P2wsh, true),
+        Err(Error::DuplicateKey)
+    );
+}
+
 #[test]
 fn every_script_form_is_recognised() {
     for (text, want) in [
