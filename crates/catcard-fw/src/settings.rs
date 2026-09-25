@@ -42,6 +42,28 @@ pub(crate) fn forget_key() {
     crate::prefs::forget();
 }
 
+/// Seed the session's settings-key cache with a key derived elsewhere -- the login-time
+/// prime, which fetches the secure-element stash once and computes the root wallet's key
+/// from it, so the first [`wallet_key`] call hits the cache instead of fetching again.
+///
+/// Best-effort and self-guarding: it installs `key` **only** if the cache is still empty
+/// and the plain root wallet is in force -- the one case in which the key must be
+/// `hash_key` of the raw stash, which is exactly what [`root_key`] computes and what the
+/// caller passed. [`crate::key::is_root`] is "root source, no passphrase", and a loaded
+/// key is never the root source, so this one check refuses to poison the cache for a
+/// passphrase wallet, a loaded XPRV/WIF, or a BIP-85 child; those fall back to deriving
+/// their own key lazily. A no-op on mk3, which has no settings store.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn install_wallet_key(key: catcard_settings::nvstore::Key) {
+    // SAFETY: foreground only, single core; the read finishes within this statement.
+    let empty = unsafe { (*core::ptr::addr_of!(WALLET_KEY)).is_none() };
+    if empty && crate::key::is_root() {
+        // SAFETY: as above.
+        unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key) };
+        crate::catlog!("settings: root wallet key primed at login");
+    }
+}
+
 /// The settings key of the wallet in force -- **its own file, not the master's**.
 ///
 /// # Every key has its own settings

@@ -6446,9 +6446,6 @@ fn root_stored(
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<Stored, &'static str> {
-    use catcard_callgate::pin::{
-        SecretKind, bip39_entropy, classify_secret, raw_master, xprv_parts,
-    };
     use zeroize::Zeroize;
 
     reading_seed(panel, head);
@@ -6456,22 +6453,41 @@ fn root_stored(
     let mut secret = login
         .fetch_secret(&pin_gate)
         .map_err(|_| "could not read seed")?;
+    let stored = stored_from_secret(&secret);
+    secret.zeroize();
+    stored
+}
+
+/// Classify an already-fetched secret into what it holds, **without fetching**.
+///
+/// The marker-byte classification and the `note_stored_seed` bookkeeping that
+/// [`root_stored`] does once it has the bytes -- pulled out so a caller that has fetched
+/// the stash for another reason (the login-time prime, which fetches once and derives both
+/// the settings key and the fingerprint from it) reaches the identical `Stored` without a
+/// second `fetch_secret`. The bytes are copied into the `Stored`, which owns and wipes
+/// them; the caller still owns and must wipe the `secret` it passed in.
+pub(crate) fn stored_from_secret(
+    secret: &[u8; catcard_callgate::pin::SECRET_LEN],
+) -> Result<Stored, &'static str> {
+    use catcard_callgate::pin::{
+        SecretKind, bip39_entropy, classify_secret, raw_master, xprv_parts,
+    };
 
     // Copied out so the secret can be wiped at once, and classified by its marker byte:
     // what the slot holds decides what every screen above can offer.
-    let stored = if let Some(e) = bip39_entropy(&secret).filter(|e| e.len() <= 32) {
+    let stored = if let Some(e) = bip39_entropy(secret).filter(|e| e.len() <= 32) {
         let mut entropy = [0u8; 32];
         entropy[..e.len()].copy_from_slice(e);
         Some(Stored::Words {
             entropy,
             len: e.len(),
         })
-    } else if let Some((chain_code, key)) = xprv_parts(&secret) {
+    } else if let Some((chain_code, key)) = xprv_parts(secret) {
         Some(Stored::Xprv {
             chain_code: *chain_code,
             key: *key,
         })
-    } else if let Some(raw) = raw_master(&secret).filter(|r| r.len() <= 64) {
+    } else if let Some(raw) = raw_master(secret).filter(|r| r.len() <= 64) {
         let mut bytes = [0u8; 64];
         bytes[..raw.len()].copy_from_slice(raw);
         Some(Stored::Raw {
@@ -6481,8 +6497,7 @@ fn root_stored(
     } else {
         None
     };
-    let kind = classify_secret(&secret);
-    secret.zeroize();
+    let kind = classify_secret(secret);
 
     // Empty means the slot holds nothing, whatever the login's flag said: a destroyed
     // seed leaves zeros behind with the flag still set.
@@ -6588,7 +6603,6 @@ pub(crate) fn master_quietly(
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
     use crate::key::{Loaded, Source};
     use catcard_wallet::bip32::{ExtendedPrivKey, Network};
-    use zeroize::Zeroize as _;
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
             let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
@@ -6604,46 +6618,66 @@ pub(crate) fn master_quietly(
     // loaded seed always has them, and goes the long way round.
     if crate::key::in_force() == Source::Root {
         let stored = root_stored(gate, login, panel, head)?;
-        if !matches!(stored, Stored::Words { .. }) && crate::passphrase::is_set() {
-            // A BIP-39 passphrase changes the seed words stretch to. There are no words
-            // here, so a passphrase would change nothing -- and a wallet that ignored one
-            // silently is a wallet the owner did not choose.
-            return Err(match stored.what() {
-                "an XPRV" => "no passphrase on an XPRV",
-                _ => "no passphrase on a raw master",
-            });
-        }
-        return match stored {
-            Stored::Words { mut entropy, len } => {
-                stretch_words(panel, head, &mut entropy, len, |seed, kw| {
-                    ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
-                })
-            }
-            // The arrays are `Copy`, so these bindings are copies of the secret that
-            // `Stored`'s Drop never sees; each is wiped once the node has been made.
-            Stored::Xprv {
-                mut chain_code,
-                mut key,
-            } => {
-                let node = crate::keywork::run(|kw| {
-                    ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key, kw)
-                });
-                chain_code.zeroize();
-                key.zeroize();
-                node.map_err(|_| "the stored key is not usable")
-            }
-            Stored::Raw { mut bytes, len } => {
-                let node = crate::keywork::run(|kw| {
-                    ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
-                });
-                bytes.zeroize();
-                node.map_err(|_| "key derivation failed")
-            }
-        };
+        return master_from_stored(stored, panel, head);
     }
     with_seed(gate, login, panel, head, |seed, kw| {
         ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
     })
+}
+
+/// Derive the root wallet's master key from an already-classified [`Stored`], with a
+/// progress screen and no dialogs -- the passphrase guard and the three derivations that
+/// [`master_quietly`] runs once the fetch has been classified.
+///
+/// Pulled out of [`master_quietly`] so a caller that already holds a `Stored` from one
+/// fetch (the login-time prime) reaches the identical master without a second
+/// `fetch_secret`. The Words arm stretches through the passphrase in force via
+/// [`stretch_words`], exactly as before; each secret-bearing arm wipes its bytes once the
+/// node is made.
+pub(crate) fn master_from_stored(
+    stored: Stored,
+    panel: &mut display::Panel,
+    head: &str,
+) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
+    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use zeroize::Zeroize as _;
+
+    if !matches!(stored, Stored::Words { .. }) && crate::passphrase::is_set() {
+        // A BIP-39 passphrase changes the seed words stretch to. There are no words
+        // here, so a passphrase would change nothing -- and a wallet that ignored one
+        // silently is a wallet the owner did not choose.
+        return Err(match stored.what() {
+            "an XPRV" => "no passphrase on an XPRV",
+            _ => "no passphrase on a raw master",
+        });
+    }
+    match stored {
+        Stored::Words { mut entropy, len } => {
+            stretch_words(panel, head, &mut entropy, len, |seed, kw| {
+                ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
+            })
+        }
+        // The arrays are `Copy`, so these bindings are copies of the secret that
+        // `Stored`'s Drop never sees; each is wiped once the node has been made.
+        Stored::Xprv {
+            mut chain_code,
+            mut key,
+        } => {
+            let node = crate::keywork::run(|kw| {
+                ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key, kw)
+            });
+            chain_code.zeroize();
+            key.zeroize();
+            node.map_err(|_| "the stored key is not usable")
+        }
+        Stored::Raw { mut bytes, len } => {
+            let node = crate::keywork::run(|kw| {
+                ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
+            });
+            bytes.zeroize();
+            node.map_err(|_| "key derivation failed")
+        }
+    }
 }
 
 /// Run `then` on the wallet in force's BIP-39 seed -- the 64 bytes the words and the

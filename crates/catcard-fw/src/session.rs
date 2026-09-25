@@ -169,13 +169,15 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         "pin: secret slot {}",
         if no_seed { "EMPTY" } else { "IN USE" }
     );
-    // Name the wallet on the status bar from the first frame. One seed stretch, here,
-    // where the owner has just entered a PIN and is waiting for the menu -- rather than
-    // on the bar's own account, which is painted every frame and must never be the
-    // reason a seed is read. Skipped on a device with no wallet to name.
-    #[cfg(feature = "board-q1")]
+    // Fetch the secure-element stash once, here, where the owner has just entered a PIN
+    // and is waiting for the menu, and prime both session caches from it: the settings
+    // key (every board with a store) and, on the Q1, the status-bar fingerprint. Before
+    // this, the fingerprint warm-up and the first settings read each fetched the stash
+    // independently -- two runs of the ~1.6 s in-element PIN stretch for one login.
+    // Skipped on a device with no wallet to read.
+    #[cfg(not(feature = "board-mk3"))]
     if !no_seed {
-        crate::pubkeys::warm_fingerprint(&gate, &mut login, &mut panel);
+        prime_session(&gate, &mut login, &mut panel);
     }
 
     // Move the pool out of the report rather than borrowing it from inside: the menu
@@ -218,6 +220,87 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
         &report,
         pool.as_mut(),
     )
+}
+
+/// Fetch the secure-element stash once, right after login, and prime the session caches
+/// that would otherwise each fetch it themselves: the settings key on every board with a
+/// store, and the status-bar master fingerprint on the Q1.
+///
+/// # Best-effort, with a fallback to today's lazy paths
+///
+/// Every step can fail and every failure is silent: the caches are left exactly as they
+/// were, and the existing lazy derivations -- [`crate::settings::wallet_key`] on the first
+/// settings access, [`crate::pubkeys::warm_fingerprint`] for the bar -- do the work later,
+/// each fetching the stash itself as before. The worst outcome of a failure here is that
+/// one redundant fetch is not saved; never a device that will not open its settings, names
+/// the wrong wallet, or will not boot. Nothing this does is on the boot-critical path.
+///
+/// # Why only the plain root wallet
+///
+/// This is called immediately after a fresh login, before any passphrase is set or any
+/// key is loaded, so the plain root wallet is always in force. The settings key primed
+/// here must be byte-identical to what [`crate::settings::root_key`] computes --
+/// `hash_key` of the raw 72-byte stash -- and it is, because it is computed from the same
+/// fetched bytes the same way. The guard in [`crate::settings::install_wallet_key`]
+/// refuses anything but the root wallet, so a stray call under a passphrase or a loaded
+/// key cannot install the wrong key; those wallets fall back to the lazy path.
+///
+/// # Residency
+///
+/// The raw stash is fetched once and wiped before the seed stretch runs, exactly as
+/// `warm_fingerprint` wiped it before stretching today: the settings key and the classified
+/// [`Stored`] are both taken from it first, then it is zeroized, and only then does the
+/// (sliced) master derivation proceed. The number of times the raw secret enters RAM goes
+/// from two per login to one; it does not stay resident any longer than before.
+#[cfg(not(feature = "board-mk3"))]
+fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut display::Panel) {
+    use zeroize::Zeroize as _;
+
+    // Only the plain root wallet -- see the note above. Not it? leave the caches alone and
+    // let the lazy paths derive the right key/fingerprint for whatever is in force.
+    if !crate::key::is_root() {
+        return;
+    }
+
+    menu::reading_seed(panel, "Wallet");
+    let pin_gate = pinentry::BootloaderGate::new(gate);
+    let mut secret = match login.fetch_secret(&pin_gate) {
+        Ok(s) => s,
+        // The lazy paths will fetch again later; nothing is lost but the saving.
+        Err(_) => return,
+    };
+
+    // The settings key, computed exactly as `root_key` does: `hash_key` of the raw stash,
+    // before it is decoded. `install_wallet_key` re-checks the guard, so this is safe even
+    // if the wallet in force changed under us.
+    let key = crate::keywork::run(|_| catcard_settings::nvstore::hash_key(&secret));
+    crate::settings::install_wallet_key(key);
+
+    // On the Q1, classify the same fetch and keep the (public) master fingerprint for the
+    // status bar. The classification copies the bytes it needs out of `secret`, so the raw
+    // stash can be -- and is -- wiped before the seed stretch, which is where the second
+    // and a half of PBKDF2 happens.
+    #[cfg(feature = "board-q1")]
+    let stored = if crate::pubkeys::known_fingerprint().is_none() {
+        menu::stored_from_secret(&secret).ok()
+    } else {
+        None
+    };
+
+    secret.zeroize();
+
+    #[cfg(feature = "board-q1")]
+    if let Some(stored) = stored {
+        match menu::master_from_stored(stored, panel, "Wallet") {
+            Ok(master) => {
+                let fp = crate::keywork::run(|kw| master.fingerprint(kw));
+                drop(master);
+                crate::pubkeys::note_fingerprint(Some(fp));
+                crate::catlog!("wallet: fingerprint primed from the login fetch");
+            }
+            Err(why) => crate::catlog!("wallet: no primed fingerprint: {}", why),
+        }
+    }
 }
 
 /// Whether cancel is down right now, sampled for long enough for the keypad's debounce to
