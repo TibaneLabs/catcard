@@ -200,7 +200,10 @@ mod tests {
     #[test]
     fn a_rendered_store_reads_back_to_the_same_entries() {
         let entries = [
-            WifEntry { label: "cold", wif: A },
+            WifEntry {
+                label: "cold",
+                wif: A,
+            },
             WifEntry { label: "", wif: B },
         ];
         let mut buf = [0u8; 512];
@@ -216,11 +219,28 @@ mod tests {
 
     #[test]
     fn re_adding_the_same_wif_replaces_rather_than_duplicates() {
-        let existing = [WifEntry { label: "old", wif: A }];
+        let existing = [WifEntry {
+            label: "old",
+            wif: A,
+        }];
         let mut out = empty();
-        let n = with_added(&existing, WifEntry { label: "new", wif: A }, &mut out).unwrap();
+        let n = with_added(
+            &existing,
+            WifEntry {
+                label: "new",
+                wif: A,
+            },
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(n, 1);
-        assert_eq!(out[0], WifEntry { label: "new", wif: A });
+        assert_eq!(
+            out[0],
+            WifEntry {
+                label: "new",
+                wif: A
+            }
+        );
     }
 
     #[test]
@@ -267,7 +287,14 @@ mod tests {
         let existing: [WifEntry; 0] = [];
         let mut out = empty();
         assert_eq!(
-            with_added(&existing, WifEntry { label: "", wif: "ab\"cd" }, &mut out),
+            with_added(
+                &existing,
+                WifEntry {
+                    label: "",
+                    wif: "ab\"cd"
+                },
+                &mut out
+            ),
             Err(Error::NotStorable)
         );
     }
@@ -278,7 +305,14 @@ mod tests {
         let existing: [WifEntry; 0] = [];
         let mut out = empty();
         assert_eq!(
-            with_added(&existing, WifEntry { label: &long, wif: A }, &mut out),
+            with_added(
+                &existing,
+                WifEntry {
+                    label: &long,
+                    wif: A
+                },
+                &mut out
+            ),
             Err(Error::LabelTooLong)
         );
     }

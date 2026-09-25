@@ -270,8 +270,8 @@ fn address_at(
     let here = derive(master, kw)?;
     let pubkey = here.public_key(kw);
     let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-    let n =
-        address::encode(KIND, crate::prefs::network(), &pubkey, &mut buf).map_err(|_| "address failed")?;
+    let n = address::encode(KIND, crate::prefs::network(), &pubkey, &mut buf)
+        .map_err(|_| "address failed")?;
     let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
     addr.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
         .map_err(|_| "address failed")?;

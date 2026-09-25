@@ -651,7 +651,8 @@ pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
     };
 
     // The target's public key, out of the start file it left on the card.
-    let Some(path) = menu::browse_sd(ui, "Pick clone start", Some("bin"), menu::Browse::File) else {
+    let Some(path) = menu::browse_sd(ui, "Pick clone start", Some("bin"), menu::Browse::File)
+    else {
         secret.zeroize();
         return;
     };
@@ -675,7 +676,12 @@ pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
     match outcome {
         Ok(name) => {
             crate::catlog!("clone: wrote {}", name.as_str());
-            menu::message(ui.panel, "Clone written", &name[1..], "put it in the new one");
+            menu::message(
+                ui.panel,
+                "Clone written",
+                &name[1..],
+                "put it in the new one",
+            );
         }
         Err(why) => {
             crate::catlog!("clone: export failed: {}", why);
@@ -789,12 +795,7 @@ pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
         "old Coldcard",
     );
     menu::wait_for_any_key(ui);
-    menu::message(
-        ui.panel,
-        "Then return here",
-        "and pick the",
-        "clone file",
-    );
+    menu::message(ui.panel, "Then return here", "and pick the", "clone file");
     menu::wait_for_any_key(ui);
 
     let Some(path) = menu::browse_sd(ui, "Pick clone file", Some("bin"), menu::Browse::File) else {

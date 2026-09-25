@@ -425,7 +425,10 @@ fn a_wif_store_key_makes_its_input_ours_in_the_review() {
     };
     let s = summarise(&psbt, &owner, &Policy::default(), &kw()).unwrap();
     assert_eq!((s.inputs, s.ours), (1, 1));
-    assert_eq!(s.change, 0, "a WIF key's receive is not change of this wallet");
+    assert_eq!(
+        s.change, 0,
+        "a WIF key's receive is not change of this wallet"
+    );
 
     // And the WIF-input finder agrees on which input it is.
     let mut hits = [0usize; 4];

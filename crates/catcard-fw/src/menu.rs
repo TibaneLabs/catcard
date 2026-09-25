@@ -5494,7 +5494,8 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             let Ok(purpose) = ChildNumber::hardened(44) else {
                 continue;
             };
-            let Ok(coin) = ChildNumber::hardened(chain.coin_type_on(crate::prefs::network())) else {
+            let Ok(coin) = ChildNumber::hardened(chain.coin_type_on(crate::prefs::network()))
+            else {
                 continue;
             };
             let Ok(account) = ChildNumber::hardened(0) else {
@@ -6783,8 +6784,7 @@ pub(crate) fn root_master(
                 .map_err(|_| "the stored key is not usable")
         }
         Stored::Raw { bytes, len } => {
-            ExtendedPrivKey::from_seed(&bytes[..*len], net, kw)
-                .map_err(|_| "key derivation failed")
+            ExtendedPrivKey::from_seed(&bytes[..*len], net, kw).map_err(|_| "key derivation failed")
         }
     });
     busy.tick(panel);
@@ -6894,9 +6894,7 @@ pub(crate) fn master_from_stored(
             node.map_err(|_| "the stored key is not usable")
         }
         Stored::Raw { mut bytes, len } => {
-            let node = crate::keywork::run(|kw| {
-                ExtendedPrivKey::from_seed(&bytes[..len], net, kw)
-            });
+            let node = crate::keywork::run(|kw| ExtendedPrivKey::from_seed(&bytes[..len], net, kw));
             bytes.zeroize();
             node.map_err(|_| "key derivation failed")
         }
@@ -7255,7 +7253,9 @@ fn single_key_addresses(
         .filter(|f| f.encoding != Encoding::Solana)
     {
         let mut buf = [0u8; address::MAX_LEN];
-        let Ok(n) = address::from_secp256k1(chain, f.encoding, crate::prefs::network(), pubkey, &mut buf) else {
+        let Ok(n) =
+            address::from_secp256k1(chain, f.encoding, crate::prefs::network(), pubkey, &mut buf)
+        else {
             continue;
         };
         let mut text = Addr::new();
@@ -7382,11 +7382,24 @@ fn export_other_chain_csv(
             .derive_child(ChildNumber::normal(index).ok()?)
             .ok()?;
         let mut out = [0u8; caddr::MAX_LEN];
-        let n = caddr::from_secp256k1(chain, format.encoding, crate::prefs::network(), &leaf.public_key, &mut out).ok()?;
+        let n = caddr::from_secp256k1(
+            chain,
+            format.encoding,
+            crate::prefs::network(),
+            &leaf.public_key,
+            &mut out,
+        )
+        .ok()?;
         let mut text = AddrText::new();
         text.push_str(core::str::from_utf8(&out[..n]).ok()?).ok()?;
         Some((
-            bip44_path(format.purpose, chain.coin_type_on(crate::prefs::network()), account, change, index)?,
+            bip44_path(
+                format.purpose,
+                chain.coin_type_on(crate::prefs::network()),
+                account,
+                change,
+                index,
+            )?,
             text,
         ))
     });
@@ -7421,10 +7434,21 @@ fn chain_explorer(
         let mut path = Line::new();
         let addr: Option<usize> = match f.encoding {
             Encoding::Solana => {
-                let _ = write!(path, "m/44h/{}h/{index}h/0h", chain.coin_type_on(crate::prefs::network()));
+                let _ = write!(
+                    path,
+                    "m/44h/{}h/{index}h/0h",
+                    chain.coin_type_on(crate::prefs::network())
+                );
                 let first = index - index % SOLANA_BATCH as u32;
                 if !matches!(sol, Some((at, _)) if at == first) {
-                    sol = solana_batch(gate, login, ui, chain.coin_type_on(crate::prefs::network()), first).map(|k| (first, k));
+                    sol = solana_batch(
+                        gate,
+                        login,
+                        ui,
+                        chain.coin_type_on(crate::prefs::network()),
+                        first,
+                    )
+                    .map(|k| (first, k));
                     if sol.is_none() {
                         return;
                     }
@@ -7462,14 +7486,22 @@ fn chain_explorer(
                 let _ = write!(
                     path,
                     "m/{}h/{}h/{account}h/{change}/{index}",
-                    f.purpose, chain.coin_type_on(crate::prefs::network())
+                    f.purpose,
+                    chain.coin_type_on(crate::prefs::network())
                 );
                 cached.as_ref().map(|(_, _, _, k)| *k).and_then(|k| {
                     ChildNumber::normal(index)
                         .ok()
                         .and_then(|c| k.derive_child(c).ok())
                         .and_then(|k| {
-                            caddr::from_secp256k1(chain, f.encoding, crate::prefs::network(), &k.public_key, &mut buf).ok()
+                            caddr::from_secp256k1(
+                                chain,
+                                f.encoding,
+                                crate::prefs::network(),
+                                &k.public_key,
+                                &mut buf,
+                            )
+                            .ok()
                         })
                 })
             }
@@ -7878,7 +7910,8 @@ fn custom_path(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
         heapless::Vec::new();
     for kind in PROTOCOLS {
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        let Ok(n) = address::encode(kind, crate::prefs::network(), &key.public_key, &mut buf) else {
+        let Ok(n) = address::encode(kind, crate::prefs::network(), &key.public_key, &mut buf)
+        else {
             continue;
         };
         let mut text = AddrText::new();
@@ -8055,7 +8088,13 @@ fn export_chain_csv(
             .derive_child(ChildNumber::normal(index).ok()?)
             .ok()?;
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        let n = address::encode(run.kind, crate::prefs::network(), &leaf.public_key, &mut buf).ok()?;
+        let n = address::encode(
+            run.kind,
+            crate::prefs::network(),
+            &leaf.public_key,
+            &mut buf,
+        )
+        .ok()?;
         let mut text = AddrText::new();
         text.push_str(core::str::from_utf8(&buf[..n]).ok()?).ok()?;
         Some((

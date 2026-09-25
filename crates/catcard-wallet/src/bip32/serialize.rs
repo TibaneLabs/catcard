@@ -414,9 +414,11 @@ mod tests {
         let r = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Regtest, &crate::KeyWork::host())
             .unwrap();
         assert!(r.to_base58(&crate::KeyWork::host()).starts_with("tprv"));
-        let parsed =
-            ExtendedPrivKey::from_base58(&r.to_base58(&crate::KeyWork::host()), &crate::KeyWork::host())
-                .unwrap();
+        let parsed = ExtendedPrivKey::from_base58(
+            &r.to_base58(&crate::KeyWork::host()),
+            &crate::KeyWork::host(),
+        )
+        .unwrap();
         assert_eq!(parsed.network, Network::Testnet);
     }
 

@@ -26,10 +26,10 @@
 use catcard_settings::json::Doc;
 use catcard_settings::store::{self, SCRATCH};
 use catcard_settings::wifs::{self, WifEntry};
+use catcard_ui::scroll::Line as Row;
 use catcard_wallet::address::{self, AddressKind};
 use catcard_wallet::bip32::Network;
 use catcard_wallet::wif::{MAX_WIF_LEN, WifKey};
-use catcard_ui::scroll::Line as Row;
 use zeroize::Zeroize as _;
 
 use crate::menu;
@@ -277,7 +277,12 @@ fn detail(ui: &mut Ui<'_>, entry: &WifEntry<'_>) -> bool {
 
 /// Show the WIF itself, behind the same warning the seed words get.
 fn reveal(ui: &mut Ui<'_>, entry: &WifEntry<'_>) {
-    menu::ask(ui.panel, HEAD, "shows a private key", "check nobody can see");
+    menu::ask(
+        ui.panel,
+        HEAD,
+        "shows a private key",
+        "check nobody can see",
+    );
     if !menu::confirmed(ui) {
         return;
     }
@@ -293,11 +298,7 @@ fn reveal(ui: &mut Ui<'_>, entry: &WifEntry<'_>) {
 }
 
 /// Generate a new key from the DRBG and store it.
-fn generate(
-    gate: &catcard_callgate::Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) {
+fn generate(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     menu::blocking_screen(ui.panel, HEAD, "generating");
 
     // Secret randomness comes from the UI DRBG (HMAC-DRBG), never a public source. A draw
@@ -342,11 +343,7 @@ fn generate(
 }
 
 /// Import a WIF from a file on the card.
-fn import(
-    gate: &catcard_callgate::Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-) {
+fn import(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(path) = menu::browse_sd(ui, "Pick a WIF file", None, menu::Browse::File) else {
         return;
     };
@@ -423,12 +420,13 @@ fn store_added(
         let mut existing = [WifEntry { label: "", wif: "" }; wifs::MAX_KEYS];
         let have = read_entries(gate, login, ui.panel, doc_buf, &mut existing)?;
         let mut merged = [WifEntry { label: "", wif: "" }; wifs::MAX_KEYS];
-        let n = wifs::with_added(&existing[..have], WifEntry { label, wif }, &mut merged)
-            .map_err(|e| match e {
+        let n = wifs::with_added(&existing[..have], WifEntry { label, wif }, &mut merged).map_err(
+            |e| match e {
                 wifs::Error::TooMany => "store full (30 keys)",
                 wifs::Error::LabelTooLong => "label too long",
                 wifs::Error::NotStorable | wifs::Error::Overflow => "could not store that",
-            })?;
+            },
+        )?;
         wifs::render(&merged[..n], list_buf).map_err(|_| "too long")?
     };
     // `list_buf` now owns the JSON text; the entry borrows on `doc_buf` have ended, so the

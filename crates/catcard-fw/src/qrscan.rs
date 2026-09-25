@@ -1037,7 +1037,15 @@ fn sign(
             return;
         }
     };
-    crate::signtx::review_and_sign(gate, login, ui, buf, spare, len, &crate::signtx::SignDest::SINGLE);
+    crate::signtx::review_and_sign(
+        gate,
+        login,
+        ui,
+        buf,
+        spare,
+        len,
+        &crate::signtx::SignDest::SINGLE,
+    );
 }
 
 /// Show what was read.

@@ -471,7 +471,12 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
             catcard_wallet::psbtfile::signed_name(src, &mut sbuf),
             catcard_wallet::psbtfile::final_name(src, &mut fbuf),
         ) else {
-            menu::message(ui.panel, strip_slash(path), "name too long", "any key to skip it");
+            menu::message(
+                ui.panel,
+                strip_slash(path),
+                "name too long",
+                "any key to skip it",
+            );
             menu::wait_for_any_key(ui);
             continue;
         };
@@ -793,13 +798,23 @@ pub(crate) fn review_and_sign(
                 Ok(n) => n,
                 Err(why) => {
                     crate::catlog!("sign: final tx not written: {}", why);
-                    menu::message(ui.panel, "Signed", strip_slash(dest.signed_name), note.as_str());
+                    menu::message(
+                        ui.panel,
+                        "Signed",
+                        strip_slash(dest.signed_name),
+                        note.as_str(),
+                    );
                     menu::wait_for_any_key(ui);
                     return;
                 }
             };
             crate::catlog!("sign: finalised, {} bytes of hex", hex_len);
-            menu::message(ui.panel, "Signed", strip_slash(dest.final_name), "ready to broadcast");
+            menu::message(
+                ui.panel,
+                "Signed",
+                strip_slash(dest.final_name),
+                "ready to broadcast",
+            );
             menu::wait_for_any_key(ui);
             // Nothing here has a network. What this offers is to put the transaction on
             // the NFC tag as a link, so a phone that taps the device can send it.
@@ -810,7 +825,12 @@ pub(crate) fn review_and_sign(
             return;
         }
         None => {
-            menu::message(ui.panel, "Signed", strip_slash(dest.signed_name), note.as_str());
+            menu::message(
+                ui.panel,
+                "Signed",
+                strip_slash(dest.signed_name),
+                note.as_str(),
+            );
         }
     }
     menu::wait_for_any_key(ui);

@@ -437,7 +437,11 @@ pub fn bitcoin_core(
     for index in 0..3u32 {
         busy.tick(panel);
         let addr = address_at(&key, kind, index)?;
-        let _ = writeln!(out, "m/{PURPOSE}h/{}h/{account}h/0/{index} => {addr}", coin());
+        let _ = writeln!(
+            out,
+            "m/{PURPOSE}h/{}h/{account}h/0/{index} => {addr}",
+            coin()
+        );
     }
     Some(())
 }

@@ -642,7 +642,11 @@ fn a_wif_key_signs_the_input_paying_its_own_address() {
     let mut out = [0u8; 4096];
     let len = sign_input_with_secret(&psbt, 0, wif.secret(), &mut out, &kw).unwrap();
     let signed = Psbt::parse(&out[..len]).unwrap();
-    let sig = signed.input(0).unwrap().partial_sig(&pk).expect("signature");
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&pk)
+        .expect("signature");
     assert_eq!(*sig.last().unwrap(), 0x01, "SIGHASH_ALL");
 
     // A key that does not pay the input is not involved, rather than signing a stranger's.

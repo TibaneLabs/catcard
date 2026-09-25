@@ -66,7 +66,11 @@ fn hex_nibble(c: u8) -> Result<u8, Error> {
 /// A ciphertext that is not a whole number of AES blocks is [`Error::BadCiphertext`], and
 /// a decrypt that produced no `xprv` is [`Error::NoXprv`] -- which is what a wrong backup
 /// key looks like, since the plaintext is then noise.
-pub fn decrypt<'o>(ciphertext: &[u8], key: &[u8; KEY_LEN], out: &'o mut [u8]) -> Result<&'o str, Error> {
+pub fn decrypt<'o>(
+    ciphertext: &[u8],
+    key: &[u8; KEY_LEN],
+    out: &'o mut [u8],
+) -> Result<&'o str, Error> {
     if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return Err(Error::BadCiphertext);
     }

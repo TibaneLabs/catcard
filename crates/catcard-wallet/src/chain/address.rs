@@ -152,7 +152,14 @@ mod tests {
 
     fn addr(chain: &Chain, encoding: Encoding, path: &str) -> String {
         let mut out = [0u8; MAX_LEN];
-        let n = from_secp256k1(chain, encoding, crate::bip32::Network::Mainnet, &secp_at(path), &mut out).unwrap();
+        let n = from_secp256k1(
+            chain,
+            encoding,
+            crate::bip32::Network::Mainnet,
+            &secp_at(path),
+            &mut out,
+        )
+        .unwrap();
         core::str::from_utf8(&out[..n]).unwrap().to_owned()
     }
 
@@ -196,7 +203,13 @@ mod tests {
         let key = secp_at("m/44'/0'/0'/0/0");
         let mut out = [0u8; MAX_LEN];
         assert_eq!(
-            from_secp256k1(&super::super::BITCOIN, Encoding::Evm, crate::bip32::Network::Mainnet, &key, &mut out),
+            from_secp256k1(
+                &super::super::BITCOIN,
+                Encoding::Evm,
+                crate::bip32::Network::Mainnet,
+                &key,
+                &mut out
+            ),
             Err(Error::NotThisChain)
         );
     }
@@ -321,8 +334,14 @@ mod tests {
                         continue;
                     }
                     let mut out = [0u8; MAX_LEN];
-                    let n = from_secp256k1(c, f.encoding, crate::bip32::Network::Mainnet, &key, &mut out)
-                        .unwrap_or_else(|e| panic!("{} {}: {e:?}", c.name, f.label));
+                    let n = from_secp256k1(
+                        c,
+                        f.encoding,
+                        crate::bip32::Network::Mainnet,
+                        &key,
+                        &mut out,
+                    )
+                    .unwrap_or_else(|e| panic!("{} {}: {e:?}", c.name, f.label));
                     assert!(n > 0 && n <= MAX_LEN, "{} {}", c.name, f.label);
                 }
             }

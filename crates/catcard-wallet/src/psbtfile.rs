@@ -41,7 +41,9 @@ pub fn is_batch_source(name: &str) -> bool {
     if stem
         .len()
         .checked_sub(SIGNED_SUFFIX.len())
-        .is_some_and(|at| stem.is_char_boundary(at) && stem[at..].eq_ignore_ascii_case(SIGNED_SUFFIX))
+        .is_some_and(|at| {
+            stem.is_char_boundary(at) && stem[at..].eq_ignore_ascii_case(SIGNED_SUFFIX)
+        })
     {
         return false;
     }
@@ -113,8 +115,14 @@ mod tests {
 
     #[test]
     fn result_names_follow_the_source() {
-        assert_eq!(name(signed_name, "tx.psbt").as_deref(), Some("/tx-signed.psbt"));
-        assert_eq!(name(final_name, "tx.psbt").as_deref(), Some("/tx-final.txn"));
+        assert_eq!(
+            name(signed_name, "tx.psbt").as_deref(),
+            Some("/tx-signed.psbt")
+        );
+        assert_eq!(
+            name(final_name, "tx.psbt").as_deref(),
+            Some("/tx-final.txn")
+        );
         // The stem is kept verbatim, extension case included in the stem's own bytes.
         assert_eq!(
             name(signed_name, "Spend-2024.PSBT").as_deref(),

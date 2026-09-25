@@ -67,7 +67,11 @@ impl WifKey {
     /// Used for a freshly generated key: the caller draws 32 bytes from the DRBG and this
     /// refuses the vanishingly rare out-of-range draw rather than reducing it into range,
     /// which would map two draws onto one key.
-    pub fn from_secret(secret: &[u8; 32], compressed: bool, network: Network) -> Result<Self, Error> {
+    pub fn from_secret(
+        secret: &[u8; 32],
+        compressed: bool,
+        network: Network,
+    ) -> Result<Self, Error> {
         if !bip32::is_valid_secret(secret) {
             return Err(Error::BadKey);
         }
@@ -118,7 +122,8 @@ impl WifKey {
         let mut payload = Zeroizing::new([0u8; 34]);
         payload[0] = match self.network {
             Network::Mainnet => VERSION_MAINNET,
-            Network::Testnet => VERSION_TESTNET,
+            // Regtest shares testnet's WIF/version bytes; only the bech32 HRP differs.
+            Network::Testnet | Network::Regtest => VERSION_TESTNET,
         };
         payload[1..33].copy_from_slice(&self.secret);
         let len = if self.compressed {
@@ -201,7 +206,10 @@ mod tests {
     #[test]
     fn a_corrupted_wif_is_refused() {
         const WIF: &str = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWm";
-        assert!(matches!(WifKey::decode(WIF, &kw()), Err(Error::BadEncoding)));
+        assert!(matches!(
+            WifKey::decode(WIF, &kw()),
+            Err(Error::BadEncoding)
+        ));
     }
 
     /// A testnet WIF names testnet.
@@ -243,9 +251,7 @@ mod tests {
         let key = WifKey::from_secret(&secret, true, Network::Mainnet).unwrap();
         let pk = key.public_key(&kw()).unwrap();
         // Compressed secp256k1 generator G.
-        let g = hex_lit(
-            "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-        );
+        let g = hex_lit("0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
         assert_eq!(pk, g);
     }
 
@@ -253,14 +259,14 @@ mod tests {
     /// public key, so an address derived from either matches.
     #[test]
     fn compressed_and_uncompressed_share_a_compressed_pubkey() {
-        let c = WifKey::decode("KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn", &kw())
-            .unwrap();
-        let u = WifKey::decode("5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf", &kw())
-            .unwrap();
-        assert_eq!(
-            c.public_key(&kw()).unwrap(),
-            u.public_key(&kw()).unwrap()
-        );
+        let c = WifKey::decode(
+            "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn",
+            &kw(),
+        )
+        .unwrap();
+        let u =
+            WifKey::decode("5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf", &kw()).unwrap();
+        assert_eq!(c.public_key(&kw()).unwrap(), u.public_key(&kw()).unwrap());
     }
 
     fn hex_lit(s: &str) -> [u8; 33] {

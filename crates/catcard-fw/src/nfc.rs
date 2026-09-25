@@ -789,7 +789,15 @@ fn sign(
             return;
         }
     };
-    crate::signtx::review_and_sign(gate, login, ui, buf, spare, len, &crate::signtx::SignDest::SINGLE);
+    crate::signtx::review_and_sign(
+        gate,
+        login,
+        ui,
+        buf,
+        spare,
+        len,
+        &crate::signtx::SignDest::SINGLE,
+    );
 }
 
 /// Debug: write a fixed URL to the tag, so the driver can be tried without a transaction.

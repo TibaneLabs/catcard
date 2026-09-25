@@ -182,7 +182,10 @@ pub(crate) fn trust_from_psbt(
         // trusting or storing.
         let ours = crate::keywork::run(|kw| multisig::our_cosigner(&candidate, master, kw));
         let Ok(Some(mine)) = ours else {
-            crate::catlog!("multisig: PSBT wallet at input {} is not ours; not trusting", index);
+            crate::catlog!(
+                "multisig: PSBT wallet at input {} is not ours; not trusting",
+                index
+            );
             continue;
         };
 
@@ -440,12 +443,7 @@ fn trust_policy_screen(
     // owner never registered. Real, and useful for airgapped setups, but never a default and
     // never one press away.
     if chosen == MultisigTrust::TrustPsbt {
-        menu::ask(
-            ui.panel,
-            HEAD,
-            "trust wallet keys",
-            "found inside a PSBT?",
-        );
+        menu::ask(ui.panel, HEAD, "trust wallet keys", "found inside a PSBT?");
         if !menu::confirmed(ui) {
             return;
         }

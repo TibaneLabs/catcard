@@ -74,6 +74,7 @@ impl Prefs {
             Chain::Regtest => Network::Regtest,
         }
     }
+}
 
 impl Default for Prefs {
     /// What a device with no settings file behaves like: no timeout, BTC, the ten-percent

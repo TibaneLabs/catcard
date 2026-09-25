@@ -130,7 +130,8 @@ fn walk(chain_key: &ExtendedPubKey, kind: AddressKind, lower: &str, exact: &str)
         let Ok(child) = ChildNumber::normal(index).and_then(|c| chain_key.derive_child(c)) else {
             continue;
         };
-        let Ok(n) = address::encode(kind, crate::prefs::network(), &child.public_key, &mut buf) else {
+        let Ok(n) = address::encode(kind, crate::prefs::network(), &child.public_key, &mut buf)
+        else {
             continue;
         };
         let made = core::str::from_utf8(&buf[..n]).unwrap_or("");

@@ -172,7 +172,12 @@ pub(crate) fn create(ui: &mut Ui<'_>, pool: Option<&mut EntropyPool>) {
     // Build the printable file. The block is wiped on drop -- it holds the WIF.
     let Some(mut block) = crate::heap::take(BODY_CAP) else {
         wif.zeroize();
-        menu::message(ui.panel, "No memory", "not enough room", "to build the file");
+        menu::message(
+            ui.panel,
+            "No memory",
+            "not enough room",
+            "to build the file",
+        );
         menu::wait_for_any_key(ui);
         return;
     };
@@ -425,16 +430,27 @@ mod tests {
         // A representative address per kind; the point is that render_html handles each
         // AddressKind's QR payload shape without overflowing.
         let cases = [
-            (AddressKind::P2wpkh, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            (
+                AddressKind::P2wpkh,
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            ),
             (
                 AddressKind::P2tr,
                 "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
             ),
-            (AddressKind::P2shP2wpkh, "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"),
+            (
+                AddressKind::P2shP2wpkh,
+                "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+            ),
             (AddressKind::P2pkh, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"),
         ];
         for (kind, addr) in cases {
-            let html = page(kind, "x", addr, "L1aW4aubDFB7yfras2S1mms3HzKwsSv8n5RzPZfxAcM2ZfrjZKm4");
+            let html = page(
+                kind,
+                "x",
+                addr,
+                "L1aW4aubDFB7yfras2S1mms3HzKwsSv8n5RzPZfxAcM2ZfrjZKm4",
+            );
             assert_eq!(html.matches("<svg").count(), 2);
         }
     }
