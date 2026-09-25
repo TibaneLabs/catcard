@@ -243,6 +243,8 @@ fn cmd_build(
         elf::load_segments(&raw).with_context(|| format!("parsing {}", elf_path.display()))?;
     let flat = elf::flatten(&segments, board.memory.firmware_base, image::FILL)?;
 
+    ensure_gate_buf_in_window(board, &raw)?;
+
     let hw_compat_override = match hw_compat.as_deref() {
         None => None,
         Some("any") => Some(catcard_fwhdr::hw_compat::ANY),
@@ -313,6 +315,40 @@ fn cmd_build(
         println!("wrote         {} ({} bytes)", p.display(), file.len());
     }
 
+    Ok(())
+}
+
+/// Prove the callgate bounce buffer landed inside this board's callgate window.
+///
+/// The bootloader accepts a callgate `buf_io` only in a window at the base of SRAM1 — on the
+/// mk3 just its first 96 KB (`0x2000_0000`..`0x2001_8000`); a buffer above that is refused
+/// with nothing written, which the firmware reads as a login that never succeeds and the
+/// device cannot be logged into at all. Source: hw-reference/bootloader-callgate-abi.md §0.1
+/// [C]. `GATE_BUF` (catcard-callgate) is pinned to the base of RAM by the `.gate_buf` linker
+/// section, but its address is only fixed at link time, so this is the one place it can be
+/// checked — and it runs for every board's own window, catching a future `.bss` drift at
+/// build/CI rather than on hardware.
+fn ensure_gate_buf_in_window(board: &BoardSpec, elf: &[u8]) -> Result<()> {
+    let Some((addr, size)) = elf::symbol(elf, "GATE_BUF")? else {
+        bail!(
+            "could not find the GATE_BUF symbol in the firmware ELF; the callgate bounce \
+             buffer's placement cannot be verified against the {} window \
+             (hw-reference/bootloader-callgate-abi.md §0.1)",
+            board.name
+        );
+    };
+    let base = board.memory.sram1_base;
+    let window_end = base as u64 + board.gate_buf_len as u64;
+    let buf_end = addr as u64 + size as u64;
+    ensure!(
+        addr as u64 >= base as u64 && buf_end <= window_end,
+        "GATE_BUF is at {addr:#010x}..{buf_end:#010x}, outside the {} callgate window \
+         {base:#010x}..{window_end:#010x} (hw-reference/bootloader-callgate-abi.md §0.1): the \
+         bootloader would refuse every gate call and the device could not be logged in. The \
+         `.gate_buf` linker section (catcard-fw/build.rs) is meant to keep it at the base of \
+         SRAM1 — check it is still placed first in RAM.",
+        board.name
+    );
     Ok(())
 }
 

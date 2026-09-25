@@ -34,11 +34,13 @@ const ET_EXEC: u16 = 2;
 const EM_ARM: u16 = 40;
 
 const PT_LOAD: u32 = 1;
+const SHT_SYMTAB: u32 = 2;
 const SHT_NOBITS: u32 = 8;
 const SHF_ALLOC: u32 = 0x2;
 
 const PH_ENT_MIN: usize = 32;
 const SH_ENT_MIN: usize = 40;
+const SYM_ENT: usize = 16; // Elf32_Sym
 
 #[derive(Debug, Clone)]
 pub struct LoadSection {
@@ -232,6 +234,92 @@ pub fn flatten(sections: &[LoadSection], base: u32, fill: u8) -> Result<Vec<u8>>
     Ok(image)
 }
 
+/// The address and byte size of the first `.symtab` symbol whose name contains `needle`.
+///
+/// Used to locate `GATE_BUF` — the callgate bounce buffer — so `build` can prove it landed
+/// inside the board's callgate window before signing an image that would brick at the PIN
+/// screen (see `cmd_build`). Rust mangles the symbol, so this matches a substring rather than
+/// the whole name; the size comes straight from the symbol so the check needs no external
+/// length constant.
+///
+/// Returns `Ok(None)` when there is no symbol table (a stripped ELF) or no match — the caller
+/// decides whether that is fatal.
+pub fn symbol(elf: &[u8], needle: &str) -> Result<Option<(u32, u32)>> {
+    check_ident(elf)?;
+
+    let sh_off = u32le(elf, EI_NIDENT + 16) as usize; // e_shoff
+    let sh_entsize = u16le(elf, EI_NIDENT + 30) as usize; // e_shentsize
+    let sh_num = u16le(elf, EI_NIDENT + 32) as usize; // e_shnum
+    if sh_off == 0 || sh_num == 0 {
+        return Ok(None);
+    }
+    ensure!(sh_entsize >= SH_ENT_MIN, "section header entry too small");
+
+    let section = |i: usize| -> Result<&[u8]> {
+        let at = sh_off
+            .checked_add(i * sh_entsize)
+            .context("section header table offset overflows")?;
+        ensure!(
+            at + sh_entsize <= elf.len(),
+            "section header {i} runs past end of file"
+        );
+        Ok(&elf[at..at + sh_entsize])
+    };
+
+    // Find the symbol table and the string table it links to.
+    let mut symtab = None;
+    for i in 0..sh_num {
+        let sh = section(i)?;
+        if u32le(sh, 4) == SHT_SYMTAB {
+            symtab = Some((i, u32le(sh, 24) as usize)); // (this section, sh_link = strtab index)
+            break;
+        }
+    }
+    let Some((sym_i, str_i)) = symtab else {
+        return Ok(None); // no .symtab (e.g. a stripped ELF)
+    };
+
+    let symh = section(sym_i)?;
+    let sym_off = u32le(symh, 16) as usize;
+    let sym_size = u32le(symh, 20) as usize;
+    let sym_ent = (u32le(symh, 36) as usize).max(SYM_ENT);
+    ensure!(
+        sym_off.saturating_add(sym_size) <= elf.len(),
+        ".symtab runs past end of file"
+    );
+
+    ensure!(
+        str_i < sh_num,
+        ".symtab links to a nonexistent string table"
+    );
+    let strh = section(str_i)?;
+    let str_off = u32le(strh, 16) as usize;
+    let str_size = u32le(strh, 20) as usize;
+    ensure!(
+        str_off.saturating_add(str_size) <= elf.len(),
+        ".strtab runs past end of file"
+    );
+    let strtab = &elf[str_off..str_off + str_size];
+
+    let mut at = sym_off;
+    while at + SYM_ENT <= sym_off + sym_size {
+        let name_off = u32le(elf, at) as usize;
+        let value = u32le(elf, at + 4);
+        let size = u32le(elf, at + 8);
+        if name_off < strtab.len() {
+            let bytes = &strtab[name_off..];
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            if let Ok(name) = core::str::from_utf8(&bytes[..end])
+                && name.contains(needle)
+            {
+                return Ok(Some((value, size)));
+            }
+        }
+        at += sym_ent;
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,10 +396,16 @@ mod tests {
 
         /// Returns the file offset the content was placed at.
         fn add_section(&mut self, ty: u32, flags: u32, addr: u32, data: &[u8]) {
+            self.add_section_link(ty, flags, addr, 0, data);
+        }
+
+        /// As `add_section`, but sets `sh_link` — needed for a `.symtab`, whose `sh_link`
+        /// names the string table its `st_name`s index into.
+        fn add_section_link(&mut self, ty: u32, flags: u32, addr: u32, link: u32, data: &[u8]) {
             let off = self.content.len();
             self.content.extend_from_slice(data);
             self.sections
-                .push([ty, flags, addr, off as u32, data.len() as u32, 0]);
+                .push([ty, flags, addr, off as u32, data.len() as u32, link]);
         }
 
         fn build(mut self) -> Vec<u8> {
@@ -355,6 +449,7 @@ mod tests {
                 h[12..16].copy_from_slice(&s[2].to_le_bytes());
                 h[16..20].copy_from_slice(&(content_base as u32 + s[3]).to_le_bytes());
                 h[20..24].copy_from_slice(&s[4].to_le_bytes());
+                h[24..28].copy_from_slice(&s[5].to_le_bytes()); // sh_link
                 self.bytes.extend(h);
             }
 
@@ -398,5 +493,58 @@ mod tests {
             !img.windows(4).any(|w| w == [0xcc; 4]),
             "non-allocatable section leaked into the image"
         );
+    }
+
+    /// One Elf32_Sym: st_name, st_value, st_size, then zeroed info/other/shndx.
+    fn sym(name_off: u32, value: u32, size: u32) -> Vec<u8> {
+        let mut s = vec![0u8; 16];
+        s[0..4].copy_from_slice(&name_off.to_le_bytes());
+        s[4..8].copy_from_slice(&value.to_le_bytes());
+        s[8..12].copy_from_slice(&size.to_le_bytes());
+        s
+    }
+
+    #[test]
+    fn symbol_reads_value_and_size_and_matches_a_substring() {
+        const SHT_PROGBITS: u32 = 1;
+        const SHT_STRTAB: u32 = 3;
+        let mut e = MiniElf::new();
+        e.add_prog(0x0800_8000, 0x0800_8000, 0x10);
+        // ELF section index 1: some ordinary content.
+        e.add_section(SHT_PROGBITS, SHF_ALLOC, 0x0800_8000, &[0; 16]);
+
+        // Index 2: the string table. A leading NUL, then NUL-terminated names. The real
+        // symbol is Rust-mangled, so `symbol` matches on a substring.
+        let mut strtab = vec![0u8];
+        let foo_off = strtab.len() as u32;
+        strtab.extend_from_slice(b"foo\0");
+        let gate_off = strtab.len() as u32;
+        strtab.extend_from_slice(b"_RNvCs123_16catcard_callgate8GATE_BUF\0");
+        e.add_section(SHT_STRTAB, 0, 0, &strtab);
+
+        // Index 3: the symbol table, linking to the string table at index 2.
+        let mut symtab = sym(0, 0, 0); // the conventional null symbol
+        symtab.extend(sym(foo_off, 0x1234, 8));
+        symtab.extend(sym(gate_off, 0x2000_0100, 1024));
+        e.add_section_link(SHT_SYMTAB, 0, 0, 2, &symtab);
+
+        let elf = e.build();
+        assert_eq!(
+            symbol(&elf, "GATE_BUF").unwrap(),
+            Some((0x2000_0100, 1024)),
+            "wrong address/size for the matched symbol"
+        );
+        assert_eq!(symbol(&elf, "foo").unwrap(), Some((0x1234, 8)));
+        assert_eq!(symbol(&elf, "nope").unwrap(), None, "no false match");
+    }
+
+    #[test]
+    fn symbol_is_none_when_there_is_no_symbol_table() {
+        const SHT_PROGBITS: u32 = 1;
+        let mut e = MiniElf::new();
+        e.add_prog(0x0800_8000, 0x0800_8000, 0x10);
+        e.add_section(SHT_PROGBITS, SHF_ALLOC, 0x0800_8000, &[0; 16]);
+        let elf = e.build();
+        assert_eq!(symbol(&elf, "GATE_BUF").unwrap(), None);
     }
 }
