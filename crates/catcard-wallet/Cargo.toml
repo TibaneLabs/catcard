@@ -31,3 +31,4 @@ multichain = ["outscript/evm", "outscript/solana"]
 purecrypto = { workspace = true, features = ["hash", "ec", "hazmat-secp256k1"] }
 zeroize = { workspace = true, features = ["derive"] }
 outscript = { workspace = true }
+unicode-normalization = { workspace = true }

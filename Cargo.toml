@@ -152,6 +152,7 @@ emjson = { version = "0.1.1", default-features = false }
 
 # --- shared ---
 bitflags = { version = "2.13.1", default-features = false }
+unicode-normalization = { version = "0.1.25", default-features = false }
 
 # --- barcodes: QR for showing an address to a watch-only wallet ---
 # `#![no_std]`, `forbid(unsafe_code)`, MIT. Only the heap-free half is taken: the

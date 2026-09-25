@@ -20,12 +20,17 @@
 //! # Passphrases and normalisation
 //!
 //! BIP-39 specifies NFKD normalisation of both the phrase and the passphrase. The
-//! English wordlist is pure ASCII, for which NFKD is the identity, so phrases are fine.
-//! Passphrases are not: an unnormalised non-ASCII passphrase yields a *different seed*
-//! from every other wallet, which is a silent fund-loss bug.
+//! English wordlist is pure ASCII, for which NFKD is the identity, so phrases rendered
+//! from it need no work. Passphrases are not ASCII in general: an unnormalised non-ASCII
+//! passphrase yields a *different seed* from every other wallet, which is a silent
+//! fund-loss bug.
 //!
-//! Rather than diverge quietly, [`Mnemonic::to_seed`] refuses a non-ASCII passphrase
-//! with [`Error::PassphraseNotAscii`]. See `docs/ROADMAP.md`.
+//! [`Stretch::begin`] therefore normalises the passphrase to Unicode NFKD before it
+//! reaches PBKDF2, using the vetted `unicode-normalization` crate (the same NFKD tables
+//! the wider Rust ecosystem relies on) rather than a hand-rolled approximation. The
+//! standard BIP-39 Japanese vector (passphrase `㍍ガバヴァぱばぐゞちぢ十人十色`) is
+//! checked against its published seed in the tests, so a table or wiring regression
+//! surfaces as a failing vector, not a wrong wallet.
 
 pub mod wordlist;
 
@@ -65,9 +70,6 @@ pub enum Error {
     UnknownWord { position: usize },
     /// The phrase parses but its checksum is wrong — a typo or a transcription error.
     BadChecksum,
-    /// Passphrase contains non-ASCII bytes, which need NFKD normalisation we do not
-    /// implement. Refused rather than silently deriving a divergent seed.
-    PassphraseNotAscii,
 }
 
 #[cfg(feature = "std")]
@@ -86,10 +88,6 @@ impl core::fmt::Display for Error {
                 write!(f, "word {} is not in the wordlist", position + 1)
             }
             Error::BadChecksum => write!(f, "phrase checksum does not match"),
-            Error::PassphraseNotAscii => write!(
-                f,
-                "non-ASCII passphrases need NFKD normalisation, which is not implemented"
-            ),
         }
     }
 }
@@ -353,19 +351,34 @@ impl Stretch {
         passphrase: &str,
         _kw: &crate::KeyWork,
     ) -> Result<Self, Error> {
-        if !passphrase.is_ascii() {
-            return Err(Error::PassphraseNotAscii);
-        }
-
         // HMAC hashes keys longer than its block size, so the phrase has to be
         // contiguous. The salt does not — it is fed with `update`.
+        //
+        // The phrase is the HMAC key. BIP-39 requires it NFKD-normalised too, but it is
+        // rendered from the English wordlist, which is pure ASCII, and NFKD is the identity
+        // on ASCII — so `render` already produces the normalised form.
         let mut phrase = [0u8; MAX_PHRASE_LEN];
         let len = mnemonic.render(&mut phrase);
 
         // U1 = PRF(P, salt || INT_32_BE(1))
         let mut mac = HmacSha512::new(&phrase[..len]);
         mac.update(SALT_PREFIX);
-        mac.update(passphrase.as_bytes());
+        // BIP-39 ("From mnemonic to seed") requires the passphrase be normalised to
+        // Unicode NFKD before use. An unnormalised non-ASCII passphrase would derive a
+        // seed that diverges from every other BIP-39 wallet — silent fund loss — so this
+        // is safety-critical and uses the vetted `unicode-normalization` tables, not an
+        // approximation. NFKD is the identity on ASCII, so ASCII passphrases (the common
+        // case) are byte-for-byte unchanged.
+        //
+        // Streamed code point by code point: HMAC hashes the concatenation, so feeding
+        // each normalised char's UTF-8 in order is identical to feeding one normalised
+        // string, and needs no heap or large stack buffer. This runs inside the masked
+        // `KeyWork` region — the table walk is over a secret, but masking hides its timing.
+        use unicode_normalization::UnicodeNormalization;
+        let mut utf8 = [0u8; 4];
+        for ch in passphrase.nfkd() {
+            mac.update(ch.encode_utf8(&mut utf8).as_bytes());
+        }
         mac.update(&1u32.to_be_bytes());
         let u: [u8; SEED_LEN] = mac.finalize();
 
@@ -674,28 +687,101 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_stretch_refuses_the_same_passphrases_to_seed_does() {
-        let kw = crate::KeyWork::host();
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &kw).unwrap();
-        assert!(Stretch::begin(&m, "pässwörd", &kw).is_err());
+    /// Reference BIP-39 seed derivation, NFKD-normalising both the mnemonic phrase and the
+    /// passphrase, computed straight from a phrase *string* (not our English-only
+    /// [`Mnemonic`]). This is the textbook algorithm, used only to check our normalisation
+    /// against published Japanese-wordlist vectors whose phrase we cannot render.
+    fn reference_seed_nfkd(mnemonic: &str, passphrase: &str) -> [u8; SEED_LEN] {
+        use unicode_normalization::UnicodeNormalization;
+        let phrase: String = mnemonic.nfkd().collect();
+        let mut salt = String::from("mnemonic");
+        salt.extend(passphrase.nfkd());
+
+        // PBKDF2-HMAC-SHA512, one output block (dkLen == hLen), PBKDF2_ROUNDS rounds.
+        let mut mac = HmacSha512::new(phrase.as_bytes());
+        mac.update(salt.as_bytes());
+        mac.update(&1u32.to_be_bytes());
+        let mut u: [u8; SEED_LEN] = mac.finalize();
+        let mut acc = u;
+        for _ in 1..PBKDF2_ROUNDS {
+            let mut m = HmacSha512::new(phrase.as_bytes());
+            m.update(&u);
+            u = m.finalize();
+            for (o, x) in acc.iter_mut().zip(u.iter()) {
+                *o ^= x;
+            }
+        }
+        acc
     }
 
     #[test]
-    fn non_ascii_passphrase_is_refused_not_mangled() {
-        // Deriving an unnormalised seed here would diverge from every other wallet
-        // and lose funds silently. Refusing is the safe behaviour until NFKD exists.
-        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &crate::KeyWork::host()).unwrap();
-        let mut seed = [0u8; SEED_LEN];
+    fn official_japanese_nfkd_vector() {
+        // The standard BIP-39 NFKD test: a Japanese-wordlist mnemonic (ideographic-space
+        // U+3000 separators, which NFKD folds to U+0020) with the non-ASCII passphrase
+        // "㍍ガバヴァぱばぐゞちぢ十人十色" (㍍ = U+3399 SQUARE METER → "メートル" under NFKD;
+        // the dakuten kana decompose). A wrong NFKD yields a different seed, so matching
+        // the published seed proves our normalisation tables and wiring are correct.
+        // Source: bip32JP/test_JP_BIP39.json (referenced by BIP-39) [C].
+        const JP_MNEMONIC: &str = "あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あいこくしん　あおぞら";
+        const JP_PASSPHRASE: &str = "㍍ガバヴァぱばぐゞちぢ十人十色";
+        const JP_SEED: &str = "a262d6fb6122ecf45be09c50492b31f92e9beb7d9a845987a02cefda57a15f9c467a17872029a9e92299b5cbdf306e3a0ee620245cbd508959b6cb7ca637bd55";
         assert_eq!(
-            m.to_seed("pässwörd", &mut seed, &crate::KeyWork::host()),
-            Err(Error::PassphraseNotAscii)
+            hex(&reference_seed_nfkd(JP_MNEMONIC, JP_PASSPHRASE)),
+            JP_SEED
         );
+    }
+
+    #[test]
+    fn to_seed_normalises_the_passphrase_to_nfkd() {
+        // Our derivation path (Stretch / to_seed) must apply NFKD to the passphrase. Check
+        // it against the textbook reference: the English phrase is ASCII (NFKD identity),
+        // so only the passphrase normalisation can make these agree.
+        let kw = crate::KeyWork::host();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &kw).unwrap();
+        let english_phrase = phrase_of(&m);
+        for pass in ["pässwörd", "日本語", "㍍ガバヴァ", ""] {
+            let mut got = [0u8; SEED_LEN];
+            m.to_seed(pass, &mut got, &kw).unwrap();
+            assert_eq!(
+                hex(&got),
+                hex(&reference_seed_nfkd(&english_phrase, pass)),
+                "to_seed diverged from NFKD reference for {pass:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nfkd_equivalent_passphrases_give_the_same_seed() {
+        // The point of normalising: two encodings that NFKD to the same string are the
+        // same passphrase and must unlock the same wallet. "café" as precomposed U+00E9
+        // vs decomposed "e"+U+0301 is the classic case; both must also differ from plain
+        // ASCII "cafe" (a real, different passphrase).
+        let kw = crate::KeyWork::host();
+        let m = Mnemonic::from_entropy(&unhex(VECTORS[0].0), &kw).unwrap();
+        let seed = |p: &str| {
+            let mut s = [0u8; SEED_LEN];
+            m.to_seed(p, &mut s, &kw).unwrap();
+            s
+        };
         assert_eq!(
-            m.to_seed("日本語", &mut seed, &crate::KeyWork::host()),
-            Err(Error::PassphraseNotAscii)
+            seed("caf\u{00e9}"),
+            seed("cafe\u{0301}"),
+            "NFKD-equivalent passphrases produced different seeds"
         );
-        assert_eq!(seed, [0u8; SEED_LEN], "seed written despite refusal");
+        assert_ne!(seed("caf\u{00e9}"), seed("cafe"));
+    }
+
+    #[test]
+    fn ascii_passphrase_is_unchanged_by_normalisation() {
+        // NFKD is the identity on ASCII, so the well-known TREZOR vectors (ASCII
+        // passphrase) must be byte-identical before and after adding normalisation.
+        let kw = crate::KeyWork::host();
+        for (ent, _, expect_seed) in VECTORS {
+            let m = Mnemonic::from_entropy(&unhex(ent), &kw).unwrap();
+            let mut seed = [0u8; SEED_LEN];
+            m.to_seed(PASSPHRASE, &mut seed, &kw).unwrap();
+            assert_eq!(hex(&seed), *expect_seed, "entropy {ent}");
+        }
     }
 
     // -- properties --------------------------------------------------------------
