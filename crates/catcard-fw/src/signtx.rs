@@ -414,7 +414,7 @@ pub(crate) fn review_and_sign(
         psbtview::destinations(
             &psbt,
             &owner,
-            catcard_wallet::bip32::Network::Mainnet,
+            crate::prefs::network(),
             // The accounts the review already worked out from the inputs: an output is
             // change only if it belongs to one of them, and deriving them twice would be
             // twice the elliptic-curve work for the same answer.

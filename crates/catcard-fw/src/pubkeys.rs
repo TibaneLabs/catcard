@@ -127,8 +127,9 @@ fn remember(purpose: u32, coin: u32, account: u32, key: ExtendedPubKey) {
     });
 }
 
-/// The Bitcoin account key at `m/{purpose}h/0h/{account}h` for `kind`, from this session
-/// or the seed. See [`account_key_at`].
+/// The Bitcoin account key at `m/{purpose}h/{coin}h/{account}h` for `kind`, from this
+/// session or the seed. The coin type follows the network in force -- 0 on mainnet, 1 on
+/// testnet and regtest -- so testnet mode moves the whole account. See [`account_key_at`].
 pub(crate) fn account_key(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -137,7 +138,8 @@ pub(crate) fn account_key(
     kind: AddressKind,
     account: u32,
 ) -> Option<ExtendedPubKey> {
-    account_key_at(gate, login, ui, head, kind.bip44_purpose(), 0, account)
+    let coin = crate::prefs::network().coin_type();
+    account_key_at(gate, login, ui, head, kind.bip44_purpose(), coin, account)
 }
 
 /// The account key at `m/{purpose}h/{coin}h/{account}h`, from this session or the seed --

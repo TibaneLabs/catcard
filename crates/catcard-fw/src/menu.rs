@@ -235,6 +235,10 @@ enum Screen {
     /// Settings that show or change secrets, apart from the rest so none is one press
     /// away by accident.
     DangerZone,
+    /// Choose the Bitcoin network: mainnet, testnet4 or regtest. In the Danger Zone
+    /// because it changes every address, xpub and path the device shows.
+    #[cfg(not(feature = "board-mk3"))]
+    TestnetMode,
     /// Which chains this wallet offers, and in what order.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
     ChainSettings,
@@ -473,7 +477,15 @@ fn settings_items(no_seed: bool) -> &'static [&'static str] {
 
 /// Settings that show or change secrets. Stock calls it the same, and keeps its seed
 /// functions there. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
-const DANGER_ITEMS: &[&str] = &["Seed tools"];
+const DANGER_ITEMS: &[&str] = &[
+    "Seed tools",
+    // Which Bitcoin network the device derives and shows addresses for. Stock keeps it
+    // here, in the Danger Zone, because switching it changes every address, xpub and
+    // default path. The mk3 has no settings store to keep the choice, so the row is left
+    // out there. Source: hw-reference/firmware-features.md §10 [C].
+    #[cfg(not(feature = "board-mk3"))]
+    "Testnet mode",
+];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Seed Functions" [C]
@@ -1430,6 +1442,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| menu_wrap_screen(a.gate, a.login, a.ui),
             Screen::Settings,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::TestnetMode => to(
+            |a| testnet_mode_screen(a.gate, a.login, a.ui),
+            Screen::DangerZone,
+        ),
         Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
         #[cfg(feature = "board-q1")]
         Screen::SeedQrShow => to(
@@ -1645,6 +1662,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Testnet mode")) => Screen::TestnetMode,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
@@ -2317,7 +2336,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::MaxFee
         | Screen::UsbPort
         | Screen::VirtualDisk
-        | Screen::MenuWrap => {}
+        | Screen::MenuWrap
+        | Screen::TestnetMode => {}
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::KillKey | Screen::Sd2fa => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
@@ -5357,7 +5377,7 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             let Ok(purpose) = ChildNumber::hardened(44) else {
                 continue;
             };
-            let Ok(coin) = ChildNumber::hardened(chain.coin_type) else {
+            let Ok(coin) = ChildNumber::hardened(chain.coin_type_on(crate::prefs::network())) else {
                 continue;
             };
             let Ok(account) = ChildNumber::hardened(0) else {
@@ -5402,7 +5422,7 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
                 if chain.scheme != Scheme::Slip10Ed25519 {
                     continue;
                 }
-                let path = [44, chain.coin_type, 0, 0];
+                let path = [44, chain.coin_type_on(crate::prefs::network()), 0, 0];
                 let Some(node) = catcard_wallet::slip10::derive(seed, &path, kw) else {
                     continue;
                 };
@@ -5689,7 +5709,7 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
                 let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
                 let n = catcard_wallet::address::encode(
                     kind,
-                    catcard_wallet::bip32::Network::Mainnet,
+                    crate::prefs::network(),
                     &leaf.public_key,
                     &mut buf,
                 )
@@ -6605,7 +6625,7 @@ pub(crate) fn plain_master(
     entropy: &[u8],
     kw: &catcard_wallet::KeyWork,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
-    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip32::ExtendedPrivKey;
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN};
     use zeroize::Zeroize;
 
@@ -6613,7 +6633,7 @@ pub(crate) fn plain_master(
     let mut seed = [0u8; SEED_LEN];
     root.to_seed("", &mut seed, kw)
         .map_err(|_| "key derivation failed")?;
-    let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, kw)
+    let master = ExtendedPrivKey::from_seed(&seed, crate::prefs::network(), kw)
         .map_err(|_| "key derivation failed");
     seed.zeroize();
     master
@@ -6631,9 +6651,10 @@ pub(crate) fn root_master(
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
-    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip32::ExtendedPrivKey;
 
     let stored = root_stored(gate, login, panel, head)?;
+    let net = crate::prefs::network();
     let mut busy = Working::seed(panel, head, "deriving the key");
     let master = crate::keywork::run(|kw| match &stored {
         Stored::Words { entropy, len } => plain_master(&entropy[..*len], kw),
@@ -6641,11 +6662,11 @@ pub(crate) fn root_master(
         // scalar is still checked: a stash that reads back as no usable key is reported,
         // not carried to the first derivation to abort there.
         Stored::Xprv { chain_code, key } => {
-            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+            ExtendedPrivKey::root_from_parts(net, *chain_code, *key, kw)
                 .map_err(|_| "the stored key is not usable")
         }
         Stored::Raw { bytes, len } => {
-            ExtendedPrivKey::from_seed(&bytes[..*len], Network::Mainnet, kw)
+            ExtendedPrivKey::from_seed(&bytes[..*len], net, kw)
                 .map_err(|_| "key derivation failed")
         }
     });
@@ -6685,12 +6706,13 @@ pub(crate) fn master_quietly(
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
     use crate::key::{Loaded, Source};
-    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip32::ExtendedPrivKey;
+    let net = crate::prefs::network();
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
             let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
             return crate::keywork::run(|kw| {
-                ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+                ExtendedPrivKey::root_from_parts(net, *chain_code, *key, kw)
             })
             .map_err(|_| "the loaded key is not usable");
         }
@@ -6704,7 +6726,7 @@ pub(crate) fn master_quietly(
         return master_from_stored(stored, panel, head);
     }
     with_seed(gate, login, panel, head, |seed, kw| {
-        ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
+        ExtendedPrivKey::from_seed(seed, net, kw).ok()
     })
 }
 
@@ -6722,9 +6744,10 @@ pub(crate) fn master_from_stored(
     panel: &mut display::Panel,
     head: &str,
 ) -> Result<catcard_wallet::bip32::ExtendedPrivKey, &'static str> {
-    use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+    use catcard_wallet::bip32::ExtendedPrivKey;
     use zeroize::Zeroize as _;
 
+    let net = crate::prefs::network();
     if !matches!(stored, Stored::Words { .. }) && crate::passphrase::is_set() {
         // A BIP-39 passphrase changes the seed words stretch to. There are no words
         // here, so a passphrase would change nothing -- and a wallet that ignored one
@@ -6737,7 +6760,7 @@ pub(crate) fn master_from_stored(
     match stored {
         Stored::Words { mut entropy, len } => {
             stretch_words(panel, head, &mut entropy, len, |seed, kw| {
-                ExtendedPrivKey::from_seed(seed, Network::Mainnet, kw).ok()
+                ExtendedPrivKey::from_seed(seed, net, kw).ok()
             })
         }
         // The arrays are `Copy`, so these bindings are copies of the secret that
@@ -6747,7 +6770,7 @@ pub(crate) fn master_from_stored(
             mut key,
         } => {
             let node = crate::keywork::run(|kw| {
-                ExtendedPrivKey::root_from_parts(Network::Mainnet, chain_code, key, kw)
+                ExtendedPrivKey::root_from_parts(net, chain_code, key, kw)
             });
             chain_code.zeroize();
             key.zeroize();
@@ -6755,7 +6778,7 @@ pub(crate) fn master_from_stored(
         }
         Stored::Raw { mut bytes, len } => {
             let node = crate::keywork::run(|kw| {
-                ExtendedPrivKey::from_seed(&bytes[..len], Network::Mainnet, kw)
+                ExtendedPrivKey::from_seed(&bytes[..len], net, kw)
             });
             bytes.zeroize();
             node.map_err(|_| "key derivation failed")
@@ -7115,7 +7138,7 @@ fn single_key_addresses(
         .filter(|f| f.encoding != Encoding::Solana)
     {
         let mut buf = [0u8; address::MAX_LEN];
-        let Ok(n) = address::from_secp256k1(chain, f.encoding, pubkey, &mut buf) else {
+        let Ok(n) = address::from_secp256k1(chain, f.encoding, crate::prefs::network(), pubkey, &mut buf) else {
             continue;
         };
         let mut text = Addr::new();
@@ -7242,11 +7265,11 @@ fn export_other_chain_csv(
             .derive_child(ChildNumber::normal(index).ok()?)
             .ok()?;
         let mut out = [0u8; caddr::MAX_LEN];
-        let n = caddr::from_secp256k1(chain, format.encoding, &leaf.public_key, &mut out).ok()?;
+        let n = caddr::from_secp256k1(chain, format.encoding, crate::prefs::network(), &leaf.public_key, &mut out).ok()?;
         let mut text = AddrText::new();
         text.push_str(core::str::from_utf8(&out[..n]).ok()?).ok()?;
         Some((
-            bip44_path(format.purpose, chain.coin_type, account, change, index)?,
+            bip44_path(format.purpose, chain.coin_type_on(crate::prefs::network()), account, change, index)?,
             text,
         ))
     });
@@ -7281,10 +7304,10 @@ fn chain_explorer(
         let mut path = Line::new();
         let addr: Option<usize> = match f.encoding {
             Encoding::Solana => {
-                let _ = write!(path, "m/44h/{}h/{index}h/0h", chain.coin_type);
+                let _ = write!(path, "m/44h/{}h/{index}h/0h", chain.coin_type_on(crate::prefs::network()));
                 let first = index - index % SOLANA_BATCH as u32;
                 if !matches!(sol, Some((at, _)) if at == first) {
-                    sol = solana_batch(gate, login, ui, chain.coin_type, first).map(|k| (first, k));
+                    sol = solana_batch(gate, login, ui, chain.coin_type_on(crate::prefs::network()), first).map(|k| (first, k));
                     if sol.is_none() {
                         return;
                     }
@@ -7305,7 +7328,7 @@ fn chain_explorer(
                                 ui,
                                 "Addresses",
                                 f.purpose,
-                                chain.coin_type,
+                                chain.coin_type_on(crate::prefs::network()),
                                 account,
                             )
                         })
@@ -7322,14 +7345,14 @@ fn chain_explorer(
                 let _ = write!(
                     path,
                     "m/{}h/{}h/{account}h/{change}/{index}",
-                    f.purpose, chain.coin_type
+                    f.purpose, chain.coin_type_on(crate::prefs::network())
                 );
                 cached.as_ref().map(|(_, _, _, k)| *k).and_then(|k| {
                     ChildNumber::normal(index)
                         .ok()
                         .and_then(|c| k.derive_child(c).ok())
                         .and_then(|k| {
-                            caddr::from_secp256k1(chain, f.encoding, &k.public_key, &mut buf).ok()
+                            caddr::from_secp256k1(chain, f.encoding, crate::prefs::network(), &k.public_key, &mut buf).ok()
                         })
                 })
             }
@@ -7698,7 +7721,7 @@ fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::Deriva
 fn custom_path(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_ui::scroll::Line as DLine;
     use catcard_wallet::address;
-    use catcard_wallet::bip32::{ChildNumber, MAX_PATH_DEPTH, Network};
+    use catcard_wallet::bip32::{ChildNumber, MAX_PATH_DEPTH};
 
     const HEAD: &str = "Custom path";
 
@@ -7738,7 +7761,7 @@ fn custom_path(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
         heapless::Vec::new();
     for kind in PROTOCOLS {
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        let Ok(n) = address::encode(kind, Network::Mainnet, &key.public_key, &mut buf) else {
+        let Ok(n) = address::encode(kind, crate::prefs::network(), &key.public_key, &mut buf) else {
             continue;
         };
         let mut text = AddrText::new();
@@ -7904,7 +7927,7 @@ fn export_chain_csv(
     chain_key: &catcard_wallet::bip32::ExtendedPubKey,
 ) {
     use catcard_wallet::address;
-    use catcard_wallet::bip32::{ChildNumber, Network};
+    use catcard_wallet::bip32::ChildNumber;
 
     let Some(count) = ask_row_count(ui, head) else {
         return;
@@ -7915,7 +7938,7 @@ fn export_chain_csv(
             .derive_child(ChildNumber::normal(index).ok()?)
             .ok()?;
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-        let n = address::encode(run.kind, Network::Mainnet, &leaf.public_key, &mut buf).ok()?;
+        let n = address::encode(run.kind, crate::prefs::network(), &leaf.public_key, &mut buf).ok()?;
         let mut text = AddrText::new();
         text.push_str(core::str::from_utf8(&buf[..n]).ok()?).ok()?;
         Some((
@@ -7999,7 +8022,7 @@ fn export_address_csv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut 
 
 fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_wallet::address;
-    use catcard_wallet::bip32::{ChildNumber, Network};
+    use catcard_wallet::bip32::ChildNumber;
 
     // No master key is held here at all. Account keys come from `pubkeys`, which derives
     // one from the seed the first time this session asks and keeps the public half after
@@ -8061,7 +8084,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             wallet
                 .script_pubkey(chain, index, &mut spk)
                 .ok()
-                .and_then(|n| address::from_script(&spk[..n], Network::Mainnet, &mut buf))
+                .and_then(|n| address::from_script(&spk[..n], crate::prefs::network(), &mut buf))
         } else {
             // First time this type, account and chain are asked for: take the account key
             // -- from this session, or from the seed if this is the first ask -- and step
@@ -8097,7 +8120,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     .ok()
                     .and_then(|c| chain.derive_child(c).ok())
                     .and_then(|k| {
-                        address::encode(kind, Network::Mainnet, &k.public_key, &mut buf).ok()
+                        address::encode(kind, crate::prefs::network(), &k.public_key, &mut buf).ok()
                     })
             })
         };
@@ -8337,14 +8360,14 @@ pub(crate) fn first_receive_address(
     panel: &mut display::Panel,
 ) -> Option<heapless::String<{ catcard_wallet::address::MAX_ADDRESS_LEN }>> {
     use catcard_wallet::address::{self, AddressKind};
-    use catcard_wallet::bip32::{ChildNumber, Network};
+    use catcard_wallet::bip32::ChildNumber;
 
     let chain = receive_chain(master, AddressKind::P2wpkh, busy, panel)?;
     let key = chain.derive_child(ChildNumber::normal(0).ok()?).ok()?;
     let mut buf = [0u8; address::MAX_ADDRESS_LEN];
     let n = address::encode(
         AddressKind::P2wpkh,
-        Network::Mainnet,
+        crate::prefs::network(),
         &key.public_key,
         &mut buf,
     )
@@ -10436,6 +10459,55 @@ fn menu_wrap_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     );
 }
 
+/// Danger zone → Testnet mode.
+///
+/// Picks the Bitcoin network the whole device works in: mainnet (BTC), testnet4 (XTN) or
+/// regtest (XRT). The choice reaches everything -- every address shown, every xpub
+/// exported, and the coin type in every default path -- so a change is warned before it
+/// is stored, and mainnet is the default a fresh device comes up in.
+///
+/// Source: hw-reference/firmware-features.md §10 [C]; wallet-export-formats.md
+/// §"Chain parameters" [C].
+#[cfg(not(feature = "board-mk3"))]
+fn testnet_mode_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_settings::prefs::Chain;
+    const HEAD: &str = "Testnet mode";
+
+    let now = crate::prefs::current();
+    let rows: [&str; Chain::ALL.len()] = [
+        Chain::Mainnet.long_name(),
+        Chain::Testnet.long_name(),
+        Chain::Regtest.long_name(),
+    ];
+    let mut note: Line = Line::new();
+    let _ = write!(note, "now {}", now.net.long_name());
+    let Some(row) = pick_row(ui, HEAD, &note, &rows) else {
+        return;
+    };
+    let chosen = Chain::ALL[row];
+    if chosen == now.net {
+        message(ui.panel, HEAD, "unchanged", chosen.long_name());
+        wait_for_any_key(ui);
+        return;
+    }
+    // Never quiet: the choice changes every address, xpub and path the device shows, so
+    // the owner is told exactly that first -- switching to a testnet and switching back
+    // both move every address, so any change is warned, not only leaving mainnet.
+    ask(ui.panel, HEAD, "changes every address", chosen.long_name());
+    if !confirmed(ui) {
+        return;
+    }
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::CHAIN, chosen.ticker()),
+        crate::prefs::Prefs { net: chosen, ..now },
+        chosen.long_name(),
+    );
+}
+
 /// Danger zone → Seed tools → Lock down seed: the key in force becomes the stored seed.
 ///
 /// **Irreversible.** The seed the secure element held is overwritten, and with it goes
@@ -10467,11 +10539,13 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let made = if let Some((chain_code, key)) = crate::key::temporary_xprv() {
         // A node stores as a node: the stash has a shape for it, and this firmware now
         // comes up in one (`root_stored`).
-        use catcard_wallet::bip32::{ExtendedPrivKey, Network};
+        use catcard_wallet::bip32::ExtendedPrivKey;
         // A node whose key is no usable scalar has nothing to store: it falls through to
-        // "could not encode", the same as a stash the callgate cannot spell.
+        // "could not encode", the same as a stash the callgate cannot spell. The
+        // fingerprint is network-independent, but the node is built for the network in
+        // force so nothing downstream sees a mainnet node under a testnet wallet.
         let fp = crate::keywork::run(|kw| {
-            ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw)
+            ExtendedPrivKey::root_from_parts(crate::prefs::network(), *chain_code, *key, kw)
                 .ok()
                 .map(|m| m.fingerprint(kw))
         });

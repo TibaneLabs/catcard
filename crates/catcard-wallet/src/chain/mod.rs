@@ -220,6 +220,21 @@ impl Chain {
             ChildNumber::hardened(self.coin_type)?,
         ])
     }
+
+    /// The SLIP-44 coin type to use for this chain's default paths under `network`.
+    ///
+    /// Testnet mode is a Bitcoin concept: on testnet or regtest, Bitcoin derives under
+    /// coin type 1 rather than 0 (SLIP-0044's "Testnet (all coins)"). Every other chain
+    /// keeps its own coin type whatever the network, so an altcoin build's paths never
+    /// shift under a Bitcoin-only setting.
+    ///
+    /// Source: hw-reference/firmware-features.md §1 [C]; SLIP-0044 [C].
+    pub const fn coin_type_on(&self, network: crate::bip32::Network) -> u32 {
+        match self.id {
+            ChainId::Bitcoin => network.coin_type(),
+            _ => self.coin_type,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -675,6 +690,24 @@ mod tests {
         );
         assert!(ETHEREUM.accepts_path(&path("m/44'/60'/0'/0/0")).is_ok());
         assert!(BITCOIN.accepts_path(&path("m/44'/0'/0'/0/0")).is_ok());
+    }
+
+    #[test]
+    fn bitcoin_coin_type_follows_the_network() {
+        use crate::bip32::Network;
+        assert_eq!(BITCOIN.coin_type_on(Network::Mainnet), 0);
+        assert_eq!(BITCOIN.coin_type_on(Network::Testnet), 1);
+        assert_eq!(BITCOIN.coin_type_on(Network::Regtest), 1);
+    }
+
+    /// Other chains keep their own coin type whatever the network: testnet mode is a
+    /// Bitcoin-only setting and must not move an altcoin's paths.
+    #[cfg(feature = "multichain")]
+    #[test]
+    fn other_chains_ignore_the_network() {
+        use crate::bip32::Network;
+        assert_eq!(ETHEREUM.coin_type_on(Network::Testnet), ETHEREUM.coin_type);
+        assert_eq!(SOLANA.coin_type_on(Network::Regtest), SOLANA.coin_type);
     }
 
     #[test]

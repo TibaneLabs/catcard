@@ -39,8 +39,9 @@
 use catcard_backup::{body, kdf, sevenz};
 use catcard_callgate::Callgate;
 use catcard_callgate::pin::{SECRET_LEN, bip39_entropy, encode_bip39, encode_xprv, xprv_parts};
-use catcard_wallet::bip32::{ExtendedPrivKey, Network, serialize::MAX_BASE58_LEN};
+use catcard_wallet::bip32::{ExtendedPrivKey, serialize::MAX_BASE58_LEN};
 use catcard_wallet::bip39::{MAX_PHRASE_LEN, Mnemonic};
+use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
 use crate::menu::{self, Working};
@@ -245,9 +246,18 @@ fn build_body(
     secret: &[u8; SECRET_LEN],
     preferences: bool,
 ) -> Result<usize, catcard_backup::Error> {
+    // The network in force decides the label, the `chain` ticker and the version bytes of
+    // the xprv/xpub below: a testnet wallet's backup reads `Bitcoin Testnet 4` / `XTN` /
+    // `tprv`, so it restores as the same wallet it was saved from.
+    // Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+    let chain = crate::prefs::current().net;
+    let net = crate::prefs::network();
+    let mut header: heapless::String<40> = heapless::String::new();
+    let _ = write!(header, "Private key details: {}", chain.long_name());
+
     let mut w = body::BodyWriter::new(&mut buf[sevenz::BODY_OFFSET..]);
     w.preamble();
-    w.section("Private key details: Bitcoin Mainnet");
+    w.section(header.as_str());
 
     // Everything below is computed from the stash, so it is all inside one masked
     // region: no interrupt runs between deriving the key and rendering it.
@@ -267,12 +277,12 @@ fn build_body(
             master = menu::plain_master(entropy, kw).ok();
         } else if let Some((chain_code, key)) = xprv_parts(secret) {
             // No usable key means no xprv/xpub lines; the raw stash below still goes out.
-            master = ExtendedPrivKey::root_from_parts(Network::Mainnet, *chain_code, *key, kw).ok();
+            master = ExtendedPrivKey::root_from_parts(net, *chain_code, *key, kw).ok();
         } else if let Some(raw) = catcard_callgate::pin::raw_master(secret) {
-            master = ExtendedPrivKey::from_seed(raw, Network::Mainnet, kw).ok();
+            master = ExtendedPrivKey::from_seed(raw, net, kw).ok();
         }
 
-        w.text("chain", "BTC");
+        w.text("chain", chain.ticker());
         if let Some(master) = &master {
             if let Ok(n) = master.write_base58(&mut xprv, kw)
                 && let Ok(text) = core::str::from_utf8(&xprv[..n])

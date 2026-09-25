@@ -23,34 +23,59 @@ pub const RAW_LEN: usize = 78;
 /// Enough room for the Base58Check form of [`RAW_LEN`] plus a checksum.
 pub const MAX_BASE58_LEN: usize = 128;
 
-/// Which network's version bytes to use.
+/// Which network's parameters to use.
 ///
-/// Regtest and signet share testnet's prefixes, so they are not separate variants —
-/// the prefix carries no more information than "not mainnet".
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// Testnet4 and regtest **share the same extended-key version bytes and the same base58
+/// address prefixes** — the version bytes carry no more than "not mainnet". They differ
+/// only in the bech32 HRP (`tb` vs `bcrt`) and in nothing else, so regtest is a variant
+/// for the address layer's sake and reads back as [`Network::Testnet`] off any serialised
+/// key. Both use SLIP-44 coin type 1.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum Network {
+    #[default]
     Mainnet,
     Testnet,
+    Regtest,
 }
 
 impl Network {
+    /// Whether this is mainnet. Mainnet is the only network with its own version bytes
+    /// and base58 prefixes; testnet and regtest share a single "not mainnet" set.
+    pub const fn is_mainnet(self) -> bool {
+        matches!(self, Network::Mainnet)
+    }
+
+    /// The SLIP-44 coin type for the `m/{purpose}'/<coin>'` level: `0` on mainnet, `1` on
+    /// both testnet and regtest. SLIP-0044 reserves coin type 1 for "Testnet (all coins)".
+    ///
+    /// Source: hw-reference/firmware-features.md §1 [C]; SLIP-0044 coin type 1 [C].
+    pub const fn coin_type(self) -> u32 {
+        if self.is_mainnet() { 0 } else { 1 }
+    }
+
     /// `xprv` / `tprv`.
     pub const fn private_version(self) -> [u8; 4] {
-        match self {
-            Network::Mainnet => 0x0488_ADE4u32.to_be_bytes(),
-            Network::Testnet => 0x0435_8394u32.to_be_bytes(),
+        if self.is_mainnet() {
+            0x0488_ADE4u32.to_be_bytes()
+        } else {
+            0x0435_8394u32.to_be_bytes()
         }
     }
 
     /// `xpub` / `tpub`.
     pub const fn public_version(self) -> [u8; 4] {
-        match self {
-            Network::Mainnet => 0x0488_B21Eu32.to_be_bytes(),
-            Network::Testnet => 0x0435_87CFu32.to_be_bytes(),
+        if self.is_mainnet() {
+            0x0488_B21Eu32.to_be_bytes()
+        } else {
+            0x0435_87CFu32.to_be_bytes()
         }
     }
 
     fn from_version(v: &[u8]) -> Option<(Network, bool)> {
+        // Regtest is not listed: it shares testnet's bytes, so a key with these prefixes
+        // reads back as `Testnet`. Regtest is a display-time choice the bytes do not record.
         let b: [u8; 4] = v.try_into().ok()?;
         for n in [Network::Mainnet, Network::Testnet] {
             if b == n.private_version() {
@@ -253,18 +278,22 @@ pub enum Slip132 {
 
 impl Slip132 {
     /// The four version bytes this form is announced with.
+    ///
+    /// Regtest shares testnet's SLIP-132 bytes, so the table turns on
+    /// [`Network::is_mainnet`] rather than the exact network.
+    /// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
     pub const fn version(self, network: Network) -> [u8; 4] {
-        let v: u32 = match (self, network) {
-            (Slip132::Classic, Network::Mainnet) => 0x0488_B21E,
-            (Slip132::Classic, Network::Testnet) => 0x0435_87CF,
-            (Slip132::P2wpkhP2sh, Network::Mainnet) => 0x049D_7CB2,
-            (Slip132::P2wpkhP2sh, Network::Testnet) => 0x044A_5262,
-            (Slip132::P2wpkh, Network::Mainnet) => 0x04B2_4746,
-            (Slip132::P2wpkh, Network::Testnet) => 0x045F_1CF6,
-            (Slip132::P2wshP2sh, Network::Mainnet) => 0x0295_B43F,
-            (Slip132::P2wshP2sh, Network::Testnet) => 0x0242_89EF,
-            (Slip132::P2wsh, Network::Mainnet) => 0x02AA_7ED3,
-            (Slip132::P2wsh, Network::Testnet) => 0x0257_5483,
+        let v: u32 = match (self, network.is_mainnet()) {
+            (Slip132::Classic, true) => 0x0488_B21E,
+            (Slip132::Classic, false) => 0x0435_87CF,
+            (Slip132::P2wpkhP2sh, true) => 0x049D_7CB2,
+            (Slip132::P2wpkhP2sh, false) => 0x044A_5262,
+            (Slip132::P2wpkh, true) => 0x04B2_4746,
+            (Slip132::P2wpkh, false) => 0x045F_1CF6,
+            (Slip132::P2wshP2sh, true) => 0x0295_B43F,
+            (Slip132::P2wshP2sh, false) => 0x0242_89EF,
+            (Slip132::P2wsh, true) => 0x02AA_7ED3,
+            (Slip132::P2wsh, false) => 0x0257_5483,
         };
         v.to_be_bytes()
     }
@@ -359,6 +388,36 @@ mod tests {
         assert_eq!(Network::Mainnet.public_version(), [0x04, 0x88, 0xB2, 0x1E]);
         assert_eq!(Network::Testnet.private_version(), [0x04, 0x35, 0x83, 0x94]);
         assert_eq!(Network::Testnet.public_version(), [0x04, 0x35, 0x87, 0xCF]);
+    }
+
+    /// Regtest borrows testnet's version bytes exactly, and its coin type. The two are
+    /// interchangeable at the serialisation layer; only the bech32 HRP tells them apart.
+    #[test]
+    fn regtest_shares_testnet_version_bytes_and_coin_type() {
+        assert_eq!(
+            Network::Regtest.private_version(),
+            Network::Testnet.private_version()
+        );
+        assert_eq!(
+            Network::Regtest.public_version(),
+            Network::Testnet.public_version()
+        );
+        assert_eq!(Network::Mainnet.coin_type(), 0);
+        assert_eq!(Network::Testnet.coin_type(), 1);
+        assert_eq!(Network::Regtest.coin_type(), 1);
+    }
+
+    /// A regtest key serialises with testnet's `tprv` prefix -- the bytes do not record
+    /// regtest -- so it reads back as [`Network::Testnet`].
+    #[test]
+    fn a_regtest_key_reads_back_as_testnet() {
+        let r = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Regtest, &crate::KeyWork::host())
+            .unwrap();
+        assert!(r.to_base58(&crate::KeyWork::host()).starts_with("tprv"));
+        let parsed =
+            ExtendedPrivKey::from_base58(&r.to_base58(&crate::KeyWork::host()), &crate::KeyWork::host())
+                .unwrap();
+        assert_eq!(parsed.network, Network::Testnet);
     }
 
     #[test]
@@ -598,6 +657,12 @@ mod slip132_tests {
                 form.version(Network::Mainnet),
                 form.version(Network::Testnet),
                 "{form:?} must differ by network"
+            );
+            // Regtest borrows testnet's SLIP-132 bytes (upub/vpub/Upub/Vpub).
+            assert_eq!(
+                form.version(Network::Regtest),
+                form.version(Network::Testnet),
+                "{form:?} regtest must match testnet"
             );
         }
     }

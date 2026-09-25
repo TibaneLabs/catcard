@@ -105,21 +105,19 @@ pub trait NetworkParams {
 
 impl NetworkParams for Network {
     fn p2pkh_version(self) -> u8 {
-        match self {
-            Network::Mainnet => 0x00,
-            Network::Testnet => 0x6f,
-        }
+        // Regtest shares testnet's base58 versions. [C] wallet-export-formats.md §Chain parameters
+        if self.is_mainnet() { 0x00 } else { 0x6f }
     }
     fn p2sh_version(self) -> u8 {
-        match self {
-            Network::Mainnet => 0x05,
-            Network::Testnet => 0xc4,
-        }
+        if self.is_mainnet() { 0x05 } else { 0xc4 }
     }
     fn bech32_hrp(self) -> &'static str {
+        // Each network has its own segwit prefix; regtest's `bcrt` is the one thing that
+        // sets it apart from testnet. [C] wallet-export-formats.md §Chain parameters
         match self {
             Network::Mainnet => "bc",
             Network::Testnet => "tb",
+            Network::Regtest => "bcrt",
         }
     }
 }
@@ -224,17 +222,31 @@ pub fn script_pubkey(
 ///
 /// The encoding itself is `outscript`'s, so only the classification is here.
 pub fn from_script(script: &[u8], network: Network, out: &mut [u8]) -> Option<usize> {
+    // Witness outputs render through our own bech32 so each network gets its own HRP --
+    // regtest's `bcrt` included, which `outscript` does not carry. For mainnet and testnet
+    // this is byte-for-byte what `outscript` produced, since both compute the same bech32.
+    // Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+    let witness = match script {
+        [0x00, 0x14, h @ ..] if h.len() == 20 => Some((0u8, h)),
+        [0x00, 0x20, h @ ..] if h.len() == 32 => Some((0u8, h)),
+        [0x51, 0x20, h @ ..] if h.len() == 32 => Some((1u8, h)),
+        _ => None,
+    };
+    if let Some((version, program)) = witness {
+        return crate::encoding::bech32::encode_segwit(network.bech32_hrp(), version, program, out)
+            .ok();
+    }
+    // Base58 outputs: regtest shares testnet's version bytes, so `outscript`'s testnet
+    // network renders both.
     let format = match script {
         [0x76, 0xa9, 0x14, h @ .., 0x88, 0xac] if h.len() == 20 => "p2pkh",
         [0xa9, 0x14, h @ .., 0x87] if h.len() == 20 => "p2sh",
-        [0x00, 0x14, h @ ..] if h.len() == 20 => "p2wpkh",
-        [0x00, 0x20, h @ ..] if h.len() == 32 => "p2wsh",
-        [0x51, 0x20, h @ ..] if h.len() == 32 => "p2tr",
         _ => return None,
     };
-    let net = match network {
-        Network::Mainnet => "bitcoin",
-        Network::Testnet => "bitcoin-testnet",
+    let net = if network.is_mainnet() {
+        "bitcoin"
+    } else {
+        "bitcoin-testnet"
     };
     outscript::address::encode_address_to_slice(format, script, net, out).ok()
 }
@@ -461,6 +473,45 @@ mod tests {
                     "{kind:?} {network:?}"
                 );
             }
+        }
+    }
+
+    /// Regtest wears `bcrt` on its segwit addresses and testnet's `m`/`2` on its legacy
+    /// ones, and `encode` and `from_script` agree on every one.
+    #[test]
+    fn regtest_addresses_use_the_bcrt_prefix() {
+        use super::*;
+        let pubkey: [u8; PUBKEY_LEN] = [
+            0x02, 0x50, 0x86, 0x3a, 0xd6, 0x4a, 0x87, 0xae, 0x8a, 0x2f, 0xe8, 0x3c, 0x1a, 0xf1,
+            0xa8, 0x40, 0x3c, 0xb5, 0x3f, 0x53, 0xe4, 0x86, 0xd8, 0x51, 0x1d, 0xad, 0x8a, 0x04,
+            0x88, 0x7e, 0x5b, 0x23, 0x52,
+        ];
+        // Native segwit and taproot carry the regtest HRP; legacy shares testnet's base58.
+        let bech32_prefixes = [(AddressKind::P2wpkh, "bcrt1"), (AddressKind::P2tr, "bcrt1")];
+        for (kind, want) in bech32_prefixes {
+            let s = encode_string(kind, Network::Regtest, &pubkey).unwrap();
+            assert!(s.starts_with(want), "{kind:?} gave {s}");
+        }
+        // The base58 forms are identical to testnet's, since the version bytes are shared.
+        for kind in [AddressKind::P2pkh, AddressKind::P2shP2wpkh] {
+            let r = encode_string(kind, Network::Regtest, &pubkey).unwrap();
+            let t = encode_string(kind, Network::Testnet, &pubkey).unwrap();
+            assert_eq!(r, t, "{kind:?} base58 must match testnet");
+        }
+        // `from_script` reproduces exactly what `encode` wrote, regtest HRP and all.
+        for kind in [
+            AddressKind::P2pkh,
+            AddressKind::P2shP2wpkh,
+            AddressKind::P2wpkh,
+            AddressKind::P2tr,
+        ] {
+            let mut from_key = [0u8; MAX_ADDRESS_LEN];
+            let n = encode(kind, Network::Regtest, &pubkey, &mut from_key).unwrap();
+            let mut script = [0u8; 34];
+            let sn = script_pubkey(kind, &pubkey, &mut script).unwrap();
+            let mut from_spk = [0u8; MAX_ADDRESS_LEN];
+            let m = from_script(&script[..sn], Network::Regtest, &mut from_spk).unwrap();
+            assert_eq!(&from_key[..n], &from_spk[..m], "{kind:?}");
         }
     }
 

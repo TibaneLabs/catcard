@@ -69,6 +69,14 @@ pub const USB_PORT: &str = "cat_usb";
 pub const VIRTUAL_DISK: &str = "cat_vdsk";
 /// Whether the menu cursor wraps past the ends of a list: `"1"` on.
 pub const MENU_WRAP: &str = "cat_wrap";
+/// Which Bitcoin network the wallet shows: the ticker `"BTC"`, `"XTN"` or `"XRT"`.
+///
+/// This is **stock's own key**, not a `cat_`-prefixed one, and it is read the way stock
+/// writes it -- a bare ticker string whose shape is fully known
+/// (hw-reference/wallet-export-formats.md §"Chain parameters" [C]), exactly as `rz` is.
+/// A device that ran stock in testnet mode keeps that choice, and one this firmware writes
+/// is understood by stock.
+pub const CHAIN: &str = "chain";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -210,6 +218,73 @@ pub fn units(doc: &Doc<'_>) -> Units {
         Some("bits") => Units::Bits,
         Some("sats") => Units::Sats,
         _ => Units::Btc,
+    }
+}
+
+/// Which Bitcoin network the device derives keys and shows addresses for.
+///
+/// Three, matching stock: mainnet (`BTC`), testnet4 (`XTN`) and regtest (`XRT`). No
+/// signet. The value stored under [`CHAIN`] is the ticker; anything else, absent or
+/// unreadable reads as [`Chain::Mainnet`] -- the default stock uses and the network whose
+/// addresses are real, so a wallet whose settings slot went bad shows mainnet rather than
+/// quietly deriving somewhere else.
+///
+/// Source: hw-reference/firmware-features.md §10 [C]; wallet-export-formats.md
+/// §"Chain parameters" [C].
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Chain {
+    /// Bitcoin mainnet. Real coins.
+    #[default]
+    Mainnet,
+    /// Bitcoin testnet4.
+    Testnet,
+    /// Bitcoin regtest.
+    Regtest,
+}
+
+impl Chain {
+    /// Every network the chooser offers, in the order it lists them.
+    pub const ALL: [Chain; 3] = [Chain::Mainnet, Chain::Testnet, Chain::Regtest];
+
+    /// The ticker this network is stored and exported as.
+    pub const fn ticker(self) -> &'static str {
+        match self {
+            Chain::Mainnet => "BTC",
+            Chain::Testnet => "XTN",
+            Chain::Regtest => "XRT",
+        }
+    }
+
+    /// The long name exports and backups write, e.g. `Bitcoin Mainnet`.
+    /// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+    pub const fn long_name(self) -> &'static str {
+        match self {
+            Chain::Mainnet => "Bitcoin Mainnet",
+            Chain::Testnet => "Bitcoin Testnet 4",
+            Chain::Regtest => "Bitcoin Regtest",
+        }
+    }
+
+    /// The SLIP-44 coin type for default paths: 0 on mainnet, 1 on testnet and regtest.
+    pub const fn coin_type(self) -> u32 {
+        match self {
+            Chain::Mainnet => 0,
+            Chain::Testnet | Chain::Regtest => 1,
+        }
+    }
+
+    /// Whether this is anything other than mainnet -- i.e. "testnet mode" is on.
+    pub const fn is_testnet_mode(self) -> bool {
+        !matches!(self, Chain::Mainnet)
+    }
+}
+
+/// Which network the wallet is set to. Anything unrecognised is [`Chain::Mainnet`].
+pub fn network(doc: &Doc<'_>) -> Chain {
+    match text(doc, CHAIN) {
+        Some("XTN") => Chain::Testnet,
+        Some("XRT") => Chain::Regtest,
+        _ => Chain::Mainnet,
     }
 }
 
@@ -470,6 +545,41 @@ mod tests {
             u.write(u64::MAX, &mut s).expect("u64::MAX must fit in 32");
             assert!(s.len() <= 32, "{} took {}", u.code(), s.len());
         }
+    }
+
+    /// The network reads back from its ticker, and doubt is always mainnet.
+    #[test]
+    fn network_reads_its_ticker_and_doubt_is_mainnet() {
+        assert_eq!(network(&doc(r#"{"chain":"BTC"}"#)), Chain::Mainnet);
+        assert_eq!(network(&doc(r#"{"chain":"XTN"}"#)), Chain::Testnet);
+        assert_eq!(network(&doc(r#"{"chain":"XRT"}"#)), Chain::Regtest);
+        // Absent, wrong case, a number, an unknown ticker, signet: all mainnet.
+        for json in [
+            r#"{}"#,
+            r#"{"chain":"xtn"}"#,
+            r#"{"chain":1}"#,
+            r#"{"chain":""}"#,
+            r#"{"chain":"SIG"}"#,
+            r#"{"chain":"BTC "}"#,
+        ] {
+            assert_eq!(network(&doc(json)), Chain::Mainnet, "{json}");
+        }
+    }
+
+    /// Every network round-trips through the ticker it is stored as, and carries the
+    /// coin type its default paths use.
+    #[test]
+    fn network_round_trips_and_carries_its_coin_type() {
+        for c in Chain::ALL {
+            let json = format!(r#"{{"chain":"{}"}}"#, c.ticker());
+            assert_eq!(network(&doc(&json)), c, "{}", c.ticker());
+        }
+        assert_eq!(Chain::Mainnet.coin_type(), 0);
+        assert_eq!(Chain::Testnet.coin_type(), 1);
+        assert_eq!(Chain::Regtest.coin_type(), 1);
+        assert!(!Chain::Mainnet.is_testnet_mode());
+        assert!(Chain::Testnet.is_testnet_mode());
+        assert!(Chain::Regtest.is_testnet_mode());
     }
 
     /// A fee cap round-trips through the text it is stored as.

@@ -131,7 +131,8 @@ pub fn generic_json(
 ) -> Option<()> {
     let master_fp = crate::keywork::run(|kw| master.fingerprint(kw));
     let [a, b, c, d] = master_fp;
-    let (network, coin) = (NETWORK, COIN);
+    let (network, coin) = (network(), coin());
+    let ticker = crate::prefs::current().net.ticker();
 
     let master_pub = crate::keywork::run(|kw| master.to_extended_pub(kw));
     let mut xpub = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
@@ -141,7 +142,7 @@ pub fn generic_json(
     // by other people's parsers and compared against other people's fixtures.
     let _ = write!(
         out,
-        "{{\"chain\":\"BTC\",\"xfp\":\"{a:02X}{b:02X}{c:02X}{d:02X}\",\"account\":{account},\"xpub\":\"{}\"",
+        "{{\"chain\":\"{ticker}\",\"xfp\":\"{a:02X}{b:02X}{c:02X}{d:02X}\",\"account\":{account},\"xpub\":\"{}\"",
         core::str::from_utf8(&xpub[..n]).unwrap_or("")
     );
 
@@ -303,15 +304,21 @@ fn write_entry(
 // the absence of whitespace are all load-bearing.
 // ---------------------------------------------------------------------------
 
-/// Mainnet, and the coin type that follows from it.
+/// The network in force, and the SLIP-44 coin type its default paths use.
 ///
-/// Both formats-wide constants rather than parameters: this firmware has no testnet
-/// mode to select, and threading a network through every writer to always pass the same
-/// value would suggest the other one had been tested.
-const NETWORK: Network = Network::Mainnet;
-const COIN: u32 = 0;
+/// Every writer here reads these rather than taking a parameter, so one setting decides
+/// the version bytes, the coin type in every path, and the chain name each format prints.
+/// On testnet the coin type is 1 and the xpubs come out as tprv/tpub/upub/vpub, because
+/// the `master` passed in was itself derived for this network.
+/// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C].
+fn network() -> Network {
+    crate::prefs::network()
+}
+fn coin() -> u32 {
+    crate::prefs::network().coin_type()
+}
 
-/// Derive `m/{purpose}h/{COIN}h/{account}h`, and a fourth hardened step if given.
+/// Derive `m/{purpose}h/{coin}h/{account}h`, and a fourth hardened step if given.
 ///
 /// The one thing every format below needs. `script` is BIP-48's level: `Some(1)` for
 /// P2SH-P2WSH, `Some(2)` for P2WSH.
@@ -326,7 +333,7 @@ fn account_key(
     busy.tick(panel);
     let steps = [
         ChildNumber::hardened(purpose).ok()?,
-        ChildNumber::hardened(COIN).ok()?,
+        ChildNumber::hardened(coin()).ok()?,
         ChildNumber::hardened(account).ok()?,
     ];
     match script {
@@ -379,7 +386,7 @@ pub fn bitcoin_core(
     let single = SingleSig {
         kind,
         fingerprint: master_fp,
-        coin: COIN,
+        coin: coin(),
         account,
     };
     // The receive and change descriptors, written once and used by both blobs.
@@ -395,11 +402,12 @@ pub fn bitcoin_core(
         "# Bitcoin Core Wallet Import File\n\n\
          https://github.com/Coldcard/firmware/blob/master/docs/bitcoin-core-usage.md\n\n\
          ## For wallet with master key fingerprint: {a:02X}{b:02X}{c:02X}{d:02X}\n\n\
-         Wallet operates on blockchain: Bitcoin Mainnet\n\n\
+         Wallet operates on blockchain: {}\n\n\
          ## Bitcoin Core RPC\n\n\
          The following command can be entered after opening Window -> Console\n\
          in Bitcoin Core, or using bitcoin-cli:\n\n\
-         importdescriptors '"
+         importdescriptors '",
+        crate::prefs::current().net.long_name()
     );
     // `active` and a hundred-address range: what Core is told to watch immediately.
     let _ = write!(
@@ -429,7 +437,7 @@ pub fn bitcoin_core(
     for index in 0..3u32 {
         busy.tick(panel);
         let addr = address_at(&key, kind, index)?;
-        let _ = writeln!(out, "m/{PURPOSE}h/{COIN}h/{account}h/0/{index} => {addr}");
+        let _ = writeln!(out, "m/{PURPOSE}h/{}h/{account}h/0/{index} => {addr}", coin());
     }
     Some(())
 }
@@ -478,7 +486,8 @@ pub fn electrum(
     let _ = write!(
         out,
         "\",\"ckcc_xfp\":{xfp_int},\"ckcc_xpub\":\"{master_xpub}\",\
-         \"derivation\":\"m/{purpose}h/{COIN}h/{account}h\",\"xpub\":\"{account_xpub}\"}}}}"
+         \"derivation\":\"m/{purpose}h/{}h/{account}h\",\"xpub\":\"{account_xpub}\"}}}}",
+        coin()
     );
     Some(())
 }
@@ -552,7 +561,8 @@ pub fn unchained(
         let xpub = base58(&key, form, &mut raw)?;
         let _ = write!(
             out,
-            ",\"{name}_deriv\":\"m/48h/{COIN}h/{account}h/{script}h\",\"{name}\":\"{xpub}\""
+            ",\"{name}_deriv\":\"m/48h/{}h/{account}h/{script}h\",\"{name}\":\"{xpub}\"",
+            coin()
         );
     }
     let _ = out.push('}');
@@ -585,7 +595,7 @@ pub fn ss_descriptor(
     let single = SingleSig {
         kind,
         fingerprint: master_fp,
-        coin: COIN,
+        coin: coin(),
         account,
     };
     let chains: &[&str] = if int_ext {
@@ -633,7 +643,7 @@ impl Signing {
         let mut steps = heapless::Vec::new();
         for step in [
             ChildNumber::hardened(purpose).ok()?,
-            ChildNumber::hardened(COIN).ok()?,
+            ChildNumber::hardened(coin()).ok()?,
             ChildNumber::hardened(account).ok()?,
             ChildNumber::normal(0).ok()?,
             ChildNumber::normal(0).ok()?,
@@ -648,7 +658,7 @@ impl Signing {
         let mut steps = heapless::Vec::new();
         for step in [
             ChildNumber::hardened(48).ok()?,
-            ChildNumber::hardened(COIN).ok()?,
+            ChildNumber::hardened(coin()).ok()?,
             ChildNumber::hardened(account).ok()?,
             ChildNumber::hardened(2).ok()?,
             ChildNumber::normal(0).ok()?,
@@ -721,7 +731,7 @@ pub fn signature_file(
             _ => return Err("signature did not verify"),
         }
         let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
-        let n = catcard_wallet::address::encode(signing.kind, NETWORK, &pubkey, &mut buf)
+        let n = catcard_wallet::address::encode(signing.kind, network(), &pubkey, &mut buf)
             .map_err(|_| "address failed")?;
         let mut addr: heapless::String<{ catcard_wallet::address::MAX_ADDRESS_LEN }> =
             heapless::String::new();
@@ -774,7 +784,7 @@ fn address_at(
         .derive_child(ChildNumber::normal(index).ok()?)
         .ok()?;
     let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
-    let n = catcard_wallet::address::encode(kind, NETWORK, &leaf.public_key, &mut buf).ok()?;
+    let n = catcard_wallet::address::encode(kind, network(), &leaf.public_key, &mut buf).ok()?;
     let mut s = heapless::String::new();
     s.push_str(core::str::from_utf8(&buf[..n]).ok()?).ok()?;
     Some(s)

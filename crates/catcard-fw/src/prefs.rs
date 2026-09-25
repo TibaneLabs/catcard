@@ -29,7 +29,8 @@
 //! or write. [`current`] still exists there and still answers -- with the defaults -- so
 //! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
 
-use catcard_settings::prefs::{FeeCap, Units};
+use catcard_settings::prefs::{Chain, FeeCap, Units};
+use catcard_wallet::bip32::Network;
 
 /// Everything the preference screens set, as the firmware reads it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -49,6 +50,22 @@ pub(crate) struct Prefs {
     pub virtual_disk: bool,
     /// Whether the menu cursor comes round at the ends of a list.
     pub menu_wrap: bool,
+    /// Which Bitcoin network every address, xpub and default path is built for.
+    pub net: Chain,
+}
+
+impl Prefs {
+    /// The BIP-32 network the wallet in force derives and encodes under.
+    ///
+    /// Baked into every master key so its version bytes and every derived address follow
+    /// from it, and passed to every address encoder alongside.
+    pub(crate) fn network(&self) -> Network {
+        match self.net {
+            Chain::Mainnet => Network::Mainnet,
+            Chain::Testnet => Network::Testnet,
+            Chain::Regtest => Network::Regtest,
+        }
+    }
 }
 
 impl Default for Prefs {
@@ -63,6 +80,7 @@ impl Default for Prefs {
             usb_port: true,
             virtual_disk: true,
             menu_wrap: false,
+            net: Chain::Mainnet,
         }
     }
 }
@@ -76,6 +94,7 @@ static mut CURRENT: Prefs = Prefs {
     usb_port: true,
     virtual_disk: true,
     menu_wrap: false,
+    net: Chain::Mainnet,
 };
 
 /// What the wallet in force is set to.
@@ -83,6 +102,16 @@ pub(crate) fn current() -> Prefs {
     // SAFETY: foreground only, single core; `Prefs` is `Copy` and the read finishes
     // within this statement. Written only by `load` and `save`, both foreground.
     unsafe { *core::ptr::addr_of!(CURRENT) }
+}
+
+/// The BIP-32 network the wallet in force derives and shows addresses for.
+///
+/// The one accessor every key-derivation and address-encoding site reads, so the choice
+/// lives in one place rather than as a `Network::Mainnet` scattered through the firmware.
+/// A plain static read, safe to call inside a [`crate::keywork::run`] closure: it depends
+/// on no secret and so leaks nothing about one.
+pub(crate) fn network() -> Network {
+    current().network()
 }
 
 /// Put `next` in force: remember it, then tell the parts of the firmware that act on it.
@@ -165,16 +194,18 @@ pub(crate) fn load(
         usb_port: prefs::usb_port(&doc),
         virtual_disk: prefs::virtual_disk(&doc),
         menu_wrap: prefs::menu_wrap(&doc),
+        net: prefs::network(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}, net {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
         next.fee_cap,
         next.usb_port,
         next.virtual_disk,
-        next.menu_wrap
+        next.menu_wrap,
+        next.net.ticker()
     );
     apply(next);
 }

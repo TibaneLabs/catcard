@@ -40,9 +40,14 @@ fn script_format(kind: AddressKind) -> &'static str {
 }
 
 /// The address `pubkey`, a compressed secp256k1 key, has on `chain` as `encoding`.
+///
+/// `network` selects Bitcoin's mainnet/testnet/regtest parameters; it is ignored for every
+/// other chain, whose network is fixed by the chain itself. A caller that only ever means
+/// mainnet passes [`crate::bip32::Network::Mainnet`].
 pub fn from_secp256k1(
     chain: &Chain,
     encoding: Encoding,
+    network: crate::bip32::Network,
     pubkey: &[u8; PUBKEY_LEN],
     out: &mut [u8],
 ) -> Result<usize, Error> {
@@ -51,12 +56,10 @@ pub fn from_secp256k1(
     }
     match encoding {
         Encoding::Utxo(kind) if chain.id == ChainId::Bitcoin => {
-            crate::address::encode(kind, crate::bip32::Network::Mainnet, pubkey, out).map_err(|e| {
-                match e {
-                    crate::address::Error::InvalidKey => Error::InvalidKey,
-                    crate::address::Error::BufferTooSmall { .. } => Error::BufferTooSmall,
-                    _ => Error::Encoding,
-                }
+            crate::address::encode(kind, network, pubkey, out).map_err(|e| match e {
+                crate::address::Error::InvalidKey => Error::InvalidKey,
+                crate::address::Error::BufferTooSmall { .. } => Error::BufferTooSmall,
+                _ => Error::Encoding,
             })
         }
         Encoding::Utxo(kind) => {
@@ -149,7 +152,7 @@ mod tests {
 
     fn addr(chain: &Chain, encoding: Encoding, path: &str) -> String {
         let mut out = [0u8; MAX_LEN];
-        let n = from_secp256k1(chain, encoding, &secp_at(path), &mut out).unwrap();
+        let n = from_secp256k1(chain, encoding, crate::bip32::Network::Mainnet, &secp_at(path), &mut out).unwrap();
         core::str::from_utf8(&out[..n]).unwrap().to_owned()
     }
 
@@ -166,13 +169,34 @@ mod tests {
         );
     }
 
+    /// The network reaches Bitcoin's address encoding: the same key on testnet and
+    /// regtest wears `tb` and `bcrt`, while other chains ignore it.
+    #[test]
+    fn bitcoin_addresses_follow_the_network() {
+        let key = secp_at("m/84'/1'/0'/0/0");
+        let enc = |net| {
+            let mut out = [0u8; MAX_LEN];
+            let n = from_secp256k1(
+                &super::super::BITCOIN,
+                Encoding::Utxo(AddressKind::P2wpkh),
+                net,
+                &key,
+                &mut out,
+            )
+            .unwrap();
+            core::str::from_utf8(&out[..n]).unwrap().to_owned()
+        };
+        assert!(enc(crate::bip32::Network::Testnet).starts_with("tb1"));
+        assert!(enc(crate::bip32::Network::Regtest).starts_with("bcrt1"));
+    }
+
     /// A format the chain does not list is refused, even if the encoder could write it.
     #[test]
     fn a_format_a_chain_does_not_have_is_refused() {
         let key = secp_at("m/44'/0'/0'/0/0");
         let mut out = [0u8; MAX_LEN];
         assert_eq!(
-            from_secp256k1(&super::super::BITCOIN, Encoding::Evm, &key, &mut out),
+            from_secp256k1(&super::super::BITCOIN, Encoding::Evm, crate::bip32::Network::Mainnet, &key, &mut out),
             Err(Error::NotThisChain)
         );
     }
@@ -265,6 +289,7 @@ mod tests {
                 from_secp256k1(
                     &BITCOIN_CASH,
                     Encoding::Utxo(AddressKind::P2wpkh),
+                    crate::bip32::Network::Mainnet,
                     &key,
                     &mut out
                 ),
@@ -296,7 +321,7 @@ mod tests {
                         continue;
                     }
                     let mut out = [0u8; MAX_LEN];
-                    let n = from_secp256k1(c, f.encoding, &key, &mut out)
+                    let n = from_secp256k1(c, f.encoding, crate::bip32::Network::Mainnet, &key, &mut out)
                         .unwrap_or_else(|e| panic!("{} {}: {e:?}", c.name, f.label));
                     assert!(n > 0 && n <= MAX_LEN, "{} {}", c.name, f.label);
                 }

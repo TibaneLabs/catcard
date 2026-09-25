@@ -25,7 +25,7 @@ use catcard_callgate::Callgate;
 use catcard_ui::keypad::{Event, KEYS, Key};
 use catcard_ui::textentry::Entry;
 use catcard_wallet::address::{self, AddressKind};
-use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, Network};
+use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey};
 use catcard_wallet::{bip322, message, signfile};
 use core::fmt::Write as _;
 use zeroize::Zeroize;
@@ -271,7 +271,7 @@ fn address_at(
     let pubkey = here.public_key(kw);
     let mut buf = [0u8; address::MAX_ADDRESS_LEN];
     let n =
-        address::encode(KIND, Network::Mainnet, &pubkey, &mut buf).map_err(|_| "address failed")?;
+        address::encode(KIND, crate::prefs::network(), &pubkey, &mut buf).map_err(|_| "address failed")?;
     let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
     addr.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
         .map_err(|_| "address failed")?;
@@ -341,7 +341,7 @@ fn sign_message(
             .map_err(|_| "no room for it")?;
 
         let mut address = [0u8; address::MAX_ADDRESS_LEN];
-        let n = address::encode(KIND, Network::Mainnet, &pubkey, &mut address)
+        let n = address::encode(KIND, crate::prefs::network(), &pubkey, &mut address)
             .map_err(|_| "address failed")?;
         let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
         addr.push_str(core::str::from_utf8(&address[..n]).unwrap_or(""))
