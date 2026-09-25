@@ -36,7 +36,7 @@
 //! minute here. It is sliced on a fixed round count so the progress bar can move --
 //! never on anything derived from the words -- exactly as `bip39::Stretch` is.
 
-use catcard_backup::{body, kdf, sevenz};
+use catcard_backup::{body, clone, kdf, sevenz};
 use catcard_callgate::Callgate;
 use catcard_callgate::pin::{SECRET_LEN, bip39_entropy, encode_bip39, encode_xprv, xprv_parts};
 use catcard_wallet::bip32::{ExtendedPrivKey, serialize::MAX_BASE58_LEN};
@@ -55,6 +55,16 @@ const RESTORE_HEAD: &str = "Restore backup";
 /// One name, not a dated one: `write_card_export` finds the next free `-2`, `-3` for us,
 /// so a card accumulates backups without either overwriting one or needing a clock.
 const CARD_FILE: &str = "/backup.7z";
+
+/// The two files a clone leaves on the card.
+///
+/// The blank device writes the start file (its ephemeral public key); the device with a
+/// wallet reads it and writes the clone file (its public key, then the encrypted archive).
+/// Both are `.bin`, so the file picker's `bin` filter shows them and the magic bytes tell
+/// them apart -- picking the wrong one is a clear refusal, not a silent misread.
+const CLONE_START_FILE: &str = "/ccbk-start.bin";
+const CLONE_FILE: &str = "/ccbk-clone.bin";
+const CLONE_HEAD: &str = "Clone Coldcard";
 
 /// The one file inside the archive. Its name is not load-bearing -- the reader takes
 /// whatever single file it finds -- but it should say what it is to whoever opens it.
@@ -515,20 +525,39 @@ fn apply(
         return Err("no wallet in that backup");
     };
 
+    let res = store_secret(gate, login, ui, &secret);
+    secret.zeroize();
+    res.map(|()| what)
+}
+
+/// Write a 72-byte stash into the secure element and confirm it stuck.
+///
+/// The committing half every restore path shares -- a decrypted backup, a clone, a
+/// TAPSIGNER master -- so they cannot drift apart in the one place where drifting apart
+/// loses a wallet. **Write, read back, then claim**: a slot that did not keep what was
+/// written is reported, not assumed, because the owner is about to trust it. The caller
+/// owns `secret` and zeroizes it; this only reads it.
+pub(crate) fn store_secret(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    secret: &[u8; SECRET_LEN],
+) -> Result<(), &'static str> {
     menu::message(ui.panel, "Applying", "do not disconnect", "");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let stored = login.set_secret(&pin_gate, &secret);
+    let stored = login.set_secret(&pin_gate, secret);
     // Written, then read back and compared, before anything claims it worked -- the
     // same order `import_seed` uses, and for the same reason.
-    let kept = stored.is_ok() && login.verify_secret(&pin_gate, &secret).unwrap_or(false);
-    secret.zeroize();
+    let kept = stored.is_ok() && login.verify_secret(&pin_gate, secret).unwrap_or(false);
     if stored.is_err() {
         return Err("the secure element refused it");
     }
     if !kept {
         return Err("the slot did not keep what was written");
     }
-    Ok(what)
+    // The stored slot holds a wallet now, whatever the menu last believed.
+    crate::key::note_stored_seed(true);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +623,230 @@ fn describe(e: catcard_backup::Error) -> &'static str {
         E::KdfTooExpensive => "it asks for too much work",
         E::Truncated | E::BufferTooSmall => "too big, or cut short",
         E::NotABackup => "no backup inside it",
+        E::CloneBadMagic => "not a clone file from a Coldcard",
+        E::CloneKeyAgreement => "the two devices could not agree a key",
         _ => "the file did not make sense",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Clone Coldcard
+// ---------------------------------------------------------------------------
+//
+// Device-to-device migration with no memorized password. The wallet travels in the same
+// AES-256 archive a backup uses, but the key is an ephemeral X25519 agreement between the
+// two devices rather than twelve words -- see [`catcard_backup::clone`]. Two trips of one
+// microSD card: the blank device writes a start file, the device with the wallet answers
+// with an encrypted clone file, and the blank device opens it.
+
+/// Export the stored wallet as a clone file, answering a blank device's start file.
+///
+/// The source side: it already holds a wallet, so it needs a target's public key (the
+/// start file) before it can seal anything. Nothing here is destructive -- it only reads
+/// the wallet out -- so there is no warning to show.
+pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    let mut secret = match fetch(gate, login, ui, CLONE_HEAD) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // The target's public key, out of the start file it left on the card.
+    let Some(path) = menu::browse_sd(ui, "Pick clone start", Some("bin"), menu::Browse::File) else {
+        secret.zeroize();
+        return;
+    };
+    let mut start = [0u8; 64];
+    let target_pub = match crate::signtx::read_card_file(&path, &mut start) {
+        Ok(n) => match clone::read_start(&start[..n]) {
+            Ok(p) => p,
+            Err(e) => {
+                secret.zeroize();
+                return say(ui, "Not a clone start", describe(e));
+            }
+        },
+        Err(why) => {
+            secret.zeroize();
+            return say(ui, "Cannot read", why);
+        }
+    };
+
+    let outcome = write_clone(ui, &secret, &target_pub);
+    secret.zeroize();
+    match outcome {
+        Ok(name) => {
+            crate::catlog!("clone: wrote {}", name.as_str());
+            menu::message(ui.panel, "Clone written", &name[1..], "put it in the new one");
+        }
+        Err(why) => {
+            crate::catlog!("clone: export failed: {}", why);
+            menu::message(ui.panel, "Clone failed", why, "any key to go back");
+        }
+    }
+    menu::wait_for_any_key(ui);
+}
+
+/// Agree a key with the target, seal the wallet, and write the clone file.
+fn write_clone(
+    ui: &mut Ui<'_>,
+    secret: &[u8; SECRET_LEN],
+    target_pub: &[u8; clone::PUBKEY_LEN],
+) -> Result<heapless::String<{ menu::EXPORT_NAME_MAX }>, &'static str> {
+    // A fresh ephemeral for this clone, from the protocol DRBG -- never the seed pool, and
+    // never reused. The scalar dies with `source`; the public key goes in the file so the
+    // target can complete the same agreement.
+    let mut scalar = [0u8; clone::PUBKEY_LEN];
+    ui.protocol
+        .generate(&mut scalar)
+        .map_err(|_| "no random key")?;
+    let source = clone::Ephemeral::new(&scalar);
+    scalar.zeroize();
+
+    let (key, iv) = source
+        .agree(target_pub, source.public(), target_pub)
+        .map_err(|_| "clone key agreement failed")?;
+
+    let mut scratch = Scratch::new();
+
+    // The body, with preferences if they fit and without them if they do not -- rebuilt
+    // over a cleared buffer, exactly as `write_archive` does and for the same reason.
+    let body_len = match build_body(&mut scratch.0, secret, true) {
+        Ok(n) => n,
+        Err(catcard_backup::Error::BufferTooSmall) => {
+            scratch.0.zeroize();
+            build_body(&mut scratch.0, secret, false).map_err(|_| "clone too large")?
+        }
+        Err(_) => return Err("could not build the clone"),
+    };
+
+    let archive_len = sevenz::seal_at(
+        &mut scratch.0,
+        body_len,
+        INNER_FILE,
+        &key,
+        &iv,
+        &[],
+        kdf::DEFAULT_CYCLES_POWER,
+    )
+    .map_err(|_| "could not seal the clone")?
+    .len();
+
+    // Prepend the header (magic + our public key). The archive is at the front of the
+    // buffer; slide it right by the header, then write the header in front of it.
+    let total = clone::HEADER_LEN
+        .checked_add(archive_len)
+        .filter(|&t| t <= scratch.0.len())
+        .ok_or("clone too large")?;
+    scratch.0.copy_within(0..archive_len, clone::HEADER_LEN);
+    clone::write_header(&mut scratch.0, source.public()).map_err(|_| "clone too large")?;
+
+    menu::card_wait(ui.panel, CLONE_HEAD, "writing to the card");
+    menu::write_card_export(CLONE_FILE, &scratch.0[..total], None)
+}
+
+/// Import a clone file onto a blank device, publishing a start file first.
+///
+/// The target side, and the destructive one: it replaces whatever is stored, so the same
+/// warning `restore` shows guards it. The ephemeral private key stays in RAM in this one
+/// function for the whole two-trip exchange, and is wiped when the function returns.
+pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    if crate::key::stored_wallet(login) {
+        menu::ask(
+            ui.panel,
+            "Wallet exists",
+            "a clone DESTROYS",
+            "the one stored now",
+        );
+        if !menu::confirmed(ui) {
+            return;
+        }
+    }
+
+    // Our ephemeral. Held here until the archive is open, then dropped (and wiped).
+    let mut scalar = [0u8; clone::PUBKEY_LEN];
+    if ui.protocol.generate(&mut scalar).is_err() {
+        scalar.zeroize();
+        return say(ui, "No clone key", "the generator would not give one");
+    }
+    let target = clone::Ephemeral::new(&scalar);
+    scalar.zeroize();
+
+    // Publish the start file: our public key, for the other device to seal against.
+    let mut start = [0u8; clone::START_LEN];
+    if clone::write_start(&mut start, target.public()).is_err() {
+        return say(ui, "Clone start", "could not be built");
+    }
+    menu::card_wait(ui.panel, CLONE_HEAD, "writing the start file");
+    let start_name = match menu::write_card_export(CLONE_START_FILE, &start[..], None) {
+        Ok(n) => n,
+        Err(why) => return say(ui, "Cannot write", why),
+    };
+    crate::catlog!("clone: start file {}", start_name.as_str());
+
+    menu::message(
+        ui.panel,
+        "Clone started",
+        "take card to the",
+        "old Coldcard",
+    );
+    menu::wait_for_any_key(ui);
+    menu::message(
+        ui.panel,
+        "Then return here",
+        "and pick the",
+        "clone file",
+    );
+    menu::wait_for_any_key(ui);
+
+    let Some(path) = menu::browse_sd(ui, "Pick clone file", Some("bin"), menu::Browse::File) else {
+        return;
+    };
+
+    let mut scratch = Scratch::new();
+    menu::card_wait(ui.panel, CLONE_HEAD, "reading the card");
+    let len = match crate::signtx::read_card_file(&path, &mut scratch.0) {
+        Ok(n) => n,
+        Err(why) => return say(ui, "Cannot read", why),
+    };
+
+    let source_pub = match clone::read_header(&scratch.0[..len]) {
+        Ok(p) => p,
+        Err(e) => return say(ui, "Not a clone", describe(e)),
+    };
+    let (key, _iv) = match target.agree(&source_pub, &source_pub, target.public()) {
+        Ok(k) => k,
+        Err(e) => return say(ui, "Clone failed", describe(e)),
+    };
+
+    let body_len = match open_clone(&mut scratch.0, len, &key) {
+        Ok(n) => n,
+        Err(why) => return say(ui, "Cannot open it", why),
+    };
+
+    match apply(gate, login, ui, &scratch.0[..body_len]) {
+        Ok(what) => {
+            crate::catlog!("clone: imported {}", what);
+            menu::message(ui.panel, "Wallet cloned", what, "from the other device");
+        }
+        Err(why) => menu::message(ui.panel, "Not cloned", why, "any key to go back"),
+    }
+    menu::wait_for_any_key(ui);
+}
+
+/// Open the archive inside a clone file with the agreed key, leaving the body at the
+/// front of `buf`.
+///
+/// The archive sits after the [`clone::HEADER_LEN`] header; it is decrypted in place there
+/// and the plaintext body then slid to the front so [`apply`] reads it the same way it
+/// reads a decrypted backup.
+fn open_clone(buf: &mut [u8; BUF], len: usize, key: &kdf::Key) -> Result<usize, &'static str> {
+    let file = match sevenz::open(&buf[clone::HEADER_LEN..len]).map_err(describe)? {
+        sevenz::Found::File(s) => s,
+        // Clone never writes an encrypted header; anything that claims to is not ours.
+        sevenz::Found::Header(_) => return Err("that clone has an encrypted header"),
+    };
+    let n = sevenz::decrypt_in_place(&mut buf[clone::HEADER_LEN..len], &file, key)
+        .map_err(describe)?
+        .len();
+    buf.copy_within(clone::HEADER_LEN..clone::HEADER_LEN + n, 0);
+    Ok(n)
 }

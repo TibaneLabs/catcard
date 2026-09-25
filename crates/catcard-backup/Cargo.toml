@@ -14,5 +14,5 @@ std = []
 
 [dependencies]
 emjson = { workspace = true }
-purecrypto = { workspace = true, features = ["hash", "cipher"] }
+purecrypto = { workspace = true, features = ["hash", "cipher", "kdf", "ec"] }
 zeroize = { workspace = true, features = ["derive"] }

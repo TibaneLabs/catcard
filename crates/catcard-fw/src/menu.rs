@@ -232,8 +232,16 @@ enum Screen {
     NewSeedMenu,
     /// Generating one, of this many words.
     NewSeed(u8),
+    /// How to import a seed: typed words, a Coldcard clone, or a TAPSIGNER backup.
+    ImportMenu,
     /// Restoring a seed: word count is not asked, the owner types until done.
     ImportSeed,
+    /// Write the wallet as a clone file, answering another Coldcard's start file.
+    CloneExport,
+    /// Import a wallet from a clone file, publishing a start file first.
+    CloneImport,
+    /// Import a wallet from a TAPSIGNER `.aes` backup and its key.
+    TapsignerImport,
     /// Device settings: the login submenu and, when a seed exists, destroying it.
     Settings,
     /// Login settings, currently just changing the main PIN.
@@ -573,6 +581,13 @@ const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk"];
 /// only a matching arm in [`step`].
 const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 
+/// The ways a blank device gets a wallet from somewhere else.
+///
+/// "Words" is the plain BIP-39 restore; "Clone" migrates from another Coldcard with no
+/// memorized password; "TAPSIGNER" decrypts a card's `.aes` backup. Dispatched by name in
+/// [`step`], so appending a fourth needs only a matching arm.
+const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER"];
+
 /// The tool drawer, stock's `Advanced/Tools`.
 ///
 /// `Upgrade Firmware` is last, and last on purpose: it is stock's own name for the entry,
@@ -617,7 +632,7 @@ const UTILS_ITEMS: &[&str] = &[
 ///
 /// Restore is here on a blank device too -- Utils is on the blank main menu -- which is
 /// the only place a device with no wallet can get one from a file.
-const BACKUP_ITEMS: &[&str] = &["Save backup", "Restore backup"];
+const BACKUP_ITEMS: &[&str] = &["Save backup", "Restore backup", "Clone Coldcard"];
 
 /// The shapes the same keys can be written in.
 ///
@@ -1328,6 +1343,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::backup::restore(a.gate, a.login, a.ui),
             Screen::BackupMenu,
         ),
+        // Export reads the wallet out; it does not change the stored secret.
+        Screen::CloneExport => to(
+            |a| crate::backup::clone_export(a.gate, a.login, a.ui),
+            Screen::BackupMenu,
+        ),
         Screen::SignPsbt => to(
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::SignMenu,
@@ -1428,6 +1448,15 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui), Screen::Main),
+        // Both put a seed on a blank device, so the session re-reads the slot afterwards.
+        Screen::CloneImport => reseeds(
+            |a| crate::backup::clone_import(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
+        Screen::TapsignerImport => reseeds(
+            |a| crate::tapsigner::import(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
         Screen::WipeSeed => reseeds(
             |a| {
                 wipe_seed(a.gate, a.login, a.ui);
@@ -1642,7 +1671,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             // The first two cells on a blank device, where there is nothing to sign and
             // nothing to explore.
             (Key::Confirm, Some("New")) => Screen::NewSeedMenu,
-            (Key::Confirm, Some("Import")) => Screen::ImportSeed,
+            (Key::Confirm, Some("Import")) => Screen::ImportMenu,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Scan QR")) => Screen::ScanQr,
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
@@ -1666,6 +1695,14 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::NewSeedMenu,
+        },
+        // By name, like the menus above it: the list is short and reorder-safe.
+        Screen::ImportMenu => match (key, IMPORT_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Words")) => Screen::ImportSeed,
+            (Key::Confirm, Some("Clone")) => Screen::CloneImport,
+            (Key::Confirm, Some("TAPSIGNER")) => Screen::TapsignerImport,
+            (Key::Cancel, _) => Screen::Main,
+            _ => Screen::ImportMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
             #[cfg(not(feature = "board-mk3"))]
@@ -1813,6 +1850,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::BackupMenu => match (key, BACKUP_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Save backup")) => Screen::BackupSave,
             (Key::Confirm, Some("Restore backup")) => Screen::BackupRestore,
+            (Key::Confirm, Some("Clone Coldcard")) => Screen::CloneExport,
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::BackupMenu,
         },
@@ -2224,6 +2262,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::BackupMenu => Some(BACKUP_ITEMS),
         Screen::SignMenu => Some(SIGN_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
+        Screen::ImportMenu => Some(IMPORT_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
         #[cfg(not(feature = "board-mk3"))]
@@ -2249,6 +2288,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::Utils
         | Screen::SignMenu
         | Screen::NewSeedMenu
+        | Screen::ImportMenu
         | Screen::Debug
         | Screen::Settings
         | Screen::Login
@@ -2360,6 +2400,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::NewSeed(_) => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
         Screen::ImportSeed => {}
+        // Handled in `run`: each drives its own file picker, key entry and progress.
+        Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
         // Handled in `run`: it drives the PIN-entry screens itself.
         Screen::ChangePin => {}
         // Handled in `run`: the game drives the panel in its own loop.
@@ -2419,6 +2461,10 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::NewSeedMenu => {
             let _ = note.push_str("how many words?");
             "New wallet"
+        }
+        Screen::ImportMenu => {
+            let _ = note.push_str("where from?");
+            "Import seed"
         }
         Screen::Debug => "Debug",
         Screen::KeyMenu => {

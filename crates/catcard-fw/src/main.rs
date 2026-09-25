@@ -158,6 +158,7 @@ mod statedump;
 /// any and whose keypad has no modifiers to report.
 #[cfg(feature = "board-q1")]
 mod statusbar;
+mod tapsigner;
 /// The lamp belongs to the scanner, so it is the Q1's too.
 #[cfg(feature = "board-q1")]
 mod torch;

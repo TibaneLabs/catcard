@@ -740,3 +740,40 @@ multisig store already is.
 The 30-key cap and the "can sign matching inputs" behaviour are confirmed from
 `hw-reference/firmware-features.md` §7 and §11 `[C]`; only stock's on-disk key and JSON
 shape are the open `[?]`.
+## TAPSIGNER backup format — the block mode and the framing are inferred
+
+`crates/catcard-backup/src/tapsigner.rs` decrypts a TAPSIGNER `.aes` card backup and
+recovers the `xprv` master inside it (menu: `Import → TAPSIGNER`). The format is taken
+from the **publicly documented** TAPSIGNER/coinkite backup, not measured against a card:
+
+- **AES-128-CBC with an all-zero IV** `[?]`. The backup key is the 32 hex characters the
+  card shows its owner once. Some public notes describe the mode as CTR rather than CBC;
+  the two produce different plaintext, so this needs a real card's file to settle. The
+  code is structured so only the one `Cbc::new(Aes128::new(key), &IV)` line changes if it
+  turns out to be CTR.
+- **The plaintext is an `xprv`/`tprv` base58 string** `[I]`. Where exactly it sits inside
+  the decrypted block — leading offset, trailing padding, any surrounding fields — is not
+  pinned, so `find_master` *searches* for the version prefix and takes the base58 run
+  rather than assuming offset zero. A wrong key (or the wrong mode) decrypts to noise with
+  no prefix in it, which surfaces as "wrong key, or not a TAPSIGNER backup" — never a
+  scrambled key reaching the secure element.
+
+Resolve by decrypting a known TAPSIGNER backup whose `xprv` is known, off a real card,
+and confirming the mode, IV and framing. Do **not** read the stock firmware for this.
+
+## Clone Coldcard file — a CatCard format, not stock's wire format
+
+`crates/catcard-backup/src/clone.rs` implements device-to-device migration with no
+memorized password (menu: `Import → Clone` on the blank device, `Utils → Backup → Clone
+Coldcard` on the one with a wallet). `hw-reference` names the feature (§7) but does not
+give stock's clone wire format, so this is **CatCard's own** `[I]`:
+
+- ephemeral X25519 both sides, HKDF-SHA256 over the shared secret with a transcript that
+  names both public keys (`info = "catcard-clone-v1"`), yielding the AES-256 key and IV
+  for the same 7-Zip container a backup uses;
+- a start file (`ccbk-start.bin`: `CCLNSTRT` + the blank device's public key) and a clone
+  file (`ccbk-clone.bin`: `CCLONE01` + the source's public key, then the archive).
+
+Two CatCards clone to each other; a CatCard and a **stock** Coldcard do **not**. If
+cross-vendor clone is ever wanted, the stock format has to be obtained from a sanctioned
+source — not the firmware tree — and this replaced with it.

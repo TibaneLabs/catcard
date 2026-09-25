@@ -44,8 +44,10 @@
 #![deny(unsafe_code)]
 
 pub mod body;
+pub mod clone;
 pub mod kdf;
 pub mod sevenz;
+pub mod tapsigner;
 
 pub use kdf::{Key, KeyDerivation};
 
@@ -97,6 +99,15 @@ pub enum Error {
     NotHex,
     /// The body is missing the opening marker line.
     NotABackup,
+    /// A TAPSIGNER backup key was not the expected 32 hex characters (16 bytes).
+    BadBackupKey,
+    /// A decrypted TAPSIGNER backup held no recognisable `xprv`/`tprv` master key.
+    NoXprv,
+    /// A clone file's magic does not match -- it is not a CatCard clone container.
+    CloneBadMagic,
+    /// The X25519 key agreement for a clone failed: the peer's public key is a
+    /// small-order point, whose shared secret an attacker could have forced.
+    CloneKeyAgreement,
 }
 
 impl core::fmt::Display for Error {
@@ -120,6 +131,10 @@ impl core::fmt::Display for Error {
             Error::Escaped => "string contains an escape",
             Error::NotHex => "value is not hex",
             Error::NotABackup => "missing backup marker line",
+            Error::BadBackupKey => "backup key is not 32 hex characters",
+            Error::NoXprv => "no master key in the decrypted backup",
+            Error::CloneBadMagic => "not a CatCard clone file",
+            Error::CloneKeyAgreement => "clone key agreement failed",
         };
         f.write_str(s)
     }
