@@ -47,6 +47,10 @@ pub mod domain {
     pub const USB: &[u8] = b"catcard/drbg/usb/v1";
     /// Deterministic-signing auxiliary randomness (RFC 6979 extra entropy).
     pub const SIGNING: &[u8] = b"catcard/drbg/signing/v1";
+    /// A single-use paper-wallet private key, unrelated to the device seed. Its own
+    /// domain so the standalone key a paper wallet hands out on paper can never coincide
+    /// with a value drawn for any other purpose, even though it is real key material.
+    pub const PAPER: &[u8] = b"catcard/drbg/paper/v1";
 }
 
 /// Build the per-purpose DRBGs from a pool that has met its policy.
@@ -125,7 +129,13 @@ mod tests {
 
     #[test]
     fn domains_are_distinct() {
-        let all = [domain::UI, domain::PROTOCOL, domain::SIGNING];
+        let all = [
+            domain::UI,
+            domain::PROTOCOL,
+            domain::USB,
+            domain::SIGNING,
+            domain::PAPER,
+        ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b);

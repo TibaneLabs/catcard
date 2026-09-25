@@ -94,6 +94,11 @@ mod notes;
 #[cfg(not(feature = "board-mk3"))]
 mod nvram;
 mod panic;
+// The paper-wallet screen leans on `menu::choose` and the card-export path, neither of
+// which the mk3 build carries, and its QR/HTML rendering would cost the mk3's scarce
+// flash. Gated off mk3; every other board offers it.
+#[cfg(not(feature = "board-mk3"))]
+mod paperwallet;
 mod passphrase;
 mod pinentry;
 #[cfg(feature = "board-q1")]

@@ -118,6 +118,9 @@ enum Screen {
     Utils,
     AnalyzeRng,
     UsbDrive,
+    /// Generate a single-use paper wallet, unrelated to the device seed, to microSD.
+    #[cfg(not(feature = "board-mk3"))]
+    PaperWallet,
     ViewTrngWords,
     /// Debug: write a fixed URL to the NFC tag and hold the screen.
     #[cfg(not(feature = "board-mk3"))]
@@ -601,6 +604,8 @@ const UTILS_ITEMS: &[&str] = &[
     "USB Drive",
     "Export wallet",
     "Backup",
+    #[cfg(not(feature = "board-mk3"))]
+    "Paper wallet",
     "Browse SD card",
     "Format SD card",
     "Games",
@@ -618,6 +623,10 @@ const UTILS_ITEMS: &[&str] = &[
     // Stock's `Advanced/Tools` → `Backup`, in the drawer this firmware calls Utils.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT [C]
     "Backup",
+    // Stock's `Advanced/Tools` → `Paper Wallets`. Gated off mk3 (no `choose`, scarce
+    // flash). Source: hw-reference/firmware-features.md §8 "paper wallets" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Paper wallet",
     "Browse SD card",
     "Format SD card",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
@@ -1288,6 +1297,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
         Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::PaperWallet => to(
+            |a| crate::paperwallet::create(a.ui, a.pool.take()),
+            Screen::Utils,
+        ),
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => to(|a| crate::nfc::probe_screen(a.ui), Screen::Debug),
@@ -1835,6 +1849,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Paper wallet")) => Screen::PaperWallet,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
             (Key::Confirm, Some("Backup")) => Screen::BackupMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
@@ -2338,6 +2354,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::AnalyzeRng => {}
         // Handled in `run`: it takes over USB and needs the keypad to leave.
         Screen::UsbDrive => {}
+        // Handled in `run`: it prompts, generates and writes the card itself.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::PaperWallet => {}
         Screen::ViewTrngWords => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
