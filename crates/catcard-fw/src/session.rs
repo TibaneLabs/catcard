@@ -209,6 +209,34 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
             pool: pool.as_mut(),
         })
     }
+    // Turn on the two stack-overflow defences now, on the normal boot-into-menu path.
+    // This is strictly *after* the failsafe CANCEL check in `main` (which runs before
+    // `session::run` and drops a held-CANCEL boot into USB recovery), so holding CANCEL at
+    // power-on always reaches the reflash before either defence is live -- a bad
+    // interaction stays recoverable on a dev unit (docs/KERNEL.md §5). Both are
+    // wallet-independent, so they arm unconditionally here, even for a device being set up.
+    //
+    // Arming the MPU fence is best-effort: if it cannot be programmed -- no MPU, or the
+    // stack already sits within the arm margin of the floor -- the boot logs why and
+    // carries on. A diagnostic defence must never be what stops the device booting.
+    match crate::stackguard::arm() {
+        Ok(()) => crate::catlog!(
+            "stackguard: MPU fence armed at {:#010x}",
+            crate::stackguard::floor()
+        ),
+        Err(e) => {
+            let why = match e {
+                crate::stackguard::ArmError::NoMpu => "no MPU regions",
+                crate::stackguard::ArmError::TooClose => "stack too near floor",
+            };
+            crate::catlog!("stackguard: MPU fence not armed: {}", why);
+        }
+    }
+    // The kernel reads both guard words on every switch from here on; the flag is honoured
+    // once `start_menu` brings the scheduler up.
+    catcard_kernel::set_guard_checks(true);
+    crate::catlog!("stackguard: switch canary checks on");
+
     crate::catlog!("boot: menu as a kernel task");
     crate::ktest::start_menu(
         &gate,
