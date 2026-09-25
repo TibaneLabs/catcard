@@ -5319,7 +5319,20 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
 
     // Every chain the owner has enabled, which on a build with one chain is that one.
     let order = crate::chains::enabled(gate, login, ui);
-    let mut keys: heapless::Vec<hdkey::HdKey, { crate::chains::MAX }> = heapless::Vec::new();
+
+    // The account keys accumulate in a heap block, not on the stack. An `HdKey` is a few
+    // hundred bytes, so `chains::MAX` of them is several kilobytes; carrying that on the UI
+    // task's stack, on top of the BIP-32 derivation frames, overran the 32 KB stack and
+    // tripped the stack guard. The encoder reads them straight out of the block as a
+    // `&[HdKey]`, so the block and the encode output are the only two live allocations.
+    let Some(mut store) =
+        crate::heap::take(crate::chains::MAX * core::mem::size_of::<hdkey::HdKey>())
+    else {
+        message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    let mut keys = HdKeyStore::new(store.bytes());
 
     // The secp256k1 chains, from the BIP-32 master. Derived a level at a time with the
     // bar moving between steps, which is what keeps a dozen accounts from looking like a
@@ -5365,7 +5378,7 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             let Some(key) = hdkey_for(chain, &steps, fingerprint, &xpub) else {
                 continue;
             };
-            let _ = keys.push(key);
+            keys.push(key);
         }
     }
     // The private key goes before anything else happens: what follows is a screen that
@@ -5381,8 +5394,10 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     let wants_ed = false;
     #[cfg(feature = "multichain")]
     if wants_ed {
+        // The closure pushes into the same heap-backed accumulator the secp256k1 pass
+        // filled, so there is one set of keys on the way to the encoder rather than a
+        // second `HdKey` vector built beside the first while both are live.
         let got = with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
-            let mut out: heapless::Vec<hdkey::HdKey, { crate::chains::MAX }> = heapless::Vec::new();
             for chain in order.iter() {
                 if chain.scheme != Scheme::Slip10Ed25519 {
                     continue;
@@ -5395,15 +5410,11 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
                 else {
                     continue;
                 };
-                let _ = out.push(key);
+                keys.push(key);
             }
-            Some(out)
+            Some(())
         });
-        if let Ok(more) = got {
-            for key in more {
-                let _ = keys.push(key);
-            }
-        }
+        let _ = got;
     }
     let _ = wants_ed;
 
@@ -5419,7 +5430,7 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         wait_for_any_key(ui);
         return;
     };
-    let Ok(len) = multi::encode(fingerprint, &keys, DEVICE, mem.bytes()) else {
+    let Ok(len) = multi::encode(fingerprint, keys.as_slice(), DEVICE, mem.bytes()) else {
         message(ui.panel, HEAD, "could not encode", "any key to go back");
         wait_for_any_key(ui);
         return;
@@ -5427,6 +5438,78 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     crate::catlog!("keystone: {} accounts, {} bytes", keys.len(), len);
     let body = &mem.bytes()[..len];
     crate::qrshow::animate_bcur(ui, HEAD, Kind::MultiAccounts.written_as(), body);
+}
+
+/// A fixed-capacity accumulator of `HdKey`s that lives in a heap block instead of on the
+/// stack.
+///
+/// `export_keystone` gathers up to `chains::MAX` account keys before handing the slice to
+/// `multi::encode`. An `HdKey` is a few hundred bytes, so that many on the stack -- on top
+/// of the derivation frames -- overran the UI task's 32 KB stack. This holds them in a
+/// `heap::take` block instead: the encoder still sees them as a `&[HdKey]`.
+#[cfg(feature = "multichain")]
+struct HdKeyStore<'a> {
+    slots: &'a mut [core::mem::MaybeUninit<catcard_bcur::registry::hdkey::HdKey>],
+    len: usize,
+}
+
+#[cfg(feature = "multichain")]
+impl<'a> HdKeyStore<'a> {
+    /// Wrap a heap block's bytes as room for as many whole `HdKey`s as they hold.
+    fn new(bytes: &'a mut [u8]) -> Self {
+        use catcard_bcur::registry::hdkey::HdKey;
+        // `heap::take` returns a 4-aligned block and an `HdKey`'s alignment is 4 on this
+        // 32-bit target, so the cast below is well aligned. Assert it rather than assume it.
+        const _: () = assert!(core::mem::align_of::<HdKey>() <= 4);
+        let count = bytes.len() / core::mem::size_of::<HdKey>();
+        // SAFETY: the block is 4-aligned (see the assert) and `count` slots of
+        // `size_of::<HdKey>()` bytes fit within its length. `MaybeUninit` needs no
+        // initialisation, and `len` below tracks which slots actually hold a key, so no
+        // uninitialised `HdKey` is ever read.
+        let slots = unsafe {
+            core::slice::from_raw_parts_mut(
+                bytes.as_mut_ptr().cast::<core::mem::MaybeUninit<HdKey>>(),
+                count,
+            )
+        };
+        HdKeyStore { slots, len: 0 }
+    }
+
+    /// Append a key. Full is a no-op: the block is sized for `chains::MAX` and the caller
+    /// never walks more chains than that, so it cannot overflow in practice.
+    fn push(&mut self, key: catcard_bcur::registry::hdkey::HdKey) {
+        if self.len < self.slots.len() {
+            self.slots[self.len].write(key);
+            self.len += 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The keys pushed so far.
+    fn as_slice(&self) -> &[catcard_bcur::registry::hdkey::HdKey] {
+        use catcard_bcur::registry::hdkey::HdKey;
+        // SAFETY: `push` initialised slots `0..len` and hands out no interior mutability,
+        // so those slots hold valid `HdKey`s for as long as `self` is borrowed.
+        unsafe { core::slice::from_raw_parts(self.slots.as_ptr().cast::<HdKey>(), self.len) }
+    }
+}
+
+#[cfg(feature = "multichain")]
+impl Drop for HdKeyStore<'_> {
+    fn drop(&mut self) {
+        for slot in &mut self.slots[..self.len] {
+            // SAFETY: slots `0..len` were initialised by `push`; each is dropped once,
+            // here, before the block's bytes go back to the heap.
+            unsafe { slot.assume_init_drop() };
+        }
+    }
 }
 
 /// One secp256k1 chain's entry: the node, its path, and what to call it.

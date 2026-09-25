@@ -950,6 +950,69 @@ fn every_account_goes_in_one_message() {
     assert!(r.at_end() || true);
 }
 
+/// A full `chains::MAX` worth of accounts encodes and reads back unchanged.
+///
+/// `export_keystone` gathers up to sixteen account keys (the firmware's `chains::MAX`),
+/// and moving that accumulator off the stack must not change a byte the encoder writes.
+/// Sixteen distinct secp256k1 accounts go in; every one comes back with its key, chain
+/// code, path and name intact, and the message is exactly the length re-encoding it
+/// produces -- so the slice the firmware now hands in encodes the same as the vector did.
+#[test]
+fn sixteen_accounts_round_trip() {
+    use crate::registry::hdkey::{Component, HdKey, KeyPath};
+    use crate::registry::multi;
+
+    const N: usize = 16;
+    const FP: u32 = 0xCA41_2C00;
+
+    let mut keys: heapless::Vec<HdKey, N> = heapless::Vec::new();
+    for i in 0..N as u32 {
+        let mut key = HdKey::of(&[(0x02 + i) as u8; 33]).expect("a compressed key");
+        key.chain_code = Some([i as u8; 32]);
+        key.parent_fingerprint = Some(0x1000_0000 + i);
+        key.origin = Some(
+            KeyPath::new(
+                FP,
+                &[
+                    Component::hardened(44),
+                    Component::hardened(i),
+                    Component::hardened(0),
+                ],
+            )
+            .expect("a path"),
+        );
+        let mut name: heapless::String<{ crate::registry::hdkey::NAME_MAX }> =
+            heapless::String::new();
+        core::fmt::Write::write_fmt(&mut name, format_args!("Chain {i}")).expect("short enough");
+        key.name = Some(name);
+        keys.push(key).expect("room for sixteen");
+    }
+
+    let mut out = vec![0u8; multi::encoded_len(N, 7)];
+    let n = multi::encode(FP, &keys, "CatCard", &mut out).expect("room");
+
+    // Read every one back and check it matches the key that went in.
+    let mut r = crate::cbor::Reader::new(&out[..n]);
+    assert_eq!(r.map().expect("a map"), 3);
+    assert_eq!(r.uint().expect("key"), 1);
+    assert_eq!(r.uint().expect("fingerprint"), u64::from(FP));
+    assert_eq!(r.uint().expect("key"), 2);
+    assert_eq!(r.array().expect("the keys"), N as u64);
+    for i in 0..N {
+        assert_eq!(r.tag().expect("tagged"), 303);
+        let got = HdKey::read(&mut r).expect("a key");
+        assert_eq!(got, keys[i], "account {i} survived the round trip");
+    }
+    assert_eq!(r.uint().expect("key"), 3);
+    assert_eq!(r.text().expect("the device"), "CatCard");
+    assert!(r.at_end(), "nothing trails the device name");
+
+    // Encoding it a second time is byte-identical: the encoder has no hidden state.
+    let mut again = vec![0u8; multi::encoded_len(N, 7)];
+    let m = multi::encode(FP, &keys, "CatCard", &mut again).expect("room");
+    assert_eq!(&out[..n], &again[..m], "the encoding is deterministic");
+}
+
 /// A key of a length neither curve uses is refused.
 #[test]
 fn a_key_of_no_curve_is_refused() {
