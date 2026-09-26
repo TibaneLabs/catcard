@@ -22,7 +22,7 @@
 //! BCR-2023-010 -- is a different structure and is refused as such, not misread as
 //! this one. [C]
 
-use super::hdkey::{self, Tags};
+use super::hdkey::{self, CoinInfo, Tags};
 use super::{
     Component, Error, HdKey, KeyPath, TAG_ACCOUNT_V1, TAG_ACCOUNT_V2, TAG_HDKEY_V1, TAG_HDKEY_V2,
     TAG_OUTPUT_V1, TAG_OUTPUT_V2,
@@ -161,17 +161,25 @@ impl Descriptor {
     /// An account-level descriptor, from the BIP-32 parts of the key.
     ///
     /// `path` is the derivation, all hardened, each index without the hardening bit --
-    /// one of [`STANDARD`]'s rows. The three optional fields BCR-2020-007 calls out
-    /// are all filled in: with the chain code, the origin and the parent fingerprint
-    /// present, the key is isomorphic with its BIP-32 serialization, and a wallet that
-    /// receives anything less cannot derive an address from it.
-    /// [C] BCR-2020-007 §"CDDL for HDKey"
+    /// what [`standard_path`] gives for the script on the network in force. The three
+    /// optional fields BCR-2020-007 calls out are all filled in: with the chain code,
+    /// the origin and the parent fingerprint present, the key is isomorphic with its
+    /// BIP-32 serialization, and a wallet that receives anything less cannot derive an
+    /// address from it. [C] BCR-2020-007 §"CDDL for HDKey"
     ///
-    /// `use-info` is deliberately absent: an omitted one means mainnet Bitcoin, which
-    /// is what this is, and every published vector leaves it out for that reason. [C]
+    /// `use_info` names the network. [`CoinInfo::BITCOIN`] is the default and is
+    /// omitted from the bytes -- "if the `use-info` field is omitted, defaults (mainnet
+    /// BTC key) are assumed" -- which is why every published vector lacks it. A
+    /// testnet key must carry [`CoinInfo::BITCOIN_TESTNET`], and its `path` must have
+    /// coin type 1, or the importer derives mainnet addresses under a testnet key and
+    /// shows the owner addresses nobody can pay. The two are taken separately rather
+    /// than one implying the other because the BCR keeps them separate: the path is a
+    /// claim about how the key was derived, the use-info about what it is for.
+    /// [C] BCR-2020-007 §"CDDL for Coin Info"
     pub fn account_key(
         script: Script,
         path: &[u32],
+        use_info: CoinInfo,
         master_fingerprint: u32,
         parent_fingerprint: u32,
         public_key: [u8; 33],
@@ -186,6 +194,9 @@ impl Descriptor {
         }
         let mut key = HdKey::derived(public_key);
         key.chain_code = Some(chain_code);
+        // Stored as given; the writer drops it again when it is the default, so a
+        // mainnet key is still the short form the vectors show.
+        key.use_info = Some(use_info);
         key.parent_fingerprint = Some(parent_fingerprint);
         key.origin = Some(KeyPath::new(master_fingerprint, &components)?);
         Ok(Descriptor { script, key })
@@ -229,6 +240,34 @@ pub const STANDARD: [(Script, &[u32]); 7] = [
     (Script::WshCosigner, &[48, 0, 0, 2]),
     (Script::Tr, &[86, 0, 0]),
 ];
+
+/// The deepest of the standard paths: BIP-48's four levels.
+pub const MAX_PATH: usize = 4;
+
+/// The standard account-zero derivation for `script` under SLIP-44 coin type
+/// `coin_type` -- 0 on Bitcoin mainnet, 1 on its testnet and regtest -- as [`STANDARD`]
+/// tabulates it for coin type 0.
+///
+/// The coin type is the second level of every BIP-44-family path, and of BIP-48's; it
+/// is what "testnet mode" moves, so an export on testnet must give it or the origin
+/// it writes names keys the device does not use there. BIP-45 has no coin level and
+/// is the same path everywhere. [C] BIP-44 §"Path levels", BIP-48 §"Path levels",
+/// BIP-45 §"Path levels"
+pub fn standard_path(script: Script, coin_type: u32) -> heapless::Vec<u32, MAX_PATH> {
+    let mut path = heapless::Vec::new();
+    // Infallible: the longest row is `MAX_PATH` long, and the compiler checks the
+    // `match` is total. `let _` rather than `unwrap` keeps this panic-free.
+    let _ = match script {
+        Script::Pkh => path.extend_from_slice(&[44, coin_type, 0]),
+        Script::ShWpkh => path.extend_from_slice(&[49, coin_type, 0]),
+        Script::Wpkh => path.extend_from_slice(&[84, coin_type, 0]),
+        Script::ShCosigner => path.extend_from_slice(&[45]),
+        Script::ShWshCosigner => path.extend_from_slice(&[48, coin_type, 0, 1]),
+        Script::WshCosigner => path.extend_from_slice(&[48, coin_type, 0, 2]),
+        Script::Tr => path.extend_from_slice(&[86, coin_type, 0]),
+    };
+    path
+}
 
 /// The most output descriptors an account may carry.
 ///

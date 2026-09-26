@@ -76,6 +76,17 @@ impl CoinInfo {
         network: 0,
     };
 
+    /// Bitcoin testnet: the SLIP-44 coin type stays 0 (the field is the coin, not the
+    /// path level) and `network` says which of its networks. [C] BCR-2020-007 §"CDDL
+    /// for Coin Info": `testnet-btc = 1`.
+    ///
+    /// Regtest has no identifier of its own in the BCR and derives under the same
+    /// paths as testnet, so it is written as this too.
+    pub const BITCOIN_TESTNET: CoinInfo = CoinInfo {
+        coin_type: 0,
+        network: 1,
+    };
+
     /// Whether this is the default, and so may be left out entirely.
     pub const fn is_default(&self) -> bool {
         self.coin_type == 0 && self.network == 0

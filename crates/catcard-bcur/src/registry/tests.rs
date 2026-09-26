@@ -751,6 +751,7 @@ fn the_published_account_is_reached_from_its_own_seed() {
         let d = Descriptor::account_key(
             script,
             path,
+            CoinInfo::BITCOIN,
             fingerprint,
             u32::from_be_bytes(xpub.parent_fingerprint),
             xpub.public_key,
@@ -761,6 +762,155 @@ fn the_published_account_is_reached_from_its_own_seed() {
     }
     let n = enc.finish().expect("all seven");
     assert_eq!(to_hex(&out[..n]), ACCOUNT_CBOR);
+}
+
+// --- crypto-account on testnet ------------------------------------------------------
+
+/// Build the BCR's account from its seed the way the device does -- through
+/// [`account::standard_path`] for `coin_type`, on `network` -- and hand back the bytes.
+fn account_from_the_bcr_seed(
+    coin_type: u32,
+    network: catcard_wallet::bip32::Network,
+    use_info: CoinInfo,
+) -> Vec<u8> {
+    use catcard_wallet::KeyWork;
+    use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey};
+    use catcard_wallet::bip39::Mnemonic;
+
+    const PHRASE: &str = "shield group erode awake lock sausage cash glare wave crew flame glove";
+
+    let kw = KeyWork::host();
+    let mnemonic = Mnemonic::parse(PHRASE, &kw).expect("a valid phrase");
+    let mut seed = [0u8; catcard_wallet::bip39::SEED_LEN];
+    mnemonic.to_seed("", &mut seed, &kw).expect("a seed");
+    let master = ExtendedPrivKey::from_seed(&seed, network, &kw).expect("a master key");
+    let fingerprint = u32::from_be_bytes(master.fingerprint(&kw));
+
+    let mut out = vec![0u8; 2048];
+    let mut enc =
+        account::Encoder::new(&mut out, fingerprint, account::STANDARD.len() as u32).unwrap();
+    for (script, _) in account::STANDARD {
+        let path = account::standard_path(script, coin_type);
+        let mut here = master.clone();
+        for &index in path.iter() {
+            here = here
+                .derive_child(ChildNumber::hardened(index).unwrap(), &kw)
+                .expect("a child");
+        }
+        let xpub = here.to_extended_pub(&kw);
+        let d = Descriptor::account_key(
+            script,
+            &path,
+            use_info,
+            fingerprint,
+            u32::from_be_bytes(xpub.parent_fingerprint),
+            xpub.public_key,
+            xpub.chain_code,
+        )
+        .expect("a descriptor");
+        enc.push(d.script, &d.key).expect("room");
+    }
+    let n = enc.finish().expect("all seven");
+    out.truncate(n);
+    out
+}
+
+/// The coin-0 paths [`account::standard_path`] gives are [`account::STANDARD`]'s rows,
+/// script for script: the table the published vector checks is the one the function
+/// produces on mainnet.
+#[test]
+fn the_standard_paths_for_coin_zero_are_the_published_table() {
+    for (script, path) in account::STANDARD {
+        assert_eq!(
+            account::standard_path(script, 0).as_slice(),
+            path,
+            "{script:?}"
+        );
+    }
+}
+
+/// On mainnet, going through `standard_path` and an explicit `CoinInfo::BITCOIN`
+/// changes nothing: the bytes are still BCR-2020-015's, use-info and all.
+#[test]
+fn a_mainnet_account_is_byte_identical_to_the_published_vector() {
+    use catcard_wallet::bip32::Network;
+    let got = account_from_the_bcr_seed(0, Network::Mainnet, CoinInfo::BITCOIN);
+    assert_eq!(to_hex(&got), ACCOUNT_CBOR);
+    assert!(
+        !to_hex(&got).contains("05d90131"),
+        "a mainnet key carries no use-info: the default is omitted"
+    );
+}
+
+/// On testnet every key says so: `use-info` is present with `network: 1`, and the
+/// origin's coin level is 1 on every path that has one.
+///
+/// The CBOR is checked as bytes as well as through the reader: map key 5, tag #6.305,
+/// `{2: 1}` -- `05 d90131 a1 02 01` -- once per descriptor, so an encoder that dropped
+/// the field for being "mostly default" would fail here rather than in a wallet.
+/// [C] BCR-2020-007 §"CDDL for HDKey", §"CDDL for Coin Info"
+#[test]
+fn a_testnet_account_carries_use_info_and_coin_type_one() {
+    use catcard_wallet::bip32::Network;
+
+    let got = account_from_the_bcr_seed(1, Network::Testnet, CoinInfo::BITCOIN_TESTNET);
+    let hex_text = to_hex(&got);
+    assert_eq!(
+        hex_text.matches("05d90131a10201").count(),
+        7,
+        "each of the seven keys carries use-info {{network: 1}}"
+    );
+
+    let account = Account::decode(&got).expect("an account");
+    assert_eq!(account.len(), 7);
+    for (d, (script, mainnet_path)) in account.descriptors().zip(account::STANDARD) {
+        let d = d.expect("a descriptor");
+        assert_eq!(d.script, script);
+        assert_eq!(
+            d.key.use_info,
+            Some(CoinInfo::BITCOIN_TESTNET),
+            "{script:?}"
+        );
+        let origin = d.key.origin.clone().expect("an origin");
+        // Every level hardened, and the path is the coin-1 row.
+        let want: Vec<Component> = account::standard_path(script, 1)
+            .iter()
+            .map(|&i| Component::hardened(i))
+            .collect();
+        assert_eq!(origin.components.as_slice(), want.as_slice(), "{script:?}");
+        // The coin level is the one that moved; BIP-45 has none and is unchanged.
+        if mainnet_path.len() > 1 {
+            assert_eq!(want[1], Component::hardened(1), "{script:?} coin type");
+            assert_eq!(mainnet_path[1], 0);
+        } else {
+            let same: Vec<Component> = mainnet_path
+                .iter()
+                .map(|&i| Component::hardened(i))
+                .collect();
+            assert_eq!(want, same, "{script:?}");
+        }
+    }
+
+    // And it is not the mainnet document with a flag on it: the keys themselves differ,
+    // because they were derived under coin type 1.
+    let mainnet = account_from_the_bcr_seed(0, Network::Mainnet, CoinInfo::BITCOIN);
+    let main_keys: Vec<_> = Account::decode(&mainnet)
+        .unwrap()
+        .descriptors()
+        .map(|d| d.unwrap().key.key_data)
+        .collect();
+    let test_keys: Vec<_> = account
+        .descriptors()
+        .map(|d| d.unwrap().key.key_data)
+        .collect();
+    for (i, (m, t)) in main_keys.iter().zip(&test_keys).enumerate() {
+        // BIP-45's key has no coin level and is the same on both networks.
+        if account::STANDARD[i].1.len() > 1 {
+            assert_ne!(m, t, "descriptor {i} must be a different key on testnet");
+        } else {
+            assert_eq!(m, t, "descriptor {i} (BIP-45) has no coin level");
+        }
+    }
 }
 
 // --- sol-sign-request, sol-signature -------------------------------------------------
