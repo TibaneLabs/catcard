@@ -41,10 +41,14 @@ pub(crate) enum Act {
     Use,
     /// Keep the bytes, whatever they are: a folder and a name, on the card.
     Save,
+    /// Text only: treat it as a signing request -- a message, and optionally the path
+    /// and address format it asks for -- and sign it with a wallet key
+    /// (`crate::signmsg::sign_request_text`).
+    Sign,
 }
 
 /// What a screen offers for some content: the rows, and what each one means.
-pub(crate) type Choices = heapless::Vec<(&'static str, Act), 2>;
+pub(crate) type Choices = heapless::Vec<(&'static str, Act), 3>;
 
 impl Content {
     /// The few words a screen has for it.
@@ -90,6 +94,15 @@ impl Content {
         }
         if !self.is_seed() {
             let _ = out.push(("Save to card", Act::Save));
+        }
+        // Text may be a message somebody wants signed -- the three-line request form,
+        // or just a line. Offered for every text payload rather than sniffed for,
+        // because a one-line request is indistinguishable from any other line; the
+        // request parser says no to what it cannot sign. Last, so a screen with room
+        // for two rows (the NFC receive screen, until it takes this one up) still
+        // offers "show" and "save" as it always has.
+        if matches!(self, Content::Text) {
+            let _ = out.push(("Sign as message", Act::Sign));
         }
         out
     }

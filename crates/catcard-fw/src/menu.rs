@@ -8078,7 +8078,10 @@ fn describe_path_error(e: catcard_wallet::bip32::path::ParseError, out: &mut Lin
 /// Parsing is `DerivationPath`'s own, so what is accepted here is exactly what the rest
 /// of the firmware derives from, and the complaint names the level that was wrong.
 #[cfg(feature = "board-q1")]
-fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::DerivationPath> {
+pub(crate) fn ask_path(
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<catcard_wallet::bip32::DerivationPath> {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Accept, Field, Input};
     use catcard_ui::text::{centred, draw_text};
@@ -8177,7 +8180,10 @@ fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::Deriva
 /// rather than a modifier -- `0` and `0h` are different keys, and a menu that made the
 /// difference a toggle would make it a thing to misread.
 #[cfg(not(feature = "board-q1"))]
-fn ask_path(ui: &mut Ui<'_>, head: &str) -> Option<catcard_wallet::bip32::DerivationPath> {
+pub(crate) fn ask_path(
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<catcard_wallet::bip32::DerivationPath> {
     use catcard_wallet::bip32::{ChildNumber, DerivationPath, MAX_PATH_DEPTH};
 
     let mut path = DerivationPath::MASTER;

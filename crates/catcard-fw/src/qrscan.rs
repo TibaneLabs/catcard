@@ -919,7 +919,7 @@ fn offer(
     // and keeping them whatever they are. `choices` is shared with the tag, so a code and
     // a tap offer the same things.
     let choices = what.choices();
-    let mut rows: heapless::Vec<&str, 2> = heapless::Vec::new();
+    let mut rows: heapless::Vec<&str, 3> = heapless::Vec::new();
     for (label, _) in &choices {
         let _ = rows.push(label);
     }
@@ -931,6 +931,23 @@ fn offer(
     };
     if choices[chosen].1 == crate::sniff::Act::Save {
         crate::sniff::save_to_card(ui, &lease.bytes()[at..at + len], what);
+        return;
+    }
+    // A signing request: text in the three-line form, or just a message. The parser
+    // behind it says what it makes of the bytes, so nothing is decided here.
+    if choices[chosen].1 == crate::sniff::Act::Sign {
+        match core::str::from_utf8(&lease.bytes()[at..at + len]) {
+            Ok(text) => crate::signmsg::sign_request_text(gate, login, ui, text),
+            Err(_) => {
+                menu::message(
+                    ui.panel,
+                    head,
+                    "the code was not text",
+                    "any key to go back",
+                );
+                menu::wait_for_any_key(ui);
+            }
+        }
         return;
     }
 

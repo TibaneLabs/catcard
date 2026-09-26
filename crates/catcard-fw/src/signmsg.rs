@@ -1,21 +1,40 @@
 //! Signing a message with one of the wallet's addresses.
 //!
-//! Proof of control without a transaction: a message comes from the keypad or off a text
-//! file on the card, the device signs it with the key behind one of its addresses, and the
-//! result is written in the armoured form every verifier reads. Nothing here can move
-//! coins -- a legacy signature commits to the "Bitcoin Signed Message" prefix, and a
-//! BIP-322 one to a transaction that spends an output which does not exist.
+//! Proof of control without a transaction: a message comes from the keypad, off a text
+//! file on the card, or out of a scanned code, the device signs it with the key behind one
+//! of its addresses, and the result is written in the armoured form every verifier reads.
+//! Nothing here can move coins -- a legacy signature commits to the "Bitcoin Signed
+//! Message" prefix, and a BIP-322 one to a transaction that spends an output which does
+//! not exist.
 //!
 //! Two formats, because both are asked for:
 //!
 //! - **legacy** ([`message`]), the 65-byte recoverable signature every wallet has read
-//!   since 2011;
+//!   since 2011, for P2PKH, P2SH-P2WPKH and P2WPKH addresses;
 //! - **BIP-322** ([`bip322`]), the standard one, which is what a verifier that wants a
-//!   proof for a segwit address rather than a convention about one will ask for.
+//!   proof for a segwit or taproot address rather than a convention about one will ask for.
 //!
 //! The owner picks, on a screen that names both. Nothing guesses: a file written in the
 //! wrong format is a file the other side rejects, and the two are not distinguishable by
 //! looking at the address.
+//!
+//! # Which key
+//!
+//! An address type and a derivation path, both chosen. The default is the first receive
+//! address of the matching account on the network in force -- `m/84h/0h/0h/0/0` for a
+//! native-segwit signature on mainnet, `m/84h/1h/0h/0/0` on testnet -- because it is the
+//! one a watch-only wallet shows first. A custom path is typed (Q1) or built a level at a
+//! time (numpad boards), through the same entry the address explorer uses.
+//!
+//! # The request file
+//!
+//! A `.txt` on the card may carry the request in the public three-line form Sparrow and
+//! stock's documentation use: the message, then an optional derivation path, then an
+//! optional address format ([`message::parse_request`]). What the file asked for is shown
+//! for confirmation before any key is touched; what it left out is asked. The same parser
+//! reads a scanned code, which is how a request arrives without a card.
+//!
+//! Source: hw-reference/firmware-features.md §6 [C].
 //!
 //! Before any signature is shown, the device checks its own work -- the legacy one by
 //! recovering the public key from it and comparing, the BIP-322 one by running the
@@ -25,7 +44,7 @@ use catcard_callgate::Callgate;
 use catcard_ui::keypad::{Event, KEYS, Key};
 use catcard_ui::textentry::Entry;
 use catcard_wallet::address::{self, AddressKind};
-use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey};
+use catcard_wallet::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, Network};
 use catcard_wallet::{bip322, message, signfile};
 use core::fmt::Write as _;
 use zeroize::Zeroize;
@@ -34,19 +53,24 @@ use crate::display;
 use crate::menu;
 use crate::ui::Ui;
 
-/// Where a typed message's signature is written.
+/// Where a typed or scanned message's signature is written.
 const FILE_NAME: &str = "/SIGNED.TXT";
 
 /// What is appended to a text file's name for the signature beside it.
 const SIGNED_SUFFIX: &str = "-signed.txt";
 
 /// Longest text file this reads. A message is at most [`message::MAX_MESSAGE`]; the rest
-/// is room for the trailing newline an editor leaves and for saying "too long" about a
-/// file that is, rather than silently signing its first 240 characters.
+/// is room for the path and format lines, the trailing newline an editor leaves, and for
+/// saying "too long" about a file that is, rather than silently signing its first 240
+/// characters.
 const MAX_FILE: usize = 2048;
 
 /// Longest path this builds for the file it writes back.
 const PATH_MAX: usize = 176;
+
+/// Characters a derivation path takes on screen: `m/` and twelve levels of up to ten
+/// digits, a marker and a separator each.
+const PATH_CHARS: usize = 2 + catcard_wallet::bip32::MAX_PATH_DEPTH * 12;
 
 /// Room for the whole armoured file: three marker lines, the message, the address and the
 /// signature, each on its own line.
@@ -62,28 +86,49 @@ const FILE_TEXT: usize = signfile::BEGIN.len()
     + bip322::MAX_ARMOURED
     + 8;
 
-/// The address the message is signed with: the wallet's first native-segwit receive
-/// address, `m/84h/0h/0h/0/0`.
-///
-/// One address rather than a choice, for now: it is the one a watch-only wallet shows
-/// first, and the file says which address signed, so a verifier needs no more. Choosing a
-/// path belongs with the custom-path work in the address explorer.
-const PATH: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
-const KIND: AddressKind = AddressKind::P2wpkh;
-
 /// Which signature the file will carry.
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum Format {
+pub(crate) enum Format {
     /// The "Bitcoin Signed Message" digest and a recoverable signature.
     Legacy,
     /// BIP-322, simple variant.
     Bip322,
 }
 
+impl Format {
+    const fn name(self) -> &'static str {
+        match self {
+            Format::Legacy => "legacy signature",
+            Format::Bip322 => "BIP-322 signature",
+        }
+    }
+}
+
+/// Which key signs, and how: an address type, the path to it, and the format.
+#[derive(Clone)]
+struct Choice {
+    kind: AddressKind,
+    path: DerivationPath,
+    format: Format,
+}
+
 /// What signing produced: the armoured signature, and the address it speaks for.
-struct Signed {
-    armoured: heapless::String<{ bip322::MAX_ARMOURED }>,
-    address: heapless::String<{ address::MAX_ADDRESS_LEN }>,
+pub(crate) struct Signed {
+    pub(crate) armoured: heapless::String<{ bip322::MAX_ARMOURED }>,
+    pub(crate) address: heapless::String<{ address::MAX_ADDRESS_LEN }>,
+}
+
+/// Where a finished signature goes.
+pub(crate) enum Target<'a> {
+    /// Beside the file it came from, as `<name>-signed.txt`, on the medium it was read
+    /// from.
+    Beside {
+        storage: menu::Storage,
+        path: &'a str,
+    },
+    /// Wherever the owner says: a file called `SIGNED.TXT` on the card or the disk, or --
+    /// on the Q1 -- animated BBQr on the glass.
+    Fresh,
 }
 
 /// Type a message, sign it, and write it to the card.
@@ -97,70 +142,20 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     if text.is_empty() {
         return;
     }
-    let format = ask_format(ui, HEAD);
-    let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
+    let Some(choice) = ask_choice(ui, HEAD, None, None) else {
         return;
     };
-
-    let mut busy = menu::Working::new(ui.panel, HEAD, "signing");
-    let signed = sign_message(&master, text, format);
-    busy.tick(ui.panel);
-    drop(master);
-
-    let signed = match signed {
-        Ok(v) => v,
-        Err(why) => return complain(ui, HEAD, why),
-    };
-
-    // Show it, then ask where it goes: the signature is long, so a screen is for checking
-    // the message and address, and the file is what gets used. On a PSRAM board the chooser
-    // offers the card or the Virtual Disk; on the mk3 there is no disk, so the old yes/no
-    // "write it to the SD card?" stands unchanged.
-    show(ui, text, &signed);
-    #[cfg(feature = "board-mk3")]
-    let storage = {
-        menu::ask(ui.panel, HEAD, "write it to the", "SD card?");
-        if !menu::confirmed(ui) {
-            return;
-        }
-        menu::Storage::Sd
-    };
-    #[cfg(not(feature = "board-mk3"))]
-    let Some(storage) = menu::pick_storage(ui, HEAD) else {
-        return;
-    };
-    let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
-    if signfile::write(&mut file, text, &signed.address, &signed.armoured).is_err() {
-        return complain(ui, HEAD, "no room for it");
-    }
-    menu::card_wait(ui.panel, HEAD, write_note(storage));
-    match menu::write_storage_file(storage, FILE_NAME, file.as_bytes()) {
-        Ok(()) => {
-            crate::catlog!("message: signed with {}", signed.address.as_str());
-            menu::message(ui.panel, "Signed", &FILE_NAME[1..], "any key to go back");
-        }
-        Err(why) => {
-            crate::catlog!("message: write failed: {}", why);
-            menu::message(ui.panel, "Write failed", why, "any key to go back");
-        }
-    }
-    menu::wait_for_any_key(ui);
+    sign_and_deliver(gate, login, ui, HEAD, text, &choice, Target::Fresh);
 }
 
-/// The "writing to …" line for the medium a signature is landing on.
-fn write_note(storage: menu::Storage) -> &'static str {
-    match storage {
-        menu::Storage::Sd => "writing to the card",
-        #[cfg(not(feature = "board-mk3"))]
-        menu::Storage::Vdisk => "writing to the disk",
-    }
-}
-
-/// Sign the text in a file on the card, and write the signature beside it.
+/// Sign the request in a text file on the card or the disk, and write the signature
+/// beside it.
 ///
-/// The message is the file's contents, so what is shown before the key is used is the
-/// whole of what will be signed -- a file is not a thing anyone reads carefully before
-/// handing it to a wallet, and the screen is the only place the two can be compared.
+/// The file is read as a request ([`message::parse_request`]): its first line is the
+/// message, and what the second and third lines ask for is shown before the key is used.
+/// What is shown is the whole of what will be signed -- a file is not a thing anyone reads
+/// carefully before handing it to a wallet, and the screen is the only place the two can
+/// be compared.
 pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign text file";
 
@@ -183,87 +178,320 @@ pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     let Ok(text) = core::str::from_utf8(&raw[..len]) else {
         return complain(ui, HEAD, "not text");
     };
-    // The trailing newline is the editor's, not the owner's: a file that ends with one and
-    // a file that does not are the same message, and signing the difference would produce
-    // two signatures nobody can tell apart on screen. What is left is what gets signed and
-    // what is written into the armoured file, so the two always agree.
-    let text = text.trim_end();
-    if let Some(why) = unshowable(text) {
-        return complain(ui, HEAD, why);
-    }
-    sign_text(gate, login, ui, HEAD, storage, &path, text);
+    let request = match message::parse_request(text) {
+        Ok(r) => r,
+        Err(why) => return complain(ui, HEAD, describe_request(why)),
+    };
+    let Some(choice) = ask_choice(ui, HEAD, request.kind, request.path) else {
+        return;
+    };
+    sign_and_deliver(
+        gate,
+        login,
+        ui,
+        HEAD,
+        request.message,
+        &choice,
+        Target::Beside {
+            storage,
+            path: &path,
+        },
+    );
 }
 
-/// Why this text cannot be signed from a file, if it cannot be.
-fn unshowable(text: &str) -> Option<&'static str> {
-    if text.is_empty() {
-        return Some("nothing in that file");
-    }
-    if text.len() > message::MAX_MESSAGE {
-        return Some("message too long");
-    }
-    // Printable ASCII only, as the typed path is. A message with a tab, a line break or a
-    // non-ASCII character in it is one the screen cannot show faithfully -- and the owner
-    // would be signing something other than what they read.
-    if !text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        return Some("plain ASCII only");
-    }
-    None
+/// Sign a request that arrived as text -- a scanned code, or a tag's payload.
+///
+/// The same three-line form a file carries, read with the same parser; the signature is
+/// offered as a file or, on the Q1, as BBQr, because the request came without a card and
+/// may want to leave the same way.
+///
+/// Reached from the Q1's scanner today (`crate::qrscan`, `sniff::Act::Sign`); the NFC
+/// receive screen is the other path that gets text without asking for it and is the
+/// intended second caller, so the boards without a scanner carry this unused for now.
+#[cfg_attr(not(feature = "board-q1"), allow(dead_code))]
+pub(crate) fn sign_request_text(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    text: &str,
+) {
+    const HEAD: &str = "Sign request";
+
+    let request = match message::parse_request(text) {
+        Ok(r) => r,
+        Err(why) => return complain(ui, HEAD, describe_request(why)),
+    };
+    let Some(choice) = ask_choice(ui, HEAD, request.kind, request.path) else {
+        return;
+    };
+    sign_and_deliver(
+        gate,
+        login,
+        ui,
+        HEAD,
+        request.message,
+        &choice,
+        Target::Fresh,
+    );
 }
 
-/// The rest of the card flow, once the file has been read and checked.
-fn sign_text(
+/// Why a request could not be read, in the words a screen has.
+fn describe_request(e: message::RequestError) -> &'static str {
+    match e {
+        message::RequestError::Empty => "nothing to sign in that",
+        message::RequestError::Message(m) => describe(m),
+        message::RequestError::BadPath(_) => "line 2 is not a path",
+        message::RequestError::BadFormat => "line 3: unknown format",
+        message::RequestError::TooManyLines => "more than three lines",
+    }
+}
+
+/// Settle the format, the address type and the path, asking for whatever the request
+/// left open. Asked before the PIN rather than after, so a change of mind costs nothing.
+///
+/// A request that names a type has narrowed the format: P2PKH and nested segwit have
+/// only the legacy signature, taproot only BIP-322. Native segwit has both, and is asked.
+fn ask_choice(
+    ui: &mut Ui<'_>,
+    head: &str,
+    kind: Option<AddressKind>,
+    path: Option<DerivationPath>,
+) -> Option<Choice> {
+    let format = match kind {
+        Some(AddressKind::P2tr) => Format::Bip322,
+        Some(AddressKind::P2pkh) | Some(AddressKind::P2shP2wpkh) => Format::Legacy,
+        Some(AddressKind::P2wpkh) | None => ask_format(ui, head),
+    };
+    let kind = match kind {
+        Some(k) => k,
+        None => ask_kind(ui, head, format)?,
+    };
+    let path = match path {
+        Some(p) => p,
+        None => ask_path(ui, head, kind)?,
+    };
+    Some(Choice { kind, path, format })
+}
+
+/// Which format to write.
+///
+/// Both answers are a choice and neither is a way out: backing out is what the screen
+/// before this one is for.
+fn ask_format(ui: &mut Ui<'_>, head: &str) -> Format {
+    menu::ask(ui.panel, head, "sign it as BIP-322?", "no = legacy format");
+    if menu::confirmed(ui) {
+        Format::Bip322
+    } else {
+        Format::Legacy
+    }
+}
+
+/// The address types a format can sign for, native segwit first because it is the one
+/// nearly everyone wants.
+///
+/// Legacy has no header range for taproot (BIP-137 stops at P2WPKH), and BIP-322's
+/// verifier here reads the two segwit scripts and nothing older, so each list is what
+/// the other side can actually check.
+fn kinds_for(format: Format) -> &'static [AddressKind] {
+    match format {
+        Format::Legacy => &[
+            AddressKind::P2wpkh,
+            AddressKind::P2shP2wpkh,
+            AddressKind::P2pkh,
+        ],
+        Format::Bip322 => &[AddressKind::P2wpkh, AddressKind::P2tr],
+    }
+}
+
+/// What to call an address type on screen.
+pub(crate) const fn kind_label(kind: AddressKind) -> &'static str {
+    match kind {
+        AddressKind::P2wpkh => "Native segwit",
+        AddressKind::P2shP2wpkh => "Nested segwit",
+        AddressKind::P2pkh => "Legacy",
+        AddressKind::P2tr => "Taproot",
+    }
+}
+
+/// Pick the address type from the ones the format can sign for.
+fn ask_kind(ui: &mut Ui<'_>, head: &str, format: Format) -> Option<AddressKind> {
+    let kinds = kinds_for(format);
+    let mut names: heapless::Vec<&str, 4> = heapless::Vec::new();
+    for k in kinds {
+        let _ = names.push(kind_label(*k));
+    }
+    let at = menu::choose(ui, head, "address type", &names)?;
+    kinds.get(at).copied()
+}
+
+/// The first receive address of `kind`'s account on the network in force:
+/// `m/{purpose}h/{coin}h/0h/0/0`. The coin type follows the network, as it does for the
+/// address explorer and the exports -- not a hardcoded 0.
+fn default_path(kind: AddressKind) -> Option<DerivationPath> {
+    let coin = crate::prefs::network().coin_type();
+    DerivationPath::from_slice(&[
+        ChildNumber::hardened(kind.bip44_purpose()).ok()?,
+        ChildNumber::hardened(coin).ok()?,
+        ChildNumber::hardened(0).ok()?,
+        ChildNumber::normal(0).ok()?,
+        ChildNumber::normal(0).ok()?,
+    ])
+    .ok()
+}
+
+/// The default path for `kind`, or one the owner builds.
+fn ask_path(ui: &mut Ui<'_>, head: &str, kind: AddressKind) -> Option<DerivationPath> {
+    let default = default_path(kind)?;
+    let mut shown: heapless::String<PATH_CHARS> = heapless::String::new();
+    let _ = write!(shown, "{default}");
+    match menu::choose(ui, head, shown.as_str(), &["Use that path", "Custom path"])? {
+        0 => Some(default),
+        _ => menu::ask_path(ui, head),
+    }
+}
+
+/// Unlock, derive, confirm, sign, show, deliver: the whole of the flow past the choice.
+fn sign_and_deliver(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     head: &str,
-    storage: menu::Storage,
-    path: &str,
     text: &str,
+    choice: &Choice,
+    target: Target<'_>,
 ) {
-    let format = ask_format(ui, head);
     let Some(master) = menu::unlock_master(gate, login, ui, head) else {
         return;
     };
 
+    // Only the leaf is kept past this point: the master is the whole wallet, and the
+    // screens that follow can stand there for as long as nobody is in the room.
+    let mut busy = menu::Working::new(ui.panel, head, "deriving");
+    let leaf = crate::keywork::run(|kw| derive(&master, &choice.path, kw));
+    drop(master);
+    busy.tick(ui.panel);
+    let leaf = match leaf {
+        Ok(k) => k,
+        Err(why) => return complain(ui, head, why),
+    };
+    let network = crate::prefs::network();
+
     // The address before the signature: what the owner is asked to approve is this text
     // signed by *that* address, and it is the last moment either can still be refused.
-    let mut busy = menu::Working::new(ui.panel, head, "deriving");
-    let address = crate::keywork::run(|kw| address_at(&master, kw));
-    busy.tick(ui.panel);
-    let address = match address {
+    let pubkey = crate::keywork::run(|kw| leaf.public_key(kw));
+    let address = match address_of(&pubkey, choice.kind, network) {
         Ok(a) => a,
         Err(why) => {
-            drop(master);
+            drop(leaf);
             return complain(ui, head, why);
         }
     };
-    if !confirm(ui, head, text, &address) {
-        drop(master);
+    if !confirm(ui, head, text, &address, choice) {
+        drop(leaf);
         return;
     }
 
     let mut busy = menu::Working::new(ui.panel, head, "signing");
-    let signed = sign_message(&master, text, format);
+    let signed = crate::keywork::run(|kw| {
+        let mut secret = *leaf.secret_bytes();
+        sign_secret(
+            &mut secret,
+            &pubkey,
+            network,
+            text,
+            choice.kind,
+            choice.format,
+            kw,
+        )
+    });
+    drop(leaf);
     busy.tick(ui.panel);
-    drop(master);
     let signed = match signed {
         Ok(v) => v,
         Err(why) => return complain(ui, head, why),
     };
 
+    // Show it, then say where it goes: the signature is long, so the screen is for
+    // checking the message and address, and the file (or the code) is what gets used.
+    show(ui, text, &signed);
+    deliver(ui, head, text, &signed, target);
+}
+
+/// Write the armoured file where `target` says, or show it as a code.
+pub(crate) fn deliver(
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    signed: &Signed,
+    target: Target<'_>,
+) {
     let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
     if signfile::write(&mut file, text, &signed.address, &signed.armoured).is_err() {
         return complain(ui, head, "no room for it");
     }
-    let Some(out) = beside(path) else {
-        return complain(ui, head, "path too long");
+    match target {
+        Target::Beside { storage, path } => {
+            let Some(out) = beside(path) else {
+                return complain(ui, head, "path too long");
+            };
+            write_signed(ui, head, storage, &out, file.as_bytes(), &signed.address);
+        }
+        Target::Fresh => fresh(ui, head, file.as_bytes(), &signed.address),
+    }
+}
+
+/// The owner's choice of where a fresh signature lands.
+///
+/// On the Q1 a list: the card, the disk, or BBQr on the glass -- the last because a
+/// request that arrived by camera may want to leave the same way. A PSRAM board without a
+/// scanner offers the card or the disk; the mk3 has only the card, so it asks yes or no.
+#[cfg(feature = "board-q1")]
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+    const WAYS: &[&str] = &["SD card", "Virtual Disk", "BBQr"];
+    match menu::choose(ui, head, "where to put it", WAYS) {
+        Some(0) => write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file, address),
+        Some(1) => write_signed(ui, head, menu::Storage::Vdisk, FILE_NAME, file, address),
+        Some(2) => {
+            crate::catlog!("message: signed with {}, shown as BBQr", address);
+            crate::qrshow::animate_bbqr(ui, head, file, catcard_bbqr::FileType::UNICODE);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(all(not(feature = "board-q1"), not(feature = "board-mk3")))]
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+    let Some(storage) = menu::pick_storage(ui, head) else {
+        return;
     };
-    menu::card_wait(ui.panel, head, write_note(storage));
-    match menu::write_storage_file(storage, &out, file.as_bytes()) {
+    write_signed(ui, head, storage, FILE_NAME, file, address);
+}
+
+#[cfg(feature = "board-mk3")]
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+    menu::ask(ui.panel, head, "write it to the", "SD card?");
+    if !menu::confirmed(ui) {
+        return;
+    }
+    write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file, address);
+}
+
+/// Write the armoured file and say so.
+fn write_signed(
+    ui: &mut Ui<'_>,
+    head: &str,
+    storage: menu::Storage,
+    path: &str,
+    file: &[u8],
+    address: &str,
+) {
+    let mut note: heapless::String<32> = heapless::String::new();
+    let _ = write!(note, "writing to {}", storage.medium());
+    menu::card_wait(ui.panel, head, note.as_str());
+    match menu::write_storage_file(storage, path, file) {
         Ok(()) => {
-            crate::catlog!("message: {} signed with {}", out.as_str(), signed.address);
-            let name = out.strip_prefix('/').unwrap_or(&out);
+            crate::catlog!("message: {} signed with {}", path, address);
+            let name = path.strip_prefix('/').unwrap_or(path);
             menu::message(ui.panel, "Signed", name, "any key to go back");
         }
         Err(why) => {
@@ -289,109 +517,84 @@ fn beside(path: &str) -> Option<heapless::String<PATH_MAX>> {
     Some(out)
 }
 
-/// Derive the signing key's address, without signing anything.
-fn address_at(
-    master: &ExtendedPrivKey,
-    kw: &catcard_wallet::KeyWork,
+/// The address a public key is written as.
+fn address_of(
+    pubkey: &[u8; 33],
+    kind: AddressKind,
+    network: Network,
 ) -> Result<heapless::String<{ address::MAX_ADDRESS_LEN }>, &'static str> {
-    let here = derive(master, kw)?;
-    let pubkey = here.public_key(kw);
     let mut buf = [0u8; address::MAX_ADDRESS_LEN];
-    let n = address::encode(KIND, crate::prefs::network(), &pubkey, &mut buf)
-        .map_err(|_| "address failed")?;
+    let n = address::encode(kind, network, pubkey, &mut buf).map_err(|_| "address failed")?;
     let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
     addr.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
         .map_err(|_| "address failed")?;
     Ok(addr)
 }
 
-/// Walk [`PATH`] from the master key.
+/// Walk `path` from the master key.
 fn derive(
     master: &ExtendedPrivKey,
+    path: &DerivationPath,
     kw: &catcard_wallet::KeyWork,
 ) -> Result<ExtendedPrivKey, &'static str> {
     let mut here = master.clone();
-    for &step in &PATH {
+    for step in path.iter() {
         here = here
-            .derive_child(ChildNumber(step), kw)
+            .derive_child(step, kw)
             .map_err(|_| "key derivation failed")?;
     }
     Ok(here)
 }
 
-/// Derive, sign, and check the signature against the key that made it.
+/// Sign `text` with a private key, and check the signature against the key that made it.
 ///
-/// Everything from the private key onwards happens inside [`crate::keywork::run`], so no
-/// interrupt runs in the middle of it: the derivation, the signature and the self-check
-/// are one masked region, and the secret is zeroized before it ends.
-fn sign_message(
-    master: &ExtendedPrivKey,
+/// Private-key work: it takes the [`catcard_wallet::KeyWork`] of the masked region it
+/// runs in, and it zeroizes `secret` before it returns, whichever way it returns. The
+/// wallet path and the WIF store both come through here, so a stored key signs exactly as
+/// a derived one does.
+pub(crate) fn sign_secret(
+    secret: &mut [u8; 32],
+    pubkey: &[u8; 33],
+    network: Network,
     text: &str,
+    kind: AddressKind,
     format: Format,
+    kw: &catcard_wallet::KeyWork,
 ) -> Result<Signed, &'static str> {
-    crate::keywork::run(|kw| {
-        let here = derive(master, kw)?;
-        let pubkey = here.public_key(kw);
-        let mut secret = *here.secret_bytes();
-
-        let mut armoured: heapless::String<{ bip322::MAX_ARMOURED }> = heapless::String::new();
-        let mut buf = [0u8; bip322::MAX_ARMOURED];
-        let written = match format {
-            Format::Legacy => {
-                let sig = message::sign(text, &secret, KIND, kw);
-                secret.zeroize();
-                let sig = sig.map_err(describe)?;
-                // Check our own work: recover the key from the signature and compare it
-                // with the one that signed. A signature that does not recover is worse
-                // than none.
-                match message::recover(text, &sig) {
-                    Ok((recovered, _)) if recovered == pubkey => {}
-                    _ => return Err("signature did not verify"),
-                }
-                message::armour(&sig, &mut buf).map_err(describe)?
+    let mut armoured: heapless::String<{ bip322::MAX_ARMOURED }> = heapless::String::new();
+    let mut buf = [0u8; bip322::MAX_ARMOURED];
+    let written = match format {
+        Format::Legacy => {
+            let sig = message::sign(text, secret, kind, kw);
+            secret.zeroize();
+            let sig = sig.map_err(describe)?;
+            // Check our own work: recover the key from the signature and compare it
+            // with the one that signed. A signature that does not recover is worse
+            // than none.
+            match message::recover(text, &sig) {
+                Ok((recovered, _)) if recovered == *pubkey => {}
+                _ => return Err("signature did not verify"),
             }
-            Format::Bip322 => {
-                let sig = bip322::sign(text.as_bytes(), &secret, KIND, kw);
-                secret.zeroize();
-                let sig = sig.map_err(describe322)?;
-                // The same self-check, through the same verifier a counterparty would
-                // use: the signature has to satisfy the script this address stands for.
-                let mut script = [0u8; bip322::MAX_SCRIPT];
-                let n = bip322::challenge(KIND, &pubkey, &mut script).map_err(describe322)?;
-                bip322::verify(text.as_bytes(), &script[..n], sig.as_bytes())
-                    .map_err(|_| "signature did not verify")?;
-                sig.armour(&mut buf).map_err(describe322)?
-            }
-        };
-        armoured
-            .push_str(core::str::from_utf8(&buf[..written]).unwrap_or(""))
-            .map_err(|_| "no room for it")?;
-
-        let mut address = [0u8; address::MAX_ADDRESS_LEN];
-        let n = address::encode(KIND, crate::prefs::network(), &pubkey, &mut address)
-            .map_err(|_| "address failed")?;
-        let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
-        addr.push_str(core::str::from_utf8(&address[..n]).unwrap_or(""))
-            .map_err(|_| "address failed")?;
-        Ok(Signed {
-            armoured,
-            address: addr,
-        })
-    })
-}
-
-/// Which format to write.
-///
-/// Asked before the PIN rather than after, so a change of mind costs nothing. Both
-/// answers are a choice and neither is a way out: backing out is what the screen before
-/// this one is for.
-fn ask_format(ui: &mut Ui<'_>, head: &str) -> Format {
-    menu::ask(ui.panel, head, "sign it as BIP-322?", "no = legacy format");
-    if menu::confirmed(ui) {
-        Format::Bip322
-    } else {
-        Format::Legacy
-    }
+            message::armour(&sig, &mut buf).map_err(describe)?
+        }
+        Format::Bip322 => {
+            let sig = bip322::sign(text.as_bytes(), secret, kind, kw);
+            secret.zeroize();
+            let sig = sig.map_err(describe322)?;
+            // The same self-check, through the same verifier a counterparty would
+            // use: the signature has to satisfy the script this address stands for.
+            let mut script = [0u8; bip322::MAX_SCRIPT];
+            let n = bip322::challenge(kind, pubkey, &mut script).map_err(describe322)?;
+            bip322::verify(text.as_bytes(), &script[..n], sig.as_bytes())
+                .map_err(|_| "signature did not verify")?;
+            sig.armour(&mut buf).map_err(describe322)?
+        }
+    };
+    armoured
+        .push_str(core::str::from_utf8(&buf[..written]).unwrap_or(""))
+        .map_err(|_| "no room for it")?;
+    let address = address_of(pubkey, kind, network)?;
+    Ok(Signed { armoured, address })
 }
 
 /// Why a message could not be signed, in the words a screen has.
@@ -423,20 +626,26 @@ fn complain(ui: &mut Ui<'_>, head: &str, why: &str) {
     menu::wait_for_any_key(ui);
 }
 
-/// The message and the address that will sign it. True if the owner said go ahead.
-fn confirm(ui: &mut Ui<'_>, head: &str, text: &str, address: &str) -> bool {
+/// The message, the address that will sign it, and how. True if the owner said go ahead.
+fn confirm(ui: &mut Ui<'_>, head: &str, text: &str, address: &str, choice: &Choice) -> bool {
     use catcard_ui::scroll::{Line, ScrollView};
+    let mut path: heapless::String<PATH_CHARS> = heapless::String::new();
+    let _ = write!(path, "{}", choice.path);
+    let mut how: heapless::String<48> = heapless::String::new();
+    let _ = write!(how, "{}, {}", kind_label(choice.kind), choice.format.name());
     let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
     let _ = doc.push(Line::title(head));
     let _ = doc.push(Line::body(text).wrapped());
     let _ = doc.push(Line::body("will be signed by").small());
     let _ = doc.push(Line::body(address).small().wrapped());
+    let _ = doc.push(Line::body(path.as_str()).small().wrapped());
+    let _ = doc.push(Line::body(how.as_str()).small().wrapped());
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
     menu::scroll_choice(ui, &mut view)
 }
 
 /// The message, the address that signed, and the signature, scrollable.
-fn show(ui: &mut Ui<'_>, text: &str, signed: &Signed) {
+pub(crate) fn show(ui: &mut Ui<'_>, text: &str, signed: &Signed) {
     use catcard_ui::scroll::{Line, ScrollView};
     let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
     let _ = doc.push(Line::title("Signed"));
@@ -449,7 +658,7 @@ fn show(ui: &mut Ui<'_>, text: &str, signed: &Signed) {
 }
 
 /// Type the message. `None` if the owner backed out.
-fn read_message(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
+pub(crate) fn read_message(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
     let mut entry = Entry::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
