@@ -105,6 +105,11 @@ pub const BACKLIGHT_DEFAULT: u8 = 100;
 /// own multisig-policy key has a shape this firmware has not confirmed, and writing a value
 /// stock misreads could relax a device's policy without its owner asking.
 pub const MULTISIG_TRUST: &str = "cat_mstrust";
+/// Whether Secure Notes & Passwords is switched on: `"1"` on, `"0"` off. Absent means the
+/// owner has never been asked, which the notes screen answers with its opt-in story.
+/// Our own key: stock's `secnap` is named but its value shape is not documented `[?]`.
+/// Source: hw-reference/settings-nvstore-format.md §5 [C] (the name only)
+pub const NOTES: &str = "cat_secnap";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -146,6 +151,16 @@ pub fn battery_idle_minutes(doc: &Doc<'_>) -> Option<u32> {
 /// Whether the menu cursor wraps past the ends of a list.
 pub fn menu_wrap(doc: &Doc<'_>) -> bool {
     text(doc, MENU_WRAP) == Some("1")
+}
+
+/// Whether Secure Notes is on. `None` when never decided: only a literal `"1"` or `"0"`
+/// counts, so an unreadable value asks again rather than deciding either way.
+pub fn notes_enabled(doc: &Doc<'_>) -> Option<bool> {
+    match text(doc, NOTES)? {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// The Q1 LCD backlight level, as a percent in `1..=100`.
