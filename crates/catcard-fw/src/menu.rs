@@ -2552,16 +2552,21 @@ impl MenuScreen {
             let was = self.off;
             self.off = catcard_ui::grid::window(self.cursor, items.len(), self.off);
             let moved = self.off.abs_diff(was);
-            if moved >= catcard_ui::grid::COLS {
-                // A jump that changes every column -- `0` back to the start from deep in
-                // the strip. The panel's own scroll is a whole screen wide, so it tells
-                // the truth only when a whole screen's worth is what changed.
-                slide_grid(ui.panel, items, self.cursor, self.off, self.off > was);
-            } else {
-                // One column, or none. Redrawn rather than slid: a screen-wide slide for
-                // a third of a screen's movement is the picture travelling further than
-                // the key asked for, which is what the list avoids by simply redrawing.
+            if moved == 0 {
+                // The cursor moved inside the window: nothing travels, the frame is
+                // redrawn in place.
                 draw_grid(ui.panel, items, self.cursor, self.off);
+            } else {
+                // The window moved: the picture slides exactly as far -- one column for
+                // an arrow, a whole screen for `0` back to the start from deep in the
+                // strip. The panel is left scrolled where the slide ends; the display
+                // layer carries that for as long as the grid is on screen.
+                let dist = if moved >= catcard_ui::grid::COLS {
+                    display::SCREEN_W
+                } else {
+                    moved * grid_column_pitch()
+                };
+                slide_grid(ui.panel, items, self.cursor, self.off, self.off > was, dist);
             }
             return;
         }
@@ -2732,7 +2737,9 @@ fn grid_frame(c: &mut display::Surface<'_>, items: &[&str], cursor: usize, off: 
 /// The art's own palette, not the text ramp: this screen is pictures.
 #[cfg(feature = "board-q1")]
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, off: usize) {
-    display::draw_with(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
+    // Scrolled or not: a slide left the panel's start where it ended, and a redraw in
+    // place goes out through that origin rather than putting it back.
+    display::draw_scrolled(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
         grid_frame(c, items, cursor, off)
     });
 }
@@ -2743,10 +2750,29 @@ fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, off: usi
 /// and is shown as one -- by the panel's own scrolling, which costs one command a frame
 /// rather than a redraw a frame.
 #[cfg(feature = "board-q1")]
-fn slide_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, off: usize, right: bool) {
-    display::slide_frame(panel, &catcard_ui::art::menuicons::PALETTE, right, |c| {
-        grid_frame(c, items, cursor, off)
-    });
+fn slide_grid(
+    panel: &mut display::Panel,
+    items: &[&str],
+    cursor: usize,
+    off: usize,
+    right: bool,
+    dist: usize,
+) {
+    display::slide_frame_by(
+        panel,
+        &catcard_ui::art::menuicons::PALETTE,
+        right,
+        dist,
+        |c| grid_frame(c, items, cursor, off),
+    );
+}
+
+/// How far one column of the grid is from the next, in pixels: where the second slot
+/// starts. Every cell moves by this when the window moves one column, whichever slot it
+/// is in -- the slots start at 0, 107 and 214 on the Q1's 320 columns.
+#[cfg(feature = "board-q1")]
+fn grid_column_pitch() -> usize {
+    catcard_ui::grid::cell_rect(1, display::SCREEN_W, display::SCREEN_H).x
 }
 
 /// The list on this screen, if it is a menu.
@@ -5504,6 +5530,7 @@ fn lcd_scroll_test(ui: &mut Ui<'_>) {
         ("first 40 fixed", 40, 140),
     ] {
         crate::catlog!("lcd scroll: {}", label);
+        display::reset_origin(ui.panel);
         let _ = ui.panel.set_scroll_area(fixed_first, 0);
         for n in 0..steps {
             if !display::wait_tear() {

@@ -101,6 +101,8 @@ pub(crate) fn flappy_cat(ui: &mut Ui<'_>) {
     crate::menu::message(ui.panel, "Flappy Cat", "any key flaps", "cancel quits");
     crate::menu::wait_for_any_key(ui);
 
+    // The game scrolls the panel itself, at raw lines: from origin 0.
+    display::reset_origin(ui.panel);
     let _ = ui.panel.set_scroll_area(0, 0);
     loop {
         let mut seed = [0u8; 4];

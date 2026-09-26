@@ -212,6 +212,7 @@ pub type Panel = catcard_ui::st7789::St7789<PanelBus>;
 #[cfg(feature = "board-q1")]
 pub fn wipe(panel: &mut Panel) {
     reclaim_bus();
+    reset_origin(panel);
     let _ = panel.clear(catcard_ui::st7789::BLACK);
     // Painted behind the row cache's back, so the next frame must be sent whole.
     // SAFETY: foreground only, single core, and not while `draw` holds the cache.
@@ -230,6 +231,7 @@ pub fn wipe(panel: &mut Panel) {
 #[cfg(feature = "board-q1")]
 pub fn show_picture(panel: &mut Panel, x: usize, y: usize, w: usize, h: usize, px: &[u16]) {
     reclaim_bus();
+    reset_origin(panel);
     let _ = panel.clear(SURROUND);
     let _ = panel.paint(x, y, w, h, |dx, dy| {
         px.get(dy * w + dx).copied().unwrap_or(SURROUND)
@@ -247,10 +249,10 @@ pub fn show_picture(panel: &mut Panel, x: usize, y: usize, w: usize, h: usize, p
 #[cfg(feature = "board-q1")]
 pub const SURROUND: u16 = catcard_ui::st7789::rgb565(0x30, 0x30, 0x30);
 
-/// Slide a new full-screen frame in from one side, with the panel doing the moving.
-///
-/// `right` means the new frame comes in from the right, which is what moving the cursor
-/// rightwards off the edge of a grid page looks like.
+/// Slide the picture `dist` columns sideways into the new frame `f` draws, with the panel
+/// doing the moving: [`st7789::WIDTH`](catcard_ui::st7789::WIDTH) for a whole screen, one
+/// grid column's pitch for an arrow. `right` means the new frame comes in from the right,
+/// which is what moving the cursor rightwards past the edge of the grid looks like.
 ///
 /// # Why the panel and not the firmware
 ///
@@ -259,26 +261,38 @@ pub const SURROUND: u16 = catcard_ui::st7789::rgb565(0x30, 0x30, 0x30);
 /// stutter. The ST7789 can do it for nothing: its frame memory is a ring of 320 lines --
 /// which on this board, mounted landscape, are the screen's *columns* -- and one command
 /// picks which line is shown first. So the move is one command a frame, and the only
-/// pixels sent are the new page's, once each, into the lines that have just scrolled off
-/// the other side.
+/// pixels sent are the incoming ones, once each, into the lines that have just scrolled
+/// off the other side.
 ///
 /// That is the same trick Flappy Cat runs on, which is where the direction comes from:
 /// a rising start moves the picture left, so the new content arrives from the right.
 ///
+/// # Any distance
+///
+/// The panel is left scrolled wherever the slide ends, and the driver's origin
+/// ([`catcard_ui::st7789::St7789::set_origin`]) records it, so every paint after it
+/// lands where it is seen. A one-column slide therefore needs nothing put back: it moves
+/// 107 columns, the columns that scrolled off are the ones the new frame's last 107 are
+/// painted into on the way, and the frame is then flushed once, whole, through the new
+/// origin -- which on the glass changes only what differs from a pure shift, the cursor.
+/// Other screens put the origin back at 0 as part of their own full redraw
+/// ([`reset_origin`]).
+///
 /// # What travels
 ///
-/// Everything, the status bar included -- the scroll moves whole columns and the fixed
-/// strips this panel can keep are at the left and right edges, not the top. The bar's
-/// pixels are already in the lines they belong to, so it wraps across during the
-/// movement and lands back exactly where it was. Only the rows below it are painted.
+/// A whole-screen slide lets the status bar wrap across and land back where it was: the
+/// scroll moves whole columns, and after a full turn every line is home. A partial one
+/// would leave the bar shifted, so each of its steps repaints the bar's rows where they
+/// belong under the new start, and the bar holds still while the picture moves under it.
 ///
-/// Falls back to an ordinary flush if the panel refuses a command, so a failure here
+/// Falls back to an ordinary full flush if the panel refuses a command, so a failure here
 /// costs the animation and not the screen.
 #[cfg(feature = "board-q1")]
-pub fn slide_frame(
+pub fn slide_frame_by(
     panel: &mut Panel,
     content: &[u16; 16],
     right: bool,
+    dist: usize,
     f: impl FnOnce(&mut Surface<'_>),
 ) {
     use core::sync::atomic::Ordering;
@@ -301,74 +315,129 @@ pub fn slide_frame(
     reclaim_bus();
     // The sweep paints the bottom rows behind the cache's back, and it must not be
     // running while the panel's scroll register is being driven from here.
-    let stopped = stop_sweep(panel.bus_mut());
+    stop_sweep(panel.bus_mut());
     // SAFETY: foreground, single core, not inside a flush.
     unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
 
-    if slide(panel, screen, content, right) {
-        // The glass now holds this canvas below the bar. Tell the cache so, so the next
-        // frame sends the bar if it changed and nothing at all if it did not.
-        // SAFETY: foreground, single core, not inside a flush.
-        let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
+    let dist = dist.clamp(1, catcard_ui::st7789::WIDTH);
+    let whole = dist == catcard_ui::st7789::WIDTH;
+    let slid = slide(panel, screen, content, right, dist);
+    // SAFETY: foreground, single core, not inside a flush.
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
+    if slid && whole {
+        // Every line below the bar holds the new frame, and the bar is home: tell the
+        // cache, so the next flush sends the bar if it changed and nothing else.
         cache.note(screen, BAR_H);
-    } else if stopped {
-        // SAFETY: as above.
-        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+    } else {
+        // A partial slide leaves the old frame shifted, which is the new one except where
+        // it is not a pure shift; a failed one leaves anything. Either way the frame goes
+        // out whole, through whatever origin the panel is at now.
+        cache.invalidate();
     }
-    // Either finishes the job (the bar, if it moved) or does the whole thing, depending
-    // on what the cache above was told.
     show(panel, screen, content, BAR_H);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
-/// Move the picture one screen sideways, painting the incoming columns as they are
+/// Paint raw frame-memory lines `[from, from + n)`, wrapping past the last line, with
+/// the colour `f(line, y)` gives for rows `y0..y0 + h`.
+#[cfg(feature = "board-q1")]
+fn paint_lines(
+    panel: &mut Panel,
+    from: usize,
+    n: usize,
+    y0: usize,
+    h: usize,
+    mut f: impl FnMut(usize, usize) -> u16,
+) -> bool {
+    use catcard_ui::st7789::WIDTH;
+    let from = from % WIDTH;
+    let first = n.min(WIDTH - from);
+    let ok = panel
+        .paint_memory(from, y0, first, h, |dx, dy| f(from + dx, dy))
+        .is_ok();
+    ok && (first == n || panel.paint_memory(0, y0, n - first, h, f).is_ok())
+}
+
+/// Move the picture `dist` columns sideways, painting the incoming columns as they are
 /// needed. `true` if the panel did it.
 ///
-/// Screen position `p` shows frame-memory line `(start + p) mod 320`, so the line that
-/// has just left one edge is the one about to arrive at the other: each step fills the
-/// lines it is about to expose and then advances the start past them. After a whole
-/// screen the start is back where it began and every line holds the new frame, so
-/// nothing has to be put back afterwards.
+/// Screen position `p` shows frame-memory line `(start + p) mod 320`, so the lines that
+/// have just left one edge are the ones about to arrive at the other: each step fills the
+/// lines it is about to expose and then moves the start past them. The new frame's column
+/// `c` belongs in line `(end + c) mod 320`, where `end` is the start the slide finishes
+/// at -- which is how each incoming line knows which column of the new frame it holds.
 #[cfg(feature = "board-q1")]
-fn slide(panel: &mut Panel, screen: &Screen, content: &[u16; 16], right: bool) -> bool {
+fn slide(
+    panel: &mut Panel,
+    screen: &Screen,
+    content: &[u16; 16],
+    right: bool,
+    dist: usize,
+) -> bool {
     use catcard_ui::canvas::Canvas as _;
-    use catcard_ui::st7789::{HEIGHT, WIDTH};
+    use catcard_ui::st7789::{GREYS, HEIGHT, WIDTH};
 
     /// Columns per step. Twenty steps across the panel: fine enough to read as motion,
     /// coarse enough that each step is one worthwhile transfer rather than a command
     /// for every column.
     const STEP: usize = 16;
 
-    if panel.set_scroll_area(0, 0).is_err() {
-        return false;
-    }
+    let origin = panel.origin();
+    // Coming from the right the picture moves left and the start rises; coming from the
+    // left it moves right and the start falls.
+    let end = if right {
+        (origin + dist) % WIDTH
+    } else {
+        (origin + WIDTH - dist) % WIDTH
+    };
+    let whole = dist == WIDTH;
     let mut done = 0;
-    while done < WIDTH {
-        let run = STEP.min(WIDTH - done);
-        // Where the incoming columns go, and where the start lands once they are there.
-        // Coming from the right the picture moves left and the start rises; coming from
-        // the left it moves right and the start falls back toward zero.
-        let (at, start) = if right {
-            (done, done + run)
+    while done < dist {
+        let run = STEP.min(dist - done);
+        let (lines, start) = if right {
+            (origin + done, origin + done + run)
         } else {
-            (WIDTH - done - run, WIDTH - done - run)
+            let at = origin + 2 * WIDTH - done - run;
+            (at, at)
         };
-        let ok = panel
-            .paint(at, BAR_H, run, HEIGHT - BAR_H, |dx, dy| {
-                content[screen.get(at + dx, BAR_H + dy) as usize]
-            })
-            .is_ok();
-        if !ok || panel.set_scroll_start(start % WIDTH).is_err() {
-            // Put the picture back where it was before giving up: a half-scrolled panel
-            // with the cache saying otherwise is worse than no animation.
-            let _ = panel.set_scroll_start(0);
+        let painted = paint_lines(panel, lines, run, BAR_H, HEIGHT - BAR_H, |line, dy| {
+            let c = (line + WIDTH - end) % WIDTH;
+            content[screen.get(c, BAR_H + dy) as usize]
+        });
+        if !painted || panel.set_origin(start).is_err() {
+            // Back where it started, before giving up: the caller flushes the frame whole
+            // through that origin, so nothing half-scrolled survives.
+            let _ = panel.set_origin(origin);
             return false;
+        }
+        // A partial slide keeps the bar still by repainting it under the new start.
+        if !whole {
+            let _ = panel.paint(0, 0, WIDTH, BAR_H, |x, y| GREYS[screen.get(x, y) as usize]);
         }
         // One step a tear pulse, so the movement is even and never tears.
         wait_tear();
         done += run;
     }
-    panel.set_scroll_start(0).is_ok()
+    true
+}
+
+/// Put the panel's scroll back at line 0 and have the next frame sent whole.
+///
+/// Only the icon grid leaves the panel scrolled -- its one-column slides end wherever
+/// they end ([`slide_frame_by`]). Everything else draws a whole new screen, so each of
+/// those resets the origin as part of that redraw: the old picture shows shifted for the
+/// few milliseconds the new one takes to arrive, which is a screen changing anyway. And
+/// anything that writes the panel at raw addresses -- the busy-bar sweep, the display
+/// co-processor, Flappy Cat's own scrolling -- starts from here.
+#[cfg(feature = "board-q1")]
+pub fn reset_origin(panel: &mut Panel) {
+    if panel.origin() == 0 {
+        return;
+    }
+    let _ = panel.set_origin(0);
+    // What the glass shows is no longer what the row cache says it shows.
+    // SAFETY: foreground only, single core, and not while `show` holds the cache.
+    unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
 }
 
 /// On the OLED a redraw covers the whole panel, so there is nothing to clear -- but the
@@ -453,6 +522,7 @@ pub fn draw_with_marks(
     f: impl FnOnce(&mut Surface<'_>),
 ) {
     use catcard_ui::art::rgba;
+    reset_origin(panel);
     let palette = &catcard_ui::st7789::SLATE;
 
     // Exactly what this frame's marks need, and nothing for a list with none: every
@@ -521,7 +591,9 @@ pub const GPU_BAR_ON_BLOCKING: bool = true;
 /// Without a co-processor that answers, the bus stays with the CPU and the screen simply
 /// has no bar -- as on stock.
 #[cfg(feature = "board-q1")]
-pub fn scroll_busy_bar(_panel: &mut Panel) {
+pub fn scroll_busy_bar(panel: &mut Panel) {
+    // The co-processor draws at raw panel addresses.
+    reset_origin(panel);
     if crate::gpu::activity_bar() {
         // SAFETY: foreground only; not inside a draw, which never calls this.
         unsafe { give_bus() };
@@ -617,6 +689,8 @@ pub fn start_sweep(panel: &mut Panel) -> bool {
     use catcard_ui::st7789::cmd;
 
     reclaim_bus();
+    // The sweep's window is a raw panel address.
+    reset_origin(panel);
     let bus = panel.bus_mut();
     stop_sweep(bus);
 
@@ -1072,6 +1146,19 @@ pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Sur
     unsafe {
         *core::ptr::addr_of_mut!(MARKS) = None
     };
+    #[cfg(feature = "board-q1")]
+    reset_origin(panel);
+    draw_keeping_marks(panel, content, f);
+}
+
+/// [`draw_with`] for a frame that may sit on a scrolled panel: the icon grid, redrawn in
+/// place after a slide left the panel's start wherever it ended. The frame goes out
+/// through the driver's origin like any other; it is only that this one does not put
+/// the origin back first.
+#[cfg(feature = "board-q1")]
+pub fn draw_scrolled(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
+    // SAFETY: foreground, single core, not inside a draw.
+    unsafe { *core::ptr::addr_of_mut!(MARKS) = None };
     draw_keeping_marks(panel, content, f);
 }
 
@@ -1205,6 +1292,7 @@ pub fn draw_with_palette(panel: &mut Panel, palette: &[u16; 16], f: impl FnOnce(
     }
     // Full height, own palette, no bar -- and say so, so an idle refresh leaves it be.
     BAR_SHOWN.store(false, Ordering::SeqCst);
+    reset_origin(panel);
     // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
