@@ -192,6 +192,21 @@ fn a_v3_failure_ends_the_link_and_nothing_opens_after_it() {
 }
 
 #[test]
+fn a_dropped_message_forgets_a_v1_session_and_ends_a_bound_one() {
+    let mut l = linked(1);
+    l.desync();
+    assert!(!l.is_encrypted() && !l.is_dead());
+    assert!(l.session_key().is_none());
+    let mut m = *b"vers";
+    assert_eq!(l.open(&mut m, 4, true), Err(Fram::NoKey));
+    for v in [2, 3] {
+        let mut l = linked(v);
+        l.desync();
+        assert!(l.is_dead(), "v{v}");
+    }
+}
+
+#[test]
 fn encrypted_without_a_session_is_no_key_and_bad_versions_are_refused() {
     let mut l = Link::new();
     let mut m = *b"vers";

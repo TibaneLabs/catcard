@@ -381,6 +381,15 @@ impl<'a, A: StagingArea> Staged<'a, A> {
         self.received = self.length;
     }
 
+    /// Declare that the whole image is already in the area, written there by something
+    /// other than this -- a transport that stored its bytes before it knew they were an
+    /// image (the ckcc USB mode's generic upload). As with [`place`](Self::place), no
+    /// digest was taken on the way in, so [`inspect`](Self::inspect) reads one back.
+    pub fn stored_elsewhere(&mut self) {
+        self.scattered = true;
+        self.received = self.length;
+    }
+
     /// Store the next chunk.
     ///
     /// Chunks must be sequential from zero. Out-of-order writes would need a map of

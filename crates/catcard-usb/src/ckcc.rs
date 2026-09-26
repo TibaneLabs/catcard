@@ -511,6 +511,21 @@ impl Link {
         }
     }
 
+    /// A message was dropped unread (the device had no room for it), so this side's
+    /// receive stream no longer lines up with the host's. v1 forgets the session -- the
+    /// host sets up a new one with its next `ncry`, as every `ckcc` run does anyway; a
+    /// bound link (v2/v3) cannot be re-keyed, so it ends.
+    pub fn desync(&mut self) {
+        if self.bound {
+            self.dead = true;
+        } else {
+            self.cipher = None;
+            self.session_key.zeroize();
+            self.session_key = None;
+            self.version = None;
+        }
+    }
+
     /// Answer `ncry`: take the host's key, make ours from `scalar`, and set up the
     /// streams. Returns our public key for the `mypb` reply.
     ///

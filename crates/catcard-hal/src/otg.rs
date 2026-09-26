@@ -565,6 +565,12 @@ impl Otg {
         self.dev.set_keyboard(on);
     }
 
+    /// Present stock Coldcard's USB identity (the ckcc mode) instead of ours, or ours
+    /// again. Like [`set_mode`](Self::set_mode) it takes effect on the next enumeration.
+    pub fn set_ckcc(&mut self, on: bool) {
+        self.dev.set_ckcc(on);
+    }
+
     /// Whether the keyboard interface is part of the current identity.
     pub fn keyboard_present(&self) -> bool {
         self.dev.keyboard_present()

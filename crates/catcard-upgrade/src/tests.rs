@@ -1090,3 +1090,24 @@ mod expanding {
         }
     }
 }
+
+/// An image some other transport already stored -- the ckcc mode's upload, which keeps
+/// bytes before it knows they are an image -- inspects by reading the area back, and a
+/// byte changed in the area is caught the same way.
+#[test]
+fn an_image_stored_elsewhere_is_digested_from_the_area() {
+    let image = image_for(&MK4, NEWER, 0);
+    let mut area = Mem::new(image.len() + 4096);
+    area.bytes[..image.len()].copy_from_slice(&image);
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+    s.stored_elsewhere();
+    let a = s.inspect(None).expect("it verifies");
+    assert!(a.is_verified());
+
+    let mut area = Mem::new(image.len() + 4096);
+    area.bytes[..image.len()].copy_from_slice(&image);
+    area.bytes[image.len() - 1] ^= 1;
+    let mut s = Staged::begin(area, &MK4, image.len() as u32).unwrap();
+    s.stored_elsewhere();
+    assert!(s.inspect(None).is_err());
+}
