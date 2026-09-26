@@ -56,7 +56,7 @@ shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backu
 Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
 out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can lose its seed
 to one. `make lint` still type-checks them through the release-shape clippy runs.
-| `Passphrase` | *(top level in stock)* | ❌ see above; also under Derive |
+| `Passphrase` → `Enter passphrase`, `Restore saved` | *(top level in stock)* → `Edit Phrase`, `Restore Saved` | ❌ drawer as above; also under Derive. Once applied, `Save to card?` seals it to `catcard-passphrases.bin` (our own format: AES-256-GCM under an HMAC of the seed's entropy, so only these words open it); `Restore saved` lists entries by the fingerprint they open, applies one with the same fingerprint-and-address check as typing (and stock's warning when the fingerprint is not the saved one), or deletes it |
 | `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
 | `Idle timeout` | `Idle Timeout` (`idle_to`, `batt_to`, in seconds) | 🔀 own keys `cat_idle` / `cat_bidle`, in **minutes** -- a separate key rather than the same name in another unit; same off/1/2/5/15/30/60 range, with the Q1's battery value asked first. Honoured by `crate::idle`, which logs out through the same callgate as the power button |
 | `Display units` | `Display Units` (`rz`) | 🔀 own key `cat_units` (`btc`/`mbtc`/`bits`/`sats`) rather than stock's decimal count; the rows show the same amount written four ways. Honoured by `crate::signtx::btc`, the only place that turns satoshis into text |
