@@ -88,7 +88,7 @@ store, so these rows are absent there rather than present and inert.
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer -- but the switch is stock's: with `Virtual Disk` (or the USB port) off, this refuses to start |
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
 | `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
-| `Backup` → `Save backup`, `Restore backup` | `Backup` → `Backup System`, `Restore Backup` | ✅ same drawer; both halves in one submenu, since the words that open the file are the same thing |
+| `Backup` → `Save backup`, `Verify backup`, `Restore backup`, `Clone Coldcard` | `Backup` → `Backup System`, `Verify Backup`, `Restore Backup`, `Clone Coldcard` | ✅ same drawer, same four rows. Save offers stock's three protections — twelve words (the default), a typed passphrase, or cleartext (asked twice, never the default) — and writes `backup-<XFP>.7z` to the card or the Virtual Disk. Verify decrypts, parses and compares the fingerprint against the wallet in force without changing anything; ours goes further than stock's CRC-only check. Restore and Verify read from either storage and detect a cleartext file rather than asking for a password. A backup can also be loaded for the session only, from Derive → `Import key` → `Coldcard backup` (stock's Temporary Seed → Coldcard Backup) |
 | — | `Temporary Seed`, `Paper Wallets`, `WIF Store`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
 
 `Upgrade Firmware` has no icon, so on the Q1 it is the one cell that shows its name
