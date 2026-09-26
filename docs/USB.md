@@ -264,6 +264,7 @@ never guessed; the policy is rejected before anything else happens):
 | BIP-322 proof-of-reserves PSBTs in HSM mode | refused | stock gates them by `msg_paths`, but which path of a proof is matched is not given `[?]` |
 | a `*` path step that is hardened | refused | `*` matches exactly one unhardened step here: `cleanup_deriv_path`'s matching rule is not given, and this is never wider than stock's |
 | more than 16 rules, 16 paths per list, 48 KB of canonical policy | refused | our bounds (the whitelist's 25 is stock's) |
+| `min_pct_self_transfer` written with an exponent (`1e1`) | refused | kept as millionths of a percent, compared exactly (no floating point in the image); a seventh decimal rounds the threshold up |
 
 **The policy hash is ours.** Stock hashes `ujson.dumps` of its own canonical dictionary,
 whose key order and defaults are not in the reference; here it is SHA-256 of this
