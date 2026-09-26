@@ -36,9 +36,8 @@
 use core::fmt::Write as _;
 
 use super::{Buf, Cosigner, Error, Kind, MAX_COSIGNERS, MAX_ORIGIN, Multisig, overflow};
-use crate::bip32::serialize::{MAX_BASE58_LEN, Slip132};
-use crate::bip32::{ExtendedPubKey, HARDENED_OFFSET, Network};
-use crate::encoding::base58;
+use crate::bip32::serialize::MAX_BASE58_LEN;
+use crate::bip32::{ExtendedPubKey, HARDENED_OFFSET};
 
 /// A setup file, read.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -209,33 +208,14 @@ pub fn write_path(out: &mut impl core::fmt::Write, origin: &[u32]) -> Result<(),
 /// Stock writes a cosigner's key in whatever form was recorded on import, and its own
 /// `ccxp` files carry `Ypub`/`Zpub` for the BIP-48 legs; so a setup file arrives with any
 /// of the five prefixes. The version bytes are the only difference, and they say nothing
-/// about the key -- the script form is the wallet's `Format:`, not the key's -- so they
-/// are read to learn the network and then replaced with the classic ones.
+/// about the key -- the script form is the wallet's `Format:`, not the key's -- so
+/// [`ExtendedPubKey::from_base58`] reads them for the network and drops the form, which
+/// is what a setup file wants.
 ///
-/// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C] for the table.
+/// Source: hw-reference/wallet-export-formats.md §"Chain parameters" [C] for the table,
+/// which lives in `bip32::serialize`.
 pub fn xpub_from_str(text: &str) -> Result<ExtendedPubKey, crate::bip32::serialize::Error> {
-    const FORMS: [Slip132; 5] = [
-        Slip132::Classic,
-        Slip132::P2wpkhP2sh,
-        Slip132::P2wpkh,
-        Slip132::P2wshP2sh,
-        Slip132::P2wsh,
-    ];
-    let mut raw = [0u8; base58::MAX_DECODED];
-    let n = base58::decode_check(text, &mut raw)?;
-    let raw = &mut raw[..n];
-    if raw.len() >= 4 {
-        let version = [raw[0], raw[1], raw[2], raw[3]];
-        'found: for network in [Network::Mainnet, Network::Testnet] {
-            for form in FORMS {
-                if form.version(network) == version {
-                    raw[..4].copy_from_slice(&network.public_version());
-                    break 'found;
-                }
-            }
-        }
-    }
-    ExtendedPubKey::from_raw(raw)
+    ExtendedPubKey::from_base58(text)
 }
 
 /// `M of N`.
