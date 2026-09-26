@@ -196,7 +196,7 @@ every multisig input is refused.
 | NFC | ✅ | ✅ | signed transaction out as a PushTx link, address out as `bitcoin:`, PSBT in and the signed one back, NFC Tools (sign / verify / multisig / words / file share) all behind NFC Sharing (`crate::nfc`, `catcard-nfc`); untested on hardware |
 | QR / BBQr | ✅ | ✅ | the Q1 scans BBQr and BC-UR, signs what it catches, hands the result back as BBQr or `ur:crypto-psbt`, exports `ur:crypto-account` for the network in force (`catcard-bcur`), reads and writes SeedQR, shares any file as BBQr |
 | PushTx | ✅ | ✅ | Settings → NFC Push Tx: coldcard.com, mempool.space, custom, disabled (`cat_pushtx`, `catcard_nfc::pushtx`); offered after a transaction finalises, never written unasked |
-| Key Teleport (Q1) | ✅ | ❌ | deferred |
+| Key Teleport (Q1) | ✅ | ✅ | stock's wire format byte for byte, the spec's vector as a host test (`catcard_wallet::teleport`); receive with resume (`cat_ktrx`), send master / temporary seed, vault entry, notes, full backup, and multisig PSBT (`E`); BBQr and the NFC link (`crate::teleport`, `docs/KEY-TELEPORT.md`); untested on hardware and against a stock Q1 |
 
 ## 8. Security features
 
