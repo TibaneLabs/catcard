@@ -586,6 +586,24 @@ so none of it is guessed:
 4. Whether "get by PIN" needs the main-PIN login gate 22 requires, or can run from the
    prompt.
 
+Until then the spending policy's escape is CatCard's own unlock code (docs/MENU.md
+§"Spending Policy and hobbled mode"): a slow hash in the pre-login blob, checked at the
+PIN prompt before gate 18. It will move to a gate-22 slot when the layout is known.
+
+## Web 2FA (spending policy): the enrolment and verification protocol `[?]`
+
+Stock's Spending Policy can require "a mobile TOTP 2FA app" for every spend: enrolment
+shows a QR that loads a shared secret into the app and forces a real round trip to confirm
+it, and each later spend needs "an NFC phone + Internet + the app holding the right secret"
+(help-and-warning-screens.md §12 "Enable Web 2FA", "Start 2FA enrollment" `[C]`). What the
+reference does not give: the URL the NFC tap carries and what it encodes, how the phone's
+code reaches the device (over the tag, over USB, typed), the TOTP parameters (digits, step,
+window), and whether a server sits in the loop. None of it is guessed: the `Web 2FA` row
+under `Settings → Spending Policy → Single-Signer → Edit Policy...` is present and answers
+"needs the Web 2FA spec", and the policy has no `web2fa` field. Resolve by writing the
+protocol down from public documentation of the feature, or by capturing what a stock device
+puts on its tag during enrolment.
+
 ## `PA_ZERO_SECRET` means "a secret was written", not "a secret is there" `[C]`
 
 Seen on the Q1 (2026-09-23), after Destroy seed: the login reports the secret slot **in

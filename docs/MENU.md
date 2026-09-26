@@ -53,6 +53,9 @@ shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backu
 | `Login` → `Kill key` (release builds) | `Login Settings` → `Kill Key` (`kbtn`) | 🔀 own key `cat_kbtn`; a digit, armed only after a test login shows the PIN lacks it; fast wipe `[I]` |
 | `Login` → `MicroSD 2FA` (release builds) | `Login Settings` → `MicroSD 2FA` (`sd2fa`) | 🔀 own key `cat_sd2fa` and card file `catcard.2fa`; a token read back before it is enrolled |
 | — | `Trick PINs` | blocked: gate 22's slot layout is not in the reference (HARDWARE-OPEN-ITEMS) |
+| `Spending Policy` → `Single-Signer` → `Edit Policy...`, `Word Check`, `Allow Notes` (Q1), `Related Keys`, `Last Violation`, `Remove Policy`, `Test Drive`, `ACTIVATE` | `Advanced/Tools` → `Spending Policy` → `Single-Signer` → the same (§SP1) | 🔀 a setting rather than a tool, beside Multisig; root wallet only, since the policy lives in the stored wallet's file. Stock's rows in stock's order; the enable story first. Own key `cat_sssp`, one JSON object (§"Spending Policy and hobbled mode" below) |
+| `Spending Policy` → `Single-Signer` → `Edit Policy...` → `Max Magnitude`, `Limit Velocity`, `Whitelist Addresses` → `Scan QR` (Q1) / `Import from File` / ‹each address› / `Clear Whitelist`, `Web 2FA` | `SpendingPolicyMenu` (§SP-POL) | 🔀 stock's rows; the magnitude is asked as whole BTC then satoshis; `Web 2FA` is present and answers "needs the Web 2FA spec" (HARDWARE-OPEN-ITEMS) |
+| `Spending Policy` → `Co-Sign Multisig (CCC)` | `Spending Policy` → `Co-Sign Multisig (CCC)` | ❌ the row answers "a later wave" |
 | `Login` → `Calculator login` (Q1) | `Login Settings` → `Calculator Login` (`calc`) | 🔀 own key `cat_calc`; on only after a test login through the calculator screen. The PIN convention is ours (below) -- the reference says "enter PIN as a formula" and no more |
 
 Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
@@ -127,7 +130,8 @@ callgate 23, is mk4+), `Chains` only in a multichain build, and `Debug → Setti
 | `Backup` → `Save backup`, `Verify backup`, `Restore backup`, `Clone Coldcard` | `Backup` → `Backup System`, `Verify Backup`, `Restore Backup`, `Clone Coldcard` | ✅ same drawer, same four rows. Save offers stock's three protections — twelve words (the default), a typed passphrase, or cleartext (asked twice, never the default) — and writes `backup-<XFP>.7z` to the card or the Virtual Disk. Verify decrypts, parses and compares the fingerprint against the wallet in force without changing anything; ours goes further than stock's CRC-only check. Restore and Verify read from either storage and detect a cleartext file rather than asking for a password. A backup can also be loaded for the session only, from Derive → `Import key` → `Coldcard backup` (stock's Temporary Seed → Coldcard Backup) |
 | `WIF Store` → per key: `Reveal WIF`, `Sign MSG`, `Descriptors`, `Delete key`; `Generate new key`, `Import from SD`, `Export All`, `Clear All` | `WIF Store` → per key: `Detail`, `Descriptors`, `Addresses`, `Sign MSG`, `Delete`; `Import WIF`, `Export All`, `Clear All` | ✅ same drawer and rows; the addresses are on the key's own screen rather than a row under it, and `Generate new key` is ours. `Sign MSG` signs legacy as the chosen address type; `Descriptors` are `wpkh` / `sh(wpkh)` / `pkh` over the public key with BIP-380 checksums; `Export All` writes the keys in plain text behind two warnings; `Clear All` asks twice and cannot be undone |
 | *(Derive → `Import key`, `New words`)* | `Temporary Seed` | 🔀 under Derive, with the other ways to change the key in force |
-| — | `Paper Wallets`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
+| — | `Paper Wallets`, `Danger Zone` | not implemented, or elsewhere |
+| *(Settings → `Spending Policy`)* | `Spending Policy` | 🔀 a setting here, not a tool; see the Settings table |
 
 `Upgrade Firmware` has no icon, so on the Q1 it is the one cell that shows its name
 alone — and, as the seventh entry, it is alone on the grid's second page.
@@ -148,6 +152,68 @@ replaces the firmware.
 stock user has no reason to open, and it is now `Utils` → `Upgrade Firmware` under
 stock's own name. It is the widest tile label on the Q1, which is the cost of using
 stock's wording and worth paying for the one entry that replaces the firmware.
+
+## Spending Policy and hobbled mode
+
+Stock's single-signer Spending Policy (SSSP) is a per-transaction **magnitude** cap, a
+**velocity** limit in blocks, an address **whitelist** and optionally web-2FA; once
+`ACTIVATE`d the device is **hobbled** -- signing and addresses only -- and an SE2 trick
+PIN is the way back (firmware-features.md §8; help-and-warning-screens.md §12). Ours is
+the same feature over our own storage, with these points decided where the reference is
+silent, each marked `[I]` in the code:
+
+- **Storage.** One JSON object under our own `cat_sssp` key in the *stored* wallet's
+  settings file: `mag` (satoshis, 0 = no cap), `vel` (blocks, 0 = off), `last` (the height
+  of the last allowed spend), `words`, `notes`, `okeys`, `active`, `addrs` (at most 25, the
+  bound stock gives its whitelist), `viol` (the last refusal). A value under the key that
+  will not read is **damaged**, never "off": the device is hobbled and signs nothing until
+  the unlock code takes it out. The engine and every bound are host-tested in
+  `catcard-settings::policy`.
+- **Enforcement at signing** (`policy::enforce`, before the review). Magnitude compares
+  what leaves the wallet, change excluded (the review's `Sending` figure). Whitelist means
+  every non-change output with value pays a listed address (bech32 compared case-blind; an
+  `OP_RETURN` with no value is not a payment). Velocity is measured by the transaction's
+  own `nLockTime` when it names a **block height** -- the anti-fee-sniping convention every
+  wallet follows, and the number stock's "block-height velocity" has to be measured by on
+  a device with no chain; a PSBT with no height lock, or a time lock, is refused under a
+  velocity limit rather than measured against a guess. The height of an allowed spend is
+  recorded **before** the signature is made, so a transaction that then fails to sign has
+  still used its window. A refusal names the rule, is shown, and is recorded as
+  `Last Violation`.
+- **Hobbled mode** is a filter over the ordinary menus (`policy::hobbled_row`, host-tested
+  over the labels), not a second tree. Main: `Sign`, `Addresses`, `Scan QR`, `Utils`,
+  `Settings`, `Help`, `Logout`; `Notes` under Allow Notes; `Derive` and `Type Passwords`
+  under Related Keys. Utils: the file, export, card and NFC rows, `Upgrade Firmware` and
+  `Help`; `WIF Store` under Related Keys; no `Backup`, no `Encrypt card`. Settings: `About`
+  and `Help`, and `Passphrase` under Related Keys -- stock's hobbled menu has no Settings
+  drawer at all; ours keeps the two rows that write nothing. Derive (Related Keys):
+  `Passphrase`, `Import key`, `New words`, `Key vault`, `Back to root`; no BIP-85, no XOR.
+  Under the menus, `settings::save_wallet` **refuses every wallet-settings key** while
+  hobbled except the policy's own object and a file's identity keys, so a row the filter
+  missed (Notes' edit screens, the WIF store's inner rows) still cannot change anything.
+- **The unlock code is CatCard's own mechanism.** Stock's escape is a gate-22 trick PIN,
+  whose slot layout the reference does not give (HARDWARE-OPEN-ITEMS); this will move to
+  gate 22 when it is known. Ours: a code of the PIN's own shape (`prefix-suffix`, four to
+  twelve digits), chosen at `ACTIVATE`, kept as PBKDF2-HMAC-SHA256 (50 000 rounds, random
+  16-byte salt) under `cat_sssp_unlock` in the pre-login blob. At the PIN prompt -- the pad
+  or the Q1 calculator -- the typed halves are checked against it **before** gate 18: a
+  match says nothing, gives a fresh prompt for the main PIN, and the session boots
+  un-hobbled with the policy suspended (`Settings → Spending Policy` then offers
+  `Remove Policy`); anything else is the PIN attempt it looks like, so a guess burns one of
+  the thirteen as a trick-PIN guess does. The code is probed against the bootloader at
+  enrolment so it cannot be the main PIN (one attempt spent, restored by the next login,
+  as Test login does), and matches at most once per boot as a second guard. Activation
+  **without** a code is allowed after stock's warning and a second confirmation: no way
+  back but destroying the seed. A policy with no rule set cannot be activated.
+- **Test Drive** hobbles the session with `EXIT TEST DRIVE` last on the main menu; the
+  policy is enforced but records neither a violation nor a spend height, and nothing is
+  written as active.
+- **Word Check**, when on, asks the first and last seed words before the policy is
+  changed, a toggle flipped, or the policy removed; the words are compared inside
+  `keywork::run`, both of them whatever the first says. It cannot be turned on for a wallet
+  with no words.
+- **Web 2FA** is not implemented: its enrolment and verification protocol is not in the
+  reference. The row is present and says so. CCC is a later wave.
 
 ## Calculator login (Q1)
 
