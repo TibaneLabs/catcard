@@ -192,7 +192,6 @@ enum PartFrom {
     /// seed loaded for the session. Stock's "fold in this device's current seed".
     OwnSeed,
     /// One of the keys kept in the Seed Vault, chosen by fingerprint and label.
-    #[cfg(not(feature = "board-mk3"))]
     Vault,
 }
 
@@ -202,14 +201,12 @@ type Line = heapless::String<40>;
 /// The source rows, in the order they are offered.
 const TYPE_WORDS: &str = "Type words";
 const OWN_SEED: &str = "This device's seed";
-#[cfg(not(feature = "board-mk3"))]
 const VAULT_ENTRY: &str = "A Seed Vault entry";
 
 /// Ask where part `head` comes from. `None` if the owner backed out.
 ///
 /// The rows are only the sources that exist: no "this device's seed" on a blank device,
-/// and no vault row when the vault holds nothing -- or on a board without a settings
-/// store to hold one.
+/// and no vault row when the vault holds nothing.
 fn pick_source(ui: &mut Ui<'_>, head: &str, has_own: bool, has_vault: bool) -> Option<PartFrom> {
     let mut rows: heapless::Vec<&str, 3> = heapless::Vec::new();
     let mut kinds: heapless::Vec<PartFrom, 3> = heapless::Vec::new();
@@ -219,13 +216,10 @@ fn pick_source(ui: &mut Ui<'_>, head: &str, has_own: bool, has_vault: bool) -> O
         let _ = rows.push(OWN_SEED);
         let _ = kinds.push(PartFrom::OwnSeed);
     }
-    #[cfg(not(feature = "board-mk3"))]
     if has_vault {
         let _ = rows.push(VAULT_ENTRY);
         let _ = kinds.push(PartFrom::Vault);
     }
-    #[cfg(feature = "board-mk3")]
-    let _ = has_vault;
     let row = pick_row(ui, head, "where is this part?", &rows)?;
     kinds.get(row).copied()
 }
@@ -303,17 +297,13 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     // loaded on top of nothing. A blank device with nothing loaded has neither, and its
     // vault -- which lives under the wallet in force -- is not worth a read either.
     let has_own = stored || crate::key::in_force() != crate::key::Source::Root;
-    #[cfg(not(feature = "board-mk3"))]
     let has_vault = has_own && crate::vault::count(gate, login, ui) > 0;
-    #[cfg(feature = "board-mk3")]
-    let has_vault = false;
 
     let mut join = Join::new();
     // The same source twice XORs itself out, so each of the fixed ones goes in once.
     // Typed parts are not policed the same way; the all-zero check below catches the
     // pair that cancels.
     let mut own_used = false;
-    #[cfg(not(feature = "board-mk3"))]
     let mut vault_used: heapless::Vec<heapless::String<8>, MAX_PARTS> = heapless::Vec::new();
 
     for i in 0..count {
@@ -355,7 +345,6 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
                         Err(why) => Err(said(why, "cannot be a part")),
                     }
                 }
-                #[cfg(not(feature = "board-mk3"))]
                 PartFrom::Vault => {
                     let Some(picked) = crate::vault::pick_part(gate, login, ui, &head) else {
                         continue;
@@ -448,7 +437,6 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
             crate::catlog!("xor: joined {} words", count_of_words);
-            #[cfg(not(feature = "board-mk3"))]
             crate::settings::open_wallet(gate, login, ui.panel, JOIN, [a, b, c, d]);
             menu::message(ui.panel, "Joined", &said, "in force until reboot");
             menu::wait_for_any_key(ui);
