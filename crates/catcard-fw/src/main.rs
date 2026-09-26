@@ -121,7 +121,7 @@ mod pinentry;
 #[cfg(feature = "board-q1")]
 mod pngview;
 /// The Single-Signer Spending Policy: hobbled mode, the check before signing, the
-/// unlock code. The mk3 has no store to keep one, so there it is inert.
+/// unlock PIN. The mk3 has no store to keep one, so there it is inert.
 mod policy;
 /// A BIP-322 proof of reserves, reviewed as a proof rather than as a spend.
 mod por;
