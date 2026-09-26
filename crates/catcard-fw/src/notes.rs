@@ -35,9 +35,6 @@ use catcard_settings::store::{self, SCRATCH};
 use catcard_ui::field::{self, Accept, Field, Input};
 use catcard_ui::keypad::{Event, KEYS, Key};
 use catcard_ui::scroll::Line as Row;
-use catcard_wallet::address::{self, AddressKind};
-use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey};
-use catcard_wallet::{bip322, message, signfile};
 use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
@@ -80,20 +77,6 @@ const DISABLE: u32 = 205;
 /// first save adds. Conservative on purpose -- refusing a note that would have fitted is
 /// annoying; a save that fails after typing five hundred characters is worse.
 const SLOT_MARGIN: usize = 160;
-
-/// The address a note is signed with: the wallet's first native-segwit receive address,
-/// as `crate::signmsg` signs a typed message.
-const SIGN_PATH: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
-const SIGN_KIND: AddressKind = AddressKind::P2wpkh;
-
-/// Room for the armoured signature file.
-const FILE_TEXT: usize = signfile::BEGIN.len()
-    + signfile::SEPARATOR.len()
-    + signfile::END.len()
-    + message::MAX_MESSAGE
-    + address::MAX_ADDRESS_LEN
-    + bip322::MAX_ARMOURED
-    + 8;
 
 // ---------------------------------------------------------------------------
 // The session clock
@@ -1295,13 +1278,13 @@ fn unseal(ui: &mut Ui<'_>, buf: &mut [u8], len: usize) -> Result<usize, &'static
 // Signing, and the passphrase
 // ---------------------------------------------------------------------------
 
-/// Sign the note's text as a Bitcoin message with the wallet's first segwit address, and
-/// write the armoured file to the chosen storage.
+/// Sign the note's text as a Bitcoin message and write the armoured file to the chosen
+/// storage.
 ///
-/// The derivation and the signing are the same as a typed message's in `crate::signmsg`.
-// TODO(integrator): `crate::signmsg` exposes only `screen` and `text_file`, both of which
-// read their message themselves; once it has a `pub(crate)` entry point that takes the
-// text (its private `sign_text` is nearly that), call it here and delete this copy.
+/// The signing is `crate::signmsg`'s, format, address type and path asked as they are
+/// for a typed message. A note is one line: the message form's second and third lines
+/// are a path and an address type, and a body with line breaks is not a request but a
+/// note that cannot be signed, which is what the ASCII check says.
 fn sign_note(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -1313,96 +1296,25 @@ fn sign_note(
     if text.len() < 2 {
         return say(ui, "nothing to sign");
     }
-    if text.len() > message::MAX_MESSAGE {
-        return say(ui, "message too long");
+    if let Some(why) = crate::signmsg::unshowable(text) {
+        return say(ui, why);
     }
-    if !text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        return say(ui, "plain ASCII only");
-    }
-    let Some(master) = menu::unlock_master(gate, login, ui, H) else {
+    let Some(file) = crate::signmsg::sign_to_file(gate, login, ui, H, text) else {
         return;
     };
-    let mut busy = Working::new(ui.panel, H, "signing");
-    let signed = sign_legacy(&master, text);
-    busy.tick(ui.panel);
-    drop(master);
-    let (armoured, addr) = match signed {
-        Ok(v) => v,
-        Err(why) => return say(ui, why),
-    };
-
-    let rows = [
-        Row::title("Signed"),
-        Row::body(text).wrapped(),
-        Row::body("signed with").small(),
-        Row::body(&addr).small().wrapped(),
-        Row::body(&armoured).small().wrapped(),
-    ];
-    let _ = menu::show_doc(ui, &rows, false, false);
-
     let Some(storage) = menu::pick_storage(ui, H) else {
         return;
     };
-    let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
-    if signfile::write(&mut file, text, &addr, &armoured).is_err() {
-        return say(ui, "no room for it");
-    }
     let path = file_name(title, "-signed.txt");
     menu::card_wait(ui.panel, H, "writing");
     match menu::write_storage_file(storage, &path, file.as_bytes()) {
         Ok(()) => {
-            crate::catlog!("notes: signed with {}", addr.as_str());
+            crate::catlog!("notes: signed note written");
             menu::message(ui.panel, "Signed", &path[1..], "any key to go back");
         }
         Err(why) => menu::message(ui.panel, "Write failed", why, "any key to go back"),
     }
     menu::wait_for_any_key(ui);
-}
-
-/// Derive, sign in the legacy "Bitcoin Signed Message" form, and check the signature
-/// against the key that made it. One masked region from the private key onwards.
-#[allow(clippy::type_complexity)]
-fn sign_legacy(
-    master: &ExtendedPrivKey,
-    text: &str,
-) -> Result<
-    (
-        heapless::String<{ bip322::MAX_ARMOURED }>,
-        heapless::String<{ address::MAX_ADDRESS_LEN }>,
-    ),
-    &'static str,
-> {
-    crate::keywork::run(|kw| {
-        let mut here = master.clone();
-        for &step in &SIGN_PATH {
-            here = here
-                .derive_child(ChildNumber(step), kw)
-                .map_err(|_| "key derivation failed")?;
-        }
-        let pubkey = here.public_key(kw);
-        let mut secret = *here.secret_bytes();
-        let sig = message::sign(text, &secret, SIGN_KIND, kw);
-        secret.zeroize();
-        let sig = sig.map_err(|_| "could not sign")?;
-        match message::recover(text, &sig) {
-            Ok((recovered, _)) if recovered == pubkey => {}
-            _ => return Err("signature did not verify"),
-        }
-        let mut buf = [0u8; bip322::MAX_ARMOURED];
-        let n = message::armour(&sig, &mut buf).map_err(|_| "no room for it")?;
-        let mut armoured: heapless::String<{ bip322::MAX_ARMOURED }> = heapless::String::new();
-        armoured
-            .push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
-            .map_err(|_| "no room for it")?;
-
-        let mut abuf = [0u8; address::MAX_ADDRESS_LEN];
-        let n = address::encode(SIGN_KIND, crate::prefs::network(), &pubkey, &mut abuf)
-            .map_err(|_| "address failed")?;
-        let mut addr: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
-        addr.push_str(core::str::from_utf8(&abuf[..n]).unwrap_or(""))
-            .map_err(|_| "address failed")?;
-        Ok((armoured, addr))
-    })
 }
 
 /// `/<title><suffix>`, with the title reduced to what a FAT name takes.
