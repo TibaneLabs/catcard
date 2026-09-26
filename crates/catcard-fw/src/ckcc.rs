@@ -416,6 +416,8 @@ pub(crate) struct Desk {
     slot: Slot,
     ident: Option<Identity>,
     next_ticket: u32,
+    /// The header the upload in progress carried at `HEADER_OFFSET`, if it got that far.
+    header: Option<[u8; catcard_fwhdr::HEADER_LEN]>,
 }
 
 /// Whether the spending policy has the device hobbled, as the UI task last saw it.
@@ -443,6 +445,7 @@ impl Desk {
             slot: Slot::Idle,
             ident: None,
             next_ticket: 0,
+            header: None,
         }
     }
 
@@ -462,6 +465,7 @@ impl Desk {
         self.upload.clear();
         self.store = None;
         self.result = None;
+        self.header = None;
         self.slot = Slot::Idle;
     }
 
@@ -799,6 +803,16 @@ impl Desk {
             return reply::err(buf, "Spending policy in effect");
         }
 
+        // On the mk3 a large upload sits in the SPI-NOR the settings store shares, and it
+        // is no use unless it was an image -- which is recognised on its last block. So it
+        // is let go as soon as the host moves on to anything but uploading and checking.
+        #[cfg(feature = "board-mk3")]
+        if !matches!(req, Request::Upload { .. } | Request::Sha)
+            && matches!(self.store, Some(Store::Nor(_)))
+        {
+            self.store = None;
+        }
+
         match req {
             Request::Logout | Request::Reboot => {
                 let reboot = matches!(req, Request::Reboot);
@@ -1101,6 +1115,7 @@ impl Desk {
             // is free to take.
             self.store = None;
             self.result = None;
+            self.header = None;
             self.store = Some(Store::take(total)?);
         }
         let Some(store) = self.store.as_mut() else {
@@ -1108,66 +1123,75 @@ impl Desk {
         };
         store.write(offset, data).map_err(|_| "Storage fault")?;
         self.upload.accept(offset, total, data);
+        // The image's header, as it goes past, for recognising the image at its end.
+        use catcard_fwhdr::{HEADER_LEN, HEADER_OFFSET};
+        let (at, end) = (offset as usize, offset as usize + data.len());
+        if at <= HEADER_OFFSET && end >= HEADER_OFFSET + HEADER_LEN {
+            let mut h = [0u8; HEADER_LEN];
+            h.copy_from_slice(&data[HEADER_OFFSET - at..HEADER_OFFSET - at + HEADER_LEN]);
+            self.header = Some(h);
+        }
         if self.upload.complete()
-            && let Some((staged, approval)) = self.firmware()
+            && let Some((staged, approval)) = self.firmware(offset, data)?
         {
             *action = Action::Offer(staged, approval);
-        }
-        // On the mk3 a large upload sits in the SPI-NOR the settings store shares. It is
-        // no use unless it was an image, so it is let go the moment it is whole.
-        #[cfg(feature = "board-mk3")]
-        if self.upload.complete() && matches!(self.store, Some(Store::Nor(_))) {
-            self.store = None;
         }
         Ok(())
     }
 
-    /// If the upload just finished is a firmware image, inspect it and hand it back.
+    /// If the block just stored finished a firmware image, inspect it and hand it back.
     ///
-    /// The host tool sends the image, then the image's 128-byte header again after it
-    /// (observed from `ckcc upgrade`; see `docs/USB.md`). So an upload is an image when its
-    /// last 128 bytes repeat the header at `HEADER_OFFSET`.
+    /// The host tool sends the image, then the image's 128-byte header again after it,
+    /// raising the total by 128 (observed from `ckcc upgrade`; see `docs/USB.md`). So the
+    /// upload is an image when its last block is 128 bytes that repeat the header the
+    /// image carried at `HEADER_OFFSET` -- which was kept, in RAM, as it went past. Nothing
+    /// is read back from the staging medium to decide: a read placed among PSRAM writes is
+    /// what corrupts it (`catcard_upgrade::psram`), and more writes may follow.
+    ///
+    /// `Ok(None)`: not an image, keep the upload. `Err`: an image, refused -- the host is
+    /// told on this block, so it does not go on to ask for the reboot that would install.
+    #[allow(clippy::type_complexity)]
     fn firmware(
         &mut self,
-    ) -> Option<(
-        catcard_upgrade::Staged<'static, crate::staging::Area>,
-        catcard_upgrade::Approval,
-    )> {
-        use catcard_fwhdr::{HEADER_LEN, HEADER_OFFSET};
-        let total = self.upload.total();
-        let image = total.checked_sub(HEADER_LEN as u32)?;
-        if image < catcard_fwhdr::MIN_FIRMWARE_LENGTH {
-            return None;
-        }
-        let store = self.store.as_mut()?;
-        let mut tail = [0u8; HEADER_LEN];
-        let mut head = [0u8; HEADER_LEN];
-        store.read(image, &mut tail).ok()?;
-        store.read(HEADER_OFFSET as u32, &mut head).ok()?;
-        if tail != head {
-            return None;
+        offset: u32,
+        data: &[u8],
+    ) -> Result<
+        Option<(
+            catcard_upgrade::Staged<'static, crate::staging::Area>,
+            catcard_upgrade::Approval,
+        )>,
+        &'static str,
+    > {
+        use catcard_fwhdr::HEADER_LEN;
+        let is_image = offset >= catcard_fwhdr::MIN_FIRMWARE_LENGTH
+            && data.len() == HEADER_LEN
+            && self.header.as_ref().is_some_and(|h| h[..] == *data);
+        if !is_image {
+            return Ok(None);
         }
         if hobbled() {
             crate::catlog!("ckcc: firmware upload refused under the spending policy");
-            return None;
+            return Err("Spending policy in effect");
         }
-        let area = self.store.take()?.into_area()?;
-        let mut staged = match catcard_upgrade::Staged::begin(area, &catcard_board::BOARD, image) {
-            Ok(s) => s,
-            Err(r) => {
+        let area = self
+            .store
+            .take()
+            .and_then(Store::into_area)
+            .ok_or("Nowhere to stage it")?;
+        let mut staged = catcard_upgrade::Staged::begin(area, &catcard_board::BOARD, offset)
+            .map_err(|r| {
                 crate::catlog!("ckcc: image refused: {:?}", r);
-                return None;
-            }
-        };
+                crate::sdupgrade::describe(r)
+            })?;
         staged.stored_elsewhere();
         match staged.inspect(crate::own_header().as_ref()) {
             Ok(a) => {
-                crate::catlog!("ckcc: firmware image {} bytes offered", image);
-                Some((staged, a))
+                crate::catlog!("ckcc: firmware image {} bytes offered", offset);
+                Ok(Some((staged, a)))
             }
             Err(r) => {
                 crate::catlog!("ckcc: image refused: {:?}", r);
-                None
+                Err(crate::sdupgrade::describe(r))
             }
         }
     }
