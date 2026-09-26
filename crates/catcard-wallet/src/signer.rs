@@ -739,5 +739,104 @@ pub fn input_pays_key(psbt: &Psbt<'_>, index: usize, pubkey: &[u8; 33]) -> bool 
     })
 }
 
+/// The signatures an input already carries: which keys have a partial signature, and
+/// whether there is a taproot key-path one. Taken before signing, so
+/// [`spoil_new_signature`] touches only the one this device then adds -- never a
+/// co-signer's.
+#[derive(Clone)]
+pub struct SigsBefore {
+    keys: [[u8; MAX_PUBKEY_LEN]; MAX_KEYS_PER_INPUT],
+    lens: [usize; MAX_KEYS_PER_INPUT],
+    n: usize,
+    tap: bool,
+}
+
+impl SigsBefore {
+    /// What input `index` of `psbt` is already signed with.
+    pub fn of(psbt: &Psbt<'_>, index: usize) -> Self {
+        let mut s = Self {
+            keys: [[0; MAX_PUBKEY_LEN]; MAX_KEYS_PER_INPUT],
+            lens: [0; MAX_KEYS_PER_INPUT],
+            n: 0,
+            tap: false,
+        };
+        if let Some(inp) = psbt.input(index) {
+            s.tap = inp.tap_key_sig().is_some();
+            for (pk, _) in inp.partial_sigs() {
+                if s.n < MAX_KEYS_PER_INPUT && pk.len() <= MAX_PUBKEY_LEN {
+                    s.keys[s.n][..pk.len()].copy_from_slice(pk);
+                    s.lens[s.n] = pk.len();
+                    s.n += 1;
+                }
+            }
+        }
+        s
+    }
+
+    fn has(&self, pk: &[u8]) -> bool {
+        (0..self.n).any(|i| self.keys[i][..self.lens[i]] == *pk)
+    }
+}
+
+/// **Delta mode**: make the signature this device just added to input `index` one that
+/// does not verify, writing the PSBT into `out`. `Ok(None)` when there is no new one.
+///
+/// A trick PIN in delta mode logs into the real wallet; stock then lets most things work
+/// but "produces bad signatures", so a person made to sign sees a normal signing and the
+/// transaction is refused by the network. The signature keeps its exact length and shape
+/// -- the last byte of `s` has its low bit flipped, which changes `s` and nothing about the
+/// encoding -- so nothing on this device or in the PSBT looks different.
+///
+/// Only a signature `before` did not have: a co-signer's stays valid, because spoiling
+/// someone else's signature would be a visible difference, and not this device's to make.
+///
+/// Source: hw-reference/help-and-warning-screens.md §11 "Delta Mode selection" [C] (the
+/// behaviour); the way the signature is spoiled is this firmware's.
+pub fn spoil_new_signature(
+    psbt: &Psbt<'_>,
+    index: usize,
+    before: &SigsBefore,
+    out: &mut [u8],
+) -> Result<Option<usize>, Error> {
+    let inp = psbt.input(index).ok_or(Error::NotOurs)?;
+    // A taproot key-path signature: 64 bytes of `R || s`, and a sighash byte if not the
+    // default. The low bit of `s`'s last byte is byte 63.
+    if !before.tap
+        && let Some(sig) = inp.tap_key_sig()
+        && sig.len() >= 64
+    {
+        let mut v = [0u8; 65];
+        v[..sig.len()].copy_from_slice(sig);
+        v[63] ^= 0x01;
+        let key = [in_key::TAP_KEY_SIG as u8];
+        return Ok(Some(psbt.set_input_record(
+            index,
+            &key,
+            &v[..sig.len()],
+            out,
+        )?));
+    }
+    // An ECDSA partial signature: DER, then the sighash byte. The byte before the sighash
+    // byte is the last of `s`.
+    for (pk, sig) in inp.partial_sigs() {
+        if before.has(pk) || sig.len() < 9 || sig.len() > 73 || pk.len() > MAX_PUBKEY_LEN {
+            continue;
+        }
+        let mut v = [0u8; 73];
+        v[..sig.len()].copy_from_slice(sig);
+        v[sig.len() - 2] ^= 0x01;
+        let mut key = [0u8; 1 + MAX_PUBKEY_LEN];
+        key[0] = in_key::PARTIAL_SIG as u8;
+        key[1..1 + pk.len()].copy_from_slice(pk);
+        return Ok(Some(psbt.set_input_record(
+            index,
+            &key[..1 + pk.len()],
+            &v[..sig.len()],
+            out,
+        )?));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests;

@@ -1225,3 +1225,107 @@ fn a_listed_key_that_matches_no_input_is_found_before_anything_signs() {
         Some(0)
     );
 }
+
+// -- delta mode: a signature that does not verify ---------------------------------------
+
+#[test]
+fn a_spoiled_signature_has_the_same_shape_and_does_not_verify() {
+    let kw = KeyWork::host();
+    let mut buf = [0u8; 2048];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let before = SigsBefore::of(&psbt, 0);
+
+    let mut out = [0u8; 4096];
+    let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let pk = pubkey_at(&PATH);
+    let good = signed.input(0).unwrap().partial_sig(&pk).unwrap().to_vec();
+
+    let mut spoiled = [0u8; 4096];
+    let m = spoil_new_signature(&signed, 0, &before, &mut spoiled)
+        .unwrap()
+        .expect("a new signature to spoil");
+    let after = Psbt::parse(&spoiled[..m]).unwrap();
+    let bad = after.input(0).unwrap().partial_sig(&pk).unwrap();
+
+    // Same length, same sighash byte, one bit apart.
+    assert_eq!(bad.len(), good.len());
+    assert_eq!(bad.last(), good.last());
+    let diff: u32 = bad
+        .iter()
+        .zip(&good)
+        .map(|(a, b)| (a ^ b).count_ones())
+        .sum();
+    assert_eq!(diff, 1);
+    // Still DER, and no longer a signature over this input.
+    let key = SecpPublicKey::from_sec1(&pk).unwrap();
+    let digest = segwit_digest(&psbt, 0, &pk);
+    let (r, s) = outscript::crypto::secp256k1::parse_der_signature(&bad[..bad.len() - 1])
+        .expect("still DER");
+    assert!(!key.verify(&digest, &r, &s), "a spoiled signature verified");
+}
+
+#[test]
+fn a_spoiled_taproot_signature_does_not_verify() {
+    let kw = KeyWork::host();
+    let steps = [86 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 0];
+    let mut buf = vec![0u8; 4096];
+    let n = psbt_for_kind(AddressKind::P2tr, &steps, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let before = SigsBefore::of(&psbt, 0);
+
+    let mut out = vec![0u8; 8192];
+    let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let mut spoiled = vec![0u8; 8192];
+    let m = spoil_new_signature(&signed, 0, &before, &mut spoiled)
+        .unwrap()
+        .unwrap();
+    let after = Psbt::parse(&spoiled[..m]).unwrap();
+    let sig = after.input(0).unwrap().tap_key_sig().unwrap();
+    assert_eq!(sig.len(), 64);
+
+    let pk = pubkey_at(&steps);
+    let internal: [u8; 32] = pk[1..].try_into().unwrap();
+    let (output_key, _) = taproot_tweak(&internal).unwrap();
+    let tx = psbt.unsigned_tx();
+    let ins: Vec<RawTxIn<'_>> = tx.inputs().collect();
+    let outs: Vec<RawTxOut<'_>> = tx.outputs().collect();
+    let raw = RawTx {
+        version: tx.version(),
+        inputs: &ins,
+        outputs: &outs,
+        locktime: tx.locktime(),
+    };
+    let prevouts = [psbt.utxo(0).unwrap()];
+    let mid = raw.taproot_midstate(&prevouts).unwrap();
+    let sighash = mid.key_spend_sighash(0).unwrap();
+    let sig64: [u8; 64] = sig.try_into().unwrap();
+    assert!(!bip340_verify(&output_key, &sighash, &sig64));
+}
+
+#[test]
+fn a_signature_that_was_already_there_is_not_touched() {
+    // A co-signer's signature, or one this device made before: spoiling it would be a
+    // visible difference and not this device's to make.
+    let kw = KeyWork::host();
+    let mut buf = [0u8; 2048];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let mut out = [0u8; 4096];
+    let len = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let before = SigsBefore::of(&signed, 0);
+    let mut spoiled = [0u8; 4096];
+    assert_eq!(
+        spoil_new_signature(&signed, 0, &before, &mut spoiled).unwrap(),
+        None
+    );
+    // And an input with nothing new at all.
+    let unsigned_before = SigsBefore::of(&psbt, 0);
+    assert_eq!(
+        spoil_new_signature(&psbt, 0, &unsigned_before, &mut spoiled).unwrap(),
+        None
+    );
+}
