@@ -111,14 +111,182 @@ pub struct Destination {
     /// True if this output is change back to this wallet, proven not claimed.
     pub change: bool,
     /// The address, and how many bytes of it are used. Empty for a script with no address.
+    /// For a bare P2PK output ([`Self::p2pk`]) it holds the compressed key in hex instead:
+    /// nothing encodes such a script as an address, and the key is what there is to show.
     pub address: [u8; address::MAX_ADDRESS_LEN],
     pub address_len: usize,
+    /// True if the output is a bare `<key> OP_CHECKSIG` script, shown as "P2PK".
+    pub p2pk: bool,
+    /// For a change output, what is odd about where it sits, if anything: the warning the
+    /// review prints under it. Proven change either way -- this is a heuristic on top of
+    /// the proof, never a substitute for it. `None` for a non-change output.
+    pub unusual: Option<Unusual>,
+    /// For a change output, the derivation path it was proven at, for the warning to name.
+    pub path: [u32; signer::MAX_STEPS],
+    pub path_len: usize,
 }
 
 impl Destination {
+    /// A slot nothing has been written into.
+    pub const BLANK: Self = Self {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; address::MAX_ADDRESS_LEN],
+        address_len: 0,
+        p2pk: false,
+        unusual: None,
+        path: [0; signer::MAX_STEPS],
+        path_len: 0,
+    };
+
     pub fn address(&self) -> &str {
         core::str::from_utf8(&self.address[..self.address_len]).unwrap_or("")
     }
+
+    /// The change path, as steps.
+    pub fn path(&self) -> &[u32] {
+        &self.path[..self.path_len]
+    }
+
+    /// Write [`Self::path`] as `m/84h/0h/0h/1/5`.
+    pub fn write_path(&self, out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        write_path(self.path(), out)
+    }
+}
+
+/// Write `steps` as `m/84h/0h/0h/1/5`: hardened levels with an `h`.
+pub fn write_path(steps: &[u32], out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+    out.write_str("m")?;
+    for &step in steps {
+        if step & HARDENED != 0 {
+            write!(out, "/{}h", step & !HARDENED)?;
+        } else {
+            write!(out, "/{step}")?;
+        }
+    }
+    Ok(())
+}
+
+/// The hardened bit of a derivation step.
+const HARDENED: u32 = 0x8000_0000;
+
+/// What is odd about a proven change output's path.
+///
+/// Stock's "suspicious change" heuristic: change that is provably ours can still sit
+/// somewhere no wallet would put it, and that is worth a line on the review -- a host
+/// that pays change to a corner of the key space the owner's software will never scan
+/// has parked the coins rather than stolen them, which is a thing to know before
+/// signing. A warning, not a refusal: the coins are recoverable from the seed, and the
+/// owner may know why. Source: hw-reference/firmware-features.md §5 "a 'suspicious
+/// change' heuristic warns on unusual change paths" [C]; the specific rules are this
+/// firmware's [I].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Unusual {
+    /// The change is on an account none of the inputs spend from.
+    OtherAccount,
+    /// The change index is far past the highest index any input spends from: more than
+    /// [`CHANGE_INDEX_MARGIN`] beyond it.
+    FarIndex { index: u32, highest: u32 },
+    /// The branch or the index level is hardened, where a wallet never hardens.
+    Hardened,
+    /// The change is on the receive branch (`.../0/i`), where a wallet would hand out the
+    /// address to someone rather than pay itself.
+    ReceiveBranch,
+}
+
+impl Unusual {
+    /// The few words the review prints.
+    pub fn text(self) -> &'static str {
+        match self {
+            Unusual::OtherAccount => "another account",
+            Unusual::FarIndex { .. } => "index far past the inputs",
+            Unusual::Hardened => "hardened where none is expected",
+            Unusual::ReceiveBranch => "on the receive branch",
+        }
+    }
+}
+
+/// How far past the highest input index a change index may sit before it is called
+/// unusual.
+///
+/// A wallet's change counter runs ahead of its receive counter, so "past every input" is
+/// normal; two hundred past is not a counter, it is a choice. A margin, not a proof; an
+/// index this flags is still proven change and still shown as such. [I]
+pub const CHANGE_INDEX_MARGIN: u32 = 200;
+
+/// What is unusual about a change path, if anything; `None` for the ordinary shape.
+///
+/// `steps` is the proven path (five levels for single-signature change; the wallet's
+/// origin plus branch and index for multisig), `accounts` the accounts the inputs spend
+/// from, and `highest_index` the highest last-level index among the inputs' own paths,
+/// when any input had one. The rules, in the order they are checked:
+///
+/// 1. [`Unusual::Hardened`]: the branch or the index level is hardened.
+/// 2. [`Unusual::OtherAccount`]: a five-level path whose first three levels are not an
+///    account the inputs spend from.
+/// 3. [`Unusual::FarIndex`]: the index is more than [`CHANGE_INDEX_MARGIN`] past
+///    `highest_index`.
+/// 4. [`Unusual::ReceiveBranch`]: the branch is `0`.
+///
+/// Under this crate's change rules ([`account_for`]) the first two cannot reach a proven
+/// change output -- such an output is not change at all, and shows as leaving -- so they
+/// are stated here for the heuristic's completeness and for a future relaxation of those
+/// rules, not because a screen will print them today.
+pub fn unusual_change(
+    steps: &[u32],
+    accounts: &[Account],
+    highest_index: Option<u32>,
+) -> Option<Unusual> {
+    let n = steps.len();
+    if n < 2 {
+        return None;
+    }
+    let (branch, index) = (steps[n - 2], steps[n - 1]);
+    if branch & HARDENED != 0 || index & HARDENED != 0 {
+        return Some(Unusual::Hardened);
+    }
+    if n == CHANGE_DEPTH {
+        let prefix = [steps[0], steps[1], steps[2]];
+        if !accounts.iter().any(|a| a.prefix == prefix) {
+            return Some(Unusual::OtherAccount);
+        }
+    }
+    if let Some(highest) = highest_index
+        && index > highest.saturating_add(CHANGE_INDEX_MARGIN)
+    {
+        return Some(Unusual::FarIndex { index, highest });
+    }
+    if branch == 0 {
+        return Some(Unusual::ReceiveBranch);
+    }
+    None
+}
+
+/// A proven change output's path, and what the heuristic says about it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ChangePath {
+    pub steps: [u32; signer::MAX_STEPS],
+    pub depth: usize,
+    pub unusual: Option<Unusual>,
+}
+
+impl ChangePath {
+    pub fn steps(&self) -> &[u32] {
+        &self.steps[..self.depth]
+    }
+}
+
+/// What [`summarise`] learnt from the inputs, as the output checks want it.
+#[derive(Copy, Clone, Debug)]
+pub struct Spent<'s> {
+    /// The single-signature accounts the inputs spend from.
+    pub accounts: &'s [Account],
+    /// The registered multisig wallets they spend from, as indices into [`Owner::wallets`].
+    pub wallets: &'s [usize],
+    /// The highest last-level index among our inputs' paths, for [`unusual_change`];
+    /// `None` when no input of ours named a path.
+    pub highest_index: Option<u32>,
 }
 
 /// What the device will say about a transaction.
@@ -170,11 +338,28 @@ pub struct Summary {
     pub odd_count: usize,
     /// How many of our inputs ask for an unusual type in all.
     pub odd_total: usize,
+    /// How many of our inputs spend a bare P2PK script, for the review to name: it is the
+    /// one input form with no address, so the screen says what it is instead.
+    pub p2pk_inputs: usize,
+    /// The highest last-level index among our inputs' derivation paths, for the
+    /// suspicious-change heuristic ([`unusual_change`]); `None` when no input named one.
+    pub highest_input_index: Option<u32>,
     /// True if any input opted in to the unified signature hash, which only a multichain
     /// build signs. Such a transaction is valid on the chain that implements that rule and
     /// on no other, so the review screen says so.
     #[cfg(feature = "multichain")]
     pub opted_in: bool,
+}
+
+impl Summary {
+    /// What the inputs said, for [`destinations_with`] and [`change_of`].
+    pub fn spent(&self) -> Spent<'_> {
+        Spent {
+            accounts: &self.accounts[..self.account_count],
+            wallets: &self.wallets[..self.wallet_count],
+            highest_index: self.highest_input_index,
+        }
+    }
 }
 
 /// One of our inputs asking for an unusual sighash type.
@@ -276,6 +461,8 @@ pub fn summarise(
     let mut odd_sighash = [OddSighash::NONE; MAX_ODD_SIGHASH];
     let mut odd_count = 0usize;
     let mut odd_total = 0usize;
+    let mut p2pk_inputs = 0usize;
+    let mut highest_input_index: Option<u32> = None;
     for index in 0..inputs {
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
@@ -290,6 +477,13 @@ pub fn summarise(
                 continue;
             };
             mine = true;
+            // The index this input sits at, for the change heuristic: the highest one
+            // across our inputs is what a change index is measured against.
+            if let Some(&last) = request.steps().last()
+                && last & HARDENED == 0
+            {
+                highest_input_index = Some(highest_input_index.map_or(last, |h| h.max(last)));
+            }
             // In which form. The kind is settled by rebuilding the script from our own key
             // and matching it against the output being spent -- which `utxo` has already
             // checked against the previous transaction's txid, so it is the chain's answer
@@ -298,6 +492,14 @@ pub fn summarise(
                 continue;
             };
             let pubkey = signer.public_key_bytes();
+            // Bare P2PK: single-signature, ours, and of no account -- a wallet does not
+            // make P2PK change, so the path it was found at names nothing an output may
+            // call itself change against. Source: hw-reference/firmware-features.md §3
+            // (P2PK: sign yes, change detection no) [C]
+            if signer::p2pk_pays(spent.script, &pubkey) {
+                single_sig = true;
+                continue;
+            }
             let form = [
                 AddressKind::P2wpkh,
                 AddressKind::P2shP2wpkh,
@@ -392,6 +594,9 @@ pub fn summarise(
             unpriced += 1;
             continue;
         };
+        if mine && signer::p2pk_key(utxo.script).is_some() {
+            p2pk_inputs += 1;
+        }
 
         // A script-hash input of ours that is not single-signature is a multisig one. The
         // chain pins *which* script it is -- the witness or redeem script has to hash to
@@ -504,6 +709,8 @@ pub fn summarise(
         odd_sighash,
         odd_count,
         odd_total,
+        p2pk_inputs,
+        highest_input_index,
         #[cfg(feature = "multichain")]
         opted_in,
     })
@@ -587,22 +794,17 @@ fn ours_address(
     None
 }
 
-/// As [`ours_address`], for an output's map.
-fn output_address(
+/// As [`ours_address`], for an output's map, with the whole record: the path is what
+/// the change heuristic reads, not only its last two levels.
+fn output_request(
     psbt: &Psbt<'_>,
     index: usize,
     fingerprint: [u8; FINGERPRINT_LEN],
-) -> Option<(u32, u32)> {
+) -> Option<KeyRequest> {
     let map = psbt.output(index)?.map();
-    for rec in map.records_of(out_key::BIP32_DERIVATION) {
-        if let Some(request) = signer::request_from_record(rec, fingerprint, false) {
-            let steps = request.steps();
-            if steps.len() >= 2 {
-                return Some((steps[steps.len() - 2], steps[steps.len() - 1]));
-            }
-        }
-    }
-    None
+    map.records_of(out_key::BIP32_DERIVATION)
+        .filter_map(|rec| signer::request_from_record(rec, fingerprint, false))
+        .find(|request| request.steps().len() >= 2)
 }
 
 /// The account a change path belongs to, if its shape allows it to be change at all.
@@ -612,7 +814,6 @@ fn output_address(
 /// change, when either of the last two levels is hardened, or when the index is past
 /// [`MAX_CHANGE_INDEX`].
 fn account_for(steps: &[u32], accounts: &[Account]) -> Option<Account> {
-    const HARDENED: u32 = 0x8000_0000;
     if steps.len() != CHANGE_DEPTH {
         return None;
     }
@@ -641,6 +842,8 @@ fn account_for(steps: &[u32], accounts: &[Account]) -> Option<Account> {
 /// this spend is not drawing on is another wallet, and paying it is money leaving this one.
 ///
 /// At most [`MAX_CHANGE_KEYS`] records are followed: this runs with interrupts masked.
+///
+/// [`change_of`] is the same test with the proven path and the heuristic's verdict on it.
 pub fn is_change(
     psbt: &Psbt<'_>,
     index: usize,
@@ -650,9 +853,39 @@ pub fn is_change(
     wallets: &[usize],
     kw: &KeyWork,
 ) -> bool {
+    let spent = Spent {
+        accounts,
+        wallets,
+        highest_index: None,
+    };
+    change_of(psbt, index, script, owner, &spent, kw).is_some()
+}
+
+/// As [`is_change`], returning the path the output was proven at and what
+/// [`unusual_change`] makes of it. `None` is "not change".
+///
+/// The heuristic runs only on an output that *is* change: it changes nothing about what
+/// counts as change, it only annotates it.
+pub fn change_of(
+    psbt: &Psbt<'_>,
+    index: usize,
+    script: &[u8],
+    owner: &Owner<'_>,
+    spent: &Spent<'_>,
+    kw: &KeyWork,
+) -> Option<ChangePath> {
     let (master, fingerprint) = (owner.master, owner.fingerprint);
-    let Some(map) = psbt.output(index).map(|o| o.map()) else {
-        return false;
+    let map = psbt.output(index).map(|o| o.map())?;
+    let (accounts, wallets) = (spent.accounts, spent.wallets);
+    let found = |request: &KeyRequest| {
+        let mut steps = [0u32; signer::MAX_STEPS];
+        let depth = request.steps().len();
+        steps[..depth].copy_from_slice(request.steps());
+        ChangePath {
+            steps,
+            depth,
+            unusual: unusual_change(request.steps(), accounts, spent.highest_index),
+        }
     };
 
     // Change back to a registered multisig wallet, proven the same way an input is: the
@@ -662,12 +895,13 @@ pub fn is_change(
     // wallet the inputs spend from: a single-signature spend paying a registered multisig
     // wallet is sending to it, however many of its keys are ours.
     if multisig::is_script_hash(script)
-        && let Some((branch, at)) = output_address(psbt, index, fingerprint)
+        && let Some(request) = output_request(psbt, index, fingerprint)
+        && let [.., branch, at] = *request.steps()
         && (branch <= 1 && at <= MAX_CHANGE_INDEX)
         && multisig::match_script(owner.wallets, script, branch, at)
             .is_some_and(|found| wallets.contains(&found.wallet))
     {
-        return true;
+        return Some(found(&request));
     }
     let mut derived = 0usize;
     for taproot in [false, true] {
@@ -678,7 +912,7 @@ pub fn is_change(
         };
         for rec in map.records_of(keytype) {
             if derived == MAX_CHANGE_KEYS {
-                return false;
+                return None;
             }
             let Some(request) = signer::request_from_record(rec, fingerprint, taproot) else {
                 continue;
@@ -701,11 +935,11 @@ pub fn is_change(
             if let Ok(n) = address::script_pubkey(account.kind, &pubkey, &mut ours)
                 && ours[..n] == *script
             {
-                return true;
+                return Some(found(&request));
             }
         }
     }
-    false
+    None
 }
 
 /// The destinations of `psbt`, written into `out`; returns how many were filled.
@@ -728,6 +962,9 @@ pub fn destinations(
 /// As [`destinations`], starting at output `start`: one page of a review that shows a
 /// long transaction a screenful at a time. Returns how many were filled, which is fewer
 /// than `out.len()` only on the last page.
+///
+/// Without the inputs' highest index, so the far-index rule of the change heuristic is
+/// off; [`destinations_with`] takes the whole of what the summary learnt.
 #[allow(clippy::too_many_arguments)]
 pub fn destinations_from(
     psbt: &Psbt<'_>,
@@ -739,23 +976,69 @@ pub fn destinations_from(
     out: &mut [Destination],
     kw: &KeyWork,
 ) -> usize {
+    let spent = Spent {
+        accounts,
+        wallets,
+        highest_index: None,
+    };
+    destinations_with(psbt, owner, network, &spent, start, out, kw)
+}
+
+/// [`destinations_from`] with everything [`summarise`] learnt from the inputs
+/// ([`Summary::spent`]), so each change output carries the heuristic's verdict.
+pub fn destinations_with(
+    psbt: &Psbt<'_>,
+    owner: &Owner<'_>,
+    network: Network,
+    spent: &Spent<'_>,
+    start: usize,
+    out: &mut [Destination],
+    kw: &KeyWork,
+) -> usize {
     let mut n = 0;
     for (index, txout) in psbt.unsigned_tx().outputs().enumerate().skip(start) {
         if n == out.len() {
             break;
         }
-        let mut address = [0u8; address::MAX_ADDRESS_LEN];
-        let address_len = address::from_script(txout.script, network, &mut address).unwrap_or(0);
-        out[n] = Destination {
+        let mut d = Destination {
             index,
             amount: txout.amount,
-            change: is_change(psbt, index, txout.script, owner, accounts, wallets, kw),
-            address,
-            address_len,
+            ..Destination::BLANK
         };
+        d.address_len = address::from_script(txout.script, network, &mut d.address).unwrap_or(0);
+        // A bare P2PK output has no address; the key is shown in its compressed form,
+        // which is the same point however the script pushed it.
+        if d.address_len == 0
+            && let Some(key) = signer::p2pk_key(txout.script)
+        {
+            d.p2pk = true;
+            if let Ok(pk) = outscript::crypto::secp256k1::SecpPublicKey::from_sec1(key) {
+                d.address_len = write_hex(&pk.serialize_compressed(), &mut d.address);
+            }
+        }
+        if let Some(change) = change_of(psbt, index, txout.script, owner, spent, kw) {
+            d.change = true;
+            d.unusual = change.unusual;
+            d.path = change.steps;
+            d.path_len = change.depth;
+        }
+        out[n] = d;
         n += 1;
     }
     n
+}
+
+/// Lower-case hex of `bytes` into `out`; returns the length, or zero if it does not fit.
+fn write_hex(bytes: &[u8], out: &mut [u8]) -> usize {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if out.len() < bytes.len() * 2 {
+        return 0;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        out[i * 2] = HEX[usize::from(b >> 4)];
+        out[i * 2 + 1] = HEX[usize::from(b & 0xf)];
+    }
+    bytes.len() * 2
 }
 
 /// Inputs of `psbt` this wallet can sign, written into `out` as indices; returns how many.

@@ -4,6 +4,7 @@
 //! stranger, so "ours" and "not ours" are both real keys rather than flags.
 
 use outscript::btcraw::{RawTx, RawTxIn, RawTxOut};
+use outscript::crypto::secp256k1::SecpPublicKey;
 use outscript::psbt::{Psbt, input as in_key};
 
 use super::*;
@@ -267,13 +268,7 @@ fn the_fee_change_and_destination_come_out_of_the_transaction() {
     assert!(s.fee_warn);
 
     let psbt = Psbt::parse(&buf[..n]).unwrap();
-    let mut dests = [Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    }; 4];
+    let mut dests = [Destination::BLANK; 4];
     let master = master_of(OURS);
     let found = destinations(
         &psbt,
@@ -780,13 +775,7 @@ fn the_cap_shows_a_stuffed_change_output_as_money_leaving() {
     assert_eq!(sum.change, 0);
     assert_eq!(sum.sending, 99_000);
 
-    let mut dests = [Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    }; 4];
+    let mut dests = [Destination::BLANK; 4];
     let found = destinations(
         &psbt,
         &owner(&master, &[]),
@@ -1444,13 +1433,7 @@ fn a_single_sig_spend_to_a_registered_multisig_wallet_is_not_change() {
     assert_eq!(summary.sending, 99_000);
     assert_eq!(summary.fee, 1_000);
 
-    let mut dests = [Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    }; 2];
+    let mut dests = [Destination::BLANK; 2];
     let found = destinations(
         &psbt,
         &me,
@@ -1987,13 +1970,7 @@ fn destinations_are_paged_without_gaps_or_repeats() {
     let psbt = Psbt::parse(&buf[..n]).unwrap();
     let master = master_of(OURS);
     let accounts = accounts_of(&psbt, &master);
-    let blank = Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    };
+    let blank = Destination::BLANK;
     let mut seen = Vec::new();
     let mut start = 0;
     loop {
@@ -2020,4 +1997,333 @@ fn destinations_are_paged_without_gaps_or_repeats() {
         seen,
         (0..5).map(|i| (i, 10_000 + i as u64)).collect::<Vec<_>>()
     );
+}
+
+// --- bare P2PK ---
+
+/// A PSBT spending one bare P2PK output of `amount` paying our key at `steps`, in the
+/// form `key` gives it (33 or 65 bytes), paying `pay_amount` to a P2PK output for the
+/// stranger's key in `pay_key`. The previous transaction is carried in full, as a legacy
+/// input needs.
+fn p2pk_spend(key: &[u8], steps: &[u32], amount: u64, pay_key: &[u8], pay_amount: u64) -> Vec<u8> {
+    let mut script = [0u8; signer::P2PK_SCRIPT_MAX];
+    let n = signer::p2pk_script(key, &mut script).unwrap();
+    let script = &script[..n];
+    let prev_in = RawTxIn {
+        txid: [0x44; 32],
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    };
+    let prev = RawTx {
+        version: 2,
+        inputs: &[prev_in],
+        outputs: &[RawTxOut { amount, script }],
+        locktime: 0,
+    };
+    let mut prev_raw = vec![0u8; prev.serialized_len()];
+    let m = prev.serialize_to_slice(&mut prev_raw).unwrap();
+    prev_raw.truncate(m);
+
+    let mut pay = [0u8; signer::P2PK_SCRIPT_MAX];
+    let p = signer::p2pk_script(pay_key, &mut pay).unwrap();
+    let input = RawTxIn {
+        txid: prev.txid(),
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    };
+    let tx = RawTx {
+        version: 2,
+        inputs: &[input],
+        outputs: &[RawTxOut {
+            amount: pay_amount,
+            script: &pay[..p],
+        }],
+        locktime: 0,
+    };
+    let mut a = vec![0u8; 4096];
+    let n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    let mut b = vec![0u8; 4096];
+    let n = Psbt::parse(&a[..n])
+        .unwrap()
+        .set_non_witness_utxo(0, &prev_raw, &mut b)
+        .unwrap();
+    let n = Psbt::parse(&b[..n])
+        .unwrap()
+        .add_input_bip32_derivation(0, key, OUR_FP, steps, &mut a)
+        .unwrap();
+    a.truncate(n);
+    a
+}
+
+/// A P2PK input of ours is ours in the review -- counted, priced, and named as P2PK --
+/// and names no account, so nothing may call itself its change. A P2PK output is shown
+/// as P2PK with its key, since it has no address.
+#[test]
+fn a_p2pk_input_is_ours_and_a_p2pk_output_is_named() {
+    let ours = pubkey_at(OURS, &RECEIVE);
+    let stranger = pubkey_at(STRANGER, &RECEIVE);
+    for (spend_key, pay_key) in [
+        (ours.to_vec(), stranger.to_vec()),
+        // The same keys in their 65-byte form: the same coins, the same review.
+        (
+            SecpPublicKey::from_sec1(&ours)
+                .unwrap()
+                .serialize_uncompressed()
+                .to_vec(),
+            SecpPublicKey::from_sec1(&stranger)
+                .unwrap()
+                .serialize_uncompressed()
+                .to_vec(),
+        ),
+    ] {
+        let bytes = p2pk_spend(&spend_key, &RECEIVE, 100_000, &pay_key, 95_000);
+        let psbt = Psbt::parse(&bytes).unwrap();
+        let master = master_of(OURS);
+        let s = summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()).unwrap();
+        assert_eq!((s.inputs, s.ours, s.p2pk_inputs), (1, 1, 1));
+        assert_eq!(s.account_count, 0, "a P2PK input names no change account");
+        assert_eq!((s.total_in, s.sending, s.fee), (100_000, 95_000, 5_000));
+        assert!(s.fee_known);
+        assert_eq!(s.highest_input_index, Some(0));
+
+        let mut ours_idx = [0usize; 4];
+        assert_eq!(our_inputs(&psbt, &master, OUR_FP, &mut ours_idx, &kw()), 1);
+
+        let mut dests = [Destination::BLANK; 2];
+        let found = destinations_with(
+            &psbt,
+            &owner(&master, &[]),
+            Network::Mainnet,
+            &s.spent(),
+            0,
+            &mut dests,
+            &kw(),
+        );
+        assert_eq!(found, 1);
+        assert!(dests[0].p2pk);
+        assert!(!dests[0].change);
+        let hex: String = stranger.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            dests[0].address(),
+            hex,
+            "the compressed key, whatever the script pushed"
+        );
+    }
+}
+
+/// A WIF-store key pays a P2PK input as it pays its addresses.
+#[test]
+fn a_wif_store_key_makes_a_p2pk_input_ours() {
+    let key = pubkey_at(STRANGER, &RECEIVE);
+    // The stranger's key stands in for a stored WIF key: the PSBT names a fingerprint that
+    // is not ours, so only the store can claim the input.
+    let bytes = p2pk_spend(&key, &RECEIVE, 100_000, &pubkey_at(OURS, &CHANGE), 95_000);
+    let psbt = Psbt::parse(&bytes).unwrap();
+    let master = master_of(OURS);
+    assert_eq!(
+        summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()),
+        Err(Refusal::NothingOfOurs)
+    );
+    let bare = [key];
+    let with_store = Owner {
+        master: &master,
+        fingerprint: OUR_FP,
+        wallets: &[],
+        bare_keys: &bare,
+    };
+    let s = summarise(&psbt, &with_store, &Policy::default(), &kw()).unwrap();
+    assert_eq!((s.ours, s.p2pk_inputs), (1, 1));
+    let mut hits = [0usize; 4];
+    assert_eq!(wif_inputs(&psbt, &key, &mut hits), 1);
+}
+
+// --- the suspicious-change heuristic ---
+
+const ACCOUNT: Account = Account {
+    prefix: [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000],
+    kind: AddressKind::P2wpkh,
+};
+
+/// Each rule of the heuristic, on the path alone.
+#[test]
+fn each_unusual_change_rule_fires_on_its_own_shape() {
+    let h = 0x8000_0000u32;
+    let accounts = [ACCOUNT];
+    // The ordinary shape: the spend's account, the change branch, a nearby index.
+    assert_eq!(
+        unusual_change(&[84 | h, h, h, 1, 3], &accounts, Some(10)),
+        None
+    );
+    assert_eq!(unusual_change(&[84 | h, h, h, 1, 3], &accounts, None), None);
+    // A hardened branch or index, where a wallet never hardens.
+    assert_eq!(
+        unusual_change(&[84 | h, h, h, 1 | h, 3], &accounts, Some(10)),
+        Some(Unusual::Hardened)
+    );
+    assert_eq!(
+        unusual_change(&[84 | h, h, h, 1, 3 | h], &accounts, Some(10)),
+        Some(Unusual::Hardened)
+    );
+    // Another account than any input spends from.
+    assert_eq!(
+        unusual_change(&[84 | h, h, 1 | h, 1, 3], &accounts, Some(10)),
+        Some(Unusual::OtherAccount)
+    );
+    assert_eq!(
+        unusual_change(&[49 | h, h, h, 1, 3], &accounts, Some(10)),
+        Some(Unusual::OtherAccount)
+    );
+    // An index far past the inputs: more than the margin beyond the highest.
+    assert_eq!(
+        unusual_change(
+            &[84 | h, h, h, 1, 10 + CHANGE_INDEX_MARGIN],
+            &accounts,
+            Some(10)
+        ),
+        None,
+        "at the margin is still ordinary"
+    );
+    assert_eq!(
+        unusual_change(
+            &[84 | h, h, h, 1, 11 + CHANGE_INDEX_MARGIN],
+            &accounts,
+            Some(10)
+        ),
+        Some(Unusual::FarIndex {
+            index: 11 + CHANGE_INDEX_MARGIN,
+            highest: 10
+        })
+    );
+    // With no input index to measure against, the rule does not fire.
+    assert_eq!(
+        unusual_change(&[84 | h, h, h, 1, 5000], &accounts, None),
+        None
+    );
+    // The receive branch.
+    assert_eq!(
+        unusual_change(&[84 | h, h, h, 0, 3], &accounts, Some(10)),
+        Some(Unusual::ReceiveBranch)
+    );
+    // A multisig-shaped path (origin plus branch and index) is judged on its last two.
+    assert_eq!(
+        unusual_change(&[48 | h, h, h, 2 | h, 1, 3], &[], Some(10)),
+        None
+    );
+    assert_eq!(
+        unusual_change(&[48 | h, h, h, 2 | h, 0, 3], &[], Some(10)),
+        Some(Unusual::ReceiveBranch)
+    );
+    assert_eq!(
+        unusual_change(&[48 | h, h, h, 2 | h, 1, 3000], &[], Some(10)),
+        Some(Unusual::FarIndex {
+            index: 3000,
+            highest: 10
+        })
+    );
+    // Too short to have a branch and an index.
+    assert_eq!(unusual_change(&[3], &accounts, Some(10)), None);
+}
+
+/// The path renders the way a wallet writes it.
+#[test]
+fn a_change_path_is_written_with_hardened_marks() {
+    let h = 0x8000_0000u32;
+    let mut s = String::new();
+    write_path(&[84 | h, h, h, 1, 500], &mut s).unwrap();
+    assert_eq!(s, "m/84h/0h/0h/1/500");
+}
+
+/// Through the review: change on an odd path is still change -- counted as change, shown
+/// as change -- and carries the warning and its path for the screen.
+#[test]
+fn unusual_change_is_still_change_and_says_why() {
+    let far = [
+        84 | 0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        1,
+        12 + CHANGE_INDEX_MARGIN,
+    ];
+    let receive = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 7];
+    for (steps, expect) in [
+        (CHANGE, None),
+        (
+            far,
+            Some(Unusual::FarIndex {
+                index: 12 + CHANGE_INDEX_MARGIN,
+                highest: 11,
+            }),
+        ),
+        (receive, Some(Unusual::ReceiveBranch)),
+    ] {
+        let mut buf = vec![0u8; 8192];
+        // Two inputs of ours, at receive indices 4 and 11: the change is measured against
+        // the higher.
+        let mut low = ours_spend(60_000);
+        low.steps[4] = 4;
+        let mut high = ours_spend(60_000);
+        high.steps[4] = 11;
+        let n = build(
+            &[low, high],
+            &[
+                Pay {
+                    phrase: STRANGER,
+                    steps: RECEIVE,
+                    amount: 70_000,
+                    claim_ours: false,
+                },
+                Pay {
+                    phrase: OURS,
+                    steps,
+                    amount: 45_000,
+                    claim_ours: true,
+                },
+            ],
+            &mut buf,
+        );
+        let psbt = Psbt::parse(&buf[..n]).unwrap();
+        let master = master_of(OURS);
+        let s = summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()).unwrap();
+        assert_eq!(s.highest_input_index, Some(11));
+        assert_eq!(s.change, 45_000, "what counts as change did not change");
+        assert_eq!(s.sending, 70_000);
+
+        let mut dests = [Destination::BLANK; 2];
+        let found = destinations_with(
+            &psbt,
+            &owner(&master, &[]),
+            Network::Mainnet,
+            &s.spent(),
+            0,
+            &mut dests,
+            &kw(),
+        );
+        assert_eq!(found, 2);
+        assert!(!dests[0].change);
+        assert_eq!(dests[0].unusual, None);
+        assert!(dests[1].change);
+        assert_eq!(dests[1].unusual, expect, "{steps:?}");
+        assert_eq!(dests[1].path(), &steps[..]);
+        // Without the inputs' highest index the far-index rule cannot fire, and the
+        // older entry point says so by staying quiet.
+        let mut plain = [Destination::BLANK; 2];
+        destinations(
+            &psbt,
+            &owner(&master, &[]),
+            Network::Mainnet,
+            &s.accounts[..s.account_count],
+            &[],
+            &mut plain,
+            &kw(),
+        );
+        assert!(plain[1].change);
+        assert_eq!(
+            plain[1].unusual,
+            expect.filter(|u| !matches!(u, Unusual::FarIndex { .. }))
+        );
+    }
 }
