@@ -18,6 +18,7 @@
 //! than truncated.
 
 use catcard_callgate::Callgate;
+use catcard_wallet::psbtv2::{self, V2};
 use catcard_wallet::psbtview::{self, Policy, Refusal, SighashPolicy, timelock};
 use catcard_wallet::signer;
 use outscript::psbt::Psbt;
@@ -352,14 +353,15 @@ pub(crate) fn as_psbt_bytes(
 /// Why the parser refused the bytes, in the few words a screen has.
 ///
 /// The one distinction worth making on screen is a PSBT version this firmware does not
-/// speak against a file that is simply broken: a wallet that writes BIP-370 (v2) files
-/// can usually be told to write v0, and "not a valid PSBT" would send its owner looking
-/// for corruption that is not there. v2 is not signed here; it is named and refused.
-/// Source: hw-reference/firmware-features.md §5 (stock accepts v0 and v2) [C]
+/// speak against a file that is simply broken: "not a valid PSBT" would send its owner
+/// looking for corruption that is not there. Version 2 (BIP-370) never reaches this --
+/// [`review_and_sign`] routes it through [`V2`] first -- so what is left is a version
+/// nobody has defined. Source: hw-reference/firmware-features.md §5 (stock accepts v0
+/// and v2) [C]
 fn parse_error_text(e: outscript::Error) -> &'static str {
     use outscript::Error as E;
     match e {
-        E::UnsupportedPsbtVersion => "PSBT v2 is not supported",
+        E::UnsupportedPsbtVersion => "PSBT version not supported",
         E::InvalidMagic => "not a PSBT",
         E::MissingUnsignedTx => "PSBT has no transaction",
         E::InvalidUnsignedTx => "PSBT tx is malformed",
@@ -367,6 +369,44 @@ fn parse_error_text(e: outscript::Error) -> &'static str {
         E::TrailingData => "PSBT has trailing bytes",
         _ => "PSBT is corrupt",
     }
+}
+
+/// Why a version-2 (BIP-370) file was refused, in the few words a screen has.
+///
+/// Each names what the host has to fix: a lock time no single `nLockTime` satisfies, a
+/// transaction it has not finished constructing, a flag this firmware cannot read, a map
+/// count that lies, a required field missing or malformed.
+fn v2_error_text(e: psbtv2::Error) -> &'static str {
+    use psbtv2::Error as E;
+    match e {
+        E::LocktimeConflict => "v2: no locktime fits all inputs",
+        E::StillModifiable(_) => "v2: tx still modifiable",
+        E::UnknownFlags(_) => "v2: unknown modifiable flags",
+        E::CountMismatch => "v2: counts disagree with maps",
+        E::MissingGlobal(_) | E::MissingInputField { .. } | E::MissingOutputField { .. } => {
+            "v2: required field missing"
+        }
+        E::BadGlobal(_) | E::BadInputField { .. } | E::BadOutputField { .. } => {
+            "v2: field malformed"
+        }
+        E::UnsignedTxPresent => "v2 carries an unsigned tx",
+        E::UnsupportedVersion(_) => "PSBT version not supported",
+        E::BufferTooSmall => "too big for this board",
+        E::Psbt(inner) => parse_error_text(inner),
+        E::Magic | E::NotV2 | E::Truncated | E::NonCanonical | E::DuplicateKey | E::Mismatch => {
+            "PSBT is corrupt"
+        }
+    }
+}
+
+/// Merge the signed v0 view back into the original v2 container, into `out`.
+///
+/// The original parsed once already; parsing it again here is cheaper than carrying the
+/// view across the signing loop's buffer swaps.
+fn write_back_v2(original: &[u8], signed_v0: &[u8], out: &mut [u8]) -> Result<usize, &'static str> {
+    let v2 = V2::parse(original).map_err(v2_error_text)?;
+    let signed = Psbt::parse(signed_v0).map_err(parse_error_text)?;
+    v2.write_back(&signed, out).map_err(v2_error_text)
 }
 
 /// Why the review stopped, in the few words a screen has.
@@ -641,6 +681,47 @@ pub(crate) fn review_and_sign(
 ) {
     const HEAD: &str = "Sign";
 
+    // A version-2 file (BIP-370) is worked on through its v0 view: the transaction its
+    // fields describe, built once here, is what the review and the signer read, so a v2
+    // gets exactly the refusals and the signatures its v0 twin would. The original stays
+    // at the head of `buf`, word-aligned, and the view goes after it; once signed, the
+    // view is merged back into the original and the owner's host gets v2 back. Nothing
+    // here touches a key, so it runs before the master is unlocked.
+    let mut original_v2: Option<&[u8]> = None;
+    let (buf, len): (&mut [u8], usize) = if psbtv2::is_v2(&buf[..len]) {
+        let at = (len + 3) & !3;
+        if at >= buf.len() {
+            menu::message(
+                ui.panel,
+                HEAD,
+                "too big for this board",
+                "any key to go back",
+            );
+            menu::wait_for_any_key(ui);
+            return;
+        }
+        let (head, tail) = buf.split_at_mut(at);
+        let head: &[u8] = &head[..len];
+        let view = V2::parse(head)
+            .and_then(|v2| v2.check_for_signing().map(|()| v2))
+            .and_then(|v2| v2.to_v0(tail));
+        match view {
+            Ok(n) => {
+                crate::catlog!("sign: PSBT v2, {} bytes as its v0 view", n);
+                original_v2 = Some(head);
+                (tail, n)
+            }
+            Err(e) => {
+                crate::catlog!("sign: psbt v2 refused: {:?}", e);
+                menu::message(ui.panel, HEAD, v2_error_text(e), "any key to go back");
+                menu::wait_for_any_key(ui);
+                return;
+            }
+        }
+    } else {
+        (buf, len)
+    };
+
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
         return;
     };
@@ -804,12 +885,11 @@ pub(crate) fn review_and_sign(
     // answer.
     let mut fill = |start: usize, page: &mut [psbtview::Destination]| {
         crate::keywork::run(|kw| {
-            psbtview::destinations_from(
+            psbtview::destinations_with(
                 &psbt,
                 &owner,
                 crate::prefs::network(),
-                &summary.accounts[..summary.account_count],
-                &summary.wallets[..summary.wallet_count],
+                &summary.spent(),
                 start,
                 page,
                 kw,
@@ -895,9 +975,32 @@ pub(crate) fn review_and_sign(
     let mut wait: heapless::String<24> = heapless::String::new();
     let _ = core::fmt::Write::write_fmt(&mut wait, format_args!("writing to {}", storage.medium()));
     menu::card_wait(ui.panel, HEAD, &wait);
-    let written = write_output(storage, dest.signed_name, &from[..at]);
+    // A v2 source gets v2 back: the signed view merged into the original container, built
+    // in `into`, which is free until `finalise` below wants it. `from` keeps the signed
+    // v0 view, which is what finalises and extracts.
+    let v2_len = match original_v2 {
+        Some(original) => match write_back_v2(original, &from[..at], into) {
+            Ok(n) => Some(n),
+            Err(why) => {
+                crate::catlog!("sign: v2 write-back failed: {}", why);
+                menu::message(ui.panel, "Write failed", why, "any key to go back");
+                menu::wait_for_any_key(ui);
+                return;
+            }
+        },
+        None => None,
+    };
+    let written = match v2_len {
+        Some(n) => write_output(storage, dest.signed_name, &into[..n]),
+        None => write_output(storage, dest.signed_name, &from[..at]),
+    };
     match &written {
-        Ok(()) => crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at),
+        Ok(()) => crate::catlog!(
+            "sign: {} of {} inputs, {} bytes",
+            signed,
+            signable,
+            v2_len.unwrap_or(at)
+        ),
         Err(why) => {
             crate::catlog!("sign: write failed: {}", why);
             menu::message(ui.panel, "Write failed", why, "any key to go back");
@@ -918,7 +1021,11 @@ pub(crate) fn review_and_sign(
     let _ = dest.offer_transports;
     #[cfg(feature = "board-q1")]
     if dest.offer_transports {
-        offer_signed_qr(ui, &from[..at], &mut into[..]);
+        match v2_len {
+            // The v2 result sits in `into`; the tail of `from` past the view is the scratch.
+            Some(n) => offer_signed_qr(ui, &into[..n], &mut from[at..]),
+            None => offer_signed_qr(ui, &from[..at], &mut into[..]),
+        }
     }
     if written.is_err() {
         return;
@@ -1164,14 +1271,7 @@ fn review(
     signable: usize,
     fill: &mut dyn FnMut(usize, &mut [psbtview::Destination]) -> usize,
 ) -> bool {
-    let blank = psbtview::Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; catcard_wallet::address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    };
-    let mut page = [blank; PAGE];
+    let mut page = [psbtview::Destination::BLANK; PAGE];
     let mut start = 0usize;
     loop {
         let got = fill(start, &mut page);
@@ -1207,9 +1307,10 @@ fn review_page(
     use catcard_ui::scroll::{Line, ScrollView};
     use core::fmt::Write as _;
 
-    /// Lines a page can hold: the totals and their warnings, the timelocks, two per
-    /// output, the page note and the key hint.
-    const LINES: usize = 12 + MAX_RELATIVE_SHOWN + 2 * PAGE;
+    /// Lines a page can hold: the totals and their warnings, the timelocks, up to three
+    /// per output (the amount, the address or key, and a change warning), the page note
+    /// and the key hint.
+    const LINES: usize = 12 + MAX_RELATIVE_SHOWN + 3 * PAGE;
     /// Relative locks named on the first page before the rest are only counted.
     const MAX_RELATIVE_SHOWN: usize = 4;
     type Text = heapless::String<72>;
@@ -1267,6 +1368,14 @@ fn review_page(
         let mut line = Text::new();
         let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
         say(&mut texts, &mut small, &mut wrapped, line, true, false);
+
+        // A bare P2PK input has no address to show, so the review says what it is.
+        // Source: hw-reference/firmware-features.md §3 (P2PK signable) [C]
+        if summary.p2pk_inputs > 0 {
+            let mut line = Text::new();
+            let _ = write!(line, "{} P2PK input(s)", summary.p2pk_inputs);
+            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        }
 
         // An opted-in transaction is signed under the unified message, which only the
         // chain that implements that rule verifies. Said here because it is the one
@@ -1351,7 +1460,11 @@ fn review_page(
             "{}{}{}",
             if d.change { "change " } else { "to " },
             amount,
-            if d.address_len == 0 {
+            // A P2PK output has no address; the line names the form and the next line
+            // carries the key.
+            if d.p2pk {
+                " P2PK"
+            } else if d.address_len == 0 {
                 " (no address)"
             } else {
                 ""
@@ -1361,6 +1474,16 @@ fn review_page(
         if d.address_len > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{}", d.address());
+            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+        }
+        // Stock's suspicious-change warning: proven change, on a path no wallet would
+        // choose. Said with the path, so the owner can see for themselves; not a
+        // refusal. Source: hw-reference/firmware-features.md §5 "suspicious change" [C]
+        if let Some(why) = d.unusual {
+            let mut line = Text::new();
+            let _ = write!(line, "unusual change path ");
+            let _ = d.write_path(&mut line);
+            let _ = write!(line, ": {}", why.text());
             say(&mut texts, &mut small, &mut wrapped, line, true, true);
         }
     }
