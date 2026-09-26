@@ -286,6 +286,122 @@ fn use_seed(
     menu::wait_for_any_key(ui);
 }
 
+/// Read the vault of the wallet in force and hand its entries to `f`.
+///
+/// The entries borrow the settings buffer, which is a heap lease: they live for `f` and
+/// no longer, so whatever `f` needs afterwards it copies out.
+fn with_entries<R>(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    f: impl FnOnce(&mut Ui<'_>, &[Seed<'_>]) -> R,
+) -> Result<R, &'static str> {
+    let Some(mut held) = crate::heap::take(SCRATCH) else {
+        return Err("not enough memory");
+    };
+    let doc_buf = held.bytes();
+    let n = read_doc(gate, login, ui.panel, doc_buf)?;
+    let doc = catcard_settings::json::Doc::parse(&doc_buf[..n]).unwrap_or_default();
+    let mut seeds = [Seed::default(); MAX_SEEDS];
+    let have = vault::list(&doc, &mut seeds);
+    Ok(f(ui, &seeds[..have]))
+}
+
+/// How many entries the wallet in force keeps. Zero when there is no vault to read.
+///
+/// For a screen deciding whether to offer the vault at all -- Seed XOR's join, which
+/// can take a part from it. No dialogs: a vault that cannot be read is a vault with
+/// nothing to offer, and the reason is in the log.
+pub(crate) fn count(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -> usize {
+    match with_entries(gate, login, ui, |_, s| s.len()) {
+        Ok(n) => n,
+        Err(why) => {
+            crate::catlog!("vault: not counted: {}", why);
+            0
+        }
+    }
+}
+
+/// One entry, taken out of the vault for a screen that wants its bytes -- the XOR join.
+///
+/// The secret is decoded here, once, and wiped with this. What it *is* -- words, an
+/// XPRV, a raw master -- is answered by [`Picked::entropy`], by name, so a screen that
+/// only knows what to do with words can say what it was handed instead.
+pub(crate) struct Picked {
+    raw: Zeroizing<[u8; RAW_MAX]>,
+    len: usize,
+    /// The fingerprint the entry names, for the log and the screen.
+    pub(crate) xfp: Xfp,
+}
+
+impl Picked {
+    /// The entry's BIP-39 entropy, or -- by name -- what it holds instead.
+    ///
+    /// Takes the token because the bytes are a seed: the caller is inside
+    /// [`crate::keywork::run`], and whatever it does with the slice stays there.
+    pub(crate) fn entropy(&self, _kw: &catcard_wallet::KeyWork) -> Result<&[u8], &'static str> {
+        let raw = &self.raw[..self.len];
+        bip39_part(raw).ok_or_else(|| kind_name(raw))
+    }
+}
+
+/// What a stash that is not BIP-39 words is, for a refusal that names it.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout [C] -- `0x01` is an XPRV; a plain
+/// length `16..=64` is a raw master secret.
+fn kind_name(raw: &[u8]) -> &'static str {
+    match raw.first().copied() {
+        Some(XPRV_MARKER) => "an XPRV, not words",
+        Some(16..=64) => "a raw master, not words",
+        _ => "not a kind this knows",
+    }
+}
+
+/// List the vault, by label and fingerprint, and hand back the entry the owner picks.
+///
+/// `None` if there is nothing to pick, the owner backed out, or the vault could not be
+/// read -- each said on screen. The hex is turned into bytes inside
+/// [`crate::keywork::run`]: it is a seed, spelled differently.
+pub(crate) fn pick_part(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<Picked> {
+    menu::blocking_screen(ui.panel, head, "reading the vault");
+    let picked = with_entries(gate, login, ui, |ui, seeds| {
+        if seeds.is_empty() {
+            return Err("the vault is empty");
+        }
+        let mut labels: heapless::Vec<heapless::String<40>, MAX_SEEDS> = heapless::Vec::new();
+        for s in seeds {
+            let mut line: heapless::String<40> = heapless::String::new();
+            let name = if s.label.is_empty() { s.xfp } else { s.label };
+            let _ = write!(line, "{name}  [{}]", s.xfp);
+            let _ = labels.push(line);
+        }
+        let refs: heapless::Vec<&str, MAX_SEEDS> = labels.iter().map(|l| l.as_str()).collect();
+        let Some(row) = menu::pick_row(ui, head, "which entry", &refs) else {
+            return Ok(None);
+        };
+        let s = seeds.get(row).ok_or("no such entry")?;
+        let mut raw = Zeroizing::new([0u8; RAW_MAX]);
+        let len = crate::keywork::run(|_| vault::decode_secret(s.secret, &mut raw[..]))
+            .ok_or("that entry is damaged")?;
+        let mut xfp: Xfp = heapless::String::new();
+        let _ = xfp.push_str(s.xfp);
+        Ok(Some(Picked { raw, len, xfp }))
+    });
+    match picked {
+        Ok(Ok(some)) => some,
+        Ok(Err(why)) | Err(why) => {
+            menu::message(ui.panel, head, why, "nothing was added");
+            menu::wait_for_any_key(ui);
+            None
+        }
+    }
+}
+
 /// The entropy inside a stash whose marker says BIP-39, if that is what it is.
 ///
 /// Source: hw-reference/secret-stash-format.md §Layout [C] -- `0x80 | ((len/8) - 2)`.
