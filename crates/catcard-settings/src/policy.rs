@@ -93,10 +93,12 @@ pub const UNLOCK_RECORD_LEN: usize = 7 + 10 + 1 + 2 * UNLOCK_SALT_LEN + 1 + 64;
 
 /// One policy, as stored.
 ///
-/// The whitelist borrows the settings text it was parsed from: an address is kept as the
-/// bytes it was written as, so nothing here copies twenty-five ninety-byte strings.
+/// Owns its whitelist -- about two and a half kilobytes at the bound -- so an address
+/// typed or scanned on the device can be added without the settings text it was read
+/// beside having to outlive it. One of these is live at a time, on the menu task's stack,
+/// never in `.bss`.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Policy<'a> {
+pub struct Policy {
     /// The most a transaction may send away, in satoshis; zero is no cap.
     pub magnitude: u64,
     /// At most one spend per this many blocks; zero is off.
@@ -112,12 +114,12 @@ pub struct Policy<'a> {
     /// Whether the policy is in force: hobbled mode from the next login.
     pub active: bool,
     /// Destinations a transaction may pay; empty means any.
-    pub whitelist: heapless::Vec<&'a str, MAX_WHITELIST>,
+    pub whitelist: heapless::Vec<heapless::String<MAX_ADDRESS>, MAX_WHITELIST>,
     /// The last refusal, as text; empty for none.
     pub violation: heapless::String<MAX_VIOLATION>,
 }
 
-impl Default for Policy<'_> {
+impl Default for Policy {
     fn default() -> Self {
         Policy {
             magnitude: 0,
@@ -134,18 +136,23 @@ impl Default for Policy<'_> {
 }
 
 /// What the wallet's settings say about the policy.
+///
+/// The policy variant is the whole owned whitelist; there is no allocator here to box
+/// it, and a caller holds one of these on its stack for a moment before taking the
+/// policy out.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Read<'a> {
+pub enum Read {
     /// No policy has ever been written.
     Absent,
     /// A policy, active or not.
-    Policy(Policy<'a>),
+    Policy(Policy),
     /// Something is under the key and it will not read. Allows nothing.
     Damaged,
 }
 
 /// Read the policy out of a wallet's settings object.
-pub fn read<'a>(doc: &Doc<'a>) -> Read<'a> {
+pub fn read(doc: &Doc<'_>) -> Read {
     let Some(raw) = doc.get(KEY) else {
         return Read::Absent;
     };
@@ -161,7 +168,7 @@ pub fn read<'a>(doc: &Doc<'a>) -> Read<'a> {
 /// and wrong makes the whole thing `None`, which [`read`] turns into [`Read::Damaged`].
 /// Lenient on what is missing and strict on what is malformed, so a policy written by a
 /// later version with a field this one does not know still reads, and a torn one does not.
-pub fn parse_object(raw: &str) -> Option<Policy<'_>> {
+pub fn parse_object(raw: &str) -> Option<Policy> {
     let inner = Doc::parse(raw.as_bytes()).ok()?;
     let mut p = Policy::default();
 
@@ -201,7 +208,9 @@ pub fn parse_object(raw: &str) -> Option<Policy<'_>> {
             if !valid_address(text) {
                 return None;
             }
-            p.whitelist.push(text).ok()?;
+            let mut owned: heapless::String<MAX_ADDRESS> = heapless::String::new();
+            owned.push_str(text).ok()?;
+            p.whitelist.push(owned).ok()?;
         }
     }
     if let Some(v) = inner.get("viol") {
@@ -214,7 +223,7 @@ pub fn parse_object(raw: &str) -> Option<Policy<'_>> {
     Some(p)
 }
 
-impl<'a> Policy<'a> {
+impl Policy {
     /// Write the object as the value for [`KEY`], into `out`. `None` if it will not fit.
     ///
     /// Every string written here passed [`valid_address`] or [`storable_text`], neither of
@@ -264,7 +273,7 @@ impl<'a> Policy<'a> {
     }
 
     /// Add an address to the whitelist, trimmed. Says why not.
-    pub fn add_address(&mut self, address: &'a str) -> Result<(), AddError> {
+    pub fn add_address(&mut self, address: &str) -> Result<(), AddError> {
         let text = address.trim();
         if !valid_address(text) {
             return Err(AddError::NotAnAddress);
@@ -272,7 +281,9 @@ impl<'a> Policy<'a> {
         if self.whitelist.iter().any(|a| same_address(a, text)) {
             return Err(AddError::Duplicate);
         }
-        self.whitelist.push(text).map_err(|_| AddError::Full)
+        let mut owned: heapless::String<MAX_ADDRESS> = heapless::String::new();
+        owned.push_str(text).map_err(|_| AddError::NotAnAddress)?;
+        self.whitelist.push(owned).map_err(|_| AddError::Full)
     }
 }
 
@@ -434,13 +445,13 @@ pub struct Allowed {
 
 /// The rules, applied one output at a time so a transaction of any length can be judged
 /// a page at a time; [`Checker::finish`] adds the totals.
-pub struct Checker<'p, 'a> {
-    policy: &'p Policy<'a>,
+pub struct Checker<'p> {
+    policy: &'p Policy,
     first: Option<Violation>,
 }
 
-impl<'p, 'a> Checker<'p, 'a> {
-    pub fn new(policy: &'p Policy<'a>) -> Self {
+impl<'p> Checker<'p> {
+    pub fn new(policy: &'p Policy) -> Self {
         Checker {
             policy,
             first: None,
@@ -517,7 +528,7 @@ impl<'p, 'a> Checker<'p, 'a> {
 
 /// [`Checker`] over a whole transaction at once.
 pub fn check(
-    policy: &Policy<'_>,
+    policy: &Policy,
     outputs: &[Out<'_>],
     sending: u64,
     height: Option<u32>,
