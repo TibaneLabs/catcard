@@ -140,6 +140,107 @@ fn segwit_digest(psbt: &Psbt<'_>, index: usize, pubkey: &[u8; 33]) -> [u8; 32] {
         .unwrap()
 }
 
+/// Under the warn policy a `NONE|ANYONECANPAY` request is signed, by this crate's own
+/// BIP-143 digest -- which drops the outputs and the other inputs as the type says --
+/// and recorded with that type byte. Under the block policy it is refused, as before.
+#[test]
+fn an_unusual_sighash_is_signed_under_warn_over_the_digest_the_type_defines() {
+    use crate::tx::Transaction;
+    use crate::tx::sighash::{Midstates, bip143};
+
+    let kw = KeyWork::host();
+    let mut buf = [0u8; 2048];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let mut typed = [0u8; 2048];
+    let n = psbt.set_sighash_type(0, 0x82, &mut typed).unwrap();
+    let psbt = Psbt::parse(&typed[..n]).unwrap();
+    let master = master();
+    let mut out = [0u8; 4096];
+
+    assert_eq!(
+        sign_input(&psbt, 0, &master, FINGERPRINT, &mut out, &kw),
+        Err(Error::Sighash { kind: 0x82 })
+    );
+    assert_eq!(
+        sign_input_under(
+            &psbt,
+            0,
+            &master,
+            FINGERPRINT,
+            SighashPolicy::Block,
+            &mut out,
+            &kw
+        ),
+        Err(Error::Sighash { kind: 0x82 })
+    );
+
+    let len = sign_input_under(
+        &psbt,
+        0,
+        &master,
+        FINGERPRINT,
+        SighashPolicy::Warn,
+        &mut out,
+        &kw,
+    )
+    .unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let pk = pubkey_at(&PATH);
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&pk)
+        .expect("signature");
+    assert_eq!(
+        *sig.last().unwrap(),
+        0x82,
+        "the type byte is the one asked for"
+    );
+
+    // Verifies against the NONE|ANYONECANPAY digest, and not against the ALL one.
+    let mut code = [0u8; 25];
+    code[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    code[3..23].copy_from_slice(&hash160(&pk));
+    code[23..].copy_from_slice(&[0x88, 0xac]);
+    let tx = Transaction::parse(psbt.unsigned_tx().bytes()).unwrap();
+    let mid = Midstates::compute(&tx).unwrap();
+    let digest = bip143(&tx, &mid, 0, &code, 60_000, 0x82).unwrap();
+    let key = SecpPublicKey::from_sec1(&pk).unwrap();
+    let (r, s) = outscript::crypto::secp256k1::parse_der_signature(&sig[..sig.len() - 1]).unwrap();
+    assert!(key.verify(&digest, &r, &s), "signature does not verify");
+    assert!(
+        !key.verify(&segwit_digest(&psbt, 0, &pk), &r, &s),
+        "that is not a SIGHASH_ALL signature"
+    );
+    // And the rest of the container is intact: the derivation record is still there.
+    let mut requests = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    assert_eq!(key_requests(&signed, 0, FINGERPRINT, &mut requests), Ok(1));
+}
+
+/// Only the five standard types are admitted, even under warn.
+#[test]
+fn the_warn_policy_admits_exactly_the_standard_types() {
+    for kind in [0x01u32, 0x02, 0x03, 0x81, 0x82, 0x83] {
+        assert!(
+            sighash_allowed_under(kind, SighashPolicy::Warn),
+            "{kind:#x}"
+        );
+        assert_eq!(
+            sighash_allowed_under(kind, SighashPolicy::Block),
+            kind == 0x01,
+            "{kind:#x}"
+        );
+    }
+    // Not `0x21`: on a multichain build that is the unified opt-in bit over `ALL`.
+    for kind in [0x00u32, 0x04, 0x1f, 0x80, 0x84, 0xff, 0x100, 0x101] {
+        assert!(
+            !sighash_allowed_under(kind, SighashPolicy::Warn),
+            "{kind:#x}"
+        );
+    }
+}
+
 #[test]
 fn an_input_whose_keys_are_not_ours_is_left_alone() {
     let kw = KeyWork::host();
@@ -640,7 +741,8 @@ fn a_wif_key_signs_the_input_paying_its_own_address() {
     assert!(!input_pays_key(&psbt, 0, &other));
 
     let mut out = [0u8; 4096];
-    let len = sign_input_with_secret(&psbt, 0, wif.secret(), &mut out, &kw).unwrap();
+    let len = sign_input_with_secret(&psbt, 0, wif.secret(), SighashPolicy::Block, &mut out, &kw)
+        .unwrap();
     let signed = Psbt::parse(&out[..len]).unwrap();
     let sig = signed
         .input(0)
@@ -652,6 +754,13 @@ fn a_wif_key_signs_the_input_paying_its_own_address() {
     // A key that does not pay the input is not involved, rather than signing a stranger's.
     let stranger = derive(&PATH);
     let mut out2 = [0u8; 4096];
-    let got = sign_input_with_secret(&psbt, 0, stranger.secret_bytes(), &mut out2, &kw);
+    let got = sign_input_with_secret(
+        &psbt,
+        0,
+        stranger.secret_bytes(),
+        SighashPolicy::Block,
+        &mut out2,
+        &kw,
+    );
     assert!(matches!(got, Err(Error::Psbt(_))), "a foreign key signed");
 }

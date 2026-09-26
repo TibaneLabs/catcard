@@ -55,6 +55,44 @@ pub fn sighash_allowed(kind: u32) -> bool {
     false
 }
 
+/// What to do with an input asking for a sighash type [`sighash_allowed`] refuses.
+///
+/// The owner's choice, from the settings (`catcard_settings::prefs::SighashChecks`): the
+/// default blocks, and the Danger Zone can turn that into a warning. This is the wallet
+/// crate's copy of that choice so the review and the signature read one value.
+/// Source: hw-reference/firmware-features.md §5 "Sighash policy" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum SighashPolicy {
+    /// Refuse the transaction. The default.
+    #[default]
+    Block,
+    /// Sign it once the owner has been warned. The review lists the inputs and their
+    /// types; a consolidation is refused regardless.
+    Warn,
+}
+
+/// Whether `kind` is a type this device will produce under `policy`.
+///
+/// Under [`SighashPolicy::Block`] this is [`sighash_allowed`]. Under
+/// [`SighashPolicy::Warn`] the five other standard ECDSA types are allowed as well --
+/// `ALL|ANYONECANPAY`, `NONE`, `SINGLE`, and those two with `ANYONECANPAY` -- and
+/// nothing beyond them: an unknown flag byte is not "unusual", it is undefined.
+/// Source: BIP-143 "hash type" values; Bitcoin Core `SIGHASH_*` [C]
+pub fn sighash_allowed_under(kind: u32, policy: SighashPolicy) -> bool {
+    use crate::tx::sighash::{SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE};
+    if sighash_allowed(kind) {
+        return true;
+    }
+    match policy {
+        SighashPolicy::Block => false,
+        SighashPolicy::Warn => {
+            let base = kind & !SIGHASH_ANYONECANPAY;
+            kind & !(SIGHASH_ANYONECANPAY | 0x1f) == 0
+                && (base == SIGHASH_ALL || base == SIGHASH_NONE || base == SIGHASH_SINGLE)
+        }
+    }
+}
+
 /// Longest derivation path this will follow.
 ///
 /// Deeper than any standard single-signature or multisig path (`m/84h/0h/0h/0/i` is five),
@@ -105,7 +143,10 @@ pub enum Error {
     KeyMismatch,
     /// Deriving the key failed.
     Derivation,
-    /// The input asks for a sighash type this will not produce; see [`sighash_allowed`].
+    /// The input asks for a sighash type this will not produce; see [`sighash_allowed`]
+    /// and [`sighash_allowed_under`]. Also a type the policy allows on an input this has
+    /// no digest for: a non-`ALL` type on a legacy (pre-segwit) input, whose sighash does
+    /// not commit to the amount and which this crate does not compute.
     Sighash { kind: u32 },
     /// `outscript` refused the input: a script it does not sign, a UTXO that does not
     /// match, a hash that does not check out.
@@ -368,8 +409,39 @@ pub fn sign_input(
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
-    if let Some(kind) = psbt.input(index).and_then(|i| i.sighash_type())
-        && !sighash_allowed(kind)
+    sign_input_under(
+        psbt,
+        index,
+        master,
+        fingerprint,
+        SighashPolicy::Block,
+        out,
+        kw,
+    )
+}
+
+/// [`sign_input`] under the owner's sighash policy.
+///
+/// A type [`sighash_allowed`] takes goes through `outscript`'s signer as before. One that
+/// only [`SighashPolicy::Warn`] admits is signed here instead, because `outscript` signs
+/// ECDSA inputs under `SIGHASH_ALL` alone: the BIP-143 digest is computed by this crate
+/// ([`crate::tx::sighash::bip143`]), which does drop the outputs and inputs the type says
+/// to, and the signature is written as the input's partial-signature record. That path
+/// covers segwit v0 inputs (P2WPKH, nested P2WPKH, P2WSH); a taproot input's type is
+/// honoured by `outscript` itself; a legacy input under a non-`ALL` type is refused with
+/// [`Error::Sighash`], since its digest is not computed here.
+pub fn sign_input_under(
+    psbt: &Psbt<'_>,
+    index: usize,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    policy: SighashPolicy,
+    out: &mut [u8],
+    kw: &KeyWork,
+) -> Result<usize, Error> {
+    let kind = psbt.input(index).and_then(|i| i.sighash_type());
+    if let Some(kind) = kind
+        && !sighash_allowed_under(kind, policy)
     {
         return Err(Error::Sighash { kind });
     }
@@ -378,11 +450,113 @@ pub fn sign_input(
     let mut last = Error::NotOurs;
     for request in &keys[..found] {
         match match_key(master, request, kw) {
-            Ok(signer) => return Ok(psbt.sign_input_to_slice(index, &signer, out)?),
+            Ok(signer) => return sign_with(psbt, index, &signer, kind, out),
             Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+/// Sign input `index` with `signer`, by whichever path its sighash type needs.
+fn sign_with(
+    psbt: &Psbt<'_>,
+    index: usize,
+    signer: &Signer,
+    kind: Option<u32>,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    match kind {
+        // The ordinary type, or a taproot input, whose type `outscript` honours itself.
+        Some(kind) if !sighash_allowed(kind) && !signer.taproot => {
+            sign_odd_sighash(psbt, index, signer, kind, out)
+        }
+        _ => Ok(psbt.sign_input_to_slice(index, signer, out)?),
+    }
+}
+
+/// Sign a segwit v0 input under a non-`ALL` type, writing the updated PSBT into `out`.
+///
+/// The one place this crate builds a signature by hand. The script code is settled the
+/// way BIP-143 says -- the implied P2PKH script for a P2WPKH program, the witness script
+/// for P2WSH -- and only after the spent output (which [`Psbt::utxo`] has checked against
+/// the previous transaction's txid) is shown to pay a script our key is in. A legacy
+/// input, or a P2SH input whose redeem script is not a P2WPKH program, is refused: its
+/// digest is not the BIP-143 one and is not computed here.
+fn sign_odd_sighash(
+    psbt: &Psbt<'_>,
+    index: usize,
+    signer: &Signer,
+    kind: u32,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    use crate::tx::Transaction;
+    use crate::tx::sighash::{Midstates, bip143};
+    use purecrypto::hash::{Digest, Sha256};
+
+    let inp = psbt.input(index).ok_or(Error::NotOurs)?;
+    let spent = psbt.utxo(index)?;
+    let pubkey = signer.public_key_bytes();
+    let key_hash = crate::bip32::hash160(&pubkey);
+
+    // `76 a9 14 <h160> 88 ac`: the script code BIP-143 gives a P2WPKH spend.
+    let mut p2pkh = [0u8; 25];
+    p2pkh[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    p2pkh[3..23].copy_from_slice(&key_hash);
+    p2pkh[23..].copy_from_slice(&[0x88, 0xac]);
+
+    // The program the coin is locked to: native, or inside P2SH via the redeem script.
+    let program: &[u8] = if spent.script.len() == 23
+        && spent.script[0] == 0xa9
+        && spent.script[1] == 0x14
+        && spent.script[22] == 0x87
+    {
+        let redeem = inp.redeem_script().ok_or(Error::Sighash { kind })?;
+        if crate::bip32::hash160(redeem) != spent.script[2..22] {
+            return Err(Error::Psbt(outscript::Error::InvalidRecordValue));
+        }
+        redeem
+    } else {
+        spent.script
+    };
+    let script_code: &[u8] = match program {
+        [0x00, 0x14, hash @ ..] if hash.len() == 20 => {
+            if *hash != key_hash {
+                return Err(Error::NotOurs);
+            }
+            &p2pkh
+        }
+        [0x00, 0x20, hash @ ..] if hash.len() == 32 => {
+            let ws = inp.witness_script().ok_or(Error::Sighash { kind })?;
+            if Sha256::digest(ws)[..] != *hash {
+                return Err(Error::Psbt(outscript::Error::InvalidRecordValue));
+            }
+            // Our key has to be pushed in the script, as `<33> <key>`.
+            let pushed = ws.windows(34).any(|w| w[0] == 33 && w[1..] == pubkey[..]);
+            if !pushed {
+                return Err(Error::NotOurs);
+            }
+            ws
+        }
+        // A legacy script (P2PKH, bare P2SH): no BIP-143 digest, and none computed here.
+        _ => return Err(Error::Sighash { kind }),
+    };
+
+    let tx_bytes = psbt.unsigned_tx().bytes();
+    let tx = Transaction::parse(tx_bytes).map_err(|_| Error::Sighash { kind })?;
+    let mid = Midstates::compute(&tx).map_err(|_| Error::Sighash { kind })?;
+    let digest = bip143(&tx, &mid, index, script_code, spent.amount, kind)
+        .map_err(|_| Error::Sighash { kind })?;
+    let der = signer.key.sign_der(&digest);
+
+    // `<der> <type byte>` under `PARTIAL_SIG || <compressed key>`, as BIP-174 lays it out.
+    let mut value = [0u8; 73];
+    let n = der.len();
+    value[..n].copy_from_slice(&der);
+    value[n] = kind as u8;
+    let mut record_key = [0u8; 34];
+    record_key[0] = in_key::PARTIAL_SIG as u8;
+    record_key[1..].copy_from_slice(&pubkey);
+    Ok(psbt.set_input_record(index, &record_key, &value[..n + 1], out)?)
 }
 
 /// Sign input `index` with a bare private key -- a WIF-store key -- writing the updated
@@ -391,25 +565,27 @@ pub fn sign_input(
 /// Unlike [`sign_input`], which asks the input which of our derived keys it names, this key
 /// has no derivation and no fingerprint: `outscript` matches its public key against the
 /// script the input actually pays and signs only if it is involved, returning
-/// [`Error::Psbt`] wrapping `KeyNotInvolved` otherwise. The same sighash policy applies as
-/// for a seed key: a WIF spend is refused on a type this device will not produce, so the
-/// signature and the review cannot disagree.
+/// [`Error::Psbt`] wrapping `KeyNotInvolved` otherwise. The same sighash `policy` applies
+/// as for a seed key ([`sign_input_under`]): a WIF spend is refused on a type this device
+/// will not produce, so the signature and the review cannot disagree.
 ///
 /// The scalar is elliptic-curve work, so this takes a [`KeyWork`] and runs masked.
 pub fn sign_input_with_secret(
     psbt: &Psbt<'_>,
     index: usize,
     secret: &[u8; 32],
+    policy: SighashPolicy,
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
-    if let Some(kind) = psbt.input(index).and_then(|i| i.sighash_type())
-        && !sighash_allowed(kind)
+    let kind = psbt.input(index).and_then(|i| i.sighash_type());
+    if let Some(kind) = kind
+        && !sighash_allowed_under(kind, policy)
     {
         return Err(Error::Sighash { kind });
     }
     let signer = Signer::from_secret(secret, kw).ok_or(Error::Derivation)?;
-    Ok(psbt.sign_input_to_slice(index, &signer, out)?)
+    sign_with(psbt, index, &signer, kind, out)
 }
 
 /// Whether input `index` pays a single-signature address of `pubkey` (compressed).

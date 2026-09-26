@@ -6,13 +6,14 @@
 //! to, or refused:
 //!
 //! - **Amounts in** come from the previous transaction each input spends, whose txid
-//!   `outscript` checks against the outpoint. A witness UTXO alone is refused: BIP-143
-//!   binds the amount of the input being *signed*, so a wrong amount on any *other* input
-//!   costs a host nothing and still moves the fee this screen states.
+//!   `outscript` checks against the outpoint. On an input of ours a witness UTXO alone is
+//!   refused: BIP-143 binds the amount of the input being *signed*, so a wrong amount on
+//!   any *other* input costs a host nothing and still moves the fee this screen states.
 //! - **Amounts out** and their destinations come from the unsigned transaction, which every
 //!   signature commits to.
-//! - **The fee** is the difference, and a fee that cannot be computed -- an input whose
-//!   spent output was not given -- is reported as unknown rather than as zero.
+//! - **The fee** is the difference, and a fee that cannot be computed -- a foreign input
+//!   whose spent output was not given, or was given on the host's word alone -- is
+//!   reported as unknown rather than as zero, as it is in a coinjoin.
 //! - **Change** is an output this wallet can rebuild from its own key: the path the PSBT
 //!   claims is derived, the script is recomputed, and it has to match byte for byte. An
 //!   output that merely *claims* our fingerprint is not change.
@@ -29,6 +30,10 @@ use crate::bip32::{ExtendedPrivKey, ExtendedPubKey, FINGERPRINT_LEN, Network};
 use crate::multisig::{self, Cosigner, Kind, MAX_COSIGNERS, MAX_ORIGIN, Multisig};
 use crate::signer::{self, KeyRequest, MAX_KEYS_PER_INPUT};
 
+pub use crate::signer::SighashPolicy;
+
+pub mod timelock;
+
 /// Sighash types this will sign.
 ///
 /// `SIGHASH_ALL` alone: every other type leaves part of the transaction unsigned, which is
@@ -44,15 +49,18 @@ pub struct Policy {
     pub max_fee_percent: u32,
     /// Warn above this percentage.
     pub warn_fee_percent: u32,
+    /// What to do with an input asking for a sighash type other than `SIGHASH_ALL`.
+    pub sighash: SighashPolicy,
 }
 
 impl Default for Policy {
-    /// Stock's defaults: refuse above 10%, warn above 5%.
+    /// Stock's defaults: refuse above 10%, warn above 5%, block the unusual sighash types.
     /// Source: hw-reference/firmware-features.md §5 [C]
     fn default() -> Self {
         Self {
             max_fee_percent: 10,
             warn_fee_percent: 5,
+            sighash: SighashPolicy::Block,
         }
     }
 }
@@ -62,14 +70,26 @@ impl Default for Policy {
 pub enum Refusal {
     /// No input in it belongs to this wallet.
     NothingOfOurs,
-    /// An input asks for a sighash type this will not produce.
+    /// An input asks for a sighash type this will not produce under the policy.
     Sighash { input: usize, kind: u32 },
+    /// Under [`SighashPolicy::Warn`], an input asks for a non-`ALL` type on a transaction
+    /// whose every output is our own change. Stock refuses this too: a consolidation has
+    /// nobody outside the wallet to warn, and a `SIGHASH_NONE` signature over one is a
+    /// blank cheque on the whole balance for no reason a consolidation could have.
+    /// Source: hw-reference/help-and-warning-screens.md "consolidation TXs must be
+    /// all-ALL" [C]
+    SighashConsolidation { input: usize, kind: u32 },
     /// The fee is above the policy's cap.
     FeeTooHigh { percent: u32, cap: u32 },
-    /// An input's spent output was not provided, so the fee cannot be computed. Signing
-    /// blind to the amounts is how a transaction that pays everything to fees gets signed.
+    /// One of *our* inputs' spent output was not provided, or does not match its
+    /// previous transaction, so its amount is nothing this can sign over. Signing blind to
+    /// the amounts is how a transaction that pays everything to fees gets signed. A
+    /// foreign input in the same state is not refused; it makes the fee unknown instead
+    /// ([`Summary::fee_known`]).
     UnknownAmount { input: usize },
-    /// An input gave an amount with no transaction behind it, so nothing checks it.
+    /// One of our inputs gave an amount with no transaction behind it, so nothing checks
+    /// it. BIP-143 binds the amount of the input being *signed*, so on our own inputs the
+    /// previous transaction is the fee-inflation defence and is required.
     UnverifiedAmount { input: usize },
     /// The amounts do not add up: outputs exceed inputs.
     Unbalanced,
@@ -127,17 +147,75 @@ pub struct Summary {
     /// Paid to someone other than us.
     pub sending: u64,
     pub change: u64,
+    /// The fee, when [`Self::fee_known`]; zero otherwise, which a screen must not print.
     pub fee: u64,
     /// The fee as a percentage of what is being sent, rounded down.
     pub fee_percent: u32,
     /// True if the fee is above the policy's warning level but below its cap.
     pub fee_warn: bool,
+    /// Whether every input's amount was settled by its previous transaction, so the fee is
+    /// a fact. False when a foreign input -- one this wallet does not sign -- came with a
+    /// witness UTXO alone, with nothing, or with a previous transaction that does not
+    /// match its outpoint: a coinjoin, typically. The fee is then unknown, and shown as
+    /// such rather than as a number the host chose. Our own inputs never leave this false;
+    /// they are refused instead ([`Refusal::UnverifiedAmount`]).
+    pub fee_known: bool,
+    /// How many inputs could not be priced; zero when [`Self::fee_known`].
+    pub unpriced: usize,
+    /// Inputs of ours that ask for a sighash type other than `SIGHASH_ALL`, admitted under
+    /// [`SighashPolicy::Warn`], for the warning screen to name. At most
+    /// [`MAX_ODD_SIGHASH`] are kept; [`Self::odd_total`] counts them all.
+    pub odd_sighash: [OddSighash; MAX_ODD_SIGHASH],
+    /// How many of [`Self::odd_sighash`] are real.
+    pub odd_count: usize,
+    /// How many of our inputs ask for an unusual type in all.
+    pub odd_total: usize,
     /// True if any input opted in to the unified signature hash, which only a multichain
     /// build signs. Such a transaction is valid on the chain that implements that rule and
     /// on no other, so the review screen says so.
     #[cfg(feature = "multichain")]
     pub opted_in: bool,
 }
+
+/// One of our inputs asking for an unusual sighash type.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct OddSighash {
+    pub input: usize,
+    pub kind: u32,
+}
+
+impl OddSighash {
+    /// A slot nothing has been written into.
+    pub const NONE: Self = Self {
+        input: usize::MAX,
+        kind: 0,
+    };
+
+    /// The type's name as the warning screen says it: `NONE`, `SINGLE|ANYONECANPAY`.
+    pub fn name(self) -> &'static str {
+        use crate::tx::sighash::{SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE};
+        let acp = self.kind & SIGHASH_ANYONECANPAY != 0;
+        match (self.kind & !SIGHASH_ANYONECANPAY, acp) {
+            (SIGHASH_ALL, false) => "ALL",
+            (SIGHASH_ALL, true) => "ALL|ANYONECANPAY",
+            (SIGHASH_NONE, false) => "NONE",
+            (SIGHASH_NONE, true) => "NONE|ANYONECANPAY",
+            (SIGHASH_SINGLE, false) => "SINGLE",
+            (SIGHASH_SINGLE, true) => "SINGLE|ANYONECANPAY",
+            _ => "unknown",
+        }
+    }
+
+    /// Whether this type signs no output at all -- the one stock words as "Danger" rather
+    /// than "Caution": the coins can go anywhere once the signature exists.
+    /// Source: hw-reference/help-and-warning-screens.md "sighash NONE on our input" [C]
+    pub fn signs_no_output(self) -> bool {
+        self.kind & !crate::tx::sighash::SIGHASH_ANYONECANPAY == crate::tx::sighash::SIGHASH_NONE
+    }
+}
+
+/// Unusual-sighash inputs the summary names; past this they are only counted.
+pub const MAX_ODD_SIGHASH: usize = 4;
 
 /// Who this device is, for the purpose of reading a transaction.
 ///
@@ -194,6 +272,10 @@ pub fn summarise(
     let mut wallet_count = 0usize;
     #[cfg(feature = "multichain")]
     let mut opted_in = false;
+    let mut unpriced = 0usize;
+    let mut odd_sighash = [OddSighash::NONE; MAX_ODD_SIGHASH];
+    let mut odd_count = 0usize;
+    let mut odd_total = 0usize;
     for index in 0..inputs {
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
@@ -264,12 +346,13 @@ pub fn summarise(
             // other inputs would hand back a PSBT that looks half-signed for no stated
             // reason.
             //
-            // The policy itself is `signer::sighash_allowed`, shared with the signature so
-            // the two cannot disagree. Anything allowed other than `SIGHASH_ALL` is the
-            // unified opt-in hash, over the same outputs `SIGHASH_ALL` covers: NONE and
-            // SINGLE leave outputs this review cannot price, opt-in or not, and
-            // ANYONECANPAY leaves the inputs open -- the fee shown is then a fee anyone
-            // can raise afterwards.
+            // The policy itself is `signer::sighash_allowed_under`, shared with the
+            // signature so the two cannot disagree. Under `Block` anything allowed other
+            // than `SIGHASH_ALL` is the unified opt-in hash, over the same outputs
+            // `SIGHASH_ALL` covers. Under `Warn` the other standard types pass, and are
+            // listed for the warning screen: NONE and SINGLE leave outputs this review
+            // cannot vouch for, and ANYONECANPAY leaves the inputs open -- the fee shown
+            // is then a fee anyone can raise afterwards.
             match psbt.input(index).and_then(|i| i.sighash_type()) {
                 None => {}
                 Some(kind) if signer::sighash_allowed(kind) =>
@@ -279,31 +362,50 @@ pub fn summarise(
                         opted_in = true;
                     }
                 }
+                Some(kind) if signer::sighash_allowed_under(kind, policy.sighash) => {
+                    odd_total += 1;
+                    if odd_count < MAX_ODD_SIGHASH {
+                        odd_sighash[odd_count] = OddSighash { input: index, kind };
+                        odd_count += 1;
+                    }
+                }
                 Some(kind) => return Err(Refusal::Sighash { input: index, kind }),
             }
         }
         // Every input's amount matters to the fee, ours or not, and only the previous
-        // transaction settles it -- `utxo` checks its txid against this outpoint.
-        if psbt
-            .input(index)
-            .is_none_or(|i| i.non_witness_utxo().is_none())
-        {
-            return Err(Refusal::UnverifiedAmount { input: index });
-        }
-        let utxo = psbt
-            .utxo(index)
-            .map_err(|_| Refusal::UnknownAmount { input: index })?;
+        // transaction settles it -- `utxo` checks its txid against this outpoint. On one
+        // of *our* inputs a missing or unmatched previous transaction is a refusal: the
+        // amount is what the signature commits to, and it must not be the host's word. On
+        // a foreign input it makes the fee unknown, which is said as such; a coinjoin
+        // carries other people's inputs with a witness UTXO alone, or with nothing, and
+        // refusing it would refuse every coinjoin.
+        let utxo = match psbt.input(index) {
+            Some(inp) if inp.non_witness_utxo().is_some() => match psbt.utxo(index) {
+                Ok(u) => Some(u),
+                Err(_) if mine => return Err(Refusal::UnknownAmount { input: index }),
+                Err(_) => None,
+            },
+            _ if mine => return Err(Refusal::UnverifiedAmount { input: index }),
+            _ => None,
+        };
+        let Some(utxo) = utxo else {
+            unpriced += 1;
+            continue;
+        };
 
-        // A script-hash input that is not one of ours is a multisig one. The chain pins
-        // *which* script it is -- the witness or redeem script has to hash to this
-        // scriptPubKey -- but not whose wallet it belongs to, and that is what a
-        // registration says. An input no registered wallet produces is refused rather than
-        // signed on the host's word that the other cosigners are who it claims.
+        // A script-hash input of ours that is not single-signature is a multisig one. The
+        // chain pins *which* script it is -- the witness or redeem script has to hash to
+        // this scriptPubKey -- but not whose wallet it belongs to, and that is what a
+        // registration says. An input no registered wallet produces is refused rather
+        // than signed on the host's word that the other cosigners are who it claims.
         //
         // `single_sig` is what keeps BIP-49 out of this: `sh(wpkh(...))` is a script hash
         // too, and gating it on a multisig registration refused an account this device
         // offers -- our own key rebuilt the script, so no registration can be wanted.
-        if !single_sig && multisig::is_script_hash(utxo.script) {
+        // A foreign script-hash input -- one naming none of our keys -- is somebody
+        // else's multisig, which this neither signs nor needs to place: it is priced
+        // and passed over, as a foreign single-signature input is.
+        if mine && !single_sig && multisig::is_script_hash(utxo.script) {
             let Some((branch, at)) = ours_address(psbt, index, fingerprint) else {
                 return Err(Refusal::UnknownMultisig { input: index });
             };
@@ -342,26 +444,45 @@ pub fn summarise(
             change = change.saturating_add(out.amount);
         }
     }
-    if total_out > total_in {
-        return Err(Refusal::Unbalanced);
-    }
-    let fee = total_in - total_out;
     let sending = total_out - change;
-    // Against what is being sent, not against the total: a consolidation that pays itself
-    // would otherwise divide by nearly zero and read as a 0% fee.
-    let fee_percent = match fee.saturating_mul(100).checked_div(sending) {
-        Some(p) => u32::try_from(p).unwrap_or(u32::MAX),
-        // Nothing is being sent: a consolidation back to ourselves. A fee against zero has
-        // no percentage, so it counts as everything rather than as nothing.
-        None if fee == 0 => 0,
-        None => 100,
-    };
-    if fee_percent > policy.max_fee_percent {
-        return Err(Refusal::FeeTooHigh {
-            percent: fee_percent,
-            cap: policy.max_fee_percent,
+    // A consolidation -- every output back to ourselves -- under a non-ALL type is refused
+    // whatever the policy says. Stock does the same; see `Refusal::SighashConsolidation`.
+    if odd_count > 0 && outputs > 0 && change == total_out {
+        return Err(Refusal::SighashConsolidation {
+            input: odd_sighash[0].input,
+            kind: odd_sighash[0].kind,
         });
     }
+
+    // The fee, where every input was priced. With a foreign input unpriced the fee is
+    // unknown -- not zero, and not whatever the host's witness UTXOs add up to -- so the
+    // cap cannot be applied and the screen says "unknown" in its place. Our own inputs
+    // are always priced, or the transaction was refused above.
+    let fee_known = unpriced == 0;
+    let (fee, fee_percent) = if fee_known {
+        if total_out > total_in {
+            return Err(Refusal::Unbalanced);
+        }
+        let fee = total_in - total_out;
+        // Against what is being sent, not against the total: a consolidation that pays
+        // itself would otherwise divide by nearly zero and read as a 0% fee.
+        let fee_percent = match fee.saturating_mul(100).checked_div(sending) {
+            Some(p) => u32::try_from(p).unwrap_or(u32::MAX),
+            // Nothing is being sent: a consolidation back to ourselves. A fee against
+            // zero has no percentage, so it counts as everything rather than as nothing.
+            None if fee == 0 => 0,
+            None => 100,
+        };
+        if fee_percent > policy.max_fee_percent {
+            return Err(Refusal::FeeTooHigh {
+                percent: fee_percent,
+                cap: policy.max_fee_percent,
+            });
+        }
+        (fee, fee_percent)
+    } else {
+        (0, 0)
+    };
 
     Ok(Summary {
         accounts,
@@ -377,7 +498,12 @@ pub fn summarise(
         change,
         fee,
         fee_percent,
-        fee_warn: fee_percent > policy.warn_fee_percent,
+        fee_warn: fee_known && fee_percent > policy.warn_fee_percent,
+        fee_known,
+        unpriced,
+        odd_sighash,
+        odd_count,
+        odd_total,
         #[cfg(feature = "multichain")]
         opted_in,
     })
@@ -585,7 +711,8 @@ pub fn is_change(
 /// The destinations of `psbt`, written into `out`; returns how many were filled.
 ///
 /// `accounts` and `wallets` are what [`summarise`] worked out from the inputs, as for
-/// [`is_change`].
+/// [`is_change`]. Stops at `out`'s length; [`destinations_from`] takes the rest a page at
+/// a time.
 pub fn destinations(
     psbt: &Psbt<'_>,
     owner: &Owner<'_>,
@@ -595,8 +722,25 @@ pub fn destinations(
     out: &mut [Destination],
     kw: &KeyWork,
 ) -> usize {
+    destinations_from(psbt, owner, network, accounts, wallets, 0, out, kw)
+}
+
+/// As [`destinations`], starting at output `start`: one page of a review that shows a
+/// long transaction a screenful at a time. Returns how many were filled, which is fewer
+/// than `out.len()` only on the last page.
+#[allow(clippy::too_many_arguments)]
+pub fn destinations_from(
+    psbt: &Psbt<'_>,
+    owner: &Owner<'_>,
+    network: Network,
+    accounts: &[Account],
+    wallets: &[usize],
+    start: usize,
+    out: &mut [Destination],
+    kw: &KeyWork,
+) -> usize {
     let mut n = 0;
-    for (index, txout) in psbt.unsigned_tx().outputs().enumerate() {
+    for (index, txout) in psbt.unsigned_tx().outputs().enumerate().skip(start) {
         if n == out.len() {
             break;
         }
@@ -685,8 +829,37 @@ pub fn already_signed(
             return true;
         }
     }
-    let _ = in_key::PARTIAL_SIG;
     false
+}
+
+/// How many more signatures the transaction needs after this pass, at most over its
+/// inputs, or zero when it is complete or has no multisig input.
+///
+/// For the "pass this to the next cosigner" screen. Each multisig input's script -- the
+/// witness or redeem script, which the chain pins to the coin -- says `M` in its first
+/// byte, and the input's partial-signature records say how many are there. An input that
+/// is already finalised needs nothing. Public work: nothing here touches a key.
+pub fn more_signatures_needed(psbt: &Psbt<'_>) -> usize {
+    let mut most = 0usize;
+    for inp in psbt.inputs() {
+        if inp.is_finalized() {
+            continue;
+        }
+        let Some(script) = inp.witness_script().or(inp.redeem_script()) else {
+            continue;
+        };
+        // `OP_M <keys...> OP_N OP_CHECKMULTISIG`, with `OP_M` in `OP_1..=OP_15`.
+        let (Some(&first), Some(&last)) = (script.first(), script.last()) else {
+            continue;
+        };
+        if !(0x51..=0x5f).contains(&first) || last != 0xae {
+            continue;
+        }
+        let m = usize::from(first - 0x50);
+        let have = inp.partial_sigs().count();
+        most = most.max(m.saturating_sub(have));
+    }
+    most
 }
 
 /// Reconstruct the multisig wallet an input spends from, out of the definition the PSBT

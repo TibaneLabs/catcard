@@ -464,7 +464,7 @@ fn a_fee_above_the_cap_is_refused_and_the_cap_is_configurable() {
         &owner(&master_of(OURS), &[]),
         &Policy {
             max_fee_percent: 50,
-            warn_fee_percent: 5,
+            ..Policy::default()
         },
         &kw(),
     )
@@ -1662,4 +1662,362 @@ fn a_plain_transaction_is_not_flagged_as_opted_in() {
         &mut buf,
     );
     assert!(!summary_of(&buf[..n]).unwrap().opted_in);
+}
+
+/// The review under the Danger Zone's "warn" sighash policy.
+fn warn_policy() -> Policy {
+    Policy {
+        sighash: SighashPolicy::Warn,
+        ..Policy::default()
+    }
+}
+
+/// Under `Warn` the transaction the block policy refuses is reviewed, and the input and
+/// its type are listed for the warning screen. Under `Block` nothing changes.
+#[test]
+fn warn_mode_admits_an_unusual_sighash_and_names_it() {
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[
+            Spend {
+                sighash: Some(0x83), // SINGLE|ANYONECANPAY
+                ..ours_spend(100_000)
+            },
+            Spend {
+                sighash: Some(0x02), // NONE
+                steps: CHANGE,
+                ..ours_spend(50_000)
+            },
+        ],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 149_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    assert!(matches!(
+        summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()),
+        Err(Refusal::Sighash {
+            input: 0,
+            kind: 0x83
+        })
+    ));
+    let s = summarise(&psbt, &owner(&master, &[]), &warn_policy(), &kw()).unwrap();
+    assert_eq!((s.odd_count, s.odd_total), (2, 2));
+    assert_eq!(
+        s.odd_sighash[0],
+        OddSighash {
+            input: 0,
+            kind: 0x83
+        }
+    );
+    assert_eq!(s.odd_sighash[0].name(), "SINGLE|ANYONECANPAY");
+    assert!(!s.odd_sighash[0].signs_no_output());
+    assert_eq!(s.odd_sighash[1].name(), "NONE");
+    assert!(s.odd_sighash[1].signs_no_output());
+    // The amounts are still the transaction's.
+    assert_eq!((s.sending, s.fee), (149_000, 1_000));
+    assert!(s.fee_known);
+}
+
+/// An unknown flag byte is not an "unusual type": warn admits the five standard ones
+/// and nothing else.
+#[test]
+fn warn_mode_does_not_admit_undefined_types() {
+    let mut buf = vec![0u8; 8192];
+    // Not `0x21`: on a multichain build that is the unified opt-in bit over `ALL`, which
+    // the block policy itself takes.
+    for kind in [0x00u32, 0x04, 0x40, 0x7f, 0x84, 0xff, 0x101] {
+        let n = build(
+            &[Spend {
+                sighash: Some(kind),
+                ..ours_spend(100_000)
+            }],
+            &[Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 99_000,
+                claim_ours: false,
+            }],
+            &mut buf,
+        );
+        let psbt = Psbt::parse(&buf[..n]).unwrap();
+        assert!(
+            matches!(
+                summarise(&psbt, &owner(&master_of(OURS), &[]), &warn_policy(), &kw()),
+                Err(Refusal::Sighash { .. })
+            ),
+            "{kind:#x} should be refused even under warn"
+        );
+    }
+}
+
+/// A consolidation -- every output our own change -- is refused under a non-ALL type
+/// whatever the policy: there is nobody to warn on its behalf.
+#[test]
+fn a_consolidation_under_an_unusual_sighash_is_refused_even_when_warning() {
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[Spend {
+            sighash: Some(0x02),
+            ..ours_spend(100_000)
+        }],
+        &[
+            Pay {
+                phrase: OURS,
+                steps: CHANGE,
+                amount: 60_000,
+                claim_ours: true,
+            },
+            Pay {
+                phrase: OURS,
+                steps: [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 1, 1],
+                amount: 39_000,
+                claim_ours: true,
+            },
+        ],
+        &mut buf,
+    );
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    assert_eq!(
+        summarise(&psbt, &owner(&master_of(OURS), &[]), &warn_policy(), &kw()),
+        Err(Refusal::SighashConsolidation {
+            input: 0,
+            kind: 0x02
+        })
+    );
+    // The same shape under SIGHASH_ALL is an ordinary consolidation.
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: OURS,
+            steps: CHANGE,
+            amount: 100_000,
+            claim_ours: true,
+        }],
+        &mut buf,
+    );
+    let s = summary_of(&buf[..n]).unwrap();
+    assert_eq!((s.sending, s.change), (0, 100_000));
+}
+
+/// A coinjoin: one input of ours with its previous transaction, two of somebody else's
+/// with a witness UTXO alone or nothing at all. Ours is signed; the fee is unknown and
+/// said to be, rather than computed from amounts nothing checked.
+#[test]
+fn a_coinjoin_with_foreign_witness_only_inputs_signs_ours_and_reports_the_fee_unknown() {
+    let mut buf = vec![0u8; 8192];
+    let stranger_fp = fingerprint_of(STRANGER);
+    let n = build(
+        &[
+            ours_spend(100_000),
+            Spend {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 100_000,
+                claim: stranger_fp,
+                sighash: None,
+                no_prev_tx: true,
+                declared: None,
+            },
+            Spend {
+                phrase: STRANGER,
+                steps: CHANGE,
+                amount: 100_000,
+                claim: stranger_fp,
+                sighash: None,
+                no_prev_tx: true,
+                declared: None,
+            },
+        ],
+        &[
+            Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 99_000,
+                claim_ours: false,
+            },
+            Pay {
+                phrase: OURS,
+                steps: CHANGE,
+                amount: 99_000,
+                claim_ours: true,
+            },
+            Pay {
+                phrase: STRANGER,
+                steps: CHANGE,
+                amount: 99_000,
+                claim_ours: false,
+            },
+        ],
+        &mut buf,
+    );
+    // Strip the third input down to nothing: no witness UTXO either.
+    let mut bare = vec![0u8; 8192];
+    let n = Psbt::parse(&buf[..n])
+        .unwrap()
+        .remove_input_record(2, &[in_key::WITNESS_UTXO as u8], &mut bare)
+        .unwrap();
+    let psbt = Psbt::parse(&bare[..n]).unwrap();
+    assert!(
+        psbt.utxo(2).is_err(),
+        "the third input carries no amount at all"
+    );
+
+    let master = master_of(OURS);
+    let s = summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()).unwrap();
+    assert_eq!((s.inputs, s.ours, s.outputs), (3, 1, 3));
+    assert!(!s.fee_known, "two inputs are the host's word alone");
+    assert_eq!(s.unpriced, 2);
+    assert_eq!((s.fee, s.fee_percent, s.fee_warn), (0, 0, false));
+    // What can be said is said: our change is found, the rest is sending.
+    assert_eq!((s.sending, s.change), (198_000, 99_000));
+    assert_eq!(s.total_in, 100_000, "only the priced input counts");
+
+    let mut ours = [0usize; 4];
+    let signable = our_inputs(&psbt, &master, OUR_FP, &mut ours, &kw());
+    assert_eq!(&ours[..signable], &[0]);
+    let mut out = vec![0u8; 8192];
+    let len = signer::sign_input(&psbt, 0, &master, OUR_FP, &mut out, &kw()).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    assert!(already_signed(&signed, 0, &master, OUR_FP, &kw()));
+    assert_eq!(
+        more_signatures_needed(&signed),
+        0,
+        "single-sig inputs need no cosigner"
+    );
+}
+
+/// Our own input with a witness UTXO alone is still refused: the amount the signature
+/// commits to has to be the chain's, not the host's.
+#[test]
+fn our_own_witness_only_input_is_still_refused_in_a_coinjoin() {
+    let mut buf = vec![0u8; 8192];
+    let n = build(
+        &[
+            Spend {
+                no_prev_tx: true,
+                ..ours_spend(100_000)
+            },
+            Spend {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 100_000,
+                claim: fingerprint_of(STRANGER),
+                sighash: None,
+                no_prev_tx: true,
+                declared: None,
+            },
+        ],
+        &[Pay {
+            phrase: STRANGER,
+            steps: RECEIVE,
+            amount: 199_000,
+            claim_ours: false,
+        }],
+        &mut buf,
+    );
+    assert_eq!(
+        summary_of(&buf[..n]),
+        Err(Refusal::UnverifiedAmount { input: 0 })
+    );
+}
+
+/// A foreign multisig input -- somebody else's script hash, naming none of our keys --
+/// is not "an unregistered wallet"; it is priced and passed over.
+#[test]
+fn a_foreign_multisig_input_is_not_refused_as_unregistered() {
+    let wallet = two_of_two_with(THIRD);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    // The wallet is ours to co-sign, but pretend it is a stranger's: strip our derivation
+    // record so the input names nobody we are.
+    let (pk, _) = ms_key(0, 0);
+    let mut key = vec![in_key::BIP32_DERIVATION as u8];
+    key.extend_from_slice(&pk);
+    let mut foreign = vec![0u8; 1 << 16];
+    let m = Psbt::parse(&buf[..n])
+        .unwrap()
+        .remove_input_record(0, &key, &mut foreign)
+        .unwrap();
+    // And add an input of ours so there is something to sign.
+    let psbt = Psbt::parse(&foreign[..m]).unwrap();
+    let master = master_of(OURS);
+    assert_eq!(
+        summarise(&psbt, &owner(&master, &[]), &Policy::default(), &kw()),
+        Err(Refusal::NothingOfOurs),
+        "with no input of ours there is nothing to sign, not an unknown wallet"
+    );
+}
+
+/// After one cosigner of a 2-of-2 signs, the transaction says it needs one more.
+#[test]
+fn a_partly_signed_multisig_says_how_many_signatures_it_still_needs() {
+    let wallet = two_of_two(true);
+    let mut buf = vec![0u8; 1 << 16];
+    let n = multisig_spend(&wallet, false, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    assert_eq!(more_signatures_needed(&psbt), 2);
+
+    let master = master_of(OURS);
+    let mut out = vec![0u8; 1 << 16];
+    let len = signer::sign_input(&psbt, 0, &master, OUR_FP, &mut out, &kw()).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    assert_eq!(more_signatures_needed(&signed), 1);
+}
+
+/// The outputs come out a page at a time, every one of them once.
+#[test]
+fn destinations_are_paged_without_gaps_or_repeats() {
+    let mut buf = vec![0u8; 8192];
+    let mut pays = Vec::new();
+    for i in 0..5u32 {
+        pays.push(Pay {
+            phrase: STRANGER,
+            steps: [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, i],
+            amount: 10_000 + u64::from(i),
+            claim_ours: false,
+        });
+    }
+    let n = build(&[ours_spend(100_000)], &pays, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let master = master_of(OURS);
+    let accounts = accounts_of(&psbt, &master);
+    let blank = Destination {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; address::MAX_ADDRESS_LEN],
+        address_len: 0,
+    };
+    let mut seen = Vec::new();
+    let mut start = 0;
+    loop {
+        let mut page = [blank; 2];
+        let got = destinations_from(
+            &psbt,
+            &owner(&master, &[]),
+            Network::Mainnet,
+            &accounts,
+            &[],
+            start,
+            &mut page,
+            &kw(),
+        );
+        for d in &page[..got] {
+            seen.push((d.index, d.amount));
+        }
+        start += got;
+        if got < page.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        (0..5).map(|i| (i, 10_000 + i as u64)).collect::<Vec<_>>()
+    );
 }
