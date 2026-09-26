@@ -852,3 +852,38 @@ Card" `[C]`. What is not confirmed on real hardware:
 Resolve with a real SD card on a bench: set/lock/unlock/clear and force-erase, confirming
 the block framing, the busy timing and the auto-lock. Do **not** read the stock firmware
 for this — the SD spec is the sanctioned source.
+
+## Genuine light read (gate 4/0): what the return value means `[?]`
+
+`Callgate::genuine_light(GenuineOp::Read)` sends method 4 with `arg2 = 0`, which the
+reference lists as "read" and no more: whether the state comes back in the return value
+or elsewhere, and which value means green, is not stated. The About → Identity page
+shows the number raw ("genuine light: gate says N") and `Bless Firmware` logs it after
+gate 18/5; nothing decodes it. To resolve: read it on a unit whose light is known red,
+bless, read again, and write the two values down.
+
+## Lock flag (gate 19/2, mk4+): encoding unknown, so DFU Upgrade always refuses `[?]`
+
+The reference confirms mk4+ bootloaders answer method 19 / `arg2 = 2` with "the RDP-2 /
+factory-mode flag", and does not say how -- return value or buffer, and which value is
+locked. `Callgate::lock_flag_raw` hands both back untouched and the Danger-zone `DFU
+Upgrade` row only logs them; it never calls `enter_dfu`, because on an RDP=2 unit
+(every bench unit) that locks the device up until a power cycle. Resolve by logging the
+raw answer on a locked unit; an unlocked one would need a dev unit that does not exist
+here. Until then the row is honest and inert.
+
+## High-water buffer (gate 21): the header timestamp verbatim `[I]`, check's answer `[?]`
+
+Methods 21/0 (read), 21/1 (check) and 21/2 (record) take an 8-byte `in/out` buffer. That
+it is the header's BCD `YYMMDDHHMMSS0000` timestamp, unchanged, is inferred from the
+install path ("`timestamp` must exceed the OTP high-water") rather than stated.
+`Set High-Water` reads the current mark and shows it before asking; a mark that is not
+BCD renders as hex, which is what a wrong inference would look like on screen. The
+check's return value is logged, not acted on. The record is irreversible, so the first
+run on real hardware should be on a unit whose downgrade floor may rise.
+
+## Bag number (gate 19/0): read as text `[I]`
+
+The 32-byte `rom_secrets.bag_number` is shown as printable ASCII up to the first byte
+that is not, "unbagged" for all-ones, hex otherwise. That it is text is inferred from
+stock showing it in a title; the reference gives the field's size and nothing more.

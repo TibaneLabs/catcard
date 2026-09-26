@@ -24,9 +24,10 @@ question for each item is only whether it is *reachable where a stock user would
 | `Settings` | `Settings` | ✅ |
 | `Scan QR` (Q1, blank device) | `Scan Any QR Code` (Q1, `has_qr`) | 🔀 a tile only on a blank device; with a wallet, the QR key opens the scanner from any menu |
 | `Logout` (mk3/mk4/mk5) | `Secure Logout` (`not has_battery`) | ✅ same gate: a device with a power button does not need a menu entry to stop |
+| `Help` | `Help` (mk4/mk5 only, `not has_qwerty`) | 🔀 on every board, and on Settings and Utils too; one short screen each, in our words |
 | — | `Passphrase` (top level, shortcut `p`) | ❌ ours is in Settings; a stock user looks for it on the main menu |
 | — | `Type Passwords`, `Seed Vault`, `Start HSM Mode` | not implemented |
-| — | `<XFP>` header item | 🔀 ours is in the status bar instead, always visible |
+| `[XFP]` / `<XFP>` header row (mk4/mk5) | `<XFP>` / `[XFP]` header item (`hmx`) | 🔀 on the mono boards the row appears when another key is in force, or always with Settings → `Home menu XFP` (own key `cat_xfp`); the Q1 names the wallet in its status bar on every screen instead |
 
 On a device with no seed, stock's top menu is `New Seed Words` / `Import Existing` /
 `Migrate Coldcard` / … / `Advanced/Tools` / `Settings`. Ours puts `New` and `Import` in
@@ -51,7 +52,7 @@ shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backu
 | `Login` → `Kill key` (release builds) | `Login Settings` → `Kill Key` (`kbtn`) | 🔀 own key `cat_kbtn`; a digit, armed only after a test login shows the PIN lacks it; fast wipe `[I]` |
 | `Login` → `MicroSD 2FA` (release builds) | `Login Settings` → `MicroSD 2FA` (`sd2fa`) | 🔀 own key `cat_sd2fa` and card file `catcard.2fa`; a token read back before it is enrolled |
 | — | `Trick PINs` | blocked: gate 22's slot layout is not in the reference (HARDWARE-OPEN-ITEMS) |
-| — | `Calculator Login` | not implemented |
+| `Login` → `Calculator login` (Q1) | `Login Settings` → `Calculator Login` (`calc`) | 🔀 own key `cat_calc`; on only after a test login through the calculator screen. The PIN convention is ours (below) -- the reference says "enter PIN as a formula" and no more |
 
 Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
 out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can lose its seed
@@ -83,11 +84,16 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | Derive → `New words` | `Temporary Seed` → `Generate Words` → `12 Words` / `24 Words` | ✅ the same generator as `New`, same entropy sources and optional dice/coin/mash, into the session rather than the slot |
 | `Danger zone` → `Seed tools` → `SeedQR` | `… Seed Functions` → `Export SeedQR` | ✅ Q1 only; both shapes, Standard and Compact, and the scanner reads either back |
 | `Danger zone` → `Sighash checks` | `Danger Zone` → `Sighash Checks` (Block / Warn) | ✅ own key `cat_sighash`, default Block; Warn is asked twice. Under Warn a non-ALL sighash on our input is named (input and type) on a warning before the review, a consolidation under one is still refused, and the signature is made over the digest the type defines |
-| — | the rest of `Danger Zone` | not implemented |
-| `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
+| `Danger zone` → `Set High-Water` | `… Danger Zone` → `Set High-Water` | ✅ **irreversible**: gate 21/2 records this build's timestamp as the floor; shown, asked three times, refused when the mark is already at or above this build |
+| `Danger zone` → `Bless Firmware` | `… Danger Zone` → `Bless Firmware` | ✅ gate 18/5 on the logged-in struct: commits this image's checksum and turns the genuine light green |
+| `Danger zone` → `DFU Upgrade` | `FactoryMenu` → `DFU Upgrade` | 🔀 always answers "unavailable on a locked device": the lock flag (gate 19/2) has no documented encoding, so the state is never *positively* open, and `enter_dfu` is never called. Use Upgrade Firmware |
+| `Danger zone` → `Settings Space` | `… Danger Zone` → `Settings Space` | ✅ slots in use and bytes in files, against the region |
+| — | `Debug Functions`, `I Am Developer.`, `Seed Vault` toggle, `Wipe HSM Policy`, caches, `AE Start Index`, `MCU Key Slots`, `Wipe LFS`, `Nuke Device` | not implemented, or elsewhere |
+| `About` → page 3 | `Advanced/Tools` → `View Identity` | 🔀 different name and drawer; the third About page is the identity: firmware and build time, hardware, bootloader version string, SE presence, bag number (read only), master fingerprint, the genuine light's raw reading, the high-water mark. The serial the gate exposes is the STM32 UID on page 2 |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
 | `Debug` → `Warm Reset` | `I Am Developer.` → `Warm Reset`; `Danger Zone` → `Debug Functions` → `Warm Reset` | ✅ same drawer; ours asks first and says the PIN is asked for again |
-| — | `Buried Settings` | not implemented |
+| `Home menu XFP` (mk4/mk5) | `Buried Settings` → `Home Menu XFP` (`hmx`: Only Tmp / Always Show) | 🔀 flat, like Menu wrapping; own key `cat_xfp`. Not on the Q1, whose bar always names the wallet |
+| — | `Buried Settings` → the rest | not implemented; `Menu wrapping` is above |
 | *(Hardware On/Off → `Keyboard EMU`)* | `Keyboard EMU` (top-level Settings row; adds `Type Passwords`) | 🔀 under Hardware On/Off with the other USB switches; the typing screens that use it (`Send Password`, BIP-85 passwords) are theirs to add |
 | `Debug` → `Keyboard EMU test` | `Debug Functions` → `Keyboard Test` | 🔀 stock's tests the device's own keys; ours types a fixed line into the host to prove the emulated keyboard |
 
@@ -110,7 +116,10 @@ store, so these rows are absent there rather than present and inert.
 | *(Sign → Message, Text file, Verify; Addresses → Verify an address)* | `File Management` → `Sign Text File`, `Verify Sig File`; `NFC Tools` → `Verify Address` | 🔀 message signing and checking under the one Sign; verify an address sits with the addresses it checks, rather than in a tag drawer — the tag is reached from whichever screen has something to put on it. `Message` and `Text file` ask the format (legacy / BIP-322), the address type and the path (default: the first address of the matching account on the network in force, or a custom one); `Text file` reads the three-line request form (message, path, address format) Sparrow and stock's docs use, and writes `<name>-signed.txt` beside it; on the Q1 a scanned text offers `Sign as message` and the result can be shown as BBQr. `Verify` reads a signed `.txt` or an export's `.sig` sidecar, hashing each file the sidecar names and reporting OK / CHANGED / missing per file before the signature verdict |
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer -- but the switch is stock's: with `Virtual Disk` (or the USB port) off, this refuses to start |
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
-| `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
+| `Format RAM disk` (mk4/mk5/Q1) | `File Management` → `Format RAM Disk` (`vdisk_enabled`) | 🔀 flat; asked first; the region is zeroed end to end before the new volume is laid down |
+| `Delete PSBTs` | `Settings` → `Delete PSBTs` (toggle) and `File Management` | 🔀 an action, not a toggle: lists the `*.psbt`, `*.txn`, `SIGNED.PSB`, `FINAL.TXN` files in the root of the chosen storage, asks, overwrites each with zeros to its length, then unlinks it |
+| `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD`, `From VirtDisk` | ✅ stock's own name, in stock's drawer; asks SD card or Virtual Disk, then browses for the `.dfu`. No `Show Version` under it: About has that |
+| `Help` | — | 🔀 what the drawer holds, in one screen |
 | `Backup` → `Save backup`, `Verify backup`, `Restore backup`, `Clone Coldcard` | `Backup` → `Backup System`, `Verify Backup`, `Restore Backup`, `Clone Coldcard` | ✅ same drawer, same four rows. Save offers stock's three protections — twelve words (the default), a typed passphrase, or cleartext (asked twice, never the default) — and writes `backup-<XFP>.7z` to the card or the Virtual Disk. Verify decrypts, parses and compares the fingerprint against the wallet in force without changing anything; ours goes further than stock's CRC-only check. Restore and Verify read from either storage and detect a cleartext file rather than asking for a password. A backup can also be loaded for the session only, from Derive → `Import key` → `Coldcard backup` (stock's Temporary Seed → Coldcard Backup) |
 | `WIF Store` (mk4/mk5/Q1) → per key: `Reveal WIF`, `Sign MSG`, `Descriptors`, `Delete key`; `Generate new key`, `Import from SD`, `Export All`, `Clear All` | `WIF Store` → per key: `Detail`, `Descriptors`, `Addresses`, `Sign MSG`, `Delete`; `Import WIF`, `Export All`, `Clear All` | ✅ same drawer and rows; the addresses are on the key's own screen rather than a row under it, and `Generate new key` is ours. `Sign MSG` signs legacy as the chosen address type; `Descriptors` are `wpkh` / `sh(wpkh)` / `pkh` over the public key with BIP-380 checksums; `Export All` writes the keys in plain text behind two warnings; `Clear All` asks twice and cannot be undone |
 | *(Derive → `Import key`, `New words`)* | `Temporary Seed` | 🔀 under Derive, with the other ways to change the key in force |
@@ -135,3 +144,23 @@ replaces the firmware.
 stock user has no reason to open, and it is now `Utils` → `Upgrade Firmware` under
 stock's own name. It is the widest tile label on the Q1, which is the cost of using
 stock's wording and worth paying for the one entry that replaces the firmware.
+
+## Calculator login (Q1)
+
+With `Settings → Login → Calculator login` on, the screen before the PIN is a working
+integer calculator (`+ - * /`, parentheses, ENTER evaluates, DELETE erases). The
+reference says stock "enters the PIN as a formula" and no more, so the convention is ours:
+
+1. type the **prefix** digits followed by `-` (SYMBOL+q on the Q1's keyboard), then ENTER.
+   A dangling minus is a syntax error to a calculator, so no sum ever reaches this step.
+   The two anti-phishing words appear where an answer would;
+2. type the **suffix** digits alone, then ENTER.
+
+Any other line is a sum, and a sum typed while the words are up drops the pending prefix
+(a fresh setup, nothing spent). A wrong PIN says so on the answer line with the tries
+left; the count also appears at the bottom from then on, as on the PIN pad. It is *not*
+`prefix-suffix` on one line: that is a subtraction, and a calculator that spent an
+attempt on every subtraction would brick itself in thirteen sums. The setting goes on
+only after a successful test login through the calculator, like Scramble keys. The kill
+key (release builds) is honoured for suffix digits only, the one place the screen knows
+a digit is a PIN digit.
