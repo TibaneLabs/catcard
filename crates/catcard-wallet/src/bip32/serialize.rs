@@ -73,16 +73,28 @@ impl Network {
         }
     }
 
-    fn from_version(v: &[u8]) -> Option<(Network, bool)> {
-        // Regtest is not listed: it shares testnet's bytes, so a key with these prefixes
-        // reads back as `Testnet`. Regtest is a display-time choice the bytes do not record.
+    /// Read four version bytes back: the network, whether the key is private, and the
+    /// SLIP-132 form they were written in.
+    ///
+    /// Every SLIP-132 form is accepted on the way in, as stock does ("read always"): a
+    /// `zpub` is the same 74 bytes of key as its `xpub`, and refusing it would refuse
+    /// every wallet that exports native-segwit keys the way SLIP-132 says to. The form is
+    /// returned rather than dropped, so a caller with an opinion about the script type --
+    /// a multisig descriptor, which states one -- can check the hint against it.
+    ///
+    /// Regtest is not listed: it shares testnet's bytes, so a key with these prefixes
+    /// reads back as `Testnet`. Regtest is a display-time choice the bytes do not record.
+    /// Source: SLIP-0132 registry, Bitcoin and Bitcoin Testnet rows [C].
+    fn from_version(v: &[u8]) -> Option<(Network, bool, Slip132)> {
         let b: [u8; 4] = v.try_into().ok()?;
         for n in [Network::Mainnet, Network::Testnet] {
-            if b == n.private_version() {
-                return Some((n, true));
-            }
-            if b == n.public_version() {
-                return Some((n, false));
+            for form in Slip132::ALL {
+                if b == form.private_version(n) {
+                    return Some((n, true, form));
+                }
+                if b == form.version(n) {
+                    return Some((n, false, form));
+                }
             }
         }
         None
@@ -136,6 +148,10 @@ struct Common {
     network: Network,
     #[zeroize(skip)]
     is_private: bool,
+    /// The SLIP-132 form the version bytes announced; [`Slip132::Classic`] for a plain
+    /// `xpub`/`xprv`.
+    #[zeroize(skip)]
+    form: Slip132,
     depth: u8,
     parent_fingerprint: [u8; FINGERPRINT_LEN],
     #[zeroize(skip)]
@@ -148,7 +164,7 @@ fn read_common(raw: &[u8]) -> Result<Common, Error> {
     if raw.len() != RAW_LEN {
         return Err(Error::BadLength { len: raw.len() });
     }
-    let (network, is_private) = Network::from_version(&raw[0..4]).ok_or(Error::BadVersion)?;
+    let (network, is_private, form) = Network::from_version(&raw[0..4]).ok_or(Error::BadVersion)?;
 
     let depth = raw[4];
     let mut parent_fingerprint = [0u8; FINGERPRINT_LEN];
@@ -169,6 +185,7 @@ fn read_common(raw: &[u8]) -> Result<Common, Error> {
     Ok(Common {
         network,
         is_private,
+        form,
         depth,
         parent_fingerprint,
         child_number,
@@ -215,7 +232,9 @@ impl ExtendedPrivKey {
         Ok(base58::encode_check(&self.to_raw(kw)[..], out)?)
     }
 
-    /// Parse an `xprv`/`tprv` string.
+    /// Parse an `xprv`/`tprv` string, or a SLIP-132 form of one (`yprv`, `zprv`, ...):
+    /// the form is only a hint about how the key is meant to be spent, and the key itself
+    /// is the same either way.
     pub fn from_base58(text: &str, kw: &crate::KeyWork) -> Result<Self, Error> {
         let mut raw = Zeroizing::new([0u8; base58::MAX_DECODED]);
         let n = base58::decode_check(text, &mut raw[..])?;
@@ -277,6 +296,53 @@ pub enum Slip132 {
 }
 
 impl Slip132 {
+    /// Every form, classic first.
+    pub const ALL: [Slip132; 5] = [
+        Slip132::Classic,
+        Slip132::P2wpkhP2sh,
+        Slip132::P2wpkh,
+        Slip132::P2wshP2sh,
+        Slip132::P2wsh,
+    ];
+
+    /// The prefix a public key in this form starts with, for a screen or a log.
+    pub const fn prefix(self, network: Network) -> &'static str {
+        match (self, network.is_mainnet()) {
+            (Slip132::Classic, true) => "xpub",
+            (Slip132::Classic, false) => "tpub",
+            (Slip132::P2wpkhP2sh, true) => "ypub",
+            (Slip132::P2wpkhP2sh, false) => "upub",
+            (Slip132::P2wpkh, true) => "zpub",
+            (Slip132::P2wpkh, false) => "vpub",
+            (Slip132::P2wshP2sh, true) => "Ypub",
+            (Slip132::P2wshP2sh, false) => "Upub",
+            (Slip132::P2wsh, true) => "Zpub",
+            (Slip132::P2wsh, false) => "Vpub",
+        }
+    }
+
+    /// The four version bytes of this form's *private* key: `yprv`, `zprv`, `Yprv`,
+    /// `Zprv`, and the testnet `uprv`/`vprv`/`Uprv`/`Vprv`.
+    ///
+    /// Read on import only -- this firmware never writes a private key in a SLIP-132
+    /// form -- so a `zprv` typed in from another wallet's backup is taken as the `xprv`
+    /// it is. Source: SLIP-0132 registry, Bitcoin and Bitcoin Testnet rows [C].
+    pub const fn private_version(self, network: Network) -> [u8; 4] {
+        let v: u32 = match (self, network.is_mainnet()) {
+            (Slip132::Classic, true) => 0x0488_ADE4,
+            (Slip132::Classic, false) => 0x0435_8394,
+            (Slip132::P2wpkhP2sh, true) => 0x049D_7878,
+            (Slip132::P2wpkhP2sh, false) => 0x044A_4E28,
+            (Slip132::P2wpkh, true) => 0x04B2_430C,
+            (Slip132::P2wpkh, false) => 0x045F_18BC,
+            (Slip132::P2wshP2sh, true) => 0x0295_B005,
+            (Slip132::P2wshP2sh, false) => 0x0242_85B5,
+            (Slip132::P2wsh, true) => 0x02AA_7A99,
+            (Slip132::P2wsh, false) => 0x0257_5048,
+        };
+        v.to_be_bytes()
+    }
+
     /// The four version bytes this form is announced with.
     ///
     /// Regtest shares testnet's SLIP-132 bytes, so the table turns on
@@ -337,13 +403,33 @@ impl ExtendedPubKey {
         Ok(base58::encode_check(&self.to_raw(), out)?)
     }
 
+    /// Parse an `xpub`/`tpub` string, or any SLIP-132 form of one (`ypub`, `zpub`,
+    /// `Ypub`, `Zpub` and the testnet `upub`/`vpub`/`Upub`/`Vpub`).
+    ///
+    /// The form is dropped: it is a hint about the script type, and a caller with no
+    /// script type to check it against has no use for it. [`Self::from_base58_with_form`]
+    /// keeps it.
     pub fn from_base58(text: &str) -> Result<Self, Error> {
-        let mut raw = [0u8; base58::MAX_DECODED];
-        let n = base58::decode_check(text, &mut raw)?;
-        Self::from_raw(&raw[..n])
+        Self::from_base58_with_form(text).map(|(key, _)| key)
     }
 
+    /// As [`Self::from_base58`], also returning which SLIP-132 form the text was in.
+    pub fn from_base58_with_form(text: &str) -> Result<(Self, Slip132), Error> {
+        let mut raw = [0u8; base58::MAX_DECODED];
+        let n = base58::decode_check(text, &mut raw)?;
+        Self::from_raw_with_form(&raw[..n])
+    }
+
+    /// Parse the raw 78-byte form, in the classic or any SLIP-132 version.
     pub fn from_raw(raw: &[u8]) -> Result<Self, Error> {
+        Self::from_raw_with_form(raw).map(|(key, _)| key)
+    }
+
+    /// As [`Self::from_raw`], also returning which SLIP-132 form the bytes were in.
+    ///
+    /// The key comes back normalised: its own [`Self::to_raw`] writes the classic version
+    /// bytes whatever it was read from, so two spellings of one key compare equal.
+    pub fn from_raw_with_form(raw: &[u8]) -> Result<(Self, Slip132), Error> {
         let c = read_common(raw)?;
         if c.is_private {
             return Err(Error::BadVersion);
@@ -353,14 +439,17 @@ impl ExtendedPubKey {
         if purecrypto::ec::secp256k1::AffinePoint::from_sec1(&c.key).is_err() {
             return Err(Error::InvalidKey);
         }
-        Ok(Self {
-            network: c.network,
-            depth: c.depth,
-            parent_fingerprint: c.parent_fingerprint,
-            child_number: c.child_number,
-            chain_code: c.chain_code,
-            public_key: c.key,
-        })
+        Ok((
+            Self {
+                network: c.network,
+                depth: c.depth,
+                parent_fingerprint: c.parent_fingerprint,
+                child_number: c.child_number,
+                chain_code: c.chain_code,
+                public_key: c.key,
+            },
+            c.form,
+        ))
     }
 }
 
@@ -693,5 +782,102 @@ mod slip132_tests {
         let n = key.write_base58(&mut a).unwrap();
         let m = key.write_base58_as(Slip132::Classic, &mut b).unwrap();
         assert_eq!(&a[..n], &b[..m]);
+    }
+
+    /// SLIP-0132's own test vectors: the BIP-39 test mnemonic, its three account keys,
+    /// and each in its published prefix. Source: SLIP-0132 §"Test vectors" [C].
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const VECTORS: [(u32, Slip132, &str, &str); 3] = [
+        (
+            44,
+            Slip132::Classic,
+            "xprv9xpXFhFpqdQK3TmytPBqXtGSwS3DLjojFhTGht8gwAAii8py5X6pxeBnQ6ehJiyJ6nDjWGJfZ95WxByFXVkDxHXrqu53WCRGypk2ttuqncb",
+            "xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj",
+        ),
+        (
+            49,
+            Slip132::P2wpkhP2sh,
+            "yprvAHwhK6RbpuS3dgCYHM5jc2ZvEKd7Bi61u9FVhYMpgMSuZS613T1xxQeKTffhrHY79hZ5PsskBjcc6C2V7DrnsMsNaGDaWev3GLRQRgV7hxF",
+            "ypub6Ww3ibxVfGzLrAH1PNcjyAWenMTbbAosGNB6VvmSEgytSER9azLDWCxoJwW7Ke7icmizBMXrzBx9979FfaHxHcrArf3zbeJJJUZPf663zsP",
+        ),
+        (
+            84,
+            Slip132::P2wpkh,
+            "zprvAdG4iTXWBoARxkkzNpNh8r6Qag3irQB8PzEMkAFeTRXxHpbF9z4QgEvBRmfvqWvGp42t42nvgGpNgYSJA9iefm1yYNZKEm7z6qUWCroSQnE",
+            "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs",
+        ),
+    ];
+
+    /// `m/{purpose}h/0h/0h` of the SLIP-132 test mnemonic.
+    fn account_of(purpose: u32) -> ExtendedPrivKey {
+        use crate::bip39::{Mnemonic, SEED_LEN};
+        let kw = crate::KeyWork::host();
+        let m = Mnemonic::parse(MNEMONIC, &kw).unwrap();
+        let mut seed = [0u8; SEED_LEN];
+        m.to_seed("", &mut seed, &kw).unwrap();
+        let mut key = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, &kw).unwrap();
+        for step in [purpose, 0, 0] {
+            key = key
+                .derive_child(crate::bip32::ChildNumber::hardened(step).unwrap(), &kw)
+                .unwrap();
+        }
+        key
+    }
+
+    /// The published `ypub`/`zpub` strings are what this writes for those accounts.
+    #[test]
+    fn slip132_vectors_encode() {
+        for (purpose, form, _, want_pub) in VECTORS {
+            let key = account_of(purpose).to_extended_pub(&crate::KeyWork::host());
+            let mut out = [0u8; MAX_BASE58_LEN];
+            let n = key.write_base58_as(form, &mut out).unwrap();
+            assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), want_pub);
+        }
+    }
+
+    /// A `ypub`/`zpub` reads back as the same key its `xpub` does, and says which form
+    /// it was in.
+    #[test]
+    fn slip132_vectors_parse_as_the_same_key_with_their_form() {
+        let kw = crate::KeyWork::host();
+        for (purpose, form, want_prv, want_pub) in VECTORS {
+            let expect = account_of(purpose);
+            let (got, got_form) = ExtendedPubKey::from_base58_with_form(want_pub).unwrap();
+            assert_eq!(got_form, form, "{want_pub}");
+            assert_eq!(got, expect.to_extended_pub(&kw), "{want_pub}");
+            // Normalised on the way in: it writes itself back as a classic xpub.
+            assert!(got.to_base58().starts_with("xpub"));
+            // And the plain parser takes it too, form dropped.
+            assert_eq!(ExtendedPubKey::from_base58(want_pub).unwrap(), got);
+
+            // The private forms are the same scalar as the xprv.
+            let prv = ExtendedPrivKey::from_base58(want_prv, &kw).unwrap();
+            assert_eq!(prv.secret_bytes(), expect.secret_bytes(), "{want_prv}");
+            assert_eq!(prv.to_extended_pub(&kw), got);
+        }
+    }
+
+    /// The testnet and multisig forms round-trip through their own bytes too, and a
+    /// public form is still refused where a private key is wanted.
+    #[test]
+    fn every_form_round_trips_on_both_networks() {
+        let kw = crate::KeyWork::host();
+        for network in [Network::Mainnet, Network::Testnet] {
+            let mut key = account_of(84).to_extended_pub(&kw);
+            key.network = network;
+            for form in Slip132::ALL {
+                let mut out = [0u8; MAX_BASE58_LEN];
+                let n = key.write_base58_as(form, &mut out).unwrap();
+                let text = core::str::from_utf8(&out[..n]).unwrap();
+                assert!(text.starts_with(form.prefix(network)), "{text}");
+                let (back, got_form) = ExtendedPubKey::from_base58_with_form(text).unwrap();
+                assert_eq!((back, got_form), (key, form), "{text}");
+                assert_eq!(
+                    ExtendedPrivKey::from_base58(text, &kw).err(),
+                    Some(Error::BadVersion),
+                    "a public key is not a private one, whatever its prefix"
+                );
+            }
+        }
     }
 }

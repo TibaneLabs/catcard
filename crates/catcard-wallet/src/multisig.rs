@@ -23,6 +23,7 @@
 //!
 //! [BIP-67]: https://github.com/bitcoin/bips/blob/master/bip-0067.mediawiki
 
+use crate::bip32::serialize::Slip132;
 use crate::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, HARDENED_OFFSET, hash160};
 use crate::descriptor;
 
@@ -161,6 +162,11 @@ pub enum Error {
     /// A cosigner claims this device's master fingerprint but its key does not derive from
     /// this device's master along the origin the descriptor gives.
     ForgedOrigin { at: usize },
+    /// A cosigner's key is written in a SLIP-132 form that names a different script type
+    /// from the one the descriptor wraps it in: a `zpub` (single-signature P2WPKH) inside
+    /// `wsh(...)`, or a `Zpub` (P2WSH) inside `sh(...)`. The bytes of the key are fine;
+    /// the file disagrees with itself about what wallet it describes.
+    FormMismatch { at: usize },
     /// The output buffer was too small.
     Overflow,
 }
@@ -497,7 +503,15 @@ pub fn parse(text: &str) -> Result<Multisig, Error> {
         if n == MAX_COSIGNERS {
             return Err(Error::CosignerCount { n: n + 1 });
         }
-        parsed[n] = Some(parse_key(key.trim(), at)?);
+        let (cosigner, form) = parse_key(key.trim(), at)?;
+        // The SLIP-132 prefix is a hint about the script type, read but never trusted
+        // over the descriptor: `wsh(...)` says what the wallet is. A hint that agrees, or
+        // a classic `xpub` that says nothing, is fine; one that names another script
+        // type is a file at odds with itself.
+        if !kind.accepts_form(form) {
+            return Err(Error::FormMismatch { at });
+        }
+        parsed[n] = Some(cosigner);
         n += 1;
     }
     let Some(first) = parsed[0] else {
@@ -531,8 +545,26 @@ pub fn parse(text: &str) -> Result<Multisig, Error> {
     })
 }
 
-/// `[fingerprint/a/b/c]xpub.../0/*` or `.../<0;1>/*`.
-fn parse_key(text: &str, at: usize) -> Result<Cosigner, Error> {
+impl Kind {
+    /// Whether a cosigner key written in `form` may sit inside this script wrapper.
+    ///
+    /// SLIP-132 gives the two multisig forms their own prefixes -- `Ypub` for P2WSH in
+    /// P2SH, `Zpub` for native P2WSH -- and none for bare `sh(multi(...))`, which stays
+    /// classic. Classic always passes: it names no script type at all.
+    /// Source: SLIP-0132 registry, "Address Encoding" column [C].
+    pub const fn accepts_form(self, form: Slip132) -> bool {
+        matches!(
+            (self, form),
+            (_, Slip132::Classic)
+                | (Kind::P2wsh, Slip132::P2wsh)
+                | (Kind::P2shP2wsh, Slip132::P2wshP2sh)
+        )
+    }
+}
+
+/// `[fingerprint/a/b/c]xpub.../0/*` or `.../<0;1>/*`, and the SLIP-132 form the key was
+/// written in.
+fn parse_key(text: &str, at: usize) -> Result<(Cosigner, Slip132), Error> {
     let bad = || Error::BadKey { at };
     let rest = text.strip_prefix('[').ok_or_else(bad)?;
     let (origin_text, rest) = rest.split_once(']').ok_or_else(bad)?;
@@ -576,14 +608,17 @@ fn parse_key(text: &str, at: usize) -> Result<Cosigner, Error> {
     if !suffix.is_empty() && !suffix.ends_with('*') {
         return Err(bad());
     }
-    let xpub = ExtendedPubKey::from_base58(key_text).map_err(|_| bad())?;
+    let (xpub, form) = ExtendedPubKey::from_base58_with_form(key_text).map_err(|_| bad())?;
 
-    Ok(Cosigner {
-        fingerprint,
-        origin,
-        origin_len,
-        xpub,
-    })
+    Ok((
+        Cosigner {
+            fingerprint,
+            origin,
+            origin_len,
+            xpub,
+        },
+        form,
+    ))
 }
 
 /// `text` without `prefix`, if it starts with it.

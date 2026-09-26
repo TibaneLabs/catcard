@@ -557,3 +557,58 @@ fn our_cosigner_ignores_the_metadata_around_the_key() {
 
     assert_eq!(our_cosigner(&wallet, &ours, &kw()), Ok(Some(mine)));
 }
+
+/// `text` with every cosigner key rewritten in `form`, re-checksummed.
+fn respelled(text: &str, form: crate::bip32::serialize::Slip132) -> String {
+    use crate::bip32::ExtendedPubKey;
+    let body = text.split('#').next().unwrap();
+    let mut out = String::new();
+    for part in body.split(']') {
+        match part.find("/0/*") {
+            Some(end) => {
+                let key = ExtendedPubKey::from_base58(&part[..end]).unwrap();
+                let mut buf = [0u8; crate::bip32::serialize::MAX_BASE58_LEN];
+                let n = key.write_base58_as(form, &mut buf).unwrap();
+                out.push_str(core::str::from_utf8(&buf[..n]).unwrap());
+                out.push_str(&part[end..]);
+            }
+            None => out.push_str(part),
+        }
+        out.push(']');
+    }
+    out.pop();
+    let sum = descriptor::checksum(&out).unwrap();
+    format!("{out}#{}", core::str::from_utf8(&sum).unwrap())
+}
+
+/// A coordinator that writes `Zpub` keys inside `wsh(...)` describes the same wallet as
+/// one that writes `xpub`; the prefix is read, and it agrees with the wrapper.
+#[test]
+fn slip132_keys_in_a_descriptor_are_read_and_checked_against_the_wrapper() {
+    use crate::bip32::serialize::Slip132;
+    let classic = descriptor_for(2, &SEEDS, "wsh", true);
+    let expect = parse(&classic).unwrap();
+    assert_eq!(parse(&respelled(&classic, Slip132::P2wsh)), Ok(expect));
+
+    let nested = descriptor_for(2, &SEEDS, "sh-wsh", true);
+    let expect = parse(&nested).unwrap();
+    assert_eq!(parse(&respelled(&nested, Slip132::P2wshP2sh)), Ok(expect));
+
+    // A prefix naming another script type is a file at odds with itself.
+    assert_eq!(
+        parse(&respelled(&classic, Slip132::P2wpkh)),
+        Err(Error::FormMismatch { at: 0 }),
+        "zpub is single-signature P2WPKH, not a wsh() cosigner"
+    );
+    assert_eq!(
+        parse(&respelled(&classic, Slip132::P2wshP2sh)),
+        Err(Error::FormMismatch { at: 0 }),
+        "Ypub says sh(wsh(...)), the descriptor says wsh(...)"
+    );
+    let legacy = descriptor_for(2, &SEEDS, "sh", true);
+    assert_eq!(
+        parse(&respelled(&legacy, Slip132::P2wsh)),
+        Err(Error::FormMismatch { at: 0 }),
+        "bare sh(multi) has no SLIP-132 form"
+    );
+}
