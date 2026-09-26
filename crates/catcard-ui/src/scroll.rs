@@ -165,6 +165,10 @@ pub struct Line<'a> {
     pub icon: Option<&'a Bitmap>,
     /// A picture at the left at its own size, ahead of any text. See [`Mark`].
     pub mark: Option<Mark<'a>>,
+    /// An on/off property of the row, drawn as a box at its right edge: filled when on.
+    /// `None` for an ordinary row. The row stays selectable; what Confirm does to it is
+    /// the caller's -- a toggle list flips it and redraws.
+    pub toggle: Option<bool>,
 }
 
 impl<'a> Line<'a> {
@@ -179,6 +183,7 @@ impl<'a> Line<'a> {
             wrap: false,
             icon: None,
             mark: None,
+            toggle: None,
         }
     }
 
@@ -193,6 +198,7 @@ impl<'a> Line<'a> {
             wrap: false,
             icon: None,
             mark: None,
+            toggle: None,
         }
     }
 
@@ -207,6 +213,7 @@ impl<'a> Line<'a> {
             wrap: false,
             icon: None,
             mark: None,
+            toggle: None,
         }
     }
 
@@ -251,6 +258,12 @@ impl<'a> Line<'a> {
         self.size = Size::Title;
         self
     }
+
+    /// Give this row an on/off property, shown as a box at its right edge.
+    pub const fn toggled(mut self, on: bool) -> Self {
+        self.toggle = Some(on);
+        self
+    }
 }
 
 /// A line after wrapping: exactly what one row on screen draws.
@@ -263,6 +276,7 @@ pub struct VisualLine<'a> {
     pub menu_item: Option<u32>,
     pub icon: Option<&'a Bitmap>,
     pub mark: Option<Mark<'a>>,
+    pub toggle: Option<bool>,
 }
 
 /// Most visual lines a document holds after wrapping. Enough for a 24-word seed with a
@@ -343,6 +357,7 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 menu_item: line.menu_item,
                 icon: line.icon,
                 mark: line.mark,
+                toggle: line.toggle,
             });
             if out.is_full() {
                 break;
@@ -364,6 +379,7 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
                 menu_item: if first { line.menu_item } else { None },
                 icon: if first { line.icon } else { None },
                 mark: if first { line.mark } else { None },
+                toggle: if first { line.toggle } else { None },
             });
             first = false;
             rest = tail.trim_start_matches(' ');
@@ -809,13 +825,26 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
             tx = fonts.margin + mw + 4;
         }
 
+        // An on/off row: a box in the row's ink at the right, just inside the gutter,
+        // filled when on. Drawn only when the whole row is on screen, like a mark.
+        let mut text_right = arrow_x;
+        if let (Some(on), Align::Left) = (vl.toggle, vl.align) {
+            let side = toggle_side(lh);
+            let bx = arrow_x.saturating_sub(side + 1);
+            let by = top + (lh as isize - side as isize) / 2;
+            if by >= 0 && by as usize + side <= h {
+                draw_toggle(canvas, bx, by as usize, side, on, ink);
+            }
+            text_right = bx.saturating_sub(fonts.margin + 1);
+        }
+
         match vl.align {
             Align::Left => {
                 // A selected, overflowing name scrolls sideways: the icon and the left edge
                 // stay put and the text is clipped to the room right of the icon.
                 let shift = if selected { view.marquee_shift() } else { 0 };
                 let x = tx as isize - shift as isize;
-                draw_clipped(canvas, face, x, top, vl.text, ink, h, tx, arrow_x);
+                draw_clipped(canvas, face, x, top, vl.text, ink, h, tx, text_right);
             }
             Align::Center => {
                 let x = centred(face, vl.text, w) as isize;
@@ -851,6 +880,31 @@ pub fn render<C: Canvas + ?Sized>(canvas: &mut C, view: &ScrollView<'_>) {
     }
 
     scrollbar(canvas, view);
+}
+
+/// The side of an on/off box for a row `lh` pixels tall: most of the row, never so small
+/// that "on" and "off" look alike, never taller than a body line needs.
+fn toggle_side(lh: usize) -> usize {
+    (lh * 2 / 3).clamp(5, 12)
+}
+
+/// An on/off box: an outline, and a solid square inside it when on. Two states that read
+/// apart at a glance on a one-bit panel, with no glyph a font may not have.
+fn draw_toggle<C: Canvas + ?Sized>(
+    c: &mut C,
+    x: usize,
+    y: usize,
+    side: usize,
+    on: bool,
+    ink: Level,
+) {
+    c.fill_rect(x, y, side, 1, ink);
+    c.fill_rect(x, y + side - 1, side, 1, ink);
+    c.fill_rect(x, y, 1, side, ink);
+    c.fill_rect(x + side - 1, y, 1, side, ink);
+    if on && side > 4 {
+        c.fill_rect(x + 2, y + 2, side - 4, side - 4, ink);
+    }
 }
 
 /// The dimmest level that still reads as something rather than as the background.
@@ -1058,6 +1112,70 @@ mod tests {
         let same = (0..fonts.body.line_height())
             .all(|y| (0..128).all(|x| Canvas::get(&c, x, y) == Canvas::get(&plain, x, y)));
         assert!(!same, "{} columns should have been clipped", cols + 1);
+    }
+
+    /// An on/off row draws its box, and "on" and "off" are different pixels -- the two
+    /// states of a one-bit panel must not read alike.
+    #[test]
+    fn a_toggle_row_draws_a_box_that_differs_on_and_off() {
+        use crate::canvas::Canvas;
+        use crate::framebuffer::Mono128x64;
+
+        let fonts = compact_fonts();
+        let draw = |doc: &[Line<'_>]| {
+            let view = ScrollView::build(doc, 128, 64, fonts);
+            let mut c = Mono128x64::new();
+            render(&mut c, &view);
+            c
+        };
+        let plain = draw(&[Line::item("Bitcoin", 1)]);
+        let off = draw(&[Line::item("Bitcoin", 1).toggled(false)]);
+        let on = draw(&[Line::item("Bitcoin", 1).toggled(true)]);
+        let lh = fonts.body.line_height();
+        let differs = |a: &Mono128x64, b: &Mono128x64| {
+            (0..lh).any(|y| (0..128).any(|x| Canvas::get(a, x, y) != Canvas::get(b, x, y)))
+        };
+        assert!(
+            differs(&plain, &off),
+            "an off row still shows its (empty) box"
+        );
+        assert!(differs(&off, &on), "on and off must not look the same");
+        // The box is in the right part of the row, clear of the name.
+        let name_end = fonts.margin + width_of(fonts.body, "Bitcoin");
+        let box_pixels = (0..lh)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .filter(|&(x, y)| Canvas::get(&off, x, y) != Canvas::get(&plain, x, y));
+        for (x, _) in box_pixels {
+            assert!(x > name_end, "box pixel at column {x} overlaps the name");
+        }
+    }
+
+    /// A long name on an on/off row is clipped before the box, never drawn under it.
+    #[test]
+    fn a_toggle_rows_text_stops_short_of_its_box() {
+        use crate::canvas::Canvas;
+        use crate::framebuffer::Mono128x64;
+
+        let fonts = compact_fonts();
+        let long: String = core::iter::repeat_n('M', 40).collect();
+        let lh = fonts.body.line_height();
+        // Second, so it is not the selected row: a selected row is a solid inverted bar,
+        // and "nothing next to the box" is only a question on an unselected one.
+        let doc = [Line::item("first", 1), Line::item(&long, 2).toggled(false)];
+        let view = ScrollView::build(&doc, 128, 64, fonts);
+        let mut c = Mono128x64::new();
+        render(&mut c, &view);
+        let row = view.top(1);
+        // The box's left edge, as render places it.
+        let arrow_x = 128 - (fonts.body.advance(b'^') + fonts.margin);
+        let side = toggle_side(lh);
+        let bx = arrow_x - side - 1;
+        // Just left of the box: nothing but gap in every row of the line.
+        for y in row..row + lh {
+            for x in bx.saturating_sub(fonts.margin)..bx {
+                assert_eq!(Canvas::get(&c, x, y), 0, "text reached the box at {x},{y}");
+            }
+        }
     }
 
     fn a_menu() -> [Line<'static>; 6] {
