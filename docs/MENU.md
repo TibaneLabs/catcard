@@ -57,7 +57,15 @@ Kill key and MicroSD 2FA erase the seed on their own, so **development builds le
 out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can lose its seed
 to one. `make lint` still type-checks them through the release-shape clippy runs.
 | `Passphrase` → `Enter passphrase`, `Restore saved` | *(top level in stock)* → `Edit Phrase`, `Restore Saved` | ❌ drawer as above; also under Derive. Once applied, `Save to card?` seals it to `catcard-passphrases.bin` (our own format: AES-256-GCM under an HMAC of the seed's entropy, so only these words open it); `Restore saved` lists entries by the fingerprint they open, applies one with the same fingerprint-and-address check as typing (and stock's warning when the fingerprint is not the saved one), or deletes it |
-| `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate |
+| `Multisig` | `Multisig Wallets` (`has_secrets`) | ✅ same drawer, same gate; the rows below follow stock's §MS |
+| `Multisig` → ‹wallet› → `View Details`, `Rename`, `Delete`, `Coldcard Export`, `Electrum Wallet`, `Descriptors` → `View Descriptor` / `Export` / `Bitcoin Core` | `make_ms_wallet_menu` | ✅ same rows; the Coldcard (J1) and Electrum (K) exports are offered for BIP-67 wallets only, as stock does; every export goes to the card, the Virtual Disk or (Q1) BBQr, signed at our cosigner path when this device is a member |
+| `Multisig` → `Import` | `Import` | 🔀 one row reads a descriptor file **or** a Coldcard setup file (J1) from the card or the Virtual Disk; also reached from Scan QR (Q1) and the NFC tag. Exact duplicates are refused, near-duplicates (same keys in another shape, or the same name) warned and asked |
+| `Multisig` → `Export XPUB` | `Export XPUB` | ✅ `ccxp-{xfp}.json` (L), account asked |
+| `Multisig` → `Create Airgapped` | `Create Airgapped` | ✅ format, account, then cosigners' `ccxp-*.json` from a file or (Q1) a BBQr scan, our key added last, M asked, the wallet stored and its setup file exported |
+| `Multisig` → `Trust policy` | `Trust PSBT?` | 🔀 own key `cat_mstrust`; verify / offer / trust |
+| `Multisig` → `Unsorted Multisig?` | `Unsorted Multisig?` | 🔀 own key `cat_msunsorted`; off by default, and a `multi()` wallet is refused at every import path while it is |
+| `Multisig` → `Full Address View?` | `Full Address View?` | 🔀 own key `cat_msfulladdr`; off by default, and the Address Explorer then shows a registered wallet's addresses as eight characters at each end |
+| — | `Skip Checks?` | not implemented |
 | `Idle timeout` | `Idle Timeout` (`idle_to`, `batt_to`, in seconds) | 🔀 own keys `cat_idle` / `cat_bidle`, in **minutes** -- a separate key rather than the same name in another unit; same off/1/2/5/15/30/60 range, with the Q1's battery value asked first. Honoured by `crate::idle`, which logs out through the same callgate as the power button |
 | `Display units` | `Display Units` (`rz`) | 🔀 own key `cat_units` (`btc`/`mbtc`/`bits`/`sats`) rather than stock's decimal count; the rows show the same amount written four ways. Honoured by `crate::signtx::btc`, the only place that turns satoshis into text |
 | `Max network fee` | `Max Network Fee` (`fee_limit`) | 🔀 own key `cat_fee` (percent, or `none`); 10% default, 25%, 50%, or no cap -- which is asked twice and warned, and which no unreadable value can ever become |
