@@ -510,6 +510,57 @@ pub fn sign_input_under(
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
+    sign_input_filtered(psbt, index, master, fingerprint, policy, None, out, kw)
+}
+
+/// [`sign_input_under`], with only the keys at `listed` paths.
+///
+/// For a request that named the keys it wants -- a computer asking over USB, which may
+/// only reach keys under an account the person showed it. A record for a key of ours at
+/// a path not in `listed` is passed over as though it were somebody else's, so an input
+/// that only such a key can sign fails [`Error::NotOurs`] and is left unsigned. The
+/// restriction is here, where the key is chosen, rather than in a pass that removes
+/// signatures afterwards: a signature that was never made cannot be left behind by
+/// mistake.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_input_listed(
+    psbt: &Psbt<'_>,
+    index: usize,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    policy: SighashPolicy,
+    listed: &[crate::hostkeys::KeyPath],
+    out: &mut [u8],
+    kw: &KeyWork,
+) -> Result<usize, Error> {
+    sign_input_filtered(
+        psbt,
+        index,
+        master,
+        fingerprint,
+        policy,
+        Some(listed),
+        out,
+        kw,
+    )
+}
+
+/// Whether `request`'s path is one of `listed`, or any path at all when there is no list.
+pub fn is_listed(request: &KeyRequest, listed: Option<&[crate::hostkeys::KeyPath]>) -> bool {
+    listed.is_none_or(|l| l.iter().any(|k| k.steps() == request.steps()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_input_filtered(
+    psbt: &Psbt<'_>,
+    index: usize,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    policy: SighashPolicy,
+    listed: Option<&[crate::hostkeys::KeyPath]>,
+    out: &mut [u8],
+    kw: &KeyWork,
+) -> Result<usize, Error> {
     let kind = psbt.input(index).and_then(|i| i.sighash_type());
     if let Some(kind) = kind
         && !sighash_allowed_under(kind, policy)
@@ -519,7 +570,7 @@ pub fn sign_input_under(
     let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
     let found = key_requests(psbt, index, fingerprint, &mut keys)?;
     let mut last = Error::NotOurs;
-    for request in &keys[..found] {
+    for request in keys[..found].iter().filter(|r| is_listed(r, listed)) {
         match match_key(master, request, kw) {
             Ok(signer) => return sign_with(psbt, index, &signer, kind, out),
             Err(e) => last = e,

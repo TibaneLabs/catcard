@@ -1067,6 +1067,86 @@ pub fn our_inputs(
     n
 }
 
+/// How a listed-keys request divides this wallet's inputs.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Listed {
+    /// Inputs one of the listed keys signs; their indices are what was written out.
+    pub signable: usize,
+    /// Inputs this wallet could sign, but only with a key the request did not list. They
+    /// stay unsigned, and the review says how many.
+    pub unlisted: usize,
+}
+
+/// [`our_inputs`], for a request that listed the keys it wants: the inputs a listed key
+/// signs are written into `out`, and the ones only an unlisted key of ours could sign
+/// are counted.
+pub fn our_inputs_listed(
+    psbt: &Psbt<'_>,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    listed: &[crate::hostkeys::KeyPath],
+    out: &mut [usize],
+    kw: &KeyWork,
+) -> Listed {
+    let mut got = Listed::default();
+    for index in 0..psbt.unsigned_tx().input_count() {
+        let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+        let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
+        let mut ours = false;
+        let mut asked = false;
+        for r in &keys[..found] {
+            if signer::match_key(master, r, kw).is_ok() {
+                ours = true;
+                if signer::is_listed(r, Some(listed)) {
+                    asked = true;
+                }
+            }
+        }
+        if asked && got.signable < out.len() {
+            out[got.signable] = index;
+            got.signable += 1;
+        } else if ours {
+            got.unlisted += 1;
+        }
+    }
+    got
+}
+
+/// Whether some input of `psbt` names `want` as ours: a derivation record claiming this
+/// wallet's fingerprint at exactly that path, whose key really is the one the path leads
+/// to.
+fn names_key(
+    psbt: &Psbt<'_>,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    want: &crate::hostkeys::KeyPath,
+    kw: &KeyWork,
+) -> bool {
+    (0..psbt.unsigned_tx().input_count()).any(|index| {
+        let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+        let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
+        keys[..found]
+            .iter()
+            .any(|r| r.steps() == want.steps() && signer::match_key(master, r, kw).is_ok())
+    })
+}
+
+/// The first listed key that no input of `psbt` names as ours, if there is one.
+///
+/// A listed key that matches nothing is a host asking for a signature the transaction has
+/// no place for, and the request is refused whole rather than signed around it.
+pub fn unmatched_key(
+    psbt: &Psbt<'_>,
+    master: &ExtendedPrivKey,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    listed: &[crate::hostkeys::KeyPath],
+    kw: &KeyWork,
+) -> Option<usize> {
+    listed
+        .iter()
+        .position(|want| !names_key(psbt, master, fingerprint, want, kw))
+}
+
 /// Inputs of `psbt` that a WIF-store key `pubkey` (compressed) can sign, as indices,
 /// written into `out`; returns how many.
 ///

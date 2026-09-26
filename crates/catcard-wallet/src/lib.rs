@@ -67,6 +67,7 @@ pub mod chain;
 pub mod csv;
 pub mod descriptor;
 pub mod encoding;
+pub mod hostkeys;
 pub mod message;
 pub mod multisig;
 pub mod psbtfile;

@@ -1052,3 +1052,176 @@ fn the_p2pk_script_is_recognised_by_shape() {
     assert_eq!(p2pk_key(&pkh), None);
     assert!(!p2pk_pays(&pkh, &pk));
 }
+
+// ---- a request that lists its keys --------------------------------------------------
+
+/// `m/84h/0h/0h/0/1`: a second key of ours, in the same account.
+const PATH_B: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 1];
+
+/// A PSBT spending two P2WPKH outputs, one at `a` and one at `b`, both recorded with
+/// their origin as a wallet would record them.
+fn two_input_psbt(a: &[u32], b: &[u32], buf: &mut [u8]) -> usize {
+    let spk = |pk: &[u8; 33]| {
+        let mut s = [0u8; 22];
+        s[..2].copy_from_slice(&[0x00, 0x14]);
+        s[2..].copy_from_slice(&hash160(pk));
+        s
+    };
+    let (pa, pb) = (pubkey_at(a), pubkey_at(b));
+    let inputs = [
+        RawTxIn {
+            txid: [0x11; 32],
+            vout: 0,
+            script_sig: &[],
+            sequence: 0xffff_ffff,
+            witness: &[],
+        },
+        RawTxIn {
+            txid: [0x22; 32],
+            vout: 1,
+            script_sig: &[],
+            sequence: 0xffff_ffff,
+            witness: &[],
+        },
+    ];
+    let mut pay = [0u8; 25];
+    pay[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    pay[3..23].copy_from_slice(&[0x22; 20]);
+    pay[23..].copy_from_slice(&[0x88, 0xac]);
+    let tx = RawTx {
+        version: 2,
+        inputs: &inputs,
+        outputs: &[RawTxOut {
+            amount: 90_000,
+            script: &pay,
+        }],
+        locktime: 0,
+    };
+    let mut x = [0u8; 4096];
+    let mut y = [0u8; 4096];
+    let n = Psbt::create_to_slice(&tx, &mut x).unwrap();
+    let n = Psbt::parse(&x[..n])
+        .unwrap()
+        .set_witness_utxo(0, 60_000, &spk(&pa), &mut y)
+        .unwrap();
+    let n = Psbt::parse(&y[..n])
+        .unwrap()
+        .set_witness_utxo(1, 40_000, &spk(&pb), &mut x)
+        .unwrap();
+    let n = Psbt::parse(&x[..n])
+        .unwrap()
+        .add_input_bip32_derivation(0, &pa, FINGERPRINT, a, &mut y)
+        .unwrap();
+    Psbt::parse(&y[..n])
+        .unwrap()
+        .add_input_bip32_derivation(1, &pb, FINGERPRINT, b, buf)
+        .unwrap()
+}
+
+fn listed(paths: &[&[u32]]) -> Vec<crate::hostkeys::KeyPath> {
+    paths
+        .iter()
+        .map(|p| crate::hostkeys::KeyPath::new(p).unwrap())
+        .collect()
+}
+
+#[test]
+fn an_owned_but_unlisted_input_stays_unsigned() {
+    let kw = KeyWork::host();
+    let master = master();
+    let mut buf = [0u8; 4096];
+    let n = two_input_psbt(&PATH, &PATH_B, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let only_a = listed(&[&PATH]);
+
+    // Both inputs are ours; only the first is asked for.
+    let mut all = [0usize; 4];
+    assert_eq!(
+        crate::psbtview::our_inputs(&psbt, &master, FINGERPRINT, &mut all, &kw),
+        2
+    );
+    let mut ours = [0usize; 4];
+    let split =
+        crate::psbtview::our_inputs_listed(&psbt, &master, FINGERPRINT, &only_a, &mut ours, &kw);
+    assert_eq!(split.signable, 1);
+    assert_eq!(split.unlisted, 1);
+    assert_eq!(ours[0], 0);
+
+    // The listed input signs.
+    let mut out = [0u8; 8192];
+    let len = sign_input_listed(
+        &psbt,
+        0,
+        &master,
+        FINGERPRINT,
+        SighashPolicy::Block,
+        &only_a,
+        &mut out,
+        &kw,
+    )
+    .unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    assert!(
+        signed
+            .input(0)
+            .unwrap()
+            .partial_sig(&pubkey_at(&PATH))
+            .is_some()
+    );
+
+    // The other is ours, and the signer still will not touch it: the key that could sign
+    // it is not on the list, so it is passed over as though it were somebody else's.
+    let mut again = [0u8; 8192];
+    assert_eq!(
+        sign_input_listed(
+            &signed,
+            1,
+            &master,
+            FINGERPRINT,
+            SighashPolicy::Block,
+            &only_a,
+            &mut again,
+            &kw,
+        ),
+        Err(Error::NotOurs)
+    );
+    assert!(
+        signed
+            .input(1)
+            .unwrap()
+            .partial_sig(&pubkey_at(&PATH_B))
+            .is_none()
+    );
+    // Unrestricted, the same input signs -- the refusal above was the list, not the key.
+    assert!(sign_input(&signed, 1, &master, FINGERPRINT, &mut again, &kw).is_ok());
+}
+
+#[test]
+fn a_listed_key_that_matches_no_input_is_found_before_anything_signs() {
+    let kw = KeyWork::host();
+    let master = master();
+    let mut buf = [0u8; 4096];
+    let n = two_input_psbt(&PATH, &PATH_B, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let both = listed(&[&PATH, &PATH_B]);
+    assert_eq!(
+        crate::psbtview::unmatched_key(&psbt, &master, FINGERPRINT, &both, &kw),
+        None
+    );
+    // `.../0/7` is under the same account but no input spends it.
+    let stray: [u32; 5] = [84 | 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 7];
+    let with_stray = listed(&[&PATH, &stray]);
+    assert_eq!(
+        crate::psbtview::unmatched_key(&psbt, &master, FINGERPRINT, &with_stray, &kw),
+        Some(1)
+    );
+    // A path an input names, but under another wallet's fingerprint, is no match either.
+    let mut other = [0u8; 4096];
+    let n = psbt_for(&PATH, [1, 2, 3, 4], &mut other);
+    let foreign = Psbt::parse(&other[..n]).unwrap();
+    assert_eq!(
+        crate::psbtview::unmatched_key(&foreign, &master, FINGERPRINT, &listed(&[&PATH]), &kw),
+        Some(0)
+    );
+}
