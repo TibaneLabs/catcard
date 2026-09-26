@@ -71,8 +71,13 @@ each step landed, then what is left.
     mk3 settings store on SPI-NOR (`catcard_settings::norslots`), which turned on every
     feature that lacked only a store there; the Single-Signer Spending Policy and hobbled
     mode (`crate::policy`). Untested on hardware.
-17. **What remains**: HSM mode and user management; Trick PINs (blocked on gate 22's
-    slot layout, `HARDWARE-OPEN-ITEMS.md`); Key Teleport; Reflash GPU; the factory menu
+17. **Wave 4, 2026-09-27**: Key Teleport (Q1, stock's wire format), CCC co-signing, Trick
+    PINs over gate 22 with the policy's escape as stock's unlock trick PIN, stock's
+    calculator login, the callgate status readings, BIP-21 `wallet=`, the Q1 battery
+    levels and on-battery power-off. Web 2FA is deliberately out. Untested on hardware.
+18. **What remains**: HSM mode and user management (over the ckcc protocol); creating
+    Delta Mode, Countdown & Brick and Add If Wrong tricks (storage not in the reference);
+    Reflash GPU; the factory menu
     (Bag Me Now / Ship w/o Bag, MCU key slots); BIP-322 `full` / `pof` for P2PKH (needs a
     legacy sighash); altcoin transaction signing beyond ETH and SOL.
 
@@ -205,14 +210,14 @@ every multisig input is refused.
 | Set PIN, change PIN | ✅ | ✅ | Settings → Login → Change PIN |
 | Test Login | ✅ | ✅ | Settings → Login → Test login; refused below four tries left |
 | Brick after 13 attempts | ✅ | ✅ | the bootloader and SE enforce it |
-| Trick PINs (duress, brick, wipe, delta...) | ✅ | ❌ | blocked on gate 22's slot layout (`HARDWARE-OPEN-ITEMS.md`) |
+| Trick PINs (duress, brick, wipe, delta...) | ✅ | 🟡 | Settings → Login → Trick PINs over gate 22 (`crate::trickpin`); a delta trick made elsewhere is honoured, but creating Delta Mode, Countdown & Brick and Add If Wrong is refused until their storage is known (`HARDWARE-OPEN-ITEMS.md`); untested on hardware |
 | Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | ✅ | all under Settings → Login and Idle timeout (`crate::pinentry`, `crate::guard`, `crate::idle`); kill key and SD 2FA in release builds only (the `dev` feature leaves them out); untested on hardware |
-| Calculator login (Q1) | ✅ | ➖ | Settings → Login → Calculator login (`cat_calc`, `pinentry`): the PIN convention is ours -- prefix then `-` then ENTER, suffix then ENTER -- since the reference gives none (`MENU.md`); untested on hardware |
+| Calculator login (Q1) | ✅ | ✅ | Settings → Login → Calculator login (`cat_calc`, `pinentry`): stock's convention: `prefix-` shows the words, the whole PIN on one line logs in (`MENU.md`); untested on hardware |
 | HSM mode, user management | ✅ | ❌ | deferred |
 | Spending Policy | ✅ | ✅ | single-signer policy: magnitude, velocity by the PSBT's lock-time height, a 25-address whitelist, Test Drive, Word Check (`crate::policy`, `cat_sssp`); untested on hardware |
 | CCC (Coldcard Co-Sign) | ✅ | ✅ | key C (new 12 words, typed 12/24, or from the Seed Vault) under stock's own `ccc` key in stock's shape; the same policy engine and editor; key C co-signs a spend from a registered wallet it is in only when the policy passes, else the owner may sign without it; Export CCC XPUBs, Build 2-of-N, Load Key C, Remove CCC; whole-key word challenge, three failures restart (`crate::ccc`, `catcard_settings::ccc`); untested on hardware |
 | Web 2FA (Spending Policy, CCC) | ✅ | ➖ | left out: relies on Coinkite's closed coldcard.com service; a policy stock enrolled in it never co-signs here |
-| Hobbled mode | ✅ | ➖ | the menus stock hides are hidden; the escape is a CatCard unlock code checked before gate 18, not a gate-22 trick PIN, until gate 22's layout is known; untested on hardware |
+| Hobbled mode | ✅ | ➖ | the menus stock hides are hidden; the escape is stock's policy-unlock trick PIN, added on ACTIVATE; untested on hardware |
 | Secure Logout | ✅ | ✅ | main menu on the boards without a power button |
 | Genuine light | ✅ | ✅ | read on About page 3 (`crate::identity`); Danger zone → Bless Firmware commits this image and turns it green (gate 18/5) |
 | Paper wallets | ✅ | ✅ | Utils → Paper wallet: a DRBG key unrelated to the seed, WIF and address with QRs to the card (`crate::paperwallet`); no BIP-38 encryption |
