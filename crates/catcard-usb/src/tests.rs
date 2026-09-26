@@ -278,9 +278,18 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
         Opcode::UpgradeCommit,
         Opcode::InjectKey,
         Opcode::UnlockPin,
+        Opcode::HostAddresses,
+        Opcode::HostSignBegin,
+        Opcode::HostSignData,
+        Opcode::HostSignCommit,
+        Opcode::HostResult,
+        Opcode::HostAbort,
     ] {
         assert_eq!(Opcode::from_u16(op as u16), Some(op));
     }
+    // The host-wallet opcodes are the published numbers.
+    assert_eq!(Opcode::HostAddresses as u16, 0x0050);
+    assert_eq!(Opcode::HostAbort as u16, 0x0055);
     // An unknown opcode has to reach the caller as a number so it can be answered with
     // UnknownOpcode rather than dropped, which would hang the host.
     assert_eq!(Opcode::from_u16(0xBEEF), None);

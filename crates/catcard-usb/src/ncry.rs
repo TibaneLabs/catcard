@@ -57,6 +57,17 @@ pub const TAG_LEN: usize = 16;
 /// Bytes added to a plaintext when it is sealed: the authentication tag.
 pub const OVERHEAD: usize = TAG_LEN;
 
+/// Largest plaintext a sealed *request* may carry, its two-byte opcode included.
+///
+/// A request that fits one frame is opened straight off the frame. A longer one -- a
+/// chunk of a transaction being uploaded -- spans frames and is gathered whole before
+/// anything in it is authenticated, let alone used, so it has to have a bound the device
+/// can hold. A kilobyte is sixteen frames and a few hundred milliseconds on this link.
+pub const PLAIN_MAX: usize = 1024;
+
+/// Largest sealed request record: [`PLAIN_MAX`] and its tag.
+pub const RECORD_MAX: usize = PLAIN_MAX + TAG_LEN;
+
 /// Domain separation for the key schedule. Bump the version suffix for any change that a
 /// peer speaking the old scheme would get wrong — a different curve, KDF, cipher, or an
 /// authenticated handshake — so the two cannot derive a matching key by accident.
@@ -75,6 +86,10 @@ pub enum Error {
     /// The direction's message counter is exhausted. Unreachable in practice — it is a
     /// 64-bit count — but a wrapped counter would reuse a nonce, so it is refused instead.
     Exhausted,
+    /// No channel is open.
+    Closed,
+    /// A record shorter than a tag and an opcode, or longer than [`RECORD_MAX`].
+    Size,
 }
 
 /// The nonce for message `counter` on one direction: the count little-endian in the low
@@ -209,6 +224,110 @@ impl Session {
             .map_err(|_| Error::BadTag)?;
         self.recv_ctr += 1;
         Ok(())
+    }
+}
+
+/// The device's end of the channel: at most one [`Session`], and a count of how many
+/// have been opened.
+///
+/// The count is what binds state to a session without keeping the session's keys around
+/// to compare: a host request remembers the id it arrived under, and belongs to whoever
+/// holds the channel only while [`id`](Self::id) still says that number and the channel
+/// is open. A new handshake, a teardown and a bus reset all move past it for good.
+///
+/// **Any failure closes it.** A record that does not authenticate, is the wrong size, or
+/// cannot be sealed ends the session: a channel that has seen one forged record is not one
+/// to keep trusting, and the host can renegotiate.
+pub struct Channel {
+    session: Option<Session>,
+    id: u32,
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Channel {
+    pub const fn new() -> Self {
+        Self {
+            session: None,
+            id: 0,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// The number of the session opened most recently, open or not. Zero before any.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Whether `id` names the session that is open now.
+    pub fn is_current(&self, id: u32) -> bool {
+        self.is_open() && id == self.id && id != 0
+    }
+
+    /// Replace whatever was open with `session`, under a new id.
+    pub fn install(&mut self, session: Session) {
+        self.id = self.id.wrapping_add(1).max(1);
+        self.session = Some(session);
+    }
+
+    /// End the session, if one is open. Its keys are wiped as it drops.
+    pub fn close(&mut self) {
+        self.session = None;
+    }
+
+    /// Open a sealed request record in place: `[ciphertext][tag]`. Returns the
+    /// plaintext -- `[u16 opcode][payload]`, at least two bytes -- as a slice of `record`.
+    ///
+    /// Closes the channel on any failure, including a record of the wrong size.
+    pub fn open_record<'b>(&mut self, record: &'b mut [u8]) -> Result<&'b mut [u8], Error> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(Error::Closed);
+        };
+        if record.len() < OVERHEAD + 2 || record.len() > RECORD_MAX {
+            self.close();
+            return Err(Error::Size);
+        }
+        let ct_len = record.len() - TAG_LEN;
+        let (ct, tag) = record.split_at_mut(ct_len);
+        let mut t = [0u8; TAG_LEN];
+        t.copy_from_slice(tag);
+        match session.open(ct, &t) {
+            Ok(()) => Ok(ct),
+            Err(e) => {
+                self.close();
+                Err(e)
+            }
+        }
+    }
+
+    /// Seal `buf[..plain_len]` in place and write its tag after it; returns the record's
+    /// length. `buf` must have [`TAG_LEN`] bytes of room past the plaintext. Closes the
+    /// channel on failure.
+    pub fn seal_record(&mut self, buf: &mut [u8], plain_len: usize) -> Result<usize, Error> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(Error::Closed);
+        };
+        if plain_len + TAG_LEN > buf.len() {
+            self.close();
+            return Err(Error::Size);
+        }
+        match session.seal(&mut buf[..plain_len]) {
+            Ok(tag) => {
+                buf[plain_len..plain_len + TAG_LEN].copy_from_slice(&tag);
+                Ok(plain_len + TAG_LEN)
+            }
+            Err(e) => {
+                self.close();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -370,4 +489,127 @@ mod tests {
         247, 67, 233, 137, 162, 231, 77, 87, 146, 173, 195, 250, 120, 56, 89, 36, 225, 153, 102,
         171, 8, 87, 85,
     ];
+
+    /// Frame a request the way a host does: a START frame, then CONT frames.
+    fn frames(opcode: u16, payload: &[u8]) -> Vec<[u8; crate::REPORT_LEN]> {
+        use crate::{CONT_PAYLOAD, KIND_CONT, KIND_START, REPORT_LEN, START_PAYLOAD};
+        let mut out = Vec::new();
+        let mut f = [0u8; REPORT_LEN];
+        f[0] = KIND_START;
+        f[2..4].copy_from_slice(&opcode.to_le_bytes());
+        f[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        let n = payload.len().min(START_PAYLOAD);
+        f[8..8 + n].copy_from_slice(&payload[..n]);
+        out.push(f);
+        let mut seq = 1u8;
+        for chunk in payload[n..].chunks(CONT_PAYLOAD) {
+            let mut f = [0u8; REPORT_LEN];
+            f[0] = KIND_CONT;
+            f[1] = seq;
+            f[2..2 + chunk.len()].copy_from_slice(chunk);
+            out.push(f);
+            seq = seq.wrapping_add(1);
+        }
+        out
+    }
+
+    /// A sealed request of `plain_len` bytes, as the host would send it.
+    fn sealed_request(host: &mut Session, plain_len: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut plain: Vec<u8> = (0..plain_len).map(|i| (i * 7 + 3) as u8).collect();
+        plain[..2].copy_from_slice(&0x0052u16.to_le_bytes());
+        let original = plain.clone();
+        let tag = host.seal(&mut plain).unwrap();
+        plain.extend_from_slice(&tag);
+        (plain, original)
+    }
+
+    /// Feed frames through the reassembler into one buffer, as the device gathers a
+    /// multi-frame record.
+    fn gather(frames: &[[u8; crate::REPORT_LEN]]) -> Vec<u8> {
+        let mut r = crate::Reassembler::new();
+        let mut got = Vec::new();
+        for f in frames {
+            let p = r.feed(f).unwrap();
+            got.extend_from_slice(p.payload);
+        }
+        assert!(!r.in_progress());
+        got
+    }
+
+    fn channel_pair() -> (Session, Channel) {
+        let (host, device) = pair();
+        let mut ch = Channel::new();
+        ch.install(device);
+        (host, ch)
+    }
+
+    #[test]
+    fn a_multi_frame_record_round_trips() {
+        let (mut host, mut ch) = channel_pair();
+        // A full-size request: sixteen-odd frames.
+        let (record, original) = sealed_request(&mut host, PLAIN_MAX);
+        assert_eq!(record.len(), RECORD_MAX);
+        let fs = frames(0x0041, &record);
+        assert!(fs.len() > 1, "must span frames");
+        let mut got = gather(&fs);
+        let plain = ch.open_record(&mut got).unwrap();
+        assert_eq!(plain, &original[..]);
+        assert!(ch.is_open());
+
+        // The next record, a short one, still opens: the counters moved in step.
+        let (mut record, original) = sealed_request(&mut host, 40);
+        let plain = ch.open_record(&mut record).unwrap();
+        assert_eq!(plain, &original[..]);
+    }
+
+    #[test]
+    fn a_tampered_multi_frame_record_tears_the_session_down() {
+        let (mut host, mut ch) = channel_pair();
+        let id = ch.id();
+        let (record, _) = sealed_request(&mut host, 700);
+        let mut fs = frames(0x0041, &record);
+        // One bit, in a continuation frame well past the first.
+        fs[5][10] ^= 0x01;
+        let mut got = gather(&fs);
+        assert_eq!(ch.open_record(&mut got), Err(Error::BadTag));
+        assert!(!ch.is_open(), "a forged record ends the session");
+        assert!(!ch.is_current(id));
+        // And nothing opens on it afterwards.
+        let (mut next, _) = sealed_request(&mut host, 40);
+        assert_eq!(ch.open_record(&mut next), Err(Error::Closed));
+    }
+
+    #[test]
+    fn an_oversized_record_is_refused_and_closes() {
+        let (mut host, mut ch) = channel_pair();
+        let (mut record, _) = sealed_request(&mut host, PLAIN_MAX + 1);
+        assert_eq!(ch.open_record(&mut record), Err(Error::Size));
+        assert!(!ch.is_open());
+    }
+
+    #[test]
+    fn a_new_handshake_moves_the_id_on() {
+        let (_, mut ch) = channel_pair();
+        let first = ch.id();
+        assert!(ch.is_current(first));
+        let (_, device) = pair();
+        ch.install(device);
+        assert!(!ch.is_current(first));
+        assert!(ch.is_current(ch.id()));
+        ch.close();
+        assert!(!ch.is_current(ch.id()));
+    }
+
+    #[test]
+    fn a_reply_seals_and_the_host_opens_it() {
+        let (mut host, mut ch) = channel_pair();
+        let mut buf = [0u8; 64];
+        buf[..5].copy_from_slice(b"hello");
+        let n = ch.seal_record(&mut buf, 5).unwrap();
+        assert_eq!(n, 5 + TAG_LEN);
+        let mut tag = [0u8; TAG_LEN];
+        tag.copy_from_slice(&buf[5..n]);
+        host.open(&mut buf[..5], &tag).unwrap();
+        assert_eq!(&buf[..5], b"hello");
+    }
 }

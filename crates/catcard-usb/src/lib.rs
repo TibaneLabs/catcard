@@ -42,6 +42,7 @@
 
 pub mod control;
 pub mod descriptor;
+pub mod hostwallet;
 pub mod kbd;
 pub mod msc;
 pub mod ncry;
@@ -177,6 +178,29 @@ pub enum Opcode {
     /// opcodes are not accepted here: the image is public and signed, and it streams to
     /// staging without being buffered whole.
     NcryMsg = 0x0041,
+    /// Ask for this wallet's addresses. **Only inside [`Opcode::NcryMsg`].**
+    ///
+    /// No payload. `Ok` means the request is queued for the person at the device, who
+    /// picks the account (and, on a multichain build, the chains) and confirms; the host
+    /// then polls [`Opcode::HostResult`]. `NotNow` + [`hostwallet::busy`] while the device
+    /// is locked or another request or an upgrade offer is pending. See [`hostwallet`].
+    HostAddresses = 0x0050,
+    /// Open an upload of a sign request: `[u8 chain][u32 blob length]`. Only inside the
+    /// channel. Reply `Ok` + `[u32 largest chunk]`, or `Refused` + reason when the board
+    /// cannot take that much or the chain does not sign.
+    HostSignBegin = 0x0051,
+    /// One chunk of the upload: `[u32 offset][bytes]`, in order. Only inside the channel.
+    /// Reply `Ok` + `[u32 bytes received]`.
+    HostSignData = 0x0052,
+    /// The upload is whole: parse it, check its keys against what this session was
+    /// shown, and queue the review. Only inside the channel.
+    HostSignCommit = 0x0053,
+    /// Poll for the outcome, and page the result out: `[u32 offset]`. Only inside the
+    /// channel. `NotNow` + [`hostwallet::stage`] while the person decides.
+    HostResult = 0x0054,
+    /// Drop an upload that was not committed, or a result nobody will fetch. Cannot
+    /// withdraw a request already waiting for the person. Only inside the channel.
+    HostAbort = 0x0055,
 }
 
 impl Opcode {
@@ -194,6 +218,12 @@ impl Opcode {
             0x0012 => Opcode::ReadLog,
             0x0040 => Opcode::NcryStart,
             0x0041 => Opcode::NcryMsg,
+            0x0050 => Opcode::HostAddresses,
+            0x0051 => Opcode::HostSignBegin,
+            0x0052 => Opcode::HostSignData,
+            0x0053 => Opcode::HostSignCommit,
+            0x0054 => Opcode::HostResult,
+            0x0055 => Opcode::HostAbort,
             0x0020 => Opcode::InjectKey,
             0x0021 => Opcode::UnlockPin,
             0x0030 => Opcode::DebugPeek,
@@ -257,6 +287,10 @@ pub mod caps {
     /// commands inside [`Opcode::NcryMsg`](super::Opcode::NcryMsg) instead of in the
     /// clear.
     pub const NCRY: u8 = 1 << 5;
+    /// This build answers the host-wallet commands (`HostAddresses` .. `HostAbort`)
+    /// inside the encrypted channel: a computer may ask for addresses and for signatures,
+    /// each decided by the person at the device. See [`hostwallet`](super::hostwallet).
+    pub const HOST_WALLET: u8 = 1 << 6;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.
