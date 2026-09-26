@@ -874,6 +874,7 @@ fn describe(why: multisig::Error) -> &'static str {
         multisig::Error::CosignerCount { .. } => "too many cosigners",
         multisig::Error::DuplicateKey => "the same key appears twice",
         multisig::Error::ForgedOrigin { .. } => "a key claims this device but is not ours",
+        multisig::Error::FormMismatch { .. } => "a key's prefix names another script type",
         multisig::Error::Overflow => "too long",
     }
 }

@@ -268,10 +268,15 @@ fn write_entry(
     }
     let _ = out.push('"');
 
-    // `_pub` only when the SLIP-132 form is a different string. For `bip44` it is the
-    // same key in the same encoding, and a field repeating its neighbour tells a reader
-    // nothing while making them wonder what it is for.
-    if entry.form != Slip132::Classic {
+    // `_pub` only when the owner switched SLIP-132 export on (Settings → SLIP-132
+    // export; off by default, as stock's is), and only when the SLIP-132 form is a
+    // different string. For `bip44` it is the same key in the same encoding, and a field
+    // repeating its neighbour tells a reader nothing while making them wonder what it is
+    // for. The descriptors stay classic either way: the origin path in each already says
+    // what the script type is.
+    // Source: hw-reference/wallet-export-formats.md §A "_pub"; firmware-features.md §1
+    // "SLIP-132 (read always; export optional, default off)" [C]
+    if crate::prefs::current().slip132 && entry.form != Slip132::Classic {
         let mut alt = [0u8; catcard_wallet::bip32::serialize::MAX_BASE58_LEN];
         if let Ok(m) = key.write_base58_as(entry.form, &mut alt) {
             let alt = core::str::from_utf8(&alt[..m]).unwrap_or("");

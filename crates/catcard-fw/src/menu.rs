@@ -271,6 +271,10 @@ enum Screen {
     /// because it changes every address, xpub and path the device shows.
     #[cfg(not(feature = "board-mk3"))]
     TestnetMode,
+    /// Block or warn on a PSBT asking for a sighash type other than `SIGHASH_ALL`. In
+    /// the Danger Zone, as stock keeps it: "warn" lets a signature over nothing be made.
+    #[cfg(not(feature = "board-mk3"))]
+    SighashChecks,
     /// Which chains this wallet offers, and in what order.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
     ChainSettings,
@@ -311,6 +315,9 @@ enum Screen {
     /// The largest share of a transaction that may go to fees.
     #[cfg(not(feature = "board-mk3"))]
     MaxFee,
+    /// Whether wallet exports carry SLIP-132 (`ypub`/`zpub`) keys beside the classic ones.
+    #[cfg(not(feature = "board-mk3"))]
+    Slip132Export,
     /// The submenu holding the two hardware switches.
     #[cfg(not(feature = "board-mk3"))]
     Hardware,
@@ -496,6 +503,12 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Display units",
     #[cfg(not(feature = "board-mk3"))]
     "Max network fee",
+    // Whether exports carry ypub/zpub keys as well. Stock keeps this as a per-export
+    // toggle; ours is one setting, off by default like stock's.
+    // Source: hw-reference/firmware-features.md §1 "SLIP-132 (export optional, default
+    // off)" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "SLIP-132 export",
     #[cfg(not(feature = "board-mk3"))]
     "Hardware On/Off",
     #[cfg(not(feature = "board-mk3"))]
@@ -553,6 +566,10 @@ const DANGER_ITEMS: &[&str] = &[
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
     #[cfg(not(feature = "board-mk3"))]
     "B85 Idx Values",
+    // Block or warn on unusual sighash types. Stock's row, in stock's drawer.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Sighash Checks" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Sighash checks",
 ];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
@@ -1603,6 +1620,16 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::MaxFee => to(|a| max_fee_screen(a.gate, a.login, a.ui), Screen::Settings),
         #[cfg(not(feature = "board-mk3"))]
+        Screen::Slip132Export => to(
+            |a| slip132_export_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SighashChecks => to(
+            |a| sighash_checks_screen(a.gate, a.login, a.ui),
+            Screen::DangerZone,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
         Screen::UsbPort => to(|a| usb_port_screen(a.gate, a.login, a.ui), Screen::Hardware),
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => to(
@@ -1844,6 +1871,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Max network fee")) => Screen::MaxFee,
             #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("SLIP-132 export")) => Screen::Slip132Export,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Hardware On/Off")) => Screen::Hardware,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
@@ -1868,6 +1897,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Testnet mode")) => Screen::TestnetMode,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("B85 Idx Values")) => Screen::B85Index,
+            (Key::Confirm, Some("Sighash checks")) => Screen::SighashChecks,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
@@ -2571,6 +2601,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::IdleTimeout
         | Screen::DisplayUnits
         | Screen::MaxFee
+        | Screen::Slip132Export
+        | Screen::SighashChecks
         | Screen::UsbPort
         | Screen::VirtualDisk
         | Screen::KeyboardEmu
@@ -11427,6 +11459,102 @@ fn max_fee_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
             ..now
         },
         FEE_ROWS[row],
+    );
+}
+
+/// Settings → SLIP-132 export.
+///
+/// Whether the generic JSON export carries each account key in its SLIP-132 form
+/// (`_pub`: `ypub`/`zpub`/`Ypub`/`Zpub`) beside the classic `xpub`. Off by default, as
+/// stock's is: classic is what every reader takes, and a descriptor already names the
+/// script type. Electrum's file always uses SLIP-132, since Electrum reads the script
+/// type off the prefix; this switch does not touch it. Reading SLIP-132 keys on import is
+/// unconditional. Honoured by [`crate::export::generic_json`].
+/// Source: hw-reference/firmware-features.md §1; wallet-export-formats.md §A, §C [C]
+#[cfg(not(feature = "board-mk3"))]
+fn slip132_export_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "SLIP-132 export";
+    let now = crate::prefs::current();
+    let Some(want) = pick_switch(ui, HEAD, now.slip132) else {
+        return;
+    };
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (
+            catcard_settings::prefs::SLIP132,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            slip132: want,
+            ..now
+        },
+        if want { "on" } else { "off" },
+    );
+}
+
+/// Danger zone → Sighash checks.
+///
+/// Block (the default) refuses a PSBT that asks for a sighash type other than
+/// `SIGHASH_ALL` on one of our inputs. Warn shows the transaction after a warning naming
+/// the input and the type -- and `SIGHASH_NONE` is a signature over no output at all,
+/// which whoever holds it can attach to a transaction paying anyone. That is why the row
+/// lives here and why switching it is asked twice. Honoured by the review and the
+/// signer in [`crate::signtx`].
+/// Source: hw-reference/firmware-features.md §5 "Sighash policy" [C]
+#[cfg(not(feature = "board-mk3"))]
+fn sighash_checks_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_settings::prefs::SighashChecks;
+    const HEAD: &str = "Sighash checks";
+
+    let now = crate::prefs::current();
+    let labels = SighashChecks::ALL.map(|p| p.label());
+    let mut note: Line = Line::new();
+    let _ = write!(note, "now {}", now.sighash.label());
+    let Some(row) = pick_row(ui, HEAD, &note, &labels) else {
+        return;
+    };
+    let chosen = SighashChecks::ALL[row];
+    if chosen == now.sighash {
+        message(ui.panel, HEAD, "unchanged", labels[row]);
+        wait_for_any_key(ui);
+        return;
+    }
+    // Never a default, never one press away: this is the switch that lets a signature
+    // over nothing be made.
+    if chosen == SighashChecks::Warn {
+        ask(
+            ui.panel,
+            HEAD,
+            "allow NONE/SINGLE sighash",
+            "after a warning?",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+        ask(
+            ui.panel,
+            "DANGER",
+            "a NONE signature lets",
+            "anyone redirect the coins",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::SIGHASH_CHECKS, chosen.code()),
+        crate::prefs::Prefs {
+            sighash: chosen,
+            ..now
+        },
+        labels[row],
     );
 }
 
