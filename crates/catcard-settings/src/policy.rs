@@ -413,6 +413,13 @@ pub enum Violation {
     TooSoon { height: u32, allowed_at: u32 },
     /// The policy itself will not read, so nothing can be allowed.
     Damaged,
+    /// The review raised a warning (an unusual sighash, a fee over the warning level).
+    /// Co-signing refuses any transaction with one, as stock's policy does.
+    /// Source: hw-reference/ccc-key-storage.md §3 "rejects any PSBT with warnings" [C]
+    Warnings,
+    /// The policy was enrolled in Web 2FA on another firmware. This one does not speak it
+    /// (Coinkite's closed service), so the rule can never be met here.
+    Web2fa,
 }
 
 impl Violation {
@@ -431,6 +438,8 @@ impl Violation {
                 write!(s, "velocity: block {height} < {allowed_at}")
             }
             Violation::Damaged => write!(s, "policy unreadable"),
+            Violation::Warnings => write!(s, "transaction has warnings"),
+            Violation::Web2fa => write!(s, "needs Web 2FA, not supported"),
         };
         s
     }
@@ -625,8 +634,16 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
 /// Only the policy's own object -- for the last violation and the last spend height --
 /// and the identity keys every save adds to a file that lacks them. Everything else a
 /// hobbled owner could write is a preference or a store the policy exists to freeze.
+///
+/// The co-signing key's object and its last refusal are the one exception outside the
+/// single-signer policy's own: a co-signature under an active single-signer policy still
+/// has to record the height it spent at. No screen that changes them is reachable while
+/// hobbled.
 pub fn may_save(key: &str) -> bool {
-    matches!(key, KEY | "chain" | "xfp" | "words" | "xpub")
+    matches!(
+        key,
+        KEY | "chain" | "xfp" | "words" | "xpub" | crate::ccc::KEY | crate::ccc::VIOLATION_KEY
+    )
 }
 
 // ---------------------------------------------------------------------------------------
@@ -897,6 +914,8 @@ mod tests {
             Violation::NotWhitelisted { index: 99_999 },
             Violation::NoAddress { index: 0 },
             Violation::NoHeight,
+            Violation::Warnings,
+            Violation::Web2fa,
             Violation::TooSoon {
                 height: u32::MAX,
                 allowed_at: u32::MAX,

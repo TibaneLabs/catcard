@@ -285,6 +285,7 @@ name = "catcard-settings"
 version = "7.0.0"
 dependencies = [
  "catcard-nfc",
+ "catcard-wallet",
  "emjson",
  "heapless",
  "purecrypto",

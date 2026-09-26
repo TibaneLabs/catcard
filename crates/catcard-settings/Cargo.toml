@@ -20,3 +20,8 @@ emjson = { workspace = true }
 purecrypto = { workspace = true, features = ["hash", "cipher", "kdf"] }
 heapless = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+# The co-signing key's stored value is checked end to end against the wallet code: the
+# phrase it holds, the fingerprint and xpub it names, and the `ccxp` bundle it exports.
+catcard-wallet = { path = "../catcard-wallet" }
