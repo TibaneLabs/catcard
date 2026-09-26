@@ -240,7 +240,7 @@ pub fn write_amount(sats: u64, out: &mut impl fmt::Write) -> fmt::Result {
         return write!(out, "{whole}");
     }
     let mut places = 8;
-    while frac % 10 == 0 {
+    while frac.is_multiple_of(10) {
         frac /= 10;
         places -= 1;
     }

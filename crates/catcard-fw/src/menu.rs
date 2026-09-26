@@ -5613,12 +5613,12 @@ pub(crate) fn qr_faces() -> (
 ///
 /// Version 8 is the largest symbol the buffers hold: 49 modules, already more than a 64-row
 /// panel can draw at one pixel each and far more than any address needs.
-fn address_qr(ui: &mut Ui<'_>, address: &str, kind: catcard_wallet::address::AddressKind) {
-    address_qr_of(ui, address, kind.is_bech32())
-}
-
-/// As [`address_qr`], for an address with no single-signature kind to name it by.
-fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
+///
+/// `bech32` is asked for directly rather than through an [`AddressKind`]: a multisig
+/// wallet's addresses have no single-signature kind to name them by, and the encoding is
+/// the only thing this decision turns on. The explorer's share path (`crate::payuri`)
+/// comes here for the bare address, which is the default.
+pub(crate) fn address_qr_of(ui: &mut Ui<'_>, address: &str, bech32: bool) {
     use catcard_wallet::address;
 
     let mut payload = [0u8; address::MAX_QR_PAYLOAD];
@@ -8867,7 +8867,7 @@ fn custom_path(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
         match show_doc(ui, &lines, false, false) {
             DocExit::Selected(i) => {
                 if let Some((kind, text)) = addresses.get(i as usize) {
-                    address_qr(ui, text.as_str(), *kind);
+                    crate::payuri::share_qr(ui, text.as_str(), kind.is_bech32());
                 }
             }
             _ => return,
@@ -9317,14 +9317,13 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     Key::Confirm => {
                         if let Some(n) = addr {
                             let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                            match wallet {
-                                Some(w) => address_qr_of(
-                                    ui,
-                                    text,
-                                    w.kind == catcard_wallet::multisig::Kind::P2wsh,
-                                ),
-                                None => address_qr(ui, text, kind),
-                            }
+                            // Bare by default; with an amount and a label as a BIP-21
+                            // URI if the owner asks for them.
+                            let bech32 = match wallet {
+                                Some(w) => w.kind == catcard_wallet::multisig::Kind::P2wsh,
+                                None => kind.is_bech32(),
+                            };
+                            crate::payuri::share_qr(ui, text, bech32);
                         }
                         break 'wait;
                     }
@@ -9397,7 +9396,9 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                                 Some(1) => {
                                     if let Some(n) = addr {
                                         let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                                        crate::nfc::share_address(ui, text);
+                                        if let Some(extras) = crate::payuri::ask_extras(ui) {
+                                            crate::nfc::share_address(ui, text, extras.as_ref());
+                                        }
                                     }
                                     break 'wait;
                                 }

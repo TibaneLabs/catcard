@@ -575,11 +575,9 @@ fn build_solana_link(out: &mut [u8], raw: &[u8]) -> Result<usize, &'static str> 
 // Sharing an address
 // ---------------------------------------------------------------------------
 
-/// The longest tag image an address can make: the BIP-21 scheme and the longest address
-/// this wallet encodes, in one URI record.
-const SHARE_ADDRESS_MAX: usize = catcard_nfc::image_len(
-    catcard_wallet::address::QR_SCHEME.len() + catcard_wallet::address::MAX_ADDRESS_LEN,
-);
+/// The longest tag image an address can make: the longest BIP-21 URI this wallet writes
+/// -- scheme, address, amount and label -- in one URI record.
+const SHARE_ADDRESS_MAX: usize = catcard_nfc::image_len(catcard_wallet::address::bip21::MAX_URI);
 
 /// Put the address on screen onto the tag, and hold the screen while a phone reads it.
 ///
@@ -592,20 +590,26 @@ const SHARE_ADDRESS_MAX: usize = catcard_nfc::image_len(
 /// alphanumeric mode, and an NDEF payload is bytes whatever is in it, so the scheme costs
 /// eight bytes of an eight-kilobyte tag and nothing else.
 ///
+/// `extras` is the amount and label the owner chose to attach (`crate::payuri`), written
+/// into the URI as BIP-21 parameters; `None` is the bare address.
+///
 /// The tag is blanked when the screen is left, so an address is not left on a device's
 /// doorstep for the next phone that passes.
-pub(crate) fn share_address(ui: &mut Ui<'_>, address: &str) {
+pub(crate) fn share_address(
+    ui: &mut Ui<'_>,
+    address: &str,
+    extras: Option<&crate::payuri::Extras>,
+) {
+    use catcard_wallet::address::bip21;
+
     const HEAD: &str = "Share";
     if refused_off(ui, HEAD) || refused_absent(ui, HEAD) {
         return;
     }
-    let mut uri: heapless::String<{ catcard_wallet::address::MAX_QR_PAYLOAD }> =
-        heapless::String::new();
-    if uri
-        .push_str(catcard_wallet::address::QR_SCHEME)
-        .and_then(|()| uri.push_str(address))
-        .is_err()
-    {
+    let mut uri: heapless::String<{ bip21::MAX_URI }> = heapless::String::new();
+    let sats = extras.and_then(|e| e.sats);
+    let label = extras.map(|e| e.label.as_str());
+    if bip21::write(&mut uri, address, sats, label, None).is_err() {
         menu::message(ui.panel, HEAD, "address too long", "any key to go back");
         menu::wait_for_any_key(ui);
         return;
@@ -1089,6 +1093,11 @@ fn offer(
         Content::MultisigConfig => {
             let text = got.text().unwrap_or("");
             crate::msimport::from_text(gate, login, ui, text);
+        }
+        // A payment request: read out, and its address checked against this wallet.
+        Content::PaymentUri => {
+            let text = got.text().unwrap_or("");
+            crate::payuri::received(gate, login, ui, text);
         }
         Content::Text => {
             let text = got.text().unwrap_or("(not text)");

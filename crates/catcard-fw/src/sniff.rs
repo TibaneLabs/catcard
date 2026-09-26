@@ -30,6 +30,8 @@ pub(crate) enum Content {
     SolanaTx { base64: Option<(usize, usize)> },
     /// A multisig wallet to register: an output descriptor, or a Coldcard setup file.
     MultisigConfig,
+    /// A BIP-21 payment request: `bitcoin:`, an address, and perhaps an amount and a label.
+    PaymentUri,
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -64,6 +66,7 @@ impl Content {
             Content::Psbt => "a transaction",
             Content::Seed(_) => "a seed backup",
             Content::MultisigConfig => "a multisig wallet",
+            Content::PaymentUri => "a payment request",
             Content::Text => "text",
             Content::Unknown => "data this device cannot read",
         }
@@ -90,6 +93,7 @@ impl Content {
             Content::Firmware => Some("Install it"),
             Content::Psbt => Some("Sign it"),
             Content::MultisigConfig => Some("Import it"),
+            Content::PaymentUri => Some("Read it"),
             Content::Text => Some("Show it"),
             Content::Seed(_) | Content::Unknown => None,
         };
@@ -126,7 +130,7 @@ impl Content {
             Content::SolanaTx { .. } => "tx",
             Content::Firmware => "bin",
             Content::Psbt => "psbt",
-            Content::MultisigConfig | Content::Text => "txt",
+            Content::MultisigConfig | Content::PaymentUri | Content::Text => "txt",
             Content::Seed(_) | Content::Unknown => "dat",
         }
     }
@@ -244,6 +248,14 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
             return Content::Seed(kind);
         }
         _ => {}
+    }
+    // A BIP-21 payment request. Text, and claimed on its scheme alone: a URI that turns
+    // out to be malformed is still a payment request, and the screen that reads it says
+    // what is wrong with it -- which beats showing `bitcoin:...` as prose.
+    if let Some(text) = text
+        && catcard_wallet::address::bip21::is_uri(text.trim_start())
+    {
+        return Content::PaymentUri;
     }
     // A multisig wallet, as a descriptor or as stock's setup file. Before the text
     // case, because both *are* text, and a wallet shown as prose is one nobody can

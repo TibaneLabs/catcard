@@ -106,6 +106,9 @@ mod vdisk;
 #[cfg(not(feature = "board-mk3"))]
 mod paperwallet;
 mod passphrase;
+/// BIP-21 payment URIs: an amount and a label on a shared address, and one that arrived
+/// read out and checked against this wallet.
+mod payuri;
 mod pinentry;
 #[cfg(feature = "board-q1")]
 mod pngview;

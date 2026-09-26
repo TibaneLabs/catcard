@@ -971,6 +971,11 @@ fn offer(
             let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("");
             crate::msimport::from_text(gate, login, ui, text);
         }
+        // A payment request: read out, and its address checked against this wallet.
+        Content::PaymentUri => {
+            let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("");
+            crate::payuri::received(gate, login, ui, text);
+        }
         Content::Text => {
             // Borrowed for the length of the screen; the lease is dropped after it.
             let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("(not text)");

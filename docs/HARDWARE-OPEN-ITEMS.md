@@ -887,3 +887,10 @@ run on real hardware should be on a unit whose downgrade floor may rise.
 The 32-byte `rom_secrets.bag_number` is shown as printable ASCII up to the first byte
 that is not, "unbagged" for all-ones, hex otherwise. That it is text is inferred from
 stock showing it in a title; the reference gives the field's size and nothing more.
+
+## BIP-21 `wallet=` parameter: semantics `[?]`
+
+`hw-reference/firmware-features.md` §1 lists BIP-21 as "+ Coldcard `wallet=` extension"
+and says nothing about what the value carries. A URI that arrives with one is shown by
+`payuri::received` with the value as opaque text under "wallet= (Coldcard extension)",
+and nothing acts on it; nothing this firmware writes carries one.

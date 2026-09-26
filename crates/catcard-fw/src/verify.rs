@@ -180,6 +180,20 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     if wanted.is_empty() {
         return;
     }
+    owned(gate, login, ui, wanted);
+}
+
+/// Search this wallet for `wanted`, say what was found, and wait for a key.
+///
+/// The screen's search, for an address that arrived some other way -- in a payment URI
+/// off a code or a tag (`crate::payuri`). The answer on screen is the same one; the
+/// return value is for a caller with something to add to it.
+pub(crate) fn owned(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    wanted: &str,
+) -> bool {
     let network = crate::prefs::network();
     // Bech32 is case-insensitive and usually written lower case; base58 is not, so the
     // comparison is done on what the device produces against what was typed, with only
@@ -200,7 +214,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
     if found.is_none() && shape.admits_any_single() {
         let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
-            return;
+            return false;
         };
         let mut busy = menu::Working::new(ui.panel, HEAD, "searching accounts");
         found = search_single(&master, shape, lower.as_str(), wanted, &mut busy, ui.panel);
@@ -212,8 +226,10 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         found = search_multisig(gate, login, ui, shape, network, lower.as_str(), wanted);
     }
 
+    let hit = found.is_some();
     report(ui, found, network);
     menu::wait_for_any_key(ui);
+    hit
 }
 
 /// Say what was found, or how far the search went.
@@ -564,12 +580,8 @@ fn scan_address(
             return Next::More;
         };
         let text = text.trim();
-        let scheme = address::QR_SCHEME.len();
-        let text = match text.get(..scheme) {
-            Some(head) if head.eq_ignore_ascii_case(address::QR_SCHEME) => &text[scheme..],
-            _ => text,
-        };
-        let text = text.split('?').next().unwrap_or("");
+        // A BIP-21 URI gives up its address; anything else is taken as it is.
+        let text = address::bip21::address_of(text).unwrap_or(text);
         if text.is_empty()
             || text.len() > address::MAX_ADDRESS_LEN
             || !text.bytes().all(|b| b.is_ascii_alphanumeric())
