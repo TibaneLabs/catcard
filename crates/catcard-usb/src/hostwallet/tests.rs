@@ -105,7 +105,10 @@ fn the_sign_blob_layout_is_pinned() {
 
 #[test]
 fn the_sign_blob_refuses_what_a_host_got_wrong() {
-    let keys = [path(&[44 | H, 60 | H, H, 0, 0]), path(&[44 | H, 60 | H, 1 | H])];
+    let keys = [
+        path(&[44 | H, 60 | H, H, 0, 0]),
+        path(&[44 | H, 60 | H, 1 | H]),
+    ];
     let tx = [9u8; 10];
     let mut out = [0u8; 128];
     let n = SignBlob::encode(2, &keys, &tx, &mut out).unwrap();
@@ -208,12 +211,6 @@ fn a_page_is_bounded_by_its_buffer_and_by_the_end() {
     // A reply claiming more than its total is refused on read.
     assert_eq!(read_page(&[1, 0, 0, 0, 9, 9]), Err(Error::TooLong));
     assert_eq!(read_page(&[1, 0, 0]), Err(Error::Truncated));
-}
-
-#[test]
-fn a_page_fits_a_sealed_reply() {
-    // Status, total, page and tag, inside the device's 512-byte reply buffer.
-    assert!(2 + 4 + PAGE_MAX + crate::ncry::TAG_LEN <= 512);
 }
 
 // ---- the address reply ------------------------------------------------------------
@@ -332,7 +329,10 @@ fn the_bitcoin_result_layout_is_pinned() {
         &out[..n],
         &[kind::BITCOIN, 2, 2, 0, 0, 0, 0xAA, 0xBB, 1, 0, 0, 0, 0xCC]
     );
-    assert_eq!(read_bitcoin(&out[..n]), Ok((2, &[0xAA, 0xBB][..], &[0xCC][..])));
+    assert_eq!(
+        read_bitcoin(&out[..n]),
+        Ok((2, &[0xAA, 0xBB][..], &[0xCC][..]))
+    );
     // An unfinished transaction is an empty tx field, not a missing one.
     let n = write_bitcoin(&mut out, 0, &[1], &[]).unwrap();
     assert_eq!(read_bitcoin(&out[..n]), Ok((0, &[1][..], &[][..])));

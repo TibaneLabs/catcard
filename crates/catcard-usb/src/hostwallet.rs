@@ -39,6 +39,9 @@ pub const MAX_KEYS: usize = 32;
 /// total -- so 490 is the ceiling; 448 is a round number under it.
 pub const PAGE_MAX: usize = 448;
 
+// Status, total, page and tag inside the device's 512-byte reply buffer.
+const _: () = assert!(2 + 4 + PAGE_MAX + ncry::TAG_LEN <= 512);
+
 /// Most transaction bytes one `HostSignData` carries: the sealed plaintext bound, less
 /// the two-byte opcode and the four-byte offset.
 pub const DATA_MAX: usize = ncry::PLAIN_MAX - 2 - 4;
@@ -627,7 +630,11 @@ fn entry<'a>(c: &mut Cursor<'a>) -> Result<Entry<'a>, Error> {
     let format = c.u8()?;
     let account_path = c.path()?;
     let address_path = c.path()?;
-    let xpub = if shape == shape::UTXO { c.short()? } else { &[] };
+    let xpub = if shape == shape::UTXO {
+        c.short()?
+    } else {
+        &[]
+    };
     let address = c.short()?;
     let pubkey = c.short()?;
     Ok(Entry {
