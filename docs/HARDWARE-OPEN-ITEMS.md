@@ -629,31 +629,37 @@ so a bootloader that does clear it will show up in a device log rather than go u
 Unknown: whether any call clears the flag short of a factory path, and whether stock reads
 it the same way. Neither blocks anything -- what a wallet needs is the bytes.
 
-## The broadcast URL: host and chain segment `[?]`
+## The broadcast URL is a PushTx link `[C]`, untapped `[I]`
 
-`crate::nfc` writes `https://www.blockexplorer.com/<chain>/broadcast?tx=<hex>` to the tag,
-with `<chain>` as `btc`. Neither half is confirmed:
+`crate::nfc` writes a PushTx link to the tag: the service URL from Settings → NFC Push
+Tx, then `t=<base64url tx>&c=<checksum>&n=<network>` in its fragment, exactly as the
+public specification (pushtx.org, "NFC Push TX") lays it out. The builder is
+`catcard_nfc::pushtx` and is host-tested against the specification's own worked example,
+checksum included -- so the *format* is `[C]`. What is `[I]` is the tap itself: no phone
+has opened one of these links off this firmware's tag yet, and that a phone's NDEF stack
+hands an 8 kB URI record to a browser whole is reasoning from the Type 5 specification,
+not something measured.
 
-- **The host** (`HOST_AND_PATH`) is the explorer named with the request. That it serves a
-  `/<chain>/broadcast?tx=` page at all, and that this is the host the owner wants a phone
-  sent to, has not been checked -- no tag has been tapped yet. It is the one string in
-  the firmware that names a third party.
-- **The chain segment** (`CHAIN`) is a guess at what that explorer uses for Bitcoin.
+The two services on offer are the specification's own defaults (`coldcard.com/pushtx#`,
+`mempool.space/pushtx#`); a custom one has to be `https://` and end in `?`, `#` or `&`.
+`Disabled` is an explicit choice. The old `blockexplorer.com` guess is gone.
 
-What depends on them: the NFC broadcast offer after a signed transaction, and nothing
-else. Signing, the card and the USB paths do not touch either.
+**Privacy.** The transaction sits in the URL's fragment, which a browser never sends,
+so the service sees nothing until the page it serves decides to post. But the phone's
+request for that page still tells the service that *this* phone is about to broadcast
+*something*, and the page then has the transaction and the phone's address together.
+That is inherent to sending a phone anywhere, and it is why the setting warns on the way
+in, why the offer is asked per transaction, and why it is never the only way out.
 
-A wrong host or segment is a page that does not know the transaction, not a wrong
-broadcast: the transaction is in the query either way, and the phone's owner sees the
-address before anything is sent. Settled by tapping a phone on a written tag once.
+## What a shared file goes out as `[?]`
 
-**Privacy.** A tap is a web request from the phone: the host learns the signed
-transaction and the phone's IP address, together, before the owner has decided to
-broadcast. That is inherent to sending a phone to any explorer, and it is why the offer
-is opt-in per transaction and never the only way out. A device that should not tell
-anyone anything broadcasts from the card or over USB instead.
-
-Both are one `const` each at the top of `crates/catcard-fw/src/nfc.rs`.
+`crate::nfc::share_bytes` writes a PSBT as its base64 in an NDEF text record, a UTF-8
+file as a text record, and anything else as a MIME record of `application/octet-stream`.
+Those are what any phone's tag reader shows and what this firmware's own receive path
+reads back. Which record a given wallet app registers to *open* -- whether Sparrow's or
+Nunchuk's NFC import expects a MIME type of its own, and which -- has not been checked
+against one. Settled by tapping a phone running such a wallet; until then a phone that
+shows the record is the claim, and a wallet that opens it is a bonus.
 
 ## Writing the NFC tag has not been tried on hardware
 
