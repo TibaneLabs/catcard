@@ -58,10 +58,11 @@ each step landed, then what is left.
     signed PSBT back on the tag; upgrade from the Virtual Disk, Format RAM disk, Delete
     PSBTs, View Identity, Bless Firmware, Set High-Water, DFU row, Settings Space, Home
     menu XFP, Calculator login, Help rows. **All of it untested on hardware.**
-15. **Wave 2, landing in parallel** -- Notes → Send Password and the main-menu Type
-    Passwords, BIP-85 passwords typed as keystrokes, Notes → Apply as BIP-39 Passphrase
-    applying directly, Notes → Sign Note Text through `crate::signmsg`. Not in this tree
-    yet; the rows below say 🟡 "wave 2".
+15. ~~**Wave 2, the seams**~~ -- Notes → Send Password and the main-menu Type Passwords
+    (BIP-85 password typed as keystrokes, or a Secure Notes password on the Q1), the BIP-85
+    password screen's "type into host", Notes → Apply as BIP-39 Passphrase applying
+    directly (`passphrase::apply`), Notes → Sign Note Text through `signmsg::sign_to_file`
+    (`crate::usbkbd::send_screen`). Untested on hardware.
 16. **What remains, deliberately deferred**: HSM mode and user management; Spending
     Policy, CCC and Hobbled mode; Trick PINs (blocked on gate 22's slot layout,
     `HARDWARE-OPEN-ITEMS.md`); Key Teleport; BIP-322 `full` / `pof` and Proof of
@@ -180,7 +181,7 @@ every multisig input is refused.
 |---|---|---|---|
 | Encrypted backup and restore | ✅ | ✅ | Utils → Backup: twelve words (default), a typed passphrase, or cleartext asked twice; Verify backup parses and compares the fingerprint (deeper than stock's CRC); Restore, and load for the session from Derive → Import key → Coldcard backup (`crate::backup`, `catcard-backup`); untested on hardware |
 | Clone Coldcard | ✅ | ✅ | both halves: `ccbk-start.bin` from the target, `ccbk-clone.bin` from the source (`backup::clone_export` / `clone_import`, `catcard-backup::clone`); untested on hardware |
-| Secure Notes & Passwords (Q1) | ✅ | 🟡 | notes, passwords with TOTP, edit / delete / sort, export as `notes.json` or password-sealed `notes.7z`, import with merge, Disable Feature (`crate::notes`, `catcard-settings::notes`, `cat_secnap`); **wave 2**: Send Password / Type Passwords absent, Apply as BIP-39 Passphrase hands over to the typing screen, Sign Note Text is a local copy rather than `crate::signmsg` |
+| Secure Notes & Passwords (Q1) | ✅ | ✅ | notes, passwords with TOTP, edit / delete / sort, export as `notes.json` or password-sealed `notes.7z`, import with merge, Disable Feature, Send Password as USB keystrokes, Apply as BIP-39 Passphrase, Sign Note Text (`crate::notes`, `catcard-settings::notes`, `cat_secnap`); untested on hardware |
 | WIF store | ✅ | ✅ | Utils → WIF Store: 30 keys (`wifs::MAX_KEYS`), Reveal, Sign MSG, Descriptors, Delete, Generate, Import, Export All, Clear All (`crate::wifstore`); matching inputs signed (§5) |
 | Wallet export presets | ✅ | ✅ | Generic JSON, Sparrow, Cove, Nunchuk, Theya, Bitcoin Safe, Bitcoin Core, Electrum, Blue Wallet, Wasabi, Unchained, Descriptor, Bull Bitcoin, Zeus, Samourai pre/post-mix, Key Expression, Export XPUB, Dump Summary, Address CSV, plus Keystone (`crate::export`, `menu.rs` export rows) |
 | microSD | ✅ | ✅ | FAT12/16/32 and exFAT, cards to 2 TB, format, card password, whole-card AES-XTS (`crate::sdcrypt`) |
