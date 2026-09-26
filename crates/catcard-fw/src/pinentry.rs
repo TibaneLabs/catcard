@@ -994,6 +994,18 @@ pub fn unlock(
         // A host driving this device needs to know which screen it is looking at.
         crate::usbtask::set_blank(matches!(login.step(), Step::Blank));
 
+        // Calculator Login: from a fresh prompt the calculator takes over and runs the
+        // whole PIN, returning only in a state it does not handle -- in, blank, bricked
+        // or failed -- which the screens below take from there. A transient failure
+        // re-runs setup below and lands back here, in the calculator again.
+        #[cfg(feature = "board-q1")]
+        if prefs.calc && matches!(login.step(), Step::Prefix) {
+            calculator_login(&g, gate, panel, matrix, drbg, &mut login, false, &prefs);
+            field.clear();
+            redraw = true;
+            continue;
+        }
+
         // A fresh layout each time a half of the PIN starts: `Some(true)` the prefix,
         // `Some(false)` the suffix.
         let half = match login.step() {
@@ -1420,5 +1432,258 @@ pub(crate) fn test_login(
         }
         Step::Wrong { attempts_left, .. } => TestLogin::Wrong { attempts_left },
         _ => TestLogin::Failed,
+    }
+}
+
+/// How the calculator ended, when it was allowed to end.
+#[cfg(feature = "board-q1")]
+enum CalcExit {
+    /// The login is in [`Step::In`], or in a state the calculator does not handle.
+    Done,
+    /// A wrong PIN, in a test: an attempt was spent.
+    Wrong { attempts_left: u32 },
+    /// Backed out of an empty line, in a test.
+    Cancelled,
+}
+
+/// The line the calculator holds: long enough for a sum, wiped on drop.
+#[cfg(feature = "board-q1")]
+type CalcLine = catcard_ui::calc::Line<40>;
+
+/// The calculator screen: the line being typed, and under it the last answer.
+///
+/// It says "calculator" and nothing else: no tries-left line, no key hints beyond what
+/// a calculator would show. The count of attempts reappears only once one has been
+/// spent, exactly as the PIN pad shows it -- by then the screen has already said "wrong".
+#[cfg(feature = "board-q1")]
+fn screen_calc(panel: &mut display::Panel, line: &str, answer: &str, left: u32, caret: bool) {
+    display::draw(panel, |c| {
+        c.clear();
+        title(c, 3, "Calculator");
+        let f = display::LAYOUT.title;
+        let (x, y) = (8, at(c, 18));
+        let end = draw_text(c, f, x, y, line);
+        if caret {
+            draw_text(c, f, end, y, "_");
+        }
+        let f = display::LAYOUT.body;
+        draw_text(c, f, 8, at(c, 34), answer);
+        small(c, 52, "ENTER = evaluate");
+        tries_left(c, left);
+    });
+}
+
+/// Run the PIN through the calculator until the login is in, or in a state the
+/// calculator does not handle. `test` makes a wrong PIN and an empty-line cancel return
+/// instead, for a test login. USB is pumped and a host-submitted PIN honoured as on the
+/// PIN pad, so a bench host still reaches a device on this screen.
+///
+/// The convention is `catcard_ui::calc`'s: prefix digits and a dangling `-`, ENTER; the
+/// words appear as the answer; suffix digits, ENTER. Anything else is a sum, and a sum
+/// typed while the words are up drops the pending prefix.
+#[cfg(feature = "board-q1")]
+#[allow(clippy::too_many_arguments)]
+fn calculator_login(
+    g: &BootloaderGate<'_>,
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    login: &mut Login,
+    test: bool,
+    prefs: &LoginPrefs<'_>,
+) -> CalcExit {
+    use catcard_ui::calc::{self, Typed};
+    use core::fmt::Write as _;
+
+    // The kill key is honoured only for suffix digits, which are the only digits this
+    // screen knows are PIN digits: a sum can contain any digit at all. Release builds
+    // only, as on the PIN pad.
+    #[cfg(not(feature = "dev"))]
+    let kill_key = prefs.kill_key;
+    #[cfg(feature = "dev")]
+    let _ = prefs;
+    let _ = gate;
+
+    let mut line = CalcLine::new();
+    let mut answer: heapless::String<40> = heapless::String::new();
+    let mut awaiting_suffix = false;
+    let mut pad = Keypad::new();
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    let mut redraw = true;
+    let (mut caret, mut caret_at) = (true, catcard_hal::dwt::cycles());
+    // SAFETY: reads RCC only.
+    let blink = (unsafe { catcard_hal::clock::hclk_hz() } / 2).max(1);
+
+    loop {
+        match login.step() {
+            Step::Prefix | Step::ConfirmWords(_) | Step::Suffix => {}
+            Step::Wrong { attempts_left, .. } if test => {
+                return CalcExit::Wrong { attempts_left };
+            }
+            Step::Wrong { attempts_left, .. } => {
+                // Say so where the answer goes, then a fresh struct for the next try.
+                answer.clear();
+                let _ = write!(answer, "wrong; {attempts_left} tries left");
+                *login = Login::new(g);
+                awaiting_suffix = false;
+                line.clear();
+                redraw = true;
+                continue;
+            }
+            _ => return CalcExit::Done,
+        }
+
+        let now = catcard_hal::dwt::cycles();
+        if now.wrapping_sub(caret_at) >= blink {
+            caret_at = now;
+            caret = !caret;
+            redraw = true;
+        }
+        if redraw {
+            screen_calc(panel, line.as_str(), &answer, login.attempts_left(), caret);
+            redraw = false;
+        }
+
+        let _ = crate::usbtask::pump();
+        // A host-submitted PIN, as on the PIN pad; not during a test.
+        if !test && let Some(pin) = crate::usbtask::take_unlock_pin() {
+            if !matches!(login.step(), Step::Prefix) {
+                *login = Login::new(g);
+            }
+            if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
+                working(panel, "USB unlock");
+                login_with(g, login, prefix, suffix);
+                line.clear();
+                awaiting_suffix = false;
+            }
+            redraw = true;
+            continue;
+        }
+
+        pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
+        if !keys.is_empty() {
+            caret = true;
+            caret_at = catcard_hal::dwt::cycles();
+            redraw = true;
+        }
+        for key in keys.iter() {
+            match key {
+                Key::Digit(d) => {
+                    #[cfg(not(feature = "dev"))]
+                    if awaiting_suffix && kill_key == Some(*d) {
+                        crate::guard::kill(gate);
+                    }
+                    line.push(b'0' + *d);
+                }
+                Key::Char(c) => {
+                    line.push(*c);
+                }
+                Key::Cancel => {
+                    if !line.pop() {
+                        if awaiting_suffix {
+                            // Back out of the pending prefix: a fresh struct, no words.
+                            *login = Login::new(g);
+                            awaiting_suffix = false;
+                            answer.clear();
+                        } else if test {
+                            return CalcExit::Cancelled;
+                        }
+                    }
+                }
+                Key::Confirm => {
+                    match calc::classify(line.as_str(), awaiting_suffix, MIN_PART_LEN, MAX_PART_LEN)
+                    {
+                        Typed::Prefix(p) => {
+                            working(panel, "Calculating");
+                            let _ = login.prefix_entered(g, p.as_bytes());
+                            log_state(login, "calc prefix");
+                            answer.clear();
+                            if let Step::ConfirmWords(w) = login.step() {
+                                let [a, b] = anti_phishing_words(w);
+                                let _ = write!(answer, "= {a} {b}");
+                                login.words_confirmed();
+                                awaiting_suffix = true;
+                            } else {
+                                let _ = answer.push_str("error");
+                            }
+                            line.clear();
+                        }
+                        Typed::Suffix(s) => {
+                            working(panel, "Calculating");
+                            let _ = login.attempt(g, s.as_bytes());
+                            log_state(login, "calc attempt");
+                            awaiting_suffix = false;
+                            answer.clear();
+                            line.clear();
+                        }
+                        Typed::Expression => {
+                            // A sum while the words were up drops the prefix with them.
+                            if awaiting_suffix {
+                                *login = Login::new(g);
+                                awaiting_suffix = false;
+                            }
+                            answer.clear();
+                            match calc::eval(line.as_str()) {
+                                Ok(v) => {
+                                    let _ = write!(answer, "= {v}");
+                                }
+                                Err(calc::Error::Empty) => {}
+                                Err(calc::Error::DivideByZero) => {
+                                    let _ = answer.push_str("division by zero");
+                                }
+                                Err(calc::Error::Overflow) => {
+                                    let _ = answer.push_str("out of range");
+                                }
+                                Err(calc::Error::Syntax) => {
+                                    let _ = answer.push_str("syntax error");
+                                }
+                            }
+                            line.clear();
+                        }
+                    }
+                }
+                Key::Qr => {}
+            }
+        }
+        catcard_hal::dwt::delay_cycles(SCAN_CYCLES);
+    }
+}
+
+/// Settings → Login → Calculator login: a test login on the calculator screen, so the
+/// setting can only go on once the owner has typed the PIN through it successfully.
+/// The same attempt rules as [`test_login`].
+#[cfg(feature = "board-q1")]
+pub(crate) fn test_login_calc(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+    session: &mut Login,
+) -> TestLogin {
+    let g = BootloaderGate { gate };
+    let mut test = Login::new(&g);
+    log_state(&test, "calc test setup");
+    if !matches!(test.step(), Step::Prefix) {
+        return TestLogin::Failed;
+    }
+    let left = test.attempts_left();
+    if left < TEST_MIN_ATTEMPTS {
+        return TestLogin::TooFewTries {
+            attempts_left: left,
+        };
+    }
+    let prefs = LoginPrefs::default();
+    match calculator_login(&g, gate, panel, matrix, drbg, &mut test, true, &prefs) {
+        CalcExit::Cancelled => TestLogin::Cancelled,
+        CalcExit::Wrong { attempts_left } => TestLogin::Wrong { attempts_left },
+        CalcExit::Done => match test.step() {
+            Step::In { .. } => {
+                *session = test;
+                TestLogin::Correct { digits: 0 }
+            }
+            _ => TestLogin::Failed,
+        },
     }
 }

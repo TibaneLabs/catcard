@@ -10,6 +10,7 @@
 #![deny(unsafe_code)]
 
 pub mod art;
+pub mod calc;
 pub mod canvas;
 pub mod display;
 pub mod face;

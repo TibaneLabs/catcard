@@ -330,6 +330,9 @@ enum Screen {
     /// Wait a chosen time after a correct PIN.
     #[cfg(not(feature = "board-mk3"))]
     LoginCountdown,
+    /// The login screen as a calculator, the PIN typed into it. Q1 only.
+    #[cfg(feature = "board-q1")]
+    CalcLogin,
     /// Release builds only: a digit that erases the seed at login.
     #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
     KillKey,
@@ -681,6 +684,10 @@ const LOGIN_ITEMS: &[&str] = &[
     "Scramble keys",
     #[cfg(not(feature = "board-mk3"))]
     "Login countdown",
+    // Stock's Calculator Login, Q1 only: it needs the keyboard.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Calculator Login" [C]
+    #[cfg(feature = "board-q1")]
+    "Calculator login",
     // They erase the seed on their own, so a development build -- which every bench unit
     // runs -- does not have them. See `crate::guard`.
     #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
@@ -1728,6 +1735,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::LoginCountdown => to(|a| login_countdown_screen(a.ui), Screen::Login),
+        #[cfg(feature = "board-q1")]
+        Screen::CalcLogin => to(|a| calc_login_screen(a.gate, a.login, a.ui), Screen::Login),
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::KillKey => to(
             |a| crate::guard::kill_key_screen(a.gate, a.login, a.ui),
@@ -2144,6 +2153,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Scramble keys")) => Screen::ScrambleKeys,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Login countdown")) => Screen::LoginCountdown,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Calculator login")) => Screen::CalcLogin,
             #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
             (Key::Confirm, Some("Kill key")) => Screen::KillKey,
             #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
@@ -2785,6 +2796,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SeedQrShow => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys | Screen::LoginCountdown => {}
+        #[cfg(feature = "board-q1")]
+        Screen::CalcLogin => {}
         // Handled in `run`: each asks its question through `pick_row` and drives the
         // panel itself.
         #[cfg(not(feature = "board-mk3"))]
@@ -11463,6 +11476,66 @@ fn scramble_keys_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         }
         (1, true) => {
             if crate::settings::save_scramble(ui, false) {
+                message(ui.panel, HEAD, "off", "from the next login");
+            } else {
+                message(ui.panel, HEAD, "could not save", "still on");
+            }
+        }
+        _ => message(ui.panel, HEAD, "unchanged", ""),
+    }
+    wait_for_any_key(ui);
+}
+
+/// Settings → Login → Calculator login (Q1).
+///
+/// **On only after a test login through the calculator succeeds**, as Scramble keys is:
+/// a login screen that hides the PIN prompt behind a convention is a screen an owner who
+/// does not know the convention cannot get past, so it is proved with this PIN on this
+/// device before it is saved. Off needs no proof. The convention is in `docs/MENU.md`.
+#[cfg(feature = "board-q1")]
+fn calc_login_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Calculator login";
+    let on = crate::settings::calc_login();
+    let note = if on { "now on" } else { "now off" };
+    let Some(row) = pick_row(ui, HEAD, note, &["On", "Off"]) else {
+        return;
+    };
+    match (row, on) {
+        (0, false) => {
+            {
+                use catcard_ui::scroll::Line as DLine;
+                let lines = [
+                    DLine::title(HEAD),
+                    DLine::body("The login screen becomes a calculator. To log in:")
+                        .small()
+                        .wrapped(),
+                    DLine::body("1. prefix digits, then - (SYMBOL+q), ENTER")
+                        .small()
+                        .wrapped(),
+                    DLine::body("2. your two words appear as the answer")
+                        .small()
+                        .wrapped(),
+                    DLine::body("3. suffix digits, ENTER").small().wrapped(),
+                    DLine::body("Try it once now; a wrong PIN counts.")
+                        .small()
+                        .wrapped(),
+                ];
+                if !matches!(show_doc(ui, &lines, false, true), DocExit::Confirmed) {
+                    return;
+                }
+            }
+            let outcome =
+                crate::pinentry::test_login_calc(gate, ui.panel, ui.matrix, ui.drbg, login);
+            if !say_test(ui, HEAD, outcome) {
+                message(ui.panel, HEAD, "left off", "");
+            } else if crate::settings::save_calc(ui, true) {
+                message(ui.panel, HEAD, "on", "from the next login");
+            } else {
+                message(ui.panel, HEAD, "could not save", "still off");
+            }
+        }
+        (1, true) => {
+            if crate::settings::save_calc(ui, false) {
                 message(ui.panel, HEAD, "off", "from the next login");
             } else {
                 message(ui.panel, HEAD, "could not save", "still on");
