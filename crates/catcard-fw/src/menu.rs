@@ -7119,17 +7119,35 @@ pub(crate) fn ask_number(
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::field::{self, Accept, Field, Input};
     use catcard_ui::text::{centred, draw_text};
+    use core::fmt::Write as _;
 
     /// The path's last element is hardened, so the range is 0 to 2^31 - 1: ten digits.
     const MAX_DIGITS: usize = 10;
     const LIMIT: u32 = 0x7FFF_FFFF;
-    let top_y = display::FIELD_TOP;
+
+    // The faces every list here uses, not the older compact layout's: on the mono panels
+    // that one's body face is 4x6, too small for the number being chosen. The title face
+    // for the heading and the list's body face for the digits; the small face only for
+    // the caption and the one-line hint. The label moves out of the card into the
+    // caption above it -- at 7x14 a label and ten digits do not share a 128-pixel row.
+    let lay = catcard_ui::widgets::Layout {
+        title: display::FONTS.title,
+        body: display::FONTS.body,
+        gap: display::FONTS.gap,
+        margin: display::FONTS.margin,
+    };
+    let small = display::FONTS.small;
+    let mut caption: heapless::String<48> = heapless::String::new();
+    match above {
+        Some((label, what)) => {
+            let _ = write!(caption, "{label} {what}, {value_label}");
+        }
+        None => {
+            let _ = caption.push_str(value_label);
+        }
+    }
 
     let mut input = Input::<MAX_DIGITS>::new(Accept::Digits, MAX_DIGITS);
-    // Sized for what the index can hold, ten digits, not for the width of the panel --
-    // or for the kind above it, where that is longer. Both rows say so because the card
-    // is one box and takes its widest row.
-    let width = MAX_DIGITS.max(above.map_or(0, |(_, what)| what.len()));
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     // Said only once it has happened, so the screen is not shouting a rule at someone
@@ -7137,22 +7155,8 @@ pub(crate) fn ask_number(
     let mut complaint = "";
 
     loop {
-        // The rows are built and drawn inside a block of their own: a `Vec` of them has a
-        // `Drop`, so its borrow of the input would otherwise run to the end of the loop
-        // body -- where the keys typing into that input are read.
         {
-            // Two rows where there is context to show, one where there is not: a card
-            // with an empty row on it reads as a field that failed to draw.
-            let mut fields: heapless::Vec<Field<'_>, 2> = heapless::Vec::new();
-            if let Some((label, what)) = above {
-                let _ = fields.push(Field::text(label, what).max(width));
-            }
-            let _ = fields.push(
-                Field::text(value_label, input.as_str())
-                    .max(width)
-                    .live(true),
-            );
-            let body = display::LAYOUT.body;
+            let fields = [Field::text("", input.as_str()).max(MAX_DIGITS).live(true)];
             let foot = match (complaint.is_empty(), note.is_empty()) {
                 (false, _) => complaint,
                 (true, false) => note,
@@ -7160,24 +7164,13 @@ pub(crate) fn ask_number(
             };
             display::draw_field_page(ui.panel, |c| {
                 c.clear();
-                let hx = centred(body, head, c.width());
-                draw_text(
-                    c,
-                    body,
-                    hx,
-                    top_y.saturating_sub(body.line_height() + 6),
-                    head,
-                );
-                let below = field::stack(
-                    c,
-                    &display::LAYOUT,
-                    top_y,
-                    &fields,
-                    display::FIELD_SKIN,
-                    true,
-                );
-                let fx = centred(body, foot, c.width());
-                draw_text(c, body, fx, below + 6, foot);
+                let w = c.width();
+                draw_text(c, lay.title, centred(lay.title, head, w), 0, head);
+                let cap_y = lay.title.line_height() + lay.gap + 1;
+                draw_text(c, small, centred(small, &caption, w), cap_y, &caption);
+                let card_y = cap_y + small.line_height() + lay.gap + 1;
+                let below = field::stack(c, &lay, card_y, &fields, display::FIELD_SKIN, true);
+                draw_text(c, small, centred(small, foot, w), below + lay.gap + 2, foot);
             });
         }
         wait_for_release(ui);
@@ -7244,19 +7237,16 @@ pub(crate) fn ask_number(
 pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
     use catcard_ui::menu::Scroll;
 
-    let mut cursor = 0usize;
+    // The window moves with the cursor: `Scroll::step` brings it along when the cursor
+    // leaves the rows on screen. A fixed `top: 0` let the cursor walk off the bottom of a
+    // longer list while the screen stayed put.
+    let rows = display::LAYOUT.rows(display::SCREEN_H);
+    let mut sc = Scroll::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
         display::draw(ui.panel, |c| {
-            catcard_ui::widgets::menu(
-                c,
-                &display::LAYOUT,
-                head,
-                note,
-                items,
-                Scroll { cursor, top: 0 },
-            );
+            catcard_ui::widgets::menu(c, &display::LAYOUT, head, note, items, sc);
         });
         wait_for_release(ui);
         loop {
@@ -7265,15 +7255,15 @@ pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) ->
             let mut moved = false;
             for k in keys.iter() {
                 match k {
-                    Key::Confirm => return Some(cursor),
+                    Key::Confirm => return Some(sc.cursor),
                     Key::Cancel => return None,
                     // The same two keys that move every other list here.
-                    Key::Digit(8) if cursor + 1 < items.len() => {
-                        cursor += 1;
+                    Key::Digit(8) if sc.cursor + 1 < items.len() => {
+                        sc = sc.step(items.len(), rows, true);
                         moved = true;
                     }
-                    Key::Digit(5) if cursor > 0 => {
-                        cursor -= 1;
+                    Key::Digit(5) if sc.cursor > 0 => {
+                        sc = sc.step(items.len(), rows, false);
                         moved = true;
                     }
                     _ => {}
@@ -7283,6 +7273,94 @@ pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) ->
                 break;
             }
             display::idle(ui.panel);
+        }
+    }
+}
+
+/// One row of a [`toggle_list`]: what the row shows, and whether it is on.
+// Generic, with one caller today -- the host-wallet chain picker, which only a
+// multichain build has. Kept in every build rather than gated to that one caller.
+#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
+pub(crate) struct Toggle<'a> {
+    /// The row as it is drawn -- a name, and a mark (a chain's logo) where there is one.
+    /// Its id and its box are the list's to set.
+    pub line: catcard_ui::scroll::Line<'a>,
+    pub on: bool,
+}
+
+/// Most rows a [`toggle_list`] takes. Every chain this firmware knows fits, with room.
+// Generic, with one caller today -- the host-wallet chain picker, which only a
+// multichain build has. Kept in every build rather than gated to that one caller.
+#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
+pub(crate) const TOGGLE_MAX: usize = 24;
+
+/// A list of on/off rows and one action row under them.
+///
+/// OK on a row flips it where it stands -- the cursor and the scroll stay where they
+/// were, so ticking the eighth of twelve does not put the person back at the top -- and
+/// OK on the action row returns `Some(())`. Cancel returns `None`, leaving `rows` as the
+/// person last set them. Each row shows its state as a box at its right edge
+/// ([`catcard_ui::scroll::Line::toggled`]), in the same list, faces and marks every other
+/// menu here draws.
+// Generic, with one caller today -- the host-wallet chain picker, which only a
+// multichain build has. Kept in every build rather than gated to that one caller.
+#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
+pub(crate) fn toggle_list(
+    ui: &mut Ui<'_>,
+    head: &str,
+    note: &str,
+    rows: &mut [Toggle<'_>],
+    action: &str,
+) -> Option<()> {
+    use catcard_ui::scroll::{Line as DLine, ScrollView};
+
+    let n = rows.len().min(TOGGLE_MAX);
+    let mut cursor = 0usize;
+    let mut off = 0usize;
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        {
+            let mut lines: heapless::Vec<DLine<'_>, { TOGGLE_MAX + 3 }> = heapless::Vec::new();
+            let _ = lines.push(DLine::title(head));
+            if !note.is_empty() {
+                let _ = lines.push(DLine::body(note).small().centered());
+            }
+            for (i, row) in rows[..n].iter().enumerate() {
+                let mut line = row.line;
+                line.menu_item = Some(i as u32);
+                let _ = lines.push(line.toggled(row.on));
+            }
+            let _ = lines.push(DLine::item(action, n as u32));
+            let mut view =
+                ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+            view.set_off(off);
+            view.select(cursor as u32);
+            #[cfg(feature = "board-q1")]
+            display::draw_with_marks(ui.panel, &view, |c| catcard_ui::scroll::render(c, &view));
+            #[cfg(not(feature = "board-q1"))]
+            display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &view));
+            off = view.off();
+        }
+
+        wait_for_release(ui);
+        let mut moved = false;
+        while !moved {
+            let _ = usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            if keys.is_empty() {
+                display::idle(ui.panel);
+                continue;
+            }
+            match keys[0] {
+                Key::Digit(5) => cursor = cursor.saturating_sub(1),
+                Key::Digit(8) => cursor = (cursor + 1).min(n),
+                Key::Confirm if cursor < n => rows[cursor].on = !rows[cursor].on,
+                Key::Confirm => return Some(()),
+                Key::Cancel => return None,
+                _ => continue,
+            }
+            moved = true;
         }
     }
 }
@@ -8107,13 +8185,9 @@ fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
         // the view and the view is rebuilt whenever anything moves.
         let mut labels: heapless::Vec<heapless::String<24>, { crate::chains::MAX }> =
             heapless::Vec::new();
-        for (c, on) in order.iter() {
+        for (c, _) in order.iter() {
             let mut row: heapless::String<24> = heapless::String::new();
             let _ = row.push_str(c.name);
-            // A row says what it is, not what pressing OK would do: "off" under the
-            // cursor must not read as an invitation to turn something off that is
-            // already off.
-            let _ = row.push_str(if *on { "" } else { "  (off)" });
             let _ = labels.push(row);
         }
 
@@ -8125,8 +8199,11 @@ fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
             // the numpad boards from 7 and 9 -- and both have arrows printed on those
             // keys. So the hint says the arrows, which is what somebody is looking at.
             let _ = lines.push(DLine::body("OK on/off   < > move").small().centered());
-            for (i, (c, _)) in order.iter().enumerate() {
-                let mut line = DLine::item(&labels[i], i as u32).large();
+            // Each row's state is its box: a row says what it is, never what pressing OK
+            // would do, so a word like "off" under the cursor cannot read as an
+            // invitation to switch off something already off.
+            for (i, (c, on)) in order.iter().enumerate() {
+                let mut line = DLine::item(&labels[i], i as u32).large().toggled(*on);
                 if let Some(mark) = catcard_ui::art::chainicons::mark(c.ticker) {
                     line = line.with_mark(mark);
                 }
@@ -8204,7 +8281,10 @@ fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
 /// One chain's row: its mark and its name. The logo in full colour on the Q1, written to
 /// the panel past the canvas; the one-bit mark on the OLED.
 #[cfg(feature = "multichain")]
-fn chain_row(c: &catcard_wallet::chain::Chain, id: u32) -> catcard_ui::scroll::Line<'static> {
+pub(crate) fn chain_row(
+    c: &catcard_wallet::chain::Chain,
+    id: u32,
+) -> catcard_ui::scroll::Line<'static> {
     use catcard_ui::art::chainicons;
     use catcard_ui::scroll::Line as DLine;
     let mut line = DLine::item(c.name, id).large();

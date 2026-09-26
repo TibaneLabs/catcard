@@ -809,8 +809,13 @@ fn addresses(
     }
 }
 
-/// The chains to share, from the wallet's own list: every one on to begin with, each
-/// toggled with Confirm, and the last row to go on. Cancel declines.
+/// The chains to share, from the wallet's own list, each drawn as every chain list here
+/// draws it -- its logo and its name -- with an on/off box. All on to begin with; OK flips
+/// a row where it stands, and the row under the list goes on. Cancel declines.
+// Every chain the wallet can list fits in one toggle list.
+#[cfg(feature = "multichain")]
+const _: () = assert!(crate::chains::MAX <= menu::TOGGLE_MAX);
+
 #[cfg(feature = "multichain")]
 fn pick_chains(
     gate: &Callgate,
@@ -818,32 +823,20 @@ fn pick_chains(
     ui: &mut Ui<'_>,
 ) -> Option<heapless::Vec<&'static chain::Chain, { crate::chains::MAX }>> {
     let order = crate::chains::enabled(gate, login, ui);
-    let mut on: heapless::Vec<bool, { crate::chains::MAX }> = heapless::Vec::new();
-    for _ in order.iter() {
-        let _ = on.push(true);
+    let mut rows: heapless::Vec<menu::Toggle<'static>, { crate::chains::MAX }> =
+        heapless::Vec::new();
+    for (i, c) in order.iter().enumerate() {
+        let _ = rows.push(menu::Toggle {
+            line: menu::chain_row(c, i as u32),
+            on: true,
+        });
     }
     loop {
-        let mut labels: heapless::Vec<heapless::String<24>, { crate::chains::MAX + 1 }> =
-            heapless::Vec::new();
-        for (c, o) in order.iter().zip(on.iter()) {
-            let mut row: heapless::String<24> = heapless::String::new();
-            let _ = write!(row, "[{}] {}", if *o { "x" } else { " " }, c.name);
-            let _ = labels.push(row);
-        }
-        let mut go: heapless::String<24> = heapless::String::new();
-        let _ = go.push_str("Share the ticked");
-        let _ = labels.push(go);
-        let rows: heapless::Vec<&str, { crate::chains::MAX + 1 }> =
-            labels.iter().map(|s| s.as_str()).collect();
-        let chosen = menu::choose(ui, "Chains", "OK ticks, last row goes on", &rows)?;
-        if chosen < order.len() {
-            on[chosen] = !on[chosen];
-            continue;
-        }
+        menu::toggle_list(ui, "Chains", "OK on/off", &mut rows, "Share these")?;
         let picked: heapless::Vec<&'static chain::Chain, { crate::chains::MAX }> = order
             .iter()
-            .zip(on.iter())
-            .filter(|(_, o)| **o)
+            .zip(rows.iter())
+            .filter(|(_, r)| r.on)
             .map(|(c, _)| *c)
             .collect();
         if picked.is_empty() {
