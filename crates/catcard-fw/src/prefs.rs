@@ -189,7 +189,8 @@ fn apply(next: Prefs) {
     // SAFETY: foreground only, single core; the write finishes within this statement.
     unsafe { *core::ptr::addr_of_mut!(CURRENT) = next };
     crate::idle::arm(next.idle_minutes);
-    crate::usbtask::set_port(next.usb_port);
+    // The old per-wallet port switch counts only while no device-wide USB mode is set.
+    crate::usbtask::wallet_port(next.usb_port);
     crate::usbtask::set_keyboard(next.keyboard_emu);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
     // and there is nothing to apply.

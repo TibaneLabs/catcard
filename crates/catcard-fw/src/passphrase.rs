@@ -169,7 +169,9 @@ fn enter(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 /// True once the wallet is in force. Refused, with a line said, on a wallet that has no
 /// words for a passphrase to change, on empty text, and on text longer than a passphrase
 /// may be -- silently truncating one would open a wallet nobody can name.
-#[cfg(feature = "board-q1")]
+///
+/// Also how a ckcc-mode computer's `pass` request is applied (`crate::ckcc`), which is why
+/// it is on every board.
 pub(crate) fn apply(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

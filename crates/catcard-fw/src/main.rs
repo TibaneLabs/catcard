@@ -45,6 +45,8 @@ mod ccc;
 /// A multichain question: the one build that carries a single chain has nothing to ask.
 #[cfg(feature = "multichain")]
 mod chains;
+/// Stock Coldcard's host protocol, for the ckcc USB mode.
+mod ckcc;
 mod derive;
 mod display;
 /// Wallet-export file formats.

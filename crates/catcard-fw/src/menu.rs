@@ -349,7 +349,7 @@ enum Screen {
     Slip132Export,
     /// The submenu holding the two hardware switches.
     Hardware,
-    /// Whether the device presents itself to a host over USB at all.
+    /// What the device is on USB: off, stock's protocol (ckcc) or ours (`crate::ckcc`).
     UsbPort,
     /// Whether the device may re-enumerate as a USB disk.
     #[cfg(not(feature = "board-mk3"))]
@@ -756,7 +756,7 @@ const LOGIN_ITEMS: &[&str] = &[
 /// lives in nor a tag, so its list is the two switches it can honour.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Hardware On/Off" [C]
 const HARDWARE_ITEMS: &[&str] = &[
-    "USB port",
+    "USB mode",
     #[cfg(not(feature = "board-mk3"))]
     "Virtual Disk",
     "Keyboard EMU",
@@ -1277,6 +1277,16 @@ pub fn run(session: Session<'_>) -> ! {
                 display::wipe(ui.panel);
             }
             crate::hostwallet::serve(gate, login, &mut ui);
+            redraw = true;
+            continue;
+        }
+        // The same for a ckcc-mode computer (`crate::ckcc`).
+        if !showing_offer && receiving.is_none() && crate::ckcc::pending() {
+            keys.clear();
+            if screen == Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            crate::ckcc::serve(gate, login, &mut ui);
             redraw = true;
             continue;
         }
@@ -1923,7 +1933,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| sighash_checks_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
         ),
-        Screen::UsbPort => to(|a| usb_port_screen(a.gate, a.login, a.ui), Screen::Hardware),
+        Screen::UsbPort => to(|a| crate::ckcc::usb_mode_screen(a.ui), Screen::Hardware),
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => to(
             |a| virtual_disk_screen(a.gate, a.login, a.ui),
@@ -2202,7 +2212,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::Settings,
         },
         Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
-            (Key::Confirm, Some("USB port")) => Screen::UsbPort,
+            (Key::Confirm, Some("USB mode")) => Screen::UsbPort,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
             (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
@@ -12426,47 +12436,6 @@ pub(crate) fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool>
     Some(want)
 }
 
-/// Settings → Hardware On/Off → USB port.
-///
-/// Off is a real soft-disconnect: the host sees the device unplug, and nothing is
-/// enumerated, answered or injected until it is switched back on. **It can only be
-/// switched off from this screen**, which is what makes it safe to offer -- the
-/// preference lives under the wallet's key, so it is not read until after the PIN, and a
-/// locked device always enumerates.
-fn usb_port_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    const HEAD: &str = "USB port";
-    let now = crate::prefs::current();
-    let Some(want) = pick_switch(ui, HEAD, now.usb_port) else {
-        return;
-    };
-    if !want {
-        ask(
-            ui.panel,
-            HEAD,
-            "no host can reach it",
-            "until this is back on",
-        );
-        if !confirmed(ui) {
-            return;
-        }
-    }
-    save_pref(
-        gate,
-        login,
-        ui,
-        HEAD,
-        (
-            catcard_settings::prefs::USB_PORT,
-            if want { "1" } else { "0" },
-        ),
-        crate::prefs::Prefs {
-            usb_port: want,
-            ..now
-        },
-        if want { "on" } else { "off" },
-    );
-}
-
 /// Settings → Hardware On/Off → Virtual Disk.
 ///
 /// Whether this device may ever present itself to a host as a USB disk. Honoured by the
@@ -12507,6 +12476,12 @@ fn virtual_disk_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
 fn keyboard_emu_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Keyboard EMU";
     let now = crate::prefs::current();
+    // The keyboard rides beside CatCard's own interface only; stock's identity never
+    // carries it.
+    if crate::usbtask::usb_mode() != catcard_settings::prelogin::UsbMode::CatCard {
+        message(ui.panel, HEAD, "works in CatCard", "USB mode only");
+        wait_for_any_key(ui);
+    }
     let Some(want) = pick_switch(ui, HEAD, now.keyboard_emu) else {
         return;
     };
@@ -13684,11 +13659,12 @@ fn usb_drive(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // itself, so a device whose owner had switched USB off would otherwise come back onto
     // the bus here -- as a disk, which is the last thing that switch was set for.
     let prefs = crate::prefs::current();
-    if !prefs.virtual_disk || !prefs.usb_port {
-        let why = if prefs.usb_port {
+    let port = crate::usbtask::usb_mode() != catcard_settings::prelogin::UsbMode::Off;
+    if !prefs.virtual_disk || !port {
+        let why = if port {
             "Virtual Disk is off"
         } else {
-            "the USB port is off"
+            "USB mode is off"
         };
         message(ui.panel, "USB Drive", why, "see Hardware On/Off");
         wait_any_key(ui);

@@ -957,6 +957,11 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
         }
     };
 
+    // The USB mode is device-wide and holds before the PIN. Handed to the USB task, which
+    // switches identity at its first poll after the prompt attaches the port -- never
+    // here, before anything services the bus. See `usbtask::set_usb_mode`.
+    let usb = prelogin::usb_mode(&doc);
+    crate::usbtask::set_usb_mode(usb.unwrap_or_default(), usb.is_some());
     prefs.scramble = prelogin::scramble(&doc);
     prefs.countdown_minutes = prelogin::countdown_minutes(&doc);
     prefs.kill_key = prelogin::kill_key(&doc);
@@ -1127,6 +1132,15 @@ pub(crate) fn save_scramble(ui: &mut crate::ui::Ui<'_>, on: bool) -> bool {
         unsafe { *core::ptr::addr_of_mut!(SCRAMBLE) = on };
     }
     ok
+}
+
+/// Set the device-wide USB mode (`crate::ckcc::usb_mode_screen`). The caller applies it.
+pub(crate) fn save_usb_mode(
+    ui: &mut crate::ui::Ui<'_>,
+    mode: catcard_settings::prelogin::UsbMode,
+) -> bool {
+    let key = catcard_settings::prelogin::USB_MODE;
+    save_prelogin(ui, "USB mode", key, mode.word())
 }
 
 /// Turn the calculator login screen on or off, from the next login (Q1).

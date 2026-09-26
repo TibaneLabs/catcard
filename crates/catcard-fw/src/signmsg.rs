@@ -472,6 +472,37 @@ fn sign_and_deliver(
     deliver(ui, head, text, &signed, target);
 }
 
+/// Sign `text` for a computer asking in the ckcc USB mode (`crate::ckcc`): the legacy
+/// "Bitcoin Signed Message" signature by the key at `path`, as an address of `kind`,
+/// after the same confirmation any message gets here -- the text, the address and the
+/// path on the screen, and yes or no. The address and the raw 65 bytes, which is what the
+/// host protocol carries; `None` when the person declined or it could not be done (which
+/// the screen has said).
+pub(crate) fn sign_for_host(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    text: &str,
+    kind: AddressKind,
+    path: DerivationPath,
+) -> Option<(
+    heapless::String<{ address::MAX_ADDRESS_LEN }>,
+    [u8; message::SIG_LEN],
+)> {
+    let choice = Choice {
+        kind,
+        path,
+        format: Format::Legacy,
+    };
+    let signed = sign_with_key(gate, login, ui, "Sign message", text, &choice)?;
+    // Base64 of 65 bytes, decoded back: the armoured form is what the rest of this module
+    // keeps, and the self-check in `sign_secret` has already recovered the key from it.
+    let mut raw = [0u8; message::SIG_LEN + 3];
+    let n = outscript::base64::decode_to_slice(signed.armoured.as_str(), &mut raw).ok()?;
+    let sig: [u8; message::SIG_LEN] = raw.get(..n)?.try_into().ok()?;
+    Some((signed.address, sig))
+}
+
 /// Sign `text` -- a bare message, or the three-line request form -- and hand back the
 /// armoured file instead of writing it anywhere, for a caller with its own way out: the
 /// NFC tag today, which puts the file back where the message came from.

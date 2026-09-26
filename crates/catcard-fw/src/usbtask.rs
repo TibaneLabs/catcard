@@ -22,7 +22,9 @@
 //! has to be able to service it without the task being threaded through each of them.
 //! The boot path is single-threaded and nothing here runs in interrupt context.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+use catcard_settings::prelogin::UsbMode;
 
 use catcard_board::BOARD;
 use catcard_hal::otg::{Event, Otg};
@@ -149,6 +151,12 @@ pub struct UsbTask {
     /// boot ([`install_drbg`]). `None` in recovery, where the pool never came up and the
     /// channel is simply not offered.
     drbg: Option<HmacDrbg>,
+    /// Whether the bus sees stock's identity and speaks stock's protocol (the ckcc USB
+    /// mode) rather than ours. Only [`set_usb_mode`] changes it, by re-enumerating; the
+    /// failsafe and recovery paths never call that, so they are always CatCard.
+    ckcc: bool,
+    /// The ckcc protocol's state. Idle in CatCard mode.
+    ck: crate::ckcc::Desk,
 }
 
 /// A single-producer/single-consumer ring of received bulk-OUT packets: the OTG interrupt
@@ -313,6 +321,8 @@ impl UsbTask {
             pair_clock: 0,
             cycles_per_ms: 0,
             drbg: None,
+            ckcc: false,
+            ck: crate::ckcc::Desk::new(),
         })
     }
 
@@ -433,7 +443,10 @@ impl UsbTask {
     /// The user declined. The staged image is dropped without being marked.
     pub fn decline(&mut self) {
         self.stage = Stage::Idle;
-        self.begin_reply(Status::Declined, &[]);
+        // A ckcc host is told nothing: stock's upgrade has no answer to wait for.
+        if !self.ckcc {
+            self.begin_reply(Status::Declined, &[]);
+        }
     }
 
     /// Service USB once.
@@ -475,6 +488,7 @@ impl UsbTask {
                         self.pair_guard.dropped();
                     }
                     self.end_session(true);
+                    self.ck.reset();
                 }
                 Event::Report => {
                     self.rx_count = self.rx_count.saturating_add(1);
@@ -482,7 +496,11 @@ impl UsbTask {
                     let mut report = [0u8; REPORT_LEN];
                     report.copy_from_slice(&self.otg.rx);
                     self.otg.receive_next();
-                    self.on_report(&report);
+                    if self.ckcc {
+                        self.ck_report(&report);
+                    } else {
+                        self.on_report(&report);
+                    }
                     // Push the reply now rather than leaving it for the next poll.
                     // A key that makes the firmware leave its polling loop for a
                     // callgate call -- choosing a PIN, fetching the anti-phishing
@@ -1506,8 +1524,64 @@ impl UsbTask {
         self.next_reply_frame();
     }
 
+    /// One report in the ckcc mode: the protocol is [`crate::ckcc::Desk`]'s; an image it
+    /// recognises goes in front of the person the same way a CatCard-mode offer does.
+    fn ck_report(&mut self, report: &[u8; REPORT_LEN]) {
+        let upgrade_pending = self.answer_pending();
+        let mut cx = crate::ckcc::Cx {
+            unlocked: self.unlocked,
+            drbg: self.drbg.as_mut(),
+            upgrade_pending,
+        };
+        if let crate::ckcc::Action::Offer(staged, approval) = self.ck.feed(report, &mut cx)
+            && !self.answer_pending()
+        {
+            self.stage = Stage::Offered { staged, approval };
+        }
+        if self.outbox_len == 0 {
+            self.next_reply_frame();
+        }
+    }
+
+    /// Present stock's identity (`ckcc`) or ours, re-enumerating so the host reads the
+    /// new descriptors: a visible disconnect, a pause, a re-attach -- as the keyboard
+    /// switch does. Everything bound to the old protocol goes with it.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    unsafe fn switch_identity(&mut self, ckcc: bool) {
+        crate::catlog!(
+            "usb: presenting as {}",
+            if ckcc { "ckcc" } else { "CatCard" }
+        );
+        self.ckcc = ckcc;
+        self.frames.reset();
+        self.drop_transfer();
+        self.reply = None;
+        self.outbox_len = 0;
+        self.ncry_rx = None;
+        if self.handshake.take().is_some() {
+            self.pair_guard.dropped();
+        }
+        self.end_session(true);
+        self.ck.reset();
+        self.otg.set_ckcc(ckcc);
+        // SAFETY: as documented.
+        unsafe {
+            self.otg.detach();
+            catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
+            self.otg.reinit();
+        }
+    }
+
     /// Move the next frame of the current reply into the outbox.
     fn next_reply_frame(&mut self) {
+        if self.ckcc {
+            if self.ck.next_report(&mut self.outbox) {
+                self.outbox_len = REPORT_LEN;
+            }
+            return;
+        }
         let Some(r) = &mut self.reply else { return };
         // Resume from the saved framing state rather than rebuilding at frame zero, which
         // is what capped every reply at one frame. The writer borrows the body only for
@@ -1691,6 +1765,7 @@ pub fn service() -> bool {
 }
 
 fn poll_once() -> bool {
+    apply_pending_switch();
     let busy = if MSC_ACTIVE.load(Ordering::Relaxed) || !PORT_ON.load(Ordering::Relaxed) {
         false
     } else {
@@ -1815,6 +1890,143 @@ pub fn attach() {
     // SAFETY: the task owns OTG_FS for the life of the firmware; the lock excludes other
     // tasks and nothing runs in interrupt context.
     with_task(|t| unsafe { t.otg.attach() });
+    ATTACHED.store(true, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------------------
+// USB mode: Off, ckcc, CatCard
+//
+// Settings → Hardware On/Off → `USB mode`, kept in the pre-login settings. The core comes
+// up at boot exactly as it always has -- CatCard's identity, attached by the PIN prompt --
+// and the mode is applied afterwards: Off is `set_port(false)`; ckcc and CatCard are an
+// identity switch, done by soft-disconnect and re-enumeration at the first poll after the
+// port was attached. Never before: a core presented to a host before anything services it
+// wedges (see `pinentry::unlock`). The failsafe (Cancel held at power-on) and
+// `recovery::headless` never read the setting, so they are always CatCard.
+// ---------------------------------------------------------------------------------------
+
+const MODE_OFF: u8 = 0;
+const MODE_CKCC: u8 = 1;
+const MODE_CATCARD: u8 = 2;
+
+/// The mode in force.
+static MODE: AtomicU8 = AtomicU8::new(MODE_CATCARD);
+/// The pre-login settings named a mode, so the wallet's old port switch is not consulted.
+static EXPLICIT: AtomicBool = AtomicBool::new(false);
+/// The PIN prompt has attached the port: from here the bus is being serviced.
+static ATTACHED: AtomicBool = AtomicBool::new(false);
+/// An identity switch is waiting for a poll to do it.
+static SWITCH: AtomicBool = AtomicBool::new(false);
+
+/// The USB mode in force.
+pub fn usb_mode() -> UsbMode {
+    match MODE.load(Ordering::Relaxed) {
+        MODE_OFF => UsbMode::Off,
+        MODE_CKCC => UsbMode::Ckcc,
+        _ => UsbMode::CatCard,
+    }
+}
+
+/// Put a USB mode in force. `explicit` when it came from the pre-login settings (or the
+/// screen that writes them): the wallet's old per-wallet switch is then ignored.
+pub fn set_usb_mode(mode: UsbMode, explicit: bool) {
+    EXPLICIT.store(explicit, Ordering::Relaxed);
+    apply_mode(mode);
+}
+
+/// The wallet's old `USB port` switch, read after the PIN. It decides only while the
+/// pre-login settings name no mode: off is Off, on is CatCard.
+pub fn wallet_port(on: bool) {
+    if !EXPLICIT.load(Ordering::Relaxed) {
+        apply_mode(catcard_settings::prelogin::effective_usb_mode(None, on));
+    }
+}
+
+fn apply_mode(mode: UsbMode) {
+    MODE.store(
+        match mode {
+            UsbMode::Off => MODE_OFF,
+            UsbMode::Ckcc => MODE_CKCC,
+            UsbMode::CatCard => MODE_CATCARD,
+        },
+        Ordering::Relaxed,
+    );
+    if mode == UsbMode::Off {
+        set_port(false);
+        return;
+    }
+    let ckcc = mode == UsbMode::Ckcc;
+    if PORT_ON.load(Ordering::Relaxed) {
+        // On the bus (or about to be): switch identity at the next poll that services it.
+        if with_task(|t| t.ckcc != ckcc).unwrap_or(false) {
+            SWITCH.store(true, Ordering::Relaxed);
+        }
+    } else {
+        // Off the bus: set the identity first, so coming back on presents it once.
+        with_task(|t| {
+            if t.ckcc != ckcc {
+                t.ckcc = ckcc;
+                t.ck.reset();
+                t.otg.set_ckcc(ckcc);
+            }
+        });
+        set_port(true);
+    }
+}
+
+/// Do a pending identity switch, from a loop that services the bus.
+fn apply_pending_switch() {
+    if !SWITCH.load(Ordering::Relaxed)
+        || !ATTACHED.load(Ordering::Relaxed)
+        || !PORT_ON.load(Ordering::Relaxed)
+        || MSC_ACTIVE.load(Ordering::Relaxed)
+    {
+        return;
+    }
+    SWITCH.store(false, Ordering::Relaxed);
+    let ckcc = MODE.load(Ordering::Relaxed) == MODE_CKCC;
+    // SAFETY: the task owns OTG_FS and the lock excludes other tasks; not in mass-storage
+    // mode, so no interrupt touches the core.
+    with_task(|t| {
+        if t.ckcc != ckcc {
+            unsafe { t.switch_identity(ckcc) }
+        }
+    });
+}
+
+/// Whether the ckcc mode has something for the UI task: a job, or the wallet's identity
+/// to learn.
+pub(crate) fn ck_waiting() -> bool {
+    with_task(|t| t.ckcc && t.ck.waiting(t.unlocked)).unwrap_or(false)
+}
+
+/// Whether the ckcc mode wants the wallet's identity learnt.
+pub(crate) fn ck_needs_identity() -> bool {
+    with_task(|t| t.ckcc && t.ck.needs_identity(t.unlocked)).unwrap_or(false)
+}
+
+pub(crate) fn ck_set_identity(ident: crate::ckcc::Identity) {
+    with_task(|t| t.ck.set_identity(ident));
+}
+
+/// The master xpub the ckcc mode reports, if it has learnt one.
+pub(crate) fn ck_identity_xpub() -> Option<heapless::String<112>> {
+    with_task(|t| t.ck.identity_xpub()).flatten()
+}
+
+/// Take the ckcc job for the screen.
+pub(crate) fn ck_take() -> Option<(u32, crate::ckcc::Job)> {
+    with_task(|t| if t.ckcc { t.ck.take() } else { None }).flatten()
+}
+
+/// The UI task's answer to ckcc job `ticket`; a reply held for it goes out now.
+pub(crate) fn ck_finish(ticket: u32, answer: crate::ckcc::Answer) {
+    with_task(|t| {
+        t.ck.finish(ticket, answer);
+        if t.ckcc && t.outbox_len == 0 {
+            t.next_reply_frame();
+        }
+    });
 }
 
 /// Whether the owner has the USB port switched on. On until a wallet's settings say
@@ -2445,7 +2657,14 @@ pub(crate) fn host_take() -> Option<crate::hostwallet::Taken> {
 
 /// Whether the question `ticket` is still wanted: on the screen, and its session open.
 pub(crate) fn host_alive(ticket: u32) -> bool {
-    with_task(|t| t.host.on_screen(ticket) && t.chan.is_current(ticket)).unwrap_or(false)
+    with_task(|t| {
+        if ticket & crate::ckcc::TICKET_BIT != 0 {
+            t.ckcc && t.ck.alive(ticket)
+        } else {
+            t.host.on_screen(ticket) && t.chan.is_current(ticket)
+        }
+    })
+    .unwrap_or(false)
 }
 
 /// Hand the person's answer to `ticket` back for the host to fetch.
@@ -2479,6 +2698,8 @@ pub(crate) fn host_forget_wallet() {
         if let Some(st) = t.chan.state_mut(id) {
             st.exposed.clear();
         }
+        // And what a ckcc host was told the wallet is.
+        t.ck.forget_identity();
     });
 }
 

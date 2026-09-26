@@ -72,13 +72,14 @@ impl StagingArea for Area {
     }
 }
 
-/// Q1 only, because the scanner is the only thing that claims this memory before it
-/// knows what it is holding.
-#[cfg(feature = "board-q1")]
+/// Every PSRAM board: the Q1's scanner and the ckcc USB mode's upload both claim this
+/// memory before they know what they are holding.
+#[cfg(not(feature = "board-mk3"))]
 impl Area {
     /// Give the PSRAM back as a plain slice, dropping the paced driver over it.
     ///
-    /// For the scanner, which claims the memory before it knows what is arriving. Once
+    /// For the scanner and the ckcc upload, which claim the memory before they know what
+    /// is arriving. Once
     /// the bytes are in, a transaction is signed out of them the way one read off a card
     /// is -- two alternating buffers, rewritten in place -- and that wants a slice, not a
     /// staging medium. An image goes the other way, back through [`area_from`].
