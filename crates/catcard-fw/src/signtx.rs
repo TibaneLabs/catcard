@@ -18,7 +18,7 @@
 //! than truncated.
 
 use catcard_callgate::Callgate;
-use catcard_wallet::psbtview::{self, Policy, Refusal};
+use catcard_wallet::psbtview::{self, Policy, Refusal, SighashPolicy, timelock};
 use catcard_wallet::signer;
 use outscript::psbt::Psbt;
 
@@ -62,10 +62,25 @@ impl SignDest<'static> {
     };
 }
 
-/// Most outputs the review can hold, change included. A transaction with more is refused
-/// rather than shown in part: an output the owner cannot see is one they cannot refuse,
-/// so every output is on the screen or the screen has no Sign key.
-const MAX_SHOWN: usize = 8;
+/// Outputs on one page of the review, change included.
+///
+/// The review is paged, not capped: a transaction with more outputs than this shows them
+/// a page at a time, each page read to its end before the next, and the Sign key is on
+/// the last page only. An output the owner cannot see is one they cannot refuse, so every
+/// output is on a screen before the key that signs them all is offered. Eight is what a
+/// page's line budget holds comfortably; it is a screen fact, not a limit on the
+/// transaction.
+const PAGE: usize = 8;
+
+/// The fewest bytes one output can occupy in a PSBT: an 8-byte amount, a 1-byte script
+/// length (an empty script), and the 1-byte terminator of its empty output map.
+///
+/// The only limit on how many outputs a transaction may have is therefore the buffer the
+/// PSBT sits in -- `buf.len() / MIN_OUTPUT_BYTES` -- which is the mk3's static buffer or
+/// half the PSRAM lease. The screen imposes none. A parsed PSBT cannot exceed that
+/// figure, so the check against it in [`review_and_sign`] is a statement of the bound
+/// rather than a refusal anyone will see.
+const MIN_OUTPUT_BYTES: usize = 8 + 1 + 1;
 
 /// Most inputs signed in one pass.
 const MAX_INPUTS: usize = 64;
@@ -334,11 +349,32 @@ pub(crate) fn as_psbt_bytes(
     Ok(n)
 }
 
+/// Why the parser refused the bytes, in the few words a screen has.
+///
+/// The one distinction worth making on screen is a PSBT version this firmware does not
+/// speak against a file that is simply broken: a wallet that writes BIP-370 (v2) files
+/// can usually be told to write v0, and "not a valid PSBT" would send its owner looking
+/// for corruption that is not there. v2 is not signed here; it is named and refused.
+/// Source: hw-reference/firmware-features.md §5 (stock accepts v0 and v2) [C]
+fn parse_error_text(e: outscript::Error) -> &'static str {
+    use outscript::Error as E;
+    match e {
+        E::UnsupportedPsbtVersion => "PSBT v2 is not supported",
+        E::InvalidMagic => "not a PSBT",
+        E::MissingUnsignedTx => "PSBT has no transaction",
+        E::InvalidUnsignedTx => "PSBT tx is malformed",
+        E::DuplicateKey => "PSBT has a duplicate key",
+        E::TrailingData => "PSBT has trailing bytes",
+        _ => "PSBT is corrupt",
+    }
+}
+
 /// Why the review stopped, in the few words a screen has.
 fn refusal_text(r: Refusal) -> &'static str {
     match r {
         Refusal::NothingOfOurs => "no input is ours",
         Refusal::Sighash { .. } => "unsupported sighash",
+        Refusal::SighashConsolidation { .. } => "consolidation needs ALL",
         Refusal::FeeTooHigh { .. } => "fee above the limit",
         Refusal::UnknownAmount { .. } => "an input has no amount",
         Refusal::UnverifiedAmount { .. } => "an input has no prev tx",
@@ -616,7 +652,7 @@ pub(crate) fn review_and_sign(
         Ok(p) => p,
         Err(e) => {
             crate::catlog!("sign: psbt refused: {:?}", e);
-            menu::message(ui.panel, HEAD, "not a valid PSBT", "any key to go back");
+            menu::message(ui.panel, HEAD, parse_error_text(e), "any key to go back");
             menu::wait_for_any_key(ui);
             return;
         }
@@ -685,8 +721,17 @@ pub(crate) fn review_and_sign(
     // The fee cap the owner set, or the ten-percent default. `Policy` still does the
     // comparing: "no cap" is a limit no percentage can exceed rather than a check that
     // gets skipped, so there is no path through this that forgets to look at the fee.
+    // The sighash policy is the owner's Danger Zone choice. Its firmware form
+    // (`SighashChecks`) and its wallet-crate form (`SighashPolicy`) are the same two
+    // words; the wallet crate does not depend on the settings crate, so they are mapped
+    // here rather than shared.
+    let sighash = match crate::prefs::current().sighash {
+        catcard_settings::prefs::SighashChecks::Block => SighashPolicy::Block,
+        catcard_settings::prefs::SighashChecks::Warn => SighashPolicy::Warn,
+    };
     let policy = Policy {
         max_fee_percent: crate::prefs::current().fee_cap.percent_limit(),
+        sighash,
         ..Policy::default()
     };
     let summary = crate::keywork::run(|kw| psbtview::summarise(&psbt, &owner, &policy, kw));
@@ -700,41 +745,16 @@ pub(crate) fn review_and_sign(
             return;
         }
     };
-    let mut shown = [psbtview::Destination {
-        index: 0,
-        amount: 0,
-        change: false,
-        address: [0; catcard_wallet::address::MAX_ADDRESS_LEN],
-        address_len: 0,
-    }; MAX_SHOWN];
-    let count = crate::keywork::run(|kw| {
-        psbtview::destinations(
-            &psbt,
-            &owner,
-            crate::prefs::network(),
-            // The accounts the review already worked out from the inputs: an output is
-            // change only if it belongs to one of them, and deriving them twice would be
-            // twice the elliptic-curve work for the same answer.
-            &summary.accounts[..summary.account_count],
-            // And the registered multisig wallets it spends from, for the same reason.
-            &summary.wallets[..summary.wallet_count],
-            &mut shown,
-            kw,
-        )
-    });
-    // Every output or none. `destinations` stops at the buffer, so an output past it would
-    // be summed into the totals and never shown -- a ninth output to an attacker, invisible
-    // behind "+N more". Refused here, before the owner is asked anything.
-    if summary.outputs > count {
-        crate::catlog!(
-            "sign: refused: {} outputs, {} shown",
-            summary.outputs,
-            count
-        );
+    // The only bound on the output count is the memory the PSBT sits in (see
+    // `MIN_OUTPUT_BYTES`); the review pages through however many there are. A parsed
+    // PSBT cannot be over this, so the check states the bound rather than enforcing a
+    // screen limit -- there is no screen limit any more.
+    if summary.outputs > buf.len() / MIN_OUTPUT_BYTES {
+        crate::catlog!("sign: refused: {} outputs", summary.outputs);
         menu::message(
             ui.panel,
             HEAD,
-            "too many outputs to review",
+            "too many outputs for memory",
             "any key to go back",
         );
         menu::wait_for_any_key(ui);
@@ -762,7 +782,41 @@ pub(crate) fn review_and_sign(
         }
     }
 
-    if !review(ui, &summary, &shown[..count], signable) {
+    // Under the warn policy, an input asking for an unusual sighash type is named -- the
+    // input and the type -- on its own screen before the review, and the owner has to say
+    // yes to it. `SIGHASH_NONE` gets stock's "Danger": the signature it asks for covers no
+    // output, so whoever holds it can attach it to a transaction paying anyone. The other
+    // types get "Caution". Source: hw-reference/help-and-warning-screens.md "sighash NONE
+    // on our input", "Other non-ALL sighash" [C]
+    if summary.odd_count > 0 {
+        drop(busy);
+        if !warn_odd_sighash(ui, &summary) {
+            menu::message(ui.panel, HEAD, "not signed", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    }
+
+    // The review, a page of outputs at a time. Each page derives the keys of the outputs
+    // it shows -- an output is change only if our own key rebuilds its script -- so it
+    // runs masked, with the accounts and wallets the summary already worked out from the
+    // inputs: deriving those twice would be twice the elliptic-curve work for the same
+    // answer.
+    let mut fill = |start: usize, page: &mut [psbtview::Destination]| {
+        crate::keywork::run(|kw| {
+            psbtview::destinations_from(
+                &psbt,
+                &owner,
+                crate::prefs::network(),
+                &summary.accounts[..summary.account_count],
+                &summary.wallets[..summary.wallet_count],
+                start,
+                page,
+                kw,
+            )
+        })
+    };
+    if !review(ui, &psbt, &summary, signable, &mut fill) {
         menu::message(ui.panel, HEAD, "not signed", "any key to go back");
         menu::wait_for_any_key(ui);
         return;
@@ -781,7 +835,7 @@ pub(crate) fn review_and_sign(
         };
         let mut done = false;
         match crate::keywork::run(|kw| {
-            signer::sign_input(&psbt, index, &master, fingerprint, into, kw)
+            signer::sign_input_under(&psbt, index, &master, fingerprint, sighash, into, kw)
         }) {
             Ok(n) => {
                 core::mem::swap(&mut from, &mut into);
@@ -805,7 +859,7 @@ pub(crate) fn review_and_sign(
                     Err(_) => break,
                 };
                 match crate::keywork::run(|kw| {
-                    signer::sign_input_with_secret(&psbt, index, k.secret(), into, kw)
+                    signer::sign_input_with_secret(&psbt, index, k.secret(), sighash, into, kw)
                 }) {
                     Ok(n) => {
                         core::mem::swap(&mut from, &mut into);
@@ -872,10 +926,25 @@ pub(crate) fn review_and_sign(
 
     // If every input is now signed, the transaction can be finished here and the result is
     // ready to broadcast -- no other software needed. A transaction still waiting on a
-    // cosigner simply does not finalise, which is not a failure.
-    let mut note: heapless::String<24> = heapless::String::new();
+    // cosigner simply does not finalise, which is not a failure -- and is said as such:
+    // how many more signatures it needs, read from the multisig script the chain pins to
+    // each coin against the partial signatures now on it, and where to take the file.
+    // Source: hw-reference/firmware-features.md §5 "re-export of a partially-signed PSBT
+    // (with an offer to hand off to a cosigner)" [C]
+    let mut note: heapless::String<32> = heapless::String::new();
     use core::fmt::Write as _;
-    let _ = write!(note, "{signed} of {signable} inputs");
+    let needs = Psbt::parse(&from[..at])
+        .map(|p| psbtview::more_signatures_needed(&p))
+        .unwrap_or(0);
+    if needs > 0 {
+        let _ = write!(
+            note,
+            "needs {needs} more signature{}",
+            if needs == 1 { "" } else { "s" }
+        );
+    } else {
+        let _ = write!(note, "{signed} of {signable} inputs");
+    }
     match finalise(&from[..at], into) {
         Some(len) => {
             let hex_len = match write_hex_file(storage, dest.final_name, &into[..len], from) {
@@ -915,9 +984,68 @@ pub(crate) fn review_and_sign(
                 strip_slash(dest.signed_name),
                 note.as_str(),
             );
+            if needs > 0 {
+                crate::catlog!("sign: {} more signature(s) needed", needs);
+                menu::wait_for_any_key(ui);
+                menu::message(
+                    ui.panel,
+                    "Cosigners",
+                    strip_slash(dest.signed_name),
+                    "pass it to the next cosigner",
+                );
+            }
         }
     }
     menu::wait_for_any_key(ui);
+}
+
+/// The red message screen where the build has one (`menu::alarm` exists on the
+/// multichain colour builds), and the plain one elsewhere: the mono boards have no red,
+/// and the words carry the warning on their own.
+fn alarm(panel: &mut crate::display::Panel, head: &str, a: &str, b: &str) {
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    menu::alarm(panel, head, a, b);
+    #[cfg(not(all(feature = "multichain", not(feature = "board-mk3"))))]
+    menu::message(panel, head, a, b);
+}
+
+/// Name each of our inputs that asks for an unusual sighash type, and ask whether to go
+/// on. True if the owner said yes to all of it.
+///
+/// Only reached under the warn policy; under block the review has already refused.
+/// `SIGHASH_NONE` is red and called danger, because a signature under it covers no
+/// output: the coins go wherever whoever holds the signature says. The rest are caution.
+/// Source: hw-reference/help-and-warning-screens.md "sighash NONE on our input" (Danger),
+/// "Other non-ALL sighash" (Caution) [C]
+fn warn_odd_sighash(ui: &mut Ui<'_>, summary: &psbtview::Summary) -> bool {
+    use core::fmt::Write as _;
+    for odd in &summary.odd_sighash[..summary.odd_count] {
+        let mut line: heapless::String<40> = heapless::String::new();
+        let _ = write!(line, "input {}: SIGHASH_{}", odd.input, odd.name());
+        if odd.signs_no_output() {
+            alarm(ui.panel, "DANGER", &line, "signs no output at all");
+        } else {
+            alarm(ui.panel, "Caution", &line, "signs only part of the tx");
+        }
+        menu::wait_for_any_key(ui);
+    }
+    if summary.odd_total > summary.odd_count {
+        let mut line: heapless::String<40> = heapless::String::new();
+        let _ = write!(
+            line,
+            "and {} more input(s)",
+            summary.odd_total - summary.odd_count
+        );
+        alarm(ui.panel, "Caution", &line, "with unusual sighash");
+        menu::wait_for_any_key(ui);
+    }
+    menu::ask(
+        ui.panel,
+        "Sighash",
+        "review it anyway?",
+        "the coins may be redirected",
+    );
+    menu::confirmed(ui)
 }
 
 /// Offer to hand the signed transaction back as animated QR.
@@ -1018,22 +1146,72 @@ fn write_output(storage: Storage, path: &str, bytes: &[u8]) -> Result<(), &'stat
     menu::write_storage_file(storage, path, bytes)
 }
 
-/// Show what signing would authorise, and ask. True if the owner confirmed.
+/// Show what signing would authorise, a page of outputs at a time, and ask. True if the
+/// owner confirmed on the last page.
 ///
 /// The fee and the destinations are the point of the screen, so they are what it leads
-/// with: how much leaves, to where, and what the miner takes.
+/// with: how much leaves, to where, and what the miner takes. `fill` writes the outputs
+/// from a given index into a page and says how many it wrote; it is called once per page,
+/// so a transaction with a thousand outputs costs a thousand rows of screen and nothing
+/// else. The Sign key is offered on the last page only: the confirm key on any earlier
+/// page turns it, and cancel on any page refuses the whole transaction. Every output is
+/// therefore on a screen -- read to its end, since `scroll_choice` takes confirm only at
+/// the end of a page -- before the key that signs them all exists.
 fn review(
     ui: &mut Ui<'_>,
+    psbt: &Psbt<'_>,
     summary: &psbtview::Summary,
-    shown: &[psbtview::Destination],
     signable: usize,
+    fill: &mut dyn FnMut(usize, &mut [psbtview::Destination]) -> usize,
+) -> bool {
+    let blank = psbtview::Destination {
+        index: 0,
+        amount: 0,
+        change: false,
+        address: [0; catcard_wallet::address::MAX_ADDRESS_LEN],
+        address_len: 0,
+    };
+    let mut page = [blank; PAGE];
+    let mut start = 0usize;
+    loop {
+        let got = fill(start, &mut page);
+        let last = start + got >= summary.outputs;
+        // A page that filled nothing and is not the last would be an output nobody sees.
+        // Refuse rather than sign past it; `destinations_from` does not do this, but the
+        // rule is stated here so no caller can.
+        if got == 0 && !last {
+            return false;
+        }
+        if !review_page(ui, psbt, summary, signable, &page[..got], start, last) {
+            return false;
+        }
+        if last {
+            return true;
+        }
+        start += got;
+    }
+}
+
+/// One page of the review: the totals and warnings on the first, the outputs from
+/// `start`, and on the last page the Sign key.
+#[allow(clippy::too_many_arguments)]
+fn review_page(
+    ui: &mut Ui<'_>,
+    psbt: &Psbt<'_>,
+    summary: &psbtview::Summary,
+    signable: usize,
+    shown: &[psbtview::Destination],
+    start: usize,
+    last: bool,
 ) -> bool {
     use catcard_ui::scroll::{Line, ScrollView};
     use core::fmt::Write as _;
 
-    /// Lines the review can hold: the totals, two per output, the opt-in note and the
-    /// key hint.
-    const LINES: usize = 4 + 2 * MAX_SHOWN;
+    /// Lines a page can hold: the totals and their warnings, the timelocks, two per
+    /// output, the page note and the key hint.
+    const LINES: usize = 12 + MAX_RELATIVE_SHOWN + 2 * PAGE;
+    /// Relative locks named on the first page before the rest are only counted.
+    const MAX_RELATIVE_SHOWN: usize = 4;
     type Text = heapless::String<72>;
 
     let mut texts: heapless::Vec<Text, LINES> = heapless::Vec::new();
@@ -1051,35 +1229,116 @@ fn review(
         }
     };
 
-    let mut amount = heapless::String::<AMOUNT_LEN>::new();
-    btc(summary.sending, &mut amount);
-    let mut line = Text::new();
-    let _ = write!(line, "Sending {amount}");
-    say(&mut texts, &mut small, &mut wrapped, line, false, false);
-
-    let mut amount = heapless::String::<AMOUNT_LEN>::new();
-    btc(summary.fee, &mut amount);
-    let mut line = Text::new();
-    let _ = write!(
-        line,
-        "Fee {amount} ({}%){}",
-        summary.fee_percent,
-        if summary.fee_warn { " HIGH" } else { "" }
-    );
-    say(&mut texts, &mut small, &mut wrapped, line, false, false);
-
-    let mut line = Text::new();
-    let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
-    say(&mut texts, &mut small, &mut wrapped, line, true, false);
-
-    // An opted-in transaction is signed under the unified message, which only the chain
-    // that implements that rule verifies. Said here because it is the one thing about this
-    // transaction the owner cannot see from the amounts: everything else on this screen
-    // reads the same either way.
-    #[cfg(feature = "multichain")]
-    if summary.opted_in {
+    if start == 0 {
+        let mut amount = heapless::String::<AMOUNT_LEN>::new();
+        btc(summary.sending, &mut amount);
         let mut line = Text::new();
-        let _ = write!(line, "OPT-IN sighash: fork only");
+        let _ = write!(line, "Sending {amount}");
+        say(&mut texts, &mut small, &mut wrapped, line, false, false);
+
+        // The fee, or that there is none to state. A foreign input priced on the host's
+        // word alone -- a coinjoin's -- leaves the fee unknown, and "unknown" is what
+        // the screen says: not zero, and not the host's figure. Stock words it the same
+        // way. Source: hw-reference/firmware-features.md §5 "Coinjoin / foreign inputs
+        // supported (fee shown as unknown, with warnings)" [C]
+        let mut line = Text::new();
+        if summary.fee_known {
+            let mut amount = heapless::String::<AMOUNT_LEN>::new();
+            btc(summary.fee, &mut amount);
+            let _ = write!(
+                line,
+                "Fee {amount} ({}%){}",
+                summary.fee_percent,
+                if summary.fee_warn { " HIGH" } else { "" }
+            );
+            say(&mut texts, &mut small, &mut wrapped, line, false, false);
+        } else {
+            let _ = write!(line, "Fee UNKNOWN");
+            say(&mut texts, &mut small, &mut wrapped, line, false, false);
+            let mut line = Text::new();
+            let _ = write!(
+                line,
+                "{} input(s) unverified: fee cap not checked",
+                summary.unpriced
+            );
+            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+        }
+
+        let mut line = Text::new();
+        let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
+        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+
+        // An opted-in transaction is signed under the unified message, which only the
+        // chain that implements that rule verifies. Said here because it is the one
+        // thing about this transaction the owner cannot see from the amounts: everything
+        // else on this screen reads the same either way.
+        #[cfg(feature = "multichain")]
+        if summary.opted_in {
+            let mut line = Text::new();
+            let _ = write!(line, "OPT-IN sighash: fork only");
+            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        }
+
+        // An unusual sighash type was already warned about on its own screen; the row
+        // here is so the review still says it once the warning is gone.
+        if summary.odd_total > 0 {
+            let mut line = Text::new();
+            let _ = write!(line, "{} input(s) NOT SIGHASH_ALL", summary.odd_total);
+            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        }
+
+        // Timelocks, only when set. An absolute lock the network will not enforce --
+        // every input final -- is said to be ineffective rather than left looking like
+        // a promise. Source: hw-reference/firmware-features.md §5 "Relative and absolute
+        // timelocks are surfaced"; help-and-warning-screens.md "odd-locktime" [C]
+        if let Some(lock) = timelock::absolute(psbt) {
+            let mut line = Text::new();
+            let _ = match lock.lock {
+                timelock::Absolute::Height(h) => write!(line, "Locktime: block {h}"),
+                timelock::Absolute::Time(t) => write!(line, "Locktime: unix time {t}"),
+            };
+            if !lock.effective {
+                let _ = write!(line, " (INEFFECTIVE)");
+            }
+            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+        }
+        let tx = psbt.unsigned_tx();
+        let mut relatives = 0usize;
+        for (input, lock) in timelock::relatives(&tx) {
+            relatives += 1;
+            if relatives > MAX_RELATIVE_SHOWN {
+                continue;
+            }
+            let mut line = Text::new();
+            let _ = match lock {
+                timelock::Relative::Blocks(b) => {
+                    write!(line, "input {input}: wait {b} blocks")
+                }
+                timelock::Relative::Seconds(s) => write!(line, "input {input}: wait {s} s"),
+            };
+            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        }
+        if relatives > MAX_RELATIVE_SHOWN {
+            let mut line = Text::new();
+            let _ = write!(
+                line,
+                "and {} more timelocked input(s)",
+                relatives - MAX_RELATIVE_SHOWN
+            );
+            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        }
+    }
+
+    // Where this page sits, when there is more than one.
+    if summary.outputs > PAGE {
+        let mut line = Text::new();
+        let _ = write!(
+            line,
+            "outputs {}-{} of {}",
+            start + 1,
+            start + shown.len(),
+            summary.outputs
+        );
         say(&mut texts, &mut small, &mut wrapped, line, true, false);
     }
 
@@ -1105,19 +1364,23 @@ fn review(
             say(&mut texts, &mut small, &mut wrapped, line, true, true);
         }
     }
-    // The caller has already refused a transaction with more outputs than `shown` holds.
-    // Said again here so that no caller can put the Sign key under a partial list: a
-    // screen that cannot show every output does not offer to sign any of them.
-    if summary.outputs > shown.len() {
-        return false;
-    }
+
     let mut line = Text::new();
-    let _ = write!(
-        line,
-        "{} sign   {} cancel",
-        display::CONFIRM_KEY,
-        display::CANCEL_KEY
-    );
+    if last {
+        let _ = write!(
+            line,
+            "{} sign   {} cancel",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+    } else {
+        let _ = write!(
+            line,
+            "{} next page   {} cancel",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+    }
     say(&mut texts, &mut small, &mut wrapped, line, true, false);
 
     let mut doc: heapless::Vec<Line, { LINES + 1 }> = heapless::Vec::new();
