@@ -137,7 +137,7 @@ heapless = { version = "0.9.3", features = ["zeroize"] }
 # RIPEMD-160. `unsafe_code = "deny"` upstream, edition 2024 / Rust 1.89 like us.
 # Firmware crates take only no-alloc features (`hash`, `ec`, `hazmat-secp256k1`,
 # `bip340`); the host tool adds the alloc/`std` pieces (PEM key loading).
-purecrypto = { version = "0.9.0", default-features = false }
+purecrypto = { version = "0.9.2", default-features = false }
 # Memory hygiene, not a primitive: kept.
 zeroize = { version = "1.9.0", default-features = false }
 
@@ -164,7 +164,7 @@ anyd = { version = "0.1.4", default-features = false, features = ["encode", "qr"
 # Bitcoin only, and no `alloc`: that leaves scripts, addresses, `btcraw`'s sighashes and
 # the PSBT roles, all writing into caller buffers. The other chains stay out of the image
 # until there is something to do with them.
-fstool = { version = "0.4.32", default-features = false }
+fstool = { version = "0.4.35", default-features = false }
 outscript = { version = "0.2.4", default-features = false, features = ["bitcoin", "bbqr", "bcur"] }
 
 # --- host tooling ---

@@ -454,9 +454,9 @@ checksum = "95adc99aee61eb921d31fc87e977aabba57c38162a7087050c906c1c0419d1e8"
 
 [[package]]
 name = "fstool"
-version = "0.4.32"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a889c45f7be7d8a5f4c9c3f5d5f2dd10d5e641c4906115b304970d1011ec1fe"
+checksum = "fe638c071ff338605e48623ebb7025f4d2e3f85683aed6aefd3a0d7c8ff0a7e2"
 dependencies = [
  "uuid",
 ]
@@ -656,9 +656,9 @@ dependencies = [
 
 [[package]]
 name = "purecrypto"
-version = "0.9.0"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59c301760fc52960fd32d5d697126f04bca123ed105b1b1db696708375c002f"
+checksum = "99c44907747928f31b5191a564778d9412e96bfcec9cb435fe6f5974746702f7"
 
 [[package]]
 name = "quote"
