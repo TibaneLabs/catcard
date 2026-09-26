@@ -308,6 +308,12 @@ pub struct Summary {
     /// Inputs in total, and how many this wallet can sign.
     pub inputs: usize,
     pub ours: usize,
+    /// How many of [`Self::ours`] are single-signature: our key alone makes the script.
+    /// The rest are multisig inputs of a registered wallet ([`Self::wallets`]).
+    pub single_sig_ours: usize,
+    /// What our own inputs spend, together. Always priced: an input of ours whose amount
+    /// the chain does not settle is refused ([`Refusal::UnverifiedAmount`]).
+    pub own_in: u64,
     pub outputs: usize,
     /// Total spent by the inputs we could price.
     pub total_in: u64,
@@ -448,6 +454,8 @@ pub fn summarise(
 
     let mut total_in = 0u64;
     let mut ours = 0usize;
+    let mut single_sig_ours = 0usize;
+    let mut own_in = 0u64;
     // The accounts this spend draws on, gathered as the inputs are walked. An output may
     // only call itself change if it belongs to one of them.
     let mut accounts = [Account::NONE; MAX_ACCOUNTS];
@@ -544,6 +552,9 @@ pub fn summarise(
         }
         if mine {
             ours += 1;
+            if single_sig {
+                single_sig_ours += 1;
+            }
             // A sighash type we will not produce stops the whole transaction: signing the
             // other inputs would hand back a PSBT that looks half-signed for no stated
             // reason.
@@ -628,6 +639,9 @@ pub fn summarise(
             }
         }
         total_in = total_in.saturating_add(utxo.amount);
+        if mine {
+            own_in = own_in.saturating_add(utxo.amount);
+        }
     }
     if ours == 0 {
         return Err(Refusal::NothingOfOurs);
@@ -696,6 +710,8 @@ pub fn summarise(
         wallet_count,
         inputs,
         ours,
+        single_sig_ours,
+        own_in,
         outputs,
         total_in,
         total_out,

@@ -262,6 +262,7 @@ fn the_fee_change_and_destination_come_out_of_the_transaction() {
     let s = summary_of(&buf[..n]).unwrap();
     assert_eq!((s.inputs, s.ours, s.outputs), (1, 1, 2));
     assert_eq!((s.total_in, s.total_out), (100_000, 95_000));
+    assert_eq!((s.own_in, s.single_sig_ours), (100_000, 1));
     assert_eq!((s.sending, s.change, s.fee), (70_000, 25_000, 5_000));
     // 5 000 of 70 000 sent is 7%: above the warning, below the cap.
     assert_eq!(s.fee_percent, 7);
@@ -343,6 +344,8 @@ fn an_input_that_is_not_ours_is_counted_but_not_signable() {
     let s = summary_of(&buf[..n]).unwrap();
     assert_eq!((s.inputs, s.ours), (2, 1), "one of the two is ours");
     assert_eq!(s.total_in, 100_000, "the fee needs both amounts");
+    assert_eq!(s.own_in, 60_000, "only ours counts as ours");
+    assert_eq!(s.single_sig_ours, 1);
     assert_eq!(s.fee, 1_000);
 
     let psbt = Psbt::parse(&buf[..n]).unwrap();
@@ -1181,6 +1184,9 @@ fn a_multisig_input_from_a_registered_wallet_is_read() {
     assert_eq!(summary.total_in, 100_000);
     assert_eq!(summary.sending, 99_000);
     assert_eq!(summary.fee, 1_000);
+    // A multisig input: ours, and not single-signature.
+    assert_eq!((summary.single_sig_ours, summary.own_in), (0, 100_000));
+    assert_eq!(summary.wallet_count, 1);
 }
 
 /// Add a global-xpub record for every cosigner of `wallet` to the PSBT in `buf` (length
