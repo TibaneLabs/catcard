@@ -3,11 +3,16 @@
 //! Stock keeps a store of standalone keys that are not derived from the seed -- a swept
 //! paper wallet, a key generated for one purpose -- and lets each one sign an input that
 //! pays its own address. This is that store: import a WIF or generate one, list them, view
-//! an entry's address and (behind a warning) its WIF, delete one, and -- through the normal
-//! signing screen -- have any stored key sign a matching PSBT input.
+//! an entry's address and (behind a warning) its WIF, sign a message with it, show its
+//! descriptors, delete one, and -- through the normal signing screen -- have any stored key
+//! sign a matching PSBT input. The store as a whole can be exported (behind two warnings:
+//! it is private keys in plain text) and cleared (behind two questions).
 //!
 //! Source: hw-reference/firmware-features.md §7 "WIF Store (up to 30 individual keys, which
-//! can sign matching inputs)", §11 "WIF store: up to 30 keys" [C]
+//! can sign matching inputs)", §11 "WIF store: up to 30 keys" [C];
+//! hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §W "WIFStoreMenu" for the per-key rows
+//! (`Detail`, `Descriptors`, `Addresses`, `Sign MSG`, `Delete`) and `Export All` /
+//! `Clear All` [C].
 //!
 //! # Where the keys live, and how they are protected
 //!
@@ -39,6 +44,26 @@ const HEAD: &str = "WIF Store";
 
 /// How the settings key is named when a save adds the store to a fresh file.
 const SETTINGS_HEAD: &str = HEAD;
+
+/// Where `Export All` writes the store, and where a key's descriptors go.
+const EXPORT_FILE: &str = "/WIFSTORE.TXT";
+const DESC_FILE: &str = "/WIF-DESC.TXT";
+
+/// The three single-signature forms a stored key is paid at, native segwit first. A P2TR
+/// address is not offered: a lone key spent through taproot is unusual and these are what
+/// a swept or generated key is paid to in practice.
+const KINDS: [(&str, AddressKind); 3] = [
+    ("Segwit", AddressKind::P2wpkh),
+    ("Nested", AddressKind::P2shP2wpkh),
+    ("Legacy", AddressKind::P2pkh),
+];
+
+/// Room for one key's three descriptors: a wrapper, a 66-character public key and a
+/// checksum each, one per line.
+const DESC_TEXT: usize = 3 * (16 + 66 + 1 + catcard_wallet::descriptor::CHECKSUM_LEN + 1);
+
+/// Room for the exported store: a label line and a WIF line per key.
+const EXPORT_TEXT: usize = wifs::MAX_KEYS * (wifs::MAX_LABEL + 3 + MAX_WIF_LEN + 1);
 
 /// The decoded keys of the store in force, filled for the signing screen.
 ///
@@ -101,6 +126,8 @@ pub(crate) fn manage(
     /// Row ids past any key index.
     const GENERATE: u32 = 1000;
     const IMPORT: u32 = 1001;
+    const EXPORT_ALL: u32 = 1002;
+    const CLEAR_ALL: u32 = 1003;
 
     /// What the list screen asked for. Nothing here borrows the settings buffer, so acting
     /// on it can read and write the settings again.
@@ -109,6 +136,7 @@ pub(crate) fn manage(
         Generate,
         Import,
         Delete(usize),
+        ClearAll,
     }
 
     loop {
@@ -148,17 +176,31 @@ pub(crate) fn manage(
                 } else {
                     let _ = rows.push(Row::body("store full (30 keys)").small().centered());
                 }
+                if have > 0 {
+                    let _ = rows.push(Row::item("Export All", EXPORT_ALL));
+                    let _ = rows.push(Row::item("Clear All", CLEAR_ALL));
+                }
                 menu::show_doc(ui, &rows, false, false)
             };
 
             match exit {
                 menu::DocExit::Selected(GENERATE) => Then::Generate,
                 menu::DocExit::Selected(IMPORT) => Then::Import,
-                menu::DocExit::Selected(i) if (i as usize) < have => {
-                    if detail(ui, &entries[i as usize]) {
-                        Then::Delete(i as usize)
+                menu::DocExit::Selected(EXPORT_ALL) => {
+                    export_all(ui, &entries[..have]);
+                    continue;
+                }
+                menu::DocExit::Selected(CLEAR_ALL) => {
+                    if clear_all_confirmed(ui, have) {
+                        Then::ClearAll
                     } else {
                         continue;
+                    }
+                }
+                menu::DocExit::Selected(i) if (i as usize) < have => {
+                    match detail(ui, &entries[i as usize]) {
+                        Detail::Delete => Then::Delete(i as usize),
+                        Detail::Back => continue,
                     }
                 }
                 _ => Then::Leave,
@@ -173,8 +215,123 @@ pub(crate) fn manage(
                 Ok(()) => say(ui, "the key is gone"),
                 Err(why) => say(ui, why),
             },
+            Then::ClearAll => match clear_all(gate, login, ui) {
+                Ok(()) => say(ui, "the store is empty"),
+                Err(why) => say(ui, why),
+            },
         }
     }
+}
+
+/// Two questions before the store is emptied, because it cannot be undone and the keys
+/// in it are not derived from anything: a cleared WIF is a lost WIF.
+///
+/// **Irreversible.** Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §W "Clear All" [C].
+fn clear_all_confirmed(ui: &mut Ui<'_>, have: usize) -> bool {
+    use core::fmt::Write as _;
+    let mut count: heapless::String<32> = heapless::String::new();
+    let _ = write!(count, "delete all {have} key(s)?");
+    menu::ask(ui.panel, HEAD, count.as_str(), "they are not in the seed");
+    if !menu::confirmed(ui) {
+        return false;
+    }
+    menu::ask(
+        ui.panel,
+        HEAD,
+        "really delete them all?",
+        "this cannot be undone",
+    );
+    menu::confirmed(ui)
+}
+
+/// Write every stored key to the card or the disk, in plain text.
+///
+/// Behind two warnings rather than one: the file is the private keys themselves, and a
+/// card is the least private place a device can put something. A label line above each
+/// WIF, so the file reads back as the list did; a single WIF per line is also what
+/// `Import from SD` reads, one at a time.
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §W "Export All" [C].
+fn export_all(ui: &mut Ui<'_>, entries: &[WifEntry<'_>]) {
+    use core::fmt::Write as _;
+    menu::ask(
+        ui.panel,
+        HEAD,
+        "writes PRIVATE KEYS",
+        "in plain text. sure?",
+    );
+    if !menu::confirmed(ui) {
+        return;
+    }
+    menu::ask(
+        ui.panel,
+        HEAD,
+        "anyone with the file",
+        "can spend. continue?",
+    );
+    if !menu::confirmed(ui) {
+        return;
+    }
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
+    };
+    let mut text: heapless::String<EXPORT_TEXT> = heapless::String::new();
+    for (i, e) in entries.iter().enumerate() {
+        let written = if e.label.is_empty() {
+            writeln!(text, "# Key {:02}", i + 1)
+        } else {
+            writeln!(text, "# {}", e.label)
+        };
+        if written.is_err() || writeln!(text, "{}", e.wif).is_err() {
+            text.zeroize();
+            return say(ui, "too long to write");
+        }
+    }
+    menu::card_wait(ui.panel, HEAD, "writing the keys");
+    let result = menu::write_storage_file(storage, EXPORT_FILE, text.as_bytes());
+    text.zeroize();
+    match result {
+        Ok(()) => {
+            crate::catlog!("wifstore: {} key(s) exported", entries.len());
+            say(ui, &EXPORT_FILE[1..]);
+        }
+        Err(why) => say(ui, why),
+    }
+}
+
+/// Empty the store and save.
+fn clear_all(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Result<(), &'static str> {
+    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let (Some(mut doc), Some(mut seal)) = (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
+    else {
+        return Err("not enough memory");
+    };
+    let mut empty = [0u8; 4];
+    let len = wifs::render(&[], &mut empty).map_err(|_| "could not clear")?;
+    let text = core::str::from_utf8(&empty[..len]).map_err(|_| "not text")?;
+    let result = crate::settings::save_wallet(
+        gate,
+        login,
+        ui,
+        SETTINGS_HEAD,
+        (wifs::KEY, text),
+        doc.bytes(),
+        seal.bytes(),
+    );
+    if result.is_ok() {
+        crate::catlog!("wifstore: cleared");
+    }
+    result
+}
+
+/// What the detail screen ended with.
+enum Detail {
+    Back,
+    Delete,
 }
 
 /// Read the stored entries into `doc_buf`. The entries borrow it, so a later write must let
@@ -206,42 +363,35 @@ fn list_label(index: usize, entry: &WifEntry<'_>) -> heapless::String<48> {
     text
 }
 
-/// Show one key's addresses, and offer to reveal the WIF or delete the key.
-///
-/// Returns whether the owner asked to delete it.
-fn detail(ui: &mut Ui<'_>, entry: &WifEntry<'_>) -> bool {
-    /// Row ids for the two actions, past nothing selectable above them.
+/// Show one key's addresses, and offer to reveal the WIF, sign a message with it, show
+/// its descriptors, or delete the key.
+fn detail(ui: &mut Ui<'_>, entry: &WifEntry<'_>) -> Detail {
+    /// Row ids for the actions, past nothing selectable above them.
     const REVEAL: u32 = 0;
-    const DELETE: u32 = 1;
+    const SIGN: u32 = 1;
+    const DESCRIPTORS: u32 = 2;
+    const DELETE: u32 = 3;
 
     // Decode once: the addresses come from the public key, the reveal from the WIF itself.
     // Both are private-key work, so the decode and the derivation run masked.
     let key = crate::keywork::run(|kw| WifKey::decode(entry.wif, kw).ok());
     let Some(key) = key else {
         say(ui, "this key will not decode");
-        return false;
+        return Detail::Back;
     };
     let network = key.network();
 
-    // The three single-signature address forms this key can be paid at. A P2TR address is
-    // not offered: a lone key spent through taproot is unusual and the three below are what
-    // a swept or generated key is paid to in practice.
     let pubkey = crate::keywork::run(|kw| key.public_key(kw));
     let mut addr_bufs = [[0u8; address::MAX_ADDRESS_LEN]; 3];
     let mut addr_lens = [0usize; 3];
-    let kinds = [
-        ("Segwit", AddressKind::P2wpkh),
-        ("Nested", AddressKind::P2shP2wpkh),
-        ("Legacy", AddressKind::P2pkh),
-    ];
     if let Some(pubkey) = pubkey {
-        for (i, (_, kind)) in kinds.iter().enumerate() {
+        for (i, (_, kind)) in KINDS.iter().enumerate() {
             addr_lens[i] = address::encode(*kind, network, &pubkey, &mut addr_bufs[i]).unwrap_or(0);
         }
     }
 
     loop {
-        let mut rows: heapless::Vec<Row, 12> = heapless::Vec::new();
+        let mut rows: heapless::Vec<Row, 14> = heapless::Vec::new();
         let _ = rows.push(Row::title(HEAD));
         if !entry.label.is_empty() {
             let _ = rows.push(Row::body(entry.label).centered());
@@ -250,7 +400,7 @@ fn detail(ui: &mut Ui<'_>, entry: &WifEntry<'_>) -> bool {
             let _ = rows.push(Row::body("testnet key").small().centered());
         }
         if pubkey.is_some() {
-            for (i, (name, _)) in kinds.iter().enumerate() {
+            for (i, (name, _)) in KINDS.iter().enumerate() {
                 let _ = rows.push(Row::body(name).small());
                 if let Ok(a) = core::str::from_utf8(&addr_bufs[i][..addr_lens[i]]) {
                     let _ = rows.push(Row::body(a).wrapped());
@@ -260,18 +410,146 @@ fn detail(ui: &mut Ui<'_>, entry: &WifEntry<'_>) -> bool {
             let _ = rows.push(Row::body("could not derive addresses"));
         }
         let _ = rows.push(Row::item("Reveal WIF", REVEAL));
+        // Signing and descriptors need the public key; a key that would not derive one
+        // gets neither row rather than a row that fails.
+        if pubkey.is_some() {
+            let _ = rows.push(Row::item("Sign MSG", SIGN));
+            let _ = rows.push(Row::item("Descriptors", DESCRIPTORS));
+        }
         let _ = rows.push(Row::item("Delete key", DELETE));
 
-        match menu::show_doc(ui, &rows, false, false) {
-            menu::DocExit::Selected(REVEAL) => reveal(ui, entry),
-            menu::DocExit::Selected(DELETE) => {
-                menu::ask(ui.panel, HEAD, "delete this key?", "it cannot be undone");
-                if menu::confirmed(ui) {
-                    return true;
+        match (menu::show_doc(ui, &rows, false, false), pubkey) {
+            (menu::DocExit::Selected(REVEAL), _) => reveal(ui, entry),
+            (menu::DocExit::Selected(SIGN), Some(pubkey)) => sign_msg(ui, &key, &pubkey),
+            (menu::DocExit::Selected(DESCRIPTORS), Some(pubkey)) => descriptors(ui, &pubkey),
+            (menu::DocExit::Selected(DELETE), _) => {
+                if delete_confirmed(ui) {
+                    return Detail::Delete;
                 }
             }
-            _ => return false,
+            _ => return Detail::Back,
         }
+    }
+}
+
+fn delete_confirmed(ui: &mut Ui<'_>) -> bool {
+    menu::ask(ui.panel, HEAD, "delete this key?", "it cannot be undone");
+    menu::confirmed(ui)
+}
+
+/// Sign a typed message with this key, in the legacy format, as one of its three
+/// addresses.
+///
+/// Legacy only: BIP-322 here is the wallet's, and what a stored key is asked to prove is
+/// almost always "I hold the key behind this address" to something that reads the 2011
+/// format. The signing is [`crate::signmsg::sign_secret`], so a stored key signs exactly
+/// as a derived one does, self-check included; the delivery is the same screen too.
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §W "Sign MSG (→ pick addr-fmt)" [C].
+fn sign_msg(ui: &mut Ui<'_>, key: &WifKey, pubkey: &[u8; 33]) {
+    const SIGN_HEAD: &str = "Sign with key";
+
+    let Some(typed) = crate::signmsg::read_message(ui, SIGN_HEAD) else {
+        return;
+    };
+    let text = typed.as_str();
+    if text.is_empty() {
+        return;
+    }
+    let names: [&str; 3] = [KINDS[0].0, KINDS[1].0, KINDS[2].0];
+    let Some(at) = menu::choose(ui, SIGN_HEAD, "address type", &names) else {
+        return;
+    };
+    let kind = KINDS[at].1;
+
+    menu::blocking_screen(ui.panel, SIGN_HEAD, "signing");
+    // The scalar is copied out of the key for the signer, which zeroizes its copy; the
+    // key itself is `ZeroizeOnDrop` and outlives only the detail screen.
+    let signed = crate::keywork::run(|kw| {
+        let mut secret = *key.secret();
+        crate::signmsg::sign_secret(
+            &mut secret,
+            pubkey,
+            key.network(),
+            text,
+            kind,
+            crate::signmsg::Format::Legacy,
+            kw,
+        )
+    });
+    let signed = match signed {
+        Ok(s) => s,
+        Err(why) => return say(ui, why),
+    };
+    crate::signmsg::show(ui, text, &signed);
+    crate::signmsg::deliver(ui, SIGN_HEAD, text, &signed, crate::signmsg::Target::Fresh);
+}
+
+/// The key's three single-signature descriptors, checksum included, shown and offered
+/// as a file.
+///
+/// Over the compressed **public** key -- `pkh(02...)`, `wpkh(02...)`, `sh(wpkh(02...))`
+/// -- which is what a watch-only importer wants and can be shown and written without a
+/// warning. A descriptor holding the WIF itself would be the key again, and `Reveal WIF`
+/// already exists for that. Checksums are BIP-380's.
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §W "Descriptors (→ pick
+/// addr-fmt)" [C]; BIP-380 (`pkh`, `wpkh`, `sh`, the checksum) [C].
+fn descriptors(ui: &mut Ui<'_>, pubkey: &[u8; 33]) {
+    use catcard_wallet::descriptor::checksum;
+    use core::fmt::Write as _;
+
+    const DESC_HEAD: &str = "Descriptors";
+
+    let mut hex: heapless::String<66> = heapless::String::new();
+    for b in pubkey {
+        let _ = write!(hex, "{b:02x}");
+    }
+    let wrappers: [(&str, &str, &str); 3] = [
+        ("Segwit", "wpkh(", ")"),
+        ("Nested", "sh(wpkh(", "))"),
+        ("Legacy", "pkh(", ")"),
+    ];
+    let mut lines: heapless::Vec<heapless::String<96>, 3> = heapless::Vec::new();
+    for (_, open, close) in &wrappers {
+        let mut body: heapless::String<96> = heapless::String::new();
+        let _ = write!(body, "{open}{hex}{close}");
+        let Some(sum) = checksum(&body) else {
+            return say(ui, "checksum failed");
+        };
+        let _ = body.push('#');
+        let _ = body.push_str(core::str::from_utf8(&sum).unwrap_or(""));
+        let _ = lines.push(body);
+    }
+
+    let mut rows: heapless::Vec<Row, 8> = heapless::Vec::new();
+    let _ = rows.push(Row::title(DESC_HEAD));
+    for ((name, _, _), line) in wrappers.iter().zip(lines.iter()) {
+        let _ = rows.push(Row::body(name).small());
+        let _ = rows.push(Row::body(line.as_str()).small().wrapped());
+    }
+    let _ = rows.push(Row::item("Write to a file", 0));
+    if !matches!(
+        menu::show_doc(ui, &rows, false, false),
+        menu::DocExit::Selected(0)
+    ) {
+        return;
+    }
+    let Some(storage) = menu::pick_storage(ui, DESC_HEAD) else {
+        return;
+    };
+    let mut text: heapless::String<DESC_TEXT> = heapless::String::new();
+    for line in &lines {
+        let _ = writeln!(text, "{line}");
+    }
+    menu::card_wait(ui.panel, DESC_HEAD, "writing");
+    match menu::write_storage_file(storage, DESC_FILE, text.as_bytes()) {
+        Ok(()) => {
+            crate::catlog!("wifstore: descriptors written");
+            menu::message(ui.panel, DESC_HEAD, &DESC_FILE[1..], "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
+        Err(why) => say(ui, why),
     }
 }
 
