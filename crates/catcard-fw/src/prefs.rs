@@ -16,6 +16,8 @@
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
 //! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
 //! | BIP-85 index cap | [`crate::derive`], which refuses an index past 9999 unless lifted |
+//! | NFC Sharing | every entry point in [`crate::nfc`], through `nfc::enabled` |
+//! | PushTx | [`crate::nfc::offer_broadcast`] and the Push Transaction tool |
 //!
 //! # Why a cache
 //!
@@ -32,7 +34,6 @@
 //! or write. [`current`] still exists there and still answers -- with the defaults -- so
 //! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
 
-use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, SighashChecks, Units};
 use catcard_wallet::bip32::Network;
 
 /// Everything the preference screens set, as the firmware reads it.
@@ -79,6 +80,11 @@ pub(crate) struct Prefs {
     /// Whether wallet exports carry account keys in their SLIP-132 form beside the
     /// classic one. Honoured by [`crate::export`].
     pub slip132: bool,
+    /// Whether the NFC tag may be written or read at all. Honoured by every entry point
+    /// in [`crate::nfc`]; the mk3 has no tag and keeps the default.
+    pub nfc_sharing: bool,
+    /// Where the PushTx link after a signed transaction points, or that there is none.
+    pub pushtx: PushTx,
 }
 
 impl Prefs {
@@ -116,6 +122,8 @@ impl Default for Prefs {
             b85_unlimited: false,
             sighash: SighashChecks::Block,
             slip132: false,
+            nfc_sharing: true,
+            pushtx: PushTx::DEFAULT,
         }
     }
 }
@@ -137,6 +145,8 @@ static mut CURRENT: Prefs = Prefs {
     b85_unlimited: false,
     sighash: SighashChecks::Block,
     slip132: false,
+    nfc_sharing: true,
+    pushtx: PushTx::DEFAULT,
 };
 
 /// What the wallet in force is set to.
@@ -249,9 +259,11 @@ pub(crate) fn load(
         b85_unlimited: prefs::b85_unlimited(&doc),
         sighash: prefs::sighash_checks(&doc),
         slip132: prefs::slip132(&doc),
+        nfc_sharing: prefs::nfc_sharing(&doc),
+        pushtx: prefs::pushtx(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -264,7 +276,9 @@ pub(crate) fn load(
         next.multisig_trust.code(),
         if next.b85_unlimited { "open" } else { "capped" },
         next.sighash.code(),
-        next.slip132
+        next.slip132,
+        next.nfc_sharing,
+        next.pushtx.label()
     );
     apply(next);
 }
