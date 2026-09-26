@@ -33,6 +33,12 @@ On a device with no seed, stock's top menu is `New Seed Words` / `Import Existin
 the two tiles whose jobs do not exist yet (Sign and Addresses), which is the same idea in
 the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no notes.
 
+`Import` holds stock's Import Existing: `Words` (12/18/24 asked first, and the last word
+offered from the checksum-valid set alone, as stock does), `Clone`, `TAPSIGNER` (stored,
+or used for this session only), `XPRV` (stored as the master, in the stash's own node
+shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backup` row is
+`Utils` → `Backup` here.
+
 ## Settings
 
 | Ours | Stock | |
@@ -60,8 +66,11 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Secure notes` (Q1) | `Advanced/Tools` → `Secure Notes & Passwords` (Q1) | 🔀 under Settings rather than the tools drawer: it is where the feature is switched on (the opt-in story, `cat_secnap`) and switched back on after `Disable Feature`; with it on, the same screen the main-menu `Notes` tile opens |
 | `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |
 | `Danger zone` → `Seed tools` → `Destroy seed` | `… Seed Functions` → `Destroy Seed` | ✅ |
-| `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; words keys only -- an XPRV root is not usable here yet |
-| Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet |
+| `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; a words key or an XPRV, stored in the stash's own node shape -- not a WIF key |
+| `Danger zone` → `B85 Idx Values` | `Danger Zone` → `B85 Idx Values` | ✅ own key `cat_b85idx`; the BIP-85 index is capped at 9999 until this lifts it to 2^31-1, after a warning |
+| Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet; `XOR join` is also `Import` → `Seed XOR` on a blank device |
+| Derive → `Import key` → `Words`, `XPRV`, `WIF key`, `TAPSIGNER` | `Temporary Seed` → `Import Words`, `Import XPRV`, `Tapsigner Backup` | ✅ in force for the session, nothing stored; `Lock down seed` keeps one |
+| Derive → `New words` | `Temporary Seed` → `Generate Words` → `12 Words` / `24 Words` | ✅ the same generator as `New`, same entropy sources and optional dice/coin/mash, into the session rather than the slot |
 | `Danger zone` → `Seed tools` → `SeedQR` | `… Seed Functions` → `Export SeedQR` | ✅ Q1 only; both shapes, Standard and Compact, and the scanner reads either back |
 | — | the rest of `Danger Zone` | not implemented |
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
@@ -83,7 +92,7 @@ store, so these rows are absent there rather than present and inert.
 | Ours | Stock | |
 |---|---|---|
 | `Export wallet` | `Export Wallet` | 🔀 Generic JSON and the six vendors that read it, plus Descriptor, Key Expression, Export XPUB, Dump Summary, Address CSV (stock writes that one from the explorer; it is here too because it is an export). Still to write: Bitcoin Core (B), Electrum + Blue Wallet (C), Wasabi (D), Unchained (E), and the account-numbered descriptor variants — Bull Bitcoin, Zeus, Samourai pre/post-mix (F) |
-| *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list, and the words, XPRV and WIF children can be put in force from it |
+| *(Derive → `BIP-85`)* | `Derive Seeds (BIP-85)` | 🔀 under Derive, not here: the same list -- words, XPRV, WIF, a password of a chosen length, 32 or 64 bytes hex -- and the words, XPRV and WIF children can be put in force from it |
 | `Browse SD card`, `Format SD card` | `File Management` → `List Files`, `Format SD Card` | ❌ stock nests these; ours are flat. Selecting a file in the listing offers `Delete file` — asked first, and irreversible; the file picker used mid-signing does not offer it |
 | *(Sign → Message, Text file, Verify; Addresses → Verify an address)* | `File Management` → `Sign Text File`, `Verify Sig File`; `NFC Tools` → `Verify Address` | 🔀 message signing and checking under the one Sign; verify an address sits with the addresses it checks, rather than in a tag drawer — the tag is reached from whichever screen has something to put on it. `Message` and `Text file` ask the format (legacy / BIP-322), the address type and the path (default: the first address of the matching account on the network in force, or a custom one); `Text file` reads the three-line request form (message, path, address format) Sparrow and stock's docs use, and writes `<name>-signed.txt` beside it; on the Q1 a scanned text offers `Sign as message` and the result can be shown as BBQr. `Verify` reads a signed `.txt` or an export's `.sig` sidecar, hashing each file the sidecar names and reporting OK / CHANGED / missing per file before the signature verdict |
 | `USB Drive` | `Settings` → `Hardware On/Off` → `Virtual Disk` | ❌ different drawer -- but the switch is stock's: with `Virtual Disk` (or the USB port) off, this refuses to start |
@@ -91,7 +100,8 @@ store, so these rows are absent there rather than present and inert.
 | `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD` | ✅ stock's own name, in stock's drawer; ours installs from the card and has no `Show Version` or `From VirtDisk` under it |
 | `Backup` → `Save backup`, `Verify backup`, `Restore backup`, `Clone Coldcard` | `Backup` → `Backup System`, `Verify Backup`, `Restore Backup`, `Clone Coldcard` | ✅ same drawer, same four rows. Save offers stock's three protections — twelve words (the default), a typed passphrase, or cleartext (asked twice, never the default) — and writes `backup-<XFP>.7z` to the card or the Virtual Disk. Verify decrypts, parses and compares the fingerprint against the wallet in force without changing anything; ours goes further than stock's CRC-only check. Restore and Verify read from either storage and detect a cleartext file rather than asking for a password. A backup can also be loaded for the session only, from Derive → `Import key` → `Coldcard backup` (stock's Temporary Seed → Coldcard Backup) |
 | `WIF Store` (mk4/mk5/Q1) → per key: `Reveal WIF`, `Sign MSG`, `Descriptors`, `Delete key`; `Generate new key`, `Import from SD`, `Export All`, `Clear All` | `WIF Store` → per key: `Detail`, `Descriptors`, `Addresses`, `Sign MSG`, `Delete`; `Import WIF`, `Export All`, `Clear All` | ✅ same drawer and rows; the addresses are on the key's own screen rather than a row under it, and `Generate new key` is ours. `Sign MSG` signs legacy as the chosen address type; `Descriptors` are `wpkh` / `sh(wpkh)` / `pkh` over the public key with BIP-380 checksums; `Export All` writes the keys in plain text behind two warnings; `Clear All` asks twice and cannot be undone |
-| — | `Temporary Seed`, `Paper Wallets`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
+| *(Derive → `Import key`, `New words`)* | `Temporary Seed` | 🔀 under Derive, with the other ways to change the key in force |
+| — | `Paper Wallets`, `Spending Policy`, `Danger Zone` | not implemented, or elsewhere |
 
 `Upgrade Firmware` has no icon, so on the Q1 it is the one cell that shows its name
 alone — and, as the seventh entry, it is alone on the grid's second page.

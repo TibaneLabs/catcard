@@ -130,6 +130,9 @@ enum Screen {
     KeyPick(u8),
     /// The passphrase screen, opened from Derive rather than from Settings.
     KeyPassphrase,
+    /// Derive -> New words: a fresh seed from the TRNGs, in force for this session only
+    /// -- stock's Temporary Seed -> Generate Words.
+    KeyNewSeed,
     /// Seed XOR: the wallet in force, cut into parts that XOR back to it.
     XorSplit,
     /// Seed XOR: parts typed back in, and the seed they make put in force.
@@ -252,6 +255,11 @@ enum Screen {
     CloneImport,
     /// Import a wallet from a TAPSIGNER `.aes` backup and its key.
     TapsignerImport,
+    /// Type an XPRV in and store it as the master: stock's Import Existing -> Import XPRV.
+    ImportXprv,
+    /// Join Seed XOR parts from the blank device's Import menu, where the result is
+    /// offered for keeping.
+    ImportXor,
     /// Device settings: the login submenu and, when a seed exists, destroying it.
     Settings,
     /// Login settings, currently just changing the main PIN.
@@ -623,9 +631,12 @@ const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 /// The ways a blank device gets a wallet from somewhere else.
 ///
 /// "Words" is the plain BIP-39 restore; "Clone" migrates from another Coldcard with no
-/// memorized password; "TAPSIGNER" decrypts a card's `.aes` backup. Dispatched by name in
-/// [`step`], so appending a fourth needs only a matching arm.
-const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER"];
+/// memorized password; "TAPSIGNER" decrypts a card's `.aes` backup; "XPRV" types a node in
+/// and stores it as the master; "Seed XOR" joins parts and offers to keep what they make.
+/// Stock's Import Existing has the same five (its backup restore is Utils -> Backup here).
+/// Dispatched by name in [`step`], so appending another needs only a matching arm.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1 "Import Existing" [C]
+const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER", "XPRV", "Seed XOR"];
 
 /// The tool drawer, stock's `Advanced/Tools`.
 ///
@@ -787,6 +798,9 @@ const KEY_ITEMS_ROOT: &[&str] = &[
     "Passphrase",
     "BIP-85",
     "Import key",
+    // A fresh seed for this session, from the same generator as New: stock's Temporary
+    // Seed -> Generate Words. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 [C]
+    "New words",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -798,6 +812,7 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "Passphrase",
     "BIP-85",
     "Import key",
+    "New words",
     "XOR split",
     "XOR join",
     #[cfg(not(feature = "board-mk3"))]
@@ -1518,10 +1533,32 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(all(feature = "games", feature = "board-q1"))]
         Screen::FlappyCat => to(|a| crate::flappy::flappy_cat(a.ui), Screen::Games),
         Screen::NewSeed(_) => reseeds(
-            |a| new_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut(), a.words),
+            |a| {
+                new_seed(
+                    a.gate,
+                    a.login,
+                    a.ui,
+                    a.pool.as_deref_mut(),
+                    a.words,
+                    SeedTarget::Store,
+                )
+            },
             Screen::Main,
         ),
+        // The same generator, but what comes out is a session key: nothing stored, so
+        // the slot is as it was.
+        Screen::KeyNewSeed => to(
+            |a| new_temp_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut()),
+            Screen::KeyMenu,
+        ),
         Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui), Screen::Main),
+        Screen::ImportXprv => reseeds(|a| import_xprv(a.gate, a.login, a.ui), Screen::Main),
+        // The join itself offers to store on a blank device; from here it goes back to
+        // the blank main menu, which is where the owner came from.
+        Screen::ImportXor => reseeds(
+            |a| crate::seedxor::join(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
         // Both put a seed on a blank device, so the session re-reads the slot afterwards.
         Screen::CloneImport => reseeds(
             |a| crate::backup::clone_import(a.gate, a.login, a.ui),
@@ -1785,6 +1822,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Words")) => Screen::ImportSeed,
             (Key::Confirm, Some("Clone")) => Screen::CloneImport,
             (Key::Confirm, Some("TAPSIGNER")) => Screen::TapsignerImport,
+            (Key::Confirm, Some("XPRV")) => Screen::ImportXprv,
+            (Key::Confirm, Some("Seed XOR")) => Screen::ImportXor,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::ImportMenu,
         },
@@ -1848,6 +1887,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Passphrase")) => Screen::KeyPassphrase,
             (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
             (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
+            (Key::Confirm, Some("New words")) => Screen::KeyNewSeed,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
@@ -2503,9 +2543,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SweepTest => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
-        Screen::NewSeed(_) => {}
+        Screen::NewSeed(_) | Screen::KeyNewSeed => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
-        Screen::ImportSeed => {}
+        Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor => {}
         // Handled in `run`: each drives its own file picker, key entry and progress.
         Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
         // Handled in `run`: it drives the PIN-entry screens itself.
@@ -6222,9 +6262,10 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
     const HEAD: &str = "Import key";
 
     // The fourth row is stock's Temporary Seed → Coldcard Backup: the wallet inside a
-    // backup file, for this session. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
-    // §D2 "Coldcard Backup" [C]
-    const ROWS: &[&str] = &["Words", "XPRV", "WIF key", "Coldcard backup"];
+    // backup file, for this session; the fifth its TAPSIGNER backup, beside the typed
+    // shapes. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 "Coldcard Backup",
+    // "Tapsigner Backup" [C]
+    const ROWS: &[&str] = &["Words", "XPRV", "WIF key", "Coldcard backup", "TAPSIGNER"];
     let Some(row) = pick_row(ui, HEAD, "for this session", ROWS) else {
         return false;
     };
@@ -6284,6 +6325,7 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
             }
             loaded
         }
+        4 => crate::tapsigner::import_temporary(ui),
         _ => {
             let Some(entry) = crate::passphrase::read(ui, "WIF key") else {
                 return false;
@@ -6376,7 +6418,24 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
         }
         _ => return,
     }
+    announce_key(gate, login, ui, HEAD, was);
+}
 
+/// Name the wallet now in force -- its fingerprint and the key's label -- after a screen
+/// has put one there, opening its settings file on the way.
+///
+/// Derives now, so the fingerprint on screen is this wallet's and not a promise. A key
+/// that cannot be derived from puts `was` back in force rather than leaving the device
+/// somewhere neither the owner nor the status bar can name. Shared by the Derive menu,
+/// the TAPSIGNER session import and the temporary seed generator, so all three land the
+/// same way.
+pub(crate) fn announce_key(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    was: crate::key::Source,
+) {
     // A single key has no master to take a fingerprint of. What names it instead is its
     // own: the first four bytes of its hash160, which is what BIP-32 would call this key's
     // fingerprint if it were a node. It keeps no settings file.
@@ -6387,7 +6446,7 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
         });
         let Some(id) = fp else {
             crate::key::set(was);
-            message(ui.panel, HEAD, "that key is not usable", "unchanged");
+            message(ui.panel, head, "that key is not usable", "unchanged");
             wait_for_any_key(ui);
             return;
         };
@@ -6398,15 +6457,12 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
         crate::catlog!("key: now WIF ({})", crate::key::label());
         #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
-        message(ui.panel, HEAD, &said, crate::key::label());
+        message(ui.panel, head, &said, crate::key::label());
         wait_for_any_key(ui);
         return;
     }
 
-    // Derive it now, so the fingerprint on screen is this wallet's and not a promise.
-    // A failure puts the old selection back rather than leaving the device somewhere
-    // neither the owner nor the status bar can name.
-    match master_quietly(gate, login, ui.panel, HEAD) {
+    match master_quietly(gate, login, ui.panel, head) {
         Ok(master) => {
             let [a, b, c, d] = crate::keywork::run(|kw| master.fingerprint(kw));
             drop(master);
@@ -6414,12 +6470,12 @@ fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
             crate::catlog!("key: now ({})", crate::key::label());
             #[cfg(not(feature = "board-mk3"))]
-            crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
-            message(ui.panel, HEAD, &said, crate::key::label());
+            crate::settings::open_wallet(gate, login, ui.panel, head, [a, b, c, d]);
+            message(ui.panel, head, &said, crate::key::label());
         }
         Err(why) => {
             crate::key::set(was);
-            message(ui.panel, HEAD, why, "unchanged");
+            message(ui.panel, head, why, "unchanged");
         }
     }
     wait_for_any_key(ui);
@@ -9415,6 +9471,7 @@ fn new_seed(
     ui: &mut Ui<'_>,
     pool: Option<&mut catcard_entropy::EntropyPool>,
     words: u8,
+    target: SeedTarget,
 ) {
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
@@ -9443,7 +9500,9 @@ fn new_seed(
     // flag *and* what the slot turned out to hold: the flag alone says "in use" about a
     // slot whose seed was destroyed, and warning about a wallet that is not there
     // teaches an owner to press through the one warning that matters.
-    if crate::key::stored_wallet(login) {
+    //
+    // A temporary seed touches the slot not at all, so there is nothing to warn about.
+    if target == SeedTarget::Store && crate::key::stored_wallet(login) {
         ask(
             ui.panel,
             "Wallet exists",
@@ -9456,7 +9515,12 @@ fn new_seed(
     }
     let mut what = Line::new();
     let _ = write!(what, "{words} words, from this");
-    ask(ui.panel, "Create wallet?", &what, "device's own TRNGs");
+    match target {
+        SeedTarget::Store => ask(ui.panel, "Create wallet?", &what, "device's own TRNGs"),
+        // Said plainly: it is gone at reboot unless its words are kept or it is locked
+        // down. Source: hw-reference/help-and-warning-screens.md §6 [C]
+        SeedTarget::Temporary => ask(ui.panel, "Temporary seed?", &what, "device; RAM only"),
+    }
     if !confirmed(ui) {
         return;
     }
@@ -9637,6 +9701,24 @@ fn new_seed(
         }
     }
 
+    // A temporary seed stops here: the words are written down, and the entropy goes in
+    // force for the session instead of into the slot. Locking it down later is the way
+    // to keep it, and that screen has its own warnings.
+    if target == SeedTarget::Temporary {
+        secret.zeroize();
+        let was = crate::key::in_force();
+        let loaded = crate::key::set_temporary(mnemonic.entropy(), "TRNG Words");
+        drop(mnemonic);
+        if !loaded {
+            message(ui.panel, "Not loaded", "that seed length", "is not usable");
+            wait_for_any_key(ui);
+            return;
+        }
+        crate::catlog!("seed: temporary, {} words", words);
+        announce_key(gate, login, ui, "Temporary seed", was);
+        return;
+    }
+
     message(ui.panel, "Applying", "do not disconnect", "");
     // `Login` is driven through the `PinGate` seam, so that the same sequencing runs
     // against a model on the host and the callgate here.
@@ -9673,6 +9755,104 @@ fn new_seed(
         "keep those words",
         "somewhere safe",
     );
+    wait_for_any_key(ui);
+}
+
+/// Where a freshly generated seed goes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum SeedTarget {
+    /// Into the secure element, as the device's wallet: New on a blank device.
+    Store,
+    /// In force for this session only, like a key typed in under Derive -> Import key:
+    /// stock's Temporary Seed -> Generate Words. Nothing is written; the stored seed,
+    /// if there is one, is untouched, and Lock down seed is the way to keep it.
+    /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 "Generate Words" [C]
+    Temporary,
+}
+
+/// Derive -> New words: choose a length, then [`new_seed`] into the session.
+fn new_temp_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    pool: Option<&mut catcard_entropy::EntropyPool>,
+) {
+    let Some(row) = pick_row(ui, "New words", "for this session", NEW_SEED_ITEMS) else {
+        return;
+    };
+    let words = match NEW_SEED_ITEMS[row] {
+        "12 words" => 12,
+        _ => 24,
+    };
+    new_seed(gate, login, ui, pool, words, SeedTarget::Temporary);
+}
+
+/// Import -> XPRV: type a BIP-32 node in and store it as the master.
+///
+/// The stored shape is the stash's own node marker (`0x01`, chain code, key), so the
+/// device comes up in it as the root, with no words: stock's Import Existing -> Import
+/// XPRV. The same warning, write, read-back and claim as every other import.
+/// Source: hw-reference/secret-stash-format.md §Layout [C];
+/// hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1 "Import XPRV" [C]
+fn import_xprv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_wallet::bip32::ExtendedPrivKey;
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Import XPRV";
+
+    if crate::key::stored_wallet(login) {
+        ask(
+            ui.panel,
+            "Wallet exists",
+            "an import DESTROYS",
+            "the one stored now",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    let Some(entry) = crate::passphrase::read(ui, HEAD) else {
+        message(ui.panel, "Import cancelled", "nothing was", "stored");
+        wait_for_any_key(ui);
+        return;
+    };
+    // Parsed, checked and packed inside the masked region: the node is a private key,
+    // and so is the stash made from it. The fingerprint comes out with it, so the owner
+    // sees which wallet this is before it goes anywhere.
+    let made = crate::keywork::run(|kw| {
+        let node = ExtendedPrivKey::from_base58(entry.as_str().trim(), kw).ok()?;
+        let fp = node.fingerprint(kw);
+        Some((
+            catcard_callgate::pin::encode_xprv(&node.chain_code, node.secret_bytes()),
+            fp,
+        ))
+    });
+    drop(entry);
+    let Some((mut secret, [a, b, c, d])) = made else {
+        message(ui.panel, HEAD, "not an xprv", "check what was typed");
+        wait_for_any_key(ui);
+        return;
+    };
+    let mut said: heapless::String<24> = heapless::String::new();
+    let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
+    ask(ui.panel, "Store this?", &said, "as the master, no words");
+    if !confirmed(ui) {
+        secret.zeroize();
+        message(ui.panel, "Import cancelled", "nothing was", "stored");
+        wait_for_any_key(ui);
+        return;
+    }
+    let res = crate::backup::store_secret(gate, login, ui, &secret);
+    secret.zeroize();
+    match res {
+        Ok(()) => {
+            crate::key::to_root();
+            #[cfg(feature = "board-q1")]
+            crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
+            crate::catlog!("seed: xprv stored");
+            message(ui.panel, "Wallet stored", &said, "is the master now");
+        }
+        Err(why) => message(ui.panel, "Not stored", why, "any key to go back"),
+    }
     wait_for_any_key(ui);
 }
 
