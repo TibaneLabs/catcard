@@ -258,6 +258,110 @@ pub fn join(parts: &[&[u8]], out: &mut [u8], _kw: &crate::KeyWork) -> Result<usi
     Ok(len)
 }
 
+/// Parts XOR-ed together one at a time, as they arrive.
+///
+/// [`join`] wants every part at once, which means every part held somewhere until the
+/// last is in. On the device the parts come one at a time from different places -- typed
+/// words, the seed in the secure element, a Seed Vault entry -- and each is a wallet.
+/// This keeps only the running XOR, so a part can be wiped the moment it is in.
+///
+/// It is the same operation with the same rules: every part the same length, that length
+/// one BIP-39 has words for, and [`MIN_PARTS`] to [`MAX_PARTS`] of them. A part that is
+/// refused is *not* mixed in -- the accumulator is as it was before, so the caller can
+/// say why and ask for another. Order does not matter: XOR is the same whichever way
+/// round.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct Join {
+    acc: [u8; MAX_ENTROPY_LEN],
+    /// Length of every part so far; `0` until the first.
+    #[zeroize(skip)]
+    len: usize,
+    #[zeroize(skip)]
+    count: usize,
+}
+
+impl Default for Join {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Join {
+    /// Nothing in yet.
+    pub const fn new() -> Self {
+        Self {
+            acc: [0; MAX_ENTROPY_LEN],
+            len: 0,
+            count: 0,
+        }
+    }
+
+    /// How many parts are in.
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The length every part has to be, once the first is in. `None` before that.
+    pub const fn len(&self) -> Option<usize> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.len)
+        }
+    }
+
+    /// Whether nothing has been mixed in yet.
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// XOR `part` in.
+    ///
+    /// The first part fixes the length; a later one of another length is
+    /// [`Error::Mixed`]. Past [`MAX_PARTS`] is [`Error::PartCount`], and a length BIP-39
+    /// has no words for is [`Error::Length`]. On any error nothing changes.
+    pub fn add(&mut self, part: &[u8], _kw: &crate::KeyWork) -> Result<(), Error> {
+        if self.count >= MAX_PARTS {
+            return Err(Error::PartCount);
+        }
+        if words_for_entropy(part.len()).is_none() {
+            return Err(Error::Length);
+        }
+        if self.count > 0 && part.len() != self.len {
+            return Err(Error::Mixed);
+        }
+        self.len = part.len();
+        xor_into(&mut self.acc[..self.len], part);
+        self.count += 1;
+        Ok(())
+    }
+
+    /// The XOR of everything so far, into `out`; its length back.
+    ///
+    /// Fewer than [`MIN_PARTS`] is [`Error::PartCount`]: one part is not a join, it is
+    /// that part. What comes out is entropy, not a phrase -- as for [`join`].
+    pub fn finish(&self, out: &mut [u8], _kw: &crate::KeyWork) -> Result<usize, Error> {
+        if self.count < MIN_PARTS {
+            return Err(Error::PartCount);
+        }
+        if self.len > out.len() {
+            return Err(Error::Length);
+        }
+        out[..self.len].copy_from_slice(&self.acc[..self.len]);
+        Ok(self.len)
+    }
+
+    /// Whether the XOR so far is all zero bits.
+    ///
+    /// Two parts that are the same cancel out, so a result of zeros almost always means
+    /// one part was put in twice -- the seed of "abandon abandon ... art" is nobody's
+    /// wallet. It is not an error here, because it is not *wrong*; it is something the
+    /// screen should say.
+    pub fn is_all_zero(&self) -> bool {
+        self.acc[..self.len].iter().all(|b| *b == 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +566,121 @@ mod tests {
             Parts::deterministic(&[0u8; 17], 2, &kw()).err(),
             Some(Error::Length)
         );
+    }
+
+    /// The one-at-a-time join is the same join. The published example, added in every
+    /// order there is, comes out the same -- which is what "order-independent" means.
+    #[test]
+    fn the_accumulator_joins_the_published_example_in_any_order() {
+        let (a, b, c) = (entropy_of(A24), entropy_of(B24), entropy_of(C24));
+        let orders: [[&[u8]; 3]; 6] = [
+            [&a, &b, &c],
+            [&a, &c, &b],
+            [&b, &a, &c],
+            [&b, &c, &a],
+            [&c, &a, &b],
+            [&c, &b, &a],
+        ];
+        for order in orders {
+            let mut j = Join::new();
+            assert!(j.is_empty());
+            assert_eq!(j.len(), None);
+            for p in order {
+                j.add(p, &kw()).unwrap();
+            }
+            assert_eq!(j.count(), 3);
+            assert_eq!(j.len(), Some(32));
+            let mut out = [0u8; MAX_ENTROPY_LEN];
+            let n = j.finish(&mut out, &kw()).unwrap();
+            let joined = Mnemonic::from_entropy(&out[..n], &kw()).unwrap();
+            let words: Vec<&str> = joined.words().collect();
+            assert_eq!(words.join(" "), R24);
+        }
+    }
+
+    /// A part read from the device's own seed or a vault entry is not special: it is
+    /// sixteen or thirty-two bytes of entropy like any typed part. Splitting a seed and
+    /// then joining the split with one part replaced by the *same bytes from elsewhere*
+    /// has to give the seed back, whichever slot that was.
+    #[test]
+    fn a_part_from_another_source_is_just_a_part() {
+        for len in [16usize, 32] {
+            let secret: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(29) ^ 0xa5)
+                .collect();
+            let parts = Parts::deterministic(&secret, 3, &kw()).unwrap();
+            // "The device's seed" contributes part 1 here; it arrives as a bare slice
+            // copied out of the secure element rather than parsed from words.
+            let own: Vec<u8> = parts.part(1).unwrap().to_vec();
+            let mut j = Join::new();
+            j.add(parts.part(0).unwrap(), &kw()).unwrap();
+            j.add(&own, &kw()).unwrap();
+            j.add(parts.part(2).unwrap(), &kw()).unwrap();
+            let mut out = [0u8; MAX_ENTROPY_LEN];
+            let n = j.finish(&mut out, &kw()).unwrap();
+            assert_eq!(&out[..n], &secret[..], "{len} bytes");
+        }
+    }
+
+    /// A 12-word part cannot go in beside 24-word ones, and the refusal leaves the
+    /// accumulator exactly as it was: the wrong part is not half-mixed in.
+    #[test]
+    fn the_accumulator_refuses_a_part_of_another_length_and_keeps_its_state() {
+        let (a, b, short) = (entropy_of(A24), entropy_of(B24), entropy_of(B12));
+        let mut j = Join::new();
+        j.add(&a, &kw()).unwrap();
+        assert_eq!(j.add(&short, &kw()), Err(Error::Mixed));
+        assert_eq!(j.count(), 1);
+        assert_eq!(j.len(), Some(32));
+        // And the other way round: a 24-word part after a 12-word first.
+        let mut k = Join::new();
+        k.add(&short, &kw()).unwrap();
+        assert_eq!(k.add(&a, &kw()), Err(Error::Mixed));
+        assert_eq!(k.count(), 1);
+        assert_eq!(k.len(), Some(16));
+        // Carrying on with the right length still gives the published answer.
+        j.add(&b, &kw()).unwrap();
+        j.add(&entropy_of(C24), &kw()).unwrap();
+        let mut out = [0u8; MAX_ENTROPY_LEN];
+        let n = j.finish(&mut out, &kw()).unwrap();
+        let joined = Mnemonic::from_entropy(&out[..n], &kw()).unwrap();
+        assert_eq!(joined.words().collect::<Vec<_>>().join(" "), R24);
+    }
+
+    /// The bounds are the same as for [`join`]: one part is not a join, and a fifth part
+    /// is refused before it is touched.
+    #[test]
+    fn the_accumulator_keeps_the_two_to_four_bound() {
+        let a = entropy_of(A24);
+        let mut j = Join::new();
+        let mut out = [0u8; MAX_ENTROPY_LEN];
+        assert_eq!(j.finish(&mut out, &kw()), Err(Error::PartCount));
+        j.add(&a, &kw()).unwrap();
+        assert_eq!(j.finish(&mut out, &kw()), Err(Error::PartCount));
+        for _ in 1..MAX_PARTS {
+            j.add(&a, &kw()).unwrap();
+        }
+        assert_eq!(j.count(), MAX_PARTS);
+        assert_eq!(j.add(&a, &kw()), Err(Error::PartCount));
+        assert_eq!(j.count(), MAX_PARTS);
+        assert!(j.finish(&mut out, &kw()).is_ok());
+        // Not a BIP-39 length: refused, not truncated.
+        let mut k = Join::new();
+        assert_eq!(k.add(&[0u8; 17], &kw()), Err(Error::Length));
+        assert!(k.is_empty());
+    }
+
+    /// The same part twice cancels to zeros -- the sign of a part entered twice, which
+    /// the screen warns about rather than handing over the all-zero wallet.
+    #[test]
+    fn a_part_put_in_twice_leaves_zeros() {
+        let a = entropy_of(A24);
+        let mut j = Join::new();
+        j.add(&a, &kw()).unwrap();
+        assert!(!j.is_all_zero());
+        j.add(&a, &kw()).unwrap();
+        assert!(j.is_all_zero());
+        j.add(&entropy_of(B24), &kw()).unwrap();
+        assert!(!j.is_all_zero());
     }
 }
