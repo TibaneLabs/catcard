@@ -802,6 +802,10 @@ pub(crate) fn unlock_record() -> Option<&'static str> {
 
 /// Enrol `record` as the unlock code (from `policy::render_unlock`), or clear it with an
 /// empty string. From the next login.
+///
+/// Not on the mk3: its settings store exists now, but the Spending Policy, the only
+/// caller, is not offered there yet.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn save_unlock_record(ui: &mut crate::ui::Ui<'_>, record: &str) -> bool {
     let key = catcard_settings::policy::UNLOCK_KEY;
     let ok = save_prelogin(ui, "Spending Policy", key, record);

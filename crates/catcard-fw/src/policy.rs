@@ -434,14 +434,7 @@ mod imp {
             let network = crate::prefs::network();
             let accounts = &summary.accounts[..summary.account_count];
             let wallets = &summary.wallets[..summary.wallet_count];
-            let blank = psbtview::Destination {
-                index: 0,
-                amount: 0,
-                change: false,
-                address: [0; catcard_wallet::address::MAX_ADDRESS_LEN],
-                address_len: 0,
-            };
-            let mut page = [blank; 4];
+            let mut page = [psbtview::Destination::BLANK; 4];
             let mut start = 0usize;
             let mut busy = menu::Working::new(ui.panel, HEAD, "checking the policy");
             loop {
