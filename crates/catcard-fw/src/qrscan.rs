@@ -1071,10 +1071,12 @@ fn sign(
         buf,
         spare,
         len,
-        &crate::signtx::SignDest::SINGLE,
         // Caught over the air, not from a file; the signed result is written to the card
         // as before.
-        crate::menu::Storage::Sd,
+        &mut crate::signtx::Sink::Files {
+            dest: &crate::signtx::SignDest::SINGLE,
+            storage: crate::menu::Storage::Sd,
+        },
     );
 }
 

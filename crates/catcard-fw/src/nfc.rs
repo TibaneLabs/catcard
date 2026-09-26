@@ -1199,10 +1199,12 @@ fn sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, mut go
         buf,
         spare,
         len,
-        &NFC_DEST,
         // Caught over the air, not from a file: the result goes to the Virtual Disk,
         // which every board with a tag has, and from there back onto the tag.
-        menu::Storage::Vdisk,
+        &mut crate::signtx::Sink::Files {
+            dest: &NFC_DEST,
+            storage: menu::Storage::Vdisk,
+        },
     );
     drop(lease);
     offer_signed_back(ui);

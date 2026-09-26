@@ -41,8 +41,8 @@ use core::fmt::Write as _;
 use outscript::psbt::Psbt;
 
 use crate::display;
-use crate::menu::{self, Storage};
-use crate::signtx::SignDest;
+use crate::menu;
+use crate::signtx::Sink;
 use crate::ui::Ui;
 
 const HEAD: &str = "Proof of reserves";
@@ -93,12 +93,15 @@ pub(crate) fn review(
     buf: &mut [u8],
     spare: &mut [u8],
     len: usize,
-    dest: &SignDest<'_>,
-    storage: Storage,
+    original_v2: Option<&[u8]>,
+    sink: &mut Sink<'_, '_>,
 ) {
     let psbt = match Psbt::parse(&buf[..len]) {
         Ok(p) => p,
-        Err(_) => return say(ui, "PSBT is corrupt"),
+        Err(_) => {
+            sink.refuse("PSBT is corrupt");
+            return say(ui, "PSBT is corrupt");
+        }
     };
     let proof = match por::inspect(&psbt) {
         Ok(p) => p,
@@ -106,6 +109,7 @@ pub(crate) fn review(
             let mut line = heapless::String::new();
             let why = refusal(r, &mut line);
             crate::catlog!("proof: refused: {}", why);
+            sink.refuse("proof of reserves refused");
             return say(ui, why);
         }
     };
@@ -138,17 +142,38 @@ pub(crate) fn review(
     }
 
     // Which inputs are ours: the seed's keys, then the WIF store's.
+    // A computer's request: only the keys it listed, and a listed key the proof has no
+    // place for is refused before anything is shown.
+    let listed = sink.listed();
+    if let Some(keys) = listed
+        && crate::keywork::run(|kw| psbtview::unmatched_key(&psbt, &master, fingerprint, keys, kw))
+            .is_some()
+    {
+        drop(master);
+        sink.refuse("a listed key matches no input");
+        return say(ui, "a key it lists signs no input");
+    }
     let mut ours = [0usize; MAX_INPUTS];
     #[cfg_attr(feature = "board-mk3", allow(unused_mut))]
-    let mut signable =
-        crate::keywork::run(|kw| psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw));
+    let mut signable = match listed {
+        Some(keys) => {
+            crate::keywork::run(|kw| {
+                psbtview::our_inputs_listed(&psbt, &master, fingerprint, keys, &mut ours, kw)
+            })
+            .signable
+        }
+        None => crate::keywork::run(|kw| {
+            psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw)
+        }),
+    };
     #[cfg(not(feature = "board-mk3"))]
     let mut wif_keys: heapless::Vec<
         catcard_wallet::wif::WifKey,
         { catcard_settings::wifs::MAX_KEYS },
     > = heapless::Vec::new();
+    // WIF keys have no path, so a computer's request, which lists paths, never uses one.
     #[cfg(not(feature = "board-mk3"))]
-    {
+    if listed.is_none() {
         crate::wifstore::load_keys(gate, login, ui.panel, &mut wif_keys);
         let mut bare: heapless::Vec<[u8; 33], { catcard_settings::wifs::MAX_KEYS }> =
             heapless::Vec::new();
@@ -172,12 +197,19 @@ pub(crate) fn review(
     }
     if signable == 0 {
         drop(master);
+        sink.refuse("no input is ours");
         return say(ui, "no input is ours");
     }
 
     if !confirm(ui, text, address, &proof, signable) {
         drop(master);
+        sink.decline();
         return say(ui, "not signed");
+    }
+    if let Some(out) = sink.host()
+        && !out.wanted()
+    {
+        return;
     }
 
     // Sign, one input at a time, alternating buffers. `SIGHASH_ALL` only: `inspect`
@@ -192,8 +224,18 @@ pub(crate) fn review(
             Err(_) => break,
         };
         let mut done = false;
-        match crate::keywork::run(|kw| {
-            signer::sign_input_under(
+        match crate::keywork::run(|kw| match sink.listed() {
+            Some(keys) => signer::sign_input_listed(
+                &psbt,
+                index,
+                &master,
+                fingerprint,
+                SighashPolicy::Block,
+                keys,
+                into,
+                kw,
+            ),
+            None => signer::sign_input_under(
                 &psbt,
                 index,
                 &master,
@@ -201,7 +243,7 @@ pub(crate) fn review(
                 SighashPolicy::Block,
                 into,
                 kw,
-            )
+            ),
         }) {
             Ok(n) => {
                 core::mem::swap(&mut from, &mut into);
@@ -246,8 +288,42 @@ pub(crate) fn review(
     drop(wif_keys);
 
     if signed == 0 {
+        sink.refuse("nothing could be signed");
         return say(ui, "nothing could be signed");
     }
+
+    // Back to the computer. A complete proof is checked as a counterparty would check it
+    // first, exactly as the card path does; the signed PSBT goes back in the version it
+    // came in, and a proof has no network transaction to go with it.
+    let (dest, storage) = match sink {
+        Sink::Host(out) => {
+            if signed == proof.inputs {
+                let ok = finalise(&from[..at], into).is_some_and(|flen| {
+                    matches!(
+                        full::verify_pof(text.as_bytes(), proof.challenge(), &into[..flen]),
+                        Ok(bip322::Variant::Proof { utxos, total })
+                            if utxos == proof.utxos && total == proof.total
+                    )
+                });
+                if !ok {
+                    out.refuse("proof did not verify");
+                    return say(ui, "proof did NOT verify");
+                }
+            }
+            if let Err(why) =
+                crate::signtx::hand_to_host(out, original_v2, &from[..at], into, false)
+            {
+                out.refuse(why);
+            }
+            crate::catlog!(
+                "proof: {} of {} inputs, for the computer",
+                signed,
+                proof.inputs
+            );
+            return;
+        }
+        Sink::Files { dest, storage } => (*dest, *storage),
+    };
 
     let mut wait: heapless::String<24> = heapless::String::new();
     let _ = write!(wait, "writing to {}", storage.medium());

@@ -63,6 +63,9 @@ mod guard;
 /// The heap: one region, lent out a block at a time.
 mod heap;
 mod help;
+/// A computer asking for addresses or a signature over the encrypted USB channel, and
+/// the person at the device deciding.
+mod hostwallet;
 /// Logging out after a while with nobody touching it.
 mod identity;
 mod idle;

@@ -116,9 +116,16 @@ pub struct UsbTask {
     /// Bulk-OUT packets the OTG interrupt has received in mass-storage mode, waiting for
     /// the transport loop to consume them. Empty and idle in polled HID mode.
     msc_rx: MscRx,
-    /// The encrypted channel, once a host has negotiated one with [`Opcode::NcryStart`].
-    /// `None` until then, and torn down on any authentication failure.
-    session: Option<ncry::Session>,
+    /// The encrypted channel, once a host has negotiated one with [`Opcode::NcryStart`],
+    /// and what the device keeps for that session. Closed until then, and torn down on
+    /// any authentication failure or bus reset.
+    chan: ncry::Channel<crate::hostwallet::SessionState>,
+    /// A sealed request that spans frames, gathered whole before it is opened. A heap
+    /// block rather than a buffer in this struct: it is a kilobyte that is almost never
+    /// in use, and this struct is a static.
+    ncry_rx: Option<(crate::heap::Block, usize)>,
+    /// Host-wallet requests: addresses and signatures a computer asked for.
+    host: crate::hostwallet::Desk,
     /// Ephemeral-key source for the channel handshake, installed from the entropy pool at
     /// boot ([`install_drbg`]). `None` in recovery, where the pool never came up and the
     /// channel is simply not offered.
@@ -220,6 +227,11 @@ struct ReplyState {
 /// Largest reply body. Enough for a useful peek without making the task struct heavy.
 const REPLY_MAX: usize = 512;
 
+/// Largest body a command inside the encrypted channel may answer with: the reply, less
+/// its two-byte status and the tag the seal adds. A body sized to `REPLY_MAX` itself
+/// would be cut off by `begin_reply` after sealing, tag and all.
+const INNER_MAX: usize = REPLY_MAX - 2 - ncry::TAG_LEN;
+
 /// Longest board name or version string an `Identify` reply carries; longer ones are cut.
 const IDENTIFY_STRING_MAX: usize = 31;
 
@@ -272,7 +284,9 @@ impl UsbTask {
             outbox_len: 0,
             reply: None,
             msc_rx: MscRx::new(),
-            session: None,
+            chan: ncry::Channel::new(),
+            ncry_rx: None,
+            host: crate::hostwallet::Desk::new(),
             drbg: None,
         })
     }
@@ -422,6 +436,12 @@ impl UsbTask {
                     // host a START frame for a message it never asked for.
                     self.reply = None;
                     self.outbox_len = 0;
+                    // And the encrypted session with it: whoever is on the bus after a
+                    // reset has not proved it is whoever negotiated the last one. What
+                    // that session was shown goes too, and a host question on the screen
+                    // ends -- the same rule as an upgrade offer.
+                    self.ncry_rx = None;
+                    self.end_session(true);
                 }
                 Event::Report => {
                     self.rx_count = self.rx_count.saturating_add(1);
@@ -539,6 +559,7 @@ impl UsbTask {
                 self.frames.reset();
                 self.frame_errors = self.frame_errors.saturating_add(1);
                 self.drop_transfer();
+                self.ncry_rx = None;
                 self.begin_reply(
                     Status::BadRequest,
                     &[matches!(e, FrameError::OutOfSequence { .. }) as u8],
@@ -563,7 +584,9 @@ impl UsbTask {
                     self.begin_reply(Status::NotNow, &[]);
                     return;
                 }
-                Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) if self.answer_pending() => {
+                Some(Opcode::UpgradeOffer | Opcode::UpgradePacked)
+                    if self.answer_pending() || self.host.pending() =>
+                {
                     // An image is already on the screen waiting for the person at the
                     // device, or has been approved and its marker published. A second
                     // offer replaces neither: the first would let a host clear a question
@@ -664,6 +687,23 @@ impl UsbTask {
                         }
                     }
                 }
+                Some(Opcode::NcryMsg)
+                    if msg.total as usize > catcard_usb::START_PAYLOAD
+                        && msg.total as usize <= ncry::RECORD_MAX =>
+                {
+                    // A sealed request longer than one frame -- a chunk of an upload. It
+                    // is gathered whole into a block of its own and opened only once it
+                    // is complete: nothing in it is used until the whole record has
+                    // authenticated. Bounded by `RECORD_MAX`, so the block is too.
+                    match crate::heap::take(ncry::RECORD_MAX) {
+                        Some(block) => self.ncry_rx = Some((block, 0)),
+                        None => {
+                            self.frames.reset();
+                            self.begin_reply(Status::Busy, &[]);
+                            return;
+                        }
+                    }
+                }
                 Some(_) if msg.total as usize > catcard_usb::START_PAYLOAD => {
                     // Only an image spans frames; every other request fits its START
                     // frame. A longer one would complete with no opcode in hand and
@@ -681,6 +721,29 @@ impl UsbTask {
                     return;
                 }
             }
+        }
+
+        // A sealed record spanning frames is gathered, and opened when it is whole.
+        if let Some((block, at)) = &mut self.ncry_rx {
+            let end = *at + payload.len();
+            match block.bytes().get_mut(*at..end) {
+                Some(dst) => {
+                    dst.copy_from_slice(payload);
+                    *at = end;
+                }
+                None => {
+                    self.ncry_rx = None;
+                    self.frames.reset();
+                    self.begin_reply(Status::BadRequest, &[]);
+                    return;
+                }
+            }
+            if progress.complete
+                && let Some((mut block, n)) = self.ncry_rx.take()
+            {
+                self.handle_ncry_record(&mut block.bytes()[..n]);
+            }
+            return;
         }
 
         // Image bytes go straight to staging as they arrive; nothing is buffered. The
@@ -838,6 +901,16 @@ impl UsbTask {
                 // the screen; until then this is simply not the time.
                 self.begin_reply(Status::NotNow, &[]);
             }
+            // Encrypted-channel only: in the clear these do not exist, as the debug ones
+            // do not exist inside it.
+            Some(
+                Opcode::HostAddresses
+                | Opcode::HostSignBegin
+                | Opcode::HostSignData
+                | Opcode::HostSignCommit
+                | Opcode::HostResult
+                | Opcode::HostAbort,
+            ) => self.begin_reply(Status::UnknownOpcode, &[]),
             Some(Opcode::NcryStart) => self.begin_ncry(progress.payload),
             Some(Opcode::NcryMsg) => self.handle_ncry_msg(progress.payload),
             Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) | None => self.finish_offer(),
@@ -868,73 +941,74 @@ impl UsbTask {
         match result {
             Ok((dev_pub, session)) => {
                 // A fresh handshake replaces any prior session outright, so a host that
-                // lost its keys can always start over.
-                self.session = Some(session);
+                // lost its keys can always start over -- and everything the old one was
+                // shown or had in hand goes with it.
+                self.end_session(false);
+                self.chan.install(session);
                 self.begin_reply(Status::Ok, &dev_pub);
             }
             Err(_) => {
-                self.session = None;
+                self.end_session(false);
                 self.begin_reply(Status::BadRequest, &[]);
             }
         }
     }
 
+    /// End the encrypted session, and everything bound to it.
+    ///
+    /// The channel's own per-session state (what the host was shown) is dropped by the
+    /// channel; the host-wallet desk drops what it held for that session.
+    fn end_session(&mut self, bus_reset: bool) {
+        self.chan.close();
+        self.host.session_ended(bus_reset);
+    }
+
+    /// A sealed request that fitted one frame: copied off the frame, then opened.
+    fn handle_ncry_msg(&mut self, payload: &[u8]) {
+        let mut buf = [0u8; catcard_usb::START_PAYLOAD];
+        let n = payload.len().min(buf.len());
+        buf[..n].copy_from_slice(&payload[..n]);
+        self.handle_ncry_record(&mut buf[..n]);
+        buf.zeroize();
+    }
+
     /// Open a sealed request, dispatch the command inside it, and seal the reply.
     ///
-    /// Any authentication failure tears the session down: a channel that has seen one
-    /// forged or corrupt record is not one to keep trusting, and the host can renegotiate.
-    fn handle_ncry_msg(&mut self, payload: &[u8]) {
-        if self.session.is_none() {
+    /// Any failure tears the session down: a channel that has seen one forged, corrupt or
+    /// wrongly sized record is not one to keep trusting, and the host can renegotiate.
+    fn handle_ncry_record(&mut self, record: &mut [u8]) {
+        if !self.chan.is_open() {
             // No channel to open it with. `NotNow`, not `BadRequest`: the host has to
             // send `NcryStart` first, and this says so without looking like a framing bug.
             self.begin_reply(Status::NotNow, &[]);
             return;
         }
-        // A record is ciphertext (which for a single-frame request is at most
-        // `START_PAYLOAD - TAG_LEN` bytes) followed by the tag. The inner plaintext needs
-        // at least a two-byte opcode.
-        if payload.len() < ncry::OVERHEAD + 2 || payload.len() > catcard_usb::START_PAYLOAD {
-            self.session = None;
-            self.begin_reply(Status::BadRequest, &[]);
-            return;
-        }
-        let ct_len = payload.len() - ncry::OVERHEAD;
-        let mut buf = [0u8; catcard_usb::START_PAYLOAD];
-        buf[..ct_len].copy_from_slice(&payload[..ct_len]);
-        let mut tag = [0u8; ncry::TAG_LEN];
-        tag.copy_from_slice(&payload[ct_len..]);
-
-        {
-            let session = self.session.as_mut().expect("checked above");
-            if session.open(&mut buf[..ct_len], &tag).is_err() {
-                self.session = None;
+        let plain = match self.chan.open_record(record) {
+            Ok(p) => p,
+            Err(_) => {
+                self.end_session(false);
                 self.begin_reply(Status::BadRequest, &[]);
                 return;
             }
-        }
+        };
 
         // The plaintext is an ordinary request: `[u16 opcode][payload]`.
-        let inner_op = u16::from_le_bytes([buf[0], buf[1]]);
+        let inner_op = u16::from_le_bytes([plain[0], plain[1]]);
         // Build the reply straight into the seal buffer: two bytes of status, then the
-        // body written in place, so no second full-size buffer sits on the USB stack.
-        let mut sealed = [0u8; 2 + REPLY_MAX + ncry::TAG_LEN];
-        let (status, n) =
-            self.inner_dispatch(inner_op, &buf[2..ct_len], &mut sealed[2..2 + REPLY_MAX]);
-        buf.zeroize();
+        // body written in place, then the tag -- all inside one reply's worth, so nothing
+        // `begin_reply` holds is cut off.
+        let mut sealed = [0u8; REPLY_MAX];
+        let (status, n) = self.inner_dispatch(inner_op, &plain[2..], &mut sealed[2..2 + INNER_MAX]);
+        plain.zeroize();
         sealed[..2].copy_from_slice(&(status as u16).to_le_bytes());
-        let plain_len = 2 + n;
-
-        let session = self.session.as_mut().expect("still open");
-        match session.seal(&mut sealed[..plain_len]) {
-            Ok(t) => {
-                sealed[plain_len..plain_len + ncry::TAG_LEN].copy_from_slice(&t);
-                self.begin_reply(Status::Ok, &sealed[..plain_len + ncry::TAG_LEN]);
-            }
+        match self.chan.seal_record(&mut sealed, 2 + n) {
+            Ok(len) => self.begin_reply(Status::Ok, &sealed[..len]),
             Err(_) => {
-                self.session = None;
+                self.end_session(false);
                 self.begin_reply(Status::BadRequest, &[]);
             }
         }
+        sealed.zeroize();
     }
 
     /// Handle a command that arrived inside the encrypted channel, writing its reply body
@@ -944,8 +1018,28 @@ impl UsbTask {
     /// round-trip check. The bulk upgrade opcodes and the bench debug ones are not
     /// reachable here -- an upgrade streams and is public, and the debug monitor is a
     /// bring-up crutch that gains nothing from a channel.
-    fn inner_dispatch(&self, opcode: u16, payload: &[u8], out: &mut [u8]) -> (Status, usize) {
+    fn inner_dispatch(&mut self, opcode: u16, payload: &[u8], out: &mut [u8]) -> (Status, usize) {
         match Opcode::from_u16(opcode) {
+            Some(
+                op @ (Opcode::HostAddresses
+                | Opcode::HostSignBegin
+                | Opcode::HostSignData
+                | Opcode::HostSignCommit
+                | Opcode::HostResult
+                | Opcode::HostAbort),
+            ) => {
+                if !self.chan.host_wallet_allowed() {
+                    return (Status::UnknownOpcode, 0);
+                }
+                let upgrade_busy = self.transferring() || self.answer_pending();
+                let cx = crate::hostwallet::Cx {
+                    session: self.chan.id(),
+                    exposed: self.chan.state().map_or(&[][..], |s| &s.exposed[..]),
+                    unlocked: self.unlocked,
+                    upgrade_busy,
+                };
+                self.host.dispatch(op, payload, out, &cx)
+            }
             Some(Opcode::Ping) => {
                 let n = payload.len().min(out.len());
                 out[..n].copy_from_slice(&payload[..n]);
@@ -1145,7 +1239,8 @@ impl UsbTask {
             catcard_usb::caps::DEBUG_MEM
         } else {
             0
-        } | catcard_usb::caps::NCRY;
+        } | catcard_usb::caps::NCRY
+            | catcard_usb::caps::HOST_WALLET;
         at += 1;
         for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
@@ -2067,6 +2162,56 @@ pub fn unlocked() {
 /// own domain. Until then, and in recovery where no pool exists, `NcryStart` is refused.
 pub fn install_drbg(drbg: HmacDrbg) {
     with_task(|t| t.drbg = Some(drbg));
+}
+
+/// Whether a computer's question (addresses, a signature) is waiting for the screen.
+pub fn host_waiting() -> bool {
+    with_task(|t| t.host.waiting()).unwrap_or(false)
+}
+
+/// Take the computer's question for the screen. It stays "on the screen" for the host
+/// until [`host_finish`].
+pub(crate) fn host_take() -> Option<crate::hostwallet::Taken> {
+    with_task(|t| t.host.take()).flatten()
+}
+
+/// Whether the question `ticket` is still wanted: on the screen, and its session open.
+pub(crate) fn host_alive(ticket: u32) -> bool {
+    with_task(|t| t.host.on_screen(ticket) && t.chan.is_current(ticket)).unwrap_or(false)
+}
+
+/// Hand the person's answer to `ticket` back for the host to fetch.
+pub(crate) fn host_finish(ticket: u32, outcome: crate::hostwallet::Outcome) {
+    with_task(|t| {
+        let open = t.chan.is_current(ticket);
+        t.host.finish(ticket, outcome, open);
+    });
+}
+
+/// Record what the session `ticket` was shown, replacing what it was shown before.
+/// False when that session has already ended.
+pub(crate) fn host_expose(ticket: u32, list: &[catcard_wallet::hostkeys::Exposed]) -> bool {
+    with_task(|t| match t.chan.state_mut(ticket) {
+        Some(st) => {
+            st.exposed.clear();
+            for e in list {
+                let _ = st.exposed.push(*e);
+            }
+            true
+        }
+        None => false,
+    })
+    .unwrap_or(false)
+}
+
+/// The wallet in force changed: what the open session was shown describes the old one.
+pub(crate) fn host_forget_wallet() {
+    with_task(|t| {
+        let id = t.chan.id();
+        if let Some(st) = t.chan.state_mut(id) {
+            st.exposed.clear();
+        }
+    });
 }
 
 /// An upgrade waiting to be approved at the screen.

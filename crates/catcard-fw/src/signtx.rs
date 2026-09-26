@@ -24,6 +24,7 @@ use catcard_wallet::signer;
 use outscript::psbt::Psbt;
 
 use crate::display;
+use crate::hostwallet::{HostBuf, HostOut, Outcome};
 use crate::menu::{self, Storage};
 use crate::ui::Ui;
 
@@ -61,6 +62,53 @@ impl SignDest<'static> {
         final_name: FINAL_NAME,
         offer_transports: true,
     };
+}
+
+/// Where a signed transaction goes: files on a card or the Virtual Disk (and from there
+/// the QR and NFC offers), or back to the computer that asked over USB.
+///
+/// The review in between is the same either way -- the same refusals, the same policy,
+/// the same screens. What the USB sink changes is only what happens around it: the keys
+/// that may sign are the ones the request listed ([`HostOut::keys`]), and once signed
+/// nothing asks where the result should go.
+pub(crate) enum Sink<'a, 'b> {
+    Files {
+        dest: &'a SignDest<'a>,
+        storage: Storage,
+    },
+    Host(&'a mut HostOut<'b>),
+}
+
+impl<'b> Sink<'_, 'b> {
+    /// The USB sink, if that is where this goes.
+    pub(crate) fn host(&mut self) -> Option<&mut HostOut<'b>> {
+        match self {
+            Sink::Host(out) => Some(out),
+            Sink::Files { .. } => None,
+        }
+    }
+
+    /// Stopped for a reason the computer should be told, when there is a computer.
+    pub(crate) fn refuse(&mut self, why: &'static str) {
+        if let Some(out) = self.host() {
+            out.refuse(why);
+        }
+    }
+
+    /// The person said no, when a computer is waiting to hear it.
+    pub(crate) fn decline(&mut self) {
+        if let Some(out) = self.host() {
+            out.decline();
+        }
+    }
+
+    /// The keys a USB request listed, or `None` when every key of ours may sign.
+    pub(crate) fn listed(&self) -> Option<&'b [catcard_wallet::hostkeys::KeyPath]> {
+        match self {
+            Sink::Host(out) => Some(out.keys),
+            Sink::Files { .. } => None,
+        }
+    }
 }
 
 /// Outputs on one page of the review, change included.
@@ -494,7 +542,18 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     crate::catlog!("sign: {} bytes from {}", len, path.as_str());
 
-    review_and_sign(gate, login, ui, buf, spare, len, &SignDest::SINGLE, storage);
+    review_and_sign(
+        gate,
+        login,
+        ui,
+        buf,
+        spare,
+        len,
+        &mut Sink::Files {
+            dest: &SignDest::SINGLE,
+            storage,
+        },
+    );
 }
 
 /// A path without its leading `/`, for a screen that names a file the card writes.
@@ -647,7 +706,18 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
             final_name,
             offer_transports: false,
         };
-        review_and_sign(gate, login, ui, buf, spare, len, &dest, storage);
+        review_and_sign(
+            gate,
+            login,
+            ui,
+            buf,
+            spare,
+            len,
+            &mut Sink::Files {
+                dest: &dest,
+                storage,
+            },
+        );
         reviewed += 1;
     }
 
@@ -668,7 +738,8 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 /// transaction read off a card and one caught as a few hundred QR codes get the same
 /// review, the same refusals and the same signatures. `spare` is the second working
 /// buffer -- every signature rewrites the whole container, so the two alternate.
-#[allow(clippy::too_many_arguments)]
+///
+/// `sink` says where the result goes; see [`Sink`].
 pub(crate) fn review_and_sign(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -676,8 +747,7 @@ pub(crate) fn review_and_sign(
     buf: &mut [u8],
     spare: &mut [u8],
     len: usize,
-    dest: &SignDest<'_>,
-    storage: Storage,
+    sink: &mut Sink<'_, '_>,
 ) {
     const HEAD: &str = "Sign";
 
@@ -691,6 +761,7 @@ pub(crate) fn review_and_sign(
     let (buf, len): (&mut [u8], usize) = if psbtv2::is_v2(&buf[..len]) {
         let at = (len + 3) & !3;
         if at >= buf.len() {
+            sink.refuse("too big for this board");
             menu::message(
                 ui.panel,
                 HEAD,
@@ -713,6 +784,7 @@ pub(crate) fn review_and_sign(
             }
             Err(e) => {
                 crate::catlog!("sign: psbt v2 refused: {:?}", e);
+                sink.refuse(v2_error_text(e));
                 menu::message(ui.panel, HEAD, v2_error_text(e), "any key to go back");
                 menu::wait_for_any_key(ui);
                 return;
@@ -723,6 +795,7 @@ pub(crate) fn review_and_sign(
     };
 
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
+        sink.refuse("the wallet could not be opened");
         return;
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
@@ -733,6 +806,7 @@ pub(crate) fn review_and_sign(
         Ok(p) => p,
         Err(e) => {
             crate::catlog!("sign: psbt refused: {:?}", e);
+            sink.refuse(parse_error_text(e));
             menu::message(ui.panel, HEAD, parse_error_text(e), "any key to go back");
             menu::wait_for_any_key(ui);
             return;
@@ -752,8 +826,8 @@ pub(crate) fn review_and_sign(
             buf,
             spare,
             len,
-            dest,
-            storage,
+            original_v2,
+            sink,
         );
     }
 
@@ -790,8 +864,12 @@ pub(crate) fn review_and_sign(
         catcard_wallet::wif::WifKey,
         { catcard_settings::wifs::MAX_KEYS },
     > = heapless::Vec::new();
+    // A computer's request signs with the keys it listed, which are all derivation
+    // paths; a stored WIF key has none, so it is not loaded for one.
     #[cfg(not(feature = "board-mk3"))]
-    crate::wifstore::load_keys(gate, login, ui.panel, &mut wif_keys);
+    if sink.listed().is_none() {
+        crate::wifstore::load_keys(gate, login, ui.panel, &mut wif_keys);
+    }
     #[cfg(not(feature = "board-mk3"))]
     let mut bare_keys: heapless::Vec<[u8; 33], { catcard_settings::wifs::MAX_KEYS }> =
         heapless::Vec::new();
@@ -839,6 +917,7 @@ pub(crate) fn review_and_sign(
         Ok(s) => s,
         Err(r) => {
             crate::catlog!("sign: refused: {:?}", r);
+            sink.refuse(refusal_text(r));
             menu::message(ui.panel, HEAD, refusal_text(r), "any key to go back");
             menu::wait_for_any_key(ui);
             return;
@@ -850,6 +929,7 @@ pub(crate) fn review_and_sign(
     // screen limit -- there is no screen limit any more.
     if summary.outputs > buf.len() / MIN_OUTPUT_BYTES {
         crate::catlog!("sign: refused: {} outputs", summary.outputs);
+        sink.refuse("too many outputs for memory");
         menu::message(
             ui.panel,
             HEAD,
@@ -862,14 +942,46 @@ pub(crate) fn review_and_sign(
     // The Single-Signer Spending Policy, where one is in force: judged before anything
     // is shown, refused with the reason, and the refusal recorded. See `crate::policy`.
     if !crate::policy::enforce(gate, login, ui, &psbt, &owner, &summary) {
+        sink.refuse("refused by the spending policy");
+        return;
+    }
+    // A computer's request names the keys it wants. One that no input names as ours is
+    // refused before the review: the host is asking for a signature this transaction has
+    // no place for, and signing around it would hand back something it did not expect.
+    if let Some(listed) = sink.listed()
+        && let Some(i) = crate::keywork::run(|kw| {
+            psbtview::unmatched_key(&psbt, &master, fingerprint, listed, kw)
+        })
+    {
+        crate::catlog!("sign: listed key {} matches no input", i);
+        sink.refuse("a listed key matches no input");
+        menu::message(
+            ui.panel,
+            HEAD,
+            "a key it lists signs no input",
+            "any key to go back",
+        );
+        menu::wait_for_any_key(ui);
         return;
     }
     let mut ours = [0usize; MAX_INPUTS];
+    // Inputs ours only through a key the request did not list: left unsigned, and said.
+    let mut unlisted = 0usize;
     // `mut` because the WIF pass below extends the set; on the mk3 that pass is compiled
     // out, so nothing there mutates it.
     #[cfg_attr(feature = "board-mk3", allow(unused_mut))]
-    let mut signable =
-        crate::keywork::run(|kw| psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw));
+    let mut signable = match sink.listed() {
+        Some(listed) => {
+            let split = crate::keywork::run(|kw| {
+                psbtview::our_inputs_listed(&psbt, &master, fingerprint, listed, &mut ours, kw)
+            });
+            unlisted = split.unlisted;
+            split.signable
+        }
+        None => crate::keywork::run(|kw| {
+            psbtview::our_inputs(&psbt, &master, fingerprint, &mut ours, kw)
+        }),
+    };
 
     // Inputs a stored WIF key can sign, added to the set the review reports and the loop
     // signs. Only those a seed key does not already cover: an input both can sign is signed
@@ -895,6 +1007,7 @@ pub(crate) fn review_and_sign(
     if summary.odd_count > 0 {
         drop(busy);
         if !warn_odd_sighash(ui, &summary) {
+            sink.decline();
             menu::message(ui.panel, HEAD, "not signed", "any key to go back");
             menu::wait_for_any_key(ui);
             return;
@@ -919,9 +1032,17 @@ pub(crate) fn review_and_sign(
             )
         })
     };
-    if !review(ui, &psbt, &summary, signable, &mut fill) {
+    if !review(ui, &psbt, &summary, signable, unlisted, &mut fill) {
+        sink.decline();
         menu::message(ui.panel, HEAD, "not signed", "any key to go back");
         menu::wait_for_any_key(ui);
+        return;
+    }
+    // The computer that asked may have gone while the review was up -- unplugged, or a
+    // new session in its place. Nothing is signed for an answer nobody can collect.
+    if let Some(out) = sink.host()
+        && !out.wanted()
+    {
         return;
     }
 
@@ -937,8 +1058,18 @@ pub(crate) fn review_and_sign(
             Err(_) => break,
         };
         let mut done = false;
-        match crate::keywork::run(|kw| {
-            signer::sign_input_under(&psbt, index, &master, fingerprint, sighash, into, kw)
+        match crate::keywork::run(|kw| match sink.listed() {
+            Some(listed) => signer::sign_input_listed(
+                &psbt,
+                index,
+                &master,
+                fingerprint,
+                sighash,
+                listed,
+                into,
+                kw,
+            ),
+            None => signer::sign_input_under(&psbt, index, &master, fingerprint, sighash, into, kw),
         }) {
             Ok(n) => {
                 core::mem::swap(&mut from, &mut into);
@@ -985,6 +1116,7 @@ pub(crate) fn review_and_sign(
     drop(wif_keys);
 
     if signed == 0 {
+        sink.refuse("nothing could be signed");
         menu::message(
             ui.panel,
             HEAD,
@@ -994,6 +1126,19 @@ pub(crate) fn review_and_sign(
         menu::wait_for_any_key(ui);
         return;
     }
+
+    // Back to the computer: no files, no QR, no tag, and no question about which.
+    let (dest, storage) = match sink {
+        Sink::Host(out) => {
+            if let Err(why) = hand_to_host(out, original_v2, &from[..at], into, true) {
+                crate::catlog!("sign: result not handed back: {}", why);
+                out.refuse(why);
+            }
+            crate::catlog!("sign: {} of {} inputs, for the computer", signed, signable);
+            return;
+        }
+        Sink::Files { dest, storage } => (*dest, *storage),
+    };
 
     let mut wait: heapless::String<24> = heapless::String::new();
     let _ = core::fmt::Write::write_fmt(&mut wait, format_args!("writing to {}", storage.medium()));
@@ -1127,6 +1272,124 @@ pub(crate) fn review_and_sign(
         }
     }
     menu::wait_for_any_key(ui);
+}
+
+/// Hand a signed PSBT back to the computer that asked: `signed` is the v0 view, merged
+/// back into `original_v2` when one arrived, with the finalised network transaction when
+/// `finish` is set and every input is complete. `scratch` is the free working buffer.
+pub(crate) fn hand_to_host(
+    out: &mut HostOut<'_>,
+    original_v2: Option<&[u8]>,
+    signed: &[u8],
+    scratch: &mut [u8],
+    finish: bool,
+) -> Result<(), &'static str> {
+    use catcard_usb::hostwallet as wire;
+    use core::fmt::Write as _;
+
+    // The transaction first, at the front of the scratch; then, for a v2 source, the v2
+    // container after it. `finalise` uses the whole of what it is given, so it goes first.
+    let tx_len = if finish {
+        finalise(signed, scratch).unwrap_or(0)
+    } else {
+        0
+    };
+    let at = (tx_len + 3) & !3;
+    if at > scratch.len() {
+        return Err("result too large for this board");
+    }
+    let (tx, rest) = scratch.split_at_mut(at);
+    let tx = &tx[..tx_len];
+    let (version, psbt): (u8, &[u8]) = match original_v2 {
+        Some(original) => {
+            let n = write_back_v2(original, signed, rest)?;
+            (2, &rest[..n])
+        }
+        None => (0, signed),
+    };
+    let needs = Psbt::parse(signed)
+        .map(|p| psbtview::more_signatures_needed(&p))
+        .unwrap_or(0);
+    out.note.clear();
+    let _ = if tx_len > 0 {
+        write!(out.note, "ready to broadcast")
+    } else if needs > 0 {
+        write!(out.note, "needs {needs} more signature(s)")
+    } else {
+        write!(out.note, "partly signed")
+    };
+    let room = out.room(wire::bitcoin_len(psbt.len(), tx.len()))?;
+    let n =
+        wire::write_bitcoin(room, version, psbt, tx).map_err(|_| "could not encode the result")?;
+    out.wrote(n);
+    Ok(())
+}
+
+/// A computer's Bitcoin sign request, from the memory it was uploaded into.
+///
+/// The transaction sits at `tx_at` in `held`, `tx_len` bytes of it. On a PSRAM board the
+/// lease is laid out the way the card path lays out its own -- two alternating signing
+/// buffers -- with the last quarter kept for the result, which is what the host then
+/// pages out of the same lease. On the mk3 the transaction is copied into the static
+/// signing buffers and the upload's heap block given back, and the result gets a block of
+/// its own, sized when it is known.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn host_sign(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    held: HostBuf,
+    tx_at: usize,
+    tx_len: usize,
+    keys: &[catcard_wallet::hostkeys::KeyPath],
+    ticket: u32,
+) -> Outcome {
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        let HostBuf::Psram(mut lease) = held else {
+            return Outcome::Refused("no memory for this");
+        };
+        let all = lease.bytes();
+        let total = all.len();
+        all.copy_within(tx_at..tx_at + tx_len, 0);
+        let work = total - crate::hostwallet::result_len(total);
+        let (area, result) = all.split_at_mut(work);
+        let half = (work / 2) & !3;
+        let (buf, spare) = area.split_at_mut(half);
+        if tx_len > buf.len() {
+            return Outcome::Refused("too big for this board");
+        }
+        let len = match as_psbt_bytes(buf, tx_len, spare) {
+            Ok(n) => n,
+            Err(why) => return Outcome::Refused(why),
+        };
+        let mut out = HostOut::new(Some(result), keys, ticket);
+        review_and_sign(gate, login, ui, buf, spare, len, &mut Sink::Host(&mut out));
+        let done = out.finish();
+        crate::hostwallet::outcome_of(done, Some(HostBuf::Psram(lease)), work)
+    }
+    #[cfg(feature = "board-mk3")]
+    {
+        let HostBuf::Heap(mut block) = held;
+        let mut work = match Workspace::take() {
+            Ok(w) => w,
+            Err(why) => return Outcome::Refused(why),
+        };
+        let (buf, spare) = work.split();
+        if tx_len > buf.len() {
+            return Outcome::Refused("too big for this board");
+        }
+        buf[..tx_len].copy_from_slice(&block.bytes()[tx_at..tx_at + tx_len]);
+        // Given back before the review: the result will want heap of its own.
+        drop(block);
+        let len = match as_psbt_bytes(buf, tx_len, spare) {
+            Ok(n) => n,
+            Err(why) => return Outcome::Refused(why),
+        };
+        let mut out = HostOut::new(None, keys, ticket);
+        review_and_sign(gate, login, ui, buf, spare, len, &mut Sink::Host(&mut out));
+        crate::hostwallet::outcome_of(out.finish(), None, 0)
+    }
 }
 
 /// The red message screen where the build has one (`menu::alarm` exists on the
@@ -1292,6 +1555,7 @@ fn review(
     psbt: &Psbt<'_>,
     summary: &psbtview::Summary,
     signable: usize,
+    unlisted: usize,
     fill: &mut dyn FnMut(usize, &mut [psbtview::Destination]) -> usize,
 ) -> bool {
     let mut page = [psbtview::Destination::BLANK; PAGE];
@@ -1305,7 +1569,16 @@ fn review(
         if got == 0 && !last {
             return false;
         }
-        if !review_page(ui, psbt, summary, signable, &page[..got], start, last) {
+        if !review_page(
+            ui,
+            psbt,
+            summary,
+            signable,
+            unlisted,
+            &page[..got],
+            start,
+            last,
+        ) {
             return false;
         }
         if last {
@@ -1323,6 +1596,7 @@ fn review_page(
     psbt: &Psbt<'_>,
     summary: &psbtview::Summary,
     signable: usize,
+    unlisted: usize,
     shown: &[psbtview::Destination],
     start: usize,
     last: bool,
@@ -1391,6 +1665,15 @@ fn review_page(
         let mut line = Text::new();
         let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
         say(&mut texts, &mut small, &mut wrapped, line, true, false);
+
+        // A computer's request signs only the keys it listed. Inputs this wallet could
+        // sign with another key are left alone, and the review says how many, so a
+        // transaction that comes back short of a signature is not a surprise.
+        if unlisted > 0 {
+            let mut line = Text::new();
+            let _ = write!(line, "{unlisted} more of ours NOT signed: not asked for");
+            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+        }
 
         // A bare P2PK input has no address to show, so the review says what it is.
         // Source: hw-reference/firmware-features.md §3 (P2PK signable) [C]

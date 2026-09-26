@@ -1255,6 +1255,20 @@ pub fn run(session: Session<'_>) -> ! {
             redraw = true;
         }
 
+        // A computer's question -- addresses, a signature -- takes the screen the same way,
+        // under the same ordering rule: checked after the keys were read, so a key read
+        // before the question arrived is dropped rather than reaching the menu under it.
+        // It is answered in a flow of its own, which returns here when the person has.
+        if !showing_offer && receiving.is_none() && usbtask::host_waiting() {
+            keys.clear();
+            if screen == Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            crate::hostwallet::serve(gate, login, &mut ui);
+            redraw = true;
+            continue;
+        }
+
         if let Some(a) = usbtask::pending() {
             if !showing_offer {
                 if screen == Screen::Colours {

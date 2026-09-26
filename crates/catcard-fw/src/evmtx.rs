@@ -235,3 +235,135 @@ pub(crate) fn screen(ui: &mut crate::ui::Ui<'_>, bytes: &[u8]) {
     describe(&tx, &mut review);
     review.show(ui, HEAD, &["Signing is not built yet"]);
 }
+
+/// A computer's EVM sign request, uploaded over USB, signed with the one key it listed.
+///
+/// The screen is [`describe`]'s, the same one a scanned transaction gets, with one row
+/// more at the top: the address that signs, derived from the listed key before anything
+/// is shown, because an EVM transaction names no sender and the signer is whoever signs.
+/// The signature is RFC 6979 over Keccak-256 of the bytes exactly as they arrived
+/// ([`catcard_evm::Tx::signing_hash`]), and the signed form appends it without rebuilding
+/// anything ([`catcard_evm::sign::encode_signed`]).
+///
+/// The upload sits at `tx_at` in the PSRAM lease `held`; the signed transaction and the
+/// result are written into the lease past it, and the host pages the result out of there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn host_sign(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    mut held: crate::hostwallet::HostBuf,
+    tx_at: usize,
+    tx_len: usize,
+    key: &catcard_wallet::hostkeys::KeyPath,
+    ticket: u32,
+) -> crate::hostwallet::Outcome {
+    use crate::hostwallet::Outcome;
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::chain::{self, Encoding, address as caddr};
+    const HEAD: &str = "EVM transaction";
+
+    let refuse = |ui: &mut crate::ui::Ui<'_>, why: &'static str| {
+        crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        Outcome::Refused(why)
+    };
+
+    let base = (tx_at + tx_len + 3) & !3;
+    let done: Result<(usize, usize), Outcome> = 'work: {
+        let bytes = held.bytes();
+        if base >= bytes.len() {
+            break 'work Err(refuse(ui, "too big for this board"));
+        }
+        let (head, rest) = bytes.split_at_mut(base);
+        let raw: &[u8] = &head[tx_at..tx_at + tx_len];
+        let Ok(tx) = catcard_evm::parse(raw) else {
+            break 'work Err(refuse(ui, "this is not a transaction"));
+        };
+        if tx.signed() {
+            break 'work Err(refuse(ui, "it is already signed"));
+        }
+
+        let Some(master) = crate::menu::unlock_master(gate, login, ui, HEAD) else {
+            break 'work Err(Outcome::Refused("the wallet could not be opened"));
+        };
+        let steps = key.steps();
+        let public = crate::keywork::run(|kw| {
+            let mut here = master.clone();
+            for &s in steps {
+                here = here.derive_child(ChildNumber(s), kw).ok()?;
+            }
+            Some(here.public_key(kw))
+        });
+        let Some(public) = public else {
+            break 'work Err(refuse(ui, "the key could not be derived"));
+        };
+        let mut addr = [0u8; caddr::MAX_LEN];
+        let who = caddr::from_secp256k1(
+            &chain::ETHEREUM,
+            Encoding::Evm,
+            crate::prefs::network(),
+            &public,
+            &mut addr,
+        )
+        .ok()
+        .and_then(|n| core::str::from_utf8(&addr[..n]).ok())
+        .unwrap_or("(no address)");
+
+        let Some(mut review) = Review::new() else {
+            break 'work Err(refuse(ui, "not enough memory"));
+        };
+        review.address("signed by", who);
+        describe(&tx, &mut review);
+        if review.show(ui, HEAD, &["Sign it"]).is_none() {
+            break 'work Err(Outcome::Declined);
+        }
+        drop(review);
+        if !crate::usbtask::host_alive(ticket) {
+            break 'work Err(Outcome::Declined);
+        }
+
+        // Scratch for the signing bytes, room for the signed transaction, then the result.
+        let scratch_len = (tx_len + 1 + 3) & !3;
+        let signed_len = (tx_len + 1 + catcard_evm::sign::OVERHEAD + 8 + 3) & !3;
+        if scratch_len + signed_len >= rest.len() {
+            break 'work Err(refuse(ui, "too big for this board"));
+        }
+        let (scratch, rest) = rest.split_at_mut(scratch_len);
+        let (signed, result) = rest.split_at_mut(signed_len);
+        let Ok(hash) = tx.signing_hash(scratch) else {
+            break 'work Err(refuse(ui, "could not hash it"));
+        };
+        let sig = crate::keywork::run(|kw| {
+            let mut here = master.clone();
+            for &s in steps {
+                here = here.derive_child(ChildNumber(s), kw).ok()?;
+            }
+            let k = outscript::crypto::secp256k1::SecpPrivateKey::from_bytes(here.secret_bytes())
+                .ok()?;
+            Some(k.sign_recoverable(&hash))
+        });
+        drop(master);
+        let Some((r, s, recid)) = sig else {
+            break 'work Err(refuse(ui, "could not sign"));
+        };
+        let n = match catcard_evm::sign::encode_signed(&tx, &r, &s, recid, signed) {
+            Ok(n) => n,
+            Err(_) => break 'work Err(refuse(ui, "could not sign")),
+        };
+        let m = match catcard_usb::hostwallet::write_evm(result, &signed[..n]) {
+            Ok(m) => m,
+            Err(_) => break 'work Err(refuse(ui, "result too large")),
+        };
+        crate::catlog!("evm: signed {} bytes for the computer", n);
+        Ok((base + scratch_len + signed_len, m))
+    };
+    match done {
+        Ok((off, len)) => Outcome::Ready {
+            buf: held,
+            off,
+            len,
+        },
+        Err(o) => o,
+    }
+}

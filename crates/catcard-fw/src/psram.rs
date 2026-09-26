@@ -51,6 +51,9 @@ pub enum Use {
     Soak = 4,
     /// A settings image staged by the host is being checked and written back.
     Restore = 5,
+    /// A computer's sign request: uploaded into it, signed out of it, and the result
+    /// held in it until the computer fetches it.
+    Host = 6,
 }
 
 impl Use {
@@ -62,6 +65,7 @@ impl Use {
             Use::AnimatedQr => "reading a QR",
             Use::Soak => "the memory test",
             Use::Restore => "restoring settings",
+            Use::Host => "a computer's request",
         }
     }
 
@@ -72,6 +76,7 @@ impl Use {
             3 => Use::AnimatedQr,
             4 => Use::Soak,
             5 => Use::Restore,
+            6 => Use::Host,
             _ => return None,
         })
     }
@@ -100,6 +105,7 @@ impl Unavailable {
             Unavailable::Busy(Use::AnimatedQr) => "busy: reading a QR",
             Unavailable::Busy(Use::Soak) => "busy: the memory test",
             Unavailable::Busy(Use::Restore) => "busy: restoring settings",
+            Unavailable::Busy(Use::Host) => "busy: a computer's request",
         }
     }
 }

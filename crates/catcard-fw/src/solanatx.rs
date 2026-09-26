@@ -1011,3 +1011,140 @@ pub(crate) fn sign_request(
         req.address,
     );
 }
+
+/// A computer's Solana sign request, uploaded over USB, signed with exactly the keys it
+/// listed.
+///
+/// Each listed key is derived first -- public keys only -- and has to be one of the
+/// transaction's signers, or the request is refused before the review: a key the
+/// transaction has no slot for is a host and this device disagreeing about whose
+/// signature this is. The review is [`describe`]'s, the listed keys marked as this
+/// device's own. Signing is a second seed stretch, as it is for a scanned transaction.
+///
+/// The upload sits at `tx_at` in the PSRAM lease `held`; the transaction with its
+/// signatures in place, and the result around it, are written into the lease past it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn host_sign(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    mut held: crate::hostwallet::HostBuf,
+    tx_at: usize,
+    tx_len: usize,
+    keys: &[catcard_wallet::hostkeys::KeyPath],
+    ticket: u32,
+) -> crate::hostwallet::Outcome {
+    use crate::hostwallet::Outcome;
+    use catcard_usb::hostwallet as wire;
+    const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
+
+    let refuse = |ui: &mut crate::ui::Ui<'_>, why: &'static str| {
+        crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        Outcome::Refused(why)
+    };
+
+    // SLIP-0010 takes the indices without their hardened bit, and every step is hardened
+    // (the USB task refused a request that was not).
+    let mut paths: heapless::Vec<heapless::Vec<u32, 8>, { wire::MAX_KEYS }> = heapless::Vec::new();
+    for k in keys {
+        let _ = paths.push(k.steps().iter().map(|s| s & !H).collect());
+    }
+
+    let base = (tx_at + tx_len + 3) & !3;
+    let done: Result<(usize, usize), Outcome> = 'work: {
+        let bytes = held.bytes();
+        if base >= bytes.len() {
+            break 'work Err(refuse(ui, "too big for this board"));
+        }
+        let (head, rest) = bytes.split_at_mut(base);
+        let raw: &[u8] = &head[tx_at..tx_at + tx_len];
+        let tx = match catcard_solana::parse(raw).or_else(|_| catcard_solana::parse_message(raw)) {
+            Ok(tx) => tx,
+            Err(why) => break 'work Err(refuse(ui, why.why())),
+        };
+
+        // The listed keys, public only.
+        let got = crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+            let mut out: heapless::Vec<[u8; 32], { wire::MAX_KEYS }> = heapless::Vec::new();
+            for p in &paths {
+                let node = catcard_wallet::slip10::derive(seed, p, kw)?;
+                let _ = out.push(node.public_key(kw));
+            }
+            Some(out)
+        });
+        let mine = match got {
+            Ok(m) => m,
+            Err(why) => break 'work Err(refuse(ui, why)),
+        };
+        if mine.iter().any(|k| tx.signer_index(k).is_none()) {
+            break 'work Err(refuse(ui, "a listed key is not a signer of it"));
+        }
+
+        let Some(mut review) = Review::new() else {
+            break 'work Err(refuse(ui, "not enough memory"));
+        };
+        describe(&tx, &mine, &mut review);
+        if review
+            .show(ui, "Solana transaction", &["Sign it"])
+            .is_none()
+        {
+            break 'work Err(Outcome::Declined);
+        }
+        drop(review);
+        if !crate::usbtask::host_alive(ticket) {
+            break 'work Err(Outcome::Declined);
+        }
+
+        // The transaction with its empty slots, in the lease past the upload.
+        let Some(n) = tx.to_transaction(rest) else {
+            break 'work Err(refuse(ui, "too big to sign"));
+        };
+        let signatures = {
+            let current = match catcard_solana::parse(&rest[..n]) {
+                Ok(c) => c,
+                Err(why) => break 'work Err(refuse(ui, why.why())),
+            };
+            let message = current.message();
+            let got = crate::menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+                let mut out: heapless::Vec<wire::SolanaSignature, { wire::MAX_KEYS }> =
+                    heapless::Vec::new();
+                for p in &paths {
+                    let node = catcard_wallet::slip10::derive(seed, p, kw)?;
+                    let slot = current.signer_index(&node.public_key(kw))?;
+                    let sig = outscript::crypto::ed25519::sign(node.secret(), message);
+                    let _ = out.push((slot as u8, sig));
+                }
+                Some(out)
+            });
+            match got {
+                Ok(s) => s,
+                Err(why) => break 'work Err(refuse(ui, why)),
+            }
+        };
+        for (slot, sig) in &signatures {
+            if !catcard_solana::place_signature(&mut rest[..n], usize::from(*slot), sig) {
+                break 'work Err(refuse(ui, "no slot for it"));
+            }
+        }
+        crate::catlog!("solana: {} signature(s) for the computer", signatures.len());
+
+        let at = (n + 3) & !3;
+        let Some((tx_part, result)) = rest.split_at_mut_checked(at) else {
+            break 'work Err(refuse(ui, "result too large"));
+        };
+        let m = match wire::write_solana(result, &signatures, &tx_part[..n]) {
+            Ok(m) => m,
+            Err(_) => break 'work Err(refuse(ui, "result too large")),
+        };
+        Ok((base + at, m))
+    };
+    match done {
+        Ok((off, len)) => Outcome::Ready {
+            buf: held,
+            off,
+            len,
+        },
+        Err(o) => o,
+    }
+}

@@ -101,6 +101,8 @@ pub(crate) fn forget() {
         (*core::ptr::addr_of_mut!(ACCOUNTS)).clear();
         *core::ptr::addr_of_mut!(FINGERPRINT) = None;
     }
+    // A computer shown the old wallet's accounts may not sign with the new one's keys.
+    crate::usbtask::host_forget_wallet();
 }
 
 /// The cached account key at `m/{purpose}h/{coin}h/{account}h`, if this session has it.
