@@ -53,13 +53,13 @@ shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backu
 | `Login` → `Login countdown` | `Login Settings` → `Login Countdown` (`lgto`) | 🔀 stored as our own `cat_lgto` (minutes), same 5 min–28 day range; a 10 s sample runs before it is saved |
 | `Login` → `Kill key` (release builds) | `Login Settings` → `Kill Key` (`kbtn`) | 🔀 own key `cat_kbtn`; a digit, armed only after a test login shows the PIN lacks it; fast wipe `[I]` |
 | `Login` → `MicroSD 2FA` (release builds) | `Login Settings` → `MicroSD 2FA` (`sd2fa`) | 🔀 own key `cat_sd2fa` and card file `catcard.2fa`; a token read back before it is enrolled |
-| — | `Trick PINs` | blocked: gate 22's slot layout is not in the reference (HARDWARE-OPEN-ITEMS) |
+| `Login` → `Trick PINs` (mk4 and later) | `Login Settings` → `Trick PINs` (§TP) | 🔀 stock's tree (below): ‹each trick›, `Add New Trick`, `Add If Wrong`, `Delete All`; per trick `Activate Wallet`, `Change PIN`, `Hide Trick`, `Delete Trick`. The list names a trick by slot, never by PIN. Delta Mode, Countdown & Brick and Add If Wrong are explained and refused (HARDWARE-OPEN-ITEMS) |
 | `Spending Policy` → `Single-Signer` → `Edit Policy...`, `Word Check`, `Allow Notes` (Q1), `Related Keys`, `Last Violation`, `Remove Policy`, `Test Drive`, `ACTIVATE` | `Advanced/Tools` → `Spending Policy` → `Single-Signer` → the same (§SP1) | 🔀 a setting rather than a tool, beside Multisig; root wallet only, since the policy lives in the stored wallet's file. Stock's rows in stock's order; the enable story first. Own key `cat_sssp`, one JSON object (§"Spending Policy and hobbled mode" below) |
 | `Spending Policy` → `Single-Signer` → `Edit Policy...` → `Max Magnitude`, `Limit Velocity`, `Whitelist Addresses` → `Scan QR` (Q1) / `Import from File` / ‹each address› / `Clear Whitelist` | `SpendingPolicyMenu` (§SP-POL) | 🔀 stock's rows; the magnitude is asked as whole BTC then satoshis. The same screens edit CCC's policy |
 | — | `SpendingPolicyMenu` → `Web 2FA`, `↳ Test 2FA`, `↳ Enroll More` | ➖ left out: Web 2FA relies on Coinkite's closed coldcard.com service. A policy stock enrolled in it is kept as it is and never co-signs here |
 | `Spending Policy` → `Co-Sign Multisig (CCC)` (no key C yet) | the same, enable flow (§SP2) | ✅ stock's story, then key C: `New 12 words` (the new-seed generator, words shown and quizzed), `Import 12 words`, `Import 24 words`, `From Seed Vault` (when it has entries). Stored under stock's own `ccc` key in stock's exact shape (§"Coldcard Co-Sign (CCC)" below). Root wallet only, as stock's `is_not_tmp` |
 | `Spending Policy` → `Co-Sign Multisig (CCC)` → `[XFP] Co-Signing`, `Last Violation`, `Spending Policy`, `Export CCC XPUBs`, ‹each wallet key C is in› `M/N: name`, `Build 2-of-N`, `Load Key C`, `Remove CCC` | `CCCConfigMenu` (§SP2) | ✅ stock's rows in stock's order, behind all of key C's words (three wrong phrases in a session restart the device); a wallet row opens that wallet's own Multisig menu. `Export CCC XPUBs` is Export XPUB's `ccxp-{C_XFP}.json` for key C (account asked; card, Virtual Disk, BBQr / BC-UR on the Q1). `Build 2-of-N` is Create Airgapped with key A and key C added and M fixed at 2 |
-| `Login` → `Calculator login` (Q1) | `Login Settings` → `Calculator Login` (`calc`) | 🔀 own key `cat_calc`; on only after a test login through the calculator screen. The PIN convention is ours (below) -- the reference says "enter PIN as a formula" and no more |
+| `Login` → `Calculator login` (Q1) | `Login Settings` → `Calculator Login` (`calc`) | 🔀 own key `cat_calc`; on only after a test login through the calculator screen. Stock's PIN convention (below) |
 
 Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
 out** (the `dev` feature, on by default; `SHIP=1` drops it): no bench unit can lose its seed
@@ -183,7 +183,7 @@ silent, each marked `[I]` in the code:
   of the last allowed spend), `words`, `notes`, `okeys`, `active`, `addrs` (at most 25, the
   bound stock gives its whitelist), `viol` (the last refusal). A value under the key that
   will not read is **damaged**, never "off": the device is hobbled and signs nothing until
-  the unlock code takes it out. The engine and every bound are host-tested in
+  the unlock PIN takes it out. The engine and every bound are host-tested in
   `catcard-settings::policy`.
 - **Enforcement at signing** (`policy::enforce`, before the review). Magnitude compares
   what leaves the wallet, change excluded (the review's `Sending` figure). Whitelist means
@@ -207,20 +207,17 @@ silent, each marked `[I]` in the code:
   Under the menus, `settings::save_wallet` **refuses every wallet-settings key** while
   hobbled except the policy's own object and a file's identity keys, so a row the filter
   missed (Notes' edit screens, the WIF store's inner rows) still cannot change anything.
-- **The unlock code is CatCard's own mechanism.** Stock's escape is a gate-22 trick PIN,
-  whose slot layout the reference does not give (HARDWARE-OPEN-ITEMS); this will move to
-  gate 22 when it is known. Ours: a code of the PIN's own shape (`prefix-suffix`, four to
-  twelve digits), chosen at `ACTIVATE`, kept as PBKDF2-HMAC-SHA256 (50 000 rounds, random
-  16-byte salt) under `cat_sssp_unlock` in the pre-login blob. At the PIN prompt -- the pad
-  or the Q1 calculator -- the typed halves are checked against it **before** gate 18: a
-  match says nothing, gives a fresh prompt for the main PIN, and the session boots
-  un-hobbled with the policy suspended (`Settings → Spending Policy` then offers
-  `Remove Policy`); anything else is the PIN attempt it looks like, so a guess burns one of
-  the thirteen as a trick-PIN guess does. The code is probed against the bootloader at
-  enrolment so it cannot be the main PIN (one attempt spent, restored by the next login,
-  as Test login does), and matches at most once per boot as a second guard. Activation
-  **without** a code is allowed after stock's warning and a second confirmation: no way
-  back but destroying the seed. A policy with no rule set cannot be activated.
+- **The way back is stock's: a "policy unlock" trick PIN** (`TC_FW_DEFINED`, argument
+  `TCA_SP_UNLOCK`; trick-pin-slot-format.md §1.4). `ACTIVATE` asks for one -- through the
+  same add flow as `Trick PINs` → `Add New Trick`, saved in the secure element before the
+  policy is written -- unless one is already listed. Typed at the PIN prompt (pad or
+  calculator), the login reports it, the device says nothing and asks for the PIN again;
+  the main PIN then boots un-hobbled with the policy suspended (`Settings → Spending
+  Policy` offers `Remove Policy`). `Remove Policy` deletes the listed unlock PINs with the
+  policy, as stock forgets its bypass PIN. `Policy Unlock & Wipe` is offered under
+  `Trick PINs`. Activation **without** an unlock PIN is allowed after stock's warning and
+  a second confirmation: no way back but destroying the seed. A policy with no rule set
+  cannot be activated. mk4 and later only, as the policy is.
 - **Test Drive** hobbles the session with `EXIT TEST DRIVE` last on the main menu; the
   policy is enforced but records neither a violation nor a spend height, and nothing is
   written as active.
@@ -268,22 +265,62 @@ needs B (ccc-key-storage.md; help-and-warning-screens.md §12).
 ## Calculator login (Q1)
 
 With `Settings → Login → Calculator login` on, the screen before the PIN is a working
-integer calculator (`+ - * /`, parentheses, ENTER evaluates, DELETE erases). The
-reference says stock "enters the PIN as a formula" and no more, so the convention is ours:
+integer calculator (`+ - * /`, parentheses, `_` as a digit separator, ENTER evaluates,
+DELETE erases). The PIN goes in by stock's convention (input.md §"Q1 Calculator Login"),
+each line classified in this order:
 
-1. type the **prefix** digits followed by `-` (SYMBOL+q on the Q1's keyboard), then ENTER.
-   A dangling minus is a syntax error to a calculator, so no sum ever reaches this step.
-   The two anti-phishing words appear where an answer would;
-2. type the **suffix** digits alone, then ENTER.
+1. **the whole PIN** on one line -- prefix, then `-`, `_` or a space, then suffix
+   (`12-3456`, `1234_5678`, `12 34`) -- logs in. A wrong one shows as the line's value
+   (`12-34` shows `= -22`, `12_34` shows `= 1234`) followed by `# N tries remain`, so it
+   reads as an ordinary sum;
+2. **the prefix** and a dangling `-` or `_` (`12-`) shows the two anti-phishing words as
+   the answer, for the owner to check before typing the whole PIN;
+3. anything else is a sum.
 
-Any other line is a sum, and a sum typed while the words are up drops the pending prefix
-(a fresh setup, nothing spent). A wrong PIN says so on the answer line with the tries
-left; the count also appears at the bottom from then on, as on the PIN pad. It is *not*
-`prefix-suffix` on one line: that is a subtraction, and a calculator that spent an
-attempt on every subtraction would brick itself in thirteen sums. The setting goes on
-only after a successful test login through the calculator, like Scramble keys. The kill
-key (release builds) is honoured for suffix digits only, the one place the screen knows
-a digit is a PIN digit.
+Each part is held to the PIN's 2 to 6 digits, so a line with a longer part is only ever a
+sum. As in stock, a subtraction of two small numbers *is* a PIN attempt on this screen.
+The setting goes on only after a successful test login through the calculator, like
+Scramble keys. The kill key (release builds) is honoured for the suffix of a whole-PIN
+line, the one place the screen knows a digit is a PIN digit.
+
+## Trick PINs (mk4 and later)
+
+`Settings → Login → Trick PINs`, stock's tree (menu-map §TP, help-and-warning §11). A trick
+PIN is typed at the ordinary prompt; its effect happens inside the bootloader before the
+login answers, and the login then looks like the real one. Fourteen slots in the second
+secure element, reached through gate 22; a duress wallet takes the next one or two slots
+for its secret. The mk3 has no second secure element and no row.
+
+- **The list** is kept as `slot:flags:arg` under our own `cat_tp` in the stored wallet's
+  encrypted file -- **never a PIN**, where stock's list holds them -- so each row is
+  `#slot Behaviour`, with `!` on the ones that erase or brick. A duress session (a
+  different wallet, a different file) sees an empty list. Opening the list calls no gate:
+  from a trick session every gate 22 call makes the bootloader erase the real seed.
+- **Add New Trick**: `Brick Self`; `Wipe Seed` → `Wipe & Reboot`, `Silent Wipe` (answers as
+  a wrong PIN), `Wipe -> Wallet` (then a duress wallet), `Wipe & Stop` (logs in to an empty
+  device); `Duress Wallet` → `BIP-85 Wallet #1`-`#3` (12 or 24 words, as the seed is;
+  `tc_arg` 2001-2003 / 1001-1003) or `XPRV Wallet` (BIP-85 XPRV child 1001 -- **ours**, not
+  stock's legacy XPRV derivation, which the reference does not give); `Login Countdown` →
+  `Just Countdown` or `Wipe, Countdown`, 5 minutes to 28 days, then the PIN is asked again;
+  `Look Blank`; `Just Reboot`; `Policy Unlock`, `Policy Unlock & Wipe`. Each is explained on
+  one screen before it is armed. **Every one that erases or bricks says IRREVERSIBLE and is
+  asked twice**, and the summary before saving says it a third time. The PIN is typed as a
+  login is (prefix, its words, suffix), must have the PIN's shape, may not be the main PIN
+  (checked without spending an attempt) or an existing trick; a hidden trick's PIN is
+  listed again instead, as stock does. The slot is read back before it is listed.
+- **Per trick**: `Activate Wallet` (duress only: works in the decoy for the session, to fund
+  it), `Change PIN` (same slot and effect), `Hide Trick` (off the list, still in force),
+  `Delete Trick` (asks first whether a duress wallet's funds were moved, and warns that a
+  policy unlock's policy can then never change). `Delete All` removes every trick, hidden
+  ones too, with the same extra questions.
+- **Not offered**, each explained where stock has the row: `Delta Mode`, `Countdown & Brick`
+  and `Add If Wrong` -- how each is stored is not in the reference (HARDWARE-OPEN-ITEMS).
+- **At login** (`trickpin::after_login`): the policy unlock and a countdown ask for the PIN
+  again; `Look Blank` logs in as a device with no wallet; a delta PIN another firmware set
+  up logs into the real wallet with every new signature spoiled and every seed-revealing
+  screen (`View words`, `SeedQR`, `Save backup`, `Clone Coldcard`, `XOR split`,
+  `Trick PINs`) turned into a silent wipe. A duress login reports nothing and nothing on
+  screen differs.
 
 ## Pairing a computer (USB)
 

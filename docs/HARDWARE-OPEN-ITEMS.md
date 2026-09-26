@@ -565,30 +565,57 @@ instead of wiping, `fast_wipe` stops rather than carrying on as though the seed 
 To confirm without losing a device: a unit whose seed is disposable (the mk5's test seed),
 a release build, arm the kill key, type it.
 
-## Trick PINs (callgate 22) — BLOCKED on the slot layout
+## Trick PINs (callgate 22) — RESOLVED `[C]`; three behaviours still unknown `[?]`; never run on hardware
 
-The reference gives the outline only: 14 SE2 slots, each a PIN and a flag word with the
-flag values (`0x8000` wipe, `0x4000` brick, `0x2000` fake-out, `0x1000` word duress,
-`0x0800` xprv duress, `0x0400` delta, `0x0200` reboot), `0xF800` hidden from the firmware,
-1–2 data pages of duress entropy per slot, and gate 22's sub-methods (0 clear all, 1 get by
-PIN, 2 clear/update slot) — secure-elements.md §"Trick PINs", bootloader-callgate-abi.md
-method 22 `[C]`.
+`hw-reference/trick-pin-slot-format.md` answers the four questions this item used to list,
+all `[C]` from the tagged source:
 
-Not given, and each one is a struct the secure element acts on — the brick flag among them —
-so none of it is guessed:
+1. **The buffer**: the session's signed `pinAttempt_t` (280 B) then a 128-byte
+   `trick_slot_t` (`slot_num i32, tc_flags u16, tc_arg u16, xdata[64], pin[16], pin_len
+   i32, blank_slots u32, spare[8]`), little-endian, 408 B in all; `arg2` is the sub-method
+   and nothing else. `catcard_callgate::trick`, tested byte for byte against the
+   reference's worked example.
+2. **A trick login through gate 18**: success with `PA_SUCCESSFUL`, the hidden bit in
+   `private_state`, the censored flags (`tc_flags & ~0xF800`) in `delay_required` and
+   `tc_arg` in `delay_achieved` (zero for delta). `fetch_secret` returns the duress secret
+   for a duress slot and the real one for a delta slot. `catcard_pin::Login::reported_trick`
+   and `catcard_pin::trick::effect`, host-tested against a model that logs in with tricks.
+3. **Data pages**: `slot+1` (word wallet) and `slot+2` (xprv) written by 22/2 and read by
+   the login; word wallets can not start at 13, xprv not at 12 or 13.
+4. **22/1 needs a completed main-PIN login**, and from a trick session every gate 22 call
+   erases the real seed first. So the firmware calls gate 22 only from an explicit action
+   on the Trick PINs screens, never when the list is merely opened.
 
-1. The slot buffer gate 22 takes and returns: its size, field order and widths (slot number,
-   flags, PIN bytes and length, tail/data fields), byte order, and what `arg2` carries
-   besides the sub-method.
-2. How a login that matched a trick PIN comes back through gate 18: which state flags or
-   return codes, and what `fetch_secret` returns afterwards for a duress or delta slot.
-3. How the duress wallet's data pages are written and read (which call, which offsets).
-4. Whether "get by PIN" needs the main-PIN login gate 22 requires, or can run from the
-   prompt.
+Wired: `Settings → Login → Trick PINs` (`crate::trickpin`, docs/MENU.md §"Trick PINs"),
+the login hook, delta mode's spoiled signatures and seed-reveal wipe, and the Spending
+Policy's unlock as stock's `TC_FW_DEFINED`/`TCA_SP_UNLOCK` trick PIN (the CatCard unlock
+code and its `cat_sssp_unlock` record are gone).
 
-Until then the spending policy's escape is CatCard's own unlock code (docs/MENU.md
-§"Spending Policy and hobbled mode"): a slow hash in the pre-login blob, checked at the
-PIN prompt before gate 18. It will move to a gate-22 slot when the layout is known.
+**Still not in the reference**, so not offered (each row explains itself on screen):
+
+- **Delta mode's `tc_arg`**: "packed nibbles of the true PIN's last 4 digits" -- the
+  nibble order, and how a digit that is not changed or a PIN shorter than four digits is
+  marked, are not given `[?]`. A wrong packing would make the bootloader log in with a PIN
+  that is not the real one: a failed attempt on the real counter each time the trick is
+  used. A delta trick another firmware created **is** honoured at login.
+- **Countdown, then brick** `[?]`: a `TC_BRICK` on the slot fires at the login, not after the
+  countdown, so stock must store it some other way.
+- **Add If Wrong** `[?]`: `tc_arg` is the fail count (`se2_handle_bad_pin`), but how the
+  bootloader tells the wrong-PIN slot from a trick PIN is not given.
+
+**Inferred `[I]`**: `Wipe, Countdown` and `Policy Unlock & Wipe` are the documented bits
+combined (`WIPE|COUNTDOWN`, `WIPE|FW_DEFINED`); `Wipe & Stop` is `WIPE` alone. **Ours, not
+stock's**: the XPRV duress wallet is BIP-85 XPRV child 1001 (stock's "legacy" derivation
+is not in the reference); the slot bytes are the bootloader's format, so the decoy opens
+the same under any firmware -- only Activate Wallet's re-derivation is ours.
+
+**Never run on hardware** -- every path below is host-tested only, and each one is
+irreversible on a locked unit. To be tried on the disposable mk5 only, with its test seed:
+gate 22 at all (a lookup from Add New Trick is the first call); saving a harmless trick
+(`Just Reboot`, `Look Blank`) and logging in with it; a duress wallet (login, then
+`Activate Wallet` from the real session to compare); the policy unlock (ACTIVATE, log in
+with it, then the main PIN); `Delete Trick` / `Delete All`; and only then, knowingly, a
+wipe trick. `Brick Self` must not be tried on any unit that is wanted afterwards.
 
 ## `PA_ZERO_SECRET` means "a secret was written", not "a secret is there" `[C]`
 
