@@ -683,13 +683,15 @@ pub const MAX_SIG_LEN: usize = 320;
 
 /// Write the detached signature for `contents` under `basename`.
 ///
-/// An RFC-2440-style armoured block over one line: the lower-case hex of the file's
-/// SHA-256, two spaces, and the file's name without its directory. Signing the name
-/// along with the digest is what stops a signature being lifted off one export and
-/// presented with another.
+/// The file's SHA-256 and its name without its directory, signed by the address at
+/// `signing`: signing the name along with the digest is what stops a signature being
+/// lifted off one export and presented with another. The name has to be the one actually
+/// written, which is why this runs after the collision numbering has picked it and not
+/// before.
 ///
-/// The name has to be the one actually written, which is why this runs after the
-/// collision numbering has picked it and not before.
+/// The format itself -- the body line, the armour, the self-check -- is
+/// [`catcard_wallet::signfile::sign_detached`], host-tested against the documented
+/// template; this only walks to the key and hands it over, inside the masked region.
 ///
 /// Source: hw-reference/wallet-export-formats.md §"Detached signature file" [C].
 pub fn signature_file(
@@ -699,23 +701,15 @@ pub fn signature_file(
     basename: &str,
     out: &mut heapless::String<MAX_SIG_LEN>,
 ) -> Result<(), &'static str> {
-    use catcard_wallet::message;
-
     let digest = {
         use purecrypto::hash::{Digest as _, Sha256};
         let mut h = Sha256::new();
         h.update(contents);
-        h.finalize()
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&h.finalize());
+        out
     };
-    // The signed body. Two spaces between the digest and the name, which is the format.
-    let mut body: heapless::String<{ message::MAX_MESSAGE }> = heapless::String::new();
-    for byte in digest {
-        write!(body, "{byte:02x}").map_err(|_| "name too long")?;
-    }
-    body.push_str("  ").map_err(|_| "name too long")?;
-    body.push_str(basename).map_err(|_| "name too long")?;
-
-    let signed = crate::keywork::run(|kw| {
+    crate::keywork::run(|kw| {
         let mut here = master.clone();
         for &step in &signing.steps {
             here = here
@@ -723,43 +717,22 @@ pub fn signature_file(
                 .map_err(|_| "derivation failed")?;
         }
         let mut secret = *here.secret_bytes();
-        let sig = message::sign(&body, &secret, signing.kind, kw);
+        let written = catcard_wallet::signfile::sign_detached(
+            &[(digest, basename)],
+            &secret,
+            signing.kind,
+            network(),
+            kw,
+            out,
+        );
         secret.zeroize();
-        let sig = sig.map_err(|_| "could not sign")?;
-        // Check our own work before it leaves: recover the key from the signature and
-        // compare it with the one that signed. A sidecar that does not verify is worse
-        // than no sidecar, because it looks like tampering.
-        let pubkey = here.public_key(kw);
-        match message::recover(&body, &sig) {
-            Ok((recovered, _)) if recovered == pubkey => {}
-            _ => return Err("signature did not verify"),
-        }
-        let mut buf = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
-        let n = catcard_wallet::address::encode(signing.kind, network(), &pubkey, &mut buf)
-            .map_err(|_| "address failed")?;
-        let mut addr: heapless::String<{ catcard_wallet::address::MAX_ADDRESS_LEN }> =
-            heapless::String::new();
-        addr.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""))
-            .map_err(|_| "address failed")?;
-        Ok((sig, addr))
-    })?;
-
-    let (sig, addr) = signed;
-    let mut armoured = [0u8; message::MAX_ARMOURED];
-    let n = message::armour(&sig, &mut armoured).map_err(|_| "could not encode it")?;
-    let armoured = core::str::from_utf8(&armoured[..n]).map_err(|_| "could not encode it")?;
-
-    // Every line ends with a newline, the last one included.
-    write!(
-        out,
-        "-----BEGIN BITCOIN SIGNED MESSAGE-----\n\
-         {body}\n\
-         -----BEGIN BITCOIN SIGNATURE-----\n\
-         {addr}\n\
-         {armoured}\n\
-         -----END BITCOIN SIGNATURE-----\n"
-    )
-    .map_err(|_| "signature too long")
+        written.map_err(|e| match e {
+            catcard_wallet::signfile::DetachedError::BadList => "name too long",
+            catcard_wallet::signfile::DetachedError::Sign(_) => "could not sign",
+            catcard_wallet::signfile::DetachedError::SelfCheck => "signature did not verify",
+            catcard_wallet::signfile::DetachedError::BufferTooSmall => "signature too long",
+        })
+    })
 }
 
 /// The SLIP-132 form that announces `kind`.
