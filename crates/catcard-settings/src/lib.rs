@@ -28,6 +28,7 @@ pub mod json;
 pub mod norslots;
 pub mod notes;
 pub mod nvstore;
+pub mod policy;
 pub mod prefs;
 pub mod prelogin;
 pub mod store;
