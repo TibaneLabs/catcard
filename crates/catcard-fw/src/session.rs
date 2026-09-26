@@ -196,29 +196,13 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // was spawned above, and the selftest screen reports `entropy`, not the pool.
     let mut pool = report.pool.take();
 
-    // The menu runs as a kernel task from here on, with USB and a heartbeat beside it --
-    // proven on mk3, mk4, mk5 and Q1 under Debug -> Kernel UI before being made the
-    // default. It starts only after the PIN is in, so the prompt a locked unit depends on
-    // is exactly the polled one it always was.
+    // The menu runs as a kernel task from here on, with USB and a heartbeat beside it.
+    // It starts only after the PIN is in, so the prompt a locked unit depends on is
+    // exactly the polled one it always was. The kernel UI is always on: there is no
+    // longer a held-key escape to a polled menu -- it is proven on every board, and the
+    // failsafe CANCEL check in `main` (which drops a held-CANCEL boot into USB recovery
+    // before this runs) remains the recovery path if the kernel is ever what went wrong.
     //
-    // Holding cancel while the PIN is checked skips it for this session and runs the menu
-    // polled, as before. The check happens before the kernel exists, so it still works if
-    // the kernel is what went wrong -- on a locked board that is the difference between a
-    // power cycle and a brick.
-    if cancel_held(&mut matrix, &mut drbg) {
-        crate::catlog!("boot: cancel held, menu polled without the kernel");
-        menu::run(menu::Session {
-            gate: &gate,
-            login: &mut login,
-            panel: &mut panel,
-            matrix: &mut matrix,
-            drbg: &mut drbg,
-            protocol: &mut protocol,
-            report: &report,
-            no_seed,
-            pool: pool.as_mut(),
-        })
-    }
     // Turn on the two stack-overflow defences now, on the normal boot-into-menu path.
     // This is strictly *after* the failsafe CANCEL check in `main` (which runs before
     // `session::run` and drops a held-CANCEL boot into USB recovery), so holding CANCEL at
@@ -339,44 +323,6 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
             Err(why) => crate::catlog!("wallet: no primed fingerprint: {}", why),
         }
     }
-}
-
-/// Whether cancel is down right now, sampled for long enough for the keypad's debounce to
-/// settle on a key that was already held when sampling began.
-///
-/// **A hold, not a press.** This used to return true the moment a `Pressed` event for
-/// cancel appeared anywhere in the sampling window, which is a different question: a
-/// press is an edge, and one glitchy scan manufactures one. Getting it wrong is not a
-/// small thing -- a false positive runs the whole session's menu polled on the main
-/// stack, which is what SRAM1 has left after `.bss`, with none of the kernel's stack
-/// guard or heartbeat behind it.
-///
-/// So the window is scanned to let the debounce settle, and then the question is asked
-/// of the settled state: is the key *still* down. A glitch has to last the whole window
-/// to pass that, and a finger holding the key passes it every time.
-fn cancel_held(matrix: &mut keypad::GpioMatrix, drbg: &mut catcard_entropy::HmacDrbg) -> bool {
-    use catcard_ui::keypad::{Event, KEYS, Key};
-    // A fresh scanner reads a key that is already down as a new press, which is exactly the
-    // question here.
-    let mut pad = keypad::Keypad::new();
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    // SAFETY: reads RCC only.
-    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
-    // Twenty samples at 10 ms is 200 ms: several times the debounce, and short enough
-    // that nobody holding the key notices the wait.
-    let mut held_for = 0u32;
-    for _ in 0..20 {
-        pinentry::pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
-        // Held through the last stretch of the window, not merely seen once in it.
-        held_for = if pad.holds(Key::Cancel) {
-            held_for + 1
-        } else {
-            0
-        };
-        catcard_hal::dwt::delay_cycles(10 * per_ms);
-    }
-    held_for >= 3
 }
 
 /// Ask about a staged firmware image.
