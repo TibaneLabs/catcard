@@ -45,23 +45,94 @@ SD_RAW = 0x0034
 UPGRADE_PACKED = 0x0013
 INJECT_KEY = 0x0020
 UNLOCK_PIN = 0x0021
-NCRY_START, NCRY_MSG = 0x0040, 0x0041
+# 0x0040 was the unauthenticated v1 `NcryStart`; retired with protocol version 2.
+NCRY_MSG = 0x0041
+PAIR_COMMIT, PAIR_REVEAL, PAIR_CONFIRM, PAIR_ABORT = 0x0042, 0x0043, 0x0044, 0x0045
 KEY_CANCEL, KEY_CONFIRM = 0x0A, 0x0B
 
-# Capability bit for the encrypted channel, matching `catcard_usb::caps::NCRY`.
-CAP_NCRY = 1 << 5
+# Capability bit for the paired encrypted channel, matching `catcard_usb::caps::PAIRING`.
+# (Bit 5 was v1's `NCRY` and is retired, not reused.)
+CAP_PAIRING = 1 << 7
+
+# How long to keep asking the device whether its user has answered. The device gives up
+# on its own prompt after two minutes (`ncry::PROMPT_MS`); a little longer here so the
+# device's answer, not this timer, is what ends a slow comparison.
+PAIR_WAIT_S = 130.0
 
 
-def ncry_handshake(sock):
-    """Negotiate an encrypted channel and return the host `ncry.Session`.
+def _ask_host_user(code_text):
+    """Show the code and ask whoever is at this computer. Anything but yes is no."""
+    print(f"pairing code: {code_text}")
+    print("Check that the device shows exactly this code.")
+    try:
+        answer = input("Same code on the device? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
 
-    One round trip: send a fresh ephemeral public key, receive the device's, derive.
+
+def open_session(sock, confirm=None):
+    """Pair an encrypted channel (ncry v2) and return the host `ncry.Session`.
+
+    Every connection is paired afresh -- nothing is stored on either side:
+
+    1. `PairCommit` with SHA-256(label || host_pub); the device answers with its key.
+    2. `PairReveal` with host_pub; the device checks it against the commitment.
+    3. Both sides derive the keys and a six-digit code. The device shows its code and
+       asks its user; `confirm(code_text)` asks ours (by default on the terminal).
+    4. On yes, send a sealed `PairConfirm` until the device's user has answered too.
+       On no, `PairAbort`, so the device's prompt goes away.
+
+    Raises `RuntimeError` saying why when the session does not end up paired. The code
+    is the defence against a relay in the middle: it only works if a person compares it.
     """
-    priv = os.urandom(ncry.KEY_LEN)
-    st, body = request(sock, NCRY_START, ncry.public_key(priv))
+    confirm = confirm or _ask_host_user
+    st, body = request(sock, IDENTIFY)
+    if not capabilities(body) & CAP_PAIRING:
+        raise RuntimeError("pairing: the device does not offer the paired channel "
+                           "(no PAIRING cap; older firmware, or recovery)")
+    info = identify(body)
+    if info and not info[1]:
+        raise RuntimeError("pairing: unlock the device first (it pairs only after the PIN)")
+
+    host = ncry.Initiator()
+    st, body = request(sock, PAIR_COMMIT, host.commit)
+    if st == 6:
+        raise RuntimeError("pairing: device busy -- a code is already on its screen, or one "
+                           "was shown in the last few seconds; answer it or wait, then retry")
     if st != 0 or len(body) != ncry.KEY_LEN:
-        raise ValueError(f"ncry: device refused the handshake (status {st}, {len(body)} B)")
-    return ncry.Session.initiator(priv, bytes(body))
+        raise RuntimeError(f"pairing: commit refused ({STATUS.get(st, st)}, {len(body)} B)")
+    session = host.finish(bytes(body))
+    st, _ = request(sock, PAIR_REVEAL, host.public)
+    if st != 0:
+        raise RuntimeError(f"pairing: reveal refused ({STATUS.get(st, st)})")
+
+    if not confirm(ncry.code_text(session.code)):
+        request(sock, PAIR_ABORT)
+        raise RuntimeError("pairing: codes not confirmed here; abandoned")
+
+    deadline = time.time() + PAIR_WAIT_S
+    waiting_said = False
+    while True:
+        st, body = request(sock, NCRY_MSG, session.seal(struct.pack("<H", PAIR_CONFIRM)))
+        if st == 4:
+            raise RuntimeError("pairing: rejected on the device")
+        if st != 0:
+            raise RuntimeError(f"pairing: session ended ({STATUS.get(st, st)}) -- "
+                               "the device timed out, or the record was refused")
+        inner = session.open(bytes(body))
+        inner_st = struct.unpack("<H", inner[:2])[0]
+        if inner_st == 0:
+            return session
+        if inner_st != 2:
+            raise RuntimeError(f"pairing: confirm refused ({STATUS.get(inner_st, inner_st)})")
+        if time.time() > deadline:
+            request(sock, PAIR_ABORT)
+            raise RuntimeError("pairing: nobody answered on the device")
+        if not waiting_said:
+            print("waiting for the device's own answer...")
+            waiting_said = True
+        time.sleep(0.5)
 
 
 def open_session(sock):
@@ -1256,15 +1327,16 @@ def main(path, image=None):
         print_log(s)
         return 0
 
-    if "--ncry" in sys.argv:
-        # Prove the encrypted channel end to end: negotiate a session, then run Identify,
-        # a log page and a Ping through it. Nothing here crosses the wire in the clear.
-        caps = capabilities(request(s, IDENTIFY)[1])
-        if not caps & CAP_NCRY:
-            print("ncry: device does not advertise the channel (no NCRY cap)")
+    if "--ncry" in sys.argv or "--pair" in sys.argv:
+        # Prove the paired channel end to end: pair (comparing the code on both screens),
+        # then run Identify, a log page and a Ping through it. Nothing here crosses the
+        # wire in the clear.
+        try:
+            session = open_session(s)
+        except RuntimeError as e:
+            print(e)
             return 1
-        session = ncry_handshake(s)
-        print("ncry: session established")
+        print("ncry: paired")
 
         st, body = ncry_request(s, session, IDENTIFY)
         info = identify(body)
