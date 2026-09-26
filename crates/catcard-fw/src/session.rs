@@ -10,7 +10,7 @@ use catcard_board::BOARD;
 use catcard_callgate::Callgate;
 use catcard_entropy::{domain, spawn_drbg};
 
-use crate::{BootReport, display, keypad, menu, pinentry, power, selftest, usbtask};
+use crate::{BootReport, display, keypad, pinentry, power, selftest, usbtask};
 
 /// Run the post-boot sequence. Never returns.
 pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
@@ -284,7 +284,7 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
         return;
     }
 
-    menu::reading_seed(panel, "Wallet");
+    crate::menu::reading_seed(panel, "Wallet");
     let pin_gate = pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,
@@ -304,7 +304,7 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
     // and a half of PBKDF2 happens.
     #[cfg(feature = "board-q1")]
     let stored = if crate::pubkeys::known_fingerprint().is_none() {
-        menu::stored_from_secret(&secret).ok()
+        crate::menu::stored_from_secret(&secret).ok()
     } else {
         None
     };
@@ -313,7 +313,7 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
 
     #[cfg(feature = "board-q1")]
     if let Some(stored) = stored {
-        match menu::master_from_stored(stored, panel, "Wallet") {
+        match crate::menu::master_from_stored(stored, panel, "Wallet") {
             Ok(master) => {
                 let fp = crate::keywork::run(|kw| master.fingerprint(kw));
                 drop(master);

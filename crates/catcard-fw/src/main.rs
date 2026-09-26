@@ -131,11 +131,6 @@ mod sdupgrade;
 mod seedqr;
 mod seedxor;
 mod selftest;
-/// Debug: the *Self-tests* harness -- deliberate fault injections that prove the
-/// low-level defences (the stack guard, and whatever risky feature comes next). Bench
-/// builds only.
-#[cfg(feature = "usb-debug-mem")]
-mod selftests;
 mod session;
 /// The settings store itself: slots, keys, and the screen that reads them.
 #[cfg(not(feature = "board-mk3"))]
