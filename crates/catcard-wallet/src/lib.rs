@@ -70,6 +70,7 @@ pub mod encoding;
 pub mod message;
 pub mod multisig;
 pub mod psbtfile;
+pub mod psbtv2;
 pub mod psbtview;
 pub mod pwsave;
 pub mod seedqr;
