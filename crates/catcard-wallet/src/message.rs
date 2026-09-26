@@ -31,6 +31,8 @@ use outscript::crypto::secp256k1::{SecpPrivateKey, recover_public_key};
 use purecrypto::hash::{Digest, Sha256};
 
 use crate::address::AddressKind;
+use crate::bip32::DerivationPath;
+use crate::bip32::path::ParseError;
 
 /// The prefix every signed message commits to, so a message digest can never collide with
 /// a transaction's.
@@ -42,6 +44,12 @@ pub const SIG_LEN: usize = 65;
 /// Longest message this signs. Long enough for a proof-of-ownership note, bounded because
 /// the digest is computed in one pass over a caller buffer.
 pub const MAX_MESSAGE: usize = 240;
+
+/// Longest *multi-line* body [`sign_lines`] signs: the detached signature over a set of
+/// exported files is one `<sha256 hex>  <name>` line per file, and a handful of those
+/// runs past [`MAX_MESSAGE`]. Separate from it on purpose -- a typed message stays one
+/// line the screen can show whole.
+pub const MAX_LINES: usize = 1024;
 
 /// Base64 of [`SIG_LEN`] bytes, which is 88 characters with its padding.
 pub const MAX_ARMOURED: usize = 88;
@@ -75,6 +83,18 @@ fn put_varstr(h: &mut Sha256, bytes: &[u8]) {
     h.update(bytes);
 }
 
+/// The construction itself, over bytes already checked.
+fn hash(message: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    put_varstr(&mut h, PREFIX.as_bytes());
+    put_varstr(&mut h, message);
+    let once = h.finalize();
+    let twice = Sha256::digest(&once);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&twice);
+    out
+}
+
 /// The digest a legacy signed message commits to.
 pub fn digest(message: &str) -> Result<[u8; 32], Error> {
     if message.len() > MAX_MESSAGE {
@@ -86,14 +106,26 @@ pub fn digest(message: &str) -> Result<[u8; 32], Error> {
     if !message.bytes().all(|b| (0x20..0x7f).contains(&b)) {
         return Err(Error::NotPrintable);
     }
-    let mut h = Sha256::new();
-    put_varstr(&mut h, PREFIX.as_bytes());
-    put_varstr(&mut h, message.as_bytes());
-    let once = h.finalize();
-    let twice = Sha256::digest(&once);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&twice);
-    Ok(out)
+    Ok(hash(message.as_bytes()))
+}
+
+/// The digest of a body of printable lines: the same construction, with `\n` allowed
+/// between lines and [`MAX_LINES`] as the bound.
+///
+/// For the detached signature over exported files, whose body is one line per file. The
+/// line break is the one control character admitted, because a screen shows such a body
+/// as its lines and nothing is lost; a tab or a carriage return still refuses.
+pub fn digest_lines(message: &str) -> Result<[u8; 32], Error> {
+    if message.len() > MAX_LINES {
+        return Err(Error::TooLong { len: message.len() });
+    }
+    if !message
+        .bytes()
+        .all(|b| (0x20..0x7f).contains(&b) || b == b'\n')
+    {
+        return Err(Error::NotPrintable);
+    }
+    Ok(hash(message.as_bytes()))
 }
 
 /// The header byte's base for an address type, to which the recovery id is added.
@@ -116,12 +148,30 @@ pub fn sign(
     message: &str,
     secret: &[u8; 32],
     kind: AddressKind,
+    kw: &crate::KeyWork,
+) -> Result<[u8; SIG_LEN], Error> {
+    sign_digest(&digest(message)?, secret, kind, kw)
+}
+
+/// [`sign`] for a body of printable lines -- see [`digest_lines`].
+pub fn sign_lines(
+    message: &str,
+    secret: &[u8; 32],
+    kind: AddressKind,
+    kw: &crate::KeyWork,
+) -> Result<[u8; SIG_LEN], Error> {
+    sign_digest(&digest_lines(message)?, secret, kind, kw)
+}
+
+fn sign_digest(
+    digest: &[u8; 32],
+    secret: &[u8; 32],
+    kind: AddressKind,
     _kw: &crate::KeyWork,
 ) -> Result<[u8; SIG_LEN], Error> {
     let base = header_base(kind)?;
-    let digest = digest(message)?;
     let key = SecpPrivateKey::from_bytes(secret).map_err(|_| Error::BadKey)?;
-    let (r, s, recid) = key.sign_recoverable(&digest);
+    let (r, s, recid) = key.sign_recoverable(digest);
     let mut out = [0u8; SIG_LEN];
     out[0] = base + recid;
     out[1..33].copy_from_slice(&r);
@@ -140,7 +190,18 @@ pub fn armour(sig: &[u8; SIG_LEN], out: &mut [u8]) -> Result<usize, Error> {
 /// means the device can check its own work -- a signature that does not recover to the
 /// signing key is not handed to anyone.
 pub fn recover(message: &str, sig: &[u8; SIG_LEN]) -> Result<([u8; 33], AddressKind), Error> {
-    let digest = digest(message)?;
+    recover_digest(&digest(message)?, sig)
+}
+
+/// [`recover`] for a body of printable lines -- see [`digest_lines`].
+pub fn recover_lines(message: &str, sig: &[u8; SIG_LEN]) -> Result<([u8; 33], AddressKind), Error> {
+    recover_digest(&digest_lines(message)?, sig)
+}
+
+fn recover_digest(
+    digest: &[u8; 32],
+    sig: &[u8; SIG_LEN],
+) -> Result<([u8; 33], AddressKind), Error> {
     let header = sig[0];
     let (kind, base) = match header {
         31..=34 => (AddressKind::P2pkh, 31),
@@ -152,8 +213,125 @@ pub fn recover(message: &str, sig: &[u8; SIG_LEN]) -> Result<([u8; 33], AddressK
     let mut s = [0u8; 32];
     r.copy_from_slice(&sig[1..33]);
     s.copy_from_slice(&sig[33..]);
-    let key = recover_public_key(&r, &s, header - base, &digest).map_err(|_| Error::BadKey)?;
+    let key = recover_public_key(&r, &s, header - base, digest).map_err(|_| Error::BadKey)?;
     Ok((key.serialize_compressed(), kind))
+}
+
+// ---------------------------------------------------------------------------
+// The signing request file.
+// ---------------------------------------------------------------------------
+
+/// A signing request, as a `.txt` file on the card or a scanned code carries it.
+///
+/// The public format Sparrow and the stock documentation use for "Sign Text File": up to
+/// three lines -- the message, then an optional derivation path, then an optional address
+/// format. A line that is absent leaves the field `None`, and the device chooses (or asks).
+///
+/// ```text
+/// This is the message
+/// m/84h/0h/0h/0/0
+/// p2wpkh
+/// ```
+///
+/// Source: hw-reference/firmware-features.md §6 "request via file, text, or the
+/// Sparrow-style form" [C]; the line order is Coldcard's public "Sign Text File" format.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Request<'a> {
+    /// The message, exactly as it will be signed.
+    pub message: &'a str,
+    /// The path the request asked for, if it named one.
+    pub path: Option<DerivationPath>,
+    /// The address format the request asked for, if it named one.
+    pub kind: Option<AddressKind>,
+}
+
+/// Why a request could not be read.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RequestError {
+    /// No message line.
+    Empty,
+    /// The message itself is not signable: too long, or not plain ASCII.
+    Message(Error),
+    /// The second line is neither a derivation path nor an address format.
+    BadPath(ParseError),
+    /// The third line is not one of the address formats this signs for.
+    BadFormat,
+    /// A fourth non-empty line: the file is something else.
+    TooManyLines,
+}
+
+/// The address format a request line names, if it names one.
+///
+/// Case-insensitive, and both spellings of the nested form, because both are written.
+pub fn kind_named(word: &str) -> Option<AddressKind> {
+    let word = word.trim();
+    const NAMES: [(&str, AddressKind); 5] = [
+        ("p2pkh", AddressKind::P2pkh),
+        ("p2sh-p2wpkh", AddressKind::P2shP2wpkh),
+        ("p2wpkh-p2sh", AddressKind::P2shP2wpkh),
+        ("p2wpkh", AddressKind::P2wpkh),
+        ("p2tr", AddressKind::P2tr),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(word))
+        .map(|(_, kind)| *kind)
+}
+
+/// The name [`kind_named`] reads back, as a request file writes it.
+pub const fn kind_name(kind: AddressKind) -> &'static str {
+    match kind {
+        AddressKind::P2pkh => "p2pkh",
+        AddressKind::P2shP2wpkh => "p2sh-p2wpkh",
+        AddressKind::P2wpkh => "p2wpkh",
+        AddressKind::P2tr => "p2tr",
+    }
+}
+
+/// Read a signing request.
+///
+/// Line endings may be either kind; blank lines at the end are the editor's. Trailing
+/// whitespace on the message line is dropped for the same reason -- invisible on screen,
+/// and signing it would produce a signature over a string nobody can see the shape of.
+/// Leading whitespace stays: it is visible, and it is part of what was asked for.
+///
+/// The second line is a path, or -- for a request that names only a format -- the
+/// format itself. The message is checked here, with [`digest`]'s rules, so a request
+/// this cannot sign is refused before a key is touched.
+pub fn parse_request(text: &str) -> Result<Request<'_>, RequestError> {
+    let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
+    let message = lines.next().ok_or(RequestError::Empty)?.trim_end();
+    if message.is_empty() {
+        return Err(RequestError::Empty);
+    }
+    digest(message).map_err(RequestError::Message)?;
+
+    let mut path = None;
+    let mut kind = None;
+    let mut rest = lines.map(str::trim).filter(|l| !l.is_empty());
+    if let Some(second) = rest.next() {
+        match kind_named(second) {
+            Some(k) => kind = Some(k),
+            None => {
+                path = Some(
+                    second
+                        .parse::<DerivationPath>()
+                        .map_err(RequestError::BadPath)?,
+                );
+                if let Some(third) = rest.next() {
+                    kind = Some(kind_named(third).ok_or(RequestError::BadFormat)?);
+                }
+            }
+        }
+    }
+    if rest.next().is_some() {
+        return Err(RequestError::TooManyLines);
+    }
+    Ok(Request {
+        message,
+        path,
+        kind,
+    })
 }
 
 #[cfg(test)]
@@ -267,5 +445,100 @@ mod tests {
         let a = sign("CatCard", &SECRET, AddressKind::P2wpkh, &kw).unwrap();
         let b = sign("CatCard", &SECRET, AddressKind::P2wpkh, &kw).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_body_of_lines_signs_and_recovers_but_a_single_line_signer_refuses_it() {
+        let kw = KeyWork::host();
+        let body = "aa  one.txt\nbb  two.txt";
+        assert_eq!(
+            sign(body, &SECRET, AddressKind::P2pkh, &kw),
+            Err(Error::NotPrintable)
+        );
+        let sig = sign_lines(body, &SECRET, AddressKind::P2pkh, &kw).unwrap();
+        let (key, kind) = recover_lines(body, &sig).unwrap();
+        assert_eq!(key, PUBKEY);
+        assert_eq!(kind, AddressKind::P2pkh);
+        // One line is the same digest either way: the line variant is a superset, not a
+        // different construction.
+        assert_eq!(digest("CatCard").unwrap(), digest_lines("CatCard").unwrap());
+        // A carriage return or a tab is still not a line.
+        for bad in ["a\r\nb", "a\tb"] {
+            assert_eq!(digest_lines(bad), Err(Error::NotPrintable), "{bad:?}");
+        }
+        let long = "x".repeat(MAX_LINES + 1);
+        assert!(matches!(digest_lines(&long), Err(Error::TooLong { .. })));
+    }
+
+    /// The three-line form, as Sparrow writes it and the stock documentation shows it.
+    #[test]
+    fn a_full_request_reads_its_three_lines() {
+        let req = parse_request("Hello world\nm/84h/0h/0h/0/0\np2wpkh\n").unwrap();
+        assert_eq!(req.message, "Hello world");
+        let path: DerivationPath = "m/84h/0h/0h/0/0".parse().unwrap();
+        assert_eq!(req.path, Some(path));
+        assert_eq!(req.kind, Some(AddressKind::P2wpkh));
+    }
+
+    #[test]
+    fn a_request_may_leave_the_path_and_format_out() {
+        let req = parse_request("just a message").unwrap();
+        assert_eq!(req.message, "just a message");
+        assert_eq!(req.path, None);
+        assert_eq!(req.kind, None);
+
+        // A path alone.
+        let req = parse_request("msg\r\nm/44'/0'/0'/0/5\r\n\r\n").unwrap();
+        let path: DerivationPath = "m/44h/0h/0h/0/5".parse().unwrap();
+        assert_eq!(req.path, Some(path));
+        assert_eq!(req.kind, None);
+
+        // A format alone, on the second line.
+        let req = parse_request("msg\nP2SH-P2WPKH\n").unwrap();
+        assert_eq!(req.path, None);
+        assert_eq!(req.kind, Some(AddressKind::P2shP2wpkh));
+    }
+
+    #[test]
+    fn the_message_line_keeps_its_leading_space_and_loses_its_trailing_one() {
+        let req = parse_request("  padded   \n").unwrap();
+        assert_eq!(req.message, "  padded");
+    }
+
+    #[test]
+    fn a_request_this_cannot_sign_is_refused_before_any_key_is_touched() {
+        assert_eq!(parse_request(""), Err(RequestError::Empty));
+        assert_eq!(parse_request("\n\nm/84h\n"), Err(RequestError::Empty));
+        assert_eq!(
+            parse_request("caf\u{e9}\n"),
+            Err(RequestError::Message(Error::NotPrintable))
+        );
+        assert!(matches!(
+            parse_request("msg\nnot/a/path\n"),
+            Err(RequestError::BadPath(_))
+        ));
+        assert_eq!(
+            parse_request("msg\nm/84h/0h/0h/0/0\np2wsh\n"),
+            Err(RequestError::BadFormat)
+        );
+        assert_eq!(
+            parse_request("msg\nm/84h/0h/0h/0/0\np2wpkh\nfourth\n"),
+            Err(RequestError::TooManyLines)
+        );
+    }
+
+    #[test]
+    fn format_names_round_trip_and_read_both_nested_spellings() {
+        for kind in [
+            AddressKind::P2pkh,
+            AddressKind::P2shP2wpkh,
+            AddressKind::P2wpkh,
+            AddressKind::P2tr,
+        ] {
+            assert_eq!(kind_named(kind_name(kind)), Some(kind));
+        }
+        assert_eq!(kind_named("p2wpkh-p2sh"), Some(AddressKind::P2shP2wpkh));
+        assert_eq!(kind_named(" P2PKH "), Some(AddressKind::P2pkh));
+        assert_eq!(kind_named("p2wsh"), None);
     }
 }

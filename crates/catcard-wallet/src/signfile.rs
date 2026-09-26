@@ -15,6 +15,28 @@
 //! the fields, and a signature broken across lines, because a file that made a round trip
 //! through a mail client is still the file someone was sent.
 //!
+//! # The detached `.sig` sidecar
+//!
+//! A wallet export is written with a second file beside it, in the RFC-2440 shape stock
+//! uses for the same thing:
+//!
+//! ```text
+//! -----BEGIN BITCOIN SIGNED MESSAGE-----
+//! <hex sha256>  <basename>
+//! -----BEGIN BITCOIN SIGNATURE-----
+//! <address>
+//! <base64 signature>
+//! -----END BITCOIN SIGNATURE-----
+//! ```
+//!
+//! The message is one `<hex sha256>  <basename>` line per file (two spaces between, the
+//! name without its directory), joined by `\n`, and the signature is a legacy one over
+//! that body. [`sign_detached`] writes it; [`parse`] reads both marker sets, so the one
+//! verifier checks a signed message and a sidecar alike; and [`listed_files`] hands a
+//! screen the files a sidecar names, so it can hash each and say which changed.
+//!
+//! Source: hw-reference/wallet-export-formats.md §"Detached signature file (`.sig`)" [C].
+//!
 //! # What "verified" means here
 //!
 //! Nothing in the file is taken as a claim about itself. The address is decoded to the
@@ -52,6 +74,22 @@ pub const BEGIN: &str = "-----BEGIN BITCOIN SIGNED MESSAGE-----";
 pub const SEPARATOR: &str = "-----BEGIN SIGNATURE-----";
 /// The closing line.
 pub const END: &str = "-----END BITCOIN SIGNED MESSAGE-----";
+
+/// The detached sidecar's line between the message and the signature block.
+pub const SIG_BEGIN: &str = "-----BEGIN BITCOIN SIGNATURE-----";
+/// The detached sidecar's closing line.
+pub const SIG_END: &str = "-----END BITCOIN SIGNATURE-----";
+
+/// Most files one sidecar lists. Every export here is one file; the bound is for reading
+/// somebody else's, and for the buffer the body is built in.
+pub const MAX_FILES: usize = 8;
+/// Longest file name a listed line carries.
+pub const MAX_NAME: usize = 64;
+/// Hex characters of a SHA-256.
+const HEX_DIGEST: usize = 64;
+/// Room for a whole sidecar body: [`MAX_FILES`] lines of digest, two spaces, name and a
+/// line break.
+pub const MAX_BODY: usize = MAX_FILES * (HEX_DIGEST + 2 + MAX_NAME + 1);
 
 /// Most signature text read out of a file, before its whitespace is dropped: base64 of a
 /// P2WPKH witness stack is 148 characters, and a file may have wrapped it.
@@ -103,7 +141,14 @@ pub enum Error {
 pub const MAX_MESSAGE: usize = message::MAX_MESSAGE;
 
 /// Is this a message the screen can put in front of someone unchanged?
+///
+/// One printable line within [`MAX_MESSAGE`], or a sidecar's file list -- which is more
+/// than one line, and shown as a list of files rather than as text, so nothing in it is
+/// lost on the glass either.
 fn showable(message: &str) -> Result<(), Error> {
+    if listed_files(message).is_some() {
+        return Ok(());
+    }
     if message.len() > MAX_MESSAGE {
         return Err(Error::Unshowable);
     }
@@ -111,6 +156,84 @@ fn showable(message: &str) -> Result<(), Error> {
         return Err(Error::Unshowable);
     }
     Ok(())
+}
+
+/// One file a sidecar names: its expected digest and its name.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ListedFile<'a> {
+    pub digest: [u8; 32],
+    /// The file's name, without a directory. Never holds a `/` or `\`, and is never `..`:
+    /// a sidecar is read from the card and names files beside itself, and a name that
+    /// climbed out of that directory would be a sidecar asking the verifier to read
+    /// something else.
+    pub name: &'a str,
+}
+
+/// The files a sidecar's message names, when *every* line of it has that shape.
+///
+/// `None` for a message that is not a file list -- an ordinary signed message, or one
+/// where only some lines look like a listing, which is not one either.
+pub fn listed_files(message: &str) -> Option<Files<'_>> {
+    let mut n = 0usize;
+    for line in message.split('\n') {
+        listed_line(line)?;
+        n += 1;
+        if n > MAX_FILES {
+            return None;
+        }
+    }
+    (n > 0).then_some(Files {
+        lines: message.split('\n'),
+        count: n,
+    })
+}
+
+/// A sidecar's file list, one [`ListedFile`] at a time.
+#[derive(Clone)]
+pub struct Files<'a> {
+    lines: core::str::Split<'a, char>,
+    count: usize,
+}
+
+impl Files<'_> {
+    /// How many files are listed.
+    pub fn total(&self) -> usize {
+        self.count
+    }
+}
+
+impl<'a> Iterator for Files<'a> {
+    type Item = ListedFile<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        // Every line was checked when the list was built, so a line that does not parse
+        // here cannot occur; `?` rather than `unwrap` keeps that from being a panic path.
+        listed_line(self.lines.next()?)
+    }
+}
+
+/// `<64 lowercase hex>  <name>`, or nothing.
+fn listed_line(line: &str) -> Option<ListedFile<'_>> {
+    let (hex, name) = line.split_at_checked(HEX_DIGEST)?;
+    let name = name.strip_prefix("  ")?;
+    if name.is_empty()
+        || name.len() > MAX_NAME
+        || name == ".."
+        || !name
+            .bytes()
+            .all(|b| (0x20..0x7f).contains(&b) && b != b'/' && b != b'\\')
+    {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let nibble = |c: u8| match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            _ => None,
+        };
+        digest[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(ListedFile { digest, name })
 }
 
 /// The three fields of an armoured file, borrowed out of it.
@@ -140,31 +263,163 @@ pub fn write(
     )
 }
 
+/// The body of a detached signature: one `<hex sha256>  <name>` line per file, joined by
+/// `\n` and with no line break after the last.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Detached signature file" [C]: the hex
+/// is lower case, the separator is two spaces, the name is the basename only.
+pub fn detached_body(
+    out: &mut impl core::fmt::Write,
+    files: &[([u8; 32], &str)],
+) -> core::fmt::Result {
+    for (i, (digest, name)) in files.iter().enumerate() {
+        if i > 0 {
+            out.write_char('\n')?;
+        }
+        for byte in digest {
+            write!(out, "{byte:02x}")?;
+        }
+        write!(out, "  {name}")?;
+    }
+    Ok(())
+}
+
+/// Write a detached signature file around a body [`detached_body`] built.
+///
+/// Every line ends with a newline, the last one included -- that is the documented
+/// shape, and a reader that compares files byte for byte will notice a missing one.
+pub fn write_detached(
+    out: &mut impl core::fmt::Write,
+    body: &str,
+    address: &str,
+    signature: &str,
+) -> core::fmt::Result {
+    write!(
+        out,
+        "{BEGIN}\n{body}\n{SIG_BEGIN}\n{address}\n{signature}\n{SIG_END}\n"
+    )
+}
+
+/// Why a sidecar could not be produced.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum DetachedError {
+    /// More than [`MAX_FILES`], or a name longer than [`MAX_NAME`] or not a bare name.
+    BadList,
+    /// The key was not usable, or the address type has no legacy signature.
+    Sign(message::Error),
+    /// The signature did not recover to the key that made it.
+    SelfCheck,
+    /// The output did not fit.
+    BufferTooSmall,
+}
+
+/// A `fmt::Write` over a fixed byte buffer.
+struct Buf<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl core::fmt::Write for Buf<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len + s.len();
+        self.out
+            .get_mut(self.len..end)
+            .ok_or(core::fmt::Error)?
+            .copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// The whole sidecar in one call: build the body for `files`, sign it with `secret` as
+/// an address of `kind` on `network`, check the signature recovers to the signing key,
+/// and write the armoured file to `out`.
+///
+/// Private-key work, so it takes a [`crate::KeyWork`]. The self-check is not optional: a
+/// sidecar that does not verify looks exactly like tampering to whoever reads it, and is
+/// worse than no sidecar at all.
+pub fn sign_detached(
+    files: &[([u8; 32], &str)],
+    secret: &[u8; 32],
+    kind: AddressKind,
+    network: Network,
+    kw: &crate::KeyWork,
+    out: &mut impl core::fmt::Write,
+) -> Result<(), DetachedError> {
+    if files.is_empty() || files.len() > MAX_FILES {
+        return Err(DetachedError::BadList);
+    }
+    let mut body = [0u8; MAX_BODY];
+    let mut buf = Buf {
+        out: &mut body,
+        len: 0,
+    };
+    detached_body(&mut buf, files).map_err(|_| DetachedError::BadList)?;
+    let len = buf.len;
+    let body = core::str::from_utf8(&body[..len]).map_err(|_| DetachedError::BadList)?;
+    // The body has to read back as the list it was built from, or the verifier on the
+    // other side will not treat it as one: a name with a `/` in it is refused here rather
+    // than signed.
+    if listed_files(body).is_none_or(|f| f.total() != files.len()) {
+        return Err(DetachedError::BadList);
+    }
+
+    let sig = message::sign_lines(body, secret, kind, kw).map_err(DetachedError::Sign)?;
+    let pubkey = crate::bip32::public_key_of(secret, kw)
+        .ok_or(DetachedError::Sign(message::Error::BadKey))?;
+    match message::recover_lines(body, &sig) {
+        Ok((recovered, _)) if recovered == pubkey => {}
+        _ => return Err(DetachedError::SelfCheck),
+    }
+
+    let mut addr = [0u8; address::MAX_ADDRESS_LEN];
+    let n = address::encode(kind, network, &pubkey, &mut addr)
+        .map_err(|_| DetachedError::Sign(message::Error::UnsupportedKind))?;
+    let addr = core::str::from_utf8(&addr[..n]).map_err(|_| DetachedError::BufferTooSmall)?;
+    let mut armoured = [0u8; message::MAX_ARMOURED];
+    let n = message::armour(&sig, &mut armoured).map_err(|_| DetachedError::BufferTooSmall)?;
+    let armoured =
+        core::str::from_utf8(&armoured[..n]).map_err(|_| DetachedError::BufferTooSmall)?;
+    write_detached(out, body, addr, armoured).map_err(|_| DetachedError::BufferTooSmall)
+}
+
 /// Strip one line ending from the front of `s`, if there is one.
 fn skip_newline(s: &str) -> Option<&str> {
     let s = s.strip_prefix('\r').unwrap_or(s);
     s.strip_prefix('\n')
 }
 
+/// Where the first of two markers sits, and which one it was.
+fn first_of<'m>(text: &str, a: &'m str, b: &'m str) -> Option<(usize, &'m str)> {
+    match (text.find(a), text.find(b)) {
+        (Some(x), Some(y)) if y < x => Some((y, b)),
+        (Some(x), _) => Some((x, a)),
+        (None, Some(y)) => Some((y, b)),
+        (None, None) => None,
+    }
+}
+
 /// Pull the three fields out of an armoured file.
 ///
 /// Anything before the opening marker is ignored -- a file may carry a note above it --
-/// and so is anything after the closing one.
+/// and so is anything after the closing one. Both marker sets are read: a signed
+/// message's `BEGIN SIGNATURE` / `END BITCOIN SIGNED MESSAGE`, and a sidecar's `BEGIN
+/// BITCOIN SIGNATURE` / `END BITCOIN SIGNATURE`.
 pub fn parse(text: &str) -> Result<Armoured<'_>, Error> {
     let start = text.find(BEGIN).ok_or(Error::NotArmoured)?;
     let after = &text[start + BEGIN.len()..];
     let after = skip_newline(after).ok_or(Error::NotArmoured)?;
 
-    let sep = after.find(SEPARATOR).ok_or(Error::NotArmoured)?;
+    let (sep, sep_marker) = first_of(after, SEPARATOR, SIG_BEGIN).ok_or(Error::NotArmoured)?;
     // The newline before the separator belongs to the format, not to the message.
     let message = after[..sep]
         .strip_suffix('\n')
         .map(|m| m.strip_suffix('\r').unwrap_or(m))
         .ok_or(Error::NotArmoured)?;
 
-    let rest = &after[sep + SEPARATOR.len()..];
+    let rest = &after[sep + sep_marker.len()..];
     let rest = skip_newline(rest).ok_or(Error::NotArmoured)?;
-    let end = rest.find(END).ok_or(Error::NotArmoured)?;
+    let (end, _) = first_of(rest, END, SIG_END).ok_or(Error::NotArmoured)?;
     let block = &rest[..end];
 
     // First line of the block is the address; everything else up to the closing marker is
@@ -246,7 +501,9 @@ pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
 /// it is checked is by building that address from the recovered key and comparing it with
 /// the one in the file. A header that lies produces an address that does not match.
 fn legacy_verify(file: &Armoured<'_>, sig: &[u8; message::SIG_LEN]) -> Result<(), Error> {
-    let (pubkey, kind) = message::recover(file.message, sig).map_err(|e| match e {
+    // The line variant: a superset of the single-line digest, and `showable` above has
+    // already ruled on which shapes get this far.
+    let (pubkey, kind) = message::recover_lines(file.message, sig).map_err(|e| match e {
         message::Error::UnsupportedKind => Error::Unsupported,
         // Already ruled out by `showable`, and kept here so the two never drift apart.
         message::Error::NotPrintable | message::Error::TooLong { .. } => Error::Unshowable,

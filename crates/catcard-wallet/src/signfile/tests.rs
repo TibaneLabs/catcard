@@ -318,3 +318,185 @@ fn an_address_this_cannot_decode_is_not_an_invalid_signature() {
     .unwrap();
     assert_eq!(verify(&parse(&file).unwrap()), Err(Error::BadAddress));
 }
+
+// ---------------------------------------------------------------------------
+// The detached `.sig` sidecar.
+// ---------------------------------------------------------------------------
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use purecrypto::hash::{Digest as _, Sha256};
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&Sha256::digest(bytes));
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The sidecar is the documented template, byte for byte: the generic JSON export's
+/// signing address (BIP-44, classic) over `<hex sha256>  <basename>`, every line ending
+/// in a newline, the last one included.
+///
+/// Source: hw-reference/wallet-export-formats.md §"Detached signature file" [C].
+#[test]
+fn the_sidecar_matches_the_documented_template_byte_for_byte() {
+    let kw = KeyWork::host();
+    let contents = b"{\"chain\":\"BTC\",\"xfp\":\"0F056943\"}";
+    let basename = "coldcard-export.json";
+    let digest = sha256(contents);
+
+    let mut out = String::new();
+    sign_detached(
+        &[(digest, basename)],
+        &SECRET,
+        AddressKind::P2pkh,
+        Network::Mainnet,
+        &kw,
+        &mut out,
+    )
+    .unwrap();
+
+    // Assembled independently from the parts the reference names: the body line, the
+    // address, and a plain legacy signature over that body -- which is what any verifier
+    // that never heard of this firmware computes.
+    let body = format!("{}  {basename}", hex(&digest));
+    let sig = message::sign(&body, &SECRET, AddressKind::P2pkh, &kw).unwrap();
+    let mut armour = [0u8; message::MAX_ARMOURED];
+    let n = message::armour(&sig, &mut armour).unwrap();
+    let expected = format!(
+        "-----BEGIN BITCOIN SIGNED MESSAGE-----\n\
+         {body}\n\
+         -----BEGIN BITCOIN SIGNATURE-----\n\
+         {}\n\
+         {}\n\
+         -----END BITCOIN SIGNATURE-----\n",
+        address_of(&SECRET, AddressKind::P2pkh),
+        core::str::from_utf8(&armour[..n]).unwrap(),
+    );
+    assert_eq!(out, expected);
+    assert_eq!(body.len(), 64 + 2 + basename.len());
+    assert!(body.contains("  "), "two spaces between digest and name");
+}
+
+#[test]
+fn a_sidecar_reads_back_as_its_file_list_and_verifies() {
+    let kw = KeyWork::host();
+    let digest = sha256(b"descriptor text\n");
+    let mut out = String::new();
+    sign_detached(
+        &[(digest, "descriptor.txt")],
+        &SECRET,
+        AddressKind::P2wpkh,
+        Network::Mainnet,
+        &kw,
+        &mut out,
+    )
+    .unwrap();
+
+    let parsed = parse(&out).unwrap();
+    assert_eq!(parsed.address, address_of(&SECRET, AddressKind::P2wpkh));
+    let files: Vec<_> = listed_files(parsed.message).unwrap().collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "descriptor.txt");
+    assert_eq!(files[0].digest, digest);
+    assert_eq!(verify(&parsed), Ok(Scheme::Legacy));
+
+    // The same sidecar with one hex digit of the digest changed: the file list still
+    // reads, and the signature no longer covers it.
+    let spoiled = out.replacen(
+        &hex(&digest)[..1],
+        if &hex(&digest)[..1] == "0" { "1" } else { "0" },
+        1,
+    );
+    let parsed = parse(&spoiled).unwrap();
+    assert!(listed_files(parsed.message).is_some());
+    assert_eq!(verify(&parsed), Err(Error::Invalid));
+}
+
+#[test]
+fn a_sidecar_over_several_files_is_one_line_each_and_still_verifies() {
+    let kw = KeyWork::host();
+    let files = [
+        (sha256(b"one"), "one.txt"),
+        (sha256(b"two"), "two.json"),
+        (sha256(b"three"), "three.sig"),
+    ];
+    let mut out = String::new();
+    sign_detached(
+        &files,
+        &SECRET,
+        AddressKind::P2pkh,
+        Network::Testnet,
+        &kw,
+        &mut out,
+    )
+    .unwrap();
+    let parsed = parse(&out).unwrap();
+    // Three lines joined by `\n`, and the message runs past the single-line bound's
+    // spirit without tripping it: a file list is showable as a list.
+    assert_eq!(parsed.message.matches('\n').count(), 2);
+    let listed = listed_files(parsed.message).unwrap();
+    assert_eq!(listed.total(), 3);
+    let names: Vec<&str> = listed.map(|f| f.name).collect();
+    assert_eq!(names, ["one.txt", "two.json", "three.sig"]);
+    assert_eq!(verify(&parsed), Ok(Scheme::Legacy));
+}
+
+#[test]
+fn a_file_list_is_all_or_nothing_and_never_leaves_its_directory() {
+    let line = format!("{}  export.json", hex(&sha256(b"x")));
+    assert_eq!(listed_files(&line).unwrap().total(), 1);
+    // A note above a listing is not a listing.
+    assert!(listed_files(&format!("hello\n{line}")).is_none());
+    // Upper-case hex is not the documented form.
+    assert!(listed_files(&line.to_uppercase()).is_none());
+    // One space, not two.
+    assert!(listed_files(&line.replacen("  ", " ", 1)).is_none());
+    // A name that would read outside the sidecar's own directory.
+    for bad in ["../x", "a/b", "a\\b", ".."] {
+        let l = format!("{}  {bad}", hex(&sha256(b"x")));
+        assert!(listed_files(&l).is_none(), "{bad:?}");
+    }
+    // Empty, or too many.
+    assert!(listed_files("").is_none());
+    let many: Vec<String> = (0..=MAX_FILES)
+        .map(|i| format!("{}  f{i}", hex(&sha256(b"x"))))
+        .collect();
+    assert!(listed_files(&many.join("\n")).is_none());
+
+    // The writer refuses the same names rather than signing them.
+    let kw = KeyWork::host();
+    let mut out = String::new();
+    assert_eq!(
+        sign_detached(
+            &[(sha256(b"x"), "dir/file")],
+            &SECRET,
+            AddressKind::P2pkh,
+            Network::Mainnet,
+            &kw,
+            &mut out
+        ),
+        Err(DetachedError::BadList)
+    );
+    assert_eq!(
+        sign_detached(
+            &[],
+            &SECRET,
+            AddressKind::P2pkh,
+            Network::Mainnet,
+            &kw,
+            &mut out
+        ),
+        Err(DetachedError::BadList)
+    );
+}
+
+#[test]
+fn a_signed_message_file_still_parses_with_its_own_markers() {
+    // Both marker sets read; the older format's separator is not mistaken for the
+    // sidecar's, nor the other way round.
+    let file = legacy_file("CatCard", AddressKind::P2wpkh);
+    assert!(file.contains(SEPARATOR) && !file.contains(SIG_BEGIN));
+    assert_eq!(verify(&parse(&file).unwrap()), Ok(Scheme::Legacy));
+}
