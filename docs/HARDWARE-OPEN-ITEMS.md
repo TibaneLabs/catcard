@@ -740,6 +740,23 @@ multisig store already is.
 The 30-key cap and the "can sign matching inputs" behaviour are confirmed from
 `hw-reference/firmware-features.md` §7 and §11 `[C]`; only stock's on-disk key and JSON
 shape are the open `[?]`.
+## Stock's Secure Notes value shape is unknown; ours live under `cat_notes` `[?]`
+
+Secure Notes & Passwords (`crates/catcard-fw/src/notes.rs`, backed by
+`catcard_settings::notes`) keeps its items under our own settings key `cat_notes`, as a
+JSON array of `{"title", "kind", "body", "user", "password", "site", "totp", "digits"}`
+objects, and its on/off switch under `cat_secnap` (`"1"`/`"0"`). The settings-format
+document names stock's `notes` and `secnap` keys but not the shape of their values
+(hw-reference/settings-nvstore-format.md §5), so this firmware never writes either: a list
+stock cannot parse under stock's own key could stop a stock device from opening its notes
+at all. Stock's `notes` list is still read, and shown read-only, field by field.
+
+Consequence of being wrong: none to safety. A device that has been stock and then this
+keeps two independent lists; neither firmware loses the other's. Only cross-firmware
+interoperability of the notes is affected, the same safe way the WIF store's is. The
+export file (`notes.json`, optionally sealed as `notes.7z`) is ours too; the import reads
+any file with a `notes` list of objects carrying a `title`.
+
 ## SD-encryption parameters use our own settings key `ccenc` `[?]`
 
 Device-bound whole-card SD encryption (`crates/catcard-fw/src/sdcrypt.rs`, backed by
