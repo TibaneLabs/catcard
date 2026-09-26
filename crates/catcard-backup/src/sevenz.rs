@@ -128,6 +128,20 @@ impl Stream {
     }
 }
 
+/// One **unencrypted** stored file inside an archive: a cleartext backup.
+///
+/// No key, no IV, no padding -- the bytes at `offset` are the file. The CRC is the only
+/// integrity check the format gives it, exactly as for the encrypted case.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Plain {
+    /// Where the file starts, from byte zero of the archive.
+    pub offset: usize,
+    /// The file's length: stored, so packed and unpacked are the same number.
+    pub len: usize,
+    /// CRC-32 over the file, when the archive declares one.
+    pub crc: Option<u32>,
+}
+
 /// What [`open`] found at the end of the archive.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Found {
@@ -137,6 +151,16 @@ pub enum Found {
     /// [`file_in`]. Its salt and cycle count are normally the same as the file's, so the
     /// key can be derived once and used twice -- only the IV differs.
     Header(Stream),
+    /// The one file is stored **in the clear**: no AES coder at all. Nothing to derive
+    /// and no password to ask for -- [`extract_in_place`] reads it straight out. A
+    /// caller that wants to *refuse* an unencrypted backup does it here, by name.
+    Clear(Plain),
+}
+
+/// What one folder describes: the AES stream, or the file as it is.
+enum Entry {
+    Aes(Stream),
+    Clear(Plain),
 }
 
 // ---------------------------------------------------------------------------
@@ -179,19 +203,71 @@ pub fn open(archive: &[u8]) -> Result<Found, Error> {
 
     let mut r = Reader::new(header);
     match r.byte()? {
-        K_HEADER => Ok(Found::File(parse_header_body(&mut r)?)),
-        K_ENCODED_HEADER => Ok(Found::Header(parse_streams_info(&mut r)?)),
+        K_HEADER => Ok(match parse_header_body(&mut r)? {
+            Entry::Aes(s) => Found::File(s),
+            Entry::Clear(p) => Found::Clear(p),
+        }),
+        K_ENCODED_HEADER => match parse_streams_info(&mut r)? {
+            Entry::Aes(s) => Ok(Found::Header(s)),
+            // An "encoded" header that is merely stored is nothing any writer produces:
+            // the point of encoding a header is to compress or encrypt it.
+            Entry::Clear(_) => Err(Error::BadArchive),
+        },
         _ => Err(Error::BadArchive),
     }
 }
 
 /// The one file described by a header that had to be decrypted first.
+///
+/// An encrypted header over an unencrypted file is a mix no writer produces, and is
+/// refused as [`Error::NotEncrypted`] rather than read as either.
 pub fn file_in(decoded_header: &[u8]) -> Result<Stream, Error> {
     let mut r = Reader::new(decoded_header);
     if r.byte()? != K_HEADER {
         return Err(Error::BadArchive);
     }
-    parse_header_body(&mut r)
+    match parse_header_body(&mut r)? {
+        Entry::Aes(s) => Ok(s),
+        Entry::Clear(_) => Err(Error::NotEncrypted),
+    }
+}
+
+/// Copies the cleartext file `p` out of `archive` into `out`, checking its CRC.
+pub fn extract<'o>(archive: &[u8], p: &Plain, out: &'o mut [u8]) -> Result<&'o [u8], Error> {
+    let end = plain_end(archive.len(), p)?;
+    if out.len() < p.len {
+        return Err(Error::BufferTooSmall);
+    }
+    out[..p.len].copy_from_slice(&archive[p.offset..end]);
+    check_plain(&out[..p.len], p)
+}
+
+/// Moves the cleartext file `p` to the **front of the buffer the archive is in**.
+///
+/// The one-buffer counterpart of [`decrypt_in_place`]: the archive is overwritten and
+/// the file comes back at offset zero, so a caller reads a cleartext backup exactly the
+/// way it reads a decrypted one.
+pub fn extract_in_place<'a>(archive: &'a mut [u8], p: &Plain) -> Result<&'a [u8], Error> {
+    let end = plain_end(archive.len(), p)?;
+    archive.copy_within(p.offset..end, 0);
+    check_plain(&archive[..p.len], p)
+}
+
+fn plain_end(archive_len: usize, p: &Plain) -> Result<usize, Error> {
+    let end = p.offset.checked_add(p.len).ok_or(Error::Truncated)?;
+    if end > archive_len {
+        return Err(Error::Truncated);
+    }
+    Ok(end)
+}
+
+fn check_plain<'o>(file: &'o [u8], p: &Plain) -> Result<&'o [u8], Error> {
+    if let Some(want) = p.crc
+        && crc32(file) != want
+    {
+        return Err(Error::BadChecksum);
+    }
+    Ok(file)
 }
 
 /// Decrypts `s` out of `archive` into `out`, and returns the plaintext.
@@ -260,7 +336,7 @@ fn unwrap_at_front<'o>(buf: &'o mut [u8], s: &Stream, key: &Key) -> Result<&'o [
 }
 
 /// `kHeader`, after its tag: the main streams, then the file list.
-fn parse_header_body(r: &mut Reader<'_>) -> Result<Stream, Error> {
+fn parse_header_body(r: &mut Reader<'_>) -> Result<Entry, Error> {
     let mut id = r.byte()?;
     // Archive properties and additional streams are legal and we do not use them; an
     // archive that has them is not one we wrote and not one we will guess at.
@@ -283,7 +359,7 @@ fn parse_header_body(r: &mut Reader<'_>) -> Result<Stream, Error> {
 ///
 /// Restricted throughout to one pack stream, one folder and one sub-stream, because
 /// that is what a backup is. Anything wider is [`Error::NotOneFile`].
-fn parse_streams_info(r: &mut Reader<'_>) -> Result<Stream, Error> {
+fn parse_streams_info(r: &mut Reader<'_>) -> Result<Entry, Error> {
     let mut pack_pos = 0u64;
     let mut packed_len: Option<u64> = None;
     let mut folder: Option<FolderInfo> = None;
@@ -323,26 +399,49 @@ fn parse_streams_info(r: &mut Reader<'_>) -> Result<Stream, Error> {
     let offset = BASE
         .checked_add(usize::try_from(pack_pos).map_err(|_| Error::Truncated)?)
         .ok_or(Error::Truncated)?;
-    Ok(Stream {
-        offset,
-        packed_len: usize::try_from(packed_len).map_err(|_| Error::Truncated)?,
-        unpacked_len: usize::try_from(f.unpacked_len).map_err(|_| Error::Truncated)?,
-        cycles_power: f.cycles_power,
-        // A CRC listed against the sub-stream wins; with no sub-stream section the
-        // folder's own CRC covers the single file.
-        crc: if have_substreams { sub_crc } else { f.crc },
-        salt: f.salt,
-        salt_len: f.salt_len,
-        iv: f.iv,
+    let packed_len = usize::try_from(packed_len).map_err(|_| Error::Truncated)?;
+    let unpacked_len = usize::try_from(f.unpacked_len).map_err(|_| Error::Truncated)?;
+    // A CRC listed against the sub-stream wins; with no sub-stream section the
+    // folder's own CRC covers the single file.
+    let crc = if have_substreams { sub_crc } else { f.crc };
+    Ok(match f.aes {
+        Some(aes) => Entry::Aes(Stream {
+            offset,
+            packed_len,
+            unpacked_len,
+            cycles_power: aes.cycles_power,
+            crc,
+            salt: aes.salt,
+            salt_len: aes.salt_len,
+            iv: aes.iv,
+        }),
+        None => {
+            // Stored as it is: the pack stream *is* the file, so the two lengths have to
+            // agree. A writer that pads a Copy stream does not exist.
+            if packed_len != unpacked_len {
+                return Err(Error::BadArchive);
+            }
+            Entry::Clear(Plain {
+                offset,
+                len: unpacked_len,
+                crc,
+            })
+        }
     })
 }
 
-struct FolderInfo {
-    unpacked_len: u64,
+/// The AES coder's properties, when the folder has one.
+struct AesProps {
     cycles_power: u8,
     salt: [u8; MAX_SALT],
     salt_len: u8,
     iv: [u8; 16],
+}
+
+struct FolderInfo {
+    unpacked_len: u64,
+    /// `None` is a folder of one Copy coder: the file in the clear.
+    aes: Option<AesProps>,
     crc: Option<u32>,
 }
 
@@ -365,7 +464,7 @@ fn parse_unpack_info(r: &mut Reader<'_>) -> Result<FolderInfo, Error> {
     }
     let mut total_in = 0u64;
     let mut total_out = 0u64;
-    let mut aes: Option<(u8, [u8; MAX_SALT], u8, [u8; 16])> = None;
+    let mut aes: Option<AesProps> = None;
     for _ in 0..num_coders {
         let flags = r.byte()?;
         if flags & 0x80 != 0 {
@@ -407,7 +506,12 @@ fn parse_unpack_info(r: &mut Reader<'_>) -> Result<FolderInfo, Error> {
             return Err(Error::Compressed);
         }
     }
-    let (cycles_power, salt, salt_len, iv) = aes.ok_or(Error::NotEncrypted)?;
+    // No AES coder is a cleartext archive, and it has exactly one shape: a single Copy
+    // coder. Two Copy coders chained together is nothing any writer produces, and is
+    // not something to guess at.
+    if aes.is_none() && num_coders != 1 {
+        return Err(Error::BadArchive);
+    }
 
     // Bind pairs wire one coder's output to another's input. The folder's own output is
     // the one out-stream nothing consumes.
@@ -457,10 +561,7 @@ fn parse_unpack_info(r: &mut Reader<'_>) -> Result<FolderInfo, Error> {
 
     Ok(FolderInfo {
         unpacked_len: sizes[final_out],
-        cycles_power,
-        salt,
-        salt_len,
-        iv,
+        aes,
         crc,
     })
 }
@@ -472,7 +573,7 @@ fn parse_unpack_info(r: &mut Reader<'_>) -> Result<FolderInfo, Error> {
 /// high nibble to the salt length and its low nibble to the IV length. Source: read off
 /// an archive written by `7z` 17.05 -- `53 0F` decoded as 19 rounds, no salt, a 16-byte
 /// IV, which is exactly the eighteen bytes that followed. [C]
-fn parse_aes_props(props: &[u8]) -> Result<(u8, [u8; MAX_SALT], u8, [u8; 16]), Error> {
+fn parse_aes_props(props: &[u8]) -> Result<AesProps, Error> {
     let b0 = *props.first().ok_or(Error::BadArchive)?;
     let cycles_power = b0 & 0x3F;
     let (salt_len, iv_len, rest) = if b0 & 0xC0 == 0 {
@@ -491,7 +592,12 @@ fn parse_aes_props(props: &[u8]) -> Result<(u8, [u8; MAX_SALT], u8, [u8; 16]), E
     // A short IV is zero-extended, which is what 7-Zip's own reader does.
     let mut iv = [0u8; 16];
     iv[..iv_len].copy_from_slice(&rest[salt_len..]);
-    Ok((cycles_power, salt, salt_len as u8, iv))
+    Ok(AesProps {
+        cycles_power,
+        salt,
+        salt_len: salt_len as u8,
+        iv,
+    })
 }
 
 /// Sub-stream info for the single-file case. Returns the file's CRC if it is here.
@@ -645,41 +751,100 @@ pub fn seal_at<'o>(
         .encrypt(&mut out[BASE..ct_end])
         .map_err(|_| Error::BadCiphertext)?;
 
+    let coder = Coder::Aes {
+        iv,
+        salt,
+        cycles_power,
+    };
+    finish_archive(out, ct_end, name, body_len, padded, crc, coder)
+}
+
+/// Packs `data` as one stored file called `name`, **unencrypted**.
+///
+/// A cleartext backup: anyone holding the file holds what is in it. Nothing here
+/// decides whether that is acceptable -- the firmware asks the owner, twice, by name --
+/// but the archive is a real 7-Zip one, so a laptop opens it with no password at all.
+pub fn write_clear<'o>(out: &'o mut [u8], name: &str, data: &[u8]) -> Result<&'o [u8], Error> {
+    let end = BODY_OFFSET
+        .checked_add(data.len())
+        .ok_or(Error::BufferTooSmall)?;
+    if out.len() < end {
+        return Err(Error::BufferTooSmall);
+    }
+    out[BODY_OFFSET..end].copy_from_slice(data);
+    seal_clear_at(out, data.len(), name)
+}
+
+/// Wraps a body already at `out[BODY_OFFSET..][..body_len]` as a cleartext archive.
+///
+/// The one-buffer form of [`write_clear`], as [`seal_at`] is of [`write`]. The body is
+/// left exactly where it is and only the header is written after it.
+pub fn seal_clear_at<'o>(
+    out: &'o mut [u8],
+    body_len: usize,
+    name: &str,
+) -> Result<&'o [u8], Error> {
+    let end = BASE.checked_add(body_len).ok_or(Error::BufferTooSmall)?;
+    if out.len() < end {
+        return Err(Error::BufferTooSmall);
+    }
+    let crc = crc32(&out[BASE..end]);
+    finish_archive(out, end, name, body_len, body_len, crc, Coder::Copy)
+}
+
+/// Write the next header after the packed stream and the signature header in front of
+/// it, and return the whole archive.
+fn finish_archive<'o>(
+    out: &'o mut [u8],
+    packed_end: usize,
+    name: &str,
+    unpacked_len: usize,
+    packed_len: usize,
+    crc: u32,
+    coder: Coder<'_>,
+) -> Result<&'o [u8], Error> {
     let header_len = {
-        let mut w = Writer::new(&mut out[ct_end..]);
-        write_header(&mut w, name, body_len, padded, crc, iv, salt, cycles_power);
+        let mut w = Writer::new(&mut out[packed_end..]);
+        write_header(&mut w, name, unpacked_len, packed_len, crc, coder);
         w.finish()?
     };
 
     // The signature header last: it carries lengths only now known, and CRCs over
     // bytes only now written.
     out[..8].copy_from_slice(&SIGNATURE);
-    out[12..20].copy_from_slice(&(padded as u64).to_le_bytes());
+    out[12..20].copy_from_slice(&(packed_len as u64).to_le_bytes());
     out[20..28].copy_from_slice(&(header_len as u64).to_le_bytes());
-    let header_crc = crc32(&out[ct_end..ct_end + header_len]);
+    let header_crc = crc32(&out[packed_end..packed_end + header_len]);
     out[28..32].copy_from_slice(&header_crc.to_le_bytes());
     let start_crc = crc32(&out[12..32]);
     out[8..12].copy_from_slice(&start_crc.to_le_bytes());
 
-    Ok(&out[..ct_end + header_len])
+    Ok(&out[..packed_end + header_len])
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How the one folder is coded: AES then Copy, or Copy alone.
+enum Coder<'a> {
+    Aes {
+        iv: &'a [u8; 16],
+        salt: &'a [u8],
+        cycles_power: u8,
+    },
+    Copy,
+}
+
 fn write_header(
     w: &mut Writer<'_>,
     name: &str,
     unpacked_len: usize,
     packed_len: usize,
     crc: u32,
-    iv: &[u8; 16],
-    salt: &[u8],
-    cycles_power: u8,
+    coder: Coder<'_>,
 ) {
     w.byte(K_HEADER);
     w.byte(K_MAIN_STREAMS);
 
     w.byte(K_PACK_INFO);
-    w.number(0); // packPos: the ciphertext starts at BASE
+    w.number(0); // packPos: the packed stream starts at BASE
     w.number(1); // one pack stream
     w.byte(K_SIZE);
     w.number(packed_len as u64);
@@ -689,21 +854,39 @@ fn write_header(
     w.byte(K_FOLDER);
     w.number(1); // one folder
     w.byte(0); // not external
-    w.number(2); // two coders: AES, then Copy
-    w.byte(0x20 | AES_CODER_ID.len() as u8); // has properties, four-byte id
-    w.bytes(&AES_CODER_ID);
-    w.number(2 + salt.len() as u64 + iv.len() as u64);
-    w.byte(cycles_power | if salt.is_empty() { 0 } else { 0x80 } | 0x40);
-    w.byte(((salt.len().saturating_sub(1) as u8) << 4) | (iv.len() as u8 - 1));
-    w.bytes(salt);
-    w.bytes(iv);
-    w.byte(COPY_CODER_ID.len() as u8); // no properties, one-byte id
-    w.bytes(&COPY_CODER_ID);
-    w.number(1); // bind pair: Copy's input ...
-    w.number(0); // ... takes AES's output
-    w.byte(K_CODERS_UNPACK_SIZE);
-    w.number(unpacked_len as u64); // out of the AES coder
-    w.number(unpacked_len as u64); // out of the Copy coder -- the folder's output
+    match coder {
+        Coder::Aes {
+            iv,
+            salt,
+            cycles_power,
+        } => {
+            w.number(2); // two coders: AES, then Copy
+            w.byte(0x20 | AES_CODER_ID.len() as u8); // has properties, four-byte id
+            w.bytes(&AES_CODER_ID);
+            w.number(2 + salt.len() as u64 + iv.len() as u64);
+            w.byte(cycles_power | if salt.is_empty() { 0 } else { 0x80 } | 0x40);
+            w.byte(((salt.len().saturating_sub(1) as u8) << 4) | (iv.len() as u8 - 1));
+            w.bytes(salt);
+            w.bytes(iv);
+            w.byte(COPY_CODER_ID.len() as u8); // no properties, one-byte id
+            w.bytes(&COPY_CODER_ID);
+            w.number(1); // bind pair: Copy's input ...
+            w.number(0); // ... takes AES's output
+            w.byte(K_CODERS_UNPACK_SIZE);
+            w.number(unpacked_len as u64); // out of the AES coder
+            w.number(unpacked_len as u64); // out of the Copy coder -- the folder's output
+        }
+        Coder::Copy => {
+            // One coder and no bind pairs: the reference tool's `-mx0 -m0=Copy` with no
+            // password writes exactly this. Source: the cleartext archive in this
+            // module's `reference_tool` tests. [C]
+            w.number(1);
+            w.byte(COPY_CODER_ID.len() as u8); // no properties, one-byte id
+            w.bytes(&COPY_CODER_ID);
+            w.byte(K_CODERS_UNPACK_SIZE);
+            w.number(unpacked_len as u64);
+        }
+    }
     w.byte(K_END);
 
     // One sub-stream per folder is the default, so only the CRC needs saying.
@@ -912,7 +1095,7 @@ mod tests {
     fn only_file(archive: &[u8]) -> Stream {
         match open(archive).unwrap() {
             Found::File(s) => s,
-            Found::Header(_) => panic!("expected a plain header"),
+            other => panic!("expected a plain header, got {other:?}"),
         }
     }
 
@@ -1204,6 +1387,105 @@ mod tests {
         let start_crc = crc32(&archive[12..32]);
         archive[8..12].copy_from_slice(&start_crc.to_le_bytes());
     }
+
+    // -- cleartext ------------------------------------------------------------------
+
+    /// A cleartext archive is one Copy coder and no key: the file goes in as it is and
+    /// comes back out through both extractors, byte for byte.
+    #[test]
+    fn a_cleartext_archive_round_trips() {
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\n\nchain = \"BTC\"\n\n# EOF\n";
+        let mut buf = vec![0u8; len_bound("backup.txt", body.len())];
+        let archive = write_clear(&mut buf, "backup.txt", body).unwrap().to_vec();
+
+        let p = match open(&archive).unwrap() {
+            Found::Clear(p) => p,
+            other => panic!("expected a cleartext file, got {other:?}"),
+        };
+        assert_eq!((p.offset, p.len), (BASE, body.len()));
+        assert_eq!(p.crc, Some(crc32(body)));
+
+        let mut out = vec![0u8; p.len];
+        assert_eq!(extract(&archive, &p, &mut out).unwrap(), body);
+        let mut held = archive.clone();
+        assert_eq!(extract_in_place(&mut held, &p).unwrap(), body);
+    }
+
+    /// The one-buffer sealer and the copying writer produce the same bytes, as their
+    /// encrypted counterparts do.
+    #[test]
+    fn the_cleartext_sealer_agrees_with_the_cleartext_writer() {
+        let body = b"chain = \"XTN\"\n";
+        let mut a = vec![0u8; len_bound("b.txt", body.len())];
+        a[BODY_OFFSET..BODY_OFFSET + body.len()].copy_from_slice(body);
+        let sealed = seal_clear_at(&mut a, body.len(), "b.txt").unwrap().to_vec();
+        let mut b = vec![0u8; len_bound("b.txt", body.len())];
+        let written = write_clear(&mut b, "b.txt", body).unwrap();
+        assert_eq!(sealed, written);
+    }
+
+    /// Detection, not a question: the same reader tells an encrypted archive from a
+    /// cleartext one by its coders, so the firmware never asks for words a file does
+    /// not need -- and never hands an unencrypted file to the decryptor.
+    #[test]
+    fn cleartext_and_encrypted_archives_are_told_apart_by_the_reader() {
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\n# EOF\n";
+        let key = Key::from_bytes([7u8; 32]);
+        let mut buf = vec![0u8; len_bound("b", body.len())];
+        let sealed = write(&mut buf, "b", body, &key, &[3u8; 16], &[], 10)
+            .unwrap()
+            .to_vec();
+        assert!(matches!(open(&sealed).unwrap(), Found::File(_)));
+
+        let mut buf = vec![0u8; len_bound("b", body.len())];
+        let clear = write_clear(&mut buf, "b", body).unwrap().to_vec();
+        assert!(matches!(open(&clear).unwrap(), Found::Clear(_)));
+
+        // A cleartext file behind an encrypted header is a mix nobody writes; the
+        // header reader refuses it by name rather than reading it as either.
+        let off = u64::from_le_bytes(clear[12..20].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(clear[20..28].try_into().unwrap()) as usize;
+        let header = &clear[BASE + off..BASE + off + len];
+        assert_eq!(file_in(header).unwrap_err(), Error::NotEncrypted);
+    }
+
+    /// With no key there is no wrong-password failure; the CRC is the only thing
+    /// standing between a damaged file and a restore of the damage.
+    #[test]
+    fn a_damaged_cleartext_file_fails_its_checksum() {
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\nchain = \"BTC\"\n";
+        let mut buf = vec![0u8; len_bound("b", body.len())];
+        let mut archive = write_clear(&mut buf, "b", body).unwrap().to_vec();
+        archive[BASE + 3] ^= 0x01;
+        let p = match open(&archive).unwrap() {
+            Found::Clear(p) => p,
+            other => panic!("expected a cleartext file, got {other:?}"),
+        };
+        assert_eq!(
+            extract_in_place(&mut archive, &p).unwrap_err(),
+            Error::BadChecksum
+        );
+    }
+
+    /// A Copy stream is never padded, so a cleartext folder whose pack and unpack sizes
+    /// disagree is a malformed archive, not a file with some padding to strip.
+    #[test]
+    fn a_padded_cleartext_stream_is_refused() {
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\n";
+        let mut buf = vec![0u8; len_bound("b", body.len())];
+        let mut archive = write_clear(&mut buf, "b", body).unwrap().to_vec();
+        // Grow the pack size by one in the next header. Its `kSize` number is the byte
+        // after `kPackInfo(06) packPos(00) numPackStreams(01) kSize(09)`.
+        let off = u64::from_le_bytes(archive[12..20].try_into().unwrap()) as usize;
+        let start = BASE + off;
+        assert_eq!(
+            &archive[start..start + 6],
+            &[K_HEADER, K_MAIN_STREAMS, K_PACK_INFO, 0, 1, K_SIZE]
+        );
+        archive[start + 6] += 1;
+        fix_crcs(&mut archive);
+        assert_eq!(open(&archive).unwrap_err(), Error::BadArchive);
+    }
 }
 
 /// Against the reference implementation, both ways.
@@ -1318,7 +1600,7 @@ mod reference_tool {
         let archive = std::fs::read(dir.join("theirs.7z")).unwrap();
         let s = match open(&archive).unwrap() {
             Found::File(s) => s,
-            Found::Header(_) => panic!("-mhe=off should leave the header plain"),
+            other => panic!("-mhe=off should leave the header plain, got {other:?}"),
         };
         assert_eq!(s.unpacked_len, body.len());
         let key = kdf::derive(PASSWORD, s.salt(), s.cycles_power).unwrap();
@@ -1364,7 +1646,7 @@ mod reference_tool {
         let archive = std::fs::read(dir.join("hidden.7z")).unwrap();
         let hdr = match open(&archive).unwrap() {
             Found::Header(s) => s,
-            Found::File(_) => panic!("-mhe=on should encrypt the header"),
+            other => panic!("-mhe=on should encrypt the header, got {other:?}"),
         };
         // One derivation serves both streams: same salt, same round count, different
         // IV. That is what makes the encrypted-header case affordable on the device.
@@ -1405,6 +1687,66 @@ mod reference_tool {
 
         let archive = std::fs::read(dir.join("lzma.7z")).unwrap();
         assert_eq!(open(&archive).unwrap_err(), Error::Compressed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cleartext backup has to open on a laptop with no password at all, or the
+    /// "cleartext" option is a lie. `7z t` with no `-p` is that laptop.
+    #[test]
+    fn the_reference_tool_opens_a_cleartext_archive_we_write() {
+        let Some(exe) = seven_zip() else {
+            eprintln!("skipped: no 7z on PATH");
+            return;
+        };
+        let dir = workdir("we-write-clear");
+
+        let body = b"# Coldcard backup file! DO NOT CHANGE.\n\nchain = \"BTC\"\n\n# EOF\n";
+        let mut buf = vec![0u8; len_bound("backup.txt", body.len())];
+        let archive = write_clear(&mut buf, "backup.txt", body).unwrap();
+        std::fs::write(dir.join("clear.7z"), archive).unwrap();
+
+        let out = run(exe, &dir, &["t", "clear.7z"]);
+        assert!(
+            out.status.success(),
+            "7z refused our cleartext archive:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let out = run(exe, &dir, &["x", "-y", "clear.7z"]);
+        assert!(out.status.success(), "7z x failed: {out:?}");
+        assert_eq!(std::fs::read(dir.join("backup.txt")).unwrap(), body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And a stored, unencrypted archive the tool wrote is read as cleartext -- the
+    /// detection the firmware relies on to skip the password screen.
+    #[test]
+    fn we_open_a_cleartext_archive_the_reference_tool_writes() {
+        let Some(exe) = seven_zip() else {
+            eprintln!("skipped: no 7z on PATH");
+            return;
+        };
+        let dir = workdir("they-write-clear");
+
+        let body: Vec<u8> = (0..700u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(dir.join("inner.txt"), &body).unwrap();
+        let out = run(
+            exe,
+            &dir,
+            &["a", "-t7z", "-mx0", "-m0=Copy", "clear.7z", "inner.txt"],
+        );
+        assert!(out.status.success(), "7z a failed: {out:?}");
+
+        let archive = std::fs::read(dir.join("clear.7z")).unwrap();
+        let p = match open(&archive).unwrap() {
+            Found::Clear(p) => p,
+            other => panic!("a stored archive with no password is cleartext, got {other:?}"),
+        };
+        assert_eq!(p.len, body.len());
+        let mut out_buf = vec![0u8; p.len];
+        assert_eq!(extract(&archive, &p, &mut out_buf).unwrap(), &body[..]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

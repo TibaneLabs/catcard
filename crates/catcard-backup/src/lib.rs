@@ -19,6 +19,11 @@
 //! protects is not encrypted, it is obfuscated. That also means a lost word list is a
 //! lost backup, which is why the words go on screen first and the write happens second.
 //!
+//! The password can also be a passphrase the owner typed -- the same derivation, a
+//! different string -- or there can be none at all: a **cleartext** archive holds the
+//! file behind a lone Copy coder. Which of the three an archive is comes out of its
+//! header ([`sevenz::Found`]), so a reader never has to ask.
+//!
 //! # Every buffer belongs to the caller
 //!
 //! There is no allocator here. A body is a few kilobytes and an archive a few more, and
@@ -72,7 +77,9 @@ pub enum Error {
     BadArchive,
     /// The archive is compressed. Only stored (`Copy`) files are supported.
     Compressed,
-    /// The archive is not AES-256 encrypted, or mixes encryption with something else.
+    /// The archive mixes encryption with something else: two AES coders in one folder,
+    /// or an encrypted header over an unencrypted file. An archive with no encryption
+    /// at all is not this -- it is read as [`sevenz::Found::Clear`].
     NotEncrypted,
     /// The archive holds other than exactly one file.
     NotOneFile,
@@ -119,7 +126,7 @@ impl core::fmt::Display for Error {
             Error::BadChecksum => "checksum mismatch",
             Error::BadArchive => "malformed archive",
             Error::Compressed => "compressed archives are not supported",
-            Error::NotEncrypted => "archive is not AES-256 encrypted",
+            Error::NotEncrypted => "archive mixes AES-256 encryption with something else",
             Error::NotOneFile => "archive does not hold exactly one file",
             Error::BadCiphertext => "ciphertext length is not a plausible AES padding",
             Error::KdfTooExpensive => "key derivation too expensive",
@@ -188,7 +195,7 @@ mod tests {
 
         let file = match sevenz::open(&buf[..archive_len]).unwrap() {
             sevenz::Found::File(s) => s,
-            sevenz::Found::Header(_) => panic!("we do not write encrypted headers"),
+            other => panic!("we write one encrypted file, got {other:?}"),
         };
         let back = {
             let plain = sevenz::decrypt_in_place(&mut buf[..archive_len], &file, &key).unwrap();
@@ -221,12 +228,122 @@ mod tests {
 
         let file = match sevenz::open(&buf[..n]).unwrap() {
             sevenz::Found::File(s) => s,
-            sevenz::Found::Header(_) => unreachable!(),
+            other => panic!("we write one encrypted file, got {other:?}"),
         };
         let wrong = kdf::derive("wrong words here", &[], 8).unwrap();
         assert_eq!(
             sevenz::decrypt_in_place(&mut buf[..n], &file, &wrong).unwrap_err(),
             Error::BadChecksum
         );
+    }
+
+    /// The body the three password modes share, built where the sealer wants it.
+    fn build_body(buf: &mut [u8]) -> usize {
+        let mut w = body::BodyWriter::new(&mut buf[sevenz::BODY_OFFSET..]);
+        w.preamble();
+        w.section("Private key details: Bitcoin Mainnet");
+        w.text("mnemonic", "abandon abandon abandon about");
+        w.text("chain", "BTC");
+        w.hex("raw_secret", &[0x82; 72]);
+        w.eof();
+        w.finish().unwrap().len()
+    }
+
+    /// A typed passphrase is the words path with a different string: same derivation,
+    /// same container. Non-ASCII on purpose, because the KDF's UTF-16 step is where a
+    /// typed password differs from twelve English words.
+    #[test]
+    fn a_typed_passphrase_backup_round_trips() {
+        const PASSPHRASE: &str = "pässwörd — für die Sicherung 42";
+        const CYCLES: u8 = 8;
+
+        let mut buf = [0u8; 1024];
+        let body_len = build_body(&mut buf);
+        let key = kdf::derive(PASSPHRASE, &[], CYCLES).unwrap();
+        let n = sevenz::seal_at(
+            &mut buf,
+            body_len,
+            "backup.txt",
+            &key,
+            &[0x5A; 16],
+            &[],
+            CYCLES,
+        )
+        .unwrap()
+        .len();
+
+        let file = match sevenz::open(&buf[..n]).unwrap() {
+            sevenz::Found::File(s) => s,
+            other => panic!("a passphrase backup is one encrypted file, got {other:?}"),
+        };
+        // The reader derives from what the archive says, as the firmware does on restore.
+        let again = kdf::derive(PASSPHRASE, file.salt(), file.cycles_power).unwrap();
+        let plain = sevenz::decrypt_in_place(&mut buf[..n], &file, &again).unwrap();
+        let got = body::scan(core::str::from_utf8(plain).unwrap()).unwrap();
+        assert_eq!(got.details.mnemonic, Some("abandon abandon abandon about"));
+
+        // And the words-shaped password does not open it: a typed passphrase is a
+        // different key, not a different spelling of the same one.
+        let mut buf = [0u8; 1024];
+        let body_len = build_body(&mut buf);
+        let n = sevenz::seal_at(
+            &mut buf,
+            body_len,
+            "backup.txt",
+            &key,
+            &[0x5A; 16],
+            &[],
+            CYCLES,
+        )
+        .unwrap()
+        .len();
+        let wrong = kdf::derive("passwort fur die sicherung 42", &[], CYCLES).unwrap();
+        assert_eq!(
+            sevenz::decrypt_in_place(&mut buf[..n], &file, &wrong).unwrap_err(),
+            Error::BadChecksum
+        );
+    }
+
+    /// A cleartext backup: no key in, none needed out. The reader recognises it from
+    /// the header, so a restore of one never asks for words -- and never derives a key
+    /// for a file that has no use for one.
+    #[test]
+    fn a_cleartext_backup_round_trips_with_no_key() {
+        let mut buf = [0u8; 1024];
+        let body_len = build_body(&mut buf);
+        let n = sevenz::seal_clear_at(&mut buf, body_len, "backup.txt")
+            .unwrap()
+            .len();
+
+        // The body sits in the file exactly as written: that is what "cleartext" means.
+        assert_eq!(&buf[sevenz::BODY_OFFSET..sevenz::BODY_OFFSET + 5], b"# Col");
+
+        let plain = match sevenz::open(&buf[..n]).unwrap() {
+            sevenz::Found::Clear(p) => p,
+            other => panic!("a cleartext backup is detected, not asked about; got {other:?}"),
+        };
+        let file = sevenz::extract_in_place(&mut buf[..n], &plain).unwrap();
+        let got = body::scan(core::str::from_utf8(file).unwrap()).unwrap();
+        assert_eq!(got.details.mnemonic, Some("abandon abandon abandon about"));
+        assert_eq!(got.details.raw_secret.map(str::len), Some(144));
+    }
+
+    /// The other side of detection: an encrypted backup is never mistaken for a
+    /// cleartext one, however it was keyed, so a reader that skips the password screen
+    /// on `Clear` cannot be tricked into skipping it by a file that needs one.
+    #[test]
+    fn an_encrypted_backup_is_never_read_as_cleartext() {
+        for (password, cycles) in [("abandon ability able about", 8u8), ("typed 1234", 10)] {
+            let mut buf = [0u8; 1024];
+            let body_len = build_body(&mut buf);
+            let key = kdf::derive(password, &[], cycles).unwrap();
+            let n = sevenz::seal_at(&mut buf, body_len, "b", &key, &[1; 16], &[], cycles)
+                .unwrap()
+                .len();
+            assert!(
+                matches!(sevenz::open(&buf[..n]).unwrap(), sevenz::Found::File(_)),
+                "{password:?} sealed an archive that did not read as encrypted"
+            );
+        }
     }
 }

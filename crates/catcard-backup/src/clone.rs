@@ -238,7 +238,7 @@ mod tests {
 
         let file = match sevenz::open(&buf[HEADER_LEN..total]).unwrap() {
             sevenz::Found::File(s) => s,
-            sevenz::Found::Header(_) => panic!("clone never writes an encrypted header"),
+            other => panic!("clone writes one encrypted file, got {other:?}"),
         };
         let plain = sevenz::decrypt_in_place(&mut buf[HEADER_LEN..total], &file, &key).unwrap();
         let text = core::str::from_utf8(plain).unwrap();
