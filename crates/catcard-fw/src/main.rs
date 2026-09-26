@@ -225,8 +225,24 @@ pub fn running_board() -> &'static str {
     }
 }
 
-/// Version reported to the host and written into the signed header.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version reported to the host and shown on screen; the signed header carries the same
+/// string, stamped by `catcard-image --version`.
+///
+/// `CATCARD_VERSION` at build time overrides the workspace version, so a release built
+/// from a tag (`v7.0.0-alpha1` -> `7.0.0a1`, see `tools/release-version.sh`) names itself
+/// the way its header does. Unset or empty, it is the crate version.
+pub const VERSION: &str = match option_env!("CATCARD_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
+// The header's version field is 7 ASCII characters and a NUL (docs/RELEASING.md). A
+// longer string would build a firmware that reports one version and an image tool that
+// refuses to stamp it, so the build stops here instead.
+const _: () = assert!(
+    !VERSION.is_empty() && VERSION.len() <= 7 && VERSION.is_ascii(),
+    "CATCARD_VERSION must be 1-7 ASCII characters"
+);
 
 #[entry]
 fn main() -> ! {

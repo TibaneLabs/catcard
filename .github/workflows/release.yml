@@ -1,0 +1,195 @@
+name: Release
+
+# A `v*` tag publishes a GitHub release with one `.dfu` per shipped shape attached.
+#
+# The images are built exactly as docs/RELEASING.md's checklist says a release is built:
+# no bench features (`--no-default-features`), the crutch-string check, `catcard-image
+# verify`, and a timestamp that is the tagged commit's own time, so a rebuild of the tag
+# reproduces the same digest and a later tag always carries a later timestamp.
+#
+# What this does NOT do: sign anything with a CatCard project key (that key never
+# touches CI), or prove the build on a second machine. Every image here is signed with
+# the published developer key and shows the red light and the warning screen.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # `gh` finds the repository from this rather than from a checkout's remote.
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Check the tag and open a draft release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      epoch: ${{ steps.v.outputs.epoch }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Version and timestamp from the tag
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Refuses a tag that is not vX.Y.Z[-alphaN|-betaN|-rcN], that does not match
+          # the workspace version, or that will not fit the header's 7 characters.
+          version=$(tools/release-version.sh "$tag")
+          epoch=$(git log -1 --format=%ct)
+          case "$tag" in *-*) pre=true ;; *) pre=false ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "tag $tag -> header version $version, SOURCE_DATE_EPOCH $epoch, prerelease $pre"
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Idempotent, so a re-run of a failed workflow finds its own draft.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          CatCard ${tag} -- clean-room firmware for Coldcard hardware.
+
+          **Signed with the published developer key.** The device shows a red genuine
+          light and a warning screen before it boots this; that is expected. The images
+          carry no bench features: no USB debug monitor and no USB key injection.
+
+          **Untested on hardware** unless the notes below say otherwise.
+
+          | Board | Image | Contents |
+          |---|---|---|
+          | mk3 | \`catcard-mk3-*.dfu\` | |
+          | mk4, mk5 | \`catcard-mk4-mk5-*.dfu\` | one image, accepted by both |
+          | Q1 | \`catcard-q1-*.dfu\` | |
+
+          Each board has two images: the default one holds every chain CatCard knows,
+          and the \`-bitcoin\` one holds Bitcoin alone.
+
+          Header version \`${{ steps.v.outputs.version }}\`; built with
+          \`SOURCE_DATE_EPOCH=${{ steps.v.outputs.epoch }}\` (the tagged commit's time),
+          so rebuilding this tag reproduces the digests in \`SHA256SUMS\` and in each
+          build's log.
+          EOF
+          flags=(--draft --verify-tag --title "CatCard ${tag}" --notes-file notes.md)
+          if [ "${{ steps.v.outputs.prerelease }}" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$tag" "${flags[@]}"
+
+  build:
+    name: ${{ matrix.board }} ${{ matrix.chains }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        board: [mk3, mk4-mk5, q1]
+        chains: [multichain, bitcoin]
+    env:
+      CATCARD_VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Shape
+        id: shape
+        run: |
+          set -euo pipefail
+          case "${{ matrix.board }}" in
+            mk3)     board=mk3; pkg=mk3; compat="" ;;
+            mk4-mk5) board=mk5; pkg=mk5; compat="--hw-compat mk4,mk5" ;;
+            q1)      board=q1;  pkg=q1;  compat="" ;;
+          esac
+          feats="board-$board"
+          name="catcard-${{ matrix.board }}"
+          if [ "${{ matrix.chains }}" = multichain ]; then
+            feats="$feats,multichain"
+          else
+            name="$name-bitcoin"
+          fi
+          name="$name-${GITHUB_REF_NAME#v}"
+          echo "features=$feats" >> "$GITHUB_OUTPUT"
+          echo "package=$pkg" >> "$GITHUB_OUTPUT"
+          echo "compat=$compat" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # `--no-default-features` drops `usb-debug-mem`, `usb-key-injection`, `dev` and
+      # `games`: the release shape, as `make <board> SHIP=1` builds it.
+      - name: Build
+        run: |
+          cargo build --release -p catcard-fw \
+            --target thumbv7em-none-eabihf \
+            --no-default-features --features ${{ steps.shape.outputs.features }}
+
+      - name: No debug monitor, no key injection
+        run: |
+          set -euo pipefail
+          elf=target/thumbv7em-none-eabihf/release/catcard-fw
+          if strings -a "$elf" \
+               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled"; then
+            echo "::error::bench features leaked into a release image"
+            exit 1
+          fi
+          # The firmware must name itself the way the header will.
+          strings -a "$elf" | grep -qF "$CATCARD_VERSION" || {
+            echo "::error::firmware does not carry version $CATCARD_VERSION"; exit 1; }
+
+      - name: Assemble, sign and verify
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          name=${{ steps.shape.outputs.name }}
+          cargo run --release -q -p catcard-image -- build \
+            target/thumbv7em-none-eabihf/release/catcard-fw \
+            --board ${{ steps.shape.outputs.package }} \
+            --version "$CATCARD_VERSION" ${{ steps.shape.outputs.compat }} \
+            --bin "out/$name.bin" --dfu "out/$name.dfu" | tee "out/$name.log"
+          cargo run --release -q -p catcard-image -- verify \
+            "out/$name.bin" --board ${{ steps.shape.outputs.package }}
+          cargo run --release -q -p catcard-image -- info "out/$name.dfu"
+
+      - name: Attach to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "out/${{ steps.shape.outputs.name }}.dfu" --clobber
+
+  publish:
+    name: Checksums and publish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: SHA256SUMS, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir dl
+          gh release download "$tag" --pattern '*.dfu' --dir dl
+          count=$(ls dl/*.dfu | wc -l)
+          [ "$count" -eq 6 ] || { echo "::error::expected 6 images, found $count"; exit 1; }
+          (cd dl && sha256sum *.dfu > SHA256SUMS && cat SHA256SUMS)
+          gh release upload "$tag" dl/SHA256SUMS --clobber
+          flags=(--draft=false)
+          if [ "${{ needs.prepare.outputs.prerelease }}" = true ]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release edit "$tag" "${flags[@]}"

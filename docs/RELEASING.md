@@ -1,7 +1,39 @@
 # Releasing
 
-Not applicable yet — there is nothing to release. Written down now because release
-signing decisions are hard to change once users have keys.
+Pre-releases are published from tags; nothing here is a finished wallet yet. The signing
+decisions below are written down early because they are hard to change once users have
+keys.
+
+## Tagging a release
+
+Push a tag named `vX.Y.Z` or `vX.Y.Z-alphaN` / `-betaN` / `-rcN`, on a commit CI has
+already passed. `.github/workflows/release.yml` then:
+
+1. checks the tag with `tools/release-version.sh`: its `X.Y.Z` must equal the workspace
+   version in `Cargo.toml`, and the version it stamps must fit the header's 7 characters;
+2. opens a draft GitHub release (a pre-release when the tag has a suffix);
+3. builds the six release shapes in parallel -- mk3, mk4-mk5 and Q1, each with every
+   chain and Bitcoin-only -- with `--no-default-features`, runs the crutch-string check,
+   signs with the dev key, runs `catcard-image verify`, and attaches each `.dfu`;
+4. attaches `SHA256SUMS` and publishes the release.
+
+The tag's suffix is folded to fit the header: `v7.0.0-alpha1` is stamped `7.0.0a1`
+(`alpha` -> `a`, `beta` -> `b`, `rc` -> `r`). The firmware reports the same string on
+screen and over USB: the build reads it from `CATCARD_VERSION` (`crate::VERSION`), and
+refuses to compile if it is longer than 7 characters. `make <board> VERSION=...` sets
+both the same way.
+
+The header timestamp is the tagged commit's time (`SOURCE_DATE_EPOCH`), so rebuilding the
+tag reproduces its digests, and a later tag on a later commit always carries a later
+timestamp.
+
+The workflow covers steps 1-5 and 8-9 of the checklist below. Steps 6 (a second machine)
+and 7 (the project key) stay manual, and a release is not a final release until they are
+done.
+
+```sh
+git tag -a v7.0.0-alpha1 -m "CatCard 7.0.0-alpha1" && git push origin v7.0.0-alpha1
+```
 
 ## Reproducible builds
 

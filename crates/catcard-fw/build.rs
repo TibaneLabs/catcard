@@ -98,6 +98,8 @@ fn main() {
     println!("cargo:rustc-link-arg=-Map=catcard.map");
 
     println!("cargo:rerun-if-changed=build.rs");
+    // `crate::VERSION` reads it through `option_env!`; a change must rebuild.
+    println!("cargo:rerun-if-env-changed=CATCARD_VERSION");
     println!("cargo:rustc-env=CATCARD_BOARD={}", board.name);
 }
 

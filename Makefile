@@ -47,6 +47,11 @@ FW      := $(CARGO) build --release -p catcard-fw --target thumbv7em-none-eabihf
 
 VERSION ?=
 VER      = $(if $(VERSION),--version $(VERSION),)
+# The firmware reports the same string the header carries (`crate::VERSION`), so an
+# override reaches the compiler too, not only the image tool.
+ifneq ($(VERSION),)
+  export CATCARD_VERSION := $(VERSION)
+endif
 SHIP    ?=
 NODEF    = $(if $(SHIP),--no-default-features,)
 # Every chain by default, because a bench build is for using the device and the device
