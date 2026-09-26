@@ -232,6 +232,7 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         return;
     };
 
+    let clear = protect.phrase.is_none();
     let outcome = write_archive(ui, storage, &secret, &protect);
     drop(protect);
     secret.zeroize();
@@ -241,9 +242,12 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             crate::catlog!("backup: wrote {}", name.as_str());
             // Say when the preferences did not fit. The wallet is in there either way,
             // but "your settings are not in this file" is not something to find out
-            // when the backup is the only copy left.
+            // when the backup is the only copy left. And a cleartext file is named as
+            // such one last time, on the screen that says where it went.
             let note = if left_out {
                 "wallet only: no settings"
+            } else if clear {
+                "NOT encrypted: guard it"
             } else {
                 "keep the password safe"
             };
