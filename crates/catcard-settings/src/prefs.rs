@@ -586,6 +586,127 @@ pub fn sighash_checks(doc: &Doc<'_>) -> SighashChecks {
     }
 }
 
+/// Whether the NFC tag may be used at all: `"0"` switches it off, anything else -- or
+/// nothing -- leaves it on. Our own key, as the other hardware switches are; stock's
+/// `nfc` key is the same idea with a shape this firmware has not confirmed.
+pub const NFC_SHARING: &str = "cat_nfc";
+
+/// Whether NFC is switched on. Only a literal `"0"` switches it off.
+pub fn nfc_sharing(doc: &Doc<'_>) -> bool {
+    text(doc, NFC_SHARING) != Some("0")
+}
+
+/// Where a signed transaction's PushTx link points: `coldcard`, `mempool`, `off`, or a
+/// custom `https://` service URL stored whole. Our own key; stock keeps a bare URL under
+/// `ptxurl`, whose absence means off, and this firmware's default is the other way round.
+pub const PUSHTX: &str = "cat_pushtx";
+
+/// The longest custom service URL kept. The same bound the tag writer applies.
+pub const PUSHTX_URL_MAX: usize = catcard_nfc::pushtx::SERVICE_MAX;
+
+/// A custom PushTx service URL, fixed-size so the preferences stay `Copy`.
+///
+/// Only made through [`ServiceUrl::new`], which applies the specification's rule, so
+/// one of these is always a URL the tag writer will accept.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct ServiceUrl {
+    bytes: [u8; PUSHTX_URL_MAX],
+    len: u8,
+}
+
+impl ServiceUrl {
+    /// `url`, if it is a service URL the PushTx specification allows.
+    pub fn new(url: &str) -> Option<Self> {
+        catcard_nfc::pushtx::check_service(url).ok()?;
+        let mut bytes = [0u8; PUSHTX_URL_MAX];
+        bytes[..url.len()].copy_from_slice(url.as_bytes());
+        Some(Self {
+            bytes,
+            len: url.len() as u8,
+        })
+    }
+
+    /// The URL.
+    pub fn as_str(&self) -> &str {
+        // Built from a `&str` that passed an ASCII-only check, so this cannot fail; the
+        // fallback is for the type's invariant, not a case that occurs.
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for ServiceUrl {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "ServiceUrl({:?})", self.as_str())
+    }
+}
+
+/// Where the PushTx link points.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum PushTx {
+    /// No link is offered after signing.
+    Disabled,
+    /// `https://coldcard.com/pushtx#`.
+    Coldcard,
+    /// `https://mempool.space/pushtx#`.
+    Mempool,
+    /// A service the owner typed.
+    Custom(ServiceUrl),
+}
+
+impl PushTx {
+    /// What a wallet with nothing stored uses: Coldcard's own page, as stock does once the
+    /// feature is enabled. Off is an explicit choice rather than the silent default, so
+    /// that a signed transaction can leave a device the day it is set up -- the link is
+    /// still offered, never written unasked.
+    pub const DEFAULT: PushTx = PushTx::Coldcard;
+
+    /// The service URL to write, or `None` when the link is off.
+    pub fn service(&self) -> Option<&str> {
+        match self {
+            PushTx::Disabled => None,
+            PushTx::Coldcard => Some(catcard_nfc::pushtx::COLDCARD),
+            PushTx::Mempool => Some(catcard_nfc::pushtx::MEMPOOL),
+            PushTx::Custom(url) => Some(url.as_str()),
+        }
+    }
+
+    /// The row's name on a chooser.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            PushTx::Disabled => "Disabled",
+            PushTx::Coldcard => "coldcard.com",
+            PushTx::Mempool => "mempool.space",
+            PushTx::Custom(_) => "Custom URL",
+        }
+    }
+
+    /// The text stored under [`PUSHTX`] for this choice.
+    pub fn value(&self) -> heapless::String<PUSHTX_URL_MAX> {
+        let mut s: heapless::String<PUSHTX_URL_MAX> = heapless::String::new();
+        let _ = s.push_str(match self {
+            PushTx::Disabled => "off",
+            PushTx::Coldcard => "coldcard",
+            PushTx::Mempool => "mempool",
+            PushTx::Custom(url) => url.as_str(),
+        });
+        s
+    }
+}
+
+/// Where the PushTx link points. Absent, or anything unreadable -- a custom URL that
+/// fails the specification's rule included -- is [`PushTx::DEFAULT`].
+pub fn pushtx(doc: &Doc<'_>) -> PushTx {
+    match text(doc, PUSHTX) {
+        Some("off") => PushTx::Disabled,
+        Some("coldcard") => PushTx::Coldcard,
+        Some("mempool") => PushTx::Mempool,
+        Some(url) => ServiceUrl::new(url)
+            .map(PushTx::Custom)
+            .unwrap_or(PushTx::DEFAULT),
+        None => PushTx::DEFAULT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +779,72 @@ mod tests {
         ] {
             assert!(!slip132(&doc(json)), "{json}");
         }
+    }
+
+    #[test]
+    fn nfc_is_on_unless_literally_off() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_nfc":""}"#,
+            r#"{"cat_nfc":0}"#,
+            r#"{"cat_nfc":"off"}"#,
+            r#"{"cat_nfc":"00"}"#,
+            // Stock's key is not ours to read.
+            r#"{"nfc":0}"#,
+        ] {
+            assert!(nfc_sharing(&doc(json)), "{json}");
+        }
+        assert!(!nfc_sharing(&doc(r#"{"cat_nfc":"0"}"#)));
+    }
+
+    #[test]
+    fn pushtx_choices_read_back_and_round_trip() {
+        assert_eq!(pushtx(&doc(r#"{"cat_pushtx":"off"}"#)), PushTx::Disabled);
+        assert_eq!(
+            pushtx(&doc(r#"{"cat_pushtx":"coldcard"}"#)),
+            PushTx::Coldcard
+        );
+        assert_eq!(pushtx(&doc(r#"{"cat_pushtx":"mempool"}"#)), PushTx::Mempool);
+        let custom = pushtx(&doc(r#"{"cat_pushtx":"https://x.example/push?"}"#));
+        assert_eq!(custom.service(), Some("https://x.example/push?"));
+        assert_eq!(custom.label(), "Custom URL");
+        for choice in [PushTx::Disabled, PushTx::Coldcard, PushTx::Mempool, custom] {
+            let json = format!(r#"{{"cat_pushtx":"{}"}}"#, choice.value());
+            assert_eq!(pushtx(&doc(&json)), choice, "{json}");
+        }
+        assert_eq!(PushTx::Disabled.service(), None);
+        assert_eq!(
+            PushTx::Coldcard.service(),
+            Some("https://coldcard.com/pushtx#")
+        );
+        assert_eq!(
+            PushTx::Mempool.service(),
+            Some("https://mempool.space/pushtx#")
+        );
+    }
+
+    /// Anything that is not one of the words and not a URL the specification allows is
+    /// the default -- never a link to a page nobody vetted.
+    #[test]
+    fn a_bad_pushtx_value_is_the_default() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_pushtx":""}"#,
+            r#"{"cat_pushtx":"Coldcard"}"#,
+            r#"{"cat_pushtx":"http://x.example/push#"}"#,
+            r#"{"cat_pushtx":"https://x.example/push"}"#,
+            r#"{"cat_pushtx":"https://x.exa mple/push#"}"#,
+            r#"{"cat_pushtx":1}"#,
+            // Stock's key is not ours to read.
+            r#"{"ptxurl":"https://x.example/push#"}"#,
+        ] {
+            assert_eq!(pushtx(&doc(json)), PushTx::DEFAULT, "{json}");
+        }
+        let long = format!(
+            r#"{{"cat_pushtx":"https://{}#"}}"#,
+            "a".repeat(PUSHTX_URL_MAX)
+        );
+        assert_eq!(pushtx(&doc(&long)), PushTx::DEFAULT);
     }
 
     #[test]

@@ -13,6 +13,9 @@ default = ["std"]
 std = []
 
 [dependencies]
+# The PushTx service-URL rule, so a stored URL is checked the way the tag writer
+# checks it and the two can never disagree.
+catcard-nfc = { path = "../catcard-nfc" }
 emjson = { workspace = true }
 purecrypto = { workspace = true, features = ["hash", "cipher", "kdf"] }
 heapless = { workspace = true }
