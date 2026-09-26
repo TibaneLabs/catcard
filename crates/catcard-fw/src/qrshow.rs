@@ -68,7 +68,15 @@ const FRAME_MS: u32 = 250;
 /// would have taken the same bytes as `JSON`.
 #[cfg(feature = "board-q1")]
 pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
-    animate(ui, head, payload, filetype)
+    animate(ui, head, payload, filetype, false)
+}
+
+/// [`animate_bbqr`] with the last part's base32 padded with `=` to a multiple of eight,
+/// as stock writes its Key Teleport codes -- so a stock Q1 reads exactly what it would
+/// have shown itself. Source: hw-reference/key-teleport-protocol.md §5a, §7 [C]
+#[cfg(feature = "board-q1")]
+pub(crate) fn animate_bbqr_padded(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
+    animate(ui, head, payload, filetype, true)
 }
 
 /// Show an opaque payload as `ur:bytes`.
@@ -243,7 +251,7 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
 /// Returns when the user leaves. There is nothing to report: a QR that was shown may or
 /// may not have been read, and only the thing reading it knows.
 #[cfg(feature = "board-q1")]
-fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
+fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType, pad: bool) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 
     const MAX_VERSION: Version = match Version::new(VERSION) {
@@ -264,7 +272,8 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
     // kilobytes is more than a screen's stack should carry, and this screen is one of
     // the few that can ask for memory and be told no.
     let (Some(mut line_mem), Some(mut scratch_mem), Some(mut store_mem)) = (
-        crate::heap::take(catcard_bbqr::part_len(ENCODING, per)),
+        // Seven more for the padding the last part may take.
+        crate::heap::take(catcard_bbqr::part_len(ENCODING, per) + 7),
         crate::heap::take(BUF),
         crate::heap::take(BUF),
     ) else {
@@ -285,11 +294,20 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
             num_parts: total as u16,
             index: at as u16,
         };
-        let Ok(n) = catcard_bbqr::encode_part_to_slice(&header, chunk, line_mem.bytes()) else {
+        let Ok(mut n) = catcard_bbqr::encode_part_to_slice(&header, chunk, line_mem.bytes()) else {
             menu::message(ui.panel, head, "could not encode", "any key to go back");
             menu::wait_for_any_key(ui);
             return;
         };
+        // Only the last part can be short of a whole group; the others are cut on five
+        // bytes, which is eight characters exactly.
+        if pad {
+            let line = line_mem.bytes();
+            while !(n - catcard_bbqr::HEADER_LEN).is_multiple_of(8) && n < line.len() {
+                line[n] = b'=';
+                n += 1;
+            }
+        }
 
         // Three separate blocks, so all three can be borrowed at once.
         let text = &line_mem.bytes()[..n];

@@ -76,6 +76,10 @@ pub(crate) struct Received {
     /// this function has no view of.
     #[cfg(feature = "multichain")]
     pub checksum: Option<u32>,
+    /// The BBQr file-type letter, for a transfer that came in as BBQr. `None` for a UR or
+    /// a lone code. What decides a Key Teleport code (`R`, `S`, `E`), whose bytes are
+    /// ciphertext and could not be recognised any other way.
+    pub file_type: Option<char>,
 }
 
 /// What one code turned out to be worth.
@@ -223,6 +227,10 @@ pub(crate) fn collect_any(
         Which::Bcur(collector) => (collector.kind(), collector.about().map(|p| p.checksum)),
         _ => (None, None),
     };
+    let file_type = match &which {
+        Which::Bbqr(collector) => collector.header().map(|h| h.file_type.as_char()),
+        _ => None,
+    };
     match outcome {
         Ok(()) if done > 0 => Ok(Received {
             len: done,
@@ -231,6 +239,7 @@ pub(crate) fn collect_any(
             kind,
             #[cfg(feature = "multichain")]
             checksum,
+            file_type,
         }),
         Ok(()) => Err(None),
         Err(qrscan::Fault::Cancelled) => Err(None),
@@ -309,6 +318,11 @@ fn read_one(
     match which {
         Which::Unknown => Ok(None),
         Which::Bbqr(collector) => {
+            // Stock pads the last part's base32 with `=`, as RFC 4648 does -- its Key
+            // Teleport codes end `...SI===` (hw-reference/key-teleport-protocol.md §5a,
+            // §7 [C]). The part decoder takes unpadded base32 only, so the padding comes
+            // off here; it carries no bits.
+            let line = line.trim_end_matches('=');
             let Ok(placed) = collector.accept(line) else {
                 return Ok(None);
             };

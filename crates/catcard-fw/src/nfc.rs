@@ -249,6 +249,37 @@ fn present_image(ui: &mut Ui<'_>, head: &str, image: &[u8], note: &str) {
     }
 }
 
+/// Put an `https://` link on the tag as an NDEF URI record, and hold the screen while a
+/// phone reads it. `tail` is the link without its scheme, which the record carries as its
+/// one-byte prefix.
+///
+/// For Key Teleport, whose NFC form is a link to the page that turns it back into a QR.
+/// Refuses, on screen, when NFC is off or absent. Source: hw-reference/key-teleport-protocol.md
+/// §5b [C]
+#[cfg(feature = "board-q1")]
+pub(crate) fn share_link(ui: &mut Ui<'_>, head: &str, tail: &str, note: &str) {
+    if refused_off(ui, head) || refused_absent(ui, head) {
+        return;
+    }
+    let Some(mut held) = crate::heap::take(USER_MEMORY) else {
+        menu::message(ui.panel, head, "not enough memory", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return;
+    };
+    let out = held.bytes();
+    let n = match catcard_nfc::uri_image(out, AREA, tail, catcard_nfc::prefix::HTTPS) {
+        Ok(n) => n,
+        Err(_) => {
+            drop(held);
+            menu::message(ui.panel, head, "too big for the tag", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    present_image(ui, head, &out[..n], note);
+    held.bytes().zeroize();
+}
+
 // ---------------------------------------------------------------------------
 // PushTx
 // ---------------------------------------------------------------------------
@@ -1054,6 +1085,14 @@ fn offer(
         load_words(gate, login, ui, head, got);
         return;
     }
+    // A Key Teleport link: ciphertext, so there is nothing to show and nothing to save
+    // that the sender cannot send again. It goes straight to the receive.
+    #[cfg(feature = "board-q1")]
+    if let Content::Teleport(_) = got.what {
+        let text = got.text().unwrap_or("");
+        crate::teleport::received_text(gate, login, ui, text);
+        return;
+    }
     // The same list the scanner offers, from the same place: what this firmware makes of
     // the bytes, and keeping them whatever they are.
     let choices = got.what.choices();
@@ -1112,6 +1151,8 @@ fn offer(
         // action at all (`Content::offer`), so it is answered above and never arrives
         // here either -- loading one is the scanner's path, where the payload is copied
         // out and the memory it came through is wiped before any screen goes up.
+        #[cfg(feature = "board-q1")]
+        Content::Teleport(_) => {}
         Content::Firmware | Content::Seed(_) | Content::Unknown => {
             drop(got);
             menu::message(ui.panel, head, "not over NFC", "any key to go back");

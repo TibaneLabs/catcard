@@ -32,6 +32,11 @@ pub(crate) enum Content {
     MultisigConfig,
     /// A BIP-21 payment request: `bitcoin:`, an address, and perhaps an amount and a label.
     PaymentUri,
+    /// A Key Teleport code: a receiver's `R`, a sender's `S`, or a multisig PSBT's `E`
+    /// (`crate::teleport`). Recognised by its BBQr file type on the scanner, and by its
+    /// `keyteleport.com/#B$2…` link on the tag.
+    #[cfg(feature = "board-q1")]
+    Teleport(catcard_wallet::teleport::Wire),
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -67,6 +72,8 @@ impl Content {
             Content::Seed(_) => "a seed backup",
             Content::MultisigConfig => "a multisig wallet",
             Content::PaymentUri => "a payment request",
+            #[cfg(feature = "board-q1")]
+            Content::Teleport(_) => "a Key Teleport code",
             Content::Text => "text",
             Content::Unknown => "data this device cannot read",
         }
@@ -94,6 +101,8 @@ impl Content {
             Content::Psbt => Some("Sign it"),
             Content::MultisigConfig => Some("Import it"),
             Content::PaymentUri => Some("Read it"),
+            #[cfg(feature = "board-q1")]
+            Content::Teleport(_) => Some("Receive it"),
             Content::Text => Some("Show it"),
             Content::Seed(_) | Content::Unknown => None,
         };
@@ -131,6 +140,8 @@ impl Content {
             Content::Firmware => "bin",
             Content::Psbt => "psbt",
             Content::MultisigConfig | Content::PaymentUri | Content::Text => "txt",
+            #[cfg(feature = "board-q1")]
+            Content::Teleport(_) => "txt",
             Content::Seed(_) | Content::Unknown => "dat",
         }
     }
@@ -248,6 +259,16 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
             return Content::Seed(kind);
         }
         _ => {}
+    }
+    // A Key Teleport link or bare single-part code, as a phone writes it to the tag:
+    // `keyteleport.com/#B$2S0100…`. Before the payment-request and text cases, because it
+    // is text, and shown as text it is a screenful of base32 nobody can use.
+    // Source: hw-reference/key-teleport-protocol.md §5b [C]
+    #[cfg(feature = "board-q1")]
+    if let Some(text) = text
+        && let Some(wire) = catcard_wallet::teleport::wire_of(text)
+    {
+        return Content::Teleport(wire);
     }
     // A BIP-21 payment request. Text, and claimed on its scheme alone: a URI that turns
     // out to be malformed is still a payment request, and the screen that reads it says

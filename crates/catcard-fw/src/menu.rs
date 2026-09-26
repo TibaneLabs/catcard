@@ -280,6 +280,9 @@ enum Screen {
     ImportSeed,
     /// Write the wallet as a clone file, answering another Coldcard's start file.
     CloneExport,
+    /// Key Teleport: receive, send, or teleport a multisig PSBT (`crate::teleport`).
+    #[cfg(feature = "board-q1")]
+    KeyTeleport,
     /// Import a wallet from a clone file, publishing a start file first.
     CloneImport,
     /// Import a wallet from a TAPSIGNER `.aes` backup and its key.
@@ -890,6 +893,12 @@ const BACKUP_ITEMS: &[&str] = &[
     "Verify backup",
     "Restore backup",
     "Clone Coldcard",
+    // Stock's `Key Teleport (start)`, which it puts on the main and Advanced menus. Here
+    // beside Clone Coldcard, the other device-to-device move, in a list: the Q1's main
+    // and Utils menus are icon grids and this row has no icon yet.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1, §B3 [C]
+    #[cfg(feature = "board-q1")]
+    "Key Teleport",
 ];
 
 /// The shapes the same keys can be written in.
@@ -1735,6 +1744,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::backup::clone_export(a.gate, a.login, a.ui),
             Screen::BackupMenu,
         ),
+        #[cfg(feature = "board-q1")]
+        Screen::KeyTeleport => to(
+            |a| crate::teleport::screen(a.gate, a.login, a.ui),
+            Screen::BackupMenu,
+        ),
         Screen::SignPsbt => to(
             |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
             Screen::SignMenu,
@@ -2336,6 +2350,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Verify backup")) => Screen::BackupVerify,
             (Key::Confirm, Some("Restore backup")) => Screen::BackupRestore,
             (Key::Confirm, Some("Clone Coldcard")) => Screen::CloneExport,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Key Teleport")) => Screen::KeyTeleport,
             (Key::Cancel, _) => Screen::Utils,
             _ => Screen::BackupMenu,
         },
@@ -2953,6 +2969,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor => {}
         // Handled in `run`: each drives its own file picker, key entry and progress.
         Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
+        #[cfg(feature = "board-q1")]
+        Screen::KeyTeleport => {}
         // Handled in `run`: it drives the PIN-entry screens itself.
         Screen::ChangePin => {}
         // Handled in `run`: the game drives the panel in its own loop.

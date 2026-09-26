@@ -1241,7 +1241,73 @@ fn import(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui:
         Ok(r) => r,
         Err(_) => return say(ui, "not a notes export"),
     };
+    merge_array(gate, login, ui, raw);
+}
 
+/// Key Teleport: the owner picks one item or all of them, and they are written into `out`
+/// as the JSON array a teleport `n` body is. Returns its length, `Ok(None)` when the owner
+/// backed out. Only our own items: stock's are read-only here and their shape is stock's.
+pub(crate) fn pick_for_teleport(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    out: &mut [u8],
+) -> Result<Option<usize>, &'static str> {
+    menu::blocking_screen(ui.panel, head, "reading");
+    let (Some(mut doc), Some(mut text)) = (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
+    else {
+        return Err("not enough memory");
+    };
+    let mut arena: &mut [u8] = text.bytes();
+    let mut ours = [""; notes::MAX_NOTES];
+    let mut stock = [""; notes::MAX_NOTES];
+    let have = read_lists(gate, login, ui.panel, doc.bytes(), &mut ours, &mut stock)?.ours;
+    if have == 0 {
+        return Err("no notes to send");
+    }
+    let mut rows: heapless::Vec<&str, { notes::MAX_NOTES + 1 }> = heapless::Vec::new();
+    let _ = rows.push("All of them");
+    for raw in &ours[..have] {
+        let _ = rows.push(title_text(&mut arena, raw).unwrap_or("(untitled)"));
+    }
+    let Some(row) = menu::pick_row(ui, head, "which to send?", &rows) else {
+        return Ok(None);
+    };
+    let items = if row == 0 {
+        &ours[..have]
+    } else {
+        &ours[row - 1..row]
+    };
+    notes::render_list(items, out)
+        .map(Some)
+        .map_err(|_| "too much to send")
+}
+
+/// Key Teleport's `n` body arriving: the opt-in first, then the merge [`import`] does.
+pub(crate) fn merge_received(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    raw: &str,
+) {
+    if ensure_enabled(gate, login, ui) {
+        merge_array(gate, login, ui, raw);
+    }
+}
+
+/// Merge a JSON array of items into the list: new titles are added, identical items
+/// skipped, and a title that is already here with different contents is asked about.
+///
+/// The half of [`import`] after the file is open, shared with Key Teleport, whose `n`
+/// payload is exactly such an array (`crate::teleport`). Every item is checked on the
+/// way in -- bounded and storable -- because the array is not this device's typing.
+pub(crate) fn merge_array(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    raw: &str,
+) {
     // The plan, made against the list as it is now; the settings buffer goes back before
     // the save re-reads it. Additions and replacements borrow the file, which stays.
     let mut add: heapless::Vec<&str, { notes::MAX_NOTES }> = heapless::Vec::new();

@@ -822,6 +822,15 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         menu::wait_for_any_key(ui);
         return;
     }
+    // A Key Teleport code says what it is in its BBQr file type, and only there: its
+    // bytes are ciphertext. Source: hw-reference/key-teleport-protocol.md §4c [C]
+    if let Some(wire) = got
+        .file_type
+        .and_then(catcard_wallet::teleport::Wire::from_code)
+    {
+        crate::teleport::scanned(gate, login, ui, lease, base..base + len, wire);
+        return;
+    }
     offer(gate, login, ui, HEAD, lease, base..base + len, kind);
 }
 
@@ -981,6 +990,8 @@ fn offer(
             let text = core::str::from_utf8(&lease.bytes()[at..at + len]).unwrap_or("(not text)");
             show(ui, text);
         }
+        // Arrives by file type in `screen`, before this; by text only over NFC.
+        Content::Teleport(_) => {}
         Content::Unknown => {}
     }
 }

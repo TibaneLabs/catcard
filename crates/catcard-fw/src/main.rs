@@ -179,6 +179,9 @@ mod statedump;
 #[cfg(feature = "board-q1")]
 mod statusbar;
 mod tapsigner;
+/// Key Teleport: a secret, a backup or a multisig PSBT to another Q1 by QR or NFC.
+#[cfg(feature = "board-q1")]
+mod teleport;
 /// The lamp belongs to the scanner, so it is the Q1's too.
 #[cfg(feature = "board-q1")]
 mod torch;

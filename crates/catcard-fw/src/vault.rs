@@ -402,6 +402,93 @@ pub(crate) fn pick_part(
     }
 }
 
+/// Key Teleport: the owner picks an entry, and it is written into `out` as the one-entry
+/// JSON list a teleport `v` body is -- `["XFP","hex","label","method"]`, the vault's own
+/// row. Returns its length, `Ok(None)` when the owner backed out.
+/// Source: hw-reference/key-teleport-protocol.md §4a `v` [C]
+#[cfg(feature = "board-q1")]
+pub(crate) fn pick_for_teleport(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    out: &mut [u8],
+) -> Result<Option<usize>, &'static str> {
+    menu::blocking_screen(ui.panel, head, "reading the vault");
+    with_entries(gate, login, ui, |ui, seeds| {
+        if seeds.is_empty() {
+            return Err("the vault is empty");
+        }
+        let mut labels: heapless::Vec<heapless::String<40>, MAX_SEEDS> = heapless::Vec::new();
+        for s in seeds {
+            let mut line: heapless::String<40> = heapless::String::new();
+            let name = if s.label.is_empty() { s.xfp } else { s.label };
+            let _ = write!(line, "{name}  [{}]", s.xfp);
+            let _ = labels.push(line);
+        }
+        let refs: heapless::Vec<&str, MAX_SEEDS> = labels.iter().map(|l| l.as_str()).collect();
+        let Some(row) = menu::pick_row(ui, head, "which entry", &refs) else {
+            return Ok(None);
+        };
+        let s = seeds.get(row).ok_or("no such entry")?;
+        // The vault's list of one, less its outer brackets: `[[...]]` to `[...]`.
+        let n = vault::render(core::slice::from_ref(s), out).map_err(|_| "no room")?;
+        out.copy_within(1..n - 1, 0);
+        out[n - 2..n].zeroize();
+        Ok(Some(n - 2))
+    })?
+}
+
+/// Key Teleport's `v` body arriving: one vault row, kept in the vault of the wallet in
+/// force as Keep Current would keep it -- replacing an entry with the same fingerprint.
+#[cfg(feature = "board-q1")]
+pub(crate) fn keep_received(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    row: &str,
+) {
+    const OPEN: &[u8] = br#"{"seeds":["#;
+    const CLOSE: &[u8] = b"]}";
+    // Wrapped as a settings document so the vault's own reader parses it: the same
+    // checks every stored row gets.
+    let mut doc_buf = Zeroizing::new([0u8; 512]);
+    let total = OPEN.len() + row.len() + CLOSE.len();
+    if total > doc_buf.len() {
+        return drop(say(ui, "that entry is too long"));
+    }
+    doc_buf[..OPEN.len()].copy_from_slice(OPEN);
+    doc_buf[OPEN.len()..OPEN.len() + row.len()].copy_from_slice(row.as_bytes());
+    doc_buf[OPEN.len() + row.len()..total].copy_from_slice(CLOSE);
+    let doc = catcard_settings::json::Doc::parse(&doc_buf[..total]).unwrap_or_default();
+    let mut seeds = [Seed::default(); 1];
+    if vault::list(&doc, &mut seeds) == 0 {
+        return drop(say(ui, "not a vault entry"));
+    }
+    let seed = seeds[0];
+    let mut raw = Zeroizing::new([0u8; RAW_MAX]);
+    if crate::keywork::run(|_| vault::decode_secret(seed.secret, &mut raw[..])).is_none() {
+        return drop(say(ui, "that entry is damaged"));
+    }
+    let label = if seed.label.is_empty() {
+        seed.xfp
+    } else {
+        seed.label
+    };
+    menu::ask(ui.panel, "Keep in vault?", label, seed.xfp);
+    if !menu::confirmed(ui) {
+        return;
+    }
+    match save(gate, login, ui, Change::Add(seed)) {
+        Ok(()) => {
+            crate::catlog!("vault: kept a teleported key");
+            menu::message(ui.panel, HEAD, label, "kept");
+        }
+        Err(why) => menu::message(ui.panel, HEAD, why, "nothing kept"),
+    }
+    menu::wait_for_any_key(ui);
+}
+
 /// The entropy inside a stash whose marker says BIP-39, if that is what it is.
 ///
 /// Source: hw-reference/secret-stash-format.md §Layout [C] -- `0x80 | ((len/8) - 2)`.

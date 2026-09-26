@@ -896,7 +896,7 @@ pub(crate) fn verify(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
 /// The master fingerprint of a stash, whatever shape it is in. Inside the masked region:
 /// it derives the master key to get there.
-fn fingerprint_of(secret: &[u8; SECRET_LEN]) -> Option<[u8; 4]> {
+pub(crate) fn fingerprint_of(secret: &[u8; SECRET_LEN]) -> Option<[u8; 4]> {
     let net = crate::prefs::network();
     crate::keywork::run(|kw| {
         let master = if let Some(entropy) = bip39_entropy(secret).filter(|e| e.len() <= 32) {
@@ -1039,6 +1039,100 @@ fn describe(e: catcard_backup::Error) -> &'static str {
         E::CloneKeyAgreement => "the two devices could not agree a key",
         _ => "the file did not make sense",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Key Teleport
+// ---------------------------------------------------------------------------
+
+/// The backup body of the stored wallet, as a Key Teleport `b` payload: the same body a
+/// backup file carries, with its comment and blank lines removed. Written into `out`;
+/// returns its length. `None` after saying why not.
+/// Source: hw-reference/key-teleport-protocol.md §4a `b` [C]
+#[cfg(feature = "board-q1")]
+pub(crate) fn teleport_body(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut secret = fetch(gate, login, ui, head)?;
+    let mut scratch = Scratch::new();
+    let built = match build_body(&mut scratch.0, &secret, true) {
+        Err(catcard_backup::Error::BufferTooSmall) => {
+            scratch.0.zeroize();
+            build_body(&mut scratch.0, &secret, false)
+        }
+        other => other,
+    };
+    secret.zeroize();
+    let Ok((len, _)) = built else {
+        say(ui, head, "could not build the backup");
+        return None;
+    };
+    let body = &mut scratch.0[sevenz::BODY_OFFSET..];
+    let n = catcard_wallet::teleport::strip_backup(body, len);
+    let Some(dest) = out.get_mut(..n) else {
+        say(ui, head, "the backup is too large");
+        return None;
+    };
+    dest.copy_from_slice(&body[..n]);
+    Some(n)
+}
+
+/// A Key Teleport `b` payload arriving: the wallet in it restored on a device with no
+/// seed, and worked in as a temporary seed on one that has one -- stock's split.
+/// Source: hw-reference/help-and-warning-screens.md §18 "Share complete backup" [C]
+///
+/// Only the wallet is installed: the restore path here installs the seed alone, and this
+/// is that path.
+#[cfg(feature = "board-q1")]
+pub(crate) fn teleport_received(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    body: &[u8],
+) {
+    const HEAD: &str = "Teleported backup";
+    let (mut secret, what, _) = match decode_secret(body) {
+        Ok(d) => d,
+        Err(why) => return say(ui, HEAD, why),
+    };
+    if !crate::key::stored_wallet(login) {
+        menu::ask(ui.panel, "Restore it?", what, "as this device's seed");
+        if !menu::confirmed(ui) {
+            secret.zeroize();
+            return;
+        }
+        let res = store_secret(gate, login, ui, &secret);
+        secret.zeroize();
+        match res {
+            Ok(()) => menu::message(ui.panel, "Wallet restored", what, "from the teleport"),
+            Err(why) => menu::message(ui.panel, "Not restored", why, "any key to go back"),
+        }
+        menu::wait_for_any_key(ui);
+        return;
+    }
+    menu::ask(ui.panel, "Work in this?", what, "the stored seed stays");
+    if !menu::confirmed(ui) {
+        secret.zeroize();
+        return;
+    }
+    let loaded = if let Some(entropy) = bip39_entropy(&secret) {
+        crate::key::set_temporary(entropy, "Teleport")
+    } else if let Some((chain_code, key)) = xprv_parts(&secret) {
+        crate::key::set_temporary_xprv(chain_code, key, "Teleport")
+    } else {
+        false
+    };
+    secret.zeroize();
+    if loaded {
+        menu::message(ui.panel, HEAD, "now in force", "the stored seed stays");
+    } else {
+        menu::message(ui.panel, HEAD, "that wallet shape", "cannot be loaded");
+    }
+    menu::wait_for_any_key(ui);
 }
 
 // ---------------------------------------------------------------------------
