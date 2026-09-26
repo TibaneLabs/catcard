@@ -843,7 +843,7 @@ fn kind_name(kind: Kind) -> &'static str {
 }
 
 /// Store the wallet list without the one whose checksum is `sum`.
-fn remove(
+pub(crate) fn remove(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
@@ -1614,8 +1614,21 @@ fn export_xpubs(
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
         return;
     };
+    export_xpubs_of(ui, HEAD, master, account);
+}
+
+/// [`export_xpubs`] for a master already in hand: this device's, or CCC's key C, whose
+/// export is the same file under key C's fingerprint.
+/// Source: hw-reference/ccc-key-storage.md §2 "reuses the standard multisig-XPUB exporter
+/// unchanged, just pointed at key C" [C]
+pub(crate) fn export_xpubs_of(
+    ui: &mut Ui<'_>,
+    head: &str,
+    master: catcard_wallet::bip32::ExtendedPrivKey,
+    account: u32,
+) {
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
-    let mut busy = menu::Working::new(ui.panel, HEAD, "deriving keys");
+    let mut busy = menu::Working::new(ui.panel, head, "deriving keys");
     let derive = |kind: Kind, busy: &mut menu::Working<'_>, panel: &mut crate::display::Panel| {
         let steps = leg_steps(kind, account)?;
         menu::public_at(&master, &steps, busy, panel)
@@ -1623,7 +1636,7 @@ fn export_xpubs(
     let p2sh = if account == 0 {
         match derive(Kind::P2sh, &mut busy, ui.panel) {
             Some(k) => Some(k),
-            None => return say(ui, HEAD, "derivation failed"),
+            None => return say(ui, head, "derivation failed"),
         }
     } else {
         None
@@ -1632,11 +1645,11 @@ fn export_xpubs(
         derive(Kind::P2shP2wsh, &mut busy, ui.panel),
         derive(Kind::P2wsh, &mut busy, ui.panel),
     ) else {
-        return say(ui, HEAD, "derivation failed");
+        return say(ui, head, "derivation failed");
     };
 
     let Some(mut out) = crate::heap::take(EXPORT_MAX) else {
-        return say(ui, HEAD, "not enough memory");
+        return say(ui, head, "not enough memory");
     };
     let keys = multisig::export::OurKeys {
         fingerprint,
@@ -1648,7 +1661,7 @@ fn export_xpubs(
     };
     let n = match multisig::export::ccxp(&keys, out.bytes()) {
         Ok(n) => n,
-        Err(why) => return say(ui, HEAD, describe(why)),
+        Err(why) => return say(ui, head, describe(why)),
     };
     let signer = menu::signer_for(master, crate::export::Signing::cosigner(account));
     let [a, b, c, d] = fingerprint;
@@ -1659,7 +1672,7 @@ fn export_xpubs(
     }
     menu::offer_export(
         ui,
-        HEAD,
+        head,
         &file,
         &out.bytes()[..n],
         catcard_bbqr::FileType::JSON,
@@ -1750,26 +1763,55 @@ fn create_airgapped(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) {
+    create(gate, login, ui, None);
+}
+
+/// CCC's Build 2-of-N: [`create_airgapped`] with key A (this device) and key C both in the
+/// wallet, the threshold fixed at two, and the other cosigners (key B) from files or codes.
+/// A leg that is this device's key or key C, by fingerprint, is refused.
+/// Source: hw-reference/ccc-key-storage.md §5 "`M` is forced to 2 ... rejects any offered
+/// leg that turns out to be this device's key A or key C" [C]
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn create_cosign(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    key_c: &ExtendedPrivKey,
+) {
+    create(gate, login, ui, Some(key_c));
+}
+
+/// The wallet builder behind [`create_airgapped`] and CCC's `create_cosign`.
+fn create(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    key_c: Option<&catcard_wallet::bip32::ExtendedPrivKey>,
+) {
     use core::fmt::Write as _;
-    const HEAD: &str = "Create Airgapped";
+    let head = if key_c.is_some() {
+        "Build 2-of-N"
+    } else {
+        "Create Airgapped"
+    };
 
     // Stock's step 1: the address format, P2WSH by default.
     const KINDS: [&str; 3] = ["P2WSH", "P2SH-P2WSH", "P2SH (BIP-45)"];
-    let Some(k) = menu::choose(ui, HEAD, "address format", &KINDS) else {
+    let Some(k) = menu::choose(ui, head, "address format", &KINDS) else {
         return;
     };
     let kind = [Kind::P2wsh, Kind::P2shP2wsh, Kind::P2sh][k];
     let account = if kind == Kind::P2sh {
         0
     } else {
-        match menu::ask_number(ui, HEAD, None, "account", "empty is account 0") {
+        match menu::ask_number(ui, head, None, "account", "empty is account 0") {
             Some(a) => a,
             None => return,
         }
     };
 
     let Some(mut keys_blk) = crate::heap::take(SCRATCH) else {
-        return say(ui, HEAD, "not enough memory");
+        return say(ui, head, "not enough memory");
     };
     let mut keys = Keys {
         buf: keys_blk.bytes(),
@@ -1783,7 +1825,7 @@ fn create_airgapped(
         const WAYS: [&str; 3] = ["Add from a file", "Scan a BBQr", "Done adding"];
         #[cfg(not(feature = "board-q1"))]
         const WAYS: [&str; 2] = ["Add from a file", "Done adding"];
-        let added = match menu::choose(ui, HEAD, &note, &WAYS) {
+        let added = match menu::choose(ui, head, &note, &WAYS) {
             Some(0) => add_from_file(ui, kind, &mut keys),
             #[cfg(feature = "board-q1")]
             Some(1) => add_from_scan(ui, kind, &mut keys),
@@ -1795,28 +1837,28 @@ fn create_airgapped(
                 let [a, b, c, d] = fp;
                 let mut who: heapless::String<16> = heapless::String::new();
                 let _ = write!(who, "{a:02X}{b:02X}{c:02X}{d:02X}");
-                menu::message(ui.panel, HEAD, "added cosigner", &who);
+                menu::message(ui.panel, head, "added cosigner", &who);
                 menu::wait_for_any_key(ui);
             }
             Ok(None) => {}
-            Err(why) => say(ui, HEAD, why),
+            Err(why) => say(ui, head, why),
         }
     }
     if keys.count == 0 {
-        return say(ui, HEAD, "no cosigner keys added");
+        return say(ui, head, "no cosigner keys added");
     }
 
     // Our own key, last.
-    let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
+    let Some(master) = menu::unlock_master(gate, login, ui, head) else {
         return;
     };
     let fingerprint = crate::keywork::run(|kw| master.fingerprint(kw));
     let Some(steps) = leg_steps(kind, account) else {
-        return say(ui, HEAD, "bad account");
+        return say(ui, head, "bad account");
     };
-    let mut busy = menu::Working::new(ui.panel, HEAD, "deriving our key");
+    let mut busy = menu::Working::new(ui.panel, head, "deriving our key");
     let Some(our_key) = menu::public_at(&master, &steps, &mut busy, ui.panel) else {
-        return say(ui, HEAD, "derivation failed");
+        return say(ui, head, "derivation failed");
     };
     let (origin, origin_len) = origin_of(&steps);
     let ours = Cosigner {
@@ -1825,18 +1867,52 @@ fn create_airgapped(
         origin_len,
         xpub: our_key,
     };
+    // Key C, for a co-signed wallet: the same leg of the other seed. Neither it nor this
+    // device may already be among the others, at any path.
+    let key_c_leg = match key_c {
+        Some(c) => {
+            let Some(xpub) = menu::public_at(c, &steps, &mut busy, ui.panel) else {
+                return say(ui, head, "derivation failed");
+            };
+            let fp = crate::keywork::run(|kw| c.fingerprint(kw));
+            for own in [fingerprint, fp] {
+                let [a, b, cc, d] = own;
+                let mut tag: heapless::String<12> = heapless::String::new();
+                let _ = write!(tag, "[{a:02x}{b:02x}{cc:02x}{d:02x}");
+                if keys.text().contains(tag.as_str()) {
+                    return say(ui, head, "a cosigner is this device or key C");
+                }
+            }
+            Some(Cosigner {
+                fingerprint: fp,
+                origin,
+                origin_len,
+                xpub,
+            })
+        }
+        None => None,
+    };
     if let Err(why) = keys.push(&ours) {
         // Our key already among the "others" is a file this device exported being fed
         // back to it.
-        return say(ui, HEAD, why);
+        return say(ui, head, why);
+    }
+    let our_index = keys.count - 1;
+    if let Some(c) = &key_c_leg
+        && let Err(why) = keys.push(c)
+    {
+        return say(ui, head, why);
     }
     let total = keys.count;
-    let our_index = total - 1;
 
     let mut of: heapless::String<16> = heapless::String::new();
     let _ = write!(of, "of {total}");
     let m = loop {
-        let Some(m) = menu::ask_number(ui, HEAD, None, "M, signatures needed", &of) else {
+        if key_c_leg.is_some() {
+            // Two: this device and key C inside the policy, or either with key B.
+            break 2u8;
+        }
+        let Some(m) = menu::ask_number(ui, head, None, "M, signatures needed", &of) else {
             return;
         };
         if m >= 1 && m as usize <= total {
@@ -1844,7 +1920,7 @@ fn create_airgapped(
         }
         menu::message(
             ui.panel,
-            HEAD,
+            head,
             "M must be between",
             "1 and the cosigner count",
         );
@@ -1854,7 +1930,7 @@ fn create_airgapped(
     // The descriptor, checksummed, then read back through the same parser every import
     // uses: the wallet stored here is exactly what a later import of its own export gives.
     let Some(mut desc_blk) = crate::heap::take(SCRATCH) else {
-        return say(ui, HEAD, "not enough memory");
+        return say(ui, head, "not enough memory");
     };
     let (open, close) = match kind {
         Kind::P2sh => ("sh(", ")"),
@@ -1866,20 +1942,20 @@ fn create_airgapped(
         len: 0,
     };
     if write!(w, "{open}sortedmulti({m}{}){close}", keys.text()).is_err() {
-        return say(ui, HEAD, "too long");
+        return say(ui, head, "too long");
     }
     let body_len = w.len;
     let sum = core::str::from_utf8(&w.out[..body_len])
         .ok()
         .and_then(catcard_wallet::descriptor::checksum);
     let Some(sum) = sum else {
-        return say(ui, HEAD, "could not checksum");
+        return say(ui, head, "could not checksum");
     };
     if w.write_char('#').is_err()
         || w.write_str(core::str::from_utf8(&sum).unwrap_or(""))
             .is_err()
     {
-        return say(ui, HEAD, "too long");
+        return say(ui, head, "too long");
     }
     let desc_len = w.len;
     // The collected key text is in the descriptor now; the slot it sat in goes back
@@ -1887,11 +1963,11 @@ fn create_airgapped(
     let _ = keys;
     drop(keys_blk);
     let Ok(descriptor) = core::str::from_utf8(&desc_blk.bytes()[..desc_len]) else {
-        return say(ui, HEAD, "not text");
+        return say(ui, head, "not text");
     };
     let wallet = match multisig::parse(descriptor) {
         Ok(w) => w,
-        Err(why) => return say(ui, HEAD, describe(why)),
+        Err(why) => return say(ui, head, describe(why)),
     };
 
     if !confirm(ui, &wallet, descriptor, Some(our_index)) {
@@ -1903,10 +1979,15 @@ fn create_airgapped(
     };
     let _ = name.push_str(entry.as_str().trim());
     if name.is_empty() {
-        let _ = write!(name, "{m}-of-{total}");
+        if key_c_leg.is_some() {
+            // Stock's name for it. Source: hw-reference/ccc-key-storage.md §5 [C]
+            let _ = name.push_str("Coldcard Co-sign");
+        } else {
+            let _ = write!(name, "{m}-of-{total}");
+        }
     }
     if let Err(why) = save(gate, login, ui, name.as_str(), descriptor) {
-        return say(ui, HEAD, why);
+        return say(ui, head, why);
     }
     menu::message(
         ui.panel,
@@ -1918,11 +1999,11 @@ fn create_airgapped(
 
     // The setup file for the other cosigners, signed at our leg as stock does.
     let Some(mut out) = crate::heap::take(EXPORT_MAX) else {
-        return say(ui, HEAD, "registered, but no memory to export");
+        return say(ui, head, "registered, but no memory to export");
     };
     let n = match multisig::coldcard::write(name.as_str(), &wallet, fingerprint, out.bytes()) {
         Ok(n) => n,
-        Err(why) => return say(ui, HEAD, describe(why)),
+        Err(why) => return say(ui, head, describe(why)),
     };
     let signer = menu::signer_for(master, signing_below(ours.origin()));
     let file = export_name(
@@ -1933,7 +2014,7 @@ fn create_airgapped(
     );
     menu::offer_export(
         ui,
-        HEAD,
+        head,
         &file,
         &out.bytes()[..n],
         catcard_bbqr::FileType::UNICODE,
@@ -2071,6 +2152,82 @@ fn describe_ccxp(why: multisig::export::CcxpError) -> &'static str {
         E::NoLeg => "no key for this format in it",
         E::BadDerivation => "its derivation is not a path",
         E::BadKey => "its key does not read",
+    }
+}
+
+/// The registered wallets `fingerprint` is a cosigner in: a label (`M/N: name`) and the
+/// checksum that names each. For CCC's list of the wallets key C belongs to.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn involving(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    fingerprint: [u8; 4],
+) -> heapless::Vec<(heapless::String<40>, heapless::String<8>), { wallets::MAX_WALLETS }> {
+    use core::fmt::Write as _;
+    let mut out = heapless::Vec::new();
+    let Some(mut doc) = crate::heap::take(SCRATCH) else {
+        return out;
+    };
+    let mut list = [Wallet {
+        name: "",
+        descriptor: "",
+    }; wallets::MAX_WALLETS];
+    let Ok(have) = load(gate, login, ui.panel, doc.bytes(), &mut list) else {
+        return out;
+    };
+    for w in &list[..have] {
+        let Ok(m) = multisig::parse(w.descriptor) else {
+            continue;
+        };
+        if !m.involves(fingerprint) {
+            continue;
+        }
+        let mut label: heapless::String<40> = heapless::String::new();
+        let name = if w.name.is_empty() { "wallet" } else { w.name };
+        let _ = write!(label, "{}/{}: {name}", m.m, m.n());
+        let mut sum: heapless::String<8> = heapless::String::new();
+        let _ = sum.push_str(w.checksum().unwrap_or(""));
+        if !sum.is_empty() {
+            let _ = out.push((label, sum));
+        }
+    }
+    out
+}
+
+/// One registered wallet's own menu, by checksum: what [`manage`] offers for it.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn open(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    sum: &str,
+) {
+    let act = {
+        let Some(mut doc) = crate::heap::take(SCRATCH) else {
+            return say(ui, "Multisig", "not enough memory");
+        };
+        let mut list = [Wallet {
+            name: "",
+            descriptor: "",
+        }; wallets::MAX_WALLETS];
+        let have = match load(gate, login, ui.panel, doc.bytes(), &mut list) {
+            Ok(n) => n,
+            Err(why) => return say(ui, "Multisig", why),
+        };
+        let Some(w) = list[..have].iter().find(|w| w.checksum() == Some(sum)) else {
+            return say(ui, "Multisig", "no such wallet");
+        };
+        wallet_menu(ui, w)
+    };
+    match act {
+        None => {}
+        Some(WalletAct::Delete) => match remove(gate, login, ui, sum) {
+            Ok(()) => say(ui, "Multisig", "the wallet is gone"),
+            Err(why) => say(ui, "Multisig", why),
+        },
+        Some(WalletAct::Rename) => rename(gate, login, ui, sum),
+        Some(act) => export_registered(gate, login, ui, act, sum),
     }
 }
 

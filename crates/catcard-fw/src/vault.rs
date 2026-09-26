@@ -322,6 +322,22 @@ pub(crate) fn count(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     }
 }
 
+/// Whether the wallet in force's vault keeps the key whose fingerprint is `xfp` (upper
+/// hex, as the vault writes it). For CCC, whose key C in the vault defeats its policy.
+/// A vault that cannot be read keeps nothing.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn holds(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    xfp: &str,
+) -> bool {
+    with_entries(gate, login, ui, |_, s| {
+        s.iter().any(|e| e.xfp.eq_ignore_ascii_case(xfp))
+    })
+    .unwrap_or(false)
+}
+
 /// One entry, taken out of the vault for a screen that wants its bytes -- the XOR join.
 ///
 /// The secret is decoded here, once, and wiped with this. What it *is* -- words, an

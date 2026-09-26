@@ -30,10 +30,12 @@
 //! menu carries `EXIT TEST DRIVE`, and the policy is enforced at signing but records
 //! neither a violation nor a spend height, so a trial leaves no trace in the policy.
 //!
-//! # Not CCC, not Web 2FA
+//! # CCC, and no Web 2FA
 //!
-//! Co-signing (CCC) is a later wave. Web 2FA's enrolment and verification protocol is not
-//! in the reference (docs/HARDWARE-OPEN-ITEMS.md), so its row is present and says so.
+//! Co-signing (CCC) is `crate::ccc`; it shares this module's policy editor (the
+//! SpendingPolicyMenu) through [`imp::Target`] and its output walk. Web 2FA -- a round
+//! trip to Coinkite's closed coldcard.com service -- is deliberately left out: there is
+//! no row for it, and a policy stock enrolled in it never co-signs here.
 
 use catcard_settings::policy::{self as engine, Allow, Menu};
 
@@ -419,45 +421,9 @@ mod imp {
             }
         };
 
-        // The height the transaction names, if it names one. A time lock is not a
-        // height and is not turned into one.
-        let height = match timelock::absolute(psbt) {
-            Some(timelock::Locktime {
-                lock: timelock::Absolute::Height(h),
-                ..
-            }) => Some(h),
-            _ => None,
-        };
-
+        let height = lock_height(psbt);
         let mut checker = Checker::new(&policy);
-        if !policy.whitelist.is_empty() {
-            let network = crate::prefs::network();
-            let accounts = &summary.accounts[..summary.account_count];
-            let wallets = &summary.wallets[..summary.wallet_count];
-            let mut page = [psbtview::Destination::BLANK; 4];
-            let mut start = 0usize;
-            let mut busy = menu::Working::new(ui.panel, HEAD, "checking the policy");
-            loop {
-                let got = crate::keywork::run(|kw| {
-                    psbtview::destinations_from(
-                        psbt, owner, network, accounts, wallets, start, &mut page, kw,
-                    )
-                });
-                for d in &page[..got] {
-                    checker.output(Out {
-                        index: d.index,
-                        amount: d.amount,
-                        change: d.change,
-                        address: d.address(),
-                    });
-                }
-                busy.tick(ui.panel);
-                if got < page.len() {
-                    break;
-                }
-                start += got;
-            }
-        }
+        check_outputs(ui, psbt, owner, summary, &policy, &mut checker);
         let verdict = checker.finish(summary.sending, height);
         let persist = mode == Mode::Hobbled;
         match verdict {
@@ -493,6 +459,59 @@ mod imp {
         }
     }
 
+    /// The block height a transaction's lock time names, if it names one. A time lock is
+    /// not a height and is not turned into one.
+    pub(crate) fn lock_height(psbt: &Psbt<'_>) -> Option<u32> {
+        match timelock::absolute(psbt) {
+            Some(timelock::Locktime {
+                lock: timelock::Absolute::Height(h),
+                ..
+            }) => Some(h),
+            _ => None,
+        }
+    }
+
+    /// Feed every output to `checker` when `policy` has a whitelist -- the only rule that
+    /// looks at outputs one by one. Each page derives change keys, so it runs masked.
+    /// Shared with CCC's co-signing check.
+    pub(crate) fn check_outputs(
+        ui: &mut Ui<'_>,
+        psbt: &Psbt<'_>,
+        owner: &psbtview::Owner<'_>,
+        summary: &psbtview::Summary,
+        policy: &Policy,
+        checker: &mut Checker<'_>,
+    ) {
+        if !policy.whitelist.is_empty() {
+            let network = crate::prefs::network();
+            let accounts = &summary.accounts[..summary.account_count];
+            let wallets = &summary.wallets[..summary.wallet_count];
+            let mut page = [psbtview::Destination::BLANK; 4];
+            let mut start = 0usize;
+            let mut busy = menu::Working::new(ui.panel, HEAD, "checking the policy");
+            loop {
+                let got = crate::keywork::run(|kw| {
+                    psbtview::destinations_from(
+                        psbt, owner, network, accounts, wallets, start, &mut page, kw,
+                    )
+                });
+                for d in &page[..got] {
+                    checker.output(Out {
+                        index: d.index,
+                        amount: d.amount,
+                        change: d.change,
+                        address: d.address(),
+                    });
+                }
+                busy.tick(ui.panel);
+                if got < page.len() {
+                    break;
+                }
+                start += got;
+            }
+        }
+    }
+
     /// Say why a transaction was refused.
     fn refuse(ui: &mut Ui<'_>, v: Violation, test_drive: bool) {
         let text = v.describe();
@@ -513,10 +532,15 @@ mod imp {
     // Settings -> Spending Policy
     // -----------------------------------------------------------------------------------
 
-    /// Settings -> Spending Policy: stock's SpendingPolicySubMenu, of which this wave has
-    /// the single-signer half.
+    /// Settings -> Spending Policy: stock's SpendingPolicySubMenu -- the single-signer
+    /// policy and CCC. `pool` is for generating key C.
     /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV "Spending Policy" [C]
-    pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    pub(crate) fn screen(
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+        mut pool: Option<&mut catcard_entropy::EntropyPool>,
+    ) {
         loop {
             let Some(row) =
                 menu::pick_row(ui, HEAD, "", &["Single-Signer", "Co-Sign Multisig (CCC)"])
@@ -525,7 +549,7 @@ mod imp {
             };
             match row {
                 0 => single_signer(gate, login, ui),
-                _ => say(ui, "CCC is a later wave"),
+                _ => crate::ccc::screen(gate, login, ui, pool.as_deref_mut()),
             }
         }
     }
@@ -583,7 +607,7 @@ mod imp {
             // The three that change the session's mode leave the screen once they have.
             let mut done = false;
             match rows[row] {
-                "Edit Policy..." => edit_policy(gate, login, ui),
+                "Edit Policy..." => edit_policy(Target::Sssp, gate, login, ui),
                 l if l.starts_with("Word Check") => toggle_word_check(gate, login, ui, &policy),
                 l if l.starts_with("Allow Notes") => {
                     toggle(gate, login, ui, &policy, Toggle::Notes);
@@ -811,15 +835,58 @@ mod imp {
     // Edit Policy (SP-POL)
     // -----------------------------------------------------------------------------------
 
-    /// The SpendingPolicyMenu: magnitude, velocity, whitelist, Web 2FA.
+    /// Which policy the shared editor works on.
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    pub(crate) enum Target {
+        /// The single-signer policy, `cat_sssp`.
+        Sssp,
+        /// CCC's, `ccc['pol']` (see `crate::ccc`).
+        Ccc,
+    }
+
+    /// The policy `t` names, as stored; `None` once the screen has said why not.
+    fn current_of(
+        t: Target,
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+    ) -> Option<Policy> {
+        match t {
+            Target::Sssp => current(gate, login, ui),
+            Target::Ccc => crate::ccc::current_policy(gate, login, ui),
+        }
+    }
+
+    /// Read, change and write back the policy `t` names; true when the write landed.
+    fn update_of(
+        t: Target,
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+        edit: impl FnOnce(&mut Policy) -> Result<(), &'static str>,
+    ) -> bool {
+        match t {
+            Target::Sssp => update_root(gate, login, ui, edit),
+            Target::Ccc => crate::ccc::update_policy(gate, login, ui, edit),
+        }
+    }
+
+    /// The SpendingPolicyMenu, shared by the single-signer policy and CCC: magnitude,
+    /// velocity, whitelist.
     /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SP-POL [C]
-    fn edit_policy(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    pub(crate) fn edit_policy(
+        t: Target,
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+    ) {
         const H: &str = "Edit Policy";
         loop {
-            let Some(policy) = current(gate, login, ui) else {
+            let Some(policy) = current_of(t, gate, login, ui) else {
                 return;
             };
-            if !word_check_passes(gate, login, ui, &policy) {
+            // CCC asked for key C's words on the way in; SSSP's own Word Check is here.
+            if t == Target::Sssp && !word_check_passes(gate, login, ui, &policy) {
                 return;
             }
             let mut mag: heapless::String<40> = heapless::String::new();
@@ -837,19 +904,16 @@ mod imp {
             };
             let mut wl: heapless::String<40> = heapless::String::new();
             let _ = write!(wl, "Whitelist Addresses ({})", policy.whitelist.len());
-            let rows = [mag.as_str(), vel.as_str(), wl.as_str(), "Web 2FA: off"];
+            // Stock's `Web 2FA` rows are not here: that rule is a round trip to
+            // Coinkite's closed coldcard.com service, which this firmware leaves out.
+            let rows = [mag.as_str(), vel.as_str(), wl.as_str()];
             let Some(row) = menu::pick_row(ui, H, "", &rows) else {
                 return;
             };
             match row {
-                0 => set_magnitude(gate, login, ui, &policy),
-                1 => set_velocity(gate, login, ui, &policy),
-                2 => whitelist(gate, login, ui),
-                _ => {
-                    // The enrolment and verification protocol is not in the reference.
-                    // docs/HARDWARE-OPEN-ITEMS.md "Web 2FA" `[?]`
-                    say(ui, "needs the Web 2FA spec");
-                }
+                0 => set_magnitude(t, gate, login, ui, &policy),
+                1 => set_velocity(t, gate, login, ui, &policy),
+                _ => whitelist(t, gate, login, ui),
             }
         }
     }
@@ -859,6 +923,7 @@ mod imp {
     /// cap, and turns velocity off with it, as stock says.
     /// Source: hw-reference/help-and-warning-screens.md §12 "Set magnitude cap to zero" [C]
     fn set_magnitude(
+        t: Target,
         gate: &Callgate,
         login: &mut catcard_pin::Login,
         ui: &mut Ui<'_>,
@@ -892,7 +957,7 @@ mod imp {
             menu::message(ui.panel, H, "no cap: velocity", "is turned off too");
             menu::wait_for_any_key(ui);
         }
-        update_root(gate, login, ui, |p| {
+        update_of(t, gate, login, ui, |p| {
             p.magnitude = cap;
             if cap == 0 {
                 p.velocity = 0;
@@ -906,6 +971,7 @@ mod imp {
     /// Source: hw-reference/help-and-warning-screens.md §12 "Enable velocity with no
     /// magnitude" [C]
     fn set_velocity(
+        t: Target,
         gate: &Callgate,
         login: &mut catcard_pin::Login,
         ui: &mut Ui<'_>,
@@ -930,7 +996,7 @@ mod imp {
             );
             menu::wait_for_any_key(ui);
         }
-        update_root(gate, login, ui, |p| {
+        update_of(t, gate, login, ui, |p| {
             p.velocity = blocks;
             if blocks > 0 && p.magnitude == 0 {
                 p.magnitude = engine::DEFAULT_VELOCITY_MAGNITUDE;
@@ -959,10 +1025,10 @@ mod imp {
 
     /// SPAddrWhitelist: scan (Q1), import from a file, each address, clear.
     /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SP-POL "Whitelist Addresses" [C]
-    fn whitelist(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    fn whitelist(t: Target, gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         const H: &str = "Whitelist";
         loop {
-            let Some(policy) = current(gate, login, ui) else {
+            let Some(policy) = current_of(t, gate, login, ui) else {
                 return;
             };
             let mut shown: heapless::Vec<heapless::String<24>, { engine::MAX_WHITELIST }> =
@@ -994,13 +1060,13 @@ mod imp {
             };
             match rows[row] {
                 #[cfg(feature = "board-q1")]
-                "Scan QR" => scan_address(gate, login, ui),
-                "Import from File" => import_file(gate, login, ui),
+                "Scan QR" => scan_address(t, gate, login, ui),
+                "Import from File" => import_file(t, gate, login, ui),
                 "(none yet)" => {}
                 "Clear Whitelist" => {
                     menu::ask(ui.panel, H, "forget every", "whitelisted address?");
                     if menu::confirmed(ui) {
-                        update_root(gate, login, ui, |p| {
+                        update_of(t, gate, login, ui, |p| {
                             p.whitelist.clear();
                             Ok(())
                         });
@@ -1015,7 +1081,7 @@ mod imp {
                             Row::body("ENTER removes it; CANCEL keeps it.").small(),
                         ];
                         if matches!(menu::show_doc(ui, &rows, false, false), DocExit::Confirmed) {
-                            update_root(gate, login, ui, |p| {
+                            update_of(t, gate, login, ui, |p| {
                                 if i < p.whitelist.len() {
                                     p.whitelist.remove(i);
                                 }
@@ -1030,9 +1096,15 @@ mod imp {
 
     /// Add one address, saying why not. The scanner's path; the file import adds many.
     #[cfg(feature = "board-q1")]
-    fn add(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, text: &str) {
+    fn add(
+        t: Target,
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+        text: &str,
+    ) {
         let mut why: Option<&'static str> = None;
-        let ok = update_root(gate, login, ui, |p| {
+        let ok = update_of(t, gate, login, ui, |p| {
             p.add_address(text).map_err(|e| {
                 why = Some(e.text());
                 e.text()
@@ -1048,7 +1120,7 @@ mod imp {
 
     /// Addresses from a text file on the card or the Virtual Disk, one per line, added
     /// until the list is full; the count and the first refusal are reported.
-    fn import_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    fn import_file(t: Target, gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         const H: &str = "Import addresses";
         let Some(storage) = menu::pick_storage(ui, H) else {
             return;
@@ -1076,7 +1148,7 @@ mod imp {
         };
         let mut added = 0usize;
         let mut first_refusal: Option<&'static str> = None;
-        let ok = update_root(gate, login, ui, |p| {
+        let ok = update_of(t, gate, login, ui, |p| {
             for line in text.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
@@ -1110,7 +1182,7 @@ mod imp {
 
     /// One address from the scanner (Q1).
     #[cfg(feature = "board-q1")]
-    fn scan_address(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    fn scan_address(t: Target, gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         use crate::qrscan::{self, Next};
         let mut got: heapless::String<{ engine::MAX_ADDRESS + 16 }> = heapless::String::new();
         let outcome = qrscan::scan_many(ui, "Scan address", &mut |_, line| {
@@ -1123,7 +1195,7 @@ mod imp {
         if outcome.is_err() || got.is_empty() {
             return;
         }
-        add(gate, login, ui, got.as_str());
+        add(t, gate, login, ui, got.as_str());
     }
 
     // -----------------------------------------------------------------------------------

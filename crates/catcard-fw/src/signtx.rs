@@ -1046,6 +1046,22 @@ pub(crate) fn review_and_sign(
         return;
     }
 
+    // CCC: a spend from a registered wallet that key C is in is judged against key C's
+    // policy, and key C signs beside our key only if it passes. See `crate::ccc`.
+    #[cfg(not(feature = "board-mk3"))]
+    let cosigner = match crate::ccc::decide(gate, login, ui, &psbt, &owner, &summary) {
+        crate::ccc::Decision::Alone => None,
+        crate::ccc::Decision::CoSign(c) => Some(c),
+        crate::ccc::Decision::Refused => {
+            sink.decline();
+            menu::message(ui.panel, HEAD, "not signed", "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    #[cfg(not(feature = "board-mk3"))]
+    let mut cosigned = 0usize;
+
     // Sign, one input at a time, alternating buffers: each signature rewrites the whole
     // container. `at` says which buffer currently holds the PSBT.
     let mut busy = menu::Working::new(ui.panel, HEAD, "signing");
@@ -1109,9 +1125,41 @@ pub(crate) fn review_and_sign(
         if !done {
             crate::catlog!("sign: input {} refused by every key", index);
         }
+        // Key C's signature on the same input, when its policy allowed one. It signs only
+        // the inputs our key reviewed as ours, and only where key C is one of the keys.
+        #[cfg(not(feature = "board-mk3"))]
+        if let Some(co) = &cosigner
+            && let Ok(psbt) = Psbt::parse(&from[..at])
+        {
+            match crate::keywork::run(|kw| {
+                signer::sign_input_under(
+                    &psbt,
+                    index,
+                    &co.master,
+                    co.fingerprint,
+                    sighash,
+                    into,
+                    kw,
+                )
+            }) {
+                Ok(n) => {
+                    core::mem::swap(&mut from, &mut into);
+                    at = n;
+                    cosigned += 1;
+                }
+                Err(e) => crate::catlog!("sign: input {} not key C's: {:?}", index, e),
+            }
+        }
         busy.tick(ui.panel);
     }
     drop(master);
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        drop(cosigner);
+        if cosigned > 0 {
+            crate::catlog!("sign: key C co-signed {} input(s)", cosigned);
+        }
+    }
     #[cfg(not(feature = "board-mk3"))]
     drop(wif_keys);
 

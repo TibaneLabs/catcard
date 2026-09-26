@@ -36,6 +36,10 @@ mod backup;
 #[cfg(feature = "board-q1")]
 mod battery;
 mod boot;
+/// Coldcard Co-Sign: key C, its spending policy, and the co-signature. Kept in the
+/// settings store, which the mk3 does not have.
+#[cfg(not(feature = "board-mk3"))]
+mod ccc;
 /// Which chains the owner sees, from the root wallet's settings.
 ///
 /// A multichain question: the one build that carries a single chain has nothing to ask.

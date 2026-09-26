@@ -1641,7 +1641,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SpendingPolicy => to(
-            |a| crate::policy::screen(a.gate, a.login, a.ui),
+            |a| crate::policy::screen(a.gate, a.login, a.ui, a.pool.as_deref_mut()),
             Screen::Settings,
         ),
         #[cfg(not(feature = "board-mk3"))]
@@ -1863,6 +1863,7 @@ fn action_for(screen: Screen) -> Option<Action> {
                     a.pool.as_deref_mut(),
                     a.words,
                     SeedTarget::Store,
+                    None,
                 )
             },
             Screen::Main,
@@ -8096,6 +8097,19 @@ fn stretch_words<T>(
     len: usize,
     then: impl FnOnce(&[u8; catcard_wallet::bip39::SEED_LEN], &catcard_wallet::KeyWork) -> Option<T>,
 ) -> Result<T, &'static str> {
+    stretch_phrase(panel, head, entropy, len, crate::passphrase::active(), then)
+}
+
+/// [`stretch_words`] under a passphrase the caller names rather than the one in force:
+/// for a seed that is not the wallet's, such as CCC's key C, which has none.
+pub(crate) fn stretch_phrase<T>(
+    panel: &mut display::Panel,
+    head: &str,
+    entropy: &mut [u8; 32],
+    len: usize,
+    passphrase: &str,
+    then: impl FnOnce(&[u8; catcard_wallet::bip39::SEED_LEN], &catcard_wallet::KeyWork) -> Option<T>,
+) -> Result<T, &'static str> {
     use catcard_wallet::bip39::{Mnemonic, SEED_LEN, Stretch};
     use zeroize::Zeroize;
 
@@ -8108,8 +8122,7 @@ fn stretch_words<T>(
         };
         // The BIP-39 passphrase in force, if any: it is part of the seed, so every screen
         // that derives from it follows it without asking.
-        Stretch::begin(&mnemonic, crate::passphrase::active(), kw)
-            .map_err(|_| "key derivation failed")
+        Stretch::begin(&mnemonic, passphrase, kw).map_err(|_| "key derivation failed")
     });
     stretch.and_then(|mut stretch| {
         while !crate::keywork::run(|kw| stretch.step(STRETCH_SLICE, kw)) {
@@ -9842,6 +9855,28 @@ pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
     }
 }
 
+/// [`confirmed`] where the yes is one particular digit, not the confirm key: for the
+/// second question before something that cannot be undone, so a confirm pressed twice out
+/// of habit does not answer it. Cancel is no; every other key keeps waiting.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn confirmed_by_digit(ui: &mut Ui<'_>, digit: u8) -> bool {
+    wait_for_release(ui);
+    let mut events = [Event::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    loop {
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+        for k in keys.iter() {
+            match k {
+                Key::Digit(d) if *d == digit => return true,
+                Key::Cancel => return false,
+                _ => {}
+            }
+        }
+        display::idle(ui.panel);
+    }
+}
+
 /// A yes/no question, with the keys named the way this board labels them.
 pub(crate) fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     use catcard_ui::canvas::Canvas;
@@ -10167,6 +10202,7 @@ fn new_seed(
     pool: Option<&mut catcard_entropy::EntropyPool>,
     words: u8,
     target: SeedTarget,
+    handoff: Option<&mut [u8; catcard_callgate::pin::SECRET_LEN]>,
 ) {
     use catcard_wallet::bip39::Mnemonic;
     use zeroize::Zeroize;
@@ -10215,6 +10251,7 @@ fn new_seed(
         // Said plainly: it is gone at reboot unless its words are kept or it is locked
         // down. Source: hw-reference/help-and-warning-screens.md §6 [C]
         SeedTarget::Temporary => ask(ui.panel, "Temporary seed?", &what, "device; RAM only"),
+        SeedTarget::Handoff => ask(ui.panel, "New key C?", &what, "device's own TRNGs"),
     }
     if !confirmed(ui) {
         return;
@@ -10396,6 +10433,17 @@ fn new_seed(
         }
     }
 
+    // A key handed to another feature (CCC's key C) stops here too: the words are written
+    // down and confirmed, and the encoding goes to the caller, which stores it.
+    if target == SeedTarget::Handoff {
+        if let Some(out) = handoff {
+            out.copy_from_slice(&secret);
+        }
+        secret.zeroize();
+        drop(mnemonic);
+        return;
+    }
+
     // A temporary seed stops here: the words are written down, and the entropy goes in
     // force for the session instead of into the slot. Locking it down later is the way
     // to keep it, and that screen has its own warnings.
@@ -10463,6 +10511,36 @@ enum SeedTarget {
     /// if there is one, is untouched, and Lock down seed is the way to keep it.
     /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 "Generate Words" [C]
     Temporary,
+    /// To the caller, as its secret-stash encoding: CCC's key C, which is a second seed
+    /// kept in the settings and never the wallet in force. The mk3 has no settings to
+    /// keep one in.
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    Handoff,
+}
+
+/// A fresh phrase for CCC's key C: the same generator, words and quiz as a new wallet,
+/// handed back as its stash encoding for the caller to store. `None` if the owner backed
+/// out or the pool refused -- each said on screen.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn new_key_c(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    pool: Option<&mut catcard_entropy::EntropyPool>,
+    words: u8,
+) -> Option<zeroize::Zeroizing<[u8; catcard_callgate::pin::SECRET_LEN]>> {
+    let mut out = zeroize::Zeroizing::new([0u8; catcard_callgate::pin::SECRET_LEN]);
+    new_seed(
+        gate,
+        login,
+        ui,
+        pool,
+        words,
+        SeedTarget::Handoff,
+        Some(&mut out),
+    );
+    // A stash's marker is never zero: nothing was handed back.
+    (out[0] != 0).then_some(out)
 }
 
 /// Derive -> New words: choose a length, then [`new_seed`] into the session.
@@ -10479,7 +10557,7 @@ fn new_temp_seed(
         "12 words" => 12,
         _ => 24,
     };
-    new_seed(gate, login, ui, pool, words, SeedTarget::Temporary);
+    new_seed(gate, login, ui, pool, words, SeedTarget::Temporary, None);
 }
 
 /// Import -> XPRV: type a BIP-32 node in and store it as the master.
