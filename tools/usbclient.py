@@ -14,6 +14,12 @@ The microSD bridge, on a bring-up build:
     tools/usbclient.py hid --sd 13 0x1234 --resp=short      one command, by number
     tools/usbclient.py hid --sd 42 0 --write=0001...        one with data to the card
 
+A computer asking the wallet, inside the encrypted channel (the person decides on the
+device):
+
+    tools/usbclient.py hid --addresses
+    tools/usbclient.py hid --sign tx.psbt --chain btc --key m/84h/0h/0h/0/3 [--out F]
+
 Reading and writing /dev/hidraw* usually needs root or a udev rule -- see docs/USB.md.
 
 `ccemu --usb-hid PATH` hands the device's report pipe to whatever connects: one whole
@@ -28,6 +34,7 @@ import select
 import socket, struct, sys, time
 
 import ncry  # the encrypted-channel primitives, alongside this file in tools/
+import hostwallet  # the host-wallet layouts and flows, likewise
 
 REPORT = 64
 KIND_START, KIND_CONT = 1, 2
@@ -55,6 +62,23 @@ def ncry_handshake(sock):
     if st != 0 or len(body) != ncry.KEY_LEN:
         raise ValueError(f"ncry: device refused the handshake (status {st}, {len(body)} B)")
     return ncry.Session.initiator(priv, bytes(body))
+
+
+def open_session(sock):
+    """An encrypted session the host-wallet commands may run on, or an exception.
+
+    **The one place those commands get a session from.** Today that is the plain `ncry`
+    handshake; when the channel gains pairing, this is what changes and nothing that
+    calls it does.
+    """
+    st, body = request(sock, IDENTIFY)
+    caps = capabilities(body) if st == 0 else 0
+    if not caps & CAP_NCRY:
+        raise ValueError("device does not advertise the encrypted channel (no NCRY cap)")
+    if not caps & hostwallet.CAP_HOST_WALLET:
+        raise ValueError("device does not answer host-wallet commands (no HOST_WALLET cap)")
+    session = ncry_handshake(sock)
+    return lambda opcode, payload=b"": ncry_request(sock, session, opcode, payload)
 
 
 def ncry_request(sock, session, opcode, payload=b""):
@@ -1261,6 +1285,83 @@ def main(path, image=None):
         print(f"ncry tamper     rejected={st != 0} (status {STATUS.get(st, st)})")
         return 0
 
+    if "--addresses" in sys.argv:
+        # Ask for the wallet's addresses. The device asks its owner which account (and on
+        # a multichain build, which chains) and whether to share them at all.
+        call = open_session(s)
+        try:
+            hostwallet.print_addresses(hostwallet.addresses(call))
+        except hostwallet.Refused as e:
+            print(f"host      not shared: {e}")
+            return 1
+        return 0
+
+    if "--sign" in sys.argv:
+        # Upload a transaction and the exact keys that must sign it -- paths from the
+        # address reply -- and wait for the owner's review on the device.
+        src = arg_after("--sign")[0]
+        chain_name = arg_after("--chain")[0] if "--chain" in sys.argv else "btc"
+        chain = hostwallet.CHAIN_IDS.get(chain_name.lower())
+        if chain is None:
+            print(f"sign      unknown chain {chain_name!r}")
+            return 1
+        keys = [hostwallet.parse_path(sys.argv[i + 1])
+                for i, a in enumerate(sys.argv) if a == "--key"]
+        if not keys:
+            print("sign      name at least one --key")
+            return 1
+        tx = open(src, "rb").read()
+        # A text file of hex or base64 is taken as what it spells; the device takes the
+        # bytes. (It also reads a base64 PSBT, but one form on the wire is simpler.)
+        import base64, binascii
+        text = tx.strip()
+        if not text.startswith(b"psbt\xff"):
+            try:
+                tx = bytes.fromhex(text.decode().removeprefix("0x"))
+            except (UnicodeDecodeError, ValueError):
+                try:
+                    tx = base64.b64decode(text, validate=True)
+                except (binascii.Error, ValueError):
+                    pass  # raw bytes, as they are
+        call = open_session(s)
+        try:
+            result = hostwallet.sign(call, chain, keys, tx)
+        except hostwallet.Refused as e:
+            print(f"sign      not signed: {e}")
+            return 1
+        out = arg_after("--out")[0] if "--out" in sys.argv else None
+        kind = result[0] if result else 0
+        if kind == hostwallet.KIND_BITCOIN:
+            version, psbt, final = hostwallet.decode_bitcoin(result)
+            print(f"sign      PSBT v{version}, {len(psbt)} bytes"
+                  + (f"; final transaction {len(final)} bytes" if final else "; not final"))
+            if out:
+                open(out, "wb").write(psbt)
+                if final:
+                    open(out + ".txn", "w").write(final.hex() + "\n")
+            elif final:
+                print(final.hex())
+        elif kind == hostwallet.KIND_EVM:
+            signed = hostwallet.decode_evm(result)
+            print(f"sign      signed EVM transaction, {len(signed)} bytes")
+            if out:
+                open(out, "w").write("0x" + signed.hex() + "\n")
+            else:
+                print("0x" + signed.hex())
+        elif kind == hostwallet.KIND_SOLANA:
+            import base64
+            sigs, signed = hostwallet.decode_solana(result)
+            for slot, sig in sigs:
+                print(f"sign      slot {slot} signature {sig.hex()}")
+            if out:
+                open(out, "w").write(base64.b64encode(signed).decode() + "\n")
+            else:
+                print(base64.b64encode(signed).decode())
+        else:
+            print(f"sign      unexpected result kind {kind}")
+            return 1
+        return 0
+
     if "--unlock" in sys.argv:
         # Hand the device the whole PIN instead of driving the keypad blindly. The one
         # key sent here is only to leave the selftest screen -- not the PIN.
@@ -1487,5 +1588,6 @@ if __name__ == "__main__":
     # reached: the hand-assembled thunk and the struct offsets it depends on.
     if "--selftest" in sys.argv:
         selftest()
+        hostwallet.selftest()
         raise SystemExit(0)
     sys.exit(main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))
