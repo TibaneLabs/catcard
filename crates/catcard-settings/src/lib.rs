@@ -25,6 +25,8 @@
 pub mod ccc;
 pub mod ccenc;
 pub mod chains;
+pub mod hsm;
+pub mod hsmusers;
 pub mod json;
 pub mod norslots;
 pub mod notes;
