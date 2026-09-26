@@ -13,6 +13,10 @@ heapless.workspace = true
 # In-place wipe of the CMD42 lock/unlock scratch buffer, which briefly holds a card
 # password. `Zeroizing` clears it on drop, on every path out of `lock_unlock`.
 zeroize.workspace = true
+# Whole-card AES-128-XTS: the transparent block-layer decrypt/encrypt of an encrypted
+# card. `cipher` only -- the KDF that turns a password into the XTS key lives in
+# `catcard-settings`, keeping this crate to the cipher and the block plumbing.
+purecrypto = { workspace = true, features = ["cipher"] }
 # The FAT/exFAT driver. Both are heapless here: one sector of scratch RAM whatever the
 # size of the card. `alloc` must stay off -- this crate is linked into firmware with no
 # heap, and the build should fail rather than grow one. `exfat` is on because modern SDXC

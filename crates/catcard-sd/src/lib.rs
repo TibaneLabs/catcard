@@ -21,6 +21,9 @@ pub const BLOCK_LEN: usize = 512;
 pub mod cid;
 pub use cid::Cid;
 
+pub mod crypto;
+pub use crypto::{CryptoError, SectorCrypto, XTS_HALF_LEN, XTS_KEY_LEN};
+
 /// What went wrong. No variant means "probably fine".
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -151,7 +154,11 @@ pub enum Addressing {
 }
 
 /// A card that finished initialisation.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+///
+/// **No longer `Copy`.** It carries an optional [`SectorCrypto`], which holds keyed cipher
+/// state that wipes on drop, so the card is moved and borrowed rather than copied. Every
+/// caller here already takes it by reference or moves it once into [`Sectors`], so this
+/// costs nothing but the derive.
 pub struct Card {
     /// Relative card address, as assigned by CMD3; the upper half of every addressed
     /// command's argument.
@@ -166,6 +173,27 @@ pub struct Card {
     /// [`Card::cid`]. Kept raw because most of it is only ever shown on a screen, and the
     /// one field that is load-bearing — the serial number — has its own accessor.
     pub cid: [u32; 4],
+    /// When set, this card is transparently AES-128-XTS encrypted: [`read_block`]
+    /// decrypts every sector after the raw read, and [`write_block`] encrypts a copy
+    /// before the raw write, both with the sector's LBA as the tweak. `None` (the
+    /// default from [`init`]) is a plaintext card and today's behaviour byte-for-byte.
+    /// See [`crate::crypto`].
+    pub crypto: Option<SectorCrypto>,
+}
+
+impl core::fmt::Debug for Card {
+    /// Never prints `crypto`: it holds key material, and a card's debug line goes to the
+    /// log. Reports only *whether* the session is encrypted.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Card")
+            .field("rca", &self.rca)
+            .field("addressing", &self.addressing)
+            .field("blocks", &self.blocks)
+            .field("wide", &self.wide)
+            .field("cid", &self.cid)
+            .field("encrypted", &self.crypto.is_some())
+            .finish()
+    }
 }
 
 impl Card {
@@ -186,6 +214,27 @@ impl Card {
     /// field with a dedicated accessor rather than being dug out of the raw words.
     pub fn serial(&self) -> u32 {
         self.cid().psn()
+    }
+
+    /// Whether reads and writes of this card are being transparently decrypted/encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        self.crypto.is_some()
+    }
+
+    /// Turn on transparent AES-128-XTS for this session, keyed by K1 ‖ K2.
+    ///
+    /// From here on [`read_block`] decrypts and [`write_block`] encrypts, with the LBA as
+    /// the tweak. Rejects `k1 == k2` (see [`CryptoError`]); the card is left plaintext on
+    /// error, so a bad key can never half-arm the layer.
+    pub fn unlock(&mut self, key: &[u8; XTS_KEY_LEN]) -> Result<(), CryptoError> {
+        self.crypto = Some(SectorCrypto::from_key(key)?);
+        Ok(())
+    }
+
+    /// Forget the session key, returning the card to plaintext access.
+    pub fn relock(&mut self) {
+        // Dropping the `SectorCrypto` wipes its key material (`ZeroizeOnDrop`).
+        self.crypto = None;
     }
 }
 
@@ -299,6 +348,9 @@ pub fn init<T: Transport>(t: &mut T) -> Result<Card, Error> {
         blocks,
         wide,
         cid,
+        // A freshly brought-up card is always plaintext; firmware turns encryption on with
+        // [`Card::unlock`] once it has verified the password.
+        crypto: None,
     })
 }
 
@@ -321,7 +373,15 @@ pub fn read_block<T: Transport>(
     };
     t.arm_block_read();
     t.command(CMD_READ_SINGLE, arg, Response::Short)?;
-    t.read_data(out)
+    t.read_data(out)?;
+    // Transparent decrypt: on an unlocked encrypted card the sector came off the medium as
+    // ciphertext, so it is deciphered in place with its own LBA as the tweak before the
+    // caller -- the filesystem or the USB drive -- ever sees it. Plaintext cards
+    // (`crypto == None`) skip this and read exactly as before.
+    if let Some(sc) = &card.crypto {
+        sc.decrypt_sector(lba, out);
+    }
+    Ok(())
 }
 
 /// Write one block.
@@ -345,7 +405,17 @@ pub fn write_block<T: Transport>(
     };
     t.arm_block_write();
     t.command(CMD_WRITE_SINGLE, arg, Response::Short)?;
-    t.write_data(data)?;
+    // Transparent encrypt: on an unlocked encrypted card the plaintext the caller handed us
+    // must reach the medium as ciphertext. Encipher a *copy* -- the caller's `data` is a
+    // shared borrow and stays plaintext -- with the LBA as the tweak, and write that.
+    // Plaintext cards write `data` unchanged, as before.
+    if let Some(sc) = &card.crypto {
+        let mut tmp = *data;
+        sc.encrypt_sector(lba, &mut tmp);
+        t.write_data(&tmp)?;
+    } else {
+        t.write_data(data)?;
+    }
     wait_until_ready(t, card)
 }
 

@@ -164,6 +164,11 @@ enum Screen {
     /// The SD card's own controller password lock (CMD42): set, change, remove, unlock,
     /// or force-erase. Needs no settings store, so it is on every board with a slot.
     CardPassword,
+    /// Device-bound, whole-card AES-128-XTS encryption of the SD card: encrypt in place,
+    /// unlock for the session, or remove. Keeps per-card parameters in the settings store,
+    /// so it needs one -- absent on the mk3.
+    #[cfg(not(feature = "board-mk3"))]
+    CardEncrypt,
     /// Write or read the encrypted backup file.
     BackupMenu,
     /// Write the wallet to the card, encrypted under twelve fresh words.
@@ -609,6 +614,10 @@ const UTILS_ITEMS: &[&str] = &[
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
+    // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
+    // settings, so it needs the store: not on the mk3.
+    #[cfg(not(feature = "board-mk3"))]
+    "Encrypt card",
     "Games",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
@@ -634,6 +643,10 @@ const UTILS_ITEMS: &[&str] = &[
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
+    // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
+    // settings, so it needs the store: not on the mk3.
+    #[cfg(not(feature = "board-mk3"))]
+    "Encrypt card",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
     #[cfg(not(feature = "board-mk3"))]
@@ -1347,6 +1360,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
         Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::CardEncrypt => to(
+            |a| crate::sdcrypt::screen(a.gate, a.login, a.ui),
+            Screen::Utils,
+        ),
         Screen::BackupSave => to(
             |a| crate::backup::save(a.gate, a.login, a.ui),
             Screen::BackupMenu,
@@ -1849,6 +1867,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Card details")) => Screen::CardDetails,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             (Key::Confirm, Some("Card password")) => Screen::CardPassword,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Encrypt card")) => Screen::CardEncrypt,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
             #[cfg(not(feature = "board-mk3"))]
@@ -2376,6 +2396,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::FormatSd => {}
         // Handled in `run`: it brings up the card and drives its own menu and prompts.
         Screen::CardPassword => {}
+        // Handled in `run`: it brings up the card and drives its own menu, prompts and
+        // (for encrypt/remove) the full-card rewrite.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::CardEncrypt => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt
         | Screen::BatchSign
@@ -3501,7 +3525,8 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
                 return Err(());
             }
         };
-        let card = match catcard_sd::init(&mut dev) {
+        #[allow(unused_mut)]
+        let mut card = match catcard_sd::init(&mut dev) {
             Ok(c) => c,
             Err(catcard_sd::Error::NoCard) => {
                 why = "no card in slot";
@@ -3513,6 +3538,11 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
                 return Err(());
             }
         };
+        // Transparent decryption: if this card was unlocked this session, every read and
+        // write through the mounted volume now decrypts/encrypts. A plaintext card is
+        // untouched. mk3 has no such feature.
+        #[cfg(not(feature = "board-mk3"))]
+        crate::sdcrypt::apply_to(&mut card);
         Ok(catcard_sd::Sectors::new(dev, card))
     })
     .map_err(|e| match e {
@@ -12026,7 +12056,8 @@ fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
             return;
         }
     };
-    let card = match catcard_sd::init(&mut dev) {
+    #[allow(unused_mut)]
+    let mut card = match catcard_sd::init(&mut dev) {
         Ok(c) => c,
         Err(catcard_sd::Error::NoCard) => {
             message(ui.panel, "USB Drive", "no card in slot", "press a key");
@@ -12040,6 +12071,11 @@ fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
             return;
         }
     };
+    // If this card is unlocked, the whole USB drive is served decrypted: the host sees
+    // the plaintext filesystem, and everything it writes is re-encrypted, because the MSC
+    // path bottoms out in the same `read_block`/`write_block` the FS path does.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::sdcrypt::apply_to(&mut card);
 
     message(
         ui.panel,

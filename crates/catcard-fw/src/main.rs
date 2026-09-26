@@ -128,6 +128,10 @@ mod recovery;
 /// Debug: write a settings image staged by the memory monitor back over the region.
 #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 mod restore;
+/// Device-bound whole-card SD encryption (AES-128-XTS): session unlock state and the
+/// Encrypt/Unlock/Remove operations. Needs the settings store, so absent on the mk3.
+#[cfg(not(feature = "board-mk3"))]
+mod sdcrypt;
 mod sdupgrade;
 /// SeedQR: the seed as a code, and a scanned code back as the seed.
 #[cfg(feature = "board-q1")]

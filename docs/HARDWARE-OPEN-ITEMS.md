@@ -740,6 +740,29 @@ multisig store already is.
 The 30-key cap and the "can sign matching inputs" behaviour are confirmed from
 `hw-reference/firmware-features.md` §7 and §11 `[C]`; only stock's on-disk key and JSON
 shape are the open `[?]`.
+## SD-encryption parameters use our own settings key `ccenc` `[?]`
+
+Device-bound whole-card SD encryption (`crates/catcard-fw/src/sdcrypt.rs`, backed by
+`catcard_settings::ccenc`) keeps its per-card parameters -- salt, PBKDF2 iteration count
+and verifier, keyed by the card's CID serial -- under our own settings key `ccenc`, as a
+JSON map `{"<serial>": {"s": <hex salt>, "i": <iterations>, "v": <hex verifier>}}`. This
+is a CatCard feature stock does not have, so there is no stock key or layout to match or
+collide with; `ccenc` is chosen the same safe way `ccwif`/`ccms` are, so a device that has
+been stock keeps its stock settings untouched. `[?]` is only that, as with those stores,
+stock's own on-disk shape (were it ever to grow this feature) is not something this can
+know.
+
+The cryptography itself is `[C]`: AES-128-XTS with the sector LBA as the tweak (IEEE
+1619), the XTS key K1‖K2 and a verifier split from one PBKDF2-HMAC-SHA256 output (RFC
+8018). The password source is either a separately-typed password or the in-force BIP-39
+passphrase read through `crate::passphrase::active()` -- our own accessor, so that path is
+`[C]`, not the fallback the task allowed for. The `200_000` default iteration count is a
+tunable policy choice (see `catcard_settings::ccenc::DEFAULT_ITERATIONS`), stored per card
+so it can be raised without stranding cards written under the old count; it is not a
+hardware fact.
+
+Consequence of being wrong about the `[?]`: none to safety, and none even to
+interoperability, since no other firmware reads or writes an `ccenc`-encrypted card.
 ## TAPSIGNER backup format — the block mode and the framing are inferred
 
 `crates/catcard-backup/src/tapsigner.rs` decrypts a TAPSIGNER `.aes` card backup and

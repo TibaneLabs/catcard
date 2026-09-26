@@ -202,7 +202,7 @@ fn a_card_that_never_finishes_powering_up_is_an_error_not_a_hang() {
         busy_for: u32::MAX,
         ..Default::default()
     };
-    assert_eq!(init(&mut c), Err(Error::InitTimeout));
+    assert!(matches!(init(&mut c), Err(Error::InitTimeout)));
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn an_empty_slot_is_reported_before_anything_is_sent() {
         present: false,
         ..Default::default()
     };
-    assert_eq!(init(&mut c), Err(Error::NoCard));
+    assert!(matches!(init(&mut c), Err(Error::NoCard)));
     assert!(c.log.as_slice().is_empty(), "talked to a slot with no card");
 }
 
@@ -394,6 +394,7 @@ mod fat_round_trip {
             blocks: SECTORS,
             wide: true,
             cid: [0; 4],
+            crypto: None,
         };
         fat::Volume::<_, 512>::mount_auto(Sectors::new(card, c)).expect("mount through card")
     }
@@ -443,6 +444,7 @@ mod fat_round_trip {
                 blocks: SECTORS,
                 wide: true,
                 cid: [0; 4],
+                crypto: None,
             },
         );
 
@@ -549,6 +551,7 @@ mod fat_round_trip {
         blocks: 64,
         wide: true,
         cid: [0; 4],
+        crypto: None,
     };
 
     #[test]
@@ -639,6 +642,7 @@ mod fat_round_trip {
                 blocks: SECTORS,
                 wide: true,
                 cid: [0; 4],
+                crypto: None,
             },
         )
     }
@@ -741,10 +745,147 @@ mod fat_round_trip {
                 blocks: SECTORS,
                 wide: true,
                 cid: [0; 4],
+                crypto: None,
             },
         );
         let block = [0u8; BLOCK_LEN];
         assert!(matches!(dev.write_sectors(0, &block), Err(Error::ReadOnly)));
+    }
+
+    /// Two distinct 16-byte halves, so `from_halves` never trips the `k1 == k2` reject.
+    const K1: [u8; XTS_HALF_LEN] = [0x11; XTS_HALF_LEN];
+    const K2: [u8; XTS_HALF_LEN] = [0x22; XTS_HALF_LEN];
+
+    fn encrypted_card(blocks: u32) -> Card {
+        Card {
+            rca: 1,
+            addressing: Addressing::BlockAddressed,
+            blocks,
+            wide: true,
+            cid: [0; 4],
+            crypto: Some(SectorCrypto::from_halves(&K1, &K2).unwrap()),
+        }
+    }
+
+    /// The whole property of the transparent layer: what `write_block` puts on the medium
+    /// is ciphertext, and `read_block` gives the plaintext straight back.
+    #[test]
+    fn a_sector_round_trips_through_the_encrypted_block_layer() {
+        const N: u32 = 8;
+        let mut t = RwImageCard {
+            image: vec![0u8; N as usize * BLOCK_LEN],
+            at: 0,
+        };
+        let card = encrypted_card(N);
+
+        // A distinctive plaintext so a stuck or zeroed cipher cannot pass by luck.
+        let mut plain = [0u8; BLOCK_LEN];
+        for (i, b) in plain.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+
+        const LBA: u32 = 5;
+        write_block(&mut t, &card, LBA, &plain).unwrap();
+
+        // On the medium it is ciphertext, not the plaintext we handed in.
+        let at = LBA as usize * BLOCK_LEN;
+        assert_ne!(
+            &t.image[at..at + BLOCK_LEN],
+            &plain[..],
+            "the sector reached the medium in the clear"
+        );
+
+        // And it decrypts back to exactly what was written.
+        let mut got = [0u8; BLOCK_LEN];
+        read_block(&mut t, &card, LBA, &mut got).unwrap();
+        assert_eq!(
+            got, plain,
+            "encrypt then decrypt did not return the plaintext"
+        );
+    }
+
+    /// XTS keys the cipher on the LBA, so the same plaintext at two LBAs must not produce
+    /// the same ciphertext -- otherwise an attacker learns which sectors are identical.
+    #[test]
+    fn identical_plaintext_at_two_lbas_gives_different_ciphertext() {
+        const N: u32 = 8;
+        let mut t = RwImageCard {
+            image: vec![0u8; N as usize * BLOCK_LEN],
+            at: 0,
+        };
+        let card = encrypted_card(N);
+
+        let plain = [0xABu8; BLOCK_LEN];
+        write_block(&mut t, &card, 1, &plain).unwrap();
+        write_block(&mut t, &card, 2, &plain).unwrap();
+
+        let a = &t.image[BLOCK_LEN..2 * BLOCK_LEN];
+        let b = &t.image[2 * BLOCK_LEN..3 * BLOCK_LEN];
+        assert_ne!(a, b, "same plaintext enciphered identically at two LBAs");
+
+        // Both still read back as the original plaintext.
+        let mut got = [0u8; BLOCK_LEN];
+        read_block(&mut t, &card, 1, &mut got).unwrap();
+        assert_eq!(got, plain);
+        read_block(&mut t, &card, 2, &mut got).unwrap();
+        assert_eq!(got, plain);
+    }
+
+    /// The two constructors agree, and equal halves are refused.
+    #[test]
+    fn key_constructors_agree_and_reject_repeated_keys() {
+        let mut joined = [0u8; XTS_KEY_LEN];
+        joined[..XTS_HALF_LEN].copy_from_slice(&K1);
+        joined[XTS_HALF_LEN..].copy_from_slice(&K2);
+
+        // Encipher one sector each way; the results must match.
+        let from_halves = SectorCrypto::from_halves(&K1, &K2).unwrap();
+        let from_key = SectorCrypto::from_key(&joined).unwrap();
+        let mut a = [0x5Au8; BLOCK_LEN];
+        let mut b = a;
+        from_halves.encrypt_sector(9, &mut a);
+        from_key.encrypt_sector(9, &mut b);
+        assert_eq!(a, b, "the two key layouts keyed the cipher differently");
+
+        // K1 == K2 is refused by both. (`SectorCrypto` has no `PartialEq`/`Debug` -- it
+        // holds key material -- so match on the error rather than `assert_eq!` the result.)
+        assert!(matches!(
+            SectorCrypto::from_halves(&K1, &K1),
+            Err(CryptoError::RepeatedKey)
+        ));
+        let mut same = [0u8; XTS_KEY_LEN];
+        same[..XTS_HALF_LEN].copy_from_slice(&K1);
+        same[XTS_HALF_LEN..].copy_from_slice(&K1);
+        assert!(matches!(
+            SectorCrypto::from_key(&same),
+            Err(CryptoError::RepeatedKey)
+        ));
+    }
+
+    /// A plaintext card (`crypto == None`) is untouched: the layer must be a no-op there,
+    /// or an existing plain card would suddenly read garbage.
+    #[test]
+    fn a_plaintext_card_is_not_transformed() {
+        const N: u32 = 4;
+        let mut t = RwImageCard {
+            image: vec![0u8; N as usize * BLOCK_LEN],
+            at: 0,
+        };
+        let card = Card {
+            rca: 1,
+            addressing: Addressing::BlockAddressed,
+            blocks: N,
+            wide: true,
+            cid: [0; 4],
+            crypto: None,
+        };
+        let plain = [0x3Cu8; BLOCK_LEN];
+        write_block(&mut t, &card, 2, &plain).unwrap();
+        // Straight to the medium, unchanged.
+        assert_eq!(&t.image[2 * BLOCK_LEN..3 * BLOCK_LEN], &plain[..]);
+        let mut got = [0u8; BLOCK_LEN];
+        read_block(&mut t, &card, 2, &mut got).unwrap();
+        assert_eq!(got, plain);
     }
 }
 

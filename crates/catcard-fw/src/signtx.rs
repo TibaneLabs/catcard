@@ -183,7 +183,8 @@ fn with_card<T>(
                 return Err(());
             }
         };
-        let card = match catcard_sd::init(&mut dev) {
+        #[allow(unused_mut)]
+        let mut card = match catcard_sd::init(&mut dev) {
             Ok(c) => c,
             Err(catcard_sd::Error::NoCard) => {
                 why = "no card in slot";
@@ -194,6 +195,9 @@ fn with_card<T>(
                 return Err(());
             }
         };
+        // Transparent decryption for the signing paths' file access, like `mount_card`.
+        #[cfg(not(feature = "board-mk3"))]
+        crate::sdcrypt::apply_to(&mut card);
         Ok(catcard_sd::Sectors::new(dev, card))
     })
     .map_err(|e| match e {

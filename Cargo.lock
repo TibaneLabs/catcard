@@ -273,6 +273,7 @@ version = "7.0.0"
 dependencies = [
  "fstool",
  "heapless",
+ "purecrypto",
  "zeroize",
 ]
 
