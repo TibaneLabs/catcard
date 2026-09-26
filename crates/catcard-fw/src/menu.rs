@@ -1398,7 +1398,7 @@ fn action_for(screen: Screen) -> Option<Action> {
     Some(match screen {
         // Back to Utils, which is where it is now reached from: a screen's way out
         // belongs to the way in.
-        Screen::SdInstall => to(|a| install_from_card(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::SdInstall => to(|a| install_firmware(a.gate, a.login, a.ui), Screen::Utils),
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
         Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
@@ -1424,7 +1424,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Debug,
         ),
         Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
-        Screen::UsbDrive => to(|a| usb_drive(a.ui), Screen::Utils),
+        Screen::UsbDrive => to(|a| usb_drive(a.gate, a.login, a.ui), Screen::Utils),
         #[cfg(not(feature = "board-mk3"))]
         Screen::PaperWallet => to(
             |a| crate::paperwallet::create(a.ui, a.pool.take()),
@@ -3449,7 +3449,8 @@ fn colours_screen(panel: &mut display::Panel) {
     info(panel, "Colours", &lines);
 }
 
-/// Read a firmware off the card, ask, and install it.
+/// Utils → Upgrade Firmware: read a firmware off the card or the Virtual Disk, ask, and
+/// install it. Stock's `From MicroSD` / `From VirtDisk`, as one row that asks which.
 ///
 /// Blocking on purpose. It draws what it is doing at each step because the steps are
 /// slow — bringing a card up, then moving a quarter of a megabyte through a 512-byte
@@ -3458,17 +3459,32 @@ fn colours_screen(panel: &mut display::Panel) {
 /// The approval is the same question the USB path asks, in the same words, and the
 /// install is the same two calls: `commit` publishes the recovery header, then the
 /// bootloader does the rest on the next boot.
-fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use crate::sdupgrade::{Outcome, stage_from_card};
-
-    // Pick the firmware from the card by browsing for a .dfu, rather than guessing at a
-    // fixed name. Cancelling the browser cancels the install.
-    let chosen = browse_sd(ui, "Pick a .dfu", Some("dfu"), Browse::File);
-    let Some(chosen) = chosen else {
+///
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D3 UpgradeMenu [C]
+fn install_firmware(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Upgrade Firmware";
+    let Some(storage) = pick_storage(ui, HEAD) else {
         return;
     };
+    // Pick the firmware by browsing for a .dfu, rather than guessing at a fixed name.
+    // Cancelling the browser cancels the install.
+    let Some(chosen) = browse_storage(ui, storage, "Pick a .dfu", Some("dfu"), Browse::File) else {
+        return;
+    };
+    stage_and_offer(gate, login, ui, storage, &chosen);
+}
 
-    crate::catlog!("sd: staging the chosen firmware");
+/// Stage `chosen` off `storage` with a progress bar, then ask and install.
+fn stage_and_offer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    storage: Storage,
+    chosen: &str,
+) {
+    use crate::sdupgrade::{Outcome, stage_from_card};
+
+    crate::catlog!("upgrade: staging {} from {}", chosen, storage.medium());
     // A bar rather than "please wait": the length is known before the first byte is read,
     // and a megabyte through a 512-byte buffer takes long enough that a still screen reads
     // as a hung device. It also says *where* a real hang happened, which is worth having.
@@ -3508,18 +3524,69 @@ fn install_from_card(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             catcard_ui::splash::draw_progress(c, pct);
         });
     };
-    let (staged, approval) =
-        match stage_from_card(catcard_hal::sdmmc::Slot::A, Some(&chosen), &mut tick) {
-            Outcome::Offered(s, a) => (s, a),
-            Outcome::Failed(why) => {
-                crate::catlog!("sd: {}", why);
-                message(ui.panel, "No upgrade", why, "any key to go back");
-                wait_for_any_key(ui);
-                return;
-            }
-        };
+    let outcome = match storage {
+        Storage::Sd => stage_from_card(catcard_hal::sdmmc::Slot::A, Some(chosen), &mut tick),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => crate::sdupgrade::stage_from_vdisk(Some(chosen), &mut tick),
+    };
+    let (staged, approval) = match outcome {
+        Outcome::Offered(s, a) => (s, a),
+        Outcome::Failed(why) => {
+            crate::catlog!("upgrade: {}", why);
+            message(ui.panel, "No upgrade", why, "any key to go back");
+            wait_for_any_key(ui);
+            return;
+        }
+    };
 
     offer_and_install(gate, login, ui, staged, approval);
+}
+
+/// A firmware the host just dropped on the Virtual Disk, offered as the drive is ejected.
+///
+/// Only when the host wrote something while the disk was shared, and only when exactly
+/// one `.dfu` sits in its root: two is a question the picker under `Upgrade Firmware`
+/// exists to ask, and a device that installed whichever it listed first would be
+/// installing something nobody chose. The install itself is the ordinary one -- the same
+/// staging, the same approval screen, the same two calls.
+#[cfg(not(feature = "board-mk3"))]
+fn offer_dropped_firmware(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Virtual Disk";
+    let mut found: heapless::Vec<heapless::String<64>, 2> = heapless::Vec::new();
+    let mut count = 0usize;
+    let listed = with_vdisk(|vol| {
+        vol.enumerate("", |name, is_dir, _len| {
+            if is_dir || !ext_matches(name, "dfu") {
+                return;
+            }
+            count += 1;
+            let mut nm: heapless::String<64> = heapless::String::new();
+            for c in name.chars() {
+                if nm.push(c).is_err() {
+                    break;
+                }
+            }
+            let _ = found.push(nm);
+        })
+        .map_err(|_| "could not list the disk")
+    });
+    if listed.is_err() || count == 0 {
+        return;
+    }
+    if count > 1 {
+        message(ui.panel, HEAD, "several .dfu files", "use Upgrade Firmware");
+        wait_for_any_key(ui);
+        return;
+    }
+    let name = &found[0];
+    let mut path: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
+    let _ = path.push('/');
+    let _ = path.push_str(name);
+    ask(ui.panel, "Install firmware?", name, "arrived on the disk");
+    if !confirmed(ui) {
+        return;
+    }
+    stage_and_offer(gate, login, ui, Storage::Vdisk, &path);
 }
 
 /// Inspect an image already sitting in `area`, ask, and install it.
@@ -12912,7 +12979,11 @@ fn wait_any_key(ui: &mut Ui<'_>) {
 /// is gone until it leaves -- and serves Bulk-Only Transport against the card. On `x` it
 /// switches its identity back and returns. Reached only from `Utils`, which is behind the
 /// PIN, so the card is never exposed on a locked device.
-fn usb_drive(ui: &mut Ui<'_>) {
+///
+/// The gate and the login are for one thing: a firmware the host dropped on the Virtual
+/// Disk is offered for install as the drive is ejected, through the ordinary approval.
+#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+fn usb_drive(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // The two hardware switches, honoured here because this is the only place in the
     // firmware that re-enumerates as mass storage. Off means nothing is ever put on the
     // bus -- refused before a controller is even brought up, so there is no window in
@@ -12933,7 +13004,7 @@ fn usb_drive(ui: &mut Ui<'_>) {
         return;
     }
 
-    usb_drive_choose(ui);
+    usb_drive_choose(gate, login, ui);
 }
 
 /// Pick which storage the USB drive exposes, then bring it up.
@@ -12941,7 +13012,8 @@ fn usb_drive(ui: &mut Ui<'_>) {
 /// SD slot A is always on offer; a slot B only where the board has two (Q1); the Virtual
 /// Disk only where there is PSRAM to back it. A board with one SD slot and no PSRAM (mk3)
 /// has one option, so it skips the chooser and exposes the card exactly as it always did.
-fn usb_drive_choose(ui: &mut Ui<'_>) {
+#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+fn usb_drive_choose(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Slot;
 
     let has_slot_b = catcard_board::BOARD.sdmmc.slot_b.is_some();
@@ -12986,7 +13058,7 @@ fn usb_drive_choose(ui: &mut Ui<'_>) {
         KIND_SD_A => usb_drive_sd(ui, Slot::A),
         KIND_SD_B => usb_drive_sd(ui, Slot::B),
         #[cfg(not(feature = "board-mk3"))]
-        KIND_VDISK => usb_drive_vdisk(ui),
+        KIND_VDISK => usb_drive_vdisk(gate, login, ui),
         _ => {}
     }
 }
@@ -13042,7 +13114,7 @@ fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
 /// upgrade overwrote — silently, since there is nothing there to lose. A disk that
 /// already mounts is exposed as it is, with whatever was staged on it earlier.
 #[cfg(not(feature = "board-mk3"))]
-fn usb_drive_vdisk(ui: &mut Ui<'_>) {
+fn usb_drive_vdisk(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(mut disk) = crate::vdisk::Vdisk::take() else {
         message(ui.panel, "USB Drive", "no PSRAM for a disk", "press a key");
         wait_any_key(ui);
@@ -13061,7 +13133,15 @@ fn usb_drive_vdisk(ui: &mut Ui<'_>) {
         "Virtual Disk is on USB",
         "press x to eject",
     );
+    // Cleared before serving, so only what *this* session's host wrote counts.
+    let _ = crate::vdisk::take_host_wrote();
     serve_usb_drive(ui, &mut disk);
+    drop(disk);
+    // The disk is off the bus again. If the host put a firmware on it, say so now rather
+    // than leaving it for someone to find under Upgrade Firmware.
+    if crate::vdisk::take_host_wrote() {
+        offer_dropped_firmware(gate, login, ui);
+    }
 }
 
 /// Re-enumerate as a disk, serve `backend` over Bulk-Only Transport until `x` (or a host

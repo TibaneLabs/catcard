@@ -46,6 +46,19 @@ use catcard_upgrade::psram::{OutOfRange, PsramArea};
 /// value only has to be stable, not unique; a recognisable constant is plenty.
 const VOLUME_ID: u32 = 0x0CA7_D15C;
 
+/// Whether a USB host has written a sector since this was last taken.
+///
+/// Set only from the mass-storage path ([`crate::msc_drive::BlockDev::write_block`]) --
+/// the firmware's own writes go through [`SectorDriver`] and do not count -- so when the
+/// USB Drive screen ends it can tell "the host put something here" from "nothing
+/// happened", and look for a firmware image only in the first case.
+static HOST_WROTE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether a host wrote to the disk since the last call; clears the flag.
+pub fn take_host_wrote() -> bool {
+    HOST_WROTE.swap(false, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The 11-byte, space-padded FAT volume label a host shows for the disk.
 const LABEL: [u8; 11] = *b"CATCARD VD ";
 
@@ -128,6 +141,7 @@ impl crate::msc_drive::BlockDev for Vdisk {
     }
 
     fn write_block(&mut self, lba: u32, data: &[u8; BLOCK_LEN]) -> Result<(), ()> {
+        HOST_WROTE.store(true, core::sync::atomic::Ordering::Relaxed);
         self.write_sectors(lba as u64, data).map_err(|_| ())
     }
 

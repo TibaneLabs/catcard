@@ -1,10 +1,12 @@
-//! Installing a firmware from a microSD card.
+//! Installing a firmware from a microSD card, or from the Virtual Disk.
 //!
-//! The card is a transport, nothing more. What it feeds is the same machinery a USB
-//! upgrade feeds — `Staged::begin`, `write`, `inspect`, the approval screen, `commit`,
-//! reboot — because the interesting parts of an upgrade are the header check, the
-//! signature, the downgrade warning and the person pressing a key, and none of those
-//! should have two implementations that can disagree about them.
+//! The card is a transport, nothing more -- and so is the disk. What either feeds is the
+//! same machinery a USB upgrade feeds — `Staged::begin`, `write`, `inspect`, the approval
+//! screen, `commit`, reboot — because the interesting parts of an upgrade are the header
+//! check, the signature, the downgrade warning and the person pressing a key, and none
+//! of those should have two implementations that can disagree about them. The two
+//! entry points here differ only in what they mount; [`stage_from_volume`] is the whole
+//! of the reading.
 //!
 //! What the card adds is a container. A `.dfu` is what `catcard-image` writes and what
 //! goes on a card, so the wrapper is unpacked here; over USB the host does that and the
@@ -92,7 +94,7 @@ pub enum Outcome {
 pub fn stage_from_card(
     slot: catcard_hal::sdmmc::Slot,
     chosen: Option<&str>,
-    mut progress: impl FnMut(u32, u32),
+    progress: impl FnMut(u32, u32),
 ) -> Outcome {
     if slot == catcard_hal::sdmmc::Slot::B && BOARD.sdmmc.slot_b.is_none() {
         return Outcome::Failed("no slot B on this board");
@@ -129,7 +131,49 @@ pub fn stage_from_card(
         Err(catcard_sd::MountError::Device) => return Outcome::Failed(why),
         Err(catcard_sd::MountError::NoFilesystem) => return Outcome::Failed("not FAT or exFAT"),
     };
+    stage_from_volume(&mut vol, chosen, "sd", progress)
+}
 
+/// Find a firmware on the PSRAM-backed Virtual Disk and stage it.
+///
+/// The disk is the top of the same PSRAM the image is staged in, so this is the one
+/// transport whose source and destination share a chip. They do not overlap for any
+/// image this firmware ships -- the image goes in from half way up the part and the disk
+/// takes the last two megabytes below the recovery header -- but the gate's own ceiling
+/// (2 MB) reaches two kilobytes into the disk's first sectors, so an image that large is
+/// refused here rather than allowed to eat the volume it is being read from.
+///
+/// Source: `catcard_board::Psram::image_base` / `vdisk_base` [C].
+#[cfg(not(feature = "board-mk3"))]
+pub fn stage_from_vdisk(chosen: Option<&str>, progress: impl FnMut(u32, u32)) -> Outcome {
+    if let Err(why) = crate::vdisk::ensure_formatted() {
+        return Outcome::Failed(why);
+    }
+    let mut vol = match crate::vdisk::mount() {
+        Ok(v) => v,
+        Err(why) => return Outcome::Failed(why),
+    };
+    stage_from_volume(&mut vol, chosen, "vdisk", progress)
+}
+
+/// Whether an image of `len` bytes, staged where this board stages, would reach into the
+/// Virtual Disk region. Always false on a board without PSRAM.
+fn reaches_vdisk(len: u32) -> bool {
+    match BOARD.psram {
+        Some(p) => p.image_base().saturating_add(len) > p.vdisk_base(),
+        None => false,
+    }
+}
+
+/// Read a firmware off an already-mounted volume, whatever backs it, and stage it.
+///
+/// `medium` is the log prefix, so a refusal says which transport it came in on.
+fn stage_from_volume<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    chosen: Option<&str>,
+    medium: &'static str,
+    mut progress: impl FnMut(u32, u32),
+) -> Outcome {
     // A file the browser picked, or the first of the fixed names that opens.
     let name: &str = match chosen {
         Some(p) => p,
@@ -149,7 +193,7 @@ pub fn stage_from_card(
     let mut head = [0u8; dfuse::HEADER_LEN as usize];
     let mut got = 0usize;
     while got < head.len() {
-        match file.read(&mut vol, &mut head[got..]) {
+        match file.read(vol, &mut head[got..]) {
             Ok(0) => break,
             Ok(n) => got += n,
             Err(_) => return Outcome::Failed("read failed"),
@@ -166,11 +210,21 @@ pub fn stage_from_card(
             Err(dfuse::NotDfuSe::Version(_)) => return Outcome::Failed("unknown dfu version"),
             Err(dfuse::NotDfuSe::NotSingle { .. }) => return Outcome::Failed("multi-part dfu"),
             Err(dfuse::NotDfuSe::WrongAddress { address }) => {
-                crate::catlog!("sd: dfu element 0 at {:#010x}, not this board's", address);
+                crate::catlog!(
+                    "{}: dfu element 0 at {:#010x}, not this board's",
+                    medium,
+                    address
+                );
                 return Outcome::Failed("dfu not for this board");
             }
             Err(dfuse::NotDfuSe::Truncated { .. }) => return Outcome::Failed("dfu is truncated"),
         };
+
+    // Only the disk is on the same chip as the staging area; a card is not, and this is
+    // never true for an image this firmware ships. See `stage_from_vdisk`.
+    if medium == "vdisk" && reaches_vdisk(len) {
+        return Outcome::Failed("too big to stage beside the disk");
+    }
 
     // The board's staging area: PSRAM on mk4/mk5/Q1, the SPI-NOR on mk3 (brought up here).
     // `None` means there is nowhere to put an image -- no PSRAM/SPI-NOR, or the SPI-NOR did
@@ -187,7 +241,7 @@ pub fn stage_from_card(
         Err(_) => return Outcome::Failed("image size refused"),
     };
 
-    if file.seek(&mut vol, start as u64).is_err() {
+    if file.seek(vol, start as u64).is_err() {
         return Outcome::Failed("seek failed");
     }
     let mut at = 0u32;
@@ -200,7 +254,7 @@ pub fn stage_from_card(
     progress(0, len);
     while at < len {
         let want = ((len - at) as usize).min(CHUNK);
-        let n = match file.read(&mut vol, &mut buf[..want]) {
+        let n = match file.read(vol, &mut buf[..want]) {
             Ok(0) => return Outcome::Failed("file ended early"),
             Ok(n) => n,
             Err(_) => return Outcome::Failed("read failed"),
@@ -208,7 +262,7 @@ pub fn stage_from_card(
         if let Err(why) = staged.write(at, &buf[..n]) {
             // The image ran past the area, or the area refused. Name it: "refused" alone
             // has already sent one person hunting for a reason nobody wrote down.
-            crate::catlog!("sd: staging write refused: {:?}", why);
+            crate::catlog!("{}: staging write refused: {:?}", medium, why);
             return Outcome::Failed("staging write failed");
         }
         at += n as u32;
@@ -228,7 +282,7 @@ pub fn stage_from_card(
             // Which check refused matters: "refused" alone has already sent one person
             // hunting through a log for a reason that was never written down. With the
             // header's own claims beside it, a refusal can be chased without the card.
-            crate::catlog!("sd: image refused: {:?}", why);
+            crate::catlog!("{}: image refused: {:?}", medium, why);
             // The staged bytes and their digest: with these in the log, a signature that
             // will not verify can be chased against the file on a computer, which is the
             // only way to tell "the wrong bytes arrived" from "the wrong key was used".
