@@ -441,6 +441,58 @@ fn bad_shapes_are_refused_not_guessed() {
 }
 
 #[test]
+fn a_p2sh_request_is_checked_whole_and_walks_its_cosigners() {
+    let script = [0x52u8; 71];
+    let mut a = Vec::new();
+    a.extend_from_slice(&af::P2WSH.to_le_bytes());
+    a.extend_from_slice(&[2, 3]);
+    a.extend_from_slice(&(script.len() as u16).to_le_bytes());
+    a.extend_from_slice(&script);
+    for xfp in [0x1111_1111u32, 0x2222_2222, 0x3333_3333] {
+        let path = [
+            xfp,
+            0x8000_0030,
+            0x8000_0000,
+            0x8000_0000,
+            0x8000_0002,
+            0,
+            7,
+        ];
+        a.push(path.len() as u8);
+        for w in path {
+            a.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    let p = P2sh::parse(&a).unwrap();
+    assert_eq!((p.addr_fmt, p.m, p.n), (af::P2WSH, 2, 3));
+    assert_eq!(p.script, &script[..]);
+    let mut out = [0u32; P2SH_PATH_MAX];
+    let (xfp, depth) = p.cosigner(2, &mut out).unwrap();
+    assert_eq!(xfp, 0x3333_3333);
+    assert_eq!(
+        &out[..depth],
+        &[0x8000_0030, 0x8000_0000, 0x8000_0000, 0x8000_0002, 0, 7]
+    );
+    assert_eq!(p.cosigner(3, &mut out), None);
+
+    // One byte too many, a path short, N paths not matching N, a non-script format,
+    // M over N: all refused.
+    let mut long = a.clone();
+    long.push(0);
+    assert_eq!(P2sh::parse(&long), Err(BadArgs::Length));
+    assert_eq!(P2sh::parse(&a[..a.len() - 1]), Err(BadArgs::Length));
+    let mut two = a.clone();
+    two[5] = 2;
+    assert_eq!(P2sh::parse(&two), Err(BadArgs::Length));
+    let mut single = a.clone();
+    single[..4].copy_from_slice(&af::P2WPKH.to_le_bytes());
+    assert_eq!(P2sh::parse(&single), Err(BadArgs::Length));
+    let mut m4 = a.clone();
+    m4[4] = 4;
+    assert_eq!(P2sh::parse(&m4), Err(BadArgs::Length));
+}
+
+#[test]
 fn paths_parse_in_every_spelling_the_host_tools_use() {
     let mut out = [0u32; 8];
     const H: u32 = 0x8000_0000;

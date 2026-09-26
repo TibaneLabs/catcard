@@ -884,6 +884,82 @@ impl<'a> Request<'a> {
     }
 }
 
+/// A `p2sh` request: show a multisig address. Source: usb-ckcc-protocol.md §3.6 [C]
+///
+/// `<IBBH addr_fmt, M, N, script_len>`, the witness or redeem script, then for each of the
+/// N cosigners -- in the order their keys appear in the script -- `[u8 count]` and `count`
+/// little-endian `u32`s: the key's master fingerprint, then its path.
+#[derive(Debug, PartialEq, Eq)]
+pub struct P2sh<'a> {
+    pub addr_fmt: u32,
+    pub m: u8,
+    pub n: u8,
+    pub script: &'a [u8],
+    paths: &'a [u8],
+}
+
+/// Most cosigners, shortest and longest script, and the path depth a `p2sh` allows.
+/// Source: usb-ckcc-protocol.md §3.6 [C]
+pub const P2SH_MAX_N: u8 = 20;
+pub const P2SH_SCRIPT: core::ops::RangeInclusive<usize> = 30..=520;
+pub const P2SH_PATH_MAX: usize = 16;
+
+impl<'a> P2sh<'a> {
+    /// Check the shape: a script-type format, `1 <= M <= N <= 20`, a script of 30..=520
+    /// bytes, and exactly N paths of 1..=16 numbers with nothing after them.
+    pub fn parse(a: &'a [u8]) -> Result<Self, BadArgs> {
+        if a.len() < 8 {
+            return Err(BadArgs::Length);
+        }
+        let addr_fmt = u32_at(a, 0);
+        let (m, n) = (a[4], a[5]);
+        let slen = u16::from_le_bytes([a[6], a[7]]) as usize;
+        if addr_fmt & af::SCRIPT == 0 || m == 0 || m > n || n > P2SH_MAX_N {
+            return Err(BadArgs::Length);
+        }
+        if !P2SH_SCRIPT.contains(&slen) || a.len() < 8 + slen {
+            return Err(BadArgs::Length);
+        }
+        let me = Self {
+            addr_fmt,
+            m,
+            n,
+            script: &a[8..8 + slen],
+            paths: &a[8 + slen..],
+        };
+        // Walk them once now, so every later walk is known to be well formed.
+        let mut count = 0;
+        let mut at = 0;
+        while at < me.paths.len() {
+            let k = me.paths[at] as usize;
+            if k == 0 || k > P2SH_PATH_MAX || me.paths.len() < at + 1 + 4 * k {
+                return Err(BadArgs::Length);
+            }
+            at += 1 + 4 * k;
+            count += 1;
+        }
+        if count != usize::from(n) {
+            return Err(BadArgs::Length);
+        }
+        Ok(me)
+    }
+
+    /// Each cosigner's `(fingerprint, path)`, the path written into `out`, in order.
+    pub fn cosigner(&self, i: usize, out: &mut [u32; P2SH_PATH_MAX]) -> Option<(u32, usize)> {
+        let mut at = 0;
+        for _ in 0..i {
+            at += 1 + 4 * usize::from(*self.paths.get(at)?);
+        }
+        let k = usize::from(*self.paths.get(at)?);
+        let words = self.paths.get(at + 1..at + 1 + 4 * k)?;
+        let xfp = u32_at(words, 0);
+        for (j, slot) in out.iter_mut().enumerate().take(k - 1) {
+            *slot = u32_at(words, 4 + 4 * j);
+        }
+        Some((xfp, k - 1))
+    }
+}
+
 /// A BIP-32 path as stock's host tools write it: `m/84'/0'/0'`, with `'`, `h`, `H` or
 /// `p` marking a hardened step. A leading `m` is optional, and `m` (or empty) alone is
 /// the master. Returns the depth, the steps written into `out`.
