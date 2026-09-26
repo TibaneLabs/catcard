@@ -1,6 +1,13 @@
 name: Release
 
-# A `v*` tag publishes a GitHub release with one `.dfu` per shipped shape attached.
+# A `v*` tag publishes a GitHub release with one `.dfu` per shipped shape attached:
+# three boards (mk3, mk4-mk5, Q1) x every chain or Bitcoin alone x with or without the
+# games, twelve images -- the same twelve shapes CI builds on every push.
+#
+# Run by hand (Actions -> Release -> Run workflow, or `gh workflow run release.yml -f
+# tag=vX.Y.Z`) to rebuild an existing tag: the code is the tag's, the workflow is the
+# default branch's, the timestamp is still the tagged commit's, so the images already
+# attached come out byte-identical and only missing ones are new.
 #
 # The images are built exactly as docs/RELEASING.md's checklist says a release is built:
 # no bench features (`--no-default-features`), the crutch-string check, `catcard-image
@@ -14,6 +21,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag to build and attach, e.g. v7.0.0-alpha1"
+        required: true
 
 permissions:
   contents: write
@@ -23,6 +35,8 @@ env:
   RUSTFLAGS: -D warnings
   # `gh` finds the repository from this rather than from a checkout's remote.
   GH_REPO: ${{ github.repository }}
+  # The tag being released: the one pushed, or the one asked for by hand.
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   prepare:
@@ -34,11 +48,13 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - name: Version and timestamp from the tag
         id: v
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="$TAG"
           # Refuses a tag that is not vX.Y.Z[-alphaN|-betaN|-rcN], that does not match
           # the workspace version, or that will not fit the header's 7 characters.
           version=$(tools/release-version.sh "$tag")
@@ -54,12 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          # Idempotent, so a re-run of a failed workflow finds its own draft.
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag already exists"
-            exit 0
-          fi
+          tag="$TAG"
           cat > notes.md <<EOF
           CatCard ${tag} -- clean-room firmware for Coldcard hardware.
 
@@ -69,20 +80,28 @@ jobs:
 
           **Untested on hardware** unless the notes below say otherwise.
 
-          | Board | Image | Contents |
-          |---|---|---|
-          | mk3 | \`catcard-mk3-*.dfu\` | |
-          | mk4, mk5 | \`catcard-mk4-mk5-*.dfu\` | one image, accepted by both |
-          | Q1 | \`catcard-q1-*.dfu\` | |
+          | Board | Images |
+          |---|---|
+          | mk3 | \`catcard-mk3-*.dfu\` |
+          | mk4, mk5 | \`catcard-mk4-mk5-*.dfu\` (one image, accepted by both) |
+          | Q1 | \`catcard-q1-*.dfu\` |
 
-          Each board has two images: the default one holds every chain CatCard knows,
-          and the \`-bitcoin\` one holds Bitcoin alone.
+          Each board has four images. Without \`-bitcoin\` in the name it holds every
+          chain CatCard knows; with it, Bitcoin alone. With \`-games\` it also carries the
+          games; without, it does not. Nothing else differs between the four.
 
           Header version \`${{ steps.v.outputs.version }}\`; built with
           \`SOURCE_DATE_EPOCH=${{ steps.v.outputs.epoch }}\` (the tagged commit's time),
           so rebuilding this tag reproduces the digests in \`SHA256SUMS\` and in each
           build's log.
           EOF
+          # Idempotent: a re-run, or a rebuild of an existing tag, refreshes the notes
+          # of the release that is already there instead of failing to create one.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; refreshing its notes"
+            gh release edit "$tag" --notes-file notes.md
+            exit 0
+          fi
           flags=(--draft --verify-tag --title "CatCard ${tag}" --notes-file notes.md)
           if [ "${{ steps.v.outputs.prerelease }}" = true ]; then
             flags+=(--prerelease)
@@ -90,7 +109,7 @@ jobs:
           gh release create "$tag" "${flags[@]}"
 
   build:
-    name: ${{ matrix.board }} ${{ matrix.chains }}
+    name: ${{ matrix.board }} ${{ matrix.chains }}${{ matrix.games && ' +games' || '' }}
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
@@ -98,11 +117,14 @@ jobs:
       matrix:
         board: [mk3, mk4-mk5, q1]
         chains: [multichain, bitcoin]
+        games: [false, true]
     env:
       CATCARD_VERSION: ${{ needs.prepare.outputs.version }}
       SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
@@ -124,14 +146,21 @@ jobs:
           else
             name="$name-bitcoin"
           fi
-          name="$name-${GITHUB_REF_NAME#v}"
+          # Plain `[ … ] && x=y` would return non-zero on the false leg and `set -e`
+          # would end the step there.
+          if [ "${{ matrix.games }}" = true ]; then
+            feats="$feats,games"
+            name="$name-games"
+          fi
+          name="$name-${TAG#v}"
           echo "features=$feats" >> "$GITHUB_OUTPUT"
           echo "package=$pkg" >> "$GITHUB_OUTPUT"
           echo "compat=$compat" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # `--no-default-features` drops `usb-debug-mem`, `usb-key-injection`, `dev` and
-      # `games`: the release shape, as `make <board> SHIP=1` builds it.
+      # `--no-default-features` drops `usb-debug-mem`, `usb-key-injection` and `dev`: the
+      # release shape, as `make <board> SHIP=1` builds it. `games` is added back for the
+      # images that carry them.
       - name: Build
         run: |
           cargo build --release -p catcard-fw \
@@ -168,7 +197,7 @@ jobs:
       - name: Attach to the draft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" "out/${{ steps.shape.outputs.name }}.dfu" --clobber
+        run: gh release upload "$TAG" "out/${{ steps.shape.outputs.name }}.dfu" --clobber
 
   publish:
     name: Checksums and publish
@@ -176,16 +205,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - name: SHA256SUMS, then publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="$TAG"
           mkdir dl
           gh release download "$tag" --pattern '*.dfu' --dir dl
           count=$(ls dl/*.dfu | wc -l)
-          [ "$count" -eq 6 ] || { echo "::error::expected 6 images, found $count"; exit 1; }
+          # Three boards x two chain builds x games or not.
+          [ "$count" -eq 12 ] || { echo "::error::expected 12 images, found $count"; exit 1; }
           (cd dl && sha256sum *.dfu > SHA256SUMS && cat SHA256SUMS)
           gh release upload "$tag" dl/SHA256SUMS --clobber
           flags=(--draft=false)

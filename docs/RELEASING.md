@@ -12,10 +12,16 @@ already passed. `.github/workflows/release.yml` then:
 1. checks the tag with `tools/release-version.sh`: its `X.Y.Z` must equal the workspace
    version in `Cargo.toml`, and the version it stamps must fit the header's 7 characters;
 2. opens a draft GitHub release (a pre-release when the tag has a suffix);
-3. builds the six release shapes in parallel -- mk3, mk4-mk5 and Q1, each with every
-   chain and Bitcoin-only -- with `--no-default-features`, runs the crutch-string check,
-   signs with the dev key, runs `catcard-image verify`, and attaches each `.dfu`;
-4. attaches `SHA256SUMS` and publishes the release.
+3. builds the twelve release shapes in parallel -- mk3, mk4-mk5 and Q1, each with every
+   chain or Bitcoin-only, each with or without the games (the same twelve CI builds) --
+   with `--no-default-features`, runs the crutch-string check, signs with the dev key,
+   runs `catcard-image verify`, and attaches each `.dfu`;
+4. checks all twelve are there, attaches `SHA256SUMS` and publishes the release.
+
+To rebuild an existing tag -- a shape was missing, or an upload failed -- run the
+workflow by hand: `gh workflow run release.yml -f tag=v7.0.0-alpha1`. It builds the
+tag's code with the default branch's workflow and the tagged commit's timestamp, so
+images already attached come out byte-identical, and it refreshes the release notes.
 
 The tag's suffix is folded to fit the header: `v7.0.0-alpha1` is stamped `7.0.0a1`
 (`alpha` -> `a`, `beta` -> `b`, `rc` -> `r`). The firmware reports the same string on
