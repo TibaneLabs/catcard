@@ -3556,8 +3556,16 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
 pub(crate) type CardVolume =
     catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>;
 
-/// Write `bytes` to `path` on an already-mounted card, replacing what was there.
-fn write_into(vol: &mut CardVolume, path: &str, bytes: &[u8]) -> Result<(), &'static str> {
+/// Write `bytes` to `path` on an already-mounted volume, replacing what was there.
+///
+/// Generic over the backing [`SectorDriver`](catcard_sd::fat::SectorDriver) so the same
+/// writer serves the card and the PSRAM-backed Virtual Disk: the sign flow reuses it to
+/// drop a signed PSBT on whichever the owner chose.
+pub(crate) fn write_into<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), &'static str> {
     let mut file = vol
         .open_or_create_file(path)
         .map_err(|_| "could not open file")?;

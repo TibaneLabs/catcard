@@ -797,6 +797,9 @@ fn sign(
         spare,
         len,
         &crate::signtx::SignDest::SINGLE,
+        // Caught over the air, not from a file; the signed result is written to the card
+        // as before.
+        crate::signtx::Storage::Sd,
     );
 }
 

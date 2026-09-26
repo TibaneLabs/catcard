@@ -164,6 +164,74 @@ fn btc(sats: u64, out: &mut heapless::String<AMOUNT_LEN>) {
     let _ = crate::prefs::current().units.write(sats, out);
 }
 
+/// Which storage a sign flow reads its PSBT from and writes its results to.
+///
+/// The card is always there; the PSRAM-backed Virtual Disk is offered only where the board
+/// has PSRAM (mk4/mk5/Q1), so on the mk3 this has one variant and every `match` on it is a
+/// single arm. The disk lives in its own reserved PSRAM region, outside the leasable area
+/// the signer takes for its two working buffers, so reading a PSBT off the disk and holding
+/// the signing lease do not collide -- they are different regions on the same part, and the
+/// traffic is sequential (the file is read in full before a signature is computed).
+/// Source: `crates/catcard-fw/src/vdisk.rs`, `docs/PSRAM.md` [C].
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Storage {
+    /// The microSD card, over SDMMC.
+    Sd,
+    /// The PSRAM-backed Virtual Disk. PSRAM boards only.
+    #[cfg(not(feature = "board-mk3"))]
+    Vdisk,
+}
+
+impl Storage {
+    /// The noun a "reading …"/"writing to …" line uses for this medium.
+    fn medium(self) -> &'static str {
+        match self {
+            Storage::Sd => "the card",
+            #[cfg(not(feature = "board-mk3"))]
+            Storage::Vdisk => "the disk",
+        }
+    }
+}
+
+/// Ask which storage to use, or return the only one on a board without PSRAM.
+///
+/// Mirrors the Browse Files / USB Drive chooser: a board with PSRAM offers the card or the
+/// Virtual Disk; the mk3 has no disk, so it goes straight to the card with no prompt.
+/// `None` if the owner cancels the chooser.
+#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+fn pick_storage(ui: &mut Ui<'_>, head: &str) -> Option<Storage> {
+    #[cfg(not(feature = "board-mk3"))]
+    if catcard_board::BOARD.psram.is_some() {
+        let pick = menu::choose(
+            ui,
+            head,
+            "which storage?",
+            &["SD card", "Virtual Disk (in PSRAM)"],
+        )?;
+        return Some(if pick == 0 {
+            Storage::Sd
+        } else {
+            Storage::Vdisk
+        });
+    }
+    Some(Storage::Sd)
+}
+
+/// Pick a file from the chosen storage's file browser.
+fn browse_source(
+    ui: &mut Ui<'_>,
+    storage: Storage,
+    title: &str,
+    filter: Option<&str>,
+    mode: menu::Browse,
+) -> Option<heapless::String<{ menu::BROWSE_PATH_MAX }>> {
+    match storage {
+        Storage::Sd => menu::browse_sd(ui, title, filter, mode),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => menu::browse_vdisk(ui, title, filter, mode),
+    }
+}
+
 /// Mount the card and hand the volume to `f`.
 ///
 /// Every entry point here needs the same bring-up, and the specific failure has to reach
@@ -207,70 +275,125 @@ fn with_card<T>(
     f(&mut vol)
 }
 
+/// Mount the Virtual Disk and hand the volume to `f`.
+///
+/// The card's [`with_card`] for the PSRAM disk: an uninitialised region is formatted first
+/// (there is nothing on it to lose, exactly as the file browser and USB Drive do it), then
+/// mounted. The disk's region is outside the signer's leasable PSRAM, so this coexists with
+/// a held signing lease.
+#[cfg(not(feature = "board-mk3"))]
+fn with_vdisk<T>(
+    f: impl FnOnce(
+        &mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>,
+    ) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    crate::vdisk::ensure_formatted()?;
+    let mut vol = crate::vdisk::mount()?;
+    f(&mut vol)
+}
+
 /// The one `.psbt` in the card's root directory, if there is exactly one.
 ///
 /// What "Ready to Sign" means: a card carrying a single transaction needs no file picker.
 /// Two or more, and the owner picks -- signing the wrong one of two transactions is not a
 /// choice to make on their behalf. Anything already written by a previous signing
 /// (`SIGNED.PSB`) is skipped, so a finished transaction does not present itself again.
-fn lone_psbt() -> Option<heapless::String<{ PATH_MAX }>> {
-    with_card(|vol| {
-        let mut found: Option<heapless::String<PATH_MAX>> = None;
-        let mut several = false;
-        let _ = vol.enumerate("", |name, is_dir, _| {
-            if is_dir || several {
-                return;
-            }
-            let lower = name.trim();
-            // Split at the last dot rather than slice at a byte count: a long name is
-            // UTF-8, and a byte offset can land inside a character, which panics.
-            let is_psbt = lower
-                .rsplit_once('.')
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("psbt"))
-                && !lower.eq_ignore_ascii_case(&SIGNED_NAME[1..]);
-            if !is_psbt {
-                return;
-            }
-            if found.is_some() {
-                several = true;
-                found = None;
-                return;
-            }
-            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
-            if path.push('/').is_ok() && path.push_str(name).is_ok() {
-                found = Some(path);
-            }
-        });
-        Ok(found)
-    })
+fn lone_psbt(storage: Storage) -> Option<heapless::String<{ PATH_MAX }>> {
+    match storage {
+        Storage::Sd => with_card(|vol| Ok(find_lone_psbt(vol))),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| Ok(find_lone_psbt(vol))),
+    }
     .ok()
     .flatten()
+}
+
+/// The one `.psbt` in the root of an already-mounted volume, if there is exactly one.
+///
+/// Generic over the backing driver so the card and the Virtual Disk share it; the "exactly
+/// one, and not our own `SIGNED.PSB`" rule is the same on both.
+fn find_lone_psbt<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+) -> Option<heapless::String<PATH_MAX>> {
+    let mut found: Option<heapless::String<PATH_MAX>> = None;
+    let mut several = false;
+    let _ = vol.enumerate("", |name, is_dir, _| {
+        if is_dir || several {
+            return;
+        }
+        let lower = name.trim();
+        // Split at the last dot rather than slice at a byte count: a long name is
+        // UTF-8, and a byte offset can land inside a character, which panics.
+        let is_psbt = lower
+            .rsplit_once('.')
+            .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("psbt"))
+            && !lower.eq_ignore_ascii_case(&SIGNED_NAME[1..]);
+        if !is_psbt {
+            return;
+        }
+        if found.is_some() {
+            several = true;
+            found = None;
+            return;
+        }
+        let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+        if path.push('/').is_ok() && path.push_str(name).is_ok() {
+            found = Some(path);
+        }
+    });
+    found
 }
 
 /// Longest path this screen carries.
 const PATH_MAX: usize = 160;
 
-/// Read the picked file into `buf`. Returns its length, or why not.
+/// Read the picked file from the SD card into `buf`. Returns its length, or why not.
+///
+/// The SD-only entry point the rest of the firmware uses (2FA token, backups, verify, …).
+/// The sign flow goes through [`read_source_file`], which can also read the Virtual Disk.
 pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
-    with_card(|vol| {
-        let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
-        let len = file.len() as usize;
-        if len > buf.len() {
-            return Err("too big for this board");
+    with_card(|vol| read_file(vol, path, buf))
+}
+
+/// Read the picked file from the chosen storage into `buf`. Returns its length, or why not.
+fn read_source_file(
+    storage: Storage,
+    path: &str,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
+    match storage {
+        Storage::Sd => read_card_file(path, buf),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| read_file(vol, path, buf)),
+    }
+}
+
+/// Read `path` from an already-mounted volume into `buf`. Returns its length, or why not.
+///
+/// Generic over the backing driver so the card and the Virtual Disk share the one read
+/// loop; the size cap is `buf`, which on a PSRAM board is a half of the signing lease.
+fn read_file<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
+    let mut file = vol.open_file(path).map_err(|_| "could not open file")?;
+    let len = file.len() as usize;
+    if len > buf.len() {
+        return Err("too big for this board");
+    }
+    let mut got = 0usize;
+    while got < len {
+        match file.read(vol, &mut buf[got..len]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(_) => return Err("read failed"),
         }
-        let mut got = 0usize;
-        while got < len {
-            match file.read(vol, &mut buf[got..len]) {
-                Ok(0) => break,
-                Ok(n) => got += n,
-                Err(_) => return Err("read failed"),
-            }
-        }
-        if got != len {
-            return Err("short read");
-        }
-        Ok(got)
-    })
+    }
+    if got != len {
+        return Err("short read");
+    }
+    Ok(got)
 }
 
 /// Decode `bytes` in place if they are base64 (as a `.psbt` written as text is), and return
@@ -316,19 +439,26 @@ fn refusal_text(r: Refusal) -> &'static str {
 pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign";
 
-    // Picked before the workspace is taken: browsing the card with the staging area held
-    // would refuse a USB upload for as long as someone spent choosing a file.
+    // Where the transaction comes from and where the result goes. On a PSRAM board the
+    // owner is asked (card or Virtual Disk), matching the Browse Files / USB Drive chooser;
+    // on the mk3, which has no disk, it is the card without a prompt.
     //
-    // The card is the only source here. A transaction that arrives by camera comes in
-    // through `Scan QR`, which reads first and offers afterwards -- it cannot know it is
-    // being handed a PSBT until it has one, so asking in advance would be a second way
-    // to do the same thing with a worse answer when the guess is wrong.
-    let path = match lone_psbt() {
-        // A card with one transaction on it needs no picker; two or more, and the owner
+    // A transaction that arrives by camera comes in through `Scan QR`, which reads first and
+    // offers afterwards -- it cannot know it is being handed a PSBT until it has one, so
+    // asking in advance would be a second way to do the same thing with a worse answer when
+    // the guess is wrong.
+    let Some(storage) = pick_storage(ui, HEAD) else {
+        return;
+    };
+
+    // Picked before the workspace is taken: browsing the storage with the staging area held
+    // would refuse a USB upload for as long as someone spent choosing a file.
+    let path = match lone_psbt(storage) {
+        // One transaction on the medium needs no picker; two or more, and the owner
         // says which.
         Some(p) => p,
         None => {
-            let Some(p) = menu::browse_sd(ui, "Pick a .psbt", Some("psbt"), menu::Browse::File)
+            let Some(p) = browse_source(ui, storage, "Pick a .psbt", Some("psbt"), menu::Browse::File)
             else {
                 return;
             };
@@ -352,8 +482,11 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     let (buf, spare) = work.split();
 
-    menu::card_wait(ui.panel, HEAD, "reading the card");
-    let len = match read_card_file(&path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+    let mut wait: heapless::String<24> = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(&mut wait, format_args!("reading {}", storage.medium()));
+    menu::card_wait(ui.panel, HEAD, &wait);
+    let len = match read_source_file(storage, &path, buf).and_then(|len| as_psbt_bytes(buf, len, spare))
+    {
         Ok(len) => len,
         Err(why) => {
             crate::catlog!("sign: {}: {}", path.as_str(), why);
@@ -364,7 +497,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     };
     crate::catlog!("sign: {} bytes from {}", len, path.as_str());
 
-    review_and_sign(gate, login, ui, buf, spare, len, &SignDest::SINGLE);
+    review_and_sign(gate, login, ui, buf, spare, len, &SignDest::SINGLE, storage);
 }
 
 /// A path without its leading `/`, for a screen that names a file the card writes.
@@ -384,26 +517,40 @@ const MAX_BATCH: usize = 8;
 /// own output. `Ok(true)` when every source fit `out`; `Ok(false)` when there were more than
 /// [`MAX_BATCH`] and the list was capped.
 fn enumerate_psbts(
+    storage: Storage,
     out: &mut heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH>,
 ) -> Result<bool, &'static str> {
+    match storage {
+        Storage::Sd => with_card(|vol| Ok(collect_psbts(vol, out))),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| Ok(collect_psbts(vol, out))),
+    }
+}
+
+/// Gather the batch-source `.psbt` files in the root of an already-mounted volume.
+///
+/// Generic over the backing driver, so the card and the Virtual Disk share it. `true` when
+/// every source fit `out`; `false` when there were more than [`MAX_BATCH`] and the list was
+/// capped.
+fn collect_psbts<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    out: &mut heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH>,
+) -> bool {
     let mut capped = false;
-    with_card(|vol| {
-        let _ = vol.enumerate("", |name, is_dir, _| {
-            if is_dir || !catcard_wallet::psbtfile::is_batch_source(name) {
-                return;
-            }
-            if out.is_full() {
-                capped = true;
-                return;
-            }
-            let mut path: heapless::String<PATH_MAX> = heapless::String::new();
-            if path.push('/').is_ok() && path.push_str(name).is_ok() {
-                let _ = out.push(path);
-            }
-        });
-        Ok(())
-    })?;
-    Ok(!capped)
+    let _ = vol.enumerate("", |name, is_dir, _| {
+        if is_dir || !catcard_wallet::psbtfile::is_batch_source(name) {
+            return;
+        }
+        if out.is_full() {
+            capped = true;
+            return;
+        }
+        let mut path: heapless::String<PATH_MAX> = heapless::String::new();
+        if path.push('/').is_ok() && path.push_str(name).is_ok() {
+            let _ = out.push(path);
+        }
+    });
+    !capped
 }
 
 /// Sign every transaction on the card, one signed file per source.
@@ -421,10 +568,14 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
     use core::fmt::Write as _;
     const HEAD: &str = "Batch sign";
 
-    // Gathered before the workspace is taken, so browsing the card does not hold the staging
-    // area against a USB upload.
+    let Some(storage) = pick_storage(ui, HEAD) else {
+        return;
+    };
+
+    // Gathered before the workspace is taken, so browsing the storage does not hold the
+    // staging area against a USB upload.
     let mut list: heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH> = heapless::Vec::new();
-    let all = match enumerate_psbts(&mut list) {
+    let all = match enumerate_psbts(storage, &mut list) {
         Ok(all) => all,
         Err(why) => {
             menu::message(ui.panel, HEAD, why, "any key to go back");
@@ -433,7 +584,9 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         }
     };
     if list.is_empty() {
-        menu::message(ui.panel, HEAD, "no PSBT on the card", "any key to go back");
+        let mut none: heapless::String<32> = heapless::String::new();
+        let _ = write!(none, "no PSBT on {}", storage.medium());
+        menu::message(ui.panel, HEAD, &none, "any key to go back");
         menu::wait_for_any_key(ui);
         return;
     }
@@ -456,7 +609,9 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         let _ = write!(note, "file {} of {}", i + 1, total);
         menu::card_wait(ui.panel, HEAD, &note);
 
-        let len = match read_card_file(path, buf).and_then(|len| as_psbt_bytes(buf, len, spare)) {
+        let len = match read_source_file(storage, path, buf)
+            .and_then(|len| as_psbt_bytes(buf, len, spare))
+        {
             Ok(len) => len,
             Err(why) => {
                 crate::catlog!("batch: {}: {}", path.as_str(), why);
@@ -495,15 +650,15 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
             final_name,
             offer_transports: false,
         };
-        review_and_sign(gate, login, ui, buf, spare, len, &dest);
+        review_and_sign(gate, login, ui, buf, spare, len, &dest, storage);
         reviewed += 1;
     }
 
-    let mut note: heapless::String<40> = heapless::String::new();
+    let mut note: heapless::String<48> = heapless::String::new();
     let _ = write!(
         note,
         "reviewed {reviewed} of {total}{}",
-        if all { "" } else { ", more on card" }
+        if all { "" } else { ", more remain" }
     );
     crate::catlog!("batch: {}", note.as_str());
     menu::message(ui.panel, HEAD, "batch complete", &note);
@@ -516,6 +671,7 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 /// transaction read off a card and one caught as a few hundred QR codes get the same
 /// review, the same refusals and the same signatures. `spare` is the second working
 /// buffer -- every signature rewrites the whole container, so the two alternate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn review_and_sign(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -524,6 +680,7 @@ pub(crate) fn review_and_sign(
     spare: &mut [u8],
     len: usize,
     dest: &SignDest<'_>,
+    storage: Storage,
 ) {
     const HEAD: &str = "Sign";
 
@@ -760,8 +917,10 @@ pub(crate) fn review_and_sign(
         return;
     }
 
-    menu::card_wait(ui.panel, HEAD, "writing to the card");
-    let written = menu::write_card_file(dest.signed_name, &from[..at]);
+    let mut wait: heapless::String<24> = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(&mut wait, format_args!("writing to {}", storage.medium()));
+    menu::card_wait(ui.panel, HEAD, &wait);
+    let written = write_output(storage, dest.signed_name, &from[..at]);
     match &written {
         Ok(()) => crate::catlog!("sign: {} of {} inputs, {} bytes", signed, signable, at),
         Err(why) => {
@@ -798,7 +957,7 @@ pub(crate) fn review_and_sign(
     let _ = write!(note, "{signed} of {signable} inputs");
     match finalise(&from[..at], into) {
         Some(len) => {
-            let hex_len = match write_hex_file(dest.final_name, &into[..len], from) {
+            let hex_len = match write_hex_file(storage, dest.final_name, &into[..len], from) {
                 Ok(n) => n,
                 Err(why) => {
                     crate::catlog!("sign: final tx not written: {}", why);
@@ -908,8 +1067,14 @@ fn finalise(psbt: &[u8], out: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
-/// Write `bytes` as lower-case hex to `path`, using `scratch` for the text.
-fn write_hex_file(path: &str, bytes: &[u8], scratch: &mut [u8]) -> Result<usize, &'static str> {
+/// Write `bytes` as lower-case hex to `path` on the chosen storage, using `scratch` for the
+/// text.
+fn write_hex_file(
+    storage: Storage,
+    path: &str,
+    bytes: &[u8],
+    scratch: &mut [u8],
+) -> Result<usize, &'static str> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let need = bytes.len() * 2;
     if need > scratch.len() {
@@ -919,8 +1084,26 @@ fn write_hex_file(path: &str, bytes: &[u8], scratch: &mut [u8]) -> Result<usize,
         scratch[i * 2] = HEX[(b >> 4) as usize];
         scratch[i * 2 + 1] = HEX[(b & 0xF) as usize];
     }
-    menu::write_card_file(path, &scratch[..need])?;
+    write_output(storage, path, &scratch[..need])?;
     Ok(need)
+}
+
+/// Write `bytes` to `path` on the chosen storage, replacing whatever it held.
+///
+/// The card path is [`menu::write_card_file`] unchanged; the Virtual Disk path mounts the
+/// PSRAM region (formatting an uninitialised one first) and reuses [`menu::write_into`], so
+/// there is one writer, not two.
+fn write_output(storage: Storage, path: &str, bytes: &[u8]) -> Result<(), &'static str> {
+    match storage {
+        Storage::Sd => menu::write_card_file(path, bytes),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => {
+            crate::vdisk::ensure_formatted()?;
+            let mut vol = crate::vdisk::mount()?;
+            menu::write_into(&mut vol, path, bytes)?;
+            vol.flush().map_err(|_| "flush failed")
+        }
+    }
 }
 
 /// Show what signing would authorise, and ask. True if the owner confirmed.
