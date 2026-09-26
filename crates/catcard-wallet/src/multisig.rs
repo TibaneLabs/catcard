@@ -27,6 +27,11 @@ use crate::bip32::serialize::Slip132;
 use crate::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, HARDENED_OFFSET, hash160};
 use crate::descriptor;
 
+/// The Coldcard multisig setup file (stock's text format, J1): reading and writing it.
+pub mod coldcard;
+/// The other exports of a wallet (Bitcoin Core, Electrum) and the `ccxp` key bundle.
+pub mod export;
+
 /// Cosigners one wallet may have. Stock's limit, and the point past which the witness
 /// script stops fitting the standardness rules anyway.
 pub const MAX_COSIGNERS: usize = 15;
@@ -284,6 +289,13 @@ impl Multisig {
     /// A fifteen-cosigner descriptor is close to two kilobytes; `out` has to hold it, and
     /// [`Error::Overflow`] says when it does not.
     pub fn write_descriptor(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.write_descriptor_chain(0, out)
+    }
+
+    /// As [`write_descriptor`](Self::write_descriptor), with `/{chain}/*` as the suffix:
+    /// `0` is the receive descriptor stored as the wallet's identity, `1` the change one
+    /// Bitcoin Core's import wants alongside it.
+    pub fn write_descriptor_chain(&self, chain: u32, out: &mut [u8]) -> Result<usize, Error> {
         use crate::bip32::serialize::MAX_BASE58_LEN;
         use core::fmt::Write as _;
 
@@ -310,7 +322,7 @@ impl Multisig {
             let mut key = [0u8; MAX_BASE58_LEN];
             let n = c.xpub.write_base58(&mut key).map_err(|_| Error::Overflow)?;
             let key = core::str::from_utf8(&key[..n]).map_err(|_| Error::Overflow)?;
-            write!(buf, "]{key}/0/*").map_err(|_| Error::Overflow)?;
+            write!(buf, "]{key}/{chain}/*").map_err(|_| Error::Overflow)?;
         }
         // Close the `multi(...)`/`sortedmulti(...)` itself, then the script wrapper(s).
         buf.write_str(")").map_err(|_| Error::Overflow)?;
@@ -326,10 +338,55 @@ impl Multisig {
     }
 }
 
-/// A `core::fmt::Write` over a fixed byte buffer, for [`Multisig::write_descriptor`].
-struct Buf<'a> {
-    out: &'a mut [u8],
-    len: usize,
+/// Any error, read as "the output buffer was too small": the one failure a writer over a
+/// caller's buffer has. Generic so one name serves `fmt`, Base58 and UTF-8 errors alike.
+pub(crate) fn overflow<E>(_: E) -> Error {
+    Error::Overflow
+}
+
+/// A `core::fmt::Write` over a fixed byte buffer, for [`Multisig::write_descriptor`] and
+/// the export writers beside it.
+pub(crate) struct Buf<'a> {
+    pub(crate) out: &'a mut [u8],
+    pub(crate) len: usize,
+}
+
+/// How one wallet stands to another: the question an import asks of every registered
+/// wallet before it adds a new one.
+///
+/// Stock calls the middle case "similar" and warns about it, because two registrations
+/// over the same keys are the way a person comes to sign against the wrong one: a
+/// `multi` where the other cosigners have `sortedmulti`, or the same keys in a different
+/// order, produces addresses none of them recognise.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Likeness {
+    /// The same agreement in every respect.
+    Same,
+    /// The same set of extended keys, but not the same wallet: another order, another
+    /// threshold, another script form, or sorted where the other is not.
+    Similar,
+    Different,
+}
+
+/// Compare two wallets. See [`Likeness`].
+pub fn compare(a: &Multisig, b: &Multisig) -> Likeness {
+    if a == b {
+        return Likeness::Same;
+    }
+    if a.n() != b.n() {
+        return Likeness::Different;
+    }
+    // The same keys, as a set: every key of `a` is in `b`, and the counts agree, and
+    // `new`/`parse` refuse a duplicate key, so that is set equality.
+    let same_keys = a
+        .cosigners()
+        .iter()
+        .all(|x| b.cosigners().iter().any(|y| y.xpub == x.xpub));
+    if same_keys {
+        Likeness::Similar
+    } else {
+        Likeness::Different
+    }
 }
 
 impl core::fmt::Write for Buf<'_> {

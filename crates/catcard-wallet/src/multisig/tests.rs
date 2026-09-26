@@ -612,3 +612,401 @@ fn slip132_keys_in_a_descriptor_are_read_and_checked_against_the_wrapper() {
         "bare sh(multi) has no SLIP-132 form"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The Coldcard setup file (J1), the other exports (J3, K, L) and the `ccxp` reader,
+// against the layouts in hw-reference/wallet-export-formats.md and against each other.
+// ---------------------------------------------------------------------------
+
+/// Our fingerprint for the export headers: the first seed's.
+fn ours() -> [u8; 4] {
+    account(SEEDS[0]).1
+}
+
+fn hex_upper(fp: [u8; 4]) -> String {
+    format!("{:02X}{:02X}{:02X}{:02X}", fp[0], fp[1], fp[2], fp[3])
+}
+
+fn hex_lower(fp: [u8; 4]) -> String {
+    format!("{:02x}{:02x}{:02x}{:02x}", fp[0], fp[1], fp[2], fp[3])
+}
+
+/// The setup file is laid out exactly as the reference shows it: header comment, name,
+/// policy, format, a blank line, one derivation for the shared path, a blank line, and a
+/// key line per cosigner with an upper-case fingerprint.
+#[test]
+fn the_setup_file_is_laid_out_as_stock_writes_it() {
+    let text = descriptor_for(2, &SEEDS, "wsh", true);
+    let wallet = parse(&text).unwrap();
+    let mut out = [0u8; 4096];
+    let n = coldcard::write("Home vault", &wallet, ours(), &mut out).unwrap();
+    let written = core::str::from_utf8(&out[..n]).unwrap();
+
+    let mut want = format!(
+        "# Coldcard Multisig setup file (exported from {})\n#\nName: Home vault\nPolicy: 2 of 3\nFormat: P2WSH\n\nDerivation: m/48h/0h/0h/2h\n\n",
+        hex_upper(ours())
+    );
+    for phrase in SEEDS {
+        let (xpub, fp) = account(phrase);
+        want.push_str(&format!("{}: {xpub}\n", hex_upper(fp)));
+    }
+    assert_eq!(written, want);
+}
+
+/// P2SH is the format's default and gets no `Format:` line at all.
+#[test]
+fn a_p2sh_setup_file_omits_the_format_line() {
+    let wallet = parse(&descriptor_for(2, &SEEDS, "sh", true)).unwrap();
+    let mut out = [0u8; 4096];
+    let n = coldcard::write("x", &wallet, ours(), &mut out).unwrap();
+    let written = core::str::from_utf8(&out[..n]).unwrap();
+    assert!(!written.contains("Format:"), "{written}");
+    assert!(written.contains("Policy: 2 of 3\n\nDerivation: m/48h/0h/0h/2h\n\n"));
+
+    let wrapped = parse(&descriptor_for(2, &SEEDS, "sh-wsh", true)).unwrap();
+    let n = coldcard::write("x", &wrapped, ours(), &mut out).unwrap();
+    assert!(
+        core::str::from_utf8(&out[..n])
+            .unwrap()
+            .contains("Format: P2SH-P2WSH\n")
+    );
+}
+
+/// J1 export → J1 import is the same wallet, with its name.
+#[test]
+fn a_setup_file_round_trips_through_its_reader() {
+    for kind in ["sh", "wsh", "sh-wsh"] {
+        let wallet = parse(&descriptor_for(2, &SEEDS, kind, true)).unwrap();
+        let mut out = [0u8; 4096];
+        let n = coldcard::write("Home vault", &wallet, ours(), &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        let back = coldcard::parse(text).expect(kind);
+        assert_eq!(back.name, "Home vault");
+        assert_eq!(back.wallet, wallet, "{kind}");
+        assert_eq!(compare(&back.wallet, &wallet), Likeness::Same);
+        assert!(coldcard::looks_like(text));
+    }
+}
+
+/// A file from a stock device: apostrophes for hardened steps, keys under different
+/// derivations, comments and blank lines wherever, and a `Format:` in any case.
+#[test]
+fn a_stock_style_setup_file_with_per_key_derivations_is_read() {
+    let (xa, fa) = account(SEEDS[0]);
+    let (xb, fb) = account(SEEDS[1]);
+    let text = format!(
+        "# Coldcard Multisig setup file (created on 0F056943)\n#\n\
+         Name: Office\n\nPolicy: 1 of 2\nFormat: p2sh-p2wsh\n\n\
+         Derivation: m/48'/0'/0'/1'\n\n{}: {xa}\n\nDerivation: 48h/1h/7h/1h\n{}: {xb}\n",
+        hex_upper(fa),
+        hex_upper(fb)
+    );
+    let got = coldcard::parse(&text).unwrap();
+    assert_eq!(got.name, "Office");
+    assert_eq!(got.wallet.m, 1);
+    assert_eq!(got.wallet.n(), 2);
+    assert_eq!(got.wallet.kind, Kind::P2shP2wsh);
+    assert!(got.wallet.sorted, "a setup file is always BIP-67");
+    let h = HARDENED_OFFSET;
+    assert_eq!(got.wallet.cosigners()[0].origin(), [48 | h, h, h, 1 | h]);
+    assert_eq!(
+        got.wallet.cosigners()[1].origin(),
+        [48 | h, 1 | h, 7 | h, 1 | h]
+    );
+    assert_eq!(got.wallet.cosigners()[1].fingerprint, fb);
+
+    // The obsolete alias for the wrapped form, and no `Format:` at all.
+    let alias = text.replace("Format: p2sh-p2wsh", "Format: P2WSH-P2SH");
+    assert_eq!(
+        coldcard::parse(&alias).unwrap().wallet.kind,
+        Kind::P2shP2wsh
+    );
+    let none = text.replace("Format: p2sh-p2wsh\n", "");
+    assert_eq!(coldcard::parse(&none).unwrap().wallet.kind, Kind::P2sh);
+}
+
+/// What a setup file may not do.
+#[test]
+fn a_malformed_setup_file_is_refused_with_the_reason() {
+    use coldcard::TextError;
+    let wallet = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    let mut out = [0u8; 4096];
+    let n = coldcard::write("x", &wallet, ours(), &mut out).unwrap();
+    let good = core::str::from_utf8(&out[..n]).unwrap().to_string();
+
+    let no_policy = good.replace("Policy: 2 of 3\n", "");
+    assert_eq!(
+        coldcard::parse(&no_policy).unwrap_err(),
+        TextError::BadPolicy
+    );
+    let bad_policy = good.replace("Policy: 2 of 3", "Policy: 4 of 3");
+    assert_eq!(
+        coldcard::parse(&bad_policy).unwrap_err(),
+        TextError::BadPolicy
+    );
+    // The policy promises three keys; a file with two is not the wallet it announces.
+    let short = good.trim_end_matches('\n');
+    let short = short.rsplit_once('\n').map(|(a, _)| a).unwrap().to_string() + "\n";
+    assert_eq!(
+        coldcard::parse(&short).unwrap_err(),
+        TextError::KeyCount { want: 3, got: 2 }
+    );
+    let no_deriv = good.replace("Derivation: m/48h/0h/0h/2h\n", "");
+    assert_eq!(
+        coldcard::parse(&no_deriv).unwrap_err(),
+        TextError::NoDerivation
+    );
+    let bad_deriv = good.replace("m/48h/0h/0h/2h", "m/48h/x/0h/2h");
+    assert_eq!(
+        coldcard::parse(&bad_deriv).unwrap_err(),
+        TextError::BadDerivation
+    );
+    let bad_format = good.replace("Format: P2WSH", "Format: P2TR");
+    assert_eq!(
+        coldcard::parse(&bad_format).unwrap_err(),
+        TextError::BadFormat
+    );
+    // A mangled key: the fingerprint is not hex, so the line is not a key line and the
+    // count comes up short.
+    let (_, fp) = account(SEEDS[1]);
+    let bad_key = good.replace(&format!("{}: xpub", hex_upper(fp)), "ZZZZZZZZ: xpub");
+    assert_eq!(
+        coldcard::parse(&bad_key).unwrap_err(),
+        TextError::KeyCount { want: 3, got: 2 }
+    );
+    // The same key twice is refused by the wallet rules, as it is for a descriptor.
+    let (xa, fa) = account(SEEDS[0]);
+    let dup = good.replace(
+        &format!("{}: {}", hex_upper(fp), account(SEEDS[1]).0),
+        &format!("{}: {xa}", hex_upper(fa)),
+    );
+    assert_eq!(
+        coldcard::parse(&dup).unwrap_err(),
+        TextError::Wallet(Error::DuplicateKey)
+    );
+    assert!(!coldcard::looks_like("wsh(sortedmulti(2,a,b))#abcdefgh"));
+}
+
+/// A SLIP-132 key is the same key: `Zpub` and `Ypub` decode to what the `xpub` does.
+#[test]
+fn slip132_forms_read_as_the_same_key() {
+    use crate::bip32::serialize::Slip132;
+    let (xpub, _) = account(SEEDS[0]);
+    let key = ExtendedPubKey::from_base58(&xpub).unwrap();
+    for form in [
+        Slip132::Classic,
+        Slip132::P2wpkhP2sh,
+        Slip132::P2wpkh,
+        Slip132::P2wshP2sh,
+        Slip132::P2wsh,
+    ] {
+        let mut buf = [0u8; 128];
+        let n = key.write_base58_as(form, &mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(coldcard::xpub_from_str(text).unwrap(), key, "{text}");
+    }
+    // And a setup file holding one imports as the wallet with the classic key.
+    let wallet = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    let mut out = [0u8; 4096];
+    let n = coldcard::write("x", &wallet, ours(), &mut out).unwrap();
+    let mut buf = [0u8; 128];
+    let n2 = key.write_base58_as(Slip132::P2wsh, &mut buf).unwrap();
+    let zpub = core::str::from_utf8(&buf[..n2]).unwrap();
+    let text = core::str::from_utf8(&out[..n])
+        .unwrap()
+        .replace(&xpub, zpub);
+    assert!(text.contains("Zpub"));
+    assert_eq!(coldcard::parse(&text).unwrap().wallet, wallet);
+    // Garbage is still garbage.
+    assert!(coldcard::xpub_from_str("xpub6notakey").is_err());
+}
+
+/// Format K, to the byte, for a wallet whose keys we can derive.
+#[test]
+fn the_electrum_file_is_laid_out_as_the_reference_shows() {
+    use crate::bip32::serialize::Slip132;
+    let wallet = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    let mut out = [0u8; 8192];
+    let n = export::electrum(&wallet, &mut out).unwrap();
+    let written = core::str::from_utf8(&out[..n]).unwrap();
+
+    let mut want =
+        String::from("{\"seed_version\":17,\"use_encryption\":false,\"wallet_type\":\"2of3\"");
+    for (i, phrase) in SEEDS.iter().enumerate() {
+        let (xpub, fp) = account(phrase);
+        let key = ExtendedPubKey::from_base58(&xpub).unwrap();
+        let mut buf = [0u8; 128];
+        let m = key.write_base58_as(Slip132::P2wsh, &mut buf).unwrap();
+        let zpub = core::str::from_utf8(&buf[..m]).unwrap();
+        want.push_str(&format!(
+            ",\"x{}/\":{{\"hw_type\":\"coldcard\",\"type\":\"hardware\",\"ckcc_xfp\":{},\"label\":\"Coldcard {}\",\"derivation\":\"m/48h/0h/0h/2h\",\"xpub\":\"{zpub}\"}}",
+            i + 1,
+            u32::from_le_bytes(fp),
+            hex_upper(fp)
+        ));
+    }
+    want.push('}');
+    assert_eq!(written, want);
+
+    // P2SH keeps the classic form; the wrapped form is `Ypub`.
+    let p2sh = parse(&descriptor_for(2, &SEEDS, "sh", true)).unwrap();
+    let n = export::electrum(&p2sh, &mut out).unwrap();
+    let text = core::str::from_utf8(&out[..n]).unwrap();
+    assert!(text.contains("\"xpub\":\"xpub") && text.contains("\"wallet_type\":\"2of3\""));
+    let wrapped = parse(&descriptor_for(2, &SEEDS, "sh-wsh", true)).unwrap();
+    let n = export::electrum(&wrapped, &mut out).unwrap();
+    assert!(
+        core::str::from_utf8(&out[..n])
+            .unwrap()
+            .contains("\"xpub\":\"Ypub")
+    );
+}
+
+/// Format J3: the verb, then the receive and change descriptors with their own checksums.
+#[test]
+fn the_bitcoin_core_line_carries_both_chains() {
+    let wallet = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    let mut out = [0u8; 8192];
+    let n = export::bitcoin_core(&wallet, &mut out).unwrap();
+    let text = core::str::from_utf8(&out[..n]).unwrap();
+
+    let mut ext = [0u8; 4096];
+    let e = wallet.write_descriptor_chain(0, &mut ext).unwrap();
+    let mut int = [0u8; 4096];
+    let i = wallet.write_descriptor_chain(1, &mut int).unwrap();
+    let want = format!(
+        "importdescriptors '[{{\"desc\":\"{}\",\"active\":true,\"timestamp\":\"now\",\"internal\":false,\"range\":[0,100]}},{{\"desc\":\"{}\",\"active\":true,\"timestamp\":\"now\",\"internal\":true,\"range\":[0,100]}}]'\n",
+        core::str::from_utf8(&ext[..e]).unwrap(),
+        core::str::from_utf8(&int[..i]).unwrap()
+    );
+    assert_eq!(text, want);
+    // Each descriptor is whole and checksummed, and the change one walks chain 1.
+    let ext = core::str::from_utf8(&ext[..e]).unwrap();
+    let int = core::str::from_utf8(&int[..i]).unwrap();
+    assert!(descriptor::verify(ext) && descriptor::verify(int));
+    assert!(ext.contains("/0/*") && !ext.contains("/1/*"));
+    assert!(int.contains("/1/*") && !int.contains("/0/*"));
+    assert_eq!(parse(ext).unwrap(), wallet);
+}
+
+/// Our three keys as a cosigner: the `ccxp` bundle, to the byte.
+#[test]
+fn the_ccxp_bundle_is_laid_out_as_stock_writes_it() {
+    use crate::bip32::serialize::Slip132;
+    use crate::bip32::{ChildNumber, Network};
+    use crate::bip39::{Mnemonic, SEED_LEN};
+
+    let mnemonic = Mnemonic::parse(SEEDS[0], &kw()).unwrap();
+    let mut seed = [0u8; SEED_LEN];
+    mnemonic.to_seed("", &mut seed, &kw()).unwrap();
+    let master = ExtendedPrivKey::from_seed(&seed, Network::Mainnet, &kw()).unwrap();
+    let fp = master.fingerprint(&kw());
+    let at = |steps: &[u32]| {
+        let mut key = master.clone();
+        for &s in steps {
+            key = key
+                .derive_child(ChildNumber::hardened(s).unwrap(), &kw())
+                .unwrap();
+        }
+        key.to_extended_pub(&kw())
+    };
+    let p2sh = at(&[45]);
+    let p2sh_p2wsh = at(&[48, 0, 0, 1]);
+    let p2wsh = at(&[48, 0, 0, 2]);
+    let b58 = |k: &ExtendedPubKey, form| {
+        let mut buf = [0u8; 128];
+        let n = k.write_base58_as(form, &mut buf).unwrap();
+        core::str::from_utf8(&buf[..n]).unwrap().to_string()
+    };
+
+    let mut out = [0u8; 4096];
+    let n = export::ccxp(
+        &export::OurKeys {
+            fingerprint: fp,
+            account: 0,
+            coin: 0,
+            p2sh: Some(&p2sh),
+            p2sh_p2wsh: &p2sh_p2wsh,
+            p2wsh: &p2wsh,
+        },
+        &mut out,
+    )
+    .unwrap();
+    let text = core::str::from_utf8(&out[..n]).unwrap();
+    let want = format!(
+        "{{\n  \"p2sh_deriv\": \"m/45h\",\n  \"p2sh\": \"{}\",\n  \"p2sh_p2wsh_deriv\": \"m/48h/0h/0h/1h\",\n  \"p2sh_p2wsh\": \"{}\",\n  \"p2sh_p2wsh_desc\": \"sh(wsh(sortedmulti(M,[{lo}/48h/0h/0h/1h]{}/0/*,...)))\",\n  \"p2wsh_deriv\": \"m/48h/0h/0h/2h\",\n  \"p2wsh\": \"{}\",\n  \"p2wsh_desc\": \"wsh(sortedmulti(M,[{lo}/48h/0h/0h/2h]{}/0/*,...))\",\n  \"account\": \"0\",\n  \"xfp\": \"{}\"\n}}\n",
+        b58(&p2sh, Slip132::Classic),
+        b58(&p2sh_p2wsh, Slip132::P2wshP2sh),
+        b58(&p2sh_p2wsh, Slip132::Classic),
+        b58(&p2wsh, Slip132::P2wsh),
+        b58(&p2wsh, Slip132::Classic),
+        hex_upper(fp),
+        lo = hex_lower(fp),
+    );
+    assert_eq!(text, want);
+
+    // Read back for each script form: the leg's key, its path and the fingerprint.
+    let h = HARDENED_OFFSET;
+    for (kind, key, origin) in [
+        (Kind::P2wsh, &p2wsh, vec![48 | h, h, h, 2 | h]),
+        (Kind::P2shP2wsh, &p2sh_p2wsh, vec![48 | h, h, h, 1 | h]),
+        (Kind::P2sh, &p2sh, vec![45 | h]),
+    ] {
+        let c = export::read_ccxp(text, kind).unwrap();
+        assert_eq!(c.fingerprint, fp);
+        assert_eq!(c.origin(), &origin[..]);
+        assert_eq!(&c.xpub, key, "{kind:?}");
+    }
+
+    // A non-zero account has no BIP-45 leg: neither written nor readable.
+    let n = export::ccxp(
+        &export::OurKeys {
+            fingerprint: fp,
+            account: 3,
+            coin: 1,
+            p2sh: None,
+            p2sh_p2wsh: &p2sh_p2wsh,
+            p2wsh: &p2wsh,
+        },
+        &mut out,
+    )
+    .unwrap();
+    let text = core::str::from_utf8(&out[..n]).unwrap();
+    assert!(text.starts_with("{\n  \"p2sh_p2wsh_deriv\": \"m/48h/1h/3h/1h\",\n"));
+    assert!(text.contains("\"account\": \"3\",\n"));
+    assert_eq!(
+        export::read_ccxp(text, Kind::P2sh).unwrap_err(),
+        export::CcxpError::NoLeg
+    );
+    assert!(export::read_ccxp(text, Kind::P2wsh).is_ok());
+    assert_eq!(
+        export::read_ccxp("{}", Kind::P2wsh).unwrap_err(),
+        export::CcxpError::NoFingerprint
+    );
+}
+
+/// The near-duplicate rule: the same keys in another shape is "similar", the same
+/// agreement is "same", and anything else is different.
+#[test]
+fn compare_tells_the_same_keys_in_another_shape_from_a_different_wallet() {
+    let sorted = parse(&descriptor_for(2, &SEEDS, "wsh", true)).unwrap();
+    assert_eq!(compare(&sorted, &sorted), Likeness::Same);
+
+    let unsorted = parse(&descriptor_for(2, &SEEDS, "wsh", false)).unwrap();
+    assert_eq!(compare(&sorted, &unsorted), Likeness::Similar);
+    let wrapped = parse(&descriptor_for(2, &SEEDS, "sh-wsh", true)).unwrap();
+    assert_eq!(compare(&sorted, &wrapped), Likeness::Similar);
+    let one_of = parse(&descriptor_for(1, &SEEDS, "wsh", true)).unwrap();
+    assert_eq!(compare(&sorted, &one_of), Likeness::Similar);
+    let reordered = parse(&descriptor_for(
+        2,
+        &[SEEDS[2], SEEDS[0], SEEDS[1]],
+        "wsh",
+        true,
+    ))
+    .unwrap();
+    assert_eq!(compare(&sorted, &reordered), Likeness::Similar);
+
+    let fewer = parse(&descriptor_for(2, &SEEDS[..2], "wsh", true)).unwrap();
+    assert_eq!(compare(&sorted, &fewer), Likeness::Different);
+}
