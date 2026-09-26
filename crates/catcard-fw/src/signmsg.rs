@@ -360,9 +360,81 @@ fn sign_and_deliver(
     choice: &Choice,
     target: Target<'_>,
 ) {
-    let Some(master) = menu::unlock_master(gate, login, ui, head) else {
+    let Some(signed) = sign_with(gate, login, ui, head, text, choice) else {
         return;
     };
+    // Show it, then say where it goes: the signature is long, so the screen is for
+    // checking the message and address, and the file (or the code) is what gets used.
+    show(ui, text, &signed);
+    deliver(ui, head, text, &signed, target);
+}
+
+/// Sign `text` -- a bare message, or the three-line request form -- and hand back the
+/// armoured file instead of writing it anywhere, for a caller with its own way out: the
+/// NFC tag today, which puts the file back where the message came from.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn sign_to_file(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+) -> Option<heapless::String<FILE_TEXT>> {
+    let request = match message::parse_request(text) {
+        Ok(r) => r,
+        Err(why) => {
+            complain(ui, head, describe_request(why));
+            return None;
+        }
+    };
+    let choice = ask_choice(ui, head, request.kind, request.path)?;
+    let signed = sign_with(gate, login, ui, head, request.message, &choice)?;
+    show(ui, request.message, &signed);
+    let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
+    if signfile::write(
+        &mut file,
+        request.message,
+        &signed.address,
+        &signed.armoured,
+    )
+    .is_err()
+    {
+        complain(ui, head, "no room for it");
+        return None;
+    }
+    Some(file)
+}
+
+/// Why `text` cannot be shown as a message to sign, before any key is touched: empty,
+/// too long, or holding a character the screen cannot show faithfully -- the owner would
+/// be signing something other than what they read.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn unshowable(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        return Some("nothing to sign in that");
+    }
+    if text.len() > message::MAX_MESSAGE {
+        return Some("message too long");
+    }
+    if !text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Some("plain ASCII only");
+    }
+    None
+}
+
+/// Unlock, derive, confirm, sign: the flow past the choice, up to the signature.
+///
+/// `None` when the owner backed out or something refused; every refusal has already been
+/// said on screen.
+fn sign_with(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    choice: &Choice,
+) -> Option<Signed> {
+    let master = menu::unlock_master(gate, login, ui, head)?;
 
     // Only the leaf is kept past this point: the master is the whole wallet, and the
     // screens that follow can stand there for as long as nobody is in the room.
@@ -372,7 +444,10 @@ fn sign_and_deliver(
     busy.tick(ui.panel);
     let leaf = match leaf {
         Ok(k) => k,
-        Err(why) => return complain(ui, head, why),
+        Err(why) => {
+            complain(ui, head, why);
+            return None;
+        }
     };
     let network = crate::prefs::network();
 
@@ -383,12 +458,13 @@ fn sign_and_deliver(
         Ok(a) => a,
         Err(why) => {
             drop(leaf);
-            return complain(ui, head, why);
+            complain(ui, head, why);
+            return None;
         }
     };
     if !confirm(ui, head, text, &address, choice) {
         drop(leaf);
-        return;
+        return None;
     }
 
     let mut busy = menu::Working::new(ui.panel, head, "signing");
@@ -406,15 +482,13 @@ fn sign_and_deliver(
     });
     drop(leaf);
     busy.tick(ui.panel);
-    let signed = match signed {
-        Ok(v) => v,
-        Err(why) => return complain(ui, head, why),
-    };
-
-    // Show it, then say where it goes: the signature is long, so the screen is for
-    // checking the message and address, and the file (or the code) is what gets used.
-    show(ui, text, &signed);
-    deliver(ui, head, text, &signed, target);
+    match signed {
+        Ok(v) => Some(v),
+        Err(why) => {
+            complain(ui, head, why);
+            None
+        }
+    }
 }
 
 /// Write the armoured file where `target` says, or show it as a code.

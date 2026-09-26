@@ -114,9 +114,38 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
     let Ok(text) = core::str::from_utf8(&raw[..len]) else {
         return say(ui, HEAD, "not text");
     };
+    check(
+        ui,
+        HEAD,
+        Some((storage, path.as_str())),
+        path.as_str(),
+        text,
+    );
+}
+
+/// Say whether the signed-message text carries its address's signature: the half of
+/// [`screen`] after the read, for a caller that has the text from somewhere other than a
+/// file -- the NFC tag today. `source` names where it came from, for the log.
+///
+/// A sidecar that names files cannot be checked this way: the files live beside the
+/// sidecar on a medium, and this has no medium. It says so rather than verifying the
+/// signature alone and calling that good.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn verify_text(ui: &mut Ui<'_>, head: &str, source: &str, text: &str) {
+    check(ui, head, None, source, text);
+}
+
+/// Parse, hash the listed files if there is a medium to find them on, then verify.
+fn check(
+    ui: &mut Ui<'_>,
+    head: &str,
+    files_at: Option<(menu::Storage, &str)>,
+    source: &str,
+    text: &str,
+) {
     let file = match signfile::parse(text) {
         Ok(f) => f,
-        Err(why) => return say(ui, HEAD, describe(why)),
+        Err(why) => return say(ui, head, describe(why)),
     };
 
     // The files a sidecar names, each hashed and compared -- before the signature, so
@@ -125,10 +154,13 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
     let mut checks: heapless::Vec<(ListedFile<'_>, Check), { signfile::MAX_FILES }> =
         heapless::Vec::new();
     if let Some(files) = signfile::listed_files(file.message) {
-        menu::card_wait(ui.panel, HEAD, "hashing the files");
+        let Some((storage, path)) = files_at else {
+            return say(ui, head, "names files: verify it from the card");
+        };
+        menu::card_wait(ui.panel, head, "hashing the files");
         let dir = &path[..path.rfind('/').map(|i| i + 1).unwrap_or(0)];
         if let Err(why) = check_files(storage, dir, files, &mut checks) {
-            return say(ui, HEAD, why);
+            return say(ui, head, why);
         }
         for (f, c) in &checks {
             crate::catlog!("verify: {}: {}", f.name, c.word());
@@ -141,7 +173,7 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
             good(ui, &file, scheme, &checks);
         }
         Err(why) => {
-            crate::catlog!("verify: {}: {}", path.as_str(), describe(why));
+            crate::catlog!("verify: {}: {}", source, describe(why));
             bad(ui, &file, describe(why), &checks);
         }
     }
