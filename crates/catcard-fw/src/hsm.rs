@@ -1011,6 +1011,13 @@ fn judge_inner(
     })
     .unwrap_or(false);
     fresh.zeroize();
+    // So is the queue of users' codes: each was sent for this PSBT or is stale now.
+    // Source: §2.4 "consumed atomically" [C]
+    let pending = with(|a| {
+        let len = core::mem::take(&mut a.pending_len);
+        a.pending.take().map(|b| (b, len))
+    })
+    .flatten();
 
     // The policy, copied out for the judging: the flows below take the heap too.
     let Some((mut text, len)) = with(|a| {
@@ -1073,14 +1080,37 @@ fn judge_inner(
     }
 
     // The users queued for this PSBT, all of them checked. Source: §2.4 [C]
-    let mut names: heapless::Vec<heapless::String<{ crate::ckcc::NAME_BYTES }>, USERS> =
-        heapless::Vec::new();
-    if let Err(w) = check_pending(gate, login, ui, &sha, &mut names) {
-        why.clear();
-        let _ = why.push_str(&w);
-        return Err(());
+    let mut udoc = None;
+    let mut list = [NO_USER; USERS];
+    let mut n = 0;
+    let mut passed = 0u32;
+    if let Some((mut queue, qlen)) = pending
+        && qlen > 0
+    {
+        let Some(block) = udoc.insert(crate::heap::take(SCRATCH)).as_mut() else {
+            return fail("not enough memory");
+        };
+        n = match read_users(gate, login, ui.panel, block.bytes(), &mut list) {
+            Ok(n) => n,
+            Err(w) => return fail(w),
+        };
+        let checked = check_pending(gate, login, ui, &sha, &queue.bytes()[..qlen], &list[..n]);
+        queue.bytes().zeroize();
+        match checked {
+            Ok(mask) => passed = mask,
+            Err(w) => {
+                why.clear();
+                let _ = why.push_str(&w);
+                return Err(());
+            }
+        }
     }
-    let given: heapless::Vec<&str, USERS> = names.iter().map(|n| n.as_str()).collect();
+    let given: heapless::Vec<&str, USERS> = list[..n]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| passed & (1 << i) != 0)
+        .map(|(_, u)| u.name)
+        .collect();
 
     // Which wallet spends.
     let mut multi: heapless::String<{ 4 * engine::WALLET_LEN.1 }> = heapless::String::new();
@@ -1206,16 +1236,17 @@ fn queue_auth(totp_time: u32, name: &str, token: &[u8]) -> Answer {
     .unwrap_or(Answer::Failed("HSM not active"))
 }
 
-/// Check every queued authentication against the users and record the counters they
-/// used, emptying the queue. Any that fails refuses the transaction. The names that
-/// passed go into `names`. Source: §2.3, §2.4 [C]
+/// Check every queued authentication against `list` and record the counters they used.
+/// Any that fails refuses the transaction. The users that passed come back as bits of
+/// their places in `list`. Source: §2.3, §2.4 [C]
 fn check_pending(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     sha: &[u8; 32],
-    names: &mut heapless::Vec<heapless::String<{ crate::ckcc::NAME_BYTES }>, USERS>,
-) -> Result<(), heapless::String<80>> {
+    queue: &[u8],
+    list: &[User<'_>],
+) -> Result<u32, heapless::String<80>> {
     let text = |s: &str| {
         let mut t = heapless::String::new();
         for c in s.chars() {
@@ -1225,44 +1256,25 @@ fn check_pending(
         }
         t
     };
-    let Some((pending, plen)) = with(|a| (a.pending.take(), core::mem::take(&mut a.pending_len)))
-    else {
-        return Ok(());
-    };
-    let Some(mut pending) = pending else {
-        return Ok(());
-    };
-    if plen == 0 {
-        return Ok(());
-    }
-    let Some(mut udoc) = crate::heap::take(SCRATCH) else {
-        return Err(text("not enough memory"));
-    };
-    let mut list = [NO_USER; USERS];
-    let n = read_users(gate, login, ui.panel, udoc.bytes(), &mut list).map_err(text)?;
     let mut updated = [NO_USER; USERS];
+    let n = list.len().min(USERS);
     updated[..n].copy_from_slice(&list[..n]);
+    let mut passed = 0u32;
     let mut problem: Option<heapless::String<80>> = None;
-    each_pending(&pending.bytes()[..plen], |name, token, time| {
+    each_pending(queue, |name, token, time| {
         if problem.is_some() {
             return;
         }
-        let Some(u) = list[..n].iter().find(|u| u.name == name) else {
+        let Some(at) = list[..n].iter().position(|u| u.name == name) else {
             let mut t = text(name);
             let _ = t.push_str(": unknown user");
             problem = Some(t);
             return;
         };
-        match users::check(u, token, time, Some(sha)) {
+        match users::check(&list[at], token, time, Some(sha)) {
             Ok(counter) => {
-                for x in updated[..n].iter_mut() {
-                    if x.name == name {
-                        x.counter = counter;
-                    }
-                }
-                let mut s = heapless::String::new();
-                let _ = s.push_str(name);
-                let _ = names.push(s);
+                updated[at].counter = counter;
+                passed |= 1 << at;
             }
             Err(r) => {
                 let mut t = text(name);
@@ -1272,7 +1284,6 @@ fn check_pending(
             }
         }
     });
-    pending.bytes().zeroize();
     if let Some(p) = problem {
         return Err(p);
     }
@@ -1281,7 +1292,7 @@ fn check_pending(
         save_users(gate, login, ui, &updated[..n])
             .map_err(|_| text("could not record the codes used"))?;
     }
-    Ok(())
+    Ok(passed)
 }
 
 /// `user`: queued in HSM mode; outside it, checked at once and answered with what stock
@@ -1519,10 +1530,11 @@ pub(crate) fn status(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
                 Err(_) => return None,
             }
         }
-    })
-    .flatten();
+    });
     let n = match written {
-        Some(n) => n,
+        Some(Some(n)) => n,
+        // Running, and even the counters would not fit: said, never reported as idle.
+        Some(None) => return Answer::Failed("status too long"),
         None => {
             let st = engine::Status {
                 active: false,
