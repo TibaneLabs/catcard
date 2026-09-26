@@ -1341,7 +1341,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::BrowseSd => to(
             |a| {
-                browse_sd(a.ui, "SD card", None, Browse::View);
+                browse_files(a.ui);
             },
             Screen::Utils,
         ),
@@ -3676,7 +3676,15 @@ const FILE_VIEW_ROW: u32 = 1;
 /// Stock reaches a file listing through `File Management` -> `List Files`.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]. That the listing is also
 /// where a file is deleted is [I]: the map names the drawer, not its per-file actions.
-fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
+fn file_info(
+    ui: &mut Ui<'_>,
+    name: &str,
+    len: u64,
+    pick: bool,
+    // Only the SD card can be viewed: the PNG viewer mounts the card itself, so it is not
+    // offered while browsing the Virtual Disk. Unused where there is no viewer at all.
+    #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))] allow_view: bool,
+) -> FileChoice {
     use catcard_ui::scroll::Line as DLine;
     let mut sz = Line::new();
     let _ = write!(sz, "{len} bytes");
@@ -3690,7 +3698,7 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
         // Showing it comes before removing it: it is the harmless one, and it is what
         // somebody who opened a picture was probably after.
         #[cfg(feature = "board-q1")]
-        if crate::pngview::is_png(name) {
+        if allow_view && crate::pngview::is_png(name) {
             let _ = lines.push(DLine::item("View", FILE_VIEW_ROW));
         }
         let _ = lines.push(DLine::item("Delete file", FILE_DELETE_ROW));
@@ -3713,24 +3721,25 @@ fn file_info(ui: &mut Ui<'_>, name: &str, len: u64, pick: bool) -> FileChoice {
 /// delete cannot be undone. The volume is flushed before anyone is told it worked -- a
 /// delete that lives only in the driver's cache is a file that comes back on the next
 /// mount, which is the one claim this screen must never make wrongly.
-fn delete_card_file(ui: &mut Ui<'_>, vol: &mut CardVolume, path: &str, name: &str) {
+fn delete_browse_file<D: catcard_sd::fat::SectorDriver>(
+    ui: &mut Ui<'_>,
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    name: &str,
+    refused: &str,
+) {
     ask(ui.panel, "Delete file?", name, "cannot be undone");
     if !confirmed(ui) {
         return;
     }
     match vol.remove_file(path).and_then(|()| vol.flush()) {
         Ok(()) => {
-            crate::catlog!("sd: deleted {}", path);
+            crate::catlog!("browse: deleted {}", path);
             message(ui.panel, "Deleted", name, "any key to go back");
         }
         Err(()) => {
-            crate::catlog!("sd: could not delete {}", path);
-            message(
-                ui.panel,
-                "Not deleted",
-                "the card refused",
-                "any key to go back",
-            );
+            crate::catlog!("browse: could not delete {}", path);
+            message(ui.panel, "Not deleted", refused, "any key to go back");
         }
     }
     wait_for_any_key(ui);
@@ -3751,56 +3760,120 @@ fn delete_card_file(ui: &mut Ui<'_>, vol: &mut CardVolume, path: &str, name: &st
 ///
 /// A mount or read failure is reported with the step it stopped at, so a missing card, a
 /// filesystem it cannot mount (exFAT, today) and a read error tell themselves apart.
+/// A browser message with `head`'s medium named, then a wait for a key.
+fn browse_fail(ui: &mut Ui<'_>, head: &str, why: &str) {
+    message(ui.panel, head, why, "any key to go back");
+    wait_for_any_key(ui);
+}
+
+/// The standalone file browser under `Utils`. On a board with PSRAM it first asks which
+/// storage to look at; a board without one (mk3) goes straight to the card.
+fn browse_files(ui: &mut Ui<'_>) {
+    #[cfg(not(feature = "board-mk3"))]
+    if catcard_board::BOARD.psram.is_some() {
+        let Some(pick) = choose(
+            ui,
+            "Browse Files",
+            "look at which storage?",
+            &["SD card", "Virtual Disk (in PSRAM)"],
+        ) else {
+            return;
+        };
+        if pick == 0 {
+            browse_sd(ui, "SD card", None, Browse::View);
+        } else {
+            browse_vdisk(ui, "Virtual Disk", None, Browse::View);
+        }
+        return;
+    }
+    browse_sd(ui, "SD card", None, Browse::View);
+}
+
+/// Browse the microSD card. Mounts it (FAT or exFAT), then walks it with [`browse_volume`].
 pub(crate) fn browse_sd(
     ui: &mut Ui<'_>,
     title: &str,
     filter: Option<&str>,
     mode: Browse,
 ) -> Option<heapless::String<BROWSE_PATH_MAX>> {
-    let pick = matches!(mode, Browse::File);
-    fn fail(ui: &mut Ui<'_>, why: &str) {
-        message(ui.panel, "SD card", why, "any key to go back");
-        wait_for_any_key(ui);
-    }
-
-    // Mount the card, FAT or exFAT, re-initialising it for the exFAT attempt. `why` carries
-    // the specific bring-up failure out of the closure for the message.
-    let mut why = "card error";
-    let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
-        // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
-        // to return before it can be chosen again.
-        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
-            Ok(d) => d,
-            Err(_) => {
-                why = "controller failed";
-                return Err(());
-            }
-        };
-        let card = match catcard_sd::init(&mut dev) {
-            Ok(c) => c,
-            Err(catcard_sd::Error::NoCard) => {
-                why = "no card in slot";
-                return Err(());
-            }
-            Err(e) => {
-                crate::catlog!("sd: card would not start: {:?}", e);
-                why = "card would not start";
-                return Err(());
-            }
-        };
-        Ok(catcard_sd::Sectors::new(dev, card))
-    });
-    let mut vol = match mount {
+    let vol = match mount_card() {
         Ok(v) => v,
-        Err(catcard_sd::MountError::Device) => {
-            fail(ui, why);
-            return None;
-        }
-        Err(catcard_sd::MountError::NoFilesystem) => {
-            fail(ui, "not FAT or exFAT");
+        Err(why) => {
+            browse_fail(ui, "SD card", why);
             return None;
         }
     };
+    // The PNG viewer is a card-only affair (it re-mounts the card itself), so it is on
+    // offer here and nowhere else.
+    let allow_view = cfg!(feature = "board-q1");
+    browse_volume(
+        ui,
+        vol,
+        title,
+        filter,
+        mode,
+        "SD card",
+        allow_view,
+        "the card refused",
+        &mut || mount_card(),
+    )
+}
+
+/// Browse the PSRAM-backed Virtual Disk. Formats an uninitialised region first (there is
+/// nothing on it to lose), mounts it, then walks it with [`browse_volume`].
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn browse_vdisk(
+    ui: &mut Ui<'_>,
+    title: &str,
+    filter: Option<&str>,
+    mode: Browse,
+) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    if let Err(why) = crate::vdisk::ensure_formatted() {
+        browse_fail(ui, "Virtual Disk", why);
+        return None;
+    }
+    let vol = match crate::vdisk::mount() {
+        Ok(v) => v,
+        Err(why) => {
+            browse_fail(ui, "Virtual Disk", why);
+            return None;
+        }
+    };
+    // No viewer on the disk: the PNG viewer mounts the card, not this.
+    browse_volume(
+        ui,
+        vol,
+        title,
+        filter,
+        mode,
+        "Virtual Disk",
+        false,
+        "the disk refused",
+        &mut || crate::vdisk::mount(),
+    )
+}
+
+/// The browser loop over an already-mounted volume, whatever backs it.
+///
+/// The shared body of [`browse_sd`] and [`browse_vdisk`]: it lists a directory, lets the
+/// cursor descend and go back, and on a file offers its details (pick, delete, and — for
+/// the card only — view). `head` names the medium in messages, `refused` is what a failed
+/// delete says, `allow_view` gates the viewer, and `remount` produces a fresh mount for
+/// the viewer to hand the bus back to.
+#[allow(clippy::too_many_arguments)]
+fn browse_volume<D: catcard_sd::fat::SectorDriver>(
+    ui: &mut Ui<'_>,
+    mut vol: catcard_sd::AnyVolume<D, 512>,
+    title: &str,
+    filter: Option<&str>,
+    mode: Browse,
+    head: &'static str,
+    allow_view: bool,
+    refused: &'static str,
+    #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))]
+    remount: &mut dyn FnMut() -> Result<catcard_sd::AnyVolume<D, 512>, &'static str>,
+) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    let pick = matches!(mode, Browse::File);
 
     let mut path: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
     // **On the heap, not on the stack.** Forty-eight entries of a 64-byte name is four
@@ -3817,7 +3890,7 @@ pub(crate) fn browse_sd(
     // wipes the screen and stops. A browser that cannot get its memory says so instead.
     let mut entries: alloc::vec::Vec<BrowseEntry> = alloc::vec::Vec::new();
     if entries.try_reserve_exact(BROWSE_ENTRIES).is_err() {
-        fail(ui, "not enough memory to list a folder");
+        browse_fail(ui, head, "not enough memory to list a folder");
         return None;
     }
 
@@ -3867,7 +3940,7 @@ pub(crate) fn browse_sd(
             // held for as long as the browser is open.
             let mut lines: alloc::vec::Vec<DLine> = alloc::vec::Vec::new();
             if lines.try_reserve_exact(BROWSE_ENTRIES + 3).is_err() {
-                fail(ui, "not enough memory to draw a folder");
+                browse_fail(ui, head, "not enough memory to draw a folder");
                 return None;
             }
             push_within(&mut lines, DLine::title(header));
@@ -3929,24 +4002,27 @@ pub(crate) fn browse_sd(
                     let _ = full.push_str(&path);
                     let _ = full.push('/');
                     let _ = full.push_str(&e.name);
-                    match file_info(ui, &e.name, e.len, pick) {
+                    match file_info(ui, &e.name, e.len, pick, allow_view) {
                         FileChoice::Pick => return Some(full),
                         // The listing is rebuilt at the top of this loop, so what is on
-                        // the glass after a delete is what is on the card -- including
+                        // the glass after a delete is what is on the medium -- including
                         // the case where the delete was refused and nothing moved.
-                        FileChoice::Delete => delete_card_file(ui, &mut vol, &full, &e.name),
+                        FileChoice::Delete => {
+                            delete_browse_file(ui, &mut vol, &full, &e.name, refused)
+                        }
                         // The viewer mounts the card itself, so this volume is dropped
                         // for the duration rather than lent: two mounts of one card at
-                        // once is not something the driver promises.
+                        // once is not something the driver promises. `remount` brings the
+                        // same medium back afterwards.
                         #[cfg(feature = "board-q1")]
                         FileChoice::View => {
                             let path = full.clone();
                             drop(vol);
                             crate::pngview::view(ui, &path);
-                            vol = match mount_card() {
+                            vol = match remount() {
                                 Ok(v) => v,
                                 Err(why) => {
-                                    fail(ui, why);
+                                    browse_fail(ui, head, why);
                                     return None;
                                 }
                             };
@@ -11858,17 +11934,14 @@ fn wait_any_key(ui: &mut Ui<'_>) {
 /// switches its identity back and returns. Reached only from `Utils`, which is behind the
 /// PIN, so the card is never exposed on a locked device.
 fn usb_drive(ui: &mut Ui<'_>) {
-    use catcard_hal::sdmmc::Sdmmc;
-
     // The two hardware switches, honoured here because this is the only place in the
-    // firmware that re-enumerates as mass storage. Off means the card is never put on the
-    // bus at all -- refused before the controller is even brought up, so there is no
-    // window in which the device is a disk.
+    // firmware that re-enumerates as mass storage. Off means nothing is ever put on the
+    // bus -- refused before a controller is even brought up, so there is no window in
+    // which the device is a disk.
     //
     // **The port is checked as well as the disk.** This screen re-attaches the core
     // itself, so a device whose owner had switched USB off would otherwise come back onto
-    // the bus here -- as a disk, with the card on it, which is the last thing that switch
-    // was set for.
+    // the bus here -- as a disk, which is the last thing that switch was set for.
     let prefs = crate::prefs::current();
     if !prefs.virtual_disk || !prefs.usb_port {
         let why = if prefs.usb_port {
@@ -11881,9 +11954,71 @@ fn usb_drive(ui: &mut Ui<'_>) {
         return;
     }
 
+    usb_drive_choose(ui);
+}
+
+/// Pick which storage the USB drive exposes, then bring it up.
+///
+/// SD slot A is always on offer; a slot B only where the board has two (Q1); the Virtual
+/// Disk only where there is PSRAM to back it. A board with one SD slot and no PSRAM (mk3)
+/// has one option, so it skips the chooser and exposes the card exactly as it always did.
+fn usb_drive_choose(ui: &mut Ui<'_>) {
+    use catcard_hal::sdmmc::Slot;
+
+    let has_slot_b = catcard_board::BOARD.sdmmc.slot_b.is_some();
+    #[cfg(not(feature = "board-mk3"))]
+    let has_vdisk = catcard_board::BOARD.psram.is_some();
+    #[cfg(feature = "board-mk3")]
+    let has_vdisk = false;
+
+    // One option: no chooser, straight to the card -- today's behaviour on a single-slot
+    // board without a Virtual Disk.
+    if !has_slot_b && !has_vdisk {
+        usb_drive_sd(ui, Slot::A);
+        return;
+    }
+
+    // Build the chooser. The kind rides alongside each label so the labels can differ
+    // between boards without the match caring how many there were.
+    const KIND_SD_A: u8 = 0;
+    const KIND_SD_B: u8 = 1;
+    const KIND_VDISK: u8 = 2;
+    let mut labels: heapless::Vec<&str, 3> = heapless::Vec::new();
+    let mut kinds: heapless::Vec<u8, 3> = heapless::Vec::new();
+    let _ = labels.push(if has_slot_b {
+        "SD card - slot A (top)"
+    } else {
+        "SD card"
+    });
+    let _ = kinds.push(KIND_SD_A);
+    if has_slot_b {
+        let _ = labels.push("SD card - slot B (bottom)");
+        let _ = kinds.push(KIND_SD_B);
+    }
+    if has_vdisk {
+        let _ = labels.push("Virtual Disk (in PSRAM)");
+        let _ = kinds.push(KIND_VDISK);
+    }
+
+    let Some(pick) = choose(ui, "USB Drive", "share which storage?", &labels) else {
+        return;
+    };
+    match kinds[pick] {
+        KIND_SD_A => usb_drive_sd(ui, Slot::A),
+        KIND_SD_B => usb_drive_sd(ui, Slot::B),
+        #[cfg(not(feature = "board-mk3"))]
+        KIND_VDISK => usb_drive_vdisk(ui),
+        _ => {}
+    }
+}
+
+/// Bring up the card in `slot`, put it on the bus, and serve it until the screen is left.
+fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
+    use catcard_hal::sdmmc::Sdmmc;
+
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
     // and the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+    let mut dev = match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, slot) } {
         Ok(d) => d,
         Err(_) => {
             message(ui.panel, "USB Drive", "no SD controller", "press a key");
@@ -11906,17 +12041,54 @@ fn usb_drive(ui: &mut Ui<'_>) {
         }
     };
 
-    message(ui.panel, "USB Drive", "SD is on USB", "press x to eject");
+    message(
+        ui.panel,
+        "USB Drive",
+        "SD card is on USB",
+        "press x to eject",
+    );
+    let mut backend = crate::msc_drive::SdBlocks::new(&mut dev, &card);
+    serve_usb_drive(ui, &mut backend);
+}
 
-    // Re-enumerate as a disk, serve it, and switch the identity back on the way out.
+/// Bring up the Virtual Disk, put it on the bus, and serve it until the screen is left.
+///
+/// Formats the region first only if it holds no filesystem yet — a fresh boot, or one an
+/// upgrade overwrote — silently, since there is nothing there to lose. A disk that
+/// already mounts is exposed as it is, with whatever was staged on it earlier.
+#[cfg(not(feature = "board-mk3"))]
+fn usb_drive_vdisk(ui: &mut Ui<'_>) {
+    let Some(mut disk) = crate::vdisk::Vdisk::take() else {
+        message(ui.panel, "USB Drive", "no PSRAM for a disk", "press a key");
+        wait_any_key(ui);
+        return;
+    };
+    if let Err(why) = crate::vdisk::ensure_formatted() {
+        crate::catlog!("vdisk: {}", why);
+        message(ui.panel, "Virtual Disk", why, "press a key");
+        wait_any_key(ui);
+        return;
+    }
+
+    message(
+        ui.panel,
+        "USB Drive",
+        "Virtual Disk is on USB",
+        "press x to eject",
+    );
+    serve_usb_drive(ui, &mut disk);
+}
+
+/// Re-enumerate as a disk, serve `backend` over Bulk-Only Transport until `x` (or a host
+/// eject), then switch the identity back. The pad is scanned once every so many transport
+/// spins -- often enough to feel a key, rarely enough not to swamp the pipe.
+fn serve_usb_drive(ui: &mut Ui<'_>, backend: &mut dyn crate::msc_drive::BlockDev) {
     crate::usbtask::msc_enter();
 
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     let mut spins: u32 = 0;
-    crate::msc_drive::run(&mut dev, &card, || {
-        // Scanning the pad every spin would swamp the transport; once every 16384 spins
-        // is a few milliseconds and plenty responsive to a key.
+    crate::msc_drive::run(backend, || {
         spins = spins.wrapping_add(1);
         if !spins.is_multiple_of(16384) {
             return false;

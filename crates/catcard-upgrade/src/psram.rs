@@ -154,6 +154,46 @@ impl PsramArea {
         }
     }
 
+    /// Claim an explicit memory-mapped PSRAM region `[base, base + capacity)` for the
+    /// same paced, word-aligned access [`claim`](Self::claim) gives the staging area,
+    /// without reimplementing it.
+    ///
+    /// This is for a *facility other than firmware staging* — the firmware's Virtual Disk
+    /// — which needs the reads and writes to obey the part's rules (aligned 32-bit stores
+    /// only, CE# released inside `tCEM` so refresh is never starved) but has nothing to do
+    /// with the bootloader's recovery header. So `header_at` is set by the caller to a
+    /// harmless in-region address and [`publish`](StagingArea::publish) /
+    /// [`retract`](StagingArea::retract) are **never** called on it: those write the
+    /// bootloader's marker, which a disk must not.
+    ///
+    /// `image_offset` is carried through unchanged for the trait; a disk does not use it.
+    ///
+    /// # Safety
+    ///
+    /// As [`claim`](Self::claim): `[base, base + capacity)` must be memory-mapped PSRAM
+    /// that is present, mapped, and used by nothing else while this lives. Writes go
+    /// straight to the address space, bounded only by `capacity`.
+    #[allow(clippy::too_many_arguments)]
+    pub const unsafe fn claim_region(
+        base: u32,
+        capacity: u32,
+        image_offset: u32,
+        header_at: u32,
+        ospi_hz: u32,
+        mmap_timeout_clocks: u32,
+        cpu_hz: u32,
+    ) -> Self {
+        Self {
+            image_base: base,
+            image_offset,
+            capacity,
+            header_at,
+            way: Way::Nothing,
+            burst: Burst::new(words_per_burst(ospi_hz)),
+            gap: gap_cycles(ospi_hz, mmap_timeout_clocks, cpu_hz),
+        }
+    }
+
     fn in_range(&self, offset: u32, len: usize) -> Result<u32, OutOfRange> {
         let end = offset.checked_add(len as u32).ok_or(OutOfRange)?;
         if end > self.capacity {

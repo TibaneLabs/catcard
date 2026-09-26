@@ -1,10 +1,11 @@
-//! USB mass storage over Bulk-Only Transport, backed by the SD card.
+//! USB mass storage over Bulk-Only Transport, backed by a chosen storage device.
 //!
 //! Runs only while `Utils → USB Drive` is open. [`usbtask`](crate::usbtask) has already
 //! switched the device's identity to mass storage; this loop moves the CBW / data / CSW
 //! of Bulk-Only Transport and turns the SCSI commands [`catcard_usb::msc`] decodes into
-//! reads and writes of the card. It returns when the caller's `should_exit` reports the
-//! screen was left, at which point the caller switches the identity back.
+//! reads and writes of a [`BlockDev`] — an SD card ([`SdBlocks`]) or the PSRAM-backed
+//! Virtual Disk ([`crate::vdisk::Vdisk`]). It returns when the caller's `should_exit`
+//! reports the screen was left, at which point the caller switches the identity back.
 
 use catcard_hal::sdmmc::Sdmmc;
 use catcard_sd::{BLOCK_LEN, Card, read_block, write_block};
@@ -12,13 +13,58 @@ use catcard_usb::msc::{self, Cbw, Command, Sense, csw_status};
 
 use crate::usbtask;
 
+/// A 512-byte-sector, `u32`-LBA block device the USB drive can serve.
+///
+/// The one seam that lets `USB Drive` expose either an SD card or the Virtual Disk
+/// through the same Bulk-Only Transport loop: both present as a run of 512-byte sectors,
+/// and this is all the transport needs of either. A failed read or write is reported as
+/// `Err(())`, which the loop turns into a SCSI `MEDIUM ERROR`.
+pub trait BlockDev {
+    /// Read one 512-byte sector at `lba`.
+    fn read_block(&mut self, lba: u32, out: &mut [u8; BLOCK_LEN]) -> Result<(), ()>;
+    /// Write one 512-byte sector at `lba`.
+    fn write_block(&mut self, lba: u32, data: &[u8; BLOCK_LEN]) -> Result<(), ()>;
+    /// How many 512-byte sectors the device has.
+    fn block_count(&self) -> u32;
+}
+
+/// The SD side of [`BlockDev`]: a borrowed controller and the card it brought up.
+///
+/// Keeps the card behaviour byte-for-byte — it is [`catcard_sd::read_block`] /
+/// [`write_block`] against `card`, exactly as this loop called them directly before it
+/// learned to serve more than one kind of device.
+pub struct SdBlocks<'a> {
+    dev: &'a mut Sdmmc,
+    card: &'a Card,
+}
+
+impl<'a> SdBlocks<'a> {
+    pub fn new(dev: &'a mut Sdmmc, card: &'a Card) -> Self {
+        Self { dev, card }
+    }
+}
+
+impl BlockDev for SdBlocks<'_> {
+    fn read_block(&mut self, lba: u32, out: &mut [u8; BLOCK_LEN]) -> Result<(), ()> {
+        read_block(self.dev, self.card, lba, out).map_err(|_| ())
+    }
+
+    fn write_block(&mut self, lba: u32, data: &[u8; BLOCK_LEN]) -> Result<(), ()> {
+        write_block(self.dev, self.card, lba, data).map_err(|_| ())
+    }
+
+    fn block_count(&self) -> u32 {
+        self.card.blocks
+    }
+}
+
 /// Polls with no host progress before a data phase is abandoned. The host has stopped
 /// reading or writing -- unplugged, or moved on -- so the transfer is dropped and the
 /// loop goes back to waiting for a command rather than spinning forever.
 const IDLE_LIMIT: u32 = 2_000_000;
 
-/// Serve the card as a USB drive until `should_exit` returns true.
-pub fn run(dev: &mut Sdmmc, card: &Card, mut should_exit: impl FnMut() -> bool) {
+/// Serve `dev` as a USB drive until `should_exit` returns true.
+pub fn run(dev: &mut dyn BlockDev, mut should_exit: impl FnMut() -> bool) {
     // The read buffer, for as long as this screen is up. A device that cannot spare
     // sixteen kilobytes right now simply does not offer the drive -- which is a screen
     // declining to open, not a failure anyone has to recover from.
@@ -56,7 +102,7 @@ pub fn run(dev: &mut Sdmmc, card: &Card, mut should_exit: impl FnMut() -> bool) 
             send_bytes(&cswb);
             return;
         }
-        let (status, moved) = dispatch(dev, card, &cbw, cmd, &mut block, chunk, &mut sense);
+        let (status, moved) = dispatch(dev, &cbw, cmd, &mut block, chunk, &mut sense);
         // If a Bulk-Only Mass Storage Reset arrived while this command was in flight, the
         // host has abandoned it and is not waiting for a CSW. Drop it and go back to
         // waiting for the next CBW -- sending a stale CSW now would be read as the front
@@ -78,8 +124,7 @@ pub fn run(dev: &mut Sdmmc, card: &Card, mut should_exit: impl FnMut() -> bool) 
 /// Carry out one command's data phase; return the CSW status and how many data bytes
 /// moved (for the CSW residue).
 fn dispatch(
-    dev: &mut Sdmmc,
-    card: &Card,
+    dev: &mut dyn BlockDev,
     cbw: &Cbw,
     cmd: Command,
     block: &mut [u8; BLOCK_LEN],
@@ -95,7 +140,7 @@ fn dispatch(
             reply_in(&reply[..n], cbw)
         }
         Command::ReadCapacity => {
-            let n = msc::read_capacity(card.blocks, &mut reply);
+            let n = msc::read_capacity(dev.block_count(), &mut reply);
             reply_in(&reply[..n], cbw)
         }
         Command::ModeSense { .. } => {
@@ -103,7 +148,7 @@ fn dispatch(
             reply_in(&reply[..n], cbw)
         }
         Command::ReadFormatCapacities { .. } => {
-            let n = msc::read_format_capacities(card.blocks, &mut reply);
+            let n = msc::read_format_capacities(dev.block_count(), &mut reply);
             reply_in(&reply[..n], cbw)
         }
         Command::RequestSense { .. } => {
@@ -111,8 +156,8 @@ fn dispatch(
             *sense = Sense::OK; // sense is consumed by being read
             reply_in(&reply[..n], cbw)
         }
-        Command::Read { lba, blocks } => transfer_read(dev, card, lba, blocks, chunk, sense),
-        Command::Write { lba, blocks } => transfer_write(dev, card, lba, blocks, block, sense),
+        Command::Read { lba, blocks } => transfer_read(dev, lba, blocks, chunk, sense),
+        Command::Write { lba, blocks } => transfer_write(dev, lba, blocks, block, sense),
         Command::Unsupported => {
             *sense = Sense::INVALID_COMMAND;
             (csw_status::FAILED, 0)
@@ -126,8 +171,8 @@ fn reply_in(data: &[u8], cbw: &Cbw) -> (u8, u32) {
     (csw_status::PASSED, send_bytes(&data[..want]) as u32)
 }
 
-fn out_of_range(card: &Card, lba: u32, blocks: u16) -> bool {
-    lba as u64 + blocks as u64 > card.blocks as u64
+fn out_of_range(dev: &dyn BlockDev, lba: u32, blocks: u16) -> bool {
+    lba as u64 + blocks as u64 > dev.block_count() as u64
 }
 
 /// Blocks read from the card and streamed to the host as one gapless bulk-IN transfer.
@@ -145,14 +190,13 @@ const CHUNK_LEN: usize = CHUNK_BLOCKS * BLOCK_LEN;
 // none of its life pretending to be a disk.
 
 fn transfer_read(
-    dev: &mut Sdmmc,
-    card: &Card,
+    dev: &mut dyn BlockDev,
     lba: u32,
     blocks: u16,
     buf: &mut [u8],
     sense: &mut Sense,
 ) -> (u8, u32) {
-    if out_of_range(card, lba, blocks) {
+    if out_of_range(dev, lba, blocks) {
         *sense = Sense::LBA_OUT_OF_RANGE;
         return (csw_status::FAILED, 0);
     }
@@ -167,7 +211,7 @@ fn transfer_read(
             let Ok(slot) = <&mut [u8; BLOCK_LEN]>::try_from(slot) else {
                 unreachable!("slice is exactly one block")
             };
-            if read_block(dev, card, lba + done + i as u32, slot).is_err() {
+            if dev.read_block(lba + done + i as u32, slot).is_err() {
                 *sense = Sense::MEDIUM_ERROR;
                 // Ship the whole blocks read before the failure, then fail the command.
                 let got = send_bytes(&buf[..i * BLOCK_LEN]);
@@ -187,14 +231,13 @@ fn transfer_read(
 }
 
 fn transfer_write(
-    dev: &mut Sdmmc,
-    card: &Card,
+    dev: &mut dyn BlockDev,
     lba: u32,
     blocks: u16,
     block: &mut [u8; BLOCK_LEN],
     sense: &mut Sense,
 ) -> (u8, u32) {
-    if out_of_range(card, lba, blocks) {
+    if out_of_range(dev, lba, blocks) {
         *sense = Sense::LBA_OUT_OF_RANGE;
         return (csw_status::FAILED, 0);
     }
@@ -204,7 +247,7 @@ fn transfer_write(
             return (csw_status::FAILED, got);
         }
         got += BLOCK_LEN as u32;
-        if write_block(dev, card, lba + i, block).is_err() {
+        if dev.write_block(lba + i, block).is_err() {
             *sense = Sense::MEDIUM_ERROR;
             return (csw_status::FAILED, got);
         }

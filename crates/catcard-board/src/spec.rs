@@ -136,6 +136,32 @@ pub struct Psram {
 }
 
 impl Psram {
+    /// Bytes reserved at the very top of PSRAM — just below the recovery header — for the
+    /// [Virtual Disk](../../catcard_fw/vdisk/index.html): a fixed, memory-mapped FAT
+    /// volume the firmware formats once, exposes over USB mass storage, and browses
+    /// locally. Carved out the way the recovery header is: [`usable`](Self::usable) stops
+    /// short of it, so a [`take`](../../catcard_fw/psram/fn.take.html) lease
+    /// (signing, a QR being reassembled, a settings restore, the memory test) is never
+    /// handed bytes that overlap the disk.
+    ///
+    /// **2 MiB.** A Coldcard PSBT, descriptor or export is tens to low hundreds of
+    /// kilobytes, so two mebibytes stages the files this device actually moves while
+    /// leaving the bulk of the 8 MiB part for the signing and staging leases. At 512-byte
+    /// sectors it is a small FAT12/FAT16 volume, which is what removable media this size
+    /// carry.
+    ///
+    /// **Not protected from firmware staging.** `catcard_upgrade`'s `PsramArea` stages an
+    /// incoming image in the *upper half* of the part (`[image_base, staging_header)`),
+    /// which the disk sits inside; its capacity cannot shrink without refusing a
+    /// legitimately large image. The two never run at once — a host cannot offer firmware
+    /// while the device is enumerated as a disk, and staging an upgrade reboots — and the
+    /// disk is volatile scratch, so an upgrade that overwrites it simply leaves an
+    /// uninitialised region the next mount reformats.
+    ///
+    /// Source: hw-reference/storage.md §PSRAM (8 MiB part) [C]; the size is a design
+    /// choice [I].
+    pub const VDISK_RESERVE: u32 = 2 * 1024 * 1024;
+
     /// One past the last byte.
     pub const fn end(&self) -> u32 {
         self.base + self.len
@@ -152,13 +178,26 @@ impl Psram {
         self.base + self.len / 2
     }
 
-    /// Everything below the recovery header: the part a holder may use.
+    /// Everything below the recovery header **and below the Virtual Disk region**: the
+    /// part a holder may use.
     ///
     /// The last two kilobytes are the bootloader's -- they say where a staged image is,
     /// and they are read before any of this firmware runs -- so they are not scratch and
-    /// are not handed out.
+    /// are not handed out. The [`VDISK_RESERVE`](Self::VDISK_RESERVE) bytes below that
+    /// are the Virtual Disk's, carved out the same way, so a lease never overlaps it.
     pub const fn usable(&self) -> u32 {
-        self.staging_header - self.base
+        self.staging_header - self.base - Self::VDISK_RESERVE
+    }
+
+    /// Base address of the [Virtual Disk](Self::VDISK_RESERVE) region: it sits just below
+    /// the recovery header, above everything a [`usable`](Self::usable) lease can reach.
+    pub const fn vdisk_base(&self) -> u32 {
+        self.staging_header - Self::VDISK_RESERVE
+    }
+
+    /// Length of the Virtual Disk region, in bytes.
+    pub const fn vdisk_len(&self) -> u32 {
+        Self::VDISK_RESERVE
     }
 }
 
@@ -886,15 +925,56 @@ mod tests {
                 "{}: the header is off the end of the chip",
                 board.name
             );
+            // The usable region now stops a Virtual Disk short of the header, not at it.
             assert_eq!(
-                psram.base + psram.usable(),
+                psram.base + psram.usable() + Psram::VDISK_RESERVE,
                 psram.staging_header,
-                "{}: usable region does not end at the header",
+                "{}: usable region does not end where the Virtual Disk begins",
                 board.name
             );
             assert!(
                 psram.image_base() < psram.staging_header,
                 "{}: no room between a staged image and the header describing it",
+                board.name
+            );
+        }
+    }
+
+    /// The Virtual Disk region sits between the usable (leasable) region and the recovery
+    /// header, touching neither: a lease stops where the disk starts, and the disk stops
+    /// where the header starts. Checked on every board that has PSRAM.
+    #[test]
+    fn the_disk_region_sits_between_the_usable_region_and_the_header() {
+        for board in ALL {
+            let Some(psram) = board.psram else { continue };
+            // Non-empty, and a whole number of 512-byte sectors so it can hold a FAT.
+            assert!(psram.vdisk_len() > 0, "{}: empty disk region", board.name);
+            assert_eq!(
+                psram.vdisk_len() % 512,
+                0,
+                "{}: disk region is not a whole number of sectors",
+                board.name
+            );
+            // Starts exactly where the leasable region ends: no gap, no overlap.
+            assert_eq!(
+                psram.vdisk_base(),
+                psram.base + psram.usable(),
+                "{}: disk does not start where the usable region ends",
+                board.name
+            );
+            // Ends exactly at the recovery header: it never touches the bootloader's
+            // sixteen bytes, and leaves no unused slack below them.
+            assert_eq!(
+                psram.vdisk_base() + psram.vdisk_len(),
+                psram.staging_header,
+                "{}: disk region does not end at the recovery header",
+                board.name
+            );
+            // And it is inside the chip.
+            assert!(
+                psram.vdisk_base() >= psram.base
+                    && psram.vdisk_base() + psram.vdisk_len() <= psram.end(),
+                "{}: disk region runs off the part",
                 board.name
             );
         }

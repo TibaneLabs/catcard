@@ -391,6 +391,34 @@ mod tests {
         round_trip(128 * GIB / BLOCK_LEN as u64, FsKind::Exfat);
     }
 
+    /// The Virtual Disk's format path: an empty FAT volume laid down over the whole
+    /// device at sector 0 (a superfloppy, no partition table), then mounted back through
+    /// [`AnyVolume`] and found empty. Run at the firmware's reserved size —
+    /// `catcard_board::Psram::VDISK_RESERVE`, 2 MiB — so a size that stopped producing a
+    /// mountable FAT would fail here rather than only on hardware. This mirrors
+    /// `catcard_fw::vdisk`, which formats with `fat::Volume::format` and mounts with
+    /// `AnyVolume::mount_with`.
+    #[test]
+    fn a_two_mib_superfloppy_formats_and_mounts_empty() {
+        const VDISK_BYTES: u64 = 2 * 1024 * 1024;
+        let mem = Mem::new(VDISK_BYTES / BLOCK_LEN as u64);
+        let opts = fat::FormatOpts {
+            volume_id: 0x0CA7_D15C,
+            label: *b"CATCARD VD ",
+            ..Default::default()
+        };
+        fat::Volume::<Mem, BLOCK_LEN>::format(mem.clone(), &opts).expect("format vdisk");
+
+        // Sector 0 is a boot sector (no MBR), so mount_auto mounts the whole device.
+        let mut vol =
+            AnyVolume::<Mem, 512>::mount_with(|| Ok(mem.clone())).expect("could not mount vdisk");
+        assert!(matches!(vol, AnyVolume::Fat(_)), "vdisk should be FAT");
+        let mut names: Vec<std::string::String> = vec![];
+        vol.enumerate("", |name, _is_dir, _len| names.push(name.into()))
+            .expect("enumerate failed");
+        assert!(names.is_empty(), "fresh vdisk had entries: {names:?}");
+    }
+
     #[test]
     fn chs_clamps_past_the_cylinder_limit() {
         // A start inside the CHS range encodes a real tuple.
