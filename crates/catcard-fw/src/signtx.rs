@@ -283,9 +283,7 @@ fn with_card<T>(
 /// a held signing lease.
 #[cfg(not(feature = "board-mk3"))]
 fn with_vdisk<T>(
-    f: impl FnOnce(
-        &mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>,
-    ) -> Result<T, &'static str>,
+    f: impl FnOnce(&mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>) -> Result<T, &'static str>,
 ) -> Result<T, &'static str> {
     crate::vdisk::ensure_formatted()?;
     let mut vol = crate::vdisk::mount()?;
@@ -356,11 +354,7 @@ pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'stat
 }
 
 /// Read the picked file from the chosen storage into `buf`. Returns its length, or why not.
-fn read_source_file(
-    storage: Storage,
-    path: &str,
-    buf: &mut [u8],
-) -> Result<usize, &'static str> {
+fn read_source_file(storage: Storage, path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
     match storage {
         Storage::Sd => read_card_file(path, buf),
         #[cfg(not(feature = "board-mk3"))]
@@ -458,8 +452,13 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         // says which.
         Some(p) => p,
         None => {
-            let Some(p) = browse_source(ui, storage, "Pick a .psbt", Some("psbt"), menu::Browse::File)
-            else {
+            let Some(p) = browse_source(
+                ui,
+                storage,
+                "Pick a .psbt",
+                Some("psbt"),
+                menu::Browse::File,
+            ) else {
                 return;
             };
             let mut path: heapless::String<PATH_MAX> = heapless::String::new();
@@ -485,7 +484,8 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     let mut wait: heapless::String<24> = heapless::String::new();
     let _ = core::fmt::Write::write_fmt(&mut wait, format_args!("reading {}", storage.medium()));
     menu::card_wait(ui.panel, HEAD, &wait);
-    let len = match read_source_file(storage, &path, buf).and_then(|len| as_psbt_bytes(buf, len, spare))
+    let len = match read_source_file(storage, &path, buf)
+        .and_then(|len| as_psbt_bytes(buf, len, spare))
     {
         Ok(len) => len,
         Err(why) => {
