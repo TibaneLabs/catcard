@@ -69,6 +69,59 @@ pub const BATT_OFF_CHOICES: [(&str, u32); 10] = [
 /// The longest on-battery power-off read back: a day. Past it, the value is nonsense.
 pub const MAX_BATT_OFF_SECONDS: u32 = 24 * 60 * 60;
 
+/// The USB mode: `"off"`, `"ckcc"` or `"catcard"`. Device-wide, and read before the PIN,
+/// because what a host sees when the cable goes in cannot wait for a login.
+pub const USB_MODE: &str = "cat_usbm";
+
+/// What the device is on the USB bus. See `docs/USB.md`, "USB modes".
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum UsbMode {
+    /// Soft-disconnected: nothing to enumerate, answer or inject through.
+    Off,
+    /// Stock Coldcard's USB identity and host protocol, for existing host tools.
+    Ckcc,
+    /// CatCard's own identity and protocol. What every device did before the choice.
+    #[default]
+    CatCard,
+}
+
+impl UsbMode {
+    /// The value written under [`USB_MODE`].
+    pub const fn word(self) -> &'static str {
+        match self {
+            UsbMode::Off => "off",
+            UsbMode::Ckcc => "ckcc",
+            UsbMode::CatCard => "catcard",
+        }
+    }
+}
+
+/// The USB mode the pre-login settings name, or `None` when they name none.
+///
+/// **Doubt reads as CatCard**, not off: a value that is there but will not read leaves the
+/// device reachable the way it always was. `None` is kept apart from that because an
+/// absent value is the one case where the wallet's old port switch still counts -- see
+/// [`effective_usb_mode`].
+pub fn usb_mode(doc: &Doc<'_>) -> Option<UsbMode> {
+    doc.get(USB_MODE)?;
+    Some(match text(doc, USB_MODE) {
+        Some("off") => UsbMode::Off,
+        Some("ckcc") => UsbMode::Ckcc,
+        _ => UsbMode::CatCard,
+    })
+}
+
+/// The mode in force: the pre-login value when there is one; otherwise the wallet's old
+/// per-wallet `USB port` switch, which only ever said on or off -- off stays off, and on
+/// is CatCard, which is what "on" meant when it was written.
+pub fn effective_usb_mode(prelogin: Option<UsbMode>, wallet_port_on: bool) -> UsbMode {
+    match prelogin {
+        Some(m) => m,
+        None if !wallet_port_on => UsbMode::Off,
+        None => UsbMode::CatCard,
+    }
+}
+
 /// The longest countdown offered: twenty-eight days, stock's own ceiling.
 /// Source: hw-reference/firmware-features.md §"PIN & login" -- "5 min–28 days" [C]
 pub const MAX_COUNTDOWN_MINUTES: u32 = 28 * 24 * 60;
@@ -348,6 +401,36 @@ mod tests {
             r#"{"cat_sd2fa":"zz00000000000000000000000000000000000000000000000000000000000000"}"#,
         ] {
             assert_eq!(sd2fa(&doc(json), &mut out), Sd2fa::Damaged, "{json}");
+        }
+    }
+
+    #[test]
+    fn the_usb_mode_reads_back_and_doubt_is_catcard() {
+        for m in [UsbMode::Off, UsbMode::Ckcc, UsbMode::CatCard] {
+            let json = format!(r#"{{"cat_usbm":"{}"}}"#, m.word());
+            assert_eq!(usb_mode(&doc(&json)), Some(m));
+        }
+        assert_eq!(usb_mode(&doc(r#"{}"#)), None);
+        for json in [
+            r#"{"cat_usbm":""}"#,
+            r#"{"cat_usbm":"OFF"}"#,
+            r#"{"cat_usbm":0}"#,
+            r#"{"cat_usbm":"stock"}"#,
+        ] {
+            assert_eq!(usb_mode(&doc(json)), Some(UsbMode::CatCard), "{json}");
+        }
+        // Stock's disable-USB key is not this one.
+        assert_eq!(usb_mode(&doc(r#"{"du":"1"}"#)), None);
+    }
+
+    /// The wallet's old on/off switch counts only while the pre-login value is absent.
+    #[test]
+    fn the_old_port_switch_is_migrated_only_when_nothing_newer_is_set() {
+        assert_eq!(effective_usb_mode(None, false), UsbMode::Off);
+        assert_eq!(effective_usb_mode(None, true), UsbMode::CatCard);
+        for m in [UsbMode::Off, UsbMode::Ckcc, UsbMode::CatCard] {
+            assert_eq!(effective_usb_mode(Some(m), false), m);
+            assert_eq!(effective_usb_mode(Some(m), true), m);
         }
     }
 
