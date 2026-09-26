@@ -1074,6 +1074,13 @@ pub(crate) fn review_and_sign(
             Err(_) => break,
         };
         let mut done = false;
+        // Delta mode: what the input already carries, so only the signature this device
+        // adds is spoiled below. See `crate::trickpin`.
+        #[cfg(not(feature = "board-mk3"))]
+        let (before, at_before) = (
+            crate::trickpin::delta_mode().then(|| signer::SigsBefore::of(&psbt, index)),
+            at,
+        );
         match crate::keywork::run(|kw| match sink.listed() {
             Some(listed) => signer::sign_input_listed(
                 &psbt,
@@ -1119,6 +1126,28 @@ pub(crate) fn review_and_sign(
                         break;
                     }
                     Err(_) => continue,
+                }
+            }
+        }
+        // Delta mode: the signature just made is spoiled before anything sees it. If that
+        // cannot be done, nothing is handed back at all -- a valid signature must never
+        // leave a delta session.
+        #[cfg(not(feature = "board-mk3"))]
+        if done && let Some(b) = before.as_ref() {
+            let spoiled = Psbt::parse(&from[..at]).ok().and_then(|p| {
+                signer::spoil_new_signature(&p, index, b, into)
+                    .ok()
+                    .flatten()
+            });
+            match spoiled {
+                Some(n) => {
+                    core::mem::swap(&mut from, &mut into);
+                    at = n;
+                }
+                None => {
+                    crate::catlog!("sign: input {} not finished ({} B)", index, at_before);
+                    signed = 0;
+                    break;
                 }
             }
         }

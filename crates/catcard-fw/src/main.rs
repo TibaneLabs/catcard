@@ -189,6 +189,10 @@ mod teleport;
 /// The lamp belongs to the scanner, so it is the Q1's too.
 #[cfg(feature = "board-q1")]
 mod torch;
+/// Trick PINs (gate 22) and delta mode. mk4 and later: the mk3 has no second secure
+/// element.
+#[cfg(not(feature = "board-mk3"))]
+mod trickpin;
 mod trng;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]

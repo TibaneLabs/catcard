@@ -1,13 +1,13 @@
 //! The Single-Signer Spending Policy, in force: hobbled mode, the check before signing,
-//! the unlock code, and the screens that set it up.
+//! the way out, and the screens that set it up.
 //!
 //! The rules themselves -- what the policy holds, what it refuses, which rows survive
 //! hobbled mode -- are [`catcard_settings::policy`], where a host can test them. This
 //! module is what the firmware does with them:
 //!
 //! - **At login**, [`load`] reads the root wallet's policy and decides the session's
-//!   [`Mode`]: hobbled when the policy is active, suspended when the unlock code was typed
-//!   at the PIN prompt, off otherwise.
+//!   [`Mode`]: hobbled when the policy is active, suspended when the policy's unlock trick
+//!   PIN was typed at the PIN prompt (`crate::trickpin`), off otherwise.
 //! - **Every menu** asks [`row_allowed`] before showing a row, so hobbled mode is one
 //!   filter over the ordinary menus and not a second tree.
 //! - **Every wallet-settings save** asks [`hobbled`] first (`crate::settings::save_wallet`)
@@ -51,11 +51,11 @@ pub(crate) enum Mode {
     Hobbled,
     /// Hobbled for this session only; nothing persists.
     TestDrive,
-    /// The policy is active but the unlock code was typed at login: full menus, no check,
+    /// The policy is active but its unlock PIN was typed at login: full menus, no check,
     /// and the configuration screen offers Remove Policy.
     Suspended,
     /// Something is under the policy's key and it will not read. Hobbled, and nothing
-    /// signs; the unlock code is the way out.
+    /// signs; the unlock PIN is the way out.
     Damaged,
 }
 
@@ -63,7 +63,9 @@ pub(crate) enum Mode {
 struct State {
     mode: Mode,
     allow: Allow,
-    /// The unlock code was typed at the PIN prompt this boot.
+    /// The policy's unlock trick PIN was typed at the PIN prompt this boot. Never on the
+    /// mk3, which has no trick PINs.
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
     unlock_typed: bool,
 }
 
@@ -109,18 +111,13 @@ fn mode_name(mode: Mode) -> &'static str {
     }
 }
 
-/// The PIN prompt matched the unlock code. Remembered until [`load`] reads the policy.
+/// The login reported the policy's unlock trick PIN (`crate::trickpin::after_login`).
+/// Remembered until [`load`] reads the policy; the main PIN is asked for next.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
 pub(crate) fn note_unlock_code() {
     // SAFETY: as in `state`; called from the PIN prompt, before the menu exists.
     unsafe { (*core::ptr::addr_of_mut!(STATE)).unlock_typed = true };
-    crate::catlog!("policy: unlock code typed");
-}
-
-/// Whether the unlock code has already been taken this boot. The PIN prompt checks this
-/// so a code that happened to equal the main PIN cannot match forever: the second time
-/// the same digits are typed they go to the bootloader.
-pub(crate) fn unlock_typed() -> bool {
-    state().unlock_typed
+    crate::catlog!("policy: unlock PIN typed");
 }
 
 #[cfg_attr(feature = "board-mk3", allow(dead_code))]
@@ -209,7 +206,7 @@ mod imp {
                     allow,
                 )
             }
-            // Not active: an unlock code typed against nothing is nothing.
+            // Not active: an unlock PIN typed against nothing is nothing.
             Read::Policy(_) => (Mode::Off, Allow::default()),
             Read::Damaged => (
                 if typed {
@@ -221,8 +218,8 @@ mod imp {
             ),
         };
         set(mode, allow);
-        // The one thing said out loud: the PIN prompt itself says nothing when the code
-        // matches, so the owner learns here that it took.
+        // The one thing said out loud: the PIN prompt itself says nothing when the unlock
+        // PIN is typed, so the owner learns here that it took.
         if mode == Mode::Suspended {
             menu::message(
                 ui.panel,
@@ -672,8 +669,8 @@ mod imp {
             )
             .wrapped(),
             Row::body(
-                "An unlock code, chosen at ACTIVATE, is the way back. Without one, only \
-                 destroying the seed is.",
+                "An unlock PIN, chosen at ACTIVATE, is the way back: typed at login, \
+                 then the main PIN. Without one, only destroying the seed is.",
             )
             .wrapped(),
             Row::body("ENTER to set one up; CANCEL to leave.")
@@ -1227,9 +1224,11 @@ mod imp {
         true
     }
 
-    /// Lock the policy in. With an unlock code, or -- after the warning -- without one.
+    /// Lock the policy in. With an unlock PIN -- stock's "policy unlock" trick PIN -- or,
+    /// after the warning, without one.
     /// Source: hw-reference/help-and-warning-screens.md §12 "Activate / lock in the
-    /// policy" [C]; that the code is chosen here rather than at enable `[I]`
+    /// policy" [C]; trick-pin-slot-format.md §1.4 (`TC_FW_DEFINED`, `TCA_SP_UNLOCK`) [C].
+    /// That the PIN is chosen here rather than at enable `[I]`.
     fn activate(
         gate: &Callgate,
         login: &mut catcard_pin::Login,
@@ -1244,20 +1243,26 @@ mod imp {
         if !word_check_passes(gate, login, ui, policy) {
             return false;
         }
-        menu::ask(ui.panel, H, "set an unlock code", "to get back out?");
-        let with_code = menu::confirmed(ui);
-        let mut record: heapless::String<{ engine::UNLOCK_RECORD_LEN }> = heapless::String::new();
+        let has_pin = crate::trickpin::has_policy_unlock(gate, login, ui);
+        let with_code = if has_pin {
+            true
+        } else {
+            menu::ask(ui.panel, H, "set an unlock PIN", "to get back out?");
+            menu::confirmed(ui)
+        };
         if with_code {
-            let Some(text) = enrol_unlock_code(gate, login, ui) else {
+            // A trick PIN, in the secure element, saved before the policy is: a device
+            // that lost power between the two has an unlock PIN and no policy, which is
+            // nothing; the other order would be a policy with no way out nobody chose.
+            if !has_pin && !crate::trickpin::add_policy_unlock(gate, login, ui) {
                 return false;
-            };
-            let _ = record.push_str(&text);
+            }
         } else {
             // No way back but the seed.
             let rows = [
-                Row::title("No unlock code"),
+                Row::title("No unlock PIN"),
                 Row::body(
-                    "With no unlock code there is NO WAY to change or remove this policy \
+                    "With no unlock PIN there is NO WAY to change or remove this policy \
                      except destroying the seed and loading it again.",
                 )
                 .wrapped(),
@@ -1275,7 +1280,7 @@ mod imp {
             Row::title("Lock in the policy?"),
             Row::body("The device is hobbled from now: signing and addresses only.").wrapped(),
             Row::body(if with_code {
-                "To get back: type the unlock code at the PIN prompt, then the main PIN, \
+                "To get back: type the unlock PIN at the PIN prompt, then the main PIN, \
                  then the seed words if Word Check is on."
             } else {
                 "There is no way back but destroying the seed."
@@ -1284,13 +1289,6 @@ mod imp {
             Row::body("CONTINUE? ENTER for yes.").small(),
         ];
         if !matches!(menu::show_doc(ui, &rows, false, true), DocExit::Confirmed) {
-            return false;
-        }
-        // The record before the flag: a device that lost power between the two has a
-        // code and no policy, which is nothing; the other order would be a policy with
-        // no way out that nobody chose.
-        if with_code && !crate::settings::save_unlock_record(ui, &record) {
-            say(ui, "could not save the code");
             return false;
         }
         if !update_root(gate, login, ui, |p| {
@@ -1312,80 +1310,7 @@ mod imp {
         true
     }
 
-    /// Choose the unlock code: both halves twice, then a probe against the bootloader so
-    /// it cannot be the main PIN -- a code that were would match at every login and the
-    /// owner could never get in. The probe spends one PIN attempt when the code is not
-    /// the PIN (the normal case), restored by the next successful login, exactly as
-    /// Test login does; refused when few attempts remain. Returns the record to store.
-    fn enrol_unlock_code(
-        gate: &Callgate,
-        login: &mut catcard_pin::Login,
-        ui: &mut Ui<'_>,
-    ) -> Option<heapless::String<{ engine::UNLOCK_RECORD_LEN }>> {
-        use crate::pinentry::{self, PinProbe};
-        const H: &str = "Unlock code";
-        menu::message(
-            ui.panel,
-            H,
-            "a prefix and a suffix,",
-            "typed like a PIN; not the PIN",
-        );
-        menu::wait_for_any_key(ui);
-        let (prefix, suffix) = pinentry::collect_unlock_code(ui.panel, ui.matrix, ui.drbg)?;
-        let mut code: heapless::Vec<u8, 16> = heapless::Vec::new();
-        let _ = code.extend_from_slice(prefix.as_bytes());
-        let _ = code.push(b'-');
-        let _ = code.extend_from_slice(suffix.as_bytes());
-        if !engine::unlock_code_ok(&code) {
-            code.zeroize();
-            say(ui, "4 to 12 digits in all");
-            return None;
-        }
-        menu::message(ui.panel, H, "checking it is not", "the PIN (spends 1 try)");
-        menu::wait_for_any_key(ui);
-        match pinentry::probe_main_pin(gate, ui.panel, login, prefix.as_bytes(), suffix.as_bytes())
-        {
-            PinProbe::NotMainPin { attempts_left } => {
-                crate::catlog!("policy: code probed, {} attempts left", attempts_left);
-            }
-            PinProbe::IsMainPin => {
-                code.zeroize();
-                say(ui, "that is the main PIN: choose another");
-                return None;
-            }
-            PinProbe::TooFewTries { attempts_left } => {
-                code.zeroize();
-                let mut line: heapless::String<40> = heapless::String::new();
-                let _ = write!(line, "only {attempts_left} tries left");
-                menu::message(ui.panel, H, &line, "log in again first");
-                menu::wait_for_any_key(ui);
-                return None;
-            }
-            PinProbe::Failed => {
-                code.zeroize();
-                say(ui, "could not check the code");
-                return None;
-            }
-        }
-        // The salt from the protocol generator: a value that leaves the device (into the
-        // flash) and must not be guessable from anything on the screen.
-        let mut salt = [0u8; engine::UNLOCK_SALT_LEN];
-        if ui.protocol.generate(&mut salt).is_err() {
-            code.zeroize();
-            say(ui, "no randomness for the salt");
-            return None;
-        }
-        menu::blocking_screen(ui.panel, H, "stretching");
-        let mut buf = [0u8; engine::UNLOCK_RECORD_LEN];
-        let record = engine::render_unlock(&code, &salt, engine::UNLOCK_ROUNDS, &mut buf);
-        code.zeroize();
-        let record = record?;
-        let mut out: heapless::String<{ engine::UNLOCK_RECORD_LEN }> = heapless::String::new();
-        out.push_str(record).ok()?;
-        Some(out)
-    }
-
-    /// Forget the policy and the unlock code. Behind the Word Check where it is on.
+    /// Forget the policy and its unlock PIN. Behind the Word Check where it is on.
     /// Source: hw-reference/help-and-warning-screens.md §12 "Remove Policy" [C]
     fn remove(
         gate: &Callgate,
@@ -1397,7 +1322,7 @@ mod imp {
         if !word_check_passes(gate, login, ui, policy) {
             return false;
         }
-        menu::ask(ui.panel, H, "forget the policy", "and the unlock code?");
+        menu::ask(ui.panel, H, "forget the policy", "and the unlock PIN?");
         if !menu::confirmed(ui) {
             return false;
         }
@@ -1407,8 +1332,9 @@ mod imp {
         }) {
             return false;
         }
-        if !crate::settings::save_unlock_record(ui, "") {
-            say(ui, "policy removed; code not cleared");
+        // Stock forgets the bypass PIN with the policy (§12 "Remove Policy").
+        if !crate::trickpin::remove_policy_unlock(gate, login, ui) {
+            say(ui, "policy removed; unlock PIN not");
         }
         set(Mode::Off, Allow::default());
         menu::message(ui.panel, H, "policy removed", "device is unrestricted");

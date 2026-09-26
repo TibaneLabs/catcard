@@ -129,6 +129,12 @@ pub const MS_UNSORTED: &str = "cat_msunsorted";
 /// `"1"` on. Off, the middle of each address is elided, as stock does by default.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §MS "Full Address View?" [C]
 pub const MS_FULL_ADDR: &str = "cat_msfulladdr";
+/// The trick PINs this firmware made, as `slot:flags:arg` records -- **never a PIN**, and
+/// never a delta trick's digits (`catcard_pin::trick::render`). Only a label for the list:
+/// the tricks themselves are in the second secure element. In the stored wallet's own
+/// file, so a duress session, in another wallet's file, sees none. Not stock's `tp`,
+/// whose value holds the PINs.
+pub const TRICK_PINS: &str = "cat_tp";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///

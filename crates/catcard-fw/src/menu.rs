@@ -327,6 +327,9 @@ enum Screen {
     LockDown,
     /// Changing the main PIN.
     ChangePin,
+    /// Trick PINs: duress, wipe, brick and the rest. mk4 and later.
+    #[cfg(not(feature = "board-mk3"))]
+    TrickPins,
     /// Type the PIN as at login, and be told whether it is right.
     TestLogin,
     /// Shuffle the number row at login.
@@ -731,6 +734,8 @@ fn seed_tools_items() -> &'static [&'static str] {
 /// the device.
 const LOGIN_ITEMS: &[&str] = &[
     "Change PIN",
+    #[cfg(not(feature = "board-mk3"))]
+    "Trick PINs",
     "Test login",
     "Nickname",
     // Both live in the pre-login settings.
@@ -1898,6 +1903,12 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Main,
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
+        // May leave a duress wallet in force (Activate Wallet).
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::TrickPins => reseeds(
+            |a| crate::trickpin::screen(a.gate, a.login, a.ui),
+            Screen::Login,
+        ),
         Screen::TestLogin => to(|a| test_login_screen(a.gate, a.login, a.ui), Screen::Login),
         Screen::ScrambleKeys => to(
             |a| scramble_keys_screen(a.gate, a.login, a.ui),
@@ -2304,6 +2315,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Trick PINs")) => Screen::TrickPins,
             (Key::Confirm, Some("Test login")) => Screen::TestLogin,
             (Key::Confirm, Some("Scramble keys")) => Screen::ScrambleKeys,
             (Key::Confirm, Some("Login countdown")) => Screen::LoginCountdown,
@@ -3015,6 +3028,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Brightness => {}
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::KillKey | Screen::Sd2fa => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::TrickPins => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
     }
@@ -11749,6 +11764,9 @@ fn why_failed(f: catcard_pin::Failure) -> &'static str {
 /// is, the xprv or WIF string. Asked first, because the whole point of the screen is to
 /// put the secret on the glass, and anyone looking over a shoulder gets it too.
 fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    // Delta mode: showing the seed erases it instead. See `crate::trickpin`.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::trickpin::seed_reveal(gate);
     use crate::key::Loaded;
     use catcard_ui::scroll::Line as DLine;
     use zeroize::Zeroize as _;

@@ -29,32 +29,21 @@
 //! that writes it. So a present-but-unreadable policy is a bug or a torn write, not an
 //! attack -- and it still reads as [`Read::Damaged`], which the firmware treats as a policy
 //! that allows nothing. The direction that matters is that damage never reads as **off**:
-//! a policy that evaporated with two bad bytes would be no policy at all. The unlock code
+//! a policy that evaporated with two bad bytes would be no policy at all. The unlock PIN
 //! is the way out of a damaged one, exactly as it is out of a good one.
 //!
-//! # The unlock code
+//! # The way out
 //!
-//! Stock's escape is an SE2 trick PIN (callgate 22), whose slot layout the reference does
-//! not give (docs/HARDWARE-OPEN-ITEMS.md). Ours is a code of the PIN's own shape --
-//! `prefix-suffix`, four to twelve digits in all -- kept as a slow hash in the pre-login
-//! settings under [`UNLOCK_KEY`]. At the PIN prompt the typed halves are checked against
-//! it *before* they go to gate 18: a match suspends the policy for the session and asks
-//! for the main PIN as usual, with nothing on screen to say so; anything else is a PIN
-//! attempt, so a guess burns one of the thirteen as a trick-PIN guess does. `[I]`
-//!
-//! The hash is PBKDF2-HMAC-SHA256 over the code with a random sixteen-byte salt and
-//! [`UNLOCK_ROUNDS`] rounds: a code is at most twelve digits, so the stretch is what
-//! stands between a copy of the flash and the policy.
+//! Stock's escape: a trick PIN in the second secure element whose flags are `TC_FW_DEFINED`
+//! and whose argument is `TCA_SP_UNLOCK` (hw-reference/trick-pin-slot-format.md §1.4 [C]).
+//! Typed at the login prompt, it is followed by the main PIN, and the policy is suspended
+//! for that session. Nothing about it is kept here: it is `catcard_pin::trick` and the
+//! firmware's `trickpin`.
 
 use crate::json::{self, Doc};
-use purecrypto::ct::ConstantTimeEq;
-use purecrypto::hash::Sha256;
 
 /// Where the policy lives in the wallet's settings object. **Not** a stock key. `[I]`
 pub const KEY: &str = "cat_sssp";
-
-/// Where the unlock code's hash lives in the pre-login settings. Our own key. `[I]`
-pub const UNLOCK_KEY: &str = "cat_sssp_unlock";
 
 /// Most whitelisted addresses. Stock's bound for its spending-policy whitelist.
 /// Source: hw-reference/firmware-features.md §"Limits" "CCC/HSM address whitelist: up to
@@ -76,20 +65,6 @@ pub const DEFAULT_VELOCITY_MAGNITUDE: u64 = 100_000_000;
 
 /// Most blocks a velocity limit can ask for: about a year.
 pub const MAX_VELOCITY: u32 = 52_560;
-
-/// PBKDF2 rounds for the unlock code. Fifty thousand: a twelve-digit code is a small
-/// space, and this is what makes searching it from a copy of the flash slow. `[I]`
-pub const UNLOCK_ROUNDS: u32 = 50_000;
-/// Most rounds a stored record may ask for; a record past this is damaged, not a
-/// stretch that runs for an hour.
-pub const UNLOCK_MAX_ROUNDS: u32 = 10_000_000;
-/// Bytes of salt under the unlock hash.
-pub const UNLOCK_SALT_LEN: usize = 16;
-/// The unlock code's digit bounds, the dash between its halves excluded.
-pub const UNLOCK_MIN_DIGITS: usize = 4;
-pub const UNLOCK_MAX_DIGITS: usize = 12;
-/// Room for a rendered unlock record.
-pub const UNLOCK_RECORD_LEN: usize = 7 + 10 + 1 + 2 * UNLOCK_SALT_LEN + 1 + 64;
 
 /// One policy, as stored.
 ///
@@ -646,122 +621,6 @@ pub fn may_save(key: &str) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------------------
-// The unlock code
-// ---------------------------------------------------------------------------------------
-
-/// Whether `code` is a well-formed unlock code: `prefix-suffix`, digits either side of
-/// one dash, four to twelve digits in all.
-pub fn unlock_code_ok(code: &[u8]) -> bool {
-    let Some(dash) = code.iter().position(|&b| b == b'-') else {
-        return false;
-    };
-    let (prefix, suffix) = (&code[..dash], &code[dash + 1..]);
-    let digits = prefix.len() + suffix.len();
-    !prefix.is_empty()
-        && !suffix.is_empty()
-        && (UNLOCK_MIN_DIGITS..=UNLOCK_MAX_DIGITS).contains(&digits)
-        && prefix.iter().chain(suffix).all(u8::is_ascii_digit)
-}
-
-/// Stretch `code` under `salt` for `rounds`.
-fn stretch(code: &[u8], salt: &[u8; UNLOCK_SALT_LEN], rounds: u32) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    // Non-zero rounds and a fixed output: neither fallible path applies.
-    purecrypto::kdf::pbkdf2::<Sha256>(code, salt, rounds.max(1), &mut out);
-    out
-}
-
-/// Write the record for `code` -- `pbkdf2$rounds$salt$hash`, hex -- into `out`.
-///
-/// `None` for a malformed code or a buffer too small. `rounds` is a parameter so a host
-/// test can run a cheap one; the firmware passes [`UNLOCK_ROUNDS`].
-pub fn render_unlock<'o>(
-    code: &[u8],
-    salt: &[u8; UNLOCK_SALT_LEN],
-    rounds: u32,
-    out: &'o mut [u8],
-) -> Option<&'o str> {
-    if !unlock_code_ok(code) || rounds == 0 || rounds > UNLOCK_MAX_ROUNDS {
-        return None;
-    }
-    let hash = stretch(code, salt, rounds);
-    let mut w = Writer { out, at: 0 };
-    w.put(b"pbkdf2$")?;
-    w.num(u64::from(rounds))?;
-    w.put(b"$")?;
-    w.hex(salt)?;
-    w.put(b"$")?;
-    w.hex(&hash)?;
-    let n = w.at;
-    core::str::from_utf8(&out[..n]).ok()
-}
-
-impl Writer<'_> {
-    fn hex(&mut self, bytes: &[u8]) -> Option<()> {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for b in bytes {
-            self.put(&[HEX[(b >> 4) as usize], HEX[(b & 15) as usize]])?;
-        }
-        Some(())
-    }
-}
-
-/// The parts of a stored record, if it is one.
-fn parse_unlock(record: &str) -> Option<(u32, [u8; UNLOCK_SALT_LEN], [u8; 32])> {
-    let mut parts = record.split('$');
-    if parts.next()? != "pbkdf2" {
-        return None;
-    }
-    let rounds: u32 = parts.next()?.parse().ok()?;
-    if rounds == 0 || rounds > UNLOCK_MAX_ROUNDS {
-        return None;
-    }
-    let mut salt = [0u8; UNLOCK_SALT_LEN];
-    unhex(parts.next()?, &mut salt)?;
-    let mut hash = [0u8; 32];
-    unhex(parts.next()?, &mut hash)?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((rounds, salt, hash))
-}
-
-fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
-    if text.len() != out.len() * 2 {
-        return None;
-    }
-    for (i, pair) in text.as_bytes().chunks(2).enumerate() {
-        let hex = |c: u8| (c as char).to_digit(16);
-        out[i] = (hex(pair[0])? * 16 + hex(pair[1])?) as u8;
-    }
-    Some(())
-}
-
-/// Whether `code` is the one `record` was made from. A record that will not parse matches
-/// nothing: the login then goes to the bootloader as an ordinary PIN attempt.
-///
-/// Costs the record's rounds of PBKDF2 whatever the answer, and compares in constant
-/// time: a timing signal here would let someone at the keys search the code a byte at a
-/// time without spending PIN attempts.
-pub fn unlock_matches(record: &str, code: &[u8]) -> bool {
-    let Some((rounds, salt, hash)) = parse_unlock(record) else {
-        return false;
-    };
-    if !unlock_code_ok(code) {
-        return false;
-    }
-    let got = stretch(code, &salt, rounds);
-    bool::from(got[..].ct_eq(&hash[..]))
-}
-
-/// The record in the pre-login settings, if one is enrolled. An empty string is none;
-/// anything else is handed to [`unlock_matches`], which decides whether it reads.
-pub fn unlock_record<'a>(doc: &Doc<'a>) -> Option<&'a str> {
-    let t = doc.get(UNLOCK_KEY)?.strip_prefix('"')?.strip_suffix('"')?;
-    (!t.is_empty()).then_some(t)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,107 +1094,8 @@ mod tests {
             "cat_wifs",
             "cat_secnap",
             "multisig",
-            "cat_sssp_unlock",
         ] {
             assert!(!may_save(k), "{k}");
         }
-    }
-
-    // --- the unlock code -------------------------------------------------------------
-
-    #[test]
-    fn unlock_code_shape() {
-        for ok in [
-            b"12-34".as_slice(),
-            b"123456-789012",
-            b"1-234",
-            b"0000-0000",
-        ] {
-            assert!(unlock_code_ok(ok), "{ok:?}");
-        }
-        for bad in [
-            b"1234".as_slice(),
-            b"1-2",
-            b"1234567-890123",
-            b"12-3a",
-            b"-1234",
-            b"1234-",
-            b"12-34-56",
-            b"",
-        ] {
-            assert!(!unlock_code_ok(bad), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn an_unlock_record_matches_its_code_and_nothing_else() {
-        let salt = [7u8; UNLOCK_SALT_LEN];
-        let mut buf = [0u8; UNLOCK_RECORD_LEN];
-        let record = render_unlock(b"1234-5678", &salt, 100, &mut buf)
-            .unwrap()
-            .to_owned();
-        assert!(record.starts_with("pbkdf2$100$0707"));
-        assert!(unlock_matches(&record, b"1234-5678"));
-        for wrong in [
-            b"1234-5679".as_slice(),
-            b"123-45678",
-            b"12345678",
-            b"1234-56780",
-            b"",
-        ] {
-            assert!(!unlock_matches(&record, wrong), "{wrong:?}");
-        }
-        // The salt is under the hash: the same code under another salt is another record.
-        let other = render_unlock(b"1234-5678", &[8u8; UNLOCK_SALT_LEN], 100, &mut buf)
-            .unwrap()
-            .to_owned();
-        assert_ne!(record, other);
-        assert!(unlock_matches(&other, b"1234-5678"));
-    }
-
-    #[test]
-    fn a_damaged_record_matches_nothing() {
-        for r in [
-            "",
-            "pbkdf2",
-            "pbkdf2$0$00$00",
-            "pbkdf2$100$0707$00",
-            "pbkdf2$100$07070707070707070707070707070707$zz",
-            "pbkdf2$99999999999$07070707070707070707070707070707$00",
-            "scrypt$100$07070707070707070707070707070707$0000000000000000000000000000000000000000000000000000000000000000",
-            "pbkdf2$100$07070707070707070707070707070707$0000000000000000000000000000000000000000000000000000000000000000$x",
-        ] {
-            assert!(!unlock_matches(r, b"1234-5678"), "{r}");
-        }
-    }
-
-    #[test]
-    fn a_malformed_code_cannot_be_enrolled() {
-        let mut buf = [0u8; UNLOCK_RECORD_LEN];
-        assert!(render_unlock(b"1234", &[0; UNLOCK_SALT_LEN], 100, &mut buf).is_none());
-        assert!(render_unlock(b"12-34", &[0; UNLOCK_SALT_LEN], 0, &mut buf).is_none());
-        let mut small = [0u8; 10];
-        assert!(render_unlock(b"12-34", &[0; UNLOCK_SALT_LEN], 100, &mut small).is_none());
-    }
-
-    #[test]
-    fn the_shipped_round_count_is_what_the_firmware_writes() {
-        let mut buf = [0u8; UNLOCK_RECORD_LEN];
-        let record =
-            render_unlock(b"12-34", &[1; UNLOCK_SALT_LEN], UNLOCK_ROUNDS, &mut buf).unwrap();
-        assert!(record.starts_with("pbkdf2$50000$"));
-        assert_eq!(record.len(), UNLOCK_RECORD_LEN - 10 + 5);
-        const { assert!(UNLOCK_ROUNDS >= 50_000) };
-    }
-
-    #[test]
-    fn the_prelogin_record_reads_back_and_empty_is_none() {
-        assert_eq!(unlock_record(&doc("{}")), None);
-        assert_eq!(unlock_record(&doc(r#"{"cat_sssp_unlock":""}"#)), None);
-        assert_eq!(unlock_record(&doc(r#"{"cat_sssp_unlock":1}"#)), None);
-        assert_eq!(
-            unlock_record(&doc(r#"{"cat_sssp_unlock":"pbkdf2$1$a$b"}"#)),
-            Some("pbkdf2$1$a$b")
-        );
     }
 }

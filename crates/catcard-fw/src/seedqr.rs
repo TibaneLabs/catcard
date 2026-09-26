@@ -65,6 +65,9 @@ const _: () = assert!(SHAPES.len() == KINDS.len());
 
 /// Danger zone → Seed tools → SeedQR: the wallet in force, as a code.
 pub(crate) fn export(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    // Delta mode: showing the seed erases it instead. See `crate::trickpin`.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::trickpin::seed_reveal(gate);
     menu::ask(
         ui.panel,
         HEAD,

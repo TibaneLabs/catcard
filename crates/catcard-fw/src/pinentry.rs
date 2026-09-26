@@ -400,10 +400,6 @@ pub struct LoginPrefs<'a> {
     /// mk4 or later; see `crate::guard`.
     #[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
     pub kill_key: Option<u8>,
-    /// The spending policy's unlock record, if a code is enrolled. A typed PIN is checked
-    /// against it before it goes to the bootloader; see [`unlock_code_typed`].
-    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
-    pub unlock: Option<&'a str>,
 }
 
 /// A fresh shuffle of the number row, or the plain one if scrambling is off.
@@ -998,9 +994,6 @@ pub fn unlock(
     let mut layout_for: Option<bool> = None;
 
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
-    // The prefix as typed, kept while the suffix is: the spending policy's unlock code
-    // is checked over both halves (`unlock_code_typed`). Wiped with the field.
-    let mut typed_prefix = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -1164,6 +1157,21 @@ pub fn unlock(
         }
 
         if let Step::In { zero_secret } = login.step() {
+            // A trick PIN whose effect is the firmware's to carry out: the policy unlock
+            // and a countdown ask for the PIN again; delta mode and look-blank carry on.
+            // Every other login -- the real PIN, a duress wallet -- reports nothing here
+            // and goes on exactly alike. See `crate::trickpin`.
+            #[cfg(not(feature = "board-mk3"))]
+            let zero_secret = match crate::trickpin::after_login(gate, panel, matrix, drbg, &login)
+            {
+                crate::trickpin::AfterLogin::Continue { look_blank } => zero_secret || look_blank,
+                crate::trickpin::AfterLogin::Reprompt => {
+                    login = Login::new(&g);
+                    field.clear();
+                    redraw = true;
+                    continue;
+                }
+            };
             // The countdown the owner chose, after the PIN and before the menu. Whatever
             // way the PIN arrived -- typed, or from a host -- it waits the same.
             if let Some(minutes) = prefs.countdown_minutes {
@@ -1267,7 +1275,6 @@ pub fn unlock(
                         checking(panel, &login, field.len());
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking");
-                        typed_prefix = field.clone();
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         log_state(&login, "prefix");
                         field.clear();
@@ -1286,19 +1293,9 @@ pub fn unlock(
                         checking(panel, &login, 0);
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking PIN");
-                        // The spending policy's unlock code, before the bootloader sees
-                        // anything: a match is a fresh prompt for the main PIN, with
-                        // nothing said; anything else is the PIN attempt it looks like.
-                        if unlock_code_typed(&prefs, typed_prefix.as_bytes(), field.as_bytes()) {
-                            login = Login::new(&g);
-                            field.clear();
-                            typed_prefix.clear();
-                            continue;
-                        }
                         let _ = login.attempt(&g, field.as_bytes());
                         log_state(&login, "attempt");
                         field.clear();
-                        typed_prefix.clear();
                     }
                 }
 
@@ -1472,111 +1469,31 @@ pub(crate) fn test_login(
     }
 }
 
-/// Whether the two typed halves are the spending policy's unlock code.
+/// Collect a PIN for the Trick PINs screens: the prefix, the anti-phishing words it will
+/// show at the login prompt, then the suffix. `None` if backed out.
 ///
-/// Checked before the suffix goes to gate 18, so a correct code never costs a PIN
-/// attempt -- which matters most when one is left -- and a wrong one is exactly the
-/// attempt it would have been anyway. Once per boot: after a match the same digits go to
-/// the bootloader, so a code that happened to equal the main PIN (refused at enrolment,
-/// but belt and braces) cannot match at every prompt and lock the owner out.
-///
-/// Costs the record's PBKDF2 rounds whenever a record is enrolled, on every login: the
-/// stretch is what the code's twelve digits have instead of a secure element.
-fn unlock_code_typed(prefs: &LoginPrefs<'_>, prefix: &[u8], suffix: &[u8]) -> bool {
-    use zeroize::Zeroize as _;
-    let Some(record) = prefs.unlock else {
-        return false;
-    };
-    if crate::policy::unlock_typed() {
-        return false;
-    }
-    let mut code: heapless::Vec<u8, { 2 * MAX_PART_LEN + 1 }> = heapless::Vec::new();
-    let _ = code.extend_from_slice(prefix);
-    let _ = code.push(b'-');
-    let _ = code.extend_from_slice(suffix);
-    let hit = catcard_settings::policy::unlock_matches(record, &code);
-    code.zeroize();
-    if hit {
-        crate::policy::note_unlock_code();
-    }
-    hit
-}
-
-/// Choose the spending policy's unlock code: a prefix and a suffix of the PIN's own
-/// shape, each typed twice. `None` if backed out or the repeats disagree.
+/// The words are shown because they are what a person typing this trick PIN will see:
+/// an owner who chose a prefix of their own main PIN learns that the words match, and one
+/// who chose another learns which two to expect.
 #[cfg(not(feature = "board-mk3"))]
-pub(crate) fn collect_unlock_code(
+pub(crate) fn collect_trick_pin(
+    gate: &Callgate,
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
+    login: &Login,
 ) -> Option<(PinBuffer<MAX_PART_LEN>, PinBuffer<MAX_PART_LEN>)> {
-    let prefix = collect(panel, matrix, drbg, "Code prefix", false)?;
-    let suffix = collect(panel, matrix, drbg, "Code suffix", false)?;
-    let again_prefix = collect(panel, matrix, drbg, "Repeat prefix", false)?;
-    let again_suffix = collect(panel, matrix, drbg, "Repeat suffix", false)?;
-    if again_prefix.as_bytes() != prefix.as_bytes() || again_suffix.as_bytes() != suffix.as_bytes()
-    {
-        screen_message(panel, "Mismatch", "the repeats", "did not match");
-        let _ = wait_for_confirm(matrix, drbg);
-        return None;
-    }
-    Some((prefix, suffix))
-}
-
-/// What [`probe_main_pin`] found.
-#[cfg(not(feature = "board-mk3"))]
-pub(crate) enum PinProbe {
-    /// The digits are the main PIN. The session's login was replaced by the probe's,
-    /// which is itself a fresh successful login.
-    IsMainPin,
-    /// They are not; an attempt was spent, to be restored by the next successful login.
-    NotMainPin { attempts_left: u32 },
-    /// Refused to start: too few attempts left to spend one.
-    TooFewTries { attempts_left: u32 },
-    /// The gate answered with something other than right or wrong.
-    Failed,
-}
-
-/// Whether `prefix`/`suffix` is the main PIN: [`test_login`] with the digits supplied
-/// rather than typed. For the spending policy, whose unlock code must not be the PIN --
-/// a code that were would match at every login before the PIN could. The same rules as
-/// a test login: a miss is a real wrong PIN, so the probe is refused near the brick.
-#[cfg(not(feature = "board-mk3"))]
-pub(crate) fn probe_main_pin(
-    gate: &Callgate,
-    panel: &mut display::Panel,
-    session: &mut Login,
-    prefix: &[u8],
-    suffix: &[u8],
-) -> PinProbe {
     let g = BootloaderGate { gate };
-    let mut test = Login::new(&g);
-    if !matches!(test.step(), Step::Prefix) {
-        return PinProbe::Failed;
-    }
-    let left = test.attempts_left();
-    if left < TEST_MIN_ATTEMPTS {
-        return PinProbe::TooFewTries {
-            attempts_left: left,
-        };
-    }
+    let prefix = collect(panel, matrix, drbg, "Trick PIN prefix", false)?;
     working(panel, "Checking");
-    let _ = test.prefix_entered(&g, prefix);
-    if !matches!(test.step(), Step::ConfirmWords(_)) {
-        return PinProbe::Failed;
-    }
-    test.words_confirmed();
-    working(panel, "Checking code");
-    let _ = test.attempt(&g, suffix);
-    log_state(&test, "code probe");
-    match test.step() {
-        Step::In { .. } => {
-            *session = test;
-            PinProbe::IsMainPin
+    if let Some(w) = login.words_for(&g, prefix.as_bytes()) {
+        screen_words(panel, anti_phishing_words(w));
+        if !wait_for_confirm(matrix, drbg) {
+            return None;
         }
-        Step::Wrong { attempts_left, .. } => PinProbe::NotMainPin { attempts_left },
-        _ => PinProbe::Failed,
     }
+    let suffix = collect(panel, matrix, drbg, "Trick PIN suffix", false)?;
+    Some((prefix, suffix))
 }
 
 /// How the calculator ended, when it was allowed to end.
@@ -1622,9 +1539,10 @@ fn screen_calc(panel: &mut display::Panel, line: &str, answer: &str, left: u32, 
 /// instead, for a test login. USB is pumped and a host-submitted PIN honoured as on the
 /// PIN pad, so a bench host still reaches a device on this screen.
 ///
-/// The convention is `catcard_ui::calc`'s: prefix digits and a dangling `-`, ENTER; the
-/// words appear as the answer; suffix digits, ENTER. Anything else is a sum, and a sum
-/// typed while the words are up drops the pending prefix.
+/// The convention is stock's (`catcard_ui::calc`, hw-reference/input.md §"Q1 Calculator
+/// Login" [C]): `<prefix>-` ENTER shows the anti-phishing words as the answer; the whole
+/// `<prefix>-<suffix>` (or `_`, or a space) ENTER logs in, and a wrong one shows as the
+/// line's value with the tries left; anything else is a sum.
 #[cfg(feature = "board-q1")]
 #[allow(clippy::too_many_arguments)]
 fn calculator_login(
@@ -1639,20 +1557,18 @@ fn calculator_login(
 ) -> CalcExit {
     use catcard_ui::calc::{self, Typed};
     use core::fmt::Write as _;
-    use zeroize::Zeroize as _;
 
-    // The kill key is honoured only for suffix digits, which are the only digits this
-    // screen knows are PIN digits: a sum can contain any digit at all. Release builds
-    // only, as on the PIN pad.
+    // The kill key is honoured for the suffix of a whole PIN, the only digits this screen
+    // knows are PIN digits: a sum can contain any digit at all. Release builds only, as on
+    // the PIN pad.
     #[cfg(not(feature = "dev"))]
     let kill_key = prefs.kill_key;
+    #[cfg(feature = "dev")]
+    let _ = prefs;
     let _ = gate;
-    // The prefix as typed, for the unlock-code check on the suffix; wiped after it.
-    let mut calc_prefix: heapless::Vec<u8, MAX_PART_LEN> = heapless::Vec::new();
 
     let mut line = CalcLine::new();
     let mut answer: heapless::String<40> = heapless::String::new();
-    let mut awaiting_suffix = false;
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -1667,13 +1583,9 @@ fn calculator_login(
             Step::Wrong { attempts_left, .. } if test => {
                 return CalcExit::Wrong { attempts_left };
             }
-            Step::Wrong { attempts_left, .. } => {
-                // Say so where the answer goes, then a fresh struct for the next try.
-                answer.clear();
-                let _ = write!(answer, "wrong; {attempts_left} tries left");
+            Step::Wrong { .. } => {
+                // The answer already says it, as a sum would; a fresh struct for the next.
                 *login = Login::new(g);
-                awaiting_suffix = false;
-                line.clear();
                 redraw = true;
                 continue;
             }
@@ -1701,7 +1613,6 @@ fn calculator_login(
                 working(panel, "USB unlock");
                 login_with(g, login, prefix, suffix);
                 line.clear();
-                awaiting_suffix = false;
             }
             redraw = true;
             continue;
@@ -1716,88 +1627,79 @@ fn calculator_login(
         for key in keys.iter() {
             match key {
                 Key::Digit(d) => {
-                    #[cfg(not(feature = "dev"))]
-                    if awaiting_suffix && kill_key == Some(*d) {
-                        crate::guard::kill(gate);
-                    }
                     line.push(b'0' + *d);
                 }
                 Key::Char(c) => {
                     line.push(*c);
                 }
                 Key::Cancel => {
-                    if !line.pop() {
-                        if awaiting_suffix {
-                            // Back out of the pending prefix: a fresh struct, no words.
-                            *login = Login::new(g);
-                            awaiting_suffix = false;
-                            answer.clear();
-                        } else if test {
-                            return CalcExit::Cancelled;
-                        }
+                    if !line.pop() && test {
+                        return CalcExit::Cancelled;
                     }
                 }
                 Key::Confirm => {
-                    match calc::classify(line.as_str(), awaiting_suffix, MIN_PART_LEN, MAX_PART_LEN)
-                    {
+                    answer.clear();
+                    match calc::classify(line.as_str(), MIN_PART_LEN, MAX_PART_LEN) {
+                        Typed::Pin { prefix, suffix } => {
+                            #[cfg(not(feature = "dev"))]
+                            if let Some(k) = kill_key
+                                && suffix.bytes().any(|b| b == b'0' + k)
+                            {
+                                crate::guard::kill(gate);
+                            }
+                            // What the line is as a sum, shown if the PIN is wrong.
+                            let _ = match calc::eval(line.as_str()) {
+                                Ok(v) => write!(answer, "= {v}"),
+                                Err(_) => answer
+                                    .push_str("syntax error")
+                                    .map_err(|_| core::fmt::Error),
+                            };
+                            working(panel, "Calculating");
+                            if !matches!(login.step(), Step::Prefix) {
+                                *login = Login::new(g);
+                            }
+                            login_with(g, login, prefix.as_bytes(), suffix.as_bytes());
+                            log_state(login, "calc attempt");
+                            match login.step() {
+                                Step::Wrong { attempts_left, .. } => {
+                                    let _ = write!(answer, "  # {attempts_left} tries remain");
+                                }
+                                _ => answer.clear(),
+                            }
+                        }
                         Typed::Prefix(p) => {
                             working(panel, "Calculating");
-                            calc_prefix.clear();
-                            let _ = calc_prefix.extend_from_slice(p.as_bytes());
+                            if !matches!(login.step(), Step::Prefix) {
+                                *login = Login::new(g);
+                            }
                             let _ = login.prefix_entered(g, p.as_bytes());
                             log_state(login, "calc prefix");
-                            answer.clear();
                             if let Step::ConfirmWords(w) = login.step() {
                                 let [a, b] = anti_phishing_words(w);
                                 let _ = write!(answer, "= {a} {b}");
-                                login.words_confirmed();
-                                awaiting_suffix = true;
                             } else {
                                 let _ = answer.push_str("error");
                             }
-                            line.clear();
+                            // The words are an answer, not a step: a whole PIN typed next
+                            // starts from a fresh struct (above), whatever came before.
                         }
-                        Typed::Suffix(s) => {
-                            working(panel, "Calculating");
-                            // The unlock code, as on the PIN pad: a match is a fresh
-                            // prompt, silently. See `unlock_code_typed`.
-                            if unlock_code_typed(prefs, &calc_prefix, s.as_bytes()) {
-                                *login = Login::new(g);
-                            } else {
-                                let _ = login.attempt(g, s.as_bytes());
-                                log_state(login, "calc attempt");
+                        Typed::Expression => match calc::eval(line.as_str()) {
+                            Ok(v) => {
+                                let _ = write!(answer, "= {v}");
                             }
-                            calc_prefix.zeroize();
-                            calc_prefix.clear();
-                            awaiting_suffix = false;
-                            answer.clear();
-                            line.clear();
-                        }
-                        Typed::Expression => {
-                            // A sum while the words were up drops the prefix with them.
-                            if awaiting_suffix {
-                                *login = Login::new(g);
-                                awaiting_suffix = false;
+                            Err(calc::Error::Empty) => {}
+                            Err(calc::Error::DivideByZero) => {
+                                let _ = answer.push_str("division by zero");
                             }
-                            answer.clear();
-                            match calc::eval(line.as_str()) {
-                                Ok(v) => {
-                                    let _ = write!(answer, "= {v}");
-                                }
-                                Err(calc::Error::Empty) => {}
-                                Err(calc::Error::DivideByZero) => {
-                                    let _ = answer.push_str("division by zero");
-                                }
-                                Err(calc::Error::Overflow) => {
-                                    let _ = answer.push_str("out of range");
-                                }
-                                Err(calc::Error::Syntax) => {
-                                    let _ = answer.push_str("syntax error");
-                                }
+                            Err(calc::Error::Overflow) => {
+                                let _ = answer.push_str("out of range");
                             }
-                            line.clear();
-                        }
+                            Err(calc::Error::Syntax) => {
+                                let _ = answer.push_str("syntax error");
+                            }
+                        },
                     }
+                    line.clear();
                 }
                 Key::Qr => {}
             }

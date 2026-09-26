@@ -2,27 +2,37 @@
 //! that tells a PIN typed into it from a sum.
 //!
 //! With Calculator Login on, the screen before the PIN looks like a plain calculator and
-//! *is* one: what is typed is evaluated on ENTER and the answer shown. The PIN goes in
-//! through a convention no arithmetic produces:
+//! *is* one: what is typed is evaluated on ENTER and the answer shown. The PIN goes in by
+//! stock's convention, classified in this order:
 //!
-//! 1. the prefix's digits followed by `-`, then ENTER -- a dangling minus, which no sum
-//!    ends in. The two anti-phishing words appear where an answer would;
-//! 2. the suffix's digits alone, then ENTER.
+//! 1. **The whole PIN**: `prefix`, a separator (`-`, `_` or a space), `suffix`, on one
+//!    line -- `12-3456`, `1234_5678`, `12 34`. That is a login attempt. A wrong one shows
+//!    as the line's arithmetic value (`12-34` is `-22`), with the tries left, so it reads
+//!    as an ordinary sum.
+//! 2. **The prefix alone**: its digits and a dangling `-` or `_` -- `12-`. The two
+//!    anti-phishing words appear where an answer would.
+//! 3. Anything else is a sum.
 //!
-//! **Why not `prefix-suffix` on one line.** That is a subtraction, and a calculator that
-//! spent a PIN attempt on every subtraction of two numbers would brick itself in thirteen
-//! sums. The dangling minus is a syntax error to a calculator, so it can never be reached
-//! by someone using the screen for what it claims to be; and the suffix counts only
-//! while the words are showing, which only that step produces.
+//! So the anti-phishing check is the owner's to ask for: `12-` first, look at the words,
+//! then the whole PIN.
+//!
+//! **This does make a subtraction of two small numbers a PIN attempt**, which is stock's
+//! design and the price of the disguise: `12-34` on this screen is a guess at the PIN.
+//! Each part is held to the PIN's own 2 to 6 digits, so a part no PIN has is only ever a
+//! sum.
+//!
+//! Source: hw-reference/input.md §"Q1 Calculator Login" [C] (the order, the separators,
+//! the lengths, and the wrong-PIN display).
 //!
 //! Integer arithmetic on `i64` with `+ - * /` and parentheses; division truncates and
-//! by zero is an error. Nothing here touches the PIN's *meaning* -- `catcard_pin` does
+//! by zero is an error; `_` between digits is a digit separator, as Python -- which stock's
+//! calculator is -- reads it. Nothing here touches the PIN's *meaning* -- `catcard_pin` does
 //! that -- so this is testable on the host as text in, text out.
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The characters the calculator takes, besides digits.
-pub const OPERATORS: &[u8] = b"+-*/() ";
+pub const OPERATORS: &[u8] = b"+-*/() _";
 
 /// What the typed line holds, `N` bytes at most, wiped on drop: it carries PIN digits
 /// between key and gate exactly as a PIN field does.
@@ -87,26 +97,47 @@ impl<const N: usize> Line<N> {
 /// How a typed line is to be taken.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Typed<'a> {
-    /// The PIN prefix: digits and a dangling minus.
+    /// The whole PIN, prefix and suffix on one line: a login attempt.
+    Pin { prefix: &'a str, suffix: &'a str },
+    /// The PIN prefix and a dangling `-` or `_`: show its words.
     Prefix(&'a str),
-    /// The PIN suffix: digits alone, while the words are showing.
-    Suffix(&'a str),
     /// Anything else: a sum to evaluate.
     Expression,
 }
 
-/// Decide what `line` is. `awaiting_suffix` is whether the words are up; `min..=max` is
-/// the length a PIN part may have.
-pub fn classify(line: &str, awaiting_suffix: bool, min: usize, max: usize) -> Typed<'_> {
-    let digits = |s: &str| (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
-    if awaiting_suffix {
-        if digits(line) {
-            return Typed::Suffix(line);
+/// The separators the whole PIN may use: stock's `[-_ ]`. Source: input.md [C]
+pub const PIN_SEPARATORS: &[u8] = b"-_ ";
+
+/// The separators a prefix alone may end in: stock's `[-_]` -- not a space, which
+/// nobody would see. Source: input.md [C]
+pub const PREFIX_SEPARATORS: &[u8] = b"-_";
+
+/// Decide what `line` is. `min..=max` is the length a PIN part may have.
+///
+/// Stock checks the whole line's length (13 at most for a PIN, 7 for a prefix) and each
+/// part's at least two digits; with parts held to `min..=max` -- 2 to 6 -- both of
+/// stock's limits follow. A line that fits stock's pattern with a part longer than `max`
+/// is a sum here: no PIN has such a part, so trying it could only spend an attempt.
+/// Source: hw-reference/input.md §"Q1 Calculator Login" [C]; gate18-pin-state-machine.md
+/// §6.1 [C] (2 to 6)
+pub fn classify(line: &str, min: usize, max: usize) -> Typed<'_> {
+    let part = |s: &str| (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let b = line.as_bytes();
+    // The whole PIN: exactly one separator, digits either side.
+    if let Some(at) = b.iter().position(|c| PIN_SEPARATORS.contains(c)) {
+        let (prefix, suffix) = (&line[..at], &line[at + 1..]);
+        if part(prefix) && part(suffix) {
+            return Typed::Pin { prefix, suffix };
         }
-    } else if let Some(p) = line.strip_suffix('-')
-        && digits(p)
+    }
+    // The prefix alone.
+    if let Some((&last, head)) = b.split_last()
+        && PREFIX_SEPARATORS.contains(&last)
     {
-        return Typed::Prefix(p);
+        let p = &line[..head.len()];
+        if part(p) {
+            return Typed::Prefix(p);
+        }
     }
     Typed::Expression
 }
@@ -202,14 +233,23 @@ impl Parser<'_> {
             }
             Some(c) if c.is_ascii_digit() => {
                 let mut v: i64 = 0;
-                while let Some(c) = self.s.get(self.at).copied()
-                    && c.is_ascii_digit()
-                {
-                    v = v
-                        .checked_mul(10)
-                        .and_then(|v| v.checked_add(i64::from(c - b'0')))
-                        .ok_or(Error::Overflow)?;
-                    self.at += 1;
+                loop {
+                    match self.s.get(self.at).copied() {
+                        Some(c) if c.is_ascii_digit() => {
+                            v = v
+                                .checked_mul(10)
+                                .and_then(|v| v.checked_add(i64::from(c - b'0')))
+                                .ok_or(Error::Overflow)?;
+                            self.at += 1;
+                        }
+                        // A digit separator, as Python reads one: a single `_` with a
+                        // digit on each side. `12_34` is 1234; `12_`, `1__2` are errors.
+                        Some(b'_') => match self.s.get(self.at + 1) {
+                            Some(d) if d.is_ascii_digit() => self.at += 1,
+                            _ => return Err(Error::Syntax),
+                        },
+                        _ => break,
+                    }
                 }
                 Ok(v)
             }
@@ -287,36 +327,73 @@ mod tests {
         assert_eq!(eval(&deep), Err(Error::Syntax));
     }
 
-    /// The whole point: a PIN is only ever taken through a line no sum produces.
+    /// input.md §"Q1 Calculator Login": the whole PIN on one line, with `-`, `_` or a
+    /// space between the parts.
     #[test]
-    fn a_pin_prefix_is_digits_and_a_dangling_minus() {
-        assert_eq!(classify("1234-", false, 2, 6), Typed::Prefix("1234"));
-        assert_eq!(classify("12-", false, 2, 6), Typed::Prefix("12"));
-        assert_eq!(classify("123456-", false, 2, 6), Typed::Prefix("123456"));
-        // Too short, too long, or a sum: never a prefix.
+    fn the_whole_pin_is_one_line_with_any_of_three_separators() {
+        for (s, p, x) in [
+            ("12-3456", "12", "3456"),
+            ("1234_5678", "1234", "5678"),
+            ("12 34", "12", "34"),
+            ("123456-654321", "123456", "654321"),
+        ] {
+            assert_eq!(
+                classify(s, 2, 6),
+                Typed::Pin {
+                    prefix: p,
+                    suffix: x
+                },
+                "{s}"
+            );
+        }
+    }
+
+    /// The prefix alone, ending in `-` or `_`, asks for the words.
+    #[test]
+    fn a_prefix_and_a_dangling_separator_asks_for_the_words() {
+        assert_eq!(classify("12-", 2, 6), Typed::Prefix("12"));
+        assert_eq!(classify("1234_", 2, 6), Typed::Prefix("1234"));
+        assert_eq!(classify("123456-", 2, 6), Typed::Prefix("123456"));
+        // A trailing space is not a prefix: nobody would see it.
+        assert_eq!(classify("12 ", 2, 6), Typed::Expression);
+    }
+
+    /// Everything else is a sum -- including stock's pattern with a part no PIN has.
+    #[test]
+    fn anything_else_is_a_sum() {
         for s in [
             "1-",
             "1234567-",
             "1234",
-            "1234-5678",
-            "12+3",
+            "1-2345",
+            "12-3",
+            "1234567-12",
+            "12-1234567",
+            "12+34",
             "-1234",
+            "12-34-56",
+            "12--34",
+            "(12)-34",
             "",
             "-",
+            "_",
+            "12_34_56",
         ] {
-            assert_eq!(classify(s, false, 2, 6), Typed::Expression, "{s}");
+            assert_eq!(classify(s, 2, 6), Typed::Expression, "{s}");
         }
     }
 
+    /// A wrong PIN shows the line's value, as stock's `eval` would: `12-34` is `-22`,
+    /// `12_34` is `1234` (Python's digit separator), `12 34` is not a sum.
     #[test]
-    fn a_suffix_counts_only_while_the_words_are_up() {
-        assert_eq!(classify("5678", true, 2, 6), Typed::Suffix("5678"));
-        assert_eq!(classify("5678", false, 2, 6), Typed::Expression);
-        // With the words up, anything but a bare part is a sum -- including a second
-        // prefix, which is how the pending one is dropped.
-        for s in ["5678-", "1", "1234567", "5+6", "", "1234-"] {
-            assert_eq!(classify(s, true, 2, 6), Typed::Expression, "{s}");
-        }
+    fn a_wrong_pin_evaluates_as_the_sum_it_looks_like() {
+        assert_eq!(eval("12-34"), Ok(-22));
+        assert_eq!(eval("12_34"), Ok(1234));
+        assert_eq!(eval("1_000+1"), Ok(1001));
+        assert_eq!(eval("12 34"), Err(Error::Syntax));
+        assert_eq!(eval("12_"), Err(Error::Syntax));
+        assert_eq!(eval("1__2"), Err(Error::Syntax));
+        assert_eq!(eval("_12"), Err(Error::Syntax));
     }
 
     #[test]
@@ -327,6 +404,8 @@ mod tests {
         assert!(l.push(b'('));
         assert!(!l.push(b'a'));
         assert!(!l.push(b'.'));
+        assert!(l.push(b'_'));
+        assert!(l.pop());
         assert_eq!(l.as_str(), "1-(");
         assert!(l.pop());
         assert_eq!(l.as_str(), "1-");

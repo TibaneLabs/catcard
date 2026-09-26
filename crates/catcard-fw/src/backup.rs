@@ -200,6 +200,9 @@ struct Protect {
 
 /// Write a backup of the stored wallet to the card or the Virtual Disk.
 pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    // Delta mode: showing the seed erases it instead. See `crate::trickpin`.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::trickpin::seed_reveal(gate);
     // The wallet first: a device with nothing to back up should say so before it asks
     // the owner to write twelve words down.
     let mut secret = match fetch(gate, login, ui, SAVE_HEAD) {
@@ -1151,6 +1154,9 @@ pub(crate) fn teleport_received(
 /// start file) before it can seal anything. Nothing here is destructive -- it only reads
 /// the wallet out -- so there is no warning to show.
 pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    // Delta mode: showing the seed erases it instead. See `crate::trickpin`.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::trickpin::seed_reveal(gate);
     let mut secret = match fetch(gate, login, ui, CLONE_HEAD) {
         Some(s) => s,
         None => return,

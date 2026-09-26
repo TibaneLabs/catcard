@@ -58,6 +58,9 @@ pub(crate) fn split(
     ui: &mut Ui<'_>,
     pool: Option<&mut catcard_entropy::EntropyPool>,
 ) {
+    // Delta mode: showing the seed erases it instead. See `crate::trickpin`.
+    #[cfg(not(feature = "board-mk3"))]
+    crate::trickpin::seed_reveal(gate);
     // The one thing about Seed XOR that people get wrong, said before anything is
     // derived: a part is not a share of the wallet, it *is* the wallet once the others
     // are beside it.
