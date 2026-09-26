@@ -72,9 +72,16 @@ pub mod request {
 pub mod hid_request {
     pub const GET_REPORT: u8 = 0x01;
     pub const GET_IDLE: u8 = 0x02;
+    pub const GET_PROTOCOL: u8 = 0x03;
     pub const SET_REPORT: u8 = 0x09;
     pub const SET_IDLE: u8 = 0x0A;
     pub const SET_PROTOCOL: u8 = 0x0B;
+}
+
+/// `wValue` of `SET_PROTOCOL` / the byte `GET_PROTOCOL` answers. Source: HID 1.11 §7.2.5.
+pub mod hid_protocol {
+    pub const BOOT: u8 = 0;
+    pub const REPORT: u8 = 1;
 }
 
 /// Request types, from `bmRequestType`.
@@ -157,6 +164,18 @@ pub struct Device {
     pub serial: &'static str,
     /// The identity to answer enumeration with.
     pub mode: DeviceMode,
+    /// Whether the HID identity also carries the keyboard interface ([`crate::kbd`]).
+    /// A configuration choice like `mode`: it survives a bus reset, and the caller
+    /// re-attaches after changing it so the host reads the descriptor set that matches.
+    pub keyboard: bool,
+    /// The keyboard interface's own idle rate, kept apart from the wallet's for the same
+    /// reason as `idle`: `GET_IDLE` on interface 1 must answer what `SET_IDLE` on
+    /// interface 1 was given.
+    pub idle_kbd: u8,
+    /// Which protocol the keyboard interface is in, boot or report. A boot-capable
+    /// interface starts in report protocol and a BIOS switches it; the two report shapes
+    /// are identical here, so this is remembered only to be answered back.
+    pub protocol_kbd: u8,
 }
 
 impl Device {
@@ -168,6 +187,9 @@ impl Device {
             idle: 0,
             serial,
             mode: DeviceMode::Hid,
+            keyboard: false,
+            idle_kbd: 0,
+            protocol_kbd: hid_protocol::REPORT,
         }
     }
 
@@ -178,12 +200,27 @@ impl Device {
         self.phase = Phase::Default;
         self.address = 0;
         self.configuration = 0;
+        // A reset puts a boot interface back into report protocol (HID 1.11 §7.2.6).
+        self.protocol_kbd = hid_protocol::REPORT;
     }
 
     /// Choose which identity to enumerate as. Takes effect on the next enumeration, so
     /// the caller re-attaches the bus after setting it.
     pub fn set_mode(&mut self, mode: DeviceMode) {
         self.mode = mode;
+    }
+
+    /// Present, or withdraw, the keyboard interface beside the wallet's. Takes effect on
+    /// the next enumeration: the caller detaches and re-attaches, because a host keeps
+    /// the descriptors it read at plug-in and would never notice a new interface.
+    pub fn set_keyboard(&mut self, on: bool) {
+        self.keyboard = on;
+    }
+
+    /// Whether the keyboard interface is part of what the host enumerated: on, and in
+    /// the HID identity (the mass-storage one never carries it).
+    pub fn keyboard_present(&self) -> bool {
+        self.keyboard && self.mode == DeviceMode::Hid
     }
 
     pub fn is_configured(&self) -> bool {
@@ -254,12 +291,18 @@ fn standard<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Actio
             Action::Data(trim(&scratch[..2], setup.wLength))
         }
 
-        // There is one interface with one setting, so the only legal answers are fixed.
-        (request::GET_INTERFACE, recipient::INTERFACE) => {
+        // Every interface has one setting, so the only legal answers are fixed -- for an
+        // interface the host was told about. Asking after one it was not is a Request
+        // Error (USB 2.0 §9.4.1), which is a stall.
+        (request::GET_INTERFACE, recipient::INTERFACE) if interface_exists(dev, setup.wIndex) => {
             scratch[0] = 0;
             Action::Data(trim(&scratch[..1], setup.wLength))
         }
-        (request::SET_INTERFACE, recipient::INTERFACE) if setup.wValue == 0 => Action::Ack,
+        (request::SET_INTERFACE, recipient::INTERFACE)
+            if setup.wValue == 0 && interface_exists(dev, setup.wIndex) =>
+        {
+            Action::Ack
+        }
 
         // Halt is the only endpoint feature (selector 0), and nothing here holds a pipe
         // halted. Clearing it still has to reset the endpoint's data toggle to DATA0 --
@@ -273,14 +316,14 @@ fn standard<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Actio
         // endpoint that does not exist is a Request Error, and that is a stall
         // (USB 2.0 §9.4.1).
         (request::CLEAR_FEATURE, recipient::ENDPOINT)
-            if setup.wValue == 0 && is_data_endpoint(setup.wIndex) =>
+            if setup.wValue == 0 && is_data_endpoint(dev, setup.wIndex) =>
         {
             Action::AckThenClearHalt(setup.wIndex as u8)
         }
         // The control endpoint has no toggle to put back: every SETUP starts it at
         // DATA0. So clearing its halt is a plain acknowledgement, with nothing to touch.
         (request::CLEAR_FEATURE | request::SET_FEATURE, recipient::ENDPOINT)
-            if endpoint_exists(setup.wIndex) =>
+            if endpoint_exists(dev, setup.wIndex) =>
         {
             Action::Ack
         }
@@ -294,17 +337,27 @@ fn standard<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Actio
 const _: () =
     assert!(descriptor::EP_IN == crate::msc::EP_IN && descriptor::EP_OUT == crate::msc::EP_OUT);
 
-/// Whether `wIndex` names one of the two data endpoints, as an endpoint-recipient
-/// request spells it: the address, direction bit included, in the low byte and zero in
-/// the high byte (USB 2.0 §9.3.4).
-fn is_data_endpoint(index: u16) -> bool {
-    index == descriptor::EP_IN as u16 || index == descriptor::EP_OUT as u16
+/// Whether `wIndex` names one of the data endpoints the host was told about, as an
+/// endpoint-recipient request spells it: the address, direction bit included, in the
+/// low byte and zero in the high byte (USB 2.0 §9.3.4). The keyboard's IN endpoint
+/// counts only while the keyboard is enumerated: otherwise a clear-halt on it would
+/// reach a register block for an endpoint the driver never opened.
+fn is_data_endpoint(dev: &Device, index: u16) -> bool {
+    index == descriptor::EP_IN as u16
+        || index == descriptor::EP_OUT as u16
+        || (dev.keyboard_present() && index == crate::kbd::EP_IN as u16)
 }
 
-/// Whether `wIndex` names any endpoint this device has: the two data endpoints, or the
+/// Whether `wIndex` names any endpoint this device has: the data endpoints, or the
 /// control endpoint in either direction.
-fn endpoint_exists(index: u16) -> bool {
-    matches!(index, 0x0000 | 0x0080) || is_data_endpoint(index)
+fn endpoint_exists(dev: &Device, index: u16) -> bool {
+    matches!(index, 0x0000 | 0x0080) || is_data_endpoint(dev, index)
+}
+
+/// Whether `wIndex` names an interface the host was told about: 0 always, the
+/// keyboard's only while it is enumerated. The high byte is reserved and must be zero.
+fn interface_exists(dev: &Device, index: u16) -> bool {
+    index == 0 || (dev.keyboard_present() && index == crate::kbd::INTERFACE as u16)
 }
 
 /// EP0's max packet size, taken from the device descriptor rather than restated.
@@ -316,6 +369,9 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
     let index = setup.wValue as u8;
 
     let msc = dev.mode == DeviceMode::Msc;
+    // The class descriptors are asked for per interface: `wIndex` names it (HID 1.11
+    // §7.1.1). Interface 0 is the wallet; 1 is the keyboard, when it is there.
+    let iface = setup.wIndex;
     match what {
         kind::DEVICE if msc => Action::Data(trim_static(&crate::msc::DEVICE, setup.wLength)),
         kind::CONFIGURATION if msc => {
@@ -324,10 +380,20 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         // In MSC mode there is no HID interface to describe.
         kind::HID_REPORT | kind::HID if msc => Action::Stall,
         kind::DEVICE => Action::Data(trim_static(&descriptor::DEVICE, setup.wLength)),
+        // With the keyboard on, the composite table: the same interface 0 at the same
+        // offset, then the keyboard. The host re-enumerated to read it -- see
+        // `Device::set_keyboard` -- so it is never a surprise mid-session.
+        kind::CONFIGURATION if dev.keyboard => {
+            Action::Data(trim_static(&crate::kbd::CONFIGURATION, setup.wLength))
+        }
         kind::CONFIGURATION => Action::Data(trim_static(&descriptor::CONFIGURATION, setup.wLength)),
-        kind::HID_REPORT => {
+        kind::HID_REPORT if iface == 0 => {
             Action::Data(trim_static(&descriptor::REPORT_DESCRIPTOR, setup.wLength))
         }
+        kind::HID_REPORT if interface_exists(dev, iface) => {
+            Action::Data(trim_static(&crate::kbd::REPORT_DESCRIPTOR, setup.wLength))
+        }
+        kind::HID_REPORT => Action::Stall,
         kind::STRING => {
             let text = match index {
                 descriptor::string::LANGID => {
@@ -345,11 +411,19 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         }
         // The HID descriptor is not fetched on its own -- it comes inside the
         // configuration -- but some hosts ask anyway, and it is inside a slice we
-        // already hold, so answering is free.
-        kind::HID => {
-            const AT: usize = 9 + 9;
+        // already hold, so answering is free. Interface 0's sits at the same offset in
+        // both tables, which `kbd` tests.
+        kind::HID if iface == 0 => {
+            const AT: usize = crate::kbd::at::VENDOR_HID;
             Action::Data(trim_static(
                 &descriptor::CONFIGURATION[AT..AT + 9],
+                setup.wLength,
+            ))
+        }
+        kind::HID if interface_exists(dev, iface) => {
+            const AT: usize = crate::kbd::at::KBD_HID;
+            Action::Data(trim_static(
+                &crate::kbd::CONFIGURATION[AT..AT + 9],
                 setup.wLength,
             ))
         }
@@ -378,22 +452,54 @@ fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'
             _ => Action::Stall,
         };
     }
+    // HID class requests name their interface in `wIndex` (HID 1.11 §7.2). One the host
+    // was never told about is a Request Error.
+    if !interface_exists(dev, setup.wIndex) {
+        return Action::Stall;
+    }
+    let kbd = setup.wIndex == crate::kbd::INTERFACE as u16;
     match setup.bRequest {
         // Windows sends SET_IDLE during enumeration and will not proceed if it stalls.
         hid_request::SET_IDLE => {
-            dev.idle = (setup.wValue >> 8) as u8;
+            let rate = (setup.wValue >> 8) as u8;
+            if kbd {
+                dev.idle_kbd = rate;
+            } else {
+                dev.idle = rate;
+            }
             Action::Ack
         }
         hid_request::GET_IDLE => {
-            scratch[0] = dev.idle;
+            scratch[0] = if kbd { dev.idle_kbd } else { dev.idle };
             Action::Data(trim(&scratch[..1], setup.wLength))
         }
-        // Only the report protocol exists here; there is no boot protocol for a
-        // vendor-defined usage page.
-        hid_request::SET_PROTOCOL => Action::Ack,
+        // The keyboard is a boot interface, so a BIOS may switch it to boot protocol
+        // and back; its report is the boot report either way, so only the answer to
+        // GET_PROTOCOL changes. The wallet's vendor page has no boot protocol: the
+        // request is acknowledged, as Windows expects, and nothing changes.
+        hid_request::SET_PROTOCOL => {
+            if kbd {
+                dev.protocol_kbd = if setup.wValue == 0 {
+                    hid_protocol::BOOT
+                } else {
+                    hid_protocol::REPORT
+                };
+            }
+            Action::Ack
+        }
+        hid_request::GET_PROTOCOL => {
+            scratch[0] = if kbd {
+                dev.protocol_kbd
+            } else {
+                hid_protocol::REPORT
+            };
+            Action::Data(trim(&scratch[..1], setup.wLength))
+        }
         // A control-pipe GET_REPORT is answered with an empty report rather than a
         // stall: some hosts probe it during enumeration, and real traffic goes over the
-        // interrupt endpoints.
+        // interrupt endpoints. For the keyboard that is an all-zero boot report -- no
+        // key down -- which is also the truth: keys are only ever down between two
+        // interrupt reports.
         //
         // Never a whole packet. The HAL sends a data stage as one packet, and a data
         // stage shorter than `wLength` has to end in a short one -- a full 64-byte packet
@@ -401,12 +507,20 @@ fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'
         // its timeout out for the rest. One byte under the packet size is short whatever
         // was asked for.
         hid_request::GET_REPORT => {
-            let n = (setup.wLength as usize)
-                .min(EP0_PACKET - 1)
-                .min(scratch.len());
+            let most = if kbd {
+                crate::kbd::REPORT_LEN
+            } else {
+                EP0_PACKET - 1
+            };
+            let n = (setup.wLength as usize).min(most).min(scratch.len());
             scratch[..n].fill(0);
             Action::Data(&scratch[..n])
         }
+        // The keyboard's is the LED report (HID 1.11 Appendix B.1): the host says which
+        // lights to show and this device has none. The wallet's has no output report on
+        // the control pipe at all. Both are acknowledged and the byte dropped -- the
+        // HAL discards a control OUT data stage, which is what makes this an ack rather
+        // than a hang.
         hid_request::SET_REPORT => Action::Ack,
         _ => Action::Stall,
     }
@@ -718,25 +832,38 @@ mod tests {
         // high byte -- must stall rather than turn into a register write past the
         // endpoint block. Every value, both requests, both modes.
         let mut s = [0u8; 64];
-        for mode in [DeviceMode::Hid, DeviceMode::Msc] {
+        for (mode, kbd) in [
+            (DeviceMode::Hid, false),
+            (DeviceMode::Hid, true),
+            (DeviceMode::Msc, false),
+            // The keyboard is never part of the mass-storage identity, however the flag
+            // is set: its endpoint must stall there too.
+            (DeviceMode::Msc, true),
+        ] {
             let mut d = dev();
             d.set_mode(mode);
+            d.set_keyboard(kbd);
+            let kbd_ep = mode == DeviceMode::Hid && kbd;
             for index in 0..=0xFFFFu16 {
-                let ours = matches!(index, 0x0000 | 0x0080 | 0x0001 | 0x0081);
+                let ours = matches!(index, 0x0000 | 0x0080 | 0x0001 | 0x0081)
+                    || (kbd_ep && index == 0x0082);
                 let clear = handle(
                     &mut d,
                     &setup(0x02, request::CLEAR_FEATURE, 0, index, 0),
                     &mut s,
                 );
                 if ours {
-                    assert_ne!(clear, Action::Stall, "clear {index:#06x} in {mode:?}");
+                    assert_ne!(clear, Action::Stall, "clear {index:#06x} in {mode:?}/{kbd}");
                 } else {
-                    assert_eq!(clear, Action::Stall, "clear {index:#06x} in {mode:?}");
+                    assert_eq!(clear, Action::Stall, "clear {index:#06x} in {mode:?}/{kbd}");
                 }
                 // And whatever the answer, the toggle reset never names a number the
                 // HAL does not have a register for.
                 if let Action::AckThenClearHalt(ep) = clear {
-                    assert!(ep == 0x81 || ep == 0x01, "clear-halt on {ep:#04x}");
+                    assert!(
+                        ep == 0x81 || ep == 0x01 || (kbd_ep && ep == 0x82),
+                        "clear-halt on {ep:#04x}"
+                    );
                 }
                 let set = handle(
                     &mut d,
@@ -744,7 +871,7 @@ mod tests {
                     &mut s,
                 );
                 let want = if ours { Action::Ack } else { Action::Stall };
-                assert_eq!(set, want, "set {index:#06x} in {mode:?}");
+                assert_eq!(set, want, "set {index:#06x} in {mode:?}/{kbd}");
             }
         }
     }
@@ -808,5 +935,200 @@ mod tests {
         assert_eq!(s.wValue, 0x0100);
         assert_eq!(s.wIndex, 0x0409);
         assert_eq!(s.wLength, 64);
+    }
+
+    /// With the keyboard off -- the default -- nothing about enumeration changes: the
+    /// same configuration bytes, and interface 1 does not exist to be asked about.
+    #[test]
+    fn with_the_keyboard_off_the_device_enumerates_exactly_as_before() {
+        let mut d = dev();
+        let mut s = [0u8; 64];
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::CONFIGURATION[..]));
+        for (bm, req, value, index, len) in [
+            (0x81, request::GET_DESCRIPTOR, 0x2200, 1, 255),
+            (0x81, request::GET_DESCRIPTOR, 0x2100, 1, 9),
+            (0x81, request::GET_INTERFACE, 0, 1, 1),
+            (0x01, request::SET_INTERFACE, 0, 1, 0),
+            (0x21, hid_request::SET_IDLE, 0, 1, 0),
+            (0xA1, hid_request::GET_PROTOCOL, 0, 1, 1),
+            (0xA1, hid_request::GET_REPORT, 0x0100, 1, 8),
+        ] {
+            assert_eq!(
+                handle(&mut d, &setup(bm, req, value, index, len), &mut s),
+                Action::Stall,
+                "request {req:#04x} on interface 1"
+            );
+        }
+    }
+
+    /// With the keyboard on, the host reads the composite configuration, and each
+    /// interface answers for its own descriptors and class requests.
+    #[test]
+    fn with_the_keyboard_on_each_interface_answers_for_itself() {
+        let mut d = dev();
+        d.set_keyboard(true);
+        let mut s = [0u8; 64];
+
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::kbd::CONFIGURATION[..]));
+
+        // Report descriptors, by interface.
+        let a = handle(
+            &mut d,
+            &setup(0x81, request::GET_DESCRIPTOR, 0x2200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::REPORT_DESCRIPTOR[..]));
+        let a = handle(
+            &mut d,
+            &setup(0x81, request::GET_DESCRIPTOR, 0x2200, 1, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::kbd::REPORT_DESCRIPTOR[..]));
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x81, request::GET_DESCRIPTOR, 0x2200, 2, 255),
+                &mut s
+            ),
+            Action::Stall
+        );
+
+        // HID descriptors, by interface: each must state its own report length.
+        let a = handle(
+            &mut d,
+            &setup(0x81, request::GET_DESCRIPTOR, 0x2100, 0, 9),
+            &mut s,
+        );
+        let Action::Data(b) = a else { panic!("{a:?}") };
+        assert_eq!(b[7] as usize, descriptor::REPORT_DESCRIPTOR.len());
+        let a = handle(
+            &mut d,
+            &setup(0x81, request::GET_DESCRIPTOR, 0x2100, 1, 9),
+            &mut s,
+        );
+        let Action::Data(b) = a else { panic!("{a:?}") };
+        assert_eq!(b[1], kind::HID);
+        assert_eq!(b[7] as usize, crate::kbd::REPORT_DESCRIPTOR.len());
+
+        // Idle rates are per interface.
+        handle(
+            &mut d,
+            &setup(0x21, hid_request::SET_IDLE, 0x0300, 0, 0),
+            &mut s,
+        );
+        handle(
+            &mut d,
+            &setup(0x21, hid_request::SET_IDLE, 0x0700, 1, 0),
+            &mut s,
+        );
+        let a = handle(&mut d, &setup(0xA1, hid_request::GET_IDLE, 0, 0, 1), &mut s);
+        assert_eq!(a, Action::Data(&[3]));
+        let a = handle(&mut d, &setup(0xA1, hid_request::GET_IDLE, 0, 1, 1), &mut s);
+        assert_eq!(a, Action::Data(&[7]));
+
+        // A GET_REPORT on the keyboard is one empty boot report, never more.
+        let a = handle(
+            &mut d,
+            &setup(0xA1, hid_request::GET_REPORT, 0x0100, 1, 64),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[0u8; 8]));
+
+        // The LED report a host sets on bind is acknowledged.
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x21, hid_request::SET_REPORT, 0x0200, 1, 1),
+                &mut s
+            ),
+            Action::Ack
+        );
+    }
+
+    /// A BIOS switches a boot keyboard to boot protocol; a bus reset puts it back.
+    #[test]
+    fn the_keyboard_protocol_is_remembered_and_reset_returns_it_to_report() {
+        let mut d = dev();
+        d.set_keyboard(true);
+        let mut s = [0u8; 64];
+        let a = handle(
+            &mut d,
+            &setup(0xA1, hid_request::GET_PROTOCOL, 0, 1, 1),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[hid_protocol::REPORT]));
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x21, hid_request::SET_PROTOCOL, 0, 1, 0),
+                &mut s
+            ),
+            Action::Ack
+        );
+        let a = handle(
+            &mut d,
+            &setup(0xA1, hid_request::GET_PROTOCOL, 0, 1, 1),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[hid_protocol::BOOT]));
+        // The wallet's interface has no boot protocol and always says report.
+        let a = handle(
+            &mut d,
+            &setup(0xA1, hid_request::GET_PROTOCOL, 0, 0, 1),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[hid_protocol::REPORT]));
+        d.reset();
+        assert!(
+            d.keyboard,
+            "the keyboard is configuration, not transfer state"
+        );
+        let a = handle(
+            &mut d,
+            &setup(0xA1, hid_request::GET_PROTOCOL, 0, 1, 1),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[hid_protocol::REPORT]));
+    }
+
+    /// The keyboard never rides along with the mass-storage identity, whatever the flag.
+    #[test]
+    fn the_mass_storage_identity_never_carries_the_keyboard() {
+        let mut d = dev();
+        d.set_keyboard(true);
+        d.set_mode(DeviceMode::Msc);
+        let mut s = [0u8; 64];
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::msc::CONFIGURATION[..]));
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x81, request::GET_DESCRIPTOR, 0x2200, 1, 255),
+                &mut s
+            ),
+            Action::Stall
+        );
+        // And switching back to HID brings it back without being asked again.
+        d.set_mode(DeviceMode::Hid);
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::kbd::CONFIGURATION[..]));
     }
 }

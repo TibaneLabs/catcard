@@ -22,6 +22,7 @@ use catcard_board::Pin;
 use catcard_usb::REPORT_LEN;
 use catcard_usb::control::{self, Action, Device, Setup};
 use catcard_usb::descriptor::{EP_IN, EP_OUT};
+use catcard_usb::kbd;
 
 use crate::gpio::{self, OutputType, Pull, Speed};
 use crate::reg;
@@ -148,16 +149,24 @@ mod pktsts {
 
 /// FIFO allocation, in 32-bit words. The FS core has 1.25 KB — 320 words — of FIFO RAM.
 ///
-/// Deliberately under-committed: 224 of 320 words. The RX minimum for one 64-byte
+/// Deliberately under-committed: 240 of 320 words. The RX minimum for one 64-byte
 /// control endpoint plus one data endpoint is around 50 words, so this is generous, and
-/// spending the remainder would buy throughput this device does not need.
+/// spending the remainder would buy throughput this device does not need. The keyboard's
+/// IN FIFO is the smallest the core allows -- sixteen words for an eight-byte report --
+/// and is sized whether or not the keyboard is enumerated, so the layout never moves.
+/// Source: RM0432 §OTG_DIEPTXFx, "minimum value is 16" [C]
 const RX_WORDS: u32 = 128;
 const EP0_TX_WORDS: u32 = 32;
 const EP1_TX_WORDS: u32 = 64;
+const EP2_TX_WORDS: u32 = 16;
+const _: () = assert!(RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS <= 320);
 
 /// Endpoint numbers, from the addresses the descriptors advertise.
 const EP_IN_NUM: u32 = (EP_IN & 0x0F) as u32;
 const EP_OUT_NUM: u32 = (EP_OUT & 0x0F) as u32;
+/// The keyboard's IN endpoint. Its own number, so the wallet's stays what it was.
+const KBD_EP_NUM: u32 = (kbd::EP_IN & 0x0F) as u32;
+const _: () = assert!(KBD_EP_NUM != EP_IN_NUM && KBD_EP_NUM >= 1 && KBD_EP_NUM <= 5);
 
 /// How long to wait for a core reset or an AHB idle, in poll iterations.
 ///
@@ -548,6 +557,68 @@ impl Otg {
         self.dev.set_mode(mode);
     }
 
+    /// Present the keyboard interface beside the wallet's, or withdraw it. Like
+    /// [`set_mode`](Self::set_mode) it takes effect on the next enumeration, so the
+    /// caller detaches and [`reinit`](Self::reinit)s: the host keeps the descriptors it
+    /// read at plug-in, and a new interface it was never told about does not exist.
+    pub fn set_keyboard(&mut self, on: bool) {
+        self.dev.set_keyboard(on);
+    }
+
+    /// Whether the keyboard interface is part of the current identity.
+    pub fn keyboard_present(&self) -> bool {
+        self.dev.keyboard_present()
+    }
+
+    /// Send one boot-keyboard report on the keyboard's IN endpoint.
+    ///
+    /// Returns false, having sent nothing, when the keyboard is not enumerated, the host
+    /// has not configured us, the previous report has not been taken yet, or the FIFO
+    /// has no room. Never blocks: the caller paces and bounds its own retries, so a host
+    /// that stops polling the endpoint costs it a timeout rather than a hang.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn kbd_send(&mut self, report: &[u8; kbd::REPORT_LEN]) -> bool {
+        // SAFETY: as documented.
+        unsafe {
+            if !self.dev.is_configured() || !self.dev.keyboard_present() {
+                return false;
+            }
+            if self.kbd_busy() {
+                return false;
+            }
+            let words = (kbd::REPORT_LEN as u32).div_ceil(4);
+            if reg::read(DTXFSTS + KBD_EP_NUM * EP_STRIDE) & 0xFFFF < words {
+                return false;
+            }
+            reg::write(
+                DIEPTSIZ + KBD_EP_NUM * EP_STRIDE,
+                (1 << 19) | kbd::REPORT_LEN as u32,
+            );
+            reg::modify(
+                DIEPCTL + KBD_EP_NUM * EP_STRIDE,
+                EPCTL_COMMANDS,
+                EPCTL_EPENA | EPCTL_CNAK,
+            );
+            write_fifo_bytes(KBD_EP_NUM, report);
+            true
+        }
+    }
+
+    /// Whether the last keyboard report is still waiting for the host to take it.
+    ///
+    /// `EPENA` stays set from the send until the host's IN token drains the FIFO, so
+    /// this is how a caller knows a release report actually left the device before it
+    /// reports success -- and how it notices a host that has stopped asking.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn kbd_busy(&self) -> bool {
+        // SAFETY: a plain read of a register this driver owns.
+        unsafe { reg::read(DIEPCTL + KBD_EP_NUM * EP_STRIDE) & EPCTL_EPENA != 0 }
+    }
+
     /// The identity currently enumerating.
     pub fn mode(&self) -> control::DeviceMode {
         self.dev.mode
@@ -741,7 +812,10 @@ impl Otg {
             // Q1 when a second libusb client configured the already-configured device.
             let reconfigured = setup.bRequest == control::request::SET_CONFIGURATION;
             if self.dev.is_configured() && (!was_configured || reconfigured) {
-                open_data_endpoints(self.dev.mode == control::DeviceMode::Msc);
+                open_data_endpoints(
+                    self.dev.mode == control::DeviceMode::Msc,
+                    self.dev.keyboard_present(),
+                );
                 self.receive_next();
             }
         }
@@ -768,9 +842,11 @@ impl Otg {
     /// # Safety
     /// Exclusive access to OTG_FS.
     unsafe fn service_in_endpoints(&mut self) {
-        // SAFETY: as documented.
+        // SAFETY: as documented. The keyboard's endpoint is included whether or not it
+        // is open: a closed endpoint raises nothing, and an open one whose completion
+        // was never acknowledged would hold `IEPINT` up for good.
         unsafe {
-            for ep in [0, EP_IN_NUM] {
+            for ep in [0, EP_IN_NUM, KBD_EP_NUM] {
                 let at = DIEPINT + ep * EP_STRIDE;
                 let v = reg::read(at);
                 if v != 0 {
@@ -850,6 +926,10 @@ unsafe fn configure_fifos() {
             DIEPTXF + (EP_IN_NUM - 1) * 4,
             (EP1_TX_WORDS << 16) | (RX_WORDS + EP0_TX_WORDS),
         );
+        reg::write(
+            DIEPTXF + (KBD_EP_NUM - 1) * 4,
+            (EP2_TX_WORDS << 16) | (RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS),
+        );
         flush_fifos();
     }
 }
@@ -912,7 +992,7 @@ unsafe fn clear_halt(ep: u8) {
 
 /// # Safety
 /// Exclusive access to OTG_FS.
-unsafe fn open_data_endpoints(bulk: bool) {
+unsafe fn open_data_endpoints(bulk: bool, keyboard: bool) {
     // Interrupt for the HID identity, bulk for mass storage; the endpoint numbers and
     // max packet size (64) are the same either way.
     let eptyp = if bulk {
@@ -935,6 +1015,23 @@ unsafe fn open_data_endpoints(bulk: bool) {
             DOEPCTL + EP_OUT_NUM * EP_STRIDE,
             EPCTL_USBAEP | eptyp | EPCTL_SD0PID | EPCTL_SNAK | REPORT_LEN as u32,
         );
+        // The keyboard's IN endpoint, only when the host was told about it. Otherwise
+        // it is left inactive (`USBAEP` clear), so a stray IN token to it is ignored by
+        // the core rather than answered with whatever the FIFO holds.
+        let kctl = DIEPCTL + KBD_EP_NUM * EP_STRIDE;
+        if keyboard {
+            reg::write(
+                kctl,
+                EPCTL_USBAEP
+                    | EPCTL_EPTYP_INTR
+                    | EPCTL_SD0PID
+                    | EPCTL_SNAK
+                    | (KBD_EP_NUM << EPCTL_TXFNUM_SHIFT)
+                    | kbd::REPORT_LEN as u32,
+            );
+        } else {
+            reg::write(kctl, 0);
+        }
     }
 }
 

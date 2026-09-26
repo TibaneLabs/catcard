@@ -42,6 +42,7 @@
 
 pub mod control;
 pub mod descriptor;
+pub mod kbd;
 pub mod msc;
 pub mod ncry;
 
