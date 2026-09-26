@@ -9885,7 +9885,12 @@ fn read_card_pwd(ui: &mut Ui<'_>, prompt: &str) -> Option<catcard_ui::textentry:
     // Byte length, not character count: the card's `PWDS_LEN` counts bytes, so a short
     // string of multi-byte characters can still be too long for it.
     if entry.is_empty() || entry.as_str().len() > catcard_sd::MAX_LOCK_PWD {
-        message(ui.panel, "Card password", "1 to 16 characters", "press a key");
+        message(
+            ui.panel,
+            "Card password",
+            "1 to 16 characters",
+            "press a key",
+        );
         wait_any_key(ui);
         entry.clear();
         return None;
@@ -10004,7 +10009,8 @@ fn card_password(ui: &mut Ui<'_>) {
                 return;
             }
             message(ui.panel, HEAD, "changing password", "do not remove card");
-            let cleared = catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(old.as_str().as_bytes()));
+            let cleared =
+                catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(old.as_str().as_bytes()));
             old.clear();
             match cleared {
                 Ok(()) => {

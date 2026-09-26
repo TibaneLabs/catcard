@@ -1043,7 +1043,10 @@ mod lock_unlock_sequence {
     fn cmd42_goes_out_after_the_data_path_is_armed_outbound() {
         let mut t = LockFake::default();
         lock_unlock(&mut t, LockOp::SetPassword(b"secret")).expect("lock");
-        assert!(!t.cmd_before_arm, "CMD42 went out before arming the data path");
+        assert!(
+            !t.cmd_before_arm,
+            "CMD42 went out before arming the data path"
+        );
         assert_eq!(t.cmd, Some(42));
         assert!(!t.armed_to_host, "the structure is written host-to-card");
         // 2 + 6 = 8 is already a power of two, so no padding.
