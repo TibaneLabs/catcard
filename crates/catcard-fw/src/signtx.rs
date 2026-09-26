@@ -739,6 +739,24 @@ pub(crate) fn review_and_sign(
         }
     };
 
+    // A BIP-322 proof of reserves -- one 0-sat `OP_RETURN` output, spending `to_spend` --
+    // is a proof and not a spend, and gets its own review: what it attests to, and that
+    // nothing leaves. `por::review` owns it from here.
+    if crate::por::is_proof_of_reserves(&psbt) {
+        return crate::por::review(
+            gate,
+            login,
+            ui,
+            master,
+            fingerprint,
+            buf,
+            spare,
+            len,
+            dest,
+            storage,
+        );
+    }
+
     // The multisig wallets a script-hash input may be checked against. The registered ones
     // come first: the chain says which script the coin is locked to, but only a
     // registration says whose wallet that script belongs to. On top of those, the trust
