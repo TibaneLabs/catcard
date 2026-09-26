@@ -245,6 +245,9 @@ version = "7.0.0"
 [[package]]
 name = "catcard-nfc"
 version = "7.0.0"
+dependencies = [
+ "purecrypto",
+]
 
 [[package]]
 name = "catcard-pin"
@@ -281,6 +284,7 @@ dependencies = [
 name = "catcard-settings"
 version = "7.0.0"
 dependencies = [
+ "catcard-nfc",
  "emjson",
  "heapless",
  "purecrypto",

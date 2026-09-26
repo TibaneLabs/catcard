@@ -119,6 +119,19 @@ enum Screen {
     /// Debug: type a fixed line into the host as a USB keyboard.
     #[cfg(not(feature = "board-mk3"))]
     KbdTest,
+    /// Stock's NFC Tools drawer: everything the tag can carry in or out, in one list.
+    #[cfg(not(feature = "board-mk3"))]
+    NfcTools,
+    /// One of that drawer's rows that is a routine, by its row in [`NFC_TOOLS_ITEMS`];
+    /// `crate::nfc::tool` turns the row into the screen.
+    #[cfg(not(feature = "board-mk3"))]
+    NfcTool(u8),
+    /// Settings → Hardware On/Off → NFC Sharing: the switch every tag use is behind.
+    #[cfg(not(feature = "board-mk3"))]
+    NfcSharing,
+    /// Settings → NFC Push Tx: where the broadcast link after a signature points.
+    #[cfg(not(feature = "board-mk3"))]
+    PushTx,
     AddressExplorer,
     /// One of the exports that is neither the generic JSON nor a plain key: Bitcoin
     /// Core, Electrum, Wasabi, Unchained or a single-signature descriptor. By its row in
@@ -411,6 +424,8 @@ impl Screen {
             | Screen::GenericJson(w)
             | Screen::ExportOne(w)
             | Screen::KeyPick(w) => w,
+            #[cfg(not(feature = "board-mk3"))]
+            Screen::NfcTool(w) => w,
             _ => 0,
         }
     }
@@ -511,6 +526,10 @@ const SETTINGS_ITEMS: &[&str] = &[
     "SLIP-132 export",
     #[cfg(not(feature = "board-mk3"))]
     "Hardware On/Off",
+    // Where the PushTx link after a signed transaction points. Stock's row and name.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "NFC Push Tx" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "NFC Push Tx",
     #[cfg(not(feature = "board-mk3"))]
     "Menu wrapping",
     // The colour panel's backlight level. Q1-only: the mono boards have no backlight PWM.
@@ -627,13 +646,30 @@ const LOGIN_ITEMS: &[&str] = &[
 /// The hardware a preference can actually switch off.
 ///
 /// **Only what the firmware really obeys.** Stock's own Hardware On/Off page lists the
-/// NFC tag and the front LED beside these two; ours does not, because nothing here would
-/// honour those rows yet and a switch that does nothing is worse than a missing one. Each
-/// row below names the code that answers it: `crate::usbtask::set_port` for the port, the
-/// USB Drive screen for the disk.
+/// four rows in this order. Each row below names the code that answers it:
+/// `crate::usbtask::set_port` for the port, the USB Drive screen for the disk,
+/// `crate::usbtask::set_keyboard` for the keyboard, and `crate::nfc::enabled` -- checked
+/// by every tag entry point -- for NFC Sharing.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Hardware On/Off" [C]
 #[cfg(not(feature = "board-mk3"))]
-const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk", "Keyboard EMU"];
+const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk", "Keyboard EMU", "NFC Sharing"];
+
+/// Stock's NFC Tools drawer, its rows in stock's order less `Verify Address`, which has
+/// no tag flow of its own here: the address explorer verifies, and shares by NFC from the
+/// address it shows. `Sign PSBT` is the receive screen and `Show Address` the explorer;
+/// the rest are routines in `crate::nfc`, reached by row through [`Screen::NfcTool`].
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT "NFC Tools" [C]
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) const NFC_TOOLS_ITEMS: &[&str] = &[
+    "Sign PSBT",
+    "Show Address",
+    "Sign Message",
+    "Verify Sig File",
+    "File Share",
+    "Import Multisig",
+    "Push Transaction",
+    "Import Words",
+];
 
 /// How long a new seed should be.
 ///
@@ -685,6 +721,10 @@ const UTILS_ITEMS: &[&str] = &[
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
     #[cfg(not(feature = "board-mk3"))]
     "WIF Store",
+    // Stock's `Advanced/Tools` → `NFC Tools`; the mk3 has no tag.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT "NFC Tools" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "NFC Tools",
     "Upgrade Firmware",
 ];
 #[cfg(not(feature = "games"))]
@@ -713,6 +753,10 @@ const UTILS_ITEMS: &[&str] = &[
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
     #[cfg(not(feature = "board-mk3"))]
     "WIF Store",
+    // Stock's `Advanced/Tools` → `NFC Tools`; the mk3 has no tag.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT "NFC Tools" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "NFC Tools",
     "Upgrade Firmware",
 ];
 
@@ -1472,6 +1516,21 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::nfc::receive_screen(a.gate, a.login, a.ui),
             Screen::SignMenu,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTool(_) => to(
+            |a| crate::nfc::tool(a.gate, a.login, a.ui, a.words),
+            Screen::NfcTools,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcSharing => to(
+            |a| crate::nfc::sharing_screen(a.gate, a.login, a.ui),
+            Screen::Hardware,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::PushTx => to(
+            |a| crate::nfc::pushtx_screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
         Screen::SignMessage => to(
             |a| crate::signmsg::screen(a.gate, a.login, a.ui),
             Screen::SignMenu,
@@ -1875,6 +1934,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Hardware On/Off")) => Screen::Hardware,
             #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("NFC Push Tx")) => Screen::PushTx,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
@@ -1888,8 +1949,19 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("USB port")) => Screen::UsbPort,
             (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
             (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
+            (Key::Confirm, Some("NFC Sharing")) => Screen::NfcSharing,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Hardware,
+        },
+        // By name, as the other lists: `Sign PSBT` and `Show Address` are screens that
+        // exist already; every other row is a routine reached by its index.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTools => match (key, NFC_TOOLS_ITEMS.get(cursor).copied()) {
+            (Key::Confirm, Some("Sign PSBT")) => Screen::SignNfc,
+            (Key::Confirm, Some("Show Address")) => Screen::AddressExplorer,
+            (Key::Confirm, Some(_)) => Screen::NfcTool(cursor as u8),
+            (Key::Cancel, _) => Screen::Utils,
+            _ => Screen::NfcTools,
         },
         Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
@@ -2009,6 +2081,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Games")) => Screen::Games,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("WIF Store")) => Screen::WifStore,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("NFC Tools")) => Screen::NfcTools,
             (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
@@ -2437,6 +2511,8 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::Login => Some(LOGIN_ITEMS),
         #[cfg(not(feature = "board-mk3"))]
         Screen::Hardware => Some(HARDWARE_ITEMS),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTools => Some(NFC_TOOLS_ITEMS),
         Screen::DangerZone => Some(DANGER_ITEMS),
         Screen::SeedTools => Some(seed_tools_items()),
         Screen::KeyMenu => Some(key_items()),
@@ -2468,7 +2544,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::BackupMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::Hardware => draw_menu(panel, screen, v),
+        Screen::Hardware | Screen::NfcTools => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
@@ -2512,6 +2588,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ViewTrngWords => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest | Screen::KbdTest => {}
+        // Handled in `run`: each drives the tag, the panel and its own prompts.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTool(_) | Screen::NfcSharing | Screen::PushTx => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         #[cfg(feature = "multichain")]
         Screen::Keystone => {}
@@ -2674,6 +2753,11 @@ fn menu_head(screen: Screen) -> (&'static str, Line) {
         Screen::Hardware => {
             let _ = note.push_str("only what the firmware obeys");
             "Hardware On/Off"
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::NfcTools => {
+            let _ = note.push_str("in and out by tapping a phone");
+            "NFC Tools"
         }
         Screen::DangerZone => {
             let _ = note.push_str("these show or change secrets");
@@ -3955,6 +4039,12 @@ enum FileChoice {
     /// Show it: a picture, on the one board with a screen that can.
     #[cfg(feature = "board-q1")]
     View,
+    /// Put it on the NFC tag for a phone to read. Boards with a tag.
+    #[cfg(not(feature = "board-mk3"))]
+    ShareNfc,
+    /// Show it as animated BBQr. The Q1, whose screen a camera can read.
+    #[cfg(feature = "board-q1")]
+    ShareQr,
 }
 
 /// What the browser is for.
@@ -3976,6 +4066,10 @@ const BROWSE_USE_FOLDER: u32 = BROWSE_PARENT - 1;
 const FILE_DELETE_ROW: u32 = 0;
 #[cfg(feature = "board-q1")]
 const FILE_VIEW_ROW: u32 = 1;
+#[cfg(not(feature = "board-mk3"))]
+const FILE_SHARE_NFC_ROW: u32 = 2;
+#[cfg(feature = "board-q1")]
+const FILE_SHARE_QR_ROW: u32 = 3;
 
 /// Show a file's details, and offer what can be done with it from here.
 ///
@@ -4012,6 +4106,15 @@ fn file_info(
         if allow_view && crate::pngview::is_png(name) {
             let _ = lines.push(DLine::item("View", FILE_VIEW_ROW));
         }
+        // Sharing before deleting, for the same reason: stock's `NFC File Share` and
+        // `BBQr File Share` are this, reached from the file rather than from a drawer.
+        // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
+        #[cfg(not(feature = "board-mk3"))]
+        if catcard_board::BOARD.nfc.is_some() {
+            let _ = lines.push(DLine::item("Share by NFC", FILE_SHARE_NFC_ROW));
+        }
+        #[cfg(feature = "board-q1")]
+        let _ = lines.push(DLine::item("Share as BBQr", FILE_SHARE_QR_ROW));
         let _ = lines.push(DLine::item("Delete file", FILE_DELETE_ROW));
     }
     match show_doc(ui, &lines, false, false) {
@@ -4021,8 +4124,53 @@ fn file_info(
         DocExit::Selected(FILE_DELETE_ROW) => FileChoice::Delete,
         #[cfg(feature = "board-q1")]
         DocExit::Selected(FILE_VIEW_ROW) => FileChoice::View,
+        #[cfg(not(feature = "board-mk3"))]
+        DocExit::Selected(FILE_SHARE_NFC_ROW) => FileChoice::ShareNfc,
+        #[cfg(feature = "board-q1")]
+        DocExit::Selected(FILE_SHARE_QR_ROW) => FileChoice::ShareQr,
         _ => FileChoice::None,
     }
+}
+
+/// Read a file off the open volume for sharing, bounded by what the tag holds, and hand
+/// it to `share`. A file over the bound is refused as too large rather than sent in part.
+#[cfg(not(feature = "board-mk3"))]
+fn share_browse_file<D: catcard_sd::fat::SectorDriver>(
+    ui: &mut Ui<'_>,
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    name: &str,
+    share: fn(&mut Ui<'_>, &str, &[u8]),
+) {
+    const HEAD: &str = "Share";
+    let Some(mut held) = crate::heap::take(crate::nfc::SHARE_MAX) else {
+        message(ui.panel, HEAD, "not enough memory", "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    };
+    card_wait(ui.panel, HEAD, "reading the file");
+    match crate::nfc::read_for_share(vol, path, held.bytes()) {
+        Ok(n) => share(ui, name, &held.bytes()[..n]),
+        Err(why) => {
+            message(ui.panel, HEAD, why, "any key to go back");
+            wait_for_any_key(ui);
+        }
+    }
+}
+
+/// Show a file's bytes as animated BBQr, typed by what they are: a PSBT as `P`, text as
+/// `U`, and anything else as `B` -- raw binary, which a reader takes as a file.
+#[cfg(feature = "board-q1")]
+fn share_as_bbqr(ui: &mut Ui<'_>, name: &str, bytes: &[u8]) {
+    use catcard_bbqr::FileType;
+    let filetype = if bytes.starts_with(b"psbt\xff") {
+        FileType::PSBT
+    } else if core::str::from_utf8(bytes).is_ok() {
+        FileType::UNICODE
+    } else {
+        FileType::BINARY
+    };
+    crate::qrshow::animate_bbqr(ui, name, bytes, filetype);
 }
 
 /// Delete one file off the card, behind a confirmation.
@@ -4342,6 +4490,16 @@ fn browse_volume<D: catcard_sd::fat::SectorDriver>(
                                     return None;
                                 }
                             };
+                        }
+                        // Read off this same mount, so no re-mount is needed: the tag
+                        // and the panel are the only other things touched.
+                        #[cfg(not(feature = "board-mk3"))]
+                        FileChoice::ShareNfc => {
+                            share_browse_file(ui, &mut vol, &full, &e.name, crate::nfc::share_bytes)
+                        }
+                        #[cfg(feature = "board-q1")]
+                        FileChoice::ShareQr => {
+                            share_browse_file(ui, &mut vol, &full, &e.name, share_as_bbqr)
                         }
                         FileChoice::None => {}
                     }
