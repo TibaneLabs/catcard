@@ -1309,7 +1309,7 @@ mod tests {
             render_unlock(b"12-34", &[1; UNLOCK_SALT_LEN], UNLOCK_ROUNDS, &mut buf).unwrap();
         assert!(record.starts_with("pbkdf2$50000$"));
         assert_eq!(record.len(), UNLOCK_RECORD_LEN - 10 + 5);
-        assert!(UNLOCK_ROUNDS >= 50_000);
+        const { assert!(UNLOCK_ROUNDS >= 50_000) };
     }
 
     #[test]
