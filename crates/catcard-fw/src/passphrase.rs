@@ -91,20 +91,27 @@ fn xfp_text(fp: [u8; 4]) -> heapless::String<12> {
     s
 }
 
+/// Whether the wallet in force has no words for a passphrase to change -- an XPRV or a
+/// single key -- said on screen when so, rather than taking a passphrase that would
+/// silently do nothing. A passphrase changes the seed that *words* stretch to.
+fn no_words(ui: &mut Ui<'_>) -> bool {
+    use crate::key::Loaded;
+    let Some(kind @ (Loaded::Xprv | Loaded::Wif)) = crate::key::loaded() else {
+        return false;
+    };
+    let what = if kind == Loaded::Xprv {
+        "an XPRV has no words"
+    } else {
+        "a WIF key has no words"
+    };
+    menu::message(ui.panel, HEAD, what, "for a passphrase to change");
+    menu::wait_for_any_key(ui);
+    true
+}
+
 /// Settings -> Passphrase: type one, or restore one saved to the card.
 pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    // A passphrase changes the seed that words stretch to. An XPRV or a single key has
-    // no words, so there is nothing for one to change -- said, rather than taking a
-    // passphrase that would silently do nothing.
-    use crate::key::Loaded;
-    if let Some(kind @ (Loaded::Xprv | Loaded::Wif)) = crate::key::loaded() {
-        let what = if kind == Loaded::Xprv {
-            "an XPRV has no words"
-        } else {
-            "a WIF key has no words"
-        };
-        menu::message(ui.panel, HEAD, what, "for a passphrase to change");
-        menu::wait_for_any_key(ui);
+    if no_words(ui) {
         return;
     }
 
@@ -136,7 +143,7 @@ fn enter(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         return;
     }
 
-    let applied = apply(gate, login, ui, entry.as_str(), None);
+    let applied = put_in_force(gate, login, ui, entry.as_str(), None);
     if let Some(fp) = applied {
         // Stock's "(1) = use AND save encrypted to MicroSD", asked as a question of its
         // own once the wallet is in force. Source: help-and-warning-screens.md §5 [C]
@@ -154,6 +161,39 @@ fn enter(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     entry.clear();
 }
 
+/// Apply a passphrase that arrived as text -- a Secure Notes password today -- exactly as
+/// a typed one is applied: the wallet it opens is shown by fingerprint and first address
+/// and the owner says whether to work in it. RAM only; the save-to-card offer is the
+/// typing screen's, not this one's, because the text is already kept somewhere.
+///
+/// True once the wallet is in force. Refused, with a line said, on a wallet that has no
+/// words for a passphrase to change, on empty text, and on text longer than a passphrase
+/// may be -- silently truncating one would open a wallet nobody can name.
+#[cfg(feature = "board-q1")]
+pub(crate) fn apply(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    text: &str,
+) -> bool {
+    if no_words(ui) {
+        return false;
+    }
+    let refused = if text.is_empty() {
+        Some("nothing to apply")
+    } else if text.len() > MAX_LEN {
+        Some("too long for a passphrase")
+    } else {
+        None
+    };
+    if let Some(why) = refused {
+        menu::message(ui.panel, HEAD, why, "any key to go back");
+        menu::wait_for_any_key(ui);
+        return false;
+    }
+    put_in_force(gate, login, ui, text, None).is_some()
+}
+
 /// Put `text` in force, show the wallet it opens, and keep it if the owner says so.
 ///
 /// `expect`, when given, is the fingerprint a saved entry was labelled with: a wallet
@@ -161,7 +201,7 @@ fn enter(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 /// words in force may not be the ones the passphrase was saved under.
 ///
 /// The fingerprint of the wallet now in force, or `None` if it was not applied.
-fn apply(
+fn put_in_force(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
@@ -422,7 +462,7 @@ fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         return;
     };
     crate::catlog!("passphrase: restored from card");
-    apply(gate, login, ui, passphrase, Some(saved_fp));
+    put_in_force(gate, login, ui, passphrase, Some(saved_fp));
 }
 
 /// Type text. `None` if the owner backed out.

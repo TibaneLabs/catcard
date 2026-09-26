@@ -1421,12 +1421,12 @@ fn file_name(title: &str, suffix: &str) -> heapless::String<64> {
 
 /// Use the stored password as the session's BIP-39 passphrase.
 ///
+/// Applied as a typed one is ([`crate::passphrase::apply`]): the wallet it opens is
+/// shown by fingerprint and first address before the owner agrees to work in it, and it
+/// lives in RAM until reboot. Asked once here first, because the row sits beside `Delete`
+/// and a passphrase applied by a slip is a different wallet on screen with no word said.
+///
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §N "Apply as BIP-39 Passphrase" [C]
-// TODO(integrator): `crate::passphrase` has no `pub(crate)` way to apply a given string --
-// `set` is private and `screen` reads from the keyboard -- and that file is not this
-// module's to change. Until it grows an `apply(gate, login, ui, text) -> bool` (set, then
-// the unlock-and-confirm half of `screen`), this reveals the password and hands over to
-// the passphrase screen for the owner to type it.
 fn apply_passphrase(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -1436,15 +1436,18 @@ fn apply_passphrase(
     if item.password.is_empty() {
         return say(ui, "no password stored");
     }
-    let rows = [
-        Row::title("As passphrase"),
-        Row::body("type this on the next screen").small(),
-        Row::body(item.password).secret().wrapped(),
-    ];
-    if !matches!(menu::show_doc(ui, &rows, true, false), DocExit::Confirmed) {
+    menu::ask(
+        ui.panel,
+        "As passphrase",
+        "open the wallet this",
+        "password names?",
+    );
+    if !menu::confirmed(ui) {
         return;
     }
-    crate::passphrase::screen(gate, login, ui);
+    if crate::passphrase::apply(gate, login, ui, item.password) {
+        crate::catlog!("notes: password applied as passphrase");
+    }
 }
 
 // ---------------------------------------------------------------------------
