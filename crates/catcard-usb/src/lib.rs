@@ -16,8 +16,13 @@
 //!
 //! Only the *transport* is standard. The stock firmware also uses 64-byte HID reports,
 //! with a framed ECDH+AES-256-CTR protocol on top; the reference says in as many words
-//! to ignore it and design our own, and this is our own. Nothing here is derived from
-//! it, and the two are not interoperable.
+//! to ignore it and design our own, and this is our own. Nothing in the framing below is
+//! derived from it, and the two are not interoperable.
+//!
+//! The one exception is [`ckcc`]: the owner may choose the **ckcc** USB mode, in which
+//! the device presents stock's identity and speaks stock's protocol so existing host tools
+//! work. That module is written from `hw-reference/usb-ckcc-protocol.md` and is used only
+//! in that mode; nothing in CatCard's own protocol depends on it.
 //!
 //! # Framing
 //!
@@ -40,6 +45,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod ckcc;
 pub mod control;
 pub mod descriptor;
 pub mod hostwallet;

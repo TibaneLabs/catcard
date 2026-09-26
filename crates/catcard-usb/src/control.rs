@@ -176,6 +176,10 @@ pub struct Device {
     /// interface starts in report protocol and a BIOS switches it; the two report shapes
     /// are identical here, so this is remembered only to be answered back.
     pub protocol_kbd: u8,
+    /// Whether the HID identity is stock's (the **ckcc** USB mode): the same interface
+    /// under [`descriptor::DEVICE_CKCC`]'s VID/PID, and never the keyboard beside it.
+    /// A configuration choice like `mode`, so it survives a bus reset.
+    pub ckcc: bool,
 }
 
 impl Device {
@@ -190,6 +194,7 @@ impl Device {
             keyboard: false,
             idle_kbd: 0,
             protocol_kbd: hid_protocol::REPORT,
+            ckcc: false,
         }
     }
 
@@ -217,10 +222,16 @@ impl Device {
         self.keyboard = on;
     }
 
+    /// Present stock's identity instead of ours, or ours again. Takes effect on the next
+    /// enumeration, like [`set_keyboard`](Self::set_keyboard).
+    pub fn set_ckcc(&mut self, on: bool) {
+        self.ckcc = on;
+    }
+
     /// Whether the keyboard interface is part of what the host enumerated: on, and in
-    /// the HID identity (the mass-storage one never carries it).
+    /// our own HID identity (the mass-storage one and stock's never carry it).
     pub fn keyboard_present(&self) -> bool {
-        self.keyboard && self.mode == DeviceMode::Hid
+        self.keyboard && self.mode == DeviceMode::Hid && !self.ckcc
     }
 
     pub fn is_configured(&self) -> bool {
@@ -379,11 +390,14 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         }
         // In MSC mode there is no HID interface to describe.
         kind::HID_REPORT | kind::HID if msc => Action::Stall,
+        kind::DEVICE if dev.ckcc => {
+            Action::Data(trim_static(&descriptor::DEVICE_CKCC, setup.wLength))
+        }
         kind::DEVICE => Action::Data(trim_static(&descriptor::DEVICE, setup.wLength)),
         // With the keyboard on, the composite table: the same interface 0 at the same
         // offset, then the keyboard. The host re-enumerated to read it -- see
         // `Device::set_keyboard` -- so it is never a surprise mid-session.
-        kind::CONFIGURATION if dev.keyboard => {
+        kind::CONFIGURATION if dev.keyboard_present() => {
             Action::Data(trim_static(&crate::kbd::CONFIGURATION, setup.wLength))
         }
         kind::CONFIGURATION => Action::Data(trim_static(&descriptor::CONFIGURATION, setup.wLength)),
@@ -968,6 +982,40 @@ mod tests {
 
     /// With the keyboard on, the host reads the composite configuration, and each
     /// interface answers for its own descriptors and class requests.
+    #[test]
+    fn the_ckcc_identity_is_stocks_vid_pid_over_our_one_interface() {
+        let mut d = dev();
+        // The keyboard switch is on, and ckcc mode still never carries it.
+        d.set_keyboard(true);
+        d.set_ckcc(true);
+        let mut s = [0u8; 64];
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0100, 0, 18),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::DEVICE_CKCC[..]));
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::CONFIGURATION[..]));
+        assert!(!d.keyboard_present());
+        // A bus reset keeps it: it is a configuration, not transfer state.
+        d.reset();
+        assert!(d.ckcc);
+        // And back.
+        d.set_ckcc(false);
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0100, 0, 18),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::DEVICE[..]));
+        assert!(d.keyboard_present());
+    }
+
     #[test]
     fn with_the_keyboard_on_each_interface_answers_for_itself() {
         let mut d = dev();

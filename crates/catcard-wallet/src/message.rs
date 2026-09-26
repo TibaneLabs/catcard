@@ -179,6 +179,21 @@ fn sign_digest(
     Ok(out)
 }
 
+/// Sign a bare 32-byte digest -- no message prefix, no hashing -- as a recoverable
+/// signature with a compressed-key header (`31 + recid`).
+///
+/// For stock's USB `mitm` check, which signs the link's session key with the master key
+/// and has the host verify it against the master xpub (hw-reference/usb-ckcc-protocol.md
+/// §2.8 [C]). Nothing else should sign an unprefixed digest: that is what keeps a message
+/// signature from being a transaction signature.
+pub fn sign_raw_digest(
+    digest: &[u8; 32],
+    secret: &[u8; 32],
+    kw: &crate::KeyWork,
+) -> Result<[u8; SIG_LEN], Error> {
+    sign_digest(digest, secret, AddressKind::P2pkh, kw)
+}
+
 /// Base64 of a signature, as the armoured form used everywhere.
 pub fn armour(sig: &[u8; SIG_LEN], out: &mut [u8]) -> Result<usize, Error> {
     outscript::base64::encode_to_slice(sig, out).map_err(|_| Error::BufferTooSmall)

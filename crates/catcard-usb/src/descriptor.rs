@@ -58,6 +58,21 @@ pub const DEVICE: [u8; 18] = [
     1,                    // bNumConfigurations
 ];
 
+/// The device descriptor for the **ckcc** USB mode: [`DEVICE`] with stock Coldcard's
+/// VID/PID, which is what the existing host tools (`ckcc`, HWI, Sparrow) match on.
+/// Everything else -- the one HID interface, its 64-byte reports, the endpoints, the
+/// strings -- is the same table as CatCard mode: the host tools match on VID/PID, not on
+/// the report descriptor or the strings (hw-reference/usb-ckcc-protocol.md §1.1 [C]), so
+/// the product string stays ours rather than borrowing stock's.
+pub const DEVICE_CKCC: [u8; 18] = {
+    let mut d = DEVICE;
+    d[8] = crate::ckcc::VENDOR_ID as u8;
+    d[9] = (crate::ckcc::VENDOR_ID >> 8) as u8;
+    d[10] = crate::ckcc::PRODUCT_ID as u8;
+    d[11] = (crate::ckcc::PRODUCT_ID >> 8) as u8;
+    d
+};
+
 /// Total length of [`CONFIGURATION`], which its own header has to state.
 pub const CONFIG_TOTAL: u16 = 9 + 9 + 9 + 7 + 7;
 
@@ -189,6 +204,20 @@ mod tests {
         assert_eq!(u16::from_le_bytes([DEVICE[10], DEVICE[11]]), 0x0401);
         assert_eq!(DEVICE[0] as usize, DEVICE.len());
         assert_eq!(DEVICE[1], kind::DEVICE);
+    }
+
+    #[test]
+    fn the_ckcc_identity_differs_only_in_vid_and_pid() {
+        assert_eq!(u16::from_le_bytes([DEVICE_CKCC[8], DEVICE_CKCC[9]]), 0xD13E);
+        assert_eq!(
+            u16::from_le_bytes([DEVICE_CKCC[10], DEVICE_CKCC[11]]),
+            0xCC10
+        );
+        for (i, (a, b)) in DEVICE.iter().zip(DEVICE_CKCC.iter()).enumerate() {
+            if !(8..12).contains(&i) {
+                assert_eq!(a, b, "byte {i}");
+            }
+        }
     }
 
     #[test]

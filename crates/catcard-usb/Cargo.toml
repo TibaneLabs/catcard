@@ -16,6 +16,10 @@ std = []
 catcard-board.workspace = true
 # X25519 ECDH, HKDF-SHA256 and ChaCha20-Poly1305 for the encrypted channel (`ncry`).
 # No-alloc features only: the firmware has no allocator on this path.
-purecrypto = { workspace = true, features = ["ec", "kdf", "cipher"] }
+purecrypto = { workspace = true, features = ["ec", "hazmat-secp256k1", "hash", "kdf", "cipher"] }
 # The session keys are secrets, wiped on drop.
 zeroize = { workspace = true }
+
+[dev-dependencies]
+# The `ckcc_sim` example signs `mitm` the way the firmware does.
+catcard-wallet = { workspace = true, features = ["std"] }
