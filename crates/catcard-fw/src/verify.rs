@@ -97,10 +97,12 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     match found {
         Some(f) => {
             let mut path = heapless::String::<48>::new();
+            // The coin level is the one `menu::chain_key` derived under.
             let _ = write!(
                 path,
-                "m/{}h/0h/{}h/{}/{}",
+                "m/{}h/{}h/{}h/{}/{}",
                 f.kind.bip44_purpose(),
+                crate::prefs::network().coin_type(),
                 f.account,
                 f.chain,
                 f.index

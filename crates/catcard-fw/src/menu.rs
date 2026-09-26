@@ -4681,7 +4681,10 @@ fn kind_name(kind: catcard_wallet::address::AddressKind) -> &'static str {
 /// HMAC-SHA512 and a point multiplication, about a tenth of a second of masked work, so the
 /// four of them are a visible pause and the bar should keep moving across it.
 /// The account-level chain key for `kind`, account `account`, chain `chain`
-/// (0 receive, 1 change): `m/{purpose}h/0h/{account}h/{chain}`.
+/// (0 receive, 1 change): `m/{purpose}h/{coin}h/{account}h/{chain}`, where the coin type
+/// follows the network in force -- 0 on mainnet, 1 on testnet and regtest -- exactly as
+/// [`crate::pubkeys::account_key`] derives it, so what this walks is what the explorer
+/// shows and the signer spends.
 ///
 /// Only the public half comes back, so the caller can walk addresses without holding key
 /// material.
@@ -4696,14 +4699,14 @@ pub(crate) fn chain_key(
     use catcard_wallet::bip32::ChildNumber;
     let steps = [
         ChildNumber::hardened(kind.bip44_purpose()).ok()?,
-        ChildNumber::hardened(0).ok()?,
+        ChildNumber::hardened(crate::prefs::network().coin_type()).ok()?,
         ChildNumber::hardened(account).ok()?,
         ChildNumber::normal(chain).ok()?,
     ];
     public_at(master, &steps, busy, panel)
 }
 
-/// The first account's receive chain, `m/{purpose}h/0h/0h/0`.
+/// The first account's receive chain, `m/{purpose}h/{coin}h/0h/0`.
 fn receive_chain(
     master: &catcard_wallet::bip32::ExtendedPrivKey,
     kind: catcard_wallet::address::AddressKind,
@@ -5516,9 +5519,11 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
             // The master key itself, which is not derived at all.
             None => Some(crate::keywork::run(|kw| master.to_extended_pub(kw))),
             Some(p) => {
+                // The coin level follows the network: a tpub at `m/84h/0h/0h` is a
+                // key the testnet wallet never uses.
                 let steps = [
                     ChildNumber::hardened(p),
-                    ChildNumber::hardened(0),
+                    ChildNumber::hardened(crate::prefs::network().coin_type()),
                     ChildNumber::hardened(0),
                 ];
                 match steps {
@@ -5578,9 +5583,11 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
 /// [C] BCR-2020-015 §Abstract
 ///
 /// The seven derivations are the ones that BCR tabulates for Bitcoin mainnet, account
-/// zero. [C] BCR-2020-015 §Introduction. Account zero and mainnet are not a limit of
-/// the format -- they are what every other export on this device uses, and an account
-/// picker here would be a second place to get that answer wrong.
+/// zero. [C] BCR-2020-015 §Introduction. Account zero is not a limit of the format --
+/// it is what every other export on this device uses, and an account picker here would
+/// be a second place to get that answer wrong. On testnet the same table is derived
+/// under coin type 1 and every key carries `use-info {network: 1}`, so what the wallet
+/// imports is what the receive and sign paths use. [C] BCR-2020-007 §"CDDL for Coin Info"
 ///
 /// # Q1 only, and QR only
 ///
@@ -5639,22 +5646,35 @@ fn build_account_ur(
     busy: &mut Working<'_>,
     ui: &mut Ui<'_>,
 ) -> Option<usize> {
-    use catcard_bcur::registry::{Descriptor, account};
+    use catcard_bcur::registry::{CoinInfo, Descriptor, account};
     use catcard_wallet::bip32::ChildNumber;
 
     /// The deepest of the standard paths is BIP-48's four levels.
-    const DEPTH: usize = 4;
+    const DEPTH: usize = account::MAX_PATH;
+
+    // The network decides both the coin level of every path and the `use-info` on every
+    // key; the two go together or a wallet derives mainnet addresses under a testnet
+    // key. [C] BCR-2020-007 §"CDDL for Coin Info"
+    let network = crate::prefs::network();
+    let coin = network.coin_type();
+    let use_info = if network.is_mainnet() {
+        CoinInfo::BITCOIN
+    } else {
+        CoinInfo::BITCOIN_TESTNET
+    };
 
     let mut enc = account::Encoder::new(out, fingerprint, account::STANDARD.len() as u32).ok()?;
-    for (script, path) in account::STANDARD {
+    for (script, _) in account::STANDARD {
+        let path = account::standard_path(script, coin);
         let mut steps: heapless::Vec<ChildNumber, DEPTH> = heapless::Vec::new();
-        for &index in path {
+        for &index in path.iter() {
             steps.push(ChildNumber::hardened(index).ok()?).ok()?;
         }
         let xpub = public_at(master, &steps, busy, ui.panel)?;
         let d = Descriptor::account_key(
             script,
-            path,
+            &path,
+            use_info,
             fingerprint,
             // Big-endian, as BIP-32 numbers a fingerprint and as the BCR's vectors
             // encode one. [C] BCR-2020-007 §"Example/Test Vector 2"
@@ -5908,6 +5928,15 @@ fn hdkey_for(
     key.chain_code = Some(xpub.chain_code);
     // Big-endian, as BIP-32 numbers a fingerprint and as the BCR's vectors encode one.
     key.parent_fingerprint = Some(u32::from_be_bytes(xpub.parent_fingerprint));
+    // Testnet mode moves Bitcoin's path to coin type 1 (`coin_type_on`), and the key
+    // says so with `use-info {network: 1}` so the wallet reading it agrees about which
+    // network the addresses are on. Every other chain keeps its own path whatever the
+    // setting, so its key is the same key and stays unmarked. [C] BCR-2020-007 §"CDDL
+    // for Coin Info"
+    if chain.id == catcard_wallet::chain::ChainId::Bitcoin && !crate::prefs::network().is_mainnet()
+    {
+        key.use_info = Some(catcard_bcur::registry::CoinInfo::BITCOIN_TESTNET);
+    }
     let mut path: heapless::Vec<Component, 8> = heapless::Vec::new();
     for step in steps {
         let _ = path.push(if step.is_hardened() {
@@ -5969,11 +5998,13 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
          # Give one to the coordinator; it is a key, not a wallet.\n"
     );
     let mut busy = Working::new(ui.panel, HEAD, "deriving");
+    // BIP-48's coin level follows the network, like every other account path here.
+    let coin_type = crate::prefs::network().coin_type();
     for (script, name) in COSIGNER {
         busy.tick(ui.panel);
         let steps = [
             ChildNumber::hardened(48),
-            ChildNumber::hardened(0),
+            ChildNumber::hardened(coin_type),
             ChildNumber::hardened(0),
             ChildNumber::hardened(script),
         ];
@@ -5990,7 +6021,7 @@ fn export_key_expression(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         };
         let _ = write!(
             text,
-            "# {name}, m/48h/0h/0h/{script}h\n[{a:02x}{b:02x}{c:02x}{d:02x}/48h/0h/0h/{script}h]{}/<0;1>/*\n",
+            "# {name}, m/48h/{coin_type}h/0h/{script}h\n[{a:02x}{b:02x}{c:02x}{d:02x}/48h/{coin_type}h/0h/{script}h]{}/<0;1>/*\n",
             core::str::from_utf8(&xpub[..xlen]).unwrap_or("")
         );
     }
@@ -6042,17 +6073,22 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
          # given the right keys shows these same addresses.\n"
     );
     let mut busy = Working::new(ui.panel, HEAD, "deriving addresses");
+    let coin_type = crate::prefs::network().coin_type();
     for (kind, name) in ACCOUNTS {
         busy.tick(ui.panel);
         let steps = [
             ChildNumber::hardened(kind.bip44_purpose()),
-            ChildNumber::hardened(0),
+            ChildNumber::hardened(coin_type),
             ChildNumber::hardened(0),
         ];
         let [Ok(p), Ok(coin), Ok(acct)] = steps else {
             continue;
         };
-        let _ = write!(text, "\n# {name}, m/{}h/0h/0h\n", kind.bip44_purpose());
+        let _ = write!(
+            text,
+            "\n# {name}, m/{}h/{coin_type}h/0h\n",
+            kind.bip44_purpose()
+        );
         // The account key once, then the chain below it -- which is unhardened, so the
         // addresses come from the public key and the seed is not touched again.
         let Some(account) = public_at(&master, &[p, coin, acct], &mut busy, ui.panel) else {
@@ -8425,8 +8461,10 @@ fn export_chain_csv(
 #[derive(Copy, Clone)]
 struct AddressRun {
     kind: catcard_wallet::address::AddressKind,
-    /// SLIP-44 coin type. Zero here: Bitcoin's explorer and the export drawer are the
-    /// two callers, and the other chains build their own rows.
+    /// SLIP-44 coin type: the network in force's, 0 on mainnet and 1 on testnet and
+    /// regtest, which is the level `pubkeys::account_key` derived the chain key under.
+    /// Bitcoin's explorer and the export drawer are the two callers, and the other chains
+    /// build their own rows.
     coin: u32,
     account: u32,
     /// 0 receive, 1 change.
@@ -8475,7 +8513,7 @@ fn export_address_csv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut 
         HEAD,
         AddressRun {
             kind,
-            coin: 0,
+            coin: crate::prefs::network().coin_type(),
             account,
             chain: 0,
             start,
@@ -8570,10 +8608,12 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     .map(|key| (proto, account, chain, key));
             }
             let _ = title.push_str(kind_name(kind));
+            // The coin level is the one `pubkeys::account_key` derived under.
             let _ = write!(
                 path,
-                "m/{}h/0h/{account}h/{chain}/{index}",
-                kind.bip44_purpose()
+                "m/{}h/{}h/{account}h/{chain}/{index}",
+                kind.bip44_purpose(),
+                crate::prefs::network().coin_type()
             );
             // Public derivation from the chain's extended public key: no private key is
             // involved, so this needs no masked region and costs the host nothing to
@@ -8765,7 +8805,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                                 "Addresses",
                                 AddressRun {
                                     kind,
-                                    coin: 0,
+                                    coin: crate::prefs::network().coin_type(),
                                     account,
                                     chain,
                                     start: index,
@@ -8814,7 +8854,8 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
 /// `held_count` is the debounced state of the pad, so this asks what is physically down
 /// instead of inferring it from events. Scanning still has to run while its events are
 /// thrown away: the scan is what updates that state.
-/// The wallet's first native-segwit receive address, `m/84h/0h/0h/0/0`.
+/// The wallet's first native-segwit receive address, `m/84h/{coin}h/0h/0/0` (coin 0 on
+/// mainnet, 1 on testnet and regtest).
 ///
 /// What identifies a wallet to its owner: a fingerprint is four bytes of hex, an address is
 /// the thing they can compare with their watch-only wallet. `None` if it did not derive.
