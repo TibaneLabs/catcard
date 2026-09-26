@@ -1,4 +1,5 @@
-"""Host side of the CatCard encrypted USB channel (`catcard_usb::ncry`).
+"""Host side of the CatCard encrypted USB channel (`catcard_usb::ncry`), v2: a channel
+paired by a six-digit code a person compares on the host and on the device.
 
 Pure standard-library crypto, so the tool stays self-contained: X25519 (RFC 7748),
 HKDF-SHA256 (RFC 5869) and ChaCha20-Poly1305 (RFC 8439). None of it is constant time,
@@ -17,8 +18,11 @@ import sys
 
 P = 2**255 - 19
 
-# Domain separation for the key schedule; must match `INFO` in the Rust `ncry` module.
-INFO = b"catcard-ncry-v1"
+# Domain separation; each must match its namesake in the Rust `ncry` module.
+INFO = b"catcard-ncry-v2"
+COMMIT_LABEL = b"catcard-pair-v2/commit"
+CODE_INFO = b"catcard-pair-v2/code"
+CODE_MODULUS = 10**6
 KEY_LEN = 32
 TAG_LEN = 16
 
@@ -173,24 +177,35 @@ def _nonce(counter):
     return struct.pack("<Q", counter) + b"\x00\x00\x00\x00"
 
 
-class Session:
-    """The host (initiator) end of an established channel."""
+def commitment(host_pub):
+    """`SHA-256(COMMIT_LABEL || host_pub)`: the `PairCommit` payload."""
+    return hashlib.sha256(COMMIT_LABEL + host_pub).digest()
 
-    def __init__(self, send_key, recv_key):
+
+def code_text(code):
+    """Six digits, zero padded, grouped the way both screens show them: `123 456`."""
+    s = f"{code:06d}"
+    return f"{s[:3]} {s[3:]}"
+
+
+def _schedule(dh, commit, device_pub, host_pub):
+    """Keys and code from the shared secret. The transcript is in wire order:
+    `commit || device_pub || host_pub`."""
+    transcript = commit + device_pub + host_pub
+    okm = hkdf(transcript, dh, INFO, 64)
+    code = int.from_bytes(hkdf(transcript, dh, CODE_INFO, 8), "big") % CODE_MODULUS
+    return okm[:32], okm[32:], code
+
+
+class Session:
+    """One end of an established channel, with the pairing code its handshake produced."""
+
+    def __init__(self, send_key, recv_key, code=None):
         self.send_key = send_key
         self.recv_key = recv_key
         self.send_ctr = 0
         self.recv_ctr = 0
-
-    @classmethod
-    def initiator(cls, eph_priv, responder_pub):
-        dh = x25519(eph_priv, responder_pub)
-        if dh == bytes(32):
-            raise ValueError("ncry: small-order peer")
-        transcript = public_key(eph_priv) + responder_pub
-        okm = hkdf(transcript, dh, INFO, 64)
-        # Host sends on initiator->responder, receives on responder->initiator.
-        return cls(okm[:32], okm[32:])
+        self.code = code
 
     def seal(self, plaintext):
         ct, tag = chacha20poly1305_encrypt(self.send_key, _nonce(self.send_ctr), b"", plaintext)
@@ -206,38 +221,93 @@ class Session:
         return pt
 
 
-def selftest():
-    # Same fixed scalars as the Rust `ncry::tests`.
-    host_priv = bytes.fromhex(
-        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
-    )
-    dev_priv = bytes.fromhex(
-        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"
-    )
-    dev_pub = public_key(dev_priv)
-    host = Session.initiator(host_priv, dev_pub)
+class Initiator:
+    """The host's half of the handshake: commit first, reveal after the device answers."""
 
-    # Counter-0 seal of b"catcard": must equal the Rust KAT_RECORD, byte for byte.
-    kat = bytes([
-        247, 67, 233, 137, 162, 231, 77, 87, 146, 173, 195, 250, 120, 56, 89, 36, 225,
-        153, 102, 171, 8, 87, 85,
-    ])
-    record = host.seal(b"catcard")
-    assert record == kat, f"KAT mismatch:\n got {list(record)}\n want {list(kat)}"
+    def __init__(self, eph_priv=None):
+        self.priv = eph_priv if eph_priv is not None else os.urandom(KEY_LEN)
+        self.public = public_key(self.priv)
+        self.commit = commitment(self.public)
 
-    # And the device (responder) built the same way opens it and can reply.
-    transcript = public_key(host_priv) + dev_pub
-    okm = hkdf(transcript, x25519(dev_priv, public_key(host_priv)), INFO, 64)
-    dev = Session(okm[32:], okm[:32])  # responder: send r2i, recv i2r
+    def finish(self, device_pub):
+        """Derive the host `Session` (and its `.code`) from the device's public key."""
+        dh = x25519(self.priv, device_pub)
+        if dh == bytes(32):
+            raise ValueError("ncry: small-order peer")
+        i2r, r2i, code = _schedule(dh, self.commit, device_pub, self.public)
+        # Host sends on initiator->responder, receives on responder->initiator.
+        return Session(i2r, r2i, code)
+
+
+def responder(eph_priv, commit, host_pub):
+    """The device's half, for the selftest: check the reveal, derive the session."""
+    if commitment(host_pub) != commit:
+        raise ValueError("ncry: reveal does not match the commitment")
+    device_pub = public_key(eph_priv)
+    dh = x25519(eph_priv, host_pub)
+    if dh == bytes(32):
+        raise ValueError("ncry: small-order peer")
+    i2r, r2i, code = _schedule(dh, commit, device_pub, host_pub)
+    # Device sends on responder->initiator, receives on initiator->responder.
+    return device_pub, Session(r2i, i2r, code)
+
+
+# The v2 vector, shared with the Rust `ncry::tests` (`HOST_PRIV`/`DEV_PRIV`, `KAT_COMMIT`,
+# `KAT_CODE`, `KAT_RECORD`): same scalars, same bytes, or the two sides have diverged.
+KAT_HOST_PRIV = bytes.fromhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+KAT_DEV_PRIV = bytes.fromhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+KAT_COMMIT = bytes([
+    65, 181, 194, 108, 161, 34, 111, 179, 156, 98, 166, 84, 21, 115, 147, 169, 108, 1,
+    121, 169, 26, 246, 122, 111, 98, 247, 189, 154, 215, 47, 20, 74,
+])
+KAT_CODE = 398660
+KAT_RECORD = bytes([
+    128, 168, 83, 37, 40, 20, 198, 221, 119, 225, 110, 89, 217, 140, 246, 68, 129, 191,
+    40, 248, 83, 179, 22,
+])
+
+
+def selftest(show=False):
+    host = Initiator(KAT_HOST_PRIV)
+    dev_pub, dev = responder(KAT_DEV_PRIV, host.commit, host.public)
+    sess = host.finish(dev_pub)
+    # Counter-0 seal of b"catcard" host->device.
+    record = sess.seal(b"catcard")
+    if show:
+        print("commit", list(host.commit))
+        print("code  ", sess.code)
+        print("record", list(record))
+        return
+    assert host.commit == KAT_COMMIT, f"commit mismatch: {list(host.commit)}"
+    assert sess.code == dev.code == KAT_CODE, f"code mismatch: {sess.code} / {dev.code}"
+    assert record == KAT_RECORD, f"KAT mismatch:\n got {list(record)}\n want {list(KAT_RECORD)}"
+
+    # The device opens it and can reply.
     assert dev.open(record) == b"catcard"
-    reply = dev.seal(b"pong")
-    assert host.open(reply) == b"pong"
-    print("ncry selftest: OK (KAT matches the firmware)")
+    assert sess.open(dev.seal(b"pong")) == b"pong"
+
+    # A reveal that misses the commitment is refused.
+    try:
+        responder(KAT_DEV_PRIV, host.commit, public_key(bytes([0x42] * 32)))
+        raise AssertionError("a reveal that misses the commitment was accepted")
+    except ValueError:
+        pass
+
+    # A relay -- one handshake facing each side, with the Rust test's relay scalars --
+    # shows the two people different codes.
+    relay_to_host = bytes([0x24] * 32)
+    relay_to_dev = Initiator(bytes([0x42] * 32))
+    host_side = Initiator(KAT_HOST_PRIV).finish(public_key(relay_to_host))
+    _, dev_side = responder(KAT_DEV_PRIV, relay_to_dev.commit, relay_to_dev.public)
+    assert host_side.code != dev_side.code
+
+    assert code_text(7) == "000 007" and code_text(123456) == "123 456"
+    print(f"ncry selftest: OK (v2 KAT matches the firmware, code {code_text(KAT_CODE)})")
 
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
-        selftest()
+        selftest(show="--show" in sys.argv)
     else:
         print("usage: ncry.py --selftest", file=sys.stderr)
         sys.exit(2)

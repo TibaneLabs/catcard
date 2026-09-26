@@ -63,7 +63,11 @@ pub const CONT_PAYLOAD: usize = REPORT_LEN - 2;
 /// Protocol version, reported by [`Opcode::Identify`].
 ///
 /// Bumped when a host that understood the previous version would get this one wrong.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// `2`: the encrypted channel is paired by a compared code (`PairCommit`/`PairReveal`/
+/// `PairConfirm`), and the unauthenticated v1 `NcryStart` is gone -- a v1 host's
+/// handshake is now `UnknownOpcode`.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// What the host is asking for.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -165,19 +169,39 @@ pub enum Opcode {
     ///
     /// Carries nothing secret: see `logbuf`.
     ReadLog = 0x0012,
-    /// Open an encrypted channel. Payload is the host's 32-byte ephemeral X25519 public
-    /// key; the reply carries the device's. See [`ncry`] — both sides derive a session
-    /// from the shared secret, after which sensitive commands travel inside
-    /// [`Opcode::NcryMsg`]. Reported by [`caps::NCRY`].
-    NcryStart = 0x0040,
-    /// A command (or its reply) sealed for the channel opened by [`Opcode::NcryStart`].
+    // 0x0040 was `NcryStart`, the unauthenticated v1 handshake. Retired with protocol
+    // version 2 and not reused: a v1 host sending it gets `UnknownOpcode`, not a
+    // different command.
+    /// A command (or its reply) sealed for the channel [paired](ncry) by
+    /// [`Opcode::PairCommit`] / [`Opcode::PairReveal`].
     ///
     /// The payload is `[ciphertext][16-byte tag]`; the plaintext inside is an ordinary
     /// message — `[u16 opcode][payload]` on the way in, `[u16 status][payload]` on the
-    /// way out — dispatched exactly as if it had arrived in the clear. The bulk upgrade
-    /// opcodes are not accepted here: the image is public and signed, and it streams to
-    /// staging without being buffered whole.
+    /// way out — dispatched exactly as if it had arrived in the clear. Until the session
+    /// is paired the only inner opcode admitted is [`Opcode::PairConfirm`]; any other
+    /// tears the session down. The bulk upgrade opcodes are not accepted here: the image
+    /// is public and signed, and it streams to staging without being buffered whole.
     NcryMsg = 0x0041,
+    /// Start pairing. Payload is the host's 32-byte commitment,
+    /// `SHA-256("catcard-pair-v2/commit" ‖ host_pub)`; the reply is the device's 32-byte
+    /// ephemeral X25519 public key. `NotNow` before the PIN, `Busy` while a pairing prompt
+    /// is already on the screen or cooling down. Reported by [`caps::PAIRING`].
+    PairCommit = 0x0042,
+    /// Finish the handshake. Payload is the host's 32-byte ephemeral public key, which
+    /// must hash to the commitment; the reply is empty. After an `Ok` the device shows
+    /// the pairing code and asks its user; see [`ncry`].
+    PairReveal = 0x0043,
+    /// **Sealed only**, as the inner opcode of an [`Opcode::NcryMsg`]: the host's user
+    /// compared the code and accepted. Empty payload. The sealed reply's inner status is
+    /// `Ok` once the device's user has accepted too (the session is paired), `NotNow`
+    /// while the device is still asking -- send it again. Sent in the clear it is
+    /// `BadRequest`.
+    PairConfirm = 0x0044,
+    /// Abandon pairing: the host's user said the codes differ, or gave up. Tears down any
+    /// handshake or session and takes the prompt off the device screen. Empty payload,
+    /// always `Ok`. Unauthenticated, like a tampered record: it can end a session, never
+    /// start or extend one.
+    PairAbort = 0x0045,
     /// Ask for this wallet's addresses. **Only inside [`Opcode::NcryMsg`].**
     ///
     /// No payload. `Ok` means the request is queued for the person at the device, who
@@ -216,8 +240,11 @@ impl Opcode {
             0x0011 => Opcode::UpgradeCommit,
             0x0013 => Opcode::UpgradePacked,
             0x0012 => Opcode::ReadLog,
-            0x0040 => Opcode::NcryStart,
             0x0041 => Opcode::NcryMsg,
+            0x0042 => Opcode::PairCommit,
+            0x0043 => Opcode::PairReveal,
+            0x0044 => Opcode::PairConfirm,
+            0x0045 => Opcode::PairAbort,
             0x0050 => Opcode::HostAddresses,
             0x0051 => Opcode::HostSignBegin,
             0x0052 => Opcode::HostSignData,
@@ -282,15 +309,17 @@ pub mod caps {
     /// reached through a smaller wire, so a device that cannot install cannot install a
     /// compressed one either.
     pub const UPGRADE_PACKED: u8 = 1 << 4;
-    /// This build accepts [`Opcode::NcryStart`](super::Opcode::NcryStart), the encrypted
-    /// channel. A host that sees this bit may negotiate a session and send sensitive
-    /// commands inside [`Opcode::NcryMsg`](super::Opcode::NcryMsg) instead of in the
-    /// clear.
-    pub const NCRY: u8 = 1 << 5;
+    // Bit 5 was `NCRY`, the unauthenticated v1 channel. Retired with protocol version 2
+    // and left unused, so no bit ever changes meaning under a host that remembers it.
     /// This build answers the host-wallet commands (`HostAddresses` .. `HostAbort`)
     /// inside the encrypted channel: a computer may ask for addresses and for signatures,
     /// each decided by the person at the device. See [`hostwallet`](super::hostwallet).
     pub const HOST_WALLET: u8 = 1 << 6;
+    /// This build pairs an encrypted channel by a compared code:
+    /// [`PairCommit`](super::Opcode::PairCommit), [`PairReveal`](super::Opcode::PairReveal)
+    /// and a sealed [`PairConfirm`](super::Opcode::PairConfirm), then sensitive commands
+    /// inside [`NcryMsg`](super::Opcode::NcryMsg). See [`ncry`](super::ncry).
+    pub const PAIRING: u8 = 1 << 7;
 }
 
 /// How a request turned out. `Ok` is zero; everything else is a refusal.

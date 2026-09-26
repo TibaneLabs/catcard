@@ -278,6 +278,11 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
         Opcode::UpgradeCommit,
         Opcode::InjectKey,
         Opcode::UnlockPin,
+        Opcode::NcryMsg,
+        Opcode::PairCommit,
+        Opcode::PairReveal,
+        Opcode::PairConfirm,
+        Opcode::PairAbort,
         Opcode::HostAddresses,
         Opcode::HostSignBegin,
         Opcode::HostSignData,
@@ -290,9 +295,26 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
     // The host-wallet opcodes are the published numbers.
     assert_eq!(Opcode::HostAddresses as u16, 0x0050);
     assert_eq!(Opcode::HostAbort as u16, 0x0055);
+    // The retired v1 handshake is unknown, not quietly some other command.
+    assert_eq!(Opcode::from_u16(0x0040), None);
     // An unknown opcode has to reach the caller as a number so it can be answered with
     // UnknownOpcode rather than dropped, which would hang the host.
     assert_eq!(Opcode::from_u16(0xBEEF), None);
     let (m, _) = round_trip(0xBEEF, b"");
     assert_eq!(m.opcode, 0xBEEF);
+}
+
+#[test]
+fn the_retired_ncry_bit_stays_retired() {
+    // Bit 5 meant the unauthenticated v1 channel. Nothing may reuse it: a host that
+    // remembers it would read a different capability as the old one.
+    let all = crate::caps::KEY_INJECTION
+        | crate::caps::UPGRADE
+        | crate::caps::DEBUG_MEM
+        | crate::caps::UNLOCK_PIN
+        | crate::caps::UPGRADE_PACKED
+        | crate::caps::PAIRING;
+    assert_eq!(all & (1 << 5), 0);
+    assert_eq!(crate::caps::PAIRING, 1 << 7);
+    const { assert!(crate::PROTOCOL_VERSION >= 2) };
 }

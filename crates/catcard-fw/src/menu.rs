@@ -1107,6 +1107,8 @@ pub fn run(session: Session<'_>) -> ! {
     } = session;
     let mut screen = Screen::Main;
     let mut showing_offer = false;
+    // The USB pairing prompt on the screen, if one is: see `crate::pairing`.
+    let mut showing_pair: Option<usbtask::PairPrompt> = None;
     // A transfer in flight owns the screen: last percentage drawn, so it repaints only
     // when it moves.
     let mut receiving: Option<u8> = None;
@@ -1168,7 +1170,7 @@ pub fn run(session: Session<'_>) -> ! {
     }
 
     loop {
-        if redraw && !showing_offer && receiving.is_none() {
+        if redraw && !showing_offer && showing_pair.is_none() && receiving.is_none() {
             // On the PRNG-status screen, draw a fresh 32-bit sample first so the counters
             // snapshotted just below include that generate call. Done only here, so no
             // other screen advances the DRBG just by being shown.
@@ -1282,6 +1284,23 @@ pub fn run(session: Session<'_>) -> ! {
             redraw = true;
         }
 
+        // A host's pairing code, waiting on the person to compare it. Same ordering as the
+        // offer above, and for the same reason: checked after the keys are read. An offer
+        // on the screen goes first; the prompt waits for it (its deadline still runs).
+        let pair = usbtask::pair_prompt().filter(|_| !showing_offer && receiving.is_none());
+        if pair != showing_pair {
+            match pair {
+                Some(p) => {
+                    if showing_pair.is_none() && screen == Screen::Colours {
+                        display::wipe(ui.panel);
+                    }
+                    crate::pairing::show(ui.panel, p.code);
+                }
+                None => redraw = true,
+            }
+            showing_pair = pair;
+        }
+
         for key in keys.iter() {
             // While an image is arriving, the only question on the screen is whether to
             // let it finish. Cancel stops it and releases the staging medium; everything
@@ -1357,6 +1376,21 @@ pub fn run(session: Session<'_>) -> ! {
                     }
                     Key::Digit(_) => {}
                     Key::Char(_) | Key::Qr => {}
+                }
+                continue;
+            }
+            // The pairing prompt: yes pairs (once the host confirms too), no tears the
+            // session down. Every other key is swallowed rather than reaching the menu.
+            if let Some(p) = showing_pair {
+                let answer = match key {
+                    Key::Confirm => Some(true),
+                    Key::Cancel => Some(false),
+                    Key::Digit(_) | Key::Char(_) | Key::Qr => None,
+                };
+                if let Some(accept) = answer {
+                    usbtask::pair_answer(p.id, accept);
+                    showing_pair = None;
+                    redraw = true;
                 }
                 continue;
             }

@@ -116,9 +116,11 @@ pub struct UsbTask {
     /// Bulk-OUT packets the OTG interrupt has received in mass-storage mode, waiting for
     /// the transport loop to consume them. Empty and idle in polled HID mode.
     msc_rx: MscRx,
-    /// The encrypted channel, once a host has negotiated one with [`Opcode::NcryStart`],
-    /// and what the device keeps for that session. Closed until then, and torn down on
-    /// any authentication failure or bus reset.
+    /// The encrypted channel, once a host has completed the pairing handshake
+    /// ([`Opcode::PairCommit`], [`Opcode::PairReveal`]), and what the device keeps for
+    /// that session. Closed until then, and torn down on any authentication failure or
+    /// bus reset. It carries commands only once [paired](ncry::Session::paired): the
+    /// device user accepted the code and the host's sealed `PairConfirm` authenticated.
     chan: ncry::Channel<crate::hostwallet::SessionState>,
     /// A sealed request that spans frames, gathered whole before it is opened. A heap
     /// block rather than a buffer in this struct: it is a kilobyte that is almost never
@@ -126,6 +128,23 @@ pub struct UsbTask {
     ncry_rx: Option<(crate::heap::Block, usize)>,
     /// Host-wallet requests: addresses and signatures a computer asked for.
     host: crate::hostwallet::Desk,
+    /// A handshake between `PairCommit` and `PairReveal`: the device's ephemeral key and
+    /// the host's commitment.
+    handshake: Option<ncry::Responder>,
+    /// Counts pairing prompts, so an answer given on the screen applies to the prompt
+    /// that was shown and not to one that replaced it.
+    pair_id: u32,
+    /// The last pairing ended with the device user saying no. A host polling with a sealed
+    /// `PairConfirm` then hears `Declined` rather than a bare `NotNow`.
+    pair_declined: bool,
+    /// Milliseconds before another handshake may start after a code was shown. See
+    /// [`PAIR_COOLDOWN_MS`].
+    pair_cooldown_ms: u32,
+    /// DWT reading at the previous pairing tick, for the prompt deadline.
+    pair_clock: u32,
+    /// CPU cycles per millisecond, taken with the DRBG at boot. Zero means no clock to
+    /// bound a prompt with, and then pairing is refused rather than left unbounded.
+    cycles_per_ms: u32,
     /// Ephemeral-key source for the channel handshake, installed from the entropy pool at
     /// boot ([`install_drbg`]). `None` in recovery, where the pool never came up and the
     /// channel is simply not offered.
@@ -224,6 +243,15 @@ struct ReplyState {
     started: bool,
 }
 
+/// How long after a pairing code is shown before another handshake may start.
+///
+/// A relay that has shown the host one code can only win by re-rolling the device's code
+/// until the two match. Each try is a fresh handshake and a new code on the device's screen,
+/// and the host's user waits [`ncry::PROMPT_MS`] at most, so five seconds a try leaves a
+/// relay about two dozen guesses at one in a million each -- and a screen visibly flickering
+/// through codes while it tries. A person who rejects and retries waits five seconds.
+const PAIR_COOLDOWN_MS: u32 = 5_000;
+
 /// Largest reply body. Enough for a useful peek without making the task struct heavy.
 const REPLY_MAX: usize = 512;
 
@@ -287,6 +315,12 @@ impl UsbTask {
             chan: ncry::Channel::new(),
             ncry_rx: None,
             host: crate::hostwallet::Desk::new(),
+            handshake: None,
+            pair_id: 0,
+            pair_declined: false,
+            pair_cooldown_ms: 0,
+            pair_clock: 0,
+            cycles_per_ms: 0,
             drbg: None,
         })
     }
@@ -416,6 +450,9 @@ impl UsbTask {
     /// # Safety
     /// Exclusive access to OTG_FS.
     pub unsafe fn poll(&mut self) -> bool {
+        // The pairing prompt's deadline runs whatever the host is doing, including
+        // nothing.
+        self.pair_tick();
         // SAFETY: as documented.
         unsafe {
             // Push any reply that is waiting for FIFO room before taking more in.
@@ -911,20 +948,53 @@ impl UsbTask {
                 | Opcode::HostResult
                 | Opcode::HostAbort,
             ) => self.begin_reply(Status::UnknownOpcode, &[]),
-            Some(Opcode::NcryStart) => self.begin_ncry(progress.payload),
+            Some(Opcode::PairCommit) => self.pair_commit(progress.payload),
+            Some(Opcode::PairReveal) => self.pair_reveal(progress.payload),
+            // Only ever sealed: in the clear it would be a confirmation anyone could send.
+            Some(Opcode::PairConfirm) => self.begin_reply(Status::BadRequest, &[]),
+            Some(Opcode::PairAbort) => self.pair_abort(),
             Some(Opcode::NcryMsg) => self.handle_ncry_msg(progress.payload),
             Some(Opcode::UpgradeOffer | Opcode::UpgradePacked) | None => self.finish_offer(),
         }
     }
 
-    /// Open the encrypted channel: the payload is the host's ephemeral public key.
-    fn begin_ncry(&mut self, payload: &[u8]) {
-        let Some(host_pub) = payload.first_chunk::<{ ncry::KEY_LEN }>() else {
+    /// Whether the encrypted channel is paired: the device user accepted the code and the
+    /// host's sealed `PairConfirm` authenticated. What gates every command that needs an
+    /// authenticated host.
+    pub fn paired(&self) -> bool {
+        self.chan.session().is_some_and(ncry::Session::paired)
+    }
+
+    /// Whether a handshake has produced a session that is not paired yet: the prompt is up,
+    /// or the device user answered and the host has not confirmed. Only one at a time.
+    fn pairing_in_progress(&self) -> bool {
+        self.chan.session().is_some_and(|s| !s.paired())
+    }
+
+    /// `PairCommit`: the host commits to its ephemeral key; answer with the device's.
+    fn pair_commit(&mut self, payload: &[u8]) {
+        let Ok(commit) = <&[u8; ncry::COMMIT_LEN]>::try_from(payload) else {
             self.begin_reply(Status::BadRequest, &[]);
             return;
         };
-        // No entropy source means no channel -- recovery, where the pool never came up.
-        let Some(drbg) = self.drbg.as_mut() else {
+        // Pairing opens a channel for wallet commands, so it waits for the PIN the same
+        // way an upgrade does. Before it the answer is "not now", not "no".
+        if !self.unlocked {
+            self.begin_reply(Status::NotNow, &[]);
+            return;
+        }
+        // One pairing at a time: a second handshake while a code is on the screen would
+        // change the code under the person reading it. And a pause after each code shown,
+        // so a relay cannot re-roll the device's code faster than a person reads it.
+        if self.pairing_in_progress() || self.pair_cooldown_ms > 0 {
+            self.begin_reply(Status::Busy, &[]);
+            return;
+        }
+        // No entropy source means no channel -- recovery, where the pool never came up --
+        // and no clock means no deadline for the prompt, which is refused rather than
+        // left unbounded.
+        let has_clock = self.cycles_per_ms > 0;
+        let Some(drbg) = self.drbg.as_mut().filter(|_| has_clock) else {
             self.begin_reply(Status::NotNow, &[]);
             return;
         };
@@ -936,19 +1006,44 @@ impl UsbTask {
             self.begin_reply(Status::BadRequest, &[]);
             return;
         }
-        let result = ncry::Session::responder(&scalar, host_pub);
+        let hs = ncry::Responder::new(&scalar, commit);
         scalar.zeroize();
-        match result {
-            Ok((dev_pub, session)) => {
-                // A fresh handshake replaces any prior session outright, so a host that
-                // lost its keys can always start over -- and everything the old one was
-                // shown or had in hand goes with it.
-                self.end_session(false);
+        // A fresh handshake replaces any prior session outright, so a host that lost its
+        // keys can always start over -- by pairing again, in front of the person.
+        self.end_session(false);
+        self.pair_declined = false;
+        let dev_pub = *hs.public_key();
+        self.handshake = Some(hs);
+        self.begin_reply(Status::Ok, &dev_pub);
+    }
+
+    /// `PairReveal`: the host's public key, which must match its commitment. On success
+    /// the code goes up on the screen and the session waits to be paired.
+    fn pair_reveal(&mut self, payload: &[u8]) {
+        let Ok(host_pub) = <&[u8; ncry::KEY_LEN]>::try_from(payload) else {
+            self.begin_reply(Status::BadRequest, &[]);
+            return;
+        };
+        if !self.unlocked {
+            self.begin_reply(Status::NotNow, &[]);
+            return;
+        }
+        // A reveal is used once: the handshake is taken whatever the outcome.
+        let Some(hs) = self.handshake.take() else {
+            self.begin_reply(Status::NotNow, &[]);
+            return;
+        };
+        match hs.reveal(host_pub) {
+            Ok(session) => {
+                self.pair_id = self.pair_id.wrapping_add(1);
+                self.pair_cooldown_ms = PAIR_COOLDOWN_MS;
+                self.pair_clock = catcard_hal::dwt::cycles();
                 self.chan.install(session);
-                self.begin_reply(Status::Ok, &dev_pub);
+                crate::catlog!("ncry: pairing code shown, waiting for the user");
+                self.begin_reply(Status::Ok, &[]);
             }
-            Err(_) => {
-                self.end_session(false);
+            Err(e) => {
+                crate::catlog!("ncry: pairing refused: {:?}", e);
                 self.begin_reply(Status::BadRequest, &[]);
             }
         }
@@ -972,6 +1067,69 @@ impl UsbTask {
         buf.zeroize();
     }
 
+    /// `PairAbort`: the host gave up. Tear down whatever there is.
+    fn pair_abort(&mut self) {
+        if self.chan.is_open() || self.handshake.is_some() {
+            crate::catlog!("ncry: host abandoned the session");
+        }
+        self.handshake = None;
+        self.end_session(false);
+        self.begin_reply(Status::Ok, &[]);
+    }
+
+    /// The pairing prompt the screen should show, if one is waiting on the device user.
+    pub fn pair_prompt(&self) -> Option<PairPrompt> {
+        self.chan
+            .session()
+            .filter(|s| s.awaiting_user())
+            .map(|s| PairPrompt {
+                id: self.pair_id,
+                code: s.code(),
+            })
+    }
+
+    /// The device user answered prompt `id`. An answer to a prompt that is no longer the
+    /// one waiting -- it timed out, or the host abandoned it -- changes nothing.
+    pub fn pair_answer(&mut self, id: u32, accept: bool) {
+        if id != self.pair_id || self.pair_prompt().is_none() {
+            return;
+        }
+        if accept {
+            if let Some(s) = self.chan.session_mut() {
+                s.accept();
+            }
+            crate::catlog!(
+                "ncry: user accepted the code{}",
+                if self.paired() { "; paired" } else { "" }
+            );
+        } else {
+            crate::catlog!("ncry: user rejected the code");
+            self.end_session(false);
+            self.pair_declined = true;
+        }
+    }
+
+    /// Count time against the pairing deadline and the cooldown.
+    ///
+    /// Measured from the DWT counter the way the idle timeout measures it: each tick adds
+    /// the gap since the last, clamped to a second, so a counter that wrapped under a long
+    /// masked stretch under-counts -- the prompt stays a little longer, never shorter.
+    fn pair_tick(&mut self) {
+        if self.cycles_per_ms == 0 {
+            return;
+        }
+        let now = catcard_hal::dwt::cycles();
+        let prev = core::mem::replace(&mut self.pair_clock, now);
+        let gap = (now.wrapping_sub(prev) / self.cycles_per_ms).min(1_000);
+        self.pair_cooldown_ms = self.pair_cooldown_ms.saturating_sub(gap);
+        if let Some(s) = self.chan.session_mut()
+            && s.wait(gap)
+        {
+            crate::catlog!("ncry: pairing timed out");
+            self.end_session(false);
+        }
+    }
+
     /// Open a sealed request, dispatch the command inside it, and seal the reply.
     ///
     /// Any failure tears the session down: a channel that has seen one forged, corrupt or
@@ -979,8 +1137,15 @@ impl UsbTask {
     fn handle_ncry_record(&mut self, record: &mut [u8]) {
         if !self.chan.is_open() {
             // No channel to open it with. `NotNow`, not `BadRequest`: the host has to
-            // send `NcryStart` first, and this says so without looking like a framing bug.
-            self.begin_reply(Status::NotNow, &[]);
+            // pair first, and this says so without looking like a framing bug. `Declined`
+            // when the device user just refused the code, so a host polling with
+            // `PairConfirm` can say why.
+            let status = if self.pair_declined {
+                Status::Declined
+            } else {
+                Status::NotNow
+            };
+            self.begin_reply(status, &[]);
             return;
         }
         let plain = match self.chan.open_record(record) {
@@ -994,11 +1159,30 @@ impl UsbTask {
 
         // The plaintext is an ordinary request: `[u16 opcode][payload]`.
         let inner_op = u16::from_le_bytes([plain[0], plain[1]]);
+        // Until the session is paired the only record it carries is `PairConfirm`.
+        let admit = match self.chan.session_mut() {
+            Some(session) => session.admit(inner_op),
+            None => ncry::Admit::Refuse,
+        };
         // Build the reply straight into the seal buffer: two bytes of status, then the
         // body written in place, then the tag -- all inside one reply's worth, so nothing
         // `begin_reply` holds is cut off.
         let mut sealed = [0u8; REPLY_MAX];
-        let (status, n) = self.inner_dispatch(inner_op, &plain[2..], &mut sealed[2..2 + INNER_MAX]);
+        let (status, n) = match admit {
+            ncry::Admit::Dispatch => {
+                self.inner_dispatch(inner_op, &plain[2..], &mut sealed[2..2 + INNER_MAX])
+            }
+            // `NotNow` while the device user is still looking at the code: ask again.
+            ncry::Admit::Confirm if self.paired() => (Status::Ok, 0),
+            ncry::Admit::Confirm => (Status::NotNow, 0),
+            ncry::Admit::Refuse => {
+                plain.zeroize();
+                crate::catlog!("ncry: sealed {:#06x} before pairing; torn down", inner_op);
+                self.end_session(false);
+                self.begin_reply(Status::BadRequest, &[]);
+                return;
+            }
+        };
         plain.zeroize();
         sealed[..2].copy_from_slice(&(status as u16).to_le_bytes());
         match self.chan.seal_record(&mut sealed, 2 + n) {
@@ -1239,8 +1423,13 @@ impl UsbTask {
             catcard_usb::caps::DEBUG_MEM
         } else {
             0
-        } | catcard_usb::caps::NCRY
-            | catcard_usb::caps::HOST_WALLET;
+        } | if self.drbg.is_some() {
+            // The host-wallet commands only ever run on a paired session, so they are
+            // advertised exactly when pairing is.
+            catcard_usb::caps::PAIRING | catcard_usb::caps::HOST_WALLET
+        } else {
+            0
+        };
         at += 1;
         for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
@@ -2159,9 +2348,42 @@ pub fn unlocked() {
 /// Install the ephemeral-key source for the encrypted channel.
 ///
 /// Called once from the boot sequence with a DRBG spawned from the entropy pool under its
-/// own domain. Until then, and in recovery where no pool exists, `NcryStart` is refused.
+/// own domain. Until then, and in recovery where no pool exists, `PairCommit` is refused.
+///
+/// Takes the clock rate with it: the pairing prompt's deadline is counted on the DWT
+/// counter, and a board where that counter is not running gets no pairing at all rather
+/// than a prompt that could wait forever.
 pub fn install_drbg(drbg: HmacDrbg) {
-    with_task(|t| t.drbg = Some(drbg));
+    // SAFETY: reads RCC; the clocks are up by the time the boot path installs this.
+    let per_ms = unsafe { catcard_hal::clock::hclk_hz() } / 1_000;
+    let per_ms = if catcard_hal::dwt::is_running() {
+        per_ms
+    } else {
+        0
+    };
+    with_task(|t| {
+        t.drbg = Some(drbg);
+        t.cycles_per_ms = per_ms;
+        t.pair_clock = catcard_hal::dwt::cycles();
+    });
+}
+
+/// A pairing code waiting on the device user. `id` names the prompt, so an answer is
+/// applied to the one that was shown.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct PairPrompt {
+    pub id: u32,
+    pub code: u32,
+}
+
+/// The pairing prompt the screen should be showing, if any.
+pub fn pair_prompt() -> Option<PairPrompt> {
+    with_task(|t| t.pair_prompt()).flatten()
+}
+
+/// The device user answered the pairing prompt `id`.
+pub fn pair_answer(id: u32, accept: bool) {
+    with_task(|t| t.pair_answer(id, accept));
 }
 
 /// Whether a computer's question (addresses, a signature) is waiting for the screen.
