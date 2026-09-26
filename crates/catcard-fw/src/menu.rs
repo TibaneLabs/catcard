@@ -2653,6 +2653,8 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         // A BIP-85 password child, typed rather than shown: the BIP-85 art, which is
         // not on this page otherwise.
         "Type Passwords" => &art::DERIVE_BIP85_INDEX,
+        // On the main menu, the blank one and Utils alike.
+        "Help" => &art::HELP,
         // The Derive grid.
         "Back to root" => &art::RETURN_ROOT_KEY,
         "Passphrase" => &art::DERIVE_PASSPHRASE,
@@ -2661,6 +2663,7 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "XOR split" => &art::XOR_SPLIT,
         "XOR join" => &art::XOR_JOIN,
         "Key vault" => &art::KEY_VAULT,
+        "New words" => &art::NEW_WORDS,
         // The Sign grid.
         "Scan" => &art::SIGN_QR,
         "From SD" => &art::SIGN_SD,
@@ -2678,6 +2681,12 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "Format" => &art::MICROSD_FORMAT,
         // The card-access icon: the CMD42 lock is about who may read the card at all.
         "Card password" => &art::MICROSD_ACCESS,
+        "Card details" => &art::CARD_DETAILS,
+        "Encrypt card" => &art::ENCRYPT_CARD,
+        "Delete PSBTs" => &art::DELETE_PSBTS,
+        "Paper wallet" => &art::PAPER_WALLET,
+        "WIF Store" => &art::WIF_STORE,
+        "NFC Tools" => &art::NFC_TOOLS,
         "Games" => &art::GAMES,
         "Backup" => &art::BACKUP,
         "Upgrade Firmware" => &art::FIRMWARE_UPGRADE,
