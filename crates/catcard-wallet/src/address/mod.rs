@@ -18,6 +18,9 @@
 //! that guesses the script type from `m/84'` and then encodes P2PKH would produce a
 //! valid-looking address nobody can spend from.
 
+/// BIP-21 payment URIs: an address with an amount and a label around it.
+pub mod bip21;
+
 use crate::bip32::{Network, hash160};
 use crate::encoding::{base58, bech32};
 use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
