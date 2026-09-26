@@ -1897,6 +1897,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Testnet mode")) => Screen::TestnetMode,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("B85 Idx Values")) => Screen::B85Index,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Sighash checks")) => Screen::SighashChecks,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
