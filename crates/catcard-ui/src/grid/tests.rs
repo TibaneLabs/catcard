@@ -382,3 +382,43 @@ fn the_window_moves_only_as_far_as_it_must() {
     // A menu that fits needs no window at all, whatever it is told.
     assert_eq!(window(0, 4, 3), 0);
 }
+
+/// The edge hints -- band and chevron, on both sides -- draw nothing outside the `EDGE`
+/// columns at each side, so holding those columns still during a slide holds all of
+/// them still. And the page dots draw nothing above `dots_rows`.
+#[test]
+fn the_hints_stay_inside_the_edges_and_the_dots_inside_their_rows() {
+    use crate::canvas::{Canvas, Gray4};
+    let (w, h) = (320usize, 224usize);
+    let mut c: Box<Gray4<320, 224, { 320 * 224 / 2 }>> = Box::default();
+    edge_hint(&mut *c, h - DOTS_H, false);
+    edge_hint(&mut *c, h - DOTS_H, true);
+    let mut drawn = 0;
+    for y in 0..h {
+        for x in 0..w {
+            if c.get(x, y) != 0 {
+                drawn += 1;
+                assert!(
+                    x < EDGE || x >= w - EDGE,
+                    "a hint pixel at {x},{y}, outside the {EDGE} edge columns"
+                );
+            }
+        }
+    }
+    assert!(drawn > 0, "the hints drew nothing");
+
+    let mut c: Box<Gray4<320, 224, { 320 * 224 / 2 }>> = Box::default();
+    let len = 24;
+    let (first, rows) = dots_rows(h, len).expect("more than a screen of columns");
+    assert_eq!(first + rows, h);
+    dots(&mut *c, 1, pages(len));
+    for y in 0..first {
+        for x in 0..w {
+            assert_eq!(c.get(x, y), 0, "a dot at {x},{y}, above the dots rows");
+        }
+    }
+    assert!(
+        dots_rows(h, CELLS).is_none(),
+        "one screen of columns has no dots"
+    );
+}

@@ -236,6 +236,19 @@ pub fn render_page<C: Canvas + ?Sized>(
 /// The strip along the bottom the page dots live in.
 const DOTS_H: usize = 10;
 
+/// Columns at each side of the grid that belong to the screen rather than to the strip of
+/// columns: the shaded band and the chevron that say there is more that way. When the
+/// strip slides, these are held still -- the panel's fixed areas -- so the hint stays put
+/// while the icons move under it. Everything [`edge_hint`] draws is inside them.
+pub const EDGE: usize = 16;
+
+/// The rows at the bottom that belong to the screen rather than the strip, when there are
+/// any: the page dots, which say where the window is and so should not travel with what
+/// it shows. `(first row, rows)` on a canvas `h` tall, for a grid of `len` items.
+pub fn dots_rows(h: usize, len: usize) -> Option<(usize, usize)> {
+    (columns(len) > COLS && h > DOTS_H).then(|| (h - DOTS_H, DOTS_H))
+}
+
 /// How wide the shaded band at an edge is.
 const HINT_W: usize = 8;
 /// Half the chevron's height, and how far it reaches in from the edge.

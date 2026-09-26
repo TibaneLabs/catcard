@@ -287,25 +287,59 @@ pub struct St7789<B: DisplayBus> {
     bus: B,
     fg: u16,
     bg: u16,
-    /// The scroll start the panel is left at, and so the frame-memory line screen column 0
-    /// is read from: screen column `x` lives in line `(x + origin) mod WIDTH`. Every paint
-    /// and flush addresses the panel through it, so a picture the panel was scrolled to
-    /// stays put and whatever is drawn next lands where it is seen. `0` unless
-    /// [`set_origin`](Self::set_origin) moved it.
+    /// How far the scrolled ring is turned: the screen column just inside the left fixed
+    /// strip is read from ring position `origin`. Every paint and flush addresses the
+    /// panel through it (and through [`fixed`](Self::fixed)), so a picture the panel was
+    /// scrolled to stays put and whatever is drawn next lands where it is seen. `0` unless
+    /// [`set_scroll`](Self::set_scroll) moved it.
     origin: usize,
+    /// The columns held still at the left and right edges while the middle scrolls: the
+    /// controller's fixed areas. `(0, 0)` unless [`set_scroll`](Self::set_scroll) set them.
+    fixed: (usize, usize),
 }
 
-/// Where a run of screen columns `[x, x + w)` lives in frame memory with the start at
-/// `origin`: one span, or two when it runs past line `WIDTH - 1` and wraps to line 0.
-/// Each span is `(first memory line, columns, offset into the run)`.
-fn spans(origin: usize, x: usize, w: usize) -> ([(usize, usize, usize); 2], usize) {
-    let m = (x + origin) % WIDTH;
-    if m + w <= WIDTH {
-        ([(m, w, 0), (0, 0, 0)], 1)
-    } else {
-        let first = WIDTH - m;
-        ([(m, first, 0), (0, w - first, first)], 2)
+/// Where a run of screen columns `[x, x + w)` lives in frame memory, with `first` and
+/// `last` columns fixed at the two edges and the ring between them turned by `origin`:
+/// the fixed columns are their own lines, and the middle ones are read from line
+/// `first + ((x - first + origin) mod ring)`. Up to four spans -- the left strip, the
+/// middle (two when it wraps back to the start of the ring), the right strip -- each
+/// `(first memory line, columns, offset into the run)`.
+fn spans(
+    origin: usize,
+    fixed: (usize, usize),
+    x: usize,
+    w: usize,
+) -> ([(usize, usize, usize); 4], usize) {
+    let (first, last) = fixed;
+    let ring = WIDTH - first - last;
+    let end = x + w;
+    let mut out = [(0, 0, 0); 4];
+    let mut n = 0;
+    let (a0, a1) = (x, end.min(first));
+    if a1 > a0 {
+        out[n] = (a0, a1 - a0, 0);
+        n += 1;
     }
+    let (b0, b1) = (x.max(first), end.min(WIDTH - last));
+    if b1 > b0 && ring > 0 {
+        let m = first + (b0 - first + origin) % ring;
+        let (len, from) = (b1 - b0, b0 - x);
+        let room = first + ring - m;
+        if len <= room {
+            out[n] = (m, len, from);
+            n += 1;
+        } else {
+            out[n] = (m, room, from);
+            out[n + 1] = (first, len - room, from + room);
+            n += 2;
+        }
+    }
+    let (c0, c1) = (x.max(WIDTH - last), end);
+    if c1 > c0 {
+        out[n] = (c0, c1 - c0, c0 - x);
+        n += 1;
+    }
+    (out, n)
 }
 
 impl<B: DisplayBus> St7789<B> {
@@ -316,27 +350,46 @@ impl<B: DisplayBus> St7789<B> {
             fg: WHITE,
             bg: BLACK,
             origin: 0,
+            fixed: (0, 0),
         }
     }
 
-    /// The frame-memory line screen column 0 is read from. See [`set_origin`](Self::set_origin).
+    /// How far the scrolled ring is turned. See [`set_scroll`](Self::set_scroll).
     pub fn origin(&self) -> usize {
         self.origin
     }
 
-    /// Scroll the whole panel so screen column 0 shows frame-memory line `origin`, and
-    /// address everything drawn from now on relative to it.
+    /// The columns held still at the left and right edges. See [`set_scroll`](Self::set_scroll).
+    pub fn fixed(&self) -> (usize, usize) {
+        self.fixed
+    }
+
+    /// Hold `first` columns still at the left edge and `last` at the right, turn the ring
+    /// of columns between them by `origin`, and address everything drawn from now on
+    /// through that arrangement.
     ///
-    /// No pixel is sent: this is the panel's own scroll, one command. A caller that moves
-    /// the origin is saying the frame memory already holds, at the new offset, what the
-    /// screen should show -- a slide paints the incoming columns before each step -- so
-    /// the picture on the glass stays coherent, and later paints keep it so.
-    pub fn set_origin(&mut self, origin: usize) -> Result<(), B::Error> {
-        let origin = origin % WIDTH;
-        self.set_scroll_area(0, 0)?;
-        self.set_scroll_start(origin)?;
+    /// No pixel is sent: these are the panel's own fixed areas and scroll start, two
+    /// commands. A caller that moves the origin is saying the frame memory already holds,
+    /// at the new offset, what the screen should show -- a slide paints the incoming
+    /// columns before each step -- so the picture stays coherent, and later paints keep
+    /// it so. Changing the fixed widths moves which line every column is read from, so a
+    /// caller doing that redraws the frame whole afterwards.
+    pub fn set_scroll(&mut self, first: usize, last: usize, origin: usize) -> Result<(), B::Error> {
+        // The same clamps the controller command applies: at least one line scrolls.
+        let first = first.min(WIDTH - 1);
+        let last = last.min(WIDTH - 1 - first);
+        let ring = WIDTH - first - last;
+        let origin = origin % ring;
+        self.set_scroll_area(first, last)?;
+        self.set_scroll_start(first + origin)?;
+        self.fixed = (first, last);
         self.origin = origin;
         Ok(())
+    }
+
+    /// [`set_scroll`](Self::set_scroll) with no fixed columns: the whole panel one ring.
+    pub fn set_origin(&mut self, origin: usize) -> Result<(), B::Error> {
+        self.set_scroll(0, 0, origin)
     }
 
     /// Colours for lit and unlit framebuffer pixels.
@@ -378,7 +431,7 @@ impl<B: DisplayBus> St7789<B> {
         for px in line[..w * 2].as_chunks_mut::<2>().0 {
             *px = colour.to_be_bytes();
         }
-        let (parts, n) = spans(self.origin, x, w);
+        let (parts, n) = spans(self.origin, self.fixed, x, w);
         for &(mx, len, _) in &parts[..n] {
             self.window(mx, y, mx + len - 1, y + h - 1)?;
             for _ in 0..h {
@@ -404,7 +457,7 @@ impl<B: DisplayBus> St7789<B> {
         }
         let (w, h) = (w.min(WIDTH - x), h.min(HEIGHT - y));
         let mut line = [0u8; WIDTH * 2];
-        let (parts, n) = spans(self.origin, x, w);
+        let (parts, n) = spans(self.origin, self.fixed, x, w);
         for &(mx, len, from) in &parts[..n] {
             self.window(mx, y, mx + len - 1, y + h - 1)?;
             for dy in 0..h {
@@ -432,9 +485,12 @@ impl<B: DisplayBus> St7789<B> {
         h: usize,
         f: impl FnMut(usize, usize) -> u16,
     ) -> Result<(), B::Error> {
-        let saved = core::mem::replace(&mut self.origin, 0);
+        let saved = (
+            core::mem::take(&mut self.origin),
+            core::mem::take(&mut self.fixed),
+        );
         let r = self.paint(line, y, w, h, f);
-        self.origin = saved;
+        (self.origin, self.fixed) = saved;
         r
     }
 
@@ -484,6 +540,7 @@ impl<B: DisplayBus> St7789<B> {
         self.set_scroll_start(0)?;
         self.set_scroll_area(0, 0)?;
         self.origin = 0;
+        self.fixed = (0, 0);
         self.bus.command(&[cmd::NORON])
     }
 
@@ -535,7 +592,7 @@ impl<B: DisplayBus> St7789<B> {
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
         let (fg, bg) = (self.fg.to_be_bytes(), self.bg.to_be_bytes());
         let mut line = [0u8; WIDTH * 2];
-        let (parts, n) = spans(self.origin, x0, w);
+        let (parts, n) = spans(self.origin, self.fixed, x0, w);
         for &(mx, len, from) in &parts[..n] {
             self.window(mx, y0, mx + len - 1, y0 + h - 1)?;
             for fy in 0..h / SCALE {
@@ -566,7 +623,7 @@ impl<B: DisplayBus> St7789<B> {
             return Ok(());
         }
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
-        let (parts, n) = spans(self.origin, x0, w);
+        let (parts, n) = spans(self.origin, self.fixed, x0, w);
         for &(mx, len, from) in &parts[..n] {
             self.window(mx, y0, mx + len - 1, y0 + h - 1)?;
             self.send_gray_rows(fb, palette, w, 0, h, &[], from..from + len)?;
@@ -653,7 +710,7 @@ impl<B: DisplayBus> St7789<B> {
                 y += 1;
             }
             let palette = if start < boundary { top } else { bottom };
-            let (parts, n) = spans(self.origin, x0, w);
+            let (parts, n) = spans(self.origin, self.fixed, x0, w);
             for &(mx, len, from) in &parts[..n] {
                 self.window(mx, y0 + start, mx + len - 1, y0 + y - 1)?;
                 self.send_gray_rows(fb, palette, w, start, y, overlays, from..from + len)?;
@@ -1011,10 +1068,23 @@ mod tests {
     /// What the glass shows with the panel scrolled to `origin`: screen column `x` is read
     /// from frame-memory line `(x + origin) mod WIDTH`.
     fn glass(memory: &[u16], origin: usize) -> Vec<u16> {
+        glass_fixed(memory, (0, 0), origin)
+    }
+
+    /// [`glass`] with `fixed` columns held at the edges: those are their own lines, and
+    /// the ring between them is turned by `origin` -- the controller's fixed areas.
+    fn glass_fixed(memory: &[u16], fixed: (usize, usize), origin: usize) -> Vec<u16> {
+        let (first, last) = fixed;
+        let ring = WIDTH - first - last;
         let mut out = vec![0u16; WIDTH * HEIGHT];
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
-                out[y * WIDTH + x] = memory[y * WIDTH + (x + origin) % WIDTH];
+                let line = if x < first || x >= WIDTH - last {
+                    x
+                } else {
+                    first + (x - first + origin) % ring
+                };
+                out[y * WIDTH + x] = memory[y * WIDTH + line];
             }
         }
         out
@@ -1067,6 +1137,60 @@ mod tests {
                 "flush_gray_changed at {origin}"
             );
         }
+    }
+
+    /// With columns held still at both edges and the ring between them turned, a flush and
+    /// a paint that spans a strip, the ring's wrap and the other strip still put every
+    /// pixel on the glass where it belongs.
+    #[test]
+    fn fixed_edges_and_a_turned_ring_still_put_the_canvas_on_the_glass() {
+        let fb = patterned();
+        let want: Vec<u16> = (0..WIDTH * HEIGHT)
+            .map(|i| PALETTE[fb.get(i % WIDTH, i / WIDTH) as usize])
+            .collect();
+        for (fixed, origin) in [
+            ((16, 16), 0),
+            ((16, 16), 107),
+            ((16, 16), 287),
+            ((40, 0), 5),
+        ] {
+            let mut p = St7789::new(MockBus::default());
+            p.set_scroll(fixed.0, fixed.1, origin).unwrap();
+            assert_eq!(p.fixed(), fixed);
+            p.bus_mut().log.clear();
+            let mut cache = RowCache::<HEIGHT>::new();
+            p.flush_gray_changed(&*fb, &PALETTE, &mut cache).unwrap();
+            let memory = replay(&p.bus_mut().log);
+            assert!(
+                glass_fixed(&memory, fixed, origin) == want,
+                "fixed {fixed:?} origin {origin}"
+            );
+        }
+        // One paint across everything: left strip, ring (wrapping), right strip.
+        let mut p = St7789::new(MockBus::default());
+        p.set_scroll(16, 16, 280).unwrap();
+        p.bus_mut().log.clear();
+        p.paint(0, 0, WIDTH, 2, |dx, dy| (dx + dy * 1000) as u16)
+            .unwrap();
+        let seen = glass_fixed(&replay(&p.bus_mut().log), (16, 16), 280);
+        for dy in 0..2 {
+            for dx in 0..WIDTH {
+                assert_eq!(seen[dy * WIDTH + dx], (dx + dy * 1000) as u16, "{dx},{dy}");
+            }
+        }
+    }
+
+    /// Setting the scroll sends the fixed areas, then the start as the absolute line
+    /// inside the ring the controller wants.
+    #[test]
+    fn set_scroll_sends_the_areas_then_an_absolute_start_inside_the_ring() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_scroll(16, 16, 300).unwrap();
+        // The ring is 288 lines; 300 wraps to 12, which is line 16 + 12.
+        assert_eq!(p.origin(), 12);
+        let log = &p.bus_mut().log;
+        assert_eq!(log[1], (true, vec![0, 16, 0x01, 0x20, 0, 16]));
+        assert_eq!(log[3], (true, vec![0, 28]));
     }
 
     /// A paint and a fill across the wrap land on the screen columns asked for.
