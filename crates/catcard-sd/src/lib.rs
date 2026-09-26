@@ -943,9 +943,64 @@ pub mod name {
         Some(out)
     }
 
+    /// Whether `name` is a transaction file a signing session may have left behind:
+    /// `*.psbt` (the unsigned and `-signed` forms alike), `*.txn`, and the two fixed
+    /// names a Coldcard writes, `SIGNED.PSB` and `FINAL.TXN`. Case does not matter --
+    /// a FAT short name comes back upper-case -- and a bare extension is not a name.
+    ///
+    /// Source: hw-reference/firmware-features.md §9 "Delete-and-blank spent PSBTs" [C];
+    /// the fixed names from wallet-export-formats.md §PSBT [C].
+    pub fn is_spent_transaction(name: &str) -> bool {
+        if name.eq_ignore_ascii_case("signed.psb") || name.eq_ignore_ascii_case("final.txn") {
+            return true;
+        }
+        let Some(dot) = name.rfind('.') else {
+            return false;
+        };
+        let (stem, ext) = name.split_at(dot);
+        !stem.is_empty() && (ext.eq_ignore_ascii_case(".psbt") || ext.eq_ignore_ascii_case(".txn"))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn spent_transaction_names_are_recognised_whatever_their_case() {
+            for n in [
+                "tx.psbt",
+                "TX.PSBT",
+                "payment-signed.psbt",
+                "PAYMENT-SIGNED.PSBT",
+                "SIGNED.PSB",
+                "signed.psb",
+                "FINAL.TXN",
+                "final.txn",
+                "a.txn",
+                "long name with spaces.psbt",
+            ] {
+                assert!(is_spent_transaction(n), "{n}");
+            }
+        }
+
+        /// Everything else on a card stays: exports, backups, notes, and a name that is
+        /// only an extension.
+        #[test]
+        fn other_files_are_left_alone() {
+            for n in [
+                "coldcard-export.json",
+                "backup.7z",
+                "notes.txt",
+                "psbt",
+                ".psbt",
+                "x.psb",
+                "tx.psbt.bak",
+                "final.tx",
+                "",
+            ] {
+                assert!(!is_spent_transaction(n), "{n}");
+            }
+        }
 
         #[test]
         fn a_plain_name_gains_the_extension_it_lacks() {

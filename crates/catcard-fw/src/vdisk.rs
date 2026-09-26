@@ -175,6 +175,24 @@ pub fn ensure_formatted() -> Result<(), &'static str> {
     format()
 }
 
+/// Blank the whole region, then lay a fresh volume on it: stock's "wipe virtual disk".
+///
+/// **Erases the disk.** [`format`] alone rewrites only the boot sector, the FATs and the
+/// root directory, so a file staged earlier would survive in the new volume's free
+/// clusters; this writes zeros over every sector first -- 4096 paced word-store writes
+/// for the two-megabyte region, bounded by the region's own length -- so nothing does.
+/// Only ever reached from a menu row that asked.
+pub fn wipe_and_format() -> Result<(), &'static str> {
+    let mut dev = Vdisk::take().ok_or("no PSRAM for a disk")?;
+    let zeros = [0u8; BLOCK_LEN];
+    for lba in 0..dev.sectors {
+        dev.write_sectors(lba, &zeros)
+            .map_err(|_| "could not blank the disk")?;
+    }
+    drop(dev);
+    format()
+}
+
 /// Lay down an empty FAT volume over the whole region (a superfloppy: the filesystem at
 /// sector 0, no partition table, using the region end to end).
 ///

@@ -50,6 +50,7 @@ mod evmtx;
 mod export;
 #[cfg(all(feature = "dev", feature = "usb-key-injection"))]
 mod failsafe;
+mod filemgmt;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;
 #[cfg(feature = "games")]

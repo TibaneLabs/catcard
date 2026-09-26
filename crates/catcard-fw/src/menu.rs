@@ -180,6 +180,11 @@ enum Screen {
     CardDetails,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
+    /// Blank the PSRAM Virtual Disk and format it again. PSRAM boards only.
+    #[cfg(not(feature = "board-mk3"))]
+    FormatRamDisk,
+    /// Blank and remove the PSBTs and signed transactions on the chosen storage.
+    DeletePsbts,
     /// The SD card's own controller password lock (CMD42): set, change, remove, unlock,
     /// or force-erase. Needs no settings store, so it is on every board with a slot.
     CardPassword,
@@ -709,6 +714,12 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Card details",
     "Format SD card",
+    // Stock's File Management rows, flat here like the two above. The RAM disk needs
+    // PSRAM, so the mk3 has no row for it.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Format RAM disk",
+    "Delete PSBTs",
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
@@ -742,6 +753,12 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Card details",
     "Format SD card",
+    // Stock's File Management rows, flat here like the two above. The RAM disk needs
+    // PSRAM, so the mk3 has no row for it.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Format RAM disk",
+    "Delete PSBTs",
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
@@ -1478,6 +1495,9 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::FormatRamDisk => to(|a| crate::filemgmt::format_ram_disk(a.ui), Screen::Utils),
+        Screen::DeletePsbts => to(|a| crate::filemgmt::delete_psbts(a.ui), Screen::Utils),
         Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
         #[cfg(not(feature = "board-mk3"))]
         Screen::CardEncrypt => to(
@@ -2074,6 +2094,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Card details")) => Screen::CardDetails,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Format RAM disk")) => Screen::FormatRamDisk,
+            (Key::Confirm, Some("Delete PSBTs")) => Screen::DeletePsbts,
             (Key::Confirm, Some("Card password")) => Screen::CardPassword,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Encrypt card")) => Screen::CardEncrypt,
@@ -2612,6 +2635,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BackupSave | Screen::BackupRestore | Screen::BackupVerify => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
+        // Handled in `run`: both ask, then work on the volume and say how it went.
+        Screen::DeletePsbts => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::FormatRamDisk => {}
         // Handled in `run`: it brings up the card and drives its own menu and prompts.
         Screen::CardPassword => {}
         // Handled in `run`: it brings up the card and drives its own menu, prompts and
