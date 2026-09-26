@@ -15,13 +15,18 @@
 //!   directory and hashed, so an export edited after it was signed is reported as changed
 //!   -- per file, before the signature's own verdict.
 //!
-//! Both schemes [`catcard_wallet::signfile`] reads are checked here -- legacy and BIP-322
-//! -- and the screen says which one the file turned out to carry, because "verified" means
-//! something slightly different in each and the owner is entitled to know which they got.
+//! Every scheme [`catcard_wallet::signfile`] reads is checked here -- legacy, and BIP-322
+//! in its simple, full and proof-of-reserves variants -- and the screen says which one the
+//! file turned out to carry, because "verified" means something slightly different in each
+//! and the owner is entitled to know which they got. A proof of reserves says what it
+//! proves: how many outputs, and their total. A multisig cosigner's share -- every
+//! signature in it good, and short of the script's threshold -- is reported as exactly
+//! that, neither verified nor forged.
 //!
-//! "Cannot check this" is its own answer. A P2WSH multisig file, or one of BIP-322's other
-//! variants, is refused as unreadable rather than reported as a bad signature: a screen
-//! that renders "I have no script interpreter" as "forged" teaches people to ignore it.
+//! "Cannot check this" is its own answer. A P2PKH address behind a BIP-322 prefix, or a
+//! script this has no interpreter for, is refused as unreadable rather than reported as a
+//! bad signature: a screen that renders "I have no script interpreter" as "forged" teaches
+//! people to ignore it.
 //!
 //! A message this screen cannot show faithfully gets no verdict either. "Signature good"
 //! above a message the panel truncated is an answer about a different string from the one
@@ -34,9 +39,14 @@ use crate::display;
 use crate::menu;
 use crate::ui::Ui;
 
-/// Longest signed-message file this reads. The armoured block is a few hundred bytes; the
-/// rest is room for a note above it and for saying so about a file that is not one.
-const MAX_FILE: usize = 2048;
+/// Longest signed-message file this reads. A legacy or simple signature is a few hundred
+/// bytes; a proof of reserves carries a whole PSBT, base64'd, and a multisig cosigner's
+/// full signature runs to a kilobyte. The rest is room for a note above the block.
+const MAX_FILE: usize = 6144;
+
+/// Scratch the verifier gets beside the file: the compacted signature text and what it
+/// decodes to. A proof of reserves decodes to its PSBT, so this is sized like the file.
+const SCRATCH: usize = 6144;
 
 /// Largest file this hashes for a sidecar check.
 ///
@@ -103,11 +113,16 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
     let Some(path) = menu::browse_storage(ui, storage, title, Some(ext), menu::Browse::File) else {
         return;
     };
-    let mut raw = [0u8; MAX_FILE];
+    // The file and the verifier's scratch, leased from the heap rather than put on the
+    // stack: twelve kilobytes is more than a foreground frame should carry.
+    let Some(mut block) = crate::heap::take(MAX_FILE + SCRATCH) else {
+        return say(ui, HEAD, "no memory free");
+    };
+    let (raw, scratch) = block.bytes().split_at_mut(MAX_FILE);
     let mut note: heapless::String<32> = heapless::String::new();
     let _ = write!(note, "reading {}", storage.medium());
     menu::card_wait(ui.panel, HEAD, note.as_str());
-    let len = match crate::signtx::read_source_file(storage, &path, &mut raw) {
+    let len = match crate::signtx::read_source_file(storage, &path, raw) {
         Ok(n) => n,
         Err(why) => return say(ui, HEAD, why),
     };
@@ -120,6 +135,7 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
         Some((storage, path.as_str())),
         path.as_str(),
         text,
+        scratch,
     );
 }
 
@@ -132,16 +148,22 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
 /// signature alone and calling that good.
 #[cfg_attr(feature = "board-mk3", allow(dead_code))]
 pub(crate) fn verify_text(ui: &mut Ui<'_>, head: &str, source: &str, text: &str) {
-    check(ui, head, None, source, text);
+    let Some(mut block) = crate::heap::take(SCRATCH) else {
+        return say(ui, head, "no memory free");
+    };
+    check(ui, head, None, source, text, block.bytes());
 }
 
 /// Parse, hash the listed files if there is a medium to find them on, then verify.
+///
+/// `scratch` is the verifier's: see [`signfile::verify_with`].
 fn check(
     ui: &mut Ui<'_>,
     head: &str,
     files_at: Option<(menu::Storage, &str)>,
     source: &str,
     text: &str,
+    scratch: &mut [u8],
 ) {
     let file = match signfile::parse(text) {
         Ok(f) => f,
@@ -167,10 +189,18 @@ fn check(
         }
     }
 
-    match signfile::verify(&file) {
+    match signfile::verify_with(&file, scratch) {
         Ok(scheme) => {
             crate::catlog!("verify: {} good ({})", file.address, scheme.name());
             good(ui, &file, scheme, &checks);
+        }
+        // A cosigner's share: not a verdict on the message, and not a forgery either. The
+        // numbers are the news, so they go on the screen.
+        Err(signfile::Error::NeedsCosigners { have, need }) => {
+            let mut why: heapless::String<48> = heapless::String::new();
+            let _ = write!(why, "cosigner {have} of {need}: needs {} more", need - have);
+            crate::catlog!("verify: {}: {}", source, why);
+            bad(ui, &file, &why, &checks);
         }
         Err(why) => {
             crate::catlog!("verify: {}: {}", source, describe(why));
@@ -268,6 +298,8 @@ fn describe(e: signfile::Error) -> &'static str {
         signfile::Error::BadAddress => "address not readable",
         signfile::Error::Unshowable => "message not plain ASCII",
         signfile::Error::Invalid => "signature does NOT match",
+        // Worded on the spot, with its numbers; never reached through here.
+        signfile::Error::NeedsCosigners { .. } => "needs more cosigners",
     }
 }
 
@@ -299,6 +331,13 @@ fn good(
     use catcard_ui::scroll::Line;
     let mut note: heapless::String<32> = heapless::String::new();
     let _ = write!(note, "{} signature", scheme.name());
+    // What a proof of reserves proved: the outputs and their total, in the owner's
+    // display units. Whether those outputs are still unspent is a question for a node.
+    let mut proved: heapless::String<48> = heapless::String::new();
+    if let Scheme::Bip322Proof { utxos, total } = scheme {
+        let _ = write!(proved, "proves {utxos} UTXO(s), total ");
+        let _ = crate::prefs::current().units.write(total, &mut proved);
+    }
     let rows = check_rows(checks);
     let all_ok = checks.iter().all(|(_, c)| *c == Check::Ok);
     let mut doc: heapless::Vec<Line, { 8 + signfile::MAX_FILES }> = heapless::Vec::new();
@@ -319,6 +358,10 @@ fn good(
         let _ = doc.push(Line::body(file.message).wrapped());
     }
     let _ = doc.push(Line::body(note.as_str()).small());
+    if !proved.is_empty() {
+        let _ = doc.push(Line::body(proved.as_str()).small().wrapped());
+        let _ = doc.push(Line::body("(unspent status not checked)").small());
+    }
     page(ui, &doc);
 }
 
