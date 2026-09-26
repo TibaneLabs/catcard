@@ -6,25 +6,27 @@
 //!
 //! - **View Identity** (About, third page): firmware and build time, hardware, the
 //!   bootloader's version string, which secure elements answer, the factory bag number,
-//!   the wallet's master fingerprint, the genuine light's raw reading and the
-//!   anti-downgrade mark. All reads.
+//!   the wallet's master fingerprint, the genuine light as the secure element reports it
+//!   (gate 4/0), whether the chip is locked (gate 19/2, mk4 on) and the anti-downgrade
+//!   mark as a date (gate 21/0). All reads.
 //! - **Bless Firmware**: gate 18/5 on the logged-in struct -- commits this image's
-//!   checksum to the SE and turns the genuine light green.
+//!   checksum to the SE and turns the genuine light green -- then reads the light back.
 //! - **Set High-Water**: gate 21/2 -- **irreversible**; asked twice.
-//! - **DFU Upgrade**: always refused. Every bench unit is RDP=2, the bootloader locks up
-//!   rather than enter DFU there, and the gate's lock flag has no documented encoding --
-//!   so the lock state is never *positively* known to be open, and `enter_dfu` is never
-//!   called from here.
+//! - **DFU Upgrade**: refused unless gate 19/2 answers, positively, *not locked*
+//!   (`0xFF`); then asked twice before `enter_dfu`. A locked unit -- every bench unit is
+//!   RDP=2 -- locks up rather than enter DFU, so a failed read, an unknown byte, or a
+//!   board without the read all refuse.
 //! - **Settings Space**: how much of the settings volume the slots use.
 //!
-//! Source: hw-reference/bootloader-callgate-abi.md methods 0, 4, 6, 19, 21 [C];
+//! Source: hw-reference/bootloader-callgate-abi.md methods 0, 4, 6, 19, 21 and
+//! §"Decoding three status gates" [C];
 //! gate18-pin-state-machine.md §2 method 5 [C]; menu-map-mk4-mk5-q1-v5.6.2.md §DZ,
 //! §ADV "View Identity" [C]; help-and-warning-screens.md §14 [C].
 
 use core::fmt::Write as _;
 
 use catcard_callgate::Callgate;
-use catcard_callgate::abi::GenuineOp;
+use catcard_callgate::abi::{DfuMode, Light, LockState};
 use catcard_ui::scroll::Line as DLine;
 
 use crate::menu::{self, DocExit};
@@ -32,6 +34,20 @@ use crate::ui::Ui;
 
 /// One rendered line of the identity page.
 type Text = heapless::String<64>;
+
+/// The genuine light in words, as the secure element reports it.
+///
+/// "green" / "red" and nothing stronger: the bootloader passes on the SE's own GPIO
+/// reading, which its source calls forgeable by a man in the middle.
+/// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+fn light_text(read: Result<Option<Light>, catcard_callgate::Error>) -> &'static str {
+    match read {
+        Ok(Some(Light::Green)) => "green",
+        Ok(Some(Light::Red)) => "red",
+        Ok(None) => "no clear answer",
+        Err(_) => "unreadable",
+    }
+}
 
 /// Whether every nibble of `ts` is a decimal digit -- the header's BCD shape.
 fn is_bcd(ts: &[u8; 8]) -> bool {
@@ -174,29 +190,50 @@ pub(crate) fn view_identity(gate: &Callgate, login: &mut catcard_pin::Login, ui:
     }
     push(t);
 
-    // The genuine light, as the gate answers a read. The number is shown as it is: the
-    // reference does not say what it means (docs/HARDWARE-OPEN-ITEMS.md).
-    let mut t = Text::new();
+    // The genuine light, in the secure element's own words: advisory, as the
+    // bootloader's source says of this read.
     // SAFETY: no buffer, a read; interrupts masked in the call.
-    match unsafe { gate.genuine_light(GenuineOp::Read) } {
-        Ok(rv) => {
-            let _ = write!(t, "genuine light: gate says {rv}");
-        }
-        Err(e) => {
-            let _ = write!(t, "genuine light: {:?}", e);
-        }
-    }
+    let light = unsafe { gate.genuine_light_read() };
+    crate::catlog!("identity: genuine light {:?}", light);
+    let mut t = Text::new();
+    let _ = write!(
+        t,
+        "genuine light: {} (secure element's reading)",
+        light_text(light)
+    );
     push(t);
 
+    // Whether the chip is locked against being read out or reflashed over DFU. The
+    // read exists from mk4 on: the boards with a second secure element.
+    if catcard_board::BOARD.has_se2 {
+        // SAFETY: method 19's documented buffer, a read sub-method; masked.
+        let lock = unsafe { gate.lock_state() };
+        crate::catlog!("identity: lock {:?}", lock);
+        let mut t = Text::new();
+        let _ = write!(
+            t,
+            "chip lock: {}",
+            match lock {
+                Ok(Some(LockState::Locked)) => "locked",
+                Ok(Some(LockState::NotLocked)) => "not locked",
+                Ok(None) => "no clear answer",
+                Err(_) => "unreadable",
+            }
+        );
+        push(t);
+    }
+
+    // The anti-downgrade mark: firmware built before this date is refused.
     let mut mark = [0u8; 8];
     let mut t = Text::new();
     // SAFETY: the documented 8-byte buffer; read only; interrupts masked in the call.
     match unsafe { gate.high_water_read(&mut mark) } {
         Ok(()) => {
-            let _ = write!(t, "high-water: {}", stamp_text(&mark));
+            let _ = write!(t, "oldest firmware allowed: {}", stamp_text(&mark));
         }
         Err(e) => {
-            let _ = write!(t, "high-water: unreadable {:?}", e);
+            crate::catlog!("identity: high-water read {:?}", e);
+            let _ = t.push_str("oldest firmware allowed: unreadable");
         }
     }
     push(t);
@@ -231,11 +268,18 @@ pub(crate) fn bless_firmware(gate: &Callgate, login: &mut catcard_pin::Login, ui
     let g = crate::pinentry::BootloaderGate::new(gate);
     match login.greenlight(&g) {
         Ok(()) => {
-            // What the light reads now, for the log: the number's meaning is open.
+            // Read the light back: the bless is only as good as what the secure element
+            // now reports, and that is what the owner is shown.
             // SAFETY: no buffer, a read; interrupts masked in the call.
-            let after = unsafe { gate.genuine_light(GenuineOp::Read) };
+            let after = unsafe { gate.genuine_light_read() };
             crate::catlog!("bless: gate 18/5 ok; light reads {:?}", after);
-            menu::message(ui.panel, HEAD, "done", "genuine light set");
+            if matches!(after, Ok(Some(Light::Green))) {
+                menu::message(ui.panel, HEAD, "done", "the light is now green");
+            } else {
+                let mut b = Text::new();
+                let _ = write!(b, "light reads {}", light_text(after));
+                menu::message(ui.panel, "Not green", "blessed, but the", &b);
+            }
         }
         Err(why) => {
             let what = match why {
@@ -321,10 +365,10 @@ pub(crate) fn set_high_water(gate: &Callgate, ui: &mut Ui<'_>) {
         return;
     }
 
-    // What the bootloader's own check says of this timestamp, for the log only: its
-    // answer's encoding is not documented, so it decides nothing here.
+    // What the bootloader's own check says of this timestamp, for the log: this image
+    // is running, so it cleared the floor when it was installed.
     // SAFETY: the documented 8-byte buffer; a check, not a write; interrupts masked.
-    let check = unsafe { gate.high_water_check(&own.timestamp) };
+    let check = unsafe { gate.is_downgrade(&own.timestamp) };
     crate::catlog!("high-water: check of own timestamp -> {:?}", check);
 
     menu::blocking_screen(ui.panel, HEAD, "recording");
@@ -345,40 +389,75 @@ pub(crate) fn set_high_water(gate: &Callgate, ui: &mut Ui<'_>) {
     menu::wait_for_any_key(ui);
 }
 
-/// Danger zone → DFU Upgrade: stock enters the ROM bootloader here. This never does.
+/// Danger zone → DFU Upgrade: restart into the chip's own ROM loader, as stock does --
+/// but only on a device that says, positively, that it is not locked.
 ///
 /// A security-locked unit (RDP=2, which every bench unit is) cannot enter DFU: the
 /// bootloader locks up instead, and that reads as a brick until the power is cycled.
-/// The one way to know the lock state is gate 19/2, whose answer's encoding the
-/// reference does not give -- so it is read and logged, raw, on the boards that have
-/// it, and the row says what it can honestly say. `enter_dfu` is not called from here
-/// in any mode. Source: firmware-features.md §9 [C]; bootloader-callgate-abi.md
-/// method 2, "gate 19 gained sub-method 2" [C]; docs/HARDWARE-OPEN-ITEMS.md.
+/// Gate 19/2 answers the question in `buf_io[0]`: `2` locked, `0xFF` not. **Only
+/// `0xFF` opens the way** -- a failed read, any other byte, and the mk3, whose
+/// bootloader has no such read, all get the refusal. Then it is asked twice, and
+/// `enter_dfu` does not return.
+///
+/// Source: firmware-features.md §9 [C]; bootloader-callgate-abi.md method 2, "gate 19
+/// gained sub-method 2", §"Decoding three status gates" [C].
 pub(crate) fn dfu_upgrade(gate: &Callgate, ui: &mut Ui<'_>) {
     const HEAD: &str = "DFU Upgrade";
     // The flag exists from mk4 on: the boards with a second secure element.
-    if catcard_board::BOARD.has_se2 {
-        let mut raw = [0u8; 32];
+    let state = if catcard_board::BOARD.has_se2 {
         // SAFETY: method 19's documented 32-byte buffer, a read sub-method; masked.
-        let rv = unsafe { gate.lock_flag_raw(&mut raw) };
-        crate::catlog!(
-            "dfu: lock flag raw rv {:?}, buf {:02x}{:02x}{:02x}{:02x}",
-            rv,
-            raw[0],
-            raw[1],
-            raw[2],
-            raw[3]
-        );
+        let read = unsafe { gate.lock_state() };
+        crate::catlog!("dfu: lock flag {:?}", read);
+        read.ok().flatten()
     } else {
         crate::catlog!("dfu: this bootloader has no lock-flag read");
+        None
+    };
+    match state {
+        Some(LockState::NotLocked) => {}
+        Some(LockState::Locked) => {
+            menu::message(
+                ui.panel,
+                HEAD,
+                "unavailable on a locked",
+                "device; use Upgrade Firmware",
+            );
+            menu::wait_for_any_key(ui);
+            return;
+        }
+        None => {
+            menu::message(
+                ui.panel,
+                HEAD,
+                "cannot tell if it is locked,",
+                "so not entering it",
+            );
+            menu::wait_for_any_key(ui);
+            return;
+        }
     }
-    menu::message(
-        ui.panel,
-        HEAD,
-        "unavailable on a locked",
-        "device; use Upgrade Firmware",
-    );
-    menu::wait_for_any_key(ui);
+
+    {
+        let lines = [
+            DLine::title(HEAD),
+            DLine::body("Restarts into the chip's own").small(),
+            DLine::body("firmware loader, for a DFU").small(),
+            DLine::body("tool on a computer to write").small(),
+            DLine::body("firmware over USB.").small(),
+            DLine::body("Power off to leave it.").small(),
+        ];
+        if !matches!(menu::show_doc(ui, &lines, false, true), DocExit::Confirmed) {
+            return;
+        }
+    }
+    menu::ask(ui.panel, "Enter DFU now?", "the device restarts", "");
+    if !menu::confirmed(ui) {
+        return;
+    }
+    crate::catlog!("dfu: entering the ROM loader");
+    // SAFETY: the lock flag read `0xFF` (not locked) just now, and the owner confirmed
+    // twice; the call wipes SRAM and does not return.
+    unsafe { gate.enter_dfu(DfuMode::Normal) }
 }
 
 /// Danger zone → Settings Space: how much of the settings volume is in use.

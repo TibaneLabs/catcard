@@ -1291,7 +1291,7 @@ pub fn run(session: Session<'_>) -> ! {
                 if screen == Screen::Colours {
                     display::wipe(ui.panel);
                 }
-                crate::session::show_offer(ui.panel, &a);
+                crate::session::show_offer(gate, ui.panel, &a);
                 showing_offer = true;
             }
         } else if showing_offer {
@@ -4033,7 +4033,7 @@ fn offer_and_install<A>(
     A: catcard_upgrade::StagingArea,
     A::Error: Into<catcard_upgrade::StorageError>,
 {
-    crate::session::show_offer(ui.panel, &approval);
+    crate::session::show_offer(gate, ui.panel, &approval);
 
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

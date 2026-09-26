@@ -31,7 +31,7 @@ pub mod abi;
 pub mod entry;
 pub mod pin;
 
-use abi::{BagOp, GenuineOp, MAX_BUF_LEN, Method, OtpOp, PinOp, RngSource, err};
+use abi::{BagOp, GenuineOp, Light, LockState, MAX_BUF_LEN, Method, OtpOp, PinOp, RngSource, err};
 use catcard_board::BoardSpec;
 use entry::{BootloaderInfo, EntryError};
 use pin::{PIN_ATTEMPT_SIZE, PinAttempt};
@@ -394,22 +394,37 @@ impl Callgate {
     /// Callgate 4: the ATECC-driven "genuine" light.
     ///
     /// Takes no buffer; `arg2` is the [`GenuineOp`]. [`GenuineOp::Read`] answers through
-    /// the gate's return value, **whose encoding the reference does not state** -- it is
-    /// handed up raw for a screen to show as the number it is, never decoded into
-    /// "green" or "red" here. [`GenuineOp::VerifyAndSet`] checksums flash and lights the
+    /// the gate's return value, `1` green and `0` red -- [`Self::genuine_light_read`]
+    /// decodes it. [`GenuineOp::VerifyAndSet`] checksums flash and lights the
     /// green only if that matches what the SE already holds; it cannot commit a new
     /// checksum -- that is gate 18/5, [`PinOp::GreenLight`], which needs a login.
     /// [`GenuineOp::Clear`] turns the light off and [`GenuineOp::Set`] is documented as
     /// always failing; nothing in this firmware calls either.
     ///
-    /// Source: hw-reference/bootloader-callgate-abi.md method 4 [C]; the meaning of the
-    /// `Read` return value [?] -- docs/HARDWARE-OPEN-ITEMS.md.
+    /// Source: hw-reference/bootloader-callgate-abi.md method 4, §"Decoding three
+    /// status gates" [C].
     ///
     /// # Safety
     /// See [`Self::call_no_buf`]. `VerifyAndSet` changes what the front LED shows.
     pub unsafe fn genuine_light(&self, op: GenuineOp) -> Result<i32, Error> {
         // SAFETY: this method takes no buffer.
         unsafe { self.call_no_buf(Method::GenuineLight, op as u32) }
+    }
+
+    /// Callgate 4/0, decoded: what the secure element says the light is.
+    ///
+    /// **Advisory.** The bootloader reads the SE's GPIO and passes it on; its own source
+    /// marks the reading as one a man in the middle could forge. `Ok(None)` for a return
+    /// value that is neither `0` nor `1`.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+    ///
+    /// # Safety
+    /// See [`Self::call_no_buf`].
+    pub unsafe fn genuine_light_read(&self) -> Result<Option<Light>, Error> {
+        // SAFETY: a read; no buffer.
+        let rv = unsafe { self.genuine_light(GenuineOp::Read)? };
+        Ok(Light::decode(rv))
     }
 
     /// Callgate 19/0: the factory bag number, **read only**.
@@ -431,30 +446,30 @@ impl Callgate {
         Ok(())
     }
 
-    /// Callgate 19/2 (mk4 and later): the RDP-2 / factory-mode flag, **raw**.
+    /// Callgate 19/2 (mk4 and later): is the MCU at RDP level 2?
     ///
-    /// The reference confirms the sub-method exists on mk4+ and reads a flag, and says
-    /// nothing about how the answer is encoded -- in the return value, in the buffer, or
-    /// which value means locked. So this returns both untouched, and **no caller may
-    /// treat any answer as "the device is open"**: it is a diagnostic to log, not a
-    /// state to act on. Absent from the mk3 bootloader, whose method 19 knows only
-    /// `0`/`1`/`100+`; not sent there.
+    /// The answer is `buf_io[0]`: `2` locked, `0xFF` not ([`LockState::decode`]).
+    /// Anything else -- including the zero the buffer is sent as, which a bootloader
+    /// that did not answer would leave there -- is `Ok(None)`, and **only
+    /// `Some(NotLocked)` may be read as open**. Absent from the mk3 bootloader, whose
+    /// method 19 knows only `0`/`1`/`100+`; not sent there.
     ///
     /// Source: hw-reference/bootloader-callgate-abi.md "gate 19 gained sub-method 2 on
-    /// Mk4" [C]; the encoding [?] -- docs/HARDWARE-OPEN-ITEMS.md.
+    /// Mk4", §"Decoding three status gates" [C].
     ///
     /// # Safety
     /// See [`Self::call`].
-    pub unsafe fn lock_flag_raw(&self, out: &mut [u8; 32]) -> Result<i32, Error> {
-        out.fill(0);
+    pub unsafe fn lock_state(&self) -> Result<Option<LockState>, Error> {
+        let mut out = [0u8; 32];
         // SAFETY: method 19's documented 32-byte in/out buffer; a read sub-method.
         unsafe {
             self.call(
                 Method::BagNumber,
                 out.as_mut_slice(),
                 BagOp::ReadLockFlag as u32,
-            )
-        }
+            )?
+        };
+        Ok(LockState::decode(out[0]))
     }
 
     /// Callgate 21/0: the anti-downgrade high-water mark the bootloader enforces.
@@ -463,9 +478,9 @@ impl Callgate {
     /// `timestamp` is below this is refused at install. All zero on a unit that has
     /// never recorded one.
     ///
-    /// Source: hw-reference/bootloader-callgate-abi.md method 21 (`in/out 8`) [C];
-    /// firmware-signing.md §header `timestamp` [C]; that the eight bytes are that field
-    /// verbatim [I] -- docs/HARDWARE-OPEN-ITEMS.md.
+    /// Source: hw-reference/bootloader-callgate-abi.md method 21 (`in/out 8`), and
+    /// §"Decoding three status gates" -- "Format = the firmware header's
+    /// `timestamp[8]`" [C]; firmware-signing.md §header `timestamp` [C].
     ///
     /// # Safety
     /// See [`Self::call`].
@@ -482,19 +497,22 @@ impl Callgate {
         Ok(())
     }
 
-    /// Callgate 21/1: ask the bootloader whether `timestamp` clears the high-water mark.
+    /// Callgate 21/1: would an image with this `timestamp` be refused as a downgrade?
     ///
-    /// The return value is passed up raw: the reference says the sub-method checks a
-    /// candidate and not how it answers, so a caller logs it and decides nothing on it.
+    /// `Ok(true)` when the bootloader says so -- the timestamp is below the high-water
+    /// mark (or the version too old) -- and an install of it would be refused; `Ok(false)`
+    /// for same-or-newer. A question, not a write: nothing reaches the OTP.
     ///
-    /// Source: hw-reference/bootloader-callgate-abi.md method 21 [C].
+    /// Source: hw-reference/bootloader-callgate-abi.md method 21, §"Decoding three
+    /// status gates" [C].
     ///
     /// # Safety
     /// See [`Self::call`].
-    pub unsafe fn high_water_check(&self, timestamp: &[u8; 8]) -> Result<i32, Error> {
+    pub unsafe fn is_downgrade(&self, timestamp: &[u8; 8]) -> Result<bool, Error> {
         let mut buf = *timestamp;
         // SAFETY: the documented 8-byte buffer; a check, which writes nothing to OTP.
-        unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Check as u32) }
+        let rv = unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Check as u32)? };
+        Ok(abi::is_downgrade(rv))
     }
 
     /// Callgate 21/2: **record `timestamp` as the new high-water mark. IRREVERSIBLE.**

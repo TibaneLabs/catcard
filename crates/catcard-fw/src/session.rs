@@ -328,7 +328,15 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
 /// anti-downgrade mark. That mark is the only irreversible thing an install can do:
 /// after it, stock firmware and every earlier CatCard are refused forever. It gets its
 /// own two lines here and a second question in the menu, the way destroying a seed does.
-pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approval) {
+///
+/// And whether the bootloader will refuse it as a downgrade -- older than the mark this
+/// device already holds -- asked of the bootloader itself (gate 21/1) rather than
+/// worked out here, so the warning is the answer the install will actually get.
+pub(crate) fn show_offer(
+    gate: &catcard_callgate::Callgate,
+    panel: &mut display::Panel,
+    a: &catcard_upgrade::Approval,
+) {
     use core::fmt::Write as _;
 
     // The version *and* the build time. Two builds of the same firmware carry the same
@@ -352,10 +360,14 @@ pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approv
     // legitimate thing to want, and the bootloader holds the final say through its OTP
     // high-water mark. But "reported" has to mean on this screen, not only in the USB
     // reply, or the person at the keys is the one party not told.
-    let mut lines: heapless::Vec<&str, 5> = heapless::Vec::new();
+    let refused = would_be_refused(gate, a);
+    let mut lines: heapless::Vec<&str, 6> = heapless::Vec::new();
     let _ = lines.push(line.as_str());
     let _ = lines.push(signature_status(a));
-    if a.older_than_running {
+    if refused {
+        let _ = lines.push("WILL BE REFUSED: older");
+        let _ = lines.push("than this device allows");
+    } else if a.older_than_running {
         let _ = lines.push("older than running");
     }
     if sets_high_water(a) {
@@ -365,6 +377,24 @@ pub(crate) fn show_offer(panel: &mut display::Panel, a: &catcard_upgrade::Approv
     display::draw(panel, |c| {
         catcard_ui::widgets::info(c, &display::LAYOUT, "Install firmware?", &lines);
     });
+}
+
+/// Whether the bootloader says it would refuse this image as a downgrade.
+///
+/// Gate 21/1 with the image's header timestamp: non-zero is "older than the high-water
+/// mark", which the install would be refused for. A failed read is `false` -- no
+/// warning -- because the bootloader still makes the real decision at install time; a
+/// warning that could only be wrong in the direction of "try anyway" is not worth
+/// inventing. Logged either way.
+/// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+pub(crate) fn would_be_refused(
+    gate: &catcard_callgate::Callgate,
+    a: &catcard_upgrade::Approval,
+) -> bool {
+    // SAFETY: the documented 8-byte buffer; a check, which writes nothing; masked.
+    let check = unsafe { gate.is_downgrade(&a.header.timestamp) };
+    crate::catlog!("upgrade: downgrade check {:?}", check);
+    matches!(check, Ok(true))
 }
 
 /// Whether installing this image records a new anti-downgrade high-water mark.

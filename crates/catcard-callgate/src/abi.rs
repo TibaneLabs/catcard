@@ -109,9 +109,10 @@ pub enum GenuineOp {
 pub enum BagOp {
     Read = 0,
     Set = 1,
-    /// **mk4 and later:** read the RDP-2 / factory-mode flag. The answer's encoding is
-    /// not in the reference; see [`Callgate::lock_flag_raw`](crate::Callgate::lock_flag_raw).
-    /// Source: bootloader-callgate-abi.md "gate 19 gained sub-method 2 on Mk4" [C]
+    /// **mk4 and later:** read the RDP-2 lock flag into `buf_io[0]`; see
+    /// [`LockState::decode`] and [`Callgate::lock_state`](crate::Callgate::lock_state).
+    /// Source: bootloader-callgate-abi.md "gate 19 gained sub-method 2 on Mk4",
+    /// §"Decoding three status gates" [C]
     ReadLockFlag = 2,
     SetRdpLevel0 = 100,
     SetRdpLevel1 = 101,
@@ -130,6 +131,77 @@ pub enum OtpOp {
     Record = 2,
     /// Read the SE monotonic counter.
     Counter = 3,
+}
+
+/// What gate 4/0 says of the genuine light.
+///
+/// The bootloader answers with the secure element's own GPIO reading as the gate's
+/// return value: `1` is green, `0` is red (or off). Its own source calls that reading
+/// "do not trust -- could be MitM'd", so it is **advisory**: a screen may say what the
+/// secure element reports, never that the device is proven genuine.
+///
+/// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Light {
+    Green,
+    Red,
+}
+
+impl Light {
+    /// The light from gate 4/0's return value; `None` for anything but `0` or `1`, which
+    /// is not an answer this bootloader gives and so is not read as either colour.
+    pub fn decode(rv: i32) -> Option<Light> {
+        match rv {
+            1 => Some(Light::Green),
+            0 => Some(Light::Red),
+            _ => None,
+        }
+    }
+}
+
+/// What gate 19/2 says of the flash read-out protection.
+///
+/// One byte, `buf_io[0]`: `2` when the MCU is at RDP level 2 (locked for good), `0xFF`
+/// when it is not. Nothing else is an answer: a buffer that comes back holding anything
+/// else -- the zero it was sent as, say, from a bootloader that did not write it -- is
+/// **not** "not locked". The one decision riding on this is whether DFU may be entered,
+/// and on a locked device that locks the device up.
+///
+/// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum LockState {
+    /// RDP level 2.
+    Locked,
+    /// Positively reported as not RDP level 2.
+    NotLocked,
+}
+
+impl LockState {
+    /// The byte that means locked.
+    pub const LOCKED: u8 = 2;
+    /// The byte that means not locked.
+    pub const NOT_LOCKED: u8 = 0xFF;
+
+    /// The state from `buf_io[0]`; `None` for any other byte.
+    pub fn decode(byte: u8) -> Option<LockState> {
+        match byte {
+            Self::LOCKED => Some(LockState::Locked),
+            Self::NOT_LOCKED => Some(LockState::NotLocked),
+            _ => None,
+        }
+    }
+}
+
+/// Whether gate 21/1's return value says the candidate would be refused as a downgrade.
+///
+/// Non-zero is a downgrade -- the candidate timestamp is below the high-water mark, or
+/// its version is too old -- and an install of it would be refused; zero is same-or-newer.
+/// Negative returns are errors and never reach here (the gate wrapper turns them into an
+/// `Err`).
+///
+/// Source: hw-reference/bootloader-callgate-abi.md §"Decoding three status gates" [C]
+pub fn is_downgrade(rv: i32) -> bool {
+    rv != 0
 }
 
 /// `arg2` for [`Method::ReadSeRng`].
@@ -311,6 +383,36 @@ mod tests {
         assert!(!err::is_pin_error(-1));
         // -115 is past the documented range; do not claim to recognise it.
         assert!(!err::is_pin_error(-115));
+    }
+
+    /// Gate 4/0: `1` green, `0` red, and nothing else read as a colour.
+    #[test]
+    fn the_genuine_light_reads_one_as_green_and_zero_as_red() {
+        assert_eq!(Light::decode(1), Some(Light::Green));
+        assert_eq!(Light::decode(0), Some(Light::Red));
+        for rv in [2, 3, 0xFF, i32::MAX] {
+            assert_eq!(Light::decode(rv), None, "{rv}");
+        }
+    }
+
+    /// Gate 19/2: only `0xFF` is "not locked". The byte the buffer was sent as (zero), a
+    /// level-1 reading, or anything else must never read as open: entering DFU on a
+    /// locked device locks it up.
+    #[test]
+    fn only_ff_reads_as_not_locked() {
+        assert_eq!(LockState::decode(2), Some(LockState::Locked));
+        assert_eq!(LockState::decode(0xFF), Some(LockState::NotLocked));
+        for b in (0u8..=0xFE).filter(|b| *b != 2) {
+            assert_eq!(LockState::decode(b), None, "{b:#x}");
+        }
+    }
+
+    /// Gate 21/1: any non-zero answer is a downgrade.
+    #[test]
+    fn a_nonzero_check_is_a_downgrade() {
+        assert!(!is_downgrade(0));
+        assert!(is_downgrade(1));
+        assert!(is_downgrade(0x7F));
     }
 
     #[test]
