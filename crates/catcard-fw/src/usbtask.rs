@@ -1530,6 +1530,111 @@ pub fn set_port(on: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Keyboard emulation
+//
+// The `Keyboard EMU` switch. On, the HID identity is a composite -- the wallet's own
+// interface exactly as before, plus a boot-protocol keyboard on its own IN endpoint --
+// and `usbkbd::type_text` sends keystrokes through it. The wallet interface keeps its
+// number and endpoints, so no host tool is affected by the switch either way.
+// ---------------------------------------------------------------------------
+
+/// Whether the owner has keyboard emulation on. Off until a wallet's settings say so:
+/// a device that can type into its host is the surprising state, never the default.
+static KBD_ON: AtomicBool = AtomicBool::new(false);
+
+/// Whether the `Keyboard EMU` switch is on.
+///
+/// The typing side (`usbkbd`, and these `kbd_*` functions) is not built on the mk3: it
+/// has no settings store, so the switch can never be on there. [`set_keyboard`] is,
+/// because the preferences are applied on every board.
+#[cfg(not(feature = "board-mk3"))]
+pub fn keyboard_on() -> bool {
+    KBD_ON.load(Ordering::Relaxed)
+}
+
+/// Switch keyboard emulation on or off, as the `Hardware On/Off` setting asks.
+///
+/// The descriptor set is fixed for the life of an enumeration, so a change means the
+/// host has to enumerate again: a visible disconnect, a pause, and a re-attach with the
+/// new configuration -- the same dance the USB Drive screen does. Only while the host is
+/// looking, though: with the port off there is nothing to re-present, and [`set_port`]
+/// brings up whatever identity is current when it comes back; in mass-storage mode the
+/// flag simply waits for [`msc_exit`] to re-enumerate as HID.
+///
+/// Read from the wallet's settings after the PIN, like the port switch, so a locked
+/// device never enumerates a keyboard.
+pub fn set_keyboard(on: bool) {
+    if KBD_ON.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    crate::catlog!("usb: keyboard emulation {}", if on { "on" } else { "off" });
+    let presenting = PORT_ON.load(Ordering::Relaxed) && !MSC_ACTIVE.load(Ordering::Relaxed);
+    // SAFETY: the task owns OTG_FS and the lock excludes other tasks; interrupts are
+    // off outside mass-storage mode, which `presenting` rules out.
+    with_task(|t| unsafe {
+        t.otg.set_keyboard(on);
+        if presenting {
+            t.otg.detach();
+            catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
+            t.otg.reinit();
+        }
+    });
+}
+
+/// What became of one keyboard report.
+#[cfg(not(feature = "board-mk3"))]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum KbdSend {
+    /// In the endpoint's FIFO, for the host's next IN token.
+    Sent,
+    /// The host has not taken the previous report yet, or the FIFO has no room; try
+    /// again after a moment.
+    Busy,
+    /// There is no keyboard to send through: the switch or the port is off, the device
+    /// is a disk right now, USB never came up, or no host has configured it.
+    Unavailable,
+}
+
+/// Whether a keyboard report could go out right now, without sending one.
+#[cfg(not(feature = "board-mk3"))]
+pub fn kbd_ready() -> bool {
+    if !keyboard_on() || !PORT_ON.load(Ordering::Relaxed) || MSC_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    with_task(|t| t.otg.is_configured() && t.otg.keyboard_present()).unwrap_or(false)
+}
+
+/// Offer one boot-keyboard report to the host. Never blocks; see [`KbdSend`].
+#[cfg(not(feature = "board-mk3"))]
+pub fn kbd_send(report: &catcard_usb::kbd::Report) -> KbdSend {
+    if !kbd_ready() {
+        return KbdSend::Unavailable;
+    }
+    with_task(|t| {
+        // SAFETY: the task owns OTG_FS and the lock excludes other tasks; not in
+        // mass-storage mode (`kbd_ready` checked), so no interrupt touches the core.
+        if unsafe { t.otg.kbd_send(report.as_bytes()) } {
+            led::saw_traffic();
+            KbdSend::Sent
+        } else {
+            KbdSend::Busy
+        }
+    })
+    .unwrap_or(KbdSend::Unavailable)
+}
+
+/// Whether the last keyboard report is still waiting for the host to take it. `false`
+/// when there is no keyboard at all: nothing is pending on an endpoint that is not open.
+#[cfg(not(feature = "board-mk3"))]
+pub fn kbd_busy() -> bool {
+    if !kbd_ready() {
+        return false;
+    }
+    // SAFETY: a register read under the task lock.
+    with_task(|t| unsafe { t.otg.kbd_busy() }).unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // Mass-storage mode
 //
 // Used only by the USB Drive screen: it switches the device's identity to a USB disk,

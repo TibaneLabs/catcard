@@ -12,6 +12,7 @@
 //! | max network fee | the [`catcard_wallet::psbtview::Policy`] the PSBT review is built with |
 //! | USB port | [`crate::usbtask::set_port`] |
 //! | Virtual Disk | the USB Drive screen, which refuses to start when it is off |
+//! | Keyboard EMU | [`crate::usbtask::set_keyboard`], which re-enumerates with or without the keyboard |
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
 //! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
 //!
@@ -49,6 +50,9 @@ pub(crate) struct Prefs {
     pub usb_port: bool,
     /// Whether the device may re-enumerate as a USB disk.
     pub virtual_disk: bool,
+    /// Whether the device also enumerates a USB keyboard, for typing passwords into the
+    /// host. Honoured by [`crate::usbtask::set_keyboard`]; [`crate::usbkbd`] types.
+    pub keyboard_emu: bool,
     /// Whether the menu cursor comes round at the ends of a list.
     pub menu_wrap: bool,
     /// Which Bitcoin network every address, xpub and default path is built for.
@@ -78,7 +82,8 @@ impl Prefs {
 
 impl Default for Prefs {
     /// What a device with no settings file behaves like: no timeout, BTC, the ten-percent
-    /// fee cap, both hardware switches on, no wrapping, and unregistered multisig refused.
+    /// fee cap, both hardware switches on, the keyboard off, no wrapping, and
+    /// unregistered multisig refused.
     fn default() -> Self {
         Self {
             idle_minutes: None,
@@ -87,6 +92,7 @@ impl Default for Prefs {
             fee_cap: FeeCap::DEFAULT,
             usb_port: true,
             virtual_disk: true,
+            keyboard_emu: false,
             menu_wrap: false,
             net: Chain::Mainnet,
             backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
@@ -103,6 +109,7 @@ static mut CURRENT: Prefs = Prefs {
     fee_cap: FeeCap::DEFAULT,
     usb_port: true,
     virtual_disk: true,
+    keyboard_emu: false,
     menu_wrap: false,
     net: Chain::Mainnet,
     backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
@@ -135,6 +142,7 @@ fn apply(next: Prefs) {
     unsafe { *core::ptr::addr_of_mut!(CURRENT) = next };
     crate::idle::arm(next.idle_minutes, next.battery_idle_minutes);
     crate::usbtask::set_port(next.usb_port);
+    crate::usbtask::set_keyboard(next.keyboard_emu);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
     // and there is nothing to apply.
     #[cfg(feature = "board-q1")]
@@ -209,19 +217,21 @@ pub(crate) fn load(
         fee_cap: prefs::fee_cap(&doc),
         usb_port: prefs::usb_port(&doc),
         virtual_disk: prefs::virtual_disk(&doc),
+        keyboard_emu: prefs::keyboard_emu(&doc),
         menu_wrap: prefs::menu_wrap(&doc),
         net: prefs::network(&doc),
         backlight_percent: prefs::backlight_percent(&doc),
         multisig_trust: prefs::multisig_trust(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, wrap {}, net {}, mstrust {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
         next.fee_cap,
         next.usb_port,
         next.virtual_disk,
+        next.keyboard_emu,
         next.menu_wrap,
         next.net.ticker(),
         next.multisig_trust.code()

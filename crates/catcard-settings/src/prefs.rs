@@ -10,6 +10,7 @@
 //! | `fee_limit` | max fee as a percentage of the value sent | [`FEE_CAP`] |
 //! | `du` | disable-USB | [`USB_PORT`] |
 //! | `vidsk` | Virtual Disk | [`VIRTUAL_DISK`] |
+//! | *(Keyboard EMU)* | USB keyboard emulation | [`KEYBOARD_EMU`] |
 //! | `wa` | menu wrap | [`MENU_WRAP`] |
 //!
 //! Source: hw-reference/settings-nvstore-format.md §5 [C]
@@ -44,6 +45,10 @@
 //!   failed: a garbled slot that switched USB off would strand exactly the unit that
 //!   needs reaching. So only a literal `"0"` disables either; nothing is ever inferred
 //!   into a disable.
+//! - **Keyboard emulation** reads as *off*, the other way round, for the mirror-image
+//!   reason: it is the one switch that makes the device act *on* the host -- type into
+//!   whatever window has focus -- and a host should never gain a keyboard because a
+//!   byte was unreadable. Only a literal `"1"` switches it on.
 //! - **Menu wrapping** reads as off, which is how the menus behaved before there was a
 //!   preference at all.
 
@@ -67,6 +72,10 @@ pub const FEE_CAP: &str = "cat_fee";
 pub const USB_PORT: &str = "cat_usb";
 /// The Virtual Disk (USB mass storage): `"0"` off, anything else on.
 pub const VIRTUAL_DISK: &str = "cat_vdsk";
+/// USB keyboard emulation: `"1"` on, anything else off. Stock keeps the same switch
+/// under a key whose shape the reference does not give, so this is our own.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Keyboard EMU" [C]
+pub const KEYBOARD_EMU: &str = "cat_kbemu";
 /// Whether the menu cursor wraps past the ends of a list: `"1"` on.
 pub const MENU_WRAP: &str = "cat_wrap";
 /// Which Bitcoin network the wallet shows: the ticker `"BTC"`, `"XTN"` or `"XRT"`.
@@ -167,6 +176,13 @@ pub fn usb_port(doc: &Doc<'_>) -> bool {
 /// Whether the Virtual Disk may be presented. Only a literal `"0"` switches it off.
 pub fn virtual_disk(doc: &Doc<'_>) -> bool {
     text(doc, VIRTUAL_DISK) != Some("0")
+}
+
+/// Whether the device also enumerates as a USB keyboard. Only a literal `"1"` switches
+/// it on: doubt reads as off, the opposite of the other two switches, because this one
+/// gives the host a keyboard rather than taking a channel away.
+pub fn keyboard_emu(doc: &Doc<'_>) -> bool {
+    text(doc, KEYBOARD_EMU) == Some("1")
 }
 
 /// How an amount is written on screen.
@@ -632,6 +648,27 @@ mod tests {
         let off = doc(r#"{"cat_usb":"0","cat_vdsk":"0"}"#);
         assert!(!usb_port(&off));
         assert!(!virtual_disk(&off));
+    }
+
+    /// The keyboard is the one switch that reads the other way: a device that types
+    /// into its host is never something a parser concludes from an unreadable byte.
+    #[test]
+    fn doubt_never_switches_the_keyboard_on() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_kbemu":""}"#,
+            r#"{"cat_kbemu":1}"#,
+            r#"{"cat_kbemu":true}"#,
+            r#"{"cat_kbemu":"on"}"#,
+            r#"{"cat_kbemu":"true"}"#,
+            r#"{"cat_kbemu":"01"}"#,
+            r#"{"cat_kbemu":"0"}"#,
+            // The other switches being on says nothing about this one.
+            r#"{"cat_usb":"1","cat_vdsk":"1"}"#,
+        ] {
+            assert!(!keyboard_emu(&doc(json)), "{json}");
+        }
+        assert!(keyboard_emu(&doc(r#"{"cat_kbemu":"1"}"#)));
     }
 
     #[test]

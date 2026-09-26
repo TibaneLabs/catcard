@@ -443,6 +443,57 @@ removal: without it the opcode, the queue, and the merge in every key loop compi
 and `Identify` stops advertising the capability. Once the key map is confirmed on
 hardware, stop building the bring-up image.
 
+### Keyboard emulation: a second interface, off by default
+
+With **Settings → Hardware On/Off → Keyboard EMU** on, the device enumerates as a
+*composite*: the wallet's vendor HID interface exactly as above, plus a **boot-protocol
+USB keyboard** as interface 1. It exists so a BIP-85 password or a stored note can be
+typed straight into a login form on the host, with no clipboard for the host's other
+software to read (stock: "USB-keyboard emulation (for BIP-85 passwords)").
+
+**It is off by default, and doubt reads as off.** The setting is `cat_kbemu` in the
+wallet's own settings file, and only a literal `"1"` switches it on -- the opposite
+direction from the port and disk switches, which read as on. Those two can only take a
+channel away; this one gives the host a keyboard, and no unreadable byte should ever do
+that. Like the port switch it is read after the PIN, so a locked device never shows a
+keyboard.
+
+**Nothing changes for host tools.** The vendor interface keeps interface number 0 and
+endpoints `0x81`/`0x01`, and the 32 bytes describing it after the configuration header
+are the same bytes as in the single-interface table (`catcard-usb` tests that they are). `usbclient`
+and `mk5install.py` open interface 0 by VID:PID and never see the difference. The
+keyboard is:
+
+| | |
+|---|---|
+| interface | 1, class HID, subclass 1 (boot), protocol 1 (keyboard) |
+| endpoint | `0x82` interrupt IN, 8 bytes, 8 ms |
+| report | the boot report: `[modifiers, 0, key×6]` (HID 1.11 Appendix B.1) |
+| report descriptor | HID 1.11 Appendix E.6, byte for byte, LED output report included |
+| keycodes | HID Usage Tables 1.12 §10, **US layout**; `catcard_usb::kbd::keycode` |
+
+A host set to another keyboard layout will type the shifted symbols wrong (`z` for `y`
+on a German host, and so on); letters, digits, space and Enter agree across the common
+ones. The device has no way to know the host's layout, so this is said here rather than
+worked around.
+
+**The descriptor set is fixed per enumeration.** Switching the setting re-enumerates the
+device -- a soft-disconnect, a pause, a re-attach -- the same dance the USB Drive screen
+does, so a host always sees a device that either has the keyboard or does not, never one
+that grew an interface mid-session. The mass-storage identity never carries it.
+
+**Typing is `usbkbd::type_text`.** Each character is one press report and one release,
+paced a few milliseconds apart; a string with a character the table cannot type is
+refused whole, before the first report, rather than typed half-way into a password
+field. No Enter is sent unless the caller asks (`Options::enter`). Every wait is
+bounded: a host that stops taking reports -- screen locked, port suspended -- is
+reported within a second, never waited for. Nothing about the text, not even its
+length, goes in the log, because the log is readable by any host that can open the port.
+
+**Proving it on hardware:** Debug → `Keyboard EMU test` types the constant line
+`catcard keyboard ok` into whatever window the host has focused, after asking. Open a
+text editor first.
+
 ### Identify reports which screen you are on
 
 A host driving the device blind needs to know what it is answering. `Identify` carries a

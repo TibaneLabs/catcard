@@ -55,7 +55,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Idle timeout` | `Idle Timeout` (`idle_to`, `batt_to`, in seconds) | 🔀 own keys `cat_idle` / `cat_bidle`, in **minutes** -- a separate key rather than the same name in another unit; same off/1/2/5/15/30/60 range, with the Q1's battery value asked first. Honoured by `crate::idle`, which logs out through the same callgate as the power button |
 | `Display units` | `Display Units` (`rz`) | 🔀 own key `cat_units` (`btc`/`mbtc`/`bits`/`sats`) rather than stock's decimal count; the rows show the same amount written four ways. Honoured by `crate::signtx::btc`, the only place that turns satoshis into text |
 | `Max network fee` | `Max Network Fee` (`fee_limit`) | 🔀 own key `cat_fee` (percent, or `none`); 10% default, 25%, 50%, or no cap -- which is asked twice and warned, and which no unreadable value can ever become |
-| `Hardware On/Off` → `USB port`, `Virtual Disk` | `Hardware On/Off` (`du` = disable-USB, `vidsk`, plus NFC / keyboard-emu rows) | 🔀 own keys `cat_usb` / `cat_vdsk`, written as *enable* rather than stock's *disable*; **only the two switches this firmware really obeys** -- the port is a real soft-disconnect, the disk gates Utils → USB Drive (which also refuses while the port is off). NFC and keyboard emulation are not offered, because nothing here would honour them |
+| `Hardware On/Off` → `USB port`, `Virtual Disk`, `Keyboard EMU` | `Hardware On/Off` (`du` = disable-USB, `vidsk`, plus NFC / keyboard-emu rows) | 🔀 own keys `cat_usb` / `cat_vdsk` / `cat_kbemu`; the first two written as *enable* rather than stock's *disable*; **only the switches this firmware really obeys** -- the port is a real soft-disconnect, the disk gates Utils → USB Drive (which also refuses while the port is off), the keyboard adds a boot-protocol USB keyboard interface beside the wallet's and re-enumerates (off by default; `docs/USB.md`). NFC is not offered, because nothing here would honour it |
 | `Menu wrapping` | `Menu Wrapping` (`wa`) | 🔀 own key `cat_wrap`; the cursor comes round at the ends of a list (`catcard_ui::scroll`) |
 | `Danger zone` → `Seed tools` → `View words` | `Advanced/Tools` → `Danger Zone` → `Seed Functions` → `View Seed Words` | 🔀 Danger zone under Settings rather than Advanced/Tools; also shows an XPRV or WIF key, which have no words |
 | `Danger zone` → `Seed tools` → `Destroy seed` | `… Seed Functions` → `Destroy Seed` | ✅ |
@@ -66,7 +66,9 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `About` | `Advanced/Tools` → `View Identity` | ❌ different name, different drawer |
 | `Debug` | `Advanced/Tools` → `Danger Zone` / `I Am Developer.` | 🔀 asked for here deliberately |
 | `Debug` → `Warm Reset` | `I Am Developer.` → `Warm Reset`; `Danger Zone` → `Debug Functions` → `Warm Reset` | ✅ same drawer; ours asks first and says the PIN is asked for again |
-| — | `NFC Push Tx`, `Keyboard EMU`, `Buried Settings` | not implemented |
+| — | `NFC Push Tx`, `Buried Settings` | not implemented |
+| *(Hardware On/Off → `Keyboard EMU`)* | `Keyboard EMU` (top-level Settings row; adds `Type Passwords`) | 🔀 under Hardware On/Off with the other USB switches; the typing screens that use it (`Send Password`, BIP-85 passwords) are theirs to add |
+| `Debug` → `Keyboard EMU test` | `Debug Functions` → `Keyboard Test` | 🔀 stock's tests the device's own keys; ours types a fixed line into the host to prove the emulated keyboard |
 
 Every preference above is kept in the **wallet in force's own** settings file, under our
 own `cat_*` key rather than stock's -- the reference names stock's keys but not the shape

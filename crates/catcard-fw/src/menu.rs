@@ -116,6 +116,9 @@ enum Screen {
     /// Debug: write a fixed URL to the NFC tag and hold the screen.
     #[cfg(not(feature = "board-mk3"))]
     NfcTest,
+    /// Debug: type a fixed line into the host as a USB keyboard.
+    #[cfg(not(feature = "board-mk3"))]
+    KbdTest,
     AddressExplorer,
     /// One of the exports that is neither the generic JSON nor a plain key: Bitcoin
     /// Core, Electrum, Wasabi, Unchained or a single-signature descriptor. By its row in
@@ -304,6 +307,9 @@ enum Screen {
     /// Whether the device may re-enumerate as a USB disk.
     #[cfg(not(feature = "board-mk3"))]
     VirtualDisk,
+    /// Whether the device also enumerates a USB keyboard, to type passwords with.
+    #[cfg(not(feature = "board-mk3"))]
+    KeyboardEmu,
     /// Whether the menu cursor comes round at the ends of a list.
     #[cfg(not(feature = "board-mk3"))]
     MenuWrap,
@@ -574,7 +580,7 @@ const LOGIN_ITEMS: &[&str] = &[
 /// USB Drive screen for the disk.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Hardware On/Off" [C]
 #[cfg(not(feature = "board-mk3"))]
-const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk"];
+const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk", "Keyboard EMU"];
 
 /// How long a new seed should be.
 ///
@@ -800,6 +806,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
     "NFC test",
+    #[cfg(not(feature = "board-mk3"))]
+    "Keyboard EMU test",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     "Dump state",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -1316,6 +1324,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => to(|a| crate::nfc::probe_screen(a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::KbdTest => to(|a| crate::usbkbd::self_test(a.ui), Screen::Debug),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
             |a| export_one(a.gate, a.login, a.ui, a.words),
@@ -1520,6 +1530,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => to(
             |a| virtual_disk_screen(a.gate, a.login, a.ui),
+            Screen::Hardware,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::KeyboardEmu => to(
+            |a| keyboard_emu_screen(a.gate, a.login, a.ui),
             Screen::Hardware,
         ),
         #[cfg(not(feature = "board-mk3"))]
@@ -1757,6 +1772,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("USB port")) => Screen::UsbPort,
             (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
+            (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Hardware,
         },
@@ -1900,6 +1916,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Keyboard EMU test")) => Screen::KbdTest,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -2372,7 +2390,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PaperWallet => {}
         Screen::ViewTrngWords => {}
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTest => {}
+        Screen::NfcTest | Screen::KbdTest => {}
         // Handled in `run`: it fetches the secret and drives its own paging loop.
         #[cfg(feature = "multichain")]
         Screen::Keystone => {}
@@ -2465,6 +2483,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::MaxFee
         | Screen::UsbPort
         | Screen::VirtualDisk
+        | Screen::KeyboardEmu
         | Screen::MenuWrap
         | Screen::TestnetMode => {}
         // Handled in `run`: picks a level through `pick_row` and drives the panel itself.
@@ -11151,6 +11170,49 @@ fn virtual_disk_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
         ),
         crate::prefs::Prefs {
             virtual_disk: want,
+            ..now
+        },
+        if want { "on" } else { "off" },
+    );
+}
+
+/// Settings → Hardware On/Off → Keyboard EMU.
+///
+/// Whether the device also enumerates as a USB keyboard, so a password can be typed
+/// into the host without a clipboard. Honoured by [`crate::usbtask::set_keyboard`],
+/// which re-enumerates with the keyboard interface added or removed; nothing is typed
+/// until a screen asks [`crate::usbkbd::type_text`] to, with the owner's say-so. Off by
+/// default, and switching it on is asked twice: a host that gains a keyboard is the
+/// one change here that acts on the host rather than the device.
+#[cfg(not(feature = "board-mk3"))]
+fn keyboard_emu_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Keyboard EMU";
+    let now = crate::prefs::current();
+    let Some(want) = pick_switch(ui, HEAD, now.keyboard_emu) else {
+        return;
+    };
+    if want {
+        ask(
+            ui.panel,
+            HEAD,
+            "the host gains a keyboard",
+            "it re-enumerates now",
+        );
+        if !confirmed(ui) {
+            return;
+        }
+    }
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (
+            catcard_settings::prefs::KEYBOARD_EMU,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            keyboard_emu: want,
             ..now
         },
         if want { "on" } else { "off" },

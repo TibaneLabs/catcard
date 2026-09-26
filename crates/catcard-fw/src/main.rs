@@ -176,6 +176,10 @@ mod txreview;
 mod ui;
 /// Deflated firmware images arriving over USB.
 mod unpack;
+/// Typing into the host as a USB keyboard. Behind the `Keyboard EMU` setting, which
+/// the mk3 has no settings store to keep, so it is not built there.
+#[cfg(not(feature = "board-mk3"))]
+mod usbkbd;
 mod usbtask;
 /// The Seed Vault: keys kept in the settings store, which the mk3 has none of.
 #[cfg(not(feature = "board-mk3"))]
