@@ -47,6 +47,42 @@ pub mod app {
 /// English, the only BIP-39 language here. Source: BIP-85 language codes [C]
 pub const LANG_ENGLISH: u32 = 0;
 
+/// The largest child index offered unless the owner lifts the cap: 9999.
+///
+/// Every BIP-85 child is reproducible only by its path, and a child at index 1234567 is
+/// a child whose owner has to remember 1234567. Stock caps the index here and lifts the
+/// cap only behind a Danger Zone switch, and so does this.
+/// Source: hw-reference/firmware-features.md §2 "BIP-85 ... Index up to 9999 by default" [C]
+pub const INDEX_CAP: u32 = 9999;
+
+/// The largest index BIP-32 can harden at all: `2^31 - 1`. Past it there is no path.
+pub const INDEX_MAX: u32 = 0x7FFF_FFFF;
+
+/// Whether `index` may be derived, under the cap or with it lifted.
+///
+/// The hardening limit holds either way: lifting the cap widens the range to what BIP-32
+/// defines, never past it.
+pub const fn index_allowed(index: u32, unlimited: bool) -> bool {
+    if unlimited {
+        index <= INDEX_MAX
+    } else {
+        index <= INDEX_CAP
+    }
+}
+
+/// The password lengths the application defines: 20 to 86 characters, 21 by default.
+///
+/// 86 is where the base64 of 64 bytes ends before its padding; 21 is the length the
+/// BIP's own vector uses and what a device offers when nothing else is asked for.
+/// Source: BIP-85 §"PWD BASE64" [C]
+pub const PWD_MIN_LEN: u32 = 20;
+pub const PWD_MAX_LEN: u32 = 86;
+pub const PWD_DEFAULT_LEN: u32 = 21;
+
+/// The byte counts the hex application defines: 16 to 64. Source: BIP-85 §"HEX" [C]
+pub const HEX_MIN_BYTES: u32 = 16;
+pub const HEX_MAX_BYTES: u32 = 64;
+
 /// The 64 bytes an application slices. Zeroized when dropped.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Entropy([u8; 64]);
@@ -210,7 +246,7 @@ pub fn hex(
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
-    if !(16..=64).contains(&num_bytes) {
+    if !(HEX_MIN_BYTES..=HEX_MAX_BYTES).contains(&num_bytes) {
         return Err(Error::BadParameter);
     }
     let need = num_bytes as usize * 2;
@@ -237,7 +273,7 @@ pub fn password(
     out: &mut [u8],
     kw: &KeyWork,
 ) -> Result<usize, Error> {
-    if !(20..=86).contains(&length) {
+    if !(PWD_MIN_LEN..=PWD_MAX_LEN).contains(&length) {
         return Err(Error::BadParameter);
     }
     let length = length as usize;
@@ -433,6 +469,98 @@ mod tests {
         let other = ExtendedPrivKey::from_seed(&[7u8; 32], Network::Mainnet, &kw).unwrap();
         let d = entropy(&other, &[app::HEX, 32, 0], &kw).unwrap();
         assert_ne!(a.as_bytes(), d.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod app_range_tests {
+    use super::*;
+
+    const ROOT: &str = "xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb";
+
+    fn root() -> ExtendedPrivKey {
+        ExtendedPrivKey::from_base58(ROOT, &KeyWork::host()).unwrap()
+    }
+
+    /// The index cap: 9999 by default, `2^31 - 1` once lifted, and nothing past the
+    /// hardening limit either way.
+    #[test]
+    fn the_index_cap_is_9999_unless_lifted_and_never_past_hardening() {
+        assert!(index_allowed(0, false));
+        assert!(index_allowed(INDEX_CAP, false));
+        assert!(!index_allowed(INDEX_CAP + 1, false));
+        assert!(index_allowed(INDEX_CAP + 1, true));
+        assert!(index_allowed(INDEX_MAX, true));
+        assert!(!index_allowed(INDEX_MAX + 1, true));
+        assert!(!index_allowed(u32::MAX, true));
+        // And what the cap refuses, the derivation would have accepted: the cap is a
+        // policy about remembering the path, not a limit of the arithmetic.
+        let kw = KeyWork::host();
+        assert!(entropy(&root(), &[app::HEX, 32, INDEX_CAP + 1], &kw).is_ok());
+        assert!(entropy(&root(), &[app::HEX, 32, INDEX_MAX], &kw).is_ok());
+        assert_eq!(
+            entropy(&root(), &[app::HEX, 32, INDEX_MAX + 1], &kw).err(),
+            Some(Error::BadParameter)
+        );
+    }
+
+    /// The 64-byte hex child is the BIP's own vector, and the 32-byte child is **not**
+    /// its first half: the byte count is in the path, so each length is its own child.
+    #[test]
+    fn the_64_byte_hex_child_is_the_vector_and_not_the_32_byte_ones_prefix() {
+        let kw = KeyWork::host();
+        let mut out = [0u8; 128];
+        let n = hex(&root(), 64, 0, &mut out, &kw).unwrap();
+        assert_eq!(n, 128);
+        let long = core::str::from_utf8(&out[..n]).unwrap().to_string();
+        assert_eq!(
+            long,
+            "492db4698cf3b73a5a24998aa3e9d7fa96275d85724a91e71aa2d645442f8785\
+             55d078fd1f1f67e368976f04137b1f7a0d19232136ca50c44614af72b5582a5c"
+        );
+        let n = hex(&root(), 32, 0, &mut out, &kw).unwrap();
+        assert_eq!(n, 64);
+        let short = core::str::from_utf8(&out[..n]).unwrap();
+        assert_ne!(&long[..64], short);
+        // The buffer must hold all 128 characters; 64 bytes into a 64-character buffer
+        // is a refusal, not a half answer.
+        assert_eq!(
+            hex(&root(), 64, 0, &mut [0u8; 64], &kw).err(),
+            Some(Error::BufferTooSmall)
+        );
+    }
+
+    /// A password of any allowed length is the base64 of the entropy at *that length's*
+    /// path, cut to the length -- so 20 and 86 are not prefixes of the 21-character
+    /// vector, and 21 is exactly it.
+    #[test]
+    fn every_password_length_is_its_own_child_cut_from_its_own_base64() {
+        let kw = KeyWork::host();
+        let mut out = [0u8; 86];
+        let n = password(&root(), PWD_DEFAULT_LEN, 0, &mut out, &kw).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "dKLoepugzdVJvdL56ogNV"
+        );
+        for len in [PWD_MIN_LEN, 40, PWD_MAX_LEN] {
+            let n = password(&root(), len, 0, &mut out, &kw).unwrap();
+            assert_eq!(n as u32, len);
+            let got = core::str::from_utf8(&out[..n]).unwrap().to_string();
+            // What it must be: base64 of the entropy at m/83696968'/707764'/{len}'/0'.
+            let e = entropy(&root(), &[app::PWD_BASE64, len, 0], &kw).unwrap();
+            let mut b64 = [0u8; 88];
+            let m = outscript::base64::encode_to_slice(e.as_bytes(), &mut b64).unwrap();
+            assert_eq!(got, core::str::from_utf8(&b64[..len as usize]).unwrap());
+            assert!(m >= len as usize);
+            // No padding character can appear inside a password.
+            assert!(!got.contains('='));
+        }
+        // 20 is not the 21-character vector shortened: a different path, a different child.
+        let n = password(&root(), 20, 0, &mut out, &kw).unwrap();
+        assert_ne!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "dKLoepugzdVJvdL56ogN"
+        );
     }
 }
 

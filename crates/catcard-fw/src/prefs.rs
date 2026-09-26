@@ -15,6 +15,7 @@
 //! | Keyboard EMU | [`crate::usbtask::set_keyboard`], which re-enumerates with or without the keyboard |
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
 //! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
+//! | BIP-85 index cap | [`crate::derive`], which refuses an index past 9999 unless lifted |
 //!
 //! # Why a cache
 //!
@@ -68,6 +69,9 @@ pub(crate) struct Prefs {
     /// the main menu, which shows the `Notes` tile only when it is `Some(true)`, and by
     /// `crate::notes`, which tells its opt-in story otherwise.
     pub notes: Option<bool>,
+    /// Whether BIP-85 takes an index past 9999. Off keeps the cap; on is the Danger
+    /// zone's `B85 Idx Values`, and reads as off from anything but a literal `"1"`.
+    pub b85_unlimited: bool,
 }
 
 impl Prefs {
@@ -102,6 +106,7 @@ impl Default for Prefs {
             backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
             multisig_trust: MultisigTrust::VerifyOnly,
             notes: None,
+            b85_unlimited: false,
         }
     }
 }
@@ -120,6 +125,7 @@ static mut CURRENT: Prefs = Prefs {
     backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
     multisig_trust: MultisigTrust::VerifyOnly,
     notes: None,
+    b85_unlimited: false,
 };
 
 /// What the wallet in force is set to.
@@ -229,9 +235,10 @@ pub(crate) fn load(
         backlight_percent: prefs::backlight_percent(&doc),
         multisig_trust: prefs::multisig_trust(&doc),
         notes: prefs::notes_enabled(&doc),
+        b85_unlimited: prefs::b85_unlimited(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -241,7 +248,8 @@ pub(crate) fn load(
         next.keyboard_emu,
         next.menu_wrap,
         next.net.ticker(),
-        next.multisig_trust.code()
+        next.multisig_trust.code(),
+        if next.b85_unlimited { "open" } else { "capped" }
     );
     apply(next);
 }

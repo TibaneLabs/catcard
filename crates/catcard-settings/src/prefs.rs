@@ -78,6 +78,9 @@ pub const VIRTUAL_DISK: &str = "cat_vdsk";
 pub const KEYBOARD_EMU: &str = "cat_kbemu";
 /// Whether the menu cursor wraps past the ends of a list: `"1"` on.
 pub const MENU_WRAP: &str = "cat_wrap";
+/// Whether BIP-85 accepts an index past 9999, up to `2^31 - 1`: `"1"` on. Off, the
+/// default, keeps the cap. Stock's `B85 Idx Values`, under our own key.
+pub const B85_INDEX: &str = "cat_b85idx";
 /// Which Bitcoin network the wallet shows: the ticker `"BTC"`, `"XTN"` or `"XRT"`.
 ///
 /// This is **stock's own key**, not a `cat_`-prefixed one, and it is read the way stock
@@ -161,6 +164,17 @@ pub fn notes_enabled(doc: &Doc<'_>) -> Option<bool> {
         "0" => Some(false),
         _ => None,
     }
+}
+
+/// Whether a BIP-85 index above 9999 may be typed: only a literal `"1"` lifts the cap.
+///
+/// Off is the safe reading: the cap exists so a child cannot be put at an index nobody
+/// will find again, and an unreadable byte must not be what lifts it. Stock's own switch
+/// is `B85 Idx Values` in the Danger Zone; this is our own key rather than stock's, whose
+/// value shape the reference does not give.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
+pub fn b85_unlimited(doc: &Doc<'_>) -> bool {
+    text(doc, B85_INDEX) == Some("1")
 }
 
 /// The Q1 LCD backlight level, as a percent in `1..=100`.
@@ -507,6 +521,25 @@ mod tests {
 
     fn doc(json: &str) -> Doc<'_> {
         Doc::parse(json.as_bytes()).unwrap()
+    }
+
+    /// The BIP-85 index cap is lifted by a literal `"1"` and by nothing else: an absent,
+    /// numeric, empty or misspelt value keeps it, because losing a child at an index
+    /// nobody will find again is the failure the cap is there for.
+    #[test]
+    fn the_b85_index_cap_is_lifted_only_by_a_literal_one() {
+        assert!(b85_unlimited(&doc(r#"{"cat_b85idx":"1"}"#)));
+        for json in [
+            r#"{}"#,
+            r#"{"cat_b85idx":"0"}"#,
+            r#"{"cat_b85idx":1}"#,
+            r#"{"cat_b85idx":""}"#,
+            r#"{"cat_b85idx":"on"}"#,
+            r#"{"cat_b85idx":"true"}"#,
+            r#"{"cat_b85idx":"11"}"#,
+        ] {
+            assert!(!b85_unlimited(&doc(json)), "{json}");
+        }
     }
 
     #[test]

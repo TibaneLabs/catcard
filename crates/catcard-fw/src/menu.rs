@@ -266,6 +266,9 @@ enum Screen {
     /// Which chains this wallet offers, and in what order.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
     ChainSettings,
+    /// Lift the BIP-85 index cap, after a warning. Danger zone, as in stock.
+    #[cfg(not(feature = "board-mk3"))]
+    B85Index,
     /// Danger zone: tools that work on the seed itself.
     SeedTools,
     /// Show the key in force: its words, or its XPRV or WIF.
@@ -536,6 +539,12 @@ const DANGER_ITEMS: &[&str] = &[
     // out there. Source: hw-reference/firmware-features.md §10 [C].
     #[cfg(not(feature = "board-mk3"))]
     "Testnet mode",
+    // Lifts the BIP-85 index cap from 9999 to 2^31-1. Stock keeps the switch here, in
+    // the Danger Zone, because a child at an index nobody remembers is a child nobody
+    // finds again; kept in the wallet's settings file, so not on the mk3.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "B85 Idx Values",
 ];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
@@ -1578,6 +1587,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| testnet_mode_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
         ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::B85Index => to(
+            |a| crate::derive::index_values_screen(a.gate, a.login, a.ui),
+            Screen::DangerZone,
+        ),
         #[cfg(feature = "board-q1")]
         Screen::Brightness => to(
             |a| brightness_screen(a.gate, a.login, a.ui),
@@ -1813,6 +1827,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Testnet mode")) => Screen::TestnetMode,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("B85 Idx Values")) => Screen::B85Index,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
@@ -2519,7 +2535,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::VirtualDisk
         | Screen::KeyboardEmu
         | Screen::MenuWrap
-        | Screen::TestnetMode => {}
+        | Screen::TestnetMode
+        | Screen::B85Index => {}
         // Handled in `run`: picks a level through `pick_row` and drives the panel itself.
         #[cfg(feature = "board-q1")]
         Screen::Brightness => {}
@@ -10977,7 +10994,7 @@ fn login_countdown_screen(ui: &mut Ui<'_>) {
 /// they come from -- and so that no screen can put a value in force that did not reach
 /// the flash. [`crate::prefs::save`] applies `next` only on a successful write.
 #[cfg(not(feature = "board-mk3"))]
-fn save_pref(
+pub(crate) fn save_pref(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
@@ -11236,7 +11253,7 @@ fn max_fee_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
 /// On/Off for a hardware switch: what was chosen, or `None` if it was cancelled or is
 /// already what it is.
 #[cfg(not(feature = "board-mk3"))]
-fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool> {
+pub(crate) fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool> {
     let note = if on { "now on" } else { "now off" };
     let want = pick_row(ui, head, note, &["On", "Off"])? == 0;
     if want == on {

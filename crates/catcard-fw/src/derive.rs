@@ -13,6 +13,14 @@
 //! password -- is the whole secret of another wallet or another account, and writing it to
 //! removable media is a decision with different consequences from writing a descriptor.
 //! Copying it down is the owner's move to make.
+//!
+//! # The index is capped
+//!
+//! A child is reproducible only by its path, and the index is the part of the path the
+//! owner has to remember. So the index is refused past 9999 unless the owner has lifted
+//! the cap in Danger zone -> `B85 Idx Values` ([`index_values_screen`]), after a warning,
+//! as stock does; lifted, it reaches `2^31 - 1`, which is as far as BIP-32 hardens.
+//! Source: hw-reference/firmware-features.md §2 "BIP-85" [C]
 
 use catcard_callgate::Callgate;
 use catcard_wallet::bip85;
@@ -32,12 +40,17 @@ enum Kind {
     Words(u32),
     Xprv,
     Wif,
-    Password,
-    Hex32,
+    /// A base64 password of this many characters, 20 to 86.
+    Password(u32),
+    /// This many bytes as hex: 32 or 64, the two stock offers.
+    Hex(u32),
 }
 
 /// The list, in the order it is shown. Every word count BIP-39 defines: the BIP names 12,
 /// 18 and 24, and 15 and 21 derive by the same rule -- fewer wallets will reproduce them.
+/// Then the key shapes, a password -- whose length is asked next, 21 unless said otherwise
+/// -- and the two hex sizes stock offers.
+/// Source: hw-reference/firmware-features.md §2 "BIP-85 ... hex (32/64 B), and passwords" [C]
 const ROWS: &[&str] = &[
     "12 words",
     "15 words",
@@ -48,8 +61,9 @@ const ROWS: &[&str] = &[
     "WIF key",
     "Password",
     "32 bytes hex",
+    "64 bytes hex",
 ];
-const KINDS: [Kind; 9] = [
+const KINDS: [Kind; 10] = [
     Kind::Words(12),
     Kind::Words(15),
     Kind::Words(18),
@@ -57,8 +71,9 @@ const KINDS: [Kind; 9] = [
     Kind::Words(24),
     Kind::Xprv,
     Kind::Wif,
-    Kind::Password,
-    Kind::Hex32,
+    Kind::Password(bip85::PWD_DEFAULT_LEN),
+    Kind::Hex(32),
+    Kind::Hex(64),
 ];
 const _: () = assert!(ROWS.len() == KINDS.len());
 
@@ -70,10 +85,73 @@ impl Kind {
             Kind::Words(n) => write!(s, "m/83696968h/39h/0h/{n}h/{index}h"),
             Kind::Xprv => write!(s, "m/83696968h/32h/{index}h"),
             Kind::Wif => write!(s, "m/83696968h/2h/{index}h"),
-            Kind::Password => write!(s, "m/83696968h/707764h/21h/{index}h"),
-            Kind::Hex32 => write!(s, "m/83696968h/128169h/32h/{index}h"),
+            Kind::Password(len) => write!(s, "m/83696968h/707764h/{len}h/{index}h"),
+            Kind::Hex(n) => write!(s, "m/83696968h/128169h/{n}h/{index}h"),
         };
         s
+    }
+}
+
+/// Whether an index past the cap may be typed, as the wallet in force's settings say.
+///
+/// The mk3 has no settings store, so there the cap is simply the cap.
+fn index_unlimited() -> bool {
+    crate::prefs::current().b85_unlimited
+}
+
+/// The index of a child, typed and checked against the cap.
+///
+/// Refused past 9999 unless the cap is lifted, and past `2^31 - 1` regardless -- said on
+/// screen, then asked again, rather than letting a mistyped digit derive a child at an
+/// index nobody wrote down. `None` if the owner backed out.
+fn ask_capped_index(ui: &mut Ui<'_>, what: &str) -> Option<u32> {
+    loop {
+        let index = menu::ask_index(ui, HEAD, what)?;
+        if bip85::index_allowed(index, index_unlimited()) {
+            return Some(index);
+        }
+        let mut said = heapless::String::<48>::new();
+        let _ = write!(said, "index over {}", bip85::INDEX_CAP);
+        let (a, b) = if index > bip85::INDEX_MAX {
+            ("past what BIP-32", "can harden")
+        } else {
+            (said.as_str(), "lift it: Danger zone")
+        };
+        menu::message(ui.panel, HEAD, a, b);
+        menu::wait_for_any_key(ui);
+    }
+}
+
+/// The length of a password child: 20 to 86, and 21 when nothing is typed.
+///
+/// Asked after the kind, before the index, so the path on screen carries both. `None` if
+/// the owner backed out.
+fn ask_password_length(ui: &mut Ui<'_>) -> Option<u32> {
+    loop {
+        let len = menu::ask_number(
+            ui,
+            HEAD,
+            Some(("child", "Password")),
+            "length",
+            "empty = 21 characters",
+        )?;
+        let len = if len == 0 {
+            bip85::PWD_DEFAULT_LEN
+        } else {
+            len
+        };
+        if (bip85::PWD_MIN_LEN..=bip85::PWD_MAX_LEN).contains(&len) {
+            return Some(len);
+        }
+        let mut said = heapless::String::<48>::new();
+        let _ = write!(
+            said,
+            "{} to {} characters",
+            bip85::PWD_MIN_LEN,
+            bip85::PWD_MAX_LEN
+        );
+        menu::message(ui.panel, HEAD, "a password is", &said);
+        menu::wait_for_any_key(ui);
     }
 }
 
@@ -113,15 +191,22 @@ pub(crate) fn bip85(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) -> Option<Chosen> {
-    let (row, index) = loop {
+    let (row, kind, index) = loop {
         let row = menu::pick_row(ui, HEAD, "derive a child", ROWS)?;
+        // A password's length is part of its path, so it is asked with the kind.
+        let kind = match KINDS[row] {
+            Kind::Password(_) => match ask_password_length(ui) {
+                Some(len) => Kind::Password(len),
+                None => continue,
+            },
+            other => other,
+        };
         // Backing out of the index goes back to the list, not out of BIP-85: they are a
         // pair, and getting the second wrong should not cost the first.
-        if let Some(index) = menu::ask_index(ui, HEAD, ROWS[row]) {
-            break (row, index);
+        if let Some(index) = ask_capped_index(ui, ROWS[row]) {
+            break (row, kind, index);
         }
     };
-    let kind = KINDS[row];
 
     let master = match menu::bip85_parent(gate, login, ui.panel, HEAD) {
         Ok(m) => m,
@@ -189,16 +274,63 @@ fn derive(
                 Some(chosen),
             )
         }
-        Kind::Password => (
-            bip85::password(master, 21, index, out, kw).map_err(|_| BAD)?,
+        Kind::Password(len) => (
+            bip85::password(master, len, index, out, kw).map_err(|_| BAD)?,
             None,
         ),
-        Kind::Hex32 => (
-            bip85::hex(master, 32, index, out, kw).map_err(|_| BAD)?,
+        Kind::Hex(n) => (
+            bip85::hex(master, n, index, out, kw).map_err(|_| BAD)?,
             None,
         ),
     };
     Ok((buf, len, chosen))
+}
+
+/// Danger zone -> B85 Idx Values: lift the index cap from 9999 to `2^31 - 1`, or put it
+/// back.
+///
+/// Warned before it is lifted, as stock warns: the cap is what keeps a child at an index
+/// its owner will remember, and the switch is kept in the wallet's own settings file, so
+/// it follows the wallet rather than the device. Not on the mk3, which has no settings
+/// store: there the cap is simply the cap.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn index_values_screen(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    const SWITCH: &str = "B85 Idx Values";
+    let now = crate::prefs::current();
+    let Some(want) = menu::pick_switch(ui, SWITCH, now.b85_unlimited) else {
+        return;
+    };
+    if want {
+        menu::ask(
+            ui.panel,
+            SWITCH,
+            "any index up to 2^31-1;",
+            "one you forget is lost",
+        );
+        if !menu::confirmed(ui) {
+            return;
+        }
+    }
+    menu::save_pref(
+        gate,
+        login,
+        ui,
+        SWITCH,
+        (
+            catcard_settings::prefs::B85_INDEX,
+            if want { "1" } else { "0" },
+        ),
+        crate::prefs::Prefs {
+            b85_unlimited: want,
+            ..now
+        },
+        if want { "cap lifted" } else { "capped at 9999" },
+    );
 }
 
 /// Show the child, scrollable. True if the owner chose to work in it -- offered only when
