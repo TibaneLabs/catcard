@@ -33,7 +33,7 @@ pub mod wordlist;
 mod test_vectors;
 
 use purecrypto::hash::{Digest, HmacSha512, Sha256};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use wordlist::{BITS_PER_WORD, ENGLISH, MAX_WORD_LEN};
 
@@ -124,6 +124,72 @@ pub const fn entropy_for_words(words: usize) -> Option<usize> {
         24 => Some(32),
         _ => None,
     }
+}
+
+/// The most words that can complete a phrase: 128, for a 12-word phrase.
+///
+/// The last word carries `11 - ENT/32` free entropy bits and `ENT/32` checksum bits, so
+/// given the first `n-1` words exactly `2^(11 - ENT/32)` of the 2048 words check out:
+/// 128 for 12 words, 64 for 15, 32 for 18, 16 for 21, 8 for 24.
+pub const MAX_LAST_WORDS: usize = 128;
+
+/// Every word that completes `prefix` into a phrase whose checksum is valid.
+///
+/// `prefix` is the first `n-1` words as wordlist indices, for a phrase of `n` words;
+/// the candidates are written to `out`, ascending, and their count returned. The set is
+/// what a restore screen offers for the final word -- the other 1920 words cannot be it,
+/// so listing them is one more chance to pick the wrong one.
+///
+/// Private-key work: it runs over the entropy of a wallet being typed in, so it takes
+/// the [`KeyWork`](crate::KeyWork) token like the rest of this module.
+///
+/// Source: BIP-39 §"Generating the mnemonic" [C] -- the checksum is the first `ENT/32`
+/// bits of `SHA-256(entropy)`, appended before the split into 11-bit words.
+pub fn last_words(
+    prefix: &[u16],
+    out: &mut [u16; MAX_LAST_WORDS],
+    _kw: &crate::KeyWork,
+) -> Result<usize, Error> {
+    let n = prefix.len() + 1;
+    let entropy_len = entropy_for_words(n).ok_or(Error::BadWordCount { count: n })?;
+    if prefix.iter().any(|&i| i as usize >= wordlist::WORD_COUNT) {
+        return Err(Error::UnknownWord { position: 0 });
+    }
+    let cs_bits = entropy_len / 4; // ENT/32, with ENT = entropy_len * 8
+    let free_bits = BITS_PER_WORD - cs_bits;
+
+    // The entropy as far as the prefix spells it: `11 * (n-1)` bits, left-aligned, and
+    // the last word's free bits still to come. Built once; only the tail changes below.
+    let mut entropy = Zeroizing::new([0u8; MAX_ENTROPY_LEN]);
+    let mut acc: u32 = 0;
+    let mut acc_bits = 0usize;
+    let mut written = 0usize;
+    for &i in prefix {
+        acc = (acc << BITS_PER_WORD) | i as u32;
+        acc_bits += BITS_PER_WORD;
+        while acc_bits >= 8 {
+            let shift = acc_bits - 8;
+            entropy[written] = ((acc >> shift) & 0xff) as u8;
+            written += 1;
+            acc_bits -= 8;
+        }
+    }
+    // What is left over is the head of the last byte: `acc_bits` bits, and the last
+    // word's free bits complete it. 11(n-1) + free = 8 * entropy_len, so they always
+    // land exactly on the byte boundary.
+    debug_assert_eq!(acc_bits + free_bits, 8);
+    debug_assert_eq!(written + 1, entropy_len);
+    let head = ((acc << (8 - acc_bits)) & 0xff) as u8;
+
+    let mut count = 0usize;
+    for free in 0u32..(1 << free_bits) {
+        entropy[written] = head | free as u8;
+        let digest = Sha256::digest(&entropy[..entropy_len]);
+        let cs = (digest[0] >> (8 - cs_bits)) as u32;
+        out[count] = ((free << cs_bits) | cs) as u16;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// A BIP-39 mnemonic, stored as entropy.
@@ -767,5 +833,88 @@ mod tests {
         }
         assert_eq!(words_for_entropy(17), None);
         assert_eq!(entropy_for_words(13), None);
+    }
+}
+
+#[cfg(test)]
+mod last_word_tests {
+    use super::*;
+    use test_vectors::VECTORS;
+
+    fn indices(phrase: &str) -> Vec<u16> {
+        phrase
+            .split_ascii_whitespace()
+            .map(|w| wordlist::index_of(w).unwrap())
+            .collect()
+    }
+
+    /// The published phrases all end in a word the filter offers, and every word it
+    /// offers really does complete the phrase.
+    #[test]
+    fn every_vectors_last_word_is_offered_and_every_offer_checks_out() {
+        let kw = crate::KeyWork::host();
+        for (_, phrase, _) in VECTORS {
+            let idx = indices(phrase);
+            let (last, prefix) = idx.split_last().unwrap();
+            let mut out = [0u16; MAX_LAST_WORDS];
+            let n = last_words(prefix, &mut out, &kw).unwrap();
+            assert!(out[..n].contains(last), "{phrase}");
+            for &w in &out[..n] {
+                let mut full: Vec<&str> = prefix.iter().map(|&i| ENGLISH[i as usize]).collect();
+                full.push(ENGLISH[w as usize]);
+                let joined = full.join(" ");
+                assert!(Mnemonic::parse(&joined, &kw).is_ok(), "{joined}");
+            }
+        }
+    }
+
+    /// 2^(11 - ENT/32) candidates: 128, 64, 32, 16 and 8 for the five lengths.
+    #[test]
+    fn the_candidate_count_is_fixed_by_the_word_count() {
+        let kw = crate::KeyWork::host();
+        for (words, expect) in [(12, 128), (15, 64), (18, 32), (21, 16), (24, 8)] {
+            let prefix = vec![0u16; words - 1];
+            let mut out = [0u16; MAX_LAST_WORDS];
+            let n = last_words(&prefix, &mut out, &kw).unwrap();
+            assert_eq!(n, expect, "{words} words");
+            // Ascending and distinct: the free bits are the word's high bits.
+            assert!(out[..n].windows(2).all(|p| p[0] < p[1]));
+        }
+        // And nothing else is offered: a word outside the set does not parse.
+        let prefix = vec![0u16; 11];
+        let mut out = [0u16; MAX_LAST_WORDS];
+        let n = last_words(&prefix, &mut out, &kw).unwrap();
+        let rejected = (0..2048u16).filter(|w| !out[..n].contains(w)).count();
+        assert_eq!(rejected, 2048 - 128);
+        for w in (0..2048u16).filter(|w| !out[..n].contains(w)).take(50) {
+            let mut full = vec!["abandon"; 11];
+            full.push(ENGLISH[w as usize]);
+            assert_eq!(
+                Mnemonic::parse(&full.join(" "), &kw).err(),
+                Some(Error::BadChecksum)
+            );
+        }
+    }
+
+    /// A prefix that is not one short of a BIP-39 length has no last word to offer, and a
+    /// prefix holding an index off the end of the wordlist is refused rather than read
+    /// past.
+    #[test]
+    fn a_prefix_of_the_wrong_length_or_content_is_refused() {
+        let kw = crate::KeyWork::host();
+        let mut out = [0u16; MAX_LAST_WORDS];
+        for bad in [0usize, 5, 12, 13, 24, 30] {
+            let prefix = vec![0u16; bad];
+            assert!(matches!(
+                last_words(&prefix, &mut out, &kw),
+                Err(Error::BadWordCount { .. })
+            ));
+        }
+        let mut prefix = vec![0u16; 11];
+        prefix[3] = 2048;
+        assert!(matches!(
+            last_words(&prefix, &mut out, &kw),
+            Err(Error::UnknownWord { .. })
+        ));
     }
 }

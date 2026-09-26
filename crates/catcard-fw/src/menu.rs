@@ -6214,9 +6214,21 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
     match row {
         3 => crate::backup::load_temporary(ui),
         0 => {
-            message(ui.panel, HEAD, "enter each word,", "then y y to finish");
+            let Some(expect) = ask_word_count(ui, HEAD) else {
+                return false;
+            };
+            message(
+                ui.panel,
+                HEAD,
+                "enter each word,",
+                if expect.is_some() {
+                    "one after another"
+                } else {
+                    "then y y to finish"
+                },
+            );
             wait_for_any_key(ui);
-            let Some(mnemonic) = read_phrase(ui) else {
+            let Some(mnemonic) = read_phrase_of(ui, expect) else {
                 return false;
             };
             let mut what = Line::new();
@@ -9708,11 +9720,19 @@ fn word_matches(word: &str, typed: &str) -> bool {
 /// so what lands in the seed is what they saw and chose.
 ///
 /// On an empty word, pressing `y` twice returns [`WordPick::Finish`] -- the "I have entered
-/// all my words" signal, since the count is not asked up front.
-fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
+/// all my words" signal, since the count is not always asked up front.
+///
+/// `only`, when given, is the whole set of words this position may take: the final word
+/// of a phrase whose length is known, where only the words that make the checksum valid
+/// are offered ([`catcard_wallet::bip39::last_words`]) -- 128 of 2048 for twelve words,
+/// eight for twenty-four. Typing still narrows it, and with nothing typed `y` lists the
+/// set as it stands. Stock does the same, and the 1920 words that cannot be right are
+/// 1920 chances to pick the wrong one.
+fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> WordPick {
     use catcard_wallet::bip39::wordlist::ENGLISH;
     // Enough to hold the candidates once a couple of letters have narrowed the list; the
-    // pick screen is only offered when the true count is within this.
+    // pick screen is only offered when the true count is within this. The full last-word
+    // set of a 12-word phrase is 128, so that one wants a letter first.
     const CAND_MAX: usize = 64;
 
     let mut typed: heapless::String<8> = heapless::String::new();
@@ -9729,16 +9749,27 @@ fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
         let mut count = 0usize;
         if !typed.is_empty() {
             for (i, w) in ENGLISH.iter().enumerate() {
-                if word_matches(w, &typed) {
+                // Within the allowed set, where there is one: a word that spells the
+                // prefix but breaks the checksum is not offered.
+                if word_matches(w, &typed) && only.is_none_or(|o| o.contains(&(i as u16))) {
                     count += 1;
                     let _ = cands.push(i as u16);
                 }
+            }
+        } else if let Some(o) = only {
+            // Nothing typed yet: the allowed set as it stands.
+            for &i in o {
+                count += 1;
+                let _ = cands.push(i);
             }
         }
 
         // --- Type screen ---
         let mut title = Line::new();
         let _ = write!(title, "Word {num}");
+        if only.is_some() {
+            let _ = title.push_str(", last");
+        }
         let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
         // Two lines either way, so the screen below is laid out the same on both.
         #[cfg(feature = "board-q1")]
@@ -9764,10 +9795,13 @@ fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
         let mut l = Line::new();
         if armed {
             let _ = l.push_str("y again: finish");
-        } else if typed.is_empty() {
+        } else if typed.is_empty() && only.is_none() {
             let _ = l.push_str("type, or y y = done");
         } else if count == 0 {
             let _ = l.push_str("no match, x=del");
+        } else if count > CAND_MAX {
+            // Too many to list on one screen: one more letter narrows it.
+            let _ = write!(l, "{count} match, add letter");
         } else {
             let _ = write!(l, "{count} match, y=list");
         }
@@ -9797,7 +9831,9 @@ fn read_word(ui: &mut Ui<'_>, num: usize) -> WordPick {
                         break 'type_wait;
                     }
                     Key::Confirm => {
-                        if !typed.is_empty() {
+                        // With an allowed set there is a list to open before anything is
+                        // typed, and no "done" to arm: the phrase ends by itself.
+                        if !typed.is_empty() || only.is_some() {
                             if count > 0 && count <= CAND_MAX {
                                 open_list = true;
                                 break 'type_wait;
@@ -9910,19 +9946,65 @@ fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
 ///
 /// `None` if the owner backed out, in which case the caller says what was not done.
 pub(crate) fn read_phrase(ui: &mut Ui<'_>) -> Option<catcard_wallet::bip39::Mnemonic> {
-    use catcard_wallet::bip39::{Mnemonic, wordlist::ENGLISH};
+    read_phrase_of(ui, None)
+}
+
+/// The words a phrase's last position may take, given the ones before it -- or `None`
+/// where this is not the last position, the count is not known, or the set could not be
+/// made. Written into `buf`; the count returned.
+fn last_word_filter(
+    idx: &[u16],
+    expect: Option<usize>,
+    buf: &mut [u16; catcard_wallet::bip39::MAX_LAST_WORDS],
+) -> Option<usize> {
+    if expect != Some(idx.len() + 1) {
+        return None;
+    }
+    // The set is computed from the entropy the prefix spells: private-key work, masked.
+    crate::keywork::run(|kw| catcard_wallet::bip39::last_words(idx, buf, kw)).ok()
+}
+
+/// How many words a phrase about to be typed has, as stock asks it: 12, 18 or 24, or
+/// "not sure" for the type-until-done entry that takes any length.
+///
+/// `None` if the owner backed out; `Some(None)` for the open-ended entry.
+pub(crate) fn ask_word_count(ui: &mut Ui<'_>, head: &str) -> Option<Option<usize>> {
+    const ROWS: &[&str] = &["12 words", "18 words", "24 words", "other / not sure"];
+    const COUNTS: [Option<usize>; 4] = [Some(12), Some(18), Some(24), None];
+    let row = pick_row(ui, head, "how many words?", ROWS)?;
+    Some(COUNTS[row])
+}
+
+/// [`read_phrase`] for a phrase of a known length.
+///
+/// With `expect` given, the last word is offered from the checksum-valid set alone
+/// ([`read_word`]'s `only`), and the phrase ends by itself after it -- no `y y`. With
+/// `None` the count is not asked and the owner types until done, as before.
+pub(crate) fn read_phrase_of(
+    ui: &mut Ui<'_>,
+    expect: Option<usize>,
+) -> Option<catcard_wallet::bip39::Mnemonic> {
+    use catcard_wallet::bip39::{MAX_LAST_WORDS, Mnemonic, wordlist::ENGLISH};
 
     // The phrase as word indices -- the seed, in another spelling. Zeroizing, so every way
     // out of this function wipes the whole buffer, a popped word's slot included.
     let mut idx = zeroize::Zeroizing::new(heapless::Vec::<u16, 24>::new());
+    // The last word's allowed set, when there is one. Made from the prefix, so it is
+    // wiped with it.
+    let mut allowed = zeroize::Zeroizing::new([0u16; MAX_LAST_WORDS]);
 
     // Enter words until the owner signals the end. `Back` steps to the previous word;
     // backing off the first word abandons the restore.
     loop {
-        match read_word(ui, idx.len() + 1) {
+        let n = last_word_filter(&idx, expect, &mut allowed);
+        match read_word(ui, idx.len() + 1, n.map(|n| &allowed[..n])) {
             WordPick::Word(i) => {
                 if idx.push(i).is_err() {
                     // 24 words is the most a phrase can be; stop taking more and verify.
+                    break;
+                }
+                // The count was known and this was the last: nothing more to type.
+                if expect == Some(idx.len()) {
                     break;
                 }
             }
@@ -9958,13 +10040,18 @@ pub(crate) fn read_phrase(ui: &mut Ui<'_>) -> Option<catcard_wallet::bip39::Mnem
                 wait_for_any_key(ui);
                 match edit_menu(ui, &idx) {
                     EditChoice::Edit(pos) => {
-                        if let WordPick::Word(i) = read_word(ui, pos + 1) {
+                        // The last word gets its filter again when the count is known.
+                        let n = last_word_filter(&idx[..pos], expect, &mut allowed);
+                        if let WordPick::Word(i) = read_word(ui, pos + 1, n.map(|n| &allowed[..n]))
+                        {
                             idx[pos] = i;
                         }
                     }
                     EditChoice::Add => {
+                        let n = last_word_filter(&idx, expect, &mut allowed);
                         if idx.len() < 24
-                            && let WordPick::Word(i) = read_word(ui, idx.len() + 1)
+                            && let WordPick::Word(i) =
+                                read_word(ui, idx.len() + 1, n.map(|n| &allowed[..n]))
                         {
                             let _ = idx.push(i);
                         }
@@ -10006,15 +10093,25 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
             return;
         }
     }
+    // The count first, as stock asks it: with it known, the last word is offered from
+    // the checksum-valid set alone. "Not sure" keeps the type-until-done entry.
+    let Some(expect) = ask_word_count(ui, "Import seed") else {
+        cancelled(ui);
+        return;
+    };
     message(
         ui.panel,
         "Import seed",
         "enter each word,",
-        "then y y to finish",
+        if expect.is_some() {
+            "one after another"
+        } else {
+            "then y y to finish"
+        },
     );
     wait_for_any_key(ui);
 
-    let Some(mnemonic) = read_phrase(ui) else {
+    let Some(mnemonic) = read_phrase_of(ui, expect) else {
         cancelled(ui);
         return;
     };
