@@ -256,6 +256,12 @@ enum Screen {
     Notes,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
+    /// One screen saying what the main menu holds.
+    HelpMain,
+    /// The same for Settings.
+    HelpSettings,
+    /// The same for Utils.
+    HelpUtils,
     /// The Games submenu.
     #[cfg(feature = "games")]
     Games,
@@ -404,6 +410,9 @@ const MAIN_ITEMS: &[&str] = &[
     // a person switching wallets should not have to go looking in a settings list.
     "Derive",
     "Settings",
+    // Stock puts Help on the boards without a keyboard; ours is on every board.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1/B2 "Help" [C]
+    "Help",
     // Stock gates Secure Logout on `not has_battery`: a device with a power button does
     // not need a menu entry to stop, and the USB-powered boards have no other way to end
     // a session than pulling the cable.
@@ -425,6 +434,7 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     "Scan QR",
     "Utils",
     "Settings",
+    "Help",
     #[cfg(not(feature = "board-q1"))]
     "Logout",
 ];
@@ -591,12 +601,13 @@ const SETTINGS_ITEMS: &[&str] = &[
     // person came to do.
     "About",
     "Debug",
+    "Help",
 ];
 const SETTINGS_ITEMS_BLANK: &[&str] = &[
     // Login and its nickname are here on a blank device too: both belong to the device
     // rather than to a wallet, and the nickname is stored under the pre-login key, which
     // exists either way.
-    "Login", "About", "Debug",
+    "Login", "About", "Debug", "Help",
 ];
 
 /// The settings menu for the device in front of you.
@@ -784,6 +795,7 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "NFC Tools",
     "Upgrade Firmware",
+    "Help",
 ];
 #[cfg(not(feature = "games"))]
 const UTILS_ITEMS: &[&str] = &[
@@ -822,6 +834,7 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "NFC Tools",
     "Upgrade Firmware",
+    "Help",
 ];
 
 /// The two halves of the backup file, together rather than in separate drawers: one
@@ -1811,6 +1824,9 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::identity::view_identity(a.gate, a.login, a.ui),
             Screen::Main,
         ),
+        Screen::HelpMain => to(|a| crate::help::main(a.ui), Screen::Main),
+        Screen::HelpSettings => to(|a| crate::help::settings(a.ui), Screen::Settings),
+        Screen::HelpUtils => to(|a| crate::help::utils(a.ui), Screen::Utils),
         Screen::BlessFirmware => to(
             |a| crate::identity::bless_firmware(a.gate, a.login, a.ui),
             Screen::DangerZone,
@@ -1991,6 +2007,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             // one you are in, and selecting it is how you leave.
             (Key::Confirm, Some(name)) if name.starts_with(['[', '<']) => Screen::KeyMenu,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
+            (Key::Confirm, Some("Help")) => Screen::HelpMain,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
             (Key::Confirm, Some("Logout")) => Screen::SecureLogout,
             _ => Screen::Main,
@@ -2019,6 +2036,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Multisig")) => Screen::Multisig,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
+            (Key::Confirm, Some("Help")) => Screen::HelpSettings,
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
@@ -2197,6 +2215,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Tools")) => Screen::NfcTools,
             (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
+            (Key::Confirm, Some("Help")) => Screen::HelpUtils,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
@@ -2725,6 +2744,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BackupSave | Screen::BackupRestore | Screen::BackupVerify => {}
         // Handled in `run`: each talks to the bootloader and drives the panel itself.
         Screen::Identity | Screen::BlessFirmware | Screen::SetHighWater | Screen::DfuUpgrade => {}
+        // Handled in `run`: a document, dismissed with any answer key.
+        Screen::HelpMain | Screen::HelpSettings | Screen::HelpUtils => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsSpace => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
@@ -13369,7 +13390,6 @@ fn usb_drive_vdisk(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
     // Cleared before serving, so only what *this* session's host wrote counts.
     let _ = crate::vdisk::take_host_wrote();
     serve_usb_drive(ui, &mut disk);
-    drop(disk);
     // The disk is off the bus again. If the host put a firmware on it, say so now rather
     // than leaving it for someone to find under Upgrade Firmware.
     if crate::vdisk::take_host_wrote() {

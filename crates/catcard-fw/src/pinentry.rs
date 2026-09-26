@@ -1681,6 +1681,8 @@ pub(crate) fn test_login_calc(
         CalcExit::Done => match test.step() {
             Step::In { .. } => {
                 *session = test;
+                // The digit mask is not gathered here: only the kill-key screen reads
+                // it, and that screen runs `test_login`, never this.
                 TestLogin::Correct { digits: 0 }
             }
             _ => TestLogin::Failed,

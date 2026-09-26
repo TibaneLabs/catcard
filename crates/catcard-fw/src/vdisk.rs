@@ -183,13 +183,14 @@ pub fn ensure_formatted() -> Result<(), &'static str> {
 /// for the two-megabyte region, bounded by the region's own length -- so nothing does.
 /// Only ever reached from a menu row that asked.
 pub fn wipe_and_format() -> Result<(), &'static str> {
-    let mut dev = Vdisk::take().ok_or("no PSRAM for a disk")?;
-    let zeros = [0u8; BLOCK_LEN];
-    for lba in 0..dev.sectors {
-        dev.write_sectors(lba, &zeros)
-            .map_err(|_| "could not blank the disk")?;
+    {
+        let mut dev = Vdisk::take().ok_or("no PSRAM for a disk")?;
+        let zeros = [0u8; BLOCK_LEN];
+        for lba in 0..dev.sectors {
+            dev.write_sectors(lba, &zeros)
+                .map_err(|_| "could not blank the disk")?;
+        }
     }
-    drop(dev);
     format()
 }
 

@@ -62,6 +62,7 @@ mod gpu;
 mod guard;
 /// The heap: one region, lent out a block at a time.
 mod heap;
+mod help;
 /// Logging out after a while with nobody touching it.
 mod identity;
 mod idle;
