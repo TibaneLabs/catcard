@@ -153,6 +153,19 @@ stock user has no reason to open, and it is now `Utils` → `Upgrade Firmware` u
 stock's own name. It is the widest tile label on the Q1, which is the cost of using
 stock's wording and worth paying for the one entry that replaces the firmware.
 
+## Questions a computer asks (over USB)
+
+Not menu rows: screens that take over whatever is showing, the way a USB upgrade offer
+does, when a computer asks inside the encrypted channel (`docs/USB.md` §"Host-wallet
+commands"). They appear once the device is unlocked, from the main menu's loop; Cancel
+at any step answers the computer "declined". Stock has no equivalent -- its USB protocol
+is not implemented here and was not studied.
+
+| Screen | What it asks | |
+|---|---|---|
+| `Computer asks` → `for this wallet's addresses. Share?` | yes / no, then the **account** (the Address Explorer's field; empty is 0), then on a multichain build **`Chains`**: this wallet's chains in Settings → Chains order, each `[x]` ticked, OK toggles, the last row `Share the ticked` goes on; then `Share these?` with the account and the number of chains | 🔀 never asks for address types: every script type a UTXO chain supports goes, each with its account xpub; an account chain sends its one address and key. What was shared is remembered for that USB session only |
+| `Computer asks` → `you to sign a <chain> transaction` | yes / no, then **the ordinary review** for the chain -- the same screens as Sign from SD, QR or NFC (Bitcoin's with Spending Policy, fee cap, sighash policy and the proof-of-reserves review; EVM's with the signing address added; Solana's) | 🔀 only the keys the computer listed, under accounts shared this session, can sign; an input of ours it did not list stays unsigned and the review says so. After signing, no destination question: `Sent back` `to the computer` |
+
 ## Spending Policy and hobbled mode
 
 Stock's single-signer Spending Policy (SSSP) is a per-transaction **magnitude** cap, a

@@ -165,6 +165,7 @@ it is the signature.
 | `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][u32 block size][deflate streams]` |
 | `0x0040` | `NcryStart` | open an encrypted channel; payload is the host's ephemeral X25519 public key, reply is the device's |
 | `0x0041` | `NcryMsg` | a command or reply sealed for that channel |
+| `0x0050`..`0x0055` | `Host*` | host-wallet commands, **inside `NcryMsg` only** -- see "Host-wallet commands" below |
 
 ### The encrypted channel (`ncry`)
 
@@ -278,7 +279,7 @@ is a diagnostic for a device under test, not something a menu should offer an ow
 Peek reads span several frames — a request returns up to 512 bytes — so a range comes
 back in one round trip rather than one byte at a time. Poke is paged one frame per
 request by the client, because the device reassembles a multi-frame message only for a
-firmware upgrade.
+firmware upgrade and a sealed `NcryMsg` record (see "Sealed requests may span frames").
 
 ### Talking to a real device
 
@@ -394,10 +395,14 @@ upload is the same holder coming back.
 twice while the first offer is on the screen fails cleanly rather than restarting the
 upload.
 
-Every other opcode fits one frame. A START frame for anything but an upgrade that
-declares more payload than one frame carries is refused with `BadRequest` and its frames
-reset, rather than being reassembled into something the device would then treat as an
-image.
+Every other opcode fits one frame, with one bounded exception: a sealed `NcryMsg` record
+of up to `ncry::RECORD_MAX` (1040) bytes, which is gathered into a heap block and opened
+only once whole (see "Sealed requests may span frames" below). A START frame for anything
+else that declares more payload than one frame carries -- or an `NcryMsg` past that bound
+-- is refused with `BadRequest` and its frames reset, rather than being reassembled into
+something the device would then treat as an image. An upgrade offer is also answered
+`NotNow` while a host-wallet question is queued or on the screen, as a host question is
+while an upgrade waits.
 
 ### Enumeration is not gated by the PIN; upgrades are
 
@@ -499,6 +504,196 @@ Password`, and Confirm on a BIP-85 password child's screen under Derive → `BIP
 **Proving it on hardware:** Debug → `Keyboard EMU test` types the constant line
 `catcard keyboard ok` into whatever window the host has focused, after asking. Open a
 text editor first.
+
+### Host-wallet commands: a computer asks, the person decides
+
+Two things a computer may ask the wallet for, **only inside the encrypted channel**:
+its addresses, and a signature. Both follow the upgrade offer's shape -- the host asks,
+the device puts the question on its own screen, the person holding it answers there,
+and the host polls for the outcome. The host cannot answer for the person and cannot
+withdraw a question once the device has it; only the person, or a bus reset, ends one.
+
+In the clear these opcodes are `UnknownOpcode`, exactly as the bench debug opcodes are
+unknown *inside* the channel. Advertised by `caps::HOST_WALLET` (bit 6) in `Identify`.
+Whether a session may carry them at all is decided in one place,
+`ncry::Channel::host_wallet_allowed()`: any open session today, a paired one when the
+channel gains pairing. The host tool gets its session from one helper,
+`usbclient.open_session()`, for the same reason.
+
+The layouts are `catcard_usb::hostwallet`, whose tests pin every one byte for byte;
+`tools/hostwallet.py` is the host half, written from this section, with `--selftest`
+checking the same bytes.
+
+| opcode | | request | reply |
+|---|---|---|---|
+| `0x0050` | `HostAddresses` | empty | `Ok` = queued for the person; `NotNow` + `[u8 busy]` |
+| `0x0051` | `HostSignBegin` | `[u8 chain][u32 blob length]` | `Ok` + `[u32 largest chunk]`; `NotNow` + `[u8 busy]`; `Refused` + reason |
+| `0x0052` | `HostSignData` | `[u32 offset][1..=1018 bytes]` | `Ok` + `[u32 received so far]`; `BadRequest` for an offset out of order or past the end |
+| `0x0053` | `HostSignCommit` | empty | `Ok` = queued for the person; `Refused` + reason |
+| `0x0054` | `HostResult` | `[u32 offset]` | `NotNow` + `[u8 stage]`; `Declined`; `Refused` + reason; `Ok` + `[u32 total][page]` |
+| `0x0055` | `HostAbort` | empty | `Ok`; `NotNow` + `[u8 stage]` for a question already queued or on the screen |
+
+Conventions: integers little-endian. A **path** is `[u8 depth][depth × u32]` with the
+hardened bit (`0x8000_0000`) set on hardened steps, depth 1 to 8. A **chain** is one byte:
+Bitcoin 1, Ethereum 2, Solana 3, Litecoin 4, Dogecoin 5, Bitcoin Cash 6, Monacoin 7,
+Electra Protocol 8, Tron 9, Namecoin 10 (`catcard_wallet::chain::ChainId`). A **reason**
+is up to 64 bytes of UTF-8, for a person to read. A request with a payload it should not
+have, or one byte too many, is `BadRequest` -- trailing bytes are refused, not ignored.
+
+`busy` (the `NotNow` byte for a new question): `1` locked -- the PIN has not been entered,
+the same gate as upgrades; `2` busy -- another host question, an upgrade offer, or an
+unfetched result is in hand. `stage` (the `NotNow` byte for `HostResult`/`HostAbort`):
+`0` nothing asked (or already fetched), `1` upload open, `2` waiting for the screen, `3`
+the person is deciding, `4` the device is busy with **another session's** question.
+
+#### Getting addresses
+
+`HostAddresses` queues the question. On the device: "Computer asks for this wallet's
+addresses. Share?", then the **account** (typed, as in the Address Explorer; empty is 0),
+then -- on a multichain build -- a checklist of the chains this wallet offers
+(Settings → Chains, in that order), all ticked, then "Share these? account N / M chains".
+Cancel anywhere answers the host `Declined`. The person is never asked about address
+types: every script type a chain supports is included.
+
+The result:
+
+```text
+[u8 kind = 1][u8 version = 1][4 master fingerprint][u32 account][u8 count]
+count × entry:
+  [u8 shape][u8 chain][u8 format]
+  [path: account]            m/purpose'/coin'/account'
+  [path: address]            where `address` and `pubkey` are
+  shape 1 (UTXO) only:       [u8 len][extended public key, base58]
+  [u8 len][address, ASCII]
+  [u8 len][public key]       33 bytes compressed secp256k1, or 32 ed25519
+```
+
+`shape` 1 is a **UTXO chain**: Bitcoin, and Litecoin, Dogecoin, Bitcoin Cash, Monacoin,
+Namecoin and Electra Protocol on a multichain build -- one entry per script type **that
+chain supports** in the registry (`chain::Chain::formats`): Bitcoin has all four
+(P2PKH/BIP-44, P2SH-P2WPKH/BIP-49, P2WPKH/BIP-84, P2TR/BIP-86); Dogecoin and Bitcoin
+Cash are BIP-44 only; the Litecoin family has no taproot. Each carries the account path
+under that chain's SLIP-44 coin type -- Bitcoin's is 1 on testnet and regtest, every
+other chain keeps its own -- the account's extended public key, and the first receive
+address `.../0/0` in the chain's own format, as a check. The host derives the rest from
+the key. **The extended key is written with the classic `xpub`/`tpub` version bytes on
+every chain**: this firmware has no per-chain version bytes anywhere (its multichain
+Keystone export carries raw key data, not base58), and inventing `Ltub`-style prefixes
+here would be a guess. `shape` 2 is an **account chain** -- Ethereum/EVM, Tron, Solana --
+with one address, its full path (`m/44'/60'/n'/0/0`, `m/44'/195'/n'/0/0`,
+`m/44'/501'/n'/0'`) and its public key.
+
+`format`: 1 P2PKH, 2 P2SH-P2WPKH, 3 P2WPKH, 4 P2TR, 5 EVM (EIP-55), 6 Tron, 7 Solana.
+
+The device then **remembers, for this session only**, the account paths it showed --
+each (chain, `m/purpose'/coin'/account'`). A later approval in the same session replaces
+the list. It lives in the channel's per-session state and is dropped with the session: a
+new `NcryStart`, a teardown after a bad record, a bus reset, logout or idle logout (both
+reboot), and a change of the wallet in force (a passphrase).
+
+#### Signing
+
+The host uploads one **sign blob**:
+
+```text
+[u8 version = 1][u8 chain][u8 key count, 1..=32]
+key count × [path]           the keys that must sign, from the address reply
+[u32 tx length][tx bytes]    nothing may follow
+```
+
+`tx` is what the chain's own signer reads: a PSBT (binary, v0 or v2; base64 is accepted
+too), an unsigned EVM transaction (RLP, typed or legacy), or a Solana transaction or
+message.
+
+1. `HostSignBegin [chain][length]`. Refused at once, before any byte is sent, for a chain
+   this build does not sign ("Litecoin cannot be signed here" -- only Bitcoin PSBT, EVM
+   and Solana sign; every address-only chain is refused by name), a chain not in this
+   build, a chain nothing was shared on this session, or a length the board cannot take
+   ("too big for this board": 16 KiB on the mk3, three eighths of the PSRAM elsewhere).
+   It claims the memory: PSRAM through `psram::take`, so an upgrade offer or a card
+   signing waits while it is held -- or, on the mk3, a heap block.
+2. `HostSignData [offset][bytes]`, in order, up to 1018 bytes each (the reply to
+   `HostSignBegin` says so). A chunk out of order is `BadRequest` and the upload is kept.
+3. `HostSignCommit`. The blob is parsed and checked: the chain matches; **every listed
+   key is strictly below an account path shown this session on that chain**; an EVM
+   request lists exactly one key; a Solana key is hardened throughout. Any failure is
+   `Refused` + reason and drops the upload. Otherwise the question is queued.
+
+On the device: "Computer asks you to sign a <chain> transaction", then **the
+ordinary review for that chain** -- the same code as signing from the card, a QR or the
+tag: for Bitcoin `signtx` with PSBT v2 through its v0 view, proof-of-reserves detection,
+the Spending Policy, hobbled mode, the fee cap and the sighash policy all unchanged; for
+EVM the `evmtx` review with the signing address added at the top; for Solana the
+`solanatx` review with the listed keys marked as this device's. On the USB sink the
+review is followed by no "where should it go" choices at all -- "Sent back to the
+computer".
+
+Only the listed keys sign, and that is enforced where the key is chosen
+(`signer::sign_input_listed`), not by removing signatures afterwards. A Bitcoin input this
+wallet could sign with a key the request did not list is **left unsigned**, and the
+review says how many ("N more of ours NOT signed: not asked for"). A listed key that
+matches no input's derivation record (fingerprint, path, and the key the path really
+leads to) is a refusal before the review. A Solana key that is not one of the
+transaction's signers likewise. Stored WIF keys never sign for a host.
+
+The result:
+
+```text
+Bitcoin  [u8 kind = 2][u8 psbt version, 0 or 2][u32 len][signed PSBT][u32 len][network tx]
+EVM      [u8 kind = 3][u32 len][signed raw transaction]
+Solana   [u8 kind = 4][u8 n][n × ([u8 signer slot][64-byte signature])][u32 len][transaction]
+```
+
+The PSBT goes back in the version it arrived in. The network transaction is present
+(non-empty) only when every input is complete and it finalised; a proof of reserves
+never carries one. The Solana transaction has the signatures already in their slots.
+
+#### Polling and paging
+
+`HostResult [offset]` answers `NotNow` + stage while the person decides, then once with
+`Declined` or `Refused` + reason (after which the desk is free), or `Ok` +
+`[u32 total][page]` with up to 448 bytes from `offset`. The host pages with rising
+offsets until it has `total` bytes; the device releases the result -- and its memory --
+when the page that reaches the end has been sent. An offset past `total` is
+`BadRequest`.
+
+A result is **bound to the session that asked**: another session polling gets `NotNow` +
+stage 4. If the asking session ends while the person is deciding, their answer is
+dropped when they give it; nobody else can fetch it. `HostAbort` drops an upload that
+was not committed or a result that will not be fetched; it cannot withdraw a question
+that is queued or on the screen.
+
+Every blocking step -- derivation, signing, the person -- happens on the UI task. The
+USB task only takes bytes, checks what can be checked without a key, and pages results
+out, so a host polling never waits on anything but the poll itself.
+
+#### Sealed requests may span frames
+
+Every host-wallet reply fits one sealed reply, but a `HostSignData` chunk does not fit
+one frame. So an `NcryMsg` record may span frames up to a bound: **1024 bytes of
+plaintext** (`ncry::PLAIN_MAX`, opcode included), 1040 sealed. A record that fits one
+frame is opened straight off the frame as before; a longer one is gathered into a heap
+block of its own (never a new static: the Q1's boot stack is what `.bss` leaves over)
+and **authenticated as a whole before anything in it is used**. A record over the bound
+is refused on its first frame. Any record that does not authenticate, or has the wrong
+size, tears the session down.
+
+#### What this defends, and what it does not
+
+`ncry` v1 is unauthenticated: both keys are ephemeral and the device has no identity to
+prove. A **passive** observer on the wire learns nothing -- not the addresses, not the
+keys, not the transaction. An **active man-in-the-middle** that relays the handshake can
+see which addresses the person chose to share, and can relay (or substitute) requests.
+What it **cannot** do is get anything signed that the person did not approve on the
+device's own screen: the review shows what the device parsed -- the amounts, the
+destinations, the fee, the signing address -- never what the host said it means, and
+only keys under accounts the person chose to share can sign at all. Pairing, which binds
+the channel to a code shown on both screens, is the next step, and it changes one method.
+
+`tools/usbclient.py hid --addresses` and
+`tools/usbclient.py hid --sign FILE --chain btc|evm|sol --key m/84h/0h/0h/0/3 [--key ...]
+[--out FILE]` drive both flows. A PSBT result is written to `FILE` (and the network
+transaction, as hex, to `FILE.txn`); an EVM one as `0x`-hex; a Solana one as base64.
 
 ### Identify reports which screen you are on
 
