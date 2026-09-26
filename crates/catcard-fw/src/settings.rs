@@ -310,6 +310,14 @@ pub(crate) fn save_wallet(
     use catcard_settings::json::Doc;
     use catcard_settings::store;
 
+    // A hobbled device writes nothing of the owner's: only the policy's own object (its
+    // last violation and last spend height) and the identity keys below. Refused here,
+    // under every screen that saves, so a row the hobbled filter missed still cannot
+    // change a setting. See `crate::policy`.
+    if crate::policy::hobbled() && !catcard_settings::policy::may_save(name) {
+        crate::catlog!("settings: {} not saved: spending policy active", name);
+        return Err("spending policy active");
+    }
     let key = wallet_key(gate, login, ui.panel, head)?;
     // SAFETY: foreground only; the caller holds the display while this runs.
     let mut files = unsafe { Files::mount() }.map_err(|_| "no settings store")?;
@@ -778,6 +786,34 @@ static mut SD2FA: (
     [[0; 32]; catcard_settings::prelogin::SD2FA_MAX],
 );
 
+/// The spending policy's unlock record (`cat_sssp_unlock`), as the boot path read it.
+/// Empty for none. Checked at the PIN prompt by `crate::pinentry`; see `crate::policy`.
+static mut UNLOCK: heapless::String<{ catcard_settings::policy::UNLOCK_RECORD_LEN }> =
+    heapless::String::new();
+
+/// The enrolled unlock record, if any: the text `catcard_settings::policy::unlock_matches`
+/// takes. Lives for the program, as the nickname does, so the PIN prompt can borrow it.
+pub(crate) fn unlock_record() -> Option<&'static str> {
+    // SAFETY: foreground only; written by `load_prelogin` on the boot path and by
+    // `save_unlock_record`, both before or between screens, never during a read.
+    let s = unsafe { &*core::ptr::addr_of!(UNLOCK) };
+    (!s.is_empty()).then_some(s.as_str())
+}
+
+/// Enrol `record` as the unlock code (from `policy::render_unlock`), or clear it with an
+/// empty string. From the next login.
+pub(crate) fn save_unlock_record(ui: &mut crate::ui::Ui<'_>, record: &str) -> bool {
+    let key = catcard_settings::policy::UNLOCK_KEY;
+    let ok = save_prelogin(ui, "Spending Policy", key, record);
+    if ok {
+        // SAFETY: foreground only.
+        let s = unsafe { &mut *core::ptr::addr_of_mut!(UNLOCK) };
+        s.clear();
+        let _ = s.push_str(record);
+    }
+    ok
+}
+
 /// The kill key's digit, if one is armed.
 // Read and written by `crate::guard`, which a dev build compiles out and the mk3 never has
 // (its bootloader has no fast wipe); the values stay on flash either way.
@@ -886,6 +922,23 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     prefs.scramble = prelogin::scramble(&doc);
     prefs.countdown_minutes = prelogin::countdown_minutes(&doc);
     prefs.kill_key = prelogin::kill_key(&doc);
+    // The spending policy's unlock record. Kept whole, unparsed: whether it reads is
+    // decided when a code is typed against it, and a record that does not read matches
+    // nothing, which sends the typed code to the bootloader as the PIN attempt it would
+    // otherwise be.
+    if let Some(record) = catcard_settings::policy::unlock_record(&doc) {
+        // SAFETY: foreground only, boot path.
+        let s = unsafe { &mut *core::ptr::addr_of_mut!(UNLOCK) };
+        s.clear();
+        if s.push_str(record).is_err() {
+            crate::catlog!(
+                "policy: unlock record too long ({} B), ignored",
+                record.len()
+            );
+            s.clear();
+        }
+    }
+    prefs.unlock = unlock_record();
     #[cfg(feature = "board-q1")]
     {
         prefs.calc = prelogin::calc(&doc);

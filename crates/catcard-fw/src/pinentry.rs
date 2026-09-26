@@ -378,6 +378,10 @@ pub struct LoginPrefs<'a> {
     /// mk4 or later; see `crate::guard`.
     #[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
     pub kill_key: Option<u8>,
+    /// The spending policy's unlock record, if a code is enrolled. A typed PIN is checked
+    /// against it before it goes to the bootloader; see [`unlock_code_typed`].
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    pub unlock: Option<&'a str>,
 }
 
 /// A fresh shuffle of the number row, or the plain one if scrambling is off.
@@ -972,6 +976,9 @@ pub fn unlock(
     let mut layout_for: Option<bool> = None;
 
     let mut field = PinBuffer::<MAX_PART_LEN>::new();
+    // The prefix as typed, kept while the suffix is: the spending policy's unlock code
+    // is checked over both halves (`unlock_code_typed`). Wiped with the field.
+    let mut typed_prefix = PinBuffer::<MAX_PART_LEN>::new();
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -1238,6 +1245,7 @@ pub fn unlock(
                         checking(panel, &login, field.len());
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking");
+                        typed_prefix = field.clone();
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         log_state(&login, "prefix");
                         field.clear();
@@ -1256,9 +1264,19 @@ pub fn unlock(
                         checking(panel, &login, 0);
                         #[cfg(not(feature = "board-q1"))]
                         working(panel, "Checking PIN");
+                        // The spending policy's unlock code, before the bootloader sees
+                        // anything: a match is a fresh prompt for the main PIN, with
+                        // nothing said; anything else is the PIN attempt it looks like.
+                        if unlock_code_typed(&prefs, typed_prefix.as_bytes(), field.as_bytes()) {
+                            login = Login::new(&g);
+                            field.clear();
+                            typed_prefix.clear();
+                            continue;
+                        }
                         let _ = login.attempt(&g, field.as_bytes());
                         log_state(&login, "attempt");
                         field.clear();
+                        typed_prefix.clear();
                     }
                 }
 
@@ -1432,6 +1450,113 @@ pub(crate) fn test_login(
     }
 }
 
+/// Whether the two typed halves are the spending policy's unlock code.
+///
+/// Checked before the suffix goes to gate 18, so a correct code never costs a PIN
+/// attempt -- which matters most when one is left -- and a wrong one is exactly the
+/// attempt it would have been anyway. Once per boot: after a match the same digits go to
+/// the bootloader, so a code that happened to equal the main PIN (refused at enrolment,
+/// but belt and braces) cannot match at every prompt and lock the owner out.
+///
+/// Costs the record's PBKDF2 rounds whenever a record is enrolled, on every login: the
+/// stretch is what the code's twelve digits have instead of a secure element.
+fn unlock_code_typed(prefs: &LoginPrefs<'_>, prefix: &[u8], suffix: &[u8]) -> bool {
+    use zeroize::Zeroize as _;
+    let Some(record) = prefs.unlock else {
+        return false;
+    };
+    if crate::policy::unlock_typed() {
+        return false;
+    }
+    let mut code: heapless::Vec<u8, { 2 * MAX_PART_LEN + 1 }> = heapless::Vec::new();
+    let _ = code.extend_from_slice(prefix);
+    let _ = code.push(b'-');
+    let _ = code.extend_from_slice(suffix);
+    let hit = catcard_settings::policy::unlock_matches(record, &code);
+    code.zeroize();
+    if hit {
+        crate::policy::note_unlock_code();
+    }
+    hit
+}
+
+/// Choose the spending policy's unlock code: a prefix and a suffix of the PIN's own
+/// shape, each typed twice. `None` if backed out or the repeats disagree.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn collect_unlock_code(
+    panel: &mut display::Panel,
+    matrix: &mut GpioMatrix,
+    drbg: &mut HmacDrbg,
+) -> Option<(PinBuffer<MAX_PART_LEN>, PinBuffer<MAX_PART_LEN>)> {
+    let prefix = collect(panel, matrix, drbg, "Code prefix", false)?;
+    let suffix = collect(panel, matrix, drbg, "Code suffix", false)?;
+    let again_prefix = collect(panel, matrix, drbg, "Repeat prefix", false)?;
+    let again_suffix = collect(panel, matrix, drbg, "Repeat suffix", false)?;
+    if again_prefix.as_bytes() != prefix.as_bytes() || again_suffix.as_bytes() != suffix.as_bytes()
+    {
+        screen_message(panel, "Mismatch", "the repeats", "did not match");
+        let _ = wait_for_confirm(matrix, drbg);
+        return None;
+    }
+    Some((prefix, suffix))
+}
+
+/// What [`probe_main_pin`] found.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) enum PinProbe {
+    /// The digits are the main PIN. The session's login was replaced by the probe's,
+    /// which is itself a fresh successful login.
+    IsMainPin,
+    /// They are not; an attempt was spent, to be restored by the next successful login.
+    NotMainPin { attempts_left: u32 },
+    /// Refused to start: too few attempts left to spend one.
+    TooFewTries { attempts_left: u32 },
+    /// The gate answered with something other than right or wrong.
+    Failed,
+}
+
+/// Whether `prefix`/`suffix` is the main PIN: [`test_login`] with the digits supplied
+/// rather than typed. For the spending policy, whose unlock code must not be the PIN --
+/// a code that were would match at every login before the PIN could. The same rules as
+/// a test login: a miss is a real wrong PIN, so the probe is refused near the brick.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn probe_main_pin(
+    gate: &Callgate,
+    panel: &mut display::Panel,
+    session: &mut Login,
+    prefix: &[u8],
+    suffix: &[u8],
+) -> PinProbe {
+    let g = BootloaderGate { gate };
+    let mut test = Login::new(&g);
+    if !matches!(test.step(), Step::Prefix) {
+        return PinProbe::Failed;
+    }
+    let left = test.attempts_left();
+    if left < TEST_MIN_ATTEMPTS {
+        return PinProbe::TooFewTries {
+            attempts_left: left,
+        };
+    }
+    working(panel, "Checking");
+    let _ = test.prefix_entered(&g, prefix);
+    if !matches!(test.step(), Step::ConfirmWords(_)) {
+        return PinProbe::Failed;
+    }
+    test.words_confirmed();
+    working(panel, "Checking code");
+    let _ = test.attempt(&g, suffix);
+    log_state(&test, "code probe");
+    match test.step() {
+        Step::In { .. } => {
+            *session = test;
+            PinProbe::IsMainPin
+        }
+        Step::Wrong { attempts_left, .. } => PinProbe::NotMainPin { attempts_left },
+        _ => PinProbe::Failed,
+    }
+}
+
 /// How the calculator ended, when it was allowed to end.
 #[cfg(feature = "board-q1")]
 enum CalcExit {
@@ -1492,15 +1617,16 @@ fn calculator_login(
 ) -> CalcExit {
     use catcard_ui::calc::{self, Typed};
     use core::fmt::Write as _;
+    use zeroize::Zeroize as _;
 
     // The kill key is honoured only for suffix digits, which are the only digits this
     // screen knows are PIN digits: a sum can contain any digit at all. Release builds
     // only, as on the PIN pad.
     #[cfg(not(feature = "dev"))]
     let kill_key = prefs.kill_key;
-    #[cfg(feature = "dev")]
-    let _ = prefs;
     let _ = gate;
+    // The prefix as typed, for the unlock-code check on the suffix; wiped after it.
+    let mut calc_prefix: heapless::Vec<u8, MAX_PART_LEN> = heapless::Vec::new();
 
     let mut line = CalcLine::new();
     let mut answer: heapless::String<40> = heapless::String::new();
@@ -1594,6 +1720,8 @@ fn calculator_login(
                     {
                         Typed::Prefix(p) => {
                             working(panel, "Calculating");
+                            calc_prefix.clear();
+                            let _ = calc_prefix.extend_from_slice(p.as_bytes());
                             let _ = login.prefix_entered(g, p.as_bytes());
                             log_state(login, "calc prefix");
                             answer.clear();
@@ -1609,8 +1737,16 @@ fn calculator_login(
                         }
                         Typed::Suffix(s) => {
                             working(panel, "Calculating");
-                            let _ = login.attempt(g, s.as_bytes());
-                            log_state(login, "calc attempt");
+                            // The unlock code, as on the PIN pad: a match is a fresh
+                            // prompt, silently. See `unlock_code_typed`.
+                            if unlock_code_typed(prefs, &calc_prefix, s.as_bytes()) {
+                                *login = Login::new(g);
+                            } else {
+                                let _ = login.attempt(g, s.as_bytes());
+                                log_state(login, "calc attempt");
+                            }
+                            calc_prefix.zeroize();
+                            calc_prefix.clear();
                             awaiting_suffix = false;
                             answer.clear();
                             line.clear();

@@ -298,6 +298,12 @@ enum Screen {
     /// Settings that show or change secrets, apart from the rest so none is one press
     /// away by accident.
     DangerZone,
+    /// Settings -> Spending Policy: the single-signer policy and hobbled mode.
+    #[cfg(not(feature = "board-mk3"))]
+    SpendingPolicy,
+    /// The main menu's `EXIT TEST DRIVE`, while a policy is on trial.
+    #[cfg(not(feature = "board-mk3"))]
+    ExitTestDrive,
     /// Choose the Bitcoin network: mainnet, testnet4 or regtest. In the Danger Zone
     /// because it changes every address, xpub and path the device shows.
     TestnetMode,
@@ -470,15 +476,21 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 
     /// The list handed back, rebuilt each time: the fingerprint and the switches can
     /// change between two draws, and a menu is a slice of `&'static`. A row's worth of
-    /// `&str`s in `.bss`; nothing to lease.
-    static mut ITEMS: [&str; 1 + MAIN_ITEMS.len()] = [""; 1 + MAIN_ITEMS.len()];
+    /// `&str`s in `.bss`; nothing to lease. One more than the rows for the header, and
+    /// one for `EXIT TEST DRIVE`.
+    static mut ITEMS: [&str; 2 + MAIN_ITEMS.len()] = [""; 2 + MAIN_ITEMS.len()];
     // SAFETY: foreground only. The menu is redrawn from one place and holds no borrow
     // of the list across a rebuild.
     let items = unsafe { &mut *core::ptr::addr_of_mut!(ITEMS) };
     let mut n = 0;
+    // Stock's row while the spending policy is on trial, last, as stock places it.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B4 "EXIT TEST DRIVE" [C]
+    let tail = crate::policy::test_driving().then_some("EXIT TEST DRIVE");
     for label in head
         .into_iter()
         .chain(MAIN_ITEMS.iter().copied().filter(|l| main_row_shown(l)))
+        .filter(|l| crate::policy::row_allowed(catcard_settings::policy::Menu::Main, l))
+        .chain(tail)
     {
         items[n] = label;
         n += 1;
@@ -555,6 +567,12 @@ const SETTINGS_ITEMS: &[&str] = &[
     // than beside the one-shot tools. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
     // §SET "Multisig Wallets (has_secrets)" [C]
     "Multisig",
+    // The Single-Signer Spending Policy and, later, CCC. Stock keeps the drawer under
+    // Advanced/Tools; ours is a setting, beside Multisig, and only in the root wallet
+    // (`settings_items`), whose file the policy lives in. Needs the store: not on the mk3.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV "Spending Policy" [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Spending Policy",
     // The preferences, in stock's own order and under stock's own names, all of them
     // kept in the wallet's own settings file. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
     "Idle timeout",
@@ -607,12 +625,46 @@ const SETTINGS_ITEMS_BLANK: &[&str] = &[
 ];
 
 /// The settings menu for the device in front of you.
+///
+/// Rebuilt each time, like [`main_items`]: the hobbled filter (`crate::policy`) and the
+/// wallet in force decide which rows are there, and both change between two draws.
 fn settings_items(no_seed: bool) -> &'static [&'static str] {
+    use catcard_settings::policy::Menu;
     if no_seed {
-        SETTINGS_ITEMS_BLANK
-    } else {
-        SETTINGS_ITEMS
+        return SETTINGS_ITEMS_BLANK;
     }
+    static mut ITEMS: [&str; SETTINGS_ITEMS.len()] = [""; SETTINGS_ITEMS.len()];
+    // SAFETY: foreground only; the menu holds no borrow of the list across a rebuild.
+    let items = unsafe { &mut *core::ptr::addr_of_mut!(ITEMS) };
+    let mut n = 0;
+    for label in SETTINGS_ITEMS.iter().copied() {
+        // The policy belongs to the stored wallet's file: offered from the root only.
+        if label == "Spending Policy" && !crate::key::is_root() {
+            continue;
+        }
+        if crate::policy::row_allowed(Menu::Settings, label) {
+            items[n] = label;
+            n += 1;
+        }
+    }
+    &items[..n]
+}
+
+/// The tool drawer for the device in front of you: [`UTILS_ITEMS`] through the hobbled
+/// filter.
+fn utils_items() -> &'static [&'static str] {
+    use catcard_settings::policy::Menu;
+    static mut ITEMS: [&str; UTILS_ITEMS.len()] = [""; UTILS_ITEMS.len()];
+    // SAFETY: as in `settings_items`.
+    let items = unsafe { &mut *core::ptr::addr_of_mut!(ITEMS) };
+    let mut n = 0;
+    for label in UTILS_ITEMS.iter().copied() {
+        if crate::policy::row_allowed(Menu::Utils, label) {
+            items[n] = label;
+            n += 1;
+        }
+    }
+    &items[..n]
 }
 
 /// Settings that show or change secrets. Stock calls it the same, and keeps its seed
@@ -952,11 +1004,28 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
 /// and sometimes inert teaches an owner to ignore it, and this is the row that says
 /// which wallet they are in.
 fn key_items() -> &'static [&'static str] {
-    if crate::key::is_root() {
+    use catcard_settings::policy::Menu;
+    let all = if crate::key::is_root() {
         KEY_ITEMS_ROOT
     } else {
         KEY_ITEMS_DERIVED
+    };
+    // Hobbled under Related Keys: the ways to another wallet stay, the ways to derive
+    // from the seed go. Nothing to filter otherwise.
+    if !crate::policy::hobbled() {
+        return all;
     }
+    static mut ITEMS: [&str; KEY_ITEMS_DERIVED.len()] = [""; KEY_ITEMS_DERIVED.len()];
+    // SAFETY: as in `settings_items`.
+    let items = unsafe { &mut *core::ptr::addr_of_mut!(ITEMS) };
+    let mut n = 0;
+    for label in all.iter().copied() {
+        if crate::policy::row_allowed(Menu::Derive, label) {
+            items[n] = label;
+            n += 1;
+        }
+    }
+    &items[..n]
 }
 
 /// Which level to export a plain xpub from, in stock's order.
@@ -1084,6 +1153,9 @@ pub fn run(session: Session<'_>) -> ! {
     // a device with no wallet, which has no file to read and no key to read it with.
     if !no_seed {
         crate::prefs::load(gate, login, ui.panel, "Settings");
+        // The spending policy, from the same warm key: it decides which rows the very
+        // first frame has.
+        crate::policy::load(gate, login, &mut ui);
         // Home Menu XFP "always": the header row needs the number before the first
         // frame, and the login fetch is still warm. Only where that row exists.
         #[cfg(not(feature = "board-q1"))]
@@ -1472,6 +1544,13 @@ fn action_for(screen: Screen) -> Option<Action> {
         // belongs to the way in.
         Screen::SdInstall => to(|a| install_firmware(a.gate, a.login, a.ui), Screen::Utils),
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SpendingPolicy => to(
+            |a| crate::policy::screen(a.gate, a.login, a.ui),
+            Screen::Settings,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::ExitTestDrive => returns(|a| crate::policy::exit_test_drive(a.ui)),
         #[cfg(feature = "multichain")]
         Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -1978,6 +2057,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Help")) => Screen::HelpMain,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
             (Key::Confirm, Some("Logout")) => Screen::SecureLogout,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("EXIT TEST DRIVE")) => Screen::ExitTestDrive,
             _ => Screen::Main,
         },
         // By name again, for the same reason as Main: the list is short today and the
@@ -2007,6 +2088,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Spending Policy")) => Screen::SpendingPolicy,
             #[cfg(feature = "multichain")]
             (Key::Confirm, Some("Chains")) => Screen::ChainSettings,
             (Key::Confirm, Some("Idle timeout")) => Screen::IdleTimeout,
@@ -2145,7 +2228,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Cancel => Screen::About,
             _ => Screen::Identity,
         },
-        Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
+        Screen::Utils => match (key, utils_items().get(cursor).copied()) {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
             (Key::Confirm, Some("USB Drive")) => Screen::UsbDrive,
             #[cfg(not(feature = "board-mk3"))]
@@ -2584,7 +2667,7 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
     match screen {
         Screen::Main => Some(main_items(no_seed)),
         Screen::Debug => Some(DEBUG_ITEMS),
-        Screen::Utils => Some(UTILS_ITEMS),
+        Screen::Utils => Some(utils_items()),
         Screen::BackupMenu => Some(BACKUP_ITEMS),
         Screen::SignMenu => Some(SIGN_ITEMS),
         Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
@@ -2725,6 +2808,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SdInstall => {}
         // Handled in `run`: it asks, then calls the bootloader; never drawn.
         Screen::WarmReset => {}
+        // Handled in `run`: `crate::policy` drives its own screens.
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SpendingPolicy | Screen::ExitTestDrive => {}
         // Handled in `run`: it drives its own screen, because moving a row is a key the
         // list screens do not have.
         #[cfg(feature = "multichain")]
@@ -10229,7 +10315,7 @@ fn import_xprv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
 }
 
 /// The outcome of entering one word during a restore.
-enum WordPick {
+pub(crate) enum WordPick {
     /// The chosen word, as its BIP-39 wordlist index.
     Word(u16),
     /// Back up to the previous word (or, at the first word, abandon the restore).
@@ -10297,7 +10383,7 @@ fn word_matches(word: &str, typed: &str) -> bool {
 /// eight for twenty-four. Typing still narrows it, and with nothing typed `y` lists the
 /// set as it stands. Stock does the same, and the 1920 words that cannot be right are
 /// 1920 chances to pick the wrong one.
-fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> WordPick {
+pub(crate) fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> WordPick {
     use catcard_wallet::bip39::wordlist::ENGLISH;
     // Enough to hold the candidates once a couple of letters have narrowed the list; the
     // pick screen is only offered when the true count is within this. The full last-word

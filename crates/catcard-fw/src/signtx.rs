@@ -841,6 +841,11 @@ pub(crate) fn review_and_sign(
         menu::wait_for_any_key(ui);
         return;
     }
+    // The Single-Signer Spending Policy, where one is in force: judged before anything
+    // is shown, refused with the reason, and the refusal recorded. See `crate::policy`.
+    if !crate::policy::enforce(gate, login, ui, &psbt, &owner, &summary) {
+        return;
+    }
     let mut ours = [0usize; MAX_INPUTS];
     // `mut` because the WIF pass below extends the set; on the mk3 that pass is compiled
     // out, so nothing there mutates it.
