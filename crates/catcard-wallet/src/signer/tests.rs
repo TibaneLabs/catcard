@@ -764,3 +764,291 @@ fn a_wif_key_signs_the_input_paying_its_own_address() {
     );
     assert!(matches!(got, Err(Error::Psbt(_))), "a foreign key signed");
 }
+
+// --- bare P2PK ---
+
+/// A PSBT spending one bare P2PK output paying `key` (33 or 65 bytes), with the previous
+/// transaction in full -- a legacy input has no other way to carry its amount -- and a
+/// derivation record for the key as given.
+fn p2pk_psbt(key: &[u8], steps: &[u32], fingerprint: [u8; 4], buf: &mut [u8]) -> usize {
+    let mut script = [0u8; P2PK_SCRIPT_MAX];
+    let n = p2pk_script(key, &mut script).unwrap();
+    let script = &script[..n];
+    // The previous transaction: one output of 60 000 to the P2PK script.
+    let prev_in = RawTxIn {
+        txid: [0x33; 32],
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_ffff,
+        witness: &[],
+    };
+    let prev = RawTx {
+        version: 2,
+        inputs: &[prev_in],
+        outputs: &[RawTxOut {
+            amount: 60_000,
+            script,
+        }],
+        locktime: 0,
+    };
+    let mut prev_raw = vec![0u8; prev.serialized_len()];
+    let m = prev.serialize_to_slice(&mut prev_raw).unwrap();
+    prev_raw.truncate(m);
+
+    let input = RawTxIn {
+        txid: prev.txid(),
+        vout: 0,
+        script_sig: &[],
+        sequence: 0xffff_fffe,
+        witness: &[],
+    };
+    let mut pay = [0u8; 25];
+    pay[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    pay[3..23].copy_from_slice(&[0x22; 20]);
+    pay[23..].copy_from_slice(&[0x88, 0xac]);
+    let tx = RawTx {
+        version: 2,
+        inputs: &[input],
+        outputs: &[RawTxOut {
+            amount: 50_000,
+            script: &pay,
+        }],
+        locktime: 0,
+    };
+    let mut a = [0u8; 2048];
+    let n = Psbt::create_to_slice(&tx, &mut a).unwrap();
+    let mut b = [0u8; 2048];
+    let n = Psbt::parse(&a[..n])
+        .unwrap()
+        .set_non_witness_utxo(0, &prev_raw, &mut b)
+        .unwrap();
+    Psbt::parse(&b[..n])
+        .unwrap()
+        .add_input_bip32_derivation(0, key, fingerprint, steps, buf)
+        .unwrap()
+}
+
+/// The legacy signature hash of input `index` of `psbt`'s transaction, by hand: the
+/// transaction re-serialised with `script_code` as this input's scriptSig and every other
+/// scriptSig empty, then the sighash type, double-SHA256'd. Independent of the code that
+/// signed, so a signature that verifies against this was made over this transaction.
+/// Source: Bitcoin `SignatureHash` (legacy) [C]
+fn legacy_digest(psbt: &Psbt<'_>, index: usize, script_code: &[u8], kind: u32) -> [u8; 32] {
+    let tx = psbt.unsigned_tx();
+    let mut pre = Vec::new();
+    pre.extend_from_slice(&tx.version().to_le_bytes());
+    pre.push(tx.input_count() as u8);
+    for (i, inp) in tx.inputs().enumerate() {
+        let mut txid = inp.txid;
+        txid.reverse();
+        pre.extend_from_slice(&txid);
+        pre.extend_from_slice(&inp.vout.to_le_bytes());
+        if i == index {
+            pre.push(script_code.len() as u8);
+            pre.extend_from_slice(script_code);
+        } else {
+            pre.push(0);
+        }
+        pre.extend_from_slice(&inp.sequence.to_le_bytes());
+    }
+    pre.push(tx.output_count() as u8);
+    for out in tx.outputs() {
+        pre.extend_from_slice(&out.amount.to_le_bytes());
+        pre.push(out.script.len() as u8);
+        pre.extend_from_slice(out.script);
+    }
+    pre.extend_from_slice(&tx.locktime().to_le_bytes());
+    pre.extend_from_slice(&kind.to_le_bytes());
+    crate::tx::sha256d(&pre)
+}
+
+/// A bare P2PK input of ours signs through the legacy sighash, and the signature both
+/// recovers our key and verifies over a digest computed here rather than by the signer.
+#[test]
+fn a_bare_p2pk_input_of_ours_is_signed_over_the_legacy_digest() {
+    use outscript::crypto::secp256k1::{parse_der_signature, recover_public_key};
+    let kw = KeyWork::host();
+    let pk = pubkey_at(&PATH);
+    let mut buf = [0u8; 4096];
+    let n = p2pk_psbt(&pk, &PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    // Recognised as paying this key, both by the record and by the script.
+    assert!(input_pays_key(&psbt, 0, &pk));
+    let mut requests = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    assert_eq!(key_requests(&psbt, 0, FINGERPRINT, &mut requests), Ok(1));
+    assert!(!requests[0].uncompressed());
+
+    let master = master();
+    let mut out = [0u8; 4096];
+    let len = sign_input(&psbt, 0, &master, FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&pk)
+        .expect("signature under the compressed key");
+    assert_eq!(*sig.last().unwrap(), 0x01);
+
+    // The independent check: the script code is the P2PK script itself.
+    let mut script = [0u8; P2PK_SCRIPT_MAX];
+    let m = p2pk_script(&pk, &mut script).unwrap();
+    let digest = legacy_digest(&psbt, 0, &script[..m], 1);
+    let (r, s) = parse_der_signature(&sig[..sig.len() - 1]).unwrap();
+    let key = SecpPublicKey::from_sec1(&pk).unwrap();
+    assert!(
+        key.verify(&digest, &r, &s),
+        "does not verify over the legacy digest"
+    );
+    let recovered = (0..4u8)
+        .filter_map(|recid| recover_public_key(&r, &s, recid, &digest).ok())
+        .any(|k| k.serialize_compressed() == pk);
+    assert!(recovered, "no recovery id yields our key");
+    // And not over the BIP-143 digest, which is not what a legacy input signs.
+    let wrong = {
+        use crate::tx::Transaction;
+        use crate::tx::sighash::{Midstates, bip143};
+        let tx = Transaction::parse(psbt.unsigned_tx().bytes()).unwrap();
+        let mid = Midstates::compute(&tx).unwrap();
+        bip143(&tx, &mid, 0, &script[..m], 60_000, 1).unwrap()
+    };
+    assert!(!key.verify(&wrong, &r, &s));
+
+    // The one signature is all a P2PK needs: it finalises to `<sig>` alone and extracts.
+    let mut fin = [0u8; 4096];
+    let (f, count) = signed.finalize_to_slice(&mut fin).unwrap();
+    assert_eq!(count, 1);
+    let done = Psbt::parse(&fin[..f]).unwrap();
+    let script_sig = done.input(0).unwrap().final_script_sig().unwrap();
+    assert_eq!(script_sig[0] as usize, sig.len());
+    assert_eq!(&script_sig[1..], sig);
+    let mut tx = [0u8; 1024];
+    assert!(done.extract_tx_to_slice(&mut tx).unwrap() > 60);
+}
+
+/// A P2PK script that pushes the 65-byte form of the key is the same key, named in a
+/// 65-byte derivation record; it derives, matches and signs, with the signature recorded
+/// under the form the script uses.
+#[test]
+fn a_p2pk_input_with_an_uncompressed_key_is_ours_too() {
+    let kw = KeyWork::host();
+    let pk = pubkey_at(&PATH);
+    let full = SecpPublicKey::from_sec1(&pk)
+        .unwrap()
+        .serialize_uncompressed();
+    let mut buf = [0u8; 4096];
+    let n = p2pk_psbt(&full, &PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+    let mut requests = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    assert_eq!(key_requests(&psbt, 0, FINGERPRINT, &mut requests), Ok(1));
+    assert!(requests[0].uncompressed());
+    assert_eq!(requests[0].pubkey(), &full[..]);
+    // The WIF-store question is asked with the compressed key, and still answered yes.
+    assert!(input_pays_key(&psbt, 0, &pk));
+    assert!(p2pk_pays(
+        &{
+            let mut s = [0u8; P2PK_SCRIPT_MAX];
+            let m = p2pk_script(&full, &mut s).unwrap();
+            s[..m].to_vec()
+        },
+        &pk
+    ));
+
+    let master = master();
+    let mut out = [0u8; 4096];
+    let len = sign_input(&psbt, 0, &master, FINGERPRINT, &mut out, &kw).unwrap();
+    let signed = Psbt::parse(&out[..len]).unwrap();
+    let sig = signed
+        .input(0)
+        .unwrap()
+        .partial_sig(&full)
+        .expect("signature under the uncompressed key");
+    let mut script = [0u8; P2PK_SCRIPT_MAX];
+    let m = p2pk_script(&full, &mut script).unwrap();
+    let digest = legacy_digest(&psbt, 0, &script[..m], 1);
+    let (r, s) = outscript::crypto::secp256k1::parse_der_signature(&sig[..sig.len() - 1]).unwrap();
+    assert!(
+        SecpPublicKey::from_sec1(&full)
+            .unwrap()
+            .verify(&digest, &r, &s)
+    );
+
+    // A 65-byte record naming a key the path does not derive is a mismatch, as for 33.
+    let other = pubkey_at(&[PATH[0], PATH[1], PATH[2], 0, 1]);
+    let wrong = SecpPublicKey::from_sec1(&other)
+        .unwrap()
+        .serialize_uncompressed();
+    let mut buf2 = [0u8; 4096];
+    let n2 = p2pk_psbt(&full, &PATH, FINGERPRINT, &mut buf2);
+    let n2 = Psbt::parse(&buf2[..n2])
+        .unwrap()
+        .remove_input_record(
+            0,
+            &{
+                let mut k = vec![in_key::BIP32_DERIVATION as u8];
+                k.extend_from_slice(&full);
+                k
+            },
+            &mut buf,
+        )
+        .unwrap();
+    let n2 = Psbt::parse(&buf[..n2])
+        .unwrap()
+        .add_input_bip32_derivation(0, &wrong, FINGERPRINT, &PATH, &mut buf2)
+        .unwrap();
+    let psbt = Psbt::parse(&buf2[..n2]).unwrap();
+    assert!(matches!(
+        sign_input(&psbt, 0, &master, FINGERPRINT, &mut out, &kw),
+        Err(Error::KeyMismatch | Error::Psbt(_))
+    ));
+}
+
+/// A P2PK input is legacy: a non-`ALL` type has no digest here and is refused even under
+/// the warn policy, as any legacy input is.
+#[test]
+fn a_p2pk_input_under_an_unusual_sighash_is_refused() {
+    let kw = KeyWork::host();
+    let pk = pubkey_at(&PATH);
+    let mut buf = [0u8; 4096];
+    let n = p2pk_psbt(&pk, &PATH, FINGERPRINT, &mut buf);
+    let mut typed = [0u8; 4096];
+    let n = Psbt::parse(&buf[..n])
+        .unwrap()
+        .set_sighash_type(0, 0x82, &mut typed)
+        .unwrap();
+    let psbt = Psbt::parse(&typed[..n]).unwrap();
+    let mut out = [0u8; 4096];
+    assert_eq!(
+        sign_input_under(
+            &psbt,
+            0,
+            &master(),
+            FINGERPRINT,
+            SighashPolicy::Warn,
+            &mut out,
+            &kw
+        ),
+        Err(Error::Sighash { kind: 0x82 })
+    );
+}
+
+/// The P2PK script template and its reader agree, and reject other lengths.
+#[test]
+fn the_p2pk_script_is_recognised_by_shape() {
+    let pk = pubkey_at(&PATH);
+    let mut s = [0u8; P2PK_SCRIPT_MAX];
+    let n = p2pk_script(&pk, &mut s).unwrap();
+    assert_eq!(n, 35);
+    assert_eq!(s[0], 0x21);
+    assert_eq!(s[34], 0xac);
+    assert_eq!(p2pk_key(&s[..n]), Some(&pk[..]));
+    assert_eq!(p2pk_key(&s[..n - 1]), None);
+    assert_eq!(p2pk_script(&pk[..32], &mut s), None);
+    // P2PKH is not P2PK.
+    let mut pkh = [0u8; 25];
+    pkh[..3].copy_from_slice(&[0x76, 0xa9, 0x14]);
+    pkh[23..].copy_from_slice(&[0x88, 0xac]);
+    assert_eq!(p2pk_key(&pkh), None);
+    assert!(!p2pk_pays(&pkh, &pk));
+}

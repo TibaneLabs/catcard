@@ -99,11 +99,19 @@ pub fn sighash_allowed_under(kind: u32, policy: SighashPolicy) -> bool {
 /// and bounded so a hostile PSBT cannot ask for an unbounded walk.
 pub const MAX_STEPS: usize = 12;
 
+/// Longest public key a derivation record names: 65 bytes, uncompressed.
+///
+/// BIP-174 allows either SEC1 form in a `BIP32_DERIVATION` key, and a bare P2PK output
+/// from before compressed keys were the norm pushes the uncompressed one. Source: BIP-174
+/// "`<33 or 65 byte pubkey>`" [C]
+pub const MAX_PUBKEY_LEN: usize = 65;
+
 /// One of our keys, as an input asks for it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct KeyRequest {
-    /// The public key the record names: 33 bytes compressed, or 32 x-only for taproot.
-    pub pubkey: [u8; 33],
+    /// The public key the record names: 33 bytes compressed, 65 uncompressed, or 32
+    /// x-only for taproot.
+    pub pubkey: [u8; MAX_PUBKEY_LEN],
     pub pubkey_len: usize,
     steps: [u32; MAX_STEPS],
     depth: usize,
@@ -114,7 +122,7 @@ pub struct KeyRequest {
 impl KeyRequest {
     /// A placeholder, for filling an array before [`key_requests`] writes into it.
     pub const EMPTY: Self = Self {
-        pubkey: [0; 33],
+        pubkey: [0; MAX_PUBKEY_LEN],
         pubkey_len: 0,
         steps: [0; MAX_STEPS],
         depth: 0,
@@ -128,6 +136,11 @@ impl KeyRequest {
 
     pub fn pubkey(&self) -> &[u8] {
         &self.pubkey[..self.pubkey_len]
+    }
+
+    /// Whether the record names the key in its uncompressed (65-byte) form.
+    pub fn uncompressed(&self) -> bool {
+        self.pubkey_len == MAX_PUBKEY_LEN
     }
 }
 
@@ -197,9 +210,14 @@ pub fn request_from_record(
     taproot: bool,
 ) -> Option<KeyRequest> {
     let key = rec.key_data();
-    // 33 bytes compressed for BIP-32 records, 32 x-only for taproot ones. Another length is
-    // a record this does not understand, not one to guess at.
-    if key.len() != if taproot { 32 } else { 33 } {
+    // 33 bytes compressed (or 65 uncompressed) for BIP-32 records, 32 x-only for taproot
+    // ones. Another length is a record this does not understand, not one to guess at.
+    let shape_ok = if taproot {
+        key.len() == 32
+    } else {
+        key.len() == 33 || key.len() == MAX_PUBKEY_LEN
+    };
+    if !shape_ok {
         return None;
     }
     // A taproot derivation value carries leaf hashes before the origin.
@@ -214,7 +232,7 @@ pub fn request_from_record(
         return None;
     }
     let (steps, depth) = steps_of(path)?;
-    let mut pubkey = [0u8; 33];
+    let mut pubkey = [0u8; MAX_PUBKEY_LEN];
     pubkey[..key.len()].copy_from_slice(key);
     Some(KeyRequest {
         pubkey,
@@ -308,8 +326,9 @@ fn varint_usize(value: &[u8]) -> Option<(usize, &[u8])> {
 /// The private key for `request`, if it really is ours.
 ///
 /// Derives down the path and compares the result with the key the record names -- x-only
-/// for a taproot record, compressed otherwise. A mismatch is [`Error::KeyMismatch`]: the
-/// host asked for a signature from a key that is not at the path it gave.
+/// for a taproot record, uncompressed for a 65-byte one, compressed otherwise. A mismatch
+/// is [`Error::KeyMismatch`]: the host asked for a signature from a key that is not at
+/// the path it gave.
 ///
 /// The returned key zeroizes its own copy of the secret on drop.
 pub fn match_key(
@@ -332,6 +351,8 @@ pub fn match_key(
     let ours = signer.key.public_key().serialize_compressed();
     let matches = if request.taproot {
         ours[1..] == *request.pubkey()
+    } else if request.uncompressed() {
+        signer.key.public_key().serialize_uncompressed()[..] == *request.pubkey()
     } else {
         ours[..] == *request.pubkey()
     };
@@ -377,6 +398,56 @@ impl Signer {
     pub fn public_key_bytes(&self) -> [u8; 33] {
         self.key.public_key().serialize_compressed()
     }
+
+    /// The uncompressed (65-byte) public key, for a bare P2PK script that pushes that form.
+    pub fn public_key_uncompressed(&self) -> [u8; MAX_PUBKEY_LEN] {
+        self.key.public_key().serialize_uncompressed()
+    }
+}
+
+/// The bare pay-to-public-key script for `pubkey` (33 or 65 bytes), written into `out`;
+/// returns its length, or `None` for a key of another length.
+///
+/// `<push> <key> OP_CHECKSIG`: the oldest output form there is, with no hash between the
+/// key and the coin. It has no address -- nothing encodes it -- so it is recognised by
+/// the script alone, and shown as "P2PK" and the key. The legacy sighash signs it, which
+/// `outscript` already does for any legacy script that pushes our key.
+/// Source: Bitcoin script `OP_CHECKSIG` (0xac); stock signs P2PK
+/// (hw-reference/firmware-features.md §3, §5) [C]
+pub fn p2pk_script(pubkey: &[u8], out: &mut [u8; P2PK_SCRIPT_MAX]) -> Option<usize> {
+    if !matches!(pubkey.len(), 33 | MAX_PUBKEY_LEN) {
+        return None;
+    }
+    out[0] = pubkey.len() as u8;
+    out[1..1 + pubkey.len()].copy_from_slice(pubkey);
+    out[1 + pubkey.len()] = 0xac;
+    Some(pubkey.len() + 2)
+}
+
+/// Longest P2PK script: a 65-byte key with its push byte and `OP_CHECKSIG`.
+pub const P2PK_SCRIPT_MAX: usize = 1 + MAX_PUBKEY_LEN + 1;
+
+/// Whether `script` is a bare P2PK output, and the key it pays, if so.
+pub fn p2pk_key(script: &[u8]) -> Option<&[u8]> {
+    match script {
+        [0x21, key @ .., 0xac] if key.len() == 33 => Some(key),
+        [0x41, key @ .., 0xac] if key.len() == MAX_PUBKEY_LEN => Some(key),
+        _ => None,
+    }
+}
+
+/// Whether `script` pays `pubkey` (compressed) through bare P2PK, in either SEC1 form.
+///
+/// Public work: the uncompressed form is the same point written out in full, and a script
+/// pushing that form is paid by the same key.
+pub fn p2pk_pays(script: &[u8], pubkey: &[u8; 33]) -> bool {
+    let Some(key) = p2pk_key(script) else {
+        return false;
+    };
+    if key.len() == 33 {
+        return key == pubkey;
+    }
+    SecpPublicKey::from_sec1(pubkey).is_ok_and(|pk| pk.serialize_uncompressed()[..] == *key)
 }
 
 impl PsbtSigner for Signer {
@@ -588,7 +659,8 @@ pub fn sign_input_with_secret(
     sign_with(psbt, index, &signer, kind, out)
 }
 
-/// Whether input `index` pays a single-signature address of `pubkey` (compressed).
+/// Whether input `index` pays a single-signature address of `pubkey` (compressed), or a
+/// bare P2PK script pushing it in either form.
 ///
 /// The chain pins which script the input spends -- [`Psbt::utxo`] checks the previous
 /// transaction's txid against this outpoint -- so this rebuilds the four single-sig
@@ -600,6 +672,9 @@ pub fn input_pays_key(psbt: &Psbt<'_>, index: usize, pubkey: &[u8; 33]) -> bool 
     let Ok(spent) = psbt.utxo(index) else {
         return false;
     };
+    if p2pk_pays(spent.script, pubkey) {
+        return true;
+    }
     [
         AddressKind::P2wpkh,
         AddressKind::P2shP2wpkh,
