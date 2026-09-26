@@ -255,6 +255,7 @@ version = "7.0.0"
 dependencies = [
  "catcard-callgate",
  "catcard-wallet",
+ "heapless",
  "purecrypto",
  "zeroize",
 ]

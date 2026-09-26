@@ -129,6 +129,28 @@ impl PinGate for BootloaderGate<'_> {
         // SAFETY: the wrapper builds and bounds its own MAX_PIN_LEN buffer.
         unsafe { self.gate.anti_phishing_words(prefix) }
     }
+
+    /// Gate 22 on mk4 and later. The mk3's bootloader has no method 22 (no second secure
+    /// element), so there it is refused here and never reaches the gate.
+    /// Source: hw-reference/trick-pin-slot-format.md "not present on Mk3" [C]
+    fn trick(
+        &self,
+        op: catcard_callgate::abi::TrickOp,
+        attempt: &PinAttempt,
+        slot: &mut catcard_callgate::trick::TrickSlot,
+    ) -> Result<i32, GateError> {
+        #[cfg(feature = "board-mk3")]
+        {
+            let _ = (op, attempt, slot);
+            Err(GateError::Failed(catcard_callgate::abi::err::BAD_REQUEST))
+        }
+        // SAFETY: the wrapper builds its own 408-byte buffer from a struct the bootloader
+        // signed; the caller (`Login::trick_request`) holds it only from a logged-in step.
+        #[cfg(not(feature = "board-mk3"))]
+        unsafe {
+            self.gate.trick_pins(op, attempt, slot)
+        }
+    }
 }
 
 /// Look up the anti-phishing indices in the BIP-39 English list.

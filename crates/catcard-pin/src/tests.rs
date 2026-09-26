@@ -38,6 +38,19 @@ struct Inner {
     greenlit: bool,
     /// The PIN field as it stood when the struct was last signed.
     signed_pin: Vec<u8>,
+    /// Trick slots: PIN, flags, arg, data, slot number.
+    tricks: Vec<ModelTrick>,
+    /// The session was opened by a trick PIN (the bootloader's hidden bit).
+    trick_session: Option<(u16, [u8; 64])>,
+}
+
+#[derive(Clone)]
+struct ModelTrick {
+    pin: Vec<u8>,
+    flags: u16,
+    arg: u16,
+    xdata: [u8; 64],
+    slot: usize,
 }
 
 impl Model {
@@ -58,6 +71,8 @@ impl Model {
                 refuse_image: false,
                 greenlit: false,
                 signed_pin: Vec::new(),
+                tricks: Vec::new(),
+                trick_session: None,
             }),
         }
     }
@@ -137,11 +152,44 @@ impl PinGate for Model {
             }
             PinOp::Login => {
                 let n = a.pin_len as usize;
-                let expected: &[u8] = if inner.set_pin.is_empty() {
-                    self.correct
+                let expected: Vec<u8> = if inner.set_pin.is_empty() {
+                    self.correct.to_vec()
                 } else {
-                    &inner.set_pin
+                    inner.set_pin.clone()
                 };
+                // A trick PIN, as `pin_login_attempt` handles one (trick-pin-slot-format.md
+                // §2.1): its effect first, then a login that reports success.
+                let found = inner.tricks.iter().find(|t| a.pin[..n] == *t.pin).cloned();
+                if let Some(t) = found {
+                    use catcard_callgate::trick::{censor, tc};
+                    if t.flags & tc::WIPE != 0 {
+                        inner.secret = [0; SECRET_LEN];
+                    }
+                    if t.flags & tc::FAKE_OUT != 0 {
+                        a.state_flags = 0;
+                        a.attempts_left = inner.attempts_left;
+                        a.num_fails = inner.num_fails;
+                        self.sign(&mut inner, a);
+                        return Err(GateError::Pin(err::AUTH_FAIL));
+                    }
+                    let delta = t.flags & tc::DELTA_MODE != 0;
+                    let pure_wipe = t.flags & tc::WIPE != 0
+                        && t.flags & (tc::WORD_WALLET | tc::XPRV_WALLET) == 0;
+                    a.state_flags = state::SUCCESSFUL;
+                    if !delta && (t.xdata[..32].iter().all(|&b| b == 0) || pure_wipe) {
+                        a.state_flags |= state::ZERO_SECRET;
+                    }
+                    a.num_fails = 0;
+                    a.attempts_left = MAX_ATTEMPTS;
+                    a.delay_required = u32::from(censor(t.flags));
+                    a.delay_achieved = if delta { 0 } else { u32::from(t.arg) };
+                    inner.trick_session = Some((t.flags, t.xdata));
+                    self.sign(&mut inner, a);
+                    return Ok(0);
+                }
+                inner.trick_session = None;
+                a.delay_required = 0;
+                a.delay_achieved = 0;
                 let ok = !inner.blank && a.pin[..n] == *expected;
                 if ok {
                     inner.num_fails = 0;
@@ -281,11 +329,86 @@ impl PinGate for Model {
                 if a.state_flags & state::SUCCESSFUL == 0 {
                     return Err(GateError::Pin(err::PIN_REQUIRED));
                 }
-                a.secret = inner.secret;
+                a.secret = match inner.trick_session {
+                    Some((flags, xdata))
+                        if flags & catcard_callgate::trick::tc::DELTA_MODE == 0 =>
+                    {
+                        catcard_callgate::trick::duress_secret(flags, &xdata)
+                    }
+                    _ => inner.secret,
+                };
                 self.sign(&mut inner, a);
                 Ok(0)
             }
             _ => Err(GateError::Pin(err::BAD_REQUEST)),
+        }
+    }
+
+    fn trick(&self, op: TrickOp, a: &PinAttempt, slot: &mut TrickSlot) -> Result<i32, GateError> {
+        use catcard_callgate::trick::{NUM_TRICKS, blank_mask};
+        let mut inner = self.inner.borrow_mut();
+        // `pin_check_logged_in`: a signed struct, from a successful login.
+        if !self.validate(&inner, a) {
+            return Err(GateError::Pin(err::HMAC_FAIL));
+        }
+        if a.state_flags & state::SUCCESSFUL == 0 {
+            return Err(GateError::Pin(err::WRONG_SUCCESS));
+        }
+        // A trick session: the real seed goes, and nothing else happens (§4).
+        if inner.trick_session.is_some() {
+            inner.secret = [0; SECRET_LEN];
+            return Ok(if op == TrickOp::GetByPin { 2 } else { 0 });
+        }
+        let used = inner
+            .tricks
+            .iter()
+            .fold(0u32, |m, t| m | blank_mask(t.slot, t.flags).unwrap());
+        let blank = ((1u32 << NUM_TRICKS) - 1) & !used;
+        match op {
+            TrickOp::ClearAll => {
+                inner.tricks.clear();
+                Ok(0)
+            }
+            TrickOp::GetByPin => {
+                let n = slot.pin_len as usize;
+                let pin = slot.pin[..n].to_vec();
+                *slot = TrickSlot::new();
+                slot.blank_slots = blank;
+                match inner.tricks.iter().find(|t| t.pin == pin) {
+                    Some(t) => {
+                        slot.slot_num = t.slot as i32;
+                        slot.tc_flags = t.flags;
+                        slot.tc_arg = t.arg;
+                        slot.xdata = t.xdata;
+                        Ok(0)
+                    }
+                    None => {
+                        slot.slot_num = -1;
+                        Ok(2)
+                    }
+                }
+            }
+            TrickOp::Save => {
+                if slot.blank_slots != 0 {
+                    let m = slot.blank_slots;
+                    inner.tricks.retain(|t| m & (1 << t.slot) == 0);
+                    return Ok(0);
+                }
+                let s = slot.slot_num as usize;
+                if blank_mask(s, slot.tc_flags).is_none() {
+                    return Err(GateError::Pin(err::RANGE_ERR));
+                }
+                let n = slot.pin_len as usize;
+                inner.tricks.retain(|t| t.slot != s);
+                inner.tricks.push(ModelTrick {
+                    pin: slot.pin[..n].to_vec(),
+                    flags: slot.tc_flags,
+                    arg: slot.tc_arg,
+                    xdata: slot.xdata,
+                    slot: s,
+                });
+                Ok(0)
+            }
         }
     }
 
@@ -1011,4 +1134,167 @@ fn greenlight_on_a_stale_struct_asks_for_setup() {
     assert_eq!(login.greenlight(&g), Err(Failure::NeedsSetup));
     assert!(matches!(login.step(), Step::Failed(Failure::NeedsSetup)));
     assert!(!g.inner.borrow().greenlit);
+}
+
+// -- trick PINs -------------------------------------------------------------------------
+
+fn with_trick(m: &Model, pin: &[u8], flags: u16, arg: u16, xdata: [u8; 64], slot: usize) {
+    m.inner.borrow_mut().tricks.push(ModelTrick {
+        pin: pin.to_vec(),
+        flags,
+        arg,
+        xdata,
+        slot,
+    });
+}
+
+#[test]
+fn a_duress_login_looks_exactly_like_the_real_one_and_opens_the_decoy() {
+    use catcard_callgate::trick::{duress_secret, tc};
+    let m = Model::new(b"12-3456");
+    let mut x = [0u8; 64];
+    x[..16].fill(0xAA);
+    with_trick(&m, b"11-22", tc::WORD_WALLET, 2001, x, 5);
+
+    let (mut real, step) = login_with(&m, b"12", b"3456");
+    assert_eq!(step, Step::In { zero_secret: false });
+    assert_eq!(real.reported_trick(), None);
+    assert_eq!(real.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
+
+    let (mut duress, step) = login_with(&m, b"11", b"22");
+    // Same step, same (absent) report: the firmware cannot tell, by design.
+    assert_eq!(step, Step::In { zero_secret: false });
+    assert_eq!(duress.reported_trick(), None);
+    let s = duress.fetch_secret(&m).unwrap();
+    assert_eq!(s, duress_secret(tc::WORD_WALLET, &x));
+    assert_eq!(s[0], 0x80);
+}
+
+#[test]
+fn the_tricks_the_firmware_acts_on_are_reported_and_nothing_else_is() {
+    use crate::trick::{Effect, effect};
+    use catcard_callgate::trick::tc;
+    let m = Model::new(b"12-3456");
+    with_trick(&m, b"20-20", tc::DELTA_MODE, 0x1234, [0; 64], 0);
+    with_trick(&m, b"30-30", tc::FW_DEFINED | tc::WIPE, 1, [0; 64], 1);
+    with_trick(&m, b"40-40", tc::COUNTDOWN, 60, [0; 64], 2);
+    with_trick(&m, b"50-50", tc::BLANK_WALLET, 0, [0; 64], 3);
+
+    let (l, _) = login_with(&m, b"20", b"20");
+    // Delta: flag visible, argument (the real digits) not.
+    assert_eq!(l.reported_trick(), Some((tc::DELTA_MODE, 0)));
+    assert_eq!(effect(tc::DELTA_MODE, 0), Effect::Delta);
+
+    let (l, step) = login_with(&m, b"30", b"30");
+    // The wipe is censored away; the unlock is not.
+    assert_eq!(l.reported_trick(), Some((tc::FW_DEFINED, 1)));
+    assert_eq!(step, Step::In { zero_secret: true });
+    let (f, a) = l.reported_trick().unwrap();
+    assert_eq!(effect(f, a), Effect::PolicyUnlock);
+
+    let (l, _) = login_with(&m, b"40", b"40");
+    let (f, a) = l.reported_trick().unwrap();
+    assert_eq!(effect(f, a), Effect::Countdown { minutes: 60 });
+
+    let (l, step) = login_with(&m, b"50", b"50");
+    assert_eq!(step, Step::In { zero_secret: true });
+    let (f, a) = l.reported_trick().unwrap();
+    assert_eq!(effect(f, a), Effect::LookBlank);
+
+    // And the real PIN afterwards reports nothing: the struct is not left carrying the
+    // last trick's flags.
+    let (l, _) = login_with(&m, b"12", b"3456");
+    assert_eq!(l.reported_trick(), None);
+}
+
+#[test]
+fn a_report_that_does_not_fit_sixteen_bits_is_no_report() {
+    let mut a = PinAttempt::new();
+    a.delay_required = 0x1_0000;
+    assert_eq!(reported_trick(&a), None);
+    a.delay_required = 0x0400;
+    a.delay_achieved = 0x1_0000;
+    assert_eq!(reported_trick(&a), None);
+    a.delay_achieved = 0;
+    assert_eq!(reported_trick(&a), Some((0x0400, 0)));
+}
+
+#[test]
+fn a_pretend_wrong_trick_is_a_wrong_pin_to_the_firmware() {
+    use catcard_callgate::trick::tc;
+    let m = Model::new(b"12-3456");
+    with_trick(&m, b"66-66", tc::WIPE | tc::FAKE_OUT, 0, [0; 64], 0);
+    let (l, step) = login_with(&m, b"66", b"66");
+    assert!(matches!(step, Step::Wrong { .. }));
+    assert_eq!(l.reported_trick(), None);
+}
+
+#[test]
+fn trick_management_needs_a_login() {
+    let m = Model::new(b"12-3456");
+    let mut l = Login::new(&m);
+    let mut slot = TrickSlot::lookup(b"11-22").unwrap();
+    assert_eq!(
+        l.trick_request(&m, TrickOp::GetByPin, &mut slot),
+        Err(Failure::Code(err::PIN_REQUIRED))
+    );
+}
+
+#[test]
+fn save_look_up_and_blank_a_trick() {
+    use catcard_callgate::trick::{blank_mask, tc};
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+
+    let mut q = TrickSlot::lookup(b"11-22").unwrap();
+    assert_eq!(l.trick_request(&m, TrickOp::GetByPin, &mut q), Ok(2));
+    assert_eq!(q.slot(), None);
+    assert_eq!(q.blank_slots, (1 << 14) - 1);
+
+    let mut s = TrickSlot::lookup(b"11-22").unwrap();
+    s.slot_num = 5;
+    s.tc_flags = tc::WORD_WALLET;
+    s.tc_arg = 1001;
+    s.xdata[..32].fill(3);
+    assert_eq!(l.trick_request(&m, TrickOp::Save, &mut s), Ok(0));
+
+    let mut q = TrickSlot::lookup(b"11-22").unwrap();
+    assert_eq!(l.trick_request(&m, TrickOp::GetByPin, &mut q), Ok(0));
+    assert_eq!(q.slot(), Some(5));
+    assert_eq!(q.tc_arg, 1001);
+    assert_eq!(q.blank_slots & (0b11 << 5), 0);
+
+    let mut b = TrickSlot::blanking(blank_mask(5, tc::WORD_WALLET).unwrap());
+    assert_eq!(l.trick_request(&m, TrickOp::Save, &mut b), Ok(0));
+    let mut q = TrickSlot::lookup(b"11-22").unwrap();
+    assert_eq!(l.trick_request(&m, TrickOp::GetByPin, &mut q), Ok(2));
+    // The session survives: the struct was sent, never changed.
+    assert!(matches!(l.step(), Step::In { .. }));
+    assert_eq!(l.fetch_secret(&m).unwrap(), [7; SECRET_LEN]);
+}
+
+#[test]
+fn from_a_trick_session_the_bootloader_takes_the_real_seed() {
+    // trick-pin-slot-format.md §4: case 22 in trick mode clears the MCU key and finds
+    // nothing. Modelled so a firmware path that calls gate 22 unasked shows up here.
+    use catcard_callgate::trick::tc;
+    let m = Model::new(b"12-3456");
+    with_trick(&m, b"11-22", tc::WORD_WALLET, 1001, [1; 64], 0);
+    let (mut l, _) = login_with(&m, b"11", b"22");
+    let mut q = TrickSlot::lookup(b"11-22").unwrap();
+    assert_eq!(l.trick_request(&m, TrickOp::GetByPin, &mut q), Ok(2));
+    assert_eq!(m.inner.borrow().secret, [0; SECRET_LEN]);
+}
+
+#[test]
+fn the_current_pin_is_recognised_without_a_gate_call() {
+    let m = Model::new(b"12-3456");
+    let (l, _) = login_with(&m, b"12", b"3456");
+    assert!(l.is_current_pin(b"12-3456"));
+    assert!(!l.is_current_pin(b"12-345"));
+    assert!(!l.is_current_pin(b"12-34567"));
+    assert!(!l.is_current_pin(b"11-3456"));
+    // Not logged in: never.
+    let fresh = Login::new(&m);
+    assert!(!fresh.is_current_pin(b"12-3456"));
 }

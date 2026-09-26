@@ -20,7 +20,9 @@
 //! - **It does not decide how many attempts are left.** `attempts_left` is read back
 //!   from the bootloader after every call; it is never inferred locally.
 //! - **It cannot tell a duress login from a real one.** That is by design in the
-//!   bootloader (§7), so no API here pretends to distinguish them.
+//!   bootloader (§7), so no API here pretends to distinguish them. A trick PIN whose
+//!   effect the firmware must carry out (delta mode, the policy unlock, a countdown)
+//!   reports *that* and nothing more: see [`Login::reported_trick`] and [`trick`].
 //! - **It does not retry.** Every failed login costs one of thirteen attempts against a
 //!   monotonic counter in the secure element. Automatic retry would spend a user's
 //!   device.
@@ -29,10 +31,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use catcard_callgate::Error as GateError;
-use catcard_callgate::abi::{PinOp, err};
+use catcard_callgate::abi::{PinOp, TrickOp, err};
 use catcard_callgate::pin::{MAX_PIN_LEN, PinAttempt, PinTooLong, SECRET_LEN};
+use catcard_callgate::trick::TrickSlot;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub mod trick;
 pub mod words;
 
 /// The separator between the prefix and the suffix, as the bootloader hashes it.
@@ -154,6 +158,14 @@ pub trait PinGate {
     fn pin_attempt(&self, op: PinOp, attempt: &mut PinAttempt) -> Result<i32, GateError>;
     /// Callgate 16: 32 bits derived from the PIN prefix.
     fn anti_phishing(&self, prefix: &[u8]) -> Result<u32, GateError>;
+    /// Callgate 22: trick PINs, with the session's signed struct (sent, not changed).
+    /// mk4 and later; the mk3 has no such method.
+    fn trick(
+        &self,
+        op: TrickOp,
+        attempt: &PinAttempt,
+        slot: &mut TrickSlot,
+    ) -> Result<i32, GateError>;
 }
 
 /// A login in progress.
@@ -177,6 +189,11 @@ pub struct Login {
     words: Option<words::Words>,
     #[zeroize(skip)]
     step: Step,
+    /// What the last successful login reported about a trick: `(flags, arg)`, taken from
+    /// `delay_required`/`delay_achieved` the moment the login returned. `None` for the
+    /// real PIN -- and for every trick the bootloader does not report, which is the point.
+    #[zeroize(skip)]
+    reported: Option<(u16, u16)>,
 }
 
 impl Login {
@@ -197,7 +214,58 @@ impl Login {
             prefix_len: 0,
             words: None,
             step,
+            reported: None,
         }
+    }
+
+    /// What the last successful login reported about a trick PIN, as `(flags, arg)`:
+    /// the censored `tc_flags` and the `tc_arg`. `None` for the real PIN, and for every
+    /// trick whose effect the bootloader keeps to itself -- a duress wallet, a wipe.
+    /// [`trick::effect`] says what to do with it.
+    ///
+    /// Source: hw-reference/trick-pin-slot-format.md §2.2 [C]
+    pub fn reported_trick(&self) -> Option<(u16, u16)> {
+        self.reported
+    }
+
+    /// Whether `pin` (`prefix-suffix`) is the PIN this session logged in with.
+    ///
+    /// For the Trick PINs screens, which must refuse a trick PIN equal to the main one
+    /// without spending an attempt to find out. Constant-time over the whole field: when
+    /// it differs, not where. Only meaningful from [`Step::In`]; `false` otherwise.
+    pub fn is_current_pin(&self, pin: &[u8]) -> bool {
+        use purecrypto::ct::ConstantTimeEq;
+        if !matches!(self.step, Step::In { .. }) || pin.len() > MAX_PIN_LEN {
+            return false;
+        }
+        let mut theirs = [0u8; MAX_PIN_LEN];
+        theirs[..pin.len()].copy_from_slice(pin);
+        let same_bytes: bool = theirs[..].ct_eq(&self.attempt.pin[..]).into();
+        theirs.zeroize();
+        same_bytes && self.attempt.pin_len == pin.len() as i32
+    }
+
+    /// Callgate 22 with this session's signed struct. Only from [`Step::In`].
+    ///
+    /// Returns the gate's answer: `Ok(0)` done or found, `Ok(other)` not found. **From a
+    /// session a trick PIN opened, the bootloader erases the real seed before answering**
+    /// (trick-pin-slot-format.md §4) -- this cannot know whether that is the case, so the
+    /// firmware calls it only when the person has asked for trick management.
+    pub fn trick_request<G: PinGate>(
+        &mut self,
+        gate: &G,
+        op: TrickOp,
+        slot: &mut TrickSlot,
+    ) -> Result<i32, Failure> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Err(Failure::Code(err::PIN_REQUIRED));
+        }
+        gate.trick(op, &self.attempt, slot)
+            .map_err(|e| match classify(e) {
+                Step::Failed(f) => f,
+                Step::Bricked => Failure::Code(err::I_AM_BRICK),
+                _ => Failure::Code(0),
+            })
     }
 
     /// What the caller should do next.
@@ -412,6 +480,10 @@ impl Login {
                 num_fails: self.attempt.num_fails,
             },
             Err(e) => classify(e),
+        };
+        self.reported = match self.step {
+            Step::In { .. } => reported_trick(&self.attempt),
+            _ => None,
         };
         Ok(self.step)
     }
@@ -728,6 +800,21 @@ impl Login {
         out[p + 1..p + 1 + suffix.len()].copy_from_slice(suffix);
         p + 1 + suffix.len()
     }
+}
+
+/// What a successful login's struct says about a trick: `delay_required` is the
+/// censored `tc_flags`, `delay_achieved` the `tc_arg` (zero in delta mode). A real login
+/// zeroes both (`set_is_trick(args, NULL)`), so zero flags is "no trick to act on".
+///
+/// Both fields are 32-bit and the values they carry 16-bit: a value that does not fit is
+/// not something the reference describes, and is reported as nothing rather than
+/// truncated into a flag word that means something.
+///
+/// Source: hw-reference/trick-pin-slot-format.md §2.1-§2.3 [C]
+fn reported_trick(a: &PinAttempt) -> Option<(u16, u16)> {
+    let flags = u16::try_from(a.delay_required).ok()?;
+    let arg = u16::try_from(a.delay_achieved).ok()?;
+    (flags != 0).then_some((flags, arg))
 }
 
 /// Map a gate error onto the step it leaves the caller in.
