@@ -1282,8 +1282,6 @@ pub(crate) fn sign_message_screen(
         return;
     }
     drop(got);
-    // TODO(integrator): `sign_to_file` is the one text-taking entry point signmsg has
-    // today; if the message-signing work replaces it, this is the call to follow.
     let Some(file) = crate::signmsg::sign_to_file(gate, login, ui, HEAD, message.as_str()) else {
         return;
     };
@@ -1320,7 +1318,8 @@ pub(crate) fn import_multisig_screen(
         menu::wait_for_any_key(ui);
         return;
     };
-    if !looks_like_multisig(text) {
+    // The one detector the scanner and the card use (`sniff::Content::MultisigConfig`).
+    if !crate::msimport::looks_like_config(text) {
         menu::message(
             ui.panel,
             HEAD,
@@ -1331,12 +1330,6 @@ pub(crate) fn import_multisig_screen(
         return;
     }
     crate::msimport::from_text(gate, login, ui, text);
-}
-
-/// Whether `text` has the shape of a multisig descriptor or a Coldcard-style config: a
-/// `multi(`/`sortedmulti(` somewhere, or the config's `Policy:` line.
-fn looks_like_multisig(text: &str) -> bool {
-    text.contains("multi(") || text.lines().any(|l| l.trim_start().starts_with("Policy:"))
 }
 
 /// NFC Tools → Import Words: a 12/18/24-word phrase a phone writes to the tag, put in
