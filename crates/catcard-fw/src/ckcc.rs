@@ -29,8 +29,16 @@
 //! # What is not here
 //!
 //! Key injection, the debug monitor, pairing and the host-wallet opcodes are CatCard-mode
-//! only. HSM, backup over USB, stock's factory opcodes and the miniscript ones stock
-//! itself does not dispatch are answered with the protocol's own errors. `docs/USB.md` lists every opcode and what it gets.
+//! only. Backup over USB, stock's factory opcodes and the miniscript ones stock itself
+//! does not dispatch are answered with the protocol's own errors. `docs/USB.md` lists
+//! every opcode and what it gets.
+//!
+//! # HSM mode
+//!
+//! The HSM opcodes (`hsms`, `hsts`, `gslr`, `nwur`, `rmur`, `user`) are jobs like the rest,
+//! answered by `crate::hsm` on the UI task. While HSM mode runs, [`Desk`] lets through only
+//! stock's whitelist, uploads only PSBTs, and [`serve`] answers every job by the policy
+//! instead of a person: nothing waits on a key. See `docs/USB.md`, "HSM mode".
 
 use core::fmt::Write as _;
 
@@ -72,6 +80,14 @@ const MK3_HEAP_UPLOAD: u32 = 16 * 1024;
 
 /// Characters of a base58 extended key, with room.
 const XPUB_LEN: usize = 112;
+
+/// Largest PSBT: what HSM mode lets an upload be. Source: usb-ckcc-protocol.md §3.2
+/// `MAX_TXN_LEN` on Mk4/5 [C]
+const MAX_TXN_LEN: u32 = 2 << 20;
+
+/// Longest username a request may carry, in bytes: sixteen characters of UTF-8.
+/// Source: hsm-policy-format.md §2.1 `MAX_USERNAME_LEN` [C]
+pub(crate) const NAME_BYTES: usize = 4 * catcard_settings::hsmusers::MAX_USERNAME_LEN;
 
 // ---------------------------------------------------------------------------------------
 // What the UI task learns once per wallet
@@ -130,6 +146,39 @@ impl Drop for Secret {
     fn drop(&mut self) {
         // SAFETY: every byte written is 0, which keeps the string valid UTF-8.
         unsafe { self.0.as_mut_vec().zeroize() };
+    }
+}
+
+/// A `user` request's token -- a six-digit code, or a password's HMAC -- wiped when
+/// dropped. Source: usb-ckcc-protocol.md §4.2, 6 to 32 bytes [C]
+pub(crate) struct Token {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl Token {
+    fn new(b: &[u8]) -> Option<Self> {
+        let (lo, hi) = catcard_settings::hsmusers::TOKEN_LEN;
+        if !(lo..=hi).contains(&b.len()) {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        bytes[..b.len()].copy_from_slice(b);
+        Some(Self {
+            bytes,
+            len: b.len(),
+        })
+    }
+
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
     }
 }
 
@@ -210,7 +259,7 @@ impl Store {
 
     /// The bytes as a signing flow takes them: the memory, and where the upload starts in
     /// it. `None` for the mk3's SPI-NOR, which holds only images.
-    fn into_host_buf(self) -> Option<(HostBuf, usize)> {
+    pub(crate) fn into_host_buf(self) -> Option<(HostBuf, usize)> {
         match self {
             #[cfg(not(feature = "board-mk3"))]
             Store::Psram(a) => {
@@ -242,6 +291,8 @@ impl Store {
 // ---------------------------------------------------------------------------------------
 
 /// Work for the UI task.
+// The HSM jobs are built on every board and answered only where there is HSM mode.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
 pub(crate) enum Job {
     /// Sign the session key with the master key, for the host's MitM check.
     Mitm([u8; 32]),
@@ -276,6 +327,25 @@ pub(crate) enum Job {
     Enroll { store: Store, len: u32 },
     /// Log out (`logo`) or restart (`rebo`), once the reply has gone.
     Logout { reboot: bool },
+    /// `hsms`: check a policy -- the uploaded one, or the stored one -- answer, then put
+    /// it in front of the person.
+    HsmStart { upload: Option<(Store, u32)> },
+    /// `hsts`: the status report.
+    HsmStatus,
+    /// `nwur`: make a user. `secret` is `None` when the device is to pick it.
+    NewUser {
+        mode: u8,
+        name: heapless::String<NAME_BYTES>,
+        secret: Option<catcard_settings::hsmusers::Secret>,
+    },
+    /// `rmur`.
+    RemoveUser { name: heapless::String<NAME_BYTES> },
+    /// `user`: queued for the next PSBT in HSM mode, checked at once outside it.
+    UserAuth {
+        totp_time: u32,
+        name: heapless::String<NAME_BYTES>,
+        token: Token,
+    },
 }
 
 /// Which poll a finished job answers.
@@ -314,10 +384,14 @@ pub(crate) enum Answer {
     Failed(&'static str),
     /// Done, nothing to say.
     Okay,
+    /// An `asci` reply too long for [`Answer::Reply`]: the status report. `len` bytes of
+    /// text in the block.
+    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    Asci(crate::heap::Block, usize),
 }
 
 impl Answer {
-    fn reply(build: impl FnOnce(&mut [u8]) -> Option<usize>) -> Self {
+    pub(crate) fn reply(build: impl FnOnce(&mut [u8]) -> Option<usize>) -> Self {
         let mut v = heapless::Vec::new();
         let mut tmp = [0u8; 160];
         match build(&mut tmp) {
@@ -428,6 +502,36 @@ fn hobbled() -> bool {
     HOBBLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether HSM mode is running. Set by `crate::hsm` on the UI task, read here by the USB
+/// task's gate and by the flows that must not wait on a person while it runs. Never set on
+/// the mk3, which has no HSM mode.
+static HSM_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the HSM commands are answered: the owner's Spending Policy → HSM Mode switch
+/// (`cat_hsmcmd`), or HSM mode itself running.
+static HSM_COMMANDS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether HSM mode is running: nothing may wait on a person, and the USB whitelist is in
+/// force. False on the mk3.
+pub(crate) fn hsm_active() -> bool {
+    HSM_ACTIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Put HSM mode's state where the USB task and the flows can see it. `crate::hsm` only.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn set_hsm_active(on: bool) {
+    HSM_ACTIVE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The owner's HSM commands switch, as the preferences read it.
+pub(crate) fn set_hsm_commands(on: bool) {
+    HSM_COMMANDS.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn hsm_commands() -> bool {
+    HSM_COMMANDS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 impl Desk {
     pub(crate) fn new() -> Self {
         Self {
@@ -535,10 +639,14 @@ impl Desk {
                 let Some(buf) = self.buffer() else {
                     return;
                 };
-                let n = match &answer {
+                let n = match answer {
                     Answer::Reply(r) => {
-                        buf[..r.len()].copy_from_slice(r);
+                        buf[..r.len()].copy_from_slice(&r);
                         r.len()
+                    }
+                    Answer::Asci(mut text, len) => {
+                        let body = &text.bytes()[..len];
+                        reply::asci(buf, body).unwrap_or(0)
                     }
                     Answer::Failed(why) => reply::err(buf, why).unwrap_or(0),
                     Answer::Refused => reply::refused(buf).unwrap_or(0),
@@ -561,7 +669,7 @@ impl Desk {
                     Answer::Xpub(x) => Done::Asci(x),
                     Answer::Refused => Done::Refused,
                     Answer::Failed(why) => Done::Failed(why),
-                    Answer::Okay | Answer::Reply(_) => Done::Okay,
+                    Answer::Okay | Answer::Reply(_) | Answer::Asci(..) => Done::Okay,
                 };
                 self.slot = Slot::Done { kind, done };
             }
@@ -788,6 +896,11 @@ impl Desk {
         if !cx.unlocked && !free_before_pin {
             return reply::err(buf, "Not ready: enter the PIN on the device");
         }
+        // HSM mode: stock's whitelist, and nothing else. Source: §4.3 `HSM_WHITELIST` [C]
+        let hsm = hsm_active();
+        if hsm && !req.allowed_in_hsm() {
+            return reply::err(buf, "Not allowed in HSM mode");
+        }
         let hobbled_refuses = matches!(
             req,
             Request::Enroll { .. }
@@ -796,11 +909,17 @@ impl Desk {
                 | Request::Passphrase(_)
                 | Request::PassphrasePoll
                 | Request::Restore { .. }
-        ) || matches!(req, Request::Bag(a) if !a.is_empty());
+        ) || matches!(req, Request::Bag(a) if !a.is_empty())
+            || req.is_hsm_command();
         if hobbled_refuses && hobbled() {
             // Stock lets `pass` through when the policy's `okeys` allows it; this
             // firmware's policy has no such allowance, so it is refused like the rest.
             return reply::err(buf, "Spending policy in effect");
+        }
+        // The HSM commands, only with the owner's switch on -- or in HSM mode, which that
+        // switch or the policy itself put the device in. Source: §4.3 `HSM_DISABLE_CMDS` [C]
+        if req.is_hsm_command() && !hsm && !hsm_commands() {
+            return reply::err(buf, "HSM commands disabled");
         }
 
         // On the mk3 a large upload sits in the SPI-NOR the settings store shares, and it
@@ -993,15 +1112,78 @@ impl Desk {
                 }
             }
             Request::PassphrasePoll => self.poll(buf, Kind::Pass),
-            // HSM: not built. A later package puts HSM mode on this transport; until then
-            // these answer as a stock device with its `hsmcmd` setting off does.
-            // Source: usb-ckcc-protocol.md §4.3 HSM_DISABLE_CMDS [C]
-            Request::HsmStart(_)
-            | Request::HsmStatus
-            | Request::StorageLocker
-            | Request::NewUser { .. }
-            | Request::RemoveUser { .. }
-            | Request::UserAuth { .. } => reply::err(buf, "HSM commands disabled"),
+            // HSM. Source: usb-ckcc-protocol.md §4 [C]; what each does is `crate::hsm`.
+            Request::HsmStart(args) => {
+                let upload = match args {
+                    None => None,
+                    Some((len, sha)) => {
+                        let sha = *sha;
+                        if !wire::HSM_POLICY_LEN.contains(&len) {
+                            return reply::err(buf, "Bad length");
+                        }
+                        if let Err(why) = self.whole_upload(len, &sha) {
+                            return reply::err(buf, why);
+                        }
+                        let Some(store) = self.store.take() else {
+                            return reply::err(buf, "Nothing uploaded");
+                        };
+                        Some((store, len))
+                    }
+                };
+                self.hold(buf, enc, Job::HsmStart { upload })
+            }
+            Request::HsmStatus => self.hold(buf, enc, Job::HsmStatus),
+            // The Storage Locker: no policy this firmware accepts allows a read (see
+            // `catcard_settings::hsm`), and stock answers it only in HSM mode.
+            Request::StorageLocker => reply::err(
+                buf,
+                if hsm {
+                    "Storage Locker not supported"
+                } else {
+                    "HSM not active"
+                },
+            ),
+            Request::NewUser { mode, name, secret } => {
+                let Some(name) = name_of(name) else {
+                    return reply::err(buf, "Bad username");
+                };
+                let secret = if secret.is_empty() {
+                    None
+                } else {
+                    match catcard_settings::hsmusers::Secret::new(secret) {
+                        Some(s) => Some(s),
+                        None => return reply::err(buf, "Bad secret length"),
+                    }
+                };
+                self.hold(buf, enc, Job::NewUser { mode, name, secret })
+            }
+            Request::RemoveUser { name } => {
+                let Some(name) = name_of(name) else {
+                    return reply::err(buf, "Bad username");
+                };
+                self.hold(buf, enc, Job::RemoveUser { name })
+            }
+            Request::UserAuth {
+                totp_time,
+                name,
+                token,
+            } => {
+                let Some(name) = name_of(name) else {
+                    return reply::err(buf, "Bad username");
+                };
+                let Some(token) = Token::new(token) else {
+                    return reply::err(buf, "Bad token length");
+                };
+                self.hold(
+                    buf,
+                    enc,
+                    Job::UserAuth {
+                        totp_time,
+                        name,
+                        token,
+                    },
+                )
+            }
             // Not in this firmware: backup and restore over USB (the card does both), and
             // stock's factory DFU entry, which a locked bench unit could not take anyway.
             // Answered as stock answers a command it does not have.
@@ -1110,6 +1292,10 @@ impl Desk {
             // Under the spending policy only a PSBT may be uploaded. Source: §3.2 [C]
             if hobbled() && !data.starts_with(b"psbt\xff") {
                 return Err("Spending policy in effect");
+            }
+            // And in HSM mode: a binary PSBT, no larger than one. Source: §3.2 [C]
+            if hsm_active() && (!data.starts_with(b"psbt\xff") || total > MAX_TXN_LEN) {
+                return Err("Not allowed in HSM mode");
             }
             // A new file: whatever was held for the last one goes first, so its memory
             // is free to take.
@@ -1279,6 +1465,14 @@ impl Desk {
     }
 }
 
+/// A username off the wire, as text that fits.
+fn name_of(b: &[u8]) -> Option<heapless::String<NAME_BYTES>> {
+    let s = core::str::from_utf8(b).ok()?;
+    let mut n = heapless::String::new();
+    n.push_str(s).ok()?;
+    Some(n)
+}
+
 /// The single-key address type an `AF_*` code names.
 fn kind_of(fmt: u32) -> Option<AddressKind> {
     use wire::af;
@@ -1316,6 +1510,11 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     let Some((ticket, job)) = crate::usbtask::ck_take() else {
         return;
     };
+    // HSM mode: the policy answers, not a person.
+    #[cfg(not(feature = "board-mk3"))]
+    if hsm_active() {
+        return unattended(gate, login, ui, ticket, job);
+    }
     match job {
         Job::Logout { reboot } => {
             use catcard_callgate::abi::LogoutMode;
@@ -1347,12 +1546,12 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             let a = xpub(gate, login, ui, &path);
             crate::usbtask::ck_finish(ticket, a);
         }
-        Job::Show { kind, path } => show(gate, login, ui, ticket, kind, &path),
+        Job::Show { kind, path } => show(gate, login, ui, ticket, kind, &path, true),
         Job::MultisigCheck { m, n, xor } => {
             let a = multisig_check(gate, login, ui, m, n, xor);
             crate::usbtask::ck_finish(ticket, a);
         }
-        Job::P2sh { args, len } => p2sh(gate, login, ui, ticket, args, len),
+        Job::P2sh { args, len } => p2sh(gate, login, ui, ticket, args, len, true),
         Job::SignTx {
             store,
             len,
@@ -1378,6 +1577,122 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             enroll(gate, login, ui, store, len);
             crate::usbtask::ck_finish(ticket, Answer::Okay);
         }
+        #[cfg(not(feature = "board-mk3"))]
+        Job::HsmStart { upload } => crate::hsm::start_from_host(gate, login, ui, ticket, upload),
+        #[cfg(not(feature = "board-mk3"))]
+        Job::HsmStatus => {
+            let a = crate::hsm::status(gate, login, ui);
+            crate::usbtask::ck_finish(ticket, a);
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        Job::NewUser { mode, name, secret } => {
+            crate::hsm::new_user(gate, login, ui, ticket, mode, &name, secret)
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        Job::RemoveUser { name } => {
+            let a = crate::hsm::remove_user(gate, login, ui, &name);
+            crate::usbtask::ck_finish(ticket, a);
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        Job::UserAuth {
+            totp_time,
+            name,
+            token,
+        } => {
+            let a = crate::hsm::user_auth(gate, login, ui, totp_time, &name, &token);
+            crate::usbtask::ck_finish(ticket, a);
+        }
+        // Never queued on the mk3: its gate answers them first.
+        #[cfg(feature = "board-mk3")]
+        Job::HsmStart { .. }
+        | Job::HsmStatus
+        | Job::NewUser { .. }
+        | Job::RemoveUser { .. }
+        | Job::UserAuth { .. } => {
+            crate::usbtask::ck_finish(ticket, Answer::Failed("HSM commands disabled"))
+        }
+    }
+}
+
+/// A job in HSM mode: answered by the policy, with nothing on the screen that waits.
+///
+/// What a person would have been asked is asked of `crate::hsm` instead -- signing by the
+/// rules, messages by `msg_paths`, keys and addresses by `share_xpubs` / `share_addrs` --
+/// and everything the USB gate should not have let through is refused again here.
+/// Source: hsm-policy-format.md §3.1, usb-ckcc-protocol.md §3.6, §4.3 [C]
+#[cfg(not(feature = "board-mk3"))]
+fn unattended(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    ticket: u32,
+    job: Job,
+) {
+    const DENIED: &str = "Not allowed in HSM mode";
+    let done = |a: Answer| crate::usbtask::ck_finish(ticket, a);
+    match job {
+        Job::Logout { reboot: false } => {
+            use catcard_callgate::abi::LogoutMode;
+            crate::catlog!("ckcc: computer asked to log out of HSM mode");
+            for _ in 0..50 {
+                let _ = crate::usbtask::pump();
+                // SAFETY: reads RCC; the clocks have been up since boot.
+                unsafe { catcard_hal::dwt::delay_ms(10) };
+            }
+            login.zeroize();
+            // SAFETY: nothing after this runs; the bootloader wipes SRAM.
+            unsafe { gate.logout(LogoutMode::Logout) }
+        }
+        Job::Mitm(key) => done(mitm(gate, login, ui, &key)),
+        Job::Xpub(path) => {
+            if crate::hsm::may_share_xpub(&path.steps[..path.depth as usize]) {
+                done(xpub(gate, login, ui, &path));
+            } else {
+                done(Answer::Failed(DENIED));
+            }
+        }
+        Job::Show { kind, path } => {
+            if crate::hsm::may_share_address(&path.steps[..path.depth as usize]) {
+                show(gate, login, ui, ticket, kind, &path, false);
+            } else {
+                done(Answer::Failed(DENIED));
+            }
+        }
+        Job::P2sh { args, len } => {
+            if crate::hsm::may_share_p2sh() {
+                p2sh(gate, login, ui, ticket, args, len, false);
+            } else {
+                done(Answer::Failed(DENIED));
+            }
+        }
+        Job::MultisigCheck { m, n, xor } => done(multisig_check(gate, login, ui, m, n, xor)),
+        Job::SignTx {
+            store,
+            len,
+            sha,
+            finalize,
+        } => {
+            let a = sign_tx(gate, login, ui, ticket, store, len, &sha, finalize);
+            done(a);
+        }
+        Job::SignMsg { kind, path, msg } => {
+            let a = sign_msg(gate, login, ui, ticket, kind, &path, &msg);
+            done(a);
+        }
+        Job::HsmStatus => done(crate::hsm::status(gate, login, ui)),
+        Job::UserAuth {
+            totp_time,
+            name,
+            token,
+        } => done(crate::hsm::user_auth(
+            gate, login, ui, totp_time, &name, &token,
+        )),
+        Job::Logout { reboot: true }
+        | Job::Passphrase(_)
+        | Job::Enroll { .. }
+        | Job::HsmStart { .. }
+        | Job::NewUser { .. }
+        | Job::RemoveUser { .. } => done(Answer::Failed(DENIED)),
     }
 }
 
@@ -1521,6 +1836,7 @@ fn show(
     ticket: u32,
     kind: AddressKind,
     path: &Path,
+    on_screen: bool,
 ) {
     let key = match derive(gate, login, ui, path) {
         Ok(k) => k,
@@ -1537,6 +1853,10 @@ fn show(
         Err(_) => return crate::usbtask::ck_finish(ticket, Answer::Failed("Address failed")),
     };
     crate::usbtask::ck_finish(ticket, Answer::reply(|b| reply::asci(b, &a[..n])));
+    // In HSM mode nobody is at the screen to clear it.
+    if !on_screen {
+        return;
+    }
     let addr = core::str::from_utf8(&a[..n]).unwrap_or("?");
     let p = path.text();
     use catcard_ui::scroll::Line;
@@ -1586,6 +1906,7 @@ fn p2sh(
     ticket: u32,
     mut args: crate::heap::Block,
     len: usize,
+    on_screen: bool,
 ) {
     use catcard_wallet::multisig::{Kind as MsKind, MAX_SCRIPT};
     const H: u32 = 0x8000_0000;
@@ -1654,6 +1975,9 @@ fn p2sh(
     };
     let (m, total) = (w.m, w.n());
     done(Answer::reply(|b| reply::asci(b, &a[..n])));
+    if !on_screen {
+        return;
+    }
     let addr = core::str::from_utf8(&a[..n]).unwrap_or("?");
     let mut what: heapless::String<40> = heapless::String::new();
     let _ = write!(what, "{m}-of-{total} multisig, {branch}/{index}");
@@ -1696,16 +2020,31 @@ fn sign_tx(
             return Answer::Failed("Checksum");
         }
     }
-    menu::ask(
-        ui.panel,
-        "Computer asks",
-        "you to sign a",
-        "Bitcoin transaction",
-    );
-    if !menu::confirmed(ui) || !crate::usbtask::host_alive(ticket) {
+    // In HSM mode the policy is asked instead of a person, inside the review
+    // (`crate::hsm::judge_tx`), against this request's digest.
+    #[cfg(not(feature = "board-mk3"))]
+    let unattended = hsm_active();
+    #[cfg(feature = "board-mk3")]
+    let unattended = false;
+    if !unattended {
+        menu::ask(
+            ui.panel,
+            "Computer asks",
+            "you to sign a",
+            "Bitcoin transaction",
+        );
+        if !menu::confirmed(ui) {
+            return Answer::Refused;
+        }
+    }
+    if !crate::usbtask::host_alive(ticket) {
         return Answer::Refused;
     }
+    #[cfg(not(feature = "board-mk3"))]
+    crate::hsm::note_request(unattended.then_some(*sha));
     let outcome = crate::signtx::host_sign(gate, login, ui, held, at, len, &[], ticket, true);
+    #[cfg(not(feature = "board-mk3"))]
+    crate::hsm::note_request(None);
     match outcome {
         crate::hostwallet::Outcome::Declined => Answer::Refused,
         crate::hostwallet::Outcome::Refused(why) => Answer::Failed(why),
@@ -1773,7 +2112,20 @@ fn sign_msg(
     if !crate::usbtask::host_alive(ticket) {
         return Answer::Refused;
     }
-    match crate::signmsg::sign_for_host(gate, login, ui, text, kind, dpath) {
+    // HSM mode: `msg_paths` decides, and nobody is asked. Source: hsm-policy-format.md
+    // §1.3 `msg_paths`, §3.1 `approve_msg_sign` [C]
+    #[cfg(not(feature = "board-mk3"))]
+    let ask = if hsm_active() {
+        if !crate::hsm::approve_message(&path.steps[..path.depth as usize]) {
+            return Answer::Refused;
+        }
+        false
+    } else {
+        true
+    };
+    #[cfg(feature = "board-mk3")]
+    let ask = true;
+    match crate::signmsg::sign_for_host(gate, login, ui, text, kind, dpath, ask) {
         Some((address, sig)) => Answer::MsgSigned { address, sig },
         None => Answer::Refused,
     }

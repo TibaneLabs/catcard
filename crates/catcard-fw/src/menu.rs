@@ -296,6 +296,13 @@ enum Screen {
     /// Settings -> Spending Policy: the single-signer policy and hobbled mode.
     #[cfg(not(feature = "board-mk3"))]
     SpendingPolicy,
+    /// Main menu -> Start HSM Mode: the stored HSM policy, approved (`crate::hsm`). The
+    /// Q1 reaches it from Settings -> Spending Policy instead.
+    #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+    HsmStart,
+    /// Danger zone -> Wipe HSM Policy.
+    #[cfg(not(feature = "board-mk3"))]
+    HsmWipe,
     /// The main menu's `EXIT TEST DRIVE`, while a policy is on trial.
     #[cfg(not(feature = "board-mk3"))]
     ExitTestDrive,
@@ -387,6 +394,11 @@ enum Screen {
 /// handful of things a person came to do.
 const MAIN_ITEMS: &[&str] = &[
     "Sign",
+    // Stock's row, in stock's place after Ready To Sign, while a policy is stored. Not on
+    // the Q1, whose main menu is a grid and this row has no icon: there it is under
+    // Settings -> Spending Policy. Source: menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+    #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+    "Start HSM Mode",
     "Addresses",
     #[cfg(feature = "board-q1")]
     "Notes",
@@ -503,6 +515,10 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
 /// turned on -- Secure notes, and Hardware On/Off.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
 fn main_row_shown(label: &str) -> bool {
+    #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+    if label == "Start HSM Mode" {
+        return crate::hsm::policy_stored() && crate::hsm::available();
+    }
     #[cfg(feature = "board-q1")]
     if label == "Notes" {
         return crate::prefs::current().notes == Some(true);
@@ -690,6 +706,10 @@ const DANGER_ITEMS: &[&str] = &[
     "Settings Space",
     "Bless Firmware",
     "DFU Upgrade",
+    // Stock shows it only while a policy is stored; here it is always listed and says so
+    // when there is none. Source: menu-map-mk4-mk5-q1-v5.6.2.md §DZ [C]
+    #[cfg(not(feature = "board-mk3"))]
+    "Wipe HSM Policy",
 ];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
@@ -1163,6 +1183,10 @@ pub fn run(session: Session<'_>) -> ! {
         // The spending policy, from the same warm key: it decides which rows the very
         // first frame has.
         crate::policy::load(gate, login, &mut ui);
+        // A stored HSM policy that boots into HSM mode does so now, before any menu.
+        // `crate::hsm::at_login`; the screen itself is entered at the top of the loop.
+        #[cfg(not(feature = "board-mk3"))]
+        crate::hsm::at_login(gate, login, &mut ui);
         // Home Menu XFP "always": the header row needs the number before the first
         // frame, and the login fetch is still warm. Only where that row exists.
         #[cfg(not(feature = "board-q1"))]
@@ -1175,6 +1199,20 @@ pub fn run(session: Session<'_>) -> ! {
     }
 
     loop {
+        // HSM mode replaces the menus until it is left (`crate::hsm::run` returns only for
+        // the boot code). Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §A
+        // `goto_top_menu`: "HSM active -> HSM UX object" [C]
+        #[cfg(not(feature = "board-mk3"))]
+        if crate::ckcc::hsm_active() {
+            if screen == Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            crate::hsm::run(gate, login, &mut ui);
+            screen = Screen::Main;
+            showing_offer = false;
+            redraw = true;
+            continue;
+        }
         if redraw
             && !showing_offer
             && showing_pair.is_none()
@@ -1648,6 +1686,13 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::ExitTestDrive => returns(|a| crate::policy::exit_test_drive(a.ui)),
+        #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+        Screen::HsmStart => to(
+            |a| crate::hsm::start_screen(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::HsmWipe => to(|a| crate::hsm::wipe_screen(a.ui), Screen::DangerZone),
         #[cfg(feature = "multichain")]
         Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
@@ -2099,6 +2144,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Main => match (key, main_items(no_seed).get(cursor).copied()) {
             // A wallet is present: the first cell signs a transaction from the SD card.
             (Key::Confirm, Some("Sign")) => Screen::SignMenu,
+            #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+            (Key::Confirm, Some("Start HSM Mode")) => Screen::HsmStart,
             // The first two cells on a blank device, where there is nothing to sign and
             // nothing to explore.
             (Key::Confirm, Some("New")) => Screen::NewSeedMenu,
@@ -2199,6 +2246,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Settings Space")) => Screen::SettingsSpace,
             (Key::Confirm, Some("Bless Firmware")) => Screen::BlessFirmware,
             (Key::Confirm, Some("DFU Upgrade")) => Screen::DfuUpgrade,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Wipe HSM Policy")) => Screen::HsmWipe,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
@@ -2904,6 +2953,11 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: `crate::policy` drives its own screens.
         #[cfg(not(feature = "board-mk3"))]
         Screen::SpendingPolicy | Screen::ExitTestDrive => {}
+        // Handled in `run`: `crate::hsm` drives its own screens.
+        #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+        Screen::HsmStart => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::HsmWipe => {}
         // Handled in `run`: it drives its own screen, because moving a row is a key the
         // list screens do not have.
         #[cfg(feature = "multichain")]
@@ -9771,6 +9825,11 @@ pub(crate) fn cancel_pressed(ui: &mut Ui<'_>) -> bool {
 }
 
 pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
+    // HSM mode: nobody is at the keypad, and a flow the policy drives must not stop for
+    // one. Every "any key" returns at once. `crate::hsm`
+    if crate::ckcc::hsm_active() {
+        return;
+    }
     wait_for_release(ui);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -9791,6 +9850,10 @@ pub(crate) fn wait_for_any_key(ui: &mut Ui<'_>) {
 /// Any other key keeps waiting. This is asked before something irreversible, and "a key
 /// was pressed" is not consent — [`wait_for_any_key`] is the one that takes anything.
 pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
+    // HSM mode: no person answers, so every question is a no. `crate::hsm`
+    if crate::ckcc::hsm_active() {
+        return false;
+    }
     // The key that brought us to this question must not also answer it. That matters
     // most here: one of the questions this asks destroys a stored wallet.
     wait_for_release(ui);
@@ -9816,6 +9879,9 @@ pub(crate) fn confirmed(ui: &mut Ui<'_>) -> bool {
 /// of habit does not answer it. Cancel is no; every other key keeps waiting.
 #[cfg(not(feature = "board-mk3"))]
 pub(crate) fn confirmed_by_digit(ui: &mut Ui<'_>, digit: u8) -> bool {
+    if crate::ckcc::hsm_active() {
+        return false;
+    }
     wait_for_release(ui);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -13028,6 +13094,10 @@ fn run_doc(
     require_end: bool,
     wrap: bool,
 ) -> DocExit {
+    // HSM mode: as `confirmed` -- nobody reads, nobody answers.
+    if crate::ckcc::hsm_active() {
+        return DocExit::Cancelled;
+    }
     let mut screen = DocScreen::new(ui, lines, scramble, require_end, wrap);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

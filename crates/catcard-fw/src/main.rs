@@ -71,9 +71,12 @@ mod guard;
 /// The heap: one region, lent out a block at a time.
 mod heap;
 mod help;
+// HSM mode, over the ckcc protocol: needs the settings store.
 /// A computer asking for addresses or a signature over the encrypted USB channel, and
 /// the person at the device deciding.
 mod hostwallet;
+#[cfg(not(feature = "board-mk3"))]
+mod hsm;
 /// Logging out after a while with nobody touching it.
 mod identity;
 mod idle;

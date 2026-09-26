@@ -156,6 +156,35 @@ pub(crate) fn registered(
     parsed
 }
 
+/// Each registered wallet's name, with its place in the list [`registered`] returns --
+/// the wallets whose descriptors parse, in the stored order -- so a wallet a review found
+/// by index can be named. For HSM rules, which name wallets (`crate::hsm`).
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn for_each_name(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    mut f: impl FnMut(usize, &str),
+) {
+    let Some(mut doc) = crate::heap::take(SCRATCH) else {
+        return;
+    };
+    let mut list = [Wallet {
+        name: "",
+        descriptor: "",
+    }; wallets::MAX_WALLETS];
+    let Ok(have) = load(gate, login, panel, doc.bytes(), &mut list) else {
+        return;
+    };
+    let mut at = 0;
+    for w in &list[..have] {
+        if multisig::parse(w.descriptor).is_ok() {
+            f(at, w.name);
+            at += 1;
+        }
+    }
+}
+
 /// The registered wallet named exactly `name`, for a BIP-21 `wallet=` search.
 ///
 /// Answers which of the wallets carries the name ([`wallets::Named`]) and, when exactly

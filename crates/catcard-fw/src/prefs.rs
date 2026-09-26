@@ -94,6 +94,9 @@ pub(crate) struct Prefs {
     /// Name the fingerprint at the top of the home menu even in the root wallet.
     /// Honoured by `crate::menu::main_items` on the boards whose menu carries that row.
     pub home_xfp: bool,
+    /// Whether the ckcc HSM commands are answered (Spending Policy → HSM Mode). Honoured by
+    /// `crate::ckcc`'s dispatch, through [`crate::ckcc::set_hsm_commands`].
+    pub hsm_commands: bool,
 }
 
 impl Prefs {
@@ -136,6 +139,7 @@ impl Default for Prefs {
             ms_unsorted: false,
             ms_full_addr: false,
             home_xfp: false,
+            hsm_commands: false,
         }
     }
 }
@@ -162,6 +166,7 @@ static mut CURRENT: Prefs = Prefs {
     ms_unsorted: false,
     ms_full_addr: false,
     home_xfp: false,
+    hsm_commands: false,
 };
 
 /// What the wallet in force is set to.
@@ -192,6 +197,7 @@ fn apply(next: Prefs) {
     // The old per-wallet port switch counts only while no device-wide USB mode is set.
     crate::usbtask::wallet_port(next.usb_port);
     crate::usbtask::set_keyboard(next.keyboard_emu);
+    crate::ckcc::set_hsm_commands(next.hsm_commands);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
     // and there is nothing to apply.
     #[cfg(feature = "board-q1")]
@@ -275,6 +281,7 @@ pub(crate) fn load(
         ms_unsorted: prefs::ms_unsorted(&doc),
         ms_full_addr: prefs::ms_full_addr(&doc),
         home_xfp: prefs::home_xfp(&doc),
+        hsm_commands: prefs::hsm_commands(&doc),
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}, xfp {}",

@@ -815,9 +815,24 @@ pub(crate) fn review_and_sign(
         }
     };
 
+    // HSM mode: the policy decides instead of a person, below. `crate::hsm`.
+    #[cfg(not(feature = "board-mk3"))]
+    let unattended = crate::ckcc::hsm_active();
+    #[cfg(feature = "board-mk3")]
+    let unattended = false;
+
     // A BIP-322 proof of reserves -- one 0-sat `OP_RETURN` output, spending `to_spend` --
     // is a proof and not a spend, and gets its own review: what it attests to, and that
     // nothing leaves. `por::review` owns it from here.
+    //
+    // Not in HSM mode: stock gates these by `msg_paths`, but which path of a proof is
+    // matched is not given, so HSM mode refuses them outright. `[?]` docs/USB.md
+    #[cfg(not(feature = "board-mk3"))]
+    if unattended && crate::por::is_proof_of_reserves(&psbt) {
+        crate::hsm::refuse_request("BIP-322 proofs are not signed in HSM mode");
+        sink.decline();
+        return;
+    }
     if crate::por::is_proof_of_reserves(&psbt) {
         return crate::por::review(
             gate,
@@ -843,7 +858,9 @@ pub(crate) fn review_and_sign(
     let wallets: &[catcard_wallet::multisig::Multisig] = {
         let registered = crate::msimport::registered(gate, login, ui.panel);
         let trust = crate::prefs::current().multisig_trust;
-        if trust == catcard_settings::prefs::MultisigTrust::VerifyOnly {
+        // HSM rules name registered wallets: in HSM mode nothing a PSBT merely describes
+        // is added, whatever the owner's trust setting says.
+        if trust == catcard_settings::prefs::MultisigTrust::VerifyOnly || unattended {
             registered
         } else {
             // `registered` has just filled the store the trust step appends to.
@@ -942,6 +959,13 @@ pub(crate) fn review_and_sign(
         menu::wait_for_any_key(ui);
         return;
     }
+    // HSM mode: the policy's rules instead of the review, and the refusal counted and kept
+    // for the status report. Nothing below then waits on a key. See `crate::hsm`.
+    #[cfg(not(feature = "board-mk3"))]
+    if unattended && crate::hsm::judge_tx(gate, login, ui, &psbt, &owner, &summary).is_err() {
+        sink.decline();
+        return;
+    }
     // The Single-Signer Spending Policy, where one is in force: judged before anything
     // is shown, refused with the reason, and the refusal recorded. See `crate::policy`.
     if !crate::policy::enforce(gate, login, ui, &psbt, &owner, &summary) {
@@ -1007,7 +1031,9 @@ pub(crate) fn review_and_sign(
     // output, so whoever holds it can attach it to a transaction paying anyone. The other
     // types get "Caution". Source: hw-reference/help-and-warning-screens.md "sighash NONE
     // on our input", "Other non-ALL sighash" [C]
-    if summary.odd_count > 0 {
+    // In HSM mode the policy has already judged these: they are warnings, refused unless
+    // `warnings_ok` (`crate::hsm::judge_tx`).
+    if summary.odd_count > 0 && !unattended {
         drop(busy);
         if !warn_odd_sighash(ui, &summary) {
             sink.decline();
@@ -1035,7 +1061,7 @@ pub(crate) fn review_and_sign(
             )
         })
     };
-    if !review(ui, &psbt, &summary, signable, unlisted, &mut fill) {
+    if !unattended && !review(ui, &psbt, &summary, signable, unlisted, &mut fill) {
         sink.decline();
         menu::message(ui.panel, HEAD, "not signed", "any key to go back");
         menu::wait_for_any_key(ui);
@@ -1051,8 +1077,17 @@ pub(crate) fn review_and_sign(
 
     // CCC: a spend from a registered wallet that key C is in is judged against key C's
     // policy, and key C signs beside our key only if it passes. See `crate::ccc`.
+    //
+    // Not in HSM mode: key C's own policy screens want a person, and an HSM policy says
+    // nothing about key C. Our key signs alone.
     #[cfg(not(feature = "board-mk3"))]
-    let cosigner = match crate::ccc::decide(gate, login, ui, &psbt, &owner, &summary) {
+    let decision = if unattended {
+        crate::ccc::Decision::Alone
+    } else {
+        crate::ccc::decide(gate, login, ui, &psbt, &owner, &summary)
+    };
+    #[cfg(not(feature = "board-mk3"))]
+    let cosigner = match decision {
         crate::ccc::Decision::Alone => None,
         crate::ccc::Decision::CoSign(c) => Some(c),
         crate::ccc::Decision::Refused => {

@@ -539,13 +539,36 @@ mod imp {
         mut pool: Option<&mut catcard_entropy::EntropyPool>,
     ) {
         loop {
-            let Some(row) =
-                menu::pick_row(ui, HEAD, "", &["Single-Signer", "Co-Sign Multisig (CCC)"])
-            else {
+            // Stock's HSM rows follow: `HSM Mode` (the HSM commands switch) and, while it
+            // is on, `User Management`. On the Q1, whose main menu has no room for it,
+            // `Start HSM Mode` is here too while a policy is stored.
+            // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV, §B3 [C]
+            let mut rows: heapless::Vec<&str, 5> = heapless::Vec::new();
+            let _ = rows.push("Single-Signer");
+            let _ = rows.push("Co-Sign Multisig (CCC)");
+            if crate::hsm::available() {
+                let _ = rows.push("HSM Mode");
+                if crate::prefs::current().hsm_commands {
+                    let _ = rows.push("User Management");
+                }
+                #[cfg(feature = "board-q1")]
+                if crate::hsm::policy_stored() {
+                    let _ = rows.push("Start HSM Mode");
+                }
+            }
+            let Some(row) = menu::pick_row(ui, HEAD, "", &rows) else {
                 return;
             };
-            match row {
-                0 => single_signer(gate, login, ui),
+            match rows[row] {
+                "Single-Signer" => single_signer(gate, login, ui),
+                "HSM Mode" => crate::hsm::commands_screen(gate, login, ui),
+                "User Management" => crate::hsm::users_screen(gate, login, ui),
+                "Start HSM Mode" => {
+                    crate::hsm::start_screen(gate, login, ui);
+                    if crate::ckcc::hsm_active() {
+                        return;
+                    }
+                }
                 _ => crate::ccc::screen(gate, login, ui, pool.as_deref_mut()),
             }
         }

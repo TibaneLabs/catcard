@@ -485,6 +485,7 @@ pub(crate) fn sign_for_host(
     text: &str,
     kind: AddressKind,
     path: DerivationPath,
+    ask: bool,
 ) -> Option<(
     heapless::String<{ address::MAX_ADDRESS_LEN }>,
     [u8; message::SIG_LEN],
@@ -494,7 +495,7 @@ pub(crate) fn sign_for_host(
         path,
         format: Format::Legacy,
     };
-    let signed = sign_with_key(gate, login, ui, "Sign message", text, &choice)?;
+    let signed = sign_with_key(gate, login, ui, "Sign message", text, &choice, ask)?;
     // Base64 of 65 bytes, decoded back: the armoured form is what the rest of this module
     // keeps, and the self-check in `sign_secret` has already recovered the key from it.
     let mut raw = [0u8; message::SIG_LEN + 3];
@@ -569,7 +570,7 @@ fn sign_with(
     who: &Who,
 ) -> Option<Signed> {
     match who {
-        Who::Key(choice) => sign_with_key(gate, login, ui, head, text, choice),
+        Who::Key(choice) => sign_with_key(gate, login, ui, head, text, choice, true),
         #[cfg(not(feature = "board-mk3"))]
         Who::Cosigner { at, branch, index } => {
             sign_as_cosigner(gate, login, ui, head, text, *at, *branch, *index)
@@ -577,7 +578,9 @@ fn sign_with(
     }
 }
 
-/// [`sign_with`] for one of this wallet's own keys.
+/// [`sign_with`] for one of this wallet's own keys. `ask` is false only in HSM mode, where
+/// the policy has already approved it (`crate::hsm::approve_message`) and nobody is there
+/// to press a key.
 fn sign_with_key(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -585,6 +588,7 @@ fn sign_with_key(
     head: &str,
     text: &str,
     choice: &Choice,
+    ask: bool,
 ) -> Option<Signed> {
     let master = menu::unlock_master(gate, login, ui, head)?;
 
@@ -618,7 +622,7 @@ fn sign_with_key(
     let _ = write!(path, "{}", choice.path);
     let mut how: heapless::String<48> = heapless::String::new();
     let _ = write!(how, "{}, {}", kind_label(choice.kind), choice.format.name());
-    if !confirm(ui, head, text, &address, &path, &how) {
+    if ask && !confirm(ui, head, text, &address, &path, &how) {
         drop(leaf);
         return None;
     }

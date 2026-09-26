@@ -682,6 +682,68 @@ impl Files {
     }
 }
 
+/// Whole files on the volume beside the settings slots -- stock keeps its HSM policy there
+/// (`crate::hsm`). The mk3's slots are raw sectors, with nowhere to put a file.
+#[cfg(not(feature = "board-mk3"))]
+impl Files {
+    /// Read `path` into `buf`. `Ok(None)` when there is no such file; an error when it is
+    /// larger than `buf` or will not read, rather than a truncated copy.
+    pub(crate) fn read_file(
+        &mut self,
+        path: &str,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, MediumError> {
+        let mut file = match self.vol.open_file(path) {
+            Ok(f) => f,
+            Err(e) if e.is_not_found() => return Ok(None),
+            Err(_) => return Err(MediumError),
+        };
+        let len = file.len() as usize;
+        if len > buf.len() {
+            return Err(MediumError);
+        }
+        let mut got = 0;
+        while got < len {
+            match file.read(&mut self.vol, &mut buf[got..len]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => return Err(MediumError),
+            }
+        }
+        if got != len {
+            return Err(MediumError);
+        }
+        Ok(Some(got))
+    }
+
+    /// The size of `path`, or `None` when there is no such file.
+    pub(crate) fn file_len(&mut self, path: &str) -> Option<usize> {
+        self.vol.open_file(path).ok().map(|f| f.len() as usize)
+    }
+
+    /// Write `bytes` as the whole of `path`, replacing what was there.
+    pub(crate) fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), MediumError> {
+        let mut file = self
+            .vol
+            .open_or_create_file(path)
+            .map_err(|_| MediumError)?;
+        file.write_all(&mut self.vol, bytes)
+            .map_err(|_| MediumError)?;
+        file.set_len(&mut self.vol, bytes.len() as u32)
+            .map_err(|_| MediumError)?;
+        file.sync(&mut self.vol).map_err(|_| MediumError)
+    }
+
+    /// Remove `path`. Already gone is success.
+    pub(crate) fn remove_file(&mut self, path: &str) -> Result<(), MediumError> {
+        match self.vol.remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => Ok(()),
+            Err(_) => Err(MediumError),
+        }
+    }
+}
+
 #[cfg(not(feature = "board-mk3"))]
 impl Slots for Files {
     fn count(&self) -> u32 {
