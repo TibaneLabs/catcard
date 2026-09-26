@@ -1,4 +1,4 @@
-//! Checking a signed-message file from the card.
+//! Checking a signed-message file, or an export's `.sig` sidecar, from the card.
 //!
 //! The other half of [`crate::signmsg`], and the half that needs no key at all: a
 //! signature is public, so nothing here unlocks the secure element or asks for a PIN.
@@ -10,7 +10,10 @@
 //! - the signature is recovered or verified against the message *in that file*, so a
 //!   signature moved onto other text fails;
 //! - the key that comes out is measured against the address *in that file*, so a signature
-//!   made by another key fails.
+//!   made by another key fails;
+//! - when the message is a sidecar's file list, each named file is read from the same
+//!   directory and hashed, so an export edited after it was signed is reported as changed
+//!   -- per file, before the signature's own verdict.
 //!
 //! Both schemes [`catcard_wallet::signfile`] reads are checked here -- legacy and BIP-322
 //! -- and the screen says which one the file turned out to carry, because "verified" means
@@ -24,7 +27,8 @@
 //! above a message the panel truncated is an answer about a different string from the one
 //! being read.
 
-use catcard_wallet::signfile::{self, Scheme};
+use catcard_wallet::signfile::{self, ListedFile, Scheme};
+use core::fmt::Write as _;
 
 use crate::display;
 use crate::menu;
@@ -34,17 +38,76 @@ use crate::ui::Ui;
 /// rest is room for a note above it and for saying so about a file that is not one.
 const MAX_FILE: usize = 2048;
 
-/// Pick a signed-message file and say whether its signature is its address's.
+/// Largest file this hashes for a sidecar check.
+///
+/// An export is a few kilobytes. The bound is against a sidecar that names something
+/// enormous: hashing a card's worth of video through a 512-byte window would turn a check
+/// into an afternoon with nothing on the glass, and "too big to check" is an answer.
+const MAX_HASHED: u64 = 1 << 20;
+
+/// Bytes read at a time while hashing: one sector, so the buffer is small and the
+/// hash never needs the file in memory.
+const CHUNK: usize = 512;
+
+/// Room for a listed file's full path: the sidecar's directory and the longest name.
+const FILE_PATH: usize = menu::BROWSE_PATH_MAX + signfile::MAX_NAME + 1;
+
+/// What became of one file a sidecar named.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Check {
+    /// Its digest is the one the sidecar carries.
+    Ok,
+    /// It is there, and it is not the file that was signed.
+    Mismatch,
+    /// Not in the sidecar's directory.
+    Missing,
+    /// Larger than [`MAX_HASHED`].
+    TooBig,
+    /// The card stopped answering part-way.
+    ReadFailed,
+}
+
+impl Check {
+    const fn word(self) -> &'static str {
+        match self {
+            Check::Ok => "OK",
+            Check::Mismatch => "CHANGED",
+            Check::Missing => "missing",
+            Check::TooBig => "too big to check",
+            Check::ReadFailed => "read failed",
+        }
+    }
+}
+
+/// Pick a signed-message file or a sidecar and say whether its signature is its
+/// address's -- and, for a sidecar, whether the files it names are still the files it
+/// signed.
 pub(crate) fn screen(ui: &mut Ui<'_>) {
     const HEAD: &str = "Verify sig";
 
-    let Some(path) = menu::browse_sd(ui, "Pick a signed .txt", Some("txt"), menu::Browse::File)
-    else {
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
+    };
+    // The browser filters on one extension, and the two kinds of file have different
+    // ones, so the kind is asked first.
+    let (title, ext) = match menu::choose(
+        ui,
+        HEAD,
+        "which kind of file?",
+        &["Signed message .txt", "Export sidecar .sig"],
+    ) {
+        Some(0) => ("Pick a signed .txt", "txt"),
+        Some(_) => ("Pick a .sig", "sig"),
+        None => return,
+    };
+    let Some(path) = menu::browse_storage(ui, storage, title, Some(ext), menu::Browse::File) else {
         return;
     };
     let mut raw = [0u8; MAX_FILE];
-    menu::card_wait(ui.panel, HEAD, "reading the card");
-    let len = match crate::signtx::read_card_file(&path, &mut raw) {
+    let mut note: heapless::String<32> = heapless::String::new();
+    let _ = write!(note, "reading {}", storage.medium());
+    menu::card_wait(ui.panel, HEAD, note.as_str());
+    let len = match crate::signtx::read_source_file(storage, &path, &mut raw) {
         Ok(n) => n,
         Err(why) => return say(ui, HEAD, why),
     };
@@ -56,15 +119,108 @@ pub(crate) fn screen(ui: &mut Ui<'_>) {
         Err(why) => return say(ui, HEAD, describe(why)),
     };
 
+    // The files a sidecar names, each hashed and compared -- before the signature, so
+    // the report reads in the order the question is asked: are these the files, and did
+    // this key sign for them.
+    let mut checks: heapless::Vec<(ListedFile<'_>, Check), { signfile::MAX_FILES }> =
+        heapless::Vec::new();
+    if let Some(files) = signfile::listed_files(file.message) {
+        menu::card_wait(ui.panel, HEAD, "hashing the files");
+        let dir = &path[..path.rfind('/').map(|i| i + 1).unwrap_or(0)];
+        if let Err(why) = check_files(storage, dir, files, &mut checks) {
+            return say(ui, HEAD, why);
+        }
+        for (f, c) in &checks {
+            crate::catlog!("verify: {}: {}", f.name, c.word());
+        }
+    }
+
     match signfile::verify(&file) {
         Ok(scheme) => {
             crate::catlog!("verify: {} good ({})", file.address, scheme.name());
-            good(ui, &file, scheme);
+            good(ui, &file, scheme, &checks);
         }
         Err(why) => {
             crate::catlog!("verify: {}: {}", path.as_str(), describe(why));
-            bad(ui, &file, describe(why));
+            bad(ui, &file, describe(why), &checks);
         }
+    }
+}
+
+/// Hash every listed file on `storage` under `dir`, recording what became of each.
+///
+/// The medium is mounted once for all of them: a name checked under one mount and
+/// hashed under another could be a different file.
+fn check_files<'a>(
+    storage: menu::Storage,
+    dir: &str,
+    files: signfile::Files<'a>,
+    out: &mut heapless::Vec<(ListedFile<'a>, Check), { signfile::MAX_FILES }>,
+) -> Result<(), &'static str> {
+    match storage {
+        menu::Storage::Sd => {
+            let mut vol = menu::mount_card()?;
+            for f in files {
+                let check = check_one(&mut vol, dir, &f);
+                let _ = out.push((f, check));
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "board-mk3"))]
+        menu::Storage::Vdisk => menu::with_vdisk(|vol| {
+            for f in files {
+                let check = check_one(vol, dir, &f);
+                let _ = out.push((f, check));
+            }
+            Ok(())
+        }),
+    }
+}
+
+/// Stream one file through SHA-256 and compare.
+///
+/// Generic over the backing driver so the card and the Virtual Disk share the one loop.
+/// The read is bounded twice: by the file's own length, and by [`MAX_HASHED`] before the
+/// first byte is read.
+fn check_one<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    dir: &str,
+    listed: &ListedFile<'_>,
+) -> Check {
+    use purecrypto::hash::{Digest as _, Sha256};
+
+    let mut path: heapless::String<FILE_PATH> = heapless::String::new();
+    if path.push_str(dir).is_err() || path.push_str(listed.name).is_err() {
+        return Check::Missing;
+    }
+    let Ok(mut file) = vol.open_file(&path) else {
+        return Check::Missing;
+    };
+    let len = file.len();
+    if len > MAX_HASHED {
+        return Check::TooBig;
+    }
+    let mut hash = Sha256::new();
+    let mut chunk = [0u8; CHUNK];
+    let mut got = 0u64;
+    while got < len {
+        match file.read(vol, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                hash.update(&chunk[..n]);
+                got += n as u64;
+            }
+            Err(_) => return Check::ReadFailed,
+        }
+    }
+    if got != len {
+        return Check::ReadFailed;
+    }
+    let digest = hash.finalize();
+    if digest[..] == listed.digest[..] {
+        Check::Ok
+    } else {
+        Check::Mismatch
     }
 }
 
@@ -83,29 +239,80 @@ fn describe(e: signfile::Error) -> &'static str {
     }
 }
 
+/// One `OK  name` row per listed file.
+type CheckRows =
+    heapless::Vec<heapless::String<{ signfile::MAX_NAME + 24 }>, { signfile::MAX_FILES }>;
+
+fn check_rows(checks: &[(ListedFile<'_>, Check)]) -> CheckRows {
+    let mut rows = CheckRows::new();
+    for (f, c) in checks {
+        let mut row = heapless::String::new();
+        let _ = write!(row, "{}  {}", c.word(), f.name);
+        let _ = rows.push(row);
+    }
+    rows
+}
+
 /// The verdict for a signature that checked out.
-fn good(ui: &mut Ui<'_>, file: &signfile::Armoured<'_>, scheme: Scheme) {
+///
+/// With a file list, the title says whether the files did too: a good signature over a
+/// list whose files have changed is the sidecar telling on the export, and the title is
+/// where that has to be said.
+fn good(
+    ui: &mut Ui<'_>,
+    file: &signfile::Armoured<'_>,
+    scheme: Scheme,
+    checks: &[(ListedFile<'_>, Check)],
+) {
     use catcard_ui::scroll::Line;
     let mut note: heapless::String<32> = heapless::String::new();
-    let _ = core::fmt::Write::write_fmt(&mut note, format_args!("{} signature", scheme.name()));
-    let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
-    let _ = doc.push(Line::title("Signature good"));
+    let _ = write!(note, "{} signature", scheme.name());
+    let rows = check_rows(checks);
+    let all_ok = checks.iter().all(|(_, c)| *c == Check::Ok);
+    let mut doc: heapless::Vec<Line, { 8 + signfile::MAX_FILES }> = heapless::Vec::new();
+    let _ = doc.push(Line::title(match (checks.is_empty(), all_ok) {
+        (true, _) => "Signature good",
+        (false, true) => "All good",
+        (false, false) => "Files NOT ok",
+    }));
+    if !checks.is_empty() {
+        let _ = doc.push(Line::body("signature good; files:").small());
+        for row in &rows {
+            let _ = doc.push(Line::body(row.as_str()).small().wrapped());
+        }
+    }
     let _ = doc.push(Line::body("signed by").small());
     let _ = doc.push(Line::body(file.address).small().wrapped());
-    let _ = doc.push(Line::body(file.message).wrapped());
+    if checks.is_empty() {
+        let _ = doc.push(Line::body(file.message).wrapped());
+    }
     let _ = doc.push(Line::body(note.as_str()).small());
     page(ui, &doc);
 }
 
 /// The verdict for one that did not, or could not be checked.
-fn bad(ui: &mut Ui<'_>, file: &signfile::Armoured<'_>, why: &str) {
+fn bad(
+    ui: &mut Ui<'_>,
+    file: &signfile::Armoured<'_>,
+    why: &str,
+    checks: &[(ListedFile<'_>, Check)],
+) {
     use catcard_ui::scroll::Line;
-    let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
+    let rows = check_rows(checks);
+    let mut doc: heapless::Vec<Line, { 8 + signfile::MAX_FILES }> = heapless::Vec::new();
     let _ = doc.push(Line::title("Not verified"));
     let _ = doc.push(Line::body(why).wrapped());
+    if !checks.is_empty() {
+        let _ = doc.push(Line::body("files:").small());
+        for row in &rows {
+            let _ = doc.push(Line::body(row.as_str()).small().wrapped());
+        }
+    }
     let _ = doc.push(Line::body("claimed address").small());
     let _ = doc.push(Line::body(file.address).small().wrapped());
-    let _ = doc.push(Line::body(file.message).wrapped());
+    if checks.is_empty() {
+        let _ = doc.push(Line::body(file.message).wrapped());
+    }
     page(ui, &doc);
 }
 
