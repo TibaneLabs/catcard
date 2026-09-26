@@ -84,10 +84,10 @@ mod msimport;
 #[cfg(not(feature = "board-mk3"))]
 mod nfc;
 mod nor;
-/// Secure Notes & Passwords, read out of the settings blob.
+/// Secure Notes & Passwords, kept in the wallet's settings file.
 ///
 /// Q1 only, as the feature is: stock offers it where there is a keyboard to type a note on,
-/// so a viewer on an mk4 or mk5 would only ever show an empty list.
+/// and every screen here is typed on that keyboard.
 #[cfg(feature = "board-q1")]
 mod notes;
 /// The settings medium on a board whose settings live in internal flash (mk4/mk5/Q1).

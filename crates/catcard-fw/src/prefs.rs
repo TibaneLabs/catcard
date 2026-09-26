@@ -64,6 +64,10 @@ pub(crate) struct Prefs {
     /// What to do with a multisig wallet a PSBT describes but this device has not registered.
     /// Honoured by [`crate::signtx`], through [`crate::msimport::trust_from_psbt`].
     pub multisig_trust: MultisigTrust,
+    /// Whether Secure Notes & Passwords is on (Q1). `None` means never asked. Honoured by
+    /// the main menu, which shows the `Notes` tile only when it is `Some(true)`, and by
+    /// `crate::notes`, which tells its opt-in story otherwise.
+    pub notes: Option<bool>,
 }
 
 impl Prefs {
@@ -97,6 +101,7 @@ impl Default for Prefs {
             net: Chain::Mainnet,
             backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
             multisig_trust: MultisigTrust::VerifyOnly,
+            notes: None,
         }
     }
 }
@@ -114,6 +119,7 @@ static mut CURRENT: Prefs = Prefs {
     net: Chain::Mainnet,
     backlight_percent: catcard_settings::prefs::BACKLIGHT_DEFAULT,
     multisig_trust: MultisigTrust::VerifyOnly,
+    notes: None,
 };
 
 /// What the wallet in force is set to.
@@ -222,6 +228,7 @@ pub(crate) fn load(
         net: prefs::network(&doc),
         backlight_percent: prefs::backlight_percent(&doc),
         multisig_trust: prefs::multisig_trust(&doc),
+        notes: prefs::notes_enabled(&doc),
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}",

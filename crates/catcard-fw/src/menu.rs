@@ -407,8 +407,19 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
     if !crate::key::is_root() {
         return main_items_with_key();
     }
+    // The Notes tile only once the feature is on, as stock gates its row on `secnap`;
+    // Settings > Secure notes is where it is turned on.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+    #[cfg(feature = "board-q1")]
+    if crate::prefs::current().notes != Some(true) {
+        return MAIN_ITEMS_NO_NOTES;
+    }
     MAIN_ITEMS
 }
+
+/// [`MAIN_ITEMS`] without the Notes tile, for a device where the feature is off.
+#[cfg(feature = "board-q1")]
+const MAIN_ITEMS_NO_NOTES: &[&str] = &["Sign", "Addresses", "Utils", "Derive", "Settings"];
 
 /// [`MAIN_ITEMS`] with the wallet in force named at the top, as `[0123ABCD]`.
 ///
@@ -482,6 +493,12 @@ const SETTINGS_ITEMS: &[&str] = &[
     // Source: hw-reference/firmware-features.md §9 "LCD brightness on battery" [C]
     #[cfg(feature = "board-q1")]
     "LCD brightness",
+    // Secure Notes & Passwords, where its opt-in story lives: the main-menu tile is shown
+    // only once the feature is on, and this row is how it is turned on -- or back on
+    // after `Disable Feature`. Stock keeps the same row under Advanced/Tools.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV, §N [C]
+    #[cfg(feature = "board-q1")]
+    "Secure notes",
     // Which chains this wallet offers, and in what order. Only where there is more than
     // one chain to order, and only where there is a settings file to keep the answer in.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
@@ -1481,8 +1498,10 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::settings::show_nickname_screen(a.ui),
             Screen::Debug,
         ),
+        // Reached from the main-menu tile, from Settings and from the Debug drawer, so it
+        // goes back to whichever opened it.
         #[cfg(feature = "board-q1")]
-        Screen::Notes => to(|a| crate::notes::view(a.gate, a.login, a.ui), Screen::Debug),
+        Screen::Notes => returns(|a| crate::notes::screen(a.gate, a.login, a.ui)),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -1777,6 +1796,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
+            #[cfg(feature = "board-q1")]
+            (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
