@@ -187,11 +187,9 @@ enum Screen {
     /// What card is in the slot: its CID (manufacturer, product, serial, date), capacity
     /// and filesystem. Read-only — brings the card up but writes nothing.
     CardDetails,
-    /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
-    FormatSd,
-    /// Blank the PSRAM Virtual Disk and format it again. PSRAM boards only.
-    #[cfg(not(feature = "board-mk3"))]
-    FormatRamDisk,
+    /// Format a medium, asked which: an SD card (MBR + FAT16/FAT32/exFAT by capacity; slot
+    /// A or B on the Q1) or, where there is one, the Virtual Disk (blanked, then formatted).
+    Format,
     /// Blank and remove the PSBTs and signed transactions on the chosen storage.
     DeletePsbts,
     /// The SD card's own controller password lock (CMD42): set, change, remove, unlock,
@@ -818,12 +816,13 @@ const UTILS_ITEMS: &[&str] = &[
     "Paper wallet",
     "Browse SD card",
     "Card details",
-    "Format SD card",
-    // Stock's File Management rows, flat here like the two above. The RAM disk needs
-    // PSRAM, so the mk3 has no row for it.
+    // One row for every medium: it asks which -- the SD card (slot A or B on the Q1)
+    // or, where there is PSRAM, the RAM disk -- rather than a row per medium.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Format SD Card",
+    // "Format RAM Disk" [C]
+    "Format",
+    // Stock's File Management row, flat here like the ones above.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
-    #[cfg(not(feature = "board-mk3"))]
-    "Format RAM disk",
     "Delete PSBTs",
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
@@ -856,12 +855,13 @@ const UTILS_ITEMS: &[&str] = &[
     "Paper wallet",
     "Browse SD card",
     "Card details",
-    "Format SD card",
-    // Stock's File Management rows, flat here like the two above. The RAM disk needs
-    // PSRAM, so the mk3 has no row for it.
+    // One row for every medium: it asks which -- the SD card (slot A or B on the Q1)
+    // or, where there is PSRAM, the RAM disk -- rather than a row per medium.
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Format SD Card",
+    // "Format RAM Disk" [C]
+    "Format",
+    // Stock's File Management row, flat here like the ones above.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
-    #[cfg(not(feature = "board-mk3"))]
-    "Format RAM disk",
     "Delete PSBTs",
     // The SD card's own CMD42 password lock. No settings store, so it is on every board
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
@@ -1709,9 +1709,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             },
             Screen::Utils,
         ),
-        Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
-        #[cfg(not(feature = "board-mk3"))]
-        Screen::FormatRamDisk => to(|a| crate::filemgmt::format_ram_disk(a.ui), Screen::Utils),
+        Screen::Format => to(|a| format_media(a.ui), Screen::Utils),
         Screen::DeletePsbts => to(|a| crate::filemgmt::delete_psbts(a.ui), Screen::Utils),
         Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
         Screen::CardEncrypt => to(
@@ -2319,9 +2317,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Backup")) => Screen::BackupMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Card details")) => Screen::CardDetails,
-            (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
-            #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("Format RAM disk")) => Screen::FormatRamDisk,
+            (Key::Confirm, Some("Format")) => Screen::Format,
             (Key::Confirm, Some("Delete PSBTs")) => Screen::DeletePsbts,
             (Key::Confirm, Some("Card password")) => Screen::CardPassword,
             (Key::Confirm, Some("Encrypt card")) => Screen::CardEncrypt,
@@ -2679,7 +2675,7 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "USB Drive" => &art::USB_DRIVE,
         "Export wallet" => &art::EXPORT_WALLET,
         "Browse SD card" => &art::MICROSD_BROWSE,
-        "Format SD card" => &art::MICROSD_FORMAT,
+        "Format" => &art::MICROSD_FORMAT,
         // The card-access icon: the CMD42 lock is about who may read the card at all.
         "Card password" => &art::MICROSD_ACCESS,
         "Games" => &art::GAMES,
@@ -2865,11 +2861,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::HelpMain | Screen::HelpSettings | Screen::HelpUtils => {}
         Screen::SettingsSpace => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
-        Screen::FormatSd => {}
+        Screen::Format => {}
         // Handled in `run`: both ask, then work on the volume and say how it went.
         Screen::DeletePsbts => {}
-        #[cfg(not(feature = "board-mk3"))]
-        Screen::FormatRamDisk => {}
         // Handled in `run`: it brings up the card and drives its own menu and prompts.
         Screen::CardPassword => {}
         // Handled in `run`: it brings up the card and drives its own menu, prompts and
@@ -4104,7 +4098,7 @@ pub(crate) fn pick_storage(ui: &mut Ui<'_>, head: &str) -> Option<Storage> {
             ui,
             head,
             "which storage?",
-            &["SD card", "Virtual Disk (in PSRAM)"],
+            &["SD card", "Virtual Disk (temporary)"],
         )?;
         return Some(if pick == 0 {
             Storage::Sd
@@ -4576,7 +4570,7 @@ fn browse_files(ui: &mut Ui<'_>) {
             ui,
             "Browse Files",
             "look at which storage?",
-            &["SD card", "Virtual Disk (in PSRAM)"],
+            &["SD card", "Virtual Disk (temporary)"],
         ) else {
             return;
         };
@@ -11128,16 +11122,68 @@ fn read_choice(ui: &mut Ui<'_>, n: usize) -> Choice {
     }
 }
 
-/// Format the SD card to the SD standard: one MBR partition filling the card, holding the
-/// filesystem its capacity tier calls for -- FAT16 up to 2 GB, FAT32 up to 32 GB, exFAT
-/// above. This erases everything on the card, so it asks twice, and shows what it is about
-/// to write first.
-fn format_sd(ui: &mut Ui<'_>) {
+/// Utils → Format: ask which medium, then format that one.
+///
+/// Every medium this board has is on offer: the SD card -- both slots, named by where they
+/// are, on the Q1 -- and, where the board has one, the Virtual Disk. A board with a single
+/// slot and no Virtual Disk (mk3) has one answer, so it asks nothing and goes straight to
+/// the card, as the row always did there.
+fn format_media(ui: &mut Ui<'_>) {
+    use catcard_hal::sdmmc::Slot;
+
+    let has_slot_b = catcard_board::BOARD.sdmmc.slot_b.is_some();
+    #[cfg(not(feature = "board-mk3"))]
+    let has_vdisk = catcard_board::BOARD.psram.is_some();
+    #[cfg(feature = "board-mk3")]
+    let has_vdisk = false;
+    if !has_slot_b && !has_vdisk {
+        format_sd(ui, Slot::A);
+        return;
+    }
+
+    const SD_A: u8 = 0;
+    const SD_B: u8 = 1;
+    const VDISK: u8 = 2;
+    let mut labels: heapless::Vec<&str, 3> = heapless::Vec::new();
+    let mut kinds: heapless::Vec<u8, 3> = heapless::Vec::new();
+    let _ = labels.push(if has_slot_b {
+        "SD card - slot A (top)"
+    } else {
+        "SD card"
+    });
+    let _ = kinds.push(SD_A);
+    if has_slot_b {
+        let _ = labels.push("SD card - slot B (bottom)");
+        let _ = kinds.push(SD_B);
+    }
+    if has_vdisk {
+        // Named by what it does for the person, not by the chip behind it: it is a disk,
+        // and it does not outlive a power-off.
+        let _ = labels.push("Virtual Disk (temporary)");
+        let _ = kinds.push(VDISK);
+    }
+    let Some(pick) = choose(ui, "Format", "which one?", &labels) else {
+        return;
+    };
+    match kinds[pick] {
+        SD_A => format_sd(ui, Slot::A),
+        SD_B => format_sd(ui, Slot::B),
+        #[cfg(not(feature = "board-mk3"))]
+        VDISK => crate::filemgmt::format_ram_disk(ui),
+        _ => {}
+    }
+}
+
+/// Format the SD card in `slot` to the SD standard: one MBR partition filling the card,
+/// holding the filesystem its capacity tier calls for -- FAT16 up to 2 GB, FAT32 up to
+/// 32 GB, exFAT above. This erases everything on the card, so it asks twice, and shows
+/// what it is about to write first.
+fn format_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
     use catcard_hal::sdmmc::Sdmmc;
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user and
     // the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+    let mut dev = match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, slot) } {
         Ok(d) => d,
         Err(_) => {
             message(ui.panel, "Format SD", "no SD controller", "press a key");
@@ -11164,12 +11210,12 @@ fn format_sd(ui: &mut Ui<'_>) {
     let fs = catcard_sd::format::standard_fs(card.blocks as u64);
     let mut summary = Line::new();
     let _ = write!(summary, "{} MiB  {}", card.mib(), fs.name());
-    ask(
-        ui.panel,
-        "Format SD card?",
-        summary.as_str(),
-        "ERASES everything",
-    );
+    let title = match (catcard_board::BOARD.sdmmc.slot_b.is_some(), slot) {
+        (false, _) => "Format SD card?",
+        (true, catcard_hal::sdmmc::Slot::A) => "Format slot A (top)?",
+        (true, catcard_hal::sdmmc::Slot::B) => "Format slot B (bottom)?",
+    };
+    ask(ui.panel, title, summary.as_str(), "ERASES everything");
     if !confirmed(ui) {
         return;
     }
@@ -13493,7 +13539,7 @@ fn usb_drive_choose(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         let _ = kinds.push(KIND_SD_B);
     }
     if has_vdisk {
-        let _ = labels.push("Virtual Disk (in PSRAM)");
+        let _ = labels.push("Virtual Disk (temporary)");
         let _ = kinds.push(KIND_VDISK);
     }
 
@@ -13562,7 +13608,7 @@ fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
 #[cfg(not(feature = "board-mk3"))]
 fn usb_drive_vdisk(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(mut disk) = crate::vdisk::Vdisk::take() else {
-        message(ui.panel, "USB Drive", "no PSRAM for a disk", "press a key");
+        message(ui.panel, "USB Drive", "no Virtual Disk here", "press a key");
         wait_any_key(ui);
         return;
     };

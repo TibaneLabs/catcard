@@ -2,7 +2,8 @@
 //! transactions a signing session leaves behind, and reformatting the RAM disk.
 //!
 //! Stock keeps both under `File Management`; this firmware's Utils is flat, so they sit
-//! beside `Format SD card` where the other card housekeeping is.
+//! beside the other card housekeeping; `Format` asks which medium and comes here for the
+//! Virtual Disk.
 //!
 //! Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 FileMgmtMenu [C];
 //! firmware-features.md §9 "Delete-and-blank spent PSBTs / Format SD or RAM disk" [C].
@@ -201,7 +202,7 @@ fn blank_and_delete<D: SectorDriver>(
     (done, failed)
 }
 
-/// Utils → Format RAM disk: blank the Virtual Disk and lay a fresh filesystem on it.
+/// Utils → Format → Virtual Disk: blank it and lay a fresh filesystem on it.
 ///
 /// Stock's `wipe_vdisk`: the region is zeroed end to end before the format, so nothing
 /// staged on it earlier survives in the free space of the new volume. Asked first --
@@ -211,22 +212,17 @@ fn blank_and_delete<D: SectorDriver>(
 /// Source: hw-reference/help-and-warning-screens.md §15 "Wipe virtual/RAM disk" [C]
 #[cfg(not(feature = "board-mk3"))]
 pub(crate) fn format_ram_disk(ui: &mut Ui<'_>) {
-    const HEAD: &str = "Format RAM disk";
+    const HEAD: &str = "Format";
     if catcard_board::BOARD.psram.is_none() {
-        menu::message(
-            ui.panel,
-            HEAD,
-            "no PSRAM on this board",
-            "any key to go back",
-        );
+        menu::message(ui.panel, HEAD, "no Virtual Disk here", "any key to go back");
         menu::wait_for_any_key(ui);
         return;
     }
     menu::ask(
         ui.panel,
-        "Format RAM disk?",
-        "erases the Virtual Disk",
-        "blanked, then formatted",
+        "Format Virtual Disk?",
+        "erases what is on it",
+        "(power-off would too)",
     );
     if !menu::confirmed(ui) {
         return;

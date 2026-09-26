@@ -157,7 +157,7 @@ impl crate::msc_drive::BlockDev for Vdisk {
 /// is built for on a card.
 pub fn mount() -> Result<AnyVolume<Vdisk, 512>, &'static str> {
     AnyVolume::mount_with(|| Vdisk::take().ok_or(())).map_err(|e| match e {
-        catcard_sd::MountError::Device => "no PSRAM for a disk",
+        catcard_sd::MountError::Device => "no Virtual Disk here",
         catcard_sd::MountError::NoFilesystem => "disk holds no filesystem",
     })
 }
@@ -184,7 +184,7 @@ pub fn ensure_formatted() -> Result<(), &'static str> {
 /// Only ever reached from a menu row that asked.
 pub fn wipe_and_format() -> Result<(), &'static str> {
     {
-        let mut dev = Vdisk::take().ok_or("no PSRAM for a disk")?;
+        let mut dev = Vdisk::take().ok_or("no Virtual Disk here")?;
         let zeros = [0u8; BLOCK_LEN];
         for lba in 0..dev.sectors {
             dev.write_sectors(lba, &zeros)
@@ -200,7 +200,7 @@ pub fn wipe_and_format() -> Result<(), &'static str> {
 /// **Erases the disk.** Callers that reach a formatted disk must warn first; the only
 /// caller here is [`ensure_formatted`], which formats only what held no filesystem.
 pub fn format() -> Result<(), &'static str> {
-    let dev = Vdisk::take().ok_or("no PSRAM for a disk")?;
+    let dev = Vdisk::take().ok_or("no Virtual Disk here")?;
     let opts = fat::FormatOpts {
         volume_id: VOLUME_ID,
         label: LABEL,
