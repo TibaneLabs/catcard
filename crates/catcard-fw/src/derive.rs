@@ -232,8 +232,84 @@ pub(crate) fn bip85(
     };
     crate::catlog!("bip85: {} at index {}", ROWS[row], index);
     let text = core::str::from_utf8(&text[..len]).unwrap_or("");
-    let take = show(ui, kind, ROWS[row], index, text, chosen.is_some());
+    // A password can go out as keystrokes instead of being copied down, with the
+    // keyboard on: Confirm on its screen is "type into host", as stock's (6) is.
+    // Source: help-and-warning-screens.md "BIP-85 result / switch" [C]
+    let typeable = matches!(kind, Kind::Password(_)) && keyboard_on();
+    let take = show(ui, kind, ROWS[row], index, text, chosen.is_some(), typeable);
+    #[cfg(not(feature = "board-mk3"))]
+    if take && typeable {
+        crate::usbkbd::send_screen(ui, HEAD, &kind.path(index), text);
+    }
+    // `text` borrows the `Zeroizing` buffer, wiped as it goes out of scope here.
     chosen.filter(|_| take)
+}
+
+/// Whether `Keyboard EMU` is on. The mk3 has no settings store to turn it on with, and
+/// no keyboard interface built, so there it never is.
+fn keyboard_on() -> bool {
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        crate::usbtask::keyboard_on()
+    }
+    #[cfg(feature = "board-mk3")]
+    {
+        false
+    }
+}
+
+/// Main menu → Type Passwords: a BIP-85 password child typed into the host, not shown.
+///
+/// Stock's row, on the menu only while `Keyboard EMU` is on. The length and the index are
+/// asked as the BIP-85 screen asks them and the child is derived from the root the same
+/// way; the keyboard screen then asks before a keystroke goes out. On the Q1 the Secure
+/// Notes passwords are offered beside it, since they are the other thing a host's login
+/// form wants.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "Type Passwords" [C]
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn type_password_screen(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    const TYPE_HEAD: &str = "Type Passwords";
+    #[cfg(feature = "board-q1")]
+    if crate::prefs::current().notes == Some(true) {
+        match menu::pick_row(ui, TYPE_HEAD, "", &["BIP-85 password", "Secure Notes"]) {
+            Some(0) => {}
+            Some(_) => return crate::notes::type_passwords(gate, login, ui),
+            None => return,
+        }
+    }
+    let Some(len) = ask_password_length(ui) else {
+        return;
+    };
+    let Some(index) = ask_capped_index(ui, "Password") else {
+        return;
+    };
+    let master = match menu::bip85_parent(gate, login, ui.panel, TYPE_HEAD) {
+        Ok(m) => m,
+        Err(why) => {
+            menu::message(ui.panel, TYPE_HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    let kind = Kind::Password(len);
+    let derived = crate::keywork::run(|kw| derive(&master, kind, index, kw));
+    drop(master);
+    let (text, n, _) = match derived {
+        Ok(d) => d,
+        Err(why) => {
+            menu::message(ui.panel, TYPE_HEAD, why, "any key to go back");
+            menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+    crate::catlog!("bip85: password child at index {} to the keyboard", index);
+    let password = core::str::from_utf8(&text[..n]).unwrap_or("");
+    crate::usbkbd::send_screen(ui, TYPE_HEAD, &kind.path(index), password);
+    // `text` is the `Zeroizing` buffer; it is wiped here, typed or not.
 }
 
 fn derive(
@@ -333,9 +409,18 @@ pub(crate) fn index_values_screen(
     );
 }
 
-/// Show the child, scrollable. True if the owner chose to work in it -- offered only when
-/// `loadable`, since a password or a hex string is not a wallet.
-fn show(ui: &mut Ui<'_>, kind: Kind, label: &str, index: u32, text: &str, loadable: bool) -> bool {
+/// Show the child, scrollable. True if the owner chose to act on it: to work in it when
+/// `loadable`, or to type it into the host when `typeable`. A hex string is neither, and
+/// its screen only says to write it down.
+fn show(
+    ui: &mut Ui<'_>,
+    kind: Kind,
+    label: &str,
+    index: u32,
+    text: &str,
+    loadable: bool,
+    typeable: bool,
+) -> bool {
     use catcard_ui::scroll::{Line, ScrollView};
     let path = kind.path(index);
     let mut hint = heapless::String::<48>::new();
@@ -343,6 +428,13 @@ fn show(ui: &mut Ui<'_>, kind: Kind, label: &str, index: u32, text: &str, loadab
         let _ = write!(
             hint,
             "{} work in it   {} back",
+            display::CONFIRM_KEY,
+            display::CANCEL_KEY
+        );
+    } else if typeable {
+        let _ = write!(
+            hint,
+            "{} type into host   {} back",
             display::CONFIRM_KEY,
             display::CANCEL_KEY
         );
@@ -355,5 +447,5 @@ fn show(ui: &mut Ui<'_>, kind: Kind, label: &str, index: u32, text: &str, loadab
     let _ = doc.push(Line::body(path.as_str()).small().wrapped());
     let _ = doc.push(Line::body(hint.as_str()).small().wrapped());
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    menu::scroll_choice(ui, &mut view) && loadable
+    menu::scroll_choice(ui, &mut view) && (loadable || typeable)
 }

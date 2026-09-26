@@ -100,15 +100,7 @@ pub fn type_text(text: &str) -> Result<(), Error> {
 
 /// [`type_text`], with a say in what follows the text.
 pub fn type_text_with(text: &str, opt: Options) -> Result<(), Error> {
-    if !usbtask::keyboard_on() {
-        return Err(Error::Off);
-    }
-    if text.chars().count() > MAX_CHARS {
-        return Err(Error::TooLong);
-    }
-    // All or nothing: checked before anything goes out.
-    kbd::typeable(text).map_err(Error::Untypeable)?;
-
+    check(text)?;
     let mut budget = Budget::new(TOTAL_MS);
     for c in text.chars() {
         // Checked just above; a `None` here would be a table that changed under us.
@@ -130,11 +122,84 @@ pub fn type_text_with(text: &str, opt: Options) -> Result<(), Error> {
     wait_taken(&mut budget)
 }
 
+/// Whether `text` can be typed at all: the switch is on, it is not too long, and every
+/// character has a key. All or nothing, checked before anything goes out -- and by the
+/// screen before it asks, so "type it?" is never asked about something that cannot be.
+pub fn check(text: &str) -> Result<(), Error> {
+    if !usbtask::keyboard_on() {
+        return Err(Error::Off);
+    }
+    if text.chars().count() > MAX_CHARS {
+        return Err(Error::TooLong);
+    }
+    kbd::typeable(text).map_err(Error::Untypeable)
+}
+
 /// Whether the host would take a keystroke right now: the switch is on, the port is
 /// up, and a host has configured the composite device. For a screen to say "no host"
 /// before asking the owner to confirm, rather than after.
 pub fn ready() -> bool {
     usbtask::keyboard_on() && usbtask::kbd_ready()
+}
+
+/// The screen every sender goes through -- a note's password, a BIP-85 child -- and
+/// the one place the owner is asked.
+///
+/// Says why not if the keyboard is off, the text cannot be typed or no host is
+/// listening; offers Enter after the text, as stock does; then asks, because the cursor
+/// has to be in the right field on the host before a keystroke goes out. `note` is what
+/// the question names -- a title, a path -- never the text. True once the host has taken
+/// the whole of it.
+///
+/// Nothing about the text is logged, not even why it was refused: "a character has no
+/// key" is a fact about the text, and the log is a host's to read.
+///
+/// Source: help-and-warning-screens.md "Send BIP-85 password as USB keystrokes" and
+/// §16 "View / send password" [C]
+pub fn send_screen(ui: &mut crate::ui::Ui<'_>, head: &str, note: &str, text: &str) -> bool {
+    use crate::menu;
+    if let Err(why) = check(text) {
+        let (a, b) = match why {
+            Error::Off => ("Keyboard EMU is off", "Settings > Hardware On/Off"),
+            other => (other.describe(), "cannot be typed"),
+        };
+        menu::message(ui.panel, head, a, b);
+        menu::wait_for_any_key(ui);
+        return false;
+    }
+    if !ready() {
+        menu::message(
+            ui.panel,
+            head,
+            "no host is listening",
+            "plug in, then retry",
+        );
+        menu::wait_for_any_key(ui);
+        return false;
+    }
+    let Some(row) = menu::pick_row(ui, head, "after the text", &["Nothing", "Press Enter"]) else {
+        return false;
+    };
+    let opt = Options { enter: row == 1 };
+    menu::ask(ui.panel, head, note, "type into the host now?");
+    if !menu::confirmed(ui) {
+        return false;
+    }
+    menu::message(ui.panel, head, "typing", "cursor in the host's field");
+    match type_text_with(text, opt) {
+        Ok(()) => {
+            crate::catlog!("kbd: text typed");
+            menu::message(ui.panel, head, "typed", "any key to go back");
+            menu::wait_for_any_key(ui);
+            true
+        }
+        Err(why) => {
+            crate::catlog!("kbd: text not typed");
+            menu::message(ui.panel, head, why.describe(), "any key to go back");
+            menu::wait_for_any_key(ui);
+            false
+        }
+    }
 }
 
 /// Milliseconds left for the whole call, spent one at a time.

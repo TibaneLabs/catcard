@@ -20,10 +20,14 @@
 //! once per session and the kernel's millisecond tick carries it from there. It is never
 //! stored: a clock that was right last week is a code that is wrong today.
 //!
+//! # Sending a password
+//!
+//! **Send Password** types the item into the host through [`crate::usbkbd`], with
+//! `Keyboard EMU` on; the same screen serves the main menu's `Type Passwords`
+//! ([`type_passwords`]), which lists the password items alone. The text is never logged.
+//!
 //! # What is not here
 //!
-//! - **Send Password** as USB keystrokes: there is no USB keyboard interface in this tree
-//!   yet (`crate::usbkbd` does not exist), so the row is left out rather than shown dead.
 //! - **Multi-line bodies** typed on the device: the keyboard has no Enter key event
 //!   ([`catcard_ui::keypad::Key`] carries printable characters only), so a body typed here
 //!   is one paragraph. A body written elsewhere with line breaks shows them.
@@ -392,6 +396,7 @@ const DELETE: u32 = 5;
 const EXPORT_ONE: u32 = 6;
 const SIGN: u32 = 7;
 const APPLY_PP: u32 = 8;
+const SEND_PW: u32 = 9;
 
 /// One of ours: show it and offer everything that can be done with it.
 fn open(
@@ -456,6 +461,9 @@ fn open(
                     let _ = rows.push(Row::body(item.body).wrapped());
                 }
                 let _ = rows.push(Row::item("View Password", VIEW_PW));
+                // Always offered, as stock offers it; the screen says so if the
+                // keyboard is off. Source: menu-map §N "Password detail" [C]
+                let _ = rows.push(Row::item("Send Password", SEND_PW));
                 if !item.totp.is_empty() {
                     let _ = rows.push(Row::item("TOTP code", TOTP));
                 }
@@ -473,6 +481,10 @@ fn open(
         let outcome = match menu::show_doc(ui, &rows, false, false) {
             DocExit::Selected(VIEW_PW) => {
                 view_password(ui, &item);
+                Ok(())
+            }
+            DocExit::Selected(SEND_PW) => {
+                send_password(ui, &item);
                 Ok(())
             }
             DocExit::Selected(TOTP) => {
@@ -531,6 +543,81 @@ fn view_password(ui: &mut Ui<'_>, item: &Item<'_>) {
         Row::body(item.password).secret().wrapped(),
     ];
     let _ = menu::show_doc(ui, &rows, true, false);
+}
+
+/// Type the password into the host as keystrokes. The keyboard screen asks first, offers
+/// Enter after it, and says why if it cannot; the text is never logged.
+///
+/// Source: help-and-warning-screens.md §16 "View / send password" [C]
+fn send_password(ui: &mut Ui<'_>, item: &Item<'_>) {
+    if item.password.is_empty() {
+        return say(ui, "no password stored");
+    }
+    crate::usbkbd::send_screen(ui, "Send password", item.title, item.password);
+}
+
+/// Main menu → Type Passwords, the Secure Notes half: the password items alone, and the
+/// chosen one typed into the host.
+///
+/// Reads the list the way [`screen`] does but shows only the items that hold a password,
+/// so a login form is two selections away rather than five.
+pub(crate) fn type_passwords(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    const HEAD: &str = "Type Passwords";
+    if crate::prefs::current().notes != Some(true) {
+        return say(ui, "Secure Notes is off");
+    }
+    loop {
+        menu::blocking_screen(ui.panel, HEAD, "reading");
+        let (Some(mut doc), Some(mut text)) =
+            (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
+        else {
+            return say(ui, "not enough memory");
+        };
+        let doc_buf = doc.bytes();
+        let mut arena: &mut [u8] = text.bytes();
+        let mut ours = [""; notes::MAX_NOTES];
+        let mut stock = [""; notes::MAX_NOTES];
+        let have = match read_lists(gate, login, ui.panel, doc_buf, &mut ours, &mut stock) {
+            Ok(l) => l.ours,
+            Err(why) => return say(ui, why),
+        };
+
+        // The password items, by their place in the full list, so the pick maps back.
+        let mut rows: heapless::Vec<Row, { notes::MAX_NOTES + 2 }> = heapless::Vec::new();
+        let _ = rows.push(Row::title(HEAD));
+        let mut listed = 0usize;
+        for (i, raw) in ours[..have].iter().enumerate() {
+            let Some(item) = Item::parse(raw) else {
+                continue;
+            };
+            if item.kind != Kind::Password {
+                continue;
+            }
+            let title = keep(&mut arena, item.title).unwrap_or("(untitled)");
+            let _ = rows.push(Row::item(title, i as u32));
+            listed += 1;
+        }
+        if listed == 0 {
+            let _ = rows.push(Row::body("(no passwords saved)").centered());
+        }
+        let DocExit::Selected(index) = menu::show_doc(ui, &rows, false, false) else {
+            return;
+        };
+        let index = index as usize;
+        if index >= have {
+            return say(ui, "no such item");
+        }
+        // Unescaped into the arena, which outlives the settings buffer; the typing
+        // screen borrows nothing else.
+        let Some(item) = Item::parse(ours[index]).and_then(|raw| raw.unescape(&mut arena)) else {
+            return say(ui, "that item did not parse");
+        };
+        send_password(ui, &item);
+    }
 }
 
 // ---------------------------------------------------------------------------

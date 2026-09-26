@@ -254,6 +254,10 @@ enum Screen {
     /// them where there is a keyboard to type them on.
     #[cfg(feature = "board-q1")]
     Notes,
+    /// A BIP-85 password (or, on the Q1, a note's) typed into the host as keystrokes.
+    /// On the main menu only while `Keyboard EMU` is on, as stock gates it on `emu`.
+    #[cfg(not(feature = "board-mk3"))]
+    TypePasswords,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
     /// One screen saying what the main menu holds.
@@ -409,6 +413,11 @@ const MAIN_ITEMS: &[&str] = &[
     // because everything else on this screen is *about* whichever key it selects, and
     // a person switching wallets should not have to go looking in a settings list.
     "Derive",
+    // Stock's `Type Passwords`, in stock's place -- before the drawers -- on the boards
+    // whose main menu is a list. Shown only while `Keyboard EMU` is on (`main_row_shown`).
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+    #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+    "Type Passwords",
     "Settings",
     // Stock puts Help on the boards without a keyboard; ours is on every board.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1/B2 "Help" [C]
@@ -419,6 +428,10 @@ const MAIN_ITEMS: &[&str] = &[
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
     #[cfg(not(feature = "board-q1"))]
     "Logout",
+    // The same row on the Q1, last: the six tiles above are one page of the grid, and
+    // this seventh, which is there only while the keyboard is on, turns to a second.
+    #[cfg(feature = "board-q1")]
+    "Type Passwords",
 ];
 /// The blank device's version: the two ways to get a wallet, in the two cells whose
 /// jobs do not exist yet.
@@ -473,22 +486,46 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
     // Another key in force always names itself; the root wallet does when the owner
     // asked for it (stock's "Home Menu XFP: Always Show").
     #[cfg(not(feature = "board-q1"))]
-    if !crate::key::is_root() || crate::prefs::current().home_xfp {
-        return main_items_with_key();
-    }
-    // The Notes tile only once the feature is on, as stock gates its row on `secnap`;
-    // Settings > Secure notes is where it is turned on.
-    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+    let head = (!crate::key::is_root() || crate::prefs::current().home_xfp).then(key_row);
     #[cfg(feature = "board-q1")]
-    if crate::prefs::current().notes != Some(true) {
-        return MAIN_ITEMS_NO_NOTES;
+    let head: Option<&'static str> = None;
+
+    /// The list handed back, rebuilt each time: the fingerprint and the switches can
+    /// change between two draws, and a menu is a slice of `&'static`. A row's worth of
+    /// `&str`s in `.bss`; nothing to lease.
+    static mut ITEMS: [&str; 1 + MAIN_ITEMS.len()] = [""; 1 + MAIN_ITEMS.len()];
+    // SAFETY: foreground only. The menu is redrawn from one place and holds no borrow
+    // of the list across a rebuild.
+    let items = unsafe { &mut *core::ptr::addr_of_mut!(ITEMS) };
+    let mut n = 0;
+    for label in head
+        .into_iter()
+        .chain(MAIN_ITEMS.iter().copied().filter(|l| main_row_shown(l)))
+    {
+        items[n] = label;
+        n += 1;
     }
-    MAIN_ITEMS
+    &items[..n]
 }
 
-/// [`MAIN_ITEMS`] without the Notes tile, for a device where the feature is off.
-#[cfg(feature = "board-q1")]
-const MAIN_ITEMS_NO_NOTES: &[&str] = &["Sign", "Addresses", "Utils", "Derive", "Settings"];
+/// Whether a [`MAIN_ITEMS`] row is on the menu right now. Two come and go with a
+/// setting, as stock's do: the Notes tile only once the feature is on (`secnap`), and
+/// `Type Passwords` only while the keyboard is on (`emu`). Settings is where either is
+/// turned on -- Secure notes, and Hardware On/Off.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
+fn main_row_shown(label: &str) -> bool {
+    #[cfg(feature = "board-q1")]
+    if label == "Notes" {
+        return crate::prefs::current().notes == Some(true);
+    }
+    #[cfg(not(feature = "board-mk3"))]
+    if label == "Type Passwords" {
+        return crate::usbtask::keyboard_on();
+    }
+    #[cfg(feature = "board-mk3")]
+    let _ = label;
+    true
+}
 
 /// [`MAIN_ITEMS`] with the wallet in force named at the top, as `[0123ABCD]` -- or
 /// `<0123ABCD>` for the root wallet, which stock spells in angle brackets and shows only
@@ -505,40 +542,33 @@ const MAIN_ITEMS_NO_NOTES: &[&str] = &["Sign", "Addresses", "Utils", "Derive", "
 ///
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "XFP header item" [C]
 #[cfg(not(feature = "board-q1"))]
-fn main_items_with_key() -> &'static [&'static str] {
+fn key_row() -> &'static str {
     use core::fmt::Write as _;
 
     /// The row's text, which has to outlive the call: a menu is a slice of `&'static`.
     static mut ROW: heapless::String<12> = heapless::String::new();
-    /// The list handed back, rebuilt each time because the fingerprint can change.
-    static mut ITEMS: [&str; 1 + MAIN_ITEMS.len()] = [""; 1 + MAIN_ITEMS.len()];
 
     // SAFETY: foreground only. The menu is redrawn from one place and holds no borrow
-    // of either across a rebuild.
-    unsafe {
-        let row = &mut *core::ptr::addr_of_mut!(ROW);
-        row.clear();
-        // Angle brackets for the master, square for anything else, as stock spells them.
-        let (open, close) = if crate::key::is_root() {
-            ('<', '>')
-        } else {
-            ('[', ']')
-        };
-        match crate::pubkeys::known_fingerprint() {
-            Some([a, b, c, d]) => {
-                let _ = write!(row, "{open}{a:02X}{b:02X}{c:02X}{d:02X}{close}");
-            }
-            // Nothing has derived its fingerprint yet. Name the kind rather than invent
-            // a number.
-            None => {
-                let _ = write!(row, "{open}{}{close}", crate::key::label());
-            }
+    // of the row across a rebuild.
+    let row = unsafe { &mut *core::ptr::addr_of_mut!(ROW) };
+    row.clear();
+    // Angle brackets for the master, square for anything else, as stock spells them.
+    let (open, close) = if crate::key::is_root() {
+        ('<', '>')
+    } else {
+        ('[', ']')
+    };
+    match crate::pubkeys::known_fingerprint() {
+        Some([a, b, c, d]) => {
+            let _ = write!(row, "{open}{a:02X}{b:02X}{c:02X}{d:02X}{close}");
         }
-        let items = &mut *core::ptr::addr_of_mut!(ITEMS);
-        items[0] = row.as_str();
-        items[1..].copy_from_slice(MAIN_ITEMS);
-        &items[..]
+        // Nothing has derived its fingerprint yet. Name the kind rather than invent
+        // a number.
+        None => {
+            let _ = write!(row, "{open}{}{close}", crate::key::label());
+        }
     }
+    row.as_str()
 }
 
 /// Settings on a device with a seed. The seed tools, "Destroy seed" among them, are in
@@ -1691,6 +1721,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         // goes back to whichever opened it.
         #[cfg(feature = "board-q1")]
         Screen::Notes => returns(|a| crate::notes::screen(a.gate, a.login, a.ui)),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::TypePasswords => returns(|a| {
+            crate::derive::type_password_screen(a.gate, a.login, a.ui);
+        }),
         #[cfg(feature = "games")]
         Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
         #[cfg(feature = "games")]
@@ -2001,6 +2035,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Type Passwords")) => Screen::TypePasswords,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("Derive")) => Screen::KeyMenu,
             // The first row when a wallet other than the root is in force: it names the
@@ -2542,6 +2578,9 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "Settings" => &art::SETTINGS,
         "Scan QR" => &art::SCAN_QR_CODE,
         "Derive" => &art::DERIVE_KEY,
+        // A BIP-85 password child, typed rather than shown: the BIP-85 art, which is
+        // not on this page otherwise.
+        "Type Passwords" => &art::DERIVE_BIP85_INDEX,
         // The Derive grid.
         "Back to root" => &art::RETURN_ROOT_KEY,
         "Passphrase" => &art::DERIVE_PASSPHRASE,
@@ -2699,7 +2738,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::SettingsToSd
         | Screen::Multisig
         | Screen::WifStore
-        | Screen::NickPreview => {}
+        | Screen::NickPreview
+        | Screen::TypePasswords => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes | Screen::ScanQr => {}
         Screen::Kernel => kernel_screen(panel),
