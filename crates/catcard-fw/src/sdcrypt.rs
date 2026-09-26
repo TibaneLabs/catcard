@@ -5,7 +5,7 @@
 //!
 //! A card can be encrypted in place with AES-128-XTS ([`catcard_sd::SectorCrypto`]), every
 //! 512-byte sector enciphered under a key derived from a password (or the wallet's BIP-39
-//! passphrase) with PBKDF2-HMAC-SHA256. A computer cannot read the card; this device
+//! passphrase, bound to the card's CID) with PBKDF2-HMAC-SHA256. A computer cannot read the card; this device
 //! decrypts it transparently once it is unlocked, because both the filesystem path
 //! ([`catcard_sd::Sectors`]) and the USB Drive path ([`crate::msc_drive`]) bottom out in
 //! [`catcard_sd::read_block`]/[`catcard_sd::write_block`], which honour
@@ -113,6 +113,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut Login, ui: &mut Ui<'_>) {
         }
     };
     let serial = card.serial();
+    let cid = card.cid;
 
     // Does this device already hold parameters for this card?
     let params = match read_params(gate, login, ui.panel, serial) {
@@ -151,7 +152,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut Login, ui: &mut Ui<'_>) {
 
     match acts[pick] {
         ENCRYPT => do_encrypt(gate, login, ui, &mut dev, card, serial),
-        UNLOCK => do_unlock(ui, serial, params),
+        UNLOCK => do_unlock(ui, serial, &cid, params),
         REMOVE => do_remove(gate, login, ui, &mut dev, card, serial, params),
         _ => {}
     }
@@ -186,7 +187,8 @@ fn do_encrypt(
         return;
     }
 
-    let Some(password) = get_password(ui, "Encryption password") else {
+    let cid = card.cid;
+    let Some(password) = get_password(ui, "Encryption password", &cid) else {
         return;
     };
 
@@ -198,11 +200,10 @@ fn do_encrypt(
     }
 
     menu::blocking_screen(ui.panel, HEAD, "deriving key");
-    let (params, key) =
-        match ccenc::new_params(password.as_bytes(), salt, ccenc::DEFAULT_ITERATIONS) {
-            Ok(pair) => pair,
-            Err(_) => return say(ui, "could not derive a key"),
-        };
+    let (params, key) = match ccenc::new_params(password.bytes(), salt, ccenc::DEFAULT_ITERATIONS) {
+        Ok(pair) => pair,
+        Err(_) => return say(ui, "could not derive a key"),
+    };
 
     // The cipher that rewrites the card, built before the parameters are saved so a save
     // that half-works cannot leave a card claimed-encrypted with no way to rewrite it.
@@ -235,15 +236,15 @@ fn do_encrypt(
 }
 
 /// Unlock an encrypted card for the session.
-fn do_unlock(ui: &mut Ui<'_>, serial: u32, params: Option<Params>) {
+fn do_unlock(ui: &mut Ui<'_>, serial: u32, cid: &[u32; 4], params: Option<Params>) {
     let Some(params) = params else {
         return say(ui, "not encrypted on this device");
     };
-    let Some(password) = get_password(ui, "Unlock password") else {
+    let Some(password) = get_password(ui, "Unlock password", cid) else {
         return;
     };
     menu::blocking_screen(ui.panel, HEAD, "checking password");
-    match ccenc::verify(&params, password.as_bytes()) {
+    match password.verify(&params) {
         Some(key) => {
             install(serial, key);
             crate::catlog!("ccenc: card {:08x} unlocked", serial);
@@ -272,11 +273,11 @@ fn do_remove(
     let key = if let Some(k) = session_key(serial) {
         k
     } else {
-        let Some(password) = get_password(ui, "Password to remove") else {
+        let Some(password) = get_password(ui, "Password to remove", &card.cid) else {
             return;
         };
         menu::blocking_screen(ui.panel, HEAD, "checking password");
-        match ccenc::verify(&params, password.as_bytes()) {
+        match password.verify(&params) {
             Some(k) => k,
             None => return say(ui, "wrong password"),
         }
@@ -380,50 +381,76 @@ fn rewrite(
     Ok(())
 }
 
-/// Choose a password source and return the password, wiped on drop.
-///
-/// Either the BIP-39 passphrase in force (offered only when one is set), or a
-/// separately-typed password. The returned string is `Zeroizing`, and a typed [`Entry`] is
-/// cleared here, so the plaintext password does not outlive this call's result.
-///
-/// [`Entry`]: catcard_ui::textentry::Entry
-fn get_password(ui: &mut Ui<'_>, prompt: &str) -> Option<Zeroizing<heapless::String<MAX_LEN>>> {
-    // The passphrase path is available through the module accessor. [C]
-    let use_passphrase = if crate::passphrase::is_set() {
-        match menu::choose(
-            ui,
-            HEAD,
-            "password source",
-            &["Wallet passphrase", "Enter a password"],
-        ) {
-            Some(0) => true,
-            Some(_) => false,
-            None => return None,
-        }
-    } else {
-        false
-    };
+/// A card's encryption password, wiped on drop.
+enum Password {
+    /// Typed by the owner.
+    Typed(Zeroizing<heapless::String<MAX_LEN>>),
+    /// Made from the passphrase in force and the card's CID
+    /// ([`ccenc::from_passphrase`]). `raw` is the passphrase itself, which builds before
+    /// the CID was mixed in used directly: [`Password::verify`] falls back to it so a
+    /// card encrypted that way still opens.
+    Passphrase {
+        bound: Zeroizing<[u8; 32]>,
+        raw: Zeroizing<heapless::String<MAX_LEN>>,
+    },
+}
 
-    let mut out: Zeroizing<heapless::String<MAX_LEN>> = Zeroizing::new(heapless::String::new());
-    if use_passphrase {
-        // The in-force passphrase, copied out of its own module's store.
-        if out.push_str(crate::passphrase::active()).is_err() {
-            return None;
-        }
-        if out.is_empty() {
-            say(ui, "no passphrase in force");
-            return None;
-        }
-    } else {
-        let mut entry = crate::passphrase::read(ui, prompt)?;
-        let ok = !entry.is_empty() && out.push_str(entry.as_str()).is_ok();
-        entry.clear();
-        if !ok {
-            say(ui, "password cannot be empty");
-            return None;
+impl Password {
+    /// The bytes a new card is encrypted under.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Password::Typed(t) => t.as_bytes(),
+            Password::Passphrase { bound, .. } => &bound[..],
         }
     }
-    Some(out)
+
+    /// Check against a card's stored parameters, handing back its key on a match.
+    fn verify(&self, params: &Params) -> Option<DerivedKey> {
+        match self {
+            Password::Typed(t) => ccenc::verify(params, t.as_bytes()),
+            Password::Passphrase { bound, raw } => {
+                ccenc::verify(params, &bound[..]).or_else(|| ccenc::verify(params, raw.as_bytes()))
+            }
+        }
+    }
+}
+
+/// Choose a password source and return the password.
+///
+/// Either the BIP-39 passphrase in force bound to this card, or a separately-typed
+/// password. A typed [`Entry`] is cleared here, so the plaintext does not outlive the
+/// result, which wipes itself on drop.
+///
+/// [`Entry`]: catcard_ui::textentry::Entry
+fn get_password(ui: &mut Ui<'_>, prompt: &str, cid: &[u32; 4]) -> Option<Password> {
+    let pick = menu::choose(ui, HEAD, prompt, &["From passphrase", "Type a password"])?;
+    if pick == 0 {
+        if !crate::passphrase::is_set() {
+            menu::message(
+                ui.panel,
+                HEAD,
+                "no passphrase in force",
+                "apply one in Derive first",
+            );
+            menu::wait_for_any_key(ui);
+            return None;
+        }
+        let mut raw: Zeroizing<heapless::String<MAX_LEN>> = Zeroizing::new(heapless::String::new());
+        raw.push_str(crate::passphrase::active()).ok()?;
+        let bound = crate::keywork::run(|_| {
+            ccenc::from_passphrase(raw.as_bytes(), cid, ccenc::CardSecret::Encrypt)
+        });
+        return Some(Password::Passphrase { bound, raw });
+    }
+    let mut out: Zeroizing<heapless::String<MAX_LEN>> = Zeroizing::new(heapless::String::new());
+    let mut entry = crate::passphrase::read(ui, prompt)?;
+    let ok = !entry.is_empty() && out.push_str(entry.as_str()).is_ok();
+    entry.clear();
+    if !ok {
+        say(ui, "password cannot be empty");
+        return None;
+    }
+    Some(Password::Typed(out))
 }
 
 /// Read this card's stored parameters, if any. Read-only: it never writes the settings.

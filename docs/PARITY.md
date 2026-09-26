@@ -232,7 +232,7 @@ every multisig input is refused.
 | Bless Firmware | ✅ | ✅ | Danger zone → Bless Firmware (`identity`) |
 | DFU Upgrade | ✅ | ➖ | Danger zone → DFU Upgrade always answers "unavailable on a locked device": the lock flag has no documented encoding and every bench unit is RDP=2, so `enter_dfu` is never called |
 | Reflash GPU (Q1) | ✅ | ❌ | the GPU is only probed and driven (`crate::gpu`) |
-| List / delete files, format SD, format RAM disk, delete PSBTs | ✅ | ✅ | Utils → Browse SD card (a file offers Delete), Format SD card, Format RAM disk, Delete PSBTs (blank then unlink) (`crate::filemgmt`) |
+| List / delete files, format SD, format RAM disk, delete PSBTs | ✅ | ✅ | Utils → Browse files (a file offers Delete), Format (the card or the Virtual Disk), Delete PSBTs (blank then unlink) (`crate::filemgmt`) |
 | Verify Sig File | ✅ | ✅ | Sign → Verify (§6) |
 | Selftest, Warm Reset, versions, power off | ✅ | ✅ | Debug → Selftest and Warm Reset; About holds the versions; View Identity is About page 3; the Q1 power button (`crate::power`) |
 | Settings store | ✅ | ✅ | stock's nvstore format on every board: LittleFS on mk4/mk5/Q1, 32 SPI-NOR slots on the mk3 (`catcard-settings::nvstore`, `norslots`, `crate::settings`); Danger zone → Settings Space; the mk3 is untested on hardware |

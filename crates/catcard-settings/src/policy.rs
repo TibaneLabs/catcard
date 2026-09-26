@@ -584,9 +584,9 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
         // keys), Show FW Version. Upgrade Firmware is kept: an upgrade is a signed image
         // the bootloader checks, not a wallet secret. Backup goes, as stock drops it.
         Menu::Utils => match label {
-            "Export wallet" | "Paper wallet" | "Browse SD card" | "Card details" | "Format"
-            | "Delete PSBTs" | "Card password" | "NFC Tools" | "Upgrade Firmware" | "Help"
-            | "USB Drive" | "Analyze RNG" | "Games" => true,
+            "Export wallet" | "Paper wallet" | "Browse files" | "SD card" | "Format"
+            | "Delete PSBTs" | "NFC Tools" | "Upgrade Firmware" | "Help" | "USB Drive"
+            | "Analyze RNG" | "Games" => true,
             "WIF Store" => allow.related_keys,
             _ => false,
         },
@@ -1038,7 +1038,8 @@ mod tests {
         for l in [
             "Export wallet",
             "Paper wallet",
-            "Browse SD card",
+            "Browse files",
+            "SD card",
             "Format",
             "Delete PSBTs",
             "NFC Tools",

@@ -858,7 +858,7 @@ source — not the firmware tree — and this replaced with it.
 ## SD CMD42 (LOCK_UNLOCK) — the block framing and card quirks are unproven
 
 `crates/catcard-sd/src/lib.rs` (`lock_unlock`) drives the SD card's own controller
-password lock (menu: `Utils → Card password`). The command byte, the flag bits (ERASE=3,
+password lock (menu: `Utils → SD card → Card password`). The command byte, the flag bits (ERASE=3,
 LOCK=2, CLR_PWD=1, SET_PWD=0) and the `[command][pwd_len][password]` data structure are
 confirmed from the **public** SD Physical Layer Simplified Specification, "Lock/Unlock
 Card" `[C]`. What is not confirmed on real hardware:

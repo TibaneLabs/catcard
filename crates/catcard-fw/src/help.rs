@@ -65,7 +65,8 @@ pub(crate) fn utils(ui: &mut Ui<'_>) {
         &[
             "Export wallet: public keys and descriptors for wallet software. Never the seed.",
             "Backup: the whole wallet in one encrypted file, and restoring one.",
-            "Browse, Card details, Card password, Encrypt card: the microSD.",
+            "Browse files: what is on the card or the Virtual Disk.",
+            "SD card: the card's details, its password lock, and encryption to this device.",
             "Format: erase and re-create the microSD, or the Virtual Disk.",
             "Delete PSBTs: blank and remove spent transactions from the card or disk.",
             "USB Drive: share the card or the Virtual Disk with the computer; a firmware left on the disk is offered on eject.",

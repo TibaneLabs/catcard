@@ -22,6 +22,14 @@
 //! be stronger but does not fit the device's ~32 KB heap, so the defence is the iteration
 //! count, stored per card so a later firmware can raise it without stranding old cards.
 //!
+//! # A password from the passphrase
+//!
+//! Instead of a typed password, the owner can use the BIP-39 passphrase in force, bound to
+//! the card: [`from_passphrase`] is HMAC-SHA256 keyed by the passphrase over a fixed label
+//! and the card's 16-byte CID register. The same passphrase gives each card a different
+//! password, and the card lock and the encryption get different ones. Nothing here is
+//! stored: the same passphrase on any CatCard re-derives it from the card in the slot.
+//!
 //! # Not a stock key
 //!
 //! [`KEY`] (`ccenc`) is this firmware's own; stock has no such feature and no such key, so
@@ -154,6 +162,37 @@ pub fn verify(params: &Params, password: &[u8]) -> Option<DerivedKey> {
         // Drop the derived key without returning it; the password was wrong.
         None
     }
+}
+
+/// Which of a card's two secrets [`from_passphrase`] makes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CardSecret {
+    /// The card controller's own lock password (CMD42). The card takes 16 bytes of it.
+    Lock,
+    /// The password stretched into the whole-card encryption key.
+    Encrypt,
+}
+
+/// The label each secret is made under. Changing either strands every card set up with it.
+const LOCK_LABEL: &[u8] = b"CatCard SD lock v1";
+const ENCRYPT_LABEL: &[u8] = b"CatCard SD encrypt v1";
+
+/// A card's password made from `passphrase` and the card's CID register (as the card
+/// sends it, most significant word first): HMAC-SHA256(passphrase, label ‖ CID).
+///
+/// The CID is burned into the card at the factory, so the result is fixed for that card
+/// and that passphrase, and differs from card to card.
+pub fn from_passphrase(passphrase: &[u8], cid: &[u32; 4], what: CardSecret) -> Zeroizing<[u8; 32]> {
+    use purecrypto::hash::HmacSha256;
+    let mut mac = HmacSha256::new(passphrase);
+    mac.update(match what {
+        CardSecret::Lock => LOCK_LABEL,
+        CardSecret::Encrypt => ENCRYPT_LABEL,
+    });
+    for w in cid {
+        mac.update(&w.to_be_bytes());
+    }
+    Zeroizing::new(mac.finalize())
 }
 
 /// Read one card's parameters out of a settings document.
@@ -383,6 +422,38 @@ mod tests {
     use super::*;
 
     const SALT: [u8; SALT_LEN] = [0x5A; SALT_LEN];
+
+    const CID: [u32; 4] = [0x1b53_4d45, 0x4231_5154, 0x3012_3456, 0x7801_2345];
+
+    fn hex(b: &[u8]) -> std::string::String {
+        b.iter().map(|x| std::format!("{x:02x}")).collect()
+    }
+
+    /// Reference values from Python's `hmac.new(b"correct horse", label + CID, sha256)`,
+    /// the CID packed as four big-endian words.
+    #[test]
+    fn a_passphrase_password_matches_an_independent_hmac() {
+        let lock = from_passphrase(b"correct horse", &CID, CardSecret::Lock);
+        let enc = from_passphrase(b"correct horse", &CID, CardSecret::Encrypt);
+        assert_eq!(
+            hex(&*lock),
+            "45539b772ac024a3e410ec9f3637673c1fafdb5bdc2bcde2ec4eedbbda3dad85"
+        );
+        assert_eq!(
+            hex(&*enc),
+            "110a8e99b6363c8d55f2b7549dbc8e2cb0034a27c41afa994ec9af2456922dc8"
+        );
+    }
+
+    #[test]
+    fn a_passphrase_password_differs_per_card_and_per_use() {
+        let mut other = CID;
+        other[2] ^= 1;
+        let a = from_passphrase(b"pw", &CID, CardSecret::Lock);
+        assert_ne!(*a, *from_passphrase(b"pw", &other, CardSecret::Lock));
+        assert_ne!(*a, *from_passphrase(b"pw", &CID, CardSecret::Encrypt));
+        assert_ne!(*a, *from_passphrase(b"pX", &CID, CardSecret::Lock));
+    }
 
     #[test]
     fn the_same_password_and_params_derive_the_same_key() {

@@ -184,20 +184,14 @@ enum Screen {
     /// A run of one account's receive addresses, written to the card as CSV.
     AddressCsv,
     BrowseSd,
-    /// What card is in the slot: its CID (manufacturer, product, serial, date), capacity
-    /// and filesystem. Read-only — brings the card up but writes nothing.
-    CardDetails,
+    /// The card in the slot: its details (CID, capacity, filesystem) above its password
+    /// lock and its encryption.
+    CardMenu,
     /// Format a medium, asked which: an SD card (MBR + FAT16/FAT32/exFAT by capacity; slot
     /// A or B on the Q1) or, where there is one, the Virtual Disk (blanked, then formatted).
     Format,
     /// Blank and remove the PSBTs and signed transactions on the chosen storage.
     DeletePsbts,
-    /// The SD card's own controller password lock (CMD42): set, change, remove, unlock,
-    /// or force-erase. Needs no settings store, so it is on every board with a slot.
-    CardPassword,
-    /// Device-bound, whole-card AES-128-XTS encryption of the SD card: encrypt in place,
-    /// unlock for the session, or remove. Keeps per-card parameters in the settings store.
-    CardEncrypt,
     /// Write or read the encrypted backup file.
     BackupMenu,
     /// Write the wallet to the card, encrypted under twelve fresh words.
@@ -822,8 +816,10 @@ const UTILS_ITEMS: &[&str] = &[
     "Backup",
     #[cfg(not(feature = "board-mk3"))]
     "Paper wallet",
-    "Browse SD card",
-    "Card details",
+    // Files on the card or the Virtual Disk: it asks which.
+    "Browse files",
+    // The card itself: its details, its password lock, its encryption.
+    "SD card",
     // One row for every medium: it asks which -- the SD card (slot A or B on the Q1)
     // or, where there is PSRAM, the RAM disk -- rather than a row per medium.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Format SD Card",
@@ -832,12 +828,6 @@ const UTILS_ITEMS: &[&str] = &[
     // Stock's File Management row, flat here like the ones above.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
     "Delete PSBTs",
-    // The SD card's own CMD42 password lock. No settings store, so it is on every board
-    // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
-    "Card password",
-    // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
-    // settings.
-    "Encrypt card",
     "Games",
     // Individual private keys, kept in the settings.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
@@ -861,8 +851,10 @@ const UTILS_ITEMS: &[&str] = &[
     // flash). Source: hw-reference/firmware-features.md §8 "paper wallets" [C]
     #[cfg(not(feature = "board-mk3"))]
     "Paper wallet",
-    "Browse SD card",
-    "Card details",
+    // Files on the card or the Virtual Disk: it asks which.
+    "Browse files",
+    // The card itself: its details, its password lock, its encryption.
+    "SD card",
     // One row for every medium: it asks which -- the SD card (slot A or B on the Q1)
     // or, where there is PSRAM, the RAM disk -- rather than a row per medium.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Format SD Card",
@@ -871,12 +863,6 @@ const UTILS_ITEMS: &[&str] = &[
     // Stock's File Management row, flat here like the ones above.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]
     "Delete PSBTs",
-    // The SD card's own CMD42 password lock. No settings store, so it is on every board
-    // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
-    "Card password",
-    // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
-    // settings.
-    "Encrypt card",
     // Individual private keys, kept in the settings.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
     "WIF Store",
@@ -1729,11 +1715,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::Format => to(|a| format_media(a.ui), Screen::Utils),
         Screen::DeletePsbts => to(|a| crate::filemgmt::delete_psbts(a.ui), Screen::Utils),
-        Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
-        Screen::CardEncrypt => to(
-            |a| crate::sdcrypt::screen(a.gate, a.login, a.ui),
-            Screen::Utils,
-        ),
+        Screen::CardMenu => to(|a| card_menu(a.gate, a.login, a.ui), Screen::Utils),
         Screen::BackupSave => to(
             |a| crate::backup::save(a.gate, a.login, a.ui),
             Screen::BackupMenu,
@@ -2347,12 +2329,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Paper wallet")) => Screen::PaperWallet,
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
             (Key::Confirm, Some("Backup")) => Screen::BackupMenu,
-            (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
-            (Key::Confirm, Some("Card details")) => Screen::CardDetails,
+            (Key::Confirm, Some("Browse files")) => Screen::BrowseSd,
+            (Key::Confirm, Some("SD card")) => Screen::CardMenu,
             (Key::Confirm, Some("Format")) => Screen::Format,
             (Key::Confirm, Some("Delete PSBTs")) => Screen::DeletePsbts,
-            (Key::Confirm, Some("Card password")) => Screen::CardPassword,
-            (Key::Confirm, Some("Encrypt card")) => Screen::CardEncrypt,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
             (Key::Confirm, Some("WIF Store")) => Screen::WifStore,
@@ -2431,9 +2411,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Confirm => Screen::PsramProbe,
             _ => Screen::Debug,
         },
-        // Card details is an info screen reached from Utils, so any key returns there
-        // rather than to the Debug fallback below.
-        Screen::CardDetails => Screen::Utils,
         // Every info screen leaves on any key, back to the drawer it was opened from.
         //
         // A **menu** that reaches here has simply forgotten to say what its keys do, and
@@ -2716,12 +2693,9 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "Analyze RNG" => &art::ANALYZE_RNG,
         "USB Drive" => &art::USB_DRIVE,
         "Export wallet" => &art::EXPORT_WALLET,
-        "Browse SD card" => &art::MICROSD_BROWSE,
+        "Browse files" => &art::MICROSD_BROWSE,
         "Format" => &art::MICROSD_FORMAT,
-        // The card-access icon: the CMD42 lock is about who may read the card at all.
-        "Card password" => &art::MICROSD_ACCESS,
-        "Card details" => &art::CARD_DETAILS,
-        "Encrypt card" => &art::ENCRYPT_CARD,
+        "SD card" => &art::CARD_DETAILS,
         "Delete PSBTs" => &art::DELETE_PSBTS,
         "Paper wallet" => &art::PAPER_WALLET,
         "WIF Store" => &art::WIF_STORE,
@@ -2893,7 +2867,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
-        Screen::CardDetails => card_details_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
         Screen::Logs => {}
         // Handled in `run`; never drawn.
@@ -2941,10 +2914,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: both ask, then work on the volume and say how it went.
         Screen::DeletePsbts => {}
         // Handled in `run`: it brings up the card and drives its own menu and prompts.
-        Screen::CardPassword => {}
         // Handled in `run`: it brings up the card and drives its own menu, prompts and
         // (for encrypt/remove) the full-card rewrite.
-        Screen::CardEncrypt => {}
+        Screen::CardMenu => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt
         | Screen::BatchSign
@@ -4494,7 +4466,7 @@ const FILE_SHARE_QR_ROW: u32 = 3;
 /// Picking and deleting are deliberately not both on offer. A browser opened to choose a
 /// `.psbt` is part-way through signing something, and a delete row under the cursor there
 /// is one keypress from removing the file the host just wrote; the viewer -- `Utils` ->
-/// `Browse SD card` -- is where a file gets deleted.
+/// `Browse files` -- is where a file gets deleted.
 ///
 /// Stock reaches a file listing through `File Management` -> `List Files`.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 [C]. That the listing is also
@@ -11450,6 +11422,63 @@ fn read_card_pwd(ui: &mut Ui<'_>, prompt: &str) -> Option<catcard_ui::textentry:
     Some(entry)
 }
 
+/// One card lock password, wiped on drop: made from the passphrase in force and this
+/// card's CID ([`catcard_settings::ccenc::from_passphrase`]), or typed.
+///
+/// The passphrase one needs nothing written down beyond the passphrase itself, and is
+/// different for every card. `twice` asks a typed password again, for a new one.
+fn lock_password(
+    ui: &mut Ui<'_>,
+    prompt: &str,
+    cid: &[u32; 4],
+    twice: bool,
+) -> Option<zeroize::Zeroizing<heapless::Vec<u8, { catcard_sd::MAX_LOCK_PWD }>>> {
+    use catcard_settings::ccenc::{CardSecret, from_passphrase};
+    const HEAD: &str = "Card password";
+    let mut out = zeroize::Zeroizing::new(heapless::Vec::new());
+    let pick = choose(ui, HEAD, prompt, &["From passphrase", "Type a password"])?;
+    if pick == 0 {
+        if !crate::passphrase::is_set() {
+            message(
+                ui.panel,
+                HEAD,
+                "no passphrase in force",
+                "apply one in Derive first",
+            );
+            wait_any_key(ui);
+            return None;
+        }
+        let full = crate::keywork::run(|_| {
+            from_passphrase(
+                crate::passphrase::active().as_bytes(),
+                cid,
+                CardSecret::Lock,
+            )
+        });
+        let _ = out.extend_from_slice(&full[..catcard_sd::MAX_LOCK_PWD]);
+        return Some(out);
+    }
+    let mut first = read_card_pwd(ui, prompt)?;
+    if twice {
+        let Some(mut again) = read_card_pwd(ui, "Repeat password") else {
+            first.clear();
+            return None;
+        };
+        let same = first.as_str() == again.as_str();
+        again.clear();
+        if !same {
+            first.clear();
+            message(ui.panel, HEAD, "did not match", "press a key");
+            wait_any_key(ui);
+            return None;
+        }
+    }
+    // `read_card_pwd` has already refused anything past the card's 16 bytes.
+    let _ = out.extend_from_slice(first.as_str().as_bytes());
+    first.clear();
+    Some(out)
+}
+
 /// The SD card's own controller-level password lock (CMD42 / LOCK_UNLOCK).
 ///
 /// **Not** encryption of the data: this is the card controller's lock. A card locked this
@@ -11458,9 +11487,10 @@ fn read_card_pwd(ui: &mut Ui<'_>, prompt: &str) -> Option<catcard_ui::textentry:
 /// unreadable off this device. Forgetting the password leaves only force-erase (total data
 /// loss) as a way back.
 ///
-/// The password is typed each time and **never stored on the device**: it lives in an
-/// [`Entry`](catcard_ui::textentry::Entry) that is wiped on every path out, and the driver
-/// copies it into a `Zeroizing` buffer of its own. Needs no settings store, so it is on
+/// The password is typed, or made from the passphrase in force and the card's CID
+/// ([`lock_password`]), each time, and **never stored on the device**: it is held in a
+/// buffer wiped on every path out, and the driver copies it into a `Zeroizing` buffer of
+/// its own. Needs no settings store, so it is on
 /// every board with a slot, the mk3 included.
 fn card_password(ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Sdmmc;
@@ -11479,8 +11509,8 @@ fn card_password(ui: &mut Ui<'_>) {
     };
     // A locked card still answers identification -- it refuses only data transfers -- so
     // bring-up succeeds on one, which is what lets "Unlock card" be offered at all.
-    match catcard_sd::init(&mut dev) {
-        Ok(_) => {}
+    let cid = match catcard_sd::init(&mut dev) {
+        Ok(card) => card.cid,
         Err(catcard_sd::Error::NoCard) => {
             message(ui.panel, HEAD, "no card in slot", "press a key");
             wait_any_key(ui);
@@ -11492,7 +11522,7 @@ fn card_password(ui: &mut Ui<'_>) {
             wait_any_key(ui);
             return;
         }
-    }
+    };
 
     const WHAT: &[&str] = &[
         "Set password",
@@ -11506,8 +11536,8 @@ fn card_password(ui: &mut Ui<'_>) {
     };
 
     match pick {
-        // Set: a fresh password, entered twice so a slip does not lock the card to a
-        // password nobody knows.
+        // Set: a fresh password. A typed one is entered twice so a slip does not lock the
+        // card to a password nobody knows; one from the passphrase is made, not typed.
         0 => {
             ask(
                 ui.panel,
@@ -11518,55 +11548,25 @@ fn card_password(ui: &mut Ui<'_>) {
             if !confirmed(ui) {
                 return;
             }
-            let Some(mut first) = read_card_pwd(ui, "New password") else {
+            let Some(new) = lock_password(ui, "New password", &cid, true) else {
                 return;
             };
-            let Some(mut again) = read_card_pwd(ui, "Repeat password") else {
-                first.clear();
-                return;
-            };
-            if first.as_str() != again.as_str() {
-                first.clear();
-                again.clear();
-                message(ui.panel, HEAD, "did not match", "press a key");
-                wait_any_key(ui);
-                return;
-            }
-            let op = LockOp::SetPassword(first.as_str().as_bytes());
+            let op = LockOp::SetPassword(&new);
             run_lock_op(ui, &mut dev, op, "Setting password", "password set");
-            first.clear();
-            again.clear();
         }
         // Change: clear the old password, then set the new. Two CMD42s -- the card is left
         // with no password if the new one never goes on, rather than with both half-applied.
         1 => {
-            let Some(mut old) = read_card_pwd(ui, "Old password") else {
+            let Some(old) = lock_password(ui, "Old password", &cid, false) else {
                 return;
             };
-            let Some(mut new) = read_card_pwd(ui, "New password") else {
-                old.clear();
+            let Some(new) = lock_password(ui, "New password", &cid, true) else {
                 return;
             };
-            let Some(mut again) = read_card_pwd(ui, "Repeat new") else {
-                old.clear();
-                new.clear();
-                return;
-            };
-            if new.as_str() != again.as_str() {
-                old.clear();
-                new.clear();
-                again.clear();
-                message(ui.panel, HEAD, "did not match", "press a key");
-                wait_any_key(ui);
-                return;
-            }
             message(ui.panel, HEAD, "changing password", "do not remove card");
-            let cleared =
-                catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(old.as_str().as_bytes()));
-            old.clear();
-            match cleared {
+            match catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(&old)) {
                 Ok(()) => {
-                    let op = LockOp::SetPassword(new.as_str().as_bytes());
+                    let op = LockOp::SetPassword(&new);
                     run_lock_op(ui, &mut dev, op, "Setting password", "password changed");
                 }
                 Err(e) => {
@@ -11575,27 +11575,23 @@ fn card_password(ui: &mut Ui<'_>) {
                     wait_any_key(ui);
                 }
             }
-            new.clear();
-            again.clear();
         }
         // Remove: clear a known password, leaving the card usable by any reader again.
         2 => {
-            let Some(mut pwd) = read_card_pwd(ui, "Password") else {
+            let Some(pwd) = lock_password(ui, "Password", &cid, false) else {
                 return;
             };
-            let op = LockOp::ClearPassword(pwd.as_str().as_bytes());
+            let op = LockOp::ClearPassword(&pwd);
             run_lock_op(ui, &mut dev, op, "Removing password", "password removed");
-            pwd.clear();
         }
         // Unlock: open a locked card for this session. The password stays set, so the card
         // locks again when it next loses power; "Remove" is how it is cleared for good.
         3 => {
-            let Some(mut pwd) = read_card_pwd(ui, "Password") else {
+            let Some(pwd) = lock_password(ui, "Password", &cid, false) else {
                 return;
             };
-            let op = LockOp::Unlock(pwd.as_str().as_bytes());
+            let op = LockOp::Unlock(&pwd);
             run_lock_op(ui, &mut dev, op, "Unlocking", "card unlocked");
-            pwd.clear();
         }
         // Force-erase: the forgotten-password recovery. Wipes the password AND every byte
         // on the card, cannot be undone, and is never a default -- two confirmations.
@@ -13474,14 +13470,46 @@ fn sd_screen(panel: &mut display::Panel) {
     info(panel, "microSD", &lines);
 }
 
-/// Utils → "Card details": what card is in the slot, from its CID, and how it is
-/// formatted.
+/// Utils → "SD card": the card in the slot, described at the top, and what can be done
+/// to it below -- its own hardware password lock, and whole-card encryption.
+///
+/// One row for the card rather than one per operation. Re-reads the card after each
+/// action, since locking or encrypting it changes what the details can say.
+fn card_menu(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    use catcard_ui::scroll::Line as Row;
+    const PASSWORD: u32 = 0;
+    const ENCRYPT: u32 = 1;
+    // Hobbled mode keeps the card's details and lock but not its encryption, whose
+    // parameters are a wallet-settings save.
+    let encrypt = crate::policy::row_allowed(catcard_settings::policy::Menu::Utils, "Encrypt card");
+    loop {
+        message(ui.panel, "SD card", "reading the card", "");
+        let lines = card_detail_lines();
+        let mut rows: heapless::Vec<Row<'_>, { MAX_LINES + 3 }> = heapless::Vec::new();
+        let _ = rows.push(Row::title("SD card"));
+        for l in &lines {
+            let _ = rows.push(Row::body(l.as_str()));
+        }
+        let _ = rows.push(Row::item("Card password", PASSWORD));
+        if encrypt {
+            let _ = rows.push(Row::item("Encryption", ENCRYPT));
+        }
+        match show_doc(ui, &rows, false, false) {
+            DocExit::Selected(PASSWORD) => card_password(ui),
+            DocExit::Selected(ENCRYPT) => crate::sdcrypt::screen(gate, login, ui),
+            _ => return,
+        }
+    }
+}
+
+/// What card is in the slot, from its CID, and how it is formatted: the top of the
+/// Utils → "SD card" menu.
 ///
 /// Read-only with respect to the card. It brings the controller and card up to read the
 /// CID and capacity, then mounts the volume purely to learn its filesystem type; nothing
 /// is ever written. The CID decode lives in `catcard_sd::cid`; here we only lay it out on
 /// the six lines this panel has.
-fn card_details_screen(panel: &mut display::Panel) {
+fn card_detail_lines() -> heapless::Vec<Line, MAX_LINES> {
     use catcard_hal::sdmmc::Sdmmc;
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
 
@@ -13495,8 +13523,7 @@ fn card_details_screen(panel: &mut display::Panel) {
                 let mut l = Line::new();
                 let _ = write!(l, "controller: {}", describe_sd(&e));
                 let _ = lines.push(l);
-                info(panel, "Card details", &lines);
-                return;
+                return lines;
             }
         };
         match catcard_sd::init(&mut dev) {
@@ -13505,8 +13532,7 @@ fn card_details_screen(panel: &mut display::Panel) {
                 let mut l = Line::new();
                 let _ = write!(l, "card: {}", describe_sd(&e));
                 let _ = lines.push(l);
-                info(panel, "Card details", &lines);
-                return;
+                return lines;
             }
         }
     };
@@ -13601,7 +13627,7 @@ fn card_details_screen(panel: &mut display::Panel) {
     }
     let _ = lines.push(l);
 
-    info(panel, "Card details", &lines);
+    lines
 }
 
 /// An SD error in the few characters a line has.
