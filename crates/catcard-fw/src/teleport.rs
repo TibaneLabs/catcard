@@ -687,6 +687,8 @@ fn pick_payload(
     let row = menu::pick_row(ui, HEAD, "what to send?", &rows)?;
     match rows[row] {
         "Master seed" => {
+            // Sending the seed reveals it: in delta mode this erases it instead.
+            crate::trickpin::seed_reveal(gate);
             menu::reading_seed(ui.panel, HEAD);
             let pin_gate = crate::pinentry::BootloaderGate::new(gate);
             let stash = match login.fetch_secret(&pin_gate) {
@@ -756,6 +758,8 @@ fn pick_payload(
             ) {
                 return None;
             }
+            // A full backup carries the seed: in delta mode this erases it instead.
+            crate::trickpin::seed_reveal(gate);
             let n = crate::backup::teleport_body(gate, login, ui, HEAD, out)?;
             Some((Dtype::Backup, n))
         }
