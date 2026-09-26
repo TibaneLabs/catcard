@@ -75,7 +75,8 @@ each step landed, then what is left.
     PINs over gate 22 with the policy's escape as stock's unlock trick PIN, stock's
     calculator login, the callgate status readings, BIP-21 `wallet=`, the Q1 battery
     levels and on-battery power-off. Web 2FA is deliberately out. Untested on hardware.
-18. **What remains**: HSM mode and user management (over the ckcc protocol); creating
+18. **What remains**: HSM mode's Storage Locker, audit log and `ATTEST` whitelists (not in
+    the reference); creating
     Delta Mode, Countdown & Brick and Add If Wrong tricks (storage not in the reference);
     Reflash GPU; the factory menu
     (Bag Me Now / Ship w/o Bag, MCU key slots); BIP-322 `full` / `pof` for P2PKH (needs a
@@ -213,7 +214,7 @@ every multisig input is refused.
 | Trick PINs (duress, brick, wipe, delta...) | ✅ | 🟡 | Settings → Login → Trick PINs over gate 22 (`crate::trickpin`); a delta trick made elsewhere is honoured, but creating Delta Mode, Countdown & Brick and Add If Wrong is refused until their storage is known (`HARDWARE-OPEN-ITEMS.md`); untested on hardware |
 | Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | ✅ | all under Settings → Login and Idle timeout (`crate::pinentry`, `crate::guard`, `crate::idle`); kill key and SD 2FA in release builds only (the `dev` feature leaves them out); untested on hardware |
 | Calculator login (Q1) | ✅ | ✅ | Settings → Login → Calculator login (`cat_calc`, `pinentry`): stock's convention: `prefix-` shows the words, the whole PIN on one line logs in (`MENU.md`); untested on hardware |
-| HSM mode, user management | ✅ | ❌ | deferred |
+| HSM mode, user management | ✅ | 🟡 | over the ckcc protocol, mk4/mk5/Q1: stock's policy file, rules, velocity, whitelists, users (TOTP/HOTP/password under stock's `usr`), local code, status report, boot-to-HSM; `ckcc hsm-start` / `hsm` / `user` / `auth` / `local-conf` unchanged (`crate::hsm`, `catcard_settings::hsm`). Refused where the reference stops: Storage Locker, `must_log`, `ATTEST` whitelists, BIP-322 in HSM mode (`USB.md`, "HSM mode"); untested on hardware |
 | Spending Policy | ✅ | ✅ | single-signer policy: magnitude, velocity by the PSBT's lock-time height, a 25-address whitelist, Test Drive, Word Check (`crate::policy`, `cat_sssp`); untested on hardware |
 | CCC (Coldcard Co-Sign) | ✅ | ✅ | key C (new 12 words, typed 12/24, or from the Seed Vault) under stock's own `ccc` key in stock's shape; the same policy engine and editor; key C co-signs a spend from a registered wallet it is in only when the policy passes, else the owner may sign without it; Export CCC XPUBs, Build 2-of-N, Load Key C, Remove CCC; whole-key word challenge, three failures restart (`crate::ccc`, `catcard_settings::ccc`); untested on hardware |
 | Web 2FA (Spending Policy, CCC) | ✅ | ➖ | left out: relies on Coinkite's closed coldcard.com service; a policy stock enrolled in it never co-signs here |

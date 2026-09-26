@@ -133,16 +133,19 @@ three-second read may time out first.
 | `show` | implemented, held | single-key address (`AF_CLASSIC`, `P2WPKH`, `P2WPKH_P2SH`, `P2TR`; old `0x17` read as P2TR); answered, then shown until a key |
 | `p2sh` | implemented, held | a **registered** multisig wallet with the same M, N and form, whose cosigners' fingerprints and origins match the paths sent and whose own script at that branch/index equals the script sent; answered, then shown. Anything else: `err_Multisig wallet not registered` |
 | `msck` | implemented, held | `int1` 1 if a registered wallet has that M, N and fingerprint XOR |
-| `upld` / `sha2` | implemented | stock's rules (256-aligned, strictly in order, running SHA-256); PSRAM (`Use::Host`) on mk4/mk5/Q1, a heap block up to 16 KiB or the SPI-NOR staging area on the mk3; under the spending policy only a PSBT |
+| `upld` / `sha2` | implemented | stock's rules (256-aligned, strictly in order, running SHA-256); PSRAM (`Use::Host`) on mk4/mk5/Q1, a heap block up to 16 KiB or the SPI-NOR staging area on the mk3; under the spending policy only a PSBT; in HSM mode only a binary PSBT of at most 2 MiB |
 | firmware upgrade | implemented | an upload whose last block is 128 bytes repeating the header it carried at `0x3F80` (kept in RAM as it passed -- nothing is read back from PSRAM mid-upload) is an image: inspected (`Staged::stored_elsewhere`) and put on the **same approval screen** as a CatCard offer; a refused image is an `err_` on that block, so the host never sends the `rebo`; `rebo` does nothing while an image waits |
-| `stxn` / `stok` | implemented, polled | the upload re-hashed on the UI task, then `signtx::host_sign` -- the ordinary review, spending policy and all, every derived key of ours allowed (stored WIF keys never sign for a computer); `strx` names the signed PSBT, or with `STXN_FINALIZE` the finished transaction when complete |
+| `stxn` / `stok` | implemented, polled | the upload re-hashed on the UI task, then `signtx::host_sign` -- the ordinary review, spending policy and all, every derived key of ours allowed (stored WIF keys never sign for a computer); `strx` names the signed PSBT, or with `STXN_FINALIZE` the finished transaction when complete. In HSM mode the policy's rules replace the review screens (below); a refusal is `refu` |
 | `dwld` | implemented | file 1 only: the last signed result; must be encrypted |
-| `smsg` / `smok` | implemented, polled | `signmsg::sign_for_host`: the ordinary message confirmation, legacy signature; taproot refused (no legacy header for it) |
+| `smsg` / `smok` | implemented, polled | `signmsg::sign_for_host`: the ordinary message confirmation, legacy signature; taproot refused (no legacy header for it). In HSM mode: `msg_paths` decides, nobody is asked |
 | `pass` / `pwok` | implemented, polled | `passphrase::apply` with its own "use this wallet?"; `pwok` answers the new master xpub; must be encrypted |
 | `enrl` | implemented | `msimport::from_text` on the uploaded file, its own review; answered `okay` at once |
 | `logo` / `rebo` | implemented | `okay`, then half a second, then logout (or restart) |
 | `bagi` | read only | the factory bag number; writing it is refused (`err_Not allowed`) |
-| `hsms` `hsts` `gslr` `nwur` `rmur` `user` | HSM stub | `err_HSM commands disabled`, as stock with `hsmcmd` off; marked `// HSM:` in `crate::ckcc` for the package that builds HSM mode |
+| `hsms` | implemented, held | mk4/mk5/Q1. With a length and digest: the uploaded policy; without: the stored one. Checked on the UI task and answered -- `err_` with the reason when it fails, as stock raises -- then explained on the screen for the person to approve. See "HSM mode" |
+| `hsts` | implemented, held | the status report, JSON (below) |
+| `nwur` `rmur` `user` | implemented, held | HSM users (below); `nwur` answers the secret or password the host is to show, `user` outside HSM mode is a dry run answered with stock's words (`mismatch`, `replay`, ...) or nothing |
+| `gslr` | refused | `err_Storage Locker not supported` in HSM mode, `err_HSM not active` otherwise: no policy this firmware accepts allows a read |
 | `back` `bkok` `rest` | refused | `err_Unknown cmd`: backup and restore are on the card here, not over USB |
 | `dfu_` | refused | `err_Unknown cmd`: never offered (bench units are RDP 2) |
 | `msls` `msdl` `msgt` `msas` `mins` | refused | `err_Unknown cmd`, as stock 5.6.2 itself answers them |
@@ -153,16 +156,138 @@ Gates, as the spec gives them: `xpub`, `mitm`, `pass` and `dwld` must arrive enc
 (`err_Not ready: enter the PIN on the device`); under the spending policy `enrl`, `pass`,
 `pwok`, a `bagi` write, `back`, `rest`, `dfu_` and firmware uploads are refused
 (`err_Spending policy in effect`) -- stock lets `pass` through when its policy allows it,
-and ours has no such allowance. A second request while a job is in hand is `busy`.
+and ours has no such allowance. A second request while a job is in hand is `busy`. The
+HSM commands (`hsms` `hsts` `gslr` `nwur` `rmur` `user`) are answered only with Settings →
+Spending Policy → **HSM Mode** enabled (`err_HSM commands disabled` otherwise, stock's
+`hsmcmd`), never under the spending policy, and never on the mk3. In HSM mode only stock's
+whitelist is answered (`err_Not allowed in HSM mode` for the rest).
 
 **Not in ckcc mode**: key injection, the memory monitor, pairing and the host-wallet
 opcodes. They exist only in CatCard mode.
 
+### HSM mode
+
+Unattended signing under a policy file, driven by stock's own host tool: `ckcc hsm-start`,
+`ckcc hsm`, `ckcc user`, `ckcc auth`, `ckcc local-conf` work unchanged. mk4, mk5 and Q1 --
+stock's `supports_hsm` is false on the Q1, but the Q1 speaks the same ckcc protocol and the
+user asked for it there; not the mk3, which has no settings store. Written from
+`hw-reference/hsm-policy-format.md`; the rules are `catcard_settings::hsm` and
+`catcard_settings::hsmusers` (host-tested), the device side is `crate::hsm`.
+
+**Setting it up.** Settings → Spending Policy → `HSM Mode` → Enable (our own key
+`cat_hsmcmd`, off by default; stock's `hsmcmd` is named but not its value shape). Then,
+from a computer with the device in ckcc USB mode:
+
+```sh
+ckcc user alice                 # a TOTP user; the device picks the secret, shows its QR
+ckcc hsm-start policy.json      # uploaded, checked, then approved on the device
+ckcc hsm                        # the status report
+ckcc local-conf tx.psbt         # the 6-digit code the local operator types for tx.psbt
+ckcc auth alice 123456          # alice's code, queued for the next PSBT
+ckcc sign tx.psbt out.psbt      # judged by the policy, signed or refused
+```
+
+**Starting.** A policy comes from `hsms` (uploaded, up to 200 000 bytes, or the stored one)
+or from the stored file `/hsm-policy.json` (stock's `/flash/hsm-policy.json`, the same
+volume): main menu → `Start HSM Mode` on mk4/mk5, Settings → Spending Policy on the Q1, and
+at every login while one is stored (stock offers it at boot). It is checked against this
+device -- its users, its registered multisig wallets, its network's address syntax --
+refused with the reason if anything is wrong, then **explained** on the screen (read to
+the end before OK counts). A new policy also gets stock's **last chance**: its hash and a
+digit picked at random from 1 2 3 4 6, which must be pressed. HSM mode needs the stored
+wallet in force (no passphrase, no temporary seed) and no active spending policy.
+
+**Running.** The menus are replaced by a status screen: approved, refused, what is left of
+the velocity period, the local-code field, and a sweep that shows the device is alive --
+never an amount. Only stock's whitelist of opcodes is answered, uploads must be binary
+PSBTs, and every job is answered by the policy: `stxn` through `signtx`'s ordinary review
+and signer with the rules in place of the screens (fee cap, sighash rules and delta-mode
+spoiling all still apply; CCC's key C does not co-sign), `smsg` by `msg_paths`, `xpub` by
+`share_xpubs` (the master always), `show` by `share_addrs`, `p2sh` by `p2sh` in
+`share_addrs`. Nothing waits on a key: every "any key" returns at once and every question
+is a no. The idle logout is off (`[I]`: the reference does not say; a mode meant to run
+with nobody at the keypad cannot time out on it). A CatCard-mode request or upgrade offer
+is turned down. A hundredth refusal logs the device out.
+
+**The order a PSBT is judged in** (stock's §3.1): the local code is used up (right or
+wrong, the key behind `next_local_code` changes); warnings refuse it unless `warnings_ok`;
+every queued user's code is checked and its counter recorded (any bad one refuses); then
+the rules, first match wins, and a velocity rule's spend is recorded. "Warnings" are what
+this firmware's review would have flagged: a fee above the warning level, an unknown fee
+(an unpriced foreign input), an unusual sighash type, change at an unusual index, and on
+multichain builds the unified-hash opt-in (`[I]`: stock's own list of PSBT warnings is not
+in the reference). The spender is `"1"` (single-signer) when every input of ours is
+single-signature, a wallet's name when every one is from that one registered multisig
+wallet, and anything else only matches a rule with no `wallet`.
+
+**Leaving.** Power off, or the host's `logo`. With `boot_to_hsm`, also its code typed on
+the keypad within the first 60 seconds of uptime.
+
+**Irreversible -- `boot_to_hsm`.** A policy with it goes straight into HSM mode at every
+login, with no question. Its code, typed within a minute of power-on, is the only way back
+to the menus -- and a code that is not six digits can never be typed, so such a device
+never leaves HSM mode again. A stored boot-to-HSM policy that no longer loads stops the
+device at login (the reason on the screen, then logout) rather than run unprotected, as
+stock does -- so a future change in what this firmware accepts could leave such a device
+unable to reach its menus. Both are on the approval screens, asked about separately (press
+4), and never a default: they come only from a policy file.
+
+**Users** (`nwur`, `rmur`, `user`; Settings → Spending Policy → `User Management`, shown
+while HSM Mode is enabled). Stock's own settings key `usr`, whose shape the reference pins:
+`{name: [mode, base32 secret, last counter]}`, thirty at most, names of 2-16 characters not
+starting with `_` (and, ours, no quote, backslash or control character). TOTP and HOTP take
+a 10- or 20-byte secret or have the device pick 10; a password user stores
+PBKDF2-HMAC-SHA512(password, SHA-256(`pepper` ‖ USB serial), 2500)[:32], and a password the
+device picks is sixteen base32 characters. `nwur` answers the base32 secret, or the picked
+password, for the host to show; with the QR bit (`0x80`) the device also shows an
+`otpauth://` enrolment QR (issuer `CatCard <serial>`) or the password as a QR. TOTP accepts
+the slot named and the two before it, never one at or before the last used; HOTP the nine
+counters after the last (not counter zero: a fresh user's counter is zero too, and
+accepting it would let the first code be sent twice -- `[I]`); a password token is
+HMAC-SHA256 of the PSBT's hash.
+
+**Status report** (`hsts`, `ckcc hsm`): `active` and `policy_available` (ours: the
+reference lists only an active policy's fields), then stock's: `policy_hash`,
+`next_local_code` (when a rule has `local_conf`), `last_refusal`, `approvals`, `refusals`,
+and unless `priv_over_ux`: `summary`, `sl_reads`, `period`, `uptime` (seconds since boot),
+`period_ends` (seconds left, or null), `has_spent` (per rule), `users` (every user on the
+device), `pending_auth`. `summary` is cut short to keep the report in one reply.
+
+**What this firmware refuses, where the reference stops** (each refused with a sentence,
+never guessed; the policy is rejected before anything else happens):
+
+| stock accepts | here | why |
+|---|---|---|
+| `set_sl`, `allow_sl` (Storage Locker), `gslr` | refused | the long secret's read/write selection on gate 18 method 6 and its stored encoding are not specified |
+| `must_log` | refused | the microSD audit log's name and format are not specified; no log is written, so `never_log` holds by construction |
+| `whitelist_opts.mode = "ATTEST"` | refused | where an output's attestation signature is carried and what it signs are not specified |
+| BIP-322 proof-of-reserves PSBTs in HSM mode | refused | stock gates them by `msg_paths`, but which path of a proof is matched is not given `[?]` |
+| a `*` path step that is hardened | refused | `*` matches exactly one unhardened step here: `cleanup_deriv_path`'s matching rule is not given, and this is never wider than stock's |
+| more than 16 rules, 16 paths per list, 48 KB of canonical policy | refused | our bounds (the whitelist's 25 is stock's) |
+
+**The policy hash is ours.** Stock hashes `ujson.dumps` of its own canonical dictionary,
+whose key order and defaults are not in the reference; here it is SHA-256 of this
+firmware's canonical form (keys in the reference's order, defaults left out, paths spelled
+`m/84h/0h/0h`), which is also what is stored. It is shown on the last-chance screen and in
+the report; it is not the number stock would print for the same file.
+
+**Not done** (needs hardware, or the reference): none of this has run on a device yet --
+the approval screens, the status screen and its keypad, boot-to-HSM at login, the policy
+file on the internal flash, and a signing under a rule are all bench items. The simulator
+stand-in runs the wire side against the real engine (`tools/ckcc_check.py --simulator
+--hsm`).
+
 ### Checking it on hardware
 
 ```sh
-tools/ckcc_check.py [--ckcc PATH] [--psbt FILE]
+tools/ckcc_check.py [--ckcc PATH] [--psbt FILE] [--hsm]
 ```
+
+`--hsm` adds the HSM commands (HSM Mode must be enabled): the status report, a TOTP user
+made, checked in a dry run and deleted, and a bad policy refused with its reason. Against
+the simulator it also starts a policy (the stand-in approves at once) and checks that the
+report says active, that `local-conf` answers and that user commands are refused. On a
+device it stops short of starting one: that is the person's call.
 
 With the device in ckcc mode, unlocked and holding a wallet: runs `ckcc version`,
 `ckcc xpub`, `ckcc xpub m/84h/0h/0h`, `ckcc addr -s m/84h/0h/0h/0/0` (the device shows the

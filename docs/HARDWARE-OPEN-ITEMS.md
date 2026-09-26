@@ -759,6 +759,19 @@ dark panel is one the owner cannot see to turn back up.
 active level. Then `set_backlight` scales `percent` to a `TIMx_CCRn` duty; nothing else
 changes — the setting, its storage, the menu row and the apply path are already in place.
 Until then this is `[?]` and the feature is on/off, not dimming.
+## HSM mode: what the policy reference leaves open `[?]`
+
+`crate::hsm`, `catcard_settings::hsm`; the full list and the choices are in `USB.md`,
+"HSM mode". Refused rather than guessed: the Storage Locker (`set_sl`, `allow_sl`, `gslr`:
+gate 18 method 6's read/write selection and the long secret's stored encoding), `must_log`
+(the audit log's file and format), `ATTEST` whitelists (the attestation signature's
+carrier and message), and BIP-322 proofs in HSM mode (which path `msg_paths` is matched
+against). Chosen and marked `[I]`: what counts as a PSBT warning, `*` in a path as exactly
+one unhardened step, HOTP not accepting counter zero, the idle logout off in HSM mode, the
+status report's `active`/`policy_available`/`period_ends`/`users` shapes, the policy hash
+over our own canonical form, and the base32 padding of stored secrets. Nothing of HSM mode
+has run on a device yet.
+
 ## Stock's WIF-store settings key and layout are unknown `[?]`
 
 The WIF store (`crates/catcard-fw/src/wifstore.rs`, backed by
