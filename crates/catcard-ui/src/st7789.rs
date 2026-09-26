@@ -287,6 +287,25 @@ pub struct St7789<B: DisplayBus> {
     bus: B,
     fg: u16,
     bg: u16,
+    /// The scroll start the panel is left at, and so the frame-memory line screen column 0
+    /// is read from: screen column `x` lives in line `(x + origin) mod WIDTH`. Every paint
+    /// and flush addresses the panel through it, so a picture the panel was scrolled to
+    /// stays put and whatever is drawn next lands where it is seen. `0` unless
+    /// [`set_origin`](Self::set_origin) moved it.
+    origin: usize,
+}
+
+/// Where a run of screen columns `[x, x + w)` lives in frame memory with the start at
+/// `origin`: one span, or two when it runs past line `WIDTH - 1` and wraps to line 0.
+/// Each span is `(first memory line, columns, offset into the run)`.
+fn spans(origin: usize, x: usize, w: usize) -> ([(usize, usize, usize); 2], usize) {
+    let m = (x + origin) % WIDTH;
+    if m + w <= WIDTH {
+        ([(m, w, 0), (0, 0, 0)], 1)
+    } else {
+        let first = WIDTH - m;
+        ([(m, first, 0), (0, w - first, first)], 2)
+    }
 }
 
 impl<B: DisplayBus> St7789<B> {
@@ -296,7 +315,28 @@ impl<B: DisplayBus> St7789<B> {
             bus,
             fg: WHITE,
             bg: BLACK,
+            origin: 0,
         }
+    }
+
+    /// The frame-memory line screen column 0 is read from. See [`set_origin`](Self::set_origin).
+    pub fn origin(&self) -> usize {
+        self.origin
+    }
+
+    /// Scroll the whole panel so screen column 0 shows frame-memory line `origin`, and
+    /// address everything drawn from now on relative to it.
+    ///
+    /// No pixel is sent: this is the panel's own scroll, one command. A caller that moves
+    /// the origin is saying the frame memory already holds, at the new offset, what the
+    /// screen should show -- a slide paints the incoming columns before each step -- so
+    /// the picture on the glass stays coherent, and later paints keep it so.
+    pub fn set_origin(&mut self, origin: usize) -> Result<(), B::Error> {
+        let origin = origin % WIDTH;
+        self.set_scroll_area(0, 0)?;
+        self.set_scroll_start(origin)?;
+        self.origin = origin;
+        Ok(())
     }
 
     /// Colours for lit and unlit framebuffer pixels.
@@ -334,13 +374,16 @@ impl<B: DisplayBus> St7789<B> {
             return Ok(());
         }
         let (w, h) = (w.min(WIDTH - x), h.min(HEIGHT - y));
-        self.window(x, y, x + w - 1, y + h - 1)?;
         let mut line = [0u8; WIDTH * 2];
         for px in line[..w * 2].as_chunks_mut::<2>().0 {
             *px = colour.to_be_bytes();
         }
-        for _ in 0..h {
-            self.bus.data(&line[..w * 2])?;
+        let (parts, n) = spans(self.origin, x, w);
+        for &(mx, len, _) in &parts[..n] {
+            self.window(mx, y, mx + len - 1, y + h - 1)?;
+            for _ in 0..h {
+                self.bus.data(&line[..len * 2])?;
+            }
         }
         Ok(())
     }
@@ -360,15 +403,39 @@ impl<B: DisplayBus> St7789<B> {
             return Ok(());
         }
         let (w, h) = (w.min(WIDTH - x), h.min(HEIGHT - y));
-        self.window(x, y, x + w - 1, y + h - 1)?;
         let mut line = [0u8; WIDTH * 2];
-        for dy in 0..h {
-            for (dx, px) in line[..w * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                *px = f(dx, dy).to_be_bytes();
+        let (parts, n) = spans(self.origin, x, w);
+        for &(mx, len, from) in &parts[..n] {
+            self.window(mx, y, mx + len - 1, y + h - 1)?;
+            for dy in 0..h {
+                for (dx, px) in line[..len * 2]
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *px = f(from + dx, dy).to_be_bytes();
+                }
+                self.bus.data(&line[..len * 2])?;
             }
-            self.bus.data(&line[..w * 2])?;
         }
         Ok(())
+    }
+
+    /// [`paint`](Self::paint) at raw frame-memory lines, ignoring the origin: for a slide,
+    /// which fills the lines about to scroll into view before it moves the start.
+    pub fn paint_memory(
+        &mut self,
+        line: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        f: impl FnMut(usize, usize) -> u16,
+    ) -> Result<(), B::Error> {
+        let saved = core::mem::replace(&mut self.origin, 0);
+        let r = self.paint(line, y, w, h, f);
+        self.origin = saved;
+        r
     }
 
     /// Scroll the panel in the controller, with no pixels sent: the frame memory is a ring
@@ -416,6 +483,7 @@ impl<B: DisplayBus> St7789<B> {
     pub fn end_scroll(&mut self) -> Result<(), B::Error> {
         self.set_scroll_start(0)?;
         self.set_scroll_area(0, 0)?;
+        self.origin = 0;
         self.bus.command(&[cmd::NORON])
     }
 
@@ -465,17 +533,19 @@ impl<B: DisplayBus> St7789<B> {
             return Ok(());
         }
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
-        self.window(x0, y0, x0 + w - 1, y0 + h - 1)?;
-
         let (fg, bg) = (self.fg.to_be_bytes(), self.bg.to_be_bytes());
         let mut line = [0u8; WIDTH * 2];
-        for fy in 0..h / SCALE {
-            for x in 0..w {
-                let px = if fb.get(x / SCALE, fy) { fg } else { bg };
-                line[x * 2..x * 2 + 2].copy_from_slice(&px);
-            }
-            for _ in 0..SCALE {
-                self.bus.data(&line[..w * 2])?;
+        let (parts, n) = spans(self.origin, x0, w);
+        for &(mx, len, from) in &parts[..n] {
+            self.window(mx, y0, mx + len - 1, y0 + h - 1)?;
+            for fy in 0..h / SCALE {
+                for x in 0..w {
+                    let px = if fb.get(x / SCALE, fy) { fg } else { bg };
+                    line[x * 2..x * 2 + 2].copy_from_slice(&px);
+                }
+                for _ in 0..SCALE {
+                    self.bus.data(&line[from * 2..(from + len) * 2])?;
+                }
             }
         }
         Ok(())
@@ -496,8 +566,12 @@ impl<B: DisplayBus> St7789<B> {
             return Ok(());
         }
         let (x0, y0) = ((WIDTH - w) / 2, (HEIGHT - h) / 2);
-        self.window(x0, y0, x0 + w - 1, y0 + h - 1)?;
-        self.send_gray_rows(fb, palette, w, 0, h, &[])
+        let (parts, n) = spans(self.origin, x0, w);
+        for &(mx, len, from) in &parts[..n] {
+            self.window(mx, y0, mx + len - 1, y0 + h - 1)?;
+            self.send_gray_rows(fb, palette, w, 0, h, &[], from..from + len)?;
+        }
+        Ok(())
     }
 
     /// [`flush_gray`](Self::flush_gray), sending only the rows that changed since the last
@@ -579,15 +653,20 @@ impl<B: DisplayBus> St7789<B> {
                 y += 1;
             }
             let palette = if start < boundary { top } else { bottom };
-            self.window(x0, y0 + start, x0 + w - 1, y0 + y - 1)?;
-            self.send_gray_rows(fb, palette, w, start, y, overlays)?;
+            let (parts, n) = spans(self.origin, x0, w);
+            for &(mx, len, from) in &parts[..n] {
+                self.window(mx, y0 + start, mx + len - 1, y0 + y - 1)?;
+                self.send_gray_rows(fb, palette, w, start, y, overlays, from..from + len)?;
+            }
             sent += y - start;
         }
         cache.valid = true;
         Ok(sent)
     }
 
-    /// Rows `start..end` of `fb`, `w` pixels each, into the window already open.
+    /// Rows `start..end` of `fb`, `w` pixels each, into the window already open -- only
+    /// the columns in `cols` of each, which is the whole row unless the window wraps.
+    #[allow(clippy::too_many_arguments)]
     fn send_gray_rows<const W: usize, const H: usize, const N: usize>(
         &mut self,
         fb: &Gray4<W, H, N>,
@@ -596,6 +675,7 @@ impl<B: DisplayBus> St7789<B> {
         start: usize,
         end: usize,
         overlays: &[Overlay<'_>],
+        cols: core::ops::Range<usize>,
     ) -> Result<(), B::Error> {
         // A packed byte holds two pixels, the even one in its high nibble. Expanding a whole
         // byte through a 256-entry table built once per flush turns 76 800 bounds-checked
@@ -625,7 +705,7 @@ impl<B: DisplayBus> St7789<B> {
                     }
                 }
             }
-            self.bus.data(&line[..w * 2])?;
+            self.bus.data(&line[cols.start * 2..cols.end.min(w) * 2])?;
         }
         Ok(())
     }
@@ -926,6 +1006,129 @@ mod tests {
             }
         }
         frame
+    }
+
+    /// What the glass shows with the panel scrolled to `origin`: screen column `x` is read
+    /// from frame-memory line `(x + origin) mod WIDTH`.
+    fn glass(memory: &[u16], origin: usize) -> Vec<u16> {
+        let mut out = vec![0u16; WIDTH * HEIGHT];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                out[y * WIDTH + x] = memory[y * WIDTH + (x + origin) % WIDTH];
+            }
+        }
+        out
+    }
+
+    /// A full-panel canvas where every pixel's index depends on where it is, so a column
+    /// or a row landing in the wrong place changes what is read back.
+    fn patterned() -> Box<Gray4<WIDTH, HEIGHT, { WIDTH * HEIGHT / 2 }>> {
+        let mut fb = Box::new(Gray4::<WIDTH, HEIGHT, { WIDTH * HEIGHT / 2 }>::new());
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.put(x, y, ((x * 7 + y * 3) % 16) as u8);
+            }
+        }
+        fb
+    }
+
+    const PALETTE: [u16; 16] = [
+        0x0000, 0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888, 0x9999, 0xAAAA,
+        0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF,
+    ];
+
+    /// The point of the origin: scrolled to any start -- one grid column, most of the
+    /// panel, the last line -- a whole-frame flush and a changed-rows flush both put the
+    /// canvas on the glass exactly, wrapping windows split where they cross line 319.
+    #[test]
+    fn a_flush_at_any_origin_puts_the_canvas_on_the_glass_exactly() {
+        let fb = patterned();
+        let want: Vec<u16> = (0..WIDTH * HEIGHT)
+            .map(|i| PALETTE[fb.get(i % WIDTH, i / WIDTH) as usize])
+            .collect();
+        for origin in [0, 1, 107, 213, 319] {
+            let mut p = St7789::new(MockBus::default());
+            p.set_origin(origin).unwrap();
+            assert_eq!(p.origin(), origin);
+            p.bus_mut().log.clear();
+            p.flush_gray(&*fb, &PALETTE).unwrap();
+            assert!(
+                glass(&replay(&p.bus_mut().log), origin) == want,
+                "flush_gray at {origin}"
+            );
+
+            let mut p = St7789::new(MockBus::default());
+            p.set_origin(origin).unwrap();
+            p.bus_mut().log.clear();
+            let mut cache = RowCache::<HEIGHT>::new();
+            p.flush_gray_changed(&*fb, &PALETTE, &mut cache).unwrap();
+            assert!(
+                glass(&replay(&p.bus_mut().log), origin) == want,
+                "flush_gray_changed at {origin}"
+            );
+        }
+    }
+
+    /// A paint and a fill across the wrap land on the screen columns asked for.
+    #[test]
+    fn a_paint_that_crosses_the_wrap_lands_where_it_is_seen() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_origin(300).unwrap();
+        p.bus_mut().log.clear();
+        // Screen columns 10..40 are memory lines 310..319 and then 0..19.
+        p.paint(10, 5, 30, 3, |dx, dy| (100 + dx + dy * 1000) as u16)
+            .unwrap();
+        p.fill_rect(15, 50, 10, 2, 0xABCD).unwrap();
+        let seen = glass(&replay(&p.bus_mut().log), 300);
+        for dy in 0..3 {
+            for dx in 0..30 {
+                assert_eq!(
+                    seen[(5 + dy) * WIDTH + 10 + dx],
+                    (100 + dx + dy * 1000) as u16
+                );
+            }
+        }
+        for dy in 0..2 {
+            for dx in 0..10 {
+                assert_eq!(seen[(50 + dy) * WIDTH + 15 + dx], 0xABCD);
+            }
+        }
+        // Both cross the wrap -- the paint is memory lines 310..339, the fill 315..324 --
+        // so each is two windows.
+        let windows = p
+            .bus_mut()
+            .log
+            .iter()
+            .filter(|(dc, b)| !*dc && b == &vec![cmd::CASET])
+            .count();
+        assert_eq!(windows, 4, "each wrapping run is two windows");
+    }
+
+    /// `paint_memory` addresses raw lines whatever the origin -- the slide fills the lines
+    /// about to scroll in -- and leaves the origin as it was.
+    #[test]
+    fn painting_raw_memory_ignores_the_origin() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_origin(200).unwrap();
+        p.bus_mut().log.clear();
+        p.paint_memory(5, 0, 2, 1, |_, _| 0x1234).unwrap();
+        assert_eq!(p.bus_mut().log[1], (true, vec![0, 5, 0, 6]));
+        assert_eq!(p.origin(), 200);
+    }
+
+    /// Moving the origin is the panel's scroll: the whole panel one area, then the start.
+    /// Ending a scroll puts the origin back with the start.
+    #[test]
+    fn the_origin_is_the_scroll_start_and_ending_a_scroll_resets_it() {
+        let mut p = St7789::new(MockBus::default());
+        p.set_origin(427).unwrap();
+        assert_eq!(p.origin(), 107, "wraps");
+        let log = &p.bus_mut().log;
+        assert_eq!(log[0], (false, vec![cmd::VSCRDEF]));
+        assert_eq!(log[2], (false, vec![cmd::VSCSAD]));
+        assert_eq!(log[3], (true, vec![0, 107]));
+        p.end_scroll().unwrap();
+        assert_eq!(p.origin(), 0);
     }
 
     #[test]
