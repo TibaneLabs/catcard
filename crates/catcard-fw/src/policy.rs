@@ -33,7 +33,7 @@
 //! # CCC, and no Web 2FA
 //!
 //! Co-signing (CCC) is `crate::ccc`; it shares this module's policy editor (the
-//! SpendingPolicyMenu) through [`imp::Target`] and its output walk. Web 2FA -- a round
+//! SpendingPolicyMenu) through `Target` and its output walk. Web 2FA -- a round
 //! trip to Coinkite's closed coldcard.com service -- is deliberately left out: there is
 //! no row for it, and a policy stock enrolled in it never co-signs here.
 

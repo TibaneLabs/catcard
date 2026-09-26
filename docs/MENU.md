@@ -7,7 +7,8 @@ Coldcard should find things where they expect them**, and where they cannot, tha
 on purpose and written down.
 
 Three kinds of entry below: ✅ same place as stock, 🔀 deliberately different, and ❌ a
-divergence we have not decided about yet.
+divergence we have not decided about yet. A fourth, ➖, marks a stock feature left out on
+purpose.
 
 ## The main menu
 
@@ -54,8 +55,10 @@ shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backu
 | `Login` → `MicroSD 2FA` (release builds) | `Login Settings` → `MicroSD 2FA` (`sd2fa`) | 🔀 own key `cat_sd2fa` and card file `catcard.2fa`; a token read back before it is enrolled |
 | — | `Trick PINs` | blocked: gate 22's slot layout is not in the reference (HARDWARE-OPEN-ITEMS) |
 | `Spending Policy` → `Single-Signer` → `Edit Policy...`, `Word Check`, `Allow Notes` (Q1), `Related Keys`, `Last Violation`, `Remove Policy`, `Test Drive`, `ACTIVATE` | `Advanced/Tools` → `Spending Policy` → `Single-Signer` → the same (§SP1) | 🔀 a setting rather than a tool, beside Multisig; root wallet only, since the policy lives in the stored wallet's file. Stock's rows in stock's order; the enable story first. Own key `cat_sssp`, one JSON object (§"Spending Policy and hobbled mode" below) |
-| `Spending Policy` → `Single-Signer` → `Edit Policy...` → `Max Magnitude`, `Limit Velocity`, `Whitelist Addresses` → `Scan QR` (Q1) / `Import from File` / ‹each address› / `Clear Whitelist`, `Web 2FA` | `SpendingPolicyMenu` (§SP-POL) | 🔀 stock's rows; the magnitude is asked as whole BTC then satoshis; `Web 2FA` is present and answers "needs the Web 2FA spec" (HARDWARE-OPEN-ITEMS) |
-| `Spending Policy` → `Co-Sign Multisig (CCC)` | `Spending Policy` → `Co-Sign Multisig (CCC)` | ❌ the row answers "a later wave" |
+| `Spending Policy` → `Single-Signer` → `Edit Policy...` → `Max Magnitude`, `Limit Velocity`, `Whitelist Addresses` → `Scan QR` (Q1) / `Import from File` / ‹each address› / `Clear Whitelist` | `SpendingPolicyMenu` (§SP-POL) | 🔀 stock's rows; the magnitude is asked as whole BTC then satoshis. The same screens edit CCC's policy |
+| — | `SpendingPolicyMenu` → `Web 2FA`, `↳ Test 2FA`, `↳ Enroll More` | ➖ left out: Web 2FA relies on Coinkite's closed coldcard.com service. A policy stock enrolled in it is kept as it is and never co-signs here |
+| `Spending Policy` → `Co-Sign Multisig (CCC)` (no key C yet) | the same, enable flow (§SP2) | ✅ stock's story, then key C: `New 12 words` (the new-seed generator, words shown and quizzed), `Import 12 words`, `Import 24 words`, `From Seed Vault` (when it has entries). Stored under stock's own `ccc` key in stock's exact shape (§"Coldcard Co-Sign (CCC)" below). Root wallet only, as stock's `is_not_tmp` |
+| `Spending Policy` → `Co-Sign Multisig (CCC)` → `[XFP] Co-Signing`, `Last Violation`, `Spending Policy`, `Export CCC XPUBs`, ‹each wallet key C is in› `M/N: name`, `Build 2-of-N`, `Load Key C`, `Remove CCC` | `CCCConfigMenu` (§SP2) | ✅ stock's rows in stock's order, behind all of key C's words (three wrong phrases in a session restart the device); a wallet row opens that wallet's own Multisig menu. `Export CCC XPUBs` is Export XPUB's `ccxp-{C_XFP}.json` for key C (account asked; card, Virtual Disk, BBQr / BC-UR on the Q1). `Build 2-of-N` is Create Airgapped with key A and key C added and M fixed at 2 |
 | `Login` → `Calculator login` (Q1) | `Login Settings` → `Calculator Login` (`calc`) | 🔀 own key `cat_calc`; on only after a test login through the calculator screen. The PIN convention is ours (below) -- the reference says "enter PIN as a formula" and no more |
 
 Kill key and MicroSD 2FA erase the seed on their own, so **development builds leave them
@@ -225,8 +228,42 @@ silent, each marked `[I]` in the code:
   changed, a toggle flipped, or the policy removed; the words are compared inside
   `keywork::run`, both of them whatever the first says. It cannot be turned on for a wallet
   with no words.
-- **Web 2FA** is not implemented: its enrolment and verification protocol is not in the
-  reference. The row is present and says so. CCC is a later wave.
+- **Web 2FA** is left out on purpose: it relies on Coinkite's closed coldcard.com
+  service. There is no row for it.
+
+## Coldcard Co-Sign (CCC)
+
+Stock's CCC puts a second seed, **key C**, on the device as one key of a 2-of-N multisig:
+key A is the device's seed, key B a backup elsewhere. Key C signs only a transaction that
+meets its spending policy -- the same engine as the single-signer one, magnitude, velocity
+and whitelist -- so within the policy the device spends alone (A + C) and outside it A
+needs B (ccc-key-storage.md; help-and-warning-screens.md §12).
+
+- **Storage is stock's.** Unlike `cat_sssp`, CCC is kept under stock's own `ccc` key in
+  the root wallet's settings, because the reference gives the value exactly:
+  `{"secret": <uppercase hex of key C's words-type stash, trailing zeros stripped>,
+  "c_xfp": <fingerprint, little-endian number>, "c_xpub": <master xpub>, "pol": {"mag",
+  "vel", "block_h", "web2fa", "addrs"}}`. `mag` below 1000 is bitcoin, from 1000 up
+  satoshis, as stock reads it; ours writes satoshis, or a decimal of bitcoin below 1000
+  sat. A device moved between stock and CatCard keeps its co-signer. A value that will
+  not read is damaged: nothing is co-signed and `Remove CCC` is offered. The last refusal
+  is our own `cat_ccc_viol` (stock's `lfr` shape is not in the reference).
+- **Key C's words are the lock.** Opening the configuration asks for all of them; the
+  phrase is re-encoded and compared with the stored key byte for byte (not the first and
+  last words -- that is the single-signer Word Check). Three wrong phrases in one session
+  restart the device. Key C in the Seed Vault skips the words, with stock's warning to
+  delete it there, and again on the way out.
+- **Co-signing** runs after the review is accepted, on every signing path. It engages
+  when the root wallet is in force and a registered multisig wallet the inputs spend from
+  has key C as a cosigner. A review warning (an odd sighash, a fee over the warning
+  level) or a Web 2FA rule refuses; then the whitelist, magnitude and velocity as for the
+  single-signer policy. Passing records the lock-time height as `block_h` (only ever
+  upward) before key C signs each of our inputs beside key A. Failing says why, records
+  it, and offers to sign without the co-signature.
+- **Load Key C** makes key C the session's temporary seed ("Key C from CCC"): one way,
+  since CCC's screens need the root wallet. **Remove CCC** forgets key C and its policy
+  (the value becomes `null`, which stock reads as off); if key C is in registered wallets,
+  a second step, `4`, deletes them too.
 
 ## Calculator login (Q1)
 
