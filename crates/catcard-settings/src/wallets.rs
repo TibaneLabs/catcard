@@ -141,6 +141,40 @@ pub fn with_added<'a>(
     Ok(n)
 }
 
+/// The list with the wallet whose checksum is `sum` renamed to `name`. Returns how many
+/// entries `out` holds, which is as many as `existing` had.
+///
+/// The descriptor -- the identity -- is untouched: a rename is the one edit that changes
+/// nothing about which spends this device will sign. `Err(NotStorable)` for a name the
+/// JSON cannot carry; `Ok` with the list unchanged if no wallet has that checksum, so a
+/// caller can see nothing happened by comparing names rather than by a second lookup.
+pub fn renamed<'a>(
+    existing: &[Wallet<'a>],
+    sum: &str,
+    name: &'a str,
+    out: &mut [Wallet<'a>],
+) -> Result<usize, Error> {
+    if !storable(name) {
+        return Err(Error::NotStorable);
+    }
+    let mut n = 0;
+    for w in existing {
+        if n == out.len() {
+            return Err(Error::TooMany);
+        }
+        out[n] = if w.checksum() == Some(sum) {
+            Wallet {
+                name,
+                descriptor: w.descriptor,
+            }
+        } else {
+            *w
+        };
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// The list without the wallet whose checksum is `sum`. Returns how many remain.
 pub fn without<'a>(existing: &[Wallet<'a>], sum: &str, out: &mut [Wallet<'a>]) -> usize {
     let mut n = 0;
@@ -325,6 +359,35 @@ mod tests {
         let n = without(&list_b[..n], "abcdefgh", &mut left);
         assert_eq!(n, 1);
         assert_eq!(left[0].descriptor, B, "removed the wrong wallet");
+    }
+
+    /// A rename changes the name of exactly the wallet named, and nothing about its
+    /// descriptor; a name the JSON cannot carry is refused before anything moves.
+    #[test]
+    fn a_rename_touches_one_name_and_no_descriptor() {
+        let home = Wallet {
+            name: "Home",
+            descriptor: A,
+        };
+        let other = Wallet {
+            name: "Wrapped",
+            descriptor: B,
+        };
+        let mut out = [home; MAX_WALLETS];
+        let n = renamed(&[home, other], "abcdefgh", "Home vault", &mut out).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(out[0].name, "Home vault");
+        assert_eq!(out[0].descriptor, A);
+        assert_eq!(out[1], other);
+
+        // An unknown checksum renames nothing.
+        let n = renamed(&[home, other], "zzzzzzzz", "x", &mut out).unwrap();
+        assert_eq!(&out[..n], &[home, other]);
+        // A quote in the name is refused rather than escaped.
+        assert_eq!(
+            renamed(&[home], "abcdefgh", "he said \"hi\"", &mut out),
+            Err(Error::NotStorable)
+        );
     }
 
     #[test]

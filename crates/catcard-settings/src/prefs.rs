@@ -113,6 +113,16 @@ pub const MULTISIG_TRUST: &str = "cat_mstrust";
 /// Our own key: stock's `secnap` is named but its value shape is not documented `[?]`.
 /// Source: hw-reference/settings-nvstore-format.md §5 [C] (the name only)
 pub const NOTES: &str = "cat_secnap";
+/// Whether a non-BIP-67 (`multi`, unsorted) multisig wallet may be imported: `"1"` on.
+/// Anything else, or absent, is off, which is stock's default too: an unsorted wallet
+/// whose key order is lost is a wallet nobody can rebuild the addresses of.
+/// Source: hw-reference/firmware-features.md §4 "unsorted multisig allowed only if
+/// explicitly enabled" [C]
+pub const MS_UNSORTED: &str = "cat_msunsorted";
+/// Whether the Address Explorer shows a registered multisig wallet's addresses in full:
+/// `"1"` on. Off, the middle of each address is elided, as stock does by default.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §MS "Full Address View?" [C]
+pub const MS_FULL_ADDR: &str = "cat_msfulladdr";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -498,6 +508,18 @@ impl MultisigTrust {
         MultisigTrust::OfferImport,
         MultisigTrust::TrustPsbt,
     ];
+}
+
+/// Whether an unsorted (`multi`) multisig wallet may be registered. Only a literal `"1"`
+/// allows it: doubt reads as the BIP-67-only default.
+pub fn ms_unsorted(doc: &Doc<'_>) -> bool {
+    text(doc, MS_UNSORTED) == Some("1")
+}
+
+/// Whether registered wallets' addresses are shown whole in the Address Explorer. Only a
+/// literal `"1"` turns it on: doubt reads as the censored default.
+pub fn ms_full_addr(doc: &Doc<'_>) -> bool {
+    text(doc, MS_FULL_ADDR) == Some("1")
 }
 
 /// The multisig PSBT trust policy this wallet is set to.
@@ -941,6 +963,26 @@ mod tests {
             );
         }
         assert_eq!(MultisigTrust::default(), MultisigTrust::VerifyOnly);
+    }
+
+    /// The two multisig switches turn on for a literal `"1"` and nothing else: an
+    /// unreadable slot leaves unsorted wallets refused and addresses censored.
+    #[test]
+    fn the_multisig_switches_are_off_unless_written_as_one() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_msunsorted":"","cat_msfulladdr":""}"#,
+            r#"{"cat_msunsorted":1,"cat_msfulladdr":1}"#,
+            r#"{"cat_msunsorted":"on","cat_msfulladdr":"true"}"#,
+            r#"{"cat_msunsorted":"0","cat_msfulladdr":"0"}"#,
+            r#"{"cat_msunsorted":"11","cat_msfulladdr":" 1"}"#,
+        ] {
+            assert!(!ms_unsorted(&doc(json)), "{json}");
+            assert!(!ms_full_addr(&doc(json)), "{json}");
+        }
+        let on = doc(r#"{"cat_msunsorted":"1","cat_msfulladdr":"1"}"#);
+        assert!(ms_unsorted(&on));
+        assert!(ms_full_addr(&on));
     }
 
     /// **The one that matters.** Nothing unreadable may ever become "no cap": a slot that
