@@ -1087,7 +1087,7 @@ fn offer(
         // A wallet to register, written to the tag by a phone as a descriptor or a
         // Coldcard setup file: the same import review the card and the scanner reach.
         Content::MultisigConfig => {
-            let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("");
+            let text = got.text().unwrap_or("");
             crate::msimport::from_text(gate, login, ui, text);
         }
         Content::Text => {
@@ -1304,16 +1304,8 @@ pub(crate) fn verify_sig_screen(ui: &mut Ui<'_>) {
     crate::verifysig::verify_text(ui, HEAD, "nfc", text);
 }
 
-/// Where a multisig descriptor a phone wrote is put for the importer to pick up.
-const NFC_MULTISIG: &str = "/NFC-MULTISIG.TXT";
-
-/// NFC Tools → Import Multisig: a descriptor or config a phone writes to the tag.
-///
-/// The importer reads from the card, so what arrived is written there under one name and
-/// the importer is opened on it: two screens where stock has one, but the same review and
-/// the same store.
-// TODO(integrator): route the text straight into `msimport` once it has a text-taking
-// entry point (the `sniff::Content::MultisigConfig` work), and drop the card round trip.
+/// NFC Tools → Import Multisig: a descriptor or config a phone writes to the tag, taken
+/// straight to the same import review the card and the scanner reach.
 pub(crate) fn import_multisig_screen(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -1338,21 +1330,7 @@ pub(crate) fn import_multisig_screen(
         menu::wait_for_any_key(ui);
         return;
     }
-    menu::card_wait(ui.panel, HEAD, "writing to the card");
-    if let Err(why) = menu::write_card_file(NFC_MULTISIG, got.bytes()) {
-        menu::message(ui.panel, HEAD, why, "needs a card to import");
-        menu::wait_for_any_key(ui);
-        return;
-    }
-    drop(got);
-    menu::message(
-        ui.panel,
-        HEAD,
-        "saved as NFC-MULTISIG.TXT",
-        "pick it to import",
-    );
-    menu::wait_for_any_key(ui);
-    crate::msimport::import(gate, login, ui);
+    crate::msimport::from_text(gate, login, ui, text);
 }
 
 /// Whether `text` has the shape of a multisig descriptor or a Coldcard-style config: a
