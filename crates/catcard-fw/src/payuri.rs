@@ -8,7 +8,9 @@
 //! **In**: a `bitcoin:` URI that arrived by camera or by tag is read out in full --
 //! address, amount, label, message -- and offered to the one check that matters for an
 //! address somebody else is showing: is it this wallet's? (`crate::verify`). A URI that
-//! asks for something this cannot honour (`req-*`) is refused as BIP-21 says, by name.
+//! carries stock's `wallet=NAME` narrows that check to the registered multisig wallet of
+//! that name. A URI that asks for something this cannot honour (`req-*`) is refused as
+//! BIP-21 says, by name.
 //!
 //! The format itself is `catcard_wallet::address::bip21`; this is the screens.
 
@@ -234,9 +236,21 @@ pub(crate) fn received(
     let label = uri.label.map(|l| shown(l, &mut label_buf));
     let message = uri.message.map(|m| shown(m, &mut message_buf));
     let wallet = uri.wallet.map(|w| shown(w, &mut wallet_buf));
+    // The name the search is narrowed to: decoded, or a name no wallet has when it will
+    // not decode, so the search refuses rather than widening.
+    let wallet_name = uri.wallet.map(crate::verify::wallet_name);
 
     let mut hint = heapless::String::<48>::new();
-    let _ = write!(hint, "{} verify it is mine", display::CONFIRM_KEY);
+    let _ = write!(
+        hint,
+        "{} verify it is {}",
+        display::CONFIRM_KEY,
+        if wallet.is_some() {
+            "in that wallet"
+        } else {
+            "mine"
+        }
+    );
 
     let mut doc: heapless::Vec<Line, 12> = heapless::Vec::new();
     let _ = doc.push(Line::title(HEAD));
@@ -251,9 +265,9 @@ pub(crate) fn received(
         let _ = doc.push(Line::body(message).wrapped());
     }
     if let Some(wallet) = wallet {
-        // Stock's extension. What it means is not documented, so it is shown and not
-        // acted on: docs/HARDWARE-OPEN-ITEMS.md §"BIP-21 wallet= parameter".
-        let _ = doc.push(Line::body("wallet= (Coldcard extension)").small());
+        // Stock's extension: a registered multisig wallet's name, which the check below
+        // is restricted to. Source: hw-reference/firmware-features.md §1 [C]
+        let _ = doc.push(Line::body("multisig wallet").small());
         let _ = doc.push(Line::body(wallet).wrapped());
     }
     let _ = doc.push(Line::body(hint.as_str()).small());
@@ -264,7 +278,7 @@ pub(crate) fn received(
         return;
     }
 
-    if crate::verify::owned(gate, login, ui, uri.address) {
+    if crate::verify::owned(gate, login, ui, uri.address, wallet_name.as_deref()) {
         menu::message(
             ui.panel,
             "OUR address",

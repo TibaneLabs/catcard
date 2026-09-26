@@ -101,6 +101,36 @@ pub fn list<'a>(doc: &Doc<'a>, out: &mut [Wallet<'a>]) -> usize {
     n
 }
 
+/// Which registered wallet carries a name, for BIP-21's `wallet=`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Named {
+    /// No wallet has that name.
+    None,
+    /// Exactly one, at this position in the list.
+    One(usize),
+    /// More than one: the name does not say which, so it answers nothing.
+    Many,
+}
+
+/// The wallet in `list` whose name is exactly `name`.
+///
+/// Exact: no case folding and no trimming. Stock's `wallet=` extension restricts the
+/// "is this address mine?" search to "the saved multisig wallet with that exact name",
+/// and fails as undefined or ambiguous when the name does not pick out one.
+/// Source: hw-reference/firmware-features.md §1 "BIP-21 `wallet=` extension" [C]
+pub fn named(list: &[Wallet<'_>], name: &str) -> Named {
+    let mut found = Named::None;
+    for (i, w) in list.iter().enumerate() {
+        if w.name == name {
+            found = match found {
+                Named::None => Named::One(i),
+                _ => return Named::Many,
+            };
+        }
+    }
+    found
+}
+
 /// The list with `wallet` added, or replacing the one with the same checksum.
 ///
 /// Returns how many entries `out` now holds. Replacing rather than appending is what makes
@@ -231,6 +261,25 @@ fn storable(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wallet=` names one wallet, exactly: case and spaces count, a missing name is
+    /// none, and a shared name is ambiguous rather than the first.
+    #[test]
+    fn a_name_picks_out_one_wallet_or_says_why_not() {
+        let w = |name| Wallet {
+            name,
+            descriptor: "wsh(sortedmulti(2,a,b))#abcdefgh",
+        };
+        let list = [w("Home"), w("Vault"), w("home"), w("Twice"), w("Twice")];
+        assert_eq!(named(&list, "Home"), Named::One(0));
+        assert_eq!(named(&list, "home"), Named::One(2));
+        assert_eq!(named(&list, "Vault"), Named::One(1));
+        assert_eq!(named(&list, "HOME"), Named::None);
+        assert_eq!(named(&list, "Home "), Named::None);
+        assert_eq!(named(&list, ""), Named::None);
+        assert_eq!(named(&list, "Twice"), Named::Many);
+        assert_eq!(named(&[], "Home"), Named::None);
+    }
 
     /// Two descriptors, disjoint cosigner keys, the same BIP-380 checksum. The checksum is
     /// a BCH code over a linear function, so one carrying any chosen value can be solved

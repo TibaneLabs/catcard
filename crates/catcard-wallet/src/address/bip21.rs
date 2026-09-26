@@ -19,9 +19,10 @@
 //!   it "MUST consider the entire URI invalid". Unknown parameters without the prefix are
 //!   ignored.
 //!
-//! Stock adds a `wallet=` parameter of its own (hw-reference/firmware-features.md §1
-//! [C] names it, and says nothing about what it carries). It is kept and shown as the
-//! opaque text it is; see `docs/HARDWARE-OPEN-ITEMS.md`.
+//! Stock adds a `wallet=` parameter of its own: the name of a registered multisig
+//! wallet, which narrows an "is this address mine?" check to that wallet
+//! (hw-reference/firmware-features.md §1 [C]). It is read, percent-encoded, into
+//! [`Uri::wallet`]; nothing here writes it, as stock does not.
 
 use core::fmt::{self, Write as _};
 
@@ -64,7 +65,7 @@ pub struct Uri<'a> {
     pub label: Option<&'a str>,
     /// `message=`, percent-encoded.
     pub message: Option<&'a str>,
-    /// Stock's `wallet=` extension, percent-encoded and otherwise opaque `[?]`.
+    /// Stock's `wallet=` extension: a multisig wallet's name, percent-encoded.
     pub wallet: Option<&'a str>,
 }
 
@@ -638,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wallet_extension_is_kept_opaque() {
+    fn the_wallet_extension_is_kept_percent_encoded() {
         let u = parse("bitcoin:175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W?wallet=whatever%20this%20is")
             .unwrap();
         assert_eq!(u.wallet, Some("whatever%20this%20is"));

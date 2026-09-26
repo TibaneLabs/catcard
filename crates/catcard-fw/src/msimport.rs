@@ -156,6 +156,51 @@ pub(crate) fn registered(
     parsed
 }
 
+/// The registered wallet named exactly `name`, for a BIP-21 `wallet=` search.
+///
+/// Answers which of the wallets carries the name ([`wallets::Named`]) and, when exactly
+/// one does and its descriptor parses, that wallet alone -- in the same store
+/// [`registered`] fills, under the same rule. A store that cannot be read has no wallet
+/// by that name.
+pub(crate) fn registered_named(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    name: &str,
+) -> (wallets::Named, &'static [Multisig]) {
+    // SAFETY: foreground only; one settings screen at a time.
+    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
+        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
+    parsed.clear();
+    let Some(mut doc) = crate::heap::take(SCRATCH) else {
+        crate::catlog!("multisig: no scratch, so no registered wallets");
+        return (wallets::Named::None, parsed);
+    };
+    let doc_buf = doc.bytes();
+    let mut list = [Wallet {
+        name: "",
+        descriptor: "",
+    }; wallets::MAX_WALLETS];
+    let have = match load(gate, login, panel, doc_buf, &mut list) {
+        Ok(n) => n,
+        Err(why) => {
+            crate::catlog!("multisig: {}, so no registered wallets", why);
+            return (wallets::Named::None, parsed);
+        }
+    };
+    let found = wallets::named(&list[..have], name);
+    if let wallets::Named::One(i) = found {
+        match multisig::parse(list[i].descriptor) {
+            Ok(m) => {
+                let _ = parsed.push(m);
+            }
+            Err(why) => crate::catlog!("multisig: skipping {}: {:?}", list[i].name, why),
+        }
+    }
+    crate::catlog!("multisig: wallet= {:?}", found);
+    (found, parsed)
+}
+
 /// Augment the registered wallets with any this PSBT itself describes, as far as the trust
 /// `policy` allows, and return the combined set.
 ///

@@ -27,6 +27,16 @@
 //! being a ten-minute wait, and it can only skip what could never match -- an address
 //! whose shape this does not recognise is searched everywhere.
 //!
+//! # A payment URI can name the wallet
+//!
+//! A `bitcoin:` URI carrying stock's `wallet=NAME` extension narrows the search to the
+//! one registered multisig wallet with exactly that name -- no WIF store, no
+//! single-signature accounts, no other wallet. A name that matches no wallet, or more
+//! than one, is an error on screen, not a fall back to searching everything: the sender
+//! said which wallet, and "found somewhere else" is not the answer to that question.
+//! Read-side only; nothing this firmware writes carries `wallet=`.
+//! Source: hw-reference/firmware-features.md §1 "BIP-21 `wallet=` extension" [C].
+//!
 //! The search is bounded and says what it covered. An address further out than
 //! [`INDEX_LIMIT`], or in an account past [`ACCOUNT_LIMIT`], is not found -- and the screen
 //! says how far it looked, because "not mine" and "not looked at" are different answers.
@@ -168,16 +178,20 @@ enum Found {
     Wif { key: usize, kind: AddressKind },
 }
 
+/// A wallet's name as `wallet=` carried it, decoded.
+pub(crate) type WalletName = heapless::String<64>;
+
 /// Type an address and say whether this wallet can spend it.
 pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    let Some(typed) = read_address(ui, HEAD) else {
+    let mut named: Option<WalletName> = None;
+    let Some(typed) = read_address(ui, HEAD, &mut named) else {
         return;
     };
     let wanted = typed.as_str().trim();
     if wanted.is_empty() {
         return;
     }
-    owned(gate, login, ui, wanted);
+    owned(gate, login, ui, wanted, named.as_deref());
 }
 
 /// Search this wallet for `wanted`, say what was found, and wait for a key.
@@ -185,11 +199,15 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 /// The screen's search, for an address that arrived some other way -- in a payment URI
 /// off a code or a tag (`crate::payuri`). The answer on screen is the same one; the
 /// return value is for a caller with something to add to it.
+///
+/// `wallet` is a BIP-21 `wallet=` name, decoded: when given, only the registered
+/// multisig wallet with exactly that name is searched (see the module notes).
 pub(crate) fn owned(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     wanted: &str,
+    wallet: Option<&str>,
 ) -> bool {
     let network = crate::prefs::network();
     // Bech32 is case-insensitive and usually written lower case; base58 is not, so the
@@ -201,6 +219,10 @@ pub(crate) fn owned(
     }
     let shape = Shape::of(lower.as_str(), network);
     crate::catlog!("verify: shape {:?}", shape);
+
+    if let Some(name) = wallet {
+        return owned_in_named(gate, login, ui, shape, network, &lower, wanted, name);
+    }
 
     // The cheap store first, then the seed, then the wallets that cost a derivation per
     // cosigner. Each stage is skipped when the shape says it could not match.
@@ -216,13 +238,89 @@ pub(crate) fn owned(
     }
 
     if found.is_none() {
-        found = search_multisig(gate, login, ui, shape, network, lower.as_str(), wanted);
+        // Taken and used here, and nothing below reads the registered wallets again --
+        // the rule `msimport::registered` sets for its slice.
+        let wallets = crate::msimport::registered(gate, login, ui.panel);
+        found = search_multisig(ui, wallets, 0, shape, network, lower.as_str(), wanted);
     }
 
     let hit = found.is_some();
     report(ui, found, network);
     menu::wait_for_any_key(ui);
     hit
+}
+
+/// The search a `wallet=` name asks for: that one registered wallet, and nothing else.
+#[allow(clippy::too_many_arguments)]
+fn owned_in_named(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    shape: Shape,
+    network: Network,
+    lower: &str,
+    wanted: &str,
+    name: &str,
+) -> bool {
+    use catcard_settings::wallets::Named;
+
+    let (named, wallets) = crate::msimport::registered_named(gate, login, ui.panel, name);
+    let mut quoted = heapless::String::<48>::new();
+    let _ = write!(quoted, "\"{}\"", Clipped(name, 40));
+    let at = match named {
+        Named::One(i) => i,
+        Named::None => {
+            crate::catlog!("verify: wallet= names no wallet");
+            menu::message(ui.panel, HEAD, "no wallet named", quoted.as_str());
+            menu::wait_for_any_key(ui);
+            return false;
+        }
+        Named::Many => {
+            crate::catlog!("verify: wallet= names several wallets");
+            menu::message(
+                ui.panel,
+                HEAD,
+                "more than one wallet named",
+                quoted.as_str(),
+            );
+            menu::wait_for_any_key(ui);
+            return false;
+        }
+    };
+    if wallets.is_empty() {
+        // Named, but its descriptor would not read: the log says why.
+        menu::message(ui.panel, HEAD, "wallet unreadable", quoted.as_str());
+        menu::wait_for_any_key(ui);
+        return false;
+    }
+    let found = search_multisig(ui, wallets, at, shape, network, lower, wanted);
+    let hit = found.is_some();
+    if hit {
+        report(ui, found, network);
+    } else {
+        let mut line = heapless::String::<48>::new();
+        let _ = write!(line, "searched {} per chain of", INDEX_LIMIT);
+        crate::catlog!("verify: no match in the named wallet");
+        menu::message(ui.panel, "Not found", line.as_str(), quoted.as_str());
+    }
+    menu::wait_for_any_key(ui);
+    hit
+}
+
+/// At most `.1` characters of `.0`, with an ellipsis when that is not all of it.
+struct Clipped<'a>(&'a str, usize);
+
+impl core::fmt::Display for Clipped<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut chars = self.0.chars();
+        for c in chars.by_ref().take(self.1) {
+            f.write_char(c)?;
+        }
+        if chars.next().is_some() {
+            f.write_str("...")?;
+        }
+        Ok(())
+    }
 }
 
 /// Say what was found, or how far the search went.
@@ -376,16 +474,17 @@ fn walk(
     None
 }
 
-/// The registered multisig wallets: receive and change, [`INDEX_LIMIT`] addresses each.
+/// Registered multisig wallets: receive and change, [`INDEX_LIMIT`] addresses each.
 ///
 /// No seed is involved -- the wallet record holds every cosigner's account key, and the
 /// address is that script's -- so nothing here is masked. It is slow instead: each
 /// address is two public derivations per cosigner, which is why the shape filter and
-/// the bar both matter here.
+/// the bar both matter here. `first` is the list position of `wallets[0]`, so a match is
+/// reported by the number the Multisig list shows it under.
 fn search_multisig(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
+    wallets: &[catcard_wallet::multisig::Multisig],
+    first: usize,
     shape: Shape,
     network: Network,
     lower: &str,
@@ -393,9 +492,6 @@ fn search_multisig(
 ) -> Option<Found> {
     use catcard_wallet::multisig::Kind;
 
-    // Taken and used here, and nothing below reads the registered wallets again -- the
-    // rule `msimport::registered` sets for its slice.
-    let wallets = crate::msimport::registered(gate, login, ui.panel);
     if wallets.is_empty() || !wallets.iter().any(|w| shape.admits_multisig(w.kind)) {
         return None;
     }
@@ -421,7 +517,7 @@ fn search_multisig(
                 let made = core::str::from_utf8(&buf[..len]).unwrap_or("");
                 if is_wanted(made, wallet.kind == Kind::P2wsh, lower, exact) {
                     return Some(Found::Multisig {
-                        wallet: w,
+                        wallet: first + w,
                         m: wallet.m,
                         n: wallet.n(),
                         kind: wallet.kind,
@@ -489,7 +585,9 @@ fn search_wifs(
 /// screen does -- and on a board with a keyboard, straight from it. On the Q1 the QR key
 /// reads one off a code instead, which is how an address usually arrives: on the screen
 /// of the wallet that is claiming it.
-fn read_address(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
+///
+/// A scanned `bitcoin:` URI that carries `wallet=` leaves the decoded name in `named`.
+fn read_address(ui: &mut Ui<'_>, head: &str, named: &mut Option<WalletName>) -> Option<Entry> {
     let mut entry = Entry::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
@@ -515,7 +613,7 @@ fn read_address(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
                     }
                     Key::Qr => {
                         #[cfg(feature = "board-q1")]
-                        if let Some(text) = scan_address(ui, head) {
+                        if let Some(text) = scan_address(ui, head, named) {
                             entry.clear();
                             for c in text.chars() {
                                 entry.put(c);
@@ -525,6 +623,8 @@ fn read_address(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
                         }
                         // The scan screen was up, or nothing happened: either way draw
                         // this one again.
+                        #[cfg(not(feature = "board-q1"))]
+                        let _ = &named;
                         redraw = true;
                     }
                     Key::Char(c) => {
@@ -554,10 +654,14 @@ fn read_address(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
 /// case) and its `?amount=...` parameters cut off, if what is left is alphanumeric and
 /// no longer than an address can be. Anything else is some other code in shot, and the
 /// scan goes on. `None` if the owner cancelled, or after the fault has been shown.
+///
+/// A URI's `wallet=` name, decoded, goes to `named`; one that will not decode is kept
+/// as a name no wallet has, so the search still refuses rather than widening.
 #[cfg(feature = "board-q1")]
 fn scan_address(
     ui: &mut Ui<'_>,
     head: &str,
+    named: &mut Option<WalletName>,
 ) -> Option<heapless::String<{ address::MAX_ADDRESS_LEN }>> {
     use crate::qrscan::{self, Fault, Next};
 
@@ -567,6 +671,7 @@ fn scan_address(
             return Next::More;
         };
         let text = text.trim();
+        let line_text = text;
         // A BIP-21 URI gives up its address; anything else is taken as it is.
         let text = address::bip21::address_of(text).unwrap_or(text);
         if text.is_empty()
@@ -577,6 +682,10 @@ fn scan_address(
         }
         got.clear();
         let _ = got.push_str(text);
+        *named = address::bip21::parse(line_text)
+            .ok()
+            .and_then(|uri| uri.wallet)
+            .map(wallet_name);
         Next::Done
     });
     match outcome {
@@ -588,6 +697,28 @@ fn scan_address(
             None
         }
     }
+}
+
+/// A `wallet=` value decoded to the name it carries.
+///
+/// A value that will not decode, or will not fit, becomes a name no wallet can have --
+/// the undecoded text in brackets -- so the search it restricts finds nothing rather
+/// than falling back to searching everything.
+///
+/// Not on the mk3: nothing there reads a URI (no scanner, no tag).
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn wallet_name(encoded: &str) -> WalletName {
+    let mut buf = [0u8; 64];
+    let mut out = WalletName::new();
+    match address::bip21::decode(encoded, &mut buf) {
+        Ok(text) => {
+            let _ = out.push_str(text);
+        }
+        Err(_) => {
+            let _ = write!(out, "[{}]", Clipped(encoded, 40));
+        }
+    }
+    out
 }
 
 fn draw(ui: &mut Ui<'_>, head: &str, entry: &Entry) {
