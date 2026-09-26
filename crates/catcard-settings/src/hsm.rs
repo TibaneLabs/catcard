@@ -1709,6 +1709,9 @@ pub struct Running<'s, 'a> {
     pub users: &'s [&'s str],
     /// Authentications queued for the next PSBT.
     pub pending_auth: usize,
+    /// Most bytes of the `summary` text sent: a reply has a fixed size, and the summary
+    /// is the one field that can be cut without losing a number.
+    pub summary_max: usize,
 }
 
 impl Status<'_, '_> {
@@ -1743,11 +1746,13 @@ impl Status<'_, '_> {
             w.member("refusals", &r.runtime.refusals)?;
             if !r.policy.priv_over_ux {
                 let mut summary: heapless::String<1024> = heapless::String::new();
-                if r.policy.explain(&mut summary).is_err() {
-                    // Cut short rather than left out: the report still fits.
-                    let _ = summary.pop();
+                // Cut short rather than left out when it runs over: the report still fits.
+                let _ = r.policy.explain(&mut summary);
+                let mut cut = summary.len().min(r.summary_max);
+                while !summary.is_char_boundary(cut) {
+                    cut -= 1;
                 }
-                w.member("summary", summary.as_str())?;
+                w.member("summary", &summary[..cut])?;
                 w.member("sl_reads", &0u32)?;
                 match r.policy.period {
                     Some(p) => w.member("period", &p)?,

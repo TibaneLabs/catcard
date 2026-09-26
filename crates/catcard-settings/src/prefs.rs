@@ -12,6 +12,7 @@
 //! | `vidsk` | Virtual Disk | [`VIRTUAL_DISK`] |
 //! | *(Keyboard EMU)* | USB keyboard emulation | [`KEYBOARD_EMU`] |
 //! | `wa` | menu wrap | [`MENU_WRAP`] |
+//! | `hsmcmd` | HSM commands over USB | [`HSM_COMMANDS`] |
 //!
 //! Source: hw-reference/settings-nvstore-format.md §5 [C]
 //!
@@ -135,6 +136,12 @@ pub const MS_FULL_ADDR: &str = "cat_msfulladdr";
 /// file, so a duress session, in another wallet's file, sees none. Not stock's `tp`,
 /// whose value holds the PINs.
 pub const TRICK_PINS: &str = "cat_tp";
+/// Whether the ckcc protocol's HSM commands (`hsms`, `hsts`, `gslr`, `nwur`, `rmur`,
+/// `user`) are answered: `"1"` on, anything else off, which is stock's default too.
+/// Stock's `hsmcmd` is named without its value shape, so this is our own key.
+/// Source: hw-reference/usb-ckcc-protocol.md §4.3 `HSM_DISABLE_CMDS` [C];
+/// settings-nvstore-format.md §5 (`hsmcmd`, the name only) [C]
+pub const HSM_COMMANDS: &str = "cat_hsmcmd";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -176,6 +183,11 @@ pub fn battery_idle_minutes(doc: &Doc<'_>) -> Option<u32> {
 /// Whether the menu cursor wraps past the ends of a list.
 pub fn menu_wrap(doc: &Doc<'_>) -> bool {
     text(doc, MENU_WRAP) == Some("1")
+}
+
+/// Whether the HSM commands are on: only a literal `"1"` is on.
+pub fn hsm_commands(doc: &Doc<'_>) -> bool {
+    text(doc, HSM_COMMANDS) == Some("1")
 }
 
 /// Whether Secure Notes is on. `None` when never decided: only a literal `"1"` or `"0"`
@@ -928,6 +940,9 @@ mod tests {
         assert!(usb_port(&d));
         assert!(virtual_disk(&d));
         assert!(!menu_wrap(&d));
+        assert!(!hsm_commands(&d), "HSM commands are off unless turned on");
+        assert!(hsm_commands(&Doc::parse(br#"{"cat_hsmcmd":"1"}"#).unwrap()));
+        assert!(!hsm_commands(&Doc::parse(br#"{"cat_hsmcmd":1}"#).unwrap()));
     }
 
     /// Absent, zero, garbage, a bare number rather than a string, negative, too big: the

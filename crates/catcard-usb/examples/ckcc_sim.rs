@@ -321,6 +321,7 @@ impl Hsm {
                 time_left,
                 users: &names,
                 pending_auth: self.pending,
+                summary_max: 1024,
             }),
         };
         st.write(out).unwrap_or(0)

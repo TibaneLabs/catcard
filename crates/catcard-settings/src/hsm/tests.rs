@@ -751,6 +751,7 @@ fn status_report_fields() {
             time_left: TimeLeft::NotStarted,
             users: &["alice", "bob"],
             pending_auth: 1,
+            summary_max: 1024,
         }),
     };
     let mut out = [0u8; 2048];
@@ -791,6 +792,7 @@ fn status_report_fields() {
             time_left: TimeLeft::NoPeriod,
             users: &["alice"],
             pending_auth: 0,
+            summary_max: 1024,
         }),
     };
     let mut out2 = [0u8; 2048];
