@@ -37,6 +37,15 @@ pub enum Method {
     ReadSeConfig = 20,
     /// Anti-downgrade high-water mark and the SE monotonic counter. See [`OtpOp`].
     Downgrade = 21,
+    /// Trick PINs, kept in the second secure element: clear all, look one up by its PIN,
+    /// save or blank slots. `arg2` is a [`TrickOp`]; `buf_io` is a signed
+    /// [`PinAttempt`](crate::pin::PinAttempt) followed by a
+    /// [`TrickSlot`](crate::trick::TrickSlot). **mk4 and later only** -- the mk3's
+    /// bootloader has no second secure element and no method 22.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 22 [C];
+    /// trick-pin-slot-format.md §1 [C]
+    TrickPins = 22,
     /// Wipe the seed and reset. **One-way.** `arg2` is [`FastWipe`]. mk4 and later only.
     FastWipe = 23,
     /// Read TRNG bytes from a secure element. `arg2` selects [`RngSource`].
@@ -53,6 +62,29 @@ pub enum FastWipe {
     Silent = 0xBEEF,
     /// Wipe and reset, saying so.
     Noisy = 0xDEAD,
+}
+
+/// `arg2` for [`Method::TrickPins`]: the submethod, and nothing else.
+///
+/// Every one of them needs a completed, bootloader-signed main-PIN login in the leading
+/// `pinAttempt_t`. From a session a *trick* PIN opened, the bootloader first **erases the
+/// real seed** (`mcu_key_clear`) and then does nothing: [`ClearAll`](Self::ClearAll) and
+/// [`Save`](Self::Save) are no-ops and [`GetByPin`](Self::GetByPin) never finds anything.
+///
+/// Source: hw-reference/trick-pin-slot-format.md §1.2, §4 [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum TrickOp {
+    /// Blank every trick slot. **Irreversible**: each trick, and each duress wallet's
+    /// data pages, is gone.
+    ClearAll = 0,
+    /// Find the slot whose PIN is `slot.pin`. Answers `0` and fills the slot when found;
+    /// anything else means not found. Always reports which slots are empty in
+    /// `blank_slots`. Safety mode: no trick's effect fires.
+    GetByPin = 1,
+    /// Write `slot` to its `slot_num` (and the data pages its flags need) -- or, when
+    /// `blank_slots` is non-zero, blank every slot whose bit is set and write nothing else.
+    Save = 2,
 }
 
 /// `arg2` for [`Method::EnterDfu`].
@@ -354,6 +386,15 @@ mod tests {
         assert_eq!(Method::ReadSeConfig as i32, 20);
         assert_eq!(Method::Downgrade as i32, 21);
         assert_eq!(Method::ReadSeRng as i32, 26);
+        assert_eq!(Method::TrickPins as i32, 22);
+    }
+
+    #[test]
+    fn trick_submethods_are_the_three_the_reference_names() {
+        // trick-pin-slot-format.md §1.2: 0 clear all, 1 get by PIN, 2 clear/update slot.
+        assert_eq!(TrickOp::ClearAll as u32, 0);
+        assert_eq!(TrickOp::GetByPin as u32, 1);
+        assert_eq!(TrickOp::Save as u32, 2);
     }
 
     #[test]

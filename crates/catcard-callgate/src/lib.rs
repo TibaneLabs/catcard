@@ -30,11 +30,15 @@
 pub mod abi;
 pub mod entry;
 pub mod pin;
+pub mod trick;
 
-use abi::{BagOp, GenuineOp, Light, LockState, MAX_BUF_LEN, Method, OtpOp, PinOp, RngSource, err};
+use abi::{
+    BagOp, GenuineOp, Light, LockState, MAX_BUF_LEN, Method, OtpOp, PinOp, RngSource, TrickOp, err,
+};
 use catcard_board::BoardSpec;
 use entry::{BootloaderInfo, EntryError};
 use pin::{PIN_ATTEMPT_SIZE, PinAttempt};
+use trick::{TRICK_BUF_LEN, TRICK_SLOT_SIZE, TrickSlot};
 use zeroize::Zeroize;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -564,9 +568,92 @@ impl Callgate {
     }
 }
 
+/// Lay out method 22's buffer: the signed attempt, then the slot.
+///
+/// Separate from the call so the layout is a host test. The attempt goes in as the
+/// bootloader signed it -- its HMAC covers the struct, so a byte changed here would fail
+/// `pin_check_logged_in` -- and the slot in its documented little-endian form.
+///
+/// Source: hw-reference/trick-pin-slot-format.md §1.1 [C]
+pub fn trick_buffer(attempt: &PinAttempt, slot: &TrickSlot) -> [u8; TRICK_BUF_LEN] {
+    let mut buf = [0u8; TRICK_BUF_LEN];
+    // SAFETY: `PinAttempt` is `#[repr(C)]` and exactly `PIN_ATTEMPT_SIZE` bytes
+    // (statically asserted in `pin`), every field plain integers and byte arrays, so
+    // reading it as bytes is well defined.
+    let pa = unsafe {
+        core::slice::from_raw_parts(attempt as *const PinAttempt as *const u8, PIN_ATTEMPT_SIZE)
+    };
+    buf[..PIN_ATTEMPT_SIZE].copy_from_slice(pa);
+    let mut sb = slot.to_bytes();
+    buf[PIN_ATTEMPT_SIZE..].copy_from_slice(&sb);
+    sb.zeroize();
+    buf
+}
+
+impl Callgate {
+    /// Callgate 22: trick PINs. **mk4 and later only.**
+    ///
+    /// `attempt` must be the struct of a completed main-PIN login, as the bootloader signed
+    /// it: every submethod starts with `pin_check_logged_in`, which checks the HMAC and
+    /// `PA_SUCCESSFUL` and re-proves the PIN against SE1. It is sent and **not** copied
+    /// back -- stock reads only the slot half of the answer, and the session's struct must
+    /// stay exactly as the bootloader last signed it.
+    ///
+    /// **From a session a trick PIN opened, any call here erases the real seed** before
+    /// doing nothing: the bootloader treats trick management from a duress login as an
+    /// attack. The firmware cannot tell such a session from a real one (that is the
+    /// design), so this is only ever called from an explicit action on the Trick PINs
+    /// screens, never on the way through a menu.
+    ///
+    /// Returns the gate's answer: `0` done (or, for [`TrickOp::GetByPin`], found); any
+    /// other non-negative value is "not found" -- the reference names it `ENOENT` and this
+    /// does not need its number. `slot` holds what the bootloader wrote back.
+    ///
+    /// Source: hw-reference/trick-pin-slot-format.md §1, §4 [C];
+    /// bootloader-callgate-abi.md method 22 [C]
+    ///
+    /// # Safety
+    /// See [`Self::call`]. [`TrickOp::ClearAll`] and a [`TrickOp::Save`] with
+    /// `blank_slots` set are irreversible.
+    pub unsafe fn trick_pins(
+        &self,
+        op: TrickOp,
+        attempt: &PinAttempt,
+        slot: &mut TrickSlot,
+    ) -> Result<i32, Error> {
+        let mut buf = trick_buffer(attempt, slot);
+        // SAFETY: the documented 408-byte buffer for method 22, `arg2` the submethod.
+        let rv = unsafe { self.call(Method::TrickPins, &mut buf, op as u32) };
+        let mut back = [0u8; TRICK_SLOT_SIZE];
+        back.copy_from_slice(&buf[PIN_ATTEMPT_SIZE..]);
+        *slot = TrickSlot::from_bytes(&back);
+        // Both halves carry a PIN; the slot half may carry a duress wallet.
+        back.zeroize();
+        buf.zeroize();
+        rv
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trick_buffer_is_the_signed_attempt_then_the_slot() {
+        let mut pa = PinAttempt::new();
+        pa.set_pin(b"12-34").unwrap();
+        pa.hmac = [0x5a; 32];
+        let mut slot = TrickSlot::lookup(b"11-22").unwrap();
+        slot.slot_num = 5;
+        let b = trick_buffer(&pa, &slot);
+        assert_eq!(b.len(), 408);
+        assert_eq!(&b[..4], &pin::PA_MAGIC_V2.to_le_bytes());
+        assert_eq!(&b[8..13], b"12-34");
+        assert_eq!(&b[68..100], &[0x5a; 32]);
+        assert_eq!(&b[280..284], &[5, 0, 0, 0]);
+        assert_eq!(&b[280 + 72..280 + 77], b"11-22");
+        assert!(check_buffer(0x2000_0000, 96 * 1024, 0x2000_0000, b.len()).is_ok());
+    }
 
     const BASE: u32 = 0x2000_0000;
     const LEN: u32 = 192 * 1024;
