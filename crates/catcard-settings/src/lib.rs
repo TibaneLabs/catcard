@@ -25,6 +25,7 @@
 pub mod ccenc;
 pub mod chains;
 pub mod json;
+pub mod norslots;
 pub mod notes;
 pub mod nvstore;
 pub mod prefs;
