@@ -36,6 +36,39 @@ pub const SD2FA_MAX: usize = 4;
 pub const SD2FA_FILE: &str = "catcard.2fa";
 pub const SD2FA_TOKEN_LEN: usize = 32;
 
+/// The Q1's on-battery power-off: seconds with no key before the device turns itself
+/// off while running on its batteries, as decimal digits; `"0"` is never.
+///
+/// **Pre-login, not per-wallet**, because stock runs it before login too: a device left
+/// at its PIN prompt drains its cells as surely as one left at the menu, and there is no
+/// wallet to read a setting from until the PIN is in. Our own key: stock's `batt_to` is
+/// named without its home or value shape being given `[?]`.
+/// Source: hw-reference/power.md §"Battery idle auto-power-off (Q1)" [C]
+pub const BATT_OFF: &str = "cat_bto";
+
+/// Stock's default: ten minutes. What an absent or unreadable value means.
+/// Source: power.md §"Battery idle auto-power-off (Q1)" -- "Default `batt_to` = 10 min" [C]
+pub const BATT_OFF_DEFAULT_SECONDS: u32 = 10 * 60;
+
+/// The chooser's rows, as stock offers them: label and seconds, `0` for never.
+/// Source: power.md §"Battery idle auto-power-off (Q1)" -- "30 s / 60 s / 2 / 5 / 10 /
+/// 15 / 30 min / 1 h / 4 h / Never" [C]
+pub const BATT_OFF_CHOICES: [(&str, u32); 10] = [
+    ("30 seconds", 30),
+    ("60 seconds", 60),
+    ("2 minutes", 2 * 60),
+    ("5 minutes", 5 * 60),
+    ("10 minutes", 10 * 60),
+    ("15 minutes", 15 * 60),
+    ("30 minutes", 30 * 60),
+    ("1 hour", 60 * 60),
+    ("4 hours", 4 * 60 * 60),
+    ("Never", 0),
+];
+
+/// The longest on-battery power-off read back: a day. Past it, the value is nonsense.
+pub const MAX_BATT_OFF_SECONDS: u32 = 24 * 60 * 60;
+
 /// The longest countdown offered: twenty-eight days, stock's own ceiling.
 /// Source: hw-reference/firmware-features.md §"PIN & login" -- "5 min–28 days" [C]
 pub const MAX_COUNTDOWN_MINUTES: u32 = 28 * 24 * 60;
@@ -65,6 +98,37 @@ pub fn countdown_minutes(doc: &Doc<'_>) -> Option<u32> {
     }
     let m: u32 = t.parse().ok()?;
     (1..=MAX_COUNTDOWN_MINUTES).contains(&m).then_some(m)
+}
+
+/// Whether the on-battery power-off has been set at all -- the key is present.
+///
+/// Separate from its value because "absent" is the one case a legacy per-wallet value
+/// may fill in: see the firmware's migration of `cat_bidle`.
+pub fn battery_off_set(doc: &Doc<'_>) -> bool {
+    doc.get(BATT_OFF).is_some()
+}
+
+/// The on-battery power-off in seconds, or `None` for never.
+///
+/// **Doubt reads as the default, ten minutes** -- not as never, unlike the login
+/// preferences above, which this module's rule reads as off. Those stand between the
+/// owner and their wallet; this one only turns an unattended device off, which a press of
+/// the power button undoes, and "never" read from a garbled byte would be a device that
+/// drains its batteries on the desk. Only a literal `"0"` is never.
+pub fn battery_off_seconds(doc: &Doc<'_>) -> Option<u32> {
+    let Some(t) = text(doc, BATT_OFF) else {
+        return Some(BATT_OFF_DEFAULT_SECONDS);
+    };
+    if t == "0" {
+        return None;
+    }
+    if t.is_empty() || t.len() > 6 || !t.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(BATT_OFF_DEFAULT_SECONDS);
+    }
+    match t.parse::<u32>() {
+        Ok(s) if (1..=MAX_BATT_OFF_SECONDS).contains(&s) => Some(s),
+        _ => Some(BATT_OFF_DEFAULT_SECONDS),
+    }
 }
 
 /// The kill key's digit, if one is set and is a single digit.
@@ -204,6 +268,41 @@ mod tests {
             assert!(!scramble(&d), "{json}");
             assert_eq!(countdown_minutes(&d), None, "{json}");
         }
+    }
+
+    /// Every row stock offers reads back as itself, "0" is never, and anything absent or
+    /// doubtful is the ten-minute default -- never "never".
+    #[test]
+    fn the_battery_power_off_reads_back_and_doubt_is_ten_minutes() {
+        for (_, secs) in BATT_OFF_CHOICES {
+            let json = format!(r#"{{"cat_bto":"{secs}"}}"#);
+            let want = (secs > 0).then_some(secs);
+            assert_eq!(battery_off_seconds(&doc(&json)), want, "{json}");
+            assert!(battery_off_set(&doc(&json)));
+        }
+        assert_eq!(BATT_OFF_CHOICES[4].1, BATT_OFF_DEFAULT_SECONDS);
+        for json in [
+            r#"{}"#,
+            r#"{"cat_bto":""}"#,
+            r#"{"cat_bto":600}"#,
+            r#"{"cat_bto":"-5"}"#,
+            r#"{"cat_bto":"ten"}"#,
+            r#"{"cat_bto":"00"}"#,
+            r#"{"cat_bto":"86401"}"#,
+            r#"{"cat_bto":"9999999"}"#,
+            r#"{"batt_to":"0"}"#,
+        ] {
+            assert_eq!(
+                battery_off_seconds(&doc(json)),
+                Some(BATT_OFF_DEFAULT_SECONDS),
+                "{json}"
+            );
+        }
+        assert!(!battery_off_set(&doc(r#"{}"#)));
+        assert_eq!(
+            battery_off_seconds(&doc(r#"{"cat_bto":"86400"}"#)),
+            Some(86400)
+        );
     }
 
     #[test]

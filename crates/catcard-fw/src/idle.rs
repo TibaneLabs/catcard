@@ -7,6 +7,20 @@
 //! [`LogoutMode::Logout`] rather than `PowerDown`, because this is a lock and not a
 //! shutdown.
 //!
+//! # On battery: powering off (Q1)
+//!
+//! Separately, and as stock does, a Q1 running on its batteries **powers itself off**
+//! after its own quiet period -- ten minutes unless the owner chose otherwise, from 30 s
+//! to 4 h or never. That one is device-wide and runs **before login too**: the value
+//! lives in the pre-login settings ([`catcard_settings::prelogin::BATT_OFF`]), read on
+//! the boot path, because a device left at its PIN prompt drains its batteries just as
+//! surely as one left at the menu. It goes through the power button's own path,
+//! [`crate::power::power_down`]. It holds off while the QR scanner is mid-scan
+//! ([`Scanning`]) or while a progress bar has moved in the last minute
+//! ([`note_progress`]): a device reading a long animated code, or grinding through a
+//! long job, is in use even with no key pressed.
+//! Source: hw-reference/power.md §"Battery idle auto-power-off (Q1)" [C]
+//!
 //! # Where the two halves live
 //!
 //! **Keys** are noted in [`crate::pinentry::pressed_keys`], the single funnel every
@@ -46,6 +60,8 @@
 //! timeout an attacker could hold open.
 
 use core::ptr::{addr_of, addr_of_mut};
+#[cfg(feature = "board-q1")]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use catcard_callgate::{Callgate, abi::LogoutMode};
@@ -67,11 +83,27 @@ static mut GATE: Option<Callgate> = None;
 /// leaves the timeout inert rather than guessing at the clock. Written once, like
 /// [`GATE`].
 static mut CYCLES_PER_MS: u32 = 0;
-/// The timeout while on external power, in milliseconds; zero is off.
+/// The logout timeout, in milliseconds; zero is off.
 static LIMIT_MS: AtomicU32 = AtomicU32::new(0);
-/// The timeout while on the battery, in milliseconds; zero means [`LIMIT_MS`] applies
-/// there too.
-static BATTERY_LIMIT_MS: AtomicU32 = AtomicU32::new(0);
+/// The on-battery power-off, in milliseconds; zero is never. Stock's default until the
+/// pre-login settings say otherwise, so a device whose settings cannot be read still
+/// turns itself off rather than draining its cells.
+/// Source: hw-reference/power.md §"Battery idle auto-power-off (Q1)" -- "Default
+/// `batt_to` = 10 min" [C]
+#[cfg(feature = "board-q1")]
+static BATTERY_OFF_MS: AtomicU32 =
+    AtomicU32::new(catcard_settings::prelogin::BATT_OFF_DEFAULT_SECONDS * 1_000);
+/// Milliseconds since a progress bar last moved, as the ticks add them up. Starts past
+/// [`PROGRESS_HOLD_MS`]: nothing has moved yet.
+#[cfg(feature = "board-q1")]
+static PROGRESS_QUIET_MS: AtomicU32 = AtomicU32::new(PROGRESS_HOLD_MS);
+/// A progress bar that moved this recently holds the power-off. Source: power.md
+/// §"Battery idle auto-power-off (Q1)" -- "a progress bar updated in the last 60 s" [C]
+#[cfg(feature = "board-q1")]
+const PROGRESS_HOLD_MS: u32 = 60_000;
+/// Whether the QR scanner is mid-scan; see [`Scanning`].
+#[cfg(feature = "board-q1")]
+static SCANNING: AtomicBool = AtomicBool::new(false);
 /// Milliseconds since the last keypress, as the ticks have added them up.
 static QUIET_MS: AtomicU32 = AtomicU32::new(0);
 /// Cycle count at the previous tick, or [`NO_TICK`] when the count is starting fresh.
@@ -95,26 +127,72 @@ pub unsafe fn init(gate: &Callgate) {
     }
 }
 
-/// Put a timeout in force, in minutes. `None` for either is off.
+/// Put the logout timeout in force, in minutes. `None` is off.
 ///
 /// Called by [`crate::prefs`] whenever the preferences change, which includes the load
 /// just after login -- so nothing is armed until a wallet's own settings have said so.
-pub fn arm(minutes: Option<u32>, battery_minutes: Option<u32>) {
-    let ms = |m: Option<u32>| m.unwrap_or(0).saturating_mul(60_000);
-    // Four separate stores, and a tick on the USB task can land between any two of
+/// The on-battery power-off is [`arm_battery_off`], and is not touched here.
+pub fn arm(minutes: Option<u32>) {
+    // Three separate stores, and a tick on the USB task can land between any two of
     // them; the worst it sees is the old limit against a fresh zero, which fires
     // nothing. See "Two tasks, one counter" above.
-    LIMIT_MS.store(ms(minutes), Ordering::Relaxed);
-    BATTERY_LIMIT_MS.store(ms(battery_minutes), Ordering::Relaxed);
+    LIMIT_MS.store(
+        minutes.unwrap_or(0).saturating_mul(60_000),
+        Ordering::Relaxed,
+    );
     QUIET_MS.store(0, Ordering::Relaxed);
     LAST_TICK.store(NO_TICK, Ordering::Relaxed);
     match minutes {
-        Some(m) => crate::catlog!(
-            "idle: logout after {} min ({:?} on battery)",
-            m,
-            battery_minutes
-        ),
+        Some(m) => crate::catlog!("idle: logout after {} min", m),
         None => crate::catlog!("idle: logout off"),
+    }
+}
+
+/// Put the on-battery power-off in force, in seconds; `None` is never.
+///
+/// From the pre-login settings on the boot path, and again when the owner changes it.
+/// Does not restart the quiet period: choosing a value is itself a keypress.
+#[cfg(feature = "board-q1")]
+pub fn arm_battery_off(seconds: Option<u32>) {
+    BATTERY_OFF_MS.store(
+        seconds.unwrap_or(0).saturating_mul(1_000),
+        Ordering::Relaxed,
+    );
+    crate::catlog!("idle: on battery, power off after {:?} s", seconds);
+}
+
+/// A progress bar moved: hold the on-battery power-off for the next minute.
+///
+/// Cheap -- one store -- and harmless on the boards with no battery, so the progress
+/// screens call it without asking which board they are on.
+pub fn note_progress() {
+    #[cfg(feature = "board-q1")]
+    PROGRESS_QUIET_MS.store(0, Ordering::Relaxed);
+}
+
+/// Held while the QR scanner is mid-scan, so the on-battery power-off waits for it.
+///
+/// Dropping it ends the hold, however the scan ends -- a code, a cancel, a fault.
+#[cfg(feature = "board-q1")]
+pub struct Scanning(());
+
+#[cfg(feature = "board-q1")]
+impl Scanning {
+    /// The scanner is reading from now until this is dropped.
+    pub fn begin() -> Self {
+        SCANNING.store(true, Ordering::Relaxed);
+        Scanning(())
+    }
+}
+
+#[cfg(feature = "board-q1")]
+impl Drop for Scanning {
+    fn drop(&mut self) {
+        SCANNING.store(false, Ordering::Relaxed);
+        // A scan that ended was someone holding a code up, or cancelling: either way,
+        // someone is there. Without this a long scan with no key pressed would end
+        // straight into a power-off.
+        note_key();
     }
 }
 
@@ -128,31 +206,42 @@ pub fn note_key() {
     LAST_TICK.store(dwt::cycles(), Ordering::Relaxed);
 }
 
-/// The timeout that applies right now, in milliseconds; zero is off.
+/// The on-battery power-off that applies right now, in milliseconds; zero is none.
 ///
-/// On a board with a battery, a separate battery value takes over whenever the device is
-/// running from it -- which is the state where it is most likely to be away from a desk.
-/// With no battery value set, the one timeout covers both.
-fn limit_ms() -> u32 {
-    let mains = LIMIT_MS.load(Ordering::Relaxed);
-    let battery = BATTERY_LIMIT_MS.load(Ordering::Relaxed);
-    #[cfg(feature = "board-q1")]
-    if battery > 0 && crate::battery::source() == Some(crate::battery::Source::Battery) {
-        return battery;
+/// Zero off battery, while the scanner is mid-scan, and while a progress bar has moved
+/// in the last minute.
+#[cfg(feature = "board-q1")]
+fn battery_off_ms() -> u32 {
+    let limit = BATTERY_OFF_MS.load(Ordering::Relaxed);
+    if limit == 0
+        || SCANNING.load(Ordering::Relaxed)
+        || PROGRESS_QUIET_MS.load(Ordering::Relaxed) < PROGRESS_HOLD_MS
+        || crate::battery::source() != Some(crate::battery::Source::Battery)
+    {
+        return 0;
     }
-    #[cfg(not(feature = "board-q1"))]
-    let _ = battery;
-    mains
+    limit
 }
 
-/// Add the time since the last tick, and log out if the quiet period is up.
+/// Add the time since the last tick, and log out -- or, on battery, power off -- if the
+/// quiet period is up.
 ///
 /// Never returns if it fires: the bootloader takes the CPU.
 pub fn tick() {
     // SAFETY: written once by `init` before any task existed, and only read since.
     let per_ms = unsafe { *addr_of!(CYCLES_PER_MS) };
-    let limit = limit_ms();
-    if per_ms == 0 || limit == 0 {
+    let limit = LIMIT_MS.load(Ordering::Relaxed);
+    #[cfg(feature = "board-q1")]
+    let off = battery_off_ms();
+    #[cfg(not(feature = "board-q1"))]
+    let off = 0u32;
+    // The progress clock runs whether or not anything is armed, so a bar that moved
+    // just before the device went onto its battery still holds the power-off.
+    #[cfg(feature = "board-q1")]
+    let progress_running = PROGRESS_QUIET_MS.load(Ordering::Relaxed) < PROGRESS_HOLD_MS;
+    #[cfg(not(feature = "board-q1"))]
+    let progress_running = false;
+    if per_ms == 0 || (limit == 0 && off == 0 && !progress_running) {
         return;
     }
 
@@ -166,6 +255,10 @@ pub fn tick() {
     // `wrapping_sub` because DWT_CYCCNT wraps; a gap long enough to have wrapped is
     // indistinguishable from a short one, which is what the clamp is for.
     let gap_ms = (now.wrapping_sub(prev) / per_ms).min(MAX_GAP_MS);
+    #[cfg(feature = "board-q1")]
+    let _ = PROGRESS_QUIET_MS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
+        Some(q.saturating_add(gap_ms).min(PROGRESS_HOLD_MS))
+    });
     // A read-modify-write, so a keypress's zero on either side of it is kept: stored
     // before, the total is this one gap; stored after, it is zero. Saturating, because
     // a timeout set to the largest value the preferences allow must not wrap to nothing.
@@ -174,7 +267,16 @@ pub fn tick() {
             Some(q.saturating_add(gap_ms))
         })
         .unwrap_or_else(|q| q);
-    if before.saturating_add(gap_ms) < limit {
+    let quiet = before.saturating_add(gap_ms);
+    // On battery, the power-off first when both are due: it is the stronger of the two,
+    // and a logout would only bring the device back up at its PIN prompt, on batteries.
+    if off > 0 && quiet >= off {
+        QUIET_MS.store(0, Ordering::Relaxed);
+        crate::catlog!("idle: {} ms quiet on battery, powering off", off);
+        crate::power::power_down();
+        return;
+    }
+    if limit == 0 || quiet < limit {
         return;
     }
     // Do not fire again while the callgate is unreachable: without it nothing here can

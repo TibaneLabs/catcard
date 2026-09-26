@@ -180,18 +180,34 @@ pub fn tick() {
             // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles -- about 35 s at
             // 120 MHz, far longer than the hold being measured.
             if now.wrapping_sub(started) >= hold {
-                if let Some(gate) = gate {
+                if gate.is_some() {
                     crate::catlog!("power: held {} ms, powering down", HOLD_MS);
-                    // The bootloader wipes all of SRAM on the way out, which is what
-                    // takes any seed and the cached PIN with it.
-                    //
-                    // SAFETY: nothing after this runs; the bootloader cuts power.
-                    unsafe { gate.logout(LogoutMode::PowerDown) }
+                    power_down();
                 }
                 // No callgate means nothing can cut power. Forget the press rather than
                 // re-deciding on every poll.
                 *since = None;
             }
         }
+    }
+}
+
+/// Cut the power, as a held button does: callgate 3 with `PowerDown`.
+///
+/// The one way this firmware turns itself off -- the button above and the on-battery
+/// idle power-off in [`crate::idle`] both come here. Never returns when the callgate is
+/// known; without it nothing can cut power, and this returns.
+///
+/// Called only from the poller that runs [`tick`] (`usbtask::pump` or the USB task),
+/// which is what keeps the read of [`GATE`] sound.
+pub(crate) fn power_down() {
+    // SAFETY: written once by `init` on the boot path; read here by the single poller.
+    let gate = unsafe { *addr_of_mut!(GATE) };
+    if let Some(gate) = gate {
+        // The bootloader wipes all of SRAM on the way out, which is what takes any seed
+        // and the cached PIN with it.
+        //
+        // SAFETY: nothing after this runs; the bootloader cuts power.
+        unsafe { gate.logout(LogoutMode::PowerDown) }
     }
 }

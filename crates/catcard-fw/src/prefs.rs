@@ -40,8 +40,9 @@ use catcard_wallet::bip32::Network;
 pub(crate) struct Prefs {
     /// Minutes of no keypress before the device logs itself out; `None` is off.
     pub idle_minutes: Option<u32>,
-    /// The same while running on the battery, where there is one. `None` means
-    /// `idle_minutes` applies on battery too.
+    /// The legacy per-wallet battery timeout (`cat_bidle`). No longer honoured as a
+    /// logout: read only so `crate::settings::migrate_battery_idle` can carry it over to
+    /// the device-wide on-battery power-off (Q1).
     pub battery_idle_minutes: Option<u32>,
     /// How an amount is written on screen.
     pub units: Units,
@@ -187,7 +188,7 @@ pub(crate) fn network() -> Network {
 fn apply(next: Prefs) {
     // SAFETY: foreground only, single core; the write finishes within this statement.
     unsafe { *core::ptr::addr_of_mut!(CURRENT) = next };
-    crate::idle::arm(next.idle_minutes, next.battery_idle_minutes);
+    crate::idle::arm(next.idle_minutes);
     crate::usbtask::set_port(next.usb_port);
     crate::usbtask::set_keyboard(next.keyboard_emu);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default

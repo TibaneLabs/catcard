@@ -180,6 +180,7 @@ fn bar(ui: &mut Ui<'_>, pct: u8) {
     display::draw(ui.panel, |c| {
         catcard_ui::widgets::info(c, &display::LAYOUT, HEAD, &["reading the picture"]);
         catcard_ui::splash::draw_progress(c, pct);
+        crate::idle::note_progress();
     });
 }
 

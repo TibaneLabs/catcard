@@ -1165,6 +1165,9 @@ pub fn run(session: Session<'_>) -> ! {
     // a device with no wallet, which has no file to read and no key to read it with.
     if !no_seed {
         crate::prefs::load(gate, login, ui.panel, "Settings");
+        // A battery timeout this wallet set before it became the device-wide power-off.
+        #[cfg(feature = "board-q1")]
+        crate::settings::migrate_battery_idle(&mut ui);
         // The spending policy, from the same warm key: it decides which rows the very
         // first frame has.
         crate::policy::load(gate, login, &mut ui);
@@ -1265,6 +1268,7 @@ pub fn run(session: Session<'_>) -> ! {
                     let lines = [note.clone(), hint.clone()];
                     catcard_ui::widgets::info(c, &display::LAYOUT, "Receiving", &lines);
                     catcard_ui::splash::draw_progress(c, pct);
+                    crate::idle::note_progress();
                 });
             }
         } else if receiving.is_some() {
@@ -3852,6 +3856,7 @@ fn stage_and_offer(
             let lines = [wait.clone(), note.clone()];
             catcard_ui::widgets::info(c, &display::LAYOUT, "Reading card", &lines);
             catcard_ui::splash::draw_progress(c, pct);
+            crate::idle::note_progress();
         });
     };
     let outcome = match storage {
@@ -3997,6 +4002,7 @@ pub(crate) fn install_staged_image(
             let lines = [wait, note.clone()];
             catcard_ui::widgets::info(c, &display::LAYOUT, HEAD, &lines);
             catcard_ui::splash::draw_progress(c, pct);
+            crate::idle::note_progress();
         });
     };
     let approval = match staged.inspect_with(crate::own_header().as_ref(), &mut tick) {
@@ -5729,6 +5735,8 @@ impl<'a> Working<'a> {
 
     /// Advance the bar one step and redraw.
     pub(crate) fn tick(&mut self, panel: &mut display::Panel) {
+        // Work is moving: the on-battery power-off waits (`crate::idle`).
+        crate::idle::note_progress();
         if self.swept {
             return;
         }
@@ -5737,6 +5745,7 @@ impl<'a> Working<'a> {
     }
 
     fn draw(&self, panel: &mut display::Panel) {
+        crate::idle::note_progress();
         let (head, note, phase) = (self.head, self.note.as_str(), self.phase);
         display::draw(panel, |c| {
             catcard_ui::widgets::working(c, &display::LAYOUT, head, note, phase);
@@ -9896,6 +9905,7 @@ fn gathering(panel: &mut display::Panel, g: &Gathered, pct: u8) {
     display::draw(panel, |c| {
         catcard_ui::widgets::info(c, &display::LAYOUT, "Collecting entropy", &lines);
         catcard_ui::splash::draw_progress(c, pct);
+        crate::idle::note_progress();
     });
 }
 
@@ -11996,69 +12006,40 @@ const IDLE_ROWS: &[&str] = &[
 const IDLE_MINUTES: [u32; 7] = [0, 1, 2, 5, 15, 30, 60];
 const _: () = assert!(IDLE_ROWS.len() == IDLE_MINUTES.len());
 
-/// The same list for the battery, where the first row defers to the USB-power value
-/// rather than switching the timeout off. A device on its battery is the one most likely
-/// to be away from its owner, so "off on battery" is not something this offers: see
-/// [`catcard_settings::prefs::battery_idle_minutes`].
-#[cfg(feature = "board-q1")]
-const BATTERY_IDLE_ROWS: &[&str] = &[
-    "Same as USB power",
-    "1 minute",
-    "2 minutes",
-    "5 minutes",
-    "15 minutes",
-    "30 minutes",
-    "60 minutes",
-];
-#[cfg(feature = "board-q1")]
-const _: () = assert!(BATTERY_IDLE_ROWS.len() == IDLE_MINUTES.len());
-
 /// Settings → Idle timeout.
 ///
 /// After this long with no key pressed -- from any screen, not just this menu -- the
 /// device hands back to the bootloader, which wipes SRAM and asks for the PIN again. The
 /// note says what is in force now, because "off" and "60 minutes" look identical on a
 /// device that has simply not been left alone yet.
+///
+/// On the Q1 it first asks which: that logout, or the on-battery **power-off**, which is
+/// stock's battery timeout -- device-wide, running before login too, and chosen from
+/// stock's own list ([`battery_off_screen`]).
 fn idle_timeout_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Idle timeout";
     let now = crate::prefs::current();
 
-    // On a board with a battery, which of the two values is being set. Asked first, so
-    // the value list below is the same list either way.
     #[cfg(feature = "board-q1")]
-    let on_battery = {
+    {
         let mut note: Line = Line::new();
-        let _ = match (now.idle_minutes, now.battery_idle_minutes) {
-            (None, _) => write!(note, "now off"),
-            (Some(m), None) => write!(note, "now {m} min, both"),
-            (Some(m), Some(b)) => write!(note, "now {m} min, {b} on battery"),
+        let _ = match now.idle_minutes {
+            None => write!(note, "log out: off"),
+            Some(m) => write!(note, "log out: {m} min"),
         };
-        match pick_row(ui, HEAD, &note, &["On USB power", "On battery"]) {
-            Some(row) => row == 1,
+        match pick_row(ui, HEAD, &note, &["Log out", "Power off on battery"]) {
+            Some(0) => {}
+            Some(_) => return battery_off_screen(ui),
             None => return,
         }
-    };
-    #[cfg(not(feature = "board-q1"))]
-    let on_battery = false;
+    }
 
-    #[cfg(feature = "board-q1")]
-    let rows = if on_battery {
-        BATTERY_IDLE_ROWS
-    } else {
-        IDLE_ROWS
-    };
-    #[cfg(not(feature = "board-q1"))]
     let rows = IDLE_ROWS;
-    let current = if on_battery {
-        now.battery_idle_minutes
-    } else {
-        now.idle_minutes
-    };
+    let current = now.idle_minutes;
 
     let mut note: Line = Line::new();
     let _ = match current {
         Some(m) => write!(note, "now {m} min"),
-        None if on_battery => write!(note, "now as USB power"),
         None => write!(note, "now off"),
     };
     let Some(row) = pick_row(ui, HEAD, &note, rows) else {
@@ -12073,30 +12054,65 @@ fn idle_timeout_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
     }
 
     // Stored as text either way: an empty string is "no value here", which reads back as
-    // off for the main timeout and as "follow the main one" for the battery. One shape,
-    // one reader, no second encoding to get wrong.
+    // off. One shape, one reader, no second encoding to get wrong.
     let mut value: heapless::String<8> = heapless::String::new();
     if let Some(m) = chosen {
         let _ = write!(value, "{m}");
     }
-    let (key, next) = if on_battery {
-        (
-            catcard_settings::prefs::BATT_IDLE,
-            crate::prefs::Prefs {
-                battery_idle_minutes: chosen,
-                ..now
-            },
-        )
-    } else {
-        (
-            catcard_settings::prefs::IDLE,
-            crate::prefs::Prefs {
-                idle_minutes: chosen,
-                ..now
-            },
-        )
+    let next = crate::prefs::Prefs {
+        idle_minutes: chosen,
+        ..now
     };
-    save_pref(gate, login, ui, HEAD, (key, &value), next, rows[row]);
+    save_pref(
+        gate,
+        login,
+        ui,
+        HEAD,
+        (catcard_settings::prefs::IDLE, &value),
+        next,
+        rows[row],
+    );
+}
+
+/// Settings → Idle timeout → Power off on battery (Q1): stock's battery timeout.
+///
+/// How long the device sits untouched on its batteries before it turns itself off --
+/// stock's list, stock's ten-minute default. Device-wide and kept with the pre-login
+/// settings, because it runs at the PIN prompt too; see [`crate::idle`].
+/// Source: hw-reference/power.md §"Battery idle auto-power-off (Q1)" [C]
+#[cfg(feature = "board-q1")]
+fn battery_off_screen(ui: &mut Ui<'_>) {
+    use catcard_settings::prelogin::BATT_OFF_CHOICES;
+    const HEAD: &str = "Power off on battery";
+
+    let current = crate::settings::battery_off().unwrap_or(0);
+    let label = |secs: u32| {
+        BATT_OFF_CHOICES
+            .iter()
+            .find(|(_, s)| *s == secs)
+            .map(|(l, _)| *l)
+    };
+    let mut note: Line = Line::new();
+    let _ = match label(current) {
+        Some(l) => write!(note, "now {l}"),
+        None => write!(note, "now {current} s"),
+    };
+    let mut rows: heapless::Vec<&str, { BATT_OFF_CHOICES.len() }> = heapless::Vec::new();
+    for (l, _) in BATT_OFF_CHOICES {
+        let _ = rows.push(l);
+    }
+    let Some(row) = pick_row(ui, HEAD, &note, &rows) else {
+        return;
+    };
+    let (label, secs) = BATT_OFF_CHOICES[row];
+    if secs == current {
+        message(ui.panel, HEAD, "unchanged", label);
+    } else if crate::settings::save_battery_off(ui, (secs > 0).then_some(secs)) {
+        message(ui.panel, HEAD, label, "saved");
+    } else {
+        message(ui.panel, HEAD, "could not save", "nothing changed");
+    }
+    wait_for_any_key(ui);
 }
 
 /// Settings → Display units.

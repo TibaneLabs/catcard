@@ -776,6 +776,72 @@ static mut COUNTDOWN: Option<u32> = None;
 #[cfg(feature = "board-q1")]
 static mut CALC: bool = false;
 
+/// The on-battery power-off as the boot path read it (Q1): whether the key is present,
+/// and the value in seconds (`None` never). Absent means stock's ten minutes.
+#[cfg(feature = "board-q1")]
+static mut BATT_OFF: (bool, Option<u32>) = (
+    false,
+    Some(catcard_settings::prelogin::BATT_OFF_DEFAULT_SECONDS),
+);
+
+/// The on-battery power-off in force, in seconds; `None` is never.
+#[cfg(feature = "board-q1")]
+pub(crate) fn battery_off() -> Option<u32> {
+    // SAFETY: foreground only; written by `load_prelogin` and `save_battery_off`.
+    unsafe { (*core::ptr::addr_of!(BATT_OFF)).1 }
+}
+
+/// Set the on-battery power-off, in seconds (`None` for never), and put it in force now.
+#[cfg(feature = "board-q1")]
+pub(crate) fn save_battery_off(ui: &mut crate::ui::Ui<'_>, seconds: Option<u32>) -> bool {
+    let mut text = heapless::String::<8>::new();
+    let _ = core::fmt::Write::write_fmt(&mut text, format_args!("{}", seconds.unwrap_or(0)));
+    let key = catcard_settings::prelogin::BATT_OFF;
+    let ok = save_prelogin(ui, "Idle timeout", key, &text);
+    if ok {
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(BATT_OFF) = (true, seconds) };
+        crate::idle::arm_battery_off(seconds);
+    }
+    ok
+}
+
+/// Carry a per-wallet battery timeout (`cat_bidle`, minutes) over to the device-wide
+/// on-battery power-off, once.
+///
+/// The battery question under Settings → Idle timeout used to set a per-wallet logout
+/// on battery; it is now stock's device-wide power-off, kept before login. A wallet that
+/// set the old value hands it over the first time it logs in -- only while the device
+/// has no power-off value of its own, so a choice made on the new chooser is never
+/// overwritten by an older wallet's. The old key stays in the wallet file, unread for
+/// anything but this.
+#[cfg(feature = "board-q1")]
+pub(crate) fn migrate_battery_idle(ui: &mut crate::ui::Ui<'_>) {
+    // SAFETY: foreground only.
+    let (set, _) = unsafe { *core::ptr::addr_of!(BATT_OFF) };
+    let Some(minutes) = crate::prefs::current().battery_idle_minutes else {
+        return;
+    };
+    if set {
+        return;
+    }
+    let secs = minutes
+        .saturating_mul(60)
+        .min(catcard_settings::prelogin::MAX_BATT_OFF_SECONDS);
+    let ok = save_battery_off(ui, Some(secs));
+    if !ok {
+        // Honoured for this session all the same; the next login tries the save again.
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(BATT_OFF) = (false, Some(secs)) };
+        crate::idle::arm_battery_off(Some(secs));
+    }
+    crate::catlog!(
+        "idle: carried cat_bidle {} min over to the power-off: {}",
+        minutes,
+        if ok { "saved" } else { "not saved" }
+    );
+}
+
 /// The kill key's digit, and the enrolled 2FA cards, as the boot path read them.
 static mut KILL_KEY: Option<u8> = None;
 static mut SD2FA: (
@@ -948,6 +1014,16 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
         prefs.calc = prelogin::calc(&doc);
         // SAFETY: foreground only, boot path.
         unsafe { *core::ptr::addr_of_mut!(CALC) = prefs.calc };
+    }
+    // The on-battery power-off: device-wide, so it is armed here, before the PIN prompt.
+    #[cfg(feature = "board-q1")]
+    {
+        let secs = prelogin::battery_off_seconds(&doc);
+        // SAFETY: foreground only, boot path.
+        unsafe {
+            *core::ptr::addr_of_mut!(BATT_OFF) = (prelogin::battery_off_set(&doc), secs);
+        }
+        crate::idle::arm_battery_off(secs);
     }
     let mut cards = [[0u8; 32]; prelogin::SD2FA_MAX];
     let cards_state = prelogin::sd2fa(&doc, &mut cards);

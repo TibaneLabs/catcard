@@ -413,6 +413,8 @@ fn setup(port: &mut Usart) -> Result<(), Fault> {
 /// this reads bytes until that terminator. Anything the module cannot express as text
 /// arrives as its own message, which is a *decoded answer* and not the code's contents.
 fn read_code(port: &mut Usart, ui: &mut Ui<'_>, out: &mut [u8]) -> Result<usize, Fault> {
+    // Mid-scan: the on-battery power-off waits until this returns (`crate::idle`).
+    let _scanning = crate::idle::Scanning::begin();
     let mut n = 0;
     let mut overflowed = false;
     loop {

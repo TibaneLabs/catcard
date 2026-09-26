@@ -453,6 +453,7 @@ fn starts_with_ur(line: &[u8]) -> bool {
 /// take longer than the first hundred and a bar that has stopped moving says nothing
 /// about how much is left.
 fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) {
+    crate::idle::note_progress();
     let mut note: heapless::String<24> = heapless::String::new();
     use core::fmt::Write as _;
     let _ = write!(note, "{have} of {total}");

@@ -57,8 +57,10 @@ use crate::json::Doc;
 /// Minutes with no key pressed before the device logs itself out. Decimal digits, as a
 /// string; `"0"` or absent is off.
 pub const IDLE: &str = "cat_idle";
-/// The same while the device runs on its battery (Q1). Absent means [`IDLE`] applies on
-/// battery too.
+/// The same while the device runs on its battery (Q1). **Legacy**: the battery timeout
+/// is now the device-wide power-off in the pre-login settings
+/// ([`crate::prelogin::BATT_OFF`]); the firmware reads this only to carry an old value
+/// over, once.
 pub const BATT_IDLE: &str = "cat_bidle";
 /// How amounts are shown: one of `btc`, `mbtc`, `bits`, `sats`.
 ///
