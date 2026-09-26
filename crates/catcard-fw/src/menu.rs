@@ -65,6 +65,18 @@ enum Screen {
     About,
     /// About's second page: the STM32 itself.
     AboutChip,
+    /// About's third page: what the bootloader and the secure elements say this device
+    /// is. Stock's `View Identity`.
+    Identity,
+    /// Danger zone: commit this image as genuine (gate 18/5).
+    BlessFirmware,
+    /// Danger zone: raise the bootloader's anti-downgrade floor. Irreversible.
+    SetHighWater,
+    /// Danger zone: stock's ROM-bootloader entry; refused on this firmware.
+    DfuUpgrade,
+    /// Danger zone: how full the settings volume is.
+    #[cfg(not(feature = "board-mk3"))]
+    SettingsSpace,
     /// Install a firmware image from the card. Reached from `Utils` -> `Upgrade
     /// Firmware`, where a stock user looks for it.
     SdInstall,
@@ -594,6 +606,15 @@ const DANGER_ITEMS: &[&str] = &[
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Sighash Checks" [C]
     #[cfg(not(feature = "board-mk3"))]
     "Sighash checks",
+    // The bootloader rows, in stock's own order. High-Water is the one irreversible thing
+    // an install can do, made explicit; Bless changes the light; DFU is never entered on
+    // this firmware (see `crate::identity::dfu_upgrade`).
+    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ [C]
+    "Set High-Water",
+    #[cfg(not(feature = "board-mk3"))]
+    "Settings Space",
+    "Bless Firmware",
+    "DFU Upgrade",
 ];
 /// Tools that work on the seed itself, in stock's order. Stock's Seed XOR is here too;
 /// ours is under Derive.
@@ -1747,6 +1768,27 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::SeedTools,
         ),
         Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
+        Screen::Identity => to(
+            |a| crate::identity::view_identity(a.gate, a.login, a.ui),
+            Screen::Main,
+        ),
+        Screen::BlessFirmware => to(
+            |a| crate::identity::bless_firmware(a.gate, a.login, a.ui),
+            Screen::DangerZone,
+        ),
+        Screen::SetHighWater => to(
+            |a| crate::identity::set_high_water(a.gate, a.ui),
+            Screen::DangerZone,
+        ),
+        Screen::DfuUpgrade => to(
+            |a| crate::identity::dfu_upgrade(a.gate, a.ui),
+            Screen::DangerZone,
+        ),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsSpace => to(
+            |a| crate::identity::settings_space(a.ui),
+            Screen::DangerZone,
+        ),
         Screen::FactoryReset => to(
             |a| factory_reset_screen(a.gate, a.login, a.ui),
             Screen::Debug,
@@ -1991,6 +2033,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("B85 Idx Values")) => Screen::B85Index,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Sighash checks")) => Screen::SighashChecks,
+            (Key::Confirm, Some("Set High-Water")) => Screen::SetHighWater,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("Settings Space")) => Screen::SettingsSpace,
+            (Key::Confirm, Some("Bless Firmware")) => Screen::BlessFirmware,
+            (Key::Confirm, Some("DFU Upgrade")) => Screen::DfuUpgrade,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
@@ -2082,7 +2129,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::AboutChip => match key {
             Key::Cancel => Screen::About,
-            _ => Screen::Main,
+            _ => Screen::Identity,
         },
         Screen::Utils => match (key, UTILS_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Analyze RNG")) => Screen::AnalyzeRng,
@@ -2633,6 +2680,10 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: both drive their own screens -- the words, the progress bar
         // for the key derivation, and the card.
         Screen::BackupSave | Screen::BackupRestore | Screen::BackupVerify => {}
+        // Handled in `run`: each talks to the bootloader and drives the panel itself.
+        Screen::Identity | Screen::BlessFirmware | Screen::SetHighWater | Screen::DfuUpgrade => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsSpace => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: both ask, then work on the volume and say how it went.

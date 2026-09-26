@@ -442,6 +442,29 @@ impl Files {
 }
 
 impl Files {
+    /// How much of the volume the slots use: files under `/settings`, and their bytes.
+    ///
+    /// The filesystem's own metadata is not counted, so this is a floor. `None` if the
+    /// folder will not open.
+    pub fn usage(&mut self) -> Option<(u32, u64)> {
+        let dir = self.vol.open_dir("/settings").ok()?;
+        let mut it = self.vol.iter_dir(dir);
+        let (mut n, mut bytes) = (0u32, 0u64);
+        loop {
+            match it.next() {
+                Ok(Some(entry)) => {
+                    if !entry.is_dir() {
+                        n += 1;
+                        bytes += u64::from(entry.len());
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        Some((n, bytes))
+    }
+
     /// Log what `/settings` holds, name and size, as this volume sees it.
     ///
     /// For telling "the file is not on the flash" from "the file is there and cannot be
