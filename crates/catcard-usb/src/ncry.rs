@@ -227,38 +227,54 @@ impl Session {
     }
 }
 
-/// The device's end of the channel: at most one [`Session`], and a count of how many
-/// have been opened.
+/// The device's end of the channel: at most one [`Session`], whatever the device keeps
+/// for the life of that session (`S`), and a count of how many have been opened.
 ///
 /// The count is what binds state to a session without keeping the session's keys around
 /// to compare: a host request remembers the id it arrived under, and belongs to whoever
 /// holds the channel only while [`id`](Self::id) still says that number and the channel
 /// is open. A new handshake, a teardown and a bus reset all move past it for good.
 ///
+/// `S` is reset to its default whenever a session is installed or closed, so anything the
+/// device learned under one session -- which addresses a host was shown -- cannot outlive
+/// it or leak into the next.
+///
 /// **Any failure closes it.** A record that does not authenticate, is the wrong size, or
 /// cannot be sealed ends the session: a channel that has seen one forged record is not one
 /// to keep trusting, and the host can renegotiate.
-pub struct Channel {
+pub struct Channel<S: Default = ()> {
     session: Option<Session>,
     id: u32,
+    state: S,
 }
 
-impl Default for Channel {
+impl<S: Default> Default for Channel<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Channel {
-    pub const fn new() -> Self {
+impl<S: Default> Channel<S> {
+    pub fn new() -> Self {
         Self {
             session: None,
             id: 0,
+            state: S::default(),
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Whether this channel may carry the host-wallet commands (addresses, signing).
+    ///
+    /// **The one place that decides it.** Today any open session may: `v1` has no
+    /// device authentication, and what protects the owner is the device's screen. When
+    /// the handshake gains pairing, this is where a session that has not been paired is
+    /// turned away.
+    pub fn host_wallet_allowed(&self) -> bool {
+        self.is_open()
     }
 
     /// The number of the session opened most recently, open or not. Zero before any.
@@ -271,15 +287,33 @@ impl Channel {
         self.is_open() && id == self.id && id != 0
     }
 
-    /// Replace whatever was open with `session`, under a new id.
+    /// What the device keeps for the open session, or `None` when none is open.
+    pub fn state(&self) -> Option<&S> {
+        self.session.as_ref().map(|_| &self.state)
+    }
+
+    /// [`state`](Self::state), to change -- only for the session `id`, so a caller
+    /// holding an old session's number cannot write into a new one.
+    pub fn state_mut(&mut self, id: u32) -> Option<&mut S> {
+        if self.is_current(id) {
+            Some(&mut self.state)
+        } else {
+            None
+        }
+    }
+
+    /// Replace whatever was open with `session`, under a new id and a fresh state.
     pub fn install(&mut self, session: Session) {
         self.id = self.id.wrapping_add(1).max(1);
         self.session = Some(session);
+        self.state = S::default();
     }
 
-    /// End the session, if one is open. Its keys are wiped as it drops.
+    /// End the session, if one is open. Its keys are wiped as it drops, and its state is
+    /// reset.
     pub fn close(&mut self) {
         self.session = None;
+        self.state = S::default();
     }
 
     /// Open a sealed request record in place: `[ciphertext][tag]`. Returns the
@@ -536,7 +570,7 @@ mod tests {
         got
     }
 
-    fn channel_pair() -> (Session, Channel) {
+    fn channel_pair() -> (Session, Channel<u32>) {
         let (host, device) = pair();
         let mut ch = Channel::new();
         ch.install(device);
@@ -598,6 +632,23 @@ mod tests {
         assert!(ch.is_current(ch.id()));
         ch.close();
         assert!(!ch.is_current(ch.id()));
+    }
+
+    #[test]
+    fn session_state_is_dropped_with_the_session() {
+        let (_, mut ch) = channel_pair();
+        let id = ch.id();
+        *ch.state_mut(id).unwrap() = 42;
+        assert_eq!(ch.state(), Some(&42));
+        // An old session's number cannot reach the new one's state.
+        let (_, device) = pair();
+        ch.install(device);
+        assert_eq!(ch.state(), Some(&0), "a new session starts clean");
+        assert!(ch.state_mut(id).is_none());
+        *ch.state_mut(ch.id()).unwrap() = 7;
+        ch.close();
+        assert_eq!(ch.state(), None);
+        assert!(!ch.host_wallet_allowed());
     }
 
     #[test]
