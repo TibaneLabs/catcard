@@ -32,6 +32,145 @@ projects. That is no longer needed and is recorded only so the change is traceab
 Separately, during ST factory DFU an unlocked device appears as `0483:df11` — ST's own
 registered identity, nothing to do with us.
 
+## USB modes: Off, ckcc, CatCard
+
+**Settings → Hardware On/Off → `USB mode`** picks what the device is on the bus, for the
+whole device:
+
+| mode | the host sees | protocol |
+|---|---|---|
+| **CatCard** (default) | `39F2:0401`, "CatCard" | ours: everything above this section -- framing, pairing, host-wallet commands, upgrades, key injection and the monitor on bench builds |
+| **ckcc** | `D13E:CC10`, "CatCard" | stock Coldcard's, so the `ckcc` command line, HWI and Sparrow work unchanged |
+| **Off** | nothing: a real soft-disconnect | none |
+
+It replaces the old per-wallet `USB port` on/off switch.
+
+**Why ckcc mode presents stock's USB identity.** Compatibility, and the owner's
+decision. Every existing Coldcard host tool finds its device by stock's VID/PID and speaks
+stock's protocol; a device that answered only to ours would be invisible to them. The
+section above on why *not* to use `0xD13E:0xCC10` still describes CatCard mode, and the
+cost it names is real: in ckcc mode this device is indistinguishable from a Coldcard to a
+host, which is exactly the point of the mode -- so it is never the default, and the screen
+says so in one line when it is chosen ("computers will see it as a Coldcard").
+
+**What stays ours in ckcc mode.** Only the VID/PID changes: the one HID interface, its two
+64-byte interrupt endpoints, the report descriptor (vendor page `0xFF00`) and the strings
+are the CatCard tables (`descriptor::DEVICE_CKCC` is `DEVICE` with two fields changed).
+The host tools match the device on VID/PID and not on the report descriptor or the
+product string (`hw-reference/usb-ckcc-protocol.md` §1.1), so the product string stays
+"CatCard" rather than borrowing stock's name. Stock's mass-storage interface is not
+presented; the Virtual Disk is still the USB Drive screen.
+
+### Where the setting lives, and when it applies
+
+The value is `cat_usbm` (`off` / `ckcc` / `catcard`) in the **pre-login** settings,
+because what a host sees when the cable goes in cannot wait for someone to log in. A value
+that is present but unreadable reads as CatCard. While no value is set, the wallet's old
+`cat_usb` switch still counts after the PIN: `"0"` is Off, anything else CatCard
+(`prelogin::effective_usb_mode`) -- so a wallet that had USB off keeps it off.
+
+Boot-time bring-up is unchanged: the core comes up as CatCard and the PIN prompt attaches
+it, exactly as before. The pre-login read (`settings::load_prelogin`) hands the mode to the
+USB task, which applies it at its **first poll after the port is attached** -- Off by
+soft-disconnect, ckcc or CatCard by a soft-disconnect and re-enumeration with the other
+identity, the same dance as the keyboard switch. Never earlier: a core presented to a host
+before anything services it wedges (`pinentry::unlock`).
+
+**Recovery is always CatCard.** The failsafe (Cancel held at power-on), `recovery::headless`
+and a boot that ends in `recovery::run` never read the setting, so they speak CatCard's
+protocol with its key injection and monitor whatever the owner chose. A device left in
+ckcc or Off mode with a dead panel is reached that way. Note what that means on a bench
+build: in ckcc or Off mode the ordinary boot has no `InjectKey` before the PIN, so a device
+that is driven blind needs the Cancel-held boot.
+
+The **Keyboard EMU** switch is separate and only means something in CatCard mode: the
+keyboard rides beside CatCard's interface, and stock's identity never carries it (its row
+says so while the mode is not CatCard).
+
+### The ckcc protocol
+
+Written from `hw-reference/usb-ckcc-protocol.md`, in `catcard_usb::ckcc` (framing, session,
+parsing, replies -- host-testable) and `crate::ckcc` (what each request does):
+
+- **Framing**: 64-byte reports, a flag byte (`len | 0x40 encrypted | 0x80 last`) and 63
+  payload bytes; an empty last report is a resync. Messages up to `MAX_MSG_LEN` (2060) --
+  2076 once v3 is up, for its tag.
+- **`ncry` v1, v2 and v3**: secp256k1 ECDH with an ephemeral key from the USB DRBG, session
+  key `SHA-256(X‖Y)`. v1/v2: AES-256-CTR under that key, a stream each way from counter
+  zero; v2 binds the link (everything encrypted, no second `ncry`). v3: four keys by
+  HKDF-SHA256 over the transcript (`ccncry3`), AES-256-CTR per direction and a 16-byte
+  HMAC-SHA256 tag over `dir ‖ seq ‖ len ‖ ciphertext`; any failure ends the link until the
+  next bus session.
+- **Tests**: known answers computed outside the crate (python-ecdsa, pyaes, `hashlib`/`hmac`)
+  for the session key, v1 streams, v3's keys and tags; tampering, replay, short messages,
+  framing limits and every parser. The module was also driven by the real host library as a
+  black box over its simulator socket -- `cargo run -p catcard-usb --example ckcc_sim` and
+  then `ckcc -x ...` -- for v1, v2 and v3 sessions, a 1500-byte ping, xpub, address, a PSBT
+  upload/sign/download, a message signature and a firmware upload.
+
+What the host tool does, observed that way: every `ckcc` run resyncs, then `ncry` v1 (the
+library's default), then its command; `sign` checks `mitm` first. `upgrade` uploads the
+image, reads `sha2`, uploads the image's 128-byte header again **after** the image (the
+total grows by 128), reads `sha2` again, then sends `rebo`.
+
+### Every opcode
+
+"Held" means the reply waits until the UI task has derived what it needs (a second or so:
+the seed is stretched each time); "polled" means `okay` at once and the host polls.
+Everything that needs the seed or the person runs on the UI task from the menu loop -- the
+same hand-off as upgrade offers and host-wallet requests -- so a request that arrives while
+the person is inside another screen waits until they come back to the menu, and the host's
+three-second read may time out first.
+
+| opcode | here | how |
+|---|---|---|
+| `ncry` | implemented | v1/v2/v3; `mypb` carries the master fingerprint and xpub once learnt (zero and empty before the PIN, as stock with no secret) |
+| `vers` | implemented | build date, version, bootloader version, `date T hhmm -v version`, board (`mk4`/`mk5`/`q1`/`mk3`) |
+| `ping` | implemented | echo |
+| `blkc` | implemented | `BTC`, or `XTN` on testnet/regtest |
+| `mitm` | implemented, held | the session key signed with the master key (`message::sign_raw_digest`, recoverable, header 31+recid); must be encrypted |
+| `xpub` | implemented, held | `menu::public_at` from the master; the master itself answered at once; must be encrypted |
+| `show` | implemented, held | single-key address (`AF_CLASSIC`, `P2WPKH`, `P2WPKH_P2SH`, `P2TR`; old `0x17` read as P2TR); answered, then shown until a key |
+| `p2sh` | implemented, held | a **registered** multisig wallet with the same M, N and form, whose cosigners' fingerprints and origins match the paths sent and whose own script at that branch/index equals the script sent; answered, then shown. Anything else: `err_Multisig wallet not registered` |
+| `msck` | implemented, held | `int1` 1 if a registered wallet has that M, N and fingerprint XOR |
+| `upld` / `sha2` | implemented | stock's rules (256-aligned, strictly in order, running SHA-256); PSRAM (`Use::Host`) on mk4/mk5/Q1, a heap block up to 16 KiB or the SPI-NOR staging area on the mk3; under the spending policy only a PSBT |
+| firmware upgrade | implemented | an upload whose last 128 bytes repeat the header at `0x3F80` is an image: inspected (`Staged::stored_elsewhere`) and put on the **same approval screen** as a CatCard offer; `rebo` does nothing while it waits |
+| `stxn` / `stok` | implemented, polled | the upload re-hashed on the UI task, then `signtx::host_sign` -- the ordinary review, spending policy and all, every derived key of ours allowed (stored WIF keys never sign for a computer); `strx` names the signed PSBT, or with `STXN_FINALIZE` the finished transaction when complete |
+| `dwld` | implemented | file 1 only: the last signed result; must be encrypted |
+| `smsg` / `smok` | implemented, polled | `signmsg::sign_for_host`: the ordinary message confirmation, legacy signature; taproot refused (no legacy header for it) |
+| `pass` / `pwok` | implemented, polled | `passphrase::apply` with its own "use this wallet?"; `pwok` answers the new master xpub; must be encrypted |
+| `enrl` | implemented | `msimport::from_text` on the uploaded file, its own review; answered `okay` at once |
+| `logo` / `rebo` | implemented | `okay`, then half a second, then logout (or restart) |
+| `bagi` | read only | the factory bag number; writing it is refused (`err_Not allowed`) |
+| `hsms` `hsts` `gslr` `nwur` `rmur` `user` | HSM stub | `err_HSM commands disabled`, as stock with `hsmcmd` off; marked `// HSM:` in `crate::ckcc` for the package that builds HSM mode |
+| `back` `bkok` `rest` | refused | `err_Unknown cmd`: backup and restore are on the card here, not over USB |
+| `dfu_` | refused | `err_Unknown cmd`: never offered (bench units are RDP 2) |
+| `msls` `msdl` `msgt` `msas` `mins` | refused | `err_Unknown cmd`, as stock 5.6.2 itself answers them |
+| anything else, `XKEY…` | refused | `err_Unknown cmd`; on a bound (v2/v3) link the device also logs out, as stock does |
+
+Gates, as the spec gives them: `xpub`, `mitm`, `pass` and `dwld` must arrive encrypted
+(`err_must encrypt`); before the PIN only `vers`, `ping`, `ncry` and `blkc` are answered
+(`err_Not ready: enter the PIN on the device`); under the spending policy `enrl`, `pass`,
+`pwok`, a `bagi` write, `back`, `rest`, `dfu_` and firmware uploads are refused
+(`err_Spending policy in effect`) -- stock lets `pass` through when its policy allows it,
+and ours has no such allowance. A second request while a job is in hand is `busy`.
+
+**Not in ckcc mode**: key injection, the memory monitor, pairing and the host-wallet
+opcodes. They exist only in CatCard mode.
+
+### Checking it on hardware
+
+```sh
+tools/ckcc_check.py [--ckcc PATH] [--psbt FILE]
+```
+
+With the device in ckcc mode, unlocked and holding a wallet: runs `ckcc version`,
+`ckcc xpub`, `ckcc xpub m/84h/0h/0h`, `ckcc addr -s m/84h/0h/0h/0/0` (the device shows the
+address; any key clears it) and, with `--psbt`, `ckcc sign` (approve it on the device).
+`--ckcc` defaults to `$CKCC`, then `../work/ckcc-venv/bin/ckcc` beside the repository.
+`--simulator` runs the same checks against `examples/ckcc_sim`. On Linux the device needs a
+udev rule for `d13e:cc10`, like the CatCard one below with the other numbers.
+
 ## DFU suffix VID/PID
 
 The DfuSe container `catcard-image` produces carries a 16-byte suffix with its own
@@ -524,18 +663,17 @@ hardware, stop building the bring-up image.
 
 ### Keyboard emulation: a second interface, off by default
 
-With **Settings → Hardware On/Off → Keyboard EMU** on, the device enumerates as a
-*composite*: the wallet's vendor HID interface exactly as above, plus a **boot-protocol
+With **Settings → Hardware On/Off → Keyboard EMU** on -- and `USB mode` CatCard, since
+stock's identity never carries it -- the device enumerates as a *composite*: the wallet's vendor HID interface exactly as above, plus a **boot-protocol
 USB keyboard** as interface 1. It exists so a BIP-85 password or a stored note can be
 typed straight into a login form on the host, with no clipboard for the host's other
 software to read (stock: "USB-keyboard emulation (for BIP-85 passwords)").
 
 **It is off by default, and doubt reads as off.** The setting is `cat_kbemu` in the
 wallet's own settings file, and only a literal `"1"` switches it on -- the opposite
-direction from the port and disk switches, which read as on. Those two can only take a
-channel away; this one gives the host a keyboard, and no unreadable byte should ever do
-that. Like the port switch it is read after the PIN, so a locked device never shows a
-keyboard.
+direction from the disk switch (and the USB mode), which read as on. Those can only take
+a channel away; this one gives the host a keyboard, and no unreadable byte should ever do
+that. It is read after the PIN, so a locked device never shows a keyboard.
 
 **Nothing changes for host tools.** The vendor interface keeps interface number 0 and
 endpoints `0x81`/`0x01`, and the 32 bytes describing it after the configuration header
@@ -800,9 +938,10 @@ to see.
 - Transport-level encryption is still worth having against a passive host, but it
   authenticates a channel, not an intent. It is not a substitute for the screen.
 
-The stock `ckcc` protocol (`vers`, `ncry`, `stxn`, …) is deliberately not implemented and
-deliberately not studied — see [`../CLEANROOM.md`](../CLEANROOM.md). Host compatibility
-with existing Coldcard tooling is not a goal.
+CatCard's own protocol is not the stock `ckcc` protocol and does not interoperate with it.
+Compatibility with existing Coldcard tooling is the **ckcc USB mode**'s job -- a separate
+identity and protocol the owner opts into, written from `hw-reference/usb-ckcc-protocol.md`
+(see "USB modes" above) -- never this one's.
 
 
 ## Rescue: staging and installing with the memory monitor
