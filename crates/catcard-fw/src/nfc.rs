@@ -1084,6 +1084,12 @@ fn offer(
         Content::SolanaTx { base64 } => {
             crate::solanatx::screen(gate, login, ui, got.bytes(), base64);
         }
+        // A wallet to register, written to the tag by a phone as a descriptor or a
+        // Coldcard setup file: the same import review the card and the scanner reach.
+        Content::MultisigConfig => {
+            let text = core::str::from_utf8(&held.bytes()[at..at + len]).unwrap_or("");
+            crate::msimport::from_text(gate, login, ui, text);
+        }
         Content::Text => {
             let text = got.text().unwrap_or("(not text)");
             let mut rows: heapless::Vec<catcard_ui::scroll::Line, 4> = heapless::Vec::new();

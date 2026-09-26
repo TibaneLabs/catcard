@@ -28,6 +28,8 @@ pub(crate) enum Content {
     /// transaction" gives. `None` means the payload is the transaction.
     #[cfg(feature = "multichain")]
     SolanaTx { base64: Option<(usize, usize)> },
+    /// A multisig wallet to register: an output descriptor, or a Coldcard setup file.
+    MultisigConfig,
     /// Something a person can read.
     Text,
     /// Bytes that are none of the above.
@@ -61,6 +63,7 @@ impl Content {
             Content::Firmware => "a firmware image",
             Content::Psbt => "a transaction",
             Content::Seed(_) => "a seed backup",
+            Content::MultisigConfig => "a multisig wallet",
             Content::Text => "text",
             Content::Unknown => "data this device cannot read",
         }
@@ -86,6 +89,7 @@ impl Content {
             Content::SolanaTx { .. } => Some("Sign it"),
             Content::Firmware => Some("Install it"),
             Content::Psbt => Some("Sign it"),
+            Content::MultisigConfig => Some("Import it"),
             Content::Text => Some("Show it"),
             Content::Seed(_) | Content::Unknown => None,
         };
@@ -122,7 +126,7 @@ impl Content {
             Content::SolanaTx { .. } => "tx",
             Content::Firmware => "bin",
             Content::Psbt => "psbt",
-            Content::Text => "txt",
+            Content::MultisigConfig | Content::Text => "txt",
             Content::Seed(_) | Content::Unknown => "dat",
         }
     }
@@ -240,6 +244,14 @@ pub(crate) fn sniff(bytes: &[u8]) -> Content {
             return Content::Seed(kind);
         }
         _ => {}
+    }
+    // A multisig wallet, as a descriptor or as stock's setup file. Before the text
+    // case, because both *are* text, and a wallet shown as prose is one nobody can
+    // register without typing it back in.
+    if let Some(text) = text
+        && crate::msimport::looks_like_config(text)
+    {
+        return Content::MultisigConfig;
     }
     match text {
         Some(_) => Content::Text,

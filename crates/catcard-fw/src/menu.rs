@@ -6943,7 +6943,7 @@ pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) ->
 /// that needs nothing but a phone. The device with no card in it and no cable is the
 /// case this exists for.
 #[cfg(feature = "board-q1")]
-fn offer_export(
+pub(crate) fn offer_export(
     ui: &mut Ui<'_>,
     head: &str,
     file: &str,
@@ -6981,7 +6981,7 @@ fn offer_export(
 /// on the mk3 it goes straight to the card with no prompt. Cancelling the chooser drops
 /// the key without writing.
 #[cfg(not(feature = "board-q1"))]
-fn offer_export(
+pub(crate) fn offer_export(
     ui: &mut Ui<'_>,
     head: &str,
     file: &str,
@@ -7190,7 +7190,7 @@ pub(crate) struct Signer {
 /// `None` if the derivation could not even be described, which leaves the export
 /// unsigned rather than unwritten: a file without its sidecar is still the file someone
 /// asked for.
-fn signer_for(
+pub(crate) fn signer_for(
     master: catcard_wallet::bip32::ExtendedPrivKey,
     signing: Option<crate::export::Signing>,
 ) -> Option<Signer> {
@@ -8972,7 +8972,20 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         match addr {
             Some(n) => {
                 let s = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                ellipsize_middle(s, cols, &mut shown);
+                // A registered wallet's address is censored unless the owner turned
+                // "Full Address View?" on: the two ends, which are what an eye compares
+                // against a cosigner's screen, and an elision where the middle was.
+                // The QR is not affected. Stock's default is the same.
+                // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §MS [C]
+                #[cfg(not(feature = "board-mk3"))]
+                let width = if wallet.is_some() && !crate::prefs::current().ms_full_addr {
+                    cols.min(crate::msimport::CENSORED_COLS)
+                } else {
+                    cols
+                };
+                #[cfg(feature = "board-mk3")]
+                let width = cols;
+                ellipsize_middle(s, width, &mut shown);
             }
             // A child index that lands on an invalid scalar is vanishingly rare, but the
             // screen must not lie about it: show a gap rather than a wrong address.

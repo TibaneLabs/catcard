@@ -86,6 +86,12 @@ pub(crate) struct Prefs {
     pub nfc_sharing: bool,
     /// Where the PushTx link after a signed transaction points, or that there is none.
     pub pushtx: PushTx,
+    /// Whether an unsorted (`multi`, non-BIP-67) multisig wallet may be registered.
+    /// Honoured by `crate::msimport`, at every import path.
+    pub ms_unsorted: bool,
+    /// Whether the Address Explorer shows a registered wallet's addresses whole rather
+    /// than with the middle elided. Honoured by the explorer in [`crate::menu`].
+    pub ms_full_addr: bool,
 }
 
 impl Prefs {
@@ -125,6 +131,8 @@ impl Default for Prefs {
             slip132: false,
             nfc_sharing: true,
             pushtx: PushTx::DEFAULT,
+            ms_unsorted: false,
+            ms_full_addr: false,
         }
     }
 }
@@ -148,6 +156,8 @@ static mut CURRENT: Prefs = Prefs {
     slip132: false,
     nfc_sharing: true,
     pushtx: PushTx::DEFAULT,
+    ms_unsorted: false,
+    ms_full_addr: false,
 };
 
 /// What the wallet in force is set to.
@@ -262,6 +272,8 @@ pub(crate) fn load(
         slip132: prefs::slip132(&doc),
         nfc_sharing: prefs::nfc_sharing(&doc),
         pushtx: prefs::pushtx(&doc),
+        ms_unsorted: prefs::ms_unsorted(&doc),
+        ms_full_addr: prefs::ms_full_addr(&doc),
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}",

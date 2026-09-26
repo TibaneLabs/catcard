@@ -146,27 +146,23 @@ pub fn ccxp(keys: &OurKeys<'_>, out: &mut [u8]) -> Result<usize, Error> {
             "))",
         ),
     ] {
-        let path_tail = (keys.coin, keys.account, script);
-        write!(
+        let (coin, account) = (keys.coin, keys.account);
+        writeln!(
             buf,
-            "  \"{name}_deriv\": \"m/48h/{}h/{}h/{}h\",\n",
-            path_tail.0, path_tail.1, path_tail.2
+            "  \"{name}_deriv\": \"m/48h/{coin}h/{account}h/{script}h\","
         )
         .map_err(overflow)?;
         let n = xpub.write_base58_as(form, &mut key).map_err(overflow)?;
-        write!(
+        writeln!(
             buf,
-            "  \"{name}\": \"{}\",\n",
+            "  \"{name}\": \"{}\",",
             core::str::from_utf8(&key[..n]).map_err(overflow)?
         )
         .map_err(overflow)?;
         let n = xpub.write_base58(&mut key).map_err(overflow)?;
-        write!(
+        writeln!(
             buf,
-            "  \"{name}_desc\": \"{open}[{a:02x}{b:02x}{c:02x}{d:02x}/48h/{}h/{}h/{}h]{}/0/*,...{close}\",\n",
-            path_tail.0,
-            path_tail.1,
-            path_tail.2,
+            "  \"{name}_desc\": \"{open}[{a:02x}{b:02x}{c:02x}{d:02x}/48h/{coin}h/{account}h/{script}h]{}/0/*,...{close}\",",
             core::str::from_utf8(&key[..n]).map_err(overflow)?
         )
         .map_err(overflow)?;
