@@ -229,14 +229,15 @@ fn string_lengths() {
 }
 
 #[test]
-fn a_boot_code_that_is_not_six_digits_can_never_be_typed() {
+fn a_boot_code_that_is_not_digits_can_never_be_typed() {
     assert!(
         load(r#"{"boot_to_hsm": "123456"}"#)
             .unwrap()
             .boot_code_typeable()
     );
+    // Fewer than six digits are sent with OK.
     assert!(
-        !load(r#"{"boot_to_hsm": "12345"}"#)
+        load(r#"{"boot_to_hsm": "12345"}"#)
             .unwrap()
             .boot_code_typeable()
     );
@@ -456,6 +457,19 @@ fn rule_percent_and_patterns() {
     assert_eq!(Percent(99_500_000).to_string(), "99.5");
     assert_eq!(Percent(50 * PCT_ONE).to_string(), "50");
     assert_eq!(Percent(1).to_string(), "0.000001");
+    // Far past the bound, with a fraction: refused, never an overflow.
+    assert_eq!(
+        problem(r#"{"rules": [{"min_pct_self_transfer": 12345.5}]}"#),
+        Problem::OutOfRange
+    );
+    assert_eq!(
+        problem(r#"{"rules": [{"min_pct_self_transfer": 101.00000001}]}"#),
+        Problem::OutOfRange
+    );
+    assert_eq!(
+        problem(r#"{"rules": [{"min_pct_self_transfer": 100.0000001}]}"#),
+        Problem::OutOfRange
+    );
     assert_eq!(
         problem(r#"{"rules": [{"patterns": ["EQ_SOMETHING"]}]}"#),
         Problem::BadPattern

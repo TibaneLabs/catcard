@@ -362,7 +362,8 @@ pub fn otpauth_uri(
     percent(name, out)?;
     write!(out, "?secret={}", secret_b32.trim_end_matches('='))?;
     if mode == AUTH_HOTP {
-        out.write_str("&counter=0")?;
+        // Counter zero is never accepted (see `check`), so the app starts at one.
+        out.write_str("&counter=1")?;
     }
     out.write_str("&issuer=")?;
     percent(issuer, out)
@@ -432,7 +433,7 @@ pub fn check(
             // The nine counters past the last one accepted. Counter zero is not tried: a
             // fresh user's counter is zero too, and accepting it would let that first code
             // be sent again. `[I]` -- see docs/USB.md.
-            for c in user.counter + 1..=user.counter + HOTP_WINDOW {
+            for c in user.counter.saturating_add(1)..=user.counter.saturating_add(HOTP_WINDOW) {
                 if six(crate::notes::hotp(secret.bytes(), c, 6))
                     .as_bytes()
                     .ct_eq(code)
@@ -701,7 +702,7 @@ mod tests {
         otpauth_uri(AUTH_HOTP, "h", "MZXW6===", "x", &mut s).unwrap();
         assert_eq!(
             s.as_str(),
-            "otpauth://hotp/h?secret=MZXW6&counter=0&issuer=x"
+            "otpauth://hotp/h?secret=MZXW6&counter=1&issuer=x"
         );
     }
 }

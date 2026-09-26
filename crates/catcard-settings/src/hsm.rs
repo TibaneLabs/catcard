@@ -401,12 +401,17 @@ fn percent(raw: &str, hi: Percent) -> Result<Percent, Problem> {
         return Err(Problem::NotNumber);
     }
     // Past the bound, the digits are not needed to know it is out of range.
+    // Past the bound, the digits are not needed to know it is out of range -- and the
+    // arithmetic below must never see a number that could overflow it.
     let w: u64 = if whole.len() > 4 {
-        u64::MAX / 2
+        return Err(Problem::OutOfRange);
     } else {
         whole.parse().map_err(|_| Problem::NotNumber)?
     };
-    let mut micro = w.saturating_mul(PCT_ONE);
+    if w > hi.0 / PCT_ONE {
+        return Err(Problem::OutOfRange);
+    }
+    let mut micro = w * PCT_ONE;
     if let Some(f) = frac {
         let mut scale = PCT_ONE / 10;
         for (i, b) in f.bytes().enumerate() {
@@ -1237,12 +1242,13 @@ impl<'a> Policy<'a> {
         self.boot_to_hsm.is_some()
     }
 
-    /// Whether the `boot_to_hsm` code can be typed as the six-digit escape at all. One that
-    /// cannot leaves no way out of HSM mode on this device. Source: §3.2 [C]
+    /// Whether the `boot_to_hsm` code can be typed on the keypad at all: digits only (six
+    /// send themselves, fewer are sent with OK). One that cannot leaves no way out of HSM
+    /// mode on this device. Source: §3.2 [C]
     pub fn boot_code_typeable(&self) -> bool {
         let mut buf = [0u8; 4 * BOOT_LEN.1];
         self.boot_to_hsm(&mut buf)
-            .is_some_and(|c| c.len() == LOCAL_PIN_LENGTH && c.bytes().all(|b| b.is_ascii_digit()))
+            .is_some_and(|c| c.bytes().all(|b| b.is_ascii_digit()))
     }
 
     /// Whether any rule wants the local operator's code. Source: §3.5 [C]
@@ -1405,7 +1411,7 @@ impl<'a> Policy<'a> {
             } else {
                 writeln!(
                     out,
-                    "IRREVERSIBLE: the boot code is not 6 digits, so it can never be typed. This device could NEVER leave HSM mode again."
+                    "IRREVERSIBLE: the boot code is not all digits, so it can never be typed. This device could NEVER leave HSM mode again."
                 )?;
             }
         }
