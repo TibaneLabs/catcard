@@ -63,13 +63,19 @@ each step landed, then what is left.
     password screen's "type into host", Notes → Apply as BIP-39 Passphrase applying
     directly (`passphrase::apply`), Notes → Sign Note Text through `signmsg::sign_to_file`
     (`crate::usbkbd::send_screen`). Untested on hardware.
-16. **What remains, deliberately deferred**: HSM mode and user management; Spending
-    Policy, CCC and Hobbled mode; Trick PINs (blocked on gate 22's slot layout,
-    `HARDWARE-OPEN-ITEMS.md`); Key Teleport; BIP-322 `full` / `pof` and Proof of
-    Reserves; BIP-370 PSBT v2; BIP-21 amounts and labels; bare P2PK; Reflash GPU; the
-    factory menu (Bag Me Now / Ship w/o Bag, MCU key slots); the mk3 settings medium;
-    Seed XOR joins that mix in the device's own seed or a vault entry; the
-    suspicious-change heuristic; altcoin transaction signing beyond ETH and SOL.
+16. ~~**Wave 3, 2026-09-26**~~ -- BIP-370 PSBT v2 (parsed, signed through a v0 view,
+    handed back as v2; `catcard_wallet::psbtv2`); bare P2PK signing; the unusual-change
+    warning; BIP-322 `full` and `pof`, P2WSH cosigner shares, and Proof of Reserves
+    (`bip322`, `crate::por`); BIP-21 amounts and labels (`address::bip21`,
+    `crate::payuri`); Seed XOR joins from the device's own seed and vault entries; the
+    mk3 settings store on SPI-NOR (`catcard_settings::norslots`), which turned on every
+    feature that lacked only a store there; the Single-Signer Spending Policy and hobbled
+    mode (`crate::policy`). Untested on hardware.
+17. **What remains**: HSM mode and user management; CCC; Web 2FA for the Spending
+    Policy; Trick PINs (blocked on gate 22's slot layout, `HARDWARE-OPEN-ITEMS.md`); Key
+    Teleport; Reflash GPU; the factory menu (Bag Me Now / Ship w/o Bag, MCU key slots);
+    BIP-322 `full` / `pof` for P2PKH (needs a legacy sighash); altcoin transaction signing
+    beyond ETH and SOL.
 
 ## 1. Standards
 
@@ -84,9 +90,9 @@ each step landed, then what is left.
 | BIP-137 legacy message | ✅ | ✅ | three address types, chosen path (`message`, `crate::signmsg`); untested on hardware |
 | BIP-141/143/144 | ✅ | ✅ | addresses, BIP-143 sighash, witness serialisation, finalise and extract |
 | BIP-174 PSBT v0 | ✅ | ✅ | read and signed (`psbtview`, `signer`, `outscript`); untested on hardware |
-| BIP-370 PSBT v2 | ✅ | ❌ | named and refused, not misread (`signtx::describe`, `UnsupportedPsbtVersion`) |
-| BIP-322 | ✅ | 🟡 | `simple` for P2WPKH and taproot key path (`bip322`); `ful`, `pof` and P2WSH refused by name |
-| BIP-21 URIs | ✅ | 🟡 | `bitcoin:` out on the NFC tag and the legacy/nested address QR; `?amount=` cut off a scanned one (`crate::verify`); no amount, label or `wallet=` written |
+| BIP-370 PSBT v2 | ✅ | ✅ | parsed against the BIP's vectors, signed through a v0 view, written back as v2 (`catcard_wallet::psbtv2`); untested on hardware |
+| BIP-322 | ✅ | ✅ | `simple`, `full` and `pof` for P2WPKH, P2SH-P2WPKH, taproot key path and registered P2WSH (cosigner shares) against the BIP's vectors (`bip322`); P2PKH `full` refused, no legacy sighash; untested on hardware |
+| BIP-21 URIs | ✅ | ✅ | written with amount and label on QR and NFC, parsed with `req-` refusal (`address::bip21`, `crate::payuri`); `wallet=` shown, never acted on (`[?]`); untested on hardware |
 | BIP-380/383 descriptors | ✅ | ✅ | single-sig export (Utils → Export wallet, BIP-389 `<0;1>`); multisig import and per-wallet View / Export / Bitcoin Core (`crate::msimport`, `multisig`) |
 | SLIP-132 | ✅ | ✅ | every form read on import (`bip32::serialize::Slip132`); export behind Settings → SLIP-132 export (`cat_slip132`), off by default like stock |
 | SLIP-44 | ✅ | ✅ | coin type 0 / 1 from the network (`chain`) |
@@ -104,7 +110,7 @@ each step landed, then what is left.
 | Dice-only seed | ✅ | ➖ | user entropy adds to the TRNGs, never replaces them (`ENTROPY.md`) |
 | Import words (12/18/24) | ✅ | ✅ | length asked first; the last word offered from the checksum-valid set (`531ea2e`) |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ✅ | Import → XPRV, Clone (`backup::clone_import`), TAPSIGNER (`crate::tapsigner`, `catcard-backup::tapsigner`), Seed XOR; a stored raw master or xprv node is worked in as is; backup via Utils → Backup → Restore; SeedQR through the scanner (`crate::seedqr`); untested on hardware |
-| Seed XOR split and join | ✅ | 🟡 | 2--4 parts, deterministic or from the TRNGs, joined under Derive or Import (`crate::seedxor`, `seedxor`); the join reads typed parts only -- the device's own seed and vault entries are not offered as parts |
+| Seed XOR split and join | ✅ | ✅ | 2--4 parts, deterministic or from the TRNGs; a part can be typed, this device's seed, or a Seed Vault entry (`crate::seedxor`, `seedxor::Join`); untested on hardware |
 | BIP-85 | ✅ | ✅ | as §1; words, XPRV and WIF children can be put in force |
 | BIP-39 passphrase | ✅ | ✅ | Settings → Passphrase, RAM only; Save to card / Restore saved / delete in `catcard-passphrases.bin` under a key only these words make (`pwsave`, `680d6a8`); NFKD is the ➖ in §1; untested on hardware |
 | Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ✅ | Derive → Import key (words, XPRV, WIF, TAPSIGNER, Coldcard backup) and New words for the session; Key vault (`crate::vault`, stock's `seeds` format); Danger zone → Seed tools → Lock down seed |
@@ -117,7 +123,7 @@ each step landed, then what is left.
 |---|---|---|---|
 | P2PKH, P2WPKH, P2SH-P2WPKH display | ✅ | ✅ | Address Explorer, with QR |
 | Taproot display | ✅ | ✅ | Address Explorer |
-| P2PK (bare pubkey) receive and sign | ✅ | ❌ | no bare-pubkey script anywhere in `catcard-wallet` |
+| P2PK (bare pubkey) receive and sign | ✅ | ✅ | signed with seed or WIF-store keys, shown in review (`signer::p2pk_*`); no address, so not in the explorer; untested on hardware |
 | Accounts, change chain, start index | ✅ | ✅ | stepped with the arrows, or typed: `2` the account, `4` where the walk starts |
 | Custom derivation path | ✅ | ✅ | Addresses → Custom path, shown in all four types |
 | Explorer export (CSV, QR, NFC) | ✅ | ✅ | `6` offers the card, the Virtual Disk or the tag: CSV of index, path and address, or the address as a `bitcoin:` URI on the tag; QR per address |
@@ -152,7 +158,7 @@ every multisig input is refused.
 |---|---|---|---|
 | Ready to Sign entry | ✅ | ✅ | the card's lone `.psbt`, or a picker; SD or the Virtual Disk |
 | Parse, review, sign, write back | ✅ | ✅ | outputs paged eight at a time, the Sign key on the last page only (`signtx::PAGE`); untested on hardware |
-| Change validation, fee limit | ✅ | 🟡 | change re-derived and proven; the cap is Settings → Max network fee (`cat_fee`: 10% default, 25/50/none); no "suspicious change path" heuristic on top of the proof |
+| Change validation, fee limit | ✅ | ✅ | change re-derived and proven, with a warning when proven change sits on an unusual path (`psbtview::unusual_change`); the cap is Settings → Max network fee (`cat_fee`) |
 | Sighash policy | ✅ | ✅ | SIGHASH_ALL, or Danger zone → Sighash checks Warn (`cat_sighash`, `signer::SighashPolicy`): a non-ALL type named before the review, consolidation under one still refused; absent on the mk3 |
 | Finalise to a network transaction | ✅ | ✅ | FINAL.TXN as hex; a PSBT still short of signatures is handed off to the next cosigner rather than called a failure |
 | Batch sign | ✅ | ✅ | Sign → Batch sign: every batch-source `.psbt` on the card, up to `signtx::MAX_BATCH` (8) per pass, one signed file each (`signtx::batch_sign`) |
@@ -163,7 +169,7 @@ every multisig input is refused.
 | Foreign inputs, coinjoin | ✅ | ✅ | signed for what is ours; a foreign input leaves the fee UNKNOWN and says so (`psbtview`, `signtx`) |
 | Timelocks | ✅ | ✅ | absolute `nLockTime` and BIP-68 relative locks surfaced, ineffective ones named (`psbtview::timelock`) |
 | WIF-store inputs | ✅ | ✅ | a bare key's matching input is signed beside the seed's (`signer::sign_input_with_secret`) |
-| PSBT v2 | ✅ | ❌ | §1 |
+| PSBT v2 | ✅ | ✅ | §1 |
 
 ## 6. Message signing and Proof of Reserves
 
@@ -172,8 +178,8 @@ every multisig input is refused.
 | Legacy signed message | ✅ | ✅ | Sign → Message: format, address type and path asked (default the account's first address); out to SD, the Virtual Disk, BBQr (Q1) or the NFC tag (NFC Tools → Sign Message) |
 | Signing a message from a file | ✅ | ✅ | Sign → Text file: a `.txt` or the three-line Sparrow request form (`message::Request`), `<name>-signed.txt` beside it |
 | Verify Sig File | ✅ | ✅ | Sign → Verify: a signed `.txt` or an export's `.sig` sidecar, each named file hashed and reported OK / CHANGED / missing (`crate::verifysig`); no wallet needed; "cannot check" for a script it has no interpreter for |
-| BIP-322 | ✅ | 🟡 | `simple` only (§1) |
-| Proof of Reserves | ✅ | ❌ | deferred with `ful` / `pof` |
+| BIP-322 | ✅ | ✅ | §1 |
+| Proof of Reserves | ✅ | ✅ | a proof PSBT gets its own review, the message checked against input 0, nothing spent; the finalised proof written as `PROOF.TXT` and verified by Sign → Verify (`crate::por`); untested on hardware |
 
 ## 7. Backup, stores and transports
 
@@ -204,8 +210,8 @@ every multisig input is refused.
 | Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | ✅ | all under Settings → Login and Idle timeout (`crate::pinentry`, `crate::guard`, `crate::idle`); kill key and SD 2FA in release builds only (the `dev` feature leaves them out); untested on hardware |
 | Calculator login (Q1) | ✅ | ➖ | Settings → Login → Calculator login (`cat_calc`, `pinentry`): the PIN convention is ours -- prefix then `-` then ENTER, suffix then ENTER -- since the reference gives none (`MENU.md`); untested on hardware |
 | HSM mode, user management | ✅ | ❌ | deferred |
-| Spending Policy, CCC | ✅ | ❌ | deferred |
-| Hobbled mode | ✅ | ❌ | deferred |
+| Spending Policy, CCC | ✅ | 🟡 | single-signer policy: magnitude, velocity by the PSBT's lock-time height, a 25-address whitelist, Test Drive, Word Check (`crate::policy`, `cat_sssp`); Web 2FA inert (spec missing), CCC not built; untested on hardware |
+| Hobbled mode | ✅ | ➖ | the menus stock hides are hidden; the escape is a CatCard unlock code checked before gate 18, not a gate-22 trick PIN, until gate 22's layout is known; untested on hardware |
 | Secure Logout | ✅ | ✅ | main menu on the boards without a power button |
 | Genuine light | ✅ | ✅ | read on About page 3 (`crate::identity`); Danger zone → Bless Firmware commits this image and turns it green (gate 18/5) |
 | Paper wallets | ✅ | ✅ | Utils → Paper wallet: a DRBG key unrelated to the seed, WIF and address with QRs to the card (`crate::paperwallet`); no BIP-38 encryption |
@@ -223,7 +229,7 @@ every multisig input is refused.
 | List / delete files, format SD, format RAM disk, delete PSBTs | ✅ | ✅ | Utils → Browse SD card (a file offers Delete), Format SD card, Format RAM disk, Delete PSBTs (blank then unlink) (`crate::filemgmt`) |
 | Verify Sig File | ✅ | ✅ | Sign → Verify (§6) |
 | Selftest, Warm Reset, versions, power off | ✅ | ✅ | Debug → Selftest and Warm Reset; About holds the versions; View Identity is About page 3; the Q1 power button (`crate::power`) |
-| Settings store | ✅ | 🟡 | stock's nvstore region read and written on mk4/mk5/Q1 (`catcard-settings::nvstore`, `crate::settings`), Danger zone → Settings Space; the mk3's SPI-NOR slots are not wired, so it has no store (`prefs.rs`) |
+| Settings store | ✅ | ✅ | stock's nvstore format on every board: LittleFS on mk4/mk5/Q1, 32 SPI-NOR slots on the mk3 (`catcard-settings::nvstore`, `norslots`, `crate::settings`); Danger zone → Settings Space; the mk3 is untested on hardware |
 | Preferences (units, timeouts, brightness, wrapping, XFP, USB/NFC/VDisk/keyboard toggles, fee, testnet) | ✅ | ➖ | every one offered (`crate::prefs`, `MENU.md`), but under our own `cat_*` keys rather than stock's, whose value shapes are undocumented; a bad value reads as the safe default; absent on the mk3 |
 | Factory / provisioning (bag number, Bag Me Now, Ship w/o Bag, MCU key slots) | ✅ | ❌ | the bag number is shown read-only on About page 3; nothing is written |
 
