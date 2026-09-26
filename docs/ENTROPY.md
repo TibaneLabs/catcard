@@ -108,12 +108,16 @@ of a bit: 2.584 a d6 face, 1 a coin flip, 3.321 a keypad digit. Three limits:
 
 | | dice | coin | keypad |
 |---|---|---|---|
-| minimum run | 50 | 128 | 32 |
+| minimum run | 50 | 128 | 65 |
 | max share of one symbol | 30% | 65% | 40% |
 | bits per symbol | 2.584 | 1 | 3.321 |
 
 - A run below its minimum, or dominated by one symbol, is **credited nothing** — and
   still mixed, because mixing cannot subtract. A die stuck on one face is a pattern.
+  The dice and keypad minimums are stock's own published ones (50 rolls; 65 presses,
+  `hw-reference/firmware-features.md` §2), not the 39 presses the keyspace arithmetic
+  alone would allow: a mash is the least even of the three inputs, so it gets the
+  higher bar. The coin's 128 is the same 128-bit bar in its own alphabet.
 - A run is absorbed as one 32-byte digest, so it can never be worth more than **256
   bits** however long it runs.
 - None of these is a hardware source, so no amount of typing satisfies the two-TRNG bar.

@@ -31,7 +31,7 @@
 //! that honest:
 //!
 //! - **A gate.** Nothing is credited until the run is long enough (50 rolls, 128 flips,
-//!   32 taps) and no one symbol takes more than its share. A die stuck on one face is a
+//!   65 taps) and no one symbol takes more than its share. A die stuck on one face is a
 //!   pattern, not entropy.
 //! - **A cap.** A run is absorbed as one 32-byte digest, so it can carry at most 256
 //!   bits no matter how long it runs.
@@ -84,13 +84,17 @@ impl Alphabet {
     ///
     /// 50 rolls is the published dice minimum (50 x 2.584 = 129 bits, past a 128-bit
     /// seed). Source: <https://coldcard.com/docs/verifying-dice-roll-math/> [C]
-    /// The coin and keypad figures are the same bar expressed in their own alphabet:
-    /// 128 flips is 128 bits, 32 taps is 106. [I]
+    /// 128 flips is the same bar in the coin's alphabet: 128 bits. [I]
+    /// 65 taps is stock's own key-mash minimum, kept as it is rather than the 39 that the
+    /// keyspace arithmetic alone would ask for: a mash is the least even of the three --
+    /// a thumb favours the keys under it -- so the bar is the published one, and a run
+    /// that clears it is worth 215 bits by keyspace, well past the seed.
+    /// Source: hw-reference/firmware-features.md §2 "Key-mash -- >= 65 keypresses" [C]
     pub const fn min_symbols(self) -> u32 {
         match self {
             Alphabet::Dice => 50,
             Alphabet::Coin => 128,
-            Alphabet::Keypad => 32,
+            Alphabet::Keypad => 65,
         }
     }
 
@@ -396,6 +400,23 @@ mod tests {
             c.push(b'0' + (i % 2)).unwrap();
         }
         assert_eq!(c.credited_bits(), 128);
+    }
+
+    /// Sixty-four taps are worth 212 bits by keyspace and credited nothing; the
+    /// sixty-fifth clears stock's bar and the run is credited what it is worth.
+    #[test]
+    fn a_keypad_mash_needs_sixty_five_presses() {
+        let mut u = UserSymbols::new(Alphabet::Keypad);
+        for i in 0..64u8 {
+            u.push(b'0' + (i % 10)).unwrap();
+        }
+        assert_eq!(u.worth_bits(), 212);
+        assert_eq!(u.credited_bits(), 0);
+        assert_eq!(u.weakness(), Some(Weak::TooFew { have: 64, need: 65 }));
+        u.push(b'4').unwrap();
+        assert_eq!(u.weakness(), None);
+        // 65 x 3.321 = 215.8, truncated: never more than the keyspace.
+        assert_eq!(u.credited_bits(), 215);
     }
 
     #[test]
