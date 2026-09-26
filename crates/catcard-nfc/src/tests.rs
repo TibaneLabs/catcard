@@ -386,3 +386,35 @@ fn a_chunked_record_is_refused() {
     image.extend_from_slice(&[0x03, 0x05, 0xB1, 0x01, 0x01, b'T', 0x00, 0xFE]);
     assert_eq!(read(&image).unwrap().next(), Some(Err(ReadError::Chunked)));
 }
+
+/// A MIME record: TNF 2, the type name spelled out, and the payload untouched. Read
+/// back, it is the record the reader's `tnf`/`kind` say it is.
+#[test]
+fn a_mime_record_round_trips() {
+    let mut out = [0u8; 96];
+    let payload = [0x00u8, 0xff, 0x10, 0x20];
+    let n = mime_image(&mut out, PART, OCTET_STREAM, &payload).unwrap();
+    assert_eq!(n, mime_image_len(OCTET_STREAM.len(), payload.len()));
+    // Header: MB, ME, SR, TNF 2; then the type length and the one-byte payload length.
+    assert_eq!(out[CC_LEN + 2], 0xD2);
+    assert_eq!(out[CC_LEN + 3] as usize, OCTET_STREAM.len());
+    assert_eq!(out[CC_LEN + 4] as usize, payload.len());
+    let mut records = read(&out[..n]).unwrap();
+    let r = records.next().unwrap().unwrap();
+    assert_eq!(r.tnf, TNF_MIME);
+    assert_eq!(r.kind, OCTET_STREAM);
+    assert_eq!(r.payload, &payload);
+    assert!(r.last);
+    assert!(records.next().is_none());
+}
+
+/// A type name longer than a byte's worth is refused, not truncated.
+#[test]
+fn a_type_name_over_255_bytes_is_refused() {
+    let mut out = [0u8; 512];
+    let long = [b'a'; 256];
+    assert_eq!(
+        mime_image(&mut out, PART, &long, b"x"),
+        Err(Error::TypeTooLong)
+    );
+}

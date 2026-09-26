@@ -10,3 +10,5 @@ default = []
 std = []
 
 [dependencies]
+# SHA-256 for the PushTx checksum, and nothing else.
+purecrypto = { workspace = true, features = ["hash"] }

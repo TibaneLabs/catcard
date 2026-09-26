@@ -41,6 +41,8 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod pushtx;
+
 /// The eight-byte capability container, for a tag whose T5T area is `area` bytes.
 ///
 /// `E2` is the magic for the eight-byte form, which is what a memory bigger than 2040
@@ -96,13 +98,30 @@ const TEXT_HEAD: usize = 1 + TEXT_LANG.len();
 pub enum Error {
     /// The tag is not big enough for this record.
     TooLong { needed: usize, room: usize },
+    /// A record's type name is longer than the one byte NDEF gives its length.
+    TypeTooLong,
 }
 
-/// Bytes a whole tag image takes for one record carrying `payload` bytes.
-pub const fn record_image_len(payload: usize) -> usize {
-    let record = if payload <= 255 { 4 } else { 7 } + payload;
+/// Bytes a whole tag image takes for one record whose type name is `kind_len` bytes and
+/// whose payload is `payload` bytes.
+pub const fn image_len_for(kind_len: usize, payload: usize) -> usize {
+    let record = if payload <= 255 { 3 } else { 6 } + kind_len + payload;
     let tlv = if record < 255 { 2 } else { 4 };
     CC_LEN + tlv + record + 1 // the terminator
+}
+
+/// Bytes a whole tag image takes for one well-known record carrying `payload` bytes.
+pub const fn record_image_len(payload: usize) -> usize {
+    image_len_for(1, payload)
+}
+
+/// The MIME type a file goes out under when nothing better describes it.
+pub const OCTET_STREAM: &[u8] = b"application/octet-stream";
+
+/// How many bytes a tag image for a MIME record of `mime_len` bytes of type name and
+/// `payload` bytes takes.
+pub const fn mime_image_len(mime_len: usize, payload: usize) -> usize {
+    image_len_for(mime_len, payload)
 }
 
 /// How many bytes a tag image for a URI of `uri_len` bytes (after the prefix byte) takes.
@@ -115,17 +134,20 @@ pub const fn text_image_len(text_len: usize) -> usize {
     record_image_len(TEXT_HEAD + text_len)
 }
 
-/// Write the container, the TLV header and the record header for a record of `kind`
-/// carrying `payload` bytes. Returns where the payload goes.
-fn open(out: &mut [u8], area: usize, kind: u8, payload: usize) -> Result<usize, Error> {
-    let needed = record_image_len(payload);
+/// Write the container, the TLV header and the record header for a record of type name
+/// `kind` under `tnf`, carrying `payload` bytes. Returns where the payload goes.
+fn open(out: &mut [u8], area: usize, tnf: u8, kind: &[u8], payload: usize) -> Result<usize, Error> {
+    if kind.len() > 255 {
+        return Err(Error::TypeTooLong);
+    }
+    let needed = image_len_for(kind.len(), payload);
     if out.len() < needed {
         return Err(Error::TooLong {
             needed,
             room: out.len(),
         });
     }
-    let record_len = if payload <= 255 { 4 } else { 7 } + payload;
+    let record_len = if payload <= 255 { 3 } else { 6 } + kind.len() + payload;
 
     out[..CC_LEN].copy_from_slice(&capability_container(area));
     let mut at = CC_LEN;
@@ -143,11 +165,11 @@ fn open(out: &mut [u8], area: usize, kind: u8, payload: usize) -> Result<usize, 
         at += 3;
     }
 
-    // One record, which is the whole message: MB and ME both set, TNF 1 (well known).
-    // SR as well where the payload is short enough for a one-byte length.
+    // One record, which is the whole message: MB and ME both set, and the TNF. SR as
+    // well where the payload is short enough for a one-byte length.
     let short = payload <= 255;
-    out[at] = 0xC1 | if short { 0x10 } else { 0x00 };
-    out[at + 1] = 1; // the type is one byte
+    out[at] = 0xC0 | (tnf & 0x07) | if short { 0x10 } else { 0x00 };
+    out[at + 1] = kind.len() as u8;
     at += 2;
     if short {
         out[at] = payload as u8;
@@ -156,8 +178,8 @@ fn open(out: &mut [u8], area: usize, kind: u8, payload: usize) -> Result<usize, 
         out[at..at + 4].copy_from_slice(&(payload as u32).to_be_bytes());
         at += 4;
     }
-    out[at] = kind;
-    Ok(at + 1)
+    out[at..at + kind.len()].copy_from_slice(kind);
+    Ok(at + kind.len())
 }
 
 /// Write everything up to the URI text: the container, the TLV header and the record
@@ -166,14 +188,20 @@ fn open(out: &mut [u8], area: usize, kind: u8, payload: usize) -> Result<usize, 
 /// Split in two because the URI this device writes is mostly a transaction's hex, which is
 /// expanded straight into the buffer rather than built somewhere first.
 pub fn begin(out: &mut [u8], area: usize, uri_len: usize, prefix: u8) -> Result<usize, Error> {
-    let at = open(out, area, rtd::URI, uri_len + 1)?;
+    let at = open(out, area, TNF_WELL_KNOWN, &[rtd::URI], uri_len + 1)?;
     out[at] = prefix;
     Ok(at + 1)
 }
 
 /// As [`begin`], for a text record: returns where the text goes.
 pub fn begin_text(out: &mut [u8], area: usize, text_len: usize) -> Result<usize, Error> {
-    let at = open(out, area, rtd::TEXT, TEXT_HEAD + text_len)?;
+    let at = open(
+        out,
+        area,
+        TNF_WELL_KNOWN,
+        &[rtd::TEXT],
+        TEXT_HEAD + text_len,
+    )?;
     // Status byte: bit 7 clear for UTF-8, the low six bits the language code's length.
     out[at] = TEXT_LANG.len() as u8;
     out[at + 1..at + 1 + TEXT_LANG.len()].copy_from_slice(TEXT_LANG);
@@ -204,6 +232,30 @@ pub fn text_image(out: &mut [u8], area: usize, text: &str) -> Result<usize, Erro
     let at = begin_text(out, area, text.len())?;
     out[at..at + text.len()].copy_from_slice(text.as_bytes());
     finish(out, at + text.len())
+}
+
+/// As [`begin`], for a MIME record whose type name is `mime` (say [`OCTET_STREAM`]):
+/// returns where the payload goes. The payload is bytes, whatever they are; nothing is
+/// put in front of them.
+pub fn begin_mime(
+    out: &mut [u8],
+    area: usize,
+    mime: &[u8],
+    payload_len: usize,
+) -> Result<usize, Error> {
+    open(out, area, TNF_MIME, mime, payload_len)
+}
+
+/// Build a whole image holding one MIME record.
+pub fn mime_image(
+    out: &mut [u8],
+    area: usize,
+    mime: &[u8],
+    payload: &[u8],
+) -> Result<usize, Error> {
+    let at = begin_mime(out, area, mime, payload.len())?;
+    out[at..at + payload.len()].copy_from_slice(payload);
+    finish(out, at + payload.len())
 }
 
 /// Build an image holding an **empty** NDEF message: a tag with nothing on it.
