@@ -3494,6 +3494,108 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
     wait_for_any_key(ui);
 }
 
+/// Which storage a file flow reads from and writes to.
+///
+/// The microSD card is always there; the PSRAM-backed Virtual Disk is offered only where
+/// the board has PSRAM (mk4/mk5/Q1), so on the mk3 this has one variant and every `match`
+/// on it is a single arm. Promoted here from the sign path so exports, the address CSV and
+/// the signed-message writer all pick a destination the same way.
+/// Source: `crates/catcard-fw/src/vdisk.rs`, `docs/PSRAM.md` [C].
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Storage {
+    /// The microSD card, over SDMMC.
+    Sd,
+    /// The PSRAM-backed Virtual Disk. PSRAM boards only.
+    #[cfg(not(feature = "board-mk3"))]
+    Vdisk,
+}
+
+impl Storage {
+    /// The noun a "reading …"/"writing to …" line uses for this medium.
+    pub(crate) fn medium(self) -> &'static str {
+        match self {
+            Storage::Sd => "the card",
+            #[cfg(not(feature = "board-mk3"))]
+            Storage::Vdisk => "the disk",
+        }
+    }
+}
+
+/// Ask which storage to use, or return the only one on a board without PSRAM.
+///
+/// Mirrors the Browse Files / USB Drive chooser: a board with PSRAM offers the card or the
+/// Virtual Disk; the mk3 has no disk, so it goes straight to the card with no prompt.
+/// `None` if the owner cancels the chooser.
+#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+pub(crate) fn pick_storage(ui: &mut Ui<'_>, head: &str) -> Option<Storage> {
+    #[cfg(not(feature = "board-mk3"))]
+    if catcard_board::BOARD.psram.is_some() {
+        let pick = choose(
+            ui,
+            head,
+            "which storage?",
+            &["SD card", "Virtual Disk (in PSRAM)"],
+        )?;
+        return Some(if pick == 0 {
+            Storage::Sd
+        } else {
+            Storage::Vdisk
+        });
+    }
+    Some(Storage::Sd)
+}
+
+/// Pick a file from the chosen storage's file browser.
+pub(crate) fn browse_storage(
+    ui: &mut Ui<'_>,
+    storage: Storage,
+    title: &str,
+    filter: Option<&str>,
+    mode: Browse,
+) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    match storage {
+        Storage::Sd => browse_sd(ui, title, filter, mode),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => browse_vdisk(ui, title, filter, mode),
+    }
+}
+
+/// Mount the Virtual Disk and hand the volume to `f`.
+///
+/// The card's `mount_card` for the PSRAM disk: an uninitialised region is formatted first
+/// (there is nothing on it to lose, exactly as the file browser and USB Drive do it), then
+/// mounted. The disk's region is outside the signer's leasable PSRAM, so this coexists with
+/// a held signing lease.
+#[cfg(not(feature = "board-mk3"))]
+pub(crate) fn with_vdisk<T>(
+    f: impl FnOnce(&mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    crate::vdisk::ensure_formatted()?;
+    let mut vol = crate::vdisk::mount()?;
+    f(&mut vol)
+}
+
+/// Write `bytes` to `path` on the chosen storage, replacing whatever it held.
+///
+/// The plain replace-contents writer (no collision numbering or detached signature); the
+/// wallet exports use [`write_storage_export`] instead. The card path is
+/// [`write_card_file`]; the Virtual Disk path mounts the PSRAM region (formatting an
+/// uninitialised one first) and reuses the one generic [`write_into`].
+pub(crate) fn write_storage_file(
+    storage: Storage,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), &'static str> {
+    match storage {
+        Storage::Sd => write_card_file(path, bytes),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| {
+            write_into(vol, path, bytes)?;
+            vol.flush().map_err(|_| "flush failed")
+        }),
+    }
+}
+
 /// Bring the card up, mount it, and write `bytes` to `path`, replacing whatever it held.
 ///
 /// Split from the screen so each step is one `?`, and the reason it stopped rides out on
@@ -3598,6 +3700,35 @@ pub(crate) fn write_card_chunks(
     next: &mut dyn FnMut(&mut CardChunk) -> bool,
 ) -> Result<u64, &'static str> {
     let mut vol = mount_card()?;
+    write_chunks_into(&mut vol, path, next)
+}
+
+/// Route a streamed write to the storage the owner chose.
+///
+/// The card is [`write_card_chunks`]; the Virtual Disk mounts its PSRAM region (formatting
+/// an uninitialised one first) and runs the same [`write_chunks_into`], so the address
+/// export streams onto whichever medium it was pointed at.
+pub(crate) fn write_storage_chunks(
+    storage: Storage,
+    path: &str,
+    next: &mut dyn FnMut(&mut CardChunk) -> bool,
+) -> Result<u64, &'static str> {
+    match storage {
+        Storage::Sd => write_card_chunks(path, next),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| write_chunks_into(vol, path, next)),
+    }
+}
+
+/// Stream a producer's output into an already-mounted volume, and answer with its length.
+///
+/// Generic over the backing driver so the card and the Virtual Disk share the one loop:
+/// each fill is written as it arrives, so what is held at once is one [`CARD_CHUNK`].
+fn write_chunks_into<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    next: &mut dyn FnMut(&mut CardChunk) -> bool,
+) -> Result<u64, &'static str> {
     let mut file = vol
         .open_or_create_file(path)
         .map_err(|_| "could not open file")?;
@@ -3611,14 +3742,13 @@ pub(crate) fn write_card_chunks(
         if chunk.is_empty() {
             continue;
         }
-        file.write_all(&mut vol, chunk.as_bytes())
+        file.write_all(vol, chunk.as_bytes())
             .map_err(|_| "write failed")?;
         written += chunk.len() as u64;
     }
     // Trim any tail from a longer earlier file, so it holds exactly what was produced.
-    file.set_len(&mut vol, written)
-        .map_err(|_| "truncate failed")?;
-    file.flush(&mut vol).map_err(|_| "flush failed")?;
+    file.set_len(vol, written).map_err(|_| "truncate failed")?;
+    file.flush(vol).map_err(|_| "flush failed")?;
     vol.flush().map_err(|_| "flush failed")?;
     Ok(written)
 }
@@ -3841,12 +3971,13 @@ pub(crate) fn browse_sd(
             return None;
         }
     };
-    // The PNG viewer is a card-only affair (it re-mounts the card itself), so it is on
-    // offer here and nowhere else.
+    // The PNG viewer reads the file back off the volume it is browsing; it is a colour
+    // feature, so it is on offer on the Q1 and nowhere else.
     let allow_view = cfg!(feature = "board-q1");
     browse_volume(
         ui,
         vol,
+        Storage::Sd,
         title,
         filter,
         mode,
@@ -3877,15 +4008,17 @@ pub(crate) fn browse_vdisk(
             return None;
         }
     };
-    // No viewer on the disk: the PNG viewer mounts the card, not this.
+    // The PNG viewer reads back off this same disk, so it is on offer here too on the Q1.
+    let allow_view = cfg!(feature = "board-q1");
     browse_volume(
         ui,
         vol,
+        Storage::Vdisk,
         title,
         filter,
         mode,
         "Virtual Disk",
-        false,
+        allow_view,
         "the disk refused",
         &mut || crate::vdisk::mount(),
     )
@@ -3894,14 +4027,15 @@ pub(crate) fn browse_vdisk(
 /// The browser loop over an already-mounted volume, whatever backs it.
 ///
 /// The shared body of [`browse_sd`] and [`browse_vdisk`]: it lists a directory, lets the
-/// cursor descend and go back, and on a file offers its details (pick, delete, and — for
-/// the card only — view). `head` names the medium in messages, `refused` is what a failed
-/// delete says, `allow_view` gates the viewer, and `remount` produces a fresh mount for
-/// the viewer to hand the bus back to.
+/// cursor descend and go back, and on a file offers its details (pick, delete, and — on the
+/// Q1 — view). `storage` says which backend the viewer re-mounts, `head` names the medium in
+/// messages, `refused` is what a failed delete says, `allow_view` gates the viewer, and
+/// `remount` produces a fresh mount for the viewer to hand the bus back to.
 #[allow(clippy::too_many_arguments)]
 fn browse_volume<D: catcard_sd::fat::SectorDriver>(
     ui: &mut Ui<'_>,
     mut vol: catcard_sd::AnyVolume<D, 512>,
+    #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))] storage: Storage,
     title: &str,
     filter: Option<&str>,
     mode: Browse,
@@ -4048,15 +4182,16 @@ fn browse_volume<D: catcard_sd::fat::SectorDriver>(
                         FileChoice::Delete => {
                             delete_browse_file(ui, &mut vol, &full, &e.name, refused)
                         }
-                        // The viewer mounts the card itself, so this volume is dropped
-                        // for the duration rather than lent: two mounts of one card at
-                        // once is not something the driver promises. `remount` brings the
-                        // same medium back afterwards.
+                        // The viewer re-mounts the medium it reads from, so this volume is
+                        // dropped for the duration rather than lent: two mounts of one card
+                        // at once is not something the driver promises. `remount` brings the
+                        // same medium back afterwards. `storage` says which backend to read
+                        // -- the card or the Virtual Disk -- so a PNG on either shows.
                         #[cfg(feature = "board-q1")]
                         FileChoice::View => {
                             let path = full.clone();
                             drop(vol);
-                            crate::pngview::view(ui, &path);
+                            crate::pngview::view(ui, storage, &path);
                             vol = match remount() {
                                 Ok(v) => v,
                                 Err(why) => {
@@ -6446,21 +6581,23 @@ fn offer_export(
     kind: catcard_bbqr::FileType,
     signer: Option<Signer>,
 ) {
-    // A list, not a yes/no. Three destinations that are not ranked -- a card for a
-    // computer, BBQr for wallets that read it, BC-UR for everything else -- and cancel
-    // means none of them rather than one of them.
-    const WAYS: &[&str] = &["SD card", "BBQr", "BC-UR"];
-    // The signature is a card-only thing: a QR carries the same bytes and no signature,
-    // because there is nowhere alongside it to put one. So every path but the card drops
+    // A list, not a yes/no. A file destination -- the card or, on this PSRAM board, the
+    // Virtual Disk -- then BBQr for wallets that read it and BC-UR for everything else;
+    // cancel means none of them rather than one of them. The Q1 always has PSRAM, so the
+    // disk is always offered here.
+    const WAYS: &[&str] = &["SD card", "Virtual Disk", "BBQr", "BC-UR"];
+    // The signature is a file-only thing: a QR carries the same bytes and no signature,
+    // because there is nowhere alongside it to put one. So every path but a file drops
     // the key first, before a screen that stays up until someone walks away from it.
     match choose(ui, head, "how to export", WAYS) {
-        Some(0) => write_export(ui, head, file, body, signer),
-        Some(1) => {
+        Some(0) => write_export(ui, head, Storage::Sd, file, body, signer),
+        Some(1) => write_export(ui, head, Storage::Vdisk, file, body, signer),
+        Some(2) => {
             drop(signer);
             crate::qrshow::animate_bbqr(ui, head, body, kind);
         }
         #[cfg(feature = "multichain")]
-        Some(2) => {
+        Some(3) => {
             drop(signer);
             crate::qrshow::animate_bytes_ur(ui, head, body);
         }
@@ -6468,7 +6605,11 @@ fn offer_export(
     }
 }
 
-/// mk3 and mk4 have no scanner and no screen for this; the card is the only way out.
+/// mk3 and mk4 have no scanner and no screen for this; a file is the only way out.
+///
+/// On a PSRAM board (mk4/mk5) [`pick_storage`] offers the card or the Virtual Disk;
+/// on the mk3 it goes straight to the card with no prompt. Cancelling the chooser drops
+/// the key without writing.
 #[cfg(not(feature = "board-q1"))]
 fn offer_export(
     ui: &mut Ui<'_>,
@@ -6478,7 +6619,11 @@ fn offer_export(
     _kind: catcard_bbqr::FileType,
     signer: Option<Signer>,
 ) {
-    write_export(ui, head, file, body, signer);
+    let Some(storage) = pick_storage(ui, head) else {
+        drop(signer);
+        return;
+    };
+    write_export(ui, head, storage, file, body, signer);
 }
 
 /// Write an export to the card and say how it went.
@@ -6486,9 +6631,21 @@ fn offer_export(
 /// The same three outcomes every time -- written, refused, or the card was not there --
 /// said the same way, because an export that fails differently each time is one nobody
 /// can help with.
-fn write_export(ui: &mut Ui<'_>, head: &str, path: &str, body: &[u8], signer: Option<Signer>) {
-    card_wait(ui.panel, head, "writing to the card");
-    match write_card_export(path, body, signer) {
+fn write_export(
+    ui: &mut Ui<'_>,
+    head: &str,
+    storage: Storage,
+    path: &str,
+    body: &[u8],
+    signer: Option<Signer>,
+) {
+    let note = match storage {
+        Storage::Sd => "writing to the card",
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => "writing to the disk",
+    };
+    card_wait(ui.panel, head, note);
+    match write_storage_export(storage, path, body, signer) {
         Ok(name) => {
             // The kind and the size, not the name: one export's name carries the
             // fingerprint, and the log is readable by any host.
@@ -6531,10 +6688,42 @@ pub(crate) fn write_card_export(
     signer: Option<Signer>,
 ) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
     let mut vol = mount_card()?;
+    export_into(&mut vol, path, body, signer)
+}
 
-    let name = unused_name(&mut vol, path)?;
+/// Route an export to the storage the owner chose.
+///
+/// The card is [`write_card_export`]; the Virtual Disk mounts its PSRAM region (formatting
+/// an uninitialised one first) and runs the same [`export_into`], so the collision
+/// numbering and the detached signature are identical on both.
+fn write_storage_export(
+    storage: Storage,
+    path: &str,
+    body: &[u8],
+    signer: Option<Signer>,
+) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
+    match storage {
+        Storage::Sd => write_card_export(path, body, signer),
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => with_vdisk(|vol| export_into(vol, path, body, signer)),
+    }
+}
 
-    write_into(&mut vol, &name, body)?;
+/// Write an export, and its detached signature when there is a key for it, into an
+/// already-mounted volume. Returns the name actually used.
+///
+/// Generic over the backing driver so the card and the Virtual Disk share the one body:
+/// the collision search, the write and the `.sig` sidecar are the same whichever medium
+/// this landed on.
+fn export_into<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+    body: &[u8],
+    signer: Option<Signer>,
+) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
+    let name = unused_name(vol, path)?;
+
+    write_into(vol, &name, body)?;
 
     // The signature covers the name that was actually used, so it is built here rather
     // than by the caller: the caller does not know yet what the file will be called.
@@ -6552,20 +6741,20 @@ pub(crate) fn write_card_export(
         let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name);
         let mut sig_name: heapless::String<EXPORT_NAME_MAX> = heapless::String::new();
         write!(sig_name, "{stem}.sig").map_err(|_| "name too long")?;
-        write_into(&mut vol, &sig_name, armoured.as_bytes())?;
+        write_into(vol, &sig_name, armoured.as_bytes())?;
     }
 
     vol.flush().map_err(|_| "flush failed")?;
     Ok(name)
 }
 
-/// The first name of this shape that nothing on the card is using.
+/// The first name of this shape that nothing on the volume is using.
 ///
 /// `base.ext`, then `base-2.ext`, `base-3.ext`. Bounded, because an unbounded search on
 /// a card with a corrupt directory would spin forever, and a hundred files under one
 /// name is already more than anyone has.
-fn unused_name(
-    vol: &mut CardVolume,
+fn unused_name<D: catcard_sd::fat::SectorDriver>(
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
     path: &str,
 ) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
     let (stem, ext) = match path.rsplit_once('.') {
@@ -8096,10 +8285,20 @@ fn write_address_csv(
 ) {
     use catcard_wallet::csv;
 
-    card_wait(ui.panel, head, "writing to the card");
+    // On a PSRAM board this offers the card or the Virtual Disk; on the mk3 it is the card
+    // with no prompt. Cancelling the chooser leaves without writing.
+    let Some(storage) = pick_storage(ui, head) else {
+        return;
+    };
+    let note = match storage {
+        Storage::Sd => "writing to the card",
+        #[cfg(not(feature = "board-mk3"))]
+        Storage::Vdisk => "writing to the disk",
+    };
+    card_wait(ui.panel, head, note);
     let mut at: u32 = 0;
     let mut rows: u32 = 0;
-    let written = write_card_chunks(file, &mut |chunk| {
+    let written = write_storage_chunks(storage, file, &mut |chunk| {
         if at == 0 {
             at = 1;
             return csv::write_header(chunk).is_ok();

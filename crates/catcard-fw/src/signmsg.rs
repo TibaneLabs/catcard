@@ -112,19 +112,29 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         Err(why) => return complain(ui, HEAD, why),
     };
 
-    // Show it, then offer the card: the signature is long, so a screen is for checking the
-    // message and address, and the file is what gets used.
+    // Show it, then ask where it goes: the signature is long, so a screen is for checking
+    // the message and address, and the file is what gets used. On a PSRAM board the chooser
+    // offers the card or the Virtual Disk; on the mk3 there is no disk, so the old yes/no
+    // "write it to the SD card?" stands unchanged.
     show(ui, text, &signed);
-    menu::ask(ui.panel, HEAD, "write it to the", "SD card?");
-    if !menu::confirmed(ui) {
+    #[cfg(feature = "board-mk3")]
+    let storage = {
+        menu::ask(ui.panel, HEAD, "write it to the", "SD card?");
+        if !menu::confirmed(ui) {
+            return;
+        }
+        menu::Storage::Sd
+    };
+    #[cfg(not(feature = "board-mk3"))]
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
         return;
-    }
+    };
     let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
     if signfile::write(&mut file, text, &signed.address, &signed.armoured).is_err() {
         return complain(ui, HEAD, "no room for it");
     }
-    menu::card_wait(ui.panel, HEAD, "writing to the card");
-    match menu::write_card_file(FILE_NAME, file.as_bytes()) {
+    menu::card_wait(ui.panel, HEAD, write_note(storage));
+    match menu::write_storage_file(storage, FILE_NAME, file.as_bytes()) {
         Ok(()) => {
             crate::catlog!("message: signed with {}", signed.address.as_str());
             menu::message(ui.panel, "Signed", &FILE_NAME[1..], "any key to go back");
@@ -137,6 +147,15 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     menu::wait_for_any_key(ui);
 }
 
+/// The "writing to …" line for the medium a signature is landing on.
+fn write_note(storage: menu::Storage) -> &'static str {
+    match storage {
+        menu::Storage::Sd => "writing to the card",
+        #[cfg(not(feature = "board-mk3"))]
+        menu::Storage::Vdisk => "writing to the disk",
+    }
+}
+
 /// Sign the text in a file on the card, and write the signature beside it.
 ///
 /// The message is the file's contents, so what is shown before the key is used is the
@@ -145,12 +164,19 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Sign text file";
 
-    let Some(path) = menu::browse_sd(ui, "Pick a .txt", Some("txt"), menu::Browse::File) else {
+    // Pick the medium first, then browse and read it there; the signature is written beside
+    // the source on the same medium. On the mk3 this is the card with no prompt.
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
+    };
+    let Some(path) =
+        menu::browse_storage(ui, storage, "Pick a .txt", Some("txt"), menu::Browse::File)
+    else {
         return;
     };
     let mut raw = [0u8; MAX_FILE];
-    menu::card_wait(ui.panel, HEAD, "reading the card");
-    let len = match crate::signtx::read_card_file(&path, &mut raw) {
+    menu::card_wait(ui.panel, HEAD, "reading the file");
+    let len = match crate::signtx::read_source_file(storage, &path, &mut raw) {
         Ok(n) => n,
         Err(why) => return complain(ui, HEAD, why),
     };
@@ -165,7 +191,7 @@ pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     if let Some(why) = unshowable(text) {
         return complain(ui, HEAD, why);
     }
-    sign_text(gate, login, ui, HEAD, &path, text);
+    sign_text(gate, login, ui, HEAD, storage, &path, text);
 }
 
 /// Why this text cannot be signed from a file, if it cannot be.
@@ -191,6 +217,7 @@ fn sign_text(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     head: &str,
+    storage: menu::Storage,
     path: &str,
     text: &str,
 ) {
@@ -232,8 +259,8 @@ fn sign_text(
     let Some(out) = beside(path) else {
         return complain(ui, head, "path too long");
     };
-    menu::card_wait(ui.panel, head, "writing to the card");
-    match menu::write_card_file(&out, file.as_bytes()) {
+    menu::card_wait(ui.panel, head, write_note(storage));
+    match menu::write_storage_file(storage, &out, file.as_bytes()) {
         Ok(()) => {
             crate::catlog!("message: {} signed with {}", out.as_str(), signed.address);
             let name = out.strip_prefix('/').unwrap_or(&out);

@@ -23,7 +23,7 @@ use catcard_wallet::signer;
 use outscript::psbt::Psbt;
 
 use crate::display;
-use crate::menu;
+use crate::menu::{self, Storage};
 use crate::ui::Ui;
 
 /// Where the signed PSBT is written back, and what the screen says it is called.
@@ -164,74 +164,6 @@ fn btc(sats: u64, out: &mut heapless::String<AMOUNT_LEN>) {
     let _ = crate::prefs::current().units.write(sats, out);
 }
 
-/// Which storage a sign flow reads its PSBT from and writes its results to.
-///
-/// The card is always there; the PSRAM-backed Virtual Disk is offered only where the board
-/// has PSRAM (mk4/mk5/Q1), so on the mk3 this has one variant and every `match` on it is a
-/// single arm. The disk lives in its own reserved PSRAM region, outside the leasable area
-/// the signer takes for its two working buffers, so reading a PSBT off the disk and holding
-/// the signing lease do not collide -- they are different regions on the same part, and the
-/// traffic is sequential (the file is read in full before a signature is computed).
-/// Source: `crates/catcard-fw/src/vdisk.rs`, `docs/PSRAM.md` [C].
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(crate) enum Storage {
-    /// The microSD card, over SDMMC.
-    Sd,
-    /// The PSRAM-backed Virtual Disk. PSRAM boards only.
-    #[cfg(not(feature = "board-mk3"))]
-    Vdisk,
-}
-
-impl Storage {
-    /// The noun a "reading …"/"writing to …" line uses for this medium.
-    fn medium(self) -> &'static str {
-        match self {
-            Storage::Sd => "the card",
-            #[cfg(not(feature = "board-mk3"))]
-            Storage::Vdisk => "the disk",
-        }
-    }
-}
-
-/// Ask which storage to use, or return the only one on a board without PSRAM.
-///
-/// Mirrors the Browse Files / USB Drive chooser: a board with PSRAM offers the card or the
-/// Virtual Disk; the mk3 has no disk, so it goes straight to the card with no prompt.
-/// `None` if the owner cancels the chooser.
-#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
-fn pick_storage(ui: &mut Ui<'_>, head: &str) -> Option<Storage> {
-    #[cfg(not(feature = "board-mk3"))]
-    if catcard_board::BOARD.psram.is_some() {
-        let pick = menu::choose(
-            ui,
-            head,
-            "which storage?",
-            &["SD card", "Virtual Disk (in PSRAM)"],
-        )?;
-        return Some(if pick == 0 {
-            Storage::Sd
-        } else {
-            Storage::Vdisk
-        });
-    }
-    Some(Storage::Sd)
-}
-
-/// Pick a file from the chosen storage's file browser.
-fn browse_source(
-    ui: &mut Ui<'_>,
-    storage: Storage,
-    title: &str,
-    filter: Option<&str>,
-    mode: menu::Browse,
-) -> Option<heapless::String<{ menu::BROWSE_PATH_MAX }>> {
-    match storage {
-        Storage::Sd => menu::browse_sd(ui, title, filter, mode),
-        #[cfg(not(feature = "board-mk3"))]
-        Storage::Vdisk => menu::browse_vdisk(ui, title, filter, mode),
-    }
-}
-
 /// Mount the card and hand the volume to `f`.
 ///
 /// Every entry point here needs the same bring-up, and the specific failure has to reach
@@ -275,21 +207,6 @@ fn with_card<T>(
     f(&mut vol)
 }
 
-/// Mount the Virtual Disk and hand the volume to `f`.
-///
-/// The card's [`with_card`] for the PSRAM disk: an uninitialised region is formatted first
-/// (there is nothing on it to lose, exactly as the file browser and USB Drive do it), then
-/// mounted. The disk's region is outside the signer's leasable PSRAM, so this coexists with
-/// a held signing lease.
-#[cfg(not(feature = "board-mk3"))]
-fn with_vdisk<T>(
-    f: impl FnOnce(&mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>) -> Result<T, &'static str>,
-) -> Result<T, &'static str> {
-    crate::vdisk::ensure_formatted()?;
-    let mut vol = crate::vdisk::mount()?;
-    f(&mut vol)
-}
-
 /// The one `.psbt` in the card's root directory, if there is exactly one.
 ///
 /// What "Ready to Sign" means: a card carrying a single transaction needs no file picker.
@@ -300,7 +217,7 @@ fn lone_psbt(storage: Storage) -> Option<heapless::String<{ PATH_MAX }>> {
     match storage {
         Storage::Sd => with_card(|vol| Ok(find_lone_psbt(vol))),
         #[cfg(not(feature = "board-mk3"))]
-        Storage::Vdisk => with_vdisk(|vol| Ok(find_lone_psbt(vol))),
+        Storage::Vdisk => menu::with_vdisk(|vol| Ok(find_lone_psbt(vol))),
     }
     .ok()
     .flatten()
@@ -354,11 +271,15 @@ pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'stat
 }
 
 /// Read the picked file from the chosen storage into `buf`. Returns its length, or why not.
-fn read_source_file(storage: Storage, path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+pub(crate) fn read_source_file(
+    storage: Storage,
+    path: &str,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
     match storage {
         Storage::Sd => read_card_file(path, buf),
         #[cfg(not(feature = "board-mk3"))]
-        Storage::Vdisk => with_vdisk(|vol| read_file(vol, path, buf)),
+        Storage::Vdisk => menu::with_vdisk(|vol| read_file(vol, path, buf)),
     }
 }
 
@@ -441,7 +362,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
     // offers afterwards -- it cannot know it is being handed a PSBT until it has one, so
     // asking in advance would be a second way to do the same thing with a worse answer when
     // the guess is wrong.
-    let Some(storage) = pick_storage(ui, HEAD) else {
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
         return;
     };
 
@@ -452,7 +373,7 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         // says which.
         Some(p) => p,
         None => {
-            let Some(p) = browse_source(
+            let Some(p) = menu::browse_storage(
                 ui,
                 storage,
                 "Pick a .psbt",
@@ -523,7 +444,7 @@ fn enumerate_psbts(
     match storage {
         Storage::Sd => with_card(|vol| Ok(collect_psbts(vol, out))),
         #[cfg(not(feature = "board-mk3"))]
-        Storage::Vdisk => with_vdisk(|vol| Ok(collect_psbts(vol, out))),
+        Storage::Vdisk => menu::with_vdisk(|vol| Ok(collect_psbts(vol, out))),
     }
 }
 
@@ -568,7 +489,7 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
     use core::fmt::Write as _;
     const HEAD: &str = "Batch sign";
 
-    let Some(storage) = pick_storage(ui, HEAD) else {
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
         return;
     };
 
@@ -1090,20 +1011,11 @@ fn write_hex_file(
 
 /// Write `bytes` to `path` on the chosen storage, replacing whatever it held.
 ///
-/// The card path is [`menu::write_card_file`] unchanged; the Virtual Disk path mounts the
-/// PSRAM region (formatting an uninitialised one first) and reuses [`menu::write_into`], so
-/// there is one writer, not two.
+/// The one plain replace-contents writer, shared with the rest of the firmware:
+/// [`menu::write_storage_file`] is the card's `write_card_file` or, on a PSRAM board, the
+/// Virtual Disk over the same generic [`menu::write_into`].
 fn write_output(storage: Storage, path: &str, bytes: &[u8]) -> Result<(), &'static str> {
-    match storage {
-        Storage::Sd => menu::write_card_file(path, bytes),
-        #[cfg(not(feature = "board-mk3"))]
-        Storage::Vdisk => {
-            crate::vdisk::ensure_formatted()?;
-            let mut vol = crate::vdisk::mount()?;
-            menu::write_into(&mut vol, path, bytes)?;
-            vol.flush().map_err(|_| "flush failed")
-        }
-    }
+    menu::write_storage_file(storage, path, bytes)
 }
 
 /// Show what signing would authorise, and ask. True if the owner confirmed.

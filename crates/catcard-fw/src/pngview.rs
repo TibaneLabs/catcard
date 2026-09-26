@@ -27,7 +27,7 @@
 use catcard_png::{Buffers, Error};
 
 use crate::display;
-use crate::menu::{self, CardVolume};
+use crate::menu::{self, Storage};
 use crate::ui::Ui;
 
 /// The head every screen here carries.
@@ -46,31 +46,43 @@ pub(crate) fn is_png(name: &str) -> bool {
     bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".png")
 }
 
-/// Read a PNG off the card and put it on the screen, then wait for a key.
-pub(crate) fn view(ui: &mut Ui<'_>, path: &str) {
-    match show(ui, path) {
-        Ok(()) => {}
-        Err(why) => {
-            crate::catlog!("png: {}: {}", path, why);
-            menu::message(ui.panel, HEAD, why, "any key to go back");
-            menu::wait_for_any_key(ui);
-        }
+/// Read a PNG off the browsed storage and put it on the screen, then wait for a key.
+///
+/// `storage` is whichever volume the browser is on -- the card or the PSRAM-backed Virtual
+/// Disk -- so the file is read back from where it was seen, not from the card by default.
+pub(crate) fn view(ui: &mut Ui<'_>, storage: Storage, path: &str) {
+    let outcome = match storage {
+        Storage::Sd => menu::mount_card().and_then(|mut vol| show(ui, &mut vol, path)),
+        // The Q1 always has PSRAM, so this variant exists in every build that compiles the
+        // viewer; the disk is mounted (and formatted if never used) exactly as its browser
+        // does it.
+        Storage::Vdisk => menu::with_vdisk(|vol| show(ui, vol, path)),
+    };
+    if let Err(why) = outcome {
+        crate::catlog!("png: {}: {}", path, why);
+        menu::message(ui.panel, HEAD, why, "any key to go back");
+        menu::wait_for_any_key(ui);
     }
 }
 
 /// Everything that can go wrong on the way, in one place, as words for a screen.
-fn show(ui: &mut Ui<'_>, path: &str) -> Result<(), &'static str> {
-    let mut vol = menu::mount_card()?;
+///
+/// Generic over the backing driver so the card and the Virtual Disk share the one decode
+/// path: the file is already open on the volume the browser handed over.
+fn show<D: catcard_sd::fat::SectorDriver>(
+    ui: &mut Ui<'_>,
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
+    path: &str,
+) -> Result<(), &'static str> {
     let mut file = vol.open_file(path).map_err(|()| "cannot open that file")?;
     let total = file.len();
 
     // The header first, off the front of the file: it says what the picture is, and
     // everything below is sized from it. A file that is not a PNG costs this one read.
     let mut head = [0u8; catcard_png::HEADER_BYTES];
-    read_exact(&mut file, &mut vol, &mut head)?;
+    read_exact(&mut file, vol, &mut head)?;
     let hdr = catcard_png::header(&head).map_err(Error::why)?;
-    file.seek(&mut vol, 0)
-        .map_err(|()| "cannot rewind the file")?;
+    file.seek(vol, 0).map_err(|()| "cannot rewind the file")?;
 
     // The whole panel, status bar included: a picture is what the screen is for while
     // it is up, and the bar comes back with the menu behind it.
@@ -113,7 +125,7 @@ fn show(ui: &mut Ui<'_>, path: &str) -> Result<(), &'static str> {
             },
             background(),
             |buf| {
-                let n = file.read(&mut vol, buf)?;
+                let n = file.read(vol, buf)?;
                 at += n as u64;
                 // A frame per percent: the bar has a hundred positions and the panel is
                 // slow, so redrawing it more often would cost more than the decode.
@@ -172,9 +184,9 @@ fn bar(ui: &mut Ui<'_>, pct: u8) {
 }
 
 /// Fill `buf` completely, or say the file is too short for it.
-fn read_exact(
+fn read_exact<D: catcard_sd::fat::SectorDriver>(
     file: &mut catcard_sd::AnyFile,
-    vol: &mut CardVolume,
+    vol: &mut catcard_sd::AnyVolume<D, 512>,
     buf: &mut [u8],
 ) -> Result<(), &'static str> {
     let mut done = 0;
@@ -182,7 +194,7 @@ fn read_exact(
         match file.read(vol, &mut buf[done..]) {
             Ok(0) => return Err("not a PNG file"),
             Ok(n) => done += n,
-            Err(()) => return Err("the card stopped responding"),
+            Err(()) => return Err("the storage stopped responding"),
         }
     }
     Ok(())
