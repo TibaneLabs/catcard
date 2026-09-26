@@ -1263,6 +1263,13 @@ fn import(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui:
 fn unseal(ui: &mut Ui<'_>, buf: &mut [u8], len: usize) -> Result<usize, &'static str> {
     const H: &str = "Import notes";
     let found = sevenz::open(&buf[..len]).map_err(|_| "not a 7-Zip archive we can read")?;
+    // A cleartext archive has no key to derive and no password to ask for: the notes
+    // are read straight out, as a plain `.json` would be.
+    if let sevenz::Found::Clear(plain) = &found {
+        return Ok(sevenz::extract_in_place(&mut buf[..len], plain)
+            .map_err(|_| "damaged archive")?
+            .len());
+    }
     let password = read_text::<64>(ui, H, "password", "", "of the .7z file").ok_or("cancelled")?;
     let key = stretch(ui, &password, H, "unlocking the file")?;
     let stream = match found {
@@ -1276,6 +1283,8 @@ fn unseal(ui: &mut Ui<'_>, buf: &mut [u8], len: usize) -> Result<usize, &'static
                 .len();
             sevenz::file_in(&header.bytes()[..n]).map_err(|_| "not a single-file archive")?
         }
+        // Handled above, before a password was asked; an error rather than a panic.
+        sevenz::Found::Clear(_) => return Err("not encrypted"),
     };
     Ok(sevenz::decrypt_in_place(&mut buf[..len], &stream, &key)
         .map_err(|_| "wrong password")?
