@@ -5,11 +5,15 @@
 //! the LittleFS volume on internal flash, named as stock names them, so a device that has
 //! been either firmware still finds its own settings.
 //!
-//! The mk3 keeps its slots in raw SPI-NOR blocks instead, with the block's byte offset as
-//! the `pos` in the counter; that medium is not wired up yet.
+//! The mk3 keeps its slots in raw SPI-NOR sectors instead -- thirty-two of them in the
+//! last 128 KB of the part, with the sector's byte offset as the `pos` in the counter
+//! ([`catcard_settings::norslots`]). Either way the type here is [`Files`], with the same
+//! `mount` / `mount_read_only` on both, so nothing that reads or writes a setting knows
+//! which board it is on.
 
 use catcard_settings::store::{MediumError, Slots};
 
+#[cfg(not(feature = "board-mk3"))]
 use crate::nvram::Blocks;
 
 /// Why the settings volume would not mount.
@@ -18,12 +22,24 @@ use crate::nvram::Blocks;
 /// board that keeps them elsewhere, a flash configured differently from the board table, and
 /// an address that does not divide into pages -- and which of those it is decides what to do
 /// next.
+#[cfg(not(feature = "board-mk3"))]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum MountFailed {
     /// The region could not be claimed; the flash driver says why.
     Region(crate::nvram::Error),
     /// The region was claimed but holds no filesystem this can read.
     NoFilesystem,
+}
+
+/// Why the mk3's settings slots could not be opened.
+#[cfg(feature = "board-mk3")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum MountFailed {
+    /// The board table has no SPI-NOR, or the part did not answer its JEDEC probe.
+    NoMedium,
+    /// Something else holds the part -- a firmware image being staged. The settings
+    /// wait rather than interleave commands on the one bus.
+    Busy,
 }
 
 /// The settings key for the wallet in force, kept for the session.
@@ -52,8 +68,7 @@ pub(crate) fn forget_key() {
 /// caller passed. [`crate::key::is_root`] is "root source, no passphrase", and a loaded
 /// key is never the root source, so this one check refuses to poison the cache for a
 /// passphrase wallet, a loaded XPRV/WIF, or a BIP-85 child; those fall back to deriving
-/// their own key lazily. A no-op on mk3, which has no settings store.
-#[cfg(not(feature = "board-mk3"))]
+/// their own key lazily.
 pub(crate) fn install_wallet_key(key: catcard_settings::nvstore::Key) {
     // SAFETY: foreground only, single core; the read finishes within this statement.
     let empty = unsafe { (*core::ptr::addr_of!(WALLET_KEY)).is_none() };
@@ -400,17 +415,168 @@ fn identity(
 
 /// Slots stock keeps on a LittleFS device, as `settings/000.aes` upwards.
 /// Source: hw-reference/settings-nvstore-format.md §1 [C]
+#[cfg(not(feature = "board-mk3"))]
 pub const SLOT_COUNT: u32 = 100;
 
+/// Slots stock keeps on the mk3: thirty-two SPI-NOR sectors.
+/// Source: hw-reference/settings-nvstore-format.md §1 [C]
+#[cfg(feature = "board-mk3")]
+pub const SLOT_COUNT: u32 = catcard_settings::norslots::MK3.count;
+
 /// The LittleFS volume, sized for the 512-byte blocks the region is formatted with.
+#[cfg(not(feature = "board-mk3"))]
 type Volume =
     fstool::fs::littlefs::Volume<Blocks, { crate::nvram::BLOCK }, { crate::nvram::BLOCK }>;
 
 /// Settings slots as files in the internal-flash volume.
+#[cfg(not(feature = "board-mk3"))]
 pub struct Files {
     vol: Volume,
 }
 
+/// Settings slots as sectors of the SPI-NOR, on the mk3.
+///
+/// Still called `Files` so every reader and writer of a setting is the same code on
+/// every board. Holds the part's ticket ([`crate::nor::claim`]) for as long as it lives,
+/// which is one screen's operation: the volume is opened per read or save, as the
+/// LittleFS one is, and given back when the screen returns.
+#[cfg(feature = "board-mk3")]
+pub struct Files {
+    slots: catcard_settings::norslots::NorSlots<crate::nor::NorMedium>,
+    _ticket: catcard_upgrade::claim::Ticket,
+}
+
+/// The layout the slots use is the board table's: same first sector, same count, same
+/// sector size. And the first sector is where firmware staging stops: an image plus its
+/// trailing header must end below `NVSTORE_BASE`, which is the same number stated in
+/// `catcard-upgrade`. Three places state the fact so that a change to any is caught here.
+/// Source: hw-reference/settings-nvstore-format.md §1, storage.md §SPI-NOR and §"mk3
+/// firmware staging & recovery" [C]
+#[cfg(feature = "board-mk3")]
+const _: () = {
+    use catcard_settings::norslots::{MK3, SECTOR};
+    assert!(catcard_upgrade::nor::NVSTORE_BASE == MK3.base);
+    match catcard_board::BOARD.settings {
+        catcard_board::spec::SettingsArea::SpiNor { start, len, slot } => {
+            assert!(start == MK3.base);
+            assert!(slot == SECTOR);
+            assert!(len == MK3.count * SECTOR);
+        }
+        catcard_board::spec::SettingsArea::InternalFlash { .. } => {
+            panic!("the mk3's settings are in SPI-NOR")
+        }
+    }
+    match catcard_board::BOARD.sflash {
+        Some(sf) => assert!(sf.sector_len == SECTOR),
+        None => panic!("the mk3 has an SPI-NOR part"),
+    }
+};
+
+#[cfg(feature = "board-mk3")]
+impl Files {
+    /// Open the settings slots for writing.
+    ///
+    /// # Safety
+    /// As [`crate::nor::init`]: SPI2 and the sflash pins are taken for as long as this
+    /// lives. The part's claim refuses a second holder, so the caller's only duty is not
+    /// to hold two of these at once on one path.
+    pub unsafe fn mount() -> Result<Self, MountFailed> {
+        // SAFETY: forwarding the caller's guarantee.
+        unsafe { Self::open(true) }
+    }
+
+    /// Open them for reading only: nothing opened this way can erase or program a sector.
+    ///
+    /// # Safety
+    /// As [`mount`](Self::mount).
+    pub unsafe fn mount_read_only() -> Result<Self, MountFailed> {
+        // SAFETY: forwarding the caller's guarantee.
+        unsafe { Self::open(false) }
+    }
+
+    /// # Safety
+    /// As [`mount`](Self::mount).
+    unsafe fn open(writable: bool) -> Result<Self, MountFailed> {
+        use catcard_settings::norslots::{MK3, NorSlots};
+        let ticket = crate::nor::claim(crate::nor::SETTINGS).ok_or_else(|| {
+            crate::catlog!(
+                "settings: SPI-NOR busy with {}",
+                crate::nor::holder().unwrap_or("nobody")
+            );
+            MountFailed::Busy
+        })?;
+        // SAFETY: the ticket above is what says nothing else has the bus or the pins.
+        let nor = unsafe { crate::nor::init() }.ok_or(MountFailed::NoMedium)?;
+        let medium = crate::nor::NorMedium(nor);
+        let slots = if writable {
+            NorSlots::new(medium, MK3)
+        } else {
+            NorSlots::read_only(medium, MK3)
+        };
+        Ok(Self {
+            slots,
+            _ticket: ticket,
+        })
+    }
+
+    /// How many sectors hold something, and their bytes. `None` if the part would not
+    /// read.
+    pub fn usage(&mut self) -> Option<(u32, u64)> {
+        self.slots.usage().ok()
+    }
+
+    /// Log what the region holds, as far as a sector can say: which are blank.
+    ///
+    /// The counterpart of the LittleFS listing, for telling "no slot is written" from
+    /// "slots are written and none opens under this key".
+    pub fn log_listing(&mut self) {
+        match self.slots.usage() {
+            Ok((n, bytes)) => crate::catlog!(
+                "settings: {} of {} SPI-NOR slots in use, {} B",
+                n,
+                SLOT_COUNT,
+                bytes
+            ),
+            Err(_) => crate::catlog!("settings: the SPI-NOR would not read"),
+        }
+    }
+}
+
+#[cfg(feature = "board-mk3")]
+impl Slots for Files {
+    fn count(&self) -> u32 {
+        self.slots.count()
+    }
+
+    fn pos(&self, index: u32) -> u32 {
+        self.slots.pos(index)
+    }
+
+    fn read(&mut self, index: u32, buf: &mut [u8]) -> Result<Option<usize>, MediumError> {
+        self.slots.read(index, buf)
+    }
+
+    fn write(&mut self, index: u32, bytes: &[u8]) -> Result<(), MediumError> {
+        self.slots.write(index, bytes)
+    }
+
+    fn clear(&mut self, index: u32) -> Result<(), MediumError> {
+        self.slots.clear(index)?;
+        // Remembered across mounts, as on LittleFS: the slots are opened per operation,
+        // so the medium's own memory of it would be gone by the next save.
+        // SAFETY: foreground only -- every settings user is a screen, the slots are
+        // opened per operation, and the menu waits for each to finish.
+        unsafe { *core::ptr::addr_of_mut!(LAST_CLEARED) = Some(index) };
+        Ok(())
+    }
+
+    fn last_cleared(&self) -> Option<u32> {
+        // SAFETY: as in `clear`.
+        unsafe { *core::ptr::addr_of!(LAST_CLEARED) }
+    }
+}
+
+#[cfg(not(feature = "board-mk3"))]
 impl Files {
     /// Mount the settings volume.
     ///
@@ -441,6 +607,7 @@ impl Files {
     }
 }
 
+#[cfg(not(feature = "board-mk3"))]
 impl Files {
     /// How much of the volume the slots use: files under `/settings`, and their bytes.
     ///
@@ -500,6 +667,7 @@ impl Files {
     }
 }
 
+#[cfg(not(feature = "board-mk3"))]
 impl Slots for Files {
     fn count(&self) -> u32 {
         SLOT_COUNT
@@ -604,14 +772,18 @@ static mut SD2FA: (
 );
 
 /// The kill key's digit, if one is armed.
-#[cfg_attr(feature = "dev", allow(dead_code))]
+// Read and written by `crate::guard`, which a dev build compiles out and the mk3 never has
+// (its bootloader has no fast wipe); the values stay on flash either way.
+#[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
 pub(crate) fn kill_key() -> Option<u8> {
     // SAFETY: foreground only; written by `load_prelogin` and the save helpers.
     unsafe { *core::ptr::addr_of!(KILL_KEY) }
 }
 
 /// What microSD 2FA is set to, and the enrolled cards' digests.
-#[cfg_attr(feature = "dev", allow(dead_code))]
+// Read and written by `crate::guard`, which a dev build compiles out and the mk3 never has
+// (its bootloader has no fast wipe); the values stay on flash either way.
+#[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
 pub(crate) fn sd2fa() -> (
     catcard_settings::prelogin::Sd2fa,
     [[u8; 32]; catcard_settings::prelogin::SD2FA_MAX],
@@ -789,6 +961,9 @@ pub(crate) fn show_nickname_screen(ui: &mut crate::ui::Ui<'_>) {
 /// attacker's copy of the flash is worth -- which is why the slots are encrypted.
 ///
 /// The read is direct from memory-mapped flash, so a 512 KB region needs no buffer at all.
+/// Which is why it is not on the mk3: its slots sit in SPI-NOR behind a bus, with no
+/// mapping to slice, and this device has nowhere to put 128 KB on the way to the card.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn backup_to_card(ui: &mut crate::ui::Ui<'_>) {
     use core::fmt::Write as _;
 
@@ -889,7 +1064,9 @@ pub(crate) fn save_countdown(ui: &mut crate::ui::Ui<'_>, minutes: Option<u32>) -
 }
 
 /// Arm the kill key on `digit`, or disarm it.
-#[cfg_attr(feature = "dev", allow(dead_code))]
+// Read and written by `crate::guard`, which a dev build compiles out and the mk3 never has
+// (its bootloader has no fast wipe); the values stay on flash either way.
+#[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
 pub(crate) fn save_kill_key(ui: &mut crate::ui::Ui<'_>, digit: Option<u8>) -> bool {
     let mut text = heapless::String::<2>::new();
     if let Some(d) = digit {
@@ -905,7 +1082,9 @@ pub(crate) fn save_kill_key(ui: &mut crate::ui::Ui<'_>, digit: Option<u8>) -> bo
 }
 
 /// Enrol exactly these cards for microSD 2FA; none turns it off.
-#[cfg_attr(feature = "dev", allow(dead_code))]
+// Read and written by `crate::guard`, which a dev build compiles out and the mk3 never has
+// (its bootloader has no fast wipe); the values stay on flash either way.
+#[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
 pub(crate) fn save_sd2fa(ui: &mut crate::ui::Ui<'_>, digests: &[[u8; 32]]) -> bool {
     use catcard_settings::prelogin::{self, Sd2fa};
     let mut buf = [0u8; prelogin::SD2FA_MAX * 65];

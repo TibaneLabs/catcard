@@ -75,7 +75,6 @@ enum Screen {
     /// Danger zone: stock's ROM-bootloader entry; refused on this firmware.
     DfuUpgrade,
     /// Danger zone: how full the settings volume is.
-    #[cfg(not(feature = "board-mk3"))]
     SettingsSpace,
     /// Install a firmware image from the card. Reached from `Utils` -> `Upgrade
     /// Firmware`, where a stock user looks for it.
@@ -129,7 +128,6 @@ enum Screen {
     #[cfg(not(feature = "board-mk3"))]
     NfcTest,
     /// Debug: type a fixed line into the host as a USB keyboard.
-    #[cfg(not(feature = "board-mk3"))]
     KbdTest,
     /// Stock's NFC Tools drawer: everything the tag can carry in or out, in one list.
     #[cfg(not(feature = "board-mk3"))]
@@ -163,7 +161,6 @@ enum Screen {
     /// Seed XOR: parts typed back in, and the seed they make put in force.
     XorJoin,
     /// The Seed Vault: keys kept in the settings, and the one in force.
-    #[cfg(not(feature = "board-mk3"))]
     KeyVault,
     /// The export drawer: which shape of the same keys to write out.
     ExportMenu,
@@ -201,9 +198,7 @@ enum Screen {
     /// or force-erase. Needs no settings store, so it is on every board with a slot.
     CardPassword,
     /// Device-bound, whole-card AES-128-XTS encryption of the SD card: encrypt in place,
-    /// unlock for the session, or remove. Keeps per-card parameters in the settings store,
-    /// so it needs one -- absent on the mk3.
-    #[cfg(not(feature = "board-mk3"))]
+    /// unlock for the session, or remove. Keeps per-card parameters in the settings store.
     CardEncrypt,
     /// Write or read the encrypted backup file.
     BackupMenu,
@@ -232,23 +227,20 @@ enum Screen {
     /// Type a BIP-39 passphrase, opening a second wallet from the same words.
     Passphrase,
     /// Debug: exercise the settings store on internal flash.
-    #[cfg(not(feature = "board-mk3"))]
     SettingsStore,
     /// The registered multisig wallets: what is stored, and importing or removing one.
-    #[cfg(not(feature = "board-mk3"))]
     Multisig,
     /// The WIF store: individual private keys, listed, viewed, generated, imported and
     /// deleted, each able to sign a matching input. Needs the settings store.
-    #[cfg(not(feature = "board-mk3"))]
     WifStore,
     /// Typing the nickname shown before the PIN prompt.
-    #[cfg(not(feature = "board-mk3"))]
     Nickname,
-    /// Copying the settings region to a card, before anything writes to it.
+    /// Copying the settings region to a card, before anything writes to it. Reads the
+    /// memory-mapped region as one slice; the mk3's SPI-NOR has no mapping and the copy
+    /// would need a chunked writer, so it is not offered there.
     #[cfg(not(feature = "board-mk3"))]
     SettingsToSd,
     /// The before-login nickname screen, drawn from the menu so it can be looked at.
-    #[cfg(not(feature = "board-mk3"))]
     NickPreview,
     /// Secure Notes & Passwords, read out of the settings blob. Q1 only: stock writes
     /// them where there is a keyboard to type them on.
@@ -256,7 +248,6 @@ enum Screen {
     Notes,
     /// A BIP-85 password (or, on the Q1, a note's) typed into the host as keystrokes.
     /// On the main menu only while `Keyboard EMU` is on, as stock gates it on `emu`.
-    #[cfg(not(feature = "board-mk3"))]
     TypePasswords,
     /// Wipe the cached PIN/secret and reboot to the PIN prompt.
     SecureLogout,
@@ -309,17 +300,14 @@ enum Screen {
     DangerZone,
     /// Choose the Bitcoin network: mainnet, testnet4 or regtest. In the Danger Zone
     /// because it changes every address, xpub and path the device shows.
-    #[cfg(not(feature = "board-mk3"))]
     TestnetMode,
     /// Block or warn on a PSBT asking for a sighash type other than `SIGHASH_ALL`. In
     /// the Danger Zone, as stock keeps it: "warn" lets a signature over nothing be made.
-    #[cfg(not(feature = "board-mk3"))]
     SighashChecks,
     /// Which chains this wallet offers, and in what order.
-    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    #[cfg(feature = "multichain")]
     ChainSettings,
     /// Lift the BIP-85 index cap, after a warning. Danger zone, as in stock.
-    #[cfg(not(feature = "board-mk3"))]
     B85Index,
     /// Danger zone: tools that work on the seed itself.
     SeedTools,
@@ -335,10 +323,8 @@ enum Screen {
     /// Type the PIN as at login, and be told whether it is right.
     TestLogin,
     /// Shuffle the number row at login.
-    #[cfg(not(feature = "board-mk3"))]
     ScrambleKeys,
     /// Wait a chosen time after a correct PIN.
-    #[cfg(not(feature = "board-mk3"))]
     LoginCountdown,
     /// The login screen as a calculator, the PIN typed into it. Q1 only.
     #[cfg(feature = "board-q1")]
@@ -350,35 +336,27 @@ enum Screen {
     #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
     Sd2fa,
     /// How long with no key before the device logs itself out.
-    #[cfg(not(feature = "board-mk3"))]
     IdleTimeout,
     /// BTC, mBTC, bits or sats, wherever an amount is shown.
-    #[cfg(not(feature = "board-mk3"))]
     DisplayUnits,
     /// The largest share of a transaction that may go to fees.
-    #[cfg(not(feature = "board-mk3"))]
     MaxFee,
     /// Whether wallet exports carry SLIP-132 (`ypub`/`zpub`) keys beside the classic ones.
-    #[cfg(not(feature = "board-mk3"))]
     Slip132Export,
     /// The submenu holding the two hardware switches.
-    #[cfg(not(feature = "board-mk3"))]
     Hardware,
     /// Whether the device presents itself to a host over USB at all.
-    #[cfg(not(feature = "board-mk3"))]
     UsbPort,
     /// Whether the device may re-enumerate as a USB disk.
     #[cfg(not(feature = "board-mk3"))]
     VirtualDisk,
     /// Whether the device also enumerates a USB keyboard, to type passwords with.
-    #[cfg(not(feature = "board-mk3"))]
     KeyboardEmu,
     /// Whether the menu cursor comes round at the ends of a list.
-    #[cfg(not(feature = "board-mk3"))]
     MenuWrap,
     /// Whether the home menu names the wallet's fingerprint even in the root wallet.
     /// Only where the home menu is a list with a header row: the Q1's bar always shows it.
-    #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+    #[cfg(not(feature = "board-q1"))]
     HomeXfp,
     /// The Q1 LCD backlight level. Q1-only: the mono boards have no backlight to dim.
     #[cfg(feature = "board-q1")]
@@ -416,7 +394,7 @@ const MAIN_ITEMS: &[&str] = &[
     // Stock's `Type Passwords`, in stock's place -- before the drawers -- on the boards
     // whose main menu is a list. Shown only while `Keyboard EMU` is on (`main_row_shown`).
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
-    #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
+    #[cfg(not(feature = "board-q1"))]
     "Type Passwords",
     "Settings",
     // Stock puts Help on the boards without a keyboard; ours is on every board.
@@ -518,12 +496,9 @@ fn main_row_shown(label: &str) -> bool {
     if label == "Notes" {
         return crate::prefs::current().notes == Some(true);
     }
-    #[cfg(not(feature = "board-mk3"))]
     if label == "Type Passwords" {
         return crate::usbtask::keyboard_on();
     }
-    #[cfg(feature = "board-mk3")]
-    let _ = label;
     true
 }
 
@@ -579,37 +554,28 @@ const SETTINGS_ITEMS: &[&str] = &[
     // Stock keeps the wallet registry in Settings, gated on there being a seed, rather
     // than beside the one-shot tools. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
     // §SET "Multisig Wallets (has_secrets)" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "Multisig",
     // The preferences, in stock's own order and under stock's own names, all of them
-    // kept in the wallet's own settings file -- which the mk3's medium is not wired up
-    // for, so on that board the rows are simply not there rather than being there and
-    // doing nothing. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
-    #[cfg(not(feature = "board-mk3"))]
+    // kept in the wallet's own settings file. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET [C]
     "Idle timeout",
-    #[cfg(not(feature = "board-mk3"))]
     "Display units",
-    #[cfg(not(feature = "board-mk3"))]
     "Max network fee",
     // Whether exports carry ypub/zpub keys as well. Stock keeps this as a per-export
     // toggle; ours is one setting, off by default like stock's.
     // Source: hw-reference/firmware-features.md §1 "SLIP-132 (export optional, default
     // off)" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "SLIP-132 export",
-    #[cfg(not(feature = "board-mk3"))]
     "Hardware On/Off",
     // Where the PushTx link after a signed transaction points. Stock's row and name.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "NFC Push Tx" [C]
     #[cfg(not(feature = "board-mk3"))]
     "NFC Push Tx",
-    #[cfg(not(feature = "board-mk3"))]
     "Menu wrapping",
     // Stock's Buried Settings → Home Menu XFP, flat here like Menu wrapping beside it.
     // Only the mono boards, whose home menu is the list that carries the header row; the
     // Q1's status bar names the wallet on every screen already.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Buried Settings" [C]
-    #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+    #[cfg(not(feature = "board-q1"))]
     "Home menu XFP",
     // The colour panel's backlight level. Q1-only: the mono boards have no backlight PWM.
     // Source: hw-reference/firmware-features.md §9 "LCD brightness on battery" [C]
@@ -623,7 +589,7 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Secure notes",
     // Which chains this wallet offers, and in what order. Only where there is more than
     // one chain to order, and only where there is a settings file to keep the answer in.
-    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    #[cfg(feature = "multichain")]
     "Chains",
     "Danger zone",
     // About and Debug sit here rather than on the main menu: both answer "what is this
@@ -655,26 +621,21 @@ const DANGER_ITEMS: &[&str] = &[
     "Seed tools",
     // Which Bitcoin network the device derives and shows addresses for. Stock keeps it
     // here, in the Danger Zone, because switching it changes every address, xpub and
-    // default path. The mk3 has no settings store to keep the choice, so the row is left
-    // out there. Source: hw-reference/firmware-features.md §10 [C].
-    #[cfg(not(feature = "board-mk3"))]
+    // default path. Source: hw-reference/firmware-features.md §10 [C].
     "Testnet mode",
     // Lifts the BIP-85 index cap from 9999 to 2^31-1. Stock keeps the switch here, in
     // the Danger Zone, because a child at an index nobody remembers is a child nobody
-    // finds again; kept in the wallet's settings file, so not on the mk3.
+    // finds again; kept in the wallet's settings file.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "B85 Idx Values",
     // Block or warn on unusual sighash types. Stock's row, in stock's drawer.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Sighash Checks" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "Sighash checks",
     // The bootloader rows, in stock's own order. High-Water is the one irreversible thing
     // an install can do, made explicit; Bless changes the light; DFU is never entered on
     // this firmware (see `crate::identity::dfu_upgrade`).
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ [C]
     "Set High-Water",
-    #[cfg(not(feature = "board-mk3"))]
     "Settings Space",
     "Bless Firmware",
     "DFU Upgrade",
@@ -718,12 +679,9 @@ fn seed_tools_items() -> &'static [&'static str] {
 const LOGIN_ITEMS: &[&str] = &[
     "Change PIN",
     "Test login",
-    #[cfg(not(feature = "board-mk3"))]
     "Nickname",
-    // Both live in the pre-login settings, which the mk3 has no medium for.
-    #[cfg(not(feature = "board-mk3"))]
+    // Both live in the pre-login settings.
     "Scramble keys",
-    #[cfg(not(feature = "board-mk3"))]
     "Login countdown",
     // Stock's Calculator Login, Q1 only: it needs the keyboard.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Calculator Login" [C]
@@ -742,10 +700,17 @@ const LOGIN_ITEMS: &[&str] = &[
 /// four rows in this order. Each row below names the code that answers it:
 /// `crate::usbtask::set_port` for the port, the USB Drive screen for the disk,
 /// `crate::usbtask::set_keyboard` for the keyboard, and `crate::nfc::enabled` -- checked
-/// by every tag entry point -- for NFC Sharing.
+/// by every tag entry point -- for NFC Sharing. The mk3 has neither the PSRAM the disk
+/// lives in nor a tag, so its list is the two switches it can honour.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Hardware On/Off" [C]
-#[cfg(not(feature = "board-mk3"))]
-const HARDWARE_ITEMS: &[&str] = &["USB port", "Virtual Disk", "Keyboard EMU", "NFC Sharing"];
+const HARDWARE_ITEMS: &[&str] = &[
+    "USB port",
+    #[cfg(not(feature = "board-mk3"))]
+    "Virtual Disk",
+    "Keyboard EMU",
+    #[cfg(not(feature = "board-mk3"))]
+    "NFC Sharing",
+];
 
 /// Stock's NFC Tools drawer, its rows in stock's order less `Verify Address`, which has
 /// no tag flow of its own here: the address explorer verifies, and shares by NFC from the
@@ -812,13 +777,11 @@ const UTILS_ITEMS: &[&str] = &[
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
     // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
-    // settings, so it needs the store: not on the mk3.
-    #[cfg(not(feature = "board-mk3"))]
+    // settings.
     "Encrypt card",
     "Games",
-    // Individual private keys, kept in the settings; needs the store, so not on the mk3.
+    // Individual private keys, kept in the settings.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "WIF Store",
     // Stock's `Advanced/Tools` → `NFC Tools`; the mk3 has no tag.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT "NFC Tools" [C]
@@ -852,12 +815,10 @@ const UTILS_ITEMS: &[&str] = &[
     // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
     "Card password",
     // Device-bound whole-card AES-128-XTS encryption. Keeps per-card parameters in the
-    // settings, so it needs the store: not on the mk3.
-    #[cfg(not(feature = "board-mk3"))]
+    // settings.
     "Encrypt card",
-    // Individual private keys, kept in the settings; needs the store, so not on the mk3.
+    // Individual private keys, kept in the settings.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
-    #[cfg(not(feature = "board-mk3"))]
     "WIF Store",
     // Stock's `Advanced/Tools` → `NFC Tools`; the mk3 has no tag.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AT "NFC Tools" [C]
@@ -971,7 +932,6 @@ const KEY_ITEMS_ROOT: &[&str] = &[
     "New words",
     "XOR split",
     "XOR join",
-    #[cfg(not(feature = "board-mk3"))]
     "Key vault",
 ];
 /// The same, from anywhere else: there is now somewhere to go back to.
@@ -983,7 +943,6 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "New words",
     "XOR split",
     "XOR join",
-    #[cfg(not(feature = "board-mk3"))]
     "Key vault",
 ];
 
@@ -1022,7 +981,6 @@ const DEBUG_ITEMS: &[&str] = &[
     "View TRNG Words",
     #[cfg(not(feature = "board-mk3"))]
     "NFC test",
-    #[cfg(not(feature = "board-mk3"))]
     "Keyboard EMU test",
     #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
     "Dump state",
@@ -1053,11 +1011,9 @@ const DEBUG_ITEMS: &[&str] = &[
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D4 "Warm Reset" [C]
     "Warm Reset",
     "Factory Reset",
-    #[cfg(not(feature = "board-mk3"))]
     "Settings store",
     #[cfg(not(feature = "board-mk3"))]
     "Settings to SD",
-    #[cfg(not(feature = "board-mk3"))]
     "Nickname screen",
     #[cfg(feature = "board-q1")]
     "Secure notes",
@@ -1130,7 +1086,7 @@ pub fn run(session: Session<'_>) -> ! {
         crate::prefs::load(gate, login, ui.panel, "Settings");
         // Home Menu XFP "always": the header row needs the number before the first
         // frame, and the login fetch is still warm. Only where that row exists.
-        #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+        #[cfg(not(feature = "board-q1"))]
         if crate::prefs::current().home_xfp
             && crate::key::is_root()
             && crate::pubkeys::known_fingerprint().is_none()
@@ -1516,7 +1472,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         // belongs to the way in.
         Screen::SdInstall => to(|a| install_firmware(a.gate, a.login, a.ui), Screen::Utils),
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
-        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        #[cfg(feature = "multichain")]
         Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::DumpState => to(
@@ -1549,7 +1505,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => to(|a| crate::nfc::probe_screen(a.ui), Screen::Debug),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::KbdTest => to(|a| crate::usbkbd::self_test(a.ui), Screen::Debug),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => to(
@@ -1598,7 +1553,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::FormatRamDisk => to(|a| crate::filemgmt::format_ram_disk(a.ui), Screen::Utils),
         Screen::DeletePsbts => to(|a| crate::filemgmt::delete_psbts(a.ui), Screen::Utils),
         Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::CardEncrypt => to(
             |a| crate::sdcrypt::screen(a.gate, a.login, a.ui),
             Screen::Utils,
@@ -1680,7 +1634,6 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::seedxor::join(a.gate, a.login, a.ui),
             Screen::KeyMenu,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::KeyVault => to(
             |a| crate::vault::screen(a.gate, a.login, a.ui),
             Screen::KeyMenu,
@@ -1689,30 +1642,24 @@ fn action_for(screen: Screen) -> Option<Action> {
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
         Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore => to(
             |a| crate::settings::inspect(a.gate, a.login, a.ui),
             Screen::Debug,
         ),
-        #[cfg(not(feature = "board-mk3"))]
-        #[cfg(not(feature = "board-mk3"))]
         Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
         #[cfg(feature = "board-q1")]
         // A main-menu tile on a blank device, and the QR key from any menu.
         Screen::ScanQr => returns(|a| crate::qrscan::screen(a.gate, a.login, a.ui)),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::Multisig => to(
             |a| crate::msimport::manage(a.gate, a.login, a.ui),
             Screen::Utils,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::WifStore => to(
             |a| crate::wifstore::manage(a.gate, a.login, a.ui),
             Screen::Utils,
         ),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::NickPreview => to(
             |a| crate::settings::show_nickname_screen(a.ui),
             Screen::Debug,
@@ -1721,7 +1668,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         // goes back to whichever opened it.
         #[cfg(feature = "board-q1")]
         Screen::Notes => returns(|a| crate::notes::screen(a.gate, a.login, a.ui)),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::TypePasswords => returns(|a| {
             crate::derive::type_password_screen(a.gate, a.login, a.ui);
         }),
@@ -1775,12 +1721,10 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
         Screen::TestLogin => to(|a| test_login_screen(a.gate, a.login, a.ui), Screen::Login),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys => to(
             |a| scramble_keys_screen(a.gate, a.login, a.ui),
             Screen::Login,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::LoginCountdown => to(|a| login_countdown_screen(a.ui), Screen::Login),
         #[cfg(feature = "board-q1")]
         Screen::CalcLogin => to(|a| calc_login_screen(a.gate, a.login, a.ui), Screen::Login),
@@ -1791,53 +1735,43 @@ fn action_for(screen: Screen) -> Option<Action> {
         ),
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
         Screen::Sd2fa => to(|a| crate::guard::sd2fa_screen(a.ui), Screen::Login),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::IdleTimeout => to(
             |a| idle_timeout_screen(a.gate, a.login, a.ui),
             Screen::Settings,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::DisplayUnits => to(
             |a| display_units_screen(a.gate, a.login, a.ui),
             Screen::Settings,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::MaxFee => to(|a| max_fee_screen(a.gate, a.login, a.ui), Screen::Settings),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::Slip132Export => to(
             |a| slip132_export_screen(a.gate, a.login, a.ui),
             Screen::Settings,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::SighashChecks => to(
             |a| sighash_checks_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::UsbPort => to(|a| usb_port_screen(a.gate, a.login, a.ui), Screen::Hardware),
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => to(
             |a| virtual_disk_screen(a.gate, a.login, a.ui),
             Screen::Hardware,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::KeyboardEmu => to(
             |a| keyboard_emu_screen(a.gate, a.login, a.ui),
             Screen::Hardware,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::MenuWrap => to(
             |a| menu_wrap_screen(a.gate, a.login, a.ui),
             Screen::Settings,
         ),
-        #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+        #[cfg(not(feature = "board-q1"))]
         Screen::HomeXfp => to(|a| home_xfp_screen(a.gate, a.login, a.ui), Screen::Settings),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::TestnetMode => to(
             |a| testnet_mode_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::B85Index => to(
             |a| crate::derive::index_values_screen(a.gate, a.login, a.ui),
             Screen::DangerZone,
@@ -1873,7 +1807,6 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::identity::dfu_upgrade(a.gate, a.ui),
             Screen::DangerZone,
         ),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsSpace => to(
             |a| crate::identity::settings_space(a.ui),
             Screen::DangerZone,
@@ -2035,7 +1968,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Addresses")) => Screen::AddressExplorer,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Notes")) => Screen::Notes,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Type Passwords")) => Screen::TypePasswords,
             (Key::Confirm, Some("Utils")) => Screen::Utils,
             (Key::Confirm, Some("Derive")) => Screen::KeyMenu,
@@ -2068,7 +2000,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::ImportMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Multisig")) => Screen::Multisig,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
@@ -2076,23 +2007,17 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Login")) => Screen::Login,
             (Key::Confirm, Some("Passphrase")) => Screen::Passphrase,
             (Key::Confirm, Some("Danger zone")) => Screen::DangerZone,
-            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            #[cfg(feature = "multichain")]
             (Key::Confirm, Some("Chains")) => Screen::ChainSettings,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Idle timeout")) => Screen::IdleTimeout,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Display units")) => Screen::DisplayUnits,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Max network fee")) => Screen::MaxFee,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("SLIP-132 export")) => Screen::Slip132Export,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Hardware On/Off")) => Screen::Hardware,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Push Tx")) => Screen::PushTx,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
-            #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+            #[cfg(not(feature = "board-q1"))]
             (Key::Confirm, Some("Home menu XFP")) => Screen::HomeXfp,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
@@ -2101,11 +2026,12 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
-        #[cfg(not(feature = "board-mk3"))]
         Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("USB port")) => Screen::UsbPort,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
             (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
+            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Sharing")) => Screen::NfcSharing,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Hardware,
@@ -2122,14 +2048,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Seed tools")) => Screen::SeedTools,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Testnet mode")) => Screen::TestnetMode,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("B85 Idx Values")) => Screen::B85Index,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Sighash checks")) => Screen::SighashChecks,
             (Key::Confirm, Some("Set High-Water")) => Screen::SetHighWater,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings Space")) => Screen::SettingsSpace,
             (Key::Confirm, Some("Bless Firmware")) => Screen::BlessFirmware,
             (Key::Confirm, Some("DFU Upgrade")) => Screen::DfuUpgrade,
@@ -2153,7 +2075,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
             (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
             (Key::Confirm, Some("New words")) => Screen::KeyNewSeed,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             (Key::Cancel, _) => Screen::Main,
@@ -2175,7 +2096,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::KeyPick(_) => Screen::KeyMenu,
         Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
         Screen::LockDown => Screen::SeedTools,
-        #[cfg(not(feature = "board-mk3"))]
         Screen::KeyVault => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some(name)) if generic_json_file(name).is_some() => {
@@ -2203,9 +2123,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Change PIN")) => Screen::ChangePin,
             (Key::Confirm, Some("Test login")) => Screen::TestLogin,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Scramble keys")) => Screen::ScrambleKeys,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Login countdown")) => Screen::LoginCountdown,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Calculator login")) => Screen::CalcLogin,
@@ -2213,7 +2131,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Kill key")) => Screen::KillKey,
             #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
             (Key::Confirm, Some("MicroSD 2FA")) => Screen::Sd2fa,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Nickname")) => Screen::Nickname,
             (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Login,
@@ -2242,11 +2159,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Format RAM disk")) => Screen::FormatRamDisk,
             (Key::Confirm, Some("Delete PSBTs")) => Screen::DeletePsbts,
             (Key::Confirm, Some("Card password")) => Screen::CardPassword,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Encrypt card")) => Screen::CardEncrypt,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("WIF Store")) => Screen::WifStore,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Tools")) => Screen::NfcTools,
@@ -2279,7 +2194,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Keyboard EMU test")) => Screen::KbdTest,
             #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
             (Key::Confirm, Some("Dump state")) => Screen::DumpState,
@@ -2294,13 +2208,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
             (Key::Confirm, Some("Kernel")) => Screen::Kernel,
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
-            #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Nickname screen")) => Screen::NickPreview,
-            #[cfg(not(feature = "board-mk3"))]
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             (Key::Confirm, Some("PSRAM")) => Screen::Psram,
@@ -2680,7 +2591,6 @@ fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
         Screen::ImportMenu => Some(IMPORT_ITEMS),
         Screen::Settings => Some(settings_items(no_seed)),
         Screen::Login => Some(LOGIN_ITEMS),
-        #[cfg(not(feature = "board-mk3"))]
         Screen::Hardware => Some(HARDWARE_ITEMS),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTools => Some(NFC_TOOLS_ITEMS),
@@ -2714,8 +2624,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::ExportMenu
         | Screen::BackupMenu
         | Screen::XpubMenu => draw_menu(panel, screen, v),
+        Screen::Hardware => draw_menu(panel, screen, v),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::Hardware | Screen::NfcTools => draw_menu(panel, screen, v),
+        Screen::NfcTools => draw_menu(panel, screen, v),
         #[cfg(feature = "games")]
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
@@ -2732,14 +2643,14 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Rtc => rtc_screen(panel, &v.rtc),
         // Handled in `run`: the scroll test owns the panel until it hands back.
         Screen::ScrollTest => {}
-        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsStore
         | Screen::Nickname
-        | Screen::SettingsToSd
         | Screen::Multisig
         | Screen::WifStore
         | Screen::NickPreview
         | Screen::TypePasswords => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::SettingsToSd => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes | Screen::ScanQr => {}
         Screen::Kernel => kernel_screen(panel),
@@ -2759,7 +2670,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PaperWallet => {}
         Screen::ViewTrngWords => {}
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTest | Screen::KbdTest => {}
+        Screen::NfcTest => {}
+        Screen::KbdTest => {}
         // Handled in `run`: each drives the tag, the panel and its own prompts.
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTool(_) | Screen::NfcSharing | Screen::PushTx => {}
@@ -2786,7 +2698,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Identity | Screen::BlessFirmware | Screen::SetHighWater | Screen::DfuUpgrade => {}
         // Handled in `run`: a document, dismissed with any answer key.
         Screen::HelpMain | Screen::HelpSettings | Screen::HelpUtils => {}
-        #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsSpace => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
@@ -2798,7 +2709,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::CardPassword => {}
         // Handled in `run`: it brings up the card and drives its own menu, prompts and
         // (for encrypt/remove) the full-card rewrite.
-        #[cfg(not(feature = "board-mk3"))]
         Screen::CardEncrypt => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt
@@ -2817,13 +2727,12 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::WarmReset => {}
         // Handled in `run`: it drives its own screen, because moving a row is a key the
         // list screens do not have.
-        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        #[cfg(feature = "multichain")]
         Screen::ChainSettings => {}
         // Handled in `run`: it derives, which needs the login struct.
         Screen::KeyPick(_) => {}
         // Handled in `run`: both drive their own screens from the keypad.
         Screen::XorSplit | Screen::XorJoin => {}
-        #[cfg(not(feature = "board-mk3"))]
         Screen::KeyVault => {}
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::DumpState => {}
@@ -2855,25 +2764,24 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it asks, picks a shape and draws a symbol full-screen.
         #[cfg(feature = "board-q1")]
         Screen::SeedQrShow => {}
-        #[cfg(not(feature = "board-mk3"))]
         Screen::ScrambleKeys | Screen::LoginCountdown => {}
         #[cfg(feature = "board-q1")]
         Screen::CalcLogin => {}
         // Handled in `run`: each asks its question through `pick_row` and drives the
         // panel itself.
-        #[cfg(not(feature = "board-mk3"))]
         Screen::IdleTimeout
         | Screen::DisplayUnits
         | Screen::MaxFee
         | Screen::Slip132Export
         | Screen::SighashChecks
         | Screen::UsbPort
-        | Screen::VirtualDisk
         | Screen::KeyboardEmu
         | Screen::MenuWrap
         | Screen::TestnetMode
         | Screen::B85Index => {}
-        #[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::VirtualDisk => {}
+        #[cfg(not(feature = "board-q1"))]
         Screen::HomeXfp => {}
         // Handled in `run`: picks a level through `pick_row` and drives the panel itself.
         #[cfg(feature = "board-q1")]
@@ -3255,8 +3163,22 @@ fn sflash_screen(panel: &mut display::Panel) {
         return;
     }
 
-    // SAFETY: this screen is the only SPI-NOR user; SPI2 and its pins belong to the
-    // sflash alone, and the menu waits for this to return before it can be chosen again.
+    // The part has other holders now -- firmware staging and the settings store -- so
+    // the probe takes its turn like them, and says who has it when it cannot.
+    #[cfg(feature = "board-mk3")]
+    let _ticket = match crate::nor::claim(crate::nor::PROBE) {
+        Some(t) => t,
+        None => {
+            let mut l = Line::new();
+            let _ = write!(l, "busy: {}", crate::nor::holder().unwrap_or("?"));
+            let _ = lines.push(l);
+            info(panel, "SPI-NOR", &lines);
+            return;
+        }
+    };
+    // SAFETY: SPI2 and its pins belong to the sflash alone, the ticket above (on the one
+    // board that has the part) is what says nothing else holds them, and the menu waits
+    // for this to return before it can be chosen again.
     match unsafe { crate::nor::init() } {
         Some(mut nor) => match nor.jedec_id() {
             Ok(id) => {
@@ -4123,7 +4045,6 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
         // Transparent decryption: if this card was unlocked this session, every read and
         // write through the mounted volume now decrypts/encrypts. A plaintext card is
         // untouched. mk3 has no such feature.
-        #[cfg(not(feature = "board-mk3"))]
         crate::sdcrypt::apply_to(&mut card);
         Ok(catcard_sd::Sectors::new(dev, card))
     })
@@ -6913,7 +6834,6 @@ pub(crate) fn announce_key(
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
             crate::catlog!("key: now ({})", crate::key::label());
-            #[cfg(not(feature = "board-mk3"))]
             crate::settings::open_wallet(gate, login, ui.panel, head, [a, b, c, d]);
             message(ui.panel, head, &said, crate::key::label());
         }
@@ -7993,7 +7913,7 @@ fn pick_addresses(
 /// **The one refusal is an empty list.** A stored list naming nothing reads back as
 /// "absent", which means *every* chain -- so turning them all off would silently turn
 /// them all on at the next read.
-#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+#[cfg(feature = "multichain")]
 fn chain_settings(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_ui::scroll::Line as DLine;
 
@@ -9128,10 +9048,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     // Their addresses come out of the wallet record, not out of this seed: that is the
     // point of looking at them here, since an address a cosigner cannot reproduce is one
     // nobody can spend from.
-    #[cfg(not(feature = "board-mk3"))]
     let wallets = crate::msimport::registered(gate, login, ui.panel);
-    #[cfg(feature = "board-mk3")]
-    let wallets: &[catcard_wallet::multisig::Multisig] = &[];
     let entries = PROTOCOLS.len() + wallets.len();
     // The chain key for the type, account and chain on screen, kept so that walking the
     // index does not redo the one unhardened step each frame.
@@ -9230,14 +9147,11 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 // against a cosigner's screen, and an elision where the middle was.
                 // The QR is not affected. Stock's default is the same.
                 // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §MS [C]
-                #[cfg(not(feature = "board-mk3"))]
                 let width = if wallet.is_some() && !crate::prefs::current().ms_full_addr {
                     cols.min(crate::msimport::CENSORED_COLS)
                 } else {
                     cols
                 };
-                #[cfg(feature = "board-mk3")]
-                let width = cols;
                 ellipsize_middle(s, width, &mut shown);
             }
             // A child index that lands on an invalid scalar is vanishingly rare, but the
@@ -11470,10 +11384,7 @@ fn test_login_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     if !confirmed(ui) {
         return;
     }
-    #[cfg(not(feature = "board-mk3"))]
     let scramble = crate::settings::scramble_keys();
-    #[cfg(feature = "board-mk3")]
-    let scramble = false;
     let outcome = crate::pinentry::test_login(gate, ui.panel, ui.matrix, ui.drbg, login, scramble);
     say_test(ui, HEAD, outcome);
 }
@@ -11507,7 +11418,6 @@ pub(crate) fn say_test(ui: &mut Ui<'_>, head: &str, outcome: crate::pinentry::Te
 /// typed something other than it showed would spend an attempt at every login; proving it
 /// on this device, with this PIN, before it is saved is what keeps the setting from ever
 /// being the thing that locks the owner out. Off needs no proof.
-#[cfg(not(feature = "board-mk3"))]
 fn scramble_keys_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Scramble keys";
     let on = crate::settings::scramble_keys();
@@ -11609,7 +11519,6 @@ fn calc_login_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 }
 
 /// The countdowns offered, stock's range: five minutes to twenty-eight days.
-#[cfg(not(feature = "board-mk3"))]
 const COUNTDOWN_ROWS: &[&str] = &[
     "Off",
     "5 minutes",
@@ -11627,11 +11536,9 @@ const COUNTDOWN_ROWS: &[&str] = &[
     "2 weeks",
     "4 weeks",
 ];
-#[cfg(not(feature = "board-mk3"))]
 const COUNTDOWN_MINUTES: [u32; 15] = [
     0, 5, 15, 30, 60, 120, 240, 480, 720, 1440, 2880, 4320, 10080, 20160, 40320,
 ];
-#[cfg(not(feature = "board-mk3"))]
 const _: () = assert!(COUNTDOWN_ROWS.len() == COUNTDOWN_MINUTES.len());
 
 /// Settings → Login → Login countdown.
@@ -11639,7 +11546,6 @@ const _: () = assert!(COUNTDOWN_ROWS.len() == COUNTDOWN_MINUTES.len());
 /// Every login from then on waits this long after the PIN, and **nothing skips it** -- that
 /// is what it is for. So it is asked twice, and before it is saved a ten-second sample runs
 /// on this device: the same code the login will run, seen to finish.
-#[cfg(not(feature = "board-mk3"))]
 fn login_countdown_screen(ui: &mut Ui<'_>) {
     const HEAD: &str = "Login countdown";
     let now = crate::settings::login_countdown();
@@ -11691,7 +11597,6 @@ fn login_countdown_screen(ui: &mut Ui<'_>) {
 /// Every chooser below ends here, so "saved" and "could not save" read the same wherever
 /// they come from -- and so that no screen can put a value in force that did not reach
 /// the flash. [`crate::prefs::save`] applies `next` only on a successful write.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn save_pref(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -11714,7 +11619,6 @@ pub(crate) fn save_pref(
 
 /// The quiet periods offered, stock's own range.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Idle Timeout" [C]
-#[cfg(not(feature = "board-mk3"))]
 const IDLE_ROWS: &[&str] = &[
     "Off",
     "1 minute",
@@ -11724,9 +11628,7 @@ const IDLE_ROWS: &[&str] = &[
     "30 minutes",
     "60 minutes",
 ];
-#[cfg(not(feature = "board-mk3"))]
 const IDLE_MINUTES: [u32; 7] = [0, 1, 2, 5, 15, 30, 60];
-#[cfg(not(feature = "board-mk3"))]
 const _: () = assert!(IDLE_ROWS.len() == IDLE_MINUTES.len());
 
 /// The same list for the battery, where the first row defers to the USB-power value
@@ -11752,7 +11654,6 @@ const _: () = assert!(BATTERY_IDLE_ROWS.len() == IDLE_MINUTES.len());
 /// device hands back to the bootloader, which wipes SRAM and asks for the PIN again. The
 /// note says what is in force now, because "off" and "60 minutes" look identical on a
 /// device that has simply not been left alone yet.
-#[cfg(not(feature = "board-mk3"))]
 fn idle_timeout_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Idle timeout";
     let now = crate::prefs::current();
@@ -11839,7 +11740,6 @@ fn idle_timeout_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
 /// because the question is what the signing screen will look like and the answer is on
 /// the row. Honoured by `crate::signtx::btc`, the only place in this firmware that turns
 /// satoshis into text.
-#[cfg(not(feature = "board-mk3"))]
 fn display_units_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_settings::prefs::Units;
     const HEAD: &str = "Display units";
@@ -11882,7 +11782,6 @@ fn display_units_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
 }
 
 /// The caps offered, in the order [`catcard_settings::prefs::FeeCap::CHOICES`] lists them.
-#[cfg(not(feature = "board-mk3"))]
 const FEE_ROWS: &[&str] = &["10% (default)", "25%", "50%", "No cap"];
 
 /// Settings → Max network fee.
@@ -11891,7 +11790,6 @@ const FEE_ROWS: &[&str] = &["10% (default)", "25%", "50%", "No cap"];
 /// what it sends is refused outright, before anything is signed. Raising it is a
 /// preference; **removing it is a warned choice**, asked twice, because with no cap a
 /// transaction can pay its entire value to miners and the review will still sign it.
-#[cfg(not(feature = "board-mk3"))]
 fn max_fee_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_settings::prefs::FeeCap;
     const HEAD: &str = "Max network fee";
@@ -11957,7 +11855,6 @@ fn max_fee_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
 /// type off the prefix; this switch does not touch it. Reading SLIP-132 keys on import is
 /// unconditional. Honoured by [`crate::export::generic_json`].
 /// Source: hw-reference/firmware-features.md §1; wallet-export-formats.md §A, §C [C]
-#[cfg(not(feature = "board-mk3"))]
 fn slip132_export_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "SLIP-132 export";
     let now = crate::prefs::current();
@@ -11990,7 +11887,6 @@ fn slip132_export_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 /// lives here and why switching it is asked twice. Honoured by the review and the
 /// signer in [`crate::signtx`].
 /// Source: hw-reference/firmware-features.md §5 "Sighash policy" [C]
-#[cfg(not(feature = "board-mk3"))]
 fn sighash_checks_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_settings::prefs::SighashChecks;
     const HEAD: &str = "Sighash checks";
@@ -12046,7 +11942,6 @@ fn sighash_checks_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
 
 /// On/Off for a hardware switch: what was chosen, or `None` if it was cancelled or is
 /// already what it is.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool> {
     let note = if on { "now on" } else { "now off" };
     let want = pick_row(ui, head, note, &["On", "Off"])? == 0;
@@ -12065,7 +11960,6 @@ pub(crate) fn pick_switch(ui: &mut Ui<'_>, head: &str, on: bool) -> Option<bool>
 /// switched off from this screen**, which is what makes it safe to offer -- the
 /// preference lives under the wallet's key, so it is not read until after the PIN, and a
 /// locked device always enumerates.
-#[cfg(not(feature = "board-mk3"))]
 fn usb_port_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "USB port";
     let now = crate::prefs::current();
@@ -12137,7 +12031,6 @@ fn virtual_disk_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
 /// until a screen asks [`crate::usbkbd::type_text`] to, with the owner's say-so. Off by
 /// default, and switching it on is asked twice: a host that gains a keyboard is the
 /// one change here that acts on the host rather than the device.
-#[cfg(not(feature = "board-mk3"))]
 fn keyboard_emu_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Keyboard EMU";
     let now = crate::prefs::current();
@@ -12177,7 +12070,6 @@ fn keyboard_emu_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut
 /// Whether the cursor comes round the other side at the ends of a list. Off is what every
 /// menu here did before the setting existed: pressing past the last item keeps scrolling
 /// to reveal the title.
-#[cfg(not(feature = "board-mk3"))]
 fn menu_wrap_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Menu wrapping";
     let now = crate::prefs::current();
@@ -12207,7 +12099,7 @@ fn menu_wrap_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
 ///
 /// The fingerprint is derived the moment the setting goes on, so the row it adds names
 /// a number rather than "MASTER" until some other screen happens to derive it.
-#[cfg(all(not(feature = "board-mk3"), not(feature = "board-q1")))]
+#[cfg(not(feature = "board-q1"))]
 fn home_xfp_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Home menu XFP";
     let now = crate::prefs::current();
@@ -12258,7 +12150,6 @@ fn home_xfp_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
 ///
 /// Source: hw-reference/firmware-features.md §10 [C]; wallet-export-formats.md
 /// §"Chain parameters" [C].
-#[cfg(not(feature = "board-mk3"))]
 fn testnet_mode_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use catcard_settings::prefs::Chain;
     const HEAD: &str = "Testnet mode";
@@ -12714,6 +12605,8 @@ pub(crate) fn show_doc(
 /// selectable one. On a transaction review that row is "Sign it", one key from the top
 /// of a list the owner has not read. A review list is not a menu to be crossed quickly,
 /// so it ignores the preference and stops at both ends.
+///
+/// Its one caller is the transaction review, which is not built on the mk3.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 pub(crate) fn show_doc_nowrap(ui: &mut Ui<'_>, lines: &[catcard_ui::scroll::Line<'_>]) -> DocExit {
     run_doc(ui, lines, false, false, false)

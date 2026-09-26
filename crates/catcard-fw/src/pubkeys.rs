@@ -238,9 +238,7 @@ pub(crate) fn known_fingerprint() -> Option<[u8; 4]> {
 /// The same unlock that derives an account key learns this, so a screen that has already
 /// shown an address pays nothing for it.
 ///
-/// Only the multisig import asks, and that is compiled out on the mk3, which has no
-/// settings store to register a wallet in.
-#[cfg(not(feature = "board-mk3"))]
+/// Only the multisig import asks.
 pub(crate) fn fingerprint(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,

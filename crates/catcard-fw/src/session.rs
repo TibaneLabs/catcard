@@ -144,11 +144,8 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // secret -- the pre-login blob is under a key of zero bytes -- and every failure is
     // silent and means the defaults, because a device whose settings cannot be read must
     // still ask for its PIN. `unlock` shows the nickname once the device has attached to USB.
-    #[cfg(not(feature = "board-mk3"))]
     // SAFETY: once, here, before anything else touches the settings volume.
     let prefs = unsafe { crate::settings::load_prelogin() };
-    #[cfg(feature = "board-mk3")]
-    let prefs = pinentry::LoginPrefs::default();
 
     crate::catlog!("pin: prompting");
     let (unlocked, mut login) = pinentry::unlock(&gate, &mut panel, &mut matrix, &mut drbg, prefs);
@@ -185,7 +182,6 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
     // this, the fingerprint warm-up and the first settings read each fetched the stash
     // independently -- two runs of the ~1.6 s in-element PIN stretch for one login.
     // Skipped on a device with no wallet to read.
-    #[cfg(not(feature = "board-mk3"))]
     if !no_seed {
         prime_session(&gate, &mut login, &mut panel);
     }
@@ -274,7 +270,6 @@ pub fn run(mut report: BootReport, panel: Option<display::Panel>) -> ! {
 /// [`Stored`] are both taken from it first, then it is zeroized, and only then does the
 /// (sliced) master derivation proceed. The number of times the raw secret enters RAM goes
 /// from two per login to one; it does not stay resident any longer than before.
-#[cfg(not(feature = "board-mk3"))]
 fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut display::Panel) {
     use zeroize::Zeroize as _;
 

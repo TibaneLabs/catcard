@@ -135,7 +135,6 @@ impl Shape {
     }
 
     /// Whether a multisig wallet of `kind` could have produced this shape.
-    #[cfg(not(feature = "board-mk3"))]
     fn admits_multisig(self, kind: catcard_wallet::multisig::Kind) -> bool {
         use catcard_wallet::multisig::Kind;
         match self {
@@ -157,7 +156,6 @@ enum Found {
         index: u32,
     },
     /// A registered multisig wallet, by its position in the list.
-    #[cfg(not(feature = "board-mk3"))]
     Multisig {
         wallet: usize,
         m: u8,
@@ -167,7 +165,6 @@ enum Found {
         index: u32,
     },
     /// A key in the WIF store, by its position, paid at this address type.
-    #[cfg(not(feature = "board-mk3"))]
     Wif { key: usize, kind: AddressKind },
 }
 
@@ -207,10 +204,7 @@ pub(crate) fn owned(
 
     // The cheap store first, then the seed, then the wallets that cost a derivation per
     // cosigner. Each stage is skipped when the shape says it could not match.
-    #[cfg(not(feature = "board-mk3"))]
     let mut found = search_wifs(gate, login, ui, shape, lower.as_str(), wanted);
-    #[cfg(feature = "board-mk3")]
-    let mut found: Option<Found> = None;
 
     if found.is_none() && shape.admits_any_single() {
         let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
@@ -221,7 +215,6 @@ pub(crate) fn owned(
         drop(master);
     }
 
-    #[cfg(not(feature = "board-mk3"))]
     if found.is_none() {
         found = search_multisig(gate, login, ui, shape, network, lower.as_str(), wanted);
     }
@@ -255,7 +248,6 @@ fn report(ui: &mut Ui<'_>, found: Option<Found>, network: Network) {
             crate::catlog!("verify: found at {}", line.as_str());
             menu::message(ui.panel, "Yours", line.as_str(), chain_name(chain));
         }
-        #[cfg(not(feature = "board-mk3"))]
         Some(Found::Multisig {
             wallet,
             m,
@@ -277,7 +269,6 @@ fn report(ui: &mut Ui<'_>, found: Option<Found>, network: Network) {
             crate::catlog!("verify: found in {} at {}", line.as_str(), at.as_str());
             menu::message(ui.panel, "Yours", line.as_str(), at.as_str());
         }
-        #[cfg(not(feature = "board-mk3"))]
         Some(Found::Wif { key, kind }) => {
             let _ = write!(line, "WIF store key {:02}", key + 1);
             crate::catlog!("verify: found as {} ({})", line.as_str(), kind_name(kind));
@@ -295,7 +286,6 @@ fn chain_name(chain: u32) -> &'static str {
     if chain == 1 { "change" } else { "receive" }
 }
 
-#[cfg(not(feature = "board-mk3"))]
 fn kind_name(kind: AddressKind) -> &'static str {
     match kind {
         AddressKind::P2wpkh => "native segwit",
@@ -305,7 +295,6 @@ fn kind_name(kind: AddressKind) -> &'static str {
     }
 }
 
-#[cfg(not(feature = "board-mk3"))]
 fn multisig_name(kind: catcard_wallet::multisig::Kind) -> &'static str {
     use catcard_wallet::multisig::Kind;
     match kind {
@@ -393,7 +382,6 @@ fn walk(
 /// address is that script's -- so nothing here is masked. It is slow instead: each
 /// address is two public derivations per cosigner, which is why the shape filter and
 /// the bar both matter here.
-#[cfg(not(feature = "board-mk3"))]
 fn search_multisig(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -454,7 +442,6 @@ fn search_multisig(
 /// each public key is taken masked as well; the encodings are public. A key is compared
 /// on its own network -- a testnet WIF is paid at a testnet address whatever the device
 /// is set to, which is how the store's own detail screen shows it.
-#[cfg(not(feature = "board-mk3"))]
 fn search_wifs(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

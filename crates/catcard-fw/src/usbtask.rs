@@ -1544,10 +1544,6 @@ static KBD_ON: AtomicBool = AtomicBool::new(false);
 
 /// Whether the `Keyboard EMU` switch is on.
 ///
-/// The typing side (`usbkbd`, and these `kbd_*` functions) is not built on the mk3: it
-/// has no settings store, so the switch can never be on there. [`set_keyboard`] is,
-/// because the preferences are applied on every board.
-#[cfg(not(feature = "board-mk3"))]
 pub fn keyboard_on() -> bool {
     KBD_ON.load(Ordering::Relaxed)
 }
@@ -1582,7 +1578,6 @@ pub fn set_keyboard(on: bool) {
 }
 
 /// What became of one keyboard report.
-#[cfg(not(feature = "board-mk3"))]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum KbdSend {
     /// In the endpoint's FIFO, for the host's next IN token.
@@ -1596,7 +1591,6 @@ pub enum KbdSend {
 }
 
 /// Whether a keyboard report could go out right now, without sending one.
-#[cfg(not(feature = "board-mk3"))]
 pub fn kbd_ready() -> bool {
     if !keyboard_on() || !PORT_ON.load(Ordering::Relaxed) || MSC_ACTIVE.load(Ordering::Relaxed) {
         return false;
@@ -1605,7 +1599,6 @@ pub fn kbd_ready() -> bool {
 }
 
 /// Offer one boot-keyboard report to the host. Never blocks; see [`KbdSend`].
-#[cfg(not(feature = "board-mk3"))]
 pub fn kbd_send(report: &catcard_usb::kbd::Report) -> KbdSend {
     if !kbd_ready() {
         return KbdSend::Unavailable;
@@ -1625,7 +1618,6 @@ pub fn kbd_send(report: &catcard_usb::kbd::Report) -> KbdSend {
 
 /// Whether the last keyboard report is still waiting for the host to take it. `false`
 /// when there is no keyboard at all: nothing is pending on an endpoint that is not open.
-#[cfg(not(feature = "board-mk3"))]
 pub fn kbd_busy() -> bool {
     if !kbd_ready() {
         return false;

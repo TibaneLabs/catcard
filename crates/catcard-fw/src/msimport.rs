@@ -36,12 +36,17 @@
 //! as stock does: with BIP-67 off, the order of the keys is part of the wallet, and a
 //! backup that loses it loses the addresses.
 
+#[cfg(not(feature = "board-mk3"))]
 use catcard_settings::prefs::MultisigTrust;
 use catcard_settings::store::SCRATCH;
 use catcard_settings::wallets::{self, Wallet};
-use catcard_wallet::bip32::{ChildNumber, ExtendedPrivKey, HARDENED_OFFSET};
+#[cfg(not(feature = "board-mk3"))]
+use catcard_wallet::bip32::ExtendedPrivKey;
+use catcard_wallet::bip32::{ChildNumber, HARDENED_OFFSET};
 use catcard_wallet::multisig::{self, Cosigner, Kind, Likeness, Multisig};
+#[cfg(not(feature = "board-mk3"))]
 use catcard_wallet::psbtview;
+#[cfg(not(feature = "board-mk3"))]
 use outscript::psbt::Psbt;
 
 use crate::menu;
@@ -176,6 +181,10 @@ pub(crate) fn registered(
 ///
 /// Exactly as [`registered`]: foreground only, and the caller must not hold the returned
 /// slice across another call into this module.
+///
+/// Not on the mk3: the signing path's multisig handling (`crate::signtx`) is not built
+/// there, so nothing would call it.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn trust_from_psbt(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -247,6 +256,7 @@ pub(crate) fn trust_from_psbt(
 /// produces. A store that cannot find memory still trusts the wallet for this one signing --
 /// the owner has just approved it on screen -- and says so in the log, rather than throwing
 /// away an approval over a transient shortage.
+#[cfg(not(feature = "board-mk3"))]
 fn offer_from_psbt(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -936,9 +946,11 @@ pub(crate) fn import(
 
 /// Whether `text` holds a wallet this can register: a descriptor line, or a setup file.
 ///
-/// For [`crate::sniff`], deciding what a scan or a tag brought. A descriptor is claimed
+/// For `crate::sniff`, deciding what a scan or a tag brought. A descriptor is claimed
 /// only if it parses whole, checksum included; a setup file on its shape alone, and the
-/// import says what is wrong with it.
+/// import says what is wrong with it. The mk3 has neither a scanner nor a tag, so it has
+/// no caller there.
+#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn looks_like_config(text: &str) -> bool {
     text.lines()
         .any(|line| line.contains("multi(") && multisig::parse(line.trim()).is_ok())

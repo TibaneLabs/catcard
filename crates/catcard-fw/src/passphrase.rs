@@ -252,7 +252,6 @@ fn put_in_force(
         // so the bar gets it without a second stretch.
         #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some(fingerprint));
-        #[cfg(not(feature = "board-mk3"))]
         crate::settings::open_wallet(gate, login, ui.panel, HEAD, fingerprint);
         menu::message(ui.panel, HEAD, "in force", "until reboot");
         menu::wait_for_any_key(ui);

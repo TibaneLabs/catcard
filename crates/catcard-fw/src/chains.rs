@@ -7,8 +7,6 @@
 //! in the build's order. A ticker this build does not carry is skipped.
 //! A list that names none of this build's chains is treated as absent: a picker with
 //! nothing in it would be a dead end with no way out but the back key.
-//!
-//! The mk3 has no settings store, so it shows every chain.
 
 use catcard_wallet::chain::{self, Chain};
 
@@ -50,7 +48,6 @@ fn all() -> heapless::Vec<&'static Chain, MAX> {
 }
 
 /// The owner's list, or `None` for "all of them".
-#[cfg(not(feature = "board-mk3"))]
 fn read(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -87,22 +84,13 @@ fn read(
     (!out.is_empty()).then_some(out)
 }
 
-#[cfg(feature = "board-mk3")]
-fn read(
-    _gate: &catcard_callgate::Callgate,
-    _login: &mut catcard_pin::Login,
-    _ui: &mut Ui<'_>,
-) -> Option<heapless::Vec<&'static Chain, MAX>> {
-    None
-}
-
 /// Save the list, and make it the one in force.
 ///
 /// The order is the order shown, and only the enabled chains are written: a list is what
 /// a wallet *offers*, so leaving a chain out is how it is turned off. An empty list would
 /// read back as "absent" and mean every chain (see the module note), so the one thing
 /// this refuses is turning them all off.
-#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+#[cfg(feature = "multichain")]
 pub(crate) fn save(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -147,7 +135,7 @@ pub(crate) fn save(
 /// The editor's starting state. The stored list names only what is offered, so anything
 /// missing from it is a chain that is off -- and those follow in the registry's order, so
 /// turning one on puts it somewhere predictable.
-#[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+#[cfg(feature = "multichain")]
 pub(crate) fn order(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,

@@ -289,7 +289,6 @@ pub(crate) fn set(source: Source) {
     // Everything cached belongs to the wallet that was in force a moment ago -- the
     // derived keys, and the settings file, which is a different file per wallet.
     crate::pubkeys::forget();
-    #[cfg(not(feature = "board-mk3"))]
     crate::settings::forget_key();
     // And the chains it shows, which are that wallet's too.
     #[cfg(feature = "multichain")]

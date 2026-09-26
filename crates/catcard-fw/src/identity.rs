@@ -84,7 +84,6 @@ fn bag_text(bag: &[u8; 32]) -> Text {
 ///
 /// A document rather than an info screen: the mono panels show six rows and there are
 /// more lines than that, and a page that clips is a page that hides.
-#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
 pub(crate) fn view_identity(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Identity";
     let mut rows: heapless::Vec<Text, 14> = heapless::Vec::new();
@@ -158,17 +157,13 @@ pub(crate) fn view_identity(gate: &Callgate, login: &mut catcard_pin::Login, ui:
     }
     push(t);
 
-    // The wallet's master fingerprint. Derived now if no screen has yet, on the boards
-    // with a settings store (the derivation lives beside it); the mk3 shows what it has.
+    // The wallet's master fingerprint, derived now if no screen has yet.
     let mut t = Text::new();
-    #[cfg(not(feature = "board-mk3"))]
     let fp = if crate::key::in_force() == crate::key::Source::Root {
         crate::pubkeys::fingerprint(gate, login, ui, HEAD)
     } else {
         crate::pubkeys::known_fingerprint()
     };
-    #[cfg(feature = "board-mk3")]
-    let fp = crate::pubkeys::known_fingerprint();
     match fp {
         Some([a, b, c, d]) => {
             let _ = write!(t, "fingerprint: {a:02X}{b:02X}{c:02X}{d:02X}");
@@ -389,13 +384,13 @@ pub(crate) fn dfu_upgrade(gate: &Callgate, ui: &mut Ui<'_>) {
 /// Danger zone → Settings Space: how much of the settings volume is in use.
 ///
 /// Files under `/settings` and their bytes, against the region the board table gives
-/// the volume. The filesystem's own metadata is not counted, so "used" is a floor.
-#[cfg(not(feature = "board-mk3"))]
+/// the volume. The filesystem's own metadata is not counted, so "used" is a floor. On
+/// the mk3 it is sectors of the SPI-NOR region, each wholly used or wholly free.
 pub(crate) fn settings_space(ui: &mut Ui<'_>) {
     const HEAD: &str = "Settings Space";
     let region = match catcard_board::BOARD.settings {
-        catcard_board::spec::SettingsArea::InternalFlash { len, .. } => Some(len),
-        catcard_board::spec::SettingsArea::SpiNor { .. } => None,
+        catcard_board::spec::SettingsArea::InternalFlash { len, .. }
+        | catcard_board::spec::SettingsArea::SpiNor { len, .. } => Some(len),
     };
     // SAFETY: read-only mount; nothing is written.
     let usage = match unsafe { crate::settings::Files::mount_read_only() } {

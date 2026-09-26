@@ -81,7 +81,6 @@ mod ktest;
 mod menu;
 mod msc_drive;
 /// Registering a multisig wallet from a descriptor on the card.
-#[cfg(not(feature = "board-mk3"))]
 mod msimport;
 /// The NFC tag, where a board has one: handing a phone a URL by tap.
 #[cfg(not(feature = "board-mk3"))]
@@ -135,8 +134,7 @@ mod recovery;
 #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 mod restore;
 /// Device-bound whole-card SD encryption (AES-128-XTS): session unlock state and the
-/// Encrypt/Unlock/Remove operations. Needs the settings store, so absent on the mk3.
-#[cfg(not(feature = "board-mk3"))]
+/// Encrypt/Unlock/Remove operations.
 mod sdcrypt;
 mod sdupgrade;
 /// SeedQR: the seed as a code, and a scanned code back as the seed.
@@ -146,7 +144,6 @@ mod seedxor;
 mod selftest;
 mod session;
 /// The settings store itself: slots, keys, and the screen that reads them.
-#[cfg(not(feature = "board-mk3"))]
 mod settings;
 mod signmsg;
 mod signtx;
@@ -182,20 +179,16 @@ mod txreview;
 mod ui;
 /// Deflated firmware images arriving over USB.
 mod unpack;
-/// Typing into the host as a USB keyboard. Behind the `Keyboard EMU` setting, which
-/// the mk3 has no settings store to keep, so it is not built there.
-#[cfg(not(feature = "board-mk3"))]
+/// Typing into the host as a USB keyboard. Behind the `Keyboard EMU` setting.
 mod usbkbd;
 mod usbtask;
-/// The Seed Vault: keys kept in the settings store, which the mk3 has none of.
-#[cfg(not(feature = "board-mk3"))]
+/// The Seed Vault: keys kept in the settings store.
 mod vault;
 mod verify;
 /// Checking a signed-message file from the card, which needs no key.
 mod verifysig;
 /// The WIF store: individual private keys, kept in the settings, each able to sign a
-/// matching input. Needs the settings store, so absent on the mk3.
-#[cfg(not(feature = "board-mk3"))]
+/// matching input.
 mod wifstore;
 
 /// Board this image was built for, from `build.rs`.

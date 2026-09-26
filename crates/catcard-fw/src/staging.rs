@@ -18,7 +18,7 @@ use catcard_callgate::Callgate;
 use catcard_callgate::abi::LogoutMode;
 use catcard_upgrade::StagingArea;
 #[cfg(feature = "board-mk3")]
-use catcard_upgrade::claim::{Claim, Ticket};
+use catcard_upgrade::claim::Ticket;
 
 use crate::display;
 
@@ -28,20 +28,6 @@ type Medium = catcard_upgrade::psram::PsramArea;
 #[cfg(feature = "board-mk3")]
 type Medium = catcard_upgrade::nor::NorArea<crate::nor::NorBus>;
 
-/// One holder at a time for the **mk3's** SPI-NOR.
-///
-/// Every other board stages into PSRAM, which is claimed through [`crate::psram`]
-/// because several unrelated things want it. The mk3's flash is wanted by staging
-/// alone, so it keeps its own claim rather than pretending to be part of a resource
-/// that board does not have.
-#[cfg(feature = "board-mk3")]
-static HELD: Claim = Claim::new();
-
-/// The tag the mk3's claim is taken under. It has one holder, but a claim will not be
-/// taken anonymously -- a holder that cannot be named is one a refusal cannot explain.
-#[cfg(feature = "board-mk3")]
-const NOR_STAGING: u8 = 1;
-
 /// The board's staging area, held exclusively for as long as this lives.
 ///
 /// The ticket is released when this is dropped, which is wherever the staging ends --
@@ -50,7 +36,8 @@ const NOR_STAGING: u8 = 1;
 pub struct Area {
     medium: Medium,
     /// What keeps the medium ours. On PSRAM boards this is the lease the rest of the
-    /// firmware asks for too; on mk3 it is the SPI-NOR's own ticket.
+    /// firmware asks for too; on mk3 it is the SPI-NOR's ticket ([`crate::nor::claim`]),
+    /// which the settings store takes for its slots in the same part.
     #[cfg(not(feature = "board-mk3"))]
     _lease: crate::psram::Lease,
     #[cfg(feature = "board-mk3")]
@@ -166,9 +153,15 @@ pub fn area() -> Result<Area, Unavailable> {
     }
     #[cfg(feature = "board-mk3")]
     {
-        let ticket = HELD.take(NOR_STAGING).ok_or(Unavailable::Busy)?;
-        // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone; the menu waits for
-        // an upgrade to finish before this can run again.
+        let ticket = crate::nor::claim(crate::nor::STAGING).ok_or_else(|| {
+            crate::catlog!(
+                "staging: SPI-NOR busy with {}",
+                crate::nor::holder().unwrap_or("nobody")
+            );
+            Unavailable::Busy
+        })?;
+        // SAFETY: SPI2 and the sflash pins belong to the SPI-NOR alone, and the ticket
+        // above is what says no other holder -- the settings store included -- has them.
         let nor = unsafe { crate::nor::init() }.ok_or(Unavailable::NoMedium)?;
         Ok(Area {
             medium: catcard_upgrade::nor::NorArea::new(nor),

@@ -28,11 +28,9 @@
 //! which updates the cache in the same call, so what the screen says and what the next
 //! boot will do can never disagree.
 //!
-//! # The mk3 has no settings store
-//!
-//! It keeps its slots in raw SPI-NOR, which is not wired up, so there is nothing to read
-//! or write. [`current`] still exists there and still answers -- with the defaults -- so
-//! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
+//! The medium differs by board -- LittleFS files on mk4/mk5/Q1, SPI-NOR sectors on the
+//! mk3 -- and none of that shows here: [`crate::settings::Files`] is the same name and
+//! the same two `mount` calls on every board.
 
 use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, PushTx, SighashChecks, Units};
 use catcard_wallet::bip32::Network;
@@ -205,10 +203,6 @@ fn apply(next: Prefs) {
 /// previous wallet's values means the gap between the switch and the next [`load`] is
 /// spent with the safe settings -- the fee cap in place and USB reachable -- rather than
 /// with a stranger's.
-///
-/// mk3 has no settings store, so nothing there ever loads a wallet's preferences and
-/// there is nothing to forget.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn forget() {
     apply(Prefs::default());
 }
@@ -222,7 +216,6 @@ pub(crate) fn forget() {
 /// **Every failure is silent and gives the defaults.** No settings region, no file, an
 /// unreadable slot, a blank device, a WIF key that has no file at all: all of them mean a
 /// device that works with the safe settings, not a device that will not start.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn load(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -303,17 +296,6 @@ pub(crate) fn load(
     apply(next);
 }
 
-/// The mk3's settings medium is not wired up, so there is nothing to read.
-#[cfg(feature = "board-mk3")]
-pub(crate) fn load(
-    _gate: &catcard_callgate::Callgate,
-    _login: &mut catcard_pin::Login,
-    _panel: &mut crate::display::Panel,
-    _head: &str,
-) {
-    apply(Prefs::default());
-}
-
 /// Save one preference into the wallet in force's file, then put `next` in force.
 ///
 /// `next` is the whole set as it will be once the write lands, so the caller states the
@@ -321,7 +303,6 @@ pub(crate) fn load(
 /// wrote. Nothing is applied unless the write succeeded: a setting that could not be
 /// stored must not be in force for this session either, or the next boot silently
 /// disagrees with the screen.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn save(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -366,7 +347,6 @@ pub(crate) fn save(
 /// Every preference here is written as a JSON *string*, never as a bare number or
 /// boolean, so that one reader ([`catcard_settings::prefs`]) covers all of them and a
 /// value's type can never be the thing that makes it unreadable.
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn quoted(value: &str) -> heapless::String<16> {
     let mut s: heapless::String<16> = heapless::String::new();
     let _ = s.push('"');

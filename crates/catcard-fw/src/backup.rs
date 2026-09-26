@@ -571,7 +571,6 @@ fn build_body(
 /// has never heard of comes back byte-identical.
 /// The key is [`catcard_settings::nvstore::hash_key`] over the stash we already hold,
 /// so this costs no second trip to the secure element.
-#[cfg(not(feature = "board-mk3"))]
 fn write_preferences(w: &mut body::BodyWriter<'_>, secret: &[u8; SECRET_LEN]) {
     use catcard_settings::json::Doc;
     use catcard_settings::nvstore;
@@ -599,11 +598,6 @@ fn write_preferences(w: &mut body::BodyWriter<'_>, secret: &[u8; SECRET_LEN]) {
         w.setting(e.key, e.raw);
     }
 }
-
-/// The mk3 keeps no settings blob: its medium is not wired up (`settings.rs`), so there
-/// is nothing to carry and no section to write.
-#[cfg(feature = "board-mk3")]
-fn write_preferences(_w: &mut body::BodyWriter<'_>, _secret: &[u8; SECRET_LEN]) {}
 
 // ---------------------------------------------------------------------------
 // Opening a backup: the half that restore, verify and the temporary load share

@@ -237,7 +237,6 @@ pub(crate) fn bip85(
     // Source: help-and-warning-screens.md "BIP-85 result / switch" [C]
     let typeable = matches!(kind, Kind::Password(_)) && keyboard_on();
     let take = show(ui, kind, ROWS[row], index, text, chosen.is_some(), typeable);
-    #[cfg(not(feature = "board-mk3"))]
     if take && typeable {
         crate::usbkbd::send_screen(ui, HEAD, &kind.path(index), text);
     }
@@ -245,17 +244,9 @@ pub(crate) fn bip85(
     chosen.filter(|_| take)
 }
 
-/// Whether `Keyboard EMU` is on. The mk3 has no settings store to turn it on with, and
-/// no keyboard interface built, so there it never is.
+/// Whether `Keyboard EMU` is on.
 fn keyboard_on() -> bool {
-    #[cfg(not(feature = "board-mk3"))]
-    {
-        crate::usbtask::keyboard_on()
-    }
-    #[cfg(feature = "board-mk3")]
-    {
-        false
-    }
+    crate::usbtask::keyboard_on()
 }
 
 /// Main menu → Type Passwords: a BIP-85 password child typed into the host, not shown.
@@ -266,7 +257,6 @@ fn keyboard_on() -> bool {
 /// Notes passwords are offered beside it, since they are the other thing a host's login
 /// form wants.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "Type Passwords" [C]
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn type_password_screen(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -367,10 +357,8 @@ fn derive(
 ///
 /// Warned before it is lifted, as stock warns: the cap is what keeps a child at an index
 /// its owner will remember, and the switch is kept in the wallet's own settings file, so
-/// it follows the wallet rather than the device. Not on the mk3, which has no settings
-/// store: there the cap is simply the cap.
+/// it follows the wallet rather than the device.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "B85 Idx Values" [C]
-#[cfg(not(feature = "board-mk3"))]
 pub(crate) fn index_values_screen(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

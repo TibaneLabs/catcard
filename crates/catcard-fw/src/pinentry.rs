@@ -364,8 +364,7 @@ fn checking(panel: &mut display::Panel, login: &Login, prefix: usize) {
 /// prompt. The defaults are what a device with no settings, or unreadable ones, gets.
 #[derive(Copy, Clone, Default)]
 pub struct LoginPrefs<'a> {
-    /// Shown before the prompt. Never set on the mk3, which has no settings medium.
-    #[cfg_attr(feature = "board-mk3", allow(dead_code))]
+    /// Shown before the prompt.
     pub nick: Option<&'a str>,
     /// Shuffle the number row for each half of the PIN.
     pub scramble: bool,
@@ -488,7 +487,6 @@ fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {
 /// can still reach a device sitting on this screen: the wait is indefinite from the owner's
 /// side, and the recovery path must not depend on someone being in the room. A key from the
 /// host dismisses it exactly as a key on the keypad does.
-#[cfg(not(feature = "board-mk3"))]
 pub fn show_nickname(
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
@@ -964,7 +962,6 @@ pub fn unlock(
 
     // The nickname, if the owner set one, before anything is typed -- and after `attach`,
     // so a host can reach a device that is sitting on it.
-    #[cfg(not(feature = "board-mk3"))]
     if let Some(nick) = prefs.nick {
         show_nickname(panel, matrix, drbg, nick);
     }
