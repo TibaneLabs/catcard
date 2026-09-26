@@ -456,6 +456,13 @@ pub struct Files {
 const _: () = {
     use catcard_settings::norslots::{MK3, SECTOR};
     assert!(catcard_upgrade::nor::NVSTORE_BASE == MK3.base);
+    // The linker and the image tool bound the image by the board's ceiling; the upgrade
+    // path bounds it by what staging holds. Anything the first lets through, the second
+    // must accept.
+    assert!(
+        catcard_board::BOARD.image_ceiling()
+            <= catcard_upgrade::nor::NVSTORE_BASE - catcard_fwhdr::HEADER_LEN as u32
+    );
     match catcard_board::BOARD.settings {
         catcard_board::spec::SettingsArea::SpiNor { start, len, slot } => {
             assert!(start == MK3.base);

@@ -453,6 +453,10 @@ pub struct BoardSpec {
 // versions and boards -- so it is read and validated by `catcard_callgate::entry`,
 // never baked into a board table. Source: bootloader-callgate-abi.md §0 [C].
 
+/// The trailing copy of the image header that SPI-NOR staging writes after the image.
+/// Source: hw-reference/firmware-signing.md (128-byte header) [C]
+const MK3_STAGED_HEADER: u32 = 128;
+
 impl BoardSpec {
     /// Look a board up by the name used in build features and CLI flags.
     pub fn by_name(name: &str) -> Option<&'static BoardSpec> {
@@ -466,7 +470,8 @@ impl BoardSpec {
     /// LittleFS settings volume at `0x0818_0000`, which this firmware page-erases. So the
     /// linker, the packaging tool and the upgrade path all bound the image by *this*: the
     /// flash length, or the distance to the settings area, whichever ends first. On mk3
-    /// the settings live in SPI-NOR and the two are the same number.
+    /// the settings live in SPI-NOR, and the bound is instead what SPI-NOR staging can
+    /// hold below them.
     ///
     /// Source: hw-reference/platform.md §"Mk4/Mk5/Q flash & SRAM map" [C] -- "~1.98 MB
     /// total from `0x08020000` to the FS", the FS being the LittleFS at `0x08180000`.
@@ -481,7 +486,20 @@ impl BoardSpec {
                     flash
                 }
             }
-            SettingsArea::SpiNor { .. } => flash,
+            // mk3: the image reaches main flash by way of SPI-NOR, staged from offset 0
+            // with a 128-byte copy of its header written right after it, and all of that
+            // must end below the settings slots. That is tighter than the flash above the
+            // bootloader, so it is the ceiling -- or an image that links and verifies
+            // would be refused by the upgrade path on the device.
+            // Source: hw-reference/storage.md §"mk3 firmware staging & recovery" [C];
+            // the header is 128 bytes, firmware-signing.md [C]
+            // Rounded down to a whole flash page, as every ceiling is.
+            SettingsArea::SpiNor { start, .. } => {
+                let page = self.memory.flash_page_len;
+                let staged = start.saturating_sub(MK3_STAGED_HEADER);
+                let staged = staged - staged % page;
+                if staged < flash { staged } else { flash }
+            }
         }
     }
 }
@@ -1043,11 +1061,22 @@ mod tests {
                     );
                     assert_eq!(start % m.flash_page_len, 0, "{}", b.name);
                 }
-                SettingsArea::SpiNor { .. } => {
-                    assert_eq!(ceiling, m.firmware_flash_len, "{}", b.name);
+                // The image is staged in SPI-NOR from offset 0, a 128-byte header copy
+                // after it, all below the settings slots; and it must still fit flash.
+                SettingsArea::SpiNor { start, .. } => {
+                    assert!(
+                        ceiling + MK3_STAGED_HEADER <= start,
+                        "{}: a staged image of {:#x} runs into the settings slots at {:#x}",
+                        b.name,
+                        ceiling,
+                        start
+                    );
+                    assert!(ceiling <= m.firmware_flash_len, "{}", b.name);
                 }
             }
         }
+        // The mk3's: 0xE0000 less the header copy, rounded down to a 2 KB page.
+        assert_eq!(MK3.image_ceiling(), 0x000D_F800);
         // The number the L4+ boards actually get: 0x0818_0000 - 0x0802_0000.
         assert_eq!(MK4.image_ceiling(), 0x0016_0000);
         assert_eq!(Q1.image_ceiling(), 0x0016_0000);
