@@ -247,3 +247,18 @@ attempt on every subtraction would brick itself in thirteen sums. The setting go
 only after a successful test login through the calculator, like Scramble keys. The kill
 key (release builds) is honoured for suffix digits only, the one place the screen knows
 a digit is a PIN digit.
+
+## Pairing a computer (USB)
+
+Not a menu row: a screen a host brings up. When a host pairs the encrypted USB channel
+(`docs/USB.md`, "The encrypted channel"), the device shows a six-digit code and asks —
+"Pair with this computer?" over the code on the Q1; the code in the large face with the
+question under it on the mono boards — with yes / no. The host tool prints the same code.
+Compare them: the same code on both means no relay in between; a different one means say
+no. Both people have to say yes for the session to pair, it is done afresh on every
+connection, and nothing is remembered — there is no "Paired computers" list.
+
+It takes the screen from wherever the main loop is, the way the firmware-upgrade offer
+does (an offer on the screen is answered first). Only after the PIN; one prompt at a time;
+it goes away on its own after two minutes, or when the host gives up. Stock has no
+equivalent: its USB channel is not paired.

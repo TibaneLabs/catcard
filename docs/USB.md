@@ -163,51 +163,105 @@ it is the signature.
 | `0x0010` | `UpgradeOffer` | payload is a complete signed image, raw — **not** a DfuSe container; stages and validates, installs nothing |
 | `0x0011` | `UpgradeCommit` | install what was offered, after approval **at the device** |
 | `0x0013` | `UpgradePacked` | the same image, deflated; `[u32 uncompressed length][u32 block size][deflate streams]` |
-| `0x0040` | `NcryStart` | open an encrypted channel; payload is the host's ephemeral X25519 public key, reply is the device's |
-| `0x0041` | `NcryMsg` | a command or reply sealed for that channel |
-| `0x0050`..`0x0055` | `Host*` | host-wallet commands, **inside `NcryMsg` only** -- see "Host-wallet commands" below |
+| `0x0041` | `NcryMsg` | a command or reply sealed for a **paired** channel; before pairing only a sealed `PairConfirm` is admitted |
+| `0x0042` | `PairCommit` | start pairing; payload `SHA-256("catcard-pair-v2/commit" ‖ host_pub)` (32 B), reply the device's ephemeral X25519 public key (32 B). `NotNow` before the PIN, `Busy` while a code is up or cooling down |
+| `0x0043` | `PairReveal` | payload `host_pub` (32 B), which must hash to the commitment (`BadRequest` if not); empty reply, and the device shows the code |
+| `0x0044` | `PairConfirm` | **sealed only**, inside `NcryMsg`: the host's user accepted the code. Inner reply `Ok` once paired, `NotNow` while the device's user is still deciding |
+| `0x0045` | `PairAbort` | the host's user refused or gave up: tears down any handshake or session, always `Ok` |
+| `0x0050`..`0x0055` | `Host*` | host-wallet commands, **inside a paired `NcryMsg` only** -- see "Host-wallet commands" below |
 
-### The encrypted channel (`ncry`)
+`0x0040` was v1's `NcryStart`. It is retired, not reused: a v1 host gets `UnknownOpcode`.
+`Identify` reports protocol version **2** and the capability `caps::PAIRING` (bit 7); bit 5,
+v1's `NCRY`, is retired and never set.
+
+### The encrypted channel (`ncry` v2): a code compared on every connection
 
 The framing above is in the clear, so a passive observer on the wire — a USB analyser, a
 logging hub — can read every opcode and payload. Anything that should not be seen travels
-instead inside `NcryMsg`, once a session has been negotiated.
+instead inside `NcryMsg`, once a session has been **paired**. Pairing is Bluetooth-style
+numeric comparison, done afresh on every connection: nothing is stored on either side —
+no pairing key, no list of paired computers.
 
-The handshake is one round trip, ephemeral on both sides (the Noise `NN` pattern):
+The handshake commits, then reveals; the host is the initiator:
 
 ```text
-host   → device   NcryStart, payload = host ephemeral X25519 public key (32 B)
-device → host     Ok,        payload = device ephemeral X25519 public key (32 B)
+host   → device   PairCommit   commit   = SHA-256("catcard-pair-v2/commit" ‖ host_pub)   32 B
+device → host     Ok           device_pub                                                 32 B
+host   → device   PairReveal   host_pub                                                   32 B
+device → host     Ok           (empty)      -- BadRequest, handshake dropped, on a mismatch
 ```
 
-Each side computes the X25519 shared secret and runs it through
-`HKDF-SHA256(salt = host_pub‖device_pub, ikm = shared, info = "catcard-ncry-v1")` to two
-directional keys. The device's ephemeral scalar comes from the HMAC-DRBG under its own
-domain (`catcard/drbg/usb/v1`), never the raw entropy pool and never anything key-derived.
+Both sides compute the X25519 shared secret and, with the whole transcript
+`T = commit ‖ device_pub ‖ host_pub` (96 B) as the salt:
 
-After the handshake, each direction is a ChaCha20-Poly1305 stream keyed separately, with a
+- `HKDF-SHA256(salt = T, ikm = shared, info = "catcard-ncry-v2")`, 64 bytes: the
+  host→device key, then the device→host key;
+- `HKDF-SHA256(salt = T, ikm = shared, info = "catcard-pair-v2/code")`, 8 bytes, read as a
+  big-endian `u64` mod 10^6: the **pairing code**, shown zero-padded as `123 456`.
+
+The device's ephemeral scalar comes from the HMAC-DRBG under its own domain
+(`catcard/drbg/usb/v1`), never the raw entropy pool and never anything key-derived.
+
+Then a person on each side compares:
+
+```text
+device screen     "Pair with this computer?"  398 660   yes / no
+host terminal     pairing code: 398 660 -- same code on the device? [y/N]
+host   → device   NcryMsg( seal([u16 PairConfirm]) )
+device → host     Ok, NcryMsg( seal([u16 Ok]) )       paired
+                  Ok, NcryMsg( seal([u16 NotNow]) )   the device's user has not answered: send again
+                  Declined                            the device's user said no; session gone
+                  NotNow                              no session: timed out, or torn down
+```
+
+The session is paired only when the device's user accepted **and** the host's sealed
+`PairConfirm` authenticated, in either order. Until then any sealed record other than
+`PairConfirm` is refused and tears the session down. The host's user saying no sends
+`PairAbort`, which takes the prompt off the device. The device drops an unpaired session
+after two minutes (`ncry::PROMPT_MS`), and a failed tag at any point tears it down.
+
+Rules on the device side: pairing needs the PIN (`NotNow` before it, as upgrades do); one
+pairing prompt at a time (`Busy`); and after each code shown a five-second pause before the
+next handshake (`Busy`), so the device's code cannot be re-rolled faster than a person
+reads it. The prompt takes the screen from the menu loop exactly as the upgrade offer does,
+checked after the keys are read, and an answer applies only to the prompt that was shown.
+
+**Why the commitment.** A relay in the middle runs one handshake with each side. If the
+host revealed its key up front, the relay could wait for it and then grind its own
+device-facing key offline until the two codes matched — 10^6 tries is a moment's work. With
+the commitment the host is bound before it sees anything the relay sends, and the device's
+key is fresh for each handshake, so the relay gets one guess per code a person looks at:
+one in a million, and with the pause above about two dozen guesses in the two minutes a
+host's user waits.
+
+**What v2 defends.** With the codes compared, an **active relay**: a relayed connection
+shows a different code on each screen, and the person says no. And, as v1 did, a
+**passive** observer reading the protocol.
+
+**What it does not.** A **host that is itself compromised** — it is the genuine other end,
+and pairing with it is exactly what the person agreed to; the channel protects the wire,
+not the computer. And a **person who accepts without comparing** the codes — the code is
+the whole defence, and a yes pressed without reading it defends nothing.
+
+After pairing, each direction is a ChaCha20-Poly1305 stream keyed separately, with a
 per-direction message counter as the nonce — used once, never reused. The receiver derives
 the nonce from the count it expects next, so a replayed or reordered record authenticates
 against the wrong nonce and is refused; any authentication failure tears the session down.
 A sealed record is `[ciphertext][16-byte tag]`, and the plaintext inside is an ordinary
 message: `[u16 opcode][payload]` in, `[u16 status][payload]` out, dispatched as if it had
-arrived in the clear.
-
-**What it defends.** Both keys are ephemeral and neither party is authenticated, so this
-stops a *passive* eavesdropper reading the protocol. It does **not** stop an *active*
-man-in-the-middle that relays the handshake: with no static device identity to bind, the
-two ends cannot tell a relay from the wire. Device authentication — a static device key and
-an on-screen session fingerprint — is a later, version-bumped step; the `info` string
-carries the version so an authenticated `v2` cannot be confused for this `v1`.
+arrived in the clear. `Identify`, `Ping` and `ReadLog` remain available in the clear too, as
+they always were; the channel is what commands that need an authenticated host require.
 
 The bulk upgrade opcodes are deliberately left in the clear and are not accepted inside the
 channel: the image is public and signed, its integrity already guaranteed, and it streams
 to staging without being buffered whole, which a per-message seal would break.
 
-`tools/usbclient.py hid <image> --ncry` negotiates a session and runs `Identify`, a log
-page and a `Ping` through it, then checks that a tampered record is rejected.
-`tools/ncry.py --selftest` checks the host crypto against a vector baked into the firmware
-unit tests, so the two implementations cannot silently diverge.
+`tools/usbclient.py hid --pair` (or `--ncry`) pairs — printing the code and asking — then
+runs `Identify`, a log page and a `Ping` through the channel and checks that a tampered
+record is rejected. Other commands pair through the same `open_session()` helper.
+`tools/ncry.py --selftest` checks the host crypto against the v2 vector baked into the
+firmware unit tests (commitment, code `398 660`, and a sealed record), so the two
+implementations cannot silently diverge.
 
 ### The log, which is the only diagnostic that does not need a screen
 
@@ -588,7 +642,7 @@ with one address, its full path (`m/44'/60'/n'/0/0`, `m/44'/195'/n'/0/0`,
 The device then **remembers, for this session only**, the account paths it showed --
 each (chain, `m/purpose'/coin'/account'`). A later approval in the same session replaces
 the list. It lives in the channel's per-session state and is dropped with the session: a
-new `NcryStart`, a teardown after a bad record, a bus reset, logout or idle logout (both
+new pairing (`PairCommit`), a teardown after a bad record, `PairAbort`, a bus reset, logout or idle logout (both
 reboot), and a change of the wallet in force (a passphrase).
 
 #### Signing
@@ -680,15 +734,20 @@ size, tears the session down.
 
 #### What this defends, and what it does not
 
-`ncry` v1 is unauthenticated: both keys are ephemeral and the device has no identity to
-prove. A **passive** observer on the wire learns nothing -- not the addresses, not the
-keys, not the transaction. An **active man-in-the-middle** that relays the handshake can
-see which addresses the person chose to share, and can relay (or substitute) requests.
-What it **cannot** do is get anything signed that the person did not approve on the
-device's own screen: the review shows what the device parsed -- the amounts, the
-destinations, the fee, the signing address -- never what the host said it means, and
-only keys under accounts the person chose to share can sign at all. Pairing, which binds
-the channel to a code shown on both screens, is the next step, and it changes one method.
+These commands run only on a **paired** session (`Channel::host_wallet_allowed`): the
+handshake committed before it revealed, both screens showed the same six-digit code, and
+the person accepted it on the device while the host's user accepted it on the computer.
+A **passive** observer on the wire learns nothing -- not the addresses, not the keys, not
+the transaction. An **active relay** in the middle produces a different code on each
+side, which the person sees and refuses; its one way through is a person who accepts
+without comparing, or a one-in-a-million code collision per attempt (the device waits a
+few seconds after each code shown, so attempts cannot be ground through).
+
+What pairing does **not** defend against is a computer that is itself compromised: it
+holds a genuine paired session. What protects the owner then is the same as for every
+other signing path: the review shows what the device parsed -- the amounts, the
+destinations, the fee, the signing address -- never what the host said it means, and only
+keys under accounts the person chose to share in this session can sign at all.
 
 `tools/usbclient.py hid --addresses` and
 `tools/usbclient.py hid --sign FILE --chain btc|evm|sol --key m/84h/0h/0h/0/3 [--key ...]
