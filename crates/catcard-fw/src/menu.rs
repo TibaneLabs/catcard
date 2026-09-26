@@ -4832,6 +4832,16 @@ fn shannon_bits(hist: &[u32; 256], total: u64) -> f32 {
     (flog2(n) - acc / n).clamp(0.0, 8.0)
 }
 
+/// Write `x` (0..=8, from [`shannon_bits`]) with two decimals, as `{:.2}` would.
+///
+/// Integer formatting only: `{:.2}` on a float links core's float-to-decimal code, about
+/// 9 KB of flash for this one readout. Rounded half up to hundredths; the value is
+/// clamped non-negative, so the float-to-int cast cannot wrap.
+fn write_hundredths(out: &mut Line, x: f32) -> core::fmt::Result {
+    let h = (x.max(0.0) * 100.0 + 0.5) as u32;
+    write!(out, "{}.{:02}", h / 100, h % 100)
+}
+
 /// Degrees of freedom for a 256-bin byte histogram, and the standard deviation of the
 /// chi-squared distribution at that df (`sqrt(2*df)`), for reading a statistic as a
 /// rough number of sigmas.
@@ -5020,7 +5030,7 @@ fn analyze_rng(gate: &Callgate, ui: &mut Ui<'_>) {
             last_h = now;
             for i in 0..RNG_SOURCES {
                 h_text[i].clear();
-                let _ = write!(h_text[i], "{:.2}", shannon_bits(&hist[i], total[i]));
+                let _ = write_hundredths(&mut h_text[i], shannon_bits(&hist[i], total[i]));
                 chi2[i] = chi2_uniform(&hist[i], total[i]);
             }
         }

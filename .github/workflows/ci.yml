@@ -46,7 +46,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
-          components: clippy
+          components: clippy, llvm-tools
       - uses: Swatinem/rust-cache@v2
 
       # `mk4-mk5` is one image for two boards: built for mk5 and marked as accepted by
@@ -120,6 +120,21 @@ jobs:
             exit 1
           fi
           echo "no debug monitor and no key injection in this image"
+
+      # Formatting a float (`{:.2}` on an f32, say) links core's float-to-decimal code,
+      # about 10 KB of flash, for what is always a readout that integers can print. The
+      # firmware does its float maths on the FPU and prints fixed-point; this keeps the
+      # formatter from coming back unnoticed.
+      - name: No float formatting
+        run: |
+          set -euo pipefail
+          nm="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-nm"
+          elf=target/thumbv7em-none-eabihf/release/catcard-fw
+          if "$nm" -C "$elf" | grep -E "flt2dec|dec2flt|fmt::float"; then
+            echo "::error::float formatting is linked into the firmware; print fixed-point instead"
+            exit 1
+          fi
+          echo "no float formatting in this image"
 
       # The build only proves it links. This proves the image the bootloader would
       # actually see is well-formed: header at 0x3F80, 512-aligned, signature over the
