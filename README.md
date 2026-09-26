@@ -91,10 +91,12 @@ genuinely independent of that source — see [`CLEANROOM.md`](CLEANROOM.md).
   derivation path of your own, shown in every type it could be spent as; a CSV of index,
   path and address to the card; Verify address; registered multisig wallets; the other
   chains' formats on a multichain build.
-- **Signing.** PSBT signing for single-sig (P2PKH, P2SH-P2WPKH, P2WPKH and P2TR key
-  path) and registered multisig, with the fee shown and capped and change proven by
-  re-deriving it. Messages too: typed or read off a text file, signed the legacy way or
-  under BIP-322, and a signed file checked against the address it names.
+- **Signing.** PSBT (v0 and BIP-370 v2, handed back in the version it came in) signing
+  for single-sig (P2PKH, P2SH-P2WPKH, P2WPKH, bare P2PK and P2TR key path) and
+  registered multisig, with the fee shown and capped, change proven by re-deriving it,
+  and a warning on change parked on an unusual path. Messages too: typed or read off a
+  text file, signed the legacy way or under BIP-322, and a signed file checked against
+  the address it names.
 - **Transfer.** USB HID, microSD (browse, format, import, export), firmware upgrade from
   either, and on the Q1 a QR scanner with BBQr and BC-UR. The NFC tag carries three
   things: a fully signed transaction goes out as a link, and a phone that taps the device

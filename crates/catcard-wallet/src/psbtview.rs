@@ -200,9 +200,9 @@ impl Unusual {
     pub fn text(self) -> &'static str {
         match self {
             Unusual::OtherAccount => "another account",
-            Unusual::FarIndex { .. } => "index far past the inputs",
-            Unusual::Hardened => "hardened where none is expected",
-            Unusual::ReceiveBranch => "on the receive branch",
+            Unusual::FarIndex { .. } => "index far past inputs",
+            Unusual::Hardened => "hardened level",
+            Unusual::ReceiveBranch => "receive branch",
         }
     }
 }
