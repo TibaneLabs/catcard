@@ -581,6 +581,9 @@ pub(crate) struct HostOut<'a> {
     len: usize,
     /// The keys the request listed: the only ones that may sign.
     pub keys: &'a [KeyPath],
+    /// Every derived key of ours may sign, `keys` notwithstanding: a ckcc-mode host,
+    /// whose protocol lists no keys (`crate::ckcc`). Stored WIF keys still never do.
+    pub every_key: bool,
     ticket: u32,
     end: End,
     /// A line for the "sent back" screen: how complete the result is.
@@ -602,6 +605,7 @@ impl<'a> HostOut<'a> {
             block: None,
             len: 0,
             keys,
+            every_key: false,
             ticket,
             end: End::Nothing,
             note: heapless::String::new(),
@@ -1016,7 +1020,7 @@ fn sign(
 
     match chain {
         ChainId::Bitcoin => {
-            crate::signtx::host_sign(gate, login, ui, buf, tx_at, tx_len, &keys, ticket)
+            crate::signtx::host_sign(gate, login, ui, buf, tx_at, tx_len, &keys, ticket, false)
         }
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
         ChainId::Ethereum => {

@@ -102,11 +102,13 @@ impl<'b> Sink<'_, 'b> {
         }
     }
 
-    /// The keys a USB request listed, or `None` when every key of ours may sign.
+    /// The keys a USB request listed, or `None` when every key of ours may sign: a card
+    /// or a QR, or a ckcc-mode host, whose protocol names no keys (stock signs with all
+    /// of them).
     pub(crate) fn listed(&self) -> Option<&'b [catcard_wallet::hostkeys::KeyPath]> {
         match self {
-            Sink::Host(out) => Some(out.keys),
-            Sink::Files { .. } => None,
+            Sink::Host(out) if !out.every_key => Some(out.keys),
+            Sink::Host(_) | Sink::Files { .. } => None,
         }
     }
 }
@@ -865,9 +867,10 @@ pub(crate) fn review_and_sign(
         { catcard_settings::wifs::MAX_KEYS },
     > = heapless::Vec::new();
     // A computer's request signs with the keys it listed, which are all derivation
-    // paths; a stored WIF key has none, so it is not loaded for one.
+    // paths; a stored WIF key has none, so it is not loaded for one. Nor for a ckcc-mode
+    // host, which lists nothing: stored WIF keys never sign for a computer.
     #[cfg(not(feature = "board-mk3"))]
-    if sink.listed().is_none() {
+    if !matches!(sink, Sink::Host(_)) {
         crate::wifstore::load_keys(gate, login, ui.panel, &mut wif_keys);
     }
     #[cfg(not(feature = "board-mk3"))]
@@ -1420,6 +1423,7 @@ pub(crate) fn host_sign(
     tx_len: usize,
     keys: &[catcard_wallet::hostkeys::KeyPath],
     ticket: u32,
+    every_key: bool,
 ) -> Outcome {
     #[cfg(not(feature = "board-mk3"))]
     {
@@ -1441,6 +1445,7 @@ pub(crate) fn host_sign(
             Err(why) => return Outcome::Refused(why),
         };
         let mut out = HostOut::new(Some(result), keys, ticket);
+        out.every_key = every_key;
         review_and_sign(gate, login, ui, buf, spare, len, &mut Sink::Host(&mut out));
         let done = out.finish();
         crate::hostwallet::outcome_of(done, Some(HostBuf::Psram(lease)), work)
@@ -1464,6 +1469,7 @@ pub(crate) fn host_sign(
             Err(why) => return Outcome::Refused(why),
         };
         let mut out = HostOut::new(None, keys, ticket);
+        out.every_key = every_key;
         review_and_sign(gate, login, ui, buf, spare, len, &mut Sink::Host(&mut out));
         crate::hostwallet::outcome_of(out.finish(), None, 0)
     }
