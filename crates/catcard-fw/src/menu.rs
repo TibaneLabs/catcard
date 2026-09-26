@@ -156,6 +156,9 @@ enum Screen {
     /// A run of one account's receive addresses, written to the card as CSV.
     AddressCsv,
     BrowseSd,
+    /// What card is in the slot: its CID (manufacturer, product, serial, date), capacity
+    /// and filesystem. Read-only — brings the card up but writes nothing.
+    CardDetails,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
     /// Write or read the encrypted backup file.
@@ -598,6 +601,7 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "Paper wallet",
     "Browse SD card",
+    "Card details",
     "Format SD card",
     "Games",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
@@ -619,6 +623,7 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "Paper wallet",
     "Browse SD card",
+    "Card details",
     "Format SD card",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
@@ -1831,6 +1836,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Export wallet")) => Screen::ExportMenu,
             (Key::Confirm, Some("Backup")) => Screen::BackupMenu,
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
+            (Key::Confirm, Some("Card details")) => Screen::CardDetails,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
@@ -1907,6 +1913,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             Key::Confirm => Screen::PsramProbe,
             _ => Screen::Debug,
         },
+        // Card details is an info screen reached from Utils, so any key returns there
+        // rather than to the Debug fallback below.
+        Screen::CardDetails => Screen::Utils,
         // Every info screen leaves on any key, back to the drawer it was opened from.
         //
         // A **menu** that reaches here has simply forgotten to say what its keys do, and
@@ -2316,6 +2325,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Kernel => kernel_screen(panel),
         Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
+        Screen::CardDetails => card_details_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
         Screen::Logs => {}
         // Handled in `run`; never drawn.
@@ -11438,6 +11448,136 @@ fn sd_screen(panel: &mut display::Panel) {
 
     let _ = lines.push(reg_line("STA    ", dev.status()));
     info(panel, "microSD", &lines);
+}
+
+/// Utils → "Card details": what card is in the slot, from its CID, and how it is
+/// formatted.
+///
+/// Read-only with respect to the card. It brings the controller and card up to read the
+/// CID and capacity, then mounts the volume purely to learn its filesystem type; nothing
+/// is ever written. The CID decode lives in `catcard_sd::cid`; here we only lay it out on
+/// the six lines this panel has.
+fn card_details_screen(panel: &mut display::Panel) {
+    use catcard_hal::sdmmc::Sdmmc;
+    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
+
+    // Phase 1: bring the card up and read its identity, then drop the controller so the
+    // filesystem probe below can claim SDMMC1 for itself.
+    let card = {
+        // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is the only user.
+        let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+            Ok(d) => d,
+            Err(e) => {
+                let mut l = Line::new();
+                let _ = write!(l, "controller: {}", describe_sd(&e));
+                let _ = lines.push(l);
+                info(panel, "Card details", &lines);
+                return;
+            }
+        };
+        match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut l = Line::new();
+                let _ = write!(l, "card: {}", describe_sd(&e));
+                let _ = lines.push(l);
+                info(panel, "Card details", &lines);
+                return;
+            }
+        }
+    };
+
+    let cid = card.cid();
+
+    // Manufacturer: the name if the small table knows the MID, else the raw byte.
+    let mut l = Line::new();
+    match cid.mid_name() {
+        Some(name) => {
+            let _ = write!(l, "{}", name);
+        }
+        None => {
+            let _ = write!(l, "mfr {:#04x}", cid.mid());
+        }
+    }
+    let _ = lines.push(l);
+
+    // Product name (five ASCII bytes) and revision major.minor. Non-printable bytes are
+    // shown as '?' so a garbled CID cannot smuggle control characters onto the screen.
+    let mut l = Line::new();
+    for &b in &cid.pnm() {
+        let c = if b.is_ascii_graphic() || b == b' ' {
+            b as char
+        } else {
+            '?'
+        };
+        let _ = l.push(c);
+    }
+    let (maj, min) = cid.prv();
+    let _ = write!(l, " r{}.{}", maj, min);
+    let _ = lines.push(l);
+
+    // Serial number, hex — the stable per-card identifier.
+    let mut l = Line::new();
+    let _ = write!(l, "SN {:08x}", cid.psn());
+    let _ = lines.push(l);
+
+    // Manufacture date, year-month.
+    let mut l = Line::new();
+    let _ = write!(l, "made {}-{:02}", cid.mdt_year(), cid.mdt_month());
+    let _ = lines.push(l);
+
+    // Capacity in MiB, plus the marketing GB (10^9 bytes) the card's own label uses.
+    let mut l = Line::new();
+    let bytes = card.blocks as u64 * catcard_sd::BLOCK_LEN as u64;
+    let gb = (bytes + 500_000_000) / 1_000_000_000;
+    let _ = write!(l, "{} MiB (~{} GB)", card.mib(), gb);
+    let _ = lines.push(l);
+
+    // Filesystem: mount FAT then exFAT only to name the format. This re-initialises the
+    // card (the phase-1 controller was dropped above); it stays read-only.
+    let mut why = "card error";
+    let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
+        // SAFETY: the phase-1 controller was dropped; nothing else holds SDMMC1 now.
+        let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+            Ok(d) => d,
+            Err(_) => {
+                why = "controller failed";
+                return Err(());
+            }
+        };
+        let card = match catcard_sd::init(&mut dev) {
+            Ok(c) => c,
+            Err(_) => {
+                why = "would not start";
+                return Err(());
+            }
+        };
+        Ok(catcard_sd::Sectors::new(dev, card))
+    });
+    let mut l = Line::new();
+    match mount {
+        Ok(vol) => {
+            let fs = match &vol {
+                // FAT12/16/32 come straight from the mounted volume's geometry.
+                catcard_sd::AnyVolume::Fat(v) => match v.kind() {
+                    catcard_sd::fat::FatKind::Fat12 => "FAT12",
+                    catcard_sd::fat::FatKind::Fat16 => "FAT16",
+                    catcard_sd::fat::FatKind::Fat32 => "FAT32",
+                },
+                catcard_sd::AnyVolume::Exfat(_) => "exFAT",
+            };
+            let _ = write!(l, "format {}", fs);
+        }
+        Err(catcard_sd::MountError::NoFilesystem) => {
+            let _ = write!(l, "no filesystem");
+        }
+        Err(catcard_sd::MountError::Device) => {
+            let _ = write!(l, "fs: {}", why);
+        }
+    }
+    let _ = lines.push(l);
+
+    info(panel, "Card details", &lines);
 }
 
 /// An SD error in the few characters a line has.

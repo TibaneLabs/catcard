@@ -81,7 +81,9 @@ impl Transport for FakeCard {
                 let ccs = if self.high_capacity { OCR_CCS } else { 0 };
                 Ok([OCR_BUSY_DONE | ccs, 0, 0, 0])
             }
-            CMD_ALL_SEND_CID => Ok([0xAAAA_AAAA, 0, 0, 0]),
+            // A real-shaped CID so bring-up has something to keep: SanDisk "SC32G",
+            // PSN 0x1234_5678. See the CID decode's known-answer test.
+            CMD_ALL_SEND_CID => Ok([0x0353_4453, 0x4333_3247, 0x3012_3456, 0x7801_2901]),
             CMD_SEND_RCA => Ok([0x1234 << 16, 0, 0, 0]),
             CMD_SEND_CSD => Ok(self.csd),
             CMD_SELECT => {
@@ -156,6 +158,21 @@ fn the_commands_go_out_in_the_order_the_spec_requires() {
         CMD_SELECT,
     ];
     assert_eq!(seen, &expected, "bring-up order changed");
+}
+
+/// Bring-up keeps the CID from CMD2 rather than discarding it, and the serial accessor
+/// reads the PSN back out of it — the field a later feature keys settings by, so a
+/// regression here must fail a test rather than a device.
+#[test]
+fn init_retains_the_cid_and_exposes_the_serial() {
+    let mut c = FakeCard::default();
+    let card = init(&mut c).expect("init");
+    assert_eq!(
+        card.cid,
+        [0x0353_4453, 0x4333_3247, 0x3012_3456, 0x7801_2901]
+    );
+    assert_eq!(card.serial(), 0x1234_5678);
+    assert_eq!(&card.cid().pnm(), b"SC32G");
 }
 
 /// Every ACMD must be preceded by CMD55. One that is not is an ordinary command with
@@ -376,6 +393,7 @@ mod fat_round_trip {
             addressing: Addressing::BlockAddressed,
             blocks: SECTORS,
             wide: true,
+            cid: [0; 4],
         };
         fat::Volume::<_, 512>::mount_auto(Sectors::new(card, c)).expect("mount through card")
     }
@@ -424,6 +442,7 @@ mod fat_round_trip {
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
                 wide: true,
+                cid: [0; 4],
             },
         );
 
@@ -529,6 +548,7 @@ mod fat_round_trip {
         addressing: Addressing::BlockAddressed,
         blocks: 64,
         wide: true,
+        cid: [0; 4],
     };
 
     #[test]
@@ -618,6 +638,7 @@ mod fat_round_trip {
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
                 wide: true,
+                cid: [0; 4],
             },
         )
     }
@@ -719,6 +740,7 @@ mod fat_round_trip {
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
                 wide: true,
+                cid: [0; 4],
             },
         );
         let block = [0u8; BLOCK_LEN];

@@ -18,6 +18,9 @@
 /// internal page size, and SDHC/SDXC address *in* blocks rather than bytes.
 pub const BLOCK_LEN: usize = 512;
 
+pub mod cid;
+pub use cid::Cid;
+
 /// What went wrong. No variant means "probably fine".
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -158,12 +161,31 @@ pub struct Card {
     pub blocks: u32,
     /// Whether the bus is running four bits wide.
     pub wide: bool,
+    /// The card's CID register, captured during bring-up (CMD2), as four words most
+    /// significant first. Never changes over the life of the card; decode it with
+    /// [`Card::cid`]. Kept raw because most of it is only ever shown on a screen, and the
+    /// one field that is load-bearing — the serial number — has its own accessor.
+    pub cid: [u32; 4],
 }
 
 impl Card {
     /// Capacity in whole mebibytes, for a screen.
     pub fn mib(&self) -> u32 {
         self.blocks / 2048
+    }
+
+    /// The decoded CID.
+    pub fn cid(&self) -> Cid {
+        Cid::new(self.cid)
+    }
+
+    /// The card's 32-bit product serial number (CID PSN).
+    ///
+    /// A stable per-card identifier: it is fixed at manufacture and reported the same on
+    /// every bring-up. A later feature keys device settings by it, so this is the one CID
+    /// field with a dedicated accessor rather than being dug out of the raw words.
+    pub fn serial(&self) -> u32 {
+        self.cid().psn()
     }
 }
 
@@ -247,7 +269,9 @@ pub fn init<T: Transport>(t: &mut T) -> Result<Card, Error> {
         Addressing::ByteAddressed
     };
 
-    t.command(CMD_ALL_SEND_CID, 0, Response::Long)?;
+    // CMD2's long response *is* the CID; keep it rather than throwing it away and asking
+    // again with CMD10, which would be a second bus round-trip for the same 128 bits.
+    let cid = t.command(CMD_ALL_SEND_CID, 0, Response::Long)?;
 
     // The card picks its own address and tells us; it lives in the top 16 bits.
     let r = t.command(CMD_SEND_RCA, 0, Response::Short)?;
@@ -271,6 +295,7 @@ pub fn init<T: Transport>(t: &mut T) -> Result<Card, Error> {
         addressing,
         blocks,
         wide,
+        cid,
     })
 }
 
