@@ -2739,9 +2739,12 @@ fn grid_frame(c: &mut display::Surface<'_>, items: &[&str], cursor: usize, off: 
 fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, off: usize) {
     // Scrolled or not: a slide left the panel's start where it ended, and a redraw in
     // place goes out through that origin rather than putting it back.
-    display::draw_scrolled(panel, &catcard_ui::art::menuicons::PALETTE, |c| {
-        grid_frame(c, items, cursor, off)
-    });
+    display::draw_scrolled(
+        panel,
+        &catcard_ui::art::menuicons::PALETTE,
+        catcard_ui::grid::EDGE,
+        |c| grid_frame(c, items, cursor, off),
+    );
 }
 
 /// Draw the page the cursor has moved to, sliding it in from the side it is on.
@@ -2758,11 +2761,15 @@ fn slide_grid(
     right: bool,
     dist: usize,
 ) {
+    // The edge hints and the page dots belong to the screen, not the strip: the panel
+    // holds the edge columns still, and the dots' rows are repainted where they are.
     display::slide_frame_by(
         panel,
         &catcard_ui::art::menuicons::PALETTE,
         right,
         dist,
+        catcard_ui::grid::EDGE,
+        catcard_ui::grid::dots_rows(display::SCREEN_H, items.len()),
         |c| grid_frame(c, items, cursor, off),
     );
 }

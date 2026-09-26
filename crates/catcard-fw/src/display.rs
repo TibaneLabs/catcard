@@ -287,12 +287,22 @@ pub const SURROUND: u16 = catcard_ui::st7789::rgb565(0x30, 0x30, 0x30);
 ///
 /// Falls back to an ordinary full flush if the panel refuses a command, so a failure here
 /// costs the animation and not the screen.
+///
+/// # What holds still
+///
+/// `edges` columns at each side are the panel's fixed areas for as long as the picture is
+/// scrolled this way ([`draw_scrolled`] sets them up): only the ring between them turns,
+/// so whatever is drawn at the edges -- the grid's "more this way" hints -- does not
+/// move. `still` rows (below the bar, in the frame's coordinates) are repainted each step
+/// where they belong, as the status bar is -- the grid's page dots.
 #[cfg(feature = "board-q1")]
 pub fn slide_frame_by(
     panel: &mut Panel,
     content: &[u16; 16],
     right: bool,
     dist: usize,
+    edges: usize,
+    still: Option<(usize, usize)>,
     f: impl FnOnce(&mut Surface<'_>),
 ) {
     use core::sync::atomic::Ordering;
@@ -319,53 +329,34 @@ pub fn slide_frame_by(
     // SAFETY: foreground, single core, not inside a flush.
     unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
 
-    let dist = dist.clamp(1, catcard_ui::st7789::WIDTH);
-    let whole = dist == catcard_ui::st7789::WIDTH;
-    let slid = slide(panel, screen, content, right, dist);
-    // SAFETY: foreground, single core, not inside a flush.
-    let cache = unsafe { &mut *core::ptr::addr_of_mut!(ROWS_SENT) };
-    if slid && whole {
-        // Every line below the bar holds the new frame, and the bar is home: tell the
-        // cache, so the next flush sends the bar if it changed and nothing else.
-        cache.note(screen, BAR_H);
+    // The panel must already be set up with these fixed edges -- the frame on it was
+    // drawn that way. If it is not, there is no coherent picture to slide from: set it up
+    // and send the frame whole instead.
+    if panel.fixed() == (edges, edges) {
+        slide(panel, screen, content, right, dist, still);
     } else {
-        // A partial slide leaves the old frame shifted, which is the new one except where
-        // it is not a pure shift; a failed one leaves anything. Either way the frame goes
-        // out whole, through whatever origin the panel is at now.
-        cache.invalidate();
+        let _ = panel.set_scroll(edges, edges, 0);
     }
+    // After a slide the ring holds the old frame shifted -- the new one except where the
+    // frames differ by more than a shift, the cursor -- and a failed step leaves anything.
+    // Either way the frame goes out whole, through whatever origin the panel is at now.
+    // SAFETY: foreground, single core, not inside a flush.
+    unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
     show(panel, screen, content, BAR_H);
     DRAWING.store(false, Ordering::SeqCst);
 }
 
-/// Paint raw frame-memory lines `[from, from + n)`, wrapping past the last line, with
-/// the colour `f(line, y)` gives for rows `y0..y0 + h`.
-#[cfg(feature = "board-q1")]
-fn paint_lines(
-    panel: &mut Panel,
-    from: usize,
-    n: usize,
-    y0: usize,
-    h: usize,
-    mut f: impl FnMut(usize, usize) -> u16,
-) -> bool {
-    use catcard_ui::st7789::WIDTH;
-    let from = from % WIDTH;
-    let first = n.min(WIDTH - from);
-    let ok = panel
-        .paint_memory(from, y0, first, h, |dx, dy| f(from + dx, dy))
-        .is_ok();
-    ok && (first == n || panel.paint_memory(0, y0, n - first, h, f).is_ok())
-}
-
-/// Move the picture `dist` columns sideways, painting the incoming columns as they are
-/// needed. `true` if the panel did it.
+/// Turn the ring between the panel's fixed edges by `dist` columns, painting the incoming
+/// columns as they are needed. `true` if the panel did it.
 ///
-/// Screen position `p` shows frame-memory line `(start + p) mod 320`, so the lines that
-/// have just left one edge are the ones about to arrive at the other: each step fills the
-/// lines it is about to expose and then moves the start past them. The new frame's column
-/// `c` belongs in line `(end + c) mod 320`, where `end` is the start the slide finishes
-/// at -- which is how each incoming line knows which column of the new frame it holds.
+/// The middle columns form a ring of lines `first..WIDTH - last`, and the column just
+/// inside the left edge is read from ring position `origin`: so the lines that have just
+/// left one side of the ring are the ones about to arrive at the other, and each step
+/// fills the lines it is about to expose before it turns the ring past them. The new
+/// frame's column `c` belongs at ring position `(end + c - first) mod ring`, where `end`
+/// is the origin the slide finishes at -- which is how each incoming line knows which
+/// column of the new frame it holds. The fixed edges are never touched: they stay as the
+/// last frame drew them until the flush that follows.
 #[cfg(feature = "board-q1")]
 fn slide(
     panel: &mut Panel,
@@ -373,6 +364,7 @@ fn slide(
     content: &[u16; 16],
     right: bool,
     dist: usize,
+    still: Option<(usize, usize)>,
 ) -> bool {
     use catcard_ui::canvas::Canvas as _;
     use catcard_ui::st7789::{GREYS, HEIGHT, WIDTH};
@@ -382,37 +374,55 @@ fn slide(
     /// for every column.
     const STEP: usize = 16;
 
+    let (first, last) = panel.fixed();
+    let ring = WIDTH - first - last;
+    let dist = dist.clamp(1, ring);
     let origin = panel.origin();
-    // Coming from the right the picture moves left and the start rises; coming from the
-    // left it moves right and the start falls.
+    // Coming from the right the picture moves left and the ring turns forward; coming
+    // from the left it moves right and the ring turns back.
     let end = if right {
-        (origin + dist) % WIDTH
+        (origin + dist) % ring
     } else {
-        (origin + WIDTH - dist) % WIDTH
+        (origin + ring - dist) % ring
     };
-    let whole = dist == WIDTH;
     let mut done = 0;
     while done < dist {
         let run = STEP.min(dist - done);
-        let (lines, start) = if right {
-            (origin + done, origin + done + run)
+        // The ring positions about to come into view, and where the ring turns to.
+        let (from, turn) = if right {
+            ((origin + done) % ring, (origin + done + run) % ring)
         } else {
-            let at = origin + 2 * WIDTH - done - run;
+            let at = (origin + 2 * ring - done - run) % ring;
             (at, at)
         };
-        let painted = paint_lines(panel, lines, run, BAR_H, HEIGHT - BAR_H, |line, dy| {
-            let c = (line + WIDTH - end) % WIDTH;
-            content[screen.get(c, BAR_H + dy) as usize]
-        });
-        if !painted || panel.set_origin(start).is_err() {
+        // Up to two runs of memory lines: the ring wraps back to its start.
+        let first_run = run.min(ring - from);
+        let mut painted = true;
+        for (pos, n) in [(from, first_run), (0, run - first_run)] {
+            if n == 0 || !painted {
+                continue;
+            }
+            painted = panel
+                .paint_memory(first + pos, BAR_H, n, HEIGHT - BAR_H, |dx, dy| {
+                    let c = first + (pos + dx + ring - end) % ring;
+                    content[screen.get(c, BAR_H + dy) as usize]
+                })
+                .is_ok();
+        }
+        if !painted || panel.set_scroll(first, last, turn).is_err() {
             // Back where it started, before giving up: the caller flushes the frame whole
             // through that origin, so nothing half-scrolled survives.
-            let _ = panel.set_origin(origin);
+            let _ = panel.set_scroll(first, last, origin);
             return false;
         }
-        // A partial slide keeps the bar still by repainting it under the new start.
-        if !whole {
-            let _ = panel.paint(0, 0, WIDTH, BAR_H, |x, y| GREYS[screen.get(x, y) as usize]);
+        // The rows that belong to the screen rather than the strip, repainted where they
+        // are under the new turn: the status bar always, and whatever else the caller
+        // holds still. The fixed edges need nothing -- the panel keeps them.
+        let _ = panel.paint(0, 0, WIDTH, BAR_H, |x, y| GREYS[screen.get(x, y) as usize]);
+        if let Some((y, h)) = still {
+            let _ = panel.paint(0, BAR_H + y, WIDTH, h, |x, dy| {
+                content[screen.get(x, BAR_H + y + dy) as usize]
+            });
         }
         // One step a tear pulse, so the movement is even and never tears.
         wait_tear();
@@ -431,10 +441,10 @@ fn slide(
 /// co-processor, Flappy Cat's own scrolling -- starts from here.
 #[cfg(feature = "board-q1")]
 pub fn reset_origin(panel: &mut Panel) {
-    if panel.origin() == 0 {
+    if panel.origin() == 0 && panel.fixed() == (0, 0) {
         return;
     }
-    let _ = panel.set_origin(0);
+    let _ = panel.set_scroll(0, 0, 0);
     // What the glass shows is no longer what the row cache says it shows.
     // SAFETY: foreground only, single core, and not while `show` holds the cache.
     unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
@@ -1155,10 +1165,25 @@ pub fn draw_with(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Sur
 /// place after a slide left the panel's start wherever it ended. The frame goes out
 /// through the driver's origin like any other; it is only that this one does not put
 /// the origin back first.
+///
+/// `edges` columns at each side are the panel's fixed areas while this frame is up, so a
+/// later [`slide_frame_by`] turns only the ring between them and whatever the frame draws
+/// at its edges holds still. Setting them up moves which line every column is read from,
+/// so a frame that finds the panel arranged otherwise is sent whole.
 #[cfg(feature = "board-q1")]
-pub fn draw_scrolled(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mut Surface<'_>)) {
+pub fn draw_scrolled(
+    panel: &mut Panel,
+    content: &[u16; 16],
+    edges: usize,
+    f: impl FnOnce(&mut Surface<'_>),
+) {
     // SAFETY: foreground, single core, not inside a draw.
     unsafe { *core::ptr::addr_of_mut!(MARKS) = None };
+    if panel.fixed() != (edges, edges) {
+        let _ = panel.set_scroll(edges, edges, 0);
+        // SAFETY: foreground, single core, not inside a draw.
+        unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+    }
     draw_keeping_marks(panel, content, f);
 }
 
