@@ -50,11 +50,12 @@
 //!
 //! - [`Scheme::Legacy`] -- the 65-byte recoverable signature of [`crate::message`], which
 //!   is what every wallet has written since 2011.
-//! - [`Scheme::Bip322Simple`] -- a BIP-322 *simple* signature ([`crate::bip322`]), with or
-//!   without its `smp` prefix.
+//! - BIP-322 ([`crate::bip322`]) in its three variants: [`Scheme::Bip322Simple`], with or
+//!   without its `smp` prefix; [`Scheme::Bip322Full`] behind `ful`; and a proof of
+//!   reserves, [`Scheme::Bip322Proof`], behind `pof`.
 //!
-//! They tell themselves apart by length: a legacy signature is exactly 65 bytes, and no
-//! witness stack this reads can be.
+//! An unprefixed signature tells itself apart by length: a legacy signature is exactly 65
+//! bytes, and no witness stack this reads can be.
 //!
 //! # A verdict is about text someone can read
 //!
@@ -91,9 +92,11 @@ const HEX_DIGEST: usize = 64;
 /// line break.
 pub const MAX_BODY: usize = MAX_FILES * (HEX_DIGEST + 2 + MAX_NAME + 1);
 
-/// Most signature text read out of a file, before its whitespace is dropped: base64 of a
-/// P2WPKH witness stack is 148 characters, and a file may have wrapped it.
-pub const MAX_SIG_TEXT: usize = 256;
+/// Scratch [`verify`] gives a signature: its compacted text and the decoded bytes. Enough
+/// for a legacy or simple signature, a full one for any single key or a fifteen-cosigner
+/// multisig, and a small proof of reserves; [`verify_with`] takes a caller's buffer for
+/// a larger one.
+pub const SCRATCH: usize = 4096;
 
 /// Longest address this reads.
 pub const MAX_ADDRESS: usize = address::MAX_ADDRESS_LEN;
@@ -105,6 +108,10 @@ pub enum Scheme {
     Legacy,
     /// BIP-322, *simple* variant.
     Bip322Simple,
+    /// BIP-322, *full* variant: the whole `to_sign` transaction.
+    Bip322Full,
+    /// BIP-322 proof of reserves: `to_sign` spending real outputs, as a finalised PSBT.
+    Bip322Proof { utxos: usize, total: u64 },
 }
 
 impl Scheme {
@@ -113,6 +120,8 @@ impl Scheme {
         match self {
             Scheme::Legacy => "legacy",
             Scheme::Bip322Simple => "BIP-322",
+            Scheme::Bip322Full => "BIP-322 full",
+            Scheme::Bip322Proof { .. } => "BIP-322 proof of reserves",
         }
     }
 }
@@ -135,6 +144,9 @@ pub enum Error {
     Unshowable,
     /// Well formed, and not a signature this address made over this message.
     Invalid,
+    /// A multisig signature whose signatures all check out but fall short of the
+    /// script's threshold: a cosigner's share, not yet a proof.
+    NeedsCosigners { have: u8, need: u8 },
 }
 
 /// Longest message this will give a verdict about.
@@ -437,8 +449,8 @@ pub fn parse(text: &str) -> Result<Armoured<'_>, Error> {
     })
 }
 
-/// The signature text with every space and line break taken out.
-fn compact(signature: &str, out: &mut [u8; MAX_SIG_TEXT]) -> Result<usize, Error> {
+/// The signature text with every space and line break taken out, into `out`.
+fn compact(signature: &str, out: &mut [u8]) -> Result<usize, Error> {
     let mut n = 0;
     for b in signature.bytes() {
         if b.is_ascii_whitespace() {
@@ -455,43 +467,71 @@ fn compact(signature: &str, out: &mut [u8; MAX_SIG_TEXT]) -> Result<usize, Error
 
 /// Is this file's signature really this file's address, over this file's message?
 ///
+/// [`verify_with`] over a [`SCRATCH`]-byte buffer of its own.
+pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
+    let mut scratch = [0u8; SCRATCH];
+    verify_with(file, &mut scratch)
+}
+
+/// Is this file's signature really this file's address, over this file's message?
+///
 /// The only `Ok` is a signature that checked out, and it says which scheme it was.
+/// `scratch` holds the compacted signature text and what it decodes to -- a proof of
+/// reserves decodes to a whole PSBT, so a caller with one to check hands in room for
+/// it; a buffer too small fails as [`Error::Malformed`] rather than truncating.
 ///
 /// The address is read first, before a byte of the signature is decoded. What an address
-/// stands for decides what could possibly satisfy it, so a file for a script this has no
-/// interpreter for -- a P2WSH multisig -- is answered as "cannot check" whatever its
-/// signature looks like, rather than as a signature that failed to parse.
-pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
+/// stands for decides what could possibly satisfy it: a P2PKH address has the legacy
+/// signature and no BIP-322 one here; a P2WSH address has BIP-322 only, and its witness
+/// carries the script.
+pub fn verify_with(file: &Armoured<'_>, scratch: &mut [u8]) -> Result<Scheme, Error> {
     showable(file.message)?;
-    let kind = address_kind(file.address)?;
+    let decoded = decode(file.address)?;
+    let kind = match decoded.format {
+        "p2pkh" => Some(AddressKind::P2pkh),
+        "p2sh" => Some(AddressKind::P2shP2wpkh),
+        "p2wpkh" => Some(AddressKind::P2wpkh),
+        "p2tr" => Some(AddressKind::P2tr),
+        "p2wsh" => None,
+        _ => return Err(Error::Unsupported),
+    };
 
-    // A prefix names the variant outright; `smp` is the one implemented, and the other two
-    // are refused as themselves.
     let head = file.signature.trim_start();
-    if matches!(head.get(..3), Some("ful") | Some("pof")) {
-        return Err(Error::Unsupported);
-    }
-    let bip322_prefixed = head.get(..bip322::PREFIX.len()) == Some(bip322::PREFIX);
-    if bip322_prefixed && !matches!(kind, AddressKind::P2wpkh | AddressKind::P2tr) {
-        return Err(Error::Unsupported);
-    }
-
-    let mut text = [0u8; MAX_SIG_TEXT];
-    let n = compact(file.signature, &mut text)?;
-    let text = core::str::from_utf8(&text[..n]).map_err(|_| Error::Malformed)?;
-    if bip322_prefixed {
-        return bip322_verify(file, kind, text).map(|()| Scheme::Bip322Simple);
-    }
+    let prefixed = matches!(head.get(..3), Some("smp") | Some("ful") | Some("pof"));
+    let n = compact(file.signature, scratch)?;
+    let (text, rest) = scratch.split_at_mut(n);
+    let text = core::str::from_utf8(text).map_err(|_| Error::Malformed)?;
 
     // No prefix: 65 bytes is a legacy signature, and a witness stack never is.
-    let mut raw = [0u8; 192];
-    let len = outscript::base64::decode_to_slice(text, &mut raw).map_err(|_| Error::Malformed)?;
-    if len == message::SIG_LEN {
-        let mut sig = [0u8; message::SIG_LEN];
-        sig.copy_from_slice(&raw[..len]);
-        legacy_verify(file, &sig).map(|()| Scheme::Legacy)
-    } else {
-        bip322_verify(file, kind, text).map(|()| Scheme::Bip322Simple)
+    if !prefixed {
+        let len = outscript::base64::decode_to_slice(text, rest).map_err(|_| Error::Malformed)?;
+        if len == message::SIG_LEN {
+            let kind = kind.ok_or(Error::Unsupported)?;
+            let mut sig = [0u8; message::SIG_LEN];
+            sig.copy_from_slice(&rest[..len]);
+            return legacy_verify(file, kind, &sig).map(|()| Scheme::Legacy);
+        }
+    }
+    // BIP-322, whichever variant the prefix names. P2PKH has no BIP-322 signature here.
+    if kind == Some(AddressKind::P2pkh) {
+        return Err(Error::Unsupported);
+    }
+    let script = challenge_of(file.address)?;
+    match bip322::verify_armoured_in(file.message.as_bytes(), script.as_slice(), text, rest) {
+        Ok(bip322::Variant::Simple) => Ok(Scheme::Bip322Simple),
+        Ok(bip322::Variant::Full) => Ok(Scheme::Bip322Full),
+        Ok(bip322::Variant::Proof { utxos, total }) => Ok(Scheme::Bip322Proof { utxos, total }),
+        Err(e) => Err(match e {
+            bip322::Error::UnsupportedKind
+            | bip322::Error::UnsupportedScript
+            | bip322::Error::Inconclusive
+            | bip322::Error::TooManyInputs => Error::Unsupported,
+            bip322::Error::Invalid | bip322::Error::NotAProof | bip322::Error::MissingUtxo => {
+                Error::Invalid
+            }
+            bip322::Error::NeedsCosigners { have, need } => Error::NeedsCosigners { have, need },
+            _ => Error::Malformed,
+        }),
     }
 }
 
@@ -500,7 +540,15 @@ pub fn verify(file: &Armoured<'_>) -> Result<Scheme, Error> {
 /// The header byte says which address type the signer used; that is a claim, and the way
 /// it is checked is by building that address from the recovered key and comparing it with
 /// the one in the file. A header that lies produces an address that does not match.
-fn legacy_verify(file: &Armoured<'_>, sig: &[u8; message::SIG_LEN]) -> Result<(), Error> {
+fn legacy_verify(
+    file: &Armoured<'_>,
+    claimed: AddressKind,
+    sig: &[u8; message::SIG_LEN],
+) -> Result<(), Error> {
+    // Taproot has no legacy signature: BIP-137's header ranges stop at P2WPKH.
+    if claimed == AddressKind::P2tr {
+        return Err(Error::Unsupported);
+    }
     // The line variant: a superset of the single-line digest, and `showable` above has
     // already ruled on which shapes get this far.
     let (pubkey, kind) = message::recover_lines(file.message, sig).map_err(|e| match e {
@@ -536,19 +584,6 @@ fn same_address(built: &str, given: &str, kind: AddressKind) -> bool {
     } else {
         built == given
     }
-}
-
-/// Check a BIP-322 simple signature against the script the address stands for.
-fn bip322_verify(file: &Armoured<'_>, kind: AddressKind, text: &str) -> Result<(), Error> {
-    if !matches!(kind, AddressKind::P2wpkh | AddressKind::P2tr) {
-        return Err(Error::Unsupported);
-    }
-    let script = challenge_of(file.address)?;
-    bip322::verify_armoured(file.message.as_bytes(), script.as_slice(), text).map_err(|e| match e {
-        bip322::Error::UnsupportedKind | bip322::Error::UnsupportedScript => Error::Unsupported,
-        bip322::Error::Invalid => Error::Invalid,
-        _ => Error::Malformed,
-    })
 }
 
 /// A scriptPubKey, inline.

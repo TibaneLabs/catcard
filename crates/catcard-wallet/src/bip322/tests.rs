@@ -344,26 +344,21 @@ fn a_signature_is_not_readable_as_another_variant_or_another_encoding() {
         Err(Error::Malformed)
     );
     assert_eq!(verify_armoured(b"", &script, ""), Err(Error::Malformed));
-    // "incorrect prefix type": a full-variant signature offered where a simple one is
-    // read. Saying which variant it is beats failing as unreadable base64.
-    assert_eq!(
+    // "incorrect prefix type": a witness stack behind a `ful` prefix, which says the
+    // bytes are a whole transaction. They are read as one, and are not one -- here the
+    // "input count" lands on a byte of the signature.
+    assert!(matches!(
         verify_armoured(
             b"incorrect prefix",
             &script,
             "fulAUDZwFXUp+adN+/UZj5dVrGAbB3zKs1Vcalz5fCF9srxS63eSWNGvH1NYbrBkPt1BJDUyWUz9zgUxfc63/QheT6M"
         ),
-        Err(Error::UnsupportedKind)
-    );
-}
-
-#[test]
-fn the_multisig_vectors_are_refused_rather_than_half_checked() {
-    // A P2WSH 3-of-3 from basic-test-vectors.json. Its witness is a script and its
-    // solution; there is no interpreter here, so the answer is "not this", never "yes".
-    let script = script_of("bc1qp0ahvfh83088w49k405szqgg4f3pptr7p2g06tdxfjcd40z4lh4q95lsz9");
-    let sig = "smpBQBHMEQCIFX9aaqPJWq2Ff2kpen5bFDTid+ehgUOpHV0LfjncXy4AiA3GNicF7aKPzdpa9PCpmaYQs3pHd+qbvvhXdxOCKCAMAFIMEUCIQD/ELXg6CNYyUQijCg96JtgvgjZb9dsl1Ctof4QAeyTcQIgVM/1AAblFl/DCt6A1gJg+T/i2qU5SQD09+chFJzolRwBSDBFAiEAlqRfSFyWNVQhvaCnmeV5tyneiCWMTcFbuujoD/pFa3wCIGnZjfQb8NolSYq9asV+ZeBSkCGHJcqnaV4JYS5MYPEGAWlTIQJ1aLEfEi/4p7wcV+XHZCBVvGGJZ7L3v+jhH+mZA8lN0yECCovfec+kIdllXpKCgA8RX/HZ2x5yHOtCSKP8/sf6pnwhAwxSng6kCgCXXSAmJOOZFdr3vdK3HzGqCFloOHgc5fM6U64=";
-    let message = "This will be a p2wsh 3-of-3 multisig BIP 322 signed message";
-    assert!(verify_armoured(message.as_bytes(), &script, sig).is_err());
+        Err(Error::Malformed | Error::TooManyInputs)
+    ));
+    // The simple decoder itself refuses the other variants by name.
+    let mut out = [0u8; MAX_WITNESS];
+    assert_eq!(dearmour("fulAA==", &mut out), Err(Error::UnsupportedKind));
+    assert_eq!(dearmour("pofAA==", &mut out), Err(Error::UnsupportedKind));
 }
 
 #[test]

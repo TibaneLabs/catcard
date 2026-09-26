@@ -194,7 +194,8 @@ fn a_signature_written_before_the_prefix_existed_is_read_as_simple() {
 
 #[test]
 fn the_variants_this_cannot_check_say_so_rather_than_invalid() {
-    // "I cannot check this" must not read as "this is forged" on a screen.
+    // "I cannot check this" must not read as "this is forged" on a screen. A witness
+    // stack behind a `ful` prefix is not a transaction, and is refused as such.
     let mut file = String::new();
     write(
         &mut file,
@@ -205,7 +206,22 @@ fn the_variants_this_cannot_check_say_so_rather_than_invalid() {
     .unwrap();
     assert_eq!(verify(&parse(&file).unwrap()), Err(Error::Unsupported));
 
-    // A P2WSH address: a script this has no interpreter for.
+    // A P2PKH address has no BIP-322 signature here: the legacy format is its own.
+    let mut file = String::new();
+    write(
+        &mut file,
+        "MOISC5NCQ42ADH2SUXLELUJOWH",
+        "13vU5PUSuArDXJdCWZvUFEbgJ2wcmtSJWn",
+        "fulAgAAAAGn3Z6t/gsHNyHdgZTOVro0Hej+qbd/ilU1ACalKoHX3gAAAABqRzBEAiB+8t/tm8Jm6zYv9JGZZVlAUjmqg7ZglIA39U+bim8EKQIgDv3E5cHOagN+xYgN3ZQjTYlAJp/WyslwJWuFP1TmM3IBIQJcPK2h9SY+Ki1oussvHnMdFAhJgsYBFPl+rNcMv9P1ROAHAAABAAAAAAAAAAABauAHAAA=",
+    )
+    .unwrap();
+    assert_eq!(verify(&parse(&file).unwrap()), Err(Error::Unsupported));
+}
+
+/// The P2WSH 3-of-3 from `basic-test-vectors.json`: the witness carries the script, so
+/// a multisig address is checked like any other.
+#[test]
+fn a_multisig_signature_verifies_out_of_a_file() {
     let mut file = String::new();
     write(
         &mut file,
@@ -214,7 +230,59 @@ fn the_variants_this_cannot_check_say_so_rather_than_invalid() {
         "smpBQBHMEQCIFX9aaqPJWq2Ff2kpen5bFDTid+ehgUOpHV0LfjncXy4AiA3GNicF7aKPzdpa9PCpmaYQs3pHd+qbvvhXdxOCKCAMAFIMEUCIQD/ELXg6CNYyUQijCg96JtgvgjZb9dsl1Ctof4QAeyTcQIgVM/1AAblFl/DCt6A1gJg+T/i2qU5SQD09+chFJzolRwBSDBFAiEAlqRfSFyWNVQhvaCnmeV5tyneiCWMTcFbuujoD/pFa3wCIGnZjfQb8NolSYq9asV+ZeBSkCGHJcqnaV4JYS5MYPEGAWlTIQJ1aLEfEi/4p7wcV+XHZCBVvGGJZ7L3v+jhH+mZA8lN0yECCovfec+kIdllXpKCgA8RX/HZ2x5yHOtCSKP8/sf6pnwhAwxSng6kCgCXXSAmJOOZFdr3vdK3HzGqCFloOHgc5fM6U64=",
     )
     .unwrap();
-    assert_eq!(verify(&parse(&file).unwrap()), Err(Error::Unsupported));
+    assert_eq!(verify(&parse(&file).unwrap()), Ok(Scheme::Bip322Simple));
+
+    // A cosigner's share alone, from the `full` 2-of-2 vector cut down to one
+    // signature: every signature in it is good, and it is not yet a proof.
+    let mut file = String::new();
+    write(
+        &mut file,
+        "QXYOWYWO7ZGJC4OPNC367HBUQF",
+        "bc1qg8r3cl47rrr75dwvr7jhzdukptegnmq8v0nmjd2jdn4qvlczqkts0rqtav",
+        "fulAgAAAAABAXshuDM6YKy1LClwk1ZOM5egX7RTFPOCvtxJkYFYk/FEAAAAAADgBwAAAQAAAAAAAAAAAWoDAEgwRQIhAI9uOxvqmBV0pldOoKWnSYhjobNhP4F+gxO0QlOdGtxFAiBROcNruLigZE4lj1DJEh8yGrqS00MeW463EO78TsaRFgFHUiECRPfLhCpM5PNSzkBirl4KXWDW+qCwe2LCBjSEqlKXu84hAjTu1hkO/Edxa5U6BQtWP4srUjrd6pVa5DNR3SqSqkn0Uq7gBwAA",
+    )
+    .unwrap();
+    assert_eq!(
+        verify(&parse(&file).unwrap()),
+        Err(Error::NeedsCosigners { have: 1, need: 2 })
+    );
+}
+
+/// A `full` signature and a proof of reserves, each from the BIP's vectors, read out of
+/// the armoured file and named for what they are.
+#[test]
+fn the_full_and_proof_variants_verify_out_of_a_file() {
+    let mut file = String::new();
+    write(
+        &mut file,
+        "EMYGZHEY3LIANYKCR7XJF3NMFQ",
+        "32Utb7Seg6EXq7UesMNJXhQ1gdohYNyzQ9",
+        "fulAgAAAAABAe5xLNMlYQH4OGjJ3h4lqQaVp0Cic7mwxkvyWswqFMXeAAAAABcWABSy/hpDH/KLAi4x25Tmb2UaO1xtWeAHAAABAAAAAAAAAAABagJHMEQCIDEleqb0n1R5c21TGkWRXNFae98wbwI0QOyh/YmRuQX1AiAcv1MhyTzPOVgZ1VIwuu0tDxrVJUHK8lhOUOXpsZnGwwEhAsjeDEoWX8hvEC8A/692yGQsPh6JBO8Zf4aITEQsKAcJ4AcAAA==",
+    )
+    .unwrap();
+    assert_eq!(verify(&parse(&file).unwrap()), Ok(Scheme::Bip322Full));
+
+    let mut file = String::new();
+    write(
+        &mut file,
+        "FUYMQWKYGS7HJEN7YFEZU5SNR5",
+        "bc1pk3vq3wpn4txexwq4dj0k2dugzp6kfwllvs89w49cvtk3j2cndcds3l9kw9",
+        "pofcHNidP8BALgCAAAABDzMFysa2DX0k4ZymoVfzNzTIL3gsWlu03HcfI+NxhOxAAAAAADIAQAAVd4moQMhq/rd+2ecRsJ0Xeg6/SdhA+owjzyzg/Fqd/oAAAAAAAAAAABuZFRaqjWRO6kKy5hrEHAg+T12/Iuz+FZBwwMt/FQvkgAAAAAAAAAAAG5kVFqqNZE7qQrLmGsQcCD5PXb8i7P4VkHDAy38VC+SAQAAAAAAAAAAAQAAAAAAAAAAAWp7AAAAAAEBKwAAAAAAAAAAIlEgtFgIuDOqzZM4FWyfZTeIEHVku/9kDldUuGLtGSsTbhsBCEIBQKoTEBqEPkib1fLnELbmsbDVlmWGzOdiiN/XJefU3tF9AEi7PszYEPguomxXp7X2rL0dP0xkV6LbBcVz7oAEeKkAAQErTkYFAAAAAAAiUSB4i5DCtSPHOkI30E30ayMoWL47vA5l2NBJp/pZ1XGduAEIQgFAic0muhAJNc4ZlRWeJGRgkN+oE/ptV4Znyli19VAnSsHM/Pb9Mp02dd3zk3RmuT6VgjBxdJn2yURGKOka3l9cugABAStORgUAAAAAACJRIMoNyg9Pai/pn4PHTOMEsDHkuUAHt5riqU81NVVj+fXKAQhCAUCL3W2Jh3ImNRSpbp0bLe+rBE4GJw5AjwJEhakHsm83YfuQKeY1syBFrmNV2ZvLv8R8uTLcmkJ1s/lWUxZ9o4qJAAEBK05GBQAAAAAAIlEgXCutuyDOvc4hiADdov7VmOUfq4ww6HES7JZ6NAucMJkBCEIBQDqu/4oik+J+eAbvUhzzuBkoVoOgD5RySjpvJQqTKNieBda8dMTkH2avx6ghs7zd6puujlBCQw3r/NiG4VX7wAEAAA==",
+    )
+    .unwrap();
+    assert_eq!(
+        verify(&parse(&file).unwrap()),
+        Ok(Scheme::Bip322Proof {
+            utxos: 3,
+            total: 3 * 345_678
+        })
+    );
+    // Too small a scratch buffer is a clean refusal, not a truncated read.
+    let mut small = [0u8; 512];
+    assert_eq!(
+        verify_with(&parse(&file).unwrap(), &mut small),
+        Err(Error::Malformed)
+    );
 }
 
 #[test]
