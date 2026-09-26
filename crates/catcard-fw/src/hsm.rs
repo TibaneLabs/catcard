@@ -444,7 +444,7 @@ fn approve(ui: &mut Ui<'_>, checked: &mut Checked, new_file: bool) -> bool {
         menu::wait_for_any_key(ui);
         return false;
     };
-    let (n, boots, typeable) = {
+    let (n, whole, boots, typeable) = {
         let Some(policy) = view(&mut checked.text, checked.len) else {
             return false;
         };
@@ -452,10 +452,9 @@ fn approve(ui: &mut Ui<'_>, checked: &mut Checked, new_file: bool) -> bool {
             buf: words.bytes(),
             n: 0,
         };
-        // Cut short rather than refused: the text is a courtesy, the rules are the policy.
-        let _ = policy.explain(&mut out);
+        let whole = policy.explain(&mut out).is_ok();
         let n = out.n;
-        (n, policy.boots_to_hsm(), policy.boot_code_typeable())
+        (n, whole, policy.boots_to_hsm(), policy.boot_code_typeable())
     };
     let text = core::str::from_utf8(&words.bytes()[..n]).unwrap_or("");
     let mut lines: heapless::Vec<Line<'_>, 64> = heapless::Vec::new();
@@ -464,10 +463,20 @@ fn approve(ui: &mut Ui<'_>, checked: &mut Checked, new_file: bool) -> bool {
     } else {
         "HSM policy"
     }));
+    // A policy is approved only as a whole: one whose explanation does not fit the screen's
+    // budget is not offered, rather than approved on the rules that happened to fit.
+    let mut fits = whole;
     for par in text.split('\n').filter(|p| !p.is_empty()) {
         if lines.push(Line::body(par).wrapped()).is_err() {
+            fits = false;
             break;
         }
+    }
+    if !fits || lines.is_full() {
+        drop(lines);
+        menu::message(ui.panel, HEAD, "policy too long", "to show: not offered");
+        menu::wait_for_any_key(ui);
+        return false;
     }
     let _ = lines.push(
         Line::body("Entering HSM mode is one-way until power off. OK to enable, X to refuse.")
@@ -486,10 +495,10 @@ fn approve(ui: &mut Ui<'_>, checked: &mut Checked, new_file: bool) -> bool {
     if boots {
         let body = if typeable {
             "Every login will go straight into HSM mode, with no menus. The only way back is \
-             its 6-digit boot code, typed within 60 seconds of power-on."
+             its boot code, typed within 60 seconds of power-on (OK sends it)."
         } else {
             "IRREVERSIBLE: every login will go straight into HSM mode, and its boot code is \
-             not 6 digits, so it can never be typed. This device would NEVER leave HSM \
+             not all digits, so it can never be typed. This device would NEVER leave HSM \
              mode again."
         };
         let lines = [
@@ -779,6 +788,12 @@ pub(crate) fn run(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
         }
         if with(|a| a.shutdown).unwrap_or(false) {
             crate::catlog!("hsm: {} refusals: logging out", engine::MAX_REFUSALS);
+            // The refusal's reply leaves first, as a `logo`'s does.
+            for _ in 0..50 {
+                let _ = crate::usbtask::pump();
+                // SAFETY: reads RCC; the clocks have been up since boot.
+                unsafe { catcard_hal::dwt::delay_ms(10) };
+            }
             let lines = [
                 Line::title("HSM MODE"),
                 Line::body("Too many refusals: logging out.").wrapped(),
@@ -1035,17 +1050,16 @@ fn judge_inner(
     // Every output, for the whitelists and the patterns. Each page derives change keys.
     let mut judge = engine::Judge::new(&policy);
     let network = crate::prefs::network();
-    let accounts = &summary.accounts[..summary.account_count];
-    let wallets = &summary.wallets[..summary.wallet_count];
+    // The inputs' accounts, wallets and highest index, as the review's own pages use them:
+    // change far past the inputs is flagged only with the index known.
+    let spent = summary.spent();
     let mut page = [psbtview::Destination::BLANK; 4];
     let mut start = 0usize;
     let mut own_outputs = 0usize;
     let mut unusual = 0usize;
     loop {
         let got = crate::keywork::run(|kw| {
-            psbtview::destinations_from(
-                psbt, owner, network, accounts, wallets, start, &mut page, kw,
-            )
+            psbtview::destinations_with(psbt, owner, network, &spent, start, &mut page, kw)
         });
         for d in &page[..got] {
             judge.output(d.amount, d.change, d.address());
@@ -1077,6 +1091,11 @@ fn judge_inner(
         why.clear();
         let _ = write!(why, "has {warnings} warning(s)");
         return Err(());
+    }
+    // Ours, whatever `warnings_ok` says: an unknown fee lets our coins leave as fee with
+    // no rule seeing them, and nobody is here to look at the number.
+    if !summary.fee_known {
+        return fail("fee unknown: an input's amount is not proven");
     }
 
     // The users queued for this PSBT, all of them checked. Source: §2.4 [C]
@@ -1139,7 +1158,12 @@ fn judge_inner(
         own_outputs,
         own_in: summary.own_in,
         own_out: summary.change,
-        sending: summary.sending,
+        // What leaves this wallet: paid out, or -- when that is larger -- spent by our
+        // inputs and not come back, which counts our share of the fee. Stock charges the
+        // outputs alone; this is never less. `[I]`
+        sending: summary
+            .sending
+            .max(summary.own_in.saturating_sub(summary.change)),
         spender,
         users: &given,
         local_ok,
@@ -1195,8 +1219,12 @@ fn queue_auth(totp_time: u32, name: &str, token: &[u8]) -> Answer {
             return Answer::Failed("Out of RAM");
         };
         let buf = block.bytes();
-        // Rebuilt without this name's earlier entry.
-        let mut kept = [0u8; USERS * ENTRY_MAX];
+        // Rebuilt without this name's earlier entry, in a block of its own: three
+        // kilobytes is too much for the stack under the signing flow.
+        let Some(mut fresh) = crate::heap::take(USERS * ENTRY_MAX) else {
+            return Answer::Failed("Out of RAM");
+        };
+        let kept = fresh.bytes();
         let mut k = 0;
         let mut count = 0;
         each_pending(&buf[..a.pending_len], |n, t, time| {
@@ -1212,12 +1240,10 @@ fn queue_auth(totp_time: u32, name: &str, token: &[u8]) -> Answer {
             }
         });
         if count >= USERS {
-            kept.zeroize();
             return Answer::Failed("Too many users queued");
         }
         let need = 2 + name.len() + token.len() + 4;
         if k + need > kept.len() {
-            kept.zeroize();
             return Answer::Failed("Too many users queued");
         }
         kept[k] = name.len() as u8;
@@ -1227,9 +1253,8 @@ fn queue_auth(totp_time: u32, name: &str, token: &[u8]) -> Answer {
         kept[at + 1..at + 1 + token.len()].copy_from_slice(token);
         kept[at + 1 + token.len()..at + 5 + token.len()].copy_from_slice(&totp_time.to_le_bytes());
         k = at + 5 + token.len();
-        buf[..k].copy_from_slice(&kept[..k]);
-        buf[k..].zeroize();
-        kept.zeroize();
+        // The old queue goes back to the heap wiped.
+        a.pending = Some(fresh);
         a.pending_len = k;
         Answer::Okay
     })
@@ -1284,13 +1309,16 @@ fn check_pending(
             }
         }
     });
+    // A code used is used, whatever the rules then say -- and whatever another user's
+    // code said: recorded before either refuses.
+    if updated[..n] != list[..n]
+        && save_users(gate, login, ui, &updated[..n]).is_err()
+        && problem.is_none()
+    {
+        return Err(text("could not record the codes used"));
+    }
     if let Some(p) = problem {
         return Err(p);
-    }
-    // A code used is used, whatever the rules then say: recorded before them.
-    if updated[..n] != list[..n] {
-        save_users(gate, login, ui, &updated[..n])
-            .map_err(|_| text("could not record the codes used"))?;
     }
     Ok(passed)
 }
@@ -1401,11 +1429,18 @@ pub(crate) fn new_user(
         Ok(m) => m,
         Err(e) => return done(Answer::Failed(e.text())),
     };
-    if let Err(why) = save_users(gate, login, ui, &more[..m]) {
+    let saved = save_users(gate, login, ui, &more[..m]);
+    let kind = new.kind();
+    drop(udoc);
+    let mut b32 = b32;
+    // SAFETY: zeros keep the string valid UTF-8.
+    unsafe { b32.as_mut_vec().zeroize() };
+    if let Err(why) = saved {
+        // SAFETY: as above.
+        unsafe { told.as_mut_vec().zeroize() };
         return done(Answer::Failed(why));
     }
-    drop(udoc);
-    crate::catlog!("hsm: user {} made ({})", name, new.kind());
+    crate::catlog!("hsm: user {} made ({})", name, kind);
     done(Answer::reply(|b| {
         catcard_usb::ckcc::reply::asci(b, told.as_bytes())
     }));

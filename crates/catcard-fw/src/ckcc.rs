@@ -1673,10 +1673,18 @@ fn unattended(
             finalize,
         } => {
             let a = sign_tx(gate, login, ui, ticket, store, len, &sha, finalize);
+            // Refused before the rules were reached (not a PSBT, a fee over the cap, ...):
+            // counted as a refusal all the same, as stock's `refuse` counts every one.
+            if let Answer::Failed(why) = &a {
+                crate::hsm::refuse_request(why);
+            }
             done(a);
         }
         Job::SignMsg { kind, path, msg } => {
             let a = sign_msg(gate, login, ui, ticket, kind, &path, &msg);
+            if let Answer::Failed(why) = &a {
+                crate::hsm::refuse_request(why);
+            }
             done(a);
         }
         Job::HsmStatus => done(crate::hsm::status(gate, login, ui)),

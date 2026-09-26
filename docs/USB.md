@@ -220,13 +220,25 @@ in the reference). The spender is `"1"` (single-signer) when every input of ours
 single-signature, a wallet's name when every one is from that one registered multisig
 wallet, and anything else only matches a rule with no `wallet`.
 
+**Stricter than stock, on purpose** (`[I]`): an unknown fee (an unpriced foreign input) is
+refused even with `warnings_ok`, since it lets our coins leave as fee with no rule seeing
+them; and `max_amount` / `per_period` are charged with what leaves this wallet -- the
+outputs paid out, or what our inputs spend and does not come back when that is larger, so
+our share of the fee counts. Stock charges the outputs alone.
+
+**Known weakness, inherited from stock** (`[?]`): outside HSM mode `user` is an unlimited
+dry-run oracle, and a TOTP slot is whatever the host names above the floor, so someone with
+USB access and HSM Mode enabled could search for a far-future slot's code at leisure --
+and using it moves that user's counter past every real code until then. The reference
+gives no rate limit and no ceiling on the slot; none is invented here.
+
 **Leaving.** Power off, or the host's `logo`. With `boot_to_hsm`, also its code typed on
 the keypad within the first 60 seconds of uptime.
 
 **Irreversible -- `boot_to_hsm`.** A policy with it goes straight into HSM mode at every
 login, with no question. Its code, typed within a minute of power-on, is the only way back
-to the menus -- and a code that is not six digits can never be typed, so such a device
-never leaves HSM mode again. A stored boot-to-HSM policy that no longer loads stops the
+to the menus (six digits send themselves, fewer are sent with OK) -- and a code that is not
+all digits can never be typed, so such a device never leaves HSM mode again. A stored boot-to-HSM policy that no longer loads stops the
 device at login (the reason on the screen, then logout) rather than run unprotected, as
 stock does -- so a future change in what this firmware accepts could leave such a device
 unable to reach its menus. Both are on the approval screens, asked about separately (press
@@ -236,7 +248,8 @@ unable to reach its menus. Both are on the approval screens, asked about separat
 while HSM Mode is enabled). Stock's own settings key `usr`, whose shape the reference pins:
 `{name: [mode, base32 secret, last counter]}`, thirty at most, names of 2-16 characters not
 starting with `_` (and, ours, no quote, backslash or control character). TOTP and HOTP take
-a 10- or 20-byte secret or have the device pick 10; a password user stores
+a 10- or 20-byte secret or have the device pick 10 (an HOTP enrolment link starts the app at
+counter 1); a password user stores
 PBKDF2-HMAC-SHA512(password, SHA-256(`pepper` ‖ USB serial), 2500)[:32], and a password the
 device picks is sixteen base32 characters. `nwur` answers the base32 secret, or the picked
 password, for the host to show; with the QR bit (`0x80`) the device also shows an
