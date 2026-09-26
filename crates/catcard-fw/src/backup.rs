@@ -1,26 +1,37 @@
-//! Backup and restore: the wallet in a 7-Zip archive, encrypted under twelve words.
+//! Backup, verify and restore: the wallet in a 7-Zip archive.
 //!
 //! The one thing this device makes that carries the seed off it. The format is
 //! [`catcard_backup`] -- a `key = value` body inside an AES-256 archive, so a laptop
-//! with p7zip and the words can read it years from now without this firmware. What is
-//! here is the screens around that, and the two decisions they encode.
+//! with p7zip and the password can read it years from now without this firmware. What is
+//! here is the screens around that, and the decisions they encode.
 //!
-//! # The password is not derived from the seed
+//! # Three ways to protect it, and the safe one is the default
 //!
-//! The twelve backup words come from the **UI DRBG**, never from the seed pool and never
-//! from the seed itself. A backup whose password can be recomputed from the thing it
-//! protects is not encrypted, it is obfuscated -- anyone holding the file would hold the
-//! wallet.
+//! Stock offers a twelve-word backup password, a custom passphrase, or an explicit
+//! cleartext file. Source: hw-reference/firmware-features.md §7 [C]. So does this:
 //!
-//! Which means the words are the only copy, and losing them loses the backup. So they go
-//! on screen, paged, before the file is written: a card that fails to write costs
-//! nothing, and a word list nobody wrote down costs everything. The owner also confirms
-//! before the words are shown at all, because putting a seed's password on a screen is
-//! not something to do by accident.
+//! - **Twelve words**, the default: drawn from the **protocol DRBG**, never from the seed
+//!   pool and never from the seed itself. A backup whose password can be recomputed from
+//!   the thing it protects is not encrypted, it is obfuscated -- anyone holding the file
+//!   would hold the wallet. They are a real BIP-39 phrase rather than twelve arbitrary
+//!   words, which buys the restore side a checksum: a typo is caught by
+//!   [`crate::menu::read_phrase`] in a second, instead of by a minute of key derivation
+//!   ending in "wrong words".
+//! - **A typed passphrase**: the same derivation over a string the owner chose. Easier to
+//!   remember and easier to guess, which the screen says; too short is refused.
+//! - **Cleartext**: no encryption at all, for a card that lives in a vault. Asked for
+//!   twice, labelled as dangerous both times, and the last row of the list -- an
+//!   irreversible exposure is never a default.
 //!
-//! They are a real BIP-39 phrase rather than twelve arbitrary words, which buys the
-//! restore side a checksum: a typo is caught by [`crate::menu::read_phrase`] in a
-//! second, instead of by a minute of key derivation ending in "wrong words".
+//! Which of the three a file is comes out of its header, so a restore never asks a
+//! question the archive already answers: a cleartext backup is read straight in, and an
+//! encrypted one asks whether it was words or a passphrase.
+//!
+//! Whatever the mode, the password is the only copy and losing it loses the backup. So
+//! the words go on screen, paged, before the file is written: a card that fails to write
+//! costs nothing, and a word list nobody wrote down costs everything. The owner also
+//! confirms before the words are shown at all, because putting a seed's password on a
+//! screen is not something to do by accident.
 //!
 //! # One buffer, and it holds the seed
 //!
@@ -28,33 +39,50 @@
 //! body is built where it will be encrypted ([`catcard_backup::sevenz::BODY_OFFSET`])
 //! and sealed in place, and a restore decrypts back over the bytes it read. The buffer
 //! is a local, zeroized on every path out -- it is not `heap::take`, because a seed in a
-//! freed block is a seed nobody is tracking.
+//! freed block is a seed nobody is tracking. Verify and the temporary load read into the
+//! same kind of buffer and it dies with the screen: neither writes anything anywhere.
 //!
 //! # The key derivation is slow, and that is the format
 //!
 //! 7-Zip's KDF is 2^19 rounds of SHA-256 over the password. That is the better part of a
 //! minute here. It is sliced on a fixed round count so the progress bar can move --
-//! never on anything derived from the words -- exactly as `bip39::Stretch` is.
+//! never on anything derived from the password -- exactly as `bip39::Stretch` is.
+//!
+//! # The file is named for the wallet
+//!
+//! `backup-<XFP>.7z`, the master fingerprint in the name as stock does it, so two devices'
+//! backups on one card do not land on the same name -- and a card with three of them says
+//! whose each one is without opening any. It goes to the storage the owner picks, the SD
+//! card or the Virtual Disk, through the chooser every export uses.
 
 use catcard_backup::{body, clone, kdf, sevenz};
 use catcard_callgate::Callgate;
-use catcard_callgate::pin::{SECRET_LEN, bip39_entropy, encode_bip39, encode_xprv, xprv_parts};
+use catcard_callgate::pin::{
+    SECRET_LEN, bip39_entropy, encode_bip39, encode_xprv, raw_master, xprv_parts,
+};
 use catcard_wallet::bip32::{ExtendedPrivKey, serialize::MAX_BASE58_LEN};
 use catcard_wallet::bip39::{MAX_PHRASE_LEN, Mnemonic};
 use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
-use crate::menu::{self, Working};
+use crate::menu::{self, Storage, Working};
 use crate::ui::Ui;
 
 const SAVE_HEAD: &str = "Backup";
 const RESTORE_HEAD: &str = "Restore backup";
+const VERIFY_HEAD: &str = "Verify backup";
+const TEMP_HEAD: &str = "Coldcard backup";
 
-/// The archive on the card.
+/// The archive's name, with the master fingerprint in it: `/backup-1A2B3C4D.7z`.
 ///
-/// One name, not a dated one: `write_card_export` finds the next free `-2`, `-3` for us,
-/// so a card accumulates backups without either overwriting one or needing a clock.
-const CARD_FILE: &str = "/backup.7z";
+/// `write_storage_export` finds the next free `-2`, `-3` for us, so a card accumulates
+/// backups of one wallet without either overwriting one or needing a clock, and two
+/// wallets' backups never share a name at all. Source: stock's `backup-{xfp}.7z` naming,
+/// hw-reference/wallet-export-formats.md §"Filenames" [I].
+const CARD_FILE_HEAD: &str = "/backup-";
+const CARD_FILE_TAIL: &str = ".7z";
+/// The name when the stash has no key to take a fingerprint of.
+const CARD_FILE_ANON: &str = "/backup.7z";
 
 /// The two files a clone leaves on the card.
 ///
@@ -79,12 +107,19 @@ const BUF: usize = 4096;
 
 /// Key-derivation rounds between redraws.
 ///
-/// A constant, fixed in advance and independent of the words -- see the module docs of
-/// [`catcard_backup::kdf`]. 2^19 rounds in slices of this is about 256 ticks of the bar.
+/// A constant, fixed in advance and independent of the password -- see the module docs
+/// of [`catcard_backup::kdf`]. 2^19 rounds in slices of this is about 256 ticks of the bar.
 const KDF_SLICE: u32 = 2048;
 
 /// Backup words: twelve, so 128 bits of entropy.
 const WORD_ENTROPY: usize = 16;
+
+/// The shortest typed passphrase accepted.
+///
+/// Stock enforces a minimum without publishing the number; eight is this firmware's,
+/// chosen so a passphrase is at least not a PIN. [I] It is a floor, not advice: the
+/// screen says a short one is easier to guess than twelve words.
+const MIN_TYPED: usize = 8;
 
 /// A backup buffer that wipes itself.
 ///
@@ -104,11 +139,66 @@ impl Scratch {
     }
 }
 
+/// The password as the KDF will see it, wiped when it goes.
+///
+/// Twelve words joined by single spaces, or the passphrase as typed: one buffer, sized
+/// for the longer of the two, so the three modes meet the archive as one `&str`.
+struct Phrase {
+    buf: [u8; MAX_PHRASE_LEN],
+    len: usize,
+}
+
+impl Drop for Phrase {
+    fn drop(&mut self) {
+        self.buf.zeroize();
+    }
+}
+
+impl Phrase {
+    /// The words joined by single spaces, which is what every 7-Zip on the other end
+    /// will be given.
+    fn from_words(words: &Mnemonic) -> Self {
+        let mut p = Phrase {
+            buf: [0u8; MAX_PHRASE_LEN],
+            len: 0,
+        };
+        p.len = words.render(&mut p.buf);
+        p
+    }
+
+    /// The text as typed, spaces and all: a passphrase's spaces are part of it.
+    fn from_text(text: &str) -> Option<Self> {
+        if text.len() > MAX_PHRASE_LEN {
+            return None;
+        }
+        let mut p = Phrase {
+            buf: [0u8; MAX_PHRASE_LEN],
+            len: text.len(),
+        };
+        p.buf[..text.len()].copy_from_slice(text.as_bytes());
+        Some(p)
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+/// How a backup being written is protected.
+///
+/// `phrase` is the password -- the words or a typed passphrase, already one string --
+/// or `None` for **no encryption at all**, reached only through two confirmations and
+/// never by default. A struct rather than an enum only because the phrase is two hundred
+/// bytes and the other case is none, which clippy rightly dislikes in a variant.
+struct Protect {
+    phrase: Option<Phrase>,
+}
+
 // ---------------------------------------------------------------------------
 // Save
 // ---------------------------------------------------------------------------
 
-/// Write an encrypted backup of the stored wallet to the microSD card.
+/// Write a backup of the stored wallet to the card or the Virtual Disk.
 pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // The wallet first: a device with nothing to back up should say so before it asks
     // the owner to write twelve words down.
@@ -117,29 +207,33 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         None => return,
     };
 
-    let Some(words) = draw_words(ui) else {
+    // The backup is of the stored seed. With something else in force -- a passphrase,
+    // a BIP-85 child, a loaded key -- say so, as stock does, so nobody walks away
+    // believing the wallet they were just using is in the file.
+    // Source: hw-reference/help-and-warning-screens.md §9 "Backup of a temp seed" [C]
+    if !crate::key::is_root() || crate::passphrase::is_set() {
+        menu::message(
+            ui.panel,
+            SAVE_HEAD,
+            "of the STORED seed,",
+            "not the one in force",
+        );
+        menu::wait_for_any_key(ui);
+    }
+
+    // Where, then how: both cheap, both cancellable, and neither should have cost a word
+    // list if the owner backs out of the other.
+    let Some(storage) = menu::pick_storage(ui, SAVE_HEAD) else {
+        secret.zeroize();
+        return;
+    };
+    let Some(protect) = choose_protection(ui) else {
         secret.zeroize();
         return;
     };
 
-    menu::ask(
-        ui.panel,
-        "Backup words",
-        "twelve words, the",
-        "ONLY key to the file",
-    );
-    if !menu::confirmed(ui) {
-        secret.zeroize();
-        return;
-    }
-    menu::show_words(ui, &words);
-
-    // The phrase is the password: the words joined by single spaces, which is what
-    // every 7-Zip on the other end will be given.
-    let mut phrase = [0u8; MAX_PHRASE_LEN];
-    let n = words.render(&mut phrase);
-    let outcome = write_archive(ui, &secret, &phrase[..n]);
-    phrase.zeroize();
+    let outcome = write_archive(ui, storage, &secret, &protect);
+    drop(protect);
     secret.zeroize();
 
     match outcome {
@@ -151,7 +245,7 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             let note = if left_out {
                 "wallet only: no settings"
             } else {
-                "keep the words safe"
+                "keep the password safe"
             };
             menu::message(ui.panel, "Backed up", &name[1..], note);
         }
@@ -161,6 +255,40 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         }
     }
     menu::wait_for_any_key(ui);
+}
+
+/// Ask how the file is to be protected, and collect the password for it.
+///
+/// The list is in order of safety and the cursor starts on the words, so the default is
+/// the strong one. `None` if the owner backed out of any step.
+/// Source: hw-reference/firmware-features.md §7 [C]; the warnings from
+/// hw-reference/help-and-warning-screens.md §9 [C].
+fn choose_protection(ui: &mut Ui<'_>) -> Option<Protect> {
+    const ROWS: &[&str] = &[
+        "12 words (default)",
+        "Typed passphrase",
+        "Cleartext: NOT encrypted",
+    ];
+    match menu::pick_row(ui, SAVE_HEAD, "protect the file with", ROWS)? {
+        0 => {
+            let words = draw_words(ui)?;
+            menu::ask(
+                ui.panel,
+                "Backup words",
+                "twelve words, the",
+                "ONLY key to the file",
+            );
+            if !menu::confirmed(ui) {
+                return None;
+            }
+            menu::show_words(ui, &words);
+            Some(Protect {
+                phrase: Some(Phrase::from_words(&words)),
+            })
+        }
+        1 => typed_passphrase(ui).map(|p| Protect { phrase: Some(p) }),
+        _ => cleartext(ui).then_some(Protect { phrase: None }),
+    }
 }
 
 /// Twelve words from the protocol DRBG.
@@ -196,13 +324,76 @@ fn draw_words(ui: &mut Ui<'_>) -> Option<Mnemonic> {
     }
 }
 
-/// Build the body, seal it under `phrase`, and put it on the card.
+/// A passphrase typed on the keypad, at least [`MIN_TYPED`] characters.
+///
+/// Warned before it is typed: it is the only key, and a short or obvious one is easier
+/// to guess than twelve words. Typed once -- the entry screen shows it as it is built --
+/// and then its length is confirmed, so a slip caught here does not become a file that
+/// nothing opens.
+fn typed_passphrase(ui: &mut Ui<'_>) -> Option<Phrase> {
+    menu::ask(
+        ui.panel,
+        "Typed passphrase",
+        "the ONLY key; a short",
+        "one is easily guessed",
+    );
+    if !menu::confirmed(ui) {
+        return None;
+    }
+    loop {
+        let entry = crate::passphrase::read(ui, "Backup passphrase")?;
+        if entry.len() < MIN_TYPED {
+            let mut why: heapless::String<32> = heapless::String::new();
+            let _ = write!(why, "at least {MIN_TYPED} characters");
+            menu::message(ui.panel, "Too short", &why, "any key to retype");
+            menu::wait_for_any_key(ui);
+            continue;
+        }
+        let mut count: heapless::String<32> = heapless::String::new();
+        let _ = write!(count, "{} characters typed", entry.len());
+        menu::ask(
+            ui.panel,
+            "Use this passphrase?",
+            &count,
+            "y yes, x to retype",
+        );
+        if menu::confirmed(ui) {
+            return Phrase::from_text(entry.as_str());
+        }
+    }
+}
+
+/// Two confirmations for a file with no encryption at all.
+///
+/// Both screens name the exposure. The second exists because the first can be a reflex;
+/// a wallet written in plain text should never be the result of one extra key press.
+/// Source: hw-reference/help-and-warning-screens.md §9 "Choose cleartext" [C]
+fn cleartext(ui: &mut Ui<'_>) -> bool {
+    menu::ask(
+        ui.panel,
+        "NOT ENCRYPTED",
+        "anyone with the file",
+        "has the whole wallet",
+    );
+    if !menu::confirmed(ui) {
+        return false;
+    }
+    menu::ask(
+        ui.panel,
+        "REALLY cleartext?",
+        "the seed in plain text",
+        "y = yes, x = encrypt",
+    );
+    menu::confirmed(ui)
+}
+
+/// Build the body, seal it as `protect` says, and put it on `storage`.
 fn write_archive(
     ui: &mut Ui<'_>,
+    storage: Storage,
     secret: &[u8; SECRET_LEN],
-    phrase: &[u8],
+    protect: &Protect,
 ) -> Result<(heapless::String<{ menu::EXPORT_NAME_MAX }>, bool), &'static str> {
-    let phrase = core::str::from_utf8(phrase).map_err(|_| "bad phrase")?;
     let mut scratch = Scratch::new();
 
     // With the preferences if they fit, without them if they do not. Nothing is
@@ -211,7 +402,7 @@ fn write_archive(
     // cleared buffer, because the abandoned attempt left the seed in there and only the
     // bytes the second attempt writes are accounted for.
     let mut left_out = false;
-    let mut body_len = match build_body(&mut scratch.0, secret, true) {
+    let (mut body_len, fingerprint) = match build_body(&mut scratch.0, secret, true) {
         Ok(n) => n,
         Err(catcard_backup::Error::BufferTooSmall) => {
             left_out = true;
@@ -224,38 +415,72 @@ fn write_archive(
         crate::catlog!("backup: preferences left out, no room");
     }
 
-    // A fresh IV per archive: reusing one under the same key would let two backups be
-    // compared block for block. From the protocol DRBG, with the words it goes with.
-    let mut iv = [0u8; 16];
-    ui.protocol.generate(&mut iv).map_err(|_| "no random IV")?;
+    body_len = match &protect.phrase {
+        Some(phrase) => {
+            // A fresh IV per archive: reusing one under the same key would let two
+            // backups be compared block for block. From the protocol DRBG, with the
+            // words it goes with.
+            let mut iv = [0u8; 16];
+            ui.protocol.generate(&mut iv).map_err(|_| "no random IV")?;
 
-    // The body is the seed in plaintext and it sits here for the whole derivation,
-    // which is the better part of a minute. Unavoidable with one buffer, and the
-    // buffer wipes itself on the way out however this ends.
-    let key = stretch(ui, phrase, SAVE_HEAD, "sealing the backup")?;
-    let archive = sevenz::seal_at(
-        &mut scratch.0,
-        body_len,
-        INNER_FILE,
-        &key,
-        &iv,
-        &[],
-        kdf::DEFAULT_CYCLES_POWER,
-    )
-    .map_err(|_| "could not seal the backup")?;
-    body_len = archive.len();
+            // The body is the seed in plaintext and it sits here for the whole
+            // derivation, which is the better part of a minute. Unavoidable with one
+            // buffer, and the buffer wipes itself on the way out however this ends.
+            let key = stretch(ui, phrase.as_str(), SAVE_HEAD, "sealing the backup")?;
+            sevenz::seal_at(
+                &mut scratch.0,
+                body_len,
+                INNER_FILE,
+                &key,
+                &iv,
+                &[],
+                kdf::DEFAULT_CYCLES_POWER,
+            )
+            .map_err(|_| "could not seal the backup")?
+            .len()
+        }
+        None => {
+            crate::catlog!("backup: CLEARTEXT, by the owner's choice");
+            sevenz::seal_clear_at(&mut scratch.0, body_len, INNER_FILE)
+                .map_err(|_| "could not pack the backup")?
+                .len()
+        }
+    };
 
-    menu::card_wait(ui.panel, SAVE_HEAD, "writing to the card");
-    let name = menu::write_card_export(CARD_FILE, &scratch.0[..body_len], None)?;
-    Ok((name, left_out))
+    let name = file_name(fingerprint);
+    let mut note: heapless::String<24> = heapless::String::new();
+    let _ = write!(note, "writing to {}", storage.medium());
+    menu::card_wait(ui.panel, SAVE_HEAD, &note);
+    let written = menu::write_storage_export(storage, &name, &scratch.0[..body_len], None)?;
+    Ok((written, left_out))
 }
 
-/// Lay the body out in `buf` at the offset the sealer expects, and return its length.
+/// `/backup-<XFP>.7z`, or the anonymous name when the stash gave no fingerprint.
+fn file_name(fingerprint: Option<[u8; 4]>) -> heapless::String<{ menu::EXPORT_NAME_MAX }> {
+    let mut name = heapless::String::new();
+    match fingerprint {
+        Some([a, b, c, d]) => {
+            let _ = write!(
+                name,
+                "{CARD_FILE_HEAD}{a:02X}{b:02X}{c:02X}{d:02X}{CARD_FILE_TAIL}"
+            );
+        }
+        None => {
+            let _ = name.push_str(CARD_FILE_ANON);
+        }
+    }
+    name
+}
+
+/// Lay the body out in `buf` at the offset the sealer expects.
+///
+/// Returns its length and the master fingerprint of the wallet in it, when the stash
+/// holds a key to take one from -- the fingerprint is public and goes in the file name.
 fn build_body(
     buf: &mut [u8; BUF],
     secret: &[u8; SECRET_LEN],
     preferences: bool,
-) -> Result<usize, catcard_backup::Error> {
+) -> Result<(usize, Option<[u8; 4]>), catcard_backup::Error> {
     // The network in force decides the label, the `chain` ticker and the version bytes of
     // the xprv/xpub below: a testnet wallet's backup reads `Bitcoin Testnet 4` / `XTN` /
     // `tprv`, so it restores as the same wallet it was saved from.
@@ -271,7 +496,7 @@ fn build_body(
 
     // Everything below is computed from the stash, so it is all inside one masked
     // region: no interrupt runs between deriving the key and rendering it.
-    crate::keywork::run(|kw| {
+    let fingerprint = crate::keywork::run(|kw| {
         let mut xprv = [0u8; MAX_BASE58_LEN];
         let mut master = None;
 
@@ -288,11 +513,12 @@ fn build_body(
         } else if let Some((chain_code, key)) = xprv_parts(secret) {
             // No usable key means no xprv/xpub lines; the raw stash below still goes out.
             master = ExtendedPrivKey::root_from_parts(net, *chain_code, *key, kw).ok();
-        } else if let Some(raw) = catcard_callgate::pin::raw_master(secret) {
+        } else if let Some(raw) = raw_master(secret) {
             master = ExtendedPrivKey::from_seed(raw, net, kw).ok();
         }
 
         w.text("chain", chain.ticker());
+        let mut fingerprint = None;
         if let Some(master) = &master {
             if let Ok(n) = master.write_base58(&mut xprv, kw)
                 && let Ok(text) = core::str::from_utf8(&xprv[..n])
@@ -306,12 +532,14 @@ fn build_body(
             {
                 w.text("xpub", text);
             }
+            fingerprint = Some(master.fingerprint(kw));
         }
         xprv.zeroize();
         // The stash exactly as the secure element holds it. Enough on its own to put
         // the wallet back, whatever shape it is in -- including the shapes that have no
         // words and no `mnemonic` line above.
         w.hex("raw_secret", secret);
+        fingerprint
     });
 
     w.section("Firmware version (informational)");
@@ -330,7 +558,7 @@ fn build_body(
     }
 
     w.eof();
-    w.finish().map(|b| b.len())
+    w.finish().map(|b| (b.len(), fingerprint))
 }
 
 /// The root wallet's settings, one `setting.<name>` line each.
@@ -374,72 +602,86 @@ fn write_preferences(w: &mut body::BodyWriter<'_>, secret: &[u8; SECRET_LEN]) {
 fn write_preferences(_w: &mut body::BodyWriter<'_>, _secret: &[u8; SECRET_LEN]) {}
 
 // ---------------------------------------------------------------------------
-// Restore
+// Opening a backup: the half that restore, verify and the temporary load share
 // ---------------------------------------------------------------------------
 
-/// Read a backup off the card and put its wallet back.
-pub(crate) fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    // The destructive case, and the only warning: this replaces whatever is stored.
-    if crate::key::stored_wallet(login) {
-        menu::ask(
-            ui.panel,
-            "Wallet exists",
-            "a restore DESTROYS",
-            "the one stored now",
-        );
-        if !menu::confirmed(ui) {
-            return;
-        }
-    }
+/// Pick a backup off the card or the disk, open it, and leave its body at the front of
+/// `scratch`. Returns the body's length.
+///
+/// Every failure has been shown by the time this returns `None`. The archive's own
+/// structure is checked before the owner is asked for anything: a file that is
+/// compressed, or holds more than one thing, is refused now rather than after a minute
+/// of key derivation. And a cleartext archive asks for nothing at all -- the header
+/// says it needs no key, and asking for words it would not use would only teach the
+/// owner that the words do not matter.
+fn open_backup(ui: &mut Ui<'_>, head: &str, scratch: &mut Scratch) -> Option<usize> {
+    let storage = menu::pick_storage(ui, head)?;
+    let path = menu::browse_storage(ui, storage, "Pick a backup", Some("7z"), menu::Browse::File)?;
 
-    let Some(path) = menu::browse_sd(ui, "Pick a backup", Some("7z"), menu::Browse::File) else {
-        return;
-    };
-
-    let mut scratch = Scratch::new();
-    menu::card_wait(ui.panel, RESTORE_HEAD, "reading the card");
-    let len = match crate::signtx::read_card_file(&path, &mut scratch.0) {
+    let mut note: heapless::String<24> = heapless::String::new();
+    let _ = write!(note, "reading {}", storage.medium());
+    menu::card_wait(ui.panel, head, &note);
+    let len = match crate::signtx::read_source_file(storage, &path, &mut scratch.0) {
         Ok(n) => n,
-        Err(why) => return say(ui, "Cannot read", why),
+        Err(why) => {
+            say(ui, "Cannot read", why);
+            return None;
+        }
     };
 
-    // The archive's own structure first, before the owner is asked for anything: a file
-    // that is compressed, or holds more than one thing, is refused now rather than after
-    // a minute of key derivation.
     let found = match sevenz::open(&scratch.0[..len]) {
         Ok(f) => f,
-        Err(e) => return say(ui, "Not a backup", describe(e)),
-    };
-
-    menu::message(
-        ui.panel,
-        "Backup words",
-        "enter each word,",
-        "then y y to finish",
-    );
-    menu::wait_for_any_key(ui);
-    let Some(words) = menu::read_phrase(ui) else {
-        return say(ui, "Restore cancelled", "nothing was stored");
-    };
-
-    let mut phrase = [0u8; MAX_PHRASE_LEN];
-    let n = words.render(&mut phrase);
-    let got = open_body(ui, &mut scratch.0, len, found, &phrase[..n]);
-    phrase.zeroize();
-
-    let body_len = match got {
-        Ok(n) => n,
-        Err(why) => return say(ui, "Cannot open it", why),
-    };
-
-    match apply(gate, login, ui, &scratch.0[..body_len]) {
-        Ok(what) => {
-            crate::catlog!("backup: restored {}", what);
-            menu::message(ui.panel, "Wallet restored", what, "from the backup");
+        Err(e) => {
+            say(ui, "Not a backup", describe(e));
+            return None;
         }
-        Err(why) => menu::message(ui.panel, "Not restored", why, "any key to go back"),
+    };
+
+    let got = match found {
+        sevenz::Found::Clear(plain) => {
+            crate::catlog!("backup: the file is cleartext");
+            sevenz::extract_in_place(&mut scratch.0[..len], &plain)
+                .map(|b| b.len())
+                .map_err(describe)
+        }
+        sevenz::Found::File(_) | sevenz::Found::Header(_) => {
+            let phrase = ask_password(ui)?;
+            open_body(ui, &mut scratch.0, len, found, phrase.as_str(), head)
+        }
+    };
+    match got {
+        Ok(n) => Some(n),
+        Err(why) => {
+            say(ui, "Cannot open it", why);
+            None
+        }
     }
-    menu::wait_for_any_key(ui);
+}
+
+/// Which kind of password the file was written under, and then the password.
+///
+/// The archive cannot say -- a phrase and a passphrase derive the same way -- so this is
+/// the one question a restore has to ask. Words go through the checksummed reader;
+/// a passphrase is taken exactly as typed.
+fn ask_password(ui: &mut Ui<'_>) -> Option<Phrase> {
+    const ROWS: &[&str] = &["12 words", "Typed passphrase"];
+    match menu::pick_row(ui, "Backup password", "how was it protected?", ROWS)? {
+        0 => {
+            menu::message(
+                ui.panel,
+                "Backup words",
+                "enter each word,",
+                "then y y to finish",
+            );
+            menu::wait_for_any_key(ui);
+            let words = menu::read_phrase(ui)?;
+            Some(Phrase::from_words(&words))
+        }
+        _ => {
+            let entry = crate::passphrase::read(ui, "Backup passphrase")?;
+            Phrase::from_text(entry.as_str())
+        }
+    }
 }
 
 /// Derive the key and decrypt, leaving the body at the front of `buf`.
@@ -451,10 +693,10 @@ fn open_body(
     buf: &mut [u8; BUF],
     len: usize,
     found: sevenz::Found,
-    phrase: &[u8],
+    phrase: &str,
+    head: &str,
 ) -> Result<usize, &'static str> {
-    let phrase = core::str::from_utf8(phrase).map_err(|_| "bad phrase")?;
-    let key = stretch(ui, phrase, RESTORE_HEAD, "unlocking the backup")?;
+    let key = stretch(ui, phrase, head, "unlocking the backup")?;
 
     let file = match found {
         sevenz::Found::File(s) => s,
@@ -468,6 +710,8 @@ fn open_body(
                 .len();
             sevenz::file_in(&header.0[..n]).map_err(describe)?
         }
+        // Routed around this by the caller; a cleartext file has no key to derive.
+        sevenz::Found::Clear(_) => return Err("it is not encrypted"),
     };
 
     let n = sevenz::decrypt_in_place(&mut buf[..len], &file, &key)
@@ -476,19 +720,15 @@ fn open_body(
     Ok(n)
 }
 
-/// Read the body and store the wallet it describes.
-fn apply(
-    gate: &Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-    body: &[u8],
-) -> Result<&'static str, &'static str> {
+/// The wallet a body describes, as a 72-byte stash, and what it was read from.
+///
+/// `raw_secret` is preferred over `mnemonic`: it is the stash byte for byte, so it
+/// restores an xprv or a raw master as faithfully as it restores words, and for a words
+/// wallet the two agree anyway. The caller owns the stash and zeroizes it.
+fn decode_secret(body: &[u8]) -> Result<([u8; SECRET_LEN], &'static str, u32), &'static str> {
     let text = core::str::from_utf8(body).map_err(|_| "the file is not text")?;
     let scan = body::scan(text).map_err(describe)?;
 
-    // `raw_secret` is preferred over `mnemonic`: it is the stash byte for byte, so it
-    // restores an xprv or a raw master as faithfully as it restores words, and for a
-    // words wallet the two agree anyway.
     let mut secret = [0u8; SECRET_LEN];
     let what = if let Some(hex) = scan.details.raw_secret {
         let n = body::unhex(hex, &mut secret)
@@ -524,7 +764,51 @@ fn apply(
     } else {
         return Err("no wallet in that backup");
     };
+    Ok((secret, what, scan.settings))
+}
 
+// ---------------------------------------------------------------------------
+// Restore
+// ---------------------------------------------------------------------------
+
+/// Read a backup off the card or the disk and put its wallet back.
+pub(crate) fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    // The destructive case, and the only warning: this replaces whatever is stored.
+    if crate::key::stored_wallet(login) {
+        menu::ask(
+            ui.panel,
+            "Wallet exists",
+            "a restore DESTROYS",
+            "the one stored now",
+        );
+        if !menu::confirmed(ui) {
+            return;
+        }
+    }
+
+    let mut scratch = Scratch::new();
+    let Some(body_len) = open_backup(ui, RESTORE_HEAD, &mut scratch) else {
+        return;
+    };
+
+    match apply(gate, login, ui, &scratch.0[..body_len]) {
+        Ok(what) => {
+            crate::catlog!("backup: restored {}", what);
+            menu::message(ui.panel, "Wallet restored", what, "from the backup");
+        }
+        Err(why) => menu::message(ui.panel, "Not restored", why, "any key to go back"),
+    }
+    menu::wait_for_any_key(ui);
+}
+
+/// Read the body and store the wallet it describes.
+fn apply(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    body: &[u8],
+) -> Result<&'static str, &'static str> {
+    let (mut secret, what, _) = decode_secret(body)?;
     let res = store_secret(gate, login, ui, &secret);
     secret.zeroize();
     res.map(|()| what)
@@ -561,6 +845,136 @@ pub(crate) fn store_secret(
 }
 
 // ---------------------------------------------------------------------------
+// Verify
+// ---------------------------------------------------------------------------
+
+/// Open a backup and report what is in it, changing nothing.
+///
+/// Stock's own verify only checks the CRC and says so; this one goes the whole way --
+/// decrypt, parse, derive -- because "the file opens and it is this wallet" is what an
+/// owner standing at a safe wants to know, and a CRC cannot say it. Nothing is stored
+/// and nothing in force changes; the buffer dies with the screen.
+/// Source: hw-reference/help-and-warning-screens.md §9 "Verify backup file" [C]
+pub(crate) fn verify(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    let mut scratch = Scratch::new();
+    let Some(body_len) = open_backup(ui, VERIFY_HEAD, &mut scratch) else {
+        return;
+    };
+
+    // Decrypted and checksummed. Now: does it parse, and whose wallet is it?
+    let (mut secret, what, settings) = match decode_secret(&scratch.0[..body_len]) {
+        Ok(d) => d,
+        Err(why) => return say(ui, "Opens, but", why),
+    };
+    drop(scratch);
+
+    let mut busy = Working::seed(ui.panel, VERIFY_HEAD, "checking the wallet");
+    let theirs = fingerprint_of(&secret);
+    secret.zeroize();
+    busy.tick(ui.panel);
+
+    let Some([a, b, c, d]) = theirs else {
+        return say(ui, "Opens and parses", "but no key to name it");
+    };
+    let mut xfp: heapless::String<16> = heapless::String::new();
+    let _ = write!(xfp, "XFP {a:02X}{b:02X}{c:02X}{d:02X}");
+
+    // Against the wallet in force. A blank device has none, and says so rather than
+    // calling a good backup a mismatch.
+    let verdict = match fingerprint_in_force(gate, login, ui) {
+        Some(ours) if ours == [a, b, c, d] => "same as this wallet",
+        Some(_) => "NOT the wallet in force",
+        None => "no wallet here to compare",
+    };
+    crate::catlog!("backup: verified: {}; {} settings", verdict, settings);
+    menu::message(ui.panel, "Backup opens", &xfp, verdict);
+    menu::wait_for_any_key(ui);
+
+    let mut detail: heapless::String<32> = heapless::String::new();
+    let _ = write!(detail, "{settings} settings inside");
+    menu::message(ui.panel, "Backup holds", what, &detail);
+    menu::wait_for_any_key(ui);
+}
+
+/// The master fingerprint of a stash, whatever shape it is in. Inside the masked region:
+/// it derives the master key to get there.
+fn fingerprint_of(secret: &[u8; SECRET_LEN]) -> Option<[u8; 4]> {
+    let net = crate::prefs::network();
+    crate::keywork::run(|kw| {
+        let master = if let Some(entropy) = bip39_entropy(secret).filter(|e| e.len() <= 32) {
+            menu::plain_master(entropy, kw).ok()
+        } else if let Some((chain_code, key)) = xprv_parts(secret) {
+            ExtendedPrivKey::root_from_parts(net, *chain_code, *key, kw).ok()
+        } else {
+            raw_master(secret).and_then(|raw| ExtendedPrivKey::from_seed(raw, net, kw).ok())
+        };
+        master.map(|m| m.fingerprint(kw))
+    })
+}
+
+/// The fingerprint of the wallet in force, from the session if it already knows it and
+/// from the seed otherwise. `None` on a device with nothing to compare against.
+fn fingerprint_in_force(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<[u8; 4]> {
+    if let Some(fp) = crate::pubkeys::known_fingerprint() {
+        return Some(fp);
+    }
+    let master = menu::master_quietly(gate, login, ui.panel, VERIFY_HEAD).ok()?;
+    Some(crate::keywork::run(|kw| master.fingerprint(kw)))
+}
+
+// ---------------------------------------------------------------------------
+// A backup as a temporary seed
+// ---------------------------------------------------------------------------
+
+/// Derive → Import key → Coldcard backup: open a backup and work in its wallet for this
+/// session, storing nothing.
+///
+/// Stock's Temporary Seed → Coldcard Backup. The stored seed is untouched and a reboot
+/// comes up in it again; [`restore`] is the deliberate step for someone who meant to
+/// replace it. Words and an XPRV can be held this way; a raw master has no temporary
+/// form here and is refused by name.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Coldcard Backup" [C]
+///
+/// Returns whether a key is now in force; the caller names it.
+pub(crate) fn load_temporary(ui: &mut Ui<'_>) -> bool {
+    let mut scratch = Scratch::new();
+    let Some(body_len) = open_backup(ui, TEMP_HEAD, &mut scratch) else {
+        return false;
+    };
+    let (mut secret, what, _) = match decode_secret(&scratch.0[..body_len]) {
+        Ok(d) => d,
+        Err(why) => {
+            say(ui, "Not loaded", why);
+            return false;
+        }
+    };
+    drop(scratch);
+
+    menu::ask(ui.panel, "Work in this?", what, "the stored seed stays");
+    if !menu::confirmed(ui) {
+        secret.zeroize();
+        return false;
+    }
+
+    let loaded = if let Some(entropy) = bip39_entropy(&secret) {
+        crate::key::set_temporary(entropy, "Backup")
+    } else if let Some((chain_code, key)) = xprv_parts(&secret) {
+        crate::key::set_temporary_xprv(chain_code, key, "Backup")
+    } else {
+        false
+    };
+    secret.zeroize();
+    if !loaded {
+        say(ui, TEMP_HEAD, "that wallet shape cannot be loaded");
+    }
+    loaded
+}
+
+// ---------------------------------------------------------------------------
 // Shared
 // ---------------------------------------------------------------------------
 
@@ -572,7 +986,7 @@ fn stretch(
     note: &str,
 ) -> Result<kdf::Key, &'static str> {
     let mut kd = kdf::KeyDerivation::new(phrase, &[], kdf::DEFAULT_CYCLES_POWER)
-        .map_err(|_| "those words cannot be a password")?;
+        .map_err(|_| "that cannot be a password")?;
     let mut busy = Working::new(ui.panel, head, note);
     while !kd.step(KDF_SLICE) {
         busy.tick(ui.panel);
@@ -615,11 +1029,11 @@ fn say(ui: &mut Ui<'_>, head: &str, why: &str) {
 fn describe(e: catcard_backup::Error) -> &'static str {
     use catcard_backup::Error as E;
     match e {
-        E::BadChecksum => "wrong words, or a damaged file",
+        E::BadChecksum => "wrong password, or damaged",
         E::Compressed => "it is compressed; not readable here",
         E::NotOneFile => "it holds more than one file",
         E::NotSevenZip => "that is not a 7z archive",
-        E::NotEncrypted => "it is not encrypted",
+        E::NotEncrypted => "it mixes encryption oddly",
         E::KdfTooExpensive => "it asks for too much work",
         E::Truncated | E::BufferTooSmall => "too big, or cut short",
         E::NotABackup => "no backup inside it",
@@ -715,7 +1129,7 @@ fn write_clone(
 
     // The body, with preferences if they fit and without them if they do not -- rebuilt
     // over a cleared buffer, exactly as `write_archive` does and for the same reason.
-    let body_len = match build_body(&mut scratch.0, secret, true) {
+    let (body_len, _) = match build_body(&mut scratch.0, secret, true) {
         Ok(n) => n,
         Err(catcard_backup::Error::BufferTooSmall) => {
             scratch.0.zeroize();
@@ -842,8 +1256,10 @@ pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
 fn open_clone(buf: &mut [u8; BUF], len: usize, key: &kdf::Key) -> Result<usize, &'static str> {
     let file = match sevenz::open(&buf[clone::HEADER_LEN..len]).map_err(describe)? {
         sevenz::Found::File(s) => s,
-        // Clone never writes an encrypted header; anything that claims to is not ours.
+        // Clone never writes an encrypted header, and never a cleartext file; anything
+        // that claims to be either is not ours.
         sevenz::Found::Header(_) => return Err("that clone has an encrypted header"),
+        sevenz::Found::Clear(_) => return Err("that clone is not encrypted"),
     };
     let n = sevenz::decrypt_in_place(&mut buf[clone::HEADER_LEN..len], &file, key)
         .map_err(describe)?

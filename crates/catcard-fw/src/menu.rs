@@ -178,6 +178,8 @@ enum Screen {
     BackupSave,
     /// Put a wallet back from a backup file on the card.
     BackupRestore,
+    /// Open a backup file and say whether it decrypts, parses and is this wallet.
+    BackupVerify,
     /// Where a transaction or a message to sign comes from.
     SignMenu,
     /// Sign a partially-signed transaction (PSBT) picked from the SD card.
@@ -665,7 +667,12 @@ const UTILS_ITEMS: &[&str] = &[
 ///
 /// Restore is here on a blank device too -- Utils is on the blank main menu -- which is
 /// the only place a device with no wallet can get one from a file.
-const BACKUP_ITEMS: &[&str] = &["Save backup", "Restore backup", "Clone Coldcard"];
+const BACKUP_ITEMS: &[&str] = &[
+    "Save backup",
+    "Verify backup",
+    "Restore backup",
+    "Clone Coldcard",
+];
 
 /// The shapes the same keys can be written in.
 ///
@@ -1384,6 +1391,11 @@ fn action_for(screen: Screen) -> Option<Action> {
             |a| crate::backup::restore(a.gate, a.login, a.ui),
             Screen::BackupMenu,
         ),
+        // Verify only reads the file and compares; nothing stored or in force changes.
+        Screen::BackupVerify => to(
+            |a| crate::backup::verify(a.gate, a.login, a.ui),
+            Screen::BackupMenu,
+        ),
         // Export reads the wallet out; it does not change the stored secret.
         Screen::CloneExport => to(
             |a| crate::backup::clone_export(a.gate, a.login, a.ui),
@@ -1895,6 +1907,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::BackupMenu => match (key, BACKUP_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Save backup")) => Screen::BackupSave,
+            (Key::Confirm, Some("Verify backup")) => Screen::BackupVerify,
             (Key::Confirm, Some("Restore backup")) => Screen::BackupRestore,
             (Key::Confirm, Some("Clone Coldcard")) => Screen::CloneExport,
             (Key::Cancel, _) => Screen::Utils,
@@ -2409,7 +2422,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BrowseSd => {}
         // Handled in `run`: both drive their own screens -- the words, the progress bar
         // for the key derivation, and the card.
-        Screen::BackupSave | Screen::BackupRestore => {}
+        Screen::BackupSave | Screen::BackupRestore | Screen::BackupVerify => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
         // Handled in `run`: it brings up the card and drives its own menu and prompts.
@@ -6170,10 +6183,15 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
     use zeroize::Zeroize as _;
     const HEAD: &str = "Import key";
 
-    let Some(row) = pick_row(ui, HEAD, "for this session", &["Words", "XPRV", "WIF key"]) else {
+    // The fourth row is stock's Temporary Seed → Coldcard Backup: the wallet inside a
+    // backup file, for this session. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
+    // §D2 "Coldcard Backup" [C]
+    const ROWS: &[&str] = &["Words", "XPRV", "WIF key", "Coldcard backup"];
+    let Some(row) = pick_row(ui, HEAD, "for this session", ROWS) else {
         return false;
     };
     match row {
+        3 => crate::backup::load_temporary(ui),
         0 => {
             message(ui.panel, HEAD, "enter each word,", "then y y to finish");
             wait_for_any_key(ui);
@@ -6751,7 +6769,7 @@ pub(crate) fn write_card_export(
 /// The card is [`write_card_export`]; the Virtual Disk mounts its PSRAM region (formatting
 /// an uninitialised one first) and runs the same [`export_into`], so the collision
 /// numbering and the detached signature are identical on both.
-fn write_storage_export(
+pub(crate) fn write_storage_export(
     storage: Storage,
     path: &str,
     body: &[u8],
