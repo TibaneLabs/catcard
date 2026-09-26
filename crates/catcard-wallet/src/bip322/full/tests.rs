@@ -329,42 +329,52 @@ fn decoded(witness: &[u8]) -> Vec<&[u8]> {
 
 // --- multisig ---------------------------------------------------------------------
 
-/// `(message, WIFs, address, witness script hex, kind, published signature)`.
-const MULTISIG: &[(&str, &[&str], &str, &str, multisig::Kind, &str)] = &[
-    (
-        "QXYOWYWO7ZGJC4OPNC367HBUQF",
-        &[
+/// One multisig vector: the message, the cosigners' WIFs, the address, the witness
+/// script, the script form and the published signature.
+struct MultisigVector {
+    message: &'static str,
+    keys: &'static [&'static str],
+    address: &'static str,
+    script: &'static str,
+    kind: multisig::Kind,
+    published: &'static str,
+}
+
+const MULTISIG: &[MultisigVector] = &[
+    MultisigVector {
+        message: "QXYOWYWO7ZGJC4OPNC367HBUQF",
+        keys: &[
             "L14bn1tSDZUKYLLiTConCRHbqzGef8eqB2tU5PBPFBkyPLUyob7V",
             "KyJnWYygb7P2P8khWyDMW9yFGA3dUe7kpkEHtLbzY6cfvvn9T5CS",
         ],
-        "bc1qg8r3cl47rrr75dwvr7jhzdukptegnmq8v0nmjd2jdn4qvlczqkts0rqtav",
-        "52210244f7cb842a4ce4f352ce4062ae5e0a5d60d6faa0b07b62c2063484aa5297bbce210234eed6190efc47716b953a050b563f8b2b523addea955ae43351dd2a92aa49f452ae",
-        multisig::Kind::P2wsh,
-        FULL[3].2,
-    ),
-    (
-        "3VJANNKSXPLND6YRKG6CUEUZXX",
-        &[
+        address: "bc1qg8r3cl47rrr75dwvr7jhzdukptegnmq8v0nmjd2jdn4qvlczqkts0rqtav",
+        script: "52210244f7cb842a4ce4f352ce4062ae5e0a5d60d6faa0b07b62c2063484aa5297bbce210234eed6190efc47716b953a050b563f8b2b523addea955ae43351dd2a92aa49f452ae",
+        kind: multisig::Kind::P2wsh,
+        published: FULL[3].2,
+    },
+    MultisigVector {
+        message: "3VJANNKSXPLND6YRKG6CUEUZXX",
+        keys: &[
             "L5QcX4UxGQByfgW6YTVWovLUxSSWSyQksGNfAJAhP36hTRRGWyiU",
             "Kzp3Vm4kEdakPrfPfGDq3SEeSeBhX3GPwqacMf1wLFLPEZaMjy57",
             "L3xZwreL3S4C5V3wLaNYSFTsZiC2YW7ao94y2omZvpkBEyP5y3PY",
         ],
-        "bc1q8vy6jhfe8ca0uruvr4aqkjk75dpg5m30rnwatg60uhya00dhlyqs2xvt2a",
-        "5321022506f12c84db93ed3e896b4d58807b341b7d5eb51d79a11763836249b3a1dfe4210305b153afc370cd8f2e522e6a435cf5e9726376bf556752c1a43704956af22305210242f20cbe0540cbe3d1323cf61659f236b89c2ae593ddb7e42080597994d216e053ae",
-        multisig::Kind::P2wsh,
-        FULL[4].2,
-    ),
-    (
-        "NQVRV3DJYLKBANM3OPTNBULEU3",
-        &[
+        address: "bc1q8vy6jhfe8ca0uruvr4aqkjk75dpg5m30rnwatg60uhya00dhlyqs2xvt2a",
+        script: "5321022506f12c84db93ed3e896b4d58807b341b7d5eb51d79a11763836249b3a1dfe4210305b153afc370cd8f2e522e6a435cf5e9726376bf556752c1a43704956af22305210242f20cbe0540cbe3d1323cf61659f236b89c2ae593ddb7e42080597994d216e053ae",
+        kind: multisig::Kind::P2wsh,
+        published: FULL[4].2,
+    },
+    MultisigVector {
+        message: "NQVRV3DJYLKBANM3OPTNBULEU3",
+        keys: &[
             "L246N8J5x5ehwjoz97ZfHXBCELxGcK2jqRFinReMBcRnqH1X4zdc",
             "L1WzdMN476EHhwsDLHJwVHZKrwVLFFsdvNoZFsZVk2Mb5rKst2Et",
         ],
-        "3PGZjFkYBL1m9WBWkWbCW5FEFTaS1Hj4EB",
-        "522103fb824153fc000a213c5456d01780d1f292a0cfbfbc5f6f8f1dc713706c5519d12103db88ce9fb8081e50460beb37539741b0667d6f2439dd1ca283d63182421c10b152ae",
-        multisig::Kind::P2shP2wsh,
-        FULL[5].2,
-    ),
+        address: "3PGZjFkYBL1m9WBWkWbCW5FEFTaS1Hj4EB",
+        script: "522103fb824153fc000a213c5456d01780d1f292a0cfbfbc5f6f8f1dc713706c5519d12103db88ce9fb8081e50460beb37539741b0667d6f2439dd1ca283d63182421c10b152ae",
+        kind: multisig::Kind::P2shP2wsh,
+        published: FULL[5].2,
+    },
 ];
 
 /// Each cosigner signs alone; the partials say how many more they need; merged in any
@@ -372,14 +382,15 @@ const MULTISIG: &[(&str, &[&str], &str, &str, multisig::Kind, &str)] = &[
 #[test]
 fn cosigners_sign_separately_and_the_merged_signature_verifies() {
     let kw = KeyWork::host();
-    for (message, keys, address, script_hex, kind, _) in MULTISIG {
+    for v in MULTISIG {
+        let (message, keys, address, kind) = (v.message, v.keys, v.address, v.kind);
         let m = message.as_bytes();
         let script = script_of(address);
-        let ws = unhex(script_hex);
+        let ws = unhex(v.script);
         let n = keys.len() as u8;
         let mut partials = Vec::new();
-        for key in *keys {
-            let p = sign_multisig_partial(m, *kind, &ws, &wif(key), &kw).unwrap();
+        for key in keys {
+            let p = sign_multisig_partial(m, kind, &ws, &wif(key), &kw).unwrap();
             assert_eq!(
                 verify_full(m, &script, p.as_bytes()),
                 Err(Error::NeedsCosigners { have: 1, need: n }),
@@ -405,7 +416,8 @@ fn cosigners_sign_separately_and_the_merged_signature_verifies() {
 /// preservation of the vector's version, sequence and lock time.
 #[test]
 fn merging_reproduces_the_published_multisig_signature_byte_for_byte() {
-    for (message, _, address, _, _, published) in MULTISIG {
+    for v in MULTISIG {
+        let (message, address, published) = (v.message, v.address, v.published);
         let m = message.as_bytes();
         let script = script_of(address);
         let bytes = dearmour_full(published);
@@ -444,10 +456,16 @@ fn merging_reproduces_the_published_multisig_signature_byte_for_byte() {
 #[test]
 fn a_key_the_script_does_not_name_cannot_sign_for_it() {
     let kw = KeyWork::host();
-    let (message, _, _, script_hex, kind, _) = MULTISIG[0];
+    let v = &MULTISIG[0];
     let stranger = wif(SIGNERS[0].1);
     assert_eq!(
-        sign_multisig_partial(message.as_bytes(), kind, &unhex(script_hex), &stranger, &kw),
+        sign_multisig_partial(
+            v.message.as_bytes(),
+            v.kind,
+            &unhex(v.script),
+            &stranger,
+            &kw
+        ),
         Err(Error::BadKey)
     );
 }
@@ -614,10 +632,8 @@ fn the_streaming_digests_agree_with_outscript_on_every_input() {
         .collect();
     let mid = raw.taproot_midstate(&prev).unwrap();
     let code = unhex("76a914aabbccddeeff00112233445566778899aabbccdd88ac");
-    for i in 0..3 {
-        let theirs = raw
-            .segwit_v0_sighash(i, &code, prevouts[i].0, 0x01)
-            .unwrap();
+    for (i, (amount, _)) in prevouts.iter().enumerate() {
+        let theirs = raw.segwit_v0_sighash(i, &code, *amount, 0x01).unwrap();
         assert_eq!(
             segwit_v0(&view, &given, i, &code).unwrap(),
             theirs,

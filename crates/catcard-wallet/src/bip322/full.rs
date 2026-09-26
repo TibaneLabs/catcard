@@ -71,6 +71,14 @@ pub const MAX_FULL_ARMOURED: usize = 3 + MAX_SINGLE_TX.div_ceil(3) * 4;
 /// Base64 of [`MAX_MULTISIG_TX`], plus the prefix.
 pub const MAX_MULTISIG_ARMOURED: usize = 3 + MAX_MULTISIG_TX.div_ceil(3) * 4;
 
+/// Longest `to_sign` one cosigner's partial signature serialises to: as
+/// [`MAX_MULTISIG_TX`] with a single signature in the witness. What a device holding one
+/// key of a wallet writes.
+pub const MAX_PARTIAL_TX: usize = MAX_MULTISIG_TX - (MAX_COSIGNERS - 1) * (1 + MAX_SIG);
+
+/// Base64 of [`MAX_PARTIAL_TX`], plus the prefix.
+pub const MAX_PARTIAL_ARMOURED: usize = 3 + MAX_PARTIAL_TX.div_ceil(3) * 4;
+
 /// One input of a transaction, as the engine reads it.
 #[derive(Copy, Clone, Debug)]
 pub struct InView<'a> {

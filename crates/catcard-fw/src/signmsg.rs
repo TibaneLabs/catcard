@@ -7,16 +7,25 @@
 //! Message" prefix, and a BIP-322 one to a transaction that spends an output which does
 //! not exist.
 //!
-//! Two formats, because both are asked for:
+//! Three formats, because all are asked for:
 //!
 //! - **legacy** ([`message`]), the 65-byte recoverable signature every wallet has read
 //!   since 2011, for P2PKH, P2SH-P2WPKH and P2WPKH addresses;
-//! - **BIP-322** ([`bip322`]), the standard one, which is what a verifier that wants a
-//!   proof for a segwit or taproot address rather than a convention about one will ask for.
+//! - **BIP-322 simple** ([`bip322`]), the standard one, which is what a verifier that
+//!   wants a proof for a native-segwit or taproot address rather than a convention about
+//!   one will ask for;
+//! - **BIP-322 full** ([`bip322::full`]), the whole `to_sign` transaction: the only form
+//!   a nested-segwit address has, and the one a multisig cosigner's share travels in.
 //!
-//! The owner picks, on a screen that names both. Nothing guesses: a file written in the
-//! wrong format is a file the other side rejects, and the two are not distinguishable by
-//! looking at the address.
+//! The owner picks the address type, then the format from those the type allows, on a
+//! screen that names each. Nothing guesses: a file written in the wrong format is a file
+//! the other side rejects, and the formats are not distinguishable by looking at the
+//! address.
+//!
+//! A registered multisig wallet can sign too, where this device is one of its cosigners:
+//! the witness script is rebuilt from the wallet's own record, this device's key is
+//! proven to be in it, and the result is a partial signature -- one of `M` -- in the full
+//! format, which `Sign → Verify` reports as needing the other cosigners.
 //!
 //! # Which key
 //!
@@ -45,6 +54,7 @@ use catcard_ui::keypad::{Event, KEYS, Key};
 use catcard_ui::textentry::Entry;
 use catcard_wallet::address::{self, AddressKind};
 use catcard_wallet::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, Network};
+use catcard_wallet::bip322::full;
 use catcard_wallet::{bip322, message, signfile};
 use core::fmt::Write as _;
 use zeroize::Zeroize;
@@ -72,6 +82,10 @@ const PATH_MAX: usize = 176;
 /// digits, a marker and a separator each.
 const PATH_CHARS: usize = 2 + catcard_wallet::bip32::MAX_PATH_DEPTH * 12;
 
+/// Longest armoured signature this writes: a cosigner's partial in the full format,
+/// which is longer than any single-key signature in any format.
+pub(crate) const SIG_TEXT: usize = full::MAX_PARTIAL_ARMOURED;
+
 /// Room for the whole armoured file: three marker lines, the message, the address and the
 /// signature, each on its own line.
 ///
@@ -83,7 +97,7 @@ const FILE_TEXT: usize = signfile::BEGIN.len()
     + signfile::END.len()
     + message::MAX_MESSAGE
     + address::MAX_ADDRESS_LEN
-    + bip322::MAX_ARMOURED
+    + SIG_TEXT
     + 8;
 
 /// Which signature the file will carry.
@@ -91,16 +105,34 @@ const FILE_TEXT: usize = signfile::BEGIN.len()
 pub(crate) enum Format {
     /// The "Bitcoin Signed Message" digest and a recoverable signature.
     Legacy,
-    /// BIP-322, simple variant.
+    /// BIP-322, simple variant: the witness stack.
     Bip322,
+    /// BIP-322, full variant: the whole `to_sign` transaction.
+    Bip322Full,
 }
 
 impl Format {
     const fn name(self) -> &'static str {
         match self {
             Format::Legacy => "legacy signature",
-            Format::Bip322 => "BIP-322 signature",
+            Format::Bip322 => "BIP-322 simple",
+            Format::Bip322Full => "BIP-322 full",
         }
+    }
+}
+
+/// The formats an address type can be signed in, the usual one first.
+///
+/// Legacy has no header range for taproot (BIP-137 stops at P2WPKH); the simple variant
+/// has nowhere to put the `scriptSig` a nested address needs, so nested segwit gets the
+/// full one; P2PKH has the legacy format, which every verifier reads, and nothing to gain
+/// from a transaction around it.
+fn formats_for(kind: AddressKind) -> &'static [Format] {
+    match kind {
+        AddressKind::P2wpkh => &[Format::Legacy, Format::Bip322, Format::Bip322Full],
+        AddressKind::P2shP2wpkh => &[Format::Legacy, Format::Bip322Full],
+        AddressKind::P2pkh => &[Format::Legacy],
+        AddressKind::P2tr => &[Format::Bip322, Format::Bip322Full],
     }
 }
 
@@ -112,9 +144,25 @@ struct Choice {
     format: Format,
 }
 
+/// Who signs: one of this wallet's own keys, or this device's share of a registered
+/// multisig wallet.
+#[derive(Clone)]
+enum Who {
+    Key(Choice),
+    /// The wallet at this index of `msimport::registered`, at `branch`/`index`. The
+    /// index rather than the record: the registry's slice is re-read when it is needed,
+    /// as its contract asks, and a fifteen-cosigner record is not something to carry.
+    #[cfg(not(feature = "board-mk3"))]
+    Cosigner {
+        at: usize,
+        branch: u32,
+        index: u32,
+    },
+}
+
 /// What signing produced: the armoured signature, and the address it speaks for.
 pub(crate) struct Signed {
-    pub(crate) armoured: heapless::String<{ bip322::MAX_ARMOURED }>,
+    pub(crate) armoured: heapless::String<SIG_TEXT>,
     pub(crate) address: heapless::String<{ address::MAX_ADDRESS_LEN }>,
 }
 
@@ -142,7 +190,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     if text.is_empty() {
         return;
     }
-    let Some(choice) = ask_choice(ui, HEAD, None, None) else {
+    let Some(choice) = ask_choice(gate, login, ui, HEAD, None, None) else {
         return;
     };
     sign_and_deliver(gate, login, ui, HEAD, text, &choice, Target::Fresh);
@@ -182,7 +230,7 @@ pub(crate) fn text_file(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
         Ok(r) => r,
         Err(why) => return complain(ui, HEAD, describe_request(why)),
     };
-    let Some(choice) = ask_choice(ui, HEAD, request.kind, request.path) else {
+    let Some(choice) = ask_choice(gate, login, ui, HEAD, request.kind, request.path) else {
         return;
     };
     sign_and_deliver(
@@ -221,7 +269,7 @@ pub(crate) fn sign_request_text(
         Ok(r) => r,
         Err(why) => return complain(ui, HEAD, describe_request(why)),
     };
-    let Some(choice) = ask_choice(ui, HEAD, request.kind, request.path) else {
+    let Some(choice) = ask_choice(gate, login, ui, HEAD, request.kind, request.path) else {
         return;
     };
     sign_and_deliver(
@@ -246,61 +294,127 @@ fn describe_request(e: message::RequestError) -> &'static str {
     }
 }
 
-/// Settle the format, the address type and the path, asking for whatever the request
-/// left open. Asked before the PIN rather than after, so a change of mind costs nothing.
+/// Settle who signs and how, asking for whatever the request left open. Asked before the
+/// PIN rather than after, so a change of mind costs nothing.
 ///
-/// A request that names a type has narrowed the format: P2PKH and nested segwit have
-/// only the legacy signature, taproot only BIP-322. Native segwit has both, and is asked.
+/// The address type first, then the format from those the type allows -- asked only
+/// when there is more than one -- then the path. A request that names a type has
+/// settled the first question; one that names a path, the last. On a board with a
+/// settings store, a registered multisig wallet is offered beside the four single-key
+/// types, and signs as a cosigner.
 fn ask_choice(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     head: &str,
     kind: Option<AddressKind>,
     path: Option<DerivationPath>,
-) -> Option<Choice> {
-    let format = match kind {
-        Some(AddressKind::P2tr) => Format::Bip322,
-        Some(AddressKind::P2pkh) | Some(AddressKind::P2shP2wpkh) => Format::Legacy,
-        Some(AddressKind::P2wpkh) | None => ask_format(ui, head),
-    };
+) -> Option<Who> {
     let kind = match kind {
         Some(k) => k,
-        None => ask_kind(ui, head, format)?,
+        None => match ask_kind(gate, login, ui, head)? {
+            Picked::Kind(k) => k,
+            #[cfg(not(feature = "board-mk3"))]
+            Picked::Wallet(at) => return ask_cosigner(ui, head, at),
+        },
     };
+    let format = ask_format(ui, head, kind)?;
     let path = match path {
         Some(p) => p,
         None => ask_path(ui, head, kind)?,
     };
-    Some(Choice { kind, path, format })
+    Some(Who::Key(Choice { kind, path, format }))
 }
 
-/// Which format to write.
+/// Which format to write, from those the address type allows.
 ///
-/// Both answers are a choice and neither is a way out: backing out is what the screen
-/// before this one is for.
-fn ask_format(ui: &mut Ui<'_>, head: &str) -> Format {
-    menu::ask(ui.panel, head, "sign it as BIP-322?", "no = legacy format");
-    if menu::confirmed(ui) {
-        Format::Bip322
-    } else {
-        Format::Legacy
+/// One allowed format is not a question. Otherwise a list, with each format named as it
+/// will be named on the confirmation screen: the difference between the three is what
+/// the other side can read, and the owner is the one who knows what that is.
+fn ask_format(ui: &mut Ui<'_>, head: &str, kind: AddressKind) -> Option<Format> {
+    let formats = formats_for(kind);
+    if let [only] = formats {
+        return Some(*only);
+    }
+    let mut names: heapless::Vec<&str, 3> = heapless::Vec::new();
+    for f in formats {
+        let _ = names.push(f.name());
+    }
+    let at = menu::choose(ui, head, "signature format", &names)?;
+    formats.get(at).copied()
+}
+
+/// What the address-type question was answered with.
+enum Picked {
+    Kind(AddressKind),
+    /// A registered multisig wallet, by its index in the registry.
+    #[cfg(not(feature = "board-mk3"))]
+    Wallet(usize),
+}
+
+/// The four single-signature types, native segwit first because it is the one nearly
+/// everyone wants.
+const KINDS: [AddressKind; 4] = [
+    AddressKind::P2wpkh,
+    AddressKind::P2shP2wpkh,
+    AddressKind::P2pkh,
+    AddressKind::P2tr,
+];
+
+/// Pick the address type, or a registered multisig wallet.
+#[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+fn ask_kind(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+) -> Option<Picked> {
+    const MOST: usize = 4 + catcard_settings::wallets::MAX_WALLETS;
+    let mut names: heapless::Vec<heapless::String<24>, MOST> = heapless::Vec::new();
+    for k in KINDS {
+        let mut name = heapless::String::new();
+        let _ = name.push_str(kind_label(k));
+        let _ = names.push(name);
+    }
+    // The registered wallets, past the four types, each named by its threshold and
+    // script form: a `sh(multi)` wallet is listed too, and refused by name if picked,
+    // rather than silently missing from a list the owner is comparing with the importer's.
+    #[cfg(not(feature = "board-mk3"))]
+    for w in crate::msimport::registered(gate, login, ui.panel) {
+        let mut name = heapless::String::new();
+        let form = match w.kind {
+            catcard_wallet::multisig::Kind::P2wsh => "wsh",
+            catcard_wallet::multisig::Kind::P2shP2wsh => "sh-wsh",
+            catcard_wallet::multisig::Kind::P2sh => "sh",
+        };
+        let _ = write!(name, "{}-of-{} {}", w.m, w.n(), form);
+        let _ = names.push(name);
+    }
+    let mut rows: heapless::Vec<&str, MOST> = heapless::Vec::new();
+    for n in &names {
+        let _ = rows.push(n.as_str());
+    }
+    let at = menu::choose(ui, head, "address type", &rows)?;
+    match KINDS.get(at) {
+        Some(k) => Some(Picked::Kind(*k)),
+        #[cfg(not(feature = "board-mk3"))]
+        None => Some(Picked::Wallet(at - KINDS.len())),
+        #[cfg(feature = "board-mk3")]
+        None => None,
     }
 }
 
-/// The address types a format can sign for, native segwit first because it is the one
-/// nearly everyone wants.
-///
-/// Legacy has no header range for taproot (BIP-137 stops at P2WPKH), and BIP-322's
-/// verifier here reads the two segwit scripts and nothing older, so each list is what
-/// the other side can actually check.
-fn kinds_for(format: Format) -> &'static [AddressKind] {
-    match format {
-        Format::Legacy => &[
-            AddressKind::P2wpkh,
-            AddressKind::P2shP2wpkh,
-            AddressKind::P2pkh,
-        ],
-        Format::Bip322 => &[AddressKind::P2wpkh, AddressKind::P2tr],
-    }
+/// Which address of a registered wallet to sign for: the branch and the index.
+#[cfg(not(feature = "board-mk3"))]
+fn ask_cosigner(ui: &mut Ui<'_>, head: &str, at: usize) -> Option<Who> {
+    let branch = menu::choose(
+        ui,
+        head,
+        "which branch",
+        &["Receive address", "Change address"],
+    )? as u32;
+    let index = menu::ask_index(ui, head, "address index")?;
+    Some(Who::Cosigner { at, branch, index })
 }
 
 /// What to call an address type on screen.
@@ -311,17 +425,6 @@ pub(crate) const fn kind_label(kind: AddressKind) -> &'static str {
         AddressKind::P2pkh => "Legacy",
         AddressKind::P2tr => "Taproot",
     }
-}
-
-/// Pick the address type from the ones the format can sign for.
-fn ask_kind(ui: &mut Ui<'_>, head: &str, format: Format) -> Option<AddressKind> {
-    let kinds = kinds_for(format);
-    let mut names: heapless::Vec<&str, 4> = heapless::Vec::new();
-    for k in kinds {
-        let _ = names.push(kind_label(*k));
-    }
-    let at = menu::choose(ui, head, "address type", &names)?;
-    kinds.get(at).copied()
 }
 
 /// The first receive address of `kind`'s account on the network in force:
@@ -357,7 +460,7 @@ fn sign_and_deliver(
     ui: &mut Ui<'_>,
     head: &str,
     text: &str,
-    choice: &Choice,
+    choice: &Who,
     target: Target<'_>,
 ) {
     let Some(signed) = sign_with(gate, login, ui, head, text, choice) else {
@@ -387,7 +490,7 @@ pub(crate) fn sign_to_file(
             return None;
         }
     };
-    let choice = ask_choice(ui, head, request.kind, request.path)?;
+    let choice = ask_choice(gate, login, ui, head, request.kind, request.path)?;
     let signed = sign_with(gate, login, ui, head, request.message, &choice)?;
     show(ui, request.message, &signed);
     let mut file: heapless::String<FILE_TEXT> = heapless::String::new();
@@ -432,6 +535,24 @@ fn sign_with(
     ui: &mut Ui<'_>,
     head: &str,
     text: &str,
+    who: &Who,
+) -> Option<Signed> {
+    match who {
+        Who::Key(choice) => sign_with_key(gate, login, ui, head, text, choice),
+        #[cfg(not(feature = "board-mk3"))]
+        Who::Cosigner { at, branch, index } => {
+            sign_as_cosigner(gate, login, ui, head, text, *at, *branch, *index)
+        }
+    }
+}
+
+/// [`sign_with`] for one of this wallet's own keys.
+fn sign_with_key(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
     choice: &Choice,
 ) -> Option<Signed> {
     let master = menu::unlock_master(gate, login, ui, head)?;
@@ -462,7 +583,11 @@ fn sign_with(
             return None;
         }
     };
-    if !confirm(ui, head, text, &address, choice) {
+    let mut path: heapless::String<PATH_CHARS> = heapless::String::new();
+    let _ = write!(path, "{}", choice.path);
+    let mut how: heapless::String<48> = heapless::String::new();
+    let _ = write!(how, "{}, {}", kind_label(choice.kind), choice.format.name());
+    if !confirm(ui, head, text, &address, &path, &how) {
         drop(leaf);
         return None;
     }
@@ -489,6 +614,117 @@ fn sign_with(
             None
         }
     }
+}
+
+/// [`sign_with`] as this device's share of a registered multisig wallet.
+///
+/// The address is rebuilt from the wallet's record and shown before the seed is touched.
+/// The signature is a partial one in the full format; the self-check that follows
+/// expects exactly that -- every signature in it good, and `M - 1` short -- unless the
+/// wallet is 1-of-N, in which case it has to verify outright.
+#[cfg(not(feature = "board-mk3"))]
+#[allow(clippy::too_many_arguments)]
+fn sign_as_cosigner(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    at: usize,
+    branch: u32,
+    index: u32,
+) -> Option<Signed> {
+    use catcard_wallet::multisig::Kind;
+
+    let wallets = crate::msimport::registered(gate, login, ui.panel);
+    let Some(wallet) = wallets.get(at) else {
+        complain(ui, head, "wallet no longer registered");
+        return None;
+    };
+    if wallet.kind == Kind::P2sh {
+        // A bare `sh(multi)` message needs the legacy signature hash, which nothing in
+        // this device computes.
+        complain(ui, head, "not for sh(multi) wallets");
+        return None;
+    }
+    let network = crate::prefs::network();
+    let mut spk = [0u8; bip322::MAX_SCRIPT];
+    let mut buf = [0u8; address::MAX_ADDRESS_LEN];
+    let shown = wallet
+        .script_pubkey(branch, index, &mut spk)
+        .ok()
+        .and_then(|n| address::from_script(&spk[..n], network, &mut buf));
+    let Some(n) = shown else {
+        complain(ui, head, "address failed");
+        return None;
+    };
+    let mut address: heapless::String<{ address::MAX_ADDRESS_LEN }> = heapless::String::new();
+    let _ = address.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
+    let mut path: heapless::String<PATH_CHARS> = heapless::String::new();
+    let _ = write!(path, ".../{branch}/{index}");
+    let mut how: heapless::String<48> = heapless::String::new();
+    let _ = write!(
+        how,
+        "{}-of-{} multisig, {}",
+        wallet.m,
+        wallet.n(),
+        Format::Bip322Full.name()
+    );
+    if !confirm(ui, head, text, &address, &path, &how) {
+        return None;
+    }
+
+    let master = menu::unlock_master(gate, login, ui, head)?;
+    let mut busy = menu::Working::new(ui.panel, head, "signing");
+    let mut challenge = [0u8; bip322::MAX_SCRIPT];
+    let signed = crate::keywork::run(|kw| {
+        full::sign_cosigner(
+            text.as_bytes(),
+            wallet,
+            branch,
+            index,
+            &master,
+            &mut challenge,
+            kw,
+        )
+    });
+    drop(master);
+    busy.tick(ui.panel);
+    let (sig, cn) = match signed {
+        Ok(v) => v,
+        Err(e) => {
+            complain(ui, head, describe322(e));
+            return None;
+        }
+    };
+    // Our own work, through the verifier a counterparty would use: a partial signature
+    // is short of the threshold and nothing else is wrong with it.
+    let check = full::verify_full(text.as_bytes(), &challenge[..cn], sig.as_bytes());
+    let expected = if wallet.m == 1 {
+        Ok(())
+    } else {
+        Err(bip322::Error::NeedsCosigners {
+            have: 1,
+            need: wallet.m,
+        })
+    };
+    if check != expected {
+        complain(ui, head, "signature did not verify");
+        return None;
+    }
+    let mut out = [0u8; SIG_TEXT];
+    let Ok(written) = sig.armour(&mut out) else {
+        complain(ui, head, "no room for it");
+        return None;
+    };
+    let mut armoured: heapless::String<SIG_TEXT> = heapless::String::new();
+    let _ = armoured.push_str(core::str::from_utf8(&out[..written]).unwrap_or(""));
+    crate::catlog!(
+        "message: cosigner share for {}, {} more needed",
+        address,
+        wallet.m.saturating_sub(1)
+    );
+    Some(Signed { armoured, address })
 }
 
 /// Write the armoured file where `target` says, or show it as a code.
@@ -635,8 +871,8 @@ pub(crate) fn sign_secret(
     format: Format,
     kw: &catcard_wallet::KeyWork,
 ) -> Result<Signed, &'static str> {
-    let mut armoured: heapless::String<{ bip322::MAX_ARMOURED }> = heapless::String::new();
-    let mut buf = [0u8; bip322::MAX_ARMOURED];
+    let mut armoured: heapless::String<SIG_TEXT> = heapless::String::new();
+    let mut buf = [0u8; SIG_TEXT];
     let written = match format {
         Format::Legacy => {
             let sig = message::sign(text, secret, kind, kw);
@@ -660,6 +896,17 @@ pub(crate) fn sign_secret(
             let mut script = [0u8; bip322::MAX_SCRIPT];
             let n = bip322::challenge(kind, pubkey, &mut script).map_err(describe322)?;
             bip322::verify(text.as_bytes(), &script[..n], sig.as_bytes())
+                .map_err(|_| "signature did not verify")?;
+            sig.armour(&mut buf).map_err(describe322)?
+        }
+        Format::Bip322Full => {
+            let sig = full::sign_full(text.as_bytes(), secret, kind, kw);
+            secret.zeroize();
+            let sig = sig.map_err(describe322)?;
+            // The same self-check, over the whole transaction this time.
+            let mut script = [0u8; bip322::MAX_SCRIPT];
+            let n = full::challenge(kind, pubkey, &mut script).map_err(describe322)?;
+            full::verify_full(text.as_bytes(), &script[..n], sig.as_bytes())
                 .map_err(|_| "signature did not verify")?;
             sig.armour(&mut buf).map_err(describe322)?
         }
@@ -689,7 +936,13 @@ fn describe322(e: bip322::Error) -> &'static str {
             "not for this address type"
         }
         bip322::Error::BadKey => "key unusable",
-        bip322::Error::Malformed | bip322::Error::Invalid => "signature did not verify",
+        bip322::Error::NeedsCosigners { .. } => "needs more cosigners",
+        bip322::Error::Malformed
+        | bip322::Error::Invalid
+        | bip322::Error::Inconclusive
+        | bip322::Error::NotAProof
+        | bip322::Error::TooManyInputs
+        | bip322::Error::MissingUtxo => "signature did not verify",
         bip322::Error::BufferTooSmall => "no room for it",
     }
 }
@@ -700,20 +953,17 @@ fn complain(ui: &mut Ui<'_>, head: &str, why: &str) {
     menu::wait_for_any_key(ui);
 }
 
-/// The message, the address that will sign it, and how. True if the owner said go ahead.
-fn confirm(ui: &mut Ui<'_>, head: &str, text: &str, address: &str, choice: &Choice) -> bool {
+/// The message, the address that will sign it, the path to it and how -- the address
+/// type and the format, by name. True if the owner said go ahead.
+fn confirm(ui: &mut Ui<'_>, head: &str, text: &str, address: &str, path: &str, how: &str) -> bool {
     use catcard_ui::scroll::{Line, ScrollView};
-    let mut path: heapless::String<PATH_CHARS> = heapless::String::new();
-    let _ = write!(path, "{}", choice.path);
-    let mut how: heapless::String<48> = heapless::String::new();
-    let _ = write!(how, "{}, {}", kind_label(choice.kind), choice.format.name());
     let mut doc: heapless::Vec<Line, 8> = heapless::Vec::new();
     let _ = doc.push(Line::title(head));
     let _ = doc.push(Line::body(text).wrapped());
     let _ = doc.push(Line::body("will be signed by").small());
     let _ = doc.push(Line::body(address).small().wrapped());
-    let _ = doc.push(Line::body(path.as_str()).small().wrapped());
-    let _ = doc.push(Line::body(how.as_str()).small().wrapped());
+    let _ = doc.push(Line::body(path).small().wrapped());
+    let _ = doc.push(Line::body(how).small().wrapped());
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
     menu::scroll_choice(ui, &mut view)
 }
