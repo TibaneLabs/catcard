@@ -904,3 +904,23 @@ references do not include, are taken with margin rather than as values:
 The icon falls back to an unfilled battery if the ADC does not come up or a conversion
 times out, and the log says which. To resolve: run on battery, compare the step shown against
 a meter on the pack at a few voltages around 2.9 / 3.5 / 4.0 V.
+
+## Installing a firmware after the PIN is cleared (factory reset) `[?]`
+
+`Debug → Factory Reset` clears the PIN to blank, wipes the settings, and can then install
+another firmware. On mk4/mk5/Q1 the install is gate 18 method 7, which needs a logged-in
+struct (install-and-usb-transport.md §2b). Two things are not documented:
+
+- whether the struct a method-3 change hands back (here, to an empty new PIN) is still
+  `PA_SUCCESSFUL`, so method 7 can follow it;
+- whether a blank device can log in (method 2, empty PIN) to get one.
+
+Stock's blank-device menu has no Upgrade Firmware, which suggests neither works. The code
+does the first (`Login::clear_pin_keeping_login`) and does **not** try an empty-PIN login,
+which could cost an attempt. When the install is refused the reset has still happened:
+the screen says the firmware was not installed and the device powers off or logs out. The
+mk3 is not affected: its staged image installs on the next boot with no gate call.
+
+To settle it: on the disposable mk5 only, reset with "Install another" and see whether it
+installs or reports "login went stale".
+

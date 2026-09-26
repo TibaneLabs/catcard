@@ -183,6 +183,46 @@ impl<M: BlockMedium> NorSlots<M> {
     }
 }
 
+impl<M: BlockMedium> NorSlots<M> {
+    /// Destroy every slot: fill each sector with `fill`'s bytes, then erase it, and check
+    /// it reads erased. What a factory reset does to the settings on this medium.
+    ///
+    /// The fill goes on first so that whatever the old sectors held is programmed over
+    /// before the erase, rather than trusting the erase alone to leave nothing behind.
+    /// The end state is stock's empty store -- every slot erased -- which is this
+    /// medium's "formatted". `progress` is told `(done, total)` after each sector.
+    ///
+    /// Touches the settings sectors and nothing below them, where firmware is staged.
+    pub fn scrub(
+        &mut self,
+        mut fill: impl FnMut(&mut [u8]),
+        mut progress: impl FnMut(u32, u32),
+    ) -> Result<(), MediumError> {
+        if !self.writable {
+            return Err(MediumError);
+        }
+        let mut chunk = [0u8; 256];
+        for index in 0..self.layout.count {
+            let addr = self.layout.offset(index).ok_or(MediumError)?;
+            self.medium.erase_sector(addr)?;
+            let mut at = 0u32;
+            while at < SECTOR {
+                fill(&mut chunk);
+                self.medium.program(addr + at, &chunk)?;
+                at += chunk.len() as u32;
+            }
+            self.medium.erase_sector(addr)?;
+            if !self.sector_is_erased(addr)? {
+                return Err(MediumError);
+            }
+            progress(index + 1, self.layout.count);
+        }
+        chunk.fill(0);
+        self.last_cleared = None;
+        Ok(())
+    }
+}
+
 impl<M: BlockMedium> Slots for NorSlots<M> {
     fn count(&self) -> u32 {
         self.layout.count
@@ -365,6 +405,47 @@ pub(crate) mod tests {
 
     fn key() -> Key {
         nvstore::hash_key(&[0x82; 72])
+    }
+
+    /// A scrub programs every settings sector over before erasing it, leaves them all
+    /// erased, and never touches the staged image below.
+    #[test]
+    fn a_scrub_overwrites_then_erases_every_slot_and_nothing_else() {
+        let mut nor = MemNor::with_staged_image();
+        nor.mem[0xE5000..0xE5010].copy_from_slice(&[0x42; 16]);
+        let mut slots = NorSlots::new(nor, MK3);
+        let mut seen = Vec::new();
+        slots
+            .scrub(|b| b.fill(0x5A), |done, total| seen.push((done, total)))
+            .unwrap();
+        assert_eq!(seen.len(), 32);
+        assert_eq!(seen.last(), Some(&(32, 32)));
+        let nor = slots.into_medium();
+        assert!(
+            nor.staged_image_intact(),
+            "the scrub reached the staged image"
+        );
+        assert_eq!(nor.lowest_touched(), Some(MK3.base));
+        assert!(nor.mem[MK3.base as usize..].iter().all(|&b| b == 0xFF));
+        for i in 0..32u32 {
+            let addr = MK3.base + i * SECTOR;
+            let covered: usize = nor
+                .programmed
+                .iter()
+                .filter(|(a, _)| (addr..addr + SECTOR).contains(a))
+                .map(|(_, n)| n)
+                .sum();
+            assert_eq!(covered, SECTOR as usize, "sector {i} was not overwritten");
+            assert_eq!(nor.erased.iter().filter(|&&a| a == addr).count(), 2);
+        }
+    }
+
+    /// A read-only view refuses to scrub, and changes nothing trying.
+    #[test]
+    fn a_read_only_view_refuses_to_scrub() {
+        let mut ro = NorSlots::read_only(MemNor::with_staged_image(), MK3);
+        assert!(ro.scrub(|b| b.fill(0), |_, _| {}).is_err());
+        assert_eq!(ro.into_medium().lowest_touched(), None);
     }
 
     fn mk3() -> NorSlots<MemNor> {

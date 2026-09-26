@@ -921,12 +921,16 @@ pub enum FactoryReset {
 /// device that was not actually unlocked with the right PIN (and a wrong entry counts
 /// toward the brick limit, exactly as a wrong login does). The caller has already
 /// confirmed the intent; on any terminal outcome here the device must reboot.
+///
+/// `keep_login`: a firmware install follows, so keep the session if the bootloader leaves
+/// it logged in ([`Login::clear_pin_keeping_login`]).
 pub(crate) fn factory_reset(
     gate: &Callgate,
     panel: &mut display::Panel,
     matrix: &mut GpioMatrix,
     drbg: &mut HmacDrbg,
     login: &mut Login,
+    keep_login: bool,
 ) -> FactoryReset {
     let g = BootloaderGate::new(gate);
 
@@ -946,9 +950,16 @@ pub(crate) fn factory_reset(
         return FactoryReset::Cancelled;
     };
 
-    working(panel, "Resetting");
-    match login.clear_pin(&g, old_prefix.as_bytes(), old_suffix.as_bytes()) {
+    working(panel, "Clearing PIN");
+    let (p, s) = (old_prefix.as_bytes(), old_suffix.as_bytes());
+    let step = if keep_login {
+        login.clear_pin_keeping_login(&g, p, s)
+    } else {
+        login.clear_pin(&g, p, s)
+    };
+    match step {
         Ok(Step::Blank) => FactoryReset::Wiped,
+        Ok(Step::In { .. }) if keep_login => FactoryReset::Wiped,
         _ => FactoryReset::Refused,
     }
 }

@@ -784,6 +784,73 @@ static mut BATT_OFF: (bool, Option<u32>) = (
     Some(catcard_settings::prelogin::BATT_OFF_DEFAULT_SECONDS),
 );
 
+/// Destroy the whole settings store and leave it as a fresh device has it: every block
+/// overwritten with `fill`'s bytes, then formatted empty. Part of a factory reset.
+///
+/// - **mk4 / mk5 / Q1**: the internal-flash region is overwritten a page at a time, then
+///   formatted as LittleFS **v2.0** with 512-byte blocks and 255-byte names -- the
+///   geometry read off a stock device's superblock (`docs/SECRETS-AND-SETTINGS.md`), so
+///   stock firmware mounts it too -- and `/settings` is created in it.
+/// - **mk3**: each settings sector of the SPI-NOR is overwritten, then erased; an erased
+///   sector is stock's empty slot, so that is the format.
+///
+/// `progress` is told `(done, total)`. Irreversible: every wallet's settings, notes,
+/// multisig wallets and the pre-login settings go with it.
+///
+/// # Safety
+/// As [`Files::mount`]: nothing else may touch the settings medium while this runs.
+pub(crate) unsafe fn factory_wipe(
+    fill: impl FnMut(&mut [u8]),
+    progress: impl FnMut(u32, u32),
+) -> Result<(), &'static str> {
+    #[cfg(not(feature = "board-mk3"))]
+    {
+        use fstool::fs::littlefs::{DISK_VERSION_2_0, FormatOpts};
+        // SAFETY: forwarding the caller's guarantee.
+        let mut blocks = unsafe { Blocks::open() }.map_err(|e| {
+            crate::catlog!("wipe: settings region will not open: {:?}", e);
+            "settings will not open"
+        })?;
+        blocks.scrub(fill, progress).map_err(|e| {
+            crate::catlog!("wipe: overwrite failed: {:?}", e);
+            "overwrite failed"
+        })?;
+        // Source: docs/SECRETS-AND-SETTINGS.md, a real Q1's superblock -- version
+        // 0x0002_0000, block_size 512, name_max 255 [C]
+        let opts = FormatOpts {
+            block_count: None,
+            disk_version: DISK_VERSION_2_0,
+            name_max: 255,
+            inline_max: None,
+        };
+        let mut vol = Volume::format_with(blocks, &opts).map_err(|e| {
+            crate::catlog!("wipe: format failed: {:?}", e);
+            "format failed"
+        })?;
+        vol.create_dir("/settings").map_err(|e| {
+            crate::catlog!("wipe: /settings not created: {:?}", e);
+            "could not create settings"
+        })?;
+        vol.unmount().map_err(|e| {
+            crate::catlog!("wipe: unmount failed: {:?}", e);
+            "format did not finish"
+        })?;
+        Ok(())
+    }
+    #[cfg(feature = "board-mk3")]
+    {
+        // SAFETY: forwarding the caller's guarantee.
+        let mut files = unsafe { Files::mount() }.map_err(|e| {
+            crate::catlog!("wipe: settings will not open: {:?}", e);
+            "settings will not open"
+        })?;
+        files
+            .slots
+            .scrub(fill, progress)
+            .map_err(|_| "overwrite failed")
+    }
+}
+
 /// The on-battery power-off in force, in seconds; `None` is never.
 #[cfg(feature = "board-q1")]
 pub(crate) fn battery_off() -> Option<u32> {

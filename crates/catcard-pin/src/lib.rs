@@ -628,6 +628,33 @@ impl Login {
         old_prefix: &[u8],
         old_suffix: &[u8],
     ) -> Result<Step, BadPartLength> {
+        self.clear(gate, old_prefix, old_suffix, false)
+    }
+
+    /// [`clear_pin`](Self::clear_pin), for a factory reset that installs a firmware after
+    /// it: if the struct the change hands back is still logged in, keep it -- and stay at
+    /// [`Step::In`] -- so [`authorize_firmware`](Self::authorize_firmware) can follow.
+    ///
+    /// **Whether the bootloader leaves it logged in is not documented** `[?]`, and a PIN
+    /// change is modelled as logging out. When it is not, this ends at [`Step::Blank`]
+    /// exactly as `clear_pin` does, and the install that follows is refused before the
+    /// gate is asked. The PIN is cleared either way.
+    pub fn clear_pin_keeping_login<G: PinGate>(
+        &mut self,
+        gate: &G,
+        old_prefix: &[u8],
+        old_suffix: &[u8],
+    ) -> Result<Step, BadPartLength> {
+        self.clear(gate, old_prefix, old_suffix, true)
+    }
+
+    fn clear<G: PinGate>(
+        &mut self,
+        gate: &G,
+        old_prefix: &[u8],
+        old_suffix: &[u8],
+        keep_login: bool,
+    ) -> Result<Step, BadPartLength> {
         if !matches!(self.step, Step::In { .. }) {
             return Ok(self.step);
         }
@@ -649,6 +676,10 @@ impl Login {
         set?;
 
         self.step = match gate.pin_attempt(PinOp::Change, &mut self.attempt) {
+            Ok(_) if keep_login && self.attempt.logged_in() => {
+                self.attempt.change_flags = 0;
+                Step::In { zero_secret: true }
+            }
             Ok(_) => {
                 // The device is blank now; re-run Setup so the struct reflects that rather
                 // than a change struct, and expect Blank back.

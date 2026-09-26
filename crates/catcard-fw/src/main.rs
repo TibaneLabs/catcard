@@ -54,6 +54,8 @@ mod display;
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod evmtx;
 mod export;
+/// Factory reset: PIN to blank, settings destroyed and formatted, optional reinstall.
+mod factoryreset;
 #[cfg(all(feature = "dev", feature = "usb-key-injection"))]
 mod failsafe;
 mod filemgmt;

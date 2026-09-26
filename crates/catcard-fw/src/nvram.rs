@@ -117,6 +117,39 @@ impl Blocks {
         })
     }
 
+    /// Overwrite the whole region with `fill`'s bytes, a page at a time: erase the page,
+    /// then program it full. What a factory reset does before it formats the region again,
+    /// so nothing the old volume held survives in the blocks the new one leaves unused.
+    ///
+    /// `progress` is told `(done, total)` pages. Refused on a read-only open.
+    pub fn scrub(
+        &mut self,
+        mut fill: impl FnMut(&mut [u8]),
+        mut progress: impl FnMut(u32, u32),
+    ) -> Result<(), iflash::Error> {
+        let page_size = self.page_size;
+        let pages = self.blocks / self.per_page();
+        let Self {
+            flash, page: held, ..
+        } = self;
+        let Some(held) = held.as_mut() else {
+            return Err(iflash::Error::ReadOnly);
+        };
+        let buf = &mut held.bytes()[..page_size];
+        for page in 0..pages {
+            // SAFETY: as in `open`; `page` is inside the region the driver bounds-checks.
+            unsafe {
+                flash.erase(page)?;
+                fill(buf);
+                flash.program(page * page_size as u32, buf)?;
+            }
+            progress(page + 1, pages);
+        }
+        // The rewrite buffer is heap that goes back to the pool: leave nothing in it.
+        buf.fill(0);
+        Ok(())
+    }
+
     /// Blocks per flash page.
     fn per_page(&self) -> u32 {
         (self.page_size / BLOCK) as u32

@@ -366,7 +366,8 @@ enum Screen {
     #[cfg(feature = "board-q1")]
     Brightness,
     WipeSeed,
-    /// Factory reset: clear the PIN to a zero-length value and reboot to blank.
+    /// Factory reset: the PIN cleared to blank, the settings overwritten and formatted,
+    /// and optionally another firmware installed last. See `crate::factoryreset`.
     FactoryReset,
 }
 
@@ -1993,7 +1994,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::DangerZone,
         ),
         Screen::FactoryReset => to(
-            |a| factory_reset_screen(a.gate, a.login, a.ui),
+            |a| crate::factoryreset::run(a.gate, a.login, a.ui),
             Screen::Debug,
         ),
         _ => return None,
@@ -2072,48 +2073,6 @@ fn change_pin_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             // SAFETY: nothing after this runs.
             unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
         }
-    }
-}
-
-/// Factory reset: clear the PIN back to blank, behind two confirmations.
-fn factory_reset_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use crate::pinentry::FactoryReset;
-
-    // Destructive and irreversible: it clears the PIN back to blank. Ask twice, the same
-    // as destroying a wallet, before even collecting the PIN.
-    let go = {
-        ask(
-            ui.panel,
-            "Factory reset?",
-            "the PIN is CLEARED",
-            "device back to blank",
-        );
-        confirmed(ui) && {
-            ask(ui.panel, "Really reset?", "this cannot be", "undone");
-            confirmed(ui)
-        }
-    };
-    if !go {
-        return;
-    }
-    match crate::pinentry::factory_reset(gate, ui.panel, ui.matrix, ui.drbg, login) {
-        // The device is blank now; reboot straight into the first-run flow.
-        FactoryReset::Wiped => {
-            crate::catlog!("pin: factory reset, rebooting blank");
-            message(ui.panel, "Reset done", "rebooting", "");
-            // SAFETY: nothing after this runs.
-            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-        }
-        // A wrong current PIN (or another failure) leaves the session invalid, so reboot
-        // to a fresh login with the unchanged PIN.
-        FactoryReset::Refused => {
-            crate::catlog!("pin: factory reset refused, rebooting");
-            message(ui.panel, "Not reset", "rebooting", "");
-            // SAFETY: nothing after this runs.
-            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
-        }
-        // Backed out during PIN entry; nothing changed.
-        FactoryReset::Cancelled => {}
     }
 }
 

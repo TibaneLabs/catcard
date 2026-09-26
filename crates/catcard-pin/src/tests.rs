@@ -1078,6 +1078,31 @@ fn clearing_the_pin_returns_the_device_to_blank() {
 }
 
 #[test]
+fn clearing_the_pin_for_an_install_ends_blank_when_the_change_logs_out() {
+    // The model logs a PIN change out, as a change is documented to. Then the reset still
+    // clears the PIN, and the install after it is refused by the login check rather than
+    // sent to the gate with a struct that is not logged in.
+    let m = Model::new(b"12-3456");
+    let (mut l, _) = login_with(&m, b"12", b"3456");
+    assert_eq!(
+        l.clear_pin_keeping_login(&m, b"12", b"3456").unwrap(),
+        Step::Blank
+    );
+    assert!(
+        Login::new(&m).step() == Step::Blank,
+        "the PIN was not cleared"
+    );
+    assert!(matches!(
+        l.authorize_firmware(&m, 0, 0x8_0000),
+        Err(Failure::Code(err::PIN_REQUIRED))
+    ));
+    assert!(
+        m.inner.borrow().authorized.is_none(),
+        "the gate was asked anyway"
+    );
+}
+
+#[test]
 fn clearing_the_pin_with_the_wrong_current_pin_is_refused() {
     // The current PIN is still required, so a factory reset cannot wipe a device the
     // operator has not actually unlocked with the right PIN.
