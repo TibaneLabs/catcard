@@ -34,6 +34,7 @@
 //! or write. [`current`] still exists there and still answers -- with the defaults -- so
 //! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
 
+use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, PushTx, SighashChecks, Units};
 use catcard_wallet::bip32::Network;
 
 /// Everything the preference screens set, as the firmware reads it.
