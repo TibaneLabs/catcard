@@ -71,11 +71,10 @@ each step landed, then what is left.
     mk3 settings store on SPI-NOR (`catcard_settings::norslots`), which turned on every
     feature that lacked only a store there; the Single-Signer Spending Policy and hobbled
     mode (`crate::policy`). Untested on hardware.
-17. **What remains**: HSM mode and user management; CCC; Web 2FA for the Spending
-    Policy; Trick PINs (blocked on gate 22's slot layout, `HARDWARE-OPEN-ITEMS.md`); Key
-    Teleport; Reflash GPU; the factory menu (Bag Me Now / Ship w/o Bag, MCU key slots);
-    BIP-322 `full` / `pof` for P2PKH (needs a legacy sighash); altcoin transaction signing
-    beyond ETH and SOL.
+17. **What remains**: HSM mode and user management; Trick PINs (blocked on gate 22's
+    slot layout, `HARDWARE-OPEN-ITEMS.md`); Key Teleport; Reflash GPU; the factory menu
+    (Bag Me Now / Ship w/o Bag, MCU key slots); BIP-322 `full` / `pof` for P2PKH (needs a
+    legacy sighash); altcoin transaction signing beyond ETH and SOL.
 
 ## 1. Standards
 
@@ -210,7 +209,9 @@ every multisig input is refused.
 | Scrambled keypad, login countdown, kill key, SD 2FA, nickname, idle timeout | ✅ | ✅ | all under Settings → Login and Idle timeout (`crate::pinentry`, `crate::guard`, `crate::idle`); kill key and SD 2FA in release builds only (the `dev` feature leaves them out); untested on hardware |
 | Calculator login (Q1) | ✅ | ➖ | Settings → Login → Calculator login (`cat_calc`, `pinentry`): the PIN convention is ours -- prefix then `-` then ENTER, suffix then ENTER -- since the reference gives none (`MENU.md`); untested on hardware |
 | HSM mode, user management | ✅ | ❌ | deferred |
-| Spending Policy, CCC | ✅ | 🟡 | single-signer policy: magnitude, velocity by the PSBT's lock-time height, a 25-address whitelist, Test Drive, Word Check (`crate::policy`, `cat_sssp`); Web 2FA inert (spec missing), CCC not built; untested on hardware |
+| Spending Policy | ✅ | ✅ | single-signer policy: magnitude, velocity by the PSBT's lock-time height, a 25-address whitelist, Test Drive, Word Check (`crate::policy`, `cat_sssp`); untested on hardware |
+| CCC (Coldcard Co-Sign) | ✅ | ✅ | key C (new 12 words, typed 12/24, or from the Seed Vault) under stock's own `ccc` key in stock's shape; the same policy engine and editor; key C co-signs a spend from a registered wallet it is in only when the policy passes, else the owner may sign without it; Export CCC XPUBs, Build 2-of-N, Load Key C, Remove CCC; whole-key word challenge, three failures restart (`crate::ccc`, `catcard_settings::ccc`); untested on hardware |
+| Web 2FA (Spending Policy, CCC) | ✅ | ➖ | left out: relies on Coinkite's closed coldcard.com service; a policy stock enrolled in it never co-signs here |
 | Hobbled mode | ✅ | ➖ | the menus stock hides are hidden; the escape is a CatCard unlock code checked before gate 18, not a gate-22 trick PIN, until gate 22's layout is known; untested on hardware |
 | Secure Logout | ✅ | ✅ | main menu on the boards without a power button |
 | Genuine light | ✅ | ✅ | read on About page 3 (`crate::identity`); Danger zone → Bless Firmware commits this image and turns it green (gate 18/5) |
