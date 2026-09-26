@@ -137,9 +137,9 @@ pub struct UsbTask {
     /// The last pairing ended with the device user saying no. A host polling with a sealed
     /// `PairConfirm` then hears `Declined` rather than a bare `NotNow`.
     pair_declined: bool,
-    /// Milliseconds before another handshake may start after a code was shown. See
-    /// [`PAIR_COOLDOWN_MS`].
-    pair_cooldown_ms: u32,
+    /// The limits on pairing attempts: a cooldown on every device key handed out, and a
+    /// block after handshakes are dropped unrevealed. See [`ncry::PairGuard`].
+    pair_guard: ncry::PairGuard,
     /// DWT reading at the previous pairing tick, for the prompt deadline.
     pair_clock: u32,
     /// CPU cycles per millisecond, taken with the DRBG at boot. Zero means no clock to
@@ -243,15 +243,6 @@ struct ReplyState {
     started: bool,
 }
 
-/// How long after a pairing code is shown before another handshake may start.
-///
-/// A relay that has shown the host one code can only win by re-rolling the device's code
-/// until the two match. Each try is a fresh handshake and a new code on the device's screen,
-/// and the host's user waits [`ncry::PROMPT_MS`] at most, so five seconds a try leaves a
-/// relay about two dozen guesses at one in a million each -- and a screen visibly flickering
-/// through codes while it tries. A person who rejects and retries waits five seconds.
-const PAIR_COOLDOWN_MS: u32 = 5_000;
-
 /// Largest reply body. Enough for a useful peek without making the task struct heavy.
 const REPLY_MAX: usize = 512;
 
@@ -318,7 +309,7 @@ impl UsbTask {
             handshake: None,
             pair_id: 0,
             pair_declined: false,
-            pair_cooldown_ms: 0,
+            pair_guard: ncry::PairGuard::new(),
             pair_clock: 0,
             cycles_per_ms: 0,
             drbg: None,
@@ -478,6 +469,11 @@ impl UsbTask {
                     // that session was shown goes too, and a host question on the screen
                     // ends -- the same rule as an upgrade offer.
                     self.ncry_rx = None;
+                    // A handshake cut by the reset never showed its code; it counts as
+                    // dropped, or a relay that can reset the bus would re-roll for free.
+                    if self.handshake.take().is_some() {
+                        self.pair_guard.dropped();
+                    }
                     self.end_session(true);
                 }
                 Event::Report => {
@@ -984,9 +980,8 @@ impl UsbTask {
             return;
         }
         // One pairing at a time: a second handshake while a code is on the screen would
-        // change the code under the person reading it. And a pause after each code shown,
-        // so a relay cannot re-roll the device's code faster than a person reads it.
-        if self.pairing_in_progress() || self.pair_cooldown_ms > 0 {
+        // change the code under the person reading it.
+        if self.pairing_in_progress() {
             self.begin_reply(Status::Busy, &[]);
             return;
         }
@@ -1001,6 +996,25 @@ impl UsbTask {
         // The ephemeral scalar is protocol randomness from the HMAC-DRBG, never the raw
         // pool and never anything key-derived. A DRBG that cannot produce is a dead
         // channel, not a weak one: refuse rather than fall back to a lesser source.
+        // Every device key is an attempt, charged whether or not a code is ever shown: a
+        // relay sees the candidate code the moment it holds the key, so a limit on shown
+        // codes alone would let it discard silent handshakes by the thousand. Checked
+        // after the conditions above, so a "not now" costs the host nothing.
+        match self.pair_guard.begin() {
+            Ok(()) => {}
+            Err(ncry::Refusal::Cooling) => {
+                self.begin_reply(Status::Busy, &[]);
+                return;
+            }
+            Err(ncry::Refusal::Locked) => {
+                crate::catlog!("ncry: pairing blocked after abandoned handshakes");
+                self.begin_reply(
+                    Status::Refused,
+                    b"pairing blocked: acknowledge it on the device",
+                );
+                return;
+            }
+        }
         let mut scalar = [0u8; ncry::KEY_LEN];
         if drbg.generate(&mut scalar).is_err() {
             self.begin_reply(Status::BadRequest, &[]);
@@ -1036,14 +1050,15 @@ impl UsbTask {
         match hs.reveal(host_pub) {
             Ok(session) => {
                 self.pair_id = self.pair_id.wrapping_add(1);
-                self.pair_cooldown_ms = PAIR_COOLDOWN_MS;
-                self.pair_clock = catcard_hal::dwt::cycles();
+                self.pair_guard.revealed();
                 self.chan.install(session);
                 crate::catlog!("ncry: pairing code shown, waiting for the user");
                 self.begin_reply(Status::Ok, &[]);
             }
             Err(e) => {
                 crate::catlog!("ncry: pairing refused: {:?}", e);
+                // A reveal that missed its commitment is a dropped handshake, and counts.
+                self.pair_guard.dropped();
                 self.begin_reply(Status::BadRequest, &[]);
             }
         }
@@ -1072,7 +1087,10 @@ impl UsbTask {
         if self.chan.is_open() || self.handshake.is_some() {
             crate::catlog!("ncry: host abandoned the session");
         }
-        self.handshake = None;
+        if self.handshake.take().is_some() {
+            // Abandoned before the reveal: no code was ever shown for it.
+            self.pair_guard.dropped();
+        }
         self.end_session(false);
         self.begin_reply(Status::Ok, &[]);
     }
@@ -1088,6 +1106,18 @@ impl UsbTask {
             })
     }
 
+    /// Whether pairing is blocked after abandoned handshakes, and how many: the screen
+    /// says so until the person dismisses it.
+    pub fn pair_blocked(&self) -> Option<u8> {
+        self.pair_guard.locked()
+    }
+
+    /// The person saw the warning and let pairing go on.
+    pub fn pair_unblock(&mut self) {
+        crate::catlog!("ncry: pairing block dismissed on the device");
+        self.pair_guard.dismiss();
+    }
+
     /// The device user answered prompt `id`. An answer to a prompt that is no longer the
     /// one waiting -- it timed out, or the host abandoned it -- changes nothing.
     pub fn pair_answer(&mut self, id: u32, accept: bool) {
@@ -1097,6 +1127,9 @@ impl UsbTask {
         if accept {
             if let Some(s) = self.chan.session_mut() {
                 s.accept();
+            }
+            if self.paired() {
+                self.pair_guard.paired();
             }
             crate::catlog!(
                 "ncry: user accepted the code{}",
@@ -1121,7 +1154,7 @@ impl UsbTask {
         let now = catcard_hal::dwt::cycles();
         let prev = core::mem::replace(&mut self.pair_clock, now);
         let gap = (now.wrapping_sub(prev) / self.cycles_per_ms).min(1_000);
-        self.pair_cooldown_ms = self.pair_cooldown_ms.saturating_sub(gap);
+        self.pair_guard.tick(gap);
         if let Some(s) = self.chan.session_mut()
             && s.wait(gap)
         {
@@ -1173,7 +1206,10 @@ impl UsbTask {
                 self.inner_dispatch(inner_op, &plain[2..], &mut sealed[2..2 + INNER_MAX])
             }
             // `NotNow` while the device user is still looking at the code: ask again.
-            ncry::Admit::Confirm if self.paired() => (Status::Ok, 0),
+            ncry::Admit::Confirm if self.paired() => {
+                self.pair_guard.paired();
+                (Status::Ok, 0)
+            }
             ncry::Admit::Confirm => (Status::NotNow, 0),
             ncry::Admit::Refuse => {
                 plain.zeroize();
@@ -2384,6 +2420,16 @@ pub fn pair_prompt() -> Option<PairPrompt> {
 /// The device user answered the pairing prompt `id`.
 pub fn pair_answer(id: u32, accept: bool) {
     with_task(|t| t.pair_answer(id, accept));
+}
+
+/// Pairing is blocked after this many handshakes were abandoned; the screen should say so.
+pub fn pair_blocked() -> Option<u8> {
+    with_task(|t| t.pair_blocked()).flatten()
+}
+
+/// The person dismissed the pairing-blocked warning.
+pub fn pair_unblock() {
+    with_task(|t| t.pair_unblock());
 }
 
 /// Whether a computer's question (addresses, a signature) is waiting for the screen.

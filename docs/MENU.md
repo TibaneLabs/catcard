@@ -262,3 +262,9 @@ It takes the screen from wherever the main loop is, the way the firmware-upgrade
 does (an offer on the screen is answered first). Only after the PIN; one prompt at a time;
 it goes away on its own after two minutes, or when the host gives up. Stock has no
 equivalent: its USB channel is not paired.
+
+**Pairing blocked** is the other screen a host can bring up: a computer took device keys
+and dropped three handshakes without revealing its own, which is what a relay re-rolling
+the code looks like. It says how many attempts were abandoned; OK or Cancel dismisses it
+and lets pairing go on, and until then every pairing attempt is refused. An honest host
+only causes it by crashing mid-handshake.

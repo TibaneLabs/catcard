@@ -38,3 +38,21 @@ pub fn show(panel: &mut display::Panel, code: u32) {
         "same code shown there?",
     );
 }
+
+/// Draw the warning that pairing is blocked: a computer took `abandoned` device keys and
+/// dropped each before revealing its own -- what a relay re-rolling the code looks like,
+/// and not something an honest host does.
+///
+/// Dismissing it lets pairing go on; the next few abandoned attempts block it again, so a
+/// relay that is still there needs the person each time.
+pub fn show_blocked(panel: &mut display::Panel, abandoned: u8) {
+    use core::fmt::Write as _;
+    let mut line: heapless::String<32> = heapless::String::new();
+    let _ = write!(line, "{abandoned} pairing attempts");
+    crate::menu::ask(
+        panel,
+        "Pairing blocked",
+        &line,
+        "abandoned. OK = allow again",
+    );
+}

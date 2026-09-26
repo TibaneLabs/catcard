@@ -221,18 +221,38 @@ The session is paired only when the device's user accepted **and** the host's se
 after two minutes (`ncry::PROMPT_MS`), and a failed tag at any point tears it down.
 
 Rules on the device side: pairing needs the PIN (`NotNow` before it, as upgrades do); one
-pairing prompt at a time (`Busy`); and after each code shown a five-second pause before the
-next handshake (`Busy`), so the device's code cannot be re-rolled faster than a person
-reads it. The prompt takes the screen from the menu loop exactly as the upgrade offer does,
-checked after the keys are read, and an answer applies only to the prompt that was shown.
+pairing prompt at a time (`Busy`); and the attempt limits below. The prompt takes the screen
+from the menu loop exactly as the upgrade offer does, checked after the keys are read, and
+an answer applies only to the prompt that was shown.
 
 **Why the commitment.** A relay in the middle runs one handshake with each side. If the
 host revealed its key up front, the relay could wait for it and then grind its own
 device-facing key offline until the two codes matched — 10^6 tries is a moment's work. With
 the commitment the host is bound before it sees anything the relay sends, and the device's
-key is fresh for each handshake, so the relay gets one guess per code a person looks at:
-one in a million, and with the pause above about two dozen guesses in the two minutes a
-host's user waits.
+key is fresh for each handshake, so within one handshake the relay cannot choose a
+matching code: one chance in a million.
+
+**Attempts are limited** (`ncry::PairGuard`). The commitment bounds one handshake, not how
+many a relay may start. Facing the device, the relay learns the device's code the moment it
+holds the device's key -- before it reveals anything, and before the device shows anything
+-- so it could discard every non-matching key and ask for another, re-rolling the device's
+code silently until it matched the one the host is already showing. So:
+
+- **Every device key is charged** a five-second cooldown (`ATTEMPT_COOLDOWN_MS`), whether
+  or not a code is ever shown; a `PairCommit` inside it gets `Busy`.
+- **A handshake dropped before its reveal counts as abandoned**: replaced by a new
+  `PairCommit`, ended by `PairAbort`, answered with a reveal that misses its commitment, or
+  cut by a bus reset. An honest host reveals right after committing and never does this
+  except by crashing mid-way.
+- **After three abandoned handshakes** (`ABANDON_LIMIT`) the device blocks pairing: a
+  `PairCommit` gets `Refused` + `pairing blocked: acknowledge it on the device`, and the
+  screen says "Pairing blocked -- N pairing attempts abandoned" until the person dismisses
+  it. Dismissing restores the full allowance; a completed pairing clears the count.
+
+A relay therefore gets at most three silent re-rolls before the person has to act, three
+chances in a million, instead of the thousands that fit in a host's two-minute wait
+without the limits. `ncry::tests::a_relay_re_rolling_the_device_code_is_throttled_then_blocked`
+runs exactly that loop.
 
 **What v2 defends.** With the codes compared, an **active relay**: a relayed connection
 shows a different code on each screen, and the person says no. And, as v1 did, a
@@ -741,7 +761,8 @@ A **passive** observer on the wire learns nothing -- not the addresses, not the 
 the transaction. An **active relay** in the middle produces a different code on each
 side, which the person sees and refuses; its one way through is a person who accepts
 without comparing, or a one-in-a-million code collision per attempt (the device waits a
-few seconds after each code shown, so attempts cannot be ground through).
+five seconds after every device key it hands out, and blocks pairing after three
+handshakes are dropped unrevealed -- see "Attempts are limited" in the channel section).
 
 What pairing does **not** defend against is a computer that is itself compromised: it
 holds a genuine paired session. What protects the owner then is the same as for every

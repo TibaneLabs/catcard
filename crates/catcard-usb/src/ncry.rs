@@ -107,6 +107,129 @@ pub const CODE_MODULUS: u64 = 1_000_000;
 /// enough to read six digits twice, short enough that a prompt nobody is watching goes.
 pub const PROMPT_MS: u32 = 120_000;
 
+/// How long after a device key is handed out before another handshake may start.
+///
+/// Charged on every [`Responder`] the device creates, **not** only when a code is shown. A
+/// relay that has shown the host one code wins only by re-rolling the device's code until
+/// the two match -- and it can see each candidate code the moment it has the device's key,
+/// before revealing anything, so a limit charged only on shown codes lets it discard
+/// thousands of silent handshakes inside the host's wait. Charged per key, the host's two
+/// minutes leave it about two dozen tries.
+pub const ATTEMPT_COOLDOWN_MS: u32 = 5_000;
+
+/// Handshakes dropped without a reveal -- replaced, abandoned, revealed wrongly, cut by a
+/// bus reset -- before pairing is blocked until the person at the device acknowledges it.
+///
+/// An honest host reveals right after it commits; it drops a handshake only when it
+/// crashes or is unplugged mid-way. A relay re-rolling the device's code drops one per
+/// try. Three is room for a clumsy honest host and three chances in a million for a
+/// relay, after which it needs the person to notice and let it go on.
+pub const ABANDON_LIMIT: u8 = 3;
+
+/// Why the device will not start a handshake right now.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Refusal {
+    /// Inside [`ATTEMPT_COOLDOWN_MS`] of the last device key. Try again shortly.
+    Cooling,
+    /// [`ABANDON_LIMIT`] handshakes were dropped unrevealed; the device is showing a
+    /// warning, and pairing waits until its user dismisses it.
+    Locked,
+}
+
+/// The limits on pairing attempts, kept by the device across handshakes.
+///
+/// The commitment makes one handshake a one-in-a-million shot for a relay; this is what
+/// keeps the relay from simply taking more shots. It holds no keys and reads no clock:
+/// the caller reports time passing ([`tick`](Self::tick)) and each step of a handshake,
+/// which is what lets the re-roll attack be tested on the host.
+#[derive(Clone, Debug, Default)]
+pub struct PairGuard {
+    cooldown_ms: u32,
+    /// A device key is out and its reveal has not arrived.
+    pending: bool,
+    abandoned: u8,
+    locked: bool,
+}
+
+impl PairGuard {
+    pub const fn new() -> Self {
+        Self {
+            cooldown_ms: 0,
+            pending: false,
+            abandoned: 0,
+            locked: false,
+        }
+    }
+
+    /// A `PairCommit` wants a device key. On `Ok` the caller creates the [`Responder`] --
+    /// replacing any pending one, which this has already counted as abandoned -- and the
+    /// cooldown starts.
+    ///
+    /// A refusal changes nothing: a pending handshake stays pending, uncounted.
+    pub fn begin(&mut self) -> Result<(), Refusal> {
+        if self.locked {
+            return Err(Refusal::Locked);
+        }
+        if self.cooldown_ms > 0 {
+            return Err(Refusal::Cooling);
+        }
+        if self.pending {
+            // Replacing a key the host never revealed against: the re-roll.
+            self.abandon();
+            if self.locked {
+                return Err(Refusal::Locked);
+            }
+        }
+        self.cooldown_ms = ATTEMPT_COOLDOWN_MS;
+        self.pending = true;
+        Ok(())
+    }
+
+    /// The reveal matched the commitment: the code is on the screen, in front of a person.
+    pub fn revealed(&mut self) {
+        self.pending = false;
+    }
+
+    /// The pending handshake went away without a good reveal: a `PairAbort`, a reveal that
+    /// missed its commitment, a bus reset. Counted like a replacement.
+    pub fn dropped(&mut self) {
+        if self.pending {
+            self.abandon();
+        }
+    }
+
+    /// Both sides accepted the code. What went before was an honest host's stumbles.
+    pub fn paired(&mut self) {
+        self.abandoned = 0;
+    }
+
+    /// Time passed, in milliseconds.
+    pub fn tick(&mut self, ms: u32) {
+        self.cooldown_ms = self.cooldown_ms.saturating_sub(ms);
+    }
+
+    /// Whether pairing is blocked, and how many handshakes were abandoned to get here.
+    pub fn locked(&self) -> Option<u8> {
+        self.locked.then_some(self.abandoned)
+    }
+
+    /// The person at the device saw the warning and let pairing go on. The count starts
+    /// again, so a relay that is still there gets [`ABANDON_LIMIT`] more tries and then
+    /// needs the person again.
+    pub fn dismiss(&mut self) {
+        self.locked = false;
+        self.abandoned = 0;
+    }
+
+    fn abandon(&mut self) {
+        self.pending = false;
+        self.abandoned = self.abandoned.saturating_add(1);
+        if self.abandoned >= ABANDON_LIMIT {
+            self.locked = true;
+        }
+    }
+}
+
 /// Why a channel operation could not be completed.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -593,6 +716,114 @@ impl<S: Default> Channel<S> {
 
 #[cfg(test)]
 mod tests {
+
+    // ---------------------------------------------------------------------------------
+    // PairGuard: the relay's re-roll, and an honest host's ordinary day.
+    // ---------------------------------------------------------------------------------
+
+    /// The attack this exists for: a relay takes a device key, sees from it that the code
+    /// will not match the one the host is showing, and starts over without revealing. It
+    /// cannot go faster than one key per cooldown, and three silent drops block pairing.
+    #[test]
+    fn a_relay_re_rolling_the_device_code_is_throttled_then_blocked() {
+        let mut g = PairGuard::new();
+        let mut keys = 0;
+        let mut elapsed = 0u32;
+        // The host waits two minutes; the relay commits every millisecond it can.
+        while elapsed < PROMPT_MS {
+            match g.begin() {
+                Ok(()) => keys += 1,
+                Err(Refusal::Cooling) => {}
+                Err(Refusal::Locked) => break,
+            }
+            g.tick(1);
+            elapsed += 1;
+        }
+        assert!(g.locked().is_some(), "silent re-rolls must end in a block");
+        // The first key, then one per cooldown until the third drop locks it.
+        assert_eq!(
+            keys, ABANDON_LIMIT as u32,
+            "keys handed out before the block"
+        );
+        assert_eq!(g.locked(), Some(ABANDON_LIMIT));
+        // Blocked stays blocked, however long it waits.
+        g.tick(u32::MAX);
+        assert_eq!(g.begin(), Err(Refusal::Locked));
+    }
+
+    /// Without the per-key charge the same loop would have had thousands of keys; with it,
+    /// a relay that also stays under the abandon limit (by revealing each time) gets one
+    /// key per cooldown, and every one of those puts a code in front of the person.
+    #[test]
+    fn keys_are_charged_even_when_no_code_is_ever_shown() {
+        let mut g = PairGuard::new();
+        assert_eq!(g.begin(), Ok(()));
+        assert_eq!(g.begin(), Err(Refusal::Cooling), "a second key at once");
+        g.tick(ATTEMPT_COOLDOWN_MS - 1);
+        assert_eq!(g.begin(), Err(Refusal::Cooling));
+        g.tick(1);
+        // The pending one is replaced now, and counted.
+        assert_eq!(g.begin(), Ok(()));
+        assert_eq!(g.locked(), None);
+    }
+
+    #[test]
+    fn every_way_of_dropping_an_unrevealed_handshake_counts() {
+        let mut g = PairGuard::new();
+        for _ in 0..ABANDON_LIMIT {
+            assert_eq!(g.begin(), Ok(()));
+            g.dropped(); // abort, bad reveal, bus reset
+            g.tick(ATTEMPT_COOLDOWN_MS);
+        }
+        assert_eq!(g.begin(), Err(Refusal::Locked));
+    }
+
+    /// An honest host commits, reveals, and the person decides. None of that is abandoning,
+    /// whatever the answer, and pairing never blocks.
+    #[test]
+    fn an_honest_host_never_trips_the_block() {
+        let mut g = PairGuard::new();
+        for round in 0..20 {
+            assert_eq!(g.begin(), Ok(()), "round {round}");
+            g.revealed();
+            g.dropped(); // the session ending after a reveal is not an abandon
+            if round % 3 == 2 {
+                g.paired();
+            }
+            g.tick(ATTEMPT_COOLDOWN_MS);
+        }
+        assert_eq!(g.locked(), None);
+    }
+
+    #[test]
+    fn a_dismissed_block_gives_the_full_allowance_again() {
+        let mut g = PairGuard::new();
+        for _ in 0..ABANDON_LIMIT {
+            let _ = g.begin();
+            g.dropped();
+            g.tick(ATTEMPT_COOLDOWN_MS);
+        }
+        assert!(g.locked().is_some());
+        g.dismiss();
+        assert_eq!(g.locked(), None);
+        assert_eq!(g.begin(), Ok(()));
+        // And a pairing that completes clears a partial count, so an honest host's slip
+        // today does not count against it tomorrow.
+        g.revealed();
+        g.dropped();
+        g.tick(ATTEMPT_COOLDOWN_MS);
+        let _ = g.begin();
+        g.dropped();
+        g.paired();
+        g.tick(ATTEMPT_COOLDOWN_MS);
+        for _ in 0..ABANDON_LIMIT - 1 {
+            let _ = g.begin();
+            g.dropped();
+            g.tick(ATTEMPT_COOLDOWN_MS);
+        }
+        assert_eq!(g.locked(), None, "the count restarted at the pairing");
+    }
+
     use super::*;
     use crate::Opcode;
 

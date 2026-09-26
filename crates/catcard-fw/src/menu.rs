@@ -1109,6 +1109,7 @@ pub fn run(session: Session<'_>) -> ! {
     let mut showing_offer = false;
     // The USB pairing prompt on the screen, if one is: see `crate::pairing`.
     let mut showing_pair: Option<usbtask::PairPrompt> = None;
+    let mut showing_blocked: Option<u8> = None;
     // A transfer in flight owns the screen: last percentage drawn, so it repaints only
     // when it moves.
     let mut receiving: Option<u8> = None;
@@ -1170,7 +1171,12 @@ pub fn run(session: Session<'_>) -> ! {
     }
 
     loop {
-        if redraw && !showing_offer && showing_pair.is_none() && receiving.is_none() {
+        if redraw
+            && !showing_offer
+            && showing_pair.is_none()
+            && showing_blocked.is_none()
+            && receiving.is_none()
+        {
             // On the PRNG-status screen, draw a fresh 32-bit sample first so the counters
             // snapshotted just below include that generate call. Done only here, so no
             // other screen advances the DRBG just by being shown.
@@ -1284,6 +1290,24 @@ pub fn run(session: Session<'_>) -> ! {
             redraw = true;
         }
 
+        // Pairing blocked after abandoned handshakes: said once, until the person dismisses
+        // it. Below an offer or a pairing prompt, which cannot be up at the same time as a
+        // block anyway (a blocked device hands out no keys).
+        let blocked = usbtask::pair_blocked()
+            .filter(|_| !showing_offer && receiving.is_none() && showing_pair.is_none());
+        if blocked != showing_blocked {
+            match blocked {
+                Some(n) => {
+                    if showing_blocked.is_none() && screen == Screen::Colours {
+                        display::wipe(ui.panel);
+                    }
+                    crate::pairing::show_blocked(ui.panel, n);
+                }
+                None => redraw = true,
+            }
+            showing_blocked = blocked;
+        }
+
         // A host's pairing code, waiting on the person to compare it. Same ordering as the
         // offer above, and for the same reason: checked after the keys are read. An offer
         // on the screen goes first; the prompt waits for it (its deadline still runs).
@@ -1376,6 +1400,16 @@ pub fn run(session: Session<'_>) -> ! {
                     }
                     Key::Digit(_) => {}
                     Key::Char(_) | Key::Qr => {}
+                }
+                continue;
+            }
+            // The pairing-blocked warning: OK or Cancel dismisses it and lets pairing go on.
+            // Every other key is swallowed rather than reaching the menu underneath.
+            if showing_blocked.is_some() {
+                if matches!(key, Key::Confirm | Key::Cancel) {
+                    usbtask::pair_unblock();
+                    showing_blocked = None;
+                    redraw = true;
                 }
                 continue;
             }

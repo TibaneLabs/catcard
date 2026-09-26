@@ -98,8 +98,12 @@ def pair_session(sock, confirm=None):
     host = ncry.Initiator()
     st, body = request(sock, PAIR_COMMIT, host.commit)
     if st == 6:
-        raise RuntimeError("pairing: device busy -- a code is already on its screen, or one "
-                           "was shown in the last few seconds; answer it or wait, then retry")
+        raise RuntimeError("pairing: device busy -- a code is on its screen, or a pairing "
+                           "was started in the last few seconds; answer it or wait, then retry")
+    if st == 5:
+        reason = bytes(body).decode("utf-8", "replace") or "refused"
+        raise RuntimeError(f"pairing: {reason} (a computer started pairing and abandoned it "
+                           "several times; the device shows a warning to dismiss)")
     if st != 0 or len(body) != ncry.KEY_LEN:
         raise RuntimeError(f"pairing: commit refused ({STATUS.get(st, st)}, {len(body)} B)")
     session = host.finish(bytes(body))
