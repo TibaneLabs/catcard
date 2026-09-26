@@ -32,7 +32,7 @@
 //! or write. [`current`] still exists there and still answers -- with the defaults -- so
 //! nothing downstream needs a `cfg` of its own. The menu rows are what disappear.
 
-use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, Units};
+use catcard_settings::prefs::{Chain, FeeCap, MultisigTrust, SighashChecks, Units};
 use catcard_wallet::bip32::Network;
 
 /// Everything the preference screens set, as the firmware reads it.
@@ -72,6 +72,13 @@ pub(crate) struct Prefs {
     /// Whether BIP-85 takes an index past 9999. Off keeps the cap; on is the Danger
     /// zone's `B85 Idx Values`, and reads as off from anything but a literal `"1"`.
     pub b85_unlimited: bool,
+    /// Whether a PSBT asking for a sighash type other than `SIGHASH_ALL` is refused or
+    /// warned about. Honoured by the [`catcard_wallet::psbtview::Policy`] the review is
+    /// built with, and by the warning screen in [`crate::signtx`].
+    pub sighash: SighashChecks,
+    /// Whether wallet exports carry account keys in their SLIP-132 form beside the
+    /// classic one. Honoured by [`crate::export`].
+    pub slip132: bool,
 }
 
 impl Prefs {
@@ -107,6 +114,8 @@ impl Default for Prefs {
             multisig_trust: MultisigTrust::VerifyOnly,
             notes: None,
             b85_unlimited: false,
+            sighash: SighashChecks::Block,
+            slip132: false,
         }
     }
 }
@@ -126,6 +135,8 @@ static mut CURRENT: Prefs = Prefs {
     multisig_trust: MultisigTrust::VerifyOnly,
     notes: None,
     b85_unlimited: false,
+    sighash: SighashChecks::Block,
+    slip132: false,
 };
 
 /// What the wallet in force is set to.
@@ -236,9 +247,11 @@ pub(crate) fn load(
         multisig_trust: prefs::multisig_trust(&doc),
         notes: prefs::notes_enabled(&doc),
         b85_unlimited: prefs::b85_unlimited(&doc),
+        sighash: prefs::sighash_checks(&doc),
+        slip132: prefs::slip132(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -249,7 +262,9 @@ pub(crate) fn load(
         next.menu_wrap,
         next.net.ticker(),
         next.multisig_trust.code(),
-        if next.b85_unlimited { "open" } else { "capped" }
+        if next.b85_unlimited { "open" } else { "capped" },
+        next.sighash.code(),
+        next.slip132
     );
     apply(next);
 }

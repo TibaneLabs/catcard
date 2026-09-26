@@ -515,6 +515,77 @@ pub fn multisig_trust(doc: &Doc<'_>) -> MultisigTrust {
     }
 }
 
+/// Whether wallet exports write account keys in their SLIP-132 form (`ypub`/`zpub`)
+/// beside the classic `xpub`: `"1"` on. Off by default, as stock has been since it made
+/// classic the default; reading SLIP-132 keys is unconditional either way.
+/// Source: hw-reference/firmware-features.md §1 "SLIP-132 (read always; export optional,
+/// default off)" [C]
+pub const SLIP132: &str = "cat_slip132";
+
+/// Whether SLIP-132 forms go into exports. Only a literal `"1"` switches it on.
+pub fn slip132(doc: &Doc<'_>) -> bool {
+    text(doc, SLIP132) == Some("1")
+}
+
+/// What to do with a PSBT input that asks for a signature hash type other than
+/// `SIGHASH_ALL`: `block` or `warn`. Anything else, or absent, is
+/// [`SighashChecks::Block`]. Our own key, prefixed `cat_`, as the rest are.
+/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §DZ "Sighash Checks (toggle:
+/// Default Block / Warn)" [C]
+pub const SIGHASH_CHECKS: &str = "cat_sighash";
+
+/// The sighash policy: refuse the unusual types, or warn and let the owner decide.
+///
+/// `SIGHASH_NONE` leaves the outputs unsigned -- whoever holds the signature can send
+/// the coins anywhere -- and `SIGHASH_SINGLE` and `ANYONECANPAY` each leave part of the
+/// transaction open. Stock blocks them by default and offers a "warn instead of block"
+/// switch in its Danger Zone; this is that switch.
+/// Source: hw-reference/firmware-features.md §5 "Sighash policy" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum SighashChecks {
+    /// **The default, and the safe one.** A transaction asking for a type other than
+    /// `SIGHASH_ALL` on one of our inputs is refused outright. Doubt reads as this.
+    #[default]
+    Block,
+    /// Such a transaction is shown, with the input and the type named on a warning the
+    /// owner has to accept before the review; a consolidation (every output ours) is
+    /// still refused, as stock does, since there is nobody to warn on its behalf.
+    Warn,
+}
+
+impl SighashChecks {
+    /// How the value is stored in a settings file.
+    pub const fn code(self) -> &'static str {
+        match self {
+            SighashChecks::Block => "block",
+            SighashChecks::Warn => "warn",
+        }
+    }
+
+    /// The name shown on the chooser, as stock spells them.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SighashChecks::Block => "Block",
+            SighashChecks::Warn => "Warn",
+        }
+    }
+
+    /// Both policies, the safe one first.
+    pub const ALL: [SighashChecks; 2] = [SighashChecks::Block, SighashChecks::Warn];
+}
+
+/// The sighash policy this wallet is set to.
+///
+/// **Doubt reads as [`SighashChecks::Block`]**: only the exact word `warn` relaxes it. An
+/// unreadable slot leaves the device refusing `SIGHASH_NONE`, which is the direction that
+/// cannot hand a host a signature over nothing.
+pub fn sighash_checks(doc: &Doc<'_>) -> SighashChecks {
+    match text(doc, SIGHASH_CHECKS) {
+        Some("warn") => SighashChecks::Warn,
+        _ => SighashChecks::Block,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +610,53 @@ mod tests {
             r#"{"cat_b85idx":"11"}"#,
         ] {
             assert!(!b85_unlimited(&doc(json)), "{json}");
+        }
+    }
+
+    /// Only the exact word `warn` relaxes the sighash checks; everything else, including
+    /// the spellings a person might reach for, keeps the block.
+    #[test]
+    fn sighash_checks_doubt_reads_as_block() {
+        assert_eq!(
+            sighash_checks(&doc(r#"{"cat_sighash":"warn"}"#)),
+            SighashChecks::Warn
+        );
+        assert_eq!(
+            sighash_checks(&doc(r#"{"cat_sighash":"block"}"#)),
+            SighashChecks::Block
+        );
+        for json in [
+            r#"{}"#,
+            r#"{"cat_sighash":""}"#,
+            r#"{"cat_sighash":"Warn"}"#,
+            r#"{"cat_sighash":"WARN"}"#,
+            r#"{"cat_sighash":"warn "}"#,
+            r#"{"cat_sighash":"1"}"#,
+            r#"{"cat_sighash":1}"#,
+            r#"{"cat_sighash":true}"#,
+        ] {
+            assert_eq!(sighash_checks(&doc(json)), SighashChecks::Block, "{json}");
+        }
+        assert_eq!(SighashChecks::default(), SighashChecks::Block);
+        for p in SighashChecks::ALL {
+            let json = format!(r#"{{"cat_sighash":"{}"}}"#, p.code());
+            assert_eq!(sighash_checks(&doc(&json)), p);
+        }
+    }
+
+    /// SLIP-132 export is off unless it is exactly `"1"`.
+    #[test]
+    fn slip132_export_is_off_unless_asked_for() {
+        assert!(slip132(&doc(r#"{"cat_slip132":"1"}"#)));
+        for json in [
+            r#"{}"#,
+            r#"{"cat_slip132":"0"}"#,
+            r#"{"cat_slip132":""}"#,
+            r#"{"cat_slip132":1}"#,
+            r#"{"cat_slip132":"on"}"#,
+            r#"{"cat_slip132":"true"}"#,
+        ] {
+            assert!(!slip132(&doc(json)), "{json}");
         }
     }
 
