@@ -202,6 +202,9 @@ const CMD_READ_SINGLE: u8 = 17;
 const CMD_WRITE_SINGLE: u8 = 24;
 const CMD_APP: u8 = 55;
 const ACMD_OP_COND: u8 = 41;
+/// LOCK_UNLOCK: set/clear a card password, lock or unlock the card, or force-erase it.
+/// Source: SD Physical Layer Simplified Specification, "Lock Card" / CMD42 [C]
+const CMD_LOCK_UNLOCK: u8 = 42;
 
 /// Card status (the R1 response to CMD13): `CURRENT_STATE` in bits 12:9, and
 /// `READY_FOR_DATA` in bit 8. Source: SD Physical Layer Specification, "Card Status" [C]
@@ -364,6 +367,116 @@ fn wait_until_ready<T: Transport>(t: &mut T, card: &Card) -> Result<(), Error> {
         }
     }
     Err(Error::Busy)
+}
+
+/// A CMD42 (LOCK_UNLOCK) operation.
+///
+/// This is the card controller's own password lock, **not** encryption of the data: a
+/// locked card refuses every read and write until it is unlocked with the password, and
+/// most computer card readers cannot drive CMD42 at all, so a card locked this way is
+/// effectively unreadable off this device.
+///
+/// The password is the caller's, borrowed for the length of the call and never held here.
+/// Source: SD Physical Layer Simplified Specification, "Lock/Unlock Card" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum LockOp<'a> {
+    /// Add a password to an unlocked card, or replace the one it has (SET_PWD).
+    SetPassword(&'a [u8]),
+    /// Remove a known password, leaving the card with none (CLR_PWD).
+    ClearPassword(&'a [u8]),
+    /// Lock the card now, using its already-set password (LOCK).
+    Lock(&'a [u8]),
+    /// Unlock a locked card with its password (UNLOCK).
+    Unlock(&'a [u8]),
+    /// Clear the password **and erase the whole card** — the only recovery for a
+    /// forgotten password (FORCE_ERASE). Destructive and irreversible.
+    ForceErase,
+}
+
+/// The longest password CMD42 carries.
+///
+/// `PWDS_LEN` is one byte, but the card's lock/unlock data structure caps the password at
+/// 16 bytes. Source: SD Physical Layer Simplified Specification, "Lock/Unlock Card Data
+/// Structure" [C]
+pub const MAX_LOCK_PWD: usize = 16;
+
+// The command byte at the head of the lock/unlock data structure is a set of flags.
+// Source: SD Physical Layer Simplified Specification, "Lock Card Data Structure" [C]
+/// Set (or replace) the password.
+const LOCK_SET_PWD: u8 = 1 << 0;
+/// Clear the password.
+const LOCK_CLR_PWD: u8 = 1 << 1;
+/// Lock the card. Clear, with neither SET_PWD nor CLR_PWD set, means *unlock*.
+const LOCK_LOCK: u8 = 1 << 2;
+/// Force-erase: wipe the card and clear the password.
+const LOCK_ERASE: u8 = 1 << 3;
+
+/// Build the CMD42 lock/unlock data structure into `buf`, returning its length in bytes.
+///
+/// The structure is a command byte of flags, then for every password operation a
+/// one-byte length and the password itself. FORCE_ERASE carries the command byte alone.
+/// Source: SD Physical Layer Simplified Specification, "Lock/Unlock Card Data Structure"
+/// [C]
+///
+/// `buf` must be at least `2 + MAX_LOCK_PWD` bytes; the caller passes the fixed scratch
+/// buffer [`lock_unlock`] uses. An empty password, or one past [`MAX_LOCK_PWD`], is
+/// [`Error::Unsupported`] rather than a structure the card would reject on the wire.
+fn build_lock_payload(op: LockOp<'_>, buf: &mut [u8]) -> Result<usize, Error> {
+    let (cmd, pwd) = match op {
+        LockOp::SetPassword(p) => (LOCK_SET_PWD, Some(p)),
+        LockOp::ClearPassword(p) => (LOCK_CLR_PWD, Some(p)),
+        LockOp::Lock(p) => (LOCK_LOCK, Some(p)),
+        // Unlock is the absence of every other flag; the password still travels.
+        LockOp::Unlock(p) => (0u8, Some(p)),
+        LockOp::ForceErase => (LOCK_ERASE, None),
+    };
+    buf[0] = cmd;
+    match pwd {
+        None => Ok(1),
+        Some(p) => {
+            if p.is_empty() || p.len() > MAX_LOCK_PWD {
+                return Err(Error::Unsupported);
+            }
+            buf[1] = p.len() as u8;
+            buf[2..2 + p.len()].copy_from_slice(p);
+            Ok(2 + p.len())
+        }
+    }
+}
+
+/// Run one CMD42 (LOCK_UNLOCK) operation against the card.
+///
+/// The `Transport` trait was shaped for exactly this: arm the data path for the outgoing
+/// structure, send CMD42, then write the structure as a short payload. See the
+/// [`Transport::arm_data`] doc comment for why the length is a power of two.
+///
+/// The structure is short — at most `2 + 16` bytes — but the controller can only move a
+/// power-of-two block, and its FIFO writer takes a length that is a multiple of four
+/// words-wide, so the payload is zero-padded up to the next power of two that is at least
+/// four. The card reads `command` and `PWDS_LEN` from the front and ignores the padding.
+/// Whether real cards tolerate that padding (rather than a `CMD16 SET_BLOCKLEN` set to
+/// the exact structure length) is unproven on hardware — see
+/// `docs/HARDWARE-OPEN-ITEMS.md`. `[?]`
+///
+/// The scratch buffer that briefly holds the password is [`zeroize::Zeroizing`], so it is
+/// wiped on every path out, error included.
+pub fn lock_unlock<T: Transport>(t: &mut T, op: LockOp<'_>) -> Result<(), Error> {
+    // header (command byte + length) + the longest password, room for the whole structure
+    // before padding. Wiped on drop.
+    let mut buf = zeroize::Zeroizing::new([0u8; 2 + MAX_LOCK_PWD]);
+    let len = build_lock_payload(op, buf.as_mut_slice())?;
+
+    // The controller moves only a power-of-two block, and its FIFO writer wants a length
+    // that is a multiple of four bytes; four is the smallest block that satisfies both, so
+    // a one-byte FORCE_ERASE still goes out as a four-byte padded block.
+    let block = len.next_power_of_two().max(4);
+    debug_assert!(block <= buf.len());
+
+    t.arm_data(block, false)?;
+    // Stuff bits: the argument to CMD42 carries no operand. Source: SD Physical Layer
+    // Simplified Specification, CMD42 [C]
+    t.command(CMD_LOCK_UNLOCK, 0, Response::Short)?;
+    t.write_short(&buf[..block])
 }
 
 /// Capacity in 512-byte blocks, from a 136-bit CSD.

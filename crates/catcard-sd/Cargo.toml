@@ -10,6 +10,9 @@ authors.workspace = true
 [dependencies]
 # For the one fixed-size string this crate builds: a file name.
 heapless.workspace = true
+# In-place wipe of the CMD42 lock/unlock scratch buffer, which briefly holds a card
+# password. `Zeroizing` clears it on drop, on every path out of `lock_unlock`.
+zeroize.workspace = true
 # The FAT/exFAT driver. Both are heapless here: one sector of scratch RAM whatever the
 # size of the card. `alloc` must stay off -- this crate is linked into firmware with no
 # heap, and the build should fail rather than grow one. `exfat` is on because modern SDXC

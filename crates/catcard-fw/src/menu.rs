@@ -161,6 +161,9 @@ enum Screen {
     CardDetails,
     /// Format the SD card to the SD standard (MBR + FAT16/FAT32/exFAT by capacity).
     FormatSd,
+    /// The SD card's own controller password lock (CMD42): set, change, remove, unlock,
+    /// or force-erase. Needs no settings store, so it is on every board with a slot.
+    CardPassword,
     /// Write or read the encrypted backup file.
     BackupMenu,
     /// Write the wallet to the card, encrypted under twelve fresh words.
@@ -603,6 +606,9 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Card details",
     "Format SD card",
+    // The SD card's own CMD42 password lock. No settings store, so it is on every board
+    // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
+    "Card password",
     "Games",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
@@ -625,6 +631,9 @@ const UTILS_ITEMS: &[&str] = &[
     "Browse SD card",
     "Card details",
     "Format SD card",
+    // The SD card's own CMD42 password lock. No settings store, so it is on every board
+    // with a slot, mk3 included. Source: SD Physical Layer Simplified Spec, "Lock Card" [C]
+    "Card password",
     // Individual private keys, kept in the settings; needs the store, so not on the mk3.
     // Source: hw-reference/firmware-features.md §7 "WIF Store" [C]
     #[cfg(not(feature = "board-mk3"))]
@@ -1337,6 +1346,7 @@ fn action_for(screen: Screen) -> Option<Action> {
             Screen::Utils,
         ),
         Screen::FormatSd => to(|a| format_sd(a.ui), Screen::Utils),
+        Screen::CardPassword => to(|a| card_password(a.ui), Screen::Utils),
         Screen::BackupSave => to(
             |a| crate::backup::save(a.gate, a.login, a.ui),
             Screen::BackupMenu,
@@ -1838,6 +1848,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Browse SD card")) => Screen::BrowseSd,
             (Key::Confirm, Some("Card details")) => Screen::CardDetails,
             (Key::Confirm, Some("Format SD card")) => Screen::FormatSd,
+            (Key::Confirm, Some("Card password")) => Screen::CardPassword,
             #[cfg(feature = "games")]
             (Key::Confirm, Some("Games")) => Screen::Games,
             #[cfg(not(feature = "board-mk3"))]
@@ -2189,6 +2200,8 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "Export wallet" => &art::EXPORT_WALLET,
         "Browse SD card" => &art::MICROSD_BROWSE,
         "Format SD card" => &art::MICROSD_FORMAT,
+        // The card-access icon: the CMD42 lock is about who may read the card at all.
+        "Card password" => &art::MICROSD_ACCESS,
         "Games" => &art::GAMES,
         "Backup" => &art::BACKUP,
         "Upgrade Firmware" => &art::FIRMWARE_UPGRADE,
@@ -2361,6 +2374,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::BackupSave | Screen::BackupRestore => {}
         // Handled in `run`: it confirms, brings up the card, and drives the panel itself.
         Screen::FormatSd => {}
+        // Handled in `run`: it brings up the card and drives its own menu and prompts.
+        Screen::CardPassword => {}
         // Handled in `run`: it runs the file picker and drives the panel itself.
         Screen::SignPsbt
         | Screen::BatchSign
@@ -6253,9 +6268,9 @@ pub(crate) fn ask_number(
 /// have been derived and the payload exists, so turning it into another `Screen` would
 /// mean deriving them again on the way back.
 ///
-/// On every board past the mk3: the Q1's scan offers what it read this way, and so does
-/// the NFC receive screen.
-#[cfg(not(feature = "board-mk3"))]
+/// The Q1's scan offers what it read this way, the NFC receive screen does the same, and
+/// the SD card-password screen picks its operation with it -- the last of which is on the
+/// mk3 too, so this is no longer gated off that board.
 pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) -> Option<usize> {
     use catcard_ui::menu::Scroll;
 
@@ -9854,6 +9869,222 @@ fn format_sd(ui: &mut Ui<'_>) {
             "size not supported",
             "press a key",
         ),
+    }
+    wait_any_key(ui);
+}
+
+/// Read one card password, capped at the card's own 16-byte limit.
+///
+/// The returned [`Entry`] is the caller's to [`Entry::clear`] on every path -- it holds the
+/// password in the clear until then. `None` means cancelled or refused (empty, or too long).
+///
+/// [`Entry`]: catcard_ui::textentry::Entry
+/// [`Entry::clear`]: catcard_ui::textentry::Entry::clear
+fn read_card_pwd(ui: &mut Ui<'_>, prompt: &str) -> Option<catcard_ui::textentry::Entry> {
+    let mut entry = crate::passphrase::read(ui, prompt)?;
+    // Byte length, not character count: the card's `PWDS_LEN` counts bytes, so a short
+    // string of multi-byte characters can still be too long for it.
+    if entry.is_empty() || entry.as_str().len() > catcard_sd::MAX_LOCK_PWD {
+        message(ui.panel, "Card password", "1 to 16 characters", "press a key");
+        wait_any_key(ui);
+        entry.clear();
+        return None;
+    }
+    Some(entry)
+}
+
+/// The SD card's own controller-level password lock (CMD42 / LOCK_UNLOCK).
+///
+/// **Not** encryption of the data: this is the card controller's lock. A card locked this
+/// way refuses every read and write until it is unlocked with the password, and most
+/// computer card readers cannot drive CMD42 at all -- so a card locked here is effectively
+/// unreadable off this device. Forgetting the password leaves only force-erase (total data
+/// loss) as a way back.
+///
+/// The password is typed each time and **never stored on the device**: it lives in an
+/// [`Entry`](catcard_ui::textentry::Entry) that is wiped on every path out, and the driver
+/// copies it into a `Zeroizing` buffer of its own. Needs no settings store, so it is on
+/// every board with a slot, the mk3 included.
+fn card_password(ui: &mut Ui<'_>) {
+    use catcard_hal::sdmmc::Sdmmc;
+    use catcard_sd::LockOp;
+    const HEAD: &str = "Card password";
+
+    // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
+    // and the menu waits for it to return before it can be chosen again.
+    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+        Ok(d) => d,
+        Err(_) => {
+            message(ui.panel, HEAD, "no SD controller", "press a key");
+            wait_any_key(ui);
+            return;
+        }
+    };
+    // A locked card still answers identification -- it refuses only data transfers -- so
+    // bring-up succeeds on one, which is what lets "Unlock card" be offered at all.
+    match catcard_sd::init(&mut dev) {
+        Ok(_) => {}
+        Err(catcard_sd::Error::NoCard) => {
+            message(ui.panel, HEAD, "no card in slot", "press a key");
+            wait_any_key(ui);
+            return;
+        }
+        Err(e) => {
+            crate::catlog!("sd: card would not start: {:?}", e);
+            message(ui.panel, HEAD, "card would not start", "press a key");
+            wait_any_key(ui);
+            return;
+        }
+    }
+
+    const WHAT: &[&str] = &[
+        "Set password",
+        "Change password",
+        "Remove password",
+        "Unlock card",
+        "Force-erase",
+    ];
+    let Some(pick) = choose(ui, HEAD, "SD hardware lock", WHAT) else {
+        return;
+    };
+
+    match pick {
+        // Set: a fresh password, entered twice so a slip does not lock the card to a
+        // password nobody knows.
+        0 => {
+            ask(
+                ui.panel,
+                "Set card password?",
+                "locks card to this device",
+                "readers can't use it",
+            );
+            if !confirmed(ui) {
+                return;
+            }
+            let Some(mut first) = read_card_pwd(ui, "New password") else {
+                return;
+            };
+            let Some(mut again) = read_card_pwd(ui, "Repeat password") else {
+                first.clear();
+                return;
+            };
+            if first.as_str() != again.as_str() {
+                first.clear();
+                again.clear();
+                message(ui.panel, HEAD, "did not match", "press a key");
+                wait_any_key(ui);
+                return;
+            }
+            let op = LockOp::SetPassword(first.as_str().as_bytes());
+            run_lock_op(ui, &mut dev, op, "Setting password", "password set");
+            first.clear();
+            again.clear();
+        }
+        // Change: clear the old password, then set the new. Two CMD42s -- the card is left
+        // with no password if the new one never goes on, rather than with both half-applied.
+        1 => {
+            let Some(mut old) = read_card_pwd(ui, "Old password") else {
+                return;
+            };
+            let Some(mut new) = read_card_pwd(ui, "New password") else {
+                old.clear();
+                return;
+            };
+            let Some(mut again) = read_card_pwd(ui, "Repeat new") else {
+                old.clear();
+                new.clear();
+                return;
+            };
+            if new.as_str() != again.as_str() {
+                old.clear();
+                new.clear();
+                again.clear();
+                message(ui.panel, HEAD, "did not match", "press a key");
+                wait_any_key(ui);
+                return;
+            }
+            message(ui.panel, HEAD, "changing password", "do not remove card");
+            let cleared = catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(old.as_str().as_bytes()));
+            old.clear();
+            match cleared {
+                Ok(()) => {
+                    let op = LockOp::SetPassword(new.as_str().as_bytes());
+                    run_lock_op(ui, &mut dev, op, "Setting password", "password changed");
+                }
+                Err(e) => {
+                    crate::catlog!("sd: CMD42 CLR_PWD failed: {:?}", e);
+                    message(ui.panel, HEAD, "wrong password?", "press a key");
+                    wait_any_key(ui);
+                }
+            }
+            new.clear();
+            again.clear();
+        }
+        // Remove: clear a known password, leaving the card usable by any reader again.
+        2 => {
+            let Some(mut pwd) = read_card_pwd(ui, "Password") else {
+                return;
+            };
+            let op = LockOp::ClearPassword(pwd.as_str().as_bytes());
+            run_lock_op(ui, &mut dev, op, "Removing password", "password removed");
+            pwd.clear();
+        }
+        // Unlock: open a locked card for this session. The password stays set, so the card
+        // locks again when it next loses power; "Remove" is how it is cleared for good.
+        3 => {
+            let Some(mut pwd) = read_card_pwd(ui, "Password") else {
+                return;
+            };
+            let op = LockOp::Unlock(pwd.as_str().as_bytes());
+            run_lock_op(ui, &mut dev, op, "Unlocking", "card unlocked");
+            pwd.clear();
+        }
+        // Force-erase: the forgotten-password recovery. Wipes the password AND every byte
+        // on the card, cannot be undone, and is never a default -- two confirmations.
+        4 => {
+            ask(
+                ui.panel,
+                "Force-erase card?",
+                "ERASES all data",
+                "the only recovery",
+            );
+            if !confirmed(ui) {
+                return;
+            }
+            ask(
+                ui.panel,
+                "Really force-erase?",
+                "everything is lost",
+                "cannot be undone",
+            );
+            if !confirmed(ui) {
+                return;
+            }
+            run_lock_op(ui, &mut dev, LockOp::ForceErase, "Erasing", "card erased");
+        }
+        _ => {}
+    }
+}
+
+/// Run one CMD42 operation and report the outcome, then wait for a key.
+///
+/// The password inside `op` is already framed by the caller; this only issues it and puts
+/// a word on the screen. A card that refuses -- a wrong password, a card that does not
+/// support locking -- is "card refused it" rather than a driver error nobody can read.
+fn run_lock_op(
+    ui: &mut Ui<'_>,
+    dev: &mut catcard_hal::sdmmc::Sdmmc,
+    op: catcard_sd::LockOp<'_>,
+    working: &str,
+    ok: &str,
+) {
+    message(ui.panel, "Card password", working, "do not remove card");
+    match catcard_sd::lock_unlock(dev, op) {
+        Ok(()) => message(ui.panel, "Card password", ok, "press a key"),
+        Err(e) => {
+            crate::catlog!("sd: CMD42 failed: {:?}", e);
+            message(ui.panel, "Card password", "card refused it", "press a key");
+        }
     }
     wait_any_key(ui);
 }

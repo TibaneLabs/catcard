@@ -777,3 +777,32 @@ give stock's clone wire format, so this is **CatCard's own** `[I]`:
 Two CatCards clone to each other; a CatCard and a **stock** Coldcard do **not**. If
 cross-vendor clone is ever wanted, the stock format has to be obtained from a sanctioned
 source — not the firmware tree — and this replaced with it.
+
+## SD CMD42 (LOCK_UNLOCK) — the block framing and card quirks are unproven
+
+`crates/catcard-sd/src/lib.rs` (`lock_unlock`) drives the SD card's own controller
+password lock (menu: `Utils → Card password`). The command byte, the flag bits (ERASE=3,
+LOCK=2, CLR_PWD=1, SET_PWD=0) and the `[command][pwd_len][password]` data structure are
+confirmed from the **public** SD Physical Layer Simplified Specification, "Lock/Unlock
+Card" `[C]`. What is not confirmed on real hardware:
+
+- **Padding vs. `CMD16 SET_BLOCKLEN`** `[?]`. The STM32 SDMMC controller moves only a
+  power-of-two block and its FIFO writer wants a length that is a multiple of four bytes,
+  so `lock_unlock` zero-pads the structure up to the next such block and sends that. The
+  spec's own procedure sets the block length to the *exact* structure length with CMD16
+  first. We rely on the card reading `command`/`pwd_len` from the front and ignoring the
+  padding. Whether real cards accept that — or require the CMD16 — needs a card and a
+  scope. If they do not, add a `CMD16` before the CMD42 and set the block to the exact
+  length; the payload builder already returns that exact length.
+- **Busy handling after CMD42** `[?]`. `write_short` waits for `DATAEND`, which covers a
+  SET/CLR/UNLOCK. FORCE_ERASE can hold the card busy far longer while it wipes; the
+  controller's data-transfer timeout may expire before the erase finishes on a large card.
+  Whether a `CMD13` busy-poll (as `write_block` does) is needed after CMD42 is unknown
+  until timed against a real card.
+- **Whether SET_PWD auto-locks** `[?]`. The UI states the card locks when it next loses
+  power (the standard behaviour), rather than issuing a combined `SET_PWD|LOCK`. Confirm
+  the power-cycle lock on a real card, or switch "Set password" to the combined command.
+
+Resolve with a real SD card on a bench: set/lock/unlock/clear and force-erase, confirming
+the block framing, the busy timing and the auto-lock. Do **not** read the stock firmware
+for this — the SD spec is the sanctioned source.

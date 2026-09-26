@@ -909,3 +909,184 @@ mod big_exfat {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// CMD42 (LOCK_UNLOCK): the data structure, and the sequence around it
+// ---------------------------------------------------------------------------
+
+/// The lock/unlock data structure is a wire format: a command byte of flags, then a length
+/// and the password for the operations that carry one. Get a bit or the length wrong and
+/// the card does the wrong thing silently -- locks when it was asked to unlock, or reads a
+/// password one byte short. These pin the framing without a card.
+mod lock_unlock_payload {
+    use super::super::*;
+
+    /// Build into the same fixed buffer `lock_unlock` uses, and return the used slice.
+    fn framed(op: LockOp<'_>) -> Result<([u8; 2 + MAX_LOCK_PWD], usize), Error> {
+        let mut buf = [0u8; 2 + MAX_LOCK_PWD];
+        let len = build_lock_payload(op, &mut buf)?;
+        Ok((buf, len))
+    }
+
+    #[test]
+    fn set_pwd_is_the_flag_then_the_length_then_the_password() {
+        let (buf, len) = framed(LockOp::SetPassword(b"secret")).expect("set");
+        assert_eq!(len, 2 + 6);
+        assert_eq!(buf[0], 0b0001, "SET_PWD is bit 0");
+        assert_eq!(buf[1], 6, "the password length byte");
+        assert_eq!(&buf[2..8], b"secret");
+    }
+
+    #[test]
+    fn each_operation_sets_the_bit_the_spec_names() {
+        assert_eq!(framed(LockOp::SetPassword(b"pw")).unwrap().0[0], 0b0001);
+        assert_eq!(framed(LockOp::ClearPassword(b"pw")).unwrap().0[0], 0b0010);
+        assert_eq!(framed(LockOp::Lock(b"pw")).unwrap().0[0], 0b0100);
+        // Unlock is the absence of every other flag; the password still travels.
+        assert_eq!(framed(LockOp::Unlock(b"pw")).unwrap().0[0], 0b0000);
+        assert_eq!(framed(LockOp::ForceErase).unwrap().0[0], 0b1000);
+    }
+
+    #[test]
+    fn unlock_still_carries_the_password() {
+        let (buf, len) = framed(LockOp::Unlock(b"open12")).expect("unlock");
+        assert_eq!(len, 2 + 6);
+        assert_eq!(buf[0], 0, "unlock sets no flag");
+        assert_eq!(buf[1], 6);
+        assert_eq!(&buf[2..8], b"open12");
+    }
+
+    #[test]
+    fn force_erase_is_the_command_byte_alone() {
+        let (buf, len) = framed(LockOp::ForceErase).expect("erase");
+        assert_eq!(len, 1, "no length byte, no password");
+        assert_eq!(buf[0], 0b1000);
+    }
+
+    #[test]
+    fn a_sixteen_byte_password_fits_and_a_longer_one_is_refused() {
+        let (buf, len) = framed(LockOp::SetPassword(&[b'x'; 16])).expect("max");
+        assert_eq!(len, 2 + 16);
+        assert_eq!(buf[1], 16);
+        assert_eq!(
+            framed(LockOp::SetPassword(&[b'x'; 17])),
+            Err(Error::Unsupported)
+        );
+    }
+
+    #[test]
+    fn an_empty_password_is_refused_rather_than_framed() {
+        for op in [
+            LockOp::SetPassword(b""),
+            LockOp::ClearPassword(b""),
+            LockOp::Lock(b""),
+            LockOp::Unlock(b""),
+        ] {
+            assert_eq!(
+                build_lock_payload(op, &mut [0u8; 2 + MAX_LOCK_PWD]),
+                Err(Error::Unsupported)
+            );
+        }
+    }
+}
+
+/// The order around CMD42 matters as much as the payload: the data path is armed for a
+/// power-of-two block before the command goes out, and the padded structure is what the
+/// card is given. A fake transport records exactly what `lock_unlock` did.
+mod lock_unlock_sequence {
+    use super::super::*;
+
+    #[derive(Default)]
+    struct LockFake {
+        armed_len: usize,
+        armed_to_host: bool,
+        cmd: Option<u8>,
+        cmd_before_arm: bool,
+        payload: [u8; 32],
+        payload_len: usize,
+    }
+
+    impl Transport for LockFake {
+        fn command(&mut self, cmd: u8, _arg: u32, _resp: Response) -> Result<[u32; 4], Error> {
+            if self.armed_len == 0 {
+                self.cmd_before_arm = true;
+            }
+            self.cmd = Some(cmd);
+            Ok([0; 4])
+        }
+        fn read_data(&mut self, _out: &mut [u8; BLOCK_LEN]) -> Result<(), Error> {
+            Err(Error::Unsupported)
+        }
+        fn set_bus_width_4(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn set_fast_clock(&mut self) {}
+        fn card_present(&self) -> bool {
+            true
+        }
+        fn arm_data(&mut self, len: usize, to_host: bool) -> Result<(), Error> {
+            if len == 0 || !len.is_power_of_two() {
+                return Err(Error::Unsupported);
+            }
+            self.armed_len = len;
+            self.armed_to_host = to_host;
+            Ok(())
+        }
+        fn write_short(&mut self, data: &[u8]) -> Result<(), Error> {
+            self.payload[..data.len()].copy_from_slice(data);
+            self.payload_len = data.len();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cmd42_goes_out_after_the_data_path_is_armed_outbound() {
+        let mut t = LockFake::default();
+        lock_unlock(&mut t, LockOp::SetPassword(b"secret")).expect("lock");
+        assert!(!t.cmd_before_arm, "CMD42 went out before arming the data path");
+        assert_eq!(t.cmd, Some(42));
+        assert!(!t.armed_to_host, "the structure is written host-to-card");
+        // 2 + 6 = 8 is already a power of two, so no padding.
+        assert_eq!(t.armed_len, 8);
+        assert_eq!(t.payload_len, 8);
+        assert_eq!(t.payload[0], 0b0001);
+        assert_eq!(t.payload[1], 6);
+        assert_eq!(&t.payload[2..8], b"secret");
+    }
+
+    #[test]
+    fn a_short_structure_is_padded_to_a_multiple_of_four() {
+        // FORCE_ERASE is one byte; the FIFO writer needs a multiple of four, so it goes
+        // out as a four-byte padded block with the tail zeroed.
+        let mut t = LockFake::default();
+        lock_unlock(&mut t, LockOp::ForceErase).expect("erase");
+        assert_eq!(t.armed_len, 4);
+        assert_eq!(t.payload_len, 4);
+        assert_eq!(t.payload[0], 0b1000);
+        assert_eq!(&t.payload[1..4], &[0, 0, 0], "padding is zero");
+    }
+
+    #[test]
+    fn an_odd_length_password_rounds_up_to_the_next_power_of_two() {
+        // 2 + 5 = 7 bytes of structure -> an 8-byte block, tail zeroed.
+        let mut t = LockFake::default();
+        lock_unlock(&mut t, LockOp::Unlock(b"hello")).expect("unlock");
+        assert_eq!(t.armed_len, 8);
+        assert_eq!(t.payload_len, 8);
+        assert_eq!(t.payload[0], 0);
+        assert_eq!(t.payload[1], 5);
+        assert_eq!(&t.payload[2..7], b"hello");
+        assert_eq!(t.payload[7], 0, "the pad byte is zero");
+    }
+
+    #[test]
+    fn too_long_a_password_never_touches_the_card() {
+        let mut t = LockFake::default();
+        assert_eq!(
+            lock_unlock(&mut t, LockOp::SetPassword(&[b'x'; 17])),
+            Err(Error::Unsupported)
+        );
+        assert_eq!(t.cmd, None, "no command was sent");
+        assert_eq!(t.armed_len, 0, "the data path was never armed");
+    }
+}
