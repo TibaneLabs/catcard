@@ -81,6 +81,10 @@ pub const MENU_WRAP: &str = "cat_wrap";
 /// Whether BIP-85 accepts an index past 9999, up to `2^31 - 1`: `"1"` on. Off, the
 /// default, keeps the cap. Stock's `B85 Idx Values`, under our own key.
 pub const B85_INDEX: &str = "cat_b85idx";
+/// Name the wallet's fingerprint at the top of the home menu even in the root wallet
+/// (stock's `hmx`, "Home Menu XFP: Always Show"). Off shows it only when another key is
+/// in force.
+pub const HOME_XFP: &str = "cat_xfp";
 /// Which Bitcoin network the wallet shows: the ticker `"BTC"`, `"XTN"` or `"XRT"`.
 ///
 /// This is **stock's own key**, not a `cat_`-prefixed one, and it is read the way stock
@@ -205,6 +209,12 @@ pub fn backlight_value(percent: u8) -> heapless::String<4> {
     let mut s: heapless::String<4> = heapless::String::new();
     let _ = write!(s, "{percent}");
     s
+}
+
+/// Whether the home menu always names the wallet's fingerprint. Only a literal `"1"`
+/// turns it on; the default is stock's "Only Tmp".
+pub fn home_xfp(doc: &Doc<'_>) -> bool {
+    text(doc, HOME_XFP) == Some("1")
 }
 
 /// Whether the USB port is switched on. Only a literal `"0"` switches it off.
@@ -867,6 +877,20 @@ mod tests {
             "a".repeat(PUSHTX_URL_MAX)
         );
         assert_eq!(pushtx(&doc(&long)), PushTx::DEFAULT);
+    }
+
+    #[test]
+    fn home_menu_xfp_is_off_unless_said() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_xfp":"0"}"#,
+            r#"{"cat_xfp":1}"#,
+            r#"{"cat_xfp":"always"}"#,
+            r#"{"hmx":"1"}"#,
+        ] {
+            assert!(!home_xfp(&doc(json)), "{json}");
+        }
+        assert!(home_xfp(&doc(r#"{"cat_xfp":"1"}"#)));
     }
 
     #[test]

@@ -92,6 +92,9 @@ pub(crate) struct Prefs {
     /// Whether the Address Explorer shows a registered wallet's addresses whole rather
     /// than with the middle elided. Honoured by the explorer in [`crate::menu`].
     pub ms_full_addr: bool,
+    /// Name the fingerprint at the top of the home menu even in the root wallet.
+    /// Honoured by `crate::menu::main_items` on the boards whose menu carries that row.
+    pub home_xfp: bool,
 }
 
 impl Prefs {
@@ -133,6 +136,7 @@ impl Default for Prefs {
             pushtx: PushTx::DEFAULT,
             ms_unsorted: false,
             ms_full_addr: false,
+            home_xfp: false,
         }
     }
 }
@@ -158,6 +162,7 @@ static mut CURRENT: Prefs = Prefs {
     pushtx: PushTx::DEFAULT,
     ms_unsorted: false,
     ms_full_addr: false,
+    home_xfp: false,
 };
 
 /// What the wallet in force is set to.
@@ -274,9 +279,10 @@ pub(crate) fn load(
         pushtx: prefs::pushtx(&doc),
         ms_unsorted: prefs::ms_unsorted(&doc),
         ms_full_addr: prefs::ms_full_addr(&doc),
+        home_xfp: prefs::home_xfp(&doc),
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}, xfp {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -291,7 +297,8 @@ pub(crate) fn load(
         next.sighash.code(),
         next.slip132,
         next.nfc_sharing,
-        next.pushtx.label()
+        next.pushtx.label(),
+        next.home_xfp
     );
     apply(next);
 }

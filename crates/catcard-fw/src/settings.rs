@@ -566,6 +566,9 @@ static mut NICK: [u8; NICK_MAX] = [0; NICK_MAX];
 /// so a test login run from the menu uses the layout the next boot will.
 static mut SCRAMBLE: bool = false;
 static mut COUNTDOWN: Option<u32> = None;
+/// Whether the login screen is the calculator. Only the Q1 has the keyboard for it.
+#[cfg(feature = "board-q1")]
+static mut CALC: bool = false;
 
 /// The kill key's digit, and the enrolled 2FA cards, as the boot path read them.
 static mut KILL_KEY: Option<u8> = None;
@@ -598,6 +601,13 @@ pub(crate) fn sd2fa() -> (
 pub(crate) fn scramble_keys() -> bool {
     // SAFETY: foreground only; written by `load_prelogin` and the save helpers.
     unsafe { *core::ptr::addr_of!(SCRAMBLE) }
+}
+
+/// Whether the login screen is the calculator (Q1).
+#[cfg(feature = "board-q1")]
+pub(crate) fn calc_login() -> bool {
+    // SAFETY: as in `scramble_keys`.
+    unsafe { *core::ptr::addr_of!(CALC) }
 }
 
 /// The login countdown in minutes, if one is set.
@@ -674,6 +684,12 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     prefs.scramble = prelogin::scramble(&doc);
     prefs.countdown_minutes = prelogin::countdown_minutes(&doc);
     prefs.kill_key = prelogin::kill_key(&doc);
+    #[cfg(feature = "board-q1")]
+    {
+        prefs.calc = prelogin::calc(&doc);
+        // SAFETY: foreground only, boot path.
+        unsafe { *core::ptr::addr_of_mut!(CALC) = prefs.calc };
+    }
     let mut cards = [[0u8; 32]; prelogin::SD2FA_MAX];
     let cards_state = prelogin::sd2fa(&doc, &mut cards);
     // SAFETY: foreground only, boot path.
@@ -820,6 +836,18 @@ pub(crate) fn save_scramble(ui: &mut crate::ui::Ui<'_>, on: bool) -> bool {
     if ok {
         // SAFETY: foreground only.
         unsafe { *core::ptr::addr_of_mut!(SCRAMBLE) = on };
+    }
+    ok
+}
+
+/// Turn the calculator login screen on or off, from the next login (Q1).
+#[cfg(feature = "board-q1")]
+pub(crate) fn save_calc(ui: &mut crate::ui::Ui<'_>, on: bool) -> bool {
+    let key = catcard_settings::prelogin::CALC;
+    let ok = save_prelogin(ui, "Calculator login", key, if on { "1" } else { "0" });
+    if ok {
+        // SAFETY: foreground only.
+        unsafe { *core::ptr::addr_of_mut!(CALC) = on };
     }
     ok
 }

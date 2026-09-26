@@ -19,6 +19,9 @@ use crate::json::Doc;
 
 /// Shuffle the number row at login: `"1"` for on.
 pub const SCRAMBLE: &str = "cat_rngk";
+/// Calculator login (Q1): the login screen looks like a calculator, and the PIN is typed
+/// into it. Our own key: stock's `calc` is a different value shape.
+pub const CALC: &str = "cat_calc";
 /// Wait this many minutes after a correct PIN before the menu: decimal digits, as a string.
 pub const COUNTDOWN: &str = "cat_lgto";
 
@@ -45,6 +48,13 @@ fn text<'a>(doc: &Doc<'a>, key: &str) -> Option<&'a str> {
 /// Whether the number row is to be shuffled at login.
 pub fn scramble(doc: &Doc<'_>) -> bool {
     text(doc, SCRAMBLE) == Some("1")
+}
+
+/// Whether the login screen is the calculator (Q1). Only a literal `"1"` turns it on:
+/// a screen that hides the PIN prompt behind a disguise must never appear by accident,
+/// because an owner who does not know the convention cannot log in through it.
+pub fn calc(doc: &Doc<'_>) -> bool {
+    text(doc, CALC) == Some("1")
 }
 
 /// The login countdown in minutes, if one is set and sane. `None` is off.
@@ -153,9 +163,28 @@ mod tests {
 
     #[test]
     fn set_values_read_back() {
-        let d = doc(r#"{"nick":"cat","cat_rngk":"1","cat_lgto":"60"}"#);
+        let d = doc(r#"{"nick":"cat","cat_rngk":"1","cat_lgto":"60","cat_calc":"1"}"#);
         assert!(scramble(&d));
+        assert!(calc(&d));
         assert_eq!(countdown_minutes(&d), Some(60));
+    }
+
+    /// The calculator disguise is on only when the value is exactly `"1"`: absent, `"0"`,
+    /// a bare number, another word, or stock's own key all leave the plain PIN pad.
+    #[test]
+    fn calculator_login_needs_an_explicit_one() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_calc":"0"}"#,
+            r#"{"cat_calc":1}"#,
+            r#"{"cat_calc":"on"}"#,
+            r#"{"cat_calc":""}"#,
+            r#"{"cat_calc":"11"}"#,
+            r#"{"calc":"1"}"#,
+        ] {
+            assert!(!calc(&doc(json)), "{json}");
+        }
+        assert!(calc(&doc(r#"{"cat_calc":"1"}"#)));
     }
 
     /// Absent, zero, garbage, a number rather than a string, negative, too long: all off.

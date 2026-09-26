@@ -371,6 +371,10 @@ pub struct LoginPrefs<'a> {
     pub scramble: bool,
     /// Minutes to wait after a correct PIN before the menu.
     pub countdown_minutes: Option<u32>,
+    /// The login screen is the calculator, and the PIN is typed into it. Q1 only: it
+    /// is the board with the keyboard the disguise needs.
+    #[cfg(feature = "board-q1")]
+    pub calc: bool,
     /// The digit that erases the seed when typed. Acted on only in a release build on
     /// mk4 or later; see `crate::guard`.
     #[cfg_attr(any(feature = "dev", feature = "board-mk3"), allow(dead_code))]
