@@ -18,12 +18,22 @@ use catcard_ui::statusbar::{Power, Status};
 static mut MODIFIERS: u8 = 0;
 /// Set when a poll sees a change the panel has not been shown yet.
 static mut DIRTY: bool = false;
-/// The power source as the last poll saw it.
+/// The power source, and on battery its charge step, as the last poll saw them.
 ///
 /// Unlike the modifiers this changes with a *cable*, so there is no keypress and no scan
 /// to hang the notice off -- without sampling it, the icon would sit wrong until some
 /// unrelated thing happened to repaint the screen.
-static mut POWER: Option<crate::battery::Source> = None;
+static mut POWER: Option<Power> = None;
+/// The charge step as last read, and when (cycle count). Read at most every
+/// [`CHARGE_EVERY_MS`], and at once when the device goes onto its battery: the bar is
+/// painted every frame and five ADC conversions are not free.
+static mut CHARGE: Option<crate::battery::Charge> = None;
+static mut CHARGE_READ_AT: Option<u32> = None;
+/// How often the level is re-read while on battery. Stock polls every 5 s on older
+/// boards and every 30 s on rev D+ (power.md §"Battery level & monitoring (Q1)" [C]);
+/// 5 s here, since this is a poll and not an interrupt, and it stays well inside the
+/// ~35 s the cycle counter takes to wrap.
+const CHARGE_EVERY_MS: u32 = 5_000;
 
 const SHIFT: u8 = 1;
 const SYMBOL: u8 = 2;
@@ -75,7 +85,11 @@ pub(crate) fn status() -> Status {
         fingerprint: crate::pubkeys::known_fingerprint(),
         power: crate::battery::source().map(|s| match s {
             crate::battery::Source::External => Power::External,
-            crate::battery::Source::Battery => Power::Battery,
+            // The last reading `poll` took, never a fresh one: this runs every frame.
+            // SAFETY: as in `note`.
+            crate::battery::Source::Battery => {
+                Power::Battery(unsafe { *core::ptr::addr_of!(CHARGE) })
+            }
         }),
     }
 }
@@ -89,14 +103,45 @@ pub(crate) fn status() -> Status {
 /// such hook -- it changes when someone moves a cable -- so it is sampled here. Stock
 /// arms an edge interrupt on rev-D+ boards and polls as a backstop; polling alone is
 /// enough while a screen is waiting, which is whenever anyone is looking at the bar.
+/// On battery the charge step is re-read every [`CHARGE_EVERY_MS`], and the bar is
+/// repainted only when the step changes, as stock's monitor does.
 ///
-/// Source: hw-reference/power.md §"Power source: battery vs USB" [C]
+/// Source: hw-reference/power.md §"Power source: battery vs USB", §"Battery level &
+/// monitoring (Q1)" [C]
 #[cfg(feature = "board-q1")]
 pub(crate) fn poll(panel: &mut crate::display::Panel) {
-    let now = crate::battery::source();
+    use crate::battery::Source;
+
+    let source = crate::battery::source();
     // SAFETY: foreground only, single core; the borrows end within this block.
     unsafe {
-        if *core::ptr::addr_of!(POWER) != now {
+        let was = *core::ptr::addr_of!(POWER);
+        let charge = &mut *core::ptr::addr_of_mut!(CHARGE);
+        let read_at = &mut *core::ptr::addr_of_mut!(CHARGE_READ_AT);
+        let now = match source {
+            None => None,
+            Some(Source::External) => {
+                *read_at = None;
+                Some(Power::External)
+            }
+            Some(Source::Battery) => {
+                let cycles = catcard_hal::dwt::cycles();
+                let per_ms = catcard_hal::clock::hclk_hz() / 1_000;
+                let due = match (*read_at, was) {
+                    // Just unplugged, or never read: read now.
+                    (None, _) | (_, Some(Power::External)) | (_, None) => true,
+                    (Some(at), _) => {
+                        cycles.wrapping_sub(at) >= CHARGE_EVERY_MS.saturating_mul(per_ms)
+                    }
+                };
+                if due {
+                    *charge = crate::battery::charge();
+                    *read_at = Some(cycles);
+                }
+                Some(Power::Battery(*charge))
+            }
+        };
+        if was != now {
             *core::ptr::addr_of_mut!(POWER) = now;
             *core::ptr::addr_of_mut!(DIRTY) = true;
         }

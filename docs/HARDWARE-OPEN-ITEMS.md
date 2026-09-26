@@ -876,3 +876,18 @@ for this — the SD spec is the sanctioned source.
 The 32-byte `rom_secrets.bag_number` is shown as printable ASCII up to the first byte
 that is not, "unbagged" for all-ones, hex otherwise. That it is text is inferred from
 stock showing it in a title; the reference gives the field's size and nothing more.
+
+## Q1 battery level: the ADC timings are margins, and the read is unproven on hardware `[I]`
+
+The channel, the pin, the divider and the reference are in `hw-reference/power.md` [C]
+(`VIN_SENSE=PA1` = ADC1 `IN6`, divide-by-two, VDDA on the 3.3 V rail), and the register
+programming is RM0432 §21 [C]. Two figures that live in the STM32L4S5 *datasheet*, which the
+references do not include, are taken with margin rather than as values:
+
+- the ADC regulator start-up time: `catcard_hal::adc::init` waits a whole millisecond;
+- the ADC clock ceiling: the ADC runs from HCLK/4 (`CCR.CKMODE = 0b11`), 30 MHz at 120 MHz,
+  the slowest synchronous clock on offer, with the longest sample time (640.5 cycles).
+
+The icon falls back to an unfilled battery if the ADC does not come up or a conversion
+times out, and the log says which. To resolve: run on battery, compare the step shown against
+a meter on the pack at a few voltages around 2.9 / 3.5 / 4.0 V.

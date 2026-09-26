@@ -326,9 +326,8 @@ pub struct BatterySense {
     pub rev_d: Pin,
     /// `VIN_SENSE`, the divided battery voltage (ADC1 IN6, with a divide-by-two).
     ///
-    /// Only meaningful while on battery. Not read yet -- the status bar shows the source,
-    /// not the level -- but it belongs with the rest of the description rather than being
-    /// rediscovered later.
+    /// Only meaningful while on battery; read by the firmware's `battery::charge` for the
+    /// status bar's four-step battery icon.
     pub vin_sense: Pin,
 }
 

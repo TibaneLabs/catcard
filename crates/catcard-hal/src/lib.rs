@@ -19,6 +19,7 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod adc;
 pub mod clock;
 pub mod dma;
 pub mod dwt;

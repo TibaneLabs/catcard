@@ -130,7 +130,7 @@ fn the_power_icon_follows_the_source() {
         ..Status::default()
     });
     let battery = bar(&Status {
-        power: Some(Power::Battery),
+        power: Some(Power::Battery(None)),
         ..Status::default()
     });
 
@@ -158,7 +158,7 @@ fn the_bar_stays_within_its_own_rows() {
         key: "PASSPHRASE",
         key_set: true,
         fingerprint: Some([0xFF; 4]),
-        power: Some(Power::Battery),
+        power: Some(Power::Battery(Some(Charge::Full))),
     });
     let h = height(&FONT);
     assert_eq!(
@@ -202,4 +202,55 @@ fn the_bar_is_the_height_the_firmware_reserves_for_it() {
         FW_BAR_H,
         "catcard-fw's display::BAR_H must change to match"
     );
+}
+
+/// Each step of charge draws more ink than the one below it, and an unread level draws
+/// the same as empty -- never a guessed fill.
+#[test]
+fn the_battery_fills_with_its_charge() {
+    let h = height(&FONT);
+    let band = |c: Option<Charge>| {
+        ink_in(
+            &bar(&Status {
+                power: Some(Power::Battery(c)),
+                ..Status::default()
+            }),
+            290,
+            320,
+            0,
+            h - 1,
+        )
+    };
+    let unread = band(None);
+    let empty = band(Some(Charge::Empty));
+    let low = band(Some(Charge::Low));
+    let most = band(Some(Charge::ThreeQuarters));
+    let full = band(Some(Charge::Full));
+    assert_eq!(unread, empty, "an unread level drew a fill");
+    assert!(
+        empty < low && low < most && most < full,
+        "{empty} {low} {most} {full}"
+    );
+}
+
+/// The steps change where stock's do, after rounding to a tenth of a volt.
+/// Source: hw-reference/power.md §"Battery level & monitoring (Q1)" [C]
+#[test]
+fn the_charge_steps_are_stocks() {
+    for (mv, want) in [
+        (0, Charge::Empty),
+        (2900, Charge::Empty),
+        (2949, Charge::Empty),
+        (2950, Charge::Low),
+        (3500, Charge::Low),
+        (3549, Charge::Low),
+        (3550, Charge::ThreeQuarters),
+        (4000, Charge::ThreeQuarters),
+        (4049, Charge::ThreeQuarters),
+        (4050, Charge::Full),
+        (4500, Charge::Full),
+        (6600, Charge::Full),
+    ] {
+        assert_eq!(Charge::from_millivolts(mv), want, "{mv} mV");
+    }
 }

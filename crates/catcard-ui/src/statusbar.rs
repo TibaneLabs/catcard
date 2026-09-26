@@ -34,8 +34,44 @@ pub const DIM: Level = 6;
 pub enum Power {
     /// External or USB power.
     External,
-    /// The batteries.
-    Battery,
+    /// The batteries, and how full they read -- `None` when no reading could be taken,
+    /// which draws an empty outline rather than a guessed level.
+    Battery(Option<Charge>),
+}
+
+/// How full the batteries read, in the four steps stock shows. There is no percentage:
+/// no fuel gauge, just a divided voltage on an ADC pin, so four steps is all the
+/// hardware honestly supports.
+///
+/// Source: hw-reference/power.md §"Battery level & monitoring (Q1)" [C]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum Charge {
+    /// At or below 2.9 V.
+    Empty,
+    /// Above 2.9 V, at or below 3.5 V.
+    Low,
+    /// Above 3.5 V, at or below 4.0 V: about three quarters.
+    ThreeQuarters,
+    /// Above 4.0 V. Three fresh AAA cells are about 4.5 V.
+    Full,
+}
+
+impl Charge {
+    /// The step for a battery voltage in millivolts.
+    ///
+    /// Stock rounds the voltage to a tenth of a volt before comparing, so 2.94 V is
+    /// "2.9" and empty; this rounds the same way (half up) so the steps change at the
+    /// same readings. Source: hw-reference/power.md §"Battery sense", §"Battery level &
+    /// monitoring (Q1)" [C]
+    pub fn from_millivolts(mv: u32) -> Charge {
+        let tenths = (mv + 50) / 100;
+        match tenths {
+            0..=29 => Charge::Empty,
+            30..=35 => Charge::Low,
+            36..=40 => Charge::ThreeQuarters,
+            _ => Charge::Full,
+        }
+    }
 }
 
 /// What the bar shows. Everything is already known by the time this is built.
@@ -136,20 +172,30 @@ fn hex(bytes: [u8; 4], out: &mut [u8; 8]) {
     }
 }
 
-/// A plug on external power, a battery on its own.
+/// A plug on external power, a battery on its own, filled to its [`Charge`].
 ///
 /// Drawn rather than drawn *from art*: at this size it is a handful of rectangles, and a
-/// glyph sheet for two icons would be more to keep in step than to write.
+/// glyph sheet for five icons would be more to keep in step than to write.
 fn power_icon<C: Canvas + ?Sized>(canvas: &mut C, x: usize, y: usize, h: usize, power: Power) {
     /// Both icons are drawn in a box this tall, centred on the text line.
     const ICON_H: usize = 10;
     let top = y + h.saturating_sub(ICON_H) / 2;
     match power {
-        Power::Battery => {
-            // Upright, with its terminal on top. Drawn empty: nothing here has read the
-            // level, and a part-filled cell would be claiming to know it.
+        Power::Battery(charge) => {
+            // Upright, with its terminal on top, filled from the bottom: nothing for an
+            // empty cell or an unread one, a third, two thirds, all of the six rows
+            // inside the outline.
             outline(canvas, x + 1, top + 2, 8, 8);
             canvas.fill_rect(x + 3, top, 4, 2, INK);
+            let rows = match charge {
+                None | Some(Charge::Empty) => 0,
+                Some(Charge::Low) => 2,
+                Some(Charge::ThreeQuarters) => 4,
+                Some(Charge::Full) => 6,
+            };
+            if rows > 0 {
+                canvas.fill_rect(x + 2, top + 9 - rows, 6, rows, INK);
+            }
         }
         Power::External => {
             // A plug: two pins above a body, with the lead leaving the bottom.
