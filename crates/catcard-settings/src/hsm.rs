@@ -75,7 +75,42 @@ pub const ALLOW_SL: (u64, u64) = (1, 100);
 /// `set_sl`: 16 to 414 characters. Source: §1.3 [C]
 pub const SET_SL_LEN: (usize, usize) = (16, 414);
 /// `min_pct_self_transfer`: 0 to 100 percent. Source: §1.4 [C]
-pub const PCT_MAX: f64 = 100.0;
+///
+/// Held as millionths of a percent, not as a float: the check is then exact integer
+/// arithmetic, and the firmware carries no floating-point parser or formatter (thirty
+/// kilobytes of image) for one field.
+pub const PCT_MAX: Percent = Percent(100 * PCT_ONE);
+/// Millionths in one percent.
+pub const PCT_ONE: u64 = 1_000_000;
+
+/// A percentage, in millionths of a percent.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct Percent(pub u64);
+
+impl core::fmt::Display for Percent {
+    /// `50`, `99.5`, `0.000001`: the digits there are, no more.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (whole, frac) = (self.0 / PCT_ONE, self.0 % PCT_ONE);
+        if frac == 0 {
+            return write!(f, "{whole}");
+        }
+        let mut digits = [0u8; 6];
+        let mut v = frac;
+        for d in digits.iter_mut().rev() {
+            *d = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        let mut end = 6;
+        while digits[end - 1] == b'0' {
+            end -= 1;
+        }
+        write!(
+            f,
+            "{whole}.{}",
+            core::str::from_utf8(&digits[..end]).unwrap_or("0")
+        )
+    }
+}
 
 /// Rules one policy may hold. **Ours**: the reference sets no bound, and a policy is held
 /// in RAM for as long as HSM mode runs.
@@ -346,21 +381,52 @@ fn int(raw: &str, lo: u64, hi: u64) -> Result<u64, Problem> {
     Ok(v)
 }
 
-/// `pop_float`: a number in `0..=hi`. Source: §1.2 [C]
-fn float(raw: &str, hi: f64) -> Result<f64, Problem> {
-    // JSON's number grammar only: Rust's parser also takes `inf` and `NaN`.
-    let ok = raw.starts_with(|c: char| c == '-' || c.is_ascii_digit())
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E'));
-    if !ok {
+/// `pop_float`: a number in `0..=hi`, as a [`Percent`]. Source: §1.2 [C]
+///
+/// A decimal written plainly -- `50`, `99.5`, `0.25` -- with up to six digits after the
+/// point; a seventh or later digit rounds the threshold **up**, never down, so a limit
+/// is never looser than written. An exponent (`1e1`) is refused as not a number: JSON
+/// allows it, and a percentage has no need of it.
+fn percent(raw: &str, hi: Percent) -> Result<Percent, Problem> {
+    let (neg, body) = match raw.strip_prefix('-') {
+        Some(b) => (true, b),
+        None => (false, raw),
+    };
+    let (whole, frac) = match body.split_once('.') {
+        Some((w, f)) => (w, Some(f)),
+        None => (body, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(whole) || frac.is_some_and(|f| !digits(f)) {
         return Err(Problem::NotNumber);
     }
-    let v: f64 = raw.parse().map_err(|_| Problem::NotNumber)?;
-    if !(0.0..=hi).contains(&v) {
+    // Past the bound, the digits are not needed to know it is out of range.
+    let w: u64 = if whole.len() > 4 {
+        u64::MAX / 2
+    } else {
+        whole.parse().map_err(|_| Problem::NotNumber)?
+    };
+    let mut micro = w.saturating_mul(PCT_ONE);
+    if let Some(f) = frac {
+        let mut scale = PCT_ONE / 10;
+        for (i, b) in f.bytes().enumerate() {
+            let d = u64::from(b - b'0');
+            if i < 6 {
+                micro += d * scale;
+                scale /= 10;
+            } else if d != 0 {
+                micro += 1;
+                break;
+            }
+        }
+    }
+    if neg && micro != 0 {
         return Err(Problem::OutOfRange);
     }
-    Ok(v)
+    if micro > hi.0 {
+        return Err(Problem::OutOfRange);
+    }
+    Ok(Percent(micro))
 }
 
 /// `pop_bool`: `true`/`false`, or stock's `1`/`0`. Source: §1.2 [C]
@@ -741,7 +807,7 @@ pub struct Rule<'a> {
     pub whitelist: Whitelist<'a>,
     /// Only `BASIC` is accepted, so this is the one option left.
     pub allow_zeroval_outs: bool,
-    pub min_pct_self_transfer: Option<f64>,
+    pub min_pct_self_transfer: Option<Percent>,
     /// Bit `i` set: [`PATTERNS`]`[i]` required.
     pub patterns: u8,
 }
@@ -883,7 +949,7 @@ impl<'a> Rule<'a> {
         }
         if let Some(v) = o.take("min_pct_self_transfer") {
             r.min_pct_self_transfer =
-                Some(float(v, PCT_MAX).map_err(|p| e(p, "min_pct_self_transfer"))?);
+                Some(percent(v, PCT_MAX).map_err(|p| e(p, "min_pct_self_transfer"))?);
         }
         if let Some(v) = o.take("patterns") {
             list(v, PATTERNS.len() * 4).map_err(|p| e(p, "patterns"))?;
@@ -956,7 +1022,10 @@ impl<'a> Rule<'a> {
             w.end_object()?;
         }
         if let Some(p) = self.min_pct_self_transfer {
-            w.member("min_pct_self_transfer", &p)?;
+            let mut t: heapless::String<16> = heapless::String::new();
+            let _ = write!(t, "{p}");
+            w.key("min_pct_self_transfer")?;
+            w.raw(&t)?;
         }
         if self.patterns != 0 {
             w.key("patterns")?;
@@ -1498,7 +1567,9 @@ impl<'p, 'a> Judge<'p, 'a> {
             if f.own_in == 0 {
                 return Some("nothing of ours spent");
             }
-            if (f.own_out as f64) / (f.own_in as f64) * 100.0 < pct {
+            // own_out / own_in * 100 >= pct, exactly: both sides in millionths.
+            let back = u128::from(f.own_out) * 100 * u128::from(PCT_ONE);
+            if back < u128::from(pct.0) * u128::from(f.own_in) {
                 return Some("too little comes back to this wallet");
             }
         }

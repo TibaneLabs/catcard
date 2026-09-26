@@ -440,6 +440,23 @@ fn rule_percent_and_patterns() {
         Problem::NotNumber
     );
     assert_eq!(
+        problem(r#"{"rules": [{"min_pct_self_transfer": 1e1}]}"#),
+        Problem::NotNumber
+    );
+    assert_eq!(
+        problem(r#"{"rules": [{"min_pct_self_transfer": 5.}]}"#),
+        Problem::NotJson
+    );
+    assert!(load(r#"{"rules": [{"min_pct_self_transfer": -0.0}]}"#).is_ok());
+    let p = load(r#"{"rules": [{"min_pct_self_transfer": 99.5}]}"#).unwrap();
+    assert_eq!(p.rules[0].min_pct_self_transfer, Some(Percent(99_500_000)));
+    // A seventh decimal rounds the threshold up, never down.
+    let p = load(r#"{"rules": [{"min_pct_self_transfer": 0.0000001}]}"#).unwrap();
+    assert_eq!(p.rules[0].min_pct_self_transfer, Some(Percent(1)));
+    assert_eq!(Percent(99_500_000).to_string(), "99.5");
+    assert_eq!(Percent(50 * PCT_ONE).to_string(), "50");
+    assert_eq!(Percent(1).to_string(), "0.000001");
+    assert_eq!(
         problem(r#"{"rules": [{"patterns": ["EQ_SOMETHING"]}]}"#),
         Problem::BadPattern
     );
@@ -658,6 +675,14 @@ fn self_transfer_percentage() {
     assert_eq!(judge(&p, &f, &[], &mut rt, 0), Ok(0));
     f.own_out = 499;
     assert!(judge(&p, &f, &[], &mut rt, 0).is_err());
+    // Exact at the boundary, fractions included.
+    let q = load(r#"{"rules": [{"min_pct_self_transfer": 33.333333}]}"#).unwrap();
+    let mut g = f;
+    g.own_in = 3_000_000;
+    g.own_out = 1_000_000;
+    assert_eq!(judge(&q, &g, &[], &mut rt, 0), Ok(0));
+    g.own_out = 999_999;
+    assert!(judge(&q, &g, &[], &mut rt, 0).is_err());
     f.own_in = 0;
     assert!(judge(&p, &f, &[], &mut rt, 0).is_err());
 }
