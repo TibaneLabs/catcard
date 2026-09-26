@@ -490,6 +490,12 @@ bounded: a host that stops taking reports -- screen locked, port suspended -- is
 reported within a second, never waited for. Nothing about the text, not even its
 length, goes in the log, because the log is readable by any host that can open the port.
 
+**What types.** Three screens, all through `usbkbd::send_screen`, which says in one line
+why not (switch off, no host, a character with no key), offers Enter after the text,
+and asks before a keystroke goes out: the main menu's `Type Passwords` (a BIP-85
+password child, never shown; on the Q1 also a Secure Notes password), Notes → `Send
+Password`, and Confirm on a BIP-85 password child's screen under Derive → `BIP-85`.
+
 **Proving it on hardware:** Debug → `Keyboard EMU test` types the constant line
 `catcard keyboard ok` into whatever window the host has focused, after asking. Open a
 text editor first.
