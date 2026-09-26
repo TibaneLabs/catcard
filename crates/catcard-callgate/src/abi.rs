@@ -109,6 +109,10 @@ pub enum GenuineOp {
 pub enum BagOp {
     Read = 0,
     Set = 1,
+    /// **mk4 and later:** read the RDP-2 / factory-mode flag. The answer's encoding is
+    /// not in the reference; see [`Callgate::lock_flag_raw`](crate::Callgate::lock_flag_raw).
+    /// Source: bootloader-callgate-abi.md "gate 19 gained sub-method 2 on Mk4" [C]
+    ReadLockFlag = 2,
     SetRdpLevel0 = 100,
     SetRdpLevel1 = 101,
     SetRdpLevel2 = 102,

@@ -31,7 +31,7 @@ pub mod abi;
 pub mod entry;
 pub mod pin;
 
-use abi::{MAX_BUF_LEN, Method, PinOp, RngSource, err};
+use abi::{BagOp, GenuineOp, MAX_BUF_LEN, Method, OtpOp, PinOp, RngSource, err};
 use catcard_board::BoardSpec;
 use entry::{BootloaderInfo, EntryError};
 use pin::{PIN_ATTEMPT_SIZE, PinAttempt};
@@ -389,6 +389,135 @@ impl Callgate {
         loop {
             core::hint::spin_loop();
         }
+    }
+
+    /// Callgate 4: the ATECC-driven "genuine" light.
+    ///
+    /// Takes no buffer; `arg2` is the [`GenuineOp`]. [`GenuineOp::Read`] answers through
+    /// the gate's return value, **whose encoding the reference does not state** -- it is
+    /// handed up raw for a screen to show as the number it is, never decoded into
+    /// "green" or "red" here. [`GenuineOp::VerifyAndSet`] checksums flash and lights the
+    /// green only if that matches what the SE already holds; it cannot commit a new
+    /// checksum -- that is gate 18/5, [`PinOp::GreenLight`], which needs a login.
+    /// [`GenuineOp::Clear`] turns the light off and [`GenuineOp::Set`] is documented as
+    /// always failing; nothing in this firmware calls either.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 4 [C]; the meaning of the
+    /// `Read` return value [?] -- docs/HARDWARE-OPEN-ITEMS.md.
+    ///
+    /// # Safety
+    /// See [`Self::call_no_buf`]. `VerifyAndSet` changes what the front LED shows.
+    pub unsafe fn genuine_light(&self, op: GenuineOp) -> Result<i32, Error> {
+        // SAFETY: this method takes no buffer.
+        unsafe { self.call_no_buf(Method::GenuineLight, op as u32) }
+    }
+
+    /// Callgate 19/0: the factory bag number, **read only**.
+    ///
+    /// The 32 bytes of `rom_secrets.bag_number` as the bootloader hands them out; all
+    /// `0xFF` on a unit that was never bagged. Only [`BagOp::Read`] is ever sent from
+    /// here: `Set` is a factory step, and the `100+` values are the irreversible RDP
+    /// lockdown, which no code in this crate issues.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 19 [C];
+    /// platform.md §`rom_secrets_t` (32-byte field) [C]; that the bytes are text [I].
+    ///
+    /// # Safety
+    /// See [`Self::call`].
+    pub unsafe fn bag_number(&self, out: &mut [u8; 32]) -> Result<(), Error> {
+        out.fill(0);
+        // SAFETY: exactly the documented 32-byte in/out buffer, and a read-only op.
+        unsafe { self.call(Method::BagNumber, out.as_mut_slice(), BagOp::Read as u32)? };
+        Ok(())
+    }
+
+    /// Callgate 19/2 (mk4 and later): the RDP-2 / factory-mode flag, **raw**.
+    ///
+    /// The reference confirms the sub-method exists on mk4+ and reads a flag, and says
+    /// nothing about how the answer is encoded -- in the return value, in the buffer, or
+    /// which value means locked. So this returns both untouched, and **no caller may
+    /// treat any answer as "the device is open"**: it is a diagnostic to log, not a
+    /// state to act on. Absent from the mk3 bootloader, whose method 19 knows only
+    /// `0`/`1`/`100+`; not sent there.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md "gate 19 gained sub-method 2 on
+    /// Mk4" [C]; the encoding [?] -- docs/HARDWARE-OPEN-ITEMS.md.
+    ///
+    /// # Safety
+    /// See [`Self::call`].
+    pub unsafe fn lock_flag_raw(&self, out: &mut [u8; 32]) -> Result<i32, Error> {
+        out.fill(0);
+        // SAFETY: method 19's documented 32-byte in/out buffer; a read sub-method.
+        unsafe {
+            self.call(
+                Method::BagNumber,
+                out.as_mut_slice(),
+                BagOp::ReadLockFlag as u32,
+            )
+        }
+    }
+
+    /// Callgate 21/0: the anti-downgrade high-water mark the bootloader enforces.
+    ///
+    /// Eight bytes, in the header's own BCD `YYMMDDHHMMSS0000` shape: an image whose
+    /// `timestamp` is below this is refused at install. All zero on a unit that has
+    /// never recorded one.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 21 (`in/out 8`) [C];
+    /// firmware-signing.md §header `timestamp` [C]; that the eight bytes are that field
+    /// verbatim [I] -- docs/HARDWARE-OPEN-ITEMS.md.
+    ///
+    /// # Safety
+    /// See [`Self::call`].
+    pub unsafe fn high_water_read(&self, out: &mut [u8; 8]) -> Result<(), Error> {
+        out.fill(0);
+        // SAFETY: the documented 8-byte buffer for sub-methods 0..=2; read only.
+        unsafe {
+            self.call(
+                Method::Downgrade,
+                out.as_mut_slice(),
+                OtpOp::ReadMinVersion as u32,
+            )?
+        };
+        Ok(())
+    }
+
+    /// Callgate 21/1: ask the bootloader whether `timestamp` clears the high-water mark.
+    ///
+    /// The return value is passed up raw: the reference says the sub-method checks a
+    /// candidate and not how it answers, so a caller logs it and decides nothing on it.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 21 [C].
+    ///
+    /// # Safety
+    /// See [`Self::call`].
+    pub unsafe fn high_water_check(&self, timestamp: &[u8; 8]) -> Result<i32, Error> {
+        let mut buf = *timestamp;
+        // SAFETY: the documented 8-byte buffer; a check, which writes nothing to OTP.
+        unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Check as u32) }
+    }
+
+    /// Callgate 21/2: **record `timestamp` as the new high-water mark. IRREVERSIBLE.**
+    ///
+    /// The mark lives in the MCU's OTP: it can be raised and never lowered. Every image
+    /// older than `timestamp` -- stock firmware included, and every earlier CatCard --
+    /// is refused by this bootloader for the life of the device. The bootloader does
+    /// this itself when it installs an image flagged `HIGH_WATER`; this is the explicit
+    /// version, for an owner who wants the floor raised now.
+    ///
+    /// Only ever called from a menu row that asked twice. `timestamp` is normally the
+    /// running image's own, which this bootloader has already accepted.
+    ///
+    /// Source: hw-reference/bootloader-callgate-abi.md method 21 [C];
+    /// install-and-usb-transport.md §"Downgrade protection" [C].
+    ///
+    /// # Safety
+    /// Irreversible on the device; see [`Self::call`].
+    pub unsafe fn high_water_record(&self, timestamp: &[u8; 8]) -> Result<(), Error> {
+        let mut buf = *timestamp;
+        // SAFETY: the documented 8-byte buffer. The caller has taken the decision.
+        unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Record as u32)? };
+        Ok(())
     }
 
     /// Callgate 18 with a [`PinAttempt`] buffer.

@@ -34,6 +34,8 @@ struct Inner {
     authorized: Option<(u32, u32)>,
     /// Whether the bootloader should reject the staged image.
     refuse_image: bool,
+    /// Whether method 5 committed a checksum: the genuine light went green.
+    greenlit: bool,
     /// The PIN field as it stood when the struct was last signed.
     signed_pin: Vec<u8>,
 }
@@ -54,6 +56,7 @@ impl Model {
                 set_pin: Vec::new(),
                 authorized: None,
                 refuse_image: false,
+                greenlit: false,
                 signed_pin: Vec::new(),
             }),
         }
@@ -263,6 +266,16 @@ impl PinGate for Model {
                 // And on success it does not return: it reboots. Nothing the test can
                 // model does that, so it reports the fact instead.
                 Err(GateError::Pin(err::WRONG_SUCCESS))
+            }
+            // Method 5 wants a login and nothing else; it changes the SE's firmware
+            // slot and the light, and leaves the struct logged in.
+            PinOp::GreenLight => {
+                if a.state_flags & state::SUCCESSFUL == 0 {
+                    return Err(GateError::Pin(err::PIN_REQUIRED));
+                }
+                inner.greenlit = true;
+                self.sign(&mut inner, a);
+                Ok(0)
             }
             PinOp::FetchSecret => {
                 if a.state_flags & state::SUCCESSFUL == 0 {
@@ -969,4 +982,33 @@ fn a_clear_pin_before_login_does_nothing() {
     let step = l.clear_pin(&m, b"12", b"3456").unwrap();
     assert_eq!(step, Step::Prefix, "clear_pin acted outside a login");
     assert!(!m.inner.borrow().blank, "clear_pin wiped without a login");
+}
+
+#[test]
+fn greenlight_needs_a_login_and_keeps_it() {
+    let g = Model::new(b"12-34");
+    let mut fresh = Login::new(&g);
+    // Before a login the gate is never asked: the refusal is ours, and the model's
+    // "greenlit" stays false.
+    assert_eq!(fresh.greenlight(&g), Err(Failure::Code(err::PIN_REQUIRED)));
+    assert!(!g.inner.borrow().greenlit);
+
+    let (mut login, step) = login_with(&g, b"12", b"34");
+    assert!(matches!(step, Step::In { .. }));
+    assert_eq!(login.greenlight(&g), Ok(()));
+    assert!(g.inner.borrow().greenlit);
+    // Still logged in afterwards: the secret can be fetched on the same struct.
+    assert!(matches!(login.step(), Step::In { .. }));
+    assert!(login.fetch_secret(&g).is_ok());
+}
+
+#[test]
+fn greenlight_on_a_stale_struct_asks_for_setup() {
+    let g = Model::new(b"12-34");
+    let (mut login, _) = login_with(&g, b"12", b"34");
+    // A second struct signed later makes the first one stale, as a reboot would.
+    let _later = Login::new(&g);
+    assert_eq!(login.greenlight(&g), Err(Failure::NeedsSetup));
+    assert!(matches!(login.step(), Step::Failed(Failure::NeedsSetup)));
+    assert!(!g.inner.borrow().greenlit);
 }

@@ -308,6 +308,38 @@ impl Login {
         }
     }
 
+    /// Gate 18/5: commit the running firmware's checksum to the secure element and turn
+    /// the genuine light green -- stock's "Bless Firmware".
+    ///
+    /// Needs a logged-in, bootloader-signed struct; refused here with `PIN_REQUIRED`
+    /// before the gate is asked otherwise. Changes nothing but what the SE holds in its
+    /// firmware slot and what the front LED shows; the seed, the PIN and the attempt
+    /// counter are untouched. A refusal that means the struct is stale moves the step
+    /// to [`Step::Failed`] so the caller re-runs setup, exactly as an upgrade
+    /// authorisation does; any other refusal leaves the login as it was.
+    ///
+    /// Source: gate18-pin-state-machine.md §2 method 5 [C].
+    pub fn greenlight<G: PinGate>(&mut self, gate: &G) -> Result<(), Failure> {
+        if !matches!(self.step, Step::In { .. }) {
+            return Err(Failure::Code(err::PIN_REQUIRED));
+        }
+        match gate.pin_attempt(PinOp::GreenLight, &mut self.attempt) {
+            Ok(_) => Ok(()),
+            Err(e) => match classify(e) {
+                s @ Step::Failed(f @ (Failure::NeedsSetup | Failure::Gate(_))) => {
+                    self.step = s;
+                    Err(f)
+                }
+                Step::Bricked => {
+                    self.step = Step::Bricked;
+                    Err(Failure::Code(err::I_AM_BRICK))
+                }
+                Step::Failed(f) => Err(f),
+                _ => Err(Failure::Code(0)),
+            },
+        }
+    }
+
     /// The anti-phishing words for a prefix, without touching the login state.
     ///
     /// [`prefix_entered`](Self::prefix_entered) is the login path and advances the state
