@@ -6,6 +6,12 @@
 //! cargo run -p catcard-usb --example ckcc_sim &
 //! ckcc -x version      # the host tool, talking to this over /tmp/ckcc-simulator.sock
 //! ```
+//!
+//! The HSM opcodes are answered by the firmware's own engine (`catcard_settings::hsm`,
+//! `hsmusers`), so `ckcc user`, `ckcc auth`, `ckcc hsm-start`, `ckcc hsm` and
+//! `ckcc local-conf` exercise the real parsing and the real status report. A policy is
+//! approved at once -- there is no one here to ask -- and HSM mode then gates the
+//! opcodes as the firmware does.
 
 use std::os::unix::net::UnixDatagram;
 
@@ -33,6 +39,7 @@ fn main() {
     let mut staged = vec![0u8; 4 << 20];
     let mut report = [0u8; 256];
     let mut polls = 0u32;
+    let mut hsm = Hsm::default();
     loop {
         let (n, from) = sock.recv_from(&mut report).expect("recv");
         let Some(from) = from.as_pathname().map(|p| p.to_path_buf()) else {
@@ -78,6 +85,15 @@ fn main() {
             }
         };
         let msg = buf[..plen].to_vec();
+        let hsm_gate = match Request::parse(&msg) {
+            Ok(Ok(r)) if hsm.active.is_some() && !r.allowed_in_hsm() => {
+                Some("Not allowed in HSM mode")
+            }
+            Ok(Ok(Request::Upload {
+                offset: 0, data, ..
+            })) if hsm.active.is_some() && !data.starts_with(b"psbt\xff") => Some("HSM: PSBT only"),
+            _ => None,
+        };
         let mut out = vec![0u8; ckcc::MAX_WIRE_LEN + 64];
         let req = Request::parse(&msg);
         let shown = match &req {
@@ -98,6 +114,7 @@ fn main() {
             shown
         );
         let n = match req {
+            _ if hsm_gate.is_some() => reply::err(&mut out, hsm_gate.unwrap_or("")).unwrap(),
             Err(f) => reply::fram(&mut out, f.reason()).unwrap(),
             Ok(Err(e)) => reply::err(&mut out, e.text()).unwrap(),
             Ok(Ok(req)) => match req {
@@ -166,6 +183,53 @@ fn main() {
                     let (a, n) = (offset as usize, length as usize);
                     reply::biny(&mut out, &staged[a..a + n]).unwrap()
                 }
+                Request::HsmStart(args) => {
+                    let text = match args {
+                        Some((len, sha)) => {
+                            if !ckcc::HSM_POLICY_LEN.contains(&len)
+                                || upload.total() != len
+                                || upload.digest() != *sha
+                            {
+                                None
+                            } else {
+                                Some(String::from_utf8_lossy(&staged[..len as usize]).into_owned())
+                            }
+                        }
+                        None => hsm.stored.clone(),
+                    };
+                    match text {
+                        None => reply::err(&mut out, "No policy").unwrap(),
+                        Some(t) => match hsm.start(&t) {
+                            Ok(()) => reply::okay(&mut out).unwrap(),
+                            Err(why) => reply::err(&mut out, &why).unwrap(),
+                        },
+                    }
+                }
+                Request::HsmStatus => {
+                    let mut o = vec![0u8; 2048];
+                    let n = hsm.status(&mut o);
+                    reply::asci(&mut out, &o[..n]).unwrap()
+                }
+                Request::StorageLocker => {
+                    reply::err(&mut out, "Storage Locker not supported").unwrap()
+                }
+                Request::NewUser { mode, name, secret } => match hsm.new_user(mode, name, secret) {
+                    Ok(t) => reply::asci(&mut out, t.as_bytes()).unwrap(),
+                    Err(why) => reply::err(&mut out, why).unwrap(),
+                },
+                Request::RemoveUser { name } => {
+                    let name = String::from_utf8_lossy(name).into_owned();
+                    hsm.users.retain(|u| u.0 != name);
+                    reply::okay(&mut out).unwrap()
+                }
+                Request::UserAuth {
+                    totp_time,
+                    name,
+                    token,
+                } => match hsm.auth(totp_time, name, token) {
+                    Some(r) => reply::asci(&mut out, r.as_bytes()).unwrap(),
+                    None => reply::okay(&mut out).unwrap(),
+                },
                 _ => reply::err(&mut out, "Unknown cmd").unwrap(),
             },
         };
@@ -186,5 +250,144 @@ fn send(sock: &UnixDatagram, to: &std::path::Path, msg: &[u8], enc: bool) {
             eprintln!("sim: send to {} failed: {e}", to.display());
             return;
         }
+    }
+}
+
+/// What the simulator keeps for HSM mode: the user store, the policy in force and its
+/// counters -- the firmware's engine, with a vector where the firmware has flash.
+#[derive(Default)]
+struct Hsm {
+    /// `(name, mode, base32 secret, last counter)`, as the `usr` key holds them.
+    users: Vec<(String, u8, String, u64)>,
+    stored: Option<String>,
+    /// The canonical policy in force.
+    active: Option<String>,
+    runtime: catcard_settings::hsm::Runtime,
+    pending: usize,
+}
+
+/// The serial the host tool uses for the simulator: its otpauth issuer names it.
+const SIM_SERIAL: &str = "F1F1F1F1F1F1";
+
+struct SimEnv<'a>(&'a [(String, u8, String, u64)]);
+
+impl catcard_settings::hsm::Env for SimEnv<'_> {
+    fn user_exists(&self, name: &str) -> bool {
+        self.0.iter().any(|u| u.0 == name)
+    }
+    fn wallets_named(&self, _: &str) -> usize {
+        0
+    }
+    fn address_ok(&self, addr: &str) -> bool {
+        addr.len() >= 26 && addr.is_ascii()
+    }
+}
+
+impl Hsm {
+    fn start(&mut self, text: &str) -> Result<(), String> {
+        use catcard_settings::hsm::Policy;
+        let p = Policy::load(text, &SimEnv(&self.users)).map_err(|r| r.to_string())?;
+        let mut canon = vec![0u8; catcard_settings::hsm::MAX_CANONICAL];
+        let n = p.write(&mut canon).map_err(|e| e.text().to_string())?;
+        let canon = String::from_utf8(canon[..n].to_vec()).map_err(|_| "not text".to_string())?;
+        eprintln!("sim: HSM policy approved (no one to ask): {canon}");
+        self.stored = Some(canon.clone());
+        self.active = Some(canon);
+        self.runtime = catcard_settings::hsm::Runtime::new();
+        Ok(())
+    }
+
+    fn status(&mut self, out: &mut [u8]) -> usize {
+        use catcard_settings::hsm::{Policy, Running, Status, Trusted, local_key_text};
+        let names: Vec<&str> = self.users.iter().map(|u| u.0.as_str()).collect();
+        let key = local_key_text(&[0u8; 15]);
+        let text = self.active.clone();
+        let policy = text.as_deref().and_then(|t| Policy::load(t, &Trusted).ok());
+        let hash = text
+            .as_deref()
+            .map(|t| Policy::hash(t.as_bytes()))
+            .unwrap_or_default();
+        let period = policy.as_ref().and_then(|p| p.period);
+        let time_left = self.runtime.time_left(period, 0);
+        let st = Status {
+            active: policy.is_some(),
+            policy_available: self.stored.is_some(),
+            running: policy.as_ref().map(|p| Running {
+                policy: p,
+                hash: &hash,
+                runtime: &self.runtime,
+                next_local_code: &key,
+                uptime: 0,
+                time_left,
+                users: &names,
+                pending_auth: self.pending,
+            }),
+        };
+        st.write(out).unwrap_or(0)
+    }
+
+    fn new_user(&mut self, mode: u8, name: &[u8], secret: &[u8]) -> Result<String, &'static str> {
+        use catcard_settings::hsmusers::{self as u, Secret};
+        let name = core::str::from_utf8(name).map_err(|_| "bad username")?;
+        u::check_name(name).map_err(|e| e.text())?;
+        if self.users.iter().any(|x| x.0 == name) {
+            return Err(u::Error::Exists.text());
+        }
+        let mode = mode & !u::AUTH_SHOW_QR;
+        let (stored, reply) = if secret.is_empty() {
+            match mode {
+                u::AUTH_TOTP | u::AUTH_HOTP => {
+                    let s = Secret::new(b"simulator!").ok_or("?")?;
+                    let b = s.base32();
+                    (b.to_string(), b.to_string())
+                }
+                u::AUTH_HMAC => {
+                    let pw = "SIMPASSWORD2345";
+                    (
+                        u::password_key(pw.as_bytes(), SIM_SERIAL)
+                            .base32()
+                            .to_string(),
+                        pw.to_string(),
+                    )
+                }
+                _ => return Err(u::Error::BadMode.text()),
+            }
+        } else {
+            if !u::secret_len_ok(mode, secret.len()) {
+                return Err(u::Error::BadSecret.text());
+            }
+            let b = Secret::new(secret).ok_or("?")?.base32();
+            let reply = if mode == u::AUTH_HMAC {
+                String::new()
+            } else {
+                b.to_string()
+            };
+            (b.to_string(), reply)
+        };
+        self.users.push((name.to_string(), mode, stored, 0));
+        Ok(reply)
+    }
+
+    /// `None`: queued (HSM mode). `Some`: a dry run's answer, empty when it checks out.
+    fn auth(&mut self, totp_time: u32, name: &[u8], token: &[u8]) -> Option<String> {
+        use catcard_settings::hsmusers::{self as u, User};
+        if self.active.is_some() {
+            self.pending += 1;
+            return None;
+        }
+        let name = String::from_utf8_lossy(name);
+        let Some(x) = self.users.iter().find(|x| x.0 == name) else {
+            return Some(u::Refused::UnknownUser.text().to_string());
+        };
+        let user = User {
+            name: &x.0,
+            mode: x.1,
+            secret: &x.2,
+            counter: x.3,
+        };
+        Some(match u::check(&user, token, totp_time, None) {
+            Ok(_) => String::new(),
+            Err(r) => r.text().to_string(),
+        })
     }
 }

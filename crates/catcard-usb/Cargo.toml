@@ -23,3 +23,5 @@ zeroize = { workspace = true }
 [dev-dependencies]
 # The `ckcc_sim` example signs `mitm` the way the firmware does.
 catcard-wallet = { workspace = true, features = ["std"] }
+# And answers the HSM opcodes with the firmware's own policy engine and user store.
+catcard-settings = { workspace = true, features = ["std"] }

@@ -710,14 +710,29 @@ pub enum Request<'a> {
     },
     Passphrase(&'a [u8]),
     PassphrasePoll,
-    // HSM: the opcodes are parsed only far enough to be named; a later package builds
-    // HSM on this transport.
-    HsmStart,
+    /// `hsms`: start HSM mode, with a newly uploaded policy (its length and digest) or,
+    /// with no arguments, the stored one. Source: §4.1 [C]
+    HsmStart(Option<(u32, &'a [u8; 32])>),
     HsmStatus,
     StorageLocker,
-    NewUser,
-    RemoveUser,
-    UserAuth,
+    /// `nwur`: `<BBB auth_mode, username_len, secret_len>` + username + secret.
+    /// Source: §4.2 [C]
+    NewUser {
+        mode: u8,
+        name: &'a [u8],
+        secret: &'a [u8],
+    },
+    /// `rmur`: `<B username_len>` + username. Source: §4.2 [C]
+    RemoveUser {
+        name: &'a [u8],
+    },
+    /// `user`: `<IBB totp_time, username_len, token_len>` + username + token.
+    /// Source: §4.2 [C]
+    UserAuth {
+        totp_time: u32,
+        name: &'a [u8],
+        token: &'a [u8],
+    },
     /// Opcodes the host library knows and stock v5.6.2 does not dispatch (miniscript).
     NotDispatched([u8; 4]),
     /// A simulator-only test command (upper-case), or anything else.
@@ -872,17 +887,96 @@ impl<'a> Request<'a> {
             }
             b"pass" => Request::Passphrase(a),
             b"pwok" => Request::PassphrasePoll,
-            b"hsms" => Request::HsmStart,
+            b"hsms" => match a.len() {
+                0 => Request::HsmStart(None),
+                36 => Request::HsmStart(Some((
+                    u32_at(a, 0),
+                    a[4..36].try_into().map_err(|_| BadArgs::Length)?,
+                ))),
+                _ => return Err(BadArgs::Length),
+            },
             b"hsts" => Request::HsmStatus,
             b"gslr" => Request::StorageLocker,
-            b"nwur" => Request::NewUser,
-            b"rmur" => Request::RemoveUser,
-            b"user" => Request::UserAuth,
+            b"nwur" => {
+                at_least(3)?;
+                let (ul, sl) = (usize::from(a[1]), usize::from(a[2]));
+                len(3 + ul + sl)?;
+                Request::NewUser {
+                    mode: a[0],
+                    name: &a[3..3 + ul],
+                    secret: &a[3 + ul..],
+                }
+            }
+            b"rmur" => {
+                at_least(1)?;
+                let ul = usize::from(a[0]);
+                len(1 + ul)?;
+                Request::RemoveUser { name: &a[1..] }
+            }
+            b"user" => {
+                at_least(6)?;
+                let (ul, tl) = (usize::from(a[4]), usize::from(a[5]));
+                len(6 + ul + tl)?;
+                Request::UserAuth {
+                    totp_time: u32_at(a, 0),
+                    name: &a[6..6 + ul],
+                    token: &a[6 + ul..],
+                }
+            }
             b"msls" | b"msdl" | b"msgt" | b"msas" | b"mins" => Request::NotDispatched(op),
             _ => Request::Unknown(op),
         })
     }
 }
+
+impl Request<'_> {
+    /// Whether HSM mode lets this request through: stock's `HSM_WHITELIST`. Anything else
+    /// is answered `err_Not allowed in HSM mode` while HSM mode runs.
+    /// Source: usb-ckcc-protocol.md §4.3 [C]
+    pub fn allowed_in_hsm(&self) -> bool {
+        matches!(
+            self,
+            Request::Logout
+                | Request::Ping(_)
+                | Request::Version
+                | Request::Upload { .. }
+                | Request::Sha
+                | Request::Download { .. }
+                | Request::SignTx { .. }
+                | Request::Mitm
+                | Request::Ncry { .. }
+                | Request::SignMsg { .. }
+                | Request::Chain
+                | Request::HsmStatus
+                | Request::SignTxPoll
+                | Request::SignMsgPoll
+                | Request::Xpub(_)
+                | Request::MultisigCheck { .. }
+                | Request::P2sh(_)
+                | Request::Show { .. }
+                | Request::UserAuth { .. }
+                | Request::StorageLocker
+        )
+    }
+
+    /// Whether this is one of the HSM commands a device answers only with its HSM
+    /// commands setting on: stock's `HSM_DISABLE_CMDS`, answered `err_HSM commands
+    /// disabled` otherwise. Source: usb-ckcc-protocol.md §4.3 [C]
+    pub fn is_hsm_command(&self) -> bool {
+        matches!(
+            self,
+            Request::UserAuth { .. }
+                | Request::RemoveUser { .. }
+                | Request::NewUser { .. }
+                | Request::StorageLocker
+                | Request::HsmStatus
+                | Request::HsmStart(_)
+        )
+    }
+}
+
+/// The size an `hsms` policy upload may be. Source: usb-ckcc-protocol.md §4.1 [C]
+pub const HSM_POLICY_LEN: core::ops::RangeInclusive<u32> = 2..=200_000;
 
 /// A `p2sh` request: show a multisig address. Source: usb-ckcc-protocol.md §3.6 [C]
 ///

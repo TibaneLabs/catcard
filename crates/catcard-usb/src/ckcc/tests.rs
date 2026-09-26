@@ -417,6 +417,7 @@ fn requests_parse_to_their_arguments() {
     assert_eq!(Request::parse(b"xpubm/84h"), Ok(Ok(Request::Xpub("m/84h"))));
     assert_eq!(Request::parse(b"vers"), Ok(Ok(Request::Version)));
     assert_eq!(Request::parse(b"hsts"), Ok(Ok(Request::HsmStatus)));
+    assert_eq!(Request::parse(b"hsms"), Ok(Ok(Request::HsmStart(None))));
     assert_eq!(
         Request::parse(b"mslsname"),
         Ok(Ok(Request::NotDispatched(*b"msls")))
@@ -583,4 +584,94 @@ fn replies_encode_as_the_host_decodes_them() {
     assert_eq!(&out[..8], b"int1\x09\0\0\0");
     // Too small a buffer is `None`, never a partial reply.
     assert_eq!(reply::asci(&mut [0u8; 6], b"abc"), None);
+}
+
+/// The HSM requests, in the shapes `ckcc user`, `ckcc auth` and `ckcc hsm-start` sent to
+/// the simulator stand-in (captured from the host tool, run as a black box).
+#[test]
+fn hsm_requests_parse_as_the_host_tool_sends_them() {
+    // `ckcc user alice`: TOTP, show the QR, let the device pick the secret.
+    assert_eq!(
+        Request::parse(b"nwur\x81\x05\x00alice"),
+        Ok(Ok(Request::NewUser {
+            mode: 0x81,
+            name: b"alice",
+            secret: b"",
+        }))
+    );
+    // `ckcc user -s JBSWY3DPEHPK3PXP dave`: TOTP with a ten-byte secret.
+    assert_eq!(
+        Request::parse(b"nwur\x01\x04\x0adaveHello!\xde\xad\xbe\xef"),
+        Ok(Ok(Request::NewUser {
+            mode: 1,
+            name: b"dave",
+            secret: b"Hello!\xde\xad\xbe\xef",
+        }))
+    );
+    assert_eq!(
+        Request::parse(b"nwur\x01\x05\x00ali"),
+        Ok(Err(BadArgs::Length))
+    );
+    assert_eq!(Request::parse(b"nwur\x01"), Ok(Err(BadArgs::Length)));
+    // `ckcc user -d alice`.
+    assert_eq!(
+        Request::parse(b"rmur\x05alice"),
+        Ok(Ok(Request::RemoveUser { name: b"alice" }))
+    );
+    assert_eq!(Request::parse(b"rmur\x06alice"), Ok(Err(BadArgs::Length)));
+    // `ckcc auth alice 123456`: the time slot, the name, the code.
+    assert_eq!(
+        Request::parse(b"user\xaa\xab\x8e\x03\x05\x06alice123456"),
+        Ok(Ok(Request::UserAuth {
+            totp_time: 0x038e_abaa,
+            name: b"alice",
+            token: b"123456",
+        }))
+    );
+    assert_eq!(
+        Request::parse(b"user\0\0\0\0\x05"),
+        Ok(Err(BadArgs::Length))
+    );
+    // `ckcc hsm-start policy.json`: length and digest of the upload.
+    let mut hsms = b"hsms".to_vec();
+    hsms.extend_from_slice(&32u32.to_le_bytes());
+    hsms.extend_from_slice(&[0x65; 32]);
+    assert_eq!(
+        Request::parse(&hsms),
+        Ok(Ok(Request::HsmStart(Some((32, &[0x65; 32])))))
+    );
+    assert_eq!(Request::parse(b"hsms\x01"), Ok(Err(BadArgs::Length)));
+}
+
+#[test]
+fn hsm_gates_follow_stocks_lists() {
+    let allowed: &[&[u8]] = &[
+        b"logo", b"ping", b"vers", b"sha2", b"mitm", b"blkc", b"hsts", b"stok", b"smok", b"xpubm",
+        b"gslr",
+    ];
+    for op in allowed {
+        let r = Request::parse(op).unwrap().unwrap();
+        assert!(r.allowed_in_hsm(), "{:?}", core::str::from_utf8(op));
+    }
+    let denied: &[&[u8]] = &[
+        b"rebo", b"back", b"bkok", b"pwok", b"hsms", b"dfu_", b"bagi",
+    ];
+    for op in denied {
+        let r = Request::parse(op).unwrap().unwrap();
+        assert!(!r.allowed_in_hsm(), "{:?}", core::str::from_utf8(op));
+    }
+    assert!(
+        !Request::parse(b"rmur\x02ab")
+            .unwrap()
+            .unwrap()
+            .allowed_in_hsm()
+    );
+    assert!(
+        Request::parse(b"rmur\x02ab")
+            .unwrap()
+            .unwrap()
+            .is_hsm_command()
+    );
+    assert!(Request::parse(b"hsts").unwrap().unwrap().is_hsm_command());
+    assert!(!Request::parse(b"vers").unwrap().unwrap().is_hsm_command());
 }

@@ -996,12 +996,12 @@ impl Desk {
             // HSM: not built. A later package puts HSM mode on this transport; until then
             // these answer as a stock device with its `hsmcmd` setting off does.
             // Source: usb-ckcc-protocol.md §4.3 HSM_DISABLE_CMDS [C]
-            Request::HsmStart
+            Request::HsmStart(_)
             | Request::HsmStatus
             | Request::StorageLocker
-            | Request::NewUser
-            | Request::RemoveUser
-            | Request::UserAuth => reply::err(buf, "HSM commands disabled"),
+            | Request::NewUser { .. }
+            | Request::RemoveUser { .. }
+            | Request::UserAuth { .. } => reply::err(buf, "HSM commands disabled"),
             // Not in this firmware: backup and restore over USB (the card does both), and
             // stock's factory DFU entry, which a locked bench unit could not take anyway.
             // Answered as stock answers a command it does not have.
