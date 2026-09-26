@@ -71,7 +71,7 @@ def _ask_host_user(code_text):
     return answer.strip().lower() in ("y", "yes")
 
 
-def open_session(sock, confirm=None):
+def pair_session(sock, confirm=None):
     """Pair an encrypted channel (ncry v2) and return the host `ncry.Session`.
 
     Every connection is paired afresh -- nothing is stored on either side:
@@ -135,20 +135,18 @@ def open_session(sock, confirm=None):
         time.sleep(0.5)
 
 
-def open_session(sock):
-    """An encrypted session the host-wallet commands may run on, or an exception.
+def open_session(sock, confirm=None):
+    """A paired session the host-wallet commands may run on, as a `call(opcode, payload)`.
 
-    **The one place those commands get a session from.** Today that is the plain `ncry`
-    handshake; when the channel gains pairing, this is what changes and nothing that
-    calls it does.
+    **The one place those commands get a session from.** It pairs afresh -- the code is
+    compared on both screens every time (`pair_session`) -- and raises `RuntimeError`
+    saying why when the device does not offer the commands or pairing does not complete.
     """
     st, body = request(sock, IDENTIFY)
     caps = capabilities(body) if st == 0 else 0
-    if not caps & CAP_NCRY:
-        raise ValueError("device does not advertise the encrypted channel (no NCRY cap)")
     if not caps & hostwallet.CAP_HOST_WALLET:
-        raise ValueError("device does not answer host-wallet commands (no HOST_WALLET cap)")
-    session = ncry_handshake(sock)
+        raise RuntimeError("device does not answer host-wallet commands (no HOST_WALLET cap)")
+    session = pair_session(sock, confirm)
     return lambda opcode, payload=b"": ncry_request(sock, session, opcode, payload)
 
 
@@ -1332,7 +1330,7 @@ def main(path, image=None):
         # then run Identify, a log page and a Ping through it. Nothing here crosses the
         # wire in the clear.
         try:
-            session = open_session(s)
+            session = pair_session(s)
         except RuntimeError as e:
             print(e)
             return 1
@@ -1360,7 +1358,11 @@ def main(path, image=None):
     if "--addresses" in sys.argv:
         # Ask for the wallet's addresses. The device asks its owner which account (and on
         # a multichain build, which chains) and whether to share them at all.
-        call = open_session(s)
+        try:
+            call = open_session(s)
+        except RuntimeError as e:
+            print(e)
+            return 1
         try:
             hostwallet.print_addresses(hostwallet.addresses(call))
         except hostwallet.Refused as e:
@@ -1395,7 +1397,11 @@ def main(path, image=None):
                     tx = base64.b64decode(text, validate=True)
                 except (binascii.Error, ValueError):
                     pass  # raw bytes, as they are
-        call = open_session(s)
+        try:
+            call = open_session(s)
+        except RuntimeError as e:
+            print(e)
+            return 1
         try:
             result = hostwallet.sign(call, chain, keys, tx)
         except hostwallet.Refused as e:
