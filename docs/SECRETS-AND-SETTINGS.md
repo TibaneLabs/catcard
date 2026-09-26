@@ -5,9 +5,10 @@ it. Tags as elsewhere: **[C]** confirmed, **[I]** inferred, **[?]** unconfirmed.
 
 Two decisions frame everything here, and they were made deliberately:
 
-- **The settings blob is stock-compatible.** Same medium (LittleFS2 on internal flash),
-  same crypto, same slot rotation, so a device that has been reflashed either way keeps
-  its settings. `hw-reference/settings-nvstore-format.md` is the contract.
+- **The settings blob is stock-compatible.** Same medium (LittleFS2 on internal flash on
+  mk4/mk5/Q1; thirty-two raw SPI-NOR sectors on the mk3), same crypto, same slot
+  rotation, so a device that has been reflashed either way keeps its settings.
+  `hw-reference/settings-nvstore-format.md` is the contract.
 - **A new seed is written in the stock SecretStash layout.** Costs nothing — the wallet
   crate already stores BIP-39 *entropy* rather than words — and means stock firmware can
   read a CatCard-generated wallet and vice versa.
@@ -53,7 +54,7 @@ So E gates D. The re-key step above belongs to E's exit criteria, not to a later
 | SE1/SE2 entropy via callgate 26 | live — `boot.rs` discovers the callgate and draws 64 B per element |
 | `catcard-wallet` | complete and portable: BIP-39 (`Mnemonic` stores entropy), BIP-32, addresses, sighash, base58/bech32 |
 | `catcard-pin` | login, `fetch_secret`, first-PIN set, firmware authorisation |
-| `catcard-settings` | complete two-slot authenticated store — **orphaned**, and superseded for mk4+ by the stock-compatible format below |
+| `catcard-settings` | the stock-compatible store: `nvstore` (the slot crypto), `store` (newest-`_age`-wins, write-new-then-clear-old, over a `Slots` medium trait), `json`, and the typed readers (`prefs`, `prelogin`, `wallets`, `vault`, `wifs`, `notes`, `ccenc`). Two media: the firmware's LittleFS `Files` (mk4/mk5/Q1) and `norslots::NorSlots` (mk3, below). The original two-slot HMAC store in `lib.rs` is orphaned |
 | crypto primitives | `purecrypto` has everything needed: `Aes256` + `Ctr`, `Sha256`/`Sha512`, `HmacSha512`, generic `pbkdf2<D>`. All no-alloc (`cipher = []`, `kdf = ["hash","cipher"]`) |
 
 ## What is missing
@@ -86,6 +87,37 @@ those equal, so stock must present 512-byte logical blocks over 8 KB pages with
 read-modify-write underneath (MicroPython's flash block device does exactly this). Any
 stock-compatible *writer* has to reproduce that mapping; a reader does not care. This is
 not recorded in `hw-reference` and is the single most load-bearing discovery here.
+
+## The mk3 medium: SPI-NOR sectors  [C]
+
+The mk3 has no LittleFS volume. Stock writes each blob into one 4 KB sector of the
+Macronix MX25L8006E, thirty-two of them in the last 128 KB of the 1 MB part --
+`range(0xE0000, 0x100000, 0x1000)` -- and the `pos` in the AES counter is the sector's
+**byte offset**, not an index (`hw-reference/settings-nvstore-format.md §1`,
+`storage.md §SPI-NOR`). A blob sealed under the mk4 convention at the same place does not
+decrypt, and that is the format.
+
+`catcard_settings::norslots` is that medium behind the same `store::Slots` trait the
+LittleFS backend implements, so the rules are one piece of code. What is specific to NOR:
+
+- **A slot is exactly one sector.** A LittleFS file may grow past 4096 bytes when the
+  JSON outruns its padding; a sector cannot, and the write is refused rather than spilling
+  into the next slot.
+- **Erase, program, read back.** NOR only clears bits, so the sector is erased first. The
+  old copy lives in another slot throughout (the store writes the new one before clearing
+  the old), so a power cut anywhere in the program leaves the old settings live. Every
+  write is compared against a read-back before it counts.
+- **Nothing addresses a byte below `0xE0000`.** Every address is `base + index × 4096`
+  with the index checked against the count first. The firmware-staging area is the rest
+  of the part, and the settings can never erase a staged image.
+- **One holder at a time.** Staging and the settings share one bus and one chip-select;
+  `crate::nor::claim` hands the part to one of them by name, and the other is refused with
+  a reason (`settings: SPI-NOR busy with firmware staging`).
+- **Bounded waits** are the driver's: `catcard_flash` polls the status register a fixed
+  number of times per erase and per page program and gives up.
+
+`Debug → Settings to SD` is the one settings screen the mk3 does not have: it slices the
+memory-mapped region, and the NOR has no mapping.
 
 ## Milestones
 
@@ -163,7 +195,8 @@ wear-levelling — materially harder, and worth deferring until the reader is pr
   `_skip_pin`. Worth implementing first: it needs no secret, so it can be developed and
   validated before E lands.
 - **Slot** = `AES-256-CTR(plaintext ‖ SHA256(plaintext))`, one continuous stream, counter
-  seeded `pack('<4I', 4, 3, 2, pos)` where `pos` is the slot index 0..99, padded to 4064 + 32.
+  seeded `pack('<4I', 4, 3, 2, pos)` where `pos` is the slot index 0..99 on mk4/mk5/Q1
+  and the sector's byte offset (`0xE0000 + 0x1000 × n`) on the mk3, padded to 4064 + 32.
 - **Load:** scan slots, cheap 2-byte prefilter against `{"`, full decrypt, verify digest,
   take the highest `_age`. **Save:** `_age += 1`, write a new random free slot, then erase
   the old one — new data durable before the old copy dies.
