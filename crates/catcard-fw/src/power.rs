@@ -208,6 +208,6 @@ pub(crate) fn power_down() {
         // and the cached PIN with it.
         //
         // SAFETY: nothing after this runs; the bootloader cuts power.
-        unsafe { gate.logout(LogoutMode::PowerDown) }
+        unsafe { crate::gatecall::logout(&gate, LogoutMode::PowerDown) }
     }
 }

@@ -1536,7 +1536,7 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 LogoutMode::Logout
             };
             // SAFETY: nothing after this runs; the bootloader wipes SRAM.
-            unsafe { gate.logout(mode) }
+            unsafe { crate::gatecall::logout(gate, mode) }
         }
         Job::Mitm(key) => {
             let a = mitm(gate, login, ui, &key);
@@ -1641,7 +1641,7 @@ fn unattended(
             }
             login.zeroize();
             // SAFETY: nothing after this runs; the bootloader wipes SRAM.
-            unsafe { gate.logout(LogoutMode::Logout) }
+            unsafe { crate::gatecall::logout(gate, LogoutMode::Logout) }
         }
         Job::Mitm(key) => done(mitm(gate, login, ui, &key)),
         Job::Xpub(path) => {

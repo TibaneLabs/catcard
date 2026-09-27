@@ -124,7 +124,7 @@ impl PanelBus {
         // forget the rows it drew; this is the net under anything that talks to the panel
         // some other way.
         #[cfg(feature = "board-q1")]
-        stop_sweep(self);
+        stop_sweep();
         // SAFETY: these pins were configured as outputs in `init`.
         unsafe {
             gpio::write(self.dc, dc_high);
@@ -325,7 +325,7 @@ pub fn slide_frame_by(
     reclaim_bus();
     // The sweep paints the bottom rows behind the cache's back, and it must not be
     // running while the panel's scroll register is being driven from here.
-    stop_sweep(panel.bus_mut());
+    stop_sweep();
     // SAFETY: foreground, single core, not inside a flush.
     unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
 
@@ -619,9 +619,30 @@ pub fn scroll_busy_bar(panel: &mut Panel) {
 #[cfg(feature = "board-q1")]
 pub const SWEEP_AT_LOGIN: bool = true;
 
-/// The DMA-driven bar, while it runs. Foreground only, single core.
+/// The DMA-driven bar's hardware while it runs: what stopping it needs, and nothing that
+/// lives on the heap -- so [`quiesce`] can stop it from anywhere.
+///
+/// Only ever touched with interrupts masked (`interrupt::free`): the foreground starts
+/// and stops it, and the backstop may reach it from another task or an exception handler.
 #[cfg(feature = "board-q1")]
-static mut SWEEP: Option<Sweep> = None;
+static mut SWEEP: catcard_ui::sweep::Slot<Sweep> = catcard_ui::sweep::Slot::new();
+
+/// Whether [`SWEEP`] holds a running sweep. Written only inside the same masked sections
+/// that change `SWEEP`, so reading it false means no channel is feeding SPI1 -- which is
+/// how the backstop, when nothing ever started a sweep, is a single load and nothing else.
+#[cfg(feature = "board-q1")]
+static SWEEPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The stream the channel reads. Foreground only, and kept apart from [`SWEEP`] so the
+/// backstop never has to touch the heap: it is freed by the next foreground stop or start
+/// that finds no channel running.
+#[cfg(feature = "board-q1")]
+static mut SWEEP_BUF: Option<crate::heap::Block> = None;
+
+/// A sweep painted the bottom rows behind the row cache's back and has stopped since the
+/// last frame: the next [`show`] has to repaint them (unless it keeps them, [`keep_sweep`]).
+#[cfg(feature = "board-q1")]
+static SWEPT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Where the last sweep stopped, `(phase, at)` as [`catcard_ui::sweep::stopped_at`]
 /// gives it -- for as long as the glass still shows it.
@@ -639,10 +660,130 @@ struct Sweep {
     /// the count register these say where it is.
     phase: usize,
     started: u32,
-    spi: spi::TxDma,
-    /// The stream the channel reads. Held here so it outlives the call that started
-    /// it; freed when the sweep stops.
-    _buf: crate::heap::Block,
+    /// SPI1 as it was before the channel took its transmit side.
+    saved: spi::TxDma,
+    /// A handle to SPI1 of the sweep's own, so stopping needs no `Panel`.
+    spi: Spi,
+    /// The panel's chip-select, held low for as long as the channel runs.
+    cs: Pin,
+}
+
+#[cfg(feature = "board-q1")]
+impl Sweep {
+    /// Stop the channel, give SPI1 back exactly as it was, and deselect the panel. Says
+    /// where the pattern had got to.
+    ///
+    /// Touches DMA1 channel 7 and its DMAMUX line, SPI1's `SR`/`DR`/`CR1`/`CR2`, the
+    /// panel's CS pin, and reads DWT and RCC. Draws nothing, allocates nothing; every wait
+    /// in it is bounded (`Spi::flush`).
+    fn stop(mut self) -> (usize, usize) {
+        // Where it is: the count register says exactly how far into the current pass, and
+        // the time since it started says how many passes -- which only has to be right to
+        // half a pass (14 ms), so the cycle counter is ample. Read before the channel
+        // stops, which freezes neither but ends the passes.
+        let pass = (catcard_ui::sweep::LEN * 2) as u64;
+        let left = catcard_hal::dma::remaining(&self.run) as u64;
+        let elapsed = catcard_hal::dwt::cycles().wrapping_sub(self.started) as u64;
+        catcard_hal::dma::stop(self.run);
+        // SAFETY: reads RCC only.
+        let (hclk, pclk2) = unsafe {
+            (
+                catcard_hal::clock::hclk_hz() as u64,
+                catcard_hal::clock::pclk2_hz() as u64,
+            )
+        };
+        // Bytes a second on the wire: PCLK2 / prescaler / 8 bits.
+        let per_s = pclk2 / (1u64 << (SWEEP_PRESCALER as u32 + 1)) / 8;
+        let sent = elapsed * per_s / hclk.max(1);
+        let into = (pass - left.min(pass)) % pass;
+        let passes = (sent.saturating_sub(into) + pass / 2) / pass;
+        // Pixels, not bytes: a stop mid-pixel loses that half, and the next RAMWR resets
+        // the panel's byte pairing anyway.
+        let at = catcard_ui::sweep::stopped_at(self.phase, passes as usize, (into / 2) as usize);
+        // Drains (bounded), then restores CR1/CR2 -- the bootloader's error screens draw
+        // assuming the configuration it left. A timeout still restores them.
+        let _ = self.spi.end_tx_dma(self.saved);
+        // SAFETY: the panel's chip-select, an output since `PanelBus::init`; nothing else
+        // drives it while the sweep holds it low.
+        unsafe { gpio::write(self.cs, true) };
+        at
+    }
+}
+
+/// Stop the running sweep -- any, or only the one `lease` names -- and say where it got
+/// to. `None`, having touched nothing but [`SWEEPING`], when there is none (or a newer
+/// one than `lease`'s is running).
+///
+/// Safe from any context: the slot is taken with interrupts masked, so a sweep is stopped
+/// exactly once however the callers interleave, and nothing here draws or allocates.
+#[cfg(feature = "board-q1")]
+fn halt(lease: Option<catcard_ui::sweep::Lease>) -> Option<(usize, usize)> {
+    use core::sync::atomic::Ordering;
+    if !SWEEPING.load(Ordering::SeqCst) {
+        return None;
+    }
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: `SWEEP` is only accessed inside `interrupt::free` on this single core,
+        // so this is the only live reference.
+        let slot = unsafe { &mut *core::ptr::addr_of_mut!(SWEEP) };
+        let run = match lease {
+            Some(l) => slot.take_leased(l),
+            None => slot.take(),
+        }?;
+        SWEEPING.store(false, Ordering::SeqCst);
+        Some(run.stop())
+    })
+}
+
+/// The backstop before the bootloader draws: stop the sweep if one is running and give
+/// SPI1, the panel's CS and DMA back as the bootloader expects them. Needs no `Panel`.
+///
+/// Every firmware call of a callgate that draws or never returns goes through
+/// `crate::gatecall`, which calls this first: the power button from the USB task, the idle
+/// logout, the fatal guard, a trick-PIN wipe could otherwise land while a waiting screen's
+/// sweep owns the bus, and the bootloader would draw its screen into a panel a DMA channel
+/// is writing.
+///
+/// Safe to call from any task and from handler mode, repeatedly, and with no sweep
+/// running. When no sweep has ever started -- always the case on the boot path and in the
+/// failsafe -- it is one atomic load of [`SWEEPING`] and nothing else. It never draws.
+/// It leaves the rest of the display state (row cache, the stream's heap block) alone:
+/// it is followed by a call that does not come back.
+#[cfg(feature = "board-q1")]
+pub fn quiesce() {
+    let _ = halt(None);
+}
+
+/// Nothing streams into the mono panels: the OLED's own scroll is the controller's, and
+/// the bootloader re-initialises that panel before it draws.
+#[cfg(not(feature = "board-q1"))]
+pub fn quiesce() {}
+
+/// Stop the sweep if one is running, from the foreground, and note what the next frame
+/// needs to know. True if one was.
+#[cfg(feature = "board-q1")]
+fn stop_sweep() -> bool {
+    finish(halt(None))
+}
+
+/// After [`halt`], in the foreground: free the stream once nothing reads it, and remember
+/// where the pattern stopped and that its rows need repainting.
+#[cfg(feature = "board-q1")]
+fn finish(at: Option<(usize, usize)>) -> bool {
+    use core::sync::atomic::Ordering;
+    // Only the foreground starts a sweep, so with none recorded no channel reads the
+    // buffer -- whoever stopped it, this call or the backstop.
+    if !SWEEPING.load(Ordering::SeqCst) {
+        // SAFETY: foreground, single core; no DMA channel reads it (above).
+        unsafe { *core::ptr::addr_of_mut!(SWEEP_BUF) = None };
+    }
+    let Some(at) = at else {
+        return false;
+    };
+    // SAFETY: foreground, single core.
+    unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = Some(at) };
+    SWEPT.store(true, Ordering::SeqCst);
+    true
 }
 
 /// The callgate's own stack, which the bootloader wipes on entry and exit. A buffer a
@@ -682,44 +823,49 @@ pub fn keep_sweep() {
 /// Start a blue-white-blue bar moving along the bottom of the panel, with nothing on
 /// the CPU driving it -- for the callgates that hold the CPU with interrupts masked.
 ///
-/// A DMA channel streams [`catcard_ui::sweep`]'s buffer into the panel's memory-write
-/// over and over, and the buffer's length makes each pass land a few pixels on. The
-/// next draw stops it (see [`show`]) and puts SPI1 back exactly as it was, which the
-/// bootloader's own error screens depend on.
+/// Unowned: it runs until the next frame (see [`show`]), which stops it and puts SPI1
+/// back exactly as it was.
 ///
 /// False, with nothing changed, if the buffer cannot be had or would sit in the
 /// callgate's stack -- the caller falls back to the co-processor's bar.
 ///
-/// Only for callgates 16 and 18/2 and 18/4, which leave SPI1, the LCD pins and DMA alone:
-/// docs/CALLGATE-DMA.md. Never before a callgate that draws (logout, wipe, the death
-/// screen): the bootloader would draw into a bus that is not its.
+/// Safe around callgates 16 and 18, which leave SPI1, the LCD pins and DMA alone:
+/// docs/CALLGATE-DMA.md. A callgate that draws (logout, wipe, DFU) is only ever called
+/// through `crate::gatecall`, whose [`quiesce`] stops the sweep first.
 #[cfg(feature = "board-q1")]
 pub fn start_sweep(panel: &mut Panel) -> bool {
+    start(panel).is_some()
+}
+
+/// [`start_sweep`], handing out the lease to the sweep it started.
+#[cfg(feature = "board-q1")]
+fn start(panel: &mut Panel) -> Option<catcard_ui::sweep::Lease> {
     use catcard_ui::display::DisplayBus as _;
     use catcard_ui::st7789::cmd;
 
     reclaim_bus();
     // The sweep's window is a raw panel address.
     reset_origin(panel);
+    stop_sweep();
     let bus = panel.bus_mut();
-    stop_sweep(bus);
 
     // Carry on from the last sweep if the glass still shows it; from the start if not.
     // SAFETY: foreground, single core.
     let phase = unsafe { (*core::ptr::addr_of_mut!(SWEEP_LAST)).take() }
         .map_or(0, |(p, at)| catcard_ui::sweep::resume_phase(p, at));
 
-    let Some(mut buf) = crate::heap::take(catcard_ui::sweep::LEN * 2) else {
-        return false;
-    };
-    let Some(n) = catcard_ui::sweep::fill_from(buf.bytes(), phase) else {
-        return false;
-    };
+    let mut buf = crate::heap::take(catcard_ui::sweep::LEN * 2)?;
+    let n = catcard_ui::sweep::fill_from(buf.bytes(), phase)?;
     let at = buf.bytes().as_ptr() as u32;
     if at < CALLGATE_SRAM.end && at + n as u32 > CALLGATE_SRAM.start {
         crate::catlog!("sweep: buffer at {:#010x} is in the callgate's SRAM", at);
-        return false;
+        return None;
     }
+    // The sweep's own handle on SPI1, so it can be stopped without the panel.
+    let (Display::Ssd1306 { spi: lines, .. } | Display::St77xx { spi: lines, .. }) = BOARD.display;
+    // SAFETY: the instance `PanelBus::init` configured; used only while the channel owns
+    // its transmit side, when nothing else may drive it.
+    let own = unsafe { Spi::steal(lines.instance) }.ok()?;
 
     // The bottom rows, as the panel addresses them (the canvas starts under the bar, the
     // panel does not). Then RAMWR, after which every byte is a pixel.
@@ -732,91 +878,73 @@ pub fn start_sweep(panel: &mut Panel) -> bool {
         && bus.data(&[y0[0], y0[1], y1[0], y1[1]]).is_ok()
         && bus.command(&[cmd::RAMWR]).is_ok();
     if !opened {
-        return false;
+        return None;
     }
-    // Selected, and data, for as long as the channel runs.
-    // SAFETY: the panel's own pins, outputs since `init`.
-    unsafe {
-        gpio::write(bus.dc, true);
-        gpio::write(bus.cs, false);
-    }
-    // SAFETY: nothing else uses SPI1 until `stop_sweep`: every transfer stops it first.
-    let saved = match unsafe { bus.spi.begin_tx_dma(SWEEP_PRESCALER) } {
-        Ok(s) => s,
-        Err(_) => {
-            // SAFETY: as above.
-            unsafe { gpio::write(bus.cs, true) };
-            return false;
+    // From here until the sweep is on record, masked: the backstop must never find a
+    // channel running that `SWEEP` does not show.
+    let lease = cortex_m::interrupt::free(|_| {
+        // Selected, and data, for as long as the channel runs.
+        // SAFETY: the panel's own pins, outputs since `init`.
+        unsafe {
+            gpio::write(bus.dc, true);
+            gpio::write(bus.cs, false);
         }
-    };
-    // SAFETY: the buffer lives in `SWEEP` until the channel is stopped; channel 7 and
-    // its DMAMUX input are nobody else's; SPI1's DR takes byte writes and is raising
-    // TX requests since `begin_tx_dma`.
-    let run = match unsafe {
-        catcard_hal::dma::start(
-            SWEEP_CHANNEL,
-            SPI1_TX_REQUEST,
-            bus.spi.dr_address(),
-            &buf.bytes()[..n],
-        )
-    } {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = bus.spi.end_tx_dma(saved);
-            // SAFETY: as above.
-            unsafe { gpio::write(bus.cs, true) };
-            return false;
-        }
-    };
-    // SAFETY: foreground, single core.
-    unsafe {
-        *core::ptr::addr_of_mut!(SWEEP) = Some(Sweep {
+        // SAFETY: nothing else uses SPI1 until the sweep is stopped: every transfer
+        // stops it first, and so does the backstop.
+        let saved = match unsafe { bus.spi.begin_tx_dma(SWEEP_PRESCALER) } {
+            Ok(s) => s,
+            Err(_) => {
+                // SAFETY: as above.
+                unsafe { gpio::write(bus.cs, true) };
+                return None;
+            }
+        };
+        // SAFETY: the buffer lives in `SWEEP_BUF` until the channel is stopped -- it is
+        // freed only once `SWEEPING` reads false; channel 7 and its DMAMUX input are
+        // nobody else's; SPI1's DR takes byte writes and is raising TX requests since
+        // `begin_tx_dma`.
+        let run = match unsafe {
+            catcard_hal::dma::start(
+                SWEEP_CHANNEL,
+                SPI1_TX_REQUEST,
+                bus.spi.dr_address(),
+                &buf.bytes()[..n],
+            )
+        } {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = bus.spi.end_tx_dma(saved);
+                // SAFETY: as above.
+                unsafe { gpio::write(bus.cs, true) };
+                return None;
+            }
+        };
+        let sweep = Sweep {
             run,
             phase,
             started: catcard_hal::dwt::cycles(),
-            spi: saved,
-            _buf: buf,
-        })
-    };
-    true
-}
-
-/// Stop the sweep if one is running, and give SPI1 back as it was. True if one was.
-#[cfg(feature = "board-q1")]
-fn stop_sweep(bus: &mut PanelBus) -> bool {
-    // SAFETY: foreground, single core.
-    let Some(sweep) = (unsafe { (*core::ptr::addr_of_mut!(SWEEP)).take() }) else {
-        return false;
-    };
-    // Where it is: the count register says exactly how far into the current pass, and
-    // the time since it started says how many passes -- which only has to be right to half
-    // a pass (14 ms), so the cycle counter is ample. Read before the channel stops, which
-    // freezes neither but ends the passes.
-    let pass = (catcard_ui::sweep::LEN * 2) as u64;
-    let left = catcard_hal::dma::remaining(&sweep.run) as u64;
-    let elapsed = catcard_hal::dwt::cycles().wrapping_sub(sweep.started) as u64;
-    catcard_hal::dma::stop(sweep.run);
-    // SAFETY: reads RCC only.
-    let (hclk, pclk2) = unsafe {
-        (
-            catcard_hal::clock::hclk_hz() as u64,
-            catcard_hal::clock::pclk2_hz() as u64,
-        )
-    };
-    // Bytes a second on the wire: PCLK2 / prescaler / 8 bits.
-    let per_s = pclk2 / (1u64 << (SWEEP_PRESCALER as u32 + 1)) / 8;
-    let sent = elapsed * per_s / hclk.max(1);
-    let into = (pass - left.min(pass)) % pass;
-    let passes = (sent.saturating_sub(into) + pass / 2) / pass;
-    // Pixels, not bytes: a stop mid-pixel loses that half, and the next RAMWR resets the
-    // panel's byte pairing anyway.
-    let at = catcard_ui::sweep::stopped_at(sweep.phase, passes as usize, (into / 2) as usize);
-    // SAFETY: foreground, single core.
-    unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = Some(at) };
-    let _ = bus.spi.end_tx_dma(sweep.spi);
-    // SAFETY: the panel's chip-select, an output since `init`.
-    unsafe { gpio::write(bus.cs, true) };
-    true
+            saved,
+            spi: own,
+            cs: bus.cs,
+        };
+        // SAFETY: inside `interrupt::free`, the only way `SWEEP` is reached.
+        match unsafe { (*core::ptr::addr_of_mut!(SWEEP)).put(sweep) } {
+            Ok(lease) => {
+                SWEEPING.store(true, core::sync::atomic::Ordering::SeqCst);
+                Some(lease)
+            }
+            // Cannot happen -- `stop_sweep` above emptied it and only the foreground
+            // starts one -- but a second channel must not be left running if it did.
+            Err(sweep) => {
+                let _ = sweep.stop();
+                None
+            }
+        }
+    })?;
+    // SAFETY: foreground, single core. The block moves; its bytes, which the channel
+    // reads, do not.
+    unsafe { *core::ptr::addr_of_mut!(SWEEP_BUF) = Some(buf) };
+    Some(lease)
 }
 
 /// Wait for the start of the panel's next tear pulse, so a change made now lands between
@@ -1460,13 +1588,15 @@ fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
     // The sweep painted rows the row cache knows nothing about. Repaint them -- unless the
     // frame asked to keep them, because it is about to start the sweep again from where
     // it stopped, and repainting would blank the bar for a frame.
-    let stopped = stop_sweep(panel.bus_mut());
+    // Stopped here, or earlier by someone else: either way the rows are the sweep's.
+    stop_sweep();
+    let swept = SWEPT.swap(false, core::sync::atomic::Ordering::SeqCst);
     // SAFETY: foreground, single core.
     let keep = unsafe { core::ptr::replace(core::ptr::addr_of_mut!(SWEEP_KEEP), false) };
     if !keep {
         // SAFETY: as above.
         unsafe { *core::ptr::addr_of_mut!(SWEEP_LAST) = None };
-        if stopped {
+        if swept {
             // SAFETY: foreground, single core, not yet inside the flush that borrows it.
             unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
         }

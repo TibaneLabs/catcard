@@ -221,7 +221,7 @@ pub fn install(
         crate::catlog!("install: mk3 SPI-NOR staged, rebooting to install");
         crate::menu::message(panel, "Installing", "rebooting", "");
         // SAFETY: nothing after this runs; the bootloader clears SRAM.
-        unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+        unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
     }
 
     #[cfg(not(feature = "board-mk3"))]

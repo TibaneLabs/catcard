@@ -682,7 +682,7 @@ fn challenge(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, c
             use zeroize::Zeroize as _;
             login.zeroize();
             // SAFETY: nothing after this runs; the bootloader clears SRAM and restarts.
-            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+            unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
         }
     }
 }

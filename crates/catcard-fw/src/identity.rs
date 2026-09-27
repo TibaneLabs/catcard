@@ -457,7 +457,7 @@ pub(crate) fn dfu_upgrade(gate: &Callgate, ui: &mut Ui<'_>) {
     crate::catlog!("dfu: entering the ROM loader");
     // SAFETY: the lock flag read `0xFF` (not locked) just now, and the owner confirmed
     // twice; the call wipes SRAM and does not return.
-    unsafe { gate.enter_dfu(DfuMode::Normal) }
+    unsafe { crate::gatecall::enter_dfu(gate, DfuMode::Normal) }
 }
 
 /// Danger zone → Settings Space: how much of the settings volume is in use.

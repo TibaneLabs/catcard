@@ -74,7 +74,7 @@ pub(crate) fn seed_reveal(gate: &Callgate) {
     if delta_mode() {
         crate::catlog!("trick: seed reveal in delta mode; wiping");
         // SAFETY: the reason delta mode exists; nothing after this runs.
-        unsafe { gate.fast_wipe(catcard_callgate::abi::FastWipe::Silent) }
+        unsafe { crate::gatecall::fast_wipe(gate, catcard_callgate::abi::FastWipe::Silent) }
     }
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn after_login(
         // The bootloader reboots itself for this one; reaching here means it did not.
         // SAFETY: a reboot, before the menu, with nothing to keep.
         Effect::Reboot => unsafe {
-            gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot)
+            crate::gatecall::logout(gate, catcard_callgate::abi::LogoutMode::LogoutAndReboot)
         },
     }
 }

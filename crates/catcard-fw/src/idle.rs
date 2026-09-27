@@ -291,5 +291,5 @@ pub fn tick() {
     // the cached PIN with it.
     //
     // SAFETY: nothing after this runs; the bootloader takes the CPU and asks for the PIN.
-    unsafe { gate.logout(LogoutMode::Logout) }
+    unsafe { crate::gatecall::logout(&gate, LogoutMode::Logout) }
 }

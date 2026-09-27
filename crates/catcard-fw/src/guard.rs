@@ -32,7 +32,7 @@ use crate::ui::Ui;
 /// what just happened.
 pub(crate) fn kill(gate: &Callgate) -> ! {
     // SAFETY: the owner armed this key for exactly this; nothing after it runs.
-    unsafe { gate.fast_wipe(catcard_callgate::abi::FastWipe::Silent) }
+    unsafe { crate::gatecall::fast_wipe(gate, catcard_callgate::abi::FastWipe::Silent) }
 }
 
 /// After a correct PIN: if cards are enrolled, the inserted card must be one of them, or the
@@ -83,7 +83,7 @@ pub(crate) fn check_card(gate: &Callgate, login: &mut catcard_pin::Login) {
         kill(gate);
     }
     // SAFETY: a reboot, from the boot path, with nothing to keep.
-    unsafe { gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot) }
+    unsafe { crate::gatecall::logout(gate, catcard_callgate::abi::LogoutMode::LogoutAndReboot) }
 }
 
 /// Settings → Login → Kill key.

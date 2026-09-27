@@ -120,7 +120,10 @@ pub(crate) fn headless(gate: Callgate) -> ! {
                         // the arm must compile. SAFETY: nothing after this runs.
                         #[cfg(feature = "board-mk3")]
                         Ok(_region) => unsafe {
-                            gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot)
+                            crate::gatecall::logout(
+                                &gate,
+                                catcard_callgate::abi::LogoutMode::LogoutAndReboot,
+                            )
                         },
                         Err(_) => crate::catlog!("upgrade: could not stage the offered image"),
                     },
@@ -139,7 +142,10 @@ pub(crate) fn headless(gate: Callgate) -> ! {
                                 #[cfg(feature = "board-mk3")]
                                 Ok(_region) => unsafe {
                                     crate::catlog!("sd: mk3 SPI-NOR staged, rebooting");
-                                    gate.logout(catcard_callgate::abi::LogoutMode::LogoutAndReboot)
+                                    crate::gatecall::logout(
+                                        &gate,
+                                        catcard_callgate::abi::LogoutMode::LogoutAndReboot,
+                                    )
                                 },
                                 Err(_) => crate::catlog!("sd: could not stage the image"),
                             }

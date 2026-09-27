@@ -101,7 +101,7 @@ pub(crate) fn run(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
             crate::catlog!("reset: PIN change refused, nothing erased, rebooting");
             menu::message(ui.panel, "Not reset", "rebooting", "");
             // SAFETY: nothing after this runs.
-            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+            unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
         }
         FactoryReset::Cancelled => return,
     }
@@ -269,7 +269,7 @@ fn end(gate: &Callgate, ui: &mut Ui<'_>, how: &str) -> ! {
     menu::message(ui.panel, "Reset", how, then);
     crate::catlog!("reset: {}, {}", how, then);
     // SAFETY: nothing after this runs; the bootloader wipes SRAM on the way out.
-    unsafe { gate.logout(mode) }
+    unsafe { crate::gatecall::logout(gate, mode) }
 }
 
 fn percent(done: u32, total: u32) -> u8 {

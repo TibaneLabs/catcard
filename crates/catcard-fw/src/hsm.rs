@@ -767,7 +767,7 @@ fn fatal(gate: &Callgate, ui: &mut Ui<'_>, why: &str) -> ! {
     ];
     draw_doc(ui, &lines);
     // SAFETY: nothing after this runs; the bootloader wipes SRAM and keeps the screen.
-    unsafe { gate.logout(catcard_callgate::abi::LogoutMode::KeepScreen) }
+    unsafe { crate::gatecall::logout(gate, catcard_callgate::abi::LogoutMode::KeepScreen) }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -839,7 +839,7 @@ pub(crate) fn run(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
             draw_doc(ui, &lines);
             login.zeroize();
             // SAFETY: nothing after this runs; the bootloader wipes SRAM.
-            unsafe { gate.logout(catcard_callgate::abi::LogoutMode::Logout) }
+            unsafe { crate::gatecall::logout(gate, catcard_callgate::abi::LogoutMode::Logout) }
         }
         let now = now_ms();
         if dirty || now.saturating_sub(last) >= 1000 {

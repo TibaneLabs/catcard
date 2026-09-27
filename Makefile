@@ -101,6 +101,9 @@ export RUSTFLAGS := -D warnings
 
 lint:
 	$(CARGO) fmt --all -- --check
+# Drawing callgates only through crate::gatecall, and no waiting-screen guard dropped at
+# once: tools/gatecall-lint.sh says why.
+	sh tools/gatecall-lint.sh
 	$(CARGO) clippy --workspace --exclude catcard-fw --exclude catcard-kernel --all-targets
 	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std
 	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std,multichain

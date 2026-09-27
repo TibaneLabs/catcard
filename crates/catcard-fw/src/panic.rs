@@ -25,7 +25,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use catcard_board::BOARD;
 use catcard_callgate::Callgate;
-use catcard_callgate::abi::{LogoutMode, Method};
+use catcard_callgate::abi::LogoutMode;
 
 unsafe extern "C" {
     // Provided by cortex-m-rt's linker script. `.data` and `.bss` are where a cached
@@ -54,8 +54,11 @@ pub fn wipe_and_stop() -> ! {
     // SAFETY: we are running on BOARD; `discover` validates the published entry
     // address before it can be branched to.
     if let Ok(gate) = unsafe { Callgate::discover(&BOARD) } {
+        // Through the backstop, which stops a waiting screen's sweep first so the
+        // bootloader's screen has the panel; with no sweep running (always so on the boot
+        // path) it is one atomic load.
         // SAFETY: `show_logout` takes no buffer. It does not return.
-        let _ = unsafe { gate.call_no_buf(Method::ShowLogout, LogoutMode::Logout as u32) };
+        let _ = unsafe { crate::gatecall::try_logout(&gate, LogoutMode::Logout) };
         // Reaching here means the bootloader declined; fall through to the local wipe.
     }
 

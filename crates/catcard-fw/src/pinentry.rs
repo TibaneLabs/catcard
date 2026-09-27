@@ -1135,7 +1135,7 @@ pub fn unlock(
                         "its pairing secret",
                     );
                     // SAFETY: nothing after this runs; the bootloader wipes SRAM.
-                    unsafe { gate.enter_dfu(DfuMode::Brick) }
+                    unsafe { crate::gatecall::enter_dfu(gate, DfuMode::Brick) }
                 }
                 // Name the reason. "PIN error" alone sent me guessing at which of
                 // fourteen documented codes it was; the code is what says.
@@ -1250,7 +1250,7 @@ pub fn unlock(
                 (Step::ConfirmWords(_), Key::Cancel) => {
                     screen_message(panel, "Stopped", "words not recognised", "powering down");
                     // SAFETY: nothing after this runs; the bootloader wipes all SRAM.
-                    unsafe { gate.logout(LogoutMode::Logout) }
+                    unsafe { crate::gatecall::logout(gate, LogoutMode::Logout) }
                 }
                 (Step::ConfirmWords(_), Key::Digit(_)) => {}
 

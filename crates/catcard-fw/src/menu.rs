@@ -2022,7 +2022,7 @@ fn secure_logout(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_
     login.zeroize();
     message(ui.panel, "Secure Logout", "wiping memory", "");
     // SAFETY: nothing after this runs; the bootloader clears SRAM.
-    unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+    unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
 }
 
 /// Restart the device, cleanly, after asking.
@@ -2054,7 +2054,7 @@ fn warm_reset(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
     login.zeroize();
     message(ui.panel, "Rebooting", "", "");
     // SAFETY: nothing after this runs; the bootloader clears SRAM and restarts the CPU.
-    unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+    unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
 }
 
 /// Change the main PIN, and say what happened.
@@ -2079,7 +2079,7 @@ fn change_pin_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             crate::catlog!("pin: change refused, rebooting");
             message(ui.panel, "Not changed", "rebooting", "");
             // SAFETY: nothing after this runs.
-            unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
+            unsafe { crate::gatecall::logout(gate, LogoutMode::LogoutAndReboot) }
         }
     }
 }
