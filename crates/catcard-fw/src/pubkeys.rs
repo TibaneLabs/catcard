@@ -114,6 +114,8 @@ pub(crate) fn forget() {
     }
     // A computer shown the old wallet's accounts may not sign with the new one's keys.
     crate::usbtask::host_forget_wallet();
+    // Nor answer as the old wallet's security key.
+    crate::fido::forget();
 }
 
 /// The cached account key at `m/{purpose}h/{coin}h/{account}h`, if this session has it.

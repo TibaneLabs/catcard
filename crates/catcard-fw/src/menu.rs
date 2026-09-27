@@ -367,6 +367,8 @@ enum Screen {
     VirtualDisk,
     /// Whether the device also enumerates a USB keyboard, to type passwords with.
     KeyboardEmu,
+    /// Whether the device also enumerates a FIDO2 security key (`crate::fido`).
+    SecurityKey,
     /// Whether the menu cursor comes round at the ends of a list.
     MenuWrap,
     /// Whether the home menu names the wallet's fingerprint even in the root wallet.
@@ -792,6 +794,8 @@ const HARDWARE_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "Virtual Disk",
     "Keyboard EMU",
+    // The FIDO security key: `crate::usbtask::set_fido`, answered by `crate::fido`.
+    "Security key",
     #[cfg(not(feature = "board-mk3"))]
     "NFC Sharing",
 ];
@@ -1347,6 +1351,16 @@ pub fn run(session: Session<'_>) -> ! {
                 display::wipe(ui.panel);
             }
             crate::ckcc::serve(gate, login, &mut ui);
+            redraw = true;
+            continue;
+        }
+        // And for a browser asking the security key (`crate::fido`).
+        if !showing_offer && receiving.is_none() && crate::fido::pending() {
+            keys.clear();
+            if screen == Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            crate::fido::serve(gate, login, &mut ui);
             redraw = true;
             continue;
         }
@@ -1951,6 +1965,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => returns(|a| virtual_disk_screen(a.gate, a.login, a.ui)),
         Screen::KeyboardEmu => returns(|a| keyboard_emu_screen(a.gate, a.login, a.ui)),
+        Screen::SecurityKey => returns(|a| crate::fido::switch_screen(a.gate, a.login, a.ui)),
         Screen::MenuWrap => returns(|a| menu_wrap_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-q1"))]
         Screen::HomeXfp => returns(|a| home_xfp_screen(a.gate, a.login, a.ui)),
@@ -2158,6 +2173,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Virtual Disk")) => Screen::VirtualDisk,
             (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
+            (Key::Confirm, Some("Security key")) => Screen::SecurityKey,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Sharing")) => Screen::NfcSharing,
             _ => Screen::Hardware,
@@ -3067,6 +3083,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::SighashChecks
         | Screen::UsbPort
         | Screen::KeyboardEmu
+        | Screen::SecurityKey
         | Screen::MenuWrap
         | Screen::TestnetMode
         | Screen::B85Index => {}

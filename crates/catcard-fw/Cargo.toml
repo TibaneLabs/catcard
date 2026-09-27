@@ -83,6 +83,7 @@ catcard-nfc = { path = "../catcard-nfc" }
 catcard-callgate.workspace = true
 catcard-entropy = { workspace = true, default-features = false }
 catcard-fwhdr = { workspace = true, default-features = false }
+catcard-fido.workspace = true
 catcard-hal.workspace = true
 catcard-kernel.workspace = true
 catcard-pin = { workspace = true, default-features = false }

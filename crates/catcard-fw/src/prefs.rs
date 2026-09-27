@@ -13,6 +13,8 @@
 //! | USB port | [`crate::usbtask::set_port`] |
 //! | Virtual Disk | the USB Drive screen, which refuses to start when it is off |
 //! | Keyboard EMU | [`crate::usbtask::set_keyboard`], which re-enumerates with or without the keyboard |
+//! | Security key | [`crate::usbtask::set_fido`], which re-enumerates with or without the FIDO interface |
+//! | FIDO generation | [`crate::fido`], which derives the security key's master from it |
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
 //! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
 //! | BIP-85 index cap | [`crate::derive`], which refuses an index past 9999 unless lifted |
@@ -97,6 +99,12 @@ pub(crate) struct Prefs {
     /// Whether the ckcc HSM commands are answered (Spending Policy → HSM Mode). Honoured by
     /// `crate::ckcc`'s dispatch, through [`crate::ckcc::set_hsm_commands`].
     pub hsm_commands: bool,
+    /// Whether the FIDO security key is presented to the host. Honoured by
+    /// [`crate::usbtask::set_fido`].
+    pub fido: bool,
+    /// The wallet's FIDO generation; `None` when the stored value cannot be read, which
+    /// [`crate::fido`] refuses to work under until a reset writes a new one.
+    pub fido_gen: Option<u32>,
 }
 
 impl Prefs {
@@ -140,6 +148,8 @@ impl Default for Prefs {
             ms_full_addr: false,
             home_xfp: false,
             hsm_commands: false,
+            fido: false,
+            fido_gen: Some(0),
         }
     }
 }
@@ -167,6 +177,8 @@ static mut CURRENT: Prefs = Prefs {
     ms_full_addr: false,
     home_xfp: false,
     hsm_commands: false,
+    fido: false,
+    fido_gen: Some(0),
 };
 
 /// What the wallet in force is set to.
@@ -197,6 +209,7 @@ fn apply(next: Prefs) {
     // The old per-wallet port switch counts only while no device-wide USB mode is set.
     crate::usbtask::wallet_port(next.usb_port);
     crate::usbtask::set_keyboard(next.keyboard_emu);
+    crate::usbtask::set_fido(next.fido);
     crate::ckcc::set_hsm_commands(next.hsm_commands);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
     // and there is nothing to apply.
@@ -282,6 +295,8 @@ pub(crate) fn load(
         ms_full_addr: prefs::ms_full_addr(&doc),
         home_xfp: prefs::home_xfp(&doc),
         hsm_commands: prefs::hsm_commands(&doc),
+        fido: prefs::fido(&doc),
+        fido_gen: prefs::fido_generation(&doc),
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}, xfp {}",

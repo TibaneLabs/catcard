@@ -58,6 +58,8 @@ mod export;
 mod factoryreset;
 #[cfg(all(feature = "dev", feature = "usb-key-injection"))]
 mod failsafe;
+/// The FIDO2 security key (CTAP2 / U2F): the USB task's desk and the UI task's answers.
+mod fido;
 mod filemgmt;
 #[cfg(all(feature = "games", feature = "board-q1"))]
 mod flappy;

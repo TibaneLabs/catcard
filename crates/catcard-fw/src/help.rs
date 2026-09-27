@@ -295,6 +295,7 @@ topic!(
         "USB mode: off, or which protocol a computer can use to talk to this device.",
         "Virtual Disk: whether the device can appear as a disk to the computer.",
         "Keyboard EMU: whether it can also type into the computer, for passwords.",
+        "Security key: a FIDO2/U2F login key for websites, made from this wallet's seed.",
         "NFC Sharing: whether a phone can tap anything in or out at all.",
         "Off is off: the firmware refuses what a switch turns off.",
     ]

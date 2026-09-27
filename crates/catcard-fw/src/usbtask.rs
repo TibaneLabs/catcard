@@ -22,7 +22,7 @@
 //! has to be able to service it without the task being threaded through each of them.
 //! The boot path is single-threaded and nothing here runs in interrupt context.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use catcard_settings::prelogin::UsbMode;
 
@@ -160,6 +160,9 @@ pub struct UsbTask {
     ckcc: bool,
     /// The ckcc protocol's state. Idle in CatCard mode.
     ck: crate::ckcc::Desk,
+    /// The FIDO security key's CTAPHID state and the request it has out. Idle unless
+    /// [`set_fido`] has presented the interface.
+    fido: crate::fido::Desk,
 }
 
 /// A single-producer/single-consumer ring of received bulk-OUT packets: the OTG interrupt
@@ -388,6 +391,7 @@ impl UsbTask {
             drbg: None,
             ckcc: false,
             ck: crate::ckcc::Desk::new(),
+            fido: crate::fido::Desk::new(),
         })
     }
 
@@ -554,6 +558,15 @@ impl UsbTask {
                     }
                     self.end_session(true);
                     self.ck.reset();
+                    self.fido.reset();
+                }
+                Event::FidoReport => {
+                    led::saw_traffic();
+                    let mut report = [0u8; catcard_fido::hid::PACKET];
+                    report.copy_from_slice(&self.otg.fido_rx);
+                    self.otg.fido_receive_next();
+                    self.fido
+                        .feed(&report, crate::fido::now_ms(), self.unlocked);
                 }
                 Event::Report => {
                     self.rx_count = self.rx_count.saturating_add(1);
@@ -599,7 +612,28 @@ impl UsbTask {
                 }
             }
 
-            event != Event::Idle || self.outbox_len > 0
+            self.fido_pump();
+
+            event != Event::Idle || self.outbox_len > 0 || self.fido.busy()
+        }
+    }
+
+    /// The security key's side of a poll: its timers, and the next report out. Nothing
+    /// at all while the interface is not presented.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    unsafe fn fido_pump(&mut self) {
+        if !self.otg.fido_present() {
+            return;
+        }
+        self.fido.tick(crate::fido::now_ms());
+        if let Some(p) = self.fido.packet().copied()
+            // SAFETY: as documented.
+            && unsafe { self.otg.fido_send(&p) }
+        {
+            self.fido.sent();
+            led::saw_traffic();
         }
     }
 
@@ -644,6 +678,8 @@ impl UsbTask {
                     // A bus reset voids anything queued: a fresh CBW must not be read as
                     // the tail of an abandoned transfer.
                     Event::Reset => self.msc_rx.clear(),
+                    // The disk identity has no security key; nothing arrives here.
+                    Event::FidoReport => {}
                     Event::Idle => break,
                 }
             }
@@ -2238,6 +2274,87 @@ pub fn set_keyboard(on: bool) {
             t.otg.reinit();
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// FIDO security key
+//
+// Settings -> Hardware On/Off -> `Security key`, per wallet like the keyboard and read
+// after the PIN, so boot enumerates exactly as it always has and a locked device never
+// offers one. On, the HID identity is a composite with the CTAPHID interface after the
+// others (`catcard_usb::fido`); `crate::fido` answers what arrives on it.
+// ---------------------------------------------------------------------------
+
+/// Whether the owner has the security key on. Off until a wallet's settings say so.
+static FIDO_ON: AtomicBool = AtomicBool::new(false);
+/// When the security key was last presented to the host, in `crate::fido::now_ms`: the
+/// start of the window in which a reset is allowed.
+static FIDO_SINCE: AtomicU32 = AtomicU32::new(0);
+
+/// Switch the security key on or off, as the `Hardware On/Off` setting asks.
+///
+/// The same dance as [`set_keyboard`], for the same reason: a host keeps the descriptors
+/// it read, so the device leaves the bus and comes back with the new configuration. Only
+/// while the host is looking; with the port off or the disk up, the flag waits for the
+/// next enumeration.
+pub fn set_fido(on: bool) {
+    if FIDO_ON.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    crate::catlog!("usb: security key {}", if on { "on" } else { "off" });
+    let presenting = PORT_ON.load(Ordering::Relaxed) && !MSC_ACTIVE.load(Ordering::Relaxed);
+    // SAFETY: the task owns OTG_FS and the lock excludes other tasks; interrupts are
+    // off outside mass-storage mode, which `presenting` rules out.
+    with_task(|t| unsafe {
+        t.fido.reset();
+        t.otg.set_fido(on);
+        if presenting {
+            t.otg.detach();
+            catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
+            t.otg.reinit();
+        }
+    });
+    FIDO_SINCE.store(crate::fido::now_ms(), Ordering::Relaxed);
+}
+
+/// When the security key was presented, for the reset window.
+pub(crate) fn fido_since() -> u32 {
+    FIDO_SINCE.load(Ordering::Relaxed)
+}
+
+/// Whether a security-key request (or a wink) is waiting for the UI task.
+pub(crate) fn fido_waiting() -> bool {
+    FIDO_ON.load(Ordering::Relaxed) && with_task(|t| t.fido.waiting()).unwrap_or(false)
+}
+
+/// Take the waiting security-key request.
+pub(crate) fn fido_take() -> Option<crate::fido::Taken> {
+    with_task(|t| t.fido.take()).flatten()
+}
+
+/// Whether security-key request `ticket` is still wanted.
+pub(crate) fn fido_alive(ticket: u32) -> bool {
+    with_task(|t| t.fido.alive(ticket)).unwrap_or(false)
+}
+
+/// Whether the host cancelled security-key request `ticket`.
+pub(crate) fn fido_cancelled(ticket: u32) -> bool {
+    with_task(|t| t.fido.cancelled(ticket)).unwrap_or(false)
+}
+
+/// What the keepalives say: waiting for the person, or working.
+pub(crate) fn fido_status(upneeded: bool) {
+    with_task(|t| t.fido.set_status(upneeded));
+}
+
+/// The UI task's answer to security-key request `ticket`.
+pub(crate) fn fido_finish(ticket: u32, buf: crate::heap::Block, len: usize) {
+    with_task(|t| t.fido.finish(ticket, buf, len));
+}
+
+/// Whether the host asked the device to show itself (`CTAPHID_WINK`), clearing it.
+pub(crate) fn fido_take_wink() -> bool {
+    with_task(|t| t.fido.take_wink()).unwrap_or(false)
 }
 
 /// What became of one keyboard report.

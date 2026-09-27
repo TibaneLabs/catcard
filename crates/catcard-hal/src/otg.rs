@@ -22,7 +22,7 @@ use catcard_board::Pin;
 use catcard_usb::REPORT_LEN;
 use catcard_usb::control::{self, Action, Device, Setup};
 use catcard_usb::descriptor::{EP_IN, EP_OUT};
-use catcard_usb::kbd;
+use catcard_usb::{fido, kbd};
 
 use crate::gpio::{self, OutputType, Pull, Speed};
 use crate::reg;
@@ -159,7 +159,12 @@ const RX_WORDS: u32 = 128;
 const EP0_TX_WORDS: u32 = 32;
 const EP1_TX_WORDS: u32 = 64;
 const EP2_TX_WORDS: u32 = 16;
-const _: () = assert!(RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS <= 320);
+/// The security key's IN FIFO: one whole 64-byte report. **Sized only while the security
+/// key is on**: `configure_fifos` writes its register then and at no other time, so a
+/// device with the switch off -- every device at boot -- programs exactly the FIFOs it
+/// always has. It sits after the keyboard's, in the space the layout above left spare.
+const EP3_TX_WORDS: u32 = 64;
+const _: () = assert!(RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS + EP3_TX_WORDS <= 320);
 
 /// Endpoint numbers, from the addresses the descriptors advertise.
 const EP_IN_NUM: u32 = (EP_IN & 0x0F) as u32;
@@ -167,6 +172,15 @@ const EP_OUT_NUM: u32 = (EP_OUT & 0x0F) as u32;
 /// The keyboard's IN endpoint. Its own number, so the wallet's stays what it was.
 const KBD_EP_NUM: u32 = (kbd::EP_IN & 0x0F) as u32;
 const _: () = assert!(KBD_EP_NUM != EP_IN_NUM && KBD_EP_NUM >= 1 && KBD_EP_NUM <= 5);
+/// The security key's endpoints, one number both ways.
+const FIDO_EP_NUM: u32 = (fido::EP_IN & 0x0F) as u32;
+const _: () = assert!(
+    FIDO_EP_NUM == (fido::EP_OUT & 0x0F) as u32
+        && FIDO_EP_NUM != EP_IN_NUM
+        && FIDO_EP_NUM != KBD_EP_NUM
+        && FIDO_EP_NUM >= 1
+        && FIDO_EP_NUM <= 5
+);
 
 /// How long to wait for a core reset or an AHB idle, in poll iterations.
 ///
@@ -192,6 +206,9 @@ pub enum Event {
     Reset,
     /// A 64-byte report arrived on the OUT endpoint.
     Report,
+    /// A 64-byte report arrived on the security key's OUT endpoint, in
+    /// [`Otg::fido_rx`].
+    FidoReport,
 }
 
 /// The device side of the OTG FS core.
@@ -216,6 +233,14 @@ pub struct Otg {
     /// data phase it may be in the middle of, rather than finish sending stale data and
     /// a CSW the host is no longer waiting for.
     msc_reset: bool,
+    /// The most recent report on the security key's OUT endpoint, valid when `poll`
+    /// returned [`Event::FidoReport`].
+    pub fido_rx: [u8; fido::REPORT_LEN],
+    fido_rx_len: usize,
+    /// Whether the security key's endpoints have ever been opened. Until they have, no
+    /// register of endpoint 3 is touched at all -- not even to close it -- so a device
+    /// with the switch off runs exactly the register sequence it always did.
+    fido_opened: bool,
 }
 
 impl Otg {
@@ -258,6 +283,9 @@ impl Otg {
             resets: 0,
             reinits: 0,
             msc_reset: false,
+            fido_rx: [0; fido::REPORT_LEN],
+            fido_rx_len: 0,
+            fido_opened: false,
         };
         // SAFETY: the clock is enabled and the data pins are configured just above.
         unsafe { this.configure()? };
@@ -297,7 +325,7 @@ impl Otg {
             reg::write(PCGCCTL, 0);
             reg::write(DCFG, DCFG_DSPD_FS | DCFG_NZLSOHSK);
 
-            configure_fifos();
+            configure_fifos(self.dev.fido_present());
             // Flush the TX and RX FIFOs after sizing them. A core soft-reset resets the
             // state machine but does not clear FIFO *contents*, so on a part whose
             // bootloader left USB running (the mk3 L496 -- unlike the L4S5, which is why
@@ -625,6 +653,73 @@ impl Otg {
         unsafe { reg::read(DIEPCTL + KBD_EP_NUM * EP_STRIDE) & EPCTL_EPENA != 0 }
     }
 
+    /// Present the FIDO security key beside the wallet's interface, or withdraw it. Like
+    /// [`set_keyboard`](Self::set_keyboard) it takes effect on the next enumeration, so
+    /// the caller detaches and [`reinit`](Self::reinit)s.
+    pub fn set_fido(&mut self, on: bool) {
+        self.dev.set_fido(on);
+    }
+
+    /// Whether the security key is part of the current identity.
+    pub fn fido_present(&self) -> bool {
+        self.dev.fido_present()
+    }
+
+    /// Send one 64-byte CTAPHID report on the security key's IN endpoint.
+    ///
+    /// Returns false, having sent nothing, when the security key is not enumerated, the
+    /// host has not configured us, the previous report has not been taken, or the FIFO
+    /// has no room. Never blocks; the caller retries on a later poll.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn fido_send(&mut self, report: &[u8; fido::REPORT_LEN]) -> bool {
+        // SAFETY: as documented.
+        unsafe {
+            if !self.dev.is_configured() || !self.dev.fido_present() || !self.fido_opened {
+                return false;
+            }
+            let ctl = DIEPCTL + FIDO_EP_NUM * EP_STRIDE;
+            if reg::read(ctl) & EPCTL_EPENA != 0 {
+                return false;
+            }
+            let words = (fido::REPORT_LEN as u32).div_ceil(4);
+            if reg::read(DTXFSTS + FIDO_EP_NUM * EP_STRIDE) & 0xFFFF < words {
+                return false;
+            }
+            reg::write(
+                DIEPTSIZ + FIDO_EP_NUM * EP_STRIDE,
+                (1 << 19) | fido::REPORT_LEN as u32,
+            );
+            reg::modify(ctl, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+            write_fifo_bytes(FIDO_EP_NUM, report);
+            true
+        }
+    }
+
+    /// Re-arm the security key's OUT endpoint for the next report.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn fido_receive_next(&mut self) {
+        if !self.fido_opened {
+            return;
+        }
+        self.fido_rx_len = 0;
+        // SAFETY: as documented.
+        unsafe {
+            reg::write(
+                DOEPTSIZ + FIDO_EP_NUM * EP_STRIDE,
+                (1 << 19) | fido::REPORT_LEN as u32,
+            );
+            reg::modify(
+                DOEPCTL + FIDO_EP_NUM * EP_STRIDE,
+                EPCTL_COMMANDS,
+                EPCTL_EPENA | EPCTL_CNAK,
+            );
+        }
+    }
+
     /// The identity currently enumerating.
     pub fn mode(&self) -> control::DeviceMode {
         self.dev.mode
@@ -723,6 +818,13 @@ impl Otg {
                     self.rx_len = n;
                     None
                 }
+                pktsts::OUT_DATA if ep == FIDO_EP_NUM && self.fido_opened => {
+                    let n = bytes.min(fido::REPORT_LEN);
+                    read_fifo(&mut self.fido_rx[..n]);
+                    discard_fifo(bytes - n);
+                    self.fido_rx_len = n;
+                    None
+                }
                 pktsts::OUT_DATA => {
                     // A data stage on endpoint zero. Nothing here has an OUT data
                     // stage, but the bytes still have to leave the FIFO or the core
@@ -736,6 +838,17 @@ impl Otg {
                     None
                 }
                 pktsts::OUT_DONE if ep == EP_OUT_NUM && self.rx_len > 0 => Some(Event::Report),
+                // A CTAPHID report is always a whole 64 bytes; a short one is not a report.
+                pktsts::OUT_DONE
+                    if ep == FIDO_EP_NUM && self.fido_opened && self.fido_rx_len > 0 =>
+                {
+                    if self.fido_rx_len == fido::REPORT_LEN {
+                        Some(Event::FidoReport)
+                    } else {
+                        self.fido_receive_next();
+                        None
+                    }
+                }
                 _ => {
                     discard_fifo(bytes);
                     None
@@ -823,6 +936,14 @@ impl Otg {
                     self.dev.keyboard_present(),
                 );
                 self.receive_next();
+                // The security key's pair, only once it has been asked for: with it
+                // off from boot, endpoint 3 is never touched.
+                let fido = self.dev.fido_present();
+                if fido || self.fido_opened {
+                    open_fido_endpoints(fido);
+                    self.fido_opened = fido;
+                    self.fido_receive_next();
+                }
             }
         }
     }
@@ -842,6 +963,11 @@ impl Otg {
                     arm_ep0_out();
                 }
             }
+            // The security key's, only once it has been opened: a device with it off
+            // services exactly the endpoints it always did.
+            if self.fido_opened {
+                clear_ep_interrupts(DOEPINT + FIDO_EP_NUM * EP_STRIDE);
+            }
         }
     }
 
@@ -858,6 +984,9 @@ impl Otg {
                 if v != 0 {
                     reg::write(at, v);
                 }
+            }
+            if self.fido_opened {
+                clear_ep_interrupts(DIEPINT + FIDO_EP_NUM * EP_STRIDE);
             }
         }
     }
@@ -922,10 +1051,16 @@ unsafe fn core_reset() -> Result<(), Error> {
 
 /// # Safety
 /// Exclusive access to OTG_FS.
-unsafe fn configure_fifos() {
+unsafe fn configure_fifos(fido: bool) {
     // SAFETY: as documented. Each TX FIFO's start address is the sum of everything
     // allocated before it, which is why these are written in order.
     unsafe {
+        if fido {
+            reg::write(
+                DIEPTXF + (FIDO_EP_NUM - 1) * 4,
+                (EP3_TX_WORDS << 16) | (RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS),
+            );
+        }
         reg::write(GRXFSIZ, RX_WORDS);
         reg::write(DIEPTXF0, (EP0_TX_WORDS << 16) | RX_WORDS);
         reg::write(
@@ -1037,6 +1172,58 @@ unsafe fn open_data_endpoints(bulk: bool, keyboard: bool) {
             );
         } else {
             reg::write(kctl, 0);
+        }
+    }
+}
+
+/// Acknowledge whatever an endpoint interrupt register holds (write-1-to-clear).
+///
+/// # Safety
+/// Exclusive access to OTG_FS; `at` is a `DIEPINTx`/`DOEPINTx` address.
+unsafe fn clear_ep_interrupts(at: u32) {
+    // SAFETY: as documented.
+    unsafe {
+        let v = reg::read(at);
+        if v != 0 {
+            reg::write(at, v);
+        }
+    }
+}
+
+/// Open the security key's two interrupt endpoints, or close them.
+///
+/// Only called once the key has been switched on in this session (see
+/// `Otg::fido_opened`), so the closing write never runs on a device that never opened
+/// them.
+///
+/// # Safety
+/// Exclusive access to OTG_FS.
+unsafe fn open_fido_endpoints(on: bool) {
+    let ictl = DIEPCTL + FIDO_EP_NUM * EP_STRIDE;
+    let octl = DOEPCTL + FIDO_EP_NUM * EP_STRIDE;
+    // SAFETY: as documented.
+    unsafe {
+        if on {
+            reg::write(
+                ictl,
+                EPCTL_USBAEP
+                    | EPCTL_EPTYP_INTR
+                    | EPCTL_SD0PID
+                    | EPCTL_SNAK
+                    | (FIDO_EP_NUM << EPCTL_TXFNUM_SHIFT)
+                    | fido::REPORT_LEN as u32,
+            );
+            reg::write(
+                octl,
+                EPCTL_USBAEP
+                    | EPCTL_EPTYP_INTR
+                    | EPCTL_SD0PID
+                    | EPCTL_SNAK
+                    | fido::REPORT_LEN as u32,
+            );
+        } else {
+            reg::write(ictl, 0);
+            reg::write(octl, 0);
         }
     }
 }
