@@ -660,9 +660,9 @@ dependencies = [
 
 [[package]]
 name = "purecrypto"
-version = "0.9.2"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c44907747928f31b5191a564778d9412e96bfcec9cb435fe6f5974746702f7"
+checksum = "019da58d8de31bdd679a92899b7ee3465cca3d890a67ebce0a111b2faf46d577"
 
 [[package]]
 name = "quote"
