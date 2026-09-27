@@ -270,7 +270,7 @@ const REENUM_DETACH_MS: u32 = 20;
 /// read that could only return one frame would not be worth having.
 struct ReplyState {
     status: Status,
-    body: [u8; REPLY_MAX],
+    body: ReplyBody,
     len: usize,
     /// Framing progress: bytes sent, next sequence number, whether the START frame went.
     sent: usize,
@@ -278,8 +278,46 @@ struct ReplyState {
     started: bool,
 }
 
-/// Largest reply body. Enough for a useful peek without making the task struct heavy.
+/// Where a reply's body waits while it is framed out.
+///
+/// Almost every reply is a status and a few bytes, and those are held in the task. The
+/// few that are longer -- a sealed answer from the encrypted channel, a bench peek --
+/// are held in a heap block for as long as they take to send, rather than the task
+/// reserving [`REPLY_MAX`] for them for the life of the device.
+enum ReplyBody {
+    Inline([u8; REPLY_INLINE]),
+    Leased(crate::heap::Block),
+}
+
+impl ReplyBody {
+    fn bytes(&mut self) -> &mut [u8] {
+        match self {
+            ReplyBody::Inline(b) => b,
+            ReplyBody::Leased(b) => b.bytes(),
+        }
+    }
+}
+
+impl Drop for ReplyBody {
+    fn drop(&mut self) {
+        // A block wipes itself; the inline bytes are wiped here, so a reply that has gone
+        // does not stay readable in the task until the next one overwrites it.
+        if let ReplyBody::Inline(b) = self {
+            b.zeroize();
+        }
+    }
+}
+
+/// Largest reply body. Enough for a useful peek; only a reply that needs it borrows it.
 const REPLY_MAX: usize = 512;
+
+/// Largest reply body held in the task itself rather than in a heap block.
+///
+/// Sized so every plaintext answer the protocol defines fits -- a whole `Identify`, and a
+/// log page, which is at most one START frame -- so none of them can ever be answered
+/// `Busy` for want of memory. Only sealed replies and the bench debug replies lease.
+const REPLY_INLINE: usize = IDENTIFY_MAX;
+const _: () = assert!(catcard_usb::START_PAYLOAD <= REPLY_INLINE);
 
 /// Largest body a command inside the encrypted channel may answer with: the reply, less
 /// its two-byte status and the tag the seal adds. A body sized to `REPLY_MAX` itself
@@ -1228,6 +1266,17 @@ impl UsbTask {
             self.begin_reply(status, &[]);
             return;
         }
+        // The sealed reply is built in a heap block and framed out of the same block. It
+        // is taken **before** the record is opened: a channel's counters move when a
+        // record is opened and when one is sealed, so a device that ran out of room after
+        // either would leave the two ends disagreeing about the next record. Refused
+        // here, nothing has moved, and `Busy` is the answer a sealed request spanning
+        // frames already gets when its own buffer cannot be had.
+        let Some(mut sealed) = crate::heap::take(REPLY_MAX) else {
+            crate::catlog!("ncry: no heap for a sealed reply; answered busy");
+            self.begin_reply(Status::Busy, &[]);
+            return;
+        };
         let plain = match self.chan.open_record(record) {
             Ok(p) => p,
             Err(_) => {
@@ -1247,10 +1296,9 @@ impl UsbTask {
         // Build the reply straight into the seal buffer: two bytes of status, then the
         // body written in place, then the tag -- all inside one reply's worth, so nothing
         // `begin_reply` holds is cut off.
-        let mut sealed = [0u8; REPLY_MAX];
         let (status, n) = match admit {
             ncry::Admit::Dispatch => {
-                self.inner_dispatch(inner_op, &plain[2..], &mut sealed[2..2 + INNER_MAX])
+                self.inner_dispatch(inner_op, &plain[2..], &mut sealed.bytes()[2..2 + INNER_MAX])
             }
             // `NotNow` while the device user is still looking at the code: ask again.
             ncry::Admit::Confirm if self.paired() => {
@@ -1267,15 +1315,15 @@ impl UsbTask {
             }
         };
         plain.zeroize();
-        sealed[..2].copy_from_slice(&(status as u16).to_le_bytes());
-        match self.chan.seal_record(&mut sealed, 2 + n) {
-            Ok(len) => self.begin_reply(Status::Ok, &sealed[..len]),
+        sealed.bytes()[..2].copy_from_slice(&(status as u16).to_le_bytes());
+        match self.chan.seal_record(sealed.bytes(), 2 + n) {
+            Ok(len) => self.send_reply(Status::Ok, ReplyBody::Leased(sealed), len),
+            // `sealed` is dropped here, and a block wipes itself.
             Err(_) => {
                 self.end_session(false);
                 self.begin_reply(Status::BadRequest, &[]);
             }
         }
-        sealed.zeroize();
     }
 
     /// Handle a command that arrived inside the encrypted channel, writing its reply body
@@ -1535,17 +1583,35 @@ impl UsbTask {
     }
 
     fn begin_reply(&mut self, status: Status, body: &[u8]) {
-        self.last_status = status as u16;
-        let mut buf = [0u8; REPLY_MAX];
         // A reply may span several frames now, so a body is clamped only to the buffer,
         // not to one frame. (It used to be clamped to one frame because the reply writer
         // was rebuilt each frame and never advanced -- fixed by carrying its state.)
         let n = body.len().min(REPLY_MAX);
-        buf[..n].copy_from_slice(&body[..n]);
+        let store = if n <= REPLY_INLINE {
+            let mut buf = [0u8; REPLY_INLINE];
+            buf[..n].copy_from_slice(&body[..n]);
+            ReplyBody::Inline(buf)
+        } else if let Some(mut block) = crate::heap::take(n) {
+            block.bytes()[..n].copy_from_slice(&body[..n]);
+            ReplyBody::Leased(block)
+        } else {
+            // Nowhere to hold it. The host still hears an answer -- one it already knows
+            // how to read -- rather than a reply cut short or none at all. Only a bench
+            // debug reply is long enough to get here: sealed replies are built in their
+            // own block, and every plaintext answer fits `REPLY_INLINE`.
+            crate::catlog!("usb: no heap for a {} byte reply; answered busy", n);
+            return self.send_reply(Status::Busy, ReplyBody::Inline([0; REPLY_INLINE]), 0);
+        };
+        self.send_reply(status, store, n);
+    }
+
+    /// Start framing out `len` bytes of `body` under `status`.
+    fn send_reply(&mut self, status: Status, body: ReplyBody, len: usize) {
+        self.last_status = status as u16;
         self.reply = Some(ReplyState {
             status,
-            body: buf,
-            len: n,
+            body,
+            len,
             sent: 0,
             seq: 0,
             started: false,
@@ -1615,7 +1681,7 @@ impl UsbTask {
         // Resume from the saved framing state rather than rebuilding at frame zero, which
         // is what capped every reply at one frame. The writer borrows the body only for
         // this call, so nothing is self-referential.
-        let mut w = Writer::resume(r.status, &r.body[..r.len], r.sent, r.seq, r.started);
+        let mut w = Writer::resume(r.status, &r.body.bytes()[..r.len], r.sent, r.seq, r.started);
         if w.next(&mut self.outbox) {
             self.outbox_len = REPORT_LEN;
             let (sent, seq, started) = w.state();
