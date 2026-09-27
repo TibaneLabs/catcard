@@ -5,30 +5,47 @@
 //!
 //! | command | here |
 //! |---|---|
-//! | `authenticatorMakeCredential` (0x01) | ES256 only, non-resident, `packed` self-attestation |
-//! | `authenticatorGetAssertion` (0x02) | `allowList` required; `up:false` answered silently |
-//! | `authenticatorGetInfo` (0x04) | fixed bytes, [`get_info`] |
-//! | `authenticatorClientPIN` (0x06) | `CTAP1_ERR_INVALID_COMMAND`: no PIN protocol |
-//! | `authenticatorReset` (0x07) | rotates the wallet's FIDO generation, see [`Env::reset`] |
-//! | `authenticatorGetNextAssertion` (0x08) | `CTAP2_ERR_NOT_ALLOWED`: one assertion per request |
+//! | `authenticatorMakeCredential` (0x01) | ES256 only, `packed` self-attestation; `rk` stores a passkey |
+//! | `authenticatorGetAssertion` (0x02) | an `allowList`, or none to find this wallet's passkeys for the site |
+//! | `authenticatorGetInfo` (0x04) | [`get_info`], from the device's [`Caps`] |
+//! | `authenticatorClientPIN` (0x06) | PIN/UV auth protocols 2 and 1, see [`crate::pin`] |
+//! | `authenticatorReset` (0x07) | rotates the wallet's FIDO generation, clears its PIN and passkeys, see [`Env::reset`] |
+//! | `authenticatorGetNextAssertion` (0x08) | the site's other passkeys, newest first |
+//! | `authenticatorCredentialManagement` (0x0A, and 0x41) | see [`crate::credmgmt`] |
 //! | `authenticatorSelection` (0x0B) | a press on the device |
 //!
-//! Source: FIDO CTAP 2.1 (Proposed Standard, 2021-06-15) §6 [C]. Section numbers below
-//! are that document's.
+//! Source: FIDO CTAP 2.1 (Proposed Standard, 2021-06-15, errata 2022-06-21) §6 [C].
+//! Section numbers below are that document's.
+//!
+//! # User verification
+//!
+//! The only user verification is the **client PIN** ([`crate::pin`]): typed in the
+//! browser, traded for a token, and the token's MAC over the request's clientDataHash is
+//! what sets the UV flag. There is no built-in method, so GetInfo carries no `uv` option
+//! and a request with `uv: true` is `CTAP2_ERR_INVALID_OPTION` (§6.1.2 step 5).
+//!
+//! With a PIN set the key is "protected by some form of user verification" and:
+//!
+//! - a **passkey** (`rk: true`) needs the PIN: `CTAP2_ERR_PUAT_REQUIRED` without it
+//!   (§6.1.2 step 7);
+//! - an ordinary **second-factor** registration does not: GetInfo says
+//!   `makeCredUvNotRqd: true`, which §6.4 says authenticators SHOULD, and §6.1.2 step 10
+//!   lets it through with the UV flag clear. Without it, turning a PIN on would break every
+//!   site that uses this key only as a second factor and whose browser does not ask for
+//!   the PIN.
+//!
+//! With no PIN set, a site that requires UV is the browser's to handle: it sees
+//! `clientPin: false` in GetInfo and offers to set one (§6.2.1 "the platform recovers in
+//! some fashion").
 //!
 //! # What is refused, and with what
 //!
 //! - an algorithm list without ES256 (`alg` -7): `CTAP2_ERR_UNSUPPORTED_ALGORITHM`;
-//! - `rk: true` (a resident key / passkey): `CTAP2_ERR_UNSUPPORTED_OPTION` -- the device
-//!   keeps no per-site state, see [`crate::keys`];
-//! - `uv: true`: `CTAP2_ERR_INVALID_OPTION` -- there is no built-in user verification
-//!   (§6.1.2 step 5; the PIN protected the whole device at login, but CTAP cannot say so);
+//! - `uv: true`: `CTAP2_ERR_INVALID_OPTION` -- no built-in user verification;
 //! - `up: false` on MakeCredential: `CTAP2_ERR_INVALID_OPTION`;
-//! - a `pinUvAuthParam`: `CTAP2_ERR_MISSING_PARAMETER` without a protocol, otherwise
-//!   `CTAP1_ERR_INVALID_PARAMETER` -- no protocol is supported (§6.1.2 step 2);
+//! - `rk: true` where the board keeps no passkeys (the mk3): `CTAP2_ERR_UNSUPPORTED_OPTION`;
 //! - `enterpriseAttestation`: `CTAP1_ERR_INVALID_PARAMETER` (§6.1.2 step 9);
-//! - GetAssertion with no `allowList`, or `rk` in its options: there are no discoverable
-//!   credentials to find, so `CTAP2_ERR_NO_CREDENTIALS` / `CTAP2_ERR_UNSUPPORTED_OPTION`.
+//! - `rk` in GetAssertion's options: `CTAP2_ERR_UNSUPPORTED_OPTION` (§6.2.2 step 3).
 //!
 //! Extensions are parsed (strictly) and ignored; none is supported, so none is answered.
 
@@ -37,7 +54,9 @@ use purecrypto::hash::{Digest, Sha256};
 
 use crate::cbor::{self, Key, Reader, Writer};
 use crate::der;
-use crate::keys::{CRED_ID_LEN, Master, NONCE_LEN};
+use crate::keys::{CRED_ID_LEN, CRED_VERSION, Master, NONCE_LEN};
+use crate::passkeys::{self, Passkeys, Record};
+use crate::pin::{self, Cursor, PinRecord, Session, perm};
 
 /// This device's AAGUID, `54a5d3d6-f9d6-4b05-bdac-7cc541efc8f1`: a random (version 4)
 /// UUID generated once (2026-09-27, Python's `uuid.uuid4()`) and fixed, so a relying party sees the same model identifier
@@ -46,7 +65,7 @@ pub const AAGUID: [u8; 16] = [
     0x54, 0xa5, 0xd3, 0xd6, 0xf9, 0xd6, 0x4b, 0x05, 0xbd, 0xac, 0x7c, 0xc5, 0x41, 0xef, 0xc8, 0xf1,
 ];
 
-/// Command bytes. Source: §6 [C]
+/// Command bytes. Source: §6, §6.13 (0x41) [C]
 pub mod command {
     pub const MAKE_CREDENTIAL: u8 = 0x01;
     pub const GET_ASSERTION: u8 = 0x02;
@@ -54,7 +73,11 @@ pub mod command {
     pub const CLIENT_PIN: u8 = 0x06;
     pub const RESET: u8 = 0x07;
     pub const GET_NEXT_ASSERTION: u8 = 0x08;
+    pub const CREDENTIAL_MANAGEMENT: u8 = 0x0A;
     pub const SELECTION: u8 = 0x0B;
+    /// The "FIDO_2_1_PRE" prototype of credential management, which some platforms
+    /// still send. Answered as 0x0A. Source: §6.13 [C]
+    pub const CREDENTIAL_MANAGEMENT_PRE: u8 = 0x41;
 }
 
 /// Status codes. Source: §8.2 "Status codes" [C]
@@ -70,13 +93,24 @@ pub mod status {
     pub const CREDENTIAL_EXCLUDED: u8 = 0x19;
     pub const UNSUPPORTED_ALGORITHM: u8 = 0x26;
     pub const OPERATION_DENIED: u8 = 0x27;
+    pub const KEY_STORE_FULL: u8 = 0x28;
     pub const UNSUPPORTED_OPTION: u8 = 0x2B;
     pub const INVALID_OPTION: u8 = 0x2C;
     pub const KEEPALIVE_CANCEL: u8 = 0x2D;
     pub const NO_CREDENTIALS: u8 = 0x2E;
     pub const USER_ACTION_TIMEOUT: u8 = 0x2F;
     pub const NOT_ALLOWED: u8 = 0x30;
+    pub const PIN_INVALID: u8 = 0x31;
+    pub const PIN_BLOCKED: u8 = 0x32;
+    pub const PIN_AUTH_INVALID: u8 = 0x33;
+    pub const PIN_AUTH_BLOCKED: u8 = 0x34;
+    pub const PIN_NOT_SET: u8 = 0x35;
+    /// `CTAP2_ERR_PUAT_REQUIRED`, `CTAP2_ERR_PIN_REQUIRED` in CTAP 2.0.
+    pub const PUAT_REQUIRED: u8 = 0x36;
+    pub const PIN_POLICY_VIOLATION: u8 = 0x37;
     pub const REQUEST_TOO_LARGE: u8 = 0x39;
+    pub const INVALID_SUBCOMMAND: u8 = 0x3E;
+    pub const UNAUTHORIZED_PERMISSION: u8 = 0x40;
     pub const OTHER: u8 = 0x7F;
 }
 
@@ -95,6 +129,8 @@ pub const MAX_CRED_ID_LEN: u64 = 64;
 pub mod flags {
     /// User present.
     pub const UP: u8 = 0x01;
+    /// User verified.
+    pub const UV: u8 = 0x04;
     /// Attested credential data included.
     pub const AT: u8 = 0x40;
 }
@@ -103,14 +139,17 @@ pub mod flags {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Ask<'a> {
     /// Register with a site. `excluded`: this wallet is already registered there, and
-    /// the answer will only be "already registered".
+    /// the answer will only be "already registered". `resident`: kept on the device as a
+    /// passkey.
     Register {
         rp_id: &'a str,
         user_name: Option<&'a str>,
         display_name: Option<&'a str>,
         excluded: bool,
+        resident: bool,
     },
-    /// Sign in to a site. `known`: one of the offered credentials is this wallet's.
+    /// Sign in to a site. `known`: one of the offered credentials is this wallet's, or it
+    /// has a passkey there.
     SignIn { rp_id: &'a str, known: bool },
     /// U2F registration: only a hash of the site is known.
     U2fRegister { app: &'a [u8; 32] },
@@ -118,6 +157,16 @@ pub enum Ask<'a> {
     U2fSignIn { app: &'a [u8; 32] },
     /// The platform wants the person to pick this authenticator among several.
     Select,
+    /// The computer wants to set the security-key PIN (none is set).
+    SetPin,
+    /// The computer wants to change the security-key PIN.
+    ChangePin,
+    /// The computer has the PIN and wants a token: for `permissions` ([`perm`]), at
+    /// `rp_id` when it named one.
+    UsePin {
+        rp_id: Option<&'a str>,
+        permissions: u8,
+    },
 }
 
 /// How a person answered, or did not.
@@ -145,27 +194,110 @@ impl Presence {
     }
 }
 
+/// What the device can do right now, as GetInfo reports it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Caps {
+    /// A PIN is set for the wallet in force (or one is stored and unreadable, which is
+    /// treated as set and blocked).
+    pub pin_set: bool,
+    /// This board keeps passkeys.
+    pub rk: bool,
+    /// Passkeys that can still be stored, when known.
+    pub remaining: Option<u8>,
+}
+
+/// One request, as the device's log says it: what was asked, about which site, and how
+/// it ended. Never a PIN, a hash, a token, a key or a user id.
+#[derive(Clone, Debug, Default)]
+pub struct Note<'a> {
+    pub command: u8,
+    /// The subcommand, for clientPIN and credential management.
+    pub sub: Option<u64>,
+    pub rp_id: Option<&'a str>,
+    pub rk: bool,
+    pub uv: bool,
+    /// Passkeys found, for a GetAssertion without an allow list.
+    pub found: Option<u8>,
+    pub pin: Option<pin::Outcome>,
+    pub status: u8,
+}
+
 /// What the protocol needs from the device around it.
 pub trait Env {
     /// Ask the person, and wait (bounded) for the answer.
     fn presence(&mut self, ask: Ask<'_>) -> Presence;
-    /// Run `f` with the FIDO master of the wallet in force, inside the masked region.
-    /// `None` when there is no wallet to derive one from (logged out, no seed, a WIF key)
-    /// or it could not be derived.
-    fn with_master<R>(&mut self, f: impl FnOnce(&Master, &KeyWork) -> R) -> Option<R>;
+    /// Run `f` once with the FIDO master of the wallet in force, inside the masked region.
+    /// False (and `f` not run) when there is no wallet to derive one from (logged out, no
+    /// seed, a WIF key) or it could not be derived.
+    ///
+    /// Takes `dyn`: the device's side of this -- the derivation, the cache, the masking --
+    /// then exists once in the image, not once per caller. [`with_master`](Self::with_master)
+    /// is the typed way to call it.
+    fn master_do(&mut self, f: &mut dyn FnMut(&Master, &KeyWork)) -> bool;
+    /// [`master_do`](Self::master_do), returning what `f` returns.
+    fn with_master<R>(&mut self, f: impl FnOnce(&Master, &KeyWork) -> R) -> Option<R>
+    where
+        Self: Sized,
+    {
+        let mut f = Some(f);
+        let mut out = None;
+        let ran = self.master_do(&mut |m, kw| {
+            if let Some(f) = f.take() {
+                out = Some(f(m, kw));
+            }
+        });
+        if ran { out } else { None }
+    }
+    /// Run `f` inside the masked region, with no wallet: the PIN protocol's key
+    /// agreement and PIN-hash work.
+    fn masked<R>(&mut self, f: impl FnOnce(&KeyWork) -> R) -> R;
     /// Fill `out` from the device's DRBG. False if it cannot.
     fn random(&mut self, out: &mut [u8]) -> bool;
+    /// Milliseconds, from any origin; wraps.
+    fn now_ms(&mut self) -> u32;
     /// `authenticatorReset`: within the allowed window, asked twice, then the wallet's
-    /// FIDO generation raised. Returns a [`status`] code.
+    /// FIDO generation raised and its PIN and passkeys removed. Returns a [`status`] code.
     fn reset(&mut self) -> u8;
     /// U2F user presence for `app`: whether a press has been given for it. The device
     /// asks on its screen when one has not, after the answer has gone back; see
     /// [`crate::u2f`].
     fn u2f_presence(&mut self, register: bool, app: &[u8; 32]) -> bool;
+    /// What GetInfo says.
+    fn caps(&mut self) -> Caps;
+    /// The wallet's PIN, `None` when none is set. A stored value that cannot be read
+    /// comes back as set with no retries left: blocked until a reset.
+    fn pin(&mut self) -> Option<PinRecord>;
+    /// Write the wallet's PIN record. False if it could not be written, in which case the
+    /// caller goes no further.
+    fn save_pin(&mut self, rec: &PinRecord) -> bool;
+    /// Run `f` once over the wallet's passkeys; when it returns `true` the list is written
+    /// back. `Err` is a [`status`]: no passkeys on this board, no wallet, no memory, or a
+    /// file that will not open or be written. `dyn` for the same reason as
+    /// [`master_do`](Self::master_do); [`passkeys`](Self::passkeys) is the typed way.
+    fn passkeys_do(&mut self, f: &mut dyn FnMut(&mut Passkeys<'_>) -> bool) -> Result<(), u8>;
+    /// [`passkeys_do`](Self::passkeys_do), returning what `f` returns.
+    fn passkeys<R>(&mut self, f: impl FnOnce(&mut Passkeys<'_>) -> (R, bool)) -> Result<R, u8>
+    where
+        Self: Sized,
+    {
+        let mut f = Some(f);
+        let mut out = None;
+        self.passkeys_do(&mut |p| match f.take() {
+            Some(f) => {
+                let (r, changed) = f(p);
+                out = Some(r);
+                changed
+            }
+            None => false,
+        })?;
+        out.ok_or(status::OTHER)
+    }
+    /// One request finished. For the log.
+    fn note(&mut self, _note: &Note<'_>) {}
 }
 
 /// A request's parse failure as its status.
-fn cbor_status(e: cbor::Error) -> u8 {
+pub(crate) fn cbor_status(e: cbor::Error) -> u8 {
     match e {
         cbor::Error::Unexpected => status::CBOR_UNEXPECTED_TYPE,
         cbor::Error::Invalid | cbor::Error::TooDeep => status::INVALID_CBOR,
@@ -173,38 +305,66 @@ fn cbor_status(e: cbor::Error) -> u8 {
     }
 }
 
-type R<T> = Result<T, u8>;
+pub(crate) type R<T> = Result<T, u8>;
 
-fn c<T>(r: Result<T, cbor::Error>) -> R<T> {
+pub(crate) fn c<T>(r: Result<T, cbor::Error>) -> R<T> {
     r.map_err(cbor_status)
 }
 
 /// Answer one CTAP2 request (`req` is the command byte and its CBOR). The response --
 /// status byte, then CBOR on success -- goes into `out`; returns its length.
 ///
-/// `out` must be at least 512 bytes; [`crate::hid::MAX_MSG`] is plenty.
-pub fn handle<E: Env>(req: &[u8], out: &mut [u8], env: &mut E) -> usize {
+/// `out` must be at least 512 bytes; [`crate::hid::MAX_MSG`] is plenty. `s` is the
+/// state kept from power-up to power-off ([`Session`]).
+#[inline(never)]
+pub fn handle<E: Env>(req: &[u8], out: &mut [u8], s: &mut Session, env: &mut E) -> usize {
     let Some((&cmd, body)) = req.split_first() else {
         out[0] = status::INVALID_LENGTH;
         return 1;
     };
+    // A stateful command's state lasts until any other command. Source: §6.3, §6.8.3 [C]
+    if !matches!(
+        cmd,
+        command::GET_NEXT_ASSERTION
+            | command::CREDENTIAL_MANAGEMENT
+            | command::CREDENTIAL_MANAGEMENT_PRE
+    ) {
+        s.cursor = Cursor::None;
+    }
+    let mut note = Note {
+        command: cmd,
+        ..Note::default()
+    };
     let result = match cmd {
-        command::GET_INFO => return get_info(out),
-        command::MAKE_CREDENTIAL => make_credential(body, &mut out[1..], env),
-        command::GET_ASSERTION => get_assertion(body, &mut out[1..], env),
+        command::GET_INFO => {
+            let caps = env.caps();
+            return get_info(out, &caps);
+        }
+        command::MAKE_CREDENTIAL => make_credential(body, &mut out[1..], s, env, &mut note),
+        command::GET_ASSERTION => get_assertion(body, &mut out[1..], s, env, &mut note),
+        command::GET_NEXT_ASSERTION => get_next_assertion(&mut out[1..], s, env, &mut note),
+        command::CLIENT_PIN => pin::handle(body, &mut out[1..], s, env, &mut note),
+        command::CREDENTIAL_MANAGEMENT | command::CREDENTIAL_MANAGEMENT_PRE => {
+            if env.caps().rk {
+                crate::credmgmt::handle(body, &mut out[1..], s, env, &mut note)
+            } else {
+                Err(status::INVALID_COMMAND)
+            }
+        }
         command::RESET => match env.reset() {
-            status::OK => Ok(0),
+            status::OK => {
+                s.forget_wallet();
+                Ok(0)
+            }
             e => Err(e),
         },
         command::SELECTION => match env.presence(Ask::Select) {
             Presence::Allowed => Ok(0),
             p => Err(p.refusal()),
         },
-        command::GET_NEXT_ASSERTION => Err(status::NOT_ALLOWED),
-        // No PIN protocol, and nothing else this device knows.
         _ => Err(status::INVALID_COMMAND),
     };
-    match result {
+    let n = match result {
         Ok(n) => {
             out[0] = status::OK;
             1 + n
@@ -213,14 +373,18 @@ pub fn handle<E: Env>(req: &[u8], out: &mut [u8], env: &mut E) -> usize {
             out[0] = e;
             1
         }
-    }
+    };
+    note.status = out[0];
+    env.note(&note);
+    n
 }
 
-/// `authenticatorGetInfo`: status byte and the fixed map. Source: §6.4 [C]
-pub fn get_info(out: &mut [u8]) -> usize {
+/// `authenticatorGetInfo`: status byte and the map. Source: §6.4 [C]
+pub fn get_info(out: &mut [u8], caps: &Caps) -> usize {
     out[0] = status::OK;
+    let remaining = caps.remaining.filter(|_| caps.rk);
     let mut w = Writer::new(&mut out[1..]);
-    w.map(8);
+    w.map(10 + remaining.is_some() as usize);
     // 0x01 versions
     w.uint(0x01)
         .array(3)
@@ -229,18 +393,26 @@ pub fn get_info(out: &mut [u8]) -> usize {
         .text("FIDO_2_1");
     // 0x03 aaguid
     w.uint(0x03).bytes(&AAGUID);
-    // 0x04 options, canonical order: "rk", "up" (two bytes), then "plat". No "uv" and no
-    // "clientPin" key: absent means not supported, which is the truth.
-    w.uint(0x04)
-        .map(3)
-        .text("rk")
-        .bool(false)
-        .text("up")
-        .bool(true)
-        .text("plat")
-        .bool(false);
+    // 0x04 options, in canonical order (shorter keys first, then bytewise). No "uv": the
+    // only user verification is the client PIN, which is not a built-in method (§6.4).
+    w.uint(0x04).map(6 + caps.rk as usize);
+    w.text("rk").bool(caps.rk);
+    w.text("up").bool(true);
+    w.text("plat").bool(false);
+    if caps.rk {
+        w.text("credMgmt").bool(true);
+    }
+    w.text("clientPin").bool(caps.pin_set);
+    w.text("pinUvAuthToken").bool(true);
+    // See the module notes: a second-factor registration needs no PIN.
+    w.text("makeCredUvNotRqd").bool(true);
     // 0x05 maxMsgSize
     w.uint(0x05).uint(crate::hid::MAX_MSG as u64);
+    // 0x06 pinUvAuthProtocols, preferred first
+    w.uint(0x06).array(pin::PROTOCOLS.len());
+    for p in pin::PROTOCOLS {
+        w.uint(p as u64);
+    }
     // 0x07 maxCredentialCountInList, 0x08 maxCredentialIdLength
     w.uint(0x07).uint(MAX_CRED_COUNT);
     w.uint(0x08).uint(MAX_CRED_ID_LEN);
@@ -254,6 +426,12 @@ pub fn get_info(out: &mut [u8]) -> usize {
         .int(ES256)
         .text("type")
         .text("public-key");
+    // 0x0D minPINLength: required when clientPIN is supported (§6.4).
+    w.uint(0x0D).uint(pin::MIN_PIN_LEN as u64);
+    // 0x14 remainingDiscoverableCredentials, when known.
+    if let Some(r) = remaining {
+        w.uint(0x14).uint(r as u64);
+    }
     match w.finish() {
         Ok(n) => 1 + n,
         Err(_) => {
@@ -311,7 +489,7 @@ impl<'a> Descriptors<'a> {
 
 /// One descriptor: `(id, is a public key)`, or `None` when `id` or `type` is missing.
 /// Source: WebAuthn L2 §5.8.3; CTAP 2.1 §6.1 (types other than "public-key" ignored) [C]
-fn descriptor<'a>(r: &mut Reader<'a>) -> Result<Option<(&'a [u8], bool)>, cbor::Error> {
+pub(crate) fn descriptor<'a>(r: &mut Reader<'a>) -> Result<Option<(&'a [u8], bool)>, cbor::Error> {
     let mut m = r.map()?;
     let mut id = None;
     let mut public_key = None;
@@ -332,6 +510,32 @@ fn descriptor<'a>(r: &mut Reader<'a>) -> Result<Option<(&'a [u8], bool)>, cbor::
         (Some(id), Some(pk)) => Some((id, pk)),
         _ => None,
     })
+}
+
+/// A PublicKeyCredentialUserEntity: `(id, name, displayName)`, `id` required and at most
+/// 64 bytes. Source: WebAuthn L2 §5.4.3 [C]
+pub(crate) type User<'a> = (&'a [u8], Option<&'a str>, Option<&'a str>);
+
+pub(crate) fn user_entity<'a>(r: &mut Reader<'a>, depth: u8) -> R<User<'a>> {
+    let mut e = c(r.map())?;
+    let mut id = None;
+    let (mut name, mut display) = (None, None);
+    while let Some(k) = c(r.key(&mut e))? {
+        match k {
+            Key::Text("id") => id = Some(c(r.bytes())?),
+            Key::Text("name") => name = Some(c(r.text())?),
+            Key::Text("displayName") => display = Some(c(r.text())?),
+            Key::Text("icon") => {
+                c(r.text())?;
+            }
+            _ => c(r.skip(depth))?,
+        }
+    }
+    let id = id.ok_or(status::MISSING_PARAMETER)?;
+    if id.len() > passkeys::USER_ID_MAX {
+        return Err(status::INVALID_PARAMETER);
+    }
+    Ok((id, name, display))
 }
 
 /// The options map both commands take. Unknown options are ignored.
@@ -356,22 +560,50 @@ fn options(r: &mut Reader<'_>) -> R<Options> {
     Ok(o)
 }
 
-/// §6.1.2 step 2 / §6.2.2 step 2, for an authenticator with no PIN/UV protocol at all.
-fn pin_auth(param: Option<&[u8]>, protocol: Option<u64>) -> R<()> {
-    match (param, protocol) {
-        (None, _) => Ok(()),
-        (Some(_), None) => Err(status::MISSING_PARAMETER),
-        (Some(_), Some(_)) => Err(status::INVALID_PARAMETER),
+fn hash32(b: &[u8]) -> R<&[u8; 32]> {
+    b.try_into().map_err(|_| status::INVALID_PARAMETER)
+}
+
+/// §6.1.2 step 1 / §6.2.2 step 1: a zero-length `pinUvAuthParam` is a platform asking
+/// the person to touch the key it will then ask for a PIN. The answer is only ever an
+/// error, which says whether a PIN is set.
+fn touch_probe<E: Env>(env: &mut E) -> u8 {
+    match env.presence(Ask::Select) {
+        Presence::Allowed if env.caps().pin_set => status::PIN_INVALID,
+        Presence::Allowed => status::PIN_NOT_SET,
+        p => p.refusal(),
     }
 }
 
-fn hash32(b: &[u8]) -> R<&[u8; 32]> {
-    b.try_into().map_err(|_| status::INVALID_PARAMETER)
+/// §6.1.2 step 11 / §6.2.2 step 6: the request's `pinUvAuthParam` checked against the
+/// token -- its MAC over the clientDataHash, the permission, the site -- and the site
+/// bound to the token if none was.
+fn check_token(
+    s: &mut Session,
+    protocol: u8,
+    cdh: &[u8; 32],
+    param: &[u8],
+    rp_id_hash: &[u8; 32],
+    permission: u8,
+    now: u32,
+) -> R<()> {
+    if !s.verify_token(protocol, &[cdh], param, now) {
+        return Err(status::PIN_AUTH_INVALID);
+    }
+    if !s.user_verified() || !s.has_permission(permission) {
+        return Err(status::PIN_AUTH_INVALID);
+    }
+    if s.token_rp().is_some_and(|rp| rp != rp_id_hash) {
+        return Err(status::PIN_AUTH_INVALID);
+    }
+    s.bind_rp(rp_id_hash);
+    Ok(())
 }
 
 struct MakeCredential<'a> {
     client_data_hash: &'a [u8; 32],
     rp_id: &'a str,
+    user_id: &'a [u8],
     user_name: Option<&'a str>,
     display_name: Option<&'a str>,
     es256: bool,
@@ -392,6 +624,7 @@ fn parse_make_credential(body: &[u8]) -> R<MakeCredential<'_>> {
     let mut mc = MakeCredential {
         client_data_hash: &[0; 32],
         rp_id: "",
+        user_id: &[],
         user_name: None,
         display_name: None,
         es256: false,
@@ -420,25 +653,10 @@ fn parse_make_credential(body: &[u8]) -> R<MakeCredential<'_>> {
                 rp_id = Some(id.ok_or(status::MISSING_PARAMETER)?);
             }
             Key::Int(0x03) => {
-                // PublicKeyCredentialUserEntity: `id` required, at most 64 bytes.
-                // Source: WebAuthn L2 §5.4.3 [C]
-                let mut e = c(r.map())?;
-                let mut id = None;
-                while let Some(k) = c(r.key(&mut e))? {
-                    match k {
-                        Key::Text("id") => id = Some(c(r.bytes())?),
-                        Key::Text("name") => mc.user_name = Some(c(r.text())?),
-                        Key::Text("displayName") => mc.display_name = Some(c(r.text())?),
-                        Key::Text("icon") => {
-                            c(r.text())?;
-                        }
-                        _ => c(r.skip(cbor::MAX_DEPTH - 2))?,
-                    }
-                }
-                let id = id.ok_or(status::MISSING_PARAMETER)?;
-                if id.len() > 64 {
-                    return Err(status::INVALID_PARAMETER);
-                }
+                let (id, name, display) = user_entity(&mut r, cbor::MAX_DEPTH - 2)?;
+                mc.user_id = id;
+                mc.user_name = name;
+                mc.display_name = display;
                 user = Some(());
             }
             Key::Int(0x04) => {
@@ -495,26 +713,76 @@ fn parse_make_credential(body: &[u8]) -> R<MakeCredential<'_>> {
 /// L2 §8.2), and over a device attestation key because such a key would have to be
 /// shared by every CatCard -- or else it would identify one -- and CatCard has neither a
 /// vendor CA nor anything to attest beyond "this key signed this".
-fn make_credential<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize> {
+#[inline(never)]
+fn make_credential<'a, E: Env>(
+    body: &'a [u8],
+    out: &mut [u8],
+    s: &mut Session,
+    env: &mut E,
+    note: &mut Note<'a>,
+) -> R<usize> {
     let mc = parse_make_credential(body)?;
-    pin_auth(mc.pin_auth, mc.pin_protocol)?;
+    note.rp_id = Some(mc.rp_id);
+    let rk = mc.options.rk == Some(true);
+    note.rk = rk;
+    // Step 1: the "touch this key" probe.
+    if mc.pin_auth.is_some_and(|p| p.is_empty()) {
+        return Err(touch_probe(env));
+    }
+    // Step 2.
+    let protocol = match mc.pin_auth {
+        Some(_) => Some(pin::check_protocol(mc.pin_protocol)?),
+        None => None,
+    };
+    // Step 3.
     if !mc.es256 {
         return Err(status::UNSUPPORTED_ALGORITHM);
     }
-    if mc.options.rk == Some(true) {
-        return Err(status::UNSUPPORTED_OPTION);
-    }
-    if mc.options.up == Some(false) || mc.options.uv == Some(true) {
+    // Step 5: options. With a pinUvAuthParam, "uv" is treated as false.
+    let caps = env.caps();
+    if mc.pin_auth.is_none() && mc.options.uv == Some(true) {
         return Err(status::INVALID_OPTION);
     }
+    if rk && !caps.rk {
+        return Err(status::UNSUPPORTED_OPTION);
+    }
+    if mc.options.up == Some(false) {
+        return Err(status::INVALID_OPTION);
+    }
+    // Step 7 (makeCredUvNotRqd is true): a passkey on a PIN-protected key needs the PIN.
+    if caps.pin_set && mc.pin_auth.is_none() && rk {
+        return Err(status::PUAT_REQUIRED);
+    }
+    // Step 9.
     if mc.enterprise {
         return Err(status::INVALID_PARAMETER);
     }
     let rp_id_hash: [u8; 32] = Sha256::digest(mc.rp_id.as_bytes());
+    let now = env.now_ms();
 
-    // §6.1.2 step 11: a credential of ours in the exclude list means this wallet is
-    // already registered here. The person still answers -- so a host cannot learn that
-    // without them -- and the answer is only ever "excluded".
+    // Step 11: the token, when there is one to check. Without a PIN set there is no
+    // token, and the step does not apply (the UV flag stays clear).
+    let mut uv = false;
+    if let (Some(param), Some(protocol), true) = (mc.pin_auth, protocol, caps.pin_set) {
+        check_token(
+            s,
+            protocol,
+            mc.client_data_hash,
+            param,
+            &rp_id_hash,
+            perm::MC,
+            now,
+        )?;
+        uv = true;
+    }
+    note.uv = uv;
+    // The press given for the token, when it is still fresh, is this request's presence
+    // (see `crate::pin`).
+    let cached_up = uv && s.user_present(now);
+
+    // Step 12: a credential of ours in the exclude list means this wallet is already
+    // registered here. The person still answers -- so a host cannot learn that without
+    // them -- and the answer is only ever "excluded".
     let excluded = if mc.exclude.is_empty() {
         false
     } else {
@@ -528,16 +796,23 @@ fn make_credential<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize>
         })
         .ok_or(status::OPERATION_DENIED)?
     };
-    let ask = Ask::Register {
-        rp_id: mc.rp_id,
-        user_name: mc.user_name,
-        display_name: mc.display_name,
-        excluded,
-    };
-    match env.presence(ask) {
-        Presence::Allowed if excluded => return Err(status::CREDENTIAL_EXCLUDED),
-        Presence::Allowed => {}
-        p => return Err(p.refusal()),
+    // Step 14.
+    if !cached_up {
+        let ask = Ask::Register {
+            rp_id: mc.rp_id,
+            user_name: mc.user_name,
+            display_name: mc.display_name,
+            excluded,
+            resident: rk,
+        };
+        match env.presence(ask) {
+            Presence::Allowed => {}
+            p => return Err(p.refusal()),
+        }
+    }
+    s.consume();
+    if excluded {
+        return Err(status::CREDENTIAL_EXCLUDED);
     }
 
     let mut nonce = [0u8; NONCE_LEN];
@@ -545,39 +820,77 @@ fn make_credential<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize>
         return Err(status::OTHER);
     }
     let cdh = mc.client_data_hash;
-    env.with_master(|m, kw| {
-        let id = m.credential_id(&rp_id_hash, &nonce, kw);
-        let key = m
-            .signing_key(&rp_id_hash, &nonce, kw)
-            .ok_or(status::OTHER)?;
-        let public = key.public_sec1(kw);
-        let mut auth = [0u8; AUTH_DATA_MAX];
-        let an = attested_auth_data(&rp_id_hash, &id, &public, &mut auth).ok_or(status::OTHER)?;
-        let (r, s) = key.sign(&[&auth[..an], cdh], kw).ok_or(status::OTHER)?;
-        let mut sig = [0u8; der::SIG_MAX];
-        let sn = der::signature(&r, &s, &mut sig);
-        let mut w = Writer::new(out);
-        // {1: fmt, 2: authData, 3: attStmt{"alg", "sig"}}
-        w.map(3)
-            .uint(1)
-            .text("packed")
-            .uint(2)
-            .bytes(&auth[..an])
-            .uint(3)
-            .map(2)
-            .text("alg")
-            .int(ES256)
-            .text("sig")
-            .bytes(&sig[..sn]);
-        w.finish().map_err(|_| status::OTHER)
-    })
-    .ok_or(status::OPERATION_DENIED)?
+    let flags = flags::UP | flags::AT | if uv { flags::UV } else { 0 };
+    let n = env
+        .with_master(|m, kw| {
+            let id = m.credential_id(&rp_id_hash, &nonce, kw);
+            let key = m
+                .signing_key(&rp_id_hash, &nonce, kw)
+                .ok_or(status::OTHER)?;
+            let public = key.public_sec1(kw);
+            let mut auth = [0u8; AUTH_DATA_MAX];
+            let an = attested_auth_data(&rp_id_hash, flags, &id, &public, &mut auth)
+                .ok_or(status::OTHER)?;
+            let (r, s) = key.sign(&[&auth[..an], cdh], kw).ok_or(status::OTHER)?;
+            let mut sig = [0u8; der::SIG_MAX];
+            let sn = der::signature(&r, &s, &mut sig);
+            let mut w = Writer::new(out);
+            // {1: fmt, 2: authData, 3: attStmt{"alg", "sig"}}
+            w.map(3)
+                .uint(1)
+                .text("packed")
+                .uint(2)
+                .bytes(&auth[..an])
+                .uint(3)
+                .map(2)
+                .text("alg")
+                .int(ES256)
+                .text("sig")
+                .bytes(&sig[..sn]);
+            w.finish().map_err(|_| status::OTHER)
+        })
+        .ok_or(status::OPERATION_DENIED)??;
+
+    // Step 17: a passkey is stored before the answer goes back, or there is no answer.
+    if rk {
+        let rec = Record::new(
+            &nonce,
+            mc.rp_id,
+            &rp_id_hash,
+            mc.user_id,
+            mc.user_name,
+            mc.display_name,
+        )
+        .ok_or(status::INVALID_PARAMETER)?;
+        env.passkeys(|p| match p.add(&rec) {
+            Ok(()) => (Ok(()), true),
+            Err(passkeys::Error::Full) => (Err(status::KEY_STORE_FULL), false),
+            Err(_) => (Err(status::OTHER), false),
+        })??;
+    }
+    Ok(n)
 }
 
 /// Authenticator data with attested credential data: 37 + 16 + 2 + 33 + 77.
 pub const AUTH_DATA_MAX: usize = 37 + 16 + 2 + CRED_ID_LEN + COSE_KEY_LEN;
 /// The COSE key below, which is always this long.
-const COSE_KEY_LEN: usize = 77;
+pub(crate) const COSE_KEY_LEN: usize = 77;
+
+/// An ES256 public key as a COSE_Key, EC2, canonical order: 1 (kty), 3 (alg), -1 (crv),
+/// -2 (x), -3 (y). Source: RFC 9052 §7, RFC 9053 §7.1.1 [C]
+pub(crate) fn write_cose_es256(w: &mut Writer<'_>, public: &[u8; 65]) {
+    w.map(5)
+        .int(1)
+        .int(2)
+        .int(3)
+        .int(ES256)
+        .int(-1)
+        .int(1)
+        .int(-2)
+        .bytes(&public[1..33])
+        .int(-3)
+        .bytes(&public[33..65]);
+}
 
 /// `rpIdHash ‖ flags ‖ signCount ‖ aaguid ‖ credIdLen ‖ credId ‖ COSE_Key`.
 /// Source: WebAuthn L2 §6.1, §6.5.1 [C]
@@ -590,31 +903,20 @@ const COSE_KEY_LEN: usize = 77;
 /// device is exactly a clone that the owner made on purpose.
 fn attested_auth_data(
     rp_id_hash: &[u8; 32],
+    flags: u8,
     id: &[u8; CRED_ID_LEN],
     public: &[u8; 65],
     out: &mut [u8; AUTH_DATA_MAX],
 ) -> Option<usize> {
     out[..32].copy_from_slice(rp_id_hash);
-    out[32] = flags::UP | flags::AT;
+    out[32] = flags;
     out[33..37].copy_from_slice(&0u32.to_be_bytes());
     out[37..53].copy_from_slice(&AAGUID);
     out[53..55].copy_from_slice(&(CRED_ID_LEN as u16).to_be_bytes());
     out[55..55 + CRED_ID_LEN].copy_from_slice(id);
     let at = 55 + CRED_ID_LEN;
-    // COSE_Key, EC2, canonical order: 1 (kty), 3 (alg), -1 (crv), -2 (x), -3 (y).
-    // Source: RFC 9052 §7, RFC 9053 §7.1.1 [C]
     let mut w = Writer::new(&mut out[at..]);
-    w.map(5)
-        .int(1)
-        .int(2)
-        .int(3)
-        .int(ES256)
-        .int(-1)
-        .int(1)
-        .int(-2)
-        .bytes(&public[1..33])
-        .int(-3)
-        .bytes(&public[33..65]);
+    write_cose_es256(&mut w, public);
     let n = w.finish().ok()?;
     debug_assert_eq!(n, COSE_KEY_LEN);
     Some(at + n)
@@ -668,27 +970,71 @@ fn parse_get_assertion(body: &[u8]) -> R<GetAssertion<'_>> {
     Ok(ga)
 }
 
-/// §6.2.2. One credential: the first in the allow list that is this wallet's for this
-/// site. With `up: false` nobody is asked and the UP flag stays clear; otherwise the
-/// person is asked even when nothing matches, and only then told "no credentials", so a
-/// host cannot probe which sites a wallet knows without someone pressing the key.
-fn get_assertion<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize> {
+/// Which credential an assertion is made with. One lives on the stack for the length of
+/// a request, so the passkey is held by value rather than boxed (there is no allocator).
+#[allow(clippy::large_enum_variant)]
+enum Chosen<'a> {
+    /// From the allow list: its id, and the nonce inside it.
+    Listed(&'a [u8], [u8; NONCE_LEN]),
+    /// A passkey, and how many the site has.
+    Resident(Record, u8),
+}
+
+/// §6.2.2. With an allow list, the first credential in it that is this wallet's for this
+/// site; without one, this wallet's passkeys for the site, newest first. With `up: false`
+/// nobody is asked and the UP flag stays clear; otherwise the person is asked even when
+/// nothing matches, and only then told "no credentials", so a host cannot probe which
+/// sites a wallet knows without someone pressing the key.
+#[inline(never)]
+fn get_assertion<'a, E: Env>(
+    body: &'a [u8],
+    out: &mut [u8],
+    s: &mut Session,
+    env: &mut E,
+    note: &mut Note<'a>,
+) -> R<usize> {
     let ga = parse_get_assertion(body)?;
-    pin_auth(ga.pin_auth, ga.pin_protocol)?;
+    note.rp_id = Some(ga.rp_id);
+    // Step 1.
+    if ga.pin_auth.is_some_and(|p| p.is_empty()) {
+        return Err(touch_probe(env));
+    }
+    // Step 2.
+    let protocol = match ga.pin_auth {
+        Some(_) => Some(pin::check_protocol(ga.pin_protocol)?),
+        None => None,
+    };
+    // Step 4.
+    if ga.pin_auth.is_none() && ga.options.uv == Some(true) {
+        return Err(status::INVALID_OPTION);
+    }
     if ga.options.rk.is_some() {
         return Err(status::UNSUPPORTED_OPTION);
     }
-    if ga.options.uv == Some(true) {
-        return Err(status::INVALID_OPTION);
-    }
     let up = ga.options.up != Some(false);
     let rp_id_hash: [u8; 32] = Sha256::digest(ga.rp_id.as_bytes());
+    let caps = env.caps();
+    let now = env.now_ms();
 
-    // Discoverable credentials are the only way to answer an empty list, and there are
-    // none here.
-    let found: Option<(&[u8], [u8; NONCE_LEN])> = if ga.allow.is_empty() {
-        None
-    } else {
+    // Step 6.
+    let mut uv = false;
+    if let (Some(param), Some(protocol), true) = (ga.pin_auth, protocol, caps.pin_set) {
+        check_token(
+            s,
+            protocol,
+            ga.client_data_hash,
+            param,
+            &rp_id_hash,
+            perm::GA,
+            now,
+        )?;
+        uv = true;
+    }
+    note.uv = uv;
+    let cached_up = uv && s.user_present(now);
+
+    // Step 7: the applicable credentials.
+    let found: Option<Chosen<'_>> = if !ga.allow.is_empty() {
         env.with_master(|m, kw| {
             let mut hit = None;
             ga.allow.each(|id| {
@@ -698,8 +1044,21 @@ fn get_assertion<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize> {
             hit
         })
         .ok_or(status::OPERATION_DENIED)?
+        .map(|(id, n)| Chosen::Listed(id, n))
+    } else if caps.rk {
+        let r = env.passkeys(|p| {
+            let n = p.count_for(&rp_id_hash);
+            let first = p.newest_for(&rp_id_hash, 0).and_then(|i| p.get(i));
+            (first.map(|r| (r, n as u8)), false)
+        })?;
+        note.found = Some(r.as_ref().map_or(0, |(_, n)| *n));
+        r.map(|(r, n)| Chosen::Resident(r, n))
+    } else {
+        None
     };
-    if up {
+
+    // Step 9.
+    if up && !cached_up {
         let ask = Ask::SignIn {
             rp_id: ga.rp_id,
             known: found.is_some(),
@@ -709,24 +1068,103 @@ fn get_assertion<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize> {
             p => return Err(p.refusal()),
         }
     }
-    let Some((id, nonce)) = found else {
+    if up {
+        s.consume();
+    }
+    let Some(found) = found else {
         return Err(status::NO_CREDENTIALS);
     };
-    let cdh = ga.client_data_hash;
+    let flags = if up { flags::UP } else { 0 } | if uv { flags::UV } else { 0 };
+    match found {
+        Chosen::Listed(id, nonce) => sign_assertion(
+            out,
+            env,
+            &rp_id_hash,
+            ga.client_data_hash,
+            flags,
+            Signed::Listed(id, &nonce),
+        ),
+        Chosen::Resident(rec, total) => {
+            let n = sign_assertion(
+                out,
+                env,
+                &rp_id_hash,
+                ga.client_data_hash,
+                flags,
+                Signed::Resident {
+                    rec: &rec,
+                    names: uv && total > 1,
+                    total: (total > 1).then_some(total),
+                },
+            )?;
+            // Step 11: more than one, and no account picker on this device -- the
+            // platform shows its own, fed by GetNextAssertion.
+            if total > 1 {
+                s.cursor = Cursor::Assertion {
+                    rp: rp_id_hash,
+                    cdh: *ga.client_data_hash,
+                    next: 1,
+                    total,
+                    up,
+                    uv,
+                    since: now,
+                };
+            }
+            Ok(n)
+        }
+    }
+}
+
+/// What an assertion is signed for.
+enum Signed<'r> {
+    Listed(&'r [u8], &'r [u8; NONCE_LEN]),
+    /// A passkey: `names` when user verification was done and there is a choice to make
+    /// (§6.2.2 step 11 "User identifiable information ... MUST NOT be returned if user
+    /// verification is not done"), `total` for the first of several.
+    Resident {
+        rec: &'r Record,
+        names: bool,
+        total: Option<u8>,
+    },
+}
+
+/// Sign `authData ‖ clientDataHash` and write the response map.
+fn sign_assertion<E: Env>(
+    out: &mut [u8],
+    env: &mut E,
+    rp_id_hash: &[u8; 32],
+    cdh: &[u8; 32],
+    flags: u8,
+    what: Signed<'_>,
+) -> R<usize> {
     env.with_master(|m, kw| {
-        let key = m
-            .signing_key(&rp_id_hash, &nonce, kw)
-            .ok_or(status::OTHER)?;
+        let (nonce, made_id);
+        let id: &[u8] = match &what {
+            Signed::Listed(id, n) => {
+                nonce = **n;
+                id
+            }
+            Signed::Resident { rec, .. } => {
+                nonce = rec.nonce;
+                made_id = m.credential_id(rp_id_hash, &nonce, kw);
+                &made_id
+            }
+        };
+        let key = m.signing_key(rp_id_hash, &nonce, kw).ok_or(status::OTHER)?;
         let mut auth = [0u8; 37];
-        auth[..32].copy_from_slice(&rp_id_hash);
-        auth[32] = if up { flags::UP } else { 0 };
+        auth[..32].copy_from_slice(rp_id_hash);
+        auth[32] = flags;
         // signCount 0: see `attested_auth_data`.
         let (r, s) = key.sign(&[&auth, cdh], kw).ok_or(status::OTHER)?;
         let mut sig = [0u8; der::SIG_MAX];
         let sn = der::signature(&r, &s, &mut sig);
         let mut w = Writer::new(out);
-        // {1: {"id", "type"}, 2: authData, 3: signature}
-        w.map(3)
+        let (user, total) = match &what {
+            Signed::Listed(..) => (None, None),
+            Signed::Resident { rec, names, total } => (Some((*rec, *names)), *total),
+        };
+        // {1: {"id", "type"}, 2: authData, 3: signature, 4: user, 5: numberOfCredentials}
+        w.map(3 + user.is_some() as usize + total.is_some() as usize)
             .uint(1)
             .map(2)
             .text("id")
@@ -737,9 +1175,101 @@ fn get_assertion<E: Env>(body: &[u8], out: &mut [u8], env: &mut E) -> R<usize> {
             .bytes(&auth)
             .uint(3)
             .bytes(&sig[..sn]);
+        if let Some((rec, names)) = user {
+            w.uint(4);
+            write_user(&mut w, rec, names);
+        }
+        if let Some(t) = total {
+            w.uint(5).uint(t as u64);
+        }
         w.finish().map_err(|_| status::OTHER)
     })
     .ok_or(status::OPERATION_DENIED)?
+}
+
+/// A PublicKeyCredentialUserEntity: the id, and the names when `names` and they are
+/// stored. Keys in canonical order: "id", "name", "displayName".
+pub(crate) fn write_user(w: &mut Writer<'_>, rec: &Record, names: bool) {
+    let name = (names && !rec.name.is_empty()).then(|| rec.name.as_str());
+    let display = (names && !rec.display_name.is_empty()).then(|| rec.display_name.as_str());
+    w.map(1 + name.is_some() as usize + display.is_some() as usize)
+        .text("id")
+        .bytes(rec.user_id.as_bytes());
+    if let Some(n) = name {
+        w.text("name").text(n);
+    }
+    if let Some(d) = display {
+        w.text("displayName").text(d);
+    }
+}
+
+/// §6.3 authenticatorGetNextAssertion: the site's next passkey, with the same flags and
+/// clientDataHash as the GetAssertion that started it, within 30 s of the last.
+#[inline(never)]
+fn get_next_assertion<E: Env>(
+    out: &mut [u8],
+    s: &mut Session,
+    env: &mut E,
+    note: &mut Note<'_>,
+) -> R<usize> {
+    let Cursor::Assertion {
+        rp,
+        cdh,
+        next,
+        total,
+        up,
+        uv,
+        since,
+    } = s.cursor
+    else {
+        return Err(status::NOT_ALLOWED);
+    };
+    let now = env.now_ms();
+    if next >= total || now.wrapping_sub(since) > pin::NEXT_MS {
+        s.cursor = Cursor::None;
+        return Err(status::NOT_ALLOWED);
+    }
+    note.uv = uv;
+    let rec = env
+        .passkeys(|p| {
+            (
+                p.newest_for(&rp, next as usize).and_then(|i| p.get(i)),
+                false,
+            )
+        })?
+        .ok_or(status::NOT_ALLOWED)?;
+    let flags = if up { flags::UP } else { 0 } | if uv { flags::UV } else { 0 };
+    let n = sign_assertion(
+        out,
+        env,
+        &rp,
+        &cdh,
+        flags,
+        Signed::Resident {
+            rec: &rec,
+            names: uv,
+            total: None,
+        },
+    )?;
+    s.cursor = Cursor::Assertion {
+        rp,
+        cdh,
+        next: next + 1,
+        total,
+        up,
+        uv,
+        since: now,
+    };
+    Ok(n)
+}
+
+/// The nonce inside a credential id of ours, from its public layout alone -- its MAC is
+/// for [`Master::owns`] to check.
+pub(crate) fn id_nonce(id: &[u8]) -> Option<[u8; NONCE_LEN]> {
+    if id.len() != CRED_ID_LEN || id[0] != CRED_VERSION {
+        return None;
+    }
+    id[1..1 + NONCE_LEN].try_into().ok()
 }
 
 // Our own ids must never be longer than what a platform is told to send.
@@ -759,7 +1289,8 @@ pub(crate) mod tests {
     use super::*;
     use purecrypto::ec::ecdsa::{EcdsaPublicKey, Signature};
 
-    /// A device with a wallet, a person who always says `answer`, and a clock-free DRBG.
+    /// A device with a wallet, a person who always says `answer`, a clock that only moves
+    /// when told, a counting DRBG, a PIN and a passkey file in memory.
     pub(crate) struct Fake {
         pub master: Option<Master>,
         pub answer: Presence,
@@ -767,6 +1298,15 @@ pub(crate) mod tests {
         pub counter: u8,
         pub reset_status: u8,
         pub u2f_ok: bool,
+        pub now: u32,
+        pub rk: bool,
+        pub pin: Option<PinRecord>,
+        /// Every retries count written, in order.
+        pub pin_writes: Vec<u8>,
+        pub pin_save_fails: bool,
+        pub file: Option<Vec<u8>>,
+        pub session: Option<Session>,
+        pub notes: Vec<String>,
     }
 
     impl Fake {
@@ -783,6 +1323,14 @@ pub(crate) mod tests {
                 counter: 0,
                 reset_status: status::OK,
                 u2f_ok: true,
+                now: 1_000,
+                rk: true,
+                pin: None,
+                pin_writes: Vec::new(),
+                pin_save_fails: false,
+                file: None,
+                session: Some(Session::new()),
+                notes: Vec::new(),
             }
         }
     }
@@ -792,9 +1340,14 @@ pub(crate) mod tests {
             self.asked.push(format!("{ask:?}"));
             self.answer
         }
-        fn with_master<T>(&mut self, f: impl FnOnce(&Master, &KeyWork) -> T) -> Option<T> {
-            let m = self.master.as_ref()?;
-            Some(f(m, &KeyWork::host()))
+        fn master_do(&mut self, f: &mut dyn FnMut(&Master, &KeyWork)) -> bool {
+            match self.master.as_ref() {
+                Some(m) => {
+                    f(m, &KeyWork::host());
+                    true
+                }
+                None => false,
+            }
         }
         fn random(&mut self, out: &mut [u8]) -> bool {
             self.counter += 1;
@@ -807,6 +1360,46 @@ pub(crate) mod tests {
         fn u2f_presence(&mut self, register: bool, app: &[u8; 32]) -> bool {
             self.asked.push(format!("u2f {register} {:02x}", app[0]));
             self.u2f_ok
+        }
+        fn masked<T>(&mut self, f: impl FnOnce(&KeyWork) -> T) -> T {
+            f(&KeyWork::host())
+        }
+        fn now_ms(&mut self) -> u32 {
+            self.now
+        }
+        fn caps(&mut self) -> Caps {
+            let remaining = self
+                .master
+                .clone()
+                .and_then(|_| self.passkeys(|p| (p.remaining() as u8, false)).ok());
+            Caps {
+                pin_set: self.pin.is_some(),
+                rk: self.rk,
+                remaining,
+            }
+        }
+        fn pin(&mut self) -> Option<PinRecord> {
+            self.pin.clone()
+        }
+        fn save_pin(&mut self, rec: &PinRecord) -> bool {
+            if self.pin_save_fails {
+                return false;
+            }
+            self.pin_writes.push(rec.retries);
+            self.pin = Some(rec.clone());
+            true
+        }
+        fn passkeys_do(&mut self, f: &mut dyn FnMut(&mut Passkeys<'_>) -> bool) -> Result<(), u8> {
+            if !self.rk {
+                return Err(status::UNSUPPORTED_OPTION);
+            }
+            let m = self.master.as_ref().ok_or(status::OPERATION_DENIED)?;
+            let key = m.passkey_key(&KeyWork::host());
+            passkeys::with_vec(&key, &mut self.file, &[self.counter; 16], |p| ((), f(p)))
+                .map_err(|_| status::OTHER)
+        }
+        fn note(&mut self, n: &Note<'_>) {
+            self.notes.push(format!("{n:?}"));
         }
     }
 
@@ -896,9 +1489,11 @@ pub(crate) mod tests {
         v
     }
 
-    fn call(env: &mut Fake, req: &[u8]) -> Vec<u8> {
+    pub(crate) fn call(env: &mut Fake, req: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; crate::hid::MAX_MSG];
-        let n = handle(req, &mut out, env);
+        let mut s = env.session.take().expect("one call at a time");
+        let n = handle(req, &mut out, &mut s, env);
+        env.session = Some(s);
         out.truncate(n);
         out
     }
@@ -922,7 +1517,7 @@ pub(crate) mod tests {
         assert_eq!(r.key(&mut m).unwrap(), None);
         r.finish().unwrap();
 
-        assert_eq!(auth[32], flags::UP | flags::AT);
+        assert_eq!(auth[32] & !flags::UV, flags::UP | flags::AT);
         assert_eq!(&auth[33..37], &[0, 0, 0, 0]);
         assert_eq!(&auth[37..53], &AAGUID);
         let idlen = u16::from_be_bytes([auth[53], auth[54]]) as usize;
@@ -971,29 +1566,57 @@ pub(crate) mod tests {
         pk.verify::<Sha256>(&all, &sig).is_ok()
     }
 
+    /// The exact bytes, so a change to what a platform is told is a deliberate one. The
+    /// expected encodings are python-fido2 2.2.1's `fido2.cbor.encode` of the same maps
+    /// (an independent canonical encoder), and the strict reader accepts ours.
     #[test]
     fn get_info_is_canonical_and_says_what_is_supported() {
-        let mut out = [0u8; 256];
-        let n = get_info(&mut out);
-        assert_eq!(out[0], 0);
-        // Strict reader: canonical order, no duplicates, nothing trailing.
-        let mut r = Reader::new(&out[1..n]);
-        r.skip(cbor::MAX_DEPTH).unwrap();
-        r.finish().unwrap();
-        // The exact bytes, so a change to what a platform is told is a deliberate one.
-        let expect = concat!(
-            "a8",
-            "0183665532465f5632684649444f5f325f30684649444f5f325f31",
-            "035054a5d3d6f9d64b05bdac7cc541efc8f1",
-            "04a362726bf4627570f564706c6174f4",
-            "05190400",
-            "0708",
-            "081840",
-            "098163757362",
-            "0a81a263616c672664747970656a7075626c69632d6b6579",
-        );
-        let got: String = out[1..n].iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(got, expect);
+        let cases = [
+            (
+                Caps {
+                    pin_set: false,
+                    rk: true,
+                    remaining: Some(50),
+                },
+                concat!(
+                    "ab0183665532465f5632684649444f5f325f30684649444f5f325f31",
+                    "035054a5d3d6f9d64b05bdac7cc541efc8f1",
+                    "04a762726bf5627570f564706c6174f468637265644d676d74f5",
+                    "69636c69656e7450696ef46e70696e557641757468546f6b656ef5",
+                    "706d616b654372656455764e6f74527164f5",
+                    "05190400068202010708081840098163757362",
+                    "0a81a263616c672664747970656a7075626c69632d6b6579",
+                    "0d04141832",
+                ),
+            ),
+            (
+                Caps {
+                    pin_set: true,
+                    rk: false,
+                    remaining: Some(50),
+                },
+                concat!(
+                    "aa0183665532465f5632684649444f5f325f30684649444f5f325f31",
+                    "035054a5d3d6f9d64b05bdac7cc541efc8f1",
+                    "04a662726bf4627570f564706c6174f4",
+                    "69636c69656e7450696ef56e70696e557641757468546f6b656ef5",
+                    "706d616b654372656455764e6f74527164f5",
+                    "05190400068202010708081840098163757362",
+                    "0a81a263616c672664747970656a7075626c69632d6b6579",
+                    "0d04",
+                ),
+            ),
+        ];
+        for (caps, expect) in cases {
+            let mut out = [0u8; 512];
+            let n = get_info(&mut out, &caps);
+            assert_eq!(out[0], 0);
+            let mut r = Reader::new(&out[1..n]);
+            r.skip(cbor::MAX_DEPTH).unwrap();
+            r.finish().unwrap();
+            let got: String = out[1..n].iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(got, expect, "{caps:?}");
+        }
     }
 
     #[test]
@@ -1132,10 +1755,6 @@ pub(crate) mod tests {
                 status::UNSUPPORTED_ALGORITHM,
             ),
             (
-                make_credential_req("a.com", &[ES256], &[], Some(("rk", true))),
-                status::UNSUPPORTED_OPTION,
-            ),
-            (
                 make_credential_req("a.com", &[ES256], &[], Some(("uv", true))),
                 status::INVALID_OPTION,
             ),
@@ -1143,7 +1762,7 @@ pub(crate) mod tests {
                 make_credential_req("a.com", &[ES256], &[], Some(("up", false))),
                 status::INVALID_OPTION,
             ),
-            (vec![command::CLIENT_PIN, 0xa0], status::INVALID_COMMAND),
+            (vec![command::CLIENT_PIN, 0xa0], status::MISSING_PARAMETER),
             (vec![command::GET_NEXT_ASSERTION], status::NOT_ALLOWED),
             (vec![0x40], status::INVALID_COMMAND),
             (vec![], status::INVALID_LENGTH),
@@ -1162,10 +1781,23 @@ pub(crate) mod tests {
             env.asked.is_empty(),
             "nothing refused here was put to the person"
         );
+        // A board that keeps no passkeys refuses rk, and has no credential management.
+        env.rk = false;
+        assert_eq!(
+            call(
+                &mut env,
+                &make_credential_req("a.com", &[ES256], &[], Some(("rk", true)))
+            ),
+            [status::UNSUPPORTED_OPTION]
+        );
+        assert_eq!(
+            call(&mut env, &[command::CREDENTIAL_MANAGEMENT, 0xa0]),
+            [status::INVALID_COMMAND]
+        );
     }
 
     #[test]
-    fn a_pin_auth_param_with_no_protocol_support() {
+    fn a_pin_auth_param_without_a_pin_set() {
         let mut env = Fake::new(0);
         let mut req = vec![command::MAKE_CREDENTIAL];
         req.extend(cbor(|w| {
@@ -1182,7 +1814,9 @@ pub(crate) mod tests {
                 .text("public-key");
             w.uint(8).bytes(&[]);
         }));
-        assert_eq!(call(&mut env, &req), [status::MISSING_PARAMETER]);
+        // Zero length: the "touch this key" probe, answered after a press.
+        assert_eq!(call(&mut env, &req), [status::PIN_NOT_SET]);
+        assert_eq!(env.asked, ["Select"]);
         let mut req = vec![command::MAKE_CREDENTIAL];
         req.extend(cbor(|w| {
             w.map(6);
@@ -1197,9 +1831,17 @@ pub(crate) mod tests {
                 .text("type")
                 .text("public-key");
             w.uint(8).bytes(&[1; 16]);
-            w.uint(9).uint(1);
+            w.uint(9).uint(3);
         }));
+        // A protocol this device does not speak.
         assert_eq!(call(&mut env, &req), [status::INVALID_PARAMETER]);
+        // With no PIN set there is no token to check (§6.1.2 step 11 does not apply):
+        // registered, without the UV flag.
+        let last = req.len() - 1;
+        req[last] = 1;
+        let resp = call(&mut env, &req);
+        let (_, _, auth, _) = registered(&resp);
+        assert_eq!(auth[32] & flags::UV, 0);
     }
 
     #[test]

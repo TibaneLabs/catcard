@@ -13,10 +13,26 @@ the CBOR -- strictly, it refuses non-canonical answers -- and every signature ch
     GetAssertion                signature verified with the new credential [press]
     GetAssertion up=false       silent: UP clear, signature verified
     exclude list                CREDENTIAL_EXCLUDED                        [press]
-    refusals                    rk, an unsupported algorithm, a foreign id
+    refusals                    an unsupported algorithm, a foreign id
     U2F                         VERSION; REGISTER (polling, as U2F does)   [press]
                                 AUTHENTICATE check-only, then signed        [press]
                                 and the U2F key handle used from CTAP2
+
+With --pin PIN (always with --sim, as 1234), the client PIN and passkeys:
+
+    setPIN                      only if none is set yet                    [press]
+    getPinRetries               8 after a right PIN
+    passkey without the PIN     CTAP2_ERR_PUAT_REQUIRED
+    PIN token, protocol 2       mc for the site                            [press]
+    MakeCredential rk + UV      a passkey, UV flag set, attestation verified
+    a second passkey, same site protocol 1 token                           [press]
+    GetAssertion, no allow list both passkeys, newest first, via GetNextAssertion,
+                                user names (UV), signatures verified       [press]
+    wrong PIN                   PIN_INVALID and one retry fewer, then restored  [press x2]
+    credential management       metadata, sites, credentials, rename, delete [press]
+
+On a device this makes two passkeys for catcard.example and deletes one; the other
+stays until you delete it (Settings -> Hardware On/Off -> Security key -> Passkeys).
 
 With --reset, **IRREVERSIBLE**: authenticatorReset, which raises this wallet's FIDO
 generation so every site registered with this wallet's security key -- by anyone, ever
@@ -48,6 +64,8 @@ try:
     from fido2.ctap import CtapError
     from fido2.ctap1 import ApduError, APDU, Ctap1
     from fido2.ctap2 import Ctap2
+    from fido2.ctap2.pin import ClientPin, PinProtocolV1, PinProtocolV2
+    from fido2.ctap2.credman import CredentialManagement
     from fido2.attestation import PackedAttestation
     from fido2.hid import CtapHidDevice, CTAPHID, CAPABILITY
     from fido2.hid.base import CtapHidConnection, HidDescriptor
@@ -151,7 +169,10 @@ def main():
         action="store_true",
         help="IRREVERSIBLE: reset this wallet's security key (every registered site stops accepting it)",
     )
+    ap.add_argument("--pin", help="check the client PIN and passkeys with this PIN (set it if none is set)")
     args = ap.parse_args()
+    if args.sim and not args.pin:
+        args.pin = "1234"
 
     if args.reset and not args.sim:
         print("--reset raises this wallet's FIDO generation: EVERY site registered with this")
@@ -180,12 +201,21 @@ def main():
         i = ctap2.get_info()
         assert set(i.versions) >= {"U2F_V2", "FIDO_2_0", "FIDO_2_1"}, i.versions
         assert bytes(i.aaguid) == AAGUID, i.aaguid
-        assert i.options.get("rk") is False and i.options.get("up") is True, i.options
-        assert "clientPin" not in i.options and "uv" not in i.options, i.options
+        assert i.options.get("up") is True, i.options
+        assert "clientPin" in i.options and "uv" not in i.options, i.options
+        assert i.options.get("pinUvAuthToken") is True, i.options
+        assert i.options.get("makeCredUvNotRqd") is True, i.options
+        assert list(i.pin_uv_protocols) == [2, 1], i.pin_uv_protocols
+        assert i.min_pin_length == 4, i.min_pin_length
+        if i.options.get("rk"):
+            assert i.options.get("credMgmt") is True, i.options
         assert i.max_msg_size == 1024, i.max_msg_size
         assert {"type": "public-key", "alg": -7} in [dict(a) for a in i.algorithms], i.algorithms
         assert "usb" in i.transports
-        return f"{i.versions}, maxMsgSize {i.max_msg_size}"
+        return (
+            f"{i.versions}, rk {i.options.get('rk')}, clientPin {i.options.get('clientPin')}, "
+            f"remaining passkeys {i.remaining_disc_creds}"
+        )
 
     c.step("GetInfo", info)
 
@@ -236,13 +266,6 @@ def main():
 
         c.step("exclude list", excluded)
 
-    c.step(
-        "rk=true refused",
-        lambda: expect_ctap_error(
-            CtapError.ERR.UNSUPPORTED_OPTION,
-            lambda: ctap2.make_credential(os.urandom(32), RP, USER, [ES256], options={"rk": True}),
-        ),
-    )
     c.step(
         "EdDSA only refused",
         lambda: expect_ctap_error(
@@ -309,6 +332,9 @@ def main():
 
         c.step("U2F key handle via CTAP2", cross)
 
+    if args.pin:
+        pin_and_passkeys(c, dev, ctap2, args.pin)
+
     if args.reset:
 
         def reset():
@@ -329,6 +355,147 @@ def main():
     dev.close()
     print("all passed" if not c.failed else f"{c.failed} failed")
     return 1 if c.failed else 0
+
+
+def pin_and_passkeys(c, dev, ctap2, pin):
+    """The client PIN (both protocols) and discoverable credentials, end to end."""
+    state = {}
+
+    def refresh():
+        ctap2._info = ctap2.get_info()  # python-fido2 caches GetInfo; the PIN changes it
+        return ctap2.info
+
+    def set_pin():
+        info = refresh()
+        if info.options.get("clientPin"):
+            return "a PIN is already set; using the one given"
+        c.press("allow setting the security key PIN")
+        ClientPin(ctap2, PinProtocolV2()).set_pin(pin)
+        assert refresh().options.get("clientPin") is True
+        return "set, and GetInfo now says clientPin: true"
+
+    c.step("setPIN", set_pin)
+
+    def retries():
+        left, cycle = ClientPin(ctap2, PinProtocolV2()).get_pin_retries()
+        return f"{left} retries, power cycle needed: {cycle}"
+
+    c.step("getPinRetries", retries)
+
+    if not ctap2.info.options.get("rk"):
+        print("      (this board keeps no passkeys: skipping the rk checks)")
+        return
+
+    c.step(
+        "a passkey without the PIN",
+        lambda: expect_ctap_error(
+            CtapError.ERR.PUAT_REQUIRED,
+            lambda: ctap2.make_credential(os.urandom(32), RP, USER, [ES256], options={"rk": True}),
+        ),
+    )
+
+    def make_rk(proto, user):
+        cp = ClientPin(ctap2, proto)
+        c.press(f"allow using the PIN to register at {RP['id']}")
+        token = cp.get_pin_token(pin, ClientPin.PERMISSION.MAKE_CREDENTIAL, RP["id"])
+        cdh = os.urandom(32)
+        att = ctap2.make_credential(
+            cdh, RP, user, [ES256], options={"rk": True},
+            pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION,
+        )
+        ad = att.auth_data
+        assert ad.is_user_present() and ad.is_user_verified(), ad.flags
+        PackedAttestation().verify(att.att_stmt, ad, cdh)
+        return ad.credential_data
+
+    def first():
+        state["a"] = make_rk(PinProtocolV2(), {"id": b"passkey-a", "name": "a@catcard.example", "displayName": "A"})
+        return "UV and UP set, packed attestation verified (protocol 2)"
+
+    c.step("MakeCredential rk + UV", first)
+
+    def second():
+        state["b"] = make_rk(PinProtocolV1(), {"id": b"passkey-b", "name": "b@catcard.example", "displayName": "B"})
+        return "UV and UP set (protocol 1)"
+
+    c.step("a second passkey, protocol 1", second)
+
+    def discoverable():
+        proto = PinProtocolV2()
+        c.press(f"allow using the PIN to sign in at {RP['id']}")
+        token = ClientPin(ctap2, proto).get_pin_token(pin, ClientPin.PERMISSION.GET_ASSERTION, RP["id"])
+        cdh = os.urandom(32)
+        rs = ctap2.get_assertions(
+            RP["id"], cdh, None, pin_uv_param=proto.authenticate(token, cdh), pin_uv_protocol=proto.VERSION
+        )
+        assert rs[0].number_of_credentials == len(rs) >= 2, [r.number_of_credentials for r in rs]
+        byid = {bytes(state[k].credential_id): state[k] for k in ("a", "b")}
+        names = []
+        for r in rs:
+            cred = byid.get(bytes(r.credential["id"]))
+            if cred is None:
+                continue  # a passkey this device already had for the site
+            r.verify(cdh, cred.public_key)
+            assert r.auth_data.is_user_verified() and r.auth_data.is_user_present()
+            names.append(r.user["name"])
+        assert names[:2] == ["b@catcard.example", "a@catcard.example"], names
+        return f"{len(rs)} passkeys, newest first, names given under UV, signatures verified"
+
+    c.step("GetAssertion without an allow list", discoverable)
+
+    def wrong():
+        cp = ClientPin(ctap2, PinProtocolV2())
+        c.press("allow using the PIN (it will be wrong)")
+        try:
+            cp.get_pin_token(pin + "0", ClientPin.PERMISSION.GET_ASSERTION)
+        except CtapError as e:
+            assert e.code == CtapError.ERR.PIN_INVALID, e.code
+        else:
+            raise AssertionError("a wrong PIN gave a token")
+        left, _ = cp.get_pin_retries()
+        assert left == 7, left
+        c.press("allow using the PIN (the right one)")
+        ClientPin(ctap2, PinProtocolV2()).get_pin_token(pin, ClientPin.PERMISSION.GET_ASSERTION)
+        left, _ = cp.get_pin_retries()
+        assert left == 8, left
+        return "PIN_INVALID with 7 left, back to 8 after the right one"
+
+    c.step("a wrong PIN", wrong)
+
+    def manage():
+        proto = PinProtocolV2()
+        c.press("allow using the PIN to manage passkeys")
+        token = ClientPin(ctap2, proto).get_pin_token(pin, ClientPin.PERMISSION.CREDENTIAL_MGMT)
+        cm = CredentialManagement(ctap2, proto, token)
+        meta = cm.get_metadata()
+        rps = cm.enumerate_rps()
+        ours = [r for r in rps if r[CredentialManagement.RESULT.RP]["id"] == RP["id"]]
+        assert ours, rps
+        rp_hash = ours[0][CredentialManagement.RESULT.RP_ID_HASH]
+        creds = cm.enumerate_creds(rp_hash)
+        ids = {bytes(cr[CredentialManagement.RESULT.CREDENTIAL_ID]["id"]) for cr in creds}
+        a = bytes(state["a"].credential_id)
+        b = bytes(state["b"].credential_id)
+        assert {a, b} <= ids, ids
+        for cr in creds:
+            if bytes(cr[CredentialManagement.RESULT.CREDENTIAL_ID]["id"]) == a:
+                assert cr[CredentialManagement.RESULT.PUBLIC_KEY] == state["a"].public_key
+        desc = {"type": "public-key", "id": a}
+        cm.update_user_info(desc, {"id": b"passkey-a", "name": "renamed@catcard.example"})
+        creds = cm.enumerate_creds(rp_hash)
+        named = [cr[CredentialManagement.RESULT.USER].get("name") for cr in creds]
+        assert "renamed@catcard.example" in named, named
+        cm.delete_cred(desc)
+        after = cm.get_metadata()
+        n0 = meta[CredentialManagement.RESULT.EXISTING_CRED_COUNT]
+        n1 = after[CredentialManagement.RESULT.EXISTING_CRED_COUNT]
+        assert n1 == n0 - 1, (meta, after)
+        return (
+            f"{n0} passkeys on {len(rps)} sites, {meta[CredentialManagement.RESULT.MAX_REMAINING_COUNT]} places left; "
+            "public key matches, renamed, deleted"
+        )
+
+    c.step("credential management", manage)
 
 
 if __name__ == "__main__":

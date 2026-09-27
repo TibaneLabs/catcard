@@ -124,6 +124,7 @@ impl<'a> Reader<'a> {
     /// One item's head: its major type and argument, with the shortest-form rule
     /// applied. Major type 7 comes back with the additional information as its argument,
     /// and only for `false`, `true` and `null`.
+    #[inline(never)]
     fn head(&mut self) -> Result<(u8, u64), Error> {
         let b = self.byte()?;
         let major = b >> 5;
@@ -417,6 +418,9 @@ impl<'a> Writer<'a> {
         self.pos
     }
 
+    // Out of line, like `head` below: every field of every response is written through
+    // these two, and inlined they cost kilobytes of flash for nothing.
+    #[inline(never)]
     pub fn raw(&mut self, b: &[u8]) -> &mut Self {
         if self.overflow {
             return self;
@@ -431,6 +435,7 @@ impl<'a> Writer<'a> {
         self
     }
 
+    #[inline(never)]
     fn head(&mut self, major: u8, arg: u64) -> &mut Self {
         let m = major << 5;
         if arg < 24 {

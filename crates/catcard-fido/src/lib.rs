@@ -5,15 +5,18 @@
 //! |---|---|
 //! | [`hid`] | CTAPHID: 64-byte reports, channels, reassembly, keepalives, timeouts |
 //! | [`cbor`] | the strict, canonical CBOR subset CTAP2 speaks |
-//! | [`ctap2`] | `authenticatorMakeCredential`, `GetAssertion`, `GetInfo`, `Reset`, `Selection` |
+//! | [`ctap2`] | `authenticatorMakeCredential`, `GetAssertion`, `GetNextAssertion`, `GetInfo`, `Reset`, `Selection` |
+//! | [`pin`] | `authenticatorClientPIN`: PIN/UV auth protocols 2 and 1, the pinUvAuthToken |
+//! | [`passkeys`] | discoverable credentials: the per-wallet file and its records |
+//! | [`credmgmt`] | `authenticatorCredentialManagement`: list, rename, delete passkeys |
 //! | [`u2f`] | the U2F raw messages: `REGISTER`, `AUTHENTICATE`, `VERSION` |
 //! | [`keys`] | the credential key derivation, and why nothing is stored |
 //! | [`der`] | ECDSA signatures and the U2F self-signed certificate |
 //!
 //! Everything here is `no_std`, allocation-free and host-tested; the firmware supplies
-//! the transport, the screen and the wallet through [`ctap2::Env`]. What is **not**
-//! here: resident keys (passkeys), a client PIN or any user-verification method, NFC,
-//! BLE, enterprise attestation, and every extension. See `docs/FIDO.md`.
+//! the transport, the screen, the wallet and the storage through [`ctap2::Env`]. What
+//! is **not** here: built-in user verification (the client PIN is the only UV), NFC, BLE,
+//! enterprise attestation, large blobs, and every extension. See `docs/FIDO.md`.
 //!
 //! Sources, cited per item as `[C]`: FIDO CTAP 2.1 Proposed Standard (2021-06-15) incl.
 //! §11.2 CTAPHID; FIDO U2F Raw Message Formats v1.2; W3C WebAuthn Level 2; RFC 8949
@@ -24,8 +27,14 @@
 #![deny(unsafe_code)]
 
 pub mod cbor;
+pub mod credmgmt;
 pub mod ctap2;
 pub mod der;
 pub mod hid;
 pub mod keys;
+pub mod passkeys;
+pub mod pin;
 pub mod u2f;
+
+#[cfg(test)]
+mod flows;

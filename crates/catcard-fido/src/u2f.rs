@@ -508,12 +508,13 @@ mod tests {
         let n = ctap2::handle(
             &get_assertion_req(rp, &[&kh], Some(false)),
             &mut out,
+            &mut crate::pin::Session::new(),
             &mut env,
         );
         assert_eq!(out[0], status::OK, "{:02x?}", &out[..n]);
         // And a CTAP2 credential passes the U2F check.
         let mc = ctap2::tests::make_credential_req(rp, &[-7], &[], None);
-        let n = ctap2::handle(&mc, &mut out, &mut env);
+        let n = ctap2::handle(&mc, &mut out, &mut crate::pin::Session::new(), &mut env);
         let (id, ..) = registered(&out[..n]);
         let mut a = [0u8; 32].to_vec();
         a.extend_from_slice(&app);

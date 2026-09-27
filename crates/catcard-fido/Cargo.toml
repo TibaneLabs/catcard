@@ -16,7 +16,9 @@ std = []
 [dependencies]
 # P-256 ECDSA (ES256) with RFC 6979 nonces, SHA-256 and HMAC. `ec` only: the P-256
 # fixed-base table (`p256-table`) is 60 KB of flash and stays off.
-purecrypto = { workspace = true, features = ["ec", "hash"] }
+# `cipher` and `kdf` for the client PIN (AES-256-CBC, HKDF-SHA-256) and the passkey file
+# (AES-256-GCM); both are already in the firmware through other crates.
+purecrypto = { workspace = true, features = ["ec", "hash", "cipher", "kdf"] }
 zeroize = { workspace = true, features = ["derive"] }
 # `KeyWork` and `ExtendedPrivKey`: every function here that touches a credential key takes
 # the token, so the firmware can only reach them inside `keywork::run`, interrupts masked.

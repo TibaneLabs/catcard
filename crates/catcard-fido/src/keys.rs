@@ -144,6 +144,34 @@ impl Master {
         ok.then_some(nonce)
     }
 
+    /// The key this wallet's passkey file is sealed under, and the eight bytes that name
+    /// the file ([`crate::passkeys`]). HMACs of the MAC half under labels no credential id
+    /// uses, so neither says anything about a credential, or the other.
+    pub fn passkey_key(&self, _kw: &KeyWork) -> crate::passkeys::PasskeyKey {
+        let mac = |label: &[u8]| {
+            let mut h = HmacSha256::new(&self.mac);
+            h.update(b"passkeys");
+            h.update(&[CRED_VERSION]);
+            h.update(label);
+            h.finalize()
+        };
+        let mut enc = mac(b"enc");
+        let mut auth = mac(b"mac");
+        let mut name = mac(b"name");
+        let mut k = crate::passkeys::PasskeyKey {
+            enc: [0; 32],
+            mac: [0; 32],
+            name: [0; 8],
+        };
+        k.enc.copy_from_slice(&enc);
+        k.mac.copy_from_slice(&auth);
+        k.name.copy_from_slice(&name[..8]);
+        enc.zeroize();
+        auth.zeroize();
+        name.zeroize();
+        k
+    }
+
     /// The credential's signing key. `None` only after [`MAX_TRIES`] out-of-range
     /// candidates in a row, which does not happen.
     pub fn signing_key(

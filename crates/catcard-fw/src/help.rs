@@ -449,6 +449,16 @@ feature!(
 );
 
 feature!(
+    /// Settings -> Hardware On/Off -> Security key.
+    SECURITY_KEY = "Security key help",
+    [
+        "On / Off: whether computers see this wallet's FIDO2 / U2F security key.",
+        "Passkeys: logins kept on this device for sites that sign in without a username. Pick one to delete it.",
+        "The security-key PIN is set and changed from the browser, and asked on this screen. Only a reset from the browser removes it, with every passkey.",
+    ]
+);
+
+feature!(
     /// Settings -> Multisig.
     MULTISIG = "Multisig help",
     [

@@ -2937,6 +2937,7 @@ fn feature_help(screen: Screen) -> Option<crate::help::Doc> {
         Screen::WifStore => h::WIF_STORE,
         Screen::Notes => h::NOTES,
         Screen::Multisig => h::MULTISIG,
+        Screen::SecurityKey => h::SECURITY_KEY,
         _ => return None,
     })
 }

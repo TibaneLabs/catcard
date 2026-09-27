@@ -334,17 +334,43 @@ pub(crate) fn save_wallet(
     login: &mut catcard_pin::Login,
     ui: &mut crate::ui::Ui<'_>,
     head: &str,
-    (name, raw): (&str, &str),
+    pair: (&str, &str),
+    doc: &mut [u8],
+    seal: &mut [u8],
+) -> Result<(), &'static str> {
+    save_wallet_many(gate, login, ui, head, &[pair], doc, seal)
+}
+
+/// [`save_wallet`] for up to [`MANY`] keys at once, in one slot write: either all of them
+/// land or none does. For values that must never be seen apart -- a security-key reset's
+/// new generation and its cleared PIN.
+pub(crate) const MANY: usize = 2;
+
+pub(crate) fn save_wallet_many(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    new: &[(&str, &str)],
     doc: &mut [u8],
     seal: &mut [u8],
 ) -> Result<(), &'static str> {
     use catcard_settings::store;
 
+    let Some(&(name, _)) = new.first() else {
+        return Ok(());
+    };
+    if new.len() > MANY {
+        return Err("too many settings at once");
+    }
     // A hobbled device writes nothing of the owner's: only the policy's own object (its
     // last violation and last spend height) and the identity keys below. Refused here,
     // under every screen that saves, so a row the hobbled filter missed still cannot
     // change a setting. See `crate::policy`.
-    if crate::policy::hobbled() && !catcard_settings::policy::may_save(name) {
+    if let Some(&(name, _)) = new
+        .iter()
+        .find(|(n, _)| crate::policy::hobbled() && !catcard_settings::policy::may_save(n))
+    {
         crate::catlog!("settings: {} not saved: spending policy active", name);
         return Err("spending policy active");
     }
@@ -378,7 +404,7 @@ pub(crate) fn save_wallet(
         );
     }
 
-    let mut pairs: heapless::Vec<(&str, &str), 5> = heapless::Vec::new();
+    let mut pairs: heapless::Vec<(&str, &str), { 4 + MANY }> = heapless::Vec::new();
     if !xfp_text.is_empty() {
         let _ = pairs.push(("chain", "\"BTC\""));
         let _ = pairs.push(("xfp", xfp_text.as_str()));
@@ -389,7 +415,9 @@ pub(crate) fn save_wallet(
             let _ = pairs.push(("xpub", xpub_text.as_str()));
         }
     }
-    let _ = pairs.push((name, raw));
+    for &p in new {
+        let _ = pairs.push(p);
+    }
 
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
     match store::set_many(&mut files, &key, &pairs, choose, doc, seal) {

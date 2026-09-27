@@ -15,6 +15,7 @@
 //! | Keyboard EMU | [`crate::usbtask::set_keyboard`], which re-enumerates with or without the keyboard |
 //! | Security key | [`crate::usbtask::set_fido`], which re-enumerates with or without the FIDO interface |
 //! | FIDO generation | [`crate::fido`], which derives the security key's master from it |
+//! | FIDO PIN set | [`crate::fido::set_pin_known`], which GetInfo's `clientPin` reports |
 //! | menu wrapping | the [`catcard_ui::scroll::ScrollView`] every menu is drawn through |
 //! | backlight (Q1) | [`crate::display::set_backlight`], from [`apply`] |
 //! | BIP-85 index cap | [`crate::derive`], which refuses an index past 9999 unless lifted |
@@ -105,6 +106,10 @@ pub(crate) struct Prefs {
     /// The wallet's FIDO generation; `None` when the stored value cannot be read, which
     /// [`crate::fido`] refuses to work under until a reset writes a new one.
     pub fido_gen: Option<u32>,
+    /// Whether a security-key PIN is stored for this wallet (an unreadable one counts:
+    /// it is blocked, not absent). Only whether: the hash and the retries are read by
+    /// [`crate::fido`] when a request needs them.
+    pub fido_pin: bool,
 }
 
 impl Prefs {
@@ -150,6 +155,7 @@ impl Default for Prefs {
             hsm_commands: false,
             fido: false,
             fido_gen: Some(0),
+            fido_pin: false,
         }
     }
 }
@@ -179,6 +185,7 @@ static mut CURRENT: Prefs = Prefs {
     hsm_commands: false,
     fido: false,
     fido_gen: Some(0),
+    fido_pin: false,
 };
 
 /// What the wallet in force is set to.
@@ -210,6 +217,7 @@ fn apply(next: Prefs) {
     crate::usbtask::wallet_port(next.usb_port);
     crate::usbtask::set_keyboard(next.keyboard_emu);
     crate::usbtask::set_fido(next.fido);
+    crate::fido::set_pin_known(next.fido_pin);
     crate::ckcc::set_hsm_commands(next.hsm_commands);
     // Only the Q1 has a backlight to drive; the mono boards carry the field at its default
     // and there is nothing to apply.
@@ -299,6 +307,7 @@ pub(crate) fn load(
         hsm_commands: prefs::hsm_commands(&doc),
         fido: prefs::fido(&doc),
         fido_gen: prefs::fido_generation(&doc),
+        fido_pin: prefs::fido_pin(&doc) != prefs::FidoPin::Unset,
     };
     crate::catlog!(
         "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}, xfp {}",
@@ -363,6 +372,44 @@ pub(crate) fn save(
         }
         Err(why) => {
             crate::catlog!("prefs: saving {} failed: {}", name, why);
+            false
+        }
+    }
+}
+
+/// [`save`] for several keys in one slot write: all of them land, or none does.
+pub(crate) fn save_many(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    pairs: &[(&str, &str)],
+    next: Prefs,
+) -> bool {
+    use catcard_settings::store::SCRATCH;
+
+    let _busy = crate::menu::blocking_screen(ui.panel, head, "saving");
+    let (Some(mut doc_held), Some(mut seal_held)) =
+        (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
+    else {
+        crate::catlog!("prefs: no memory to save {} settings", pairs.len());
+        return false;
+    };
+    match crate::settings::save_wallet_many(
+        gate,
+        login,
+        ui,
+        head,
+        pairs,
+        doc_held.bytes(),
+        seal_held.bytes(),
+    ) {
+        Ok(()) => {
+            apply(next);
+            true
+        }
+        Err(why) => {
+            crate::catlog!("prefs: saving {} settings failed: {}", pairs.len(), why);
             false
         }
     }
