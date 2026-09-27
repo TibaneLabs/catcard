@@ -218,6 +218,21 @@ impl Spi {
         Ok(Self { base })
     }
 
+    /// A second handle to an instance [`init`](Self::init) already configured, touching
+    /// no register -- for a path that has to hand the transmit side back from DMA
+    /// ([`end_tx_dma`](Self::end_tx_dma)) without being able to reach the owner's handle:
+    /// a backstop run from another task or an exception handler.
+    ///
+    /// # Safety
+    ///
+    /// The instance was initialised, and for as long as the handle is used nothing else
+    /// drives it -- which holds while a DMA channel has its transmit side, since the
+    /// owner must not use it then either.
+    pub unsafe fn steal(instance: u8) -> Result<Self, Error> {
+        let base = base_of(instance).ok_or(Error::NoSuchInstance { instance })?;
+        Ok(Self { base })
+    }
+
     fn wait(&self, mask: u32, want: u32) -> Result<(), Error> {
         // SAFETY: reading this instance's status register.
         if unsafe { reg::wait_for(self.base + SR, mask, want, POLL_LIMIT) } {

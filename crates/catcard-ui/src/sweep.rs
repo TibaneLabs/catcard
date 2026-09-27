@@ -106,6 +106,76 @@ pub const fn resume_phase(phase: usize, at: usize) -> usize {
     (phase + PERIOD - at % PERIOD) % PERIOD
 }
 
+/// Who may stop a running sweep: the one holder of the [`Lease`] it was started under,
+/// or anyone who must stop whatever is running.
+///
+/// A waiting screen starts the sweep and keeps a lease for as long as its work runs, then
+/// stops the sweep by that lease. The lease is what stops a *stale* holder -- a screen
+/// whose sweep a later draw already stopped, and which is only now being dropped -- from
+/// stopping somebody else's newer sweep. [`take`](Self::take) needs no lease: it is for
+/// the frame about to be drawn over the bar, and for the backstop before the bootloader
+/// draws, both of which must stop whatever is there.
+///
+/// `T` is what the running sweep needs to be stopped. Nothing here touches hardware.
+pub struct Slot<T> {
+    /// Bumped by every [`put`](Self::put): a lease names the start it came from.
+    started: u32,
+    held: Option<T>,
+}
+
+/// The right to stop one particular start of a sweep. Not `Copy`: one holder.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a sweep nobody holds the lease to runs until the next frame"]
+pub struct Lease(u32);
+
+impl<T> Slot<T> {
+    /// Nothing running.
+    pub const fn new() -> Self {
+        Self {
+            started: 0,
+            held: None,
+        }
+    }
+
+    /// Whether a sweep is running.
+    pub const fn is_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Record a sweep that has just started, and hand out the lease to it. `Err` gives
+    /// `run` back if one is already recorded -- stop that one first; two cannot share
+    /// the bus.
+    pub fn put(&mut self, run: T) -> Result<Lease, T> {
+        if self.held.is_some() {
+            return Err(run);
+        }
+        self.started = self.started.wrapping_add(1);
+        self.held = Some(run);
+        Ok(Lease(self.started))
+    }
+
+    /// Take whatever is running, whoever started it.
+    pub fn take(&mut self) -> Option<T> {
+        self.held.take()
+    }
+
+    /// Take the running sweep only if it is the one `lease` was handed out for. `None`,
+    /// with the slot left alone, if nothing is running or a newer start is.
+    pub fn take_leased(&mut self, lease: Lease) -> Option<T> {
+        if lease.0 == self.started {
+            self.held.take()
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +282,45 @@ mod tests {
     fn a_short_buffer_is_refused() {
         let mut small = [0u8; 16];
         assert_eq!(fill(&mut small), None);
+    }
+
+    #[test]
+    fn a_lease_stops_its_own_sweep_once() {
+        let mut slot = Slot::new();
+        let lease = slot.put('a').unwrap();
+        assert!(slot.is_held());
+        assert_eq!(slot.take_leased(lease), Some('a'));
+        assert!(!slot.is_held());
+    }
+
+    #[test]
+    fn a_stale_lease_cannot_stop_a_newer_sweep() {
+        // A waiting screen's sweep, stopped by the next frame; then a new sweep for the
+        // next wait; then the first screen's guard is dropped. It must not stop the new one.
+        let mut slot = Slot::new();
+        let old = slot.put(1).unwrap();
+        assert_eq!(slot.take(), Some(1));
+        let new = slot.put(2).unwrap();
+        assert_eq!(slot.take_leased(old), None);
+        assert!(slot.is_held());
+        assert_eq!(slot.take_leased(new), Some(2));
+    }
+
+    #[test]
+    fn a_lease_whose_sweep_was_already_stopped_is_a_no_op() {
+        let mut slot: Slot<u8> = Slot::new();
+        let lease = slot.put(7).unwrap();
+        // The backstop, or the frame drawn over it.
+        assert_eq!(slot.take(), Some(7));
+        assert_eq!(slot.take_leased(lease), None);
+        assert_eq!(slot.take(), None);
+    }
+
+    #[test]
+    fn two_sweeps_cannot_be_recorded_at_once() {
+        let mut slot = Slot::new();
+        let _lease = slot.put(1).unwrap();
+        assert_eq!(slot.put(2), Err(2));
+        assert_eq!(slot.take(), Some(1));
     }
 }
