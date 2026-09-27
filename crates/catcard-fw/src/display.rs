@@ -1270,6 +1270,8 @@ fn draw_keeping_marks(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mu
     // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+    #[cfg(all(feature = "board-q1", feature = "dev"))]
+    let t0 = catcard_hal::dwt::cycles();
     #[cfg(feature = "board-q1")]
     {
         // The screen paints into the rows below the bar, then the bar goes on top of its
@@ -1285,7 +1287,24 @@ fn draw_keeping_marks(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mu
     f(screen);
     #[cfg(feature = "board-q1")]
     BAR_SHOWN.store(true, Ordering::SeqCst);
+    #[cfg(all(feature = "board-q1", feature = "dev"))]
+    let t1 = catcard_hal::dwt::cycles();
     show(panel, screen, content, BAR_H);
+    // Where a frame's time goes, on development builds: painting the canvas, then sending
+    // what changed (and how many rows that was).
+    #[cfg(all(feature = "board-q1", feature = "dev"))]
+    {
+        let t2 = catcard_hal::dwt::cycles();
+        // SAFETY: reads RCC.
+        let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
+        crate::catlog!(
+            "frame: render {} us, send {} us, {} rows",
+            t1.wrapping_sub(t0) / per_us,
+            t2.wrapping_sub(t1) / per_us,
+            // SAFETY: foreground, single core, outside the flush.
+            unsafe { *core::ptr::addr_of!(ROWS_LAST) }
+        );
+    }
     DRAWING.store(false, Ordering::SeqCst);
 }
 
@@ -1486,7 +1505,7 @@ fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
             });
         }
     }
-    let _ = panel.flush_gray_changed_split(
+    let sent = panel.flush_gray_changed_split(
         screen,
         &catcard_ui::st7789::GREYS,
         palette,
@@ -1494,7 +1513,13 @@ fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
         cache,
         &overlays,
     );
+    // SAFETY: foreground, single core.
+    unsafe { *core::ptr::addr_of_mut!(ROWS_LAST) = sent.unwrap_or(usize::MAX) };
 }
+
+/// Rows the last flush sent, for the development builds' frame timing.
+#[cfg(feature = "board-q1")]
+static mut ROWS_LAST: usize = 0;
 
 /// The palette the panel was last flushed through.
 #[cfg(feature = "board-q1")]

@@ -127,6 +127,7 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
     fn height(&self) -> usize {
         H
     }
+    #[inline]
     fn put(&mut self, x: usize, y: usize, level: Level) {
         if x >= W || y >= H {
             return;
@@ -134,6 +135,7 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
         let (i, shift) = Self::at(x, y);
         self.buf[i] = (self.buf[i] & !(0x0F << shift)) | (level.min(INK) << shift);
     }
+    #[inline]
     fn get(&self, x: usize, y: usize) -> Level {
         if x >= W || y >= H {
             return PAPER;
@@ -143,6 +145,34 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
     }
     fn clear(&mut self) {
         self.buf.fill(0);
+    }
+    /// Whole bytes -- two pixels each -- for the run between a row's odd ends, rather than
+    /// a read-modify-write per pixel. Every list, card and page starts by filling most of
+    /// the panel, so this is most of a frame's painting.
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, level: Level) {
+        let x1 = x.saturating_add(w).min(W);
+        let y1 = y.saturating_add(h).min(H);
+        if x >= x1 || y >= y1 {
+            return;
+        }
+        let l = level.min(INK);
+        let both = (l << 4) | l;
+        for yy in y..y1 {
+            let mut xx = x;
+            if xx % 2 == 1 {
+                self.put(xx, yy, l);
+                xx += 1;
+            }
+            let pairs = (x1 - xx) / 2;
+            if pairs > 0 {
+                let (i, _) = Self::at(xx, yy);
+                self.buf[i..i + pairs].fill(both);
+                xx += pairs * 2;
+            }
+            if xx < x1 {
+                self.put(xx, yy, l);
+            }
+        }
     }
 }
 
@@ -321,6 +351,7 @@ impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
             .saturating_sub(self.bottom)
     }
 
+    #[inline]
     fn put(&mut self, x: usize, y: usize, level: Level) {
         // Clipped against the *inset* height, not the panel's: without this a widget
         // drawing one row past its canvas would land on the far side of the offset and
@@ -330,6 +361,18 @@ impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
         }
     }
 
+    /// One rectangle for the canvas underneath, clipped to this band, instead of the
+    /// default's pixel at a time through every layer of inset.
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, level: Level) {
+        let band = self.height();
+        if y >= band {
+            return;
+        }
+        self.inner
+            .fill_rect(x, y + self.top, w, h.min(band - y), level);
+    }
+
+    #[inline]
     fn get(&self, x: usize, y: usize) -> Level {
         if y < self.height() {
             self.inner.get(x, y + self.top)
@@ -409,6 +452,51 @@ mod inset_tests {
 
     /// A band hides its foot as well as its top: clearing it, or drawing past its end,
     /// leaves both alone.
+    /// The byte-wide fill paints exactly the pixels a pixel-at-a-time fill would, for
+    /// every parity of start and end, and clips the same way.
+    #[test]
+    fn the_fast_fill_matches_the_pixel_fill() {
+        let rects = [
+            (0, 0, 320, 240),
+            (1, 3, 5, 2),
+            (2, 0, 4, 1),
+            (3, 7, 1, 1),
+            (318, 238, 10, 10),
+            (7, 9, 0, 4),
+            (100, 100, 51, 33),
+        ];
+        for (i, &(x, y, w, h)) in rects.iter().enumerate() {
+            let level = (i as Level % 15) + 1;
+            let mut fast = Gray320x240::new();
+            let mut slow = Gray320x240::new();
+            fast.fill_rect(x, y, w, h, level);
+            let x1 = (x + w).min(320);
+            let y1 = (y + h).min(240);
+            for yy in y..y1 {
+                for xx in x..x1 {
+                    slow.put(xx, yy, level);
+                }
+            }
+            assert!(fast.as_bytes() == slow.as_bytes(), "rect {i} differs");
+        }
+    }
+
+    /// Filling through two layers of inset lands in the same place as filling the canvas
+    /// at the combined offset, clipped to the inner band.
+    #[test]
+    fn a_fill_through_insets_is_offset_and_clipped() {
+        let mut through = Gray320x240::new();
+        {
+            let mut a = Inset::new(&mut through, 16);
+            let mut b = Inset::band(&mut a, 0, 16);
+            b.fill_rect(10, 200, 20, 50, 9);
+        }
+        let mut direct = Gray320x240::new();
+        // The inner band is 240 - 16 - 16 = 208 rows tall, so rows 200..208 of it.
+        direct.fill_rect(10, 216, 20, 8, 9);
+        assert!(through.as_bytes() == direct.as_bytes());
+    }
+
     #[test]
     fn a_band_leaves_the_rows_under_it_alone() {
         let mut grid = Grid([[INK; 4]; 4]);
