@@ -173,6 +173,7 @@ mod imp {
     /// A store that cannot be read at all -- no key, no mount, no memory -- reads as off,
     /// as every other preference does: the failure is the device's, not the policy's, and
     /// it is logged. A policy that is *there* and will not read is [`Mode::Damaged`].
+    #[inline(never)]
     pub(crate) fn load(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         let typed = state().unlock_typed;
         let read = {

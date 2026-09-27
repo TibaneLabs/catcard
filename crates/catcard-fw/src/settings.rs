@@ -945,6 +945,7 @@ pub(crate) fn save_battery_off(ui: &mut crate::ui::Ui<'_>, seconds: Option<u32>)
 /// overwritten by an older wallet's. The old key stays in the wallet file, unread for
 /// anything but this.
 #[cfg(feature = "board-q1")]
+#[inline(never)]
 pub(crate) fn migrate_battery_idle(ui: &mut crate::ui::Ui<'_>) {
     // SAFETY: foreground only.
     let (set, _) = unsafe { *core::ptr::addr_of!(BATT_OFF) };

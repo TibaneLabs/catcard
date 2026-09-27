@@ -1133,6 +1133,11 @@ const DEBUG_ITEMS: &[&str] = &[
 /// Also the idle loop: USB is polled here, and a staged upgrade takes over the screen
 /// wherever the user happens to be. Keeping one loop means there is no menu screen that
 /// quietly stops serving the host.
+///
+/// Its frame sits under every screen for the whole session, so what it calls that has
+/// a frame of its own -- `draw`, the login readers, the host flows, HSM mode, a menu's
+/// key handler -- is `#[inline(never)]`. Inlined, their locals were summed into this one
+/// frame (14 KB of the UI task's 32) and stayed resident beneath everything else.
 pub fn run(session: Session<'_>) -> ! {
     let Session {
         gate,
@@ -2553,6 +2558,7 @@ impl MenuScreen {
     /// The move runs through the scroll view so the highlight travels within the panel
     /// and only pushes the view at an edge, and so pressing past the first or last item
     /// keeps scrolling to reveal the title.
+    #[inline(never)]
     fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
         #[cfg(feature = "board-q1")]
         if is_grid_items(items) {
@@ -2907,6 +2913,7 @@ fn feature_help(screen: Screen) -> Option<crate::help::Doc> {
 }
 
 /// Draw whichever screen we are on.
+#[inline(never)]
 fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     match screen {
         // Every list screen renders the same way; the title and note come from

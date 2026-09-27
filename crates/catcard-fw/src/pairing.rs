@@ -19,6 +19,7 @@ use crate::display;
 /// Q1 the 10x20 title fits the whole question, with the code under it in the 7x14 body; on
 /// the mono panels the body face is 4x6, too small to compare digits at arm's length, so
 /// the code takes the 7x14 title row and the question moves below it.
+#[inline(never)]
 pub fn show(panel: &mut display::Panel, code: u32) {
     let text = catcard_usb::ncry::code_text(code);
     // Always ASCII digits and one space; the fallback is never taken.
@@ -45,6 +46,7 @@ pub fn show(panel: &mut display::Panel, code: u32) {
 ///
 /// Dismissing it lets pairing go on; the next few abandoned attempts block it again, so a
 /// relay that is still there needs the person each time.
+#[inline(never)]
 pub fn show_blocked(panel: &mut display::Panel, abandoned: u8) {
     use core::fmt::Write as _;
     let mut line: heapless::String<32> = heapless::String::new();

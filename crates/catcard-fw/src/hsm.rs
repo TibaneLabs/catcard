@@ -701,6 +701,7 @@ pub(crate) fn start_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
 /// explained and offered, and refusing it leads to the menus. The HSM commands are
 /// answered for the session either way, as stock sets `hsmcmd` here.
 /// Source: hsm-policy-format.md §1.5, §4 "Boot" [C]
+#[inline(never)]
 pub(crate) fn at_login(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     if !look_for_policy() || !crate::key::is_root() {
         return;
@@ -749,6 +750,7 @@ fn fatal(gate: &Callgate, ui: &mut Ui<'_>, why: &str) -> ! {
 
 /// HSM mode's screen, in place of the menus. Returns only when the boot code was typed.
 /// Source: §3.5, help-and-warning-screens.md §13 "During HSM operation" [C]
+#[inline(never)]
 pub(crate) fn run(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

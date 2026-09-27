@@ -65,6 +65,7 @@ macro_rules! feature {
 /// Show a help document, and wait until it is dismissed.
 ///
 /// Straight from the constant: no list is built on the stack for it.
+#[inline(never)]
 pub(crate) fn show(ui: &mut Ui<'_>, doc: Doc) {
     let _ = menu::show_doc(ui, doc, false, false);
 }

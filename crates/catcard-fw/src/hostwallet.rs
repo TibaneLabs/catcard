@@ -703,6 +703,7 @@ fn take_note() -> heapless::String<40> {
 }
 
 /// Answer the question a host is waiting on, if there is one. Called by the menu loop.
+#[inline(never)]
 pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(t) = crate::usbtask::host_take() else {
         return;
