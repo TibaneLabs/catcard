@@ -180,6 +180,12 @@ pub struct Device {
     /// under [`descriptor::DEVICE_CKCC`]'s VID/PID, and never the keyboard beside it.
     /// A configuration choice like `mode`, so it survives a bus reset.
     pub ckcc: bool,
+    /// Whether the HID identity also carries the FIDO security key ([`crate::fido`]).
+    /// A configuration choice like `keyboard`: off by default, and the caller
+    /// re-attaches after changing it.
+    pub fido: bool,
+    /// The security key interface's own idle rate, for the same reason as `idle_kbd`.
+    pub idle_fido: u8,
 }
 
 impl Device {
@@ -195,6 +201,8 @@ impl Device {
             idle_kbd: 0,
             protocol_kbd: hid_protocol::REPORT,
             ckcc: false,
+            fido: false,
+            idle_fido: 0,
         }
     }
 
@@ -232,6 +240,37 @@ impl Device {
     /// our own HID identity (the mass-storage one and stock's never carry it).
     pub fn keyboard_present(&self) -> bool {
         self.keyboard && self.mode == DeviceMode::Hid && !self.ckcc
+    }
+
+    /// Present, or withdraw, the FIDO security key beside the wallet's interface (and
+    /// the keyboard's). Takes effect on the next enumeration, like
+    /// [`set_keyboard`](Self::set_keyboard).
+    pub fn set_fido(&mut self, on: bool) {
+        self.fido = on;
+    }
+
+    /// Whether the security key is part of what the host enumerated: on, and in our own
+    /// HID identity -- never stock's, never the mass-storage one.
+    pub fn fido_present(&self) -> bool {
+        self.fido && self.mode == DeviceMode::Hid && !self.ckcc
+    }
+
+    /// The security key's interface number: straight after the wallet, or after the
+    /// keyboard when that is there too. Meaningful only while [`fido_present`].
+    ///
+    /// [`fido_present`]: Self::fido_present
+    pub fn fido_interface(&self) -> u16 {
+        if self.keyboard_present() { 2 } else { 1 }
+    }
+
+    /// Whether `index` names the keyboard's interface, while it is enumerated.
+    fn is_kbd_interface(&self, index: u16) -> bool {
+        self.keyboard_present() && index == crate::kbd::INTERFACE as u16
+    }
+
+    /// Whether `index` names the security key's interface, while it is enumerated.
+    fn is_fido_interface(&self, index: u16) -> bool {
+        self.fido_present() && index == self.fido_interface()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -357,6 +396,8 @@ fn is_data_endpoint(dev: &Device, index: u16) -> bool {
     index == descriptor::EP_IN as u16
         || index == descriptor::EP_OUT as u16
         || (dev.keyboard_present() && index == crate::kbd::EP_IN as u16)
+        || (dev.fido_present()
+            && (index == crate::fido::EP_IN as u16 || index == crate::fido::EP_OUT as u16))
 }
 
 /// Whether `wIndex` names any endpoint this device has: the data endpoints, or the
@@ -366,9 +407,10 @@ fn endpoint_exists(dev: &Device, index: u16) -> bool {
 }
 
 /// Whether `wIndex` names an interface the host was told about: 0 always, the
-/// keyboard's only while it is enumerated. The high byte is reserved and must be zero.
+/// keyboard's and the security key's only while they are enumerated. The high byte is
+/// reserved and must be zero.
 fn interface_exists(dev: &Device, index: u16) -> bool {
-    index == 0 || (dev.keyboard_present() && index == crate::kbd::INTERFACE as u16)
+    index == 0 || dev.is_kbd_interface(index) || dev.is_fido_interface(index)
 }
 
 /// EP0's max packet size, taken from the device descriptor rather than restated.
@@ -397,6 +439,14 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         // With the keyboard on, the composite table: the same interface 0 at the same
         // offset, then the keyboard. The host re-enumerated to read it -- see
         // `Device::set_keyboard` -- so it is never a surprise mid-session.
+        // The security key goes last, after the keyboard if that is on too; see
+        // `crate::fido`. Off, these two arms never match and nothing below changes.
+        kind::CONFIGURATION if dev.fido_present() && dev.keyboard_present() => Action::Data(
+            trim_static(&crate::fido::CONFIGURATION_WITH_KBD, setup.wLength),
+        ),
+        kind::CONFIGURATION if dev.fido_present() => {
+            Action::Data(trim_static(&crate::fido::CONFIGURATION, setup.wLength))
+        }
         kind::CONFIGURATION if dev.keyboard_present() => {
             Action::Data(trim_static(&crate::kbd::CONFIGURATION, setup.wLength))
         }
@@ -404,8 +454,11 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
         kind::HID_REPORT if iface == 0 => {
             Action::Data(trim_static(&descriptor::REPORT_DESCRIPTOR, setup.wLength))
         }
-        kind::HID_REPORT if interface_exists(dev, iface) => {
+        kind::HID_REPORT if dev.is_kbd_interface(iface) => {
             Action::Data(trim_static(&crate::kbd::REPORT_DESCRIPTOR, setup.wLength))
+        }
+        kind::HID_REPORT if dev.is_fido_interface(iface) => {
+            Action::Data(trim_static(&crate::fido::REPORT_DESCRIPTOR, setup.wLength))
         }
         kind::HID_REPORT => Action::Stall,
         kind::STRING => {
@@ -434,10 +487,17 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
                 setup.wLength,
             ))
         }
-        kind::HID if interface_exists(dev, iface) => {
+        kind::HID if dev.is_kbd_interface(iface) => {
             const AT: usize = crate::kbd::at::KBD_HID;
             Action::Data(trim_static(
                 &crate::kbd::CONFIGURATION[AT..AT + 9],
+                setup.wLength,
+            ))
+        }
+        kind::HID if dev.is_fido_interface(iface) => {
+            const AT: usize = crate::fido::at::HID;
+            Action::Data(trim_static(
+                &crate::fido::CONFIGURATION[AT..AT + 9],
                 setup.wLength,
             ))
         }
@@ -471,20 +531,31 @@ fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'
     if !interface_exists(dev, setup.wIndex) {
         return Action::Stall;
     }
-    let kbd = setup.wIndex == crate::kbd::INTERFACE as u16;
+    // Which interface, by what it is rather than by number: with the keyboard off, the
+    // security key is interface 1, the number the keyboard has when it is on.
+    let kbd = dev.is_kbd_interface(setup.wIndex);
+    let fido = dev.is_fido_interface(setup.wIndex);
     match setup.bRequest {
         // Windows sends SET_IDLE during enumeration and will not proceed if it stalls.
         hid_request::SET_IDLE => {
             let rate = (setup.wValue >> 8) as u8;
             if kbd {
                 dev.idle_kbd = rate;
+            } else if fido {
+                dev.idle_fido = rate;
             } else {
                 dev.idle = rate;
             }
             Action::Ack
         }
         hid_request::GET_IDLE => {
-            scratch[0] = if kbd { dev.idle_kbd } else { dev.idle };
+            scratch[0] = if kbd {
+                dev.idle_kbd
+            } else if fido {
+                dev.idle_fido
+            } else {
+                dev.idle
+            };
             Action::Data(trim(&scratch[..1], setup.wLength))
         }
         // The keyboard is a boot interface, so a BIOS may switch it to boot protocol
@@ -1147,6 +1218,160 @@ mod tests {
             &mut s,
         );
         assert_eq!(a, Action::Data(&[hid_protocol::REPORT]));
+    }
+
+    /// With the security key off -- the default -- the device enumerates exactly as
+    /// before, keyboard or not: its endpoints and interface do not exist to be asked about.
+    #[test]
+    fn with_the_security_key_off_nothing_about_enumeration_changes() {
+        for kbd in [false, true] {
+            let mut d = dev();
+            d.set_keyboard(kbd);
+            let mut s = [0u8; 64];
+            let a = handle(
+                &mut d,
+                &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+                &mut s,
+            );
+            let want: &[u8] = if kbd {
+                &crate::kbd::CONFIGURATION
+            } else {
+                &descriptor::CONFIGURATION
+            };
+            assert_eq!(a, Action::Data(want));
+            let iface = if kbd { 2 } else { 1 };
+            assert_eq!(
+                handle(
+                    &mut d,
+                    &setup(0x81, request::GET_DESCRIPTOR, 0x2200, iface, 255),
+                    &mut s
+                ),
+                Action::Stall
+            );
+            for ep in [0x83u16, 0x03] {
+                assert_eq!(
+                    handle(
+                        &mut d,
+                        &setup(0x02, request::CLEAR_FEATURE, 0, ep, 0),
+                        &mut s
+                    ),
+                    Action::Stall,
+                    "endpoint {ep:#x}"
+                );
+            }
+        }
+    }
+
+    /// On, the security key is the interface after the others, and answers for itself --
+    /// in particular, as interface 1 with the keyboard off, it is not mistaken for the
+    /// keyboard, which has that number when it is on.
+    #[test]
+    fn with_the_security_key_on_it_is_the_last_interface_and_answers_for_itself() {
+        let mut s = [0u8; 64];
+        for (kbd, iface, table) in [
+            (false, 1u16, &crate::fido::CONFIGURATION[..]),
+            (true, 2, &crate::fido::CONFIGURATION_WITH_KBD[..]),
+        ] {
+            let mut d = dev();
+            d.set_keyboard(kbd);
+            d.set_fido(true);
+            assert!(d.fido_present());
+            assert_eq!(d.fido_interface(), iface);
+            let a = handle(
+                &mut d,
+                &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 512),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(table));
+            let a = handle(
+                &mut d,
+                &setup(0x81, request::GET_DESCRIPTOR, 0x2200, iface, 255),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(&crate::fido::REPORT_DESCRIPTOR[..]));
+            let a = handle(
+                &mut d,
+                &setup(0x81, request::GET_DESCRIPTOR, 0x2100, iface, 9),
+                &mut s,
+            );
+            let Action::Data(b) = a else { panic!("{a:?}") };
+            assert_eq!(b[1], kind::HID);
+            assert_eq!(b[7] as usize, crate::fido::REPORT_DESCRIPTOR.len());
+            // Its own idle rate, and a plain GET_REPORT under one packet.
+            handle(
+                &mut d,
+                &setup(0x21, hid_request::SET_IDLE, 0x0900, iface, 0),
+                &mut s,
+            );
+            let a = handle(
+                &mut d,
+                &setup(0xA1, hid_request::GET_IDLE, 0, iface, 1),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(&[9]));
+            assert_eq!(d.idle, 0);
+            let a = handle(
+                &mut d,
+                &setup(0xA1, hid_request::GET_PROTOCOL, 0, iface, 1),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(&[hid_protocol::REPORT]));
+            // Both its endpoints exist now.
+            for ep in [0x83u16, 0x03] {
+                assert_eq!(
+                    handle(
+                        &mut d,
+                        &setup(0x02, request::CLEAR_FEATURE, 0, ep, 0),
+                        &mut s
+                    ),
+                    Action::AckThenClearHalt(ep as u8)
+                );
+            }
+            // And the interface after it still does not.
+            assert_eq!(
+                handle(
+                    &mut d,
+                    &setup(0x81, request::GET_DESCRIPTOR, 0x2200, iface + 1, 255),
+                    &mut s
+                ),
+                Action::Stall
+            );
+        }
+        // With the keyboard on, interface 1 is still the keyboard.
+        let mut d = dev();
+        d.set_keyboard(true);
+        d.set_fido(true);
+        let a = handle(
+            &mut d,
+            &setup(0x81, request::GET_DESCRIPTOR, 0x2200, 1, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::kbd::REPORT_DESCRIPTOR[..]));
+    }
+
+    /// Stock's identity and the disk never carry the security key, whatever the flag.
+    #[test]
+    fn neither_ckcc_nor_mass_storage_carries_the_security_key() {
+        let mut s = [0u8; 64];
+        let mut d = dev();
+        d.set_fido(true);
+        d.set_ckcc(true);
+        assert!(!d.fido_present());
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&descriptor::CONFIGURATION[..]));
+        d.set_ckcc(false);
+        d.set_mode(DeviceMode::Msc);
+        assert!(!d.fido_present());
+        let a = handle(
+            &mut d,
+            &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::msc::CONFIGURATION[..]));
     }
 
     /// The keyboard never rides along with the mass-storage identity, whatever the flag.

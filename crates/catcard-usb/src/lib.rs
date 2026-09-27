@@ -48,6 +48,7 @@
 pub mod ckcc;
 pub mod control;
 pub mod descriptor;
+pub mod fido;
 pub mod hostwallet;
 pub mod kbd;
 pub mod msc;
