@@ -508,18 +508,35 @@ impl UiEnv<'_, '_> {
         if self.ticket.is_some() {
             usbtask::fido_status(true);
         }
+        // The bottom rows are the countdown: the standard progress bar, draining as the
+        // request's time runs out, so the person can see how long the site will wait.
+        let bar = catcard_ui::splash::progress_h(display::SCREEN_H);
         let mut view = catcard_ui::scroll::ScrollView::build(
             lines,
             display::SCREEN_W,
-            display::Strip::Off.body_h(),
+            display::Strip::Off.body_h().saturating_sub(bar),
             display::FONTS,
         );
         let started = now_ms();
+        let left = |t: u32| -> u8 {
+            let gone = t.wrapping_sub(started).min(PRESENCE_MS) as u64;
+            (100 - gone * 100 / PRESENCE_MS as u64) as u8
+        };
         let mut events = [KeyEvent::Pressed(Key::Cancel); KEYS];
         let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+        // Wait for the keys to be let go only when the page itself changed hands: the
+        // first time, and after a scroll -- not on every tick of the countdown.
+        let mut release = true;
         let answer = 'ask: loop {
-            display::draw(self.ui.panel, |c| catcard_ui::scroll::render(c, &view));
-            menu::wait_for_release(self.ui);
+            let shown = left(now_ms());
+            display::draw(self.ui.panel, |c| {
+                catcard_ui::scroll::render(c, &view);
+                catcard_ui::splash::draw_progress(c, shown);
+            });
+            if release {
+                menu::wait_for_release(self.ui);
+                release = false;
+            }
             loop {
                 let _ = usbtask::pump();
                 if !self.alive() {
@@ -557,6 +574,12 @@ impl UiEnv<'_, '_> {
                     }
                 }
                 if moved {
+                    release = true;
+                    continue 'ask;
+                }
+                // A new step of the countdown: only the bar's rows differ, which is all
+                // the row cache sends.
+                if left(now_ms()) != shown {
                     continue 'ask;
                 }
                 display::idle(self.ui.panel);
@@ -674,46 +697,41 @@ impl Env for UiEnv<'_, '_> {
                 if excluded {
                     hint = keys_hint("tell the site", "refuse");
                     (
-                        "Already registered at",
-                        "This wallet has a login there already.",
+                        "Already registered",
+                        "This wallet already has a login here.",
                     )
                 } else {
-                    ("Register at", "")
+                    ("Register", "")
                 }
             }
             Ask::SignIn { rp_id, known } => {
                 site = sanitised(rp_id, 64);
                 if known {
-                    ("Sign in to", "")
+                    ("Sign in", "")
                 } else {
                     hint = keys_hint("tell the site", "refuse");
-                    ("Sign in to", "This wallet has no login there.")
+                    ("Sign in", "This wallet has no login here.")
                 }
             }
-            Ask::U2fRegister { .. } => (
-                "Register at a site",
-                "An older (U2F) request: the computer does not say which site.",
-            ),
-            Ask::U2fSignIn { .. } => (
-                "Sign in to a site",
-                "An older (U2F) request: the computer does not say which site.",
-            ),
-            Ask::Select => ("Use this security key?", "The computer asks which to use."),
+            Ask::U2fRegister { .. } => ("Register", "Older U2F request: the site is not named."),
+            Ask::U2fSignIn { .. } => ("Sign in", "Older U2F request: the site is not named."),
+            Ask::Select => ("Security key", "The computer asks which key to use."),
         };
+        // The action is the heading, the site is what the page is about -- centred, on
+        // its own line -- and the account, the wallet and the keys are the fine print.
         let mut lines: heapless::Vec<Line<'_>, 8> = heapless::Vec::new();
-        let _ = lines.push(Line::title(HEAD));
-        let _ = lines.push(Line::body(what).wrapped());
+        let _ = lines.push(Line::title(what).centered());
         if !site.is_empty() {
-            let _ = lines.push(Line::body(site.as_str()).wrapped());
+            let _ = lines.push(Line::body(site.as_str()).centered().wrapped());
         }
         if !account.is_empty() {
-            let _ = lines.push(Line::body(account.as_str()).wrapped());
+            let _ = lines.push(Line::body(account.as_str()).small().centered().wrapped());
         }
         if !note.is_empty() {
-            let _ = lines.push(Line::body(note).wrapped());
+            let _ = lines.push(Line::body(note).small().centered().wrapped());
         }
-        let _ = lines.push(Line::body(wallet.as_str()).wrapped());
-        let _ = lines.push(Line::body(hint.as_str()).small().wrapped());
+        let _ = lines.push(Line::body(wallet.as_str()).small().centered().wrapped());
+        let _ = lines.push(Line::body(hint.as_str()).small().centered().wrapped());
         self.ask_lines(&lines, Key::Confirm)
     }
 
