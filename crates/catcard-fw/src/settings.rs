@@ -338,7 +338,6 @@ pub(crate) fn save_wallet(
     doc: &mut [u8],
     seal: &mut [u8],
 ) -> Result<(), &'static str> {
-    use catcard_settings::json::Doc;
     use catcard_settings::store;
 
     // A hobbled device writes nothing of the owner's: only the policy's own object (its
@@ -355,9 +354,7 @@ pub(crate) fn save_wallet(
 
     // Does this file already say whose it is?
     let n = store::read(&mut files, &key, doc).unwrap_or(0);
-    let known = Doc::parse(&doc[..n])
-        .ok()
-        .is_some_and(|d| d.get("xfp").is_some());
+    let known = says_whose(&doc[..n]);
     crate::catlog!(
         "settings: saving {} into a {} B file{}",
         name,
@@ -410,6 +407,16 @@ pub(crate) fn save_wallet(
             Err("could not save")
         }
     }
+}
+
+/// Whether a settings object already carries its wallet's identity (`xfp`).
+///
+/// A leaf of its own, so the parse is gone before the identity derivation and the save
+/// that [`save_wallet`] goes on to.
+#[inline(never)]
+fn says_whose(json: &[u8]) -> bool {
+    let mut doc = catcard_settings::json::Doc::new();
+    doc.parse_into(json).is_ok() && doc.get("xfp").is_some()
 }
 
 /// The wallet in force's fingerprint, word count and master xpub, as JSON text.
@@ -1433,22 +1440,27 @@ pub(crate) fn inspect(
     login: &mut catcard_pin::Login,
     ui: &mut crate::ui::Ui<'_>,
 ) {
-    use catcard_settings::json::Doc;
     use catcard_settings::nvstore;
     use catcard_settings::store::{self, SCRATCH};
     use catcard_ui::scroll::Line as Row;
     use core::fmt::Write as _;
     use zeroize::Zeroize as _;
 
-    // The decrypted blob outlives the document that borrows its values, so it is declared
-    // first: the rows below point into it rather than copying it. And it is wiped on
-    // every way out of this function -- it is the wallet's whole settings file, Seed
-    // Vault and notes included, and there is more than one early return below.
-    let mut buf = zeroize::Zeroizing::new([0u8; SCRATCH]);
-
     type Note = heapless::String<64>;
     // Owned text the document borrows: the summary lines, which have to be formatted.
     let mut notes: heapless::Vec<Note, 6> = heapless::Vec::new();
+
+    // The decrypted blob outlives the document that borrows its values, so it is taken
+    // first: the rows below point into it rather than copying it. A heap block, which is
+    // wiped when it goes back on every way out of this function -- it is the wallet's
+    // whole settings file, Seed Vault and notes included, and there is more than one
+    // early return below.
+    let Some(mut held) = crate::heap::take(SCRATCH) else {
+        let _ = notes.push(Note::try_from("not enough memory").unwrap_or_default());
+        show(ui, &notes, &[]);
+        return;
+    };
+    let buf = held.bytes();
     // What stands in for the two values this screen never prints; see below.
     let mut seeds_len = Note::new();
     let mut notes_len = Note::new();
@@ -1476,7 +1488,7 @@ pub(crate) fn inspect(
     let mut pre = Note::new();
     match store::read(&mut files, &nvstore::prelogin_key(), &mut buf[..]) {
         Ok(n) => {
-            let doc = Doc::parse(&buf[..n]).ok();
+            let doc = parse_doc(&buf[..n]);
             let age = doc.as_ref().and_then(|d| d.get_u64("_age")).unwrap_or(0);
             let nick = doc.as_ref().and_then(|d| d.get_str("nick")).unwrap_or("-");
             let _ = write!(
@@ -1536,8 +1548,15 @@ pub(crate) fn inspect(
     for n in notes.iter() {
         let _ = rows.push(Row::body(n.as_str()).small());
     }
+    // Declared out here: the rows borrow what it read until the screen is shown.
+    let mut held_doc = crate::heap::room().map(|r| r.fill(catcard_settings::json::Doc::new()));
     if let Ok(n) = found {
-        if let Ok(doc) = Doc::parse(&buf[..n]) {
+        let parsed = held_doc
+            .as_deref_mut()
+            .map(|d| d.parse_into(&buf[..n]).is_ok());
+        if parsed.is_none() {
+            let _ = rows.push(Row::body("not enough memory to read it"));
+        } else if let (Some(true), Some(doc)) = (parsed, held_doc.as_deref()) {
             // Two values are never printed: the Seed Vault, which is other wallets'
             // seeds, and the notes, which hold passwords. Their length is enough to
             // say the decryption came out right, which is all this screen is for.

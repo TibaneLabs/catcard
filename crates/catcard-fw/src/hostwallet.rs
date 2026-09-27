@@ -559,11 +559,22 @@ pub(crate) fn keys_of(
     blob: &wire::SignBlob<'_>,
 ) -> Result<heapless::Vec<KeyPath, { wire::MAX_KEYS }>, &'static str> {
     let mut keys = heapless::Vec::new();
+    keys_into(blob, &mut keys)?;
+    Ok(keys)
+}
+
+/// [`keys_of`], into a list that already lives somewhere -- the signing flow keeps it in a
+/// heap block, under a review that is the deepest the UI's stack goes.
+fn keys_into(
+    blob: &wire::SignBlob<'_>,
+    keys: &mut heapless::Vec<KeyPath, { wire::MAX_KEYS }>,
+) -> Result<(), &'static str> {
+    keys.clear();
     for k in blob.keys() {
         let p = KeyPath::new(k.steps()).ok_or("key path too deep")?;
         keys.push(p).map_err(|_| "too many keys")?;
     }
-    Ok(keys)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1005,12 +1016,15 @@ fn sign(
     len: usize,
 ) -> Outcome {
     // Read again for use: the USB task checked it, and this is where it is acted on.
-    let (keys, tx_at, tx_len) = {
+    let Some(mut keys) = crate::heap::room().map(|r| r.fill(heapless::Vec::new())) else {
+        return Outcome::Refused("not enough memory");
+    };
+    let (tx_at, tx_len) = {
         let Ok(blob) = wire::SignBlob::decode(&buf.bytes()[..len]) else {
             return Outcome::Refused("malformed sign request");
         };
-        match keys_of(&blob) {
-            Ok(k) => (k, blob.tx_at, blob.tx.len()),
+        match keys_into(&blob, &mut keys) {
+            Ok(()) => (blob.tx_at, blob.tx.len()),
             Err(why) => return Outcome::Refused(why),
         }
     };

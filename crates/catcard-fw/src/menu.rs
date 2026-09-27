@@ -6962,9 +6962,8 @@ fn dump_summary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>
 /// meant to replace the stored one.
 ///
 /// Returns whether a key is now in force; the caller names it.
+#[inline(never)]
 fn import_key(ui: &mut Ui<'_>) -> bool {
-    use catcard_wallet::bip32::ExtendedPrivKey;
-    use zeroize::Zeroize as _;
     const HEAD: &str = "Import key";
 
     // The fourth row is stock's Temporary Seed → Coldcard Backup: the wallet inside a
@@ -6977,96 +6976,114 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
     };
     match row {
         3 => crate::backup::load_temporary(ui),
-        0 => {
-            let Some(expect) = ask_word_count(ui, HEAD) else {
-                return false;
-            };
-            message(
-                ui.panel,
-                HEAD,
-                "enter each word,",
-                if expect.is_some() {
-                    "one after another"
-                } else {
-                    "then y y to finish"
-                },
-            );
-            wait_for_any_key(ui);
-            let Some(mnemonic) = read_phrase_of(ui, expect) else {
-                return false;
-            };
-            let mut what = Line::new();
-            let _ = write!(what, "{} words, checksum ok", mnemonic.word_count());
-            ask(ui.panel, "Work in this?", &what, "the stored seed stays");
-            if !confirmed(ui) {
-                return false;
-            }
-            if !crate::key::set_temporary(mnemonic.entropy(), "Words") {
-                message(ui.panel, HEAD, "that seed length", "is not usable");
-                wait_for_any_key(ui);
-                return false;
-            }
-            true
-        }
-        1 => {
-            let Some(entry) = crate::passphrase::read(ui, "XPRV") else {
-                return false;
-            };
-            // Parsed inside the masked region: what it decodes to is a private key.
-            let parsed = crate::keywork::run(|kw| {
-                ExtendedPrivKey::from_base58(entry.as_str().trim(), kw)
-                    .ok()
-                    .map(|key| (key.chain_code, *key.secret_bytes()))
-            });
-            let Some((chain_code, mut secret)) = parsed else {
-                message(ui.panel, HEAD, "not an xprv", "check what was typed");
-                wait_for_any_key(ui);
-                return false;
-            };
-            let loaded = crate::key::set_temporary_xprv(&chain_code, &secret, "XPRV");
-            secret.zeroize();
-            if !loaded {
-                message(ui.panel, HEAD, "that key is not usable", "");
-                wait_for_any_key(ui);
-            }
-            loaded
-        }
+        0 => temporary_words(ui),
+        1 => temporary_xprv(ui),
         4 => crate::tapsigner::import_temporary(ui),
-        _ => {
-            let Some(entry) = crate::passphrase::read(ui, "WIF key") else {
-                return false;
-            };
-            let mut raw = [0u8; 40];
-            let decoded =
-                catcard_wallet::encoding::base58::decode_check(entry.as_str().trim(), &mut raw);
-            // A mainnet key, compressed or not: `0x80`, the scalar, and the compression
-            // byte where the key is used compressed. Every address this device shows is
-            // from a compressed key, so an uncompressed WIF is refused rather than shown
-            // against addresses its owner would not recognise.
-            let loaded = match decoded {
-                Ok(34) if raw[0] == 0x80 && raw[33] == 0x01 => {
-                    let mut key = [0u8; 32];
-                    key.copy_from_slice(&raw[1..33]);
-                    let ok = crate::key::set_temporary_wif(&key, "WIF");
-                    key.zeroize();
-                    ok
-                }
-                Ok(33) if raw[0] == 0x80 => {
-                    message(ui.panel, HEAD, "uncompressed WIF", "not supported");
-                    wait_for_any_key(ui);
-                    raw.zeroize();
-                    return false;
-                }
-                _ => false,
-            };
-            raw.zeroize();
-            if !loaded {
-                message(ui.panel, HEAD, "not a mainnet WIF", "check what was typed");
-                wait_for_any_key(ui);
-            }
-            loaded
-        }
+        _ => temporary_wif(ui),
     }
+}
+
+// Each shape of key in a frame of its own: `import_key` is reached from the Derive menu,
+// and the three shapes inlined together were nine kilobytes of one frame under whichever
+// of them -- or the TAPSIGNER import beside them -- was running.
+
+#[inline(never)]
+fn temporary_words(ui: &mut Ui<'_>) -> bool {
+    const HEAD: &str = "Import key";
+    let Some(expect) = ask_word_count(ui, HEAD) else {
+        return false;
+    };
+    message(
+        ui.panel,
+        HEAD,
+        "enter each word,",
+        if expect.is_some() {
+            "one after another"
+        } else {
+            "then y y to finish"
+        },
+    );
+    wait_for_any_key(ui);
+    let Some(mnemonic) = read_phrase_of(ui, expect) else {
+        return false;
+    };
+    let mut what = Line::new();
+    let _ = write!(what, "{} words, checksum ok", mnemonic.word_count());
+    ask(ui.panel, "Work in this?", &what, "the stored seed stays");
+    if !confirmed(ui) {
+        return false;
+    }
+    if !crate::key::set_temporary(mnemonic.entropy(), "Words") {
+        message(ui.panel, HEAD, "that seed length", "is not usable");
+        wait_for_any_key(ui);
+        return false;
+    }
+    true
+}
+
+#[inline(never)]
+fn temporary_xprv(ui: &mut Ui<'_>) -> bool {
+    use catcard_wallet::bip32::ExtendedPrivKey;
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Import key";
+    let Some(entry) = crate::passphrase::read(ui, "XPRV") else {
+        return false;
+    };
+    // Parsed inside the masked region: what it decodes to is a private key.
+    let parsed = crate::keywork::run(|kw| {
+        ExtendedPrivKey::from_base58(entry.as_str().trim(), kw)
+            .ok()
+            .map(|key| (key.chain_code, *key.secret_bytes()))
+    });
+    let Some((chain_code, mut secret)) = parsed else {
+        message(ui.panel, HEAD, "not an xprv", "check what was typed");
+        wait_for_any_key(ui);
+        return false;
+    };
+    let loaded = crate::key::set_temporary_xprv(&chain_code, &secret, "XPRV");
+    secret.zeroize();
+    if !loaded {
+        message(ui.panel, HEAD, "that key is not usable", "");
+        wait_for_any_key(ui);
+    }
+    loaded
+}
+
+#[inline(never)]
+fn temporary_wif(ui: &mut Ui<'_>) -> bool {
+    use zeroize::Zeroize as _;
+    const HEAD: &str = "Import key";
+    let Some(entry) = crate::passphrase::read(ui, "WIF key") else {
+        return false;
+    };
+    let mut raw = [0u8; 40];
+    let decoded = catcard_wallet::encoding::base58::decode_check(entry.as_str().trim(), &mut raw);
+    // A mainnet key, compressed or not: `0x80`, the scalar, and the compression
+    // byte where the key is used compressed. Every address this device shows is
+    // from a compressed key, so an uncompressed WIF is refused rather than shown
+    // against addresses its owner would not recognise.
+    let loaded = match decoded {
+        Ok(34) if raw[0] == 0x80 && raw[33] == 0x01 => {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&raw[1..33]);
+            let ok = crate::key::set_temporary_wif(&key, "WIF");
+            key.zeroize();
+            ok
+        }
+        Ok(33) if raw[0] == 0x80 => {
+            message(ui.panel, HEAD, "uncompressed WIF", "not supported");
+            wait_for_any_key(ui);
+            raw.zeroize();
+            return false;
+        }
+        _ => false,
+    };
+    raw.zeroize();
+    if !loaded {
+        message(ui.panel, HEAD, "not a mainnet WIF", "check what was typed");
+        wait_for_any_key(ui);
+    }
+    loaded
 }
 
 /// Act on one row of [`KEY_ITEMS`]: change the wallet the device works in.
@@ -7076,6 +7093,7 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
 /// a *valid* wallet, so there is nothing for the device to reject and a mistyped index
 /// is not an error -- it is a different, empty wallet that behaves perfectly normally.
 /// Naming the one you landed in is the only defence there is.
+#[inline(never)]
 fn choose_key(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, which: u8) {
     use crate::key::Source;
 

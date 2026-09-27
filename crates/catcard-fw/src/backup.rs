@@ -941,6 +941,7 @@ fn fingerprint_in_force(
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §D2 "Coldcard Backup" [C]
 ///
 /// Returns whether a key is now in force; the caller names it.
+#[inline(never)]
 pub(crate) fn load_temporary(ui: &mut Ui<'_>) -> bool {
     let mut scratch = Scratch::new();
     let Some(body_len) = open_backup(ui, TEMP_HEAD, &mut scratch) else {

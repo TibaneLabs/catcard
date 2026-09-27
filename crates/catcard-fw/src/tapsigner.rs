@@ -90,6 +90,7 @@ pub(crate) fn import(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
 /// Derive -> Import key -> TAPSIGNER: the same backup, in force for this session and
 /// never stored. Returns whether a key is now in force; the Derive menu names it.
+#[inline(never)]
 pub(crate) fn import_temporary(ui: &mut Ui<'_>) -> bool {
     let Some(node) = decrypt(ui) else {
         return false;
@@ -141,6 +142,7 @@ fn load_session(ui: &mut Ui<'_>, node: &Node) -> bool {
 
 /// Pick the `.aes` file, take the backup key, and decrypt: the node inside, if the key
 /// opened it. Every refusal is said here; `None` means the owner has already been told.
+#[inline(never)]
 fn decrypt(ui: &mut Ui<'_>) -> Option<Node> {
     let path = menu::browse_sd(ui, "Pick .aes backup", Some("aes"), menu::Browse::File)?;
 

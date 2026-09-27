@@ -69,6 +69,9 @@ pub(crate) fn view(ui: &mut Ui<'_>, storage: Storage, path: &str) {
 ///
 /// Generic over the backing driver so the card and the Virtual Disk share the one decode
 /// path: the file is already open on the volume the browser handed over.
+// Not inlined: `view` instantiates this twice, once per storage, and the two copies
+// inlined side by side were summed into one frame under the file browser.
+#[inline(never)]
 fn show<D: catcard_sd::fat::SectorDriver>(
     ui: &mut Ui<'_>,
     vol: &mut catcard_sd::AnyVolume<D, 512>,

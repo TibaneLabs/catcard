@@ -41,7 +41,7 @@ use catcard_callgate::Callgate;
 use catcard_settings::hsm::{self as engine, Policy};
 use catcard_settings::hsmusers::{self as users, User};
 use catcard_settings::json::Doc;
-use catcard_settings::store::{self, SCRATCH};
+use catcard_settings::store::SCRATCH;
 use catcard_ui::keypad::{Event, KEYS, Key};
 use catcard_ui::scroll::Line;
 use catcard_wallet::psbtview;
@@ -189,12 +189,10 @@ fn read_users<'d>(
     out: &mut [User<'d>],
 ) -> Result<usize, &'static str> {
     let key = crate::settings::wallet_key(gate, login, panel, HEAD)?;
-    // SAFETY: the region is mapped and readable; nothing is written.
-    let mut files =
-        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
-    let n = store::read(&mut files, &key, doc).unwrap_or(0);
+    let n = crate::settings::read_slot(&key, doc)?;
     let doc: &'d [u8] = doc;
-    let parsed = Doc::parse(&doc[..n]).unwrap_or_default();
+    // The table in the heap: this is read from inside the judging, under the signing.
+    let parsed = crate::settings::parse_doc(&doc[..n]).ok_or("not enough memory")?;
     Ok(users::list(&parsed, out))
 }
 
@@ -303,6 +301,41 @@ struct Checked {
     boots: bool,
 }
 
+/// `/hsm-policy.json` off the flash, in a heap block of its size: the block and the length.
+///
+/// A leaf of its own, so the mount is not carried through the users, the wallets and the
+/// parse that [`check`] goes on to.
+#[inline(never)]
+fn read_stored() -> Result<(crate::heap::Block, usize), &'static str> {
+    // SAFETY: the region is mapped and readable; nothing is written.
+    let mut files =
+        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
+    let n = files
+        .file_len(engine::POLICY_PATH)
+        .ok_or("no policy stored")?;
+    if n > engine::MAX_CANONICAL {
+        return Err("stored policy too large");
+    }
+    let mut b = crate::heap::take(n.max(1)).ok_or("not enough memory")?;
+    match files.read_file(engine::POLICY_PATH, b.bytes()) {
+        Ok(Some(got)) if got == n => Ok((b, n)),
+        _ => Err("the stored policy will not read"),
+    }
+}
+
+/// Whether a policy's text asks to boot into HSM mode, read before the full parse: one
+/// that does must not fall back to the menus because it will not load. A leaf of its own,
+/// so the table it parses is gone before the rest of [`check`].
+/// Source: §1.5 `cant_fail` [C]
+#[inline(never)]
+fn asks_to_boot(text: &str) -> bool {
+    let mut doc = Doc::new();
+    doc.parse_into(text.as_bytes()).is_ok()
+        && doc
+            .get("boot_to_hsm")
+            .is_some_and(|v| v != "null" && v != "false" && v != "\"\"")
+}
+
 /// Read and validate the policy, and write its canonical form. Source: §1, §4 [C]
 ///
 /// The refusal carries its sentence by value: it is made once, on the way to a screen.
@@ -328,28 +361,13 @@ fn check(
             }
             None => return fail("no memory for the policy", false),
         },
-        Source::Stored => {
-            // SAFETY: the region is mapped and readable; nothing is written.
-            let mut files = match unsafe { crate::settings::Files::mount_read_only() } {
-                Ok(f) => f,
-                Err(_) => return fail("no settings store", false),
-            };
-            let Some(n) = files.file_len(engine::POLICY_PATH) else {
-                return fail("no policy stored", false);
-            };
-            if n > engine::MAX_CANONICAL {
-                return fail("stored policy too large", false);
+        Source::Stored => match read_stored() {
+            Ok((b, n)) => {
+                read = Some(b);
+                (0, n)
             }
-            let Some(mut b) = crate::heap::take(n.max(1)) else {
-                return fail("not enough memory", false);
-            };
-            match files.read_file(engine::POLICY_PATH, b.bytes()) {
-                Ok(Some(got)) if got == n => {}
-                _ => return fail("the stored policy will not read", false),
-            }
-            read = Some(b);
-            (0, n)
-        }
+            Err(why) => return fail(why, false),
+        },
     };
     let bytes: &[u8] = match (held.as_mut(), read.as_mut()) {
         (Some(h), _) => match h.bytes().get(at..at + len) {
@@ -364,10 +382,7 @@ fn check(
     };
     // Read before the full parse: a policy that asks to boot into HSM mode must not
     // fall back to the menus because it will not load. Source: §1.5 `cant_fail` [C]
-    let cant_fail = Doc::parse(text.as_bytes())
-        .ok()
-        .and_then(|d| d.get("boot_to_hsm"))
-        .is_some_and(|v| v != "null" && v != "false" && v != "\"\"");
+    let cant_fail = asks_to_boot(text);
 
     // Checked against this device.
     let Some(mut udoc) = crate::heap::take(SCRATCH) else {
@@ -383,8 +398,12 @@ fn check(
         users: &list[..n],
         wallets: &wallets,
     };
-    let policy = match Policy::load(text, &env) {
-        Ok(p) => p,
+    // In a heap block, as `view` keeps one: the policy is the largest thing this holds.
+    let Some(mut policy) = crate::heap::room().map(|r| r.fill(Policy::default())) else {
+        return fail("not enough memory", cant_fail);
+    };
+    match policy.load_into(text, &env) {
+        Ok(()) => {}
         Err(r) => {
             let mut why: heapless::String<120> = heapless::String::new();
             let _ = write!(why, "{r}");
@@ -420,9 +439,15 @@ fn check(
 }
 
 /// The canonical text of a checked or running policy, as a view.
-fn view(text: &mut crate::heap::Block, len: usize) -> Option<Policy<'_>> {
+///
+/// The view is in a heap block: it is held across the judging's derivations and the users'
+/// checks, under the signing review, and on the stack it was a kilobyte and more in every
+/// frame it passed through. No room reads as unreadable, which every caller refuses on.
+fn view(text: &mut crate::heap::Block, len: usize) -> Option<crate::heap::Owned<Policy<'_>>> {
     let t = core::str::from_utf8(&text.bytes()[..len]).ok()?;
-    Policy::load(t, &engine::Trusted).ok()
+    let mut policy = crate::heap::room()?.fill(Policy::default());
+    policy.load_into(t, &engine::Trusted).ok()?;
+    Some(policy)
 }
 
 /// A formatter over a byte slice, for the explanation.

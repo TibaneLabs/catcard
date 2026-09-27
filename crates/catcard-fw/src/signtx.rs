@@ -279,6 +279,7 @@ fn with_card<T>(
 /// Two or more, and the owner picks -- signing the wrong one of two transactions is not a
 /// choice to make on their behalf. Anything already written by a previous signing
 /// (`SIGNED.PSB`) is skipped, so a finished transaction does not present itself again.
+#[inline(never)]
 fn lone_psbt(storage: Storage) -> Option<heapless::String<{ PATH_MAX }>> {
     match storage {
         Storage::Sd => with_card(|vol| Ok(find_lone_psbt(vol))),
@@ -337,6 +338,7 @@ pub(crate) fn read_card_file(path: &str, buf: &mut [u8]) -> Result<usize, &'stat
 }
 
 /// Read the picked file from the chosen storage into `buf`. Returns its length, or why not.
+#[inline(never)]
 pub(crate) fn read_source_file(
     storage: Storage,
     path: &str,
@@ -574,6 +576,7 @@ const MAX_BATCH: usize = 8;
 /// [`catcard_wallet::psbtfile::is_batch_source`], so running a batch twice does not sign its
 /// own output. `Ok(true)` when every source fit `out`; `Ok(false)` when there were more than
 /// [`MAX_BATCH`] and the list was capped.
+#[inline(never)]
 fn enumerate_psbts(
     storage: Storage,
     out: &mut heapless::Vec<heapless::String<PATH_MAX>, MAX_BATCH>,

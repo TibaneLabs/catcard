@@ -385,8 +385,7 @@ pub(crate) fn trust_from_psbt(
         }
         // Reconstruct against everything held so far -- registered wallets and ones already
         // trusted from this PSBT -- so an input matched by those is left alone.
-        let Some(candidate) = psbtview::reconstruct_for_input(psbt, index, fingerprint, &parsed)
-        else {
+        let Some(candidate) = reconstruct(psbt, index, fingerprint, &parsed) else {
             continue;
         };
         if parsed.contains(&candidate) {
@@ -424,6 +423,20 @@ pub(crate) fn trust_from_psbt(
     parsed
 }
 
+/// [`psbtview::reconstruct_for_input`] in a frame of its own: rebuilding the wallet takes
+/// several of them in working state, and only the one it returns should stay on the stack
+/// under the offer and the save that may follow.
+#[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
+fn reconstruct(
+    psbt: &Psbt<'_>,
+    index: usize,
+    fingerprint: [u8; 4],
+    known: &[Multisig],
+) -> Option<Multisig> {
+    psbtview::reconstruct_for_input(psbt, index, fingerprint, known)
+}
+
 /// Show a wallet reconstructed from the PSBT and ask whether to import it. On yes it is
 /// stored (so it needs no re-approval next time) and this returns `true` to trust it for the
 /// signing in hand; on no, `false`, and the input it came from stays refused.
@@ -433,6 +446,7 @@ pub(crate) fn trust_from_psbt(
 /// the owner has just approved it on screen -- and says so in the log, rather than throwing
 /// away an approval over a transient shortage.
 #[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
 fn offer_from_psbt(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
