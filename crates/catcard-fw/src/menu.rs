@@ -11633,6 +11633,7 @@ fn lock_password(
 /// buffer wiped on every path out, and the driver copies it into a `Zeroizing` buffer of
 /// its own. Needs no settings store, so it is on
 /// every board with a slot, the mk3 included.
+#[inline(never)]
 fn card_password(ui: &mut Ui<'_>) {
     use catcard_hal::sdmmc::Sdmmc;
     use catcard_sd::LockOp;
@@ -13704,8 +13705,8 @@ fn sd_screen(panel: &mut display::Panel) {
 ///
 /// One row for the card rather than one per operation. Re-reads the card after each
 /// action, since locking or encrypting it changes what the details can say.
+#[inline(never)]
 fn card_menu(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use catcard_ui::scroll::Line as Row;
     const PASSWORD: u32 = 0;
     const ENCRYPT: u32 = 1;
     // Hobbled mode keeps the card's details and lock but not its encryption, whose
@@ -13713,22 +13714,35 @@ fn card_menu(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let encrypt = crate::policy::row_allowed(catcard_settings::policy::Menu::Utils, "Encrypt card");
     loop {
         message(ui.panel, "SD card", "reading the card", "");
-        let lines = card_detail_lines();
-        let mut rows: heapless::Vec<Row<'_>, { MAX_LINES + 3 }> = heapless::Vec::new();
-        let _ = rows.push(Row::title("SD card"));
-        for l in &lines {
-            let _ = rows.push(Row::body(l.as_str()));
-        }
-        let _ = rows.push(Row::item("Card password", PASSWORD));
-        if encrypt {
-            let _ = rows.push(Row::item("Encryption", ENCRYPT));
-        }
-        match show_doc(ui, &rows, false, false) {
+        let exit = card_details_screen(ui, encrypt);
+        // The details and their rows are gone by here, in a frame that has returned: the
+        // password and encryption screens run on the stack they used.
+        match exit {
             DocExit::Selected(PASSWORD) => card_password(ui),
             DocExit::Selected(ENCRYPT) => crate::sdcrypt::screen(gate, login, ui),
             _ => return,
         }
     }
+}
+
+/// The card's details with its two rows under them, until one is chosen or the screen is
+/// left.
+#[inline(never)]
+fn card_details_screen(ui: &mut Ui<'_>, encrypt: bool) -> DocExit {
+    use catcard_ui::scroll::Line as Row;
+    const PASSWORD: u32 = 0;
+    const ENCRYPT: u32 = 1;
+    let lines = card_detail_lines();
+    let mut rows: heapless::Vec<Row<'_>, { MAX_LINES + 3 }> = heapless::Vec::new();
+    let _ = rows.push(Row::title("SD card"));
+    for l in &lines {
+        let _ = rows.push(Row::body(l.as_str()));
+    }
+    let _ = rows.push(Row::item("Card password", PASSWORD));
+    if encrypt {
+        let _ = rows.push(Row::item("Encryption", ENCRYPT));
+    }
+    show_doc(ui, &rows, false, false)
 }
 
 /// What card is in the slot, from its CID, and how it is formatted: the top of the

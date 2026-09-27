@@ -91,6 +91,7 @@ pub enum Outcome {
 /// far along it is. The length is known before the first byte is read, and a megabyte over a
 /// 512-byte buffer takes long enough that a still screen reads as a hung device -- which,
 /// today, is exactly how a hung device read too.
+#[inline(never)]
 pub fn stage_from_card(
     slot: catcard_hal::sdmmc::Slot,
     chosen: Option<&str>,
@@ -145,6 +146,7 @@ pub fn stage_from_card(
 ///
 /// Source: `catcard_board::Psram::image_base` / `vdisk_base` [C].
 #[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
 pub fn stage_from_vdisk(chosen: Option<&str>, progress: impl FnMut(u32, u32)) -> Outcome {
     if let Err(why) = crate::vdisk::ensure_formatted() {
         return Outcome::Failed(why);

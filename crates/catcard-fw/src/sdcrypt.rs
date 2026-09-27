@@ -95,6 +95,7 @@ fn is_unlocked(serial: u32) -> bool {
 }
 
 /// The Encrypt / Unlock / Remove menu.
+#[inline(never)]
 pub(crate) fn screen(gate: &Callgate, login: &mut Login, ui: &mut Ui<'_>) {
     // Bring the card up first: a serial is needed for everything below, and a locked or
     // encrypted card still identifies (only its *data* is ciphertext), so init succeeds.
