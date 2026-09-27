@@ -179,9 +179,86 @@ pub const ALIGN: usize = 4;
 /// Take `len` bytes, or `None` if the heap has no room. The first byte is aligned to
 /// [`ALIGN`].
 pub fn take(len: usize) -> Option<Block> {
-    let layout = Layout::from_size_align(len, ALIGN).ok()?;
+    take_aligned(len, ALIGN)
+}
+
+/// Take `len` bytes whose first byte is aligned to `align` (at least [`ALIGN`]).
+fn take_aligned(len: usize, align: usize) -> Option<Block> {
+    let layout = Layout::from_size_align(len, align.max(ALIGN)).ok()?;
     let ptr = alloc_from_anywhere(layout)?;
     Some(Block { ptr, len })
+}
+
+/// Room for one `T` in a block, reserved but not yet filled.
+///
+/// For state that lives only while one mode runs and would otherwise be a resident
+/// `static`: reserve the room before anything irreversible happens -- so "no memory" is
+/// said before a file is written, not after -- then [`fill`](Self::fill) it, which cannot
+/// fail.
+pub struct Room<T> {
+    block: Block,
+    _t: core::marker::PhantomData<T>,
+}
+
+/// Reserve room for a `T`, sized and aligned for it, or `None` if the heap has none.
+pub fn room<T>() -> Option<Room<T>> {
+    let block = take_aligned(core::mem::size_of::<T>(), core::mem::align_of::<T>())?;
+    Some(Room {
+        block,
+        _t: core::marker::PhantomData,
+    })
+}
+
+impl<T> Room<T> {
+    /// Move `value` into the room.
+    pub fn fill(mut self, value: T) -> Owned<T> {
+        let ptr = NonNull::from(self.block.bytes()).cast::<T>();
+        // SAFETY: `room` sized the block for a `T` and aligned it for one, the block is
+        // ours and alive, and nothing is in it yet, so nothing is overwritten that needed
+        // dropping.
+        unsafe { ptr.as_ptr().write(value) };
+        Owned {
+            ptr,
+            block: self.block,
+        }
+    }
+}
+
+/// One `T` in a heap block: the value dropped, then the block wiped and freed, when this
+/// is dropped. What [`Room::fill`] makes.
+///
+/// Like every block, not for key material -- see the module documentation.
+pub struct Owned<T> {
+    /// The value, inside `block`.
+    ptr: NonNull<T>,
+    /// Owned only so that it outlives the value and is wiped and freed after it.
+    #[allow(dead_code)]
+    block: Block,
+}
+
+impl<T> core::ops::Deref for Owned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: `fill` wrote a `T` here, in the block this owns, and only `drop` ends
+        // it; the borrow is tied to `&self`.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<T> core::ops::DerefMut for Owned<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as `deref`, and `&mut self` makes this the only borrow.
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<T> Drop for Owned<T> {
+    fn drop(&mut self) {
+        // SAFETY: the `T` `fill` wrote, dropped exactly once -- this is the only drop, and
+        // the block (dropped after this, as a field) only wipes the bytes.
+        unsafe { core::ptr::drop_in_place(self.ptr.as_ptr()) };
+    }
 }
 
 /// Allocate out of the linked heap, and out of the spare bank if the linked heap cannot.

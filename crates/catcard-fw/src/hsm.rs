@@ -120,13 +120,20 @@ impl Drop for Active {
     }
 }
 
-static mut ACTIVE: Option<Active> = None;
+/// HSM mode's state while it runs, in a heap block -- `None` the rest of the time.
+///
+/// It was a 416-byte resident static (in `.data`, since `None` of it is not all zeros),
+/// under the Q1's boot stack for the device's whole life to serve a mode almost no device
+/// ever enters. What it holds is the policy's counters, the local-code nonce the host is
+/// shown anyway (`next_local_code`), and codes typed for the next PSBT; `Active`'s own drop
+/// wipes the last two and the block is wiped again as it is freed.
+static mut ACTIVE: Option<crate::heap::Owned<Active>> = None;
 
 /// Run `f` on HSM mode's state, if it is running.
 fn with<R>(f: impl FnOnce(&mut Active) -> R) -> Option<R> {
     // SAFETY: foreground only: HSM mode's state belongs to the UI task, and nothing holds
     // a borrow of it across this call.
-    unsafe { (*core::ptr::addr_of_mut!(ACTIVE)).as_mut().map(f) }
+    unsafe { (*core::ptr::addr_of_mut!(ACTIVE)).as_mut().map(|a| f(a)) }
 }
 
 /// The request whose PSBT is being judged: its SHA-256, for the local code and the
@@ -556,6 +563,9 @@ fn activate(
     precharge: bool,
 ) -> Result<(), &'static str> {
     let Checked { mut text, len, .. } = checked;
+    // The state's room first, so a heap that cannot spare it stops this before the
+    // policy is written rather than leaving one stored that never ran.
+    let room = crate::heap::room::<Active>().ok_or("not enough memory")?;
     if new_file {
         // SAFETY: foreground only; the caller holds the display while this runs.
         let mut files =
@@ -587,7 +597,7 @@ fn activate(
     };
     key.zeroize();
     // SAFETY: foreground only; nothing borrows the state across this write.
-    unsafe { *core::ptr::addr_of_mut!(ACTIVE) = Some(active) };
+    unsafe { *core::ptr::addr_of_mut!(ACTIVE) = Some(room.fill(active)) };
     crate::ckcc::set_hsm_active(true);
     // The commands stay answered for as long as HSM mode runs, as stock sets `hsmcmd`
     // when it boots into it. Source: §4 [C]
