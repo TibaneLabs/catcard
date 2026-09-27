@@ -56,7 +56,7 @@ The host hears `KEEPALIVE UPNEEDED` every 100 ms while the question is up. The w
 browser's: when the site's WebAuthn timeout ends, or the person cancels in the browser, the
 host sends CANCEL, the screen goes and it hears `CTAP2_ERR_KEEPALIVE_CANCEL`. Nothing is
 counted down on the device. Only a host that goes quiet without cancelling is answered by
-the device itself, after 5 minutes (WebAuthn's longest recommended ceremony):
+the device itself, after 1 minute:
 `CTAP2_ERR_USER_ACTION_TIMEOUT`. Cancel on the device: `CTAP2_ERR_OPERATION_DENIED`.
 
 A request that arrives while the person is inside another flow waits for the menu (with

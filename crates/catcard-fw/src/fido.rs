@@ -51,12 +51,11 @@ const HEAD: &str = "Security key";
 /// The wait belongs to the browser: the site's WebAuthn `timeout` runs there, and when it
 /// ends -- or the person cancels in the browser -- the host sends CTAPHID CANCEL, which
 /// closes the question at once. CTAP sets no duration for the authenticator's own give-up.
-/// So this is only a backstop for a host that goes quiet without cancelling, and it is
-/// set at the longest ceremony WebAuthn recommends, so it never ends a question the
-/// browser is still waiting on. Nothing counts it down on the screen.
-/// Source: WebAuthn L2 §5.1.3 (timeout recommended at most 300 s) [C]; CTAP 2.1 §8.2
-/// `CTAP2_ERR_USER_ACTION_TIMEOUT` [C]
-const PRESENCE_MS: u32 = 300_000;
+/// So this is only a backstop for a host that goes quiet without cancelling: a minute,
+/// the owner's choice -- long enough to read the site and answer, short enough that an
+/// abandoned question does not hold the screen. Nothing counts it down on the screen.
+/// Source: CTAP 2.1 §8.2 `CTAP2_ERR_USER_ACTION_TIMEOUT` [C]
+const PRESENCE_MS: u32 = 60_000;
 
 /// How long a request may wait for the UI task to take it -- the person may be deep in
 /// another flow -- before it is answered as timed out.
