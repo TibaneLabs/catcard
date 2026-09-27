@@ -52,9 +52,12 @@ Every request that needs a person takes the screen through the menu loop's host 
 - `ENTER to allow, CANCEL to refuse` (`y`/`x` on the mono boards). A question longer than
   the screen scrolls, and confirm pages down until the end has been seen.
 
-The host hears `KEEPALIVE UPNEEDED` every 100 ms while the question is up. Nobody answers
-in **30 s**: `CTAP2_ERR_USER_ACTION_TIMEOUT`. The browser cancels: the screen goes and it
-hears `CTAP2_ERR_KEEPALIVE_CANCEL`. Cancel on the device: `CTAP2_ERR_OPERATION_DENIED`.
+The host hears `KEEPALIVE UPNEEDED` every 100 ms while the question is up. The wait is the
+browser's: when the site's WebAuthn timeout ends, or the person cancels in the browser, the
+host sends CANCEL, the screen goes and it hears `CTAP2_ERR_KEEPALIVE_CANCEL`. Nothing is
+counted down on the device. Only a host that goes quiet without cancelling is answered by
+the device itself, after 5 minutes (WebAuthn's longest recommended ceremony):
+`CTAP2_ERR_USER_ACTION_TIMEOUT`. Cancel on the device: `CTAP2_ERR_OPERATION_DENIED`.
 
 A request that arrives while the person is inside another flow waits for the menu (with
 keepalives) for up to 30 s, then is answered as timed out.
@@ -236,7 +239,7 @@ this wallet's security key stops accepting it, and nothing brings those logins b
 - Only within **10 s** of the security key appearing on USB (CTAP 2.1 §6.6): the interface
   appears after login, so replug, log in, and let the browser send it. Otherwise
   `CTAP2_ERR_NOT_ALLOWED`, with no question.
-- **Asked twice** on the device, both bounded to 30 s: first confirm, then **the 7 key**
+- **Asked twice** on the device, each bounded as a question is (above): first confirm, then **the 7 key**
   (not confirm, so a confirm pressed twice out of habit does not do it). Cancel at either
   is `CTAP2_ERR_OPERATION_DENIED`.
 - Never a default and never automatic; `tools/fido_check.py --reset` makes you type RESET.

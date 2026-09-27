@@ -45,10 +45,18 @@ use crate::{display, menu, usbtask};
 
 const HEAD: &str = "Security key";
 
-/// How long a question waits for the person. Browsers give up at about a minute; this
-/// answers well before, with `CTAP2_ERR_USER_ACTION_TIMEOUT`. [I] WebAuthn L2 §5.1.3
-/// recommends 300 s at most for the whole ceremony [C]
-const PRESENCE_MS: u32 = 30_000;
+/// How long a question waits for the person before answering
+/// `CTAP2_ERR_USER_ACTION_TIMEOUT`.
+///
+/// The wait belongs to the browser: the site's WebAuthn `timeout` runs there, and when it
+/// ends -- or the person cancels in the browser -- the host sends CTAPHID CANCEL, which
+/// closes the question at once. CTAP sets no duration for the authenticator's own give-up.
+/// So this is only a backstop for a host that goes quiet without cancelling, and it is
+/// set at the longest ceremony WebAuthn recommends, so it never ends a question the
+/// browser is still waiting on. Nothing counts it down on the screen.
+/// Source: WebAuthn L2 §5.1.3 (timeout recommended at most 300 s) [C]; CTAP 2.1 §8.2
+/// `CTAP2_ERR_USER_ACTION_TIMEOUT` [C]
+const PRESENCE_MS: u32 = 300_000;
 
 /// How long a request may wait for the UI task to take it -- the person may be deep in
 /// another flow -- before it is answered as timed out.
@@ -508,35 +516,18 @@ impl UiEnv<'_, '_> {
         if self.ticket.is_some() {
             usbtask::fido_status(true);
         }
-        // The bottom rows are the countdown: the standard progress bar, draining as the
-        // request's time runs out, so the person can see how long the site will wait.
-        let bar = catcard_ui::splash::progress_h(display::SCREEN_H);
         let mut view = catcard_ui::scroll::ScrollView::build(
             lines,
             display::SCREEN_W,
-            display::Strip::Off.body_h().saturating_sub(bar),
+            display::Strip::Off.body_h(),
             display::FONTS,
         );
         let started = now_ms();
-        let left = |t: u32| -> u8 {
-            let gone = t.wrapping_sub(started).min(PRESENCE_MS) as u64;
-            (100 - gone * 100 / PRESENCE_MS as u64) as u8
-        };
         let mut events = [KeyEvent::Pressed(Key::Cancel); KEYS];
         let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-        // Wait for the keys to be let go only when the page itself changed hands: the
-        // first time, and after a scroll -- not on every tick of the countdown.
-        let mut release = true;
         let answer = 'ask: loop {
-            let shown = left(now_ms());
-            display::draw(self.ui.panel, |c| {
-                catcard_ui::scroll::render(c, &view);
-                catcard_ui::splash::draw_progress(c, shown);
-            });
-            if release {
-                menu::wait_for_release(self.ui);
-                release = false;
-            }
+            display::draw(self.ui.panel, |c| catcard_ui::scroll::render(c, &view));
+            menu::wait_for_release(self.ui);
             loop {
                 let _ = usbtask::pump();
                 if !self.alive() {
@@ -574,12 +565,6 @@ impl UiEnv<'_, '_> {
                     }
                 }
                 if moved {
-                    release = true;
-                    continue 'ask;
-                }
-                // A new step of the countdown: only the bar's rows differ, which is all
-                // the row cache sends.
-                if left(now_ms()) != shown {
                     continue 'ask;
                 }
                 display::idle(self.ui.panel);
