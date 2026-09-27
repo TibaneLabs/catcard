@@ -238,10 +238,9 @@ pub(crate) fn owned(
     }
 
     if found.is_none() {
-        // Taken and used here, and nothing below reads the registered wallets again --
-        // the rule `msimport::registered` sets for its slice.
+        // A heap lease, given back when this block ends.
         let wallets = crate::msimport::registered(gate, login, ui.panel);
-        found = search_multisig(ui, wallets, 0, shape, network, lower.as_str(), wanted);
+        found = search_multisig(ui, &wallets, 0, shape, network, lower.as_str(), wanted);
     }
 
     let hit = found.is_some();
@@ -293,7 +292,7 @@ fn owned_in_named(
         menu::wait_for_any_key(ui);
         return false;
     }
-    let found = search_multisig(ui, wallets, at, shape, network, lower, wanted);
+    let found = search_multisig(ui, &wallets, at, shape, network, lower, wanted);
     let hit = found.is_some();
     if hit {
         report(ui, found, network);

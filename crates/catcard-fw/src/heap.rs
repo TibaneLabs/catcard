@@ -169,12 +169,17 @@ impl Drop for Block {
     }
 }
 
-/// Take `len` bytes, or `None` if the heap has no room.
+/// The alignment of every [`Block`]'s first byte.
 ///
 /// Word-aligned, because most of what the firmware puts in these ends up copied into
-/// memory-mapped PSRAM, where only aligned word stores are issued correctly.
+/// memory-mapped PSRAM, where only aligned word stores are issued correctly. A caller that
+/// places a typed value in a block asserts its alignment against this, at compile time.
+pub const ALIGN: usize = 4;
+
+/// Take `len` bytes, or `None` if the heap has no room. The first byte is aligned to
+/// [`ALIGN`].
 pub fn take(len: usize) -> Option<Block> {
-    let layout = Layout::from_size_align(len, 4).ok()?;
+    let layout = Layout::from_size_align(len, ALIGN).ok()?;
     let ptr = alloc_from_anywhere(layout)?;
     Some(Block { ptr, len })
 }

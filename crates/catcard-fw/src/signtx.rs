@@ -854,8 +854,10 @@ pub(crate) fn review_and_sign(
     // policy may add wallets the PSBT itself proves -- [`MultisigTrust::VerifyOnly`], the
     // default, adds nothing, so an unregistered multisig stays refused; the other two add a
     // wallet whose keys rebuild this coin's script and that this device provably co-signs.
+    //
+    // A heap lease, held for the rest of the signing and given back (wiped) when it ends.
     #[cfg(not(feature = "board-mk3"))]
-    let wallets: &[catcard_wallet::multisig::Multisig] = {
+    let wallets = {
         let registered = crate::msimport::registered(gate, login, ui.panel);
         let trust = crate::prefs::current().multisig_trust;
         // HSM rules name registered wallets: in HSM mode nothing a PSBT merely describes
@@ -863,10 +865,20 @@ pub(crate) fn review_and_sign(
         if trust == catcard_settings::prefs::MultisigTrust::VerifyOnly || unattended {
             registered
         } else {
-            // `registered` has just filled the store the trust step appends to.
-            crate::msimport::trust_from_psbt(gate, login, ui, &psbt, &master, fingerprint, trust)
+            crate::msimport::trust_from_psbt(
+                gate,
+                login,
+                ui,
+                registered,
+                &psbt,
+                &master,
+                fingerprint,
+                trust,
+            )
         }
     };
+    #[cfg(not(feature = "board-mk3"))]
+    let wallets: &[catcard_wallet::multisig::Multisig] = &wallets;
     // The mk3 has no settings store yet, so nothing can be registered on it and every
     // multisig input is refused. That is the safe direction, and the honest one: the
     // alternative is signing for a wallet this device was never shown.

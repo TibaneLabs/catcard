@@ -80,56 +80,152 @@ pub(crate) const CENSORED_COLS: usize = 19;
 // heap is where a buffer this size that is only sometimes needed belongs.
 //
 // `crate::heap::take` can say no, and then the screen says so and returns rather than
-// reserving the space against the chance. The parsed wallets below are the one thing that
-// stays resident: a slice of them outlives the call that made it.
+// reserving the space against the chance. The parsed wallets are leased the same way, as a
+// [`Registered`] the caller owns.
 
-/// The parsed wallets, kept between calls so a slice of them can outlive [`registered`].
+/// The parsed multisig wallets, in a heap block the holder owns.
 ///
-/// A `Multisig` is around two kilobytes -- fifteen extended keys and their origins -- so
-/// eight of them do not go on a stack either.
-static mut PARSED: heapless::Vec<Multisig, { wallets::MAX_WALLETS }> = heapless::Vec::new();
+/// What [`registered`], [`registered_named`] and `trust_from_psbt` return. It derefs to
+/// `[Multisig]`, and dropping it gives the block back, wiped.
+///
+/// # Why this is a lease and not a static
+///
+/// A `Multisig` is around 1.75 KB -- fifteen extended keys and their origins -- so eight
+/// of them do not go on a stack. They used to live in a 14 KB resident static, and every
+/// call handed out a `&'static` slice of it -- after emptying it and parsing afresh. So a
+/// slice from one call aliased memory the next call was rewriting, and "never hold it
+/// across another call" was a rule in a doc comment that nothing enforced. Each call now
+/// fills its own block: two callers can hold two lists, and neither can see the other
+/// change. And the 14 KB no longer sits under the Q1's boot stack for the device's whole
+/// life to serve a list that is read for a few seconds per signing.
+///
+/// A block holds exactly as many wallets as it was leased for -- one per stored record, so
+/// a device with one registration leases 1.75 KB, not 14 -- except the one
+/// `trust_from_psbt` builds, which has room for [`wallets::MAX_WALLETS`].
+///
+/// # When the heap says no
+///
+/// Then the list is empty, which is the answer a device with nothing registered gives, and
+/// makes every multisig input refuse rather than be signed on the host's word.
+pub(crate) struct Registered {
+    /// The storage, or `None` for an empty list (nothing to hold, or nowhere to hold it).
+    /// Owned here only so it lives, and is wiped and freed, with the list.
+    #[allow(dead_code)]
+    block: Option<crate::heap::Block>,
+    /// The first slot of `block`: `cap` of them, the first `len` initialised.
+    slots: core::ptr::NonNull<Multisig>,
+    cap: usize,
+    len: usize,
+}
+
+// A block's alignment is the heap's promise, a wallet's is the compiler's; the slots are
+// written through a pointer to the block's first byte, so the one has to cover the other.
+const _: () = assert!(core::mem::align_of::<Multisig>() <= crate::heap::ALIGN);
+
+impl Registered {
+    /// No wallets, and no block.
+    fn empty() -> Self {
+        Self {
+            block: None,
+            slots: core::ptr::NonNull::dangling(),
+            cap: 0,
+            len: 0,
+        }
+    }
+
+    /// Room for `cap` wallets, none of them there yet -- or an empty list that cannot grow
+    /// if the heap cannot spare the room, which refuses every multisig input.
+    fn with_room(cap: usize) -> Self {
+        if cap == 0 {
+            return Self::empty();
+        }
+        let Some(mut block) = cap
+            .checked_mul(core::mem::size_of::<Multisig>())
+            .and_then(crate::heap::take)
+        else {
+            crate::catlog!("multisig: no memory for {} wallet(s)", cap);
+            return Self::empty();
+        };
+        let slots = core::ptr::NonNull::from(block.bytes()).cast::<Multisig>();
+        Self {
+            block: Some(block),
+            slots,
+            cap,
+            len: 0,
+        }
+    }
+
+    /// Whether another wallet would fit.
+    fn is_full(&self) -> bool {
+        self.len == self.cap
+    }
+
+    /// Add `wallet` at the end. Whether it went in: a full list leaves it out.
+    fn push(&mut self, wallet: Multisig) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        // SAFETY: `len < cap`, so the slot is inside the block -- `cap` wallets' worth of
+        // bytes, aligned for a wallet by the const assertion above -- which `self.block`
+        // owns and keeps alive. The slot is not initialised yet, so nothing that needed
+        // dropping is overwritten.
+        unsafe { self.slots.as_ptr().add(self.len).write(wallet) };
+        self.len += 1;
+        true
+    }
+}
+
+impl core::ops::Deref for Registered {
+    type Target = [Multisig];
+
+    fn deref(&self) -> &[Multisig] {
+        // SAFETY: the first `len` slots were written by `push` and live in the block this
+        // guard owns -- or `len` is zero and the pointer is a well-aligned dangling one,
+        // which an empty slice allows. The shared borrow is tied to `&self`, and only
+        // `push`, which takes `&mut self`, writes the slots.
+        unsafe { core::slice::from_raw_parts(self.slots.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        // Whatever a wallet owns goes before its bytes are wiped and freed with the block,
+        // which drops after this. `Multisig` is plain data today, so this is nothing; it is
+        // here so that stays true if a wallet ever holds something that is not.
+        let live = core::ptr::slice_from_raw_parts_mut(self.slots.as_ptr(), self.len);
+        self.len = 0;
+        // SAFETY: exactly the initialised slots, inside the block that is still alive,
+        // dropped once -- `len` is already zero, so nothing can reach them again.
+        unsafe { core::ptr::drop_in_place(live) };
+    }
+}
 
 /// The multisig wallets this device has registered.
 ///
 /// Read once per transaction rather than once per input: it costs a settings mount and a
-/// callgate fetch of the login secret. **An empty slice is a meaningful answer** -- it is
+/// callgate fetch of the login secret. **An empty list is a meaningful answer** -- it is
 /// what a device with nothing registered returns, and it makes every multisig input refuse
 /// rather than be signed on the host's word about who the other cosigners are. So a
-/// settings store that will not mount reads as "none registered", never as "allow".
+/// settings store that will not mount -- or a heap that cannot hold the list -- reads as
+/// "none registered", never as "allow".
 ///
 /// A descriptor that no longer parses is skipped rather than failing the list: one entry
 /// written by a version that stores more must not hide the wallets beside it.
 ///
-/// # The slice is borrowed from a static this clears
-///
-/// The `'static` lifetime is a convenience, not a promise: the wallets live in
-/// [`PARSED`], and the next call empties it and parses afresh. So a slice from one call
-/// is stale -- and, since it aliases memory being rewritten, unsound to read -- the
-/// moment another call is made. The rule for a caller is:
-///
-/// - **foreground only**, one screen at a time, like everything else in this module;
-/// - **never hold the slice across another `registered()`**. Take it, use it, and let
-///   it go before anything that might read the registered wallets again runs.
-///
-/// Both callers do: the signing screen reads it once per transaction and drops it with
-/// the review, and the address explorer reads it once on entry and holds it for a loop
-/// that calls nothing in this module.
+/// The list is the caller's own [`Registered`] lease: hold it as long as it is needed and
+/// drop it when done, which is when its memory goes back to the heap. Foreground only, like
+/// everything else in this module.
 pub(crate) fn registered(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut crate::display::Panel,
-) -> &'static [Multisig] {
-    // SAFETY: foreground only; one settings screen at a time.
-    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
-        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
-    parsed.clear();
-
+) -> Registered {
     // A leased slot to read the stored records into. If the heap cannot spare one, an
     // empty list is the safe answer -- the same one a store that will not mount gives --
     // so every multisig input refuses rather than being signed on the host's word.
     let Some(mut doc) = crate::heap::take(SCRATCH) else {
         crate::catlog!("multisig: no scratch, so no registered wallets");
-        return parsed;
+        return Registered::empty();
     };
     let doc_buf = doc.bytes();
 
@@ -141,9 +237,11 @@ pub(crate) fn registered(
         Ok(n) => n,
         Err(why) => {
             crate::catlog!("multisig: {}, so no registered wallets", why);
-            return parsed;
+            return Registered::empty();
         }
     };
+    // Room for every stored record, whether or not it parses: one lease, sized up front.
+    let mut parsed = Registered::with_room(have);
     for w in &list[..have] {
         match multisig::parse(w.descriptor) {
             Ok(m) => {
@@ -188,22 +286,17 @@ pub(crate) fn for_each_name(
 /// The registered wallet named exactly `name`, for a BIP-21 `wallet=` search.
 ///
 /// Answers which of the wallets carries the name ([`wallets::Named`]) and, when exactly
-/// one does and its descriptor parses, that wallet alone -- in the same store
-/// [`registered`] fills, under the same rule. A store that cannot be read has no wallet
-/// by that name.
+/// one does and its descriptor parses, that wallet alone, under the same rules as
+/// [`registered`]. A store that cannot be read has no wallet by that name.
 pub(crate) fn registered_named(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut crate::display::Panel,
     name: &str,
-) -> (wallets::Named, &'static [Multisig]) {
-    // SAFETY: foreground only; one settings screen at a time.
-    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
-        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
-    parsed.clear();
+) -> (wallets::Named, Registered) {
     let Some(mut doc) = crate::heap::take(SCRATCH) else {
         crate::catlog!("multisig: no scratch, so no registered wallets");
-        return (wallets::Named::None, parsed);
+        return (wallets::Named::None, Registered::empty());
     };
     let doc_buf = doc.bytes();
     let mut list = [Wallet {
@@ -214,13 +307,15 @@ pub(crate) fn registered_named(
         Ok(n) => n,
         Err(why) => {
             crate::catlog!("multisig: {}, so no registered wallets", why);
-            return (wallets::Named::None, parsed);
+            return (wallets::Named::None, Registered::empty());
         }
     };
     let found = wallets::named(&list[..have], name);
+    let mut parsed = Registered::empty();
     if let wallets::Named::One(i) = found {
         match multisig::parse(list[i].descriptor) {
             Ok(m) => {
+                parsed = Registered::with_room(1);
                 let _ = parsed.push(m);
             }
             Err(why) => crate::catlog!("multisig: skipping {}: {:?}", list[i].name, why),
@@ -230,12 +325,12 @@ pub(crate) fn registered_named(
     (found, parsed)
 }
 
-/// Augment the registered wallets with any this PSBT itself describes, as far as the trust
+/// Augment the `registered` wallets with any this PSBT itself describes, as far as the trust
 /// `policy` allows, and return the combined set.
 ///
-/// Called straight after [`registered`], which has just filled [`PARSED`]; this appends to
-/// the same store, so the slice it returns is the registered wallets plus whichever ones the
-/// PSBT vouched for. The multisig PSBT trust policy in one place:
+/// Takes the list [`registered`] returned and gives back one with room for
+/// [`wallets::MAX_WALLETS`]: the registered wallets plus whichever ones the PSBT vouched
+/// for. The multisig PSBT trust policy in one place:
 ///
 /// - [`MultisigTrust::VerifyOnly`]: nothing is added -- an unregistered multisig stays
 ///   refused. (The caller does not call here in that case, but it is honoured anyway.)
@@ -251,30 +346,35 @@ pub(crate) fn registered_named(
 /// so a mere fingerprint claim does not qualify. Nothing here is signed on the host's word
 /// alone.
 ///
-/// # The slice is borrowed from [`PARSED`], which the next call rewrites
-///
-/// Exactly as [`registered`]: foreground only, and the caller must not hold the returned
-/// slice across another call into this module.
+/// If the heap cannot hold the larger list, `registered` comes back as it went in: the
+/// registered wallets still sign, and nothing the PSBT describes is trusted.
 ///
 /// Not on the mk3: the signing path's multisig handling (`crate::signtx`) is not built
 /// there, so nothing would call it.
 #[cfg(not(feature = "board-mk3"))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn trust_from_psbt(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
+    registered: Registered,
     psbt: &Psbt<'_>,
     master: &ExtendedPrivKey,
     fingerprint: [u8; 4],
     policy: MultisigTrust,
-) -> &'static [Multisig] {
-    // SAFETY: foreground only; one signing screen at a time. `registered` filled this on
-    // the call just before ours.
-    let parsed: &'static mut heapless::Vec<Multisig, { wallets::MAX_WALLETS }> =
-        unsafe { &mut *core::ptr::addr_of_mut!(PARSED) };
+) -> Registered {
     if policy == MultisigTrust::VerifyOnly {
-        return parsed;
+        return registered;
     }
+    let mut parsed = Registered::with_room(wallets::MAX_WALLETS);
+    if parsed.is_full() {
+        crate::catlog!("multisig: no room for PSBT wallets; registered ones only");
+        return registered;
+    }
+    for w in registered.iter() {
+        let _ = parsed.push(*w);
+    }
+    drop(registered);
 
     let inputs = psbt.unsigned_tx().input_count();
     for index in 0..inputs {
@@ -283,7 +383,7 @@ pub(crate) fn trust_from_psbt(
         }
         // Reconstruct against everything held so far -- registered wallets and ones already
         // trusted from this PSBT -- so an input matched by those is left alone.
-        let Some(candidate) = psbtview::reconstruct_for_input(psbt, index, fingerprint, parsed)
+        let Some(candidate) = psbtview::reconstruct_for_input(psbt, index, fingerprint, &parsed)
         else {
             continue;
         };

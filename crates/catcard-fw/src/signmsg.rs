@@ -380,7 +380,7 @@ fn ask_kind(
     // script form: a `sh(multi)` wallet is listed too, and refused by name if picked,
     // rather than silently missing from a list the owner is comparing with the importer's.
     #[cfg(not(feature = "board-mk3"))]
-    for w in crate::msimport::registered(gate, login, ui.panel) {
+    for w in crate::msimport::registered(gate, login, ui.panel).iter() {
         let mut name = heapless::String::new();
         let form = match w.kind {
             catcard_wallet::multisig::Kind::P2wsh => "wsh",

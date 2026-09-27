@@ -316,7 +316,7 @@ fn open_psbt(
     }
     let mut busy = Working::seed(ui.panel, HEAD, "finding the co-signer");
     let mut found: Option<(Key32, usize)> = None;
-    for w in wallets {
+    for w in wallets.iter() {
         let try_one = crate::keywork::run(|kw| {
             let ours = catcard_wallet::multisig::our_cosigner(w, &master, kw).ok()??;
             let leg = derive_origin(&master, w.cosigners()[ours].origin(), kw)?;
