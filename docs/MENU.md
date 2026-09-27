@@ -25,9 +25,9 @@ question for each item is only whether it is *reachable where a stock user would
 | `Settings` | `Settings` | ✅ |
 | `Scan QR` (Q1, blank device) | `Scan Any QR Code` (Q1, `has_qr`) | 🔀 a tile only on a blank device; with a wallet, the QR key opens the scanner from any menu |
 | `Logout` (mk3/mk4/mk5) | `Secure Logout` (`not has_battery`) | ✅ same gate: a device with a power button does not need a menu entry to stop |
-| `Help` | `Help` (mk4/mk5 only, `not has_qwerty`) | 🔀 on every board, and on Settings and Utils too; one short screen each, in our words |
+| `Help` (mk3/mk4/mk5); the help strip (Q1) | `Help` (mk4/mk5 only, `not has_qwerty`) | 🔀 a row on the mono boards, on Settings and Utils too; one short screen each, in our words. The Q1 has no Help tile: every screen with help has the strip at its foot instead -- see [Help on the Q1](#help-on-the-q1) |
 | — | `Passphrase` (top level, shortcut `p`) | ❌ ours is in Settings; a stock user looks for it on the main menu |
-| `Type Passwords` (`cat_kbemu` on) | `Type Passwords` (`emu` **and** `has_secrets`) | ✅ same gate, same place on the mono boards' list (before Settings); on the Q1 it is a seventh tile, alone on the grid's second page, rather than a row inside Notes -- stock's row is BIP-85 password typing, which is not a Notes feature and exists on boards without Notes. A BIP-85 password child (length and index asked as under Derive → `BIP-85`) is typed into the host and never shown; on the Q1 with Secure Notes on, the notes' password items are offered beside it |
+| `Type Passwords` (`cat_kbemu` on) | `Type Passwords` (`emu` **and** `has_secrets`) | ✅ same gate, same place on the mono boards' list (before Settings); on the Q1 it is the last tile (alone on the grid's second page while the Notes tile is on), rather than a row inside Notes -- stock's row is BIP-85 password typing, which is not a Notes feature and exists on boards without Notes. A BIP-85 password child (length and index asked as under Derive → `BIP-85`) is typed into the host and never shown; on the Q1 with Secure Notes on, the notes' password items are offered beside it |
 | — | `Seed Vault` | not implemented |
 | `Start HSM Mode` (mk4/mk5, while a policy is stored) | `Start HSM Mode` | mk4/mk5 main list, after `Sign`; on the Q1 under Settings → Spending Policy, since its grid has no icon for it (`crate::hsm`) |
 | `[XFP]` / `<XFP>` header row (mk4/mk5) | `<XFP>` / `[XFP]` header item (`hmx`) | 🔀 on the mono boards the row appears when another key is in force, or always with Settings → `Home menu XFP` (own key `cat_xfp`); the Q1 names the wallet in its status bar on every screen instead |
@@ -135,7 +135,7 @@ callgate 23, is mk4+), `Chains` only in a multichain build, and `Debug → Setti
 | `Analyze RNG`, `Games` | — | 🔀 ours alone; `View TRNG Words` is a Debug entry now |
 | `Delete PSBTs` | `Settings` → `Delete PSBTs` (toggle) and `File Management` | 🔀 an action, not a toggle: lists the `*.psbt`, `*.txn`, `SIGNED.PSB`, `FINAL.TXN` files in the root of the chosen storage, asks, overwrites each with zeros to its length, then unlinks it |
 | `Upgrade Firmware` | `Upgrade Firmware` → `From MicroSD`, `From VirtDisk` | ✅ stock's own name, in stock's drawer; asks SD card or Virtual Disk, then browses for the `.dfu`. The offer screen (here and for a USB upload) asks the bootloader (gate 21/1) whether the image is older than this device allows, and warns "WILL BE REFUSED" when it is. No `Show Version` under it: About has that |
-| `Help` | — | 🔀 what the drawer holds, in one screen |
+| `Help` (mk3/mk4/mk5) | — | 🔀 what the drawer holds, in one screen; on the Q1 the help strip opens the same |
 | `Backup` → `Save backup`, `Verify backup`, `Restore backup`, `Clone Coldcard` | `Backup` → `Backup System`, `Verify Backup`, `Restore Backup`, `Clone Coldcard` | ✅ same drawer, same four rows. Save offers stock's three protections — twelve words (the default), a typed passphrase, or cleartext (asked twice, never the default) — and writes `backup-<XFP>.7z` to the card or the Virtual Disk. Verify decrypts, parses and compares the fingerprint against the wallet in force without changing anything; ours goes further than stock's CRC-only check. Restore and Verify read from either storage and detect a cleartext file rather than asking for a password. A backup can also be loaded for the session only, from Derive → `Import key` → `Coldcard backup` (stock's Temporary Seed → Coldcard Backup) |
 | `Backup` → `Key Teleport` → `Receive`, `Send`, `Multisig PSBT` (Q1) | `Key Teleport (start)` on the main menu and `Advanced/Tools`; `File Management` → `Teleport Multisig PSBT` | 🔀 one list row beside `Clone Coldcard`, the other device-to-device move, rather than a main-menu tile: the Q1's main and Utils menus are icon grids and a row without art turns a grid into a list, so a tile waits for an icon. `Multisig PSBT` is in the same list rather than under File Management (whose PSBT rows here are the Sign grid's). Stock's wire format byte for byte (`R`/`S`/`E` BBQr, `keyteleport.com` NFC link), so it interoperates with a stock Q1; stock's warnings before anything is sent. A teleport code caught by `Scan QR` or tapped in by NFC goes straight to the receive. See `docs/KEY-TELEPORT.md` |
 | `WIF Store` → per key: `Reveal WIF`, `Sign MSG`, `Descriptors`, `Delete key`; `Generate new key`, `Import from SD`, `Export All`, `Clear All` | `WIF Store` → per key: `Detail`, `Descriptors`, `Addresses`, `Sign MSG`, `Delete`; `Import WIF`, `Export All`, `Clear All` | ✅ same drawer and rows; the addresses are on the key's own screen rather than a row under it, and `Generate new key` is ours. `Sign MSG` signs legacy as the chosen address type; `Descriptors` are `wpkh` / `sh(wpkh)` / `pkh` over the public key with BIP-380 checksums; `Export All` writes the keys in plain text behind two warnings; `Clear All` asks twice and cannot be undone |
@@ -145,6 +145,31 @@ callgate 23, is mk4+), `Chains` only in a multichain build, and `Debug → Setti
 
 `Upgrade Firmware` has no icon, so on the Q1 it is the one cell that shows its name
 alone — and, as the seventh entry, it is alone on the grid's second page.
+
+## Help on the Q1
+
+The mono boards keep stock's shape: a `Help` row on the main menu (blank or not), Settings
+(blank or not) and Utils. The Q1 has none of those rows. Help there is a **strip** along
+the foot of the screen -- `? Help` in the small face (7×14), dim, centred, one line of 16
+rows under the grid or list, which lays itself out in the 208 rows above it. It is not a
+row: the arrows, digits and ENTER do what they did before, and the cursor never lands on
+it. On the icon grid it holds still while the pages slide, with the page dots.
+
+| Key | With the focus on the menu | With the focus on the strip |
+|---|---|---|
+| `TAB` | focus to the strip (drawn inverted) | focus back to the menu, where it was |
+| `?` (SHIFT or SYMBOL + `/`) | opens the help | opens the help |
+| ENTER | the row under the cursor, as ever | opens the help |
+| CANCEL, an arrow | as ever | focus back to the menu; nothing else happens |
+
+The help is the same scrolling document the mono boards' rows open, and leaving it
+returns to the same screen with the cursor where it was. **Every menu has one**:
+`menu::menu_of` pairs each menu with its help, so a menu cannot be added without it. The
+full-screen features that are menus of their own -- Key Teleport, SD card, Spending
+Policy (with the HSM rows under it), Trick PINs, Key vault, WIF Store, Notes, Multisig --
+arm theirs while they run, and every list inside them carries the strip; there the help
+opens in the list's place and ENTER or CANCEL puts the list back. A transaction under
+review never has the strip, whichever feature it was reached from.
 
 ## What to do about the ❌ rows
 
@@ -208,7 +233,8 @@ silent, each marked `[I]` in the code:
   `Settings`, `Help`, `Logout`; `Notes` under Allow Notes; `Derive` and `Type Passwords`
   under Related Keys. Utils: the file, export, card and NFC rows, `Upgrade Firmware` and
   `Help`; `WIF Store` under Related Keys; no `Backup`, and `SD card` without its `Encryption` row. Settings: `About`
-  and `Help`, and `Passphrase` under Related Keys -- stock's hobbled menu has no Settings
+  and `Help`, and `Passphrase` under Related Keys (`Help` is a row only on the mono boards;
+  the Q1's help strip writes nothing and stays) -- stock's hobbled menu has no Settings
   drawer at all; ours keeps the two rows that write nothing. Derive (Related Keys):
   `Passphrase`, `Import key`, `New words`, `Key vault`, `Back to root`; no BIP-85, no XOR.
   Under the menus, `settings::save_wallet` **refuses every wallet-settings key** while

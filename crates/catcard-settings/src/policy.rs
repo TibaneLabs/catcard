@@ -556,7 +556,9 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
     match menu {
         Menu::Main => match label {
             // Ready To Sign, Address Explorer, Scan Any QR Code, Advanced/Tools, Secure
-            // Logout; Help is ours on every board.
+            // Logout; Help is ours, a row on the mono boards. (The Q1 has no Help row: its
+            // help is the strip at the foot of each screen, which this filter never sees
+            // and which writes nothing, so it stays in a hobbled device too.)
             "Sign" | "Addresses" | "Scan QR" | "Utils" | "Settings" | "Help" | "Logout" => true,
             // Only while test-driving; the firmware adds the row itself.
             "EXIT TEST DRIVE" => true,
@@ -571,7 +573,8 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
         },
         // Stock's hobbled menu has no Settings drawer at all. Ours keeps the drawer for
         // About (stock's View Identity and Show FW Version live under Advanced/Tools) and
-        // Help, and Passphrase under Related Keys; every preference row goes, because a
+        // Help (a row on the mono boards, the strip on the Q1), and Passphrase under
+        // Related Keys; every preference row goes, because a
         // hobbled device refuses to save them. `[I]`
         Menu::Settings => match label {
             "About" | "Help" => true,
