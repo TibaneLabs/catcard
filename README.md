@@ -22,8 +22,8 @@ in the page (WebHID, no server), switches a stock Coldcard to CatCard, updates a
 and can put official Coldcard firmware back. Nothing is installed until you approve it on
 the device.
 
-Building it yourself, or taking a `.dfu` straight from CI instead:
-[Images built for you](#images-built-for-you).
+Taking a `.dfu` from a [release](https://github.com/TibaneLabs/catcard/releases), or from
+CI, or building it yourself instead: [Images built for you](#images-built-for-you).
 
 ## Why
 
@@ -165,8 +165,15 @@ You do not have to build anything to try this. The simplest way in is
 **[CatCard Manager](https://tibanelabs.github.io/catcard-mgr/)**, which picks the right
 image for the connected device, checks it, and offers it to the device over USB.
 
-To handle the files yourself: CI builds **every shape on every push** and attaches the
-signed `.dfu` files to the run:
+To handle the files yourself, take them from a release:
+
+**[Releases →](https://github.com/TibaneLabs/catcard/releases)** — the newest is at the
+top. Each carries the twelve signed `.dfu` files described below and a `SHA256SUMS` to
+check them against, and stays downloadable. (Releases are marked pre-release while
+CatCard is alpha, so GitHub's "latest release" link skips them; use the list.)
+
+For something newer than the last release, CI builds **every shape on every push** and
+attaches the same signed `.dfu` files to the run:
 
 **[Latest builds →](https://github.com/TibaneLabs/catcard/actions/workflows/ci.yml?query=branch%3Amaster+is%3Asuccess)**
 — open the newest green run and scroll to **Artifacts** at the bottom of the summary
