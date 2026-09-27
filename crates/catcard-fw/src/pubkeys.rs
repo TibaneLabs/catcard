@@ -86,8 +86,19 @@ struct Cached {
     key: ExtendedPubKey,
 }
 
+/// The cache itself, in a heap block taken the first time a key is remembered.
+///
+/// It was a resident `static` -- 708 bytes under the Q1's boot stack whether or not the
+/// session ever derived an account key. Leased, it costs nothing until a screen that shows
+/// addresses is opened, and it is given back (wiped) when [`forget`] runs. The first
+/// derivation is almost always made on entry to such a screen, before that screen takes
+/// its own buffers, so the block lands low in an empty heap rather than splitting it.
+///
+/// A heap that cannot spare it means nothing is cached: every visit derives from the seed
+/// again, as it would have with no cache at all.
+///
 /// Foreground only, single core -- as with [`crate::passphrase`].
-static mut ACCOUNTS: heapless::Vec<Cached, MAX> = heapless::Vec::new();
+static mut ACCOUNTS: Option<crate::heap::Owned<heapless::Vec<Cached, MAX>>> = None;
 /// This wallet's master fingerprint, which costs the same unlock to learn.
 static mut FINGERPRINT: Option<[u8; 4]> = None;
 
@@ -98,7 +109,7 @@ static mut FINGERPRINT: Option<[u8; 4]> = None;
 pub(crate) fn forget() {
     // SAFETY: foreground only; the menu is the sole writer and holds no borrow across it.
     unsafe {
-        (*core::ptr::addr_of_mut!(ACCOUNTS)).clear();
+        *core::ptr::addr_of_mut!(ACCOUNTS) = None;
         *core::ptr::addr_of_mut!(FINGERPRINT) = None;
     }
     // A computer shown the old wallet's accounts may not sign with the new one's keys.
@@ -108,7 +119,7 @@ pub(crate) fn forget() {
 /// The cached account key at `m/{purpose}h/{coin}h/{account}h`, if this session has it.
 fn cached(purpose: u32, coin: u32, account: u32) -> Option<ExtendedPubKey> {
     // SAFETY: as in `forget`.
-    let all = unsafe { &*core::ptr::addr_of!(ACCOUNTS) };
+    let all = unsafe { (*core::ptr::addr_of!(ACCOUNTS)).as_deref()? };
     all.iter()
         .find(|c| (c.purpose, c.coin, c.account) == (purpose, coin, account))
         .map(|c| c.key)
@@ -117,7 +128,17 @@ fn cached(purpose: u32, coin: u32, account: u32) -> Option<ExtendedPubKey> {
 /// Remember an account key, evicting the oldest if there is no room.
 fn remember(purpose: u32, coin: u32, account: u32, key: ExtendedPubKey) {
     // SAFETY: as in `forget`.
-    let all = unsafe { &mut *core::ptr::addr_of_mut!(ACCOUNTS) };
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(ACCOUNTS) };
+    if slot.is_none() {
+        let Some(room) = crate::heap::room::<heapless::Vec<Cached, MAX>>() else {
+            crate::catlog!("pubkeys: no memory to cache account keys");
+            return;
+        };
+        *slot = Some(room.fill(heapless::Vec::new()));
+    }
+    let Some(all) = slot.as_deref_mut() else {
+        return;
+    };
     if all.is_full() {
         all.remove(0);
     }
