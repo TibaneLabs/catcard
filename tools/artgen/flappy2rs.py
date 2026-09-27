@@ -22,6 +22,10 @@ the table does not name stops the bake rather than slipping through unchanged.
 
 Every sprite shares one RGB565 palette (the set has under 256 colours after RGB565
 rounding) and stores one byte per pixel; 0xFF is transparent.
+
+Each sprite keeps its distinct rows once, plus a byte per row saying which of them it is.
+The scenery is mostly rows that repeat -- sky, the body of a pipe, the ground's stripes --
+so the 45 KB of pixels come to about 11, and a pixel is still one lookup away.
 """
 import argparse, pathlib, sys
 
@@ -122,20 +126,32 @@ def main():
     out.append(f"//! at `{commit}`, halved to their native 144x256 scale. MIT License, Copyright (c) 2019")
     out.append("//! Samuel Custodio. The flying cat: `art/flappy-cat/`. See THIRD-PARTY-NOTICES.md.")
     out.append("")
-    out.append("/// A sprite: one byte per pixel into [`PALETTE`], row-major; [`TRANSPARENT`] shows through.")
+    out.append("/// A sprite: one byte per pixel into [`PALETTE`]; [`TRANSPARENT`] shows through.")
+    out.append("///")
+    out.append("/// Stored as its distinct rows, each once, and which of them each row of the picture is:")
+    out.append("/// the scenery repeats rows far more than it has new ones.")
     out.append("pub struct Sprite {")
     out.append("    pub width: u16,")
     out.append("    pub height: u16,")
+    out.append("    /// For each of the `height` rows, which row of `pixels` it is.")
+    out.append("    pub rows: &'static [u8],")
+    out.append("    /// The distinct rows, `width` bytes each, in the order they are first used.")
     out.append("    pub pixels: &'static [u8],")
     out.append("}")
     out.append("")
     out.append("impl Sprite {")
-    out.append("    /// The RGB565 colour at `(x, y)`, or `None` where it is transparent or outside.")
-    out.append("    pub fn at(&self, x: usize, y: usize) -> Option<u16> {")
+    out.append("    /// The palette index at `(x, y)`, [`TRANSPARENT`] included, or `None` outside.")
+    out.append("    pub fn index(&self, x: usize, y: usize) -> Option<u8> {")
     out.append("        if x >= self.width as usize || y >= self.height as usize {")
     out.append("            return None;")
     out.append("        }")
-    out.append("        match self.pixels[y * self.width as usize + x] {")
+    out.append("        let row = self.rows[y] as usize;")
+    out.append("        Some(self.pixels[row * self.width as usize + x])")
+    out.append("    }")
+    out.append("")
+    out.append("    /// The RGB565 colour at `(x, y)`, or `None` where it is transparent or outside.")
+    out.append("    pub fn at(&self, x: usize, y: usize) -> Option<u16> {")
+    out.append("        match self.index(x, y)? {")
     out.append("            TRANSPARENT => None,")
     out.append("            i => Some(PALETTE[i as usize]),")
     out.append("        }")
@@ -148,15 +164,29 @@ def main():
     for i in range(0, len(palette), 10):
         out.append("    " + " ".join(f"0x{c:04X}," for c in palette[i:i + 10]))
     out.append("];")
+    stored = 0
     for name, file, w, h, px in baked:
         out.append("")
         out.append(f"/// `art/{file}`, {w}x{h}.")
         out.append(f"pub const {name}: Sprite = Sprite {{")
         out.append(f"    width: {w},")
         out.append(f"    height: {h},")
+        rows, uniq = [], []
+        for y in range(h):
+            row = tuple(px[y * w:(y + 1) * w])
+            if row not in uniq:
+                uniq.append(row)
+            rows.append(uniq.index(row))
+        if len(uniq) > 256:
+            sys.exit(f"{name} has {len(uniq)} distinct rows: too many for a byte each")
+        stored += len(rows) + len(uniq) * w
+        out.append("    rows: &[")
+        for i in range(0, len(rows), 24):
+            out.append("        " + " ".join(f"{v}," for v in rows[i:i + 24]))
+        out.append("    ],")
         out.append("    pixels: &[")
-        for i in range(0, len(px), w):
-            out.append("        " + " ".join(f"{v}," for v in px[i:i + w]))
+        for row in uniq:
+            out.append("        " + " ".join(f"{v}," for v in row))
         out.append("    ],")
         out.append("};")
     out.append("")
@@ -166,7 +196,7 @@ def main():
     out.append("];")
     a.out.write_text("\n".join(out) + "\n")
     total = sum(len(b[4]) for b in baked)
-    print(f"{len(palette)} colours, {total} bytes of pixels -> {a.out}")
+    print(f"{len(palette)} colours, {total} pixels in {stored} bytes -> {a.out}")
 
 
 if __name__ == "__main__":

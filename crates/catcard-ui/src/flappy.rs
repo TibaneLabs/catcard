@@ -427,6 +427,42 @@ mod tests {
     }
 
     #[test]
+    fn the_pixels_are_the_ones_baked() {
+        // FNV-1a over every sprite's size and palette indices, row by row, then the
+        // palette: pinned from the one-byte-per-pixel tables before the sprites were
+        // stored as distinct rows, so a change of storage cannot change a pixel.
+        use crate::art::flappy::{DIGITS, GAME_OVER, PALETTE};
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let sprites = [&BACKGROUND, &BASE, &PIPE, &GAME_OVER]
+            .into_iter()
+            .chain(DIGITS.iter())
+            .chain([&CAT_UP, &CAT_MID, &CAT_DOWN]);
+        for s in sprites {
+            assert_eq!(s.rows.len(), s.height as usize);
+            assert_eq!(s.pixels.len() % s.width as usize, 0);
+            feed(&s.width.to_le_bytes());
+            feed(&s.height.to_le_bytes());
+            for y in 0..s.height as usize {
+                for x in 0..s.width as usize {
+                    feed(&[s.index(x, y).unwrap()]);
+                }
+            }
+            assert_eq!(s.index(s.width as usize, 0), None);
+            assert_eq!(s.index(0, s.height as usize), None);
+        }
+        for c in PALETTE {
+            feed(&c.to_le_bytes());
+        }
+        assert_eq!(h, 0x2f53_eb9b_f2cc_b4ae);
+    }
+
+    #[test]
     fn a_world_column_keeps_its_memory_column_as_the_view_moves() {
         // The whole trick: draw once, scroll for free.
         assert_eq!(memory_column(0), 0);
