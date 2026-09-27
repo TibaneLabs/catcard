@@ -513,20 +513,17 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
     &items[..n]
 }
 
-/// Whether a [`MAIN_ITEMS`] row is on the menu right now. Two come and go with a
-/// setting, as stock's do: the Notes tile only once the feature is on (`secnap`), and
-/// `Type Passwords` only while the keyboard is on (`emu`). Settings is where either is
-/// turned on -- Secure notes, and Hardware On/Off.
+/// Whether a [`MAIN_ITEMS`] row is on the menu right now: `Type Passwords` comes and
+/// goes with the keyboard (`emu`, Settings > Hardware On/Off), as stock's does.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
 fn main_row_shown(label: &str) -> bool {
     #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
     if label == "Start HSM Mode" {
         return crate::hsm::policy_stored() && crate::hsm::available();
     }
-    #[cfg(feature = "board-q1")]
-    if label == "Notes" {
-        return crate::prefs::current().notes == Some(true);
-    }
+    // The Notes tile is always there on the Q1, where the owner expects it. Stock shows
+    // its row only once the feature is on; here, opening the tile with the feature off
+    // tells the opt-in story first (`notes::ensure_enabled`), so nothing is skipped.
     if label == "Type Passwords" {
         return crate::usbtask::keyboard_on();
     }
