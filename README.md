@@ -15,10 +15,15 @@ MIT licensed. Copyright © 2026 Karpeles Lab Inc.
 > Do not put funds on a device running this. Keep the words of any seed you let it
 > store, and expect to reinstall stock firmware.
 
-**Want to try it?** Every push builds a signed image for every board:
-[latest builds](https://github.com/TibaneLabs/catcard/actions/workflows/ci.yml?query=branch%3Amaster+is%3Asuccess)
-— open the newest green run and take a `.dfu` from **Artifacts**. Details and what the
-names mean: [Images built for you](#images-built-for-you).
+**Want to try it?** Install it from your browser with
+**[CatCard Manager](https://tibanelabs.github.io/catcard-mgr/)**: plug the device in over
+USB, pick a release, and approve the install on the device's own screen. It runs entirely
+in the page (WebHID, no server), switches a stock Coldcard to CatCard, updates a CatCard,
+and can put official Coldcard firmware back. Nothing is installed until you approve it on
+the device.
+
+Building it yourself, or taking a `.dfu` straight from CI instead:
+[Images built for you](#images-built-for-you).
 
 ## Why
 
@@ -156,8 +161,12 @@ Getting it onto hardware: [`docs/FLASHING.md`](docs/FLASHING.md).
 
 ### Images built for you
 
-You do not have to build anything to try this. CI builds **every shape on every push**
-and attaches the signed `.dfu` files to the run:
+You do not have to build anything to try this. The simplest way in is
+**[CatCard Manager](https://tibanelabs.github.io/catcard-mgr/)**, which picks the right
+image for the connected device, checks it, and offers it to the device over USB.
+
+To handle the files yourself: CI builds **every shape on every push** and attaches the
+signed `.dfu` files to the run:
 
 **[Latest builds →](https://github.com/TibaneLabs/catcard/actions/workflows/ci.yml?query=branch%3Amaster+is%3Asuccess)**
 — open the newest green run and scroll to **Artifacts** at the bottom of the summary
