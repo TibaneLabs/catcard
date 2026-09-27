@@ -12,6 +12,8 @@ Stock has no security key; this is a CatCard addition.
 | switch | Settings → Hardware On/Off → `Security key` (`cat_fido`, per wallet, off by default) |
 | USB | an extra HID interface, usage page `0xF1D0` (FIDO), endpoints `0x83`/`0x03` |
 | protocols | CTAP 2.1 (`FIDO_2_0`, `FIDO_2_1`) and U2F (`U2F_V2`) |
+| user verification | the **client PIN**, typed in the browser; PIN/UV auth protocols 2 and 1 |
+| passkeys | up to **50 per wallet** (mk4/mk5/Q1), in a sealed file of their own; none on the mk3 |
 | algorithm | ES256 only (ECDSA P-256, SHA-256), RFC 6979 deterministic nonces |
 | attestation | `packed` self-attestation (CTAP2); a per-registration self-signed certificate (U2F) |
 | sign counter | always 0 ("no counter", WebAuthn L2 §6.1.1) |
@@ -64,22 +66,40 @@ keepalives) for up to 30 s, then is answered as timed out.
 
 `CTAPHID_WINK` shows "the computer is pointing at this one" for a second and a half.
 
+The PIN adds its own questions, all on the same approval page, each naming the wallet:
+
+| question | when |
+|---|---|
+| **Set security key PIN?** | the browser sets the first PIN (Chrome: Settings → Privacy and security → Security keys → Create a PIN) |
+| **Change security key PIN?** | the browser changes it; asked *before* the old PIN is tried |
+| **Register** / **Sign in** / **Manage passkeys** at *site*, "With the PIN typed on the computer." | the browser has the PIN and wants a token for that; asked *before* the PIN is tried |
+| **Delete passkey?** | Settings → Hardware On/Off → Security key → Passkeys, one picked |
+
+A passkey registration adds "Saved on this device as a passkey." to the Register question.
+
 ## What is supported
 
 | CTAP2 command | |
 |---|---|
 | `authenticatorGetInfo` | answered at once, without the screen |
-| `authenticatorMakeCredential` | ES256, `excludeList` honoured, `packed` self-attestation |
-| `authenticatorGetAssertion` | `allowList` required; the first id that is this wallet's for this site |
+| `authenticatorMakeCredential` | ES256, `excludeList` honoured, `packed` self-attestation; `rk` stores a passkey; a PIN token sets UV |
+| `authenticatorGetAssertion` | an `allowList`, or none: this wallet's passkeys for the site, newest first |
+| `authenticatorGetNextAssertion` | the site's other passkeys, within 30 s |
+| `authenticatorClientPIN` | getPINRetries, getKeyAgreement, setPIN, changePIN, getPinToken, getPinUvAuthTokenUsingPinWithPermissions (`mc`, `ga`, `cm`) |
+| `authenticatorCredentialManagement` (0x0A, and 0x41) | metadata, enumerate sites and credentials, delete, update user |
 | `authenticatorReset` | see [Reset](#reset-irreversible) |
 | `authenticatorSelection` | one press |
 
 GetInfo says: versions `U2F_V2`, `FIDO_2_0`, `FIDO_2_1`; AAGUID
 `54a5d3d6-f9d6-4b05-bdac-7cc541efc8f1` (a random version-4 UUID generated once for this
-firmware, 2026-09-27 -- it identifies the model, never a unit or a wallet); options `rk: false`,
-`up: true`, `plat: false`, and no `uv` or `clientPin` key (absent means unsupported);
-`maxMsgSize` 1024; `maxCredentialCountInList` 8; `maxCredentialIdLength` 64 (ours are 33);
-transports `usb`; algorithms `[{alg: -7, type: "public-key"}]`.
+firmware, 2026-09-27 -- it identifies the model, never a unit or a wallet); options `rk`
+(true on mk4/mk5/Q1), `up: true`, `plat: false`, `credMgmt: true` (where `rk` is),
+`clientPin` (true once this wallet has a PIN, false before), `pinUvAuthToken: true`,
+`makeCredUvNotRqd: true`, and no `uv` (no built-in user verification); `pinUvAuthProtocols`
+`[2, 1]`; `minPINLength` 4; `maxMsgSize` 1024; `maxCredentialCountInList` 8;
+`maxCredentialIdLength` 64 (ours are 33); transports `usb`; algorithms
+`[{alg: -7, type: "public-key"}]`; `remainingDiscoverableCredentials` once the wallet's
+passkey file has been read this session. No `forcePINChange`: nothing here forces one.
 
 | U2F | |
 |---|---|
@@ -111,15 +131,20 @@ a session may show the seed-reading progress screen (see below).
 | request | answer |
 |---|---|
 | no ES256 in `pubKeyCredParams` | `CTAP2_ERR_UNSUPPORTED_ALGORITHM` |
-| `rk: true` (resident key, passkey) | `CTAP2_ERR_UNSUPPORTED_OPTION` |
+| `rk: true` on the mk3 (no passkeys) | `CTAP2_ERR_UNSUPPORTED_OPTION` |
+| `rk: true` with a PIN set and no `pinUvAuthParam` | `CTAP2_ERR_PUAT_REQUIRED` (§6.1.2 step 7) |
 | `uv: true` | `CTAP2_ERR_INVALID_OPTION` (no built-in user verification) |
 | `up: false` on MakeCredential | `CTAP2_ERR_INVALID_OPTION` |
-| `pinUvAuthParam` without / with a protocol | `CTAP2_ERR_MISSING_PARAMETER` / `CTAP1_ERR_INVALID_PARAMETER` |
+| a zero-length `pinUvAuthParam` | a press, then `CTAP2_ERR_PIN_NOT_SET` / `CTAP2_ERR_PIN_INVALID` (§6.1.2 step 1) |
+| `pinUvAuthParam` without / with an unknown protocol | `CTAP2_ERR_MISSING_PARAMETER` / `CTAP1_ERR_INVALID_PARAMETER` |
+| a token that fails its MAC, lacks the permission, is bound to another site, was spent or has lapsed | `CTAP2_ERR_PIN_AUTH_INVALID` |
 | `enterpriseAttestation` | `CTAP1_ERR_INVALID_PARAMETER` |
 | `rk` in GetAssertion options | `CTAP2_ERR_UNSUPPORTED_OPTION` |
-| GetAssertion with no (matching) `allowList` | `CTAP2_ERR_NO_CREDENTIALS` (after the person answers, unless `up: false`) |
-| `authenticatorClientPIN`, anything unknown | `CTAP1_ERR_INVALID_COMMAND` |
-| `authenticatorGetNextAssertion` | `CTAP2_ERR_NOT_ALLOWED` |
+| GetAssertion with nothing of this wallet's for the site | `CTAP2_ERR_NO_CREDENTIALS` (after the person answers, unless `up: false`) |
+| a passkey when 50 are stored | `CTAP2_ERR_KEY_STORE_FULL` |
+| `authenticatorGetNextAssertion` with nothing to continue, or after 30 s | `CTAP2_ERR_NOT_ALLOWED` |
+| built-in UV subcommands (`getPinUvAuthTokenUsingUvWithPermissions`, `getUVRetries`) | `CTAP2_ERR_INVALID_SUBCOMMAND` |
+| anything unknown | `CTAP1_ERR_INVALID_COMMAND` |
 | no wallet (logged out, no seed, a WIF key) | `CTAP2_ERR_OPERATION_DENIED` / U2F `0x6985`, never a question |
 | malformed CBOR, non-canonical CBOR | `CTAP2_ERR_INVALID_CBOR` / `CTAP2_ERR_CBOR_UNEXPECTED_TYPE` |
 | a malformed CTAPHID frame | a `CTAPHID_ERROR` frame; never a hang |
@@ -130,16 +155,121 @@ no tags or floats, nesting at most 6 deep, UTF-8 text, nothing trailing.
 
 ### Not supported
 
-- **Resident keys / passkeys** (`rk: true`, discoverable credentials, credential
-  management). The device stores nothing per site; a passkey would need storage and a
-  way to list and delete it.
-- **clientPIN and user verification** (`uv`). The device PIN protects the whole wallet at
-  login, but CTAP has no way to say so; a site demanding UV will not accept this key.
+- **Built-in user verification** (the `uv` option). The device PIN protects the whole
+  wallet at login, but CTAP has no way to say so; the client PIN below is the UV.
+- **Passkeys on the mk3**: its settings are raw SPI-NOR sectors with no file volume for
+  the passkey file. The PIN works there; `rk` is false.
 - **NFC.** The NFC chip on the mk4/Q1 is a passive tag the device writes; it cannot run
   the ISO 14443-4 card emulation CTAP-over-NFC needs.
 - **BLE** (no radio), **enterprise attestation**, and every **extension**
   (`credProtect`, `hmac-secret`, `largeBlob`, `minPinLength`, ...): parsed, ignored, never
   answered.
+
+## The security-key PIN (client PIN)
+
+A site that wants **user verification** -- every passkey, and any site set to
+"UV required" -- gets it from the **PIN typed in the browser** (CTAP 2.1 §6.5). The PIN
+never crosses USB in the clear: the browser and the device agree a secret over P-256 ECDH
+(a key pair made per power-up per protocol, from the UI DRBG), the browser sends
+`LEFT(SHA-256(PIN), 16)` encrypted under it, and the device answers with a random 32-byte
+**token** the browser then uses to MAC each request. A request carrying a valid token gets
+the **UV flag**.
+
+| | |
+|---|---|
+| protocols | 2 (HKDF-SHA-256, random-IV AES-256-CBC, full HMAC) preferred, then 1 (SHA-256, zero-IV AES-256-CBC, HMAC cut to 16) |
+| PIN | 4 to 63 bytes of UTF-8, at least 4 code points (§6.5.1) |
+| stored | per **wallet**: `cat_fidopin` in the wallet's own encrypted settings, `"R:HASH"` -- the retries left and the 16-byte hash. Nothing else |
+| retries | **8**. Written down *before* a guess is judged, so a power cut mid-guess does not give it back; a right PIN puts them back to 8 |
+| three wrong in a row | `CTAP2_ERR_PIN_AUTH_BLOCKED` until the device is unplugged (the count lives in RAM) |
+| none left | `CTAP2_ERR_PIN_BLOCKED` for good: only a [reset](#reset-irreversible) clears it |
+| tokens | one at a time, per power-up; must be used within 30 s, lives at most 10 min; `mc`/`ga` are spent by the request that uses them (§6.1.2 step 14), `cm` is not; void after a PIN change or a wallet change |
+| permissions | `mc`, `ga`, `cm`; `be`, `lbw`, `acfg` are `CTAP2_ERR_UNAUTHORIZED_PERMISSION` |
+
+A stored value that cannot be read is **not** "no PIN" (that would let anyone set a new
+one): it is a PIN with no retries left, blocked until a reset. Setting a PIN raises GetInfo's
+`clientPin` to true at once.
+
+**Where this departs from the letter of CTAP, and why:**
+
+- **Every token is asked for on the device**, before the PIN is tried (§6.5.5.7.2 says a
+  device with a display asks for consent; here that is also what stops software on the
+  computer from spending the eight retries -- and forcing a reset that loses every passkey
+  -- with nobody at the device).
+- **That press stands for the next request's presence** for 30 s: the token is begun with
+  `userIsPresent: true` where §6.5.5.7.2 says `false`, so a passkey sign-in is one press on
+  the device, not two. It is what §6.5.5.7.3 does for a built-in method that collects
+  presence.
+- **setPIN and changePIN are asked on the device.** CTAP does not require it (the browser
+  collects the PIN); this device does because a computer setting or changing the PIN of a
+  key in someone's pocket -- and so owning its passkeys -- is exactly what it exists to
+  prevent.
+- **`makeCredUvNotRqd: true`**: with a PIN set, an ordinary second-factor registration
+  (`rk: false`) still needs no PIN (§6.1.2 step 10; §6.4 says authenticators SHOULD). Only
+  passkeys require it. Otherwise turning a PIN on would break every site that uses the key
+  as a second factor through a browser that does not ask for the PIN.
+- No **"remove PIN"** anywhere: CTAP has none but a reset.
+
+With **no PIN set**, a site that requires UV is the browser's to handle: it sees
+`clientPin: false` and offers to create one (Chrome does).
+
+## Passkeys
+
+A **passkey** (discoverable credential, `rk: true`) is found from the site alone: the
+browser sends no allow list, and the device answers with the passkeys it keeps for that
+site, newest first -- the first with `numberOfCredentials`, the rest through
+`authenticatorGetNextAssertion` -- and the browser shows its own account picker (this
+device answers as one without a picker of its own, §6.2.2 step 11). Each answer carries
+`user.id`; the name and display name only when the request was user-verified and there is
+more than one to choose from (§6.2.2).
+
+**The key is still derived, never stored.** A passkey is an ordinary credential of this
+wallet (same key derivation, same MAC'd 33-byte id, below) plus a record of what the site
+no longer sends: its RP ID (up to 32 bytes, shortened as §6.8.7 prescribes), rpIdHash, the
+credential's 16-byte nonce, `user.id` (≤ 64 bytes), `user.name` and `displayName` (64
+bytes each, cut at a character boundary), and the creation order -- 280 bytes. The same
+site and `user.id` again replaces the old one (§6.1.2 step 17).
+
+| | |
+|---|---|
+| where | the internal-flash volume, `/fido-XXXXXXXXXXXXXXXX.pk`, **one file per wallet and generation**, not in the 4 KB settings slot (which already holds every preference, note and store) |
+| sealed | AES-256-CTR, then HMAC-SHA-256 over magic, IV and ciphertext, checked in constant time before decrypting; both keys HMACs of the wallet's FIDO master (`Master::passkey_key`), the file name a third |
+| capacity | **50** per wallet: 14 KB of plaintext, which one heap block holds beside a request's 2 KB |
+| read | into one heap block per request (what is there plus room for one more), wiped when it goes back |
+| mk3 | none: no file volume. `rk: false` |
+
+So **a restored seed plus the file** recovers every passkey, a restored seed alone every
+*login* whose site still sends an allow list; the file says nothing to anyone without the
+wallet; and a reset -- which changes the master -- leaves nothing that opens (the old file
+is removed as well).
+
+On the device: Settings → Hardware On/Off → Security key → **Passkeys** lists them (site
+and account), and picking one asks **Delete passkey?** on the approval page.
+
+### Credential management
+
+`authenticatorCredentialManagement` (0x0A, and the `FIDO_2_1_PRE` alias 0x41) is what
+Chrome's Settings → Security keys → *Sign-in data* uses: metadata (stored / places left),
+the sites, each site's credentials (with public key, `credProtect` 1), rename
+(`updateUserInformation`: the `user.id` must match; an empty name is removed) and delete.
+Every request carries a token with the `cm` permission -- the PIN typed and "Manage
+passkeys" allowed on the device -- and nothing more is asked. A token bound to a site sees
+only that site.
+
+## Logging
+
+One line per request in the device log (`catlog`), with the site and the outcome, never a
+PIN, hash, token, key or user id:
+
+```text
+fido: clientPin getPinUvAuthToken rp=token2.com -> ok (8 left)
+fido: clientPin getPinUvAuthToken -> wrong PIN (6 left) [0x31]
+fido: makeCredential rp=token2.com rk=1 uv=1 -> allowed
+fido: makeCredential rp=webauthn.io rk=1 uv=0 -> refused (PIN required) [0x36]
+fido: getAssertion rp=webauthn.io rk=0 uv=1 found=2 -> allowed
+fido: getAssertion rp=example.com rk=0 uv=0 -> cancelled by host [0x2d]
+fido: credMgmt deleteCredential -> ok
+```
 
 ## The keys
 
@@ -232,9 +362,12 @@ through it. A server that checks U2F attestation against a vendor list will not 
 ## Reset (IRREVERSIBLE)
 
 `authenticatorReset` (Chrome: Settings → Privacy and security → Security keys → Reset)
-**raises this wallet's FIDO generation** (`cat_fidogen` in the wallet's settings). Every
-credential id made before then fails its tag from then on: **every site registered with
-this wallet's security key stops accepting it, and nothing brings those logins back.**
+**raises this wallet's FIDO generation** (`cat_fidogen` in the wallet's settings) and, in
+the same settings write, **clears its PIN** (`cat_fidopin`); then it removes the wallet's
+passkey file. Every credential id made before then fails its tag from then on: **every
+site registered with this wallet's security key stops accepting it, every passkey is gone,
+and nothing brings those logins back.** It is the only way to remove a PIN, or to unblock
+one that has run out of retries.
 
 - Only within **10 s** of the security key appearing on USB (CTAP 2.1 §6.6): the interface
   appears after login, so replug, log in, and let the browser send it. Otherwise
@@ -268,10 +401,13 @@ control registers, not its interrupt flags -- so a device that never turns it on
 exactly the register sequence it always did (`Otg::fido_opened`).
 
 Memory: the CTAPHID state is a few hundred bytes in the USB task (`.bss` grew 552 bytes on
-the Q1). A request leases **1 KB** from the heap while it is in flight and the UI task
-leases **another 1 KB** for the answer, so a request peaks at 2 KB of heap; a reset's
-settings write takes the usual two settings buffers on top. Nothing is held between
-requests.
+the Q1), and the PIN protocols' per-power-up state (`catcard_fido::pin::Session`: the
+key-agreement keys, the token, the stateful commands' cursor) about 300 more in the UI
+task's. A request leases **1 KB** from the heap while it is in flight and the UI task
+leases **another 1 KB** for the answer, so a request peaks at 2 KB of heap; a request that
+reads the PIN takes one 4 KB settings buffer, one that writes it (every PIN attempt) the
+usual two; one that touches passkeys takes one block of up to **14 KB** for the file. None
+of these is held at the same time as another, and nothing is held between requests.
 
 ## Timing
 
@@ -297,13 +433,28 @@ python3 -m venv /tmp/fido-venv && /tmp/fido-venv/bin/pip install fido2
 ```
 
 `--sim` runs `cargo run -p catcard-fido --example fido_sim`, the protocol code on a pipe;
-it passes every step with python-fido2 2.2.1. On a device, confirm on the screen when the
-script says so. `--reset` is the irreversible reset above.
+it passes every step with python-fido2 2.2.1, including the PIN and passkey steps
+(setPIN, retries, a passkey refused without the PIN, tokens over protocols 2 and 1, two
+passkeys with UV, a discoverable sign-in through GetNextAssertion, a wrong PIN, and
+credential management's list, rename and delete). On a device, confirm on the screen when
+the script says so; the PIN steps run only with `--pin PIN` (which sets that PIN if none is
+set). `--reset` is the irreversible reset above.
 
-Then a real site: <https://webauthn.io> (register, then authenticate), and Chrome's
-Settings → Security keys.
+Then real sites:
+
+1. Chrome → Settings → Privacy and security → Security keys → **Create a PIN** (the device
+   asks "Set security key PIN?"), then **Sign-in data** (asks "Manage passkeys"; lists,
+   deletes).
+2. <https://webauthn.io>, *Advanced settings*: discoverable **required**, user verification
+   **required**; register (PIN in the browser, one press), then authenticate with no
+   username.
+3. <https://www.token2.com/tools/fido2-demo> (or its WebAuthn test): the registration that
+   said "Your device can't be used with this site" before.
 
 What only hardware can settle: that the composite enumerates with the security key
 (Windows, macOS, Linux; with and without Keyboard EMU), that endpoint 3's FIFO and
 interrupt handling work as the others do, keepalive pacing under a real browser, the
-sign times above, and the U2F retry loop against Chrome's `appid` path.
+sign times above, and the U2F retry loop against Chrome's `appid` path. For the PIN and
+passkeys: the ECDH time (one variable-base multiplication per `getKeyAgreement`-then-token,
+≈ a signature's), the settings write per PIN attempt (the "saving" screen), the passkey
+file's write on the internal-flash volume, and Chrome's own flows above.
