@@ -167,8 +167,13 @@ pub struct UsbTask {
 /// block's eight packets so a burst arriving while the foreground is mid-SD-write is
 /// absorbed; when it does fill, the interrupt stops re-arming the endpoint (the host is
 /// NAKed) until the foreground drains a slot -- back-pressure, not loss.
+///
+/// The slots are a heap block, taken by [`msc_enter`] only when the interrupt transport
+/// is used and given back by [`msc_exit`]: the ring exists only while the USB Drive
+/// screen is open, and the polled transport never fills it at all. Without a block the
+/// ring is empty and full at once, so nothing is ever queued into it.
 struct MscRx {
-    buf: [[u8; REPORT_LEN]; MSC_RXQ],
+    buf: Option<crate::heap::Block>,
     len: [u8; MSC_RXQ],
     head: usize,
     tail: usize,
@@ -180,11 +185,26 @@ const MSC_RXQ: usize = 20;
 impl MscRx {
     const fn new() -> Self {
         Self {
-            buf: [[0; REPORT_LEN]; MSC_RXQ],
+            buf: None,
             len: [0; MSC_RXQ],
             head: 0,
             tail: 0,
         }
+    }
+
+    /// Take the slots from the heap, emptying the ring. False if the heap has no room.
+    fn lease(&mut self) -> bool {
+        self.clear();
+        if self.buf.is_none() {
+            self.buf = crate::heap::take(MSC_RXQ * REPORT_LEN);
+        }
+        self.buf.is_some()
+    }
+
+    /// Give the slots back. Whatever was queued is wiped with the block.
+    fn release(&mut self) {
+        self.clear();
+        self.buf = None;
     }
 
     fn is_empty(&self) -> bool {
@@ -192,7 +212,7 @@ impl MscRx {
     }
 
     fn is_full(&self) -> bool {
-        (self.head + 1) % MSC_RXQ == self.tail
+        self.buf.is_none() || (self.head + 1) % MSC_RXQ == self.tail
     }
 
     fn clear(&mut self) {
@@ -202,8 +222,10 @@ impl MscRx {
 
     /// Producer (interrupt). The caller has checked the ring is not full.
     fn push(&mut self, data: &[u8]) {
+        let Some(buf) = self.buf.as_mut() else { return };
         let n = data.len().min(REPORT_LEN);
-        self.buf[self.head][..n].copy_from_slice(&data[..n]);
+        let at = self.head * REPORT_LEN;
+        buf.bytes()[at..at + n].copy_from_slice(&data[..n]);
         self.len[self.head] = n as u8;
         self.head = (self.head + 1) % MSC_RXQ;
     }
@@ -213,8 +235,10 @@ impl MscRx {
         if self.is_empty() {
             return None;
         }
+        let buf = self.buf.as_mut()?;
         let n = (self.len[self.tail] as usize).min(out.len());
-        out[..n].copy_from_slice(&self.buf[self.tail][..n]);
+        let at = self.tail * REPORT_LEN;
+        out[..n].copy_from_slice(&buf.bytes()[at..at + n]);
         self.tail = (self.tail + 1) % MSC_RXQ;
         Some(n)
     }
@@ -2219,6 +2243,17 @@ pub fn on_otg_interrupt() {
     }
 }
 
+/// Whether the OTG interrupt is driving mass storage right now: the interrupt transport
+/// is compiled in **and** this session got a receive ring for it. Only [`msc_enter`] sets
+/// it and only [`msc_exit`] clears it.
+static MSC_IRQ: AtomicBool = AtomicBool::new(false);
+
+/// Whether the `msc_*` functions must keep the handler out and drain its ring. Folds to
+/// `false` while the interrupt transport is compiled out.
+fn msc_irq() -> bool {
+    MSC_INTERRUPTS && MSC_IRQ.load(Ordering::Relaxed)
+}
+
 /// Re-enumerate as a USB mass-storage device, and (in interrupt mode) hand the transport
 /// to the OTG interrupt.
 pub fn msc_enter() {
@@ -2236,12 +2271,21 @@ pub fn msc_enter() {
             t.otg.detach();
             catcard_hal::dwt::delay_ms(REENUM_DETACH_MS);
             t.otg.reinit();
+            // The interrupt transport needs its receive ring, and the ring comes from the
+            // heap. Without one this session runs polled -- the transport the drive
+            // works on today -- rather than handing the core to a handler with nowhere
+            // to put what it receives. The host sees the same drive either way.
             if MSC_INTERRUPTS {
-                // Open the core's gate, then the NVIC line. From here the handler drives
-                // the transport and the foreground reaches the core only through the
-                // `msc_*` functions below, each inside `interrupt::free`.
-                t.otg.enable_interrupts();
-                crate::interrupts::enable_otg();
+                if t.msc_rx.lease() {
+                    // Open the core's gate, then the NVIC line. From here the handler
+                    // drives the transport and the foreground reaches the core only
+                    // through the `msc_*` functions below, each inside `interrupt::free`.
+                    MSC_IRQ.store(true, Ordering::Relaxed);
+                    t.otg.enable_interrupts();
+                    crate::interrupts::enable_otg();
+                } else {
+                    crate::catlog!("usb drive: no heap for the receive ring; polled");
+                }
             }
         }
     });
@@ -2252,12 +2296,15 @@ pub fn msc_exit() {
     with_task(|t| {
         // SAFETY: as in `msc_enter`.
         unsafe {
-            if MSC_INTERRUPTS {
+            if msc_irq() {
                 // Shut the line first, so no handler runs during the switch; HID never
                 // re-opens it.
                 crate::interrupts::disable_otg();
                 t.otg.disable_interrupts();
+                MSC_IRQ.store(false, Ordering::Relaxed);
             }
+            // The handler is shut out, so the ring can go back to the heap.
+            t.msc_rx.release();
             t.otg.set_mode(catcard_usb::control::DeviceMode::Hid);
             // Re-enumerate back to the HID wallet the same way: a visible disconnect, a
             // pause, then re-attach with the HID descriptors.
@@ -2274,7 +2321,7 @@ pub fn msc_exit() {
 /// ring the handler fills, re-opening the endpoint if the ring had backed up; in polled
 /// mode it services the core inline. `None` if nothing is waiting.
 pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
-    if MSC_INTERRUPTS {
+    if msc_irq() {
         // Keep the handler out while we touch the shared ring and the core.
         cortex_m::interrupt::free(|_| {
             with_task(|t| {
@@ -2315,7 +2362,7 @@ pub fn msc_poll(out: &mut [u8]) -> Option<usize> {
 /// FIFO is full; retry after another [`msc_poll`]. Wrapped so it never races the handler.
 pub fn msc_send(data: &[u8]) -> bool {
     let send = |t: &mut UsbTask| unsafe { t.otg.bulk_send(data) };
-    if MSC_INTERRUPTS {
+    if msc_irq() {
         cortex_m::interrupt::free(|_| with_task(send).unwrap_or(false))
     } else {
         with_task(send).unwrap_or(false)
@@ -2325,7 +2372,7 @@ pub fn msc_send(data: &[u8]) -> bool {
 /// Whether the host issued a Bulk-Only Mass Storage Reset that the transport loop has
 /// not yet acted on. Peeks without clearing, so a data phase can bail early.
 pub fn msc_reset_pending() -> bool {
-    if MSC_INTERRUPTS {
+    if msc_irq() {
         cortex_m::interrupt::free(|_| with_task(|t| t.otg.msc_reset_pending()).unwrap_or(false))
     } else {
         with_task(|t| t.otg.msc_reset_pending()).unwrap_or(false)
@@ -2335,7 +2382,7 @@ pub fn msc_reset_pending() -> bool {
 /// Read and clear the mass-storage reset flag, once the transport loop has abandoned
 /// whatever it was doing and is ready for the next CBW.
 pub fn msc_take_reset() -> bool {
-    if MSC_INTERRUPTS {
+    if msc_irq() {
         cortex_m::interrupt::free(|_| with_task(|t| t.otg.take_msc_reset()).unwrap_or(false))
     } else {
         with_task(|t| t.otg.take_msc_reset()).unwrap_or(false)
