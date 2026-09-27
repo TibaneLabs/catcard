@@ -4346,7 +4346,9 @@ pub(crate) fn write_card_file(path: &str, bytes: &[u8]) -> Result<(), &'static s
 pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
     // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
     let mut why: &'static str = "card error";
-    let vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
+    // Handed straight back rather than bound and re-wrapped: the volume is kilobytes, and
+    // each `let` / `?` / `Ok` on the way out was another copy of it in this frame.
+    catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
         // to return before it can be chosen again.
         let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
@@ -4378,8 +4380,7 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
     .map_err(|e| match e {
         catcard_sd::MountError::Device => why,
         catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
-    })?;
-    Ok(vol)
+    })
 }
 
 /// The mounted card, spelled out once so it can be passed around.
