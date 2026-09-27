@@ -102,8 +102,20 @@ pub fn parse(b: &[u8]) -> Result<Apdu<'_>, u16> {
         3 => &[],
         n if n >= 3 => {
             let lc = u16::from_be_bytes([rest[1], rest[2]]) as usize;
+            // A zero Lc followed by a two-byte Le: no data. Not ISO's own spelling of case
+            // 2E, but the one U2F hosts send for VERSION (python-fido2 among them), and a
+            // U2F token answers it.
             if lc == 0 {
-                return Err(sw::WRONG_LENGTH);
+                return match n {
+                    5 => Ok(Apdu {
+                        cla,
+                        ins,
+                        p1,
+                        p2,
+                        data: &[],
+                    }),
+                    _ => Err(sw::WRONG_LENGTH),
+                };
             }
             match n - 3 {
                 m if m == lc || m == lc + 2 => &rest[3..3 + lc],
@@ -356,6 +368,7 @@ mod tests {
             &[0, 1, 0, 0, 0, 0],
             &[0, 1, 0, 0, 0, 0, 5, 1],
             &[0, 1, 0, 0, 0, 0, 0, 1],
+            &[0, 1, 0, 0, 0, 0, 0, 0],
         ] {
             assert_eq!(parse(bad), Err(sw::WRONG_LENGTH), "{bad:02x?}");
         }
@@ -366,9 +379,9 @@ mod tests {
         let mut out = [0u8; 16];
         let n = immediate(&[0, 3, 0, 0], &mut out).unwrap();
         assert_eq!(&out[..n], b"U2F_V2\x90\x00");
-        let n = immediate(&ext(3, 0, &[]), &mut out).unwrap_or(0);
-        // An extended APDU with Lc of zero is malformed.
-        assert!(n == 2);
+        // Extended, Lc zero and a two-byte Le: how U2F hosts ask for the version.
+        let n = immediate(&ext(3, 0, &[]), &mut out).unwrap();
+        assert_eq!(&out[..n], b"U2F_V2\x90\x00");
         for (apdu, want) in [
             (vec![0x80, 3, 0, 0], sw::CLA_NOT_SUPPORTED),
             (vec![0, 0x40, 0, 0], sw::INS_NOT_SUPPORTED),
