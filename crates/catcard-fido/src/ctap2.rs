@@ -1228,6 +1228,38 @@ pub(crate) mod tests {
         assert_eq!(call(&mut env, &short), [status::INVALID_PARAMETER]);
     }
 
+    /// Requests as an independent encoder writes them: python-fido2 2.2.1's
+    /// `fido2.cbor.encode`, which sorts keys the CTAP2 canonical way. Accepted by the
+    /// strict reader, and answered.
+    #[test]
+    fn requests_encoded_by_python_fido2_are_accepted() {
+        let unhex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let mut env = Fake::new(0);
+        let mut mc = vec![command::MAKE_CREDENTIAL];
+        mc.extend(unhex(concat!(
+            "a5015820010101010101010101010101010101010101010101010101010101010101010102a2",
+            "6269646b6578616d706c652e636f6d646e616d65674578616d706c6503a3626964420102646e",
+            "616d65636140626b646973706c61794e616d6561410482a263616c672664747970656a707562",
+            "6c69632d6b6579a263616c6739010064747970656a7075626c69632d6b657907a162726bf4",
+        )));
+        let (id, ..) = registered(&call(&mut env, &mc));
+        assert!(env.asked[0].contains("a@b"));
+        let mut ga = vec![command::GET_ASSERTION];
+        ga.extend(unhex(concat!(
+            "a4016b6578616d706c652e636f6d025820020202020202020202020202020202020202020202",
+            "02020202020202020202020381a2626964582103030303030303030303030303030303030303",
+            "030303030303030303030303030364747970656a7075626c69632d6b657905a1627570f4",
+        )));
+        // A well-formed request for an id that is not ours: parsed, and answered so.
+        assert_eq!(call(&mut env, &ga), [status::NO_CREDENTIALS]);
+        assert_eq!(id.len(), CRED_ID_LEN);
+    }
+
     #[test]
     fn no_wallet_means_denied_without_asking() {
         let mut env = Fake::new(0);
