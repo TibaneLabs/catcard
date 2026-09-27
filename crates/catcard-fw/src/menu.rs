@@ -1263,7 +1263,18 @@ pub fn run(session: Session<'_>) -> ! {
             // Snapshot the DRBG's counters so the PRNG-status screen shows the current
             // numbers; cheap and side-effect-free on any other screen.
             v.drbg_stats = ui.drbg.stats();
+            #[cfg(feature = "dev")]
+            let t0 = catcard_hal::dwt::cycles();
             draw(ui.panel, screen, &v);
+            #[cfg(feature = "dev")]
+            if items_of(screen, v.blank()).is_some() {
+                // SAFETY: reads RCC.
+                let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
+                crate::catlog!(
+                    "menu draw: {} us",
+                    catcard_hal::dwt::cycles().wrapping_sub(t0) / per_us
+                );
+            }
             redraw = false;
         }
 
@@ -2596,8 +2607,12 @@ impl MenuScreen {
             }
             return;
         }
+        #[cfg(feature = "dev")]
+        let t0 = catcard_hal::dwt::cycles();
         let (title, note) = menu_head(screen);
         let mut view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
+        #[cfg(feature = "dev")]
+        let t1 = catcard_hal::dwt::cycles();
         let old = view.off();
         match k {
             // `0` jumps back to the top, the arrows move one row.
@@ -2612,6 +2627,20 @@ impl MenuScreen {
         // Animate the move, then let the loop's redraw paint the settled frame.
         glide_view(ui.panel, &mut view, old, new_off, self.strip());
         self.off = new_off;
+        // How long a list key takes, on development builds: building the view, then the
+        // glide frames. The settled frame the loop draws after is timed there.
+        #[cfg(feature = "dev")]
+        {
+            let t2 = catcard_hal::dwt::cycles();
+            // SAFETY: reads RCC.
+            let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
+            crate::catlog!(
+                "menu key: build {} us, glide {} us ({} rows)",
+                t1.wrapping_sub(t0) / per_us,
+                t2.wrapping_sub(t1) / per_us,
+                items.len()
+            );
+        }
     }
 }
 
