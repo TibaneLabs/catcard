@@ -1658,7 +1658,40 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
 // The singleton
 // ---------------------------------------------------------------------------
 
-static mut TASK: Option<UsbTask> = None;
+/// The task, once [`init`] has brought USB up.
+///
+/// Not an `Option<UsbTask>`. That enum's `None` is a niche value somewhere inside the
+/// struct rather than all zeroes, so the static was initialised data: its whole size
+/// stored in the image and copied out at every boot, for a value that says "nothing
+/// here". A flag that is `false` at zero, beside storage that is zero until written,
+/// leaves the whole static zeroed, and a zeroed static is `.bss`.
+struct Slot {
+    live: bool,
+    task: core::mem::MaybeUninit<UsbTask>,
+}
+
+static mut TASK: Slot = Slot {
+    live: false,
+    task: core::mem::MaybeUninit::zeroed(),
+};
+
+/// The task, if [`init`] brought it up.
+///
+/// # Safety
+/// The caller must be the only holder of the returned reference for as long as it lives:
+/// [`with_task`] and [`task_from_isr`] are the two callers, and they say why they are.
+unsafe fn task_slot() -> Option<&'static mut UsbTask> {
+    // SAFETY: the caller's contract makes this the only reference to the static; `task`
+    // is initialised whenever `live` is set, because `init` writes it first.
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(TASK);
+        if slot.live {
+            Some(slot.task.assume_init_mut())
+        } else {
+            None
+        }
+    }
+}
 
 /// Bring USB up, if this board can host it.
 ///
@@ -1674,8 +1707,11 @@ pub unsafe fn init(serial: &'static str) {
     // SAFETY: single-threaded bring-up; this is the only writer and no reader exists
     // until it returns.
     unsafe {
-        let task = UsbTask::init(serial);
-        core::ptr::addr_of_mut!(TASK).write(task);
+        if let Some(task) = UsbTask::init(serial) {
+            let slot = &mut *core::ptr::addr_of_mut!(TASK);
+            slot.task.write(task);
+            slot.live = true;
+        }
     }
     // The activity light, on the boards that have one. Set up here rather than in
     // bring-up because it is USB's, and because a light that blinks before USB exists
@@ -2568,7 +2604,7 @@ fn with_task<R>(f: impl FnOnce(&mut UsbTask) -> R) -> Option<R> {
         // SAFETY: the scheduler lock excludes every other task, and the only other accessor
         // -- the OTG interrupt -- runs only in mass-storage interrupt mode, where every
         // foreground caller additionally holds `interrupt::free`.
-        unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }.map(f)
+        unsafe { task_slot() }.map(f)
     })
 }
 
@@ -2580,7 +2616,7 @@ fn with_task<R>(f: impl FnOnce(&mut UsbTask) -> R) -> Option<R> {
 /// `interrupt::free`, so the handler and a task never hold the reference at once.
 fn task_from_isr() -> Option<&'static mut UsbTask> {
     // SAFETY: as above.
-    unsafe { (*core::ptr::addr_of_mut!(TASK)).as_mut() }
+    unsafe { task_slot() }
 }
 
 /// Tell a host whether the device has a PIN at all.
