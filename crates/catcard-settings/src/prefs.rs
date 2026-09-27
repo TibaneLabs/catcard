@@ -150,6 +150,11 @@ pub const FIDO: &str = "cat_fido";
 /// (`catcard_fido::keys`). **Never lowered**: writing an old number back is the only
 /// thing that would bring reset credentials back.
 pub const FIDO_GEN: &str = "cat_fidogen";
+/// The wallet's security-key PIN (CTAP2 clientPIN): `"R:HASH"`, the retries left as
+/// decimal digits and `LEFT(SHA-256(PIN), 16)` as 32 lowercase hex digits. Absent or `""`
+/// is no PIN. Written before every PIN attempt is judged (the retries counter), and
+/// cleared only by a security-key reset. Our own key; stock has no security key.
+pub const FIDO_PIN: &str = "cat_fidopin";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -256,6 +261,76 @@ pub fn fido_generation(doc: &Doc<'_>) -> Option<u32> {
         return Some(0);
     }
     digits(text(doc, FIDO_GEN)?, 10)
+}
+
+/// The wallet's security-key PIN as stored.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FidoPin {
+    /// No PIN set.
+    Unset,
+    /// A PIN: its hash, and the retries left.
+    Set { retries: u8, hash: [u8; 16] },
+    /// A value is there and cannot be read. **Not** read as "no PIN" -- that would let
+    /// anyone set a new one -- but as a PIN with no retries left: blocked until the
+    /// security key is reset, which is the direction a doubt should fail in.
+    Unreadable,
+}
+
+impl Drop for FidoPin {
+    fn drop(&mut self) {
+        if let FidoPin::Set { hash, .. } = self {
+            zeroize::Zeroize::zeroize(hash);
+        }
+    }
+}
+
+/// The wallet's security-key PIN. Source: our own format, [`FIDO_PIN`].
+pub fn fido_pin(doc: &Doc<'_>) -> FidoPin {
+    if doc.get(FIDO_PIN).is_none() {
+        return FidoPin::Unset;
+    }
+    let Some(t) = text(doc, FIDO_PIN) else {
+        return FidoPin::Unreadable;
+    };
+    if t.is_empty() {
+        return FidoPin::Unset;
+    }
+    let Some((r, h)) = t.split_once(':') else {
+        return FidoPin::Unreadable;
+    };
+    let retries = match digits(r, 1) {
+        Some(n) if n <= 8 => n as u8,
+        _ => return FidoPin::Unreadable,
+    };
+    let hb = h.as_bytes();
+    if hb.len() != 32 {
+        return FidoPin::Unreadable;
+    }
+    let mut hash = [0u8; 16];
+    for (i, pair) in hb.chunks(2).enumerate() {
+        let nib = |c: u8| match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            _ => None,
+        };
+        match (nib(pair[0]), nib(pair[1])) {
+            (Some(a), Some(b)) => hash[i] = (a << 4) | b,
+            _ => return FidoPin::Unreadable,
+        }
+    }
+    FidoPin::Set { retries, hash }
+}
+
+/// The text a security-key PIN is stored as: `"R:HASH"`, see [`FIDO_PIN`].
+pub fn fido_pin_value(retries: u8, hash: &[u8; 16]) -> zeroize::Zeroizing<heapless::String<36>> {
+    use core::fmt::Write as _;
+    let mut s: zeroize::Zeroizing<heapless::String<36>> =
+        zeroize::Zeroizing::new(heapless::String::new());
+    let _ = write!(s, "{}:", retries.min(8));
+    for b in hash {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// The text a FIDO generation is stored as.
@@ -1165,6 +1240,34 @@ mod tests {
 
     /// A reset raises the generation; a value nobody can read must never quietly become
     /// the generation before it.
+    #[test]
+    fn the_fido_pin_round_trips_and_garbled_reads_as_blocked() {
+        let hash: [u8; 16] = core::array::from_fn(|i| (i * 17) as u8);
+        let v = fido_pin_value(7, &hash);
+        assert_eq!(v.as_str(), "7:00112233445566778899aabbccddeeff");
+        let json = format!(r#"{{"cat_fidopin":"{}"}}"#, v.as_str());
+        assert_eq!(fido_pin(&doc(&json)), FidoPin::Set { retries: 7, hash });
+        assert_eq!(fido_pin(&doc("{}")), FidoPin::Unset);
+        assert_eq!(fido_pin(&doc(r#"{"cat_fidopin":""}"#)), FidoPin::Unset);
+        for bad in [
+            r#"{"cat_fidopin":7}"#,
+            r#"{"cat_fidopin":"9:00112233445566778899aabbccddeeff"}"#,
+            r#"{"cat_fidopin":"12:00112233445566778899aabbccddeeff"}"#,
+            r#"{"cat_fidopin":"7:00112233445566778899aabbccddeef"}"#,
+            r#"{"cat_fidopin":"7:00112233445566778899AABBCCDDEEFF"}"#,
+            r#"{"cat_fidopin":"700112233445566778899aabbccddeeff"}"#,
+            r#"{"cat_fidopin":"x:00112233445566778899aabbccddeeff"}"#,
+        ] {
+            assert_eq!(fido_pin(&doc(bad)), FidoPin::Unreadable, "{bad}");
+        }
+        assert_eq!(
+            fido_pin(&doc(
+                r#"{"cat_fidopin":"0:00112233445566778899aabbccddeeff"}"#
+            )),
+            FidoPin::Set { retries: 0, hash }
+        );
+    }
+
     #[test]
     fn the_fido_generation_reads_absent_as_zero_and_garbled_as_unknown() {
         assert_eq!(fido_generation(&doc(r#"{}"#)), Some(0));
