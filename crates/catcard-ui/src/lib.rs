@@ -19,6 +19,7 @@ pub mod flappy;
 pub mod font;
 pub mod framebuffer;
 pub mod grid;
+pub mod helpstrip;
 pub mod icons;
 pub mod keypad;
 pub mod menu;

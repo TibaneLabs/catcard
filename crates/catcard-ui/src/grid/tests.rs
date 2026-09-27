@@ -422,3 +422,23 @@ fn the_hints_stay_inside_the_edges_and_the_dots_inside_their_rows() {
         "one screen of columns has no dots"
     );
 }
+
+/// Under the help strip the grid has sixteen rows fewer, and a cell still holds the icon
+/// the art is authored at and a label under it -- on a page with dots too, which take
+/// their own rows out of the same band. And the dots sit directly on top of the strip,
+/// so the two together are one run of rows a slide can hold still.
+#[test]
+fn a_grid_above_the_help_strip_still_fits_its_art() {
+    let h = 224 - crate::helpstrip::height(&peep7x14::FONT);
+    assert_eq!(h, 208);
+    for body in [h, h - DOTS_H] {
+        let r = cell_rect(0, W, body);
+        assert!(
+            r.h >= ICON + LABEL_GAP + FONT.line_height(),
+            "a cell {} tall under the strip cannot hold the icon and a label",
+            r.h
+        );
+    }
+    let (first, rows) = dots_rows(h, 24).expect("a strip longer than a screen");
+    assert_eq!(first + rows, h, "the dots end where the strip starts");
+}

@@ -287,15 +287,25 @@ mod tests {
 /// by `top`. A widget that clears the canvas clears its own area and leaves the bar
 /// alone, which is the property that makes this safe to wrap around code that knows
 /// nothing about it.
+///
+/// Rows can be reserved at the bottom the same way ([`Inset::band`]): the Q1's help strip
+/// sits there, under a menu that lays itself out in what is left.
 pub struct Inset<'a, C: Canvas + ?Sized> {
     inner: &'a mut C,
     top: usize,
+    bottom: usize,
 }
 
 impl<'a, C: Canvas + ?Sized> Inset<'a, C> {
     /// Reserve `top` rows of `inner`.
     pub fn new(inner: &'a mut C, top: usize) -> Self {
-        Self { inner, top }
+        Self::band(inner, top, 0)
+    }
+
+    /// Reserve `top` rows of `inner` and `bottom` rows at its foot: what is handed out is
+    /// the band between them.
+    pub fn band(inner: &'a mut C, top: usize, bottom: usize) -> Self {
+        Self { inner, top, bottom }
     }
 }
 
@@ -305,7 +315,10 @@ impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
     }
 
     fn height(&self) -> usize {
-        self.inner.height().saturating_sub(self.top)
+        self.inner
+            .height()
+            .saturating_sub(self.top)
+            .saturating_sub(self.bottom)
     }
 
     fn put(&mut self, x: usize, y: usize, level: Level) {
@@ -392,6 +405,23 @@ mod inset_tests {
             grid.0.iter().all(|r| r.iter().all(|&p| p == PAPER)),
             "an out-of-range write landed somewhere"
         );
+    }
+
+    /// A band hides its foot as well as its top: clearing it, or drawing past its end,
+    /// leaves both alone.
+    #[test]
+    fn a_band_leaves_the_rows_under_it_alone() {
+        let mut grid = Grid([[INK; 4]; 4]);
+        {
+            let mut view = Inset::band(&mut grid, 1, 1);
+            assert_eq!(view.height(), 2);
+            view.clear();
+            view.put(0, 2, PAPER);
+        }
+        assert_eq!(grid.0[0], [INK; 4], "the top row was touched");
+        assert_eq!(grid.0[1], [PAPER; 4]);
+        assert_eq!(grid.0[2], [PAPER; 4]);
+        assert_eq!(grid.0[3], [INK; 4], "the foot was touched");
     }
 
     /// Reading back is translated the same way, or `blend` would mix with the wrong pixel.
