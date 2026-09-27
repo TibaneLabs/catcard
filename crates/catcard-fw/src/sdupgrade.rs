@@ -95,15 +95,24 @@ pub enum Outcome {
 pub fn stage_from_card(
     slot: catcard_hal::sdmmc::Slot,
     chosen: Option<&str>,
-    progress: impl FnMut(u32, u32),
+    progress: &mut dyn FnMut(u32, u32),
 ) -> Outcome {
     if slot == catcard_hal::sdmmc::Slot::B && BOARD.sdmmc.slot_b.is_none() {
         return Outcome::Failed("no slot B on this board");
     }
 
-    // Mount FAT or exFAT; `why` carries the specific bring-up failure out of the closure.
+    stage_from_volume(&mut || mount_card(slot), chosen, "sd", progress)
+}
+
+/// Mount the card in `slot`, FAT or exFAT, or say why not.
+///
+/// Its own frame, never inlined: the mount's temporaries are kilobytes, and here they are
+/// gone again before the image is read and its signature checked -- the deep part.
+#[inline(never)]
+fn mount_card(slot: catcard_hal::sdmmc::Slot) -> Result<crate::media::Volume, &'static str> {
+    // `why` carries the specific bring-up failure out of the closure.
     let mut why = "card error";
-    let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
+    catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins, and this is not re-entrant:
         // the menu waits for it to return before it can be chosen again.
         let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, slot) } {
@@ -128,13 +137,11 @@ pub fn stage_from_card(
         Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
             dev, card,
         )))
-    });
-    let mut vol = match mount {
-        Ok(v) => v,
-        Err(catcard_sd::MountError::Device) => return Outcome::Failed(why),
-        Err(catcard_sd::MountError::NoFilesystem) => return Outcome::Failed("not FAT or exFAT"),
-    };
-    stage_from_volume(&mut vol, chosen, "sd", progress)
+    })
+    .map_err(|e| match e {
+        catcard_sd::MountError::Device => why,
+        catcard_sd::MountError::NoFilesystem => "not FAT or exFAT",
+    })
 }
 
 /// Find a firmware on the PSRAM-backed Virtual Disk and stage it.
@@ -149,15 +156,11 @@ pub fn stage_from_card(
 /// Source: `catcard_board::Psram::image_base` / `vdisk_base` [C].
 #[cfg(not(feature = "board-mk3"))]
 #[inline(never)]
-pub fn stage_from_vdisk(chosen: Option<&str>, progress: impl FnMut(u32, u32)) -> Outcome {
+pub fn stage_from_vdisk(chosen: Option<&str>, progress: &mut dyn FnMut(u32, u32)) -> Outcome {
     if let Err(why) = crate::vdisk::ensure_formatted() {
         return Outcome::Failed(why);
     }
-    let mut vol = match crate::vdisk::mount() {
-        Ok(v) => v,
-        Err(why) => return Outcome::Failed(why),
-    };
-    stage_from_volume(&mut vol, chosen, "vdisk", progress)
+    stage_from_volume(&mut crate::vdisk::mount, chosen, "vdisk", progress)
 }
 
 /// Whether an image of `len` bytes, staged where this board stages, would reach into the
@@ -169,15 +172,24 @@ fn reaches_vdisk(len: u32) -> bool {
     }
 }
 
-/// Read a firmware off an already-mounted volume, whatever backs it, and stage it.
+/// Mount a volume with `mount`, whatever backs it, read a firmware off it and stage it.
 ///
 /// `medium` is the log prefix, so a refusal says which transport it came in on.
-fn stage_from_volume<D: catcard_sd::fat::SectorDriver>(
-    vol: &mut catcard_sd::AnyVolume<D, 512>,
+///
+/// Mounting here rather than in the caller keeps one copy of the volume, in this frame,
+/// under the signature check at the end; and `mount` runs in a frame of its own that has
+/// gone by then.
+fn stage_from_volume(
+    mount: &mut dyn FnMut() -> Result<crate::media::Volume, &'static str>,
     chosen: Option<&str>,
     medium: &'static str,
-    mut progress: impl FnMut(u32, u32),
+    progress: &mut dyn FnMut(u32, u32),
 ) -> Outcome {
+    let mut vol = match mount() {
+        Ok(v) => v,
+        Err(why) => return Outcome::Failed(why),
+    };
+    let vol = &mut vol;
     // A file the browser picked, or the first of the fixed names that opens.
     let name: &str = match chosen {
         Some(p) => p,
@@ -280,7 +292,7 @@ fn stage_from_volume<D: catcard_sd::fat::SectorDriver>(
     let running = crate::own_header();
     // No second bar: the digest was taken as the card was read, so verifying is now a
     // header read and one signature check rather than another pass over a slow memory.
-    match staged.inspect_with(running.as_ref(), &mut progress) {
+    match staged.inspect_with(running.as_ref(), &mut *progress) {
         Ok(approval) => Outcome::Offered(staged, approval),
         Err(why) => {
             // Which check refused matters: "refused" alone has already sent one person
