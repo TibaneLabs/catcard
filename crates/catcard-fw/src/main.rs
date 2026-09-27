@@ -96,6 +96,7 @@ mod debug_mem;
 mod inflate;
 mod interrupts;
 mod ktest;
+mod media;
 mod menu;
 mod msc_drive;
 /// Registering a multisig wallet from a descriptor on the card.

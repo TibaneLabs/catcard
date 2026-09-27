@@ -2787,7 +2787,9 @@ fn sd_diag() -> (u8, u32, u32) {
 
     // Prove the whole read path, not just one block: mount the FAT volume, which reads
     // the boot sector and walks the FAT across many blocks.
-    match catcard_sd::fat::Volume::<_, 512>::mount_auto(catcard_sd::Sectors::new(dev, card)) {
+    match catcard_sd::fat::Volume::<_, 512>::mount_auto(crate::media::Media::Card(
+        catcard_sd::Sectors::new(dev, card),
+    )) {
         Ok(_) => crate::catlog!("sddiag: FAT mount OK"),
         Err(_) => crate::catlog!("sddiag: FAT mount FAIL (block read works, fs did not)"),
     }

@@ -4326,7 +4326,7 @@ pub(crate) fn browse_storage(
 /// a held signing lease.
 #[cfg(not(feature = "board-mk3"))]
 pub(crate) fn with_vdisk<T>(
-    f: impl FnOnce(&mut catcard_sd::AnyVolume<crate::vdisk::Vdisk, 512>) -> Result<T, &'static str>,
+    f: impl FnOnce(&mut crate::media::Volume) -> Result<T, &'static str>,
 ) -> Result<T, &'static str> {
     crate::vdisk::ensure_formatted()?;
     let mut vol = crate::vdisk::mount()?;
@@ -4404,7 +4404,9 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
         // write through the mounted volume now decrypts/encrypts. A plaintext card is
         // untouched. mk3 has no such feature.
         crate::sdcrypt::apply_to(&mut card);
-        Ok(catcard_sd::Sectors::new(dev, card))
+        Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
+            dev, card,
+        )))
     })
     .map_err(|e| match e {
         catcard_sd::MountError::Device => why,
@@ -4412,9 +4414,9 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
     })
 }
 
-/// The mounted card, spelled out once so it can be passed around.
-pub(crate) type CardVolume =
-    catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>;
+/// The mounted card, spelled out once so it can be passed around. The same type as a
+/// mounted Virtual Disk: see [`crate::media`].
+pub(crate) type CardVolume = crate::media::Volume;
 
 /// Write `bytes` to `path` on an already-mounted volume, replacing what was there.
 ///
@@ -4786,19 +4788,11 @@ pub(crate) fn browse_sd(
     filter: Option<&str>,
     mode: Browse,
 ) -> Option<heapless::String<BROWSE_PATH_MAX>> {
-    let vol = match mount_card() {
-        Ok(v) => v,
-        Err(why) => {
-            browse_fail(ui, "SD card", why);
-            return None;
-        }
-    };
     // The PNG viewer reads the file back off the volume it is browsing; it is a colour
     // feature, so it is on offer on the Q1 and nowhere else.
     let allow_view = cfg!(feature = "board-q1");
     browse_volume(
         ui,
-        vol,
         Storage::Sd,
         title,
         filter,
@@ -4823,18 +4817,10 @@ pub(crate) fn browse_vdisk(
         browse_fail(ui, "Virtual Disk", why);
         return None;
     }
-    let vol = match crate::vdisk::mount() {
-        Ok(v) => v,
-        Err(why) => {
-            browse_fail(ui, "Virtual Disk", why);
-            return None;
-        }
-    };
     // The PNG viewer reads back off this same disk, so it is on offer here too on the Q1.
     let allow_view = cfg!(feature = "board-q1");
     browse_volume(
         ui,
-        vol,
         Storage::Vdisk,
         title,
         filter,
@@ -4846,17 +4832,21 @@ pub(crate) fn browse_vdisk(
     )
 }
 
-/// The browser loop over an already-mounted volume, whatever backs it.
+/// The browser loop over a volume, whatever backs it.
 ///
-/// The shared body of [`browse_sd`] and [`browse_vdisk`]: it lists a directory, lets the
-/// cursor descend and go back, and on a file offers its details (pick, delete, and — on the
-/// Q1 — view). `storage` says which backend the viewer re-mounts, `head` names the medium in
-/// messages, `refused` is what a failed delete says, `allow_view` gates the viewer, and
-/// `remount` produces a fresh mount for the viewer to hand the bus back to.
+/// The shared body of [`browse_sd`] and [`browse_vdisk`]: it mounts with `remount`, lists a
+/// directory, lets the cursor descend and go back, and on a file offers its details (pick,
+/// delete, and — on the Q1 — view). `storage` says which backend the viewer re-mounts,
+/// `head` names the medium in messages, `refused` is what a failed delete says,
+/// `allow_view` gates the viewer, and `remount` also produces the fresh mount the viewer
+/// hands the bus back to.
+///
+/// It mounts here rather than being handed a mounted volume so there is one copy of the
+/// volume -- kilobytes -- in one frame: a caller that mounted and passed it down would hold
+/// its own copy for as long as this ran.
 #[allow(clippy::too_many_arguments)]
 fn browse_volume<D: catcard_sd::fat::SectorDriver>(
     ui: &mut Ui<'_>,
-    mut vol: catcard_sd::AnyVolume<D, 512>,
     #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))] storage: Storage,
     title: &str,
     filter: Option<&str>,
@@ -4864,9 +4854,15 @@ fn browse_volume<D: catcard_sd::fat::SectorDriver>(
     head: &'static str,
     allow_view: bool,
     refused: &'static str,
-    #[cfg_attr(not(feature = "board-q1"), allow(unused_variables))]
     remount: &mut dyn FnMut() -> Result<catcard_sd::AnyVolume<D, 512>, &'static str>,
 ) -> Option<heapless::String<BROWSE_PATH_MAX>> {
+    let mut vol = match remount() {
+        Ok(v) => v,
+        Err(why) => {
+            browse_fail(ui, head, why);
+            return None;
+        }
+    };
     let pick = matches!(mode, Browse::File);
 
     let mut path: heapless::String<BROWSE_PATH_MAX> = heapless::String::new();
@@ -11546,7 +11542,7 @@ fn format_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
     let volume_id = u32::from_le_bytes(id);
 
     message(ui.panel, "Formatting", "do not remove card", "");
-    let sectors = catcard_sd::Sectors::new(dev, card);
+    let sectors = crate::media::Media::Card(catcard_sd::Sectors::new(dev, card));
     match catcard_sd::format::format(sectors, volume_id, "CATCARD") {
         Ok(fs) => {
             let mut done = Line::new();
@@ -13879,7 +13875,9 @@ fn card_detail_lines() -> heapless::Vec<Line, MAX_LINES> {
                 return Err(());
             }
         };
-        Ok(catcard_sd::Sectors::new(dev, card))
+        Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
+            dev, card,
+        )))
     });
     let mut l = Line::new();
     match mount {

@@ -39,6 +39,8 @@
 
 use catcard_sd::fat::{self, SectorDriver};
 use catcard_sd::{AnyVolume, BLOCK_LEN};
+
+use crate::media::Media;
 use catcard_upgrade::StagingArea;
 use catcard_upgrade::psram::{OutOfRange, PsramArea};
 
@@ -155,8 +157,8 @@ impl crate::msc_drive::BlockDev for Vdisk {
 /// A fresh [`Vdisk`] per attempt, because a failed FAT probe leaves the driver's cursor
 /// where the exFAT attempt does not want it — the same contract [`AnyVolume::mount_with`]
 /// is built for on a card.
-pub fn mount() -> Result<AnyVolume<Vdisk, 512>, &'static str> {
-    AnyVolume::mount_with(|| Vdisk::take().ok_or(())).map_err(|e| match e {
+pub fn mount() -> Result<crate::media::Volume, &'static str> {
+    AnyVolume::mount_with(|| Vdisk::take().map(Media::Disk).ok_or(())).map_err(|e| match e {
         catcard_sd::MountError::Device => "no Virtual Disk here",
         catcard_sd::MountError::NoFilesystem => "disk holds no filesystem",
     })
@@ -209,7 +211,7 @@ pub fn format() -> Result<(), &'static str> {
     // `format` writes the boot sector, both FATs and the root directory and mounts the
     // result; dropping the volume is enough since our sector writes land straight in
     // memory-mapped PSRAM with no cache of their own.
-    fat::Volume::<Vdisk, 512>::format(dev, &opts).map_err(|e| match e {
+    fat::Volume::<Media, 512>::format(Media::Disk(dev), &opts).map_err(|e| match e {
         fat::Error::Unsupported(_) => "region too small for a FAT volume",
         _ => "could not format the disk",
     })?;

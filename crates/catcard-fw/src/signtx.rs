@@ -235,9 +235,7 @@ fn btc(sats: u64, out: &mut heapless::String<AMOUNT_LEN>) {
 /// Every entry point here needs the same bring-up, and the specific failure has to reach
 /// the screen rather than a generic "card error".
 fn with_card<T>(
-    f: impl FnOnce(
-        &mut catcard_sd::AnyVolume<catcard_sd::Sectors<catcard_hal::sdmmc::Sdmmc>, 512>,
-    ) -> Result<T, &'static str>,
+    f: impl FnOnce(&mut crate::media::Volume) -> Result<T, &'static str>,
 ) -> Result<T, &'static str> {
     let mut why: &'static str = "card error";
     let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
@@ -264,7 +262,9 @@ fn with_card<T>(
         // Transparent decryption for the signing paths' file access, like `mount_card`.
         #[cfg(not(feature = "board-mk3"))]
         crate::sdcrypt::apply_to(&mut card);
-        Ok(catcard_sd::Sectors::new(dev, card))
+        Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
+            dev, card,
+        )))
     })
     .map_err(|e| match e {
         catcard_sd::MountError::Device => why,

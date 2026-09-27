@@ -125,7 +125,9 @@ pub fn stage_from_card(
                 return Err(());
             }
         };
-        Ok(catcard_sd::Sectors::new(dev, card))
+        Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
+            dev, card,
+        )))
     });
     let mut vol = match mount {
         Ok(v) => v,
