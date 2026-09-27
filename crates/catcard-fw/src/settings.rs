@@ -275,7 +275,7 @@ pub(crate) fn root_key(
 
     // A second and a half inside the bootloader: say so, rather than holding whatever
     // was on screen still.
-    crate::menu::reading_seed(panel, head);
+    let _busy = crate::menu::reading_seed(panel, head);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = login
         .fetch_secret(&pin_gate)
@@ -1384,7 +1384,7 @@ fn save_prelogin(ui: &mut crate::ui::Ui<'_>, head: &str, name: &str, text: &str)
     use catcard_settings::nvstore;
     use catcard_settings::store::{self, SCRATCH};
 
-    crate::menu::blocking_screen(ui.panel, head, "saving");
+    let _busy = crate::menu::blocking_screen(ui.panel, head, "saving");
     // SAFETY: foreground only; the menu waits for this screen to return, and nothing else
     // touches the settings region. Writable, unlike everywhere else that opens this store.
     let mut files = match unsafe { Files::mount() } {
@@ -1511,7 +1511,7 @@ pub(crate) fn inspect(
     let _ = notes.push(pre);
 
     // Now the wallet blob, which needs the stash the secure element holds.
-    crate::menu::reading_seed(ui.panel, "Settings");
+    let _busy = crate::menu::reading_seed(ui.panel, "Settings");
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,

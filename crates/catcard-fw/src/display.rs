@@ -587,7 +587,9 @@ pub fn draw_with_marks(
     draw_keeping_marks(panel, palette, f);
 }
 
-/// Whether blocking screens hand the Q1's bus to the GPU co-processor for its bar.
+/// Whether a waiting screen whose sweep cannot start hands the Q1's bus to the GPU
+/// co-processor for its bar instead ([`Busy::start`], the PIN check). Only the fallback:
+/// our own sweep is what a waiting screen shows.
 ///
 /// Watched working on the Q1 from Debug -> Scroll test before this was turned on: a PIN
 /// check is on the boot path, and this board has no recovery.
@@ -786,6 +788,60 @@ fn finish(at: Option<(usize, usize)>) -> bool {
     true
 }
 
+/// The moving bar under a waiting screen, for exactly as long as the wait.
+///
+/// [`start`](Self::start) sets it going under the screen just drawn -- on the Q1 our
+/// blue-white sweep, falling back to the co-processor's bar if the sweep cannot start; on
+/// the mono panels the controller's own scroll, as before -- and dropping it stops the
+/// sweep and hands SPI1 back. So bind it for the whole of the work it covers:
+/// `let _busy = ...`. Never `let _ = ...`, which drops it on the spot (`make lint` refuses
+/// that spelling).
+///
+/// A frame drawn while it is held stops the sweep as any frame does, and then the drop has
+/// nothing to do; a newer sweep started meanwhile is someone else's and the drop leaves it
+/// alone ([`catcard_ui::sweep::Slot`]).
+#[must_use = "the bar stops when this is dropped: hold it for the work (`let _busy = ...`)"]
+pub struct Busy {
+    #[cfg(feature = "board-q1")]
+    lease: Option<catcard_ui::sweep::Lease>,
+}
+
+impl Busy {
+    /// The bar for a wait, under the screen just drawn.
+    pub fn start(panel: &mut Panel) -> Self {
+        #[cfg(feature = "board-q1")]
+        {
+            if let Some(busy) = Self::sweep(panel) {
+                return busy;
+            }
+            if GPU_BAR_ON_BLOCKING {
+                scroll_busy_bar(panel);
+            }
+            Self { lease: None }
+        }
+        #[cfg(not(feature = "board-q1"))]
+        {
+            scroll_busy_bar(panel);
+            Self {}
+        }
+    }
+
+    /// Our sweep alone, with no fallback: `None`, with nothing changed, if it cannot start.
+    #[cfg(feature = "board-q1")]
+    pub fn sweep(panel: &mut Panel) -> Option<Self> {
+        start(panel).map(|lease| Self { lease: Some(lease) })
+    }
+}
+
+#[cfg(feature = "board-q1")]
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            finish(halt(Some(lease)));
+        }
+    }
+}
+
 /// The callgate's own stack, which the bootloader wipes on entry and exit. A buffer a
 /// DMA channel is reading must not be in it.
 /// Source: docs/CALLGATE-DMA.md (5) [C]
@@ -824,7 +880,7 @@ pub fn keep_sweep() {
 /// the CPU driving it -- for the callgates that hold the CPU with interrupts masked.
 ///
 /// Unowned: it runs until the next frame (see [`show`]), which stops it and puts SPI1
-/// back exactly as it was.
+/// back exactly as it was. For a wait with an end, use [`Busy`], which stops it there.
 ///
 /// False, with nothing changed, if the buffer cannot be had or would sit in the
 /// callgate's stack -- the caller falls back to the co-processor's bar.
@@ -1588,7 +1644,8 @@ fn show(panel: &mut Panel, screen: &Screen, palette: &[u16; 16], split: usize) {
     // The sweep painted rows the row cache knows nothing about. Repaint them -- unless the
     // frame asked to keep them, because it is about to start the sweep again from where
     // it stopped, and repainting would blank the bar for a frame.
-    // Stopped here, or earlier by someone else: either way the rows are the sweep's.
+    // Stopped here, or earlier by a waiting screen's guard ([`Busy`]): either way the
+    // rows are the sweep's.
     stop_sweep();
     let swept = SWEPT.swap(false, core::sync::atomic::Ordering::SeqCst);
     // SAFETY: foreground, single core.

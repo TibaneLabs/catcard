@@ -572,7 +572,7 @@ pub(crate) fn manage(
     }
 
     loop {
-        menu::blocking_screen(ui.panel, "Multisig", "reading");
+        let _busy = menu::blocking_screen(ui.panel, "Multisig", "reading");
         // Scoped: the wallet records borrow the settings buffer, and acting on one reads
         // the settings afresh.
         let next = {
@@ -988,7 +988,7 @@ pub(crate) fn remove(
     ui: &mut Ui<'_>,
     sum: &str,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, "Multisig", "saving");
+    let _busy = menu::blocking_screen(ui.panel, "Multisig", "saving");
     // Three leased slots: the settings scratch, the rendered list, and the seal the write
     // needs. All wiped on drop at the end of this call.
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
@@ -1035,7 +1035,7 @@ fn rename(
     if name.is_empty() {
         return say(ui, HEAD, "a name cannot be empty");
     }
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
         crate::heap::take(SCRATCH),
         crate::heap::take(SCRATCH),
@@ -1478,7 +1478,7 @@ fn save(
     name: &str,
     descriptor: &str,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, "Register wallet", "saving");
+    let _busy = menu::blocking_screen(ui.panel, "Register wallet", "saving");
     // Three leased slots: the settings scratch, the rendered list, and the seal the write
     // needs. All wiped on drop at the end of this call.
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (

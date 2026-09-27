@@ -140,7 +140,7 @@ pub(crate) fn manage(
     }
 
     loop {
-        menu::blocking_screen(ui.panel, HEAD, "reading");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "reading");
         let next = {
             let Some(mut doc) = crate::heap::take(SCRATCH) else {
                 return say(ui, "not enough memory");
@@ -305,7 +305,7 @@ fn clear_all(
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc), Some(mut seal)) = (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
     else {
         return Err("not enough memory");
@@ -462,7 +462,7 @@ fn sign_msg(ui: &mut Ui<'_>, key: &WifKey, pubkey: &[u8; 33]) {
     };
     let kind = KINDS[at].1;
 
-    menu::blocking_screen(ui.panel, SIGN_HEAD, "signing");
+    let _busy = menu::blocking_screen(ui.panel, SIGN_HEAD, "signing");
     // The scalar is copied out of the key for the signer, which zeroizes its copy; the
     // key itself is `ZeroizeOnDrop` and outlives only the detail screen.
     let signed = crate::keywork::run(|kw| {
@@ -577,7 +577,7 @@ fn reveal(ui: &mut Ui<'_>, entry: &WifEntry<'_>) {
 
 /// Generate a new key from the DRBG and store it.
 fn generate(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    menu::blocking_screen(ui.panel, HEAD, "generating");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "generating");
 
     // Secret randomness comes from the UI DRBG (HMAC-DRBG), never a public source. A draw
     // that is not a usable scalar is redrawn -- vanishingly rare, and bounded so a stuck
@@ -681,7 +681,7 @@ fn store_added(
     label: &str,
     wif: &str,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     // Three leased slots: the settings scratch, the rendered list, and the seal the write
     // needs. All wiped on drop at the end of this call.
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
@@ -730,7 +730,7 @@ fn remove(
     ui: &mut Ui<'_>,
     index: usize,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
         crate::heap::take(SCRATCH),
         crate::heap::take(SCRATCH),

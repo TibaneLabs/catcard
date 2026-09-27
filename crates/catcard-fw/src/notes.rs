@@ -132,7 +132,7 @@ pub(crate) fn screen(
         return;
     }
     loop {
-        menu::blocking_screen(ui.panel, HEAD, "reading");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "reading");
         let next = {
             let (Some(mut doc), Some(mut text)) =
                 (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
@@ -406,7 +406,7 @@ fn open(
     index: usize,
 ) {
     loop {
-        menu::blocking_screen(ui.panel, HEAD, "reading");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "reading");
         // The item's text outlives the settings buffer it was read from: the arena is what
         // every action below borrows, and the buffer goes back before any of them writes.
         let Some(mut text) = crate::heap::take(TEXT_LEN) else {
@@ -571,7 +571,7 @@ pub(crate) fn type_passwords(
         return say(ui, "Secure Notes is off");
     }
     loop {
-        menu::blocking_screen(ui.panel, HEAD, "reading");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "reading");
         let (Some(mut doc), Some(mut text)) =
             (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
         else {
@@ -903,7 +903,7 @@ fn save(
     ui: &mut Ui<'_>,
     change: Change<'_>,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc), Some(mut list_blk), Some(mut seal)) = (
         crate::heap::take(SCRATCH),
         crate::heap::take(SCRATCH),
@@ -1254,7 +1254,7 @@ pub(crate) fn pick_for_teleport(
     head: &str,
     out: &mut [u8],
 ) -> Result<Option<usize>, &'static str> {
-    menu::blocking_screen(ui.panel, head, "reading");
+    let _busy = menu::blocking_screen(ui.panel, head, "reading");
     let (Some(mut doc), Some(mut text)) = (crate::heap::take(SCRATCH), crate::heap::take(TEXT_LEN))
     else {
         return Err("not enough memory");

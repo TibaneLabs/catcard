@@ -550,7 +550,7 @@ fn search_wifs(
     if !shape.admits_any_single() {
         return None;
     }
-    menu::blocking_screen(ui.panel, HEAD, "reading key store");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "reading key store");
     let mut keys: heapless::Vec<WifKey, { catcard_settings::wifs::MAX_KEYS }> =
         heapless::Vec::new();
     if crate::wifstore::load_keys(gate, login, ui.panel, &mut keys) == 0 {

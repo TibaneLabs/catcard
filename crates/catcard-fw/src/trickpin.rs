@@ -172,7 +172,7 @@ fn save_records(
     }
     let mut raw: heapless::String<{ meaning::RECORDS_TEXT_LEN + 2 }> = heapless::String::new();
     let _ = write!(raw, "\"{text}\"");
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc_held), Some(mut seal_held)) =
         (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
     else {
@@ -251,7 +251,7 @@ fn look_up(
     ui: &mut Ui<'_>,
     pin: &TypedPin,
 ) -> Result<(Option<TrickSlot>, u32), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "checking");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "checking");
     let g = BootloaderGate::new(gate);
     let mut s = TrickSlot::lookup(pin.as_bytes()).map_err(|_| "PIN too long")?;
     let rv = login
@@ -269,7 +269,7 @@ fn save_slot(
     ui: &mut Ui<'_>,
     slot: &mut TrickSlot,
 ) -> bool {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let g = BootloaderGate::new(gate);
     matches!(login.trick_request(&g, TrickOp::Save, slot), Ok(0))
 }
@@ -289,7 +289,7 @@ fn fill_duress(
         return Ok(());
     }
     let master = menu::master_quietly(gate, login, ui.panel, HEAD)?;
-    menu::blocking_screen(ui.panel, HEAD, "deriving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "deriving");
     let xdata = &mut slot.xdata;
     crate::keywork::run(|kw| {
         use catcard_wallet::bip85;
@@ -1100,7 +1100,7 @@ fn delete_all(
             return;
         }
     }
-    menu::blocking_screen(ui.panel, HEAD, "removing");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "removing");
     let g = BootloaderGate::new(gate);
     let mut s = TrickSlot::new();
     if !matches!(login.trick_request(&g, TrickOp::ClearAll, &mut s), Ok(0)) {

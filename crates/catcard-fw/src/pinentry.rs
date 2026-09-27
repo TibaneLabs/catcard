@@ -604,7 +604,7 @@ fn setup_first_pin(
     };
     // A query, not the login path: `set_first_pin` only acts while the device is still
     // blank, and walking the login state machine here would take it out of that state.
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     if let Some(w) = login.words_for(g, prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -709,9 +709,10 @@ fn log_state(login: &Login, what: &str) {
 /// handed to the panel, which scrolls the bar from its own frame counter and does not care
 /// that the CPU is busy. Where the controller cannot do that, the screen stays a plain
 /// message rather than a bar frozen mid-sweep — see
-/// [`menu::blocking_screen`](crate::menu::blocking_screen).
-fn working(panel: &mut display::Panel, what: &str) {
-    crate::menu::blocking_screen(panel, what, "please wait");
+/// [`menu::blocking_screen`](crate::menu::blocking_screen). Hold what it returns across the
+/// call: the bar stops when it is dropped.
+fn working(panel: &mut display::Panel, what: &str) -> display::Busy {
+    crate::menu::blocking_screen(panel, what, "please wait")
 }
 
 /// Collect one PIN part. `None` if the user backs out.
@@ -843,7 +844,7 @@ pub(crate) fn change_pin(
     let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix", false) else {
         return ChangePin::Cancelled;
     };
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     if let Some(w) = login.words_for(&g, old_prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -858,7 +859,7 @@ pub(crate) fn change_pin(
     let Some(new_prefix) = collect(panel, matrix, drbg, "New prefix", false) else {
         return ChangePin::Cancelled;
     };
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     if let Some(w) = login.words_for(&g, new_prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -882,7 +883,7 @@ pub(crate) fn change_pin(
         return ChangePin::Mismatch;
     }
 
-    working(panel, "Saving");
+    let _busy = working(panel, "Saving");
     let step = login.change_pin(
         &g,
         old_prefix.as_bytes(),
@@ -894,7 +895,7 @@ pub(crate) fn change_pin(
         return ChangePin::Refused;
     }
 
-    working(panel, "Verifying");
+    let _busy = working(panel, "Verifying");
     login_with(&g, login, new_prefix.as_bytes(), new_suffix.as_bytes());
     if matches!(login.step(), Step::In { .. }) {
         ChangePin::Changed
@@ -939,7 +940,7 @@ pub(crate) fn factory_reset(
     let Some(old_prefix) = collect(panel, matrix, drbg, "Current prefix", false) else {
         return FactoryReset::Cancelled;
     };
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     if let Some(w) = login.words_for(&g, old_prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -950,7 +951,7 @@ pub(crate) fn factory_reset(
         return FactoryReset::Cancelled;
     };
 
-    working(panel, "Clearing PIN");
+    let _busy = working(panel, "Clearing PIN");
     let (p, s) = (old_prefix.as_bytes(), old_suffix.as_bytes());
     let step = if keep_login {
         login.clear_pin_keeping_login(&g, p, s)
@@ -1210,7 +1211,7 @@ pub fn unlock(
                 login = Login::new(&g);
             }
             if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
-                working(panel, "USB unlock");
+                let _busy = working(panel, "USB unlock");
                 login_with(&g, &mut login, prefix, suffix);
                 field.clear();
             }
@@ -1285,7 +1286,7 @@ pub fn unlock(
                         #[cfg(feature = "board-q1")]
                         checking(panel, &login, field.len());
                         #[cfg(not(feature = "board-q1"))]
-                        working(panel, "Checking");
+                        let _busy = working(panel, "Checking");
                         let _ = login.prefix_entered(&g, field.as_bytes());
                         log_state(&login, "prefix");
                         field.clear();
@@ -1303,7 +1304,7 @@ pub fn unlock(
                         #[cfg(feature = "board-q1")]
                         checking(panel, &login, 0);
                         #[cfg(not(feature = "board-q1"))]
-                        working(panel, "Checking PIN");
+                        let _busy = working(panel, "Checking PIN");
                         let _ = login.attempt(&g, field.as_bytes());
                         log_state(&login, "attempt");
                         field.clear();
@@ -1446,7 +1447,7 @@ pub(crate) fn test_login(
     let Some(prefix) = collect(panel, matrix, drbg, "Test: prefix", scramble) else {
         return TestLogin::Cancelled;
     };
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     let _ = test.prefix_entered(&g, prefix.as_bytes());
     log_state(&test, "test prefix");
     let Step::ConfirmWords(w) = test.step() else {
@@ -1461,7 +1462,7 @@ pub(crate) fn test_login(
     let Some(suffix) = collect(panel, matrix, drbg, "Test: suffix", scramble) else {
         return TestLogin::Cancelled;
     };
-    working(panel, "Checking PIN");
+    let _busy = working(panel, "Checking PIN");
     let _ = test.attempt(&g, suffix.as_bytes());
     log_state(&test, "test attempt");
     let digits = prefix
@@ -1496,7 +1497,7 @@ pub(crate) fn collect_trick_pin(
 ) -> Option<(PinBuffer<MAX_PART_LEN>, PinBuffer<MAX_PART_LEN>)> {
     let g = BootloaderGate { gate };
     let prefix = collect(panel, matrix, drbg, "Trick PIN prefix", false)?;
-    working(panel, "Checking");
+    let _busy = working(panel, "Checking");
     if let Some(w) = login.words_for(&g, prefix.as_bytes()) {
         screen_words(panel, anti_phishing_words(w));
         if !wait_for_confirm(matrix, drbg) {
@@ -1621,7 +1622,7 @@ fn calculator_login(
                 *login = Login::new(g);
             }
             if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
-                working(panel, "USB unlock");
+                let _busy = working(panel, "USB unlock");
                 login_with(g, login, prefix, suffix);
                 line.clear();
             }
@@ -1665,7 +1666,7 @@ fn calculator_login(
                                     .push_str("syntax error")
                                     .map_err(|_| core::fmt::Error),
                             };
-                            working(panel, "Calculating");
+                            let _busy = working(panel, "Calculating");
                             if !matches!(login.step(), Step::Prefix) {
                                 *login = Login::new(g);
                             }
@@ -1679,7 +1680,7 @@ fn calculator_login(
                             }
                         }
                         Typed::Prefix(p) => {
-                            working(panel, "Calculating");
+                            let _busy = working(panel, "Calculating");
                             if !matches!(login.step(), Step::Prefix) {
                                 *login = Login::new(g);
                             }

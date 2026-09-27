@@ -389,7 +389,7 @@ mod imp {
         let Ok(key) = crate::settings::root_key(gate, login, ui.panel, HEAD) else {
             return false;
         };
-        menu::blocking_screen(ui.panel, HEAD, "saving");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
         // SAFETY: foreground only; the caller holds the display while this runs.
         let Ok(mut files) = (unsafe { crate::settings::Files::mount() }) else {
             return false;

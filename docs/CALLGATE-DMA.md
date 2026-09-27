@@ -46,10 +46,34 @@ Calls through the published callgate entry (`0x0800_0040`), interrupts masked:
 
 ## What this firmware does with it
 
-Before gate 16 and gate 18/2 on the Q1 PIN prompt, and before every gate 18/4 seed
-read (`menu::reading_seed`): set the panel window to the bottom
-320x5 strip, issue RAMWR, hold CS low and D/C high, slow SPI1 to /128, and start DMA1
-channel 7 (DMAMUX1 input 11, SPI1_TX) circular from a heap buffer outside the range in
-(5), with no DMA interrupts. After the call, the next draw stops the channel, drains SPI1
-and restores `CR1`/`CR2` exactly as they were -- so a bootloader screen drawn later
-still renders.
+Before gate 16 and gate 18/2 on the Q1 PIN prompt, before every gate 18/4 seed read
+(`menu::reading_seed`), and under every waiting screen (`menu::blocking_screen`): set the
+panel window to the bottom 320x5 strip, issue RAMWR, hold CS low and D/C high, slow SPI1
+to /128, and start DMA1 channel 7 (DMAMUX1 input 11, SPI1_TX) circular from a heap buffer
+outside the range in (5), with no DMA interrupts. Stopping it stops the channel, drains
+SPI1 (bounded), restores `CR1`/`CR2` exactly as they were and raises CS -- so a
+bootloader screen drawn later still renders.
+
+Who stops it:
+
+- **The waiting screen's guard.** `blocking_screen` and `reading_seed` return a
+  `display::Busy`; the caller holds it for the work, and dropping it stops the sweep. A
+  lease (`catcard_ui::sweep::Slot`) makes a stale guard -- one whose sweep a later frame
+  already stopped -- leave a newer sweep alone.
+- **The next frame**, as before, for the PIN check's unowned sweep and anything the guard
+  outlived.
+- **The backstop, `display::quiesce`, before every callgate that draws** (2, 3, 23; 4/3 is
+  never called). A waiting screen's work can be interrupted by the power button (USB
+  task), the idle logout, the fatal guard, a trick-PIN wipe or a host's logout, all of
+  which end in one of those gates. Every firmware call of them goes through
+  `crates/catcard-fw/src/gatecall.rs`, which calls `quiesce` first; `make lint`
+  (`tools/gatecall-lint.sh`) refuses a direct call anywhere else. `quiesce` works from
+  statics only -- the running sweep's record holds its own SPI1 handle, saved `CR1`/`CR2`
+  and the CS pin -- takes that record with interrupts masked so a sweep is stopped exactly
+  once, never draws or allocates, and with no sweep running is one atomic load.
+
+What is still not covered: the bootloader's SE2-fault screen, reachable inside gate 18 and
+gate 22 while a waiting screen's sweep runs. It is terminal, draws assuming SPI1 as the
+bootloader left it, and would come out garbled -- no crypto or fund impact
+(hw-reference/bootloader-callgate-abi.md §"Caveat"), the same exposure the seed read has
+had since the sweep was introduced.

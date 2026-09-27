@@ -233,7 +233,7 @@ fn refused_absent(ui: &mut Ui<'_>, head: &str) -> bool {
 ///
 /// `note` is the second line of the "tap your phone" screen: what the phone gets.
 fn present_image(ui: &mut Ui<'_>, head: &str, image: &[u8], note: &str) {
-    menu::blocking_screen(ui.panel, head, "writing the tag");
+    let _busy = menu::blocking_screen(ui.panel, head, "writing the tag");
     match write_user_memory(image) {
         Ok(()) => {
             crate::catlog!("nfc: {} bytes on the tag", image.len());
@@ -883,7 +883,7 @@ fn receive(ui: &mut Ui<'_>, head: &str) -> Option<Received> {
     let Ok(n) = catcard_nfc::text_image(&mut marker, AREA, READY_TEXT) else {
         return None;
     };
-    menu::blocking_screen(ui.panel, head, "marking the tag");
+    let _busy = menu::blocking_screen(ui.panel, head, "marking the tag");
     if let Err(why) = write_user_memory(&marker[..n]) {
         crate::catlog!("nfc: could not mark the tag: {}", why);
         menu::message(ui.panel, head, why, "any key to go back");
@@ -921,7 +921,7 @@ fn receive(ui: &mut Ui<'_>, head: &str) -> Option<Received> {
         menu::wait_for_any_key(ui);
         return None;
     };
-    menu::blocking_screen(ui.panel, head, "reading the tag");
+    let _busy = menu::blocking_screen(ui.panel, head, "reading the tag");
     if let Err(why) = read_user_memory(0, held.bytes()) {
         crate::catlog!("nfc: read failed: {}", why);
         drop(held);
@@ -976,7 +976,7 @@ enum Waited {
 /// Watch the head of user memory until it is not `baseline` any more and has stopped
 /// moving, or the owner leaves, or the budget runs out.
 fn wait_for_write(ui: &mut Ui<'_>, head: &str, baseline: &[u8; WATCH]) -> Waited {
-    menu::blocking_screen(ui.panel, head, "tap your phone to write");
+    let _busy = menu::blocking_screen(ui.panel, head, "tap your phone to write");
     let mut last = *baseline;
     let mut quiet = 0u32;
     let mut missed = 0u32;

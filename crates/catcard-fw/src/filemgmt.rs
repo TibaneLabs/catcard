@@ -89,7 +89,7 @@ pub(crate) fn delete_psbts(ui: &mut Ui<'_>) {
         return;
     }
 
-    menu::blocking_screen(ui.panel, HEAD, "blanking");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "blanking");
     let mut a: heapless::String<32> = heapless::String::new();
     let mut b: heapless::String<32> = heapless::String::new();
     match delete_on(storage, &found.names) {
@@ -227,7 +227,7 @@ pub(crate) fn format_ram_disk(ui: &mut Ui<'_>) {
     if !menu::confirmed(ui) {
         return;
     }
-    menu::blocking_screen(ui.panel, HEAD, "blanking");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "blanking");
     match crate::vdisk::wipe_and_format() {
         Ok(()) => {
             crate::catlog!("vdisk: blanked and formatted from the menu");

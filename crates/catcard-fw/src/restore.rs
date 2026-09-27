@@ -172,7 +172,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         return say(ui, "staged image does not fit");
     };
 
-    menu::blocking_screen(ui.panel, HEAD, "checking the image");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "checking the image");
     let got = {
         use purecrypto::hash::{Digest as _, Sha256};
         let mut h = Sha256::new();

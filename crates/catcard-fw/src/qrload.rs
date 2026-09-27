@@ -144,6 +144,8 @@ pub(crate) fn collect_any(
     // Taken when a part says how big the message is, and only for one small enough to
     // hold: see `room_to_unmix`.
     let mut known: Option<crate::heap::Block> = None;
+    // The bar under the count, kept moving between parts; the next count replaces it.
+    let mut bar: Option<crate::display::Busy> = None;
 
     let outcome = qrscan::scan_many(ui, head, &mut |ui, line| {
         let scratch = scratch_mem.bytes();
@@ -189,7 +191,7 @@ pub(crate) fn collect_any(
                 compressed = landed.compressed;
                 if (landed.have, landed.total) != shown {
                     shown = (landed.have, landed.total);
-                    progress(ui, head, landed.have, landed.total);
+                    bar = Some(progress(ui, head, landed.have, landed.total));
                 }
                 match landed.complete {
                     Some(len) => {
@@ -452,12 +454,15 @@ fn starts_with_ur(line: &[u8]) -> bool {
 /// going anywhere, and a number because the last few parts of an animated transfer can
 /// take longer than the first hundred and a bar that has stopped moving says nothing
 /// about how much is left.
-fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) {
+///
+/// The bar under it moves for as long as the returned guard is held: the caller keeps it
+/// until the next count replaces it.
+fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) -> crate::display::Busy {
     crate::idle::note_progress();
     let mut note: heapless::String<24> = heapless::String::new();
     use core::fmt::Write as _;
     let _ = write!(note, "{have} of {total}");
-    menu::blocking_screen(ui.panel, head, &note);
+    menu::blocking_screen(ui.panel, head, &note)
 }
 
 /// The PSRAM staging area, which is where everything scanned goes.

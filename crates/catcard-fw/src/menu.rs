@@ -5714,28 +5714,23 @@ fn lcd_scroll_test(ui: &mut Ui<'_>) {
 }
 
 /// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are
-/// masked and the firewall resets the CPU if one lands inside.
+/// masked and the firewall resets the CPU if one lands inside -- or any other work long
+/// enough that a still screen would read as a hang.
 ///
-/// On an OLED the bar goes up and the controller keeps it moving (see
-/// [`display::scroll_busy_bar`]). On the Q1 the text goes up without a bar of ours, and the
-/// GPU co-processor draws its own moving one along the bottom -- or, where it is not in use,
-/// nothing does: a bar that sits still for two seconds claims progress that is not being
-/// shown, which is worse than a plain line saying what the device is waiting for.
-pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str) {
+/// Hold what it returns for as long as the work runs (`let _busy = blocking_screen(..)`):
+/// the bar moves until it is dropped. On an OLED the bar goes up and the controller keeps
+/// it moving (see [`display::scroll_busy_bar`]). On the Q1 the text goes up with our
+/// blue-white sweep along the bottom, fed to the panel by DMA ([`display::Busy`]) and
+/// stopped when the guard goes -- or, if the sweep cannot start, the GPU co-processor's
+/// bar.
+pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str) -> display::Busy {
     #[cfg(not(feature = "board-q1"))]
-    {
-        display::draw(panel, |c| {
-            catcard_ui::widgets::working(c, &display::LAYOUT, head, note, 0);
-        });
-        display::scroll_busy_bar(panel);
-    }
+    display::draw(panel, |c| {
+        catcard_ui::widgets::working(c, &display::LAYOUT, head, note, 0);
+    });
     #[cfg(feature = "board-q1")]
-    {
-        message(panel, head, note, "");
-        if display::GPU_BAR_ON_BLOCKING {
-            display::scroll_busy_bar(panel);
-        }
-    }
+    message(panel, head, note, "");
+    display::Busy::start(panel)
 }
 
 /// The screen for reading the seed out of the secure element: the cat, reading.
@@ -5747,15 +5742,16 @@ pub(crate) fn blocking_screen(panel: &mut display::Panel, head: &str, note: &str
 /// (docs/CALLGATE-DMA.md, watched working 2026-09-22). Elsewhere it is the plain
 /// [`blocking_screen`].
 ///
-/// Only for a wait that *is* the seed read. Before a callgate that draws for itself --
-/// logout, wipe -- the sweep would leave the bootloader a bus that is not its own.
-pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) {
+/// Hold what it returns across the read, as for [`blocking_screen`]. Dropping it stops the
+/// sweep where it is, and a [`Working::seed`] after it carries on from there.
+pub(crate) fn reading_seed(panel: &mut display::Panel, head: &str) -> display::Busy {
     #[cfg(feature = "board-q1")]
-    if !seed_wait(panel, head, "reading the seed") && display::GPU_BAR_ON_BLOCKING {
-        display::scroll_busy_bar(panel);
+    {
+        seed_page(panel, head, "reading the seed");
+        display::Busy::start(panel)
     }
     #[cfg(not(feature = "board-q1"))]
-    blocking_screen(panel, head, "reading seed");
+    blocking_screen(panel, head, "reading seed")
 }
 
 /// A page with one picture in the middle: `head` above it, `note` below, the bottom rows
@@ -5806,11 +5802,21 @@ pub(crate) fn card_wait(panel: &mut display::Panel, head: &str, note: &str) {
 /// One page for every stage of getting at the seed, reading it and stretching it alike,
 /// so going from one to the next changes the caption and nothing else: the bar keeps
 /// moving from where it was.
+///
+/// Unowned: the sweep runs until the next frame. That suits the PIN check, whose next
+/// screen ends it; a wait with an end holds a [`display::Busy`] instead ([`reading_seed`],
+/// [`Working::seed`]).
 #[cfg(feature = "board-q1")]
 pub(crate) fn seed_wait(panel: &mut display::Panel, head: &str, note: &str) -> bool {
+    seed_page(panel, head, note);
+    display::start_sweep(panel)
+}
+
+/// [`seed_wait`]'s page, drawn to be followed by the sweep.
+#[cfg(feature = "board-q1")]
+fn seed_page(panel: &mut display::Panel, head: &str, note: &str) {
     display::keep_sweep();
     icon_page(panel, &catcard_ui::art::menuicons::READING_SEED, head, note);
-    display::start_sweep(panel)
 }
 
 /// The screen shown while something slow runs: a heading, a note, and a bar that moves.
@@ -5825,8 +5831,9 @@ pub(crate) struct Working<'a> {
     note: Line,
     phase: u32,
     /// The DMA sweep is supplying the motion, so a tick has nothing to draw -- and
-    /// drawing would stop the sweep it is meant to be showing.
-    swept: bool,
+    /// drawing would stop the sweep it is meant to be showing. Held for as long as this
+    /// screen is: it stops the sweep when the work is done.
+    swept: Option<display::Busy>,
 }
 
 impl<'a> Working<'a> {
@@ -5837,7 +5844,7 @@ impl<'a> Working<'a> {
             head,
             note: Line::new(),
             phase: 0,
-            swept: false,
+            swept: None,
         };
         let _ = w.note.push_str(note);
         w.draw(panel);
@@ -5849,15 +5856,18 @@ impl<'a> Working<'a> {
     /// start, it is [`Working::new`] and its ticking bar.
     pub(crate) fn seed(panel: &mut display::Panel, head: &'a str, note: &str) -> Self {
         #[cfg(feature = "board-q1")]
-        if seed_wait(panel, head, note) {
-            let mut w = Self {
-                head,
-                note: Line::new(),
-                phase: 0,
-                swept: true,
-            };
-            let _ = w.note.push_str(note);
-            return w;
+        {
+            seed_page(panel, head, note);
+            if let Some(bar) = display::Busy::sweep(panel) {
+                let mut w = Self {
+                    head,
+                    note: Line::new(),
+                    phase: 0,
+                    swept: Some(bar),
+                };
+                let _ = w.note.push_str(note);
+                return w;
+            }
         }
         Self::new(panel, head, note)
     }
@@ -5866,7 +5876,7 @@ impl<'a> Working<'a> {
     pub(crate) fn tick(&mut self, panel: &mut display::Panel) {
         // Work is moving: the on-battery power-off waits (`crate::idle`).
         crate::idle::note_progress();
-        if self.swept {
+        if self.swept.is_some() {
             return;
         }
         self.phase = self.phase.wrapping_add(1);
@@ -7977,7 +7987,7 @@ fn root_stored(
 ) -> Result<Stored, &'static str> {
     use zeroize::Zeroize;
 
-    reading_seed(panel, head);
+    let _busy = reading_seed(panel, head);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     let mut secret = login
         .fetch_secret(&pin_gate)

@@ -264,7 +264,7 @@ pub(crate) fn bless_firmware(gate: &Callgate, login: &mut catcard_pin::Login, ui
     if !menu::confirmed(ui) {
         return;
     }
-    menu::blocking_screen(ui.panel, HEAD, "asking the bootloader");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "asking the bootloader");
     let g = crate::pinentry::BootloaderGate::new(gate);
     match login.greenlight(&g) {
         Ok(()) => {
@@ -371,7 +371,7 @@ pub(crate) fn set_high_water(gate: &Callgate, ui: &mut Ui<'_>) {
     let check = unsafe { gate.is_downgrade(&own.timestamp) };
     crate::catlog!("high-water: check of own timestamp -> {:?}", check);
 
-    menu::blocking_screen(ui.panel, HEAD, "recording");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "recording");
     // SAFETY: the irreversible write, taken after three answers on screen; the buffer is
     // the documented 8 bytes and the call masks interrupts.
     match unsafe { gate.high_water_record(&own.timestamp) } {

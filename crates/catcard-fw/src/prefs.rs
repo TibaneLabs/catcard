@@ -339,7 +339,7 @@ pub(crate) fn save(
 ) -> bool {
     use catcard_settings::store::SCRATCH;
 
-    crate::menu::blocking_screen(ui.panel, head, "saving");
+    let _busy = crate::menu::blocking_screen(ui.panel, head, "saving");
     // Two full-slot buffers, as every other writer here takes: one holds the settings
     // while the key is changed, the other seals them.
     let (Some(mut doc_held), Some(mut seal_held)) =

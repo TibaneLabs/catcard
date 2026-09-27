@@ -111,7 +111,7 @@ pub(crate) fn save(
     let n = catcard_settings::chains::render(&tickers, &mut json).ok_or("too many chains")?;
     let raw = core::str::from_utf8(&json[..n]).map_err(|_| "bad list")?;
 
-    crate::menu::blocking_screen(ui.panel, "Chains", "saving");
+    let _busy = crate::menu::blocking_screen(ui.panel, "Chains", "saving");
     let (Some(mut doc), Some(mut seal)) = (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
     else {
         return Err("not enough memory to save");

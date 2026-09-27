@@ -99,7 +99,7 @@ fn list_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     /// Row ids past any entry.
     const STORE: u32 = 1000;
 
-    menu::blocking_screen(ui.panel, HEAD, "reading");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "reading");
     let Some(mut held) = crate::heap::take(SCRATCH) else {
         return say(ui, "not enough memory");
     };
@@ -384,7 +384,7 @@ pub(crate) fn pick_part(
     ui: &mut Ui<'_>,
     head: &str,
 ) -> Option<Picked> {
-    menu::blocking_screen(ui.panel, head, "reading the vault");
+    let _busy = menu::blocking_screen(ui.panel, head, "reading the vault");
     let picked = with_entries(gate, login, ui, |ui, seeds| {
         if seeds.is_empty() {
             return Err("the vault is empty");
@@ -430,7 +430,7 @@ pub(crate) fn pick_for_teleport(
     head: &str,
     out: &mut [u8],
 ) -> Result<Option<usize>, &'static str> {
-    menu::blocking_screen(ui.panel, head, "reading the vault");
+    let _busy = menu::blocking_screen(ui.panel, head, "reading the vault");
     with_entries(gate, login, ui, |ui, seeds| {
         if seeds.is_empty() {
             return Err("the vault is empty");
@@ -688,7 +688,7 @@ fn save(
     ui: &mut Ui<'_>,
     change: Change<'_>,
 ) -> Result<(), &'static str> {
-    menu::blocking_screen(ui.panel, HEAD, "saving");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
     let (Some(mut doc_held), Some(mut seal_held)) =
         (crate::heap::take(SCRATCH), crate::heap::take(SCRATCH))
     else {

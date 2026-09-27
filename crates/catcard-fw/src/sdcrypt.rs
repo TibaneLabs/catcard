@@ -200,7 +200,7 @@ fn do_encrypt(
         return say(ui, "no randomness for a salt");
     }
 
-    menu::blocking_screen(ui.panel, HEAD, "deriving key");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "deriving key");
     let (params, key) = match ccenc::new_params(password.bytes(), salt, ccenc::DEFAULT_ITERATIONS) {
         Ok(pair) => pair,
         Err(_) => return say(ui, "could not derive a key"),
@@ -244,7 +244,7 @@ fn do_unlock(ui: &mut Ui<'_>, serial: u32, cid: &[u32; 4], params: Option<Params
     let Some(password) = get_password(ui, "Unlock password", cid) else {
         return;
     };
-    menu::blocking_screen(ui.panel, HEAD, "checking password");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "checking password");
     match password.verify(&params) {
         Some(key) => {
             install(serial, key);
@@ -277,7 +277,7 @@ fn do_remove(
         let Some(password) = get_password(ui, "Password to remove", &card.cid) else {
             return;
         };
-        menu::blocking_screen(ui.panel, HEAD, "checking password");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "checking password");
         match password.verify(&params) {
             Some(k) => k,
             None => return say(ui, "wrong password"),
@@ -488,7 +488,7 @@ fn save_params(
     use catcard_settings::json::Doc;
     use catcard_settings::store::{self, SCRATCH};
 
-    menu::blocking_screen(ui.panel, HEAD, "saving parameters");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "saving parameters");
     let key = crate::settings::wallet_key(gate, login, ui.panel, HEAD)?;
 
     let (Some(mut doc_held), Some(mut map_held), Some(mut seal_held)) = (

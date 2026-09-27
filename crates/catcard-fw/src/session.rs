@@ -279,7 +279,7 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
         return;
     }
 
-    crate::menu::reading_seed(panel, "Wallet");
+    let _busy = crate::menu::reading_seed(panel, "Wallet");
     let pin_gate = pinentry::BootloaderGate::new(gate);
     let mut secret = match login.fetch_secret(&pin_gate) {
         Ok(s) => s,

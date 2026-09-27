@@ -575,7 +575,7 @@ fn collect(
     find(port)?;
     setup(port)?;
 
-    menu::blocking_screen(ui.panel, head, "point it at the codes");
+    let _busy = menu::blocking_screen(ui.panel, head, "point it at the codes");
     if !command(port, cmd::SCAN_START) {
         return Err(Fault::SetupRefused);
     }
@@ -635,7 +635,7 @@ pub(crate) fn probe(ui: &mut Ui<'_>) {
     };
 
     crate::torch::release();
-    menu::blocking_screen(ui.panel, HEAD, "resetting the module");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "resetting the module");
     // SAFETY: as `scan_many` -- the board table's scanner pins and USART2 belong to this
     // screen, and the menu waits for it to return.
     // The one screen that always resets: its whole job is to answer "does this module
@@ -769,7 +769,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     // pass over the whole thing, so it says so -- on a payload this size it is not
     // instant, and a screen that has stopped changing reads as a device that has hung.
     let len = if got.compressed {
-        menu::blocking_screen(ui.panel, HEAD, "expanding");
+        let _busy = menu::blocking_screen(ui.panel, HEAD, "expanding");
         let max = catcard_board::BOARD.image_ceiling();
         match crate::inflate::staged(&mut area, got.len as u32, max) {
             Ok(n) => {

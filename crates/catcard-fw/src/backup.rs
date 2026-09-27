@@ -1003,7 +1003,7 @@ fn fetch(
     ui: &mut Ui<'_>,
     head: &str,
 ) -> Option<[u8; SECRET_LEN]> {
-    menu::reading_seed(ui.panel, head);
+    let _busy = menu::reading_seed(ui.panel, head);
     let pin_gate = crate::pinentry::BootloaderGate::new(gate);
     match login.fetch_secret(&pin_gate) {
         Ok(s) if s.iter().any(|b| *b != 0) => Some(s),

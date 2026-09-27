@@ -266,7 +266,7 @@ fn open_tx(
         }
     };
     let sealed = range.start + kt::PUBKEY_LEN..range.end;
-    menu::blocking_screen(ui.panel, HEAD, "opening");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "opening");
     let opened = crate::keywork::run(|kw| {
         let session = kt::ecdh(&key, &sender, kw)?;
         let b1 = kt::open_outer(&session, &mut lease.bytes()[sealed.clone()])?;
@@ -645,7 +645,7 @@ fn send_to(
         buf.zeroize();
         return;
     };
-    menu::blocking_screen(ui.panel, HEAD, "sealing");
+    let _busy = menu::blocking_screen(ui.panel, HEAD, "sealing");
     let agreed = crate::keywork::run(|kw| {
         let me = kt::public_key(&my_priv, kw)?;
         let session = kt::ecdh(&my_priv, &rx_pub, kw)?;
@@ -693,7 +693,7 @@ fn pick_payload(
         "Master seed" => {
             // Sending the seed reveals it: in delta mode this erases it instead.
             crate::trickpin::seed_reveal(gate);
-            menu::reading_seed(ui.panel, HEAD);
+            let _busy = menu::reading_seed(ui.panel, HEAD);
             let pin_gate = crate::pinentry::BootloaderGate::new(gate);
             let stash = match login.fetch_secret(&pin_gate) {
                 Ok(s) if s.iter().any(|b| *b != 0) => Zeroizing::new(s),
@@ -925,7 +925,7 @@ fn psbt_send(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(noid) = random_noid(ui) else {
         return;
     };
-    menu::blocking_screen(ui.panel, H, "sealing");
+    let _busy = menu::blocking_screen(ui.panel, H, "sealing");
     let session = crate::keywork::run(|kw| {
         let leg =
             derive_origin(&master, w.cosigners()[ours].origin(), kw).ok_or(kt::Error::BadKey)?;
