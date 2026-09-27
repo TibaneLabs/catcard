@@ -171,6 +171,32 @@ arm theirs while they run, and every list inside them carries the strip; there t
 opens in the list's place and ENTER or CANCEL puts the list back. A transaction under
 review never has the strip, whichever feature it was reached from.
 
+## Going back
+
+Back (`x`, CANCEL, or the left arrow outside a grid) always returns to the screen the
+current one was **opened from**, with the row that opened it still selected and scrolled
+into view -- whichever way it was reached. Notes opened from the main menu's tile goes
+back to the main menu on the Notes tile; opened from Settings, back to Settings on
+`Secure notes`. Settings → Login → Trick PINs, then back twice, lands on Settings with
+`Login` selected. A feature that runs to completion (a signing flow, an export, a
+setting's picker) hands back to the menu that opened it in the same way. Back on the main
+menu does nothing.
+
+The run loop keeps the way back as a small stack (`menu::Nav`, `catcard_ui::nav`): one
+level per menu opened, three bytes each (the screen, the selected row), eight levels deep,
+the oldest dropped first past that. A remembered row is clamped to the menu as it is when
+shown again, since a setting can hide a row meanwhile. Two exceptions:
+
+- **A wallet made or destroyed** (New, Import, a restore, a join kept, Destroy seed)
+  lands on the main menu at the top with nothing behind it: every menu on the way back
+  belonged to the device as it was.
+- **About's pages** turn in place: the splash and the chip page replace each other rather
+  than stacking, and Cancel on the chip page steps back a page. Leaving the last page
+  (identity) leaves About.
+
+A computer's request, an upgrade offer, a pairing prompt or HSM mode takes the screen
+without moving the way back; HSM mode, when it ends, lands on the main menu.
+
 ## What to do about the ❌ rows
 
 `Scan QR` works: the module is configured once at boot and slept, and the LAMP key
