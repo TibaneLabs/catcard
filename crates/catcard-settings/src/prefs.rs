@@ -142,6 +142,14 @@ pub const TRICK_PINS: &str = "cat_tp";
 /// Source: hw-reference/usb-ckcc-protocol.md §4.3 `HSM_DISABLE_CMDS` [C];
 /// settings-nvstore-format.md §5 (`hsmcmd`, the name only) [C]
 pub const HSM_COMMANDS: &str = "cat_hsmcmd";
+/// The FIDO security key (CTAP2 / U2F over USB): `"1"` on, anything else off. Our own
+/// switch; stock has no security key.
+pub const FIDO: &str = "cat_fido";
+/// The wallet's FIDO generation: decimal digits, absent meaning `0`. Raised by a
+/// security-key reset, which is what makes every earlier credential stop verifying
+/// (`catcard_fido::keys`). **Never lowered**: writing an old number back is the only
+/// thing that would bring reset credentials back.
+pub const FIDO_GEN: &str = "cat_fidogen";
 
 /// The longest idle timeout accepted: twenty-four hours.
 ///
@@ -228,6 +236,33 @@ pub fn backlight_value(percent: u8) -> heapless::String<4> {
     use core::fmt::Write as _;
     let mut s: heapless::String<4> = heapless::String::new();
     let _ = write!(s, "{percent}");
+    s
+}
+
+/// Whether the security key is presented to the host. Only a literal `"1"` switches it
+/// on, like the keyboard: it adds something a host can use, so doubt reads as off.
+pub fn fido(doc: &Doc<'_>) -> bool {
+    text(doc, FIDO) == Some("1")
+}
+
+/// The wallet's FIDO generation, or `None` when a value is there and cannot be read.
+///
+/// Absent is generation 0, the one every wallet starts at. A value that is present and
+/// garbled is **not** read as 0: that would silently bring back every credential a reset
+/// retired. `None` makes the security key refuse to work for this wallet until it is
+/// reset again, which is the direction a doubt should fail in.
+pub fn fido_generation(doc: &Doc<'_>) -> Option<u32> {
+    if doc.get(FIDO_GEN).is_none() {
+        return Some(0);
+    }
+    digits(text(doc, FIDO_GEN)?, 10)
+}
+
+/// The text a FIDO generation is stored as.
+pub fn fido_generation_value(generation: u32) -> heapless::String<10> {
+    use core::fmt::Write as _;
+    let mut s: heapless::String<10> = heapless::String::new();
+    let _ = write!(s, "{generation}");
     s
 }
 
@@ -1111,6 +1146,50 @@ mod tests {
             assert!(!keyboard_emu(&doc(json)), "{json}");
         }
         assert!(keyboard_emu(&doc(r#"{"cat_kbemu":"1"}"#)));
+    }
+
+    #[test]
+    fn doubt_never_switches_the_security_key_on() {
+        for json in [
+            r#"{}"#,
+            r#"{"cat_fido":""}"#,
+            r#"{"cat_fido":1}"#,
+            r#"{"cat_fido":"on"}"#,
+            r#"{"cat_fido":"0"}"#,
+            r#"{"cat_kbemu":"1"}"#,
+        ] {
+            assert!(!fido(&doc(json)), "{json}");
+        }
+        assert!(fido(&doc(r#"{"cat_fido":"1"}"#)));
+    }
+
+    /// A reset raises the generation; a value nobody can read must never quietly become
+    /// the generation before it.
+    #[test]
+    fn the_fido_generation_reads_absent_as_zero_and_garbled_as_unknown() {
+        assert_eq!(fido_generation(&doc(r#"{}"#)), Some(0));
+        assert_eq!(fido_generation(&doc(r#"{"cat_fidogen":"0"}"#)), Some(0));
+        assert_eq!(fido_generation(&doc(r#"{"cat_fidogen":"7"}"#)), Some(7));
+        assert_eq!(
+            fido_generation(&doc(r#"{"cat_fidogen":"4294967295"}"#)),
+            Some(u32::MAX)
+        );
+        for bad in [
+            r#"{"cat_fidogen":""}"#,
+            r#"{"cat_fidogen":3}"#,
+            r#"{"cat_fidogen":"-1"}"#,
+            r#"{"cat_fidogen":"4294967296"}"#,
+            r#"{"cat_fidogen":"12345678901"}"#,
+            r#"{"cat_fidogen":"1a"}"#,
+            r#"{"cat_fidogen":null}"#,
+        ] {
+            assert_eq!(fido_generation(&doc(bad)), None, "{bad}");
+        }
+        for g in [0, 1, 99, u32::MAX] {
+            let v = fido_generation_value(g);
+            let json = format!(r#"{{"cat_fidogen":"{v}"}}"#);
+            assert_eq!(fido_generation(&doc(&json)), Some(g));
+        }
     }
 
     #[test]
