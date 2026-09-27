@@ -1753,39 +1753,84 @@ fn describe_reject(r: &Reject, out: &mut [u8; 64]) -> usize {
 // The singleton
 // ---------------------------------------------------------------------------
 
-/// The task, once [`init`] has brought USB up.
+/// The task, as every unit has booted it: an `Option<UsbTask>`.
 ///
-/// Not an `Option<UsbTask>`. That enum's `None` is a niche value somewhere inside the
-/// struct rather than all zeroes, so the static was initialised data: its whole size
-/// stored in the image and copied out at every boot, for a value that says "nothing
-/// here". A flag that is `false` at zero, beside storage that is zero until written,
-/// leaves the whole static zeroed, and a zeroed static is `.bss`.
+/// Its `None` is a niche inside the struct rather than all zeroes, so this static is
+/// initialised data -- its size stored in the image and copied out at boot. [`SLOT`] is
+/// the zeroed `.bss` storage meant to replace it, and it is not on the boot path yet: the
+/// boot and the CANCEL-held failsafe both bring USB up through [`init`], which writes
+/// here, and every bench unit is locked. So the new storage is proven at runtime first --
+/// Debug → `USB storage test` ([`move_to_slot`]) moves the live task into it -- and only
+/// once that has run on hardware does [`init`] write there instead.
+static mut TASK: Option<UsbTask> = None;
+
+/// Where the task lives after [`move_to_slot`]: a `live` flag beside zeroed storage,
+/// which is `.bss`. See [`TASK`].
 struct Slot {
     live: bool,
     task: core::mem::MaybeUninit<UsbTask>,
 }
 
-static mut TASK: Slot = Slot {
+static mut SLOT: Slot = Slot {
     live: false,
     task: core::mem::MaybeUninit::zeroed(),
 };
 
-/// The task, if [`init`] brought it up.
+/// The task, wherever it lives now.
 ///
 /// # Safety
 /// The caller must be the only holder of the returned reference for as long as it lives:
 /// [`with_task`] and [`task_from_isr`] are the two callers, and they say why they are.
 unsafe fn task_slot() -> Option<&'static mut UsbTask> {
-    // SAFETY: the caller's contract makes this the only reference to the static; `task`
-    // is initialised whenever `live` is set, because `init` writes it first.
+    // SAFETY: the caller's contract makes this the only reference to either static;
+    // `SLOT.task` is initialised whenever `live` is set, because `move_to_slot` writes it
+    // before setting the flag, and from then on `TASK` is `None`.
     unsafe {
-        let slot = &mut *core::ptr::addr_of_mut!(TASK);
+        let slot = &mut *core::ptr::addr_of_mut!(SLOT);
         if slot.live {
-            Some(slot.task.assume_init_mut())
-        } else {
-            None
+            return Some(slot.task.assume_init_mut());
         }
+        (*core::ptr::addr_of_mut!(TASK)).as_mut()
     }
+}
+
+/// Debug → `USB storage test`: move the running task out of [`TASK`] into [`SLOT`], so
+/// everything USB does from here on goes through the new storage.
+///
+/// The runtime proof of the `.bss` layout before it goes on the boot path: if USB keeps
+/// working after this -- the host still enumerates, identifies, pages the log, offers an
+/// image -- the storage is sound, and a failure costs a power cycle, which boots the
+/// proven way again. A plain move: nothing in the task points into itself (the OTG core
+/// has no DMA, and its leased buffers are heap pointers), which is also why [`init`] can
+/// return it by value. `false` if USB never came up. Moving twice is a no-op.
+pub fn move_to_slot() -> bool {
+    catcard_kernel::without_preemption(|| {
+        cortex_m::interrupt::free(|_| {
+            // SAFETY: the scheduler lock excludes every task-side accessor and the
+            // interrupt mask excludes the OTG handler, so nothing holds a reference to
+            // either static while the task moves between them.
+            unsafe {
+                let slot = &mut *core::ptr::addr_of_mut!(SLOT);
+                if slot.live {
+                    return true;
+                }
+                match (*core::ptr::addr_of_mut!(TASK)).take() {
+                    Some(task) => {
+                        slot.task.write(task);
+                        slot.live = true;
+                        true
+                    }
+                    None => false,
+                }
+            }
+        })
+    })
+}
+
+/// Whether the task has been moved into [`SLOT`].
+pub fn in_slot() -> bool {
+    // SAFETY: a single `bool` read; written only under the locks in `move_to_slot`.
+    unsafe { (*core::ptr::addr_of!(SLOT)).live }
 }
 
 /// Bring USB up, if this board can host it.
@@ -1802,11 +1847,8 @@ pub unsafe fn init(serial: &'static str) {
     // SAFETY: single-threaded bring-up; this is the only writer and no reader exists
     // until it returns.
     unsafe {
-        if let Some(task) = UsbTask::init(serial) {
-            let slot = &mut *core::ptr::addr_of_mut!(TASK);
-            slot.task.write(task);
-            slot.live = true;
-        }
+        let task = UsbTask::init(serial);
+        core::ptr::addr_of_mut!(TASK).write(task);
     }
     // The activity light, on the boards that have one. Set up here rather than in
     // bring-up because it is USB's, and because a light that blinks before USB exists

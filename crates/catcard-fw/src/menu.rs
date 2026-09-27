@@ -373,6 +373,9 @@ enum Screen {
     #[cfg(feature = "board-q1")]
     Brightness,
     WipeSeed,
+    /// Debug: move the running USB state into its new `.bss` storage, to prove it at
+    /// runtime before the boot writes there. See `usbtask::TASK`.
+    UsbStorageTest,
     /// Factory reset: the PIN cleared to blank, the settings overwritten and formatted,
     /// and optionally another firmware installed last. See `crate::factoryreset`.
     FactoryReset,
@@ -1084,6 +1087,9 @@ const DEBUG_ITEMS: &[&str] = &[
     "Clocks",
     "RTC",
     "Kernel",
+    // Moves the running USB state into the storage the boot will use once this has run
+    // on hardware -- see `usbtask::TASK`. A failure costs a power cycle.
+    "USB storage test",
     "Scroll test",
     "PSRAM",
     "SPI-NOR",
@@ -1679,6 +1685,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         // belongs to the way in.
         Screen::SdInstall => to(|a| install_firmware(a.gate, a.login, a.ui), Screen::Utils),
         Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
+        Screen::UsbStorageTest => to(|a| usb_storage_test(a.ui), Screen::Debug),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SpendingPolicy => to(
             |a| crate::policy::screen(a.gate, a.login, a.ui, a.pool.as_deref_mut()),
@@ -2094,6 +2101,33 @@ fn warm_reset(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
     unsafe { gate.logout(LogoutMode::LogoutAndReboot) }
 }
 
+/// Debug → `USB storage test`: prove the USB task's new storage at runtime.
+///
+/// Moves the live USB state into the zeroed `.bss` slot the boot is meant to use
+/// ([`usbtask::move_to_slot`]). From then on every USB request goes through it, so a
+/// host that still enumerates, identifies and installs is the proof; a hang is cured by a
+/// power cycle, which boots the proven way again.
+fn usb_storage_test(ui: &mut Ui<'_>) {
+    const HEAD: &str = "USB storage test";
+    if usbtask::in_slot() {
+        message(ui.panel, HEAD, "already moved:", "USB runs from it now");
+        wait_for_any_key(ui);
+        return;
+    }
+    ask(ui.panel, HEAD, "move USB state to", "its new memory?");
+    if !confirmed(ui) {
+        return;
+    }
+    let moved = usbtask::move_to_slot();
+    crate::catlog!("usb: storage test, moved={}", moved);
+    if moved {
+        message(ui.panel, HEAD, "moved: now use USB", "a hang: power cycle");
+    } else {
+        message(ui.panel, HEAD, "USB is not up", "nothing moved");
+    }
+    wait_for_any_key(ui);
+}
+
 /// Change the main PIN, and say what happened.
 fn change_pin_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     use crate::pinentry::ChangePin;
@@ -2400,6 +2434,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Clocks")) => Screen::Clocks,
             (Key::Confirm, Some("RTC")) => Screen::Rtc,
             (Key::Confirm, Some("Kernel")) => Screen::Kernel,
+            (Key::Confirm, Some("USB storage test")) => Screen::UsbStorageTest,
             (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
             #[cfg(not(feature = "board-mk3"))]
@@ -2950,6 +2985,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::SdInstall => {}
         // Handled in `run`: it asks, then calls the bootloader; never drawn.
         Screen::WarmReset => {}
+        // Handled in `run`: it asks, then moves the USB state.
+        Screen::UsbStorageTest => {}
         // Handled in `run`: `crate::policy` drives its own screens.
         #[cfg(not(feature = "board-mk3"))]
         Screen::SpendingPolicy | Screen::ExitTestDrive => {}
