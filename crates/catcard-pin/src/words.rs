@@ -47,11 +47,11 @@ pub const fn from_bits(bits: u32) -> Words {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catcard_wallet::bip39::wordlist::ENGLISH;
+    use catcard_wallet::bip39::wordlist::{self, word};
 
     fn words_for(bits: u32) -> [&'static str; 2] {
         let w = from_bits(bits);
-        [ENGLISH[w.index[0] as usize], ENGLISH[w.index[1] as usize]]
+        [word(w.index[0] as usize), word(w.index[1] as usize)]
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod tests {
         // 11 bits addresses exactly 2048, so this cannot fail by arithmetic -- it fails
         // if the wordlist is ever not 2048 long, which would make the caller's lookup
         // panic on a device rather than here.
-        assert_eq!(ENGLISH.len(), WORD_COUNT as usize);
+        assert_eq!(wordlist::all().len(), WORD_COUNT as usize);
         for bits in [0u32, 0x003f_ffff, 0xffff_ffff, 0x5555_5555, 0xaaaa_aaaa] {
             let w = from_bits(bits);
             assert!(w.index.iter().all(|&i| i < WORD_COUNT));

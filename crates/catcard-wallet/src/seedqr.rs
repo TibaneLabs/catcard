@@ -212,9 +212,7 @@ pub fn from_digits(payload: &[u8], kw: &crate::KeyWork) -> Result<Mnemonic, Erro
         let index = group
             .iter()
             .fold(0usize, |acc, &b| acc * 10 + (b - b'0') as usize);
-        let word = wordlist::ENGLISH
-            .get(index)
-            .ok_or(Error::NoSuchWord { position })?;
+        let word = wordlist::get(index).ok_or(Error::NoSuchWord { position })?;
         if at > 0 {
             phrase[at] = b' ';
             at += 1;

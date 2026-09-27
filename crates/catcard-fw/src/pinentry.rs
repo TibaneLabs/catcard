@@ -159,8 +159,8 @@ impl PinGate for BootloaderGate<'_> {
 /// would let the PIN gate reach wallet code. The lookup belongs here, where a screen is
 /// being drawn anyway.
 fn anti_phishing_words(w: catcard_pin::words::Words) -> [&'static str; 2] {
-    use catcard_wallet::bip39::wordlist::ENGLISH;
-    [ENGLISH[w.index[0] as usize], ENGLISH[w.index[1] as usize]]
+    use catcard_wallet::bip39::wordlist::word;
+    [word(w.index[0] as usize), word(w.index[1] as usize)]
 }
 
 /// Rows the PIN screens were first laid out on.

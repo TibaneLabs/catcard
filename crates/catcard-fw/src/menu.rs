@@ -10861,7 +10861,7 @@ fn word_matches(word: &str, typed: &str) -> bool {
 /// set as it stands. Stock does the same, and the 1920 words that cannot be right are
 /// 1920 chances to pick the wrong one.
 pub(crate) fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> WordPick {
-    use catcard_wallet::bip39::wordlist::ENGLISH;
+    use catcard_wallet::bip39::wordlist;
     // Enough to hold the candidates once a couple of letters have narrowed the list; the
     // pick screen is only offered when the true count is within this. The full last-word
     // set of a 12-word phrase is 128, so that one wants a letter first.
@@ -10880,7 +10880,7 @@ pub(crate) fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> Wo
         let mut cands: heapless::Vec<u16, CAND_MAX> = heapless::Vec::new();
         let mut count = 0usize;
         if !typed.is_empty() {
-            for (i, w) in ENGLISH.iter().enumerate() {
+            for (i, w) in wordlist::all().enumerate() {
                 // Within the allowed set, where there is one: a word that spells the
                 // prefix but breaks the checksum is not offered.
                 if word_matches(w, &typed) && only.is_none_or(|o| o.contains(&(i as u16))) {
@@ -11002,7 +11002,7 @@ pub(crate) fn read_word(ui: &mut Ui<'_>, num: usize, only: Option<&[u16]>) -> Wo
         let _ = lines.push(catcard_ui::scroll::Line::title("Pick the word"));
         for (pos, &ci) in cands.iter().enumerate() {
             let _ = lines.push(catcard_ui::scroll::Line::item(
-                ENGLISH[ci as usize],
+                wordlist::word(ci as usize),
                 pos as u32,
             ));
         }
@@ -11042,13 +11042,13 @@ const EDIT_CANCEL: u32 = u32::MAX - 1;
 /// Show the entered words as a menu so the owner can fix one, add another, or discard.
 fn edit_menu(ui: &mut Ui<'_>, idx: &[u16]) -> EditChoice {
     use catcard_ui::scroll::Line as DLine;
-    use catcard_wallet::bip39::wordlist::ENGLISH;
+    use catcard_wallet::bip39::wordlist::word;
 
     // The words themselves, as text: wiped when the screen leaves, whichever way.
     let mut texts = zeroize::Zeroizing::new(heapless::Vec::<Line, 24>::new());
     for (pos, &i) in idx.iter().enumerate() {
         let mut s = Line::new();
-        let _ = write!(s, "{:2}  {}", pos + 1, ENGLISH[i as usize]);
+        let _ = write!(s, "{:2}  {}", pos + 1, word(i as usize));
         let _ = texts.push(s);
     }
     let mut lines: heapless::Vec<DLine, 28> = heapless::Vec::new();
@@ -11116,7 +11116,7 @@ pub(crate) fn read_phrase_of(
     ui: &mut Ui<'_>,
     expect: Option<usize>,
 ) -> Option<catcard_wallet::bip39::Mnemonic> {
-    use catcard_wallet::bip39::{MAX_LAST_WORDS, Mnemonic, wordlist::ENGLISH};
+    use catcard_wallet::bip39::{MAX_LAST_WORDS, Mnemonic, wordlist::word};
 
     // The phrase as word indices -- the seed, in another spelling. Zeroizing, so every way
     // out of this function wipes the whole buffer, a popped word's slot included.
@@ -11155,7 +11155,7 @@ pub(crate) fn read_phrase_of(
             if n > 0 {
                 let _ = phrase.push(' ');
             }
-            let _ = phrase.push_str(ENGLISH[i as usize]);
+            let _ = phrase.push_str(word(i as usize));
         }
         // Parsing rebuilds the entropy and checks its checksum: private-key work, masked.
         let parsed = crate::keywork::run(|kw| Mnemonic::parse(&phrase, kw));
@@ -11330,7 +11330,7 @@ pub(crate) fn store_seed(
 ///
 /// Returns false on a wrong answer or a cancel; the caller stores nothing either way.
 fn quiz(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) -> bool {
-    use catcard_wallet::bip39::wordlist::{ENGLISH, WORD_COUNT};
+    use catcard_wallet::bip39::wordlist::{WORD_COUNT, word};
     const ASKS: usize = 3;
     const CHOICES: usize = 3;
 
@@ -11352,7 +11352,7 @@ fn quiz(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) -> bool {
                 let Ok(pick) = ui.drbg.below(WORD_COUNT as u32) else {
                     return false;
                 };
-                let w = ENGLISH[pick as usize];
+                let w = word(pick as usize);
                 // Distinct from the answer and from the other decoys, or the question
                 // has two right answers or fewer than three options.
                 if w != correct && !choices[..i].contains(&w) {

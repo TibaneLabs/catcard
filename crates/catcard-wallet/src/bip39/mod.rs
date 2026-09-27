@@ -35,7 +35,7 @@ mod test_vectors;
 use purecrypto::hash::{Digest, HmacSha512, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use wordlist::{BITS_PER_WORD, ENGLISH, MAX_WORD_LEN};
+use wordlist::{BITS_PER_WORD, MAX_WORD_LEN, word};
 
 /// Largest entropy BIP-39 allows: 256 bits.
 pub const MAX_ENTROPY_LEN: usize = 32;
@@ -282,7 +282,7 @@ impl Mnemonic {
     pub fn words(&self) -> impl Iterator<Item = &'static str> + '_ {
         let mut idx = [0u16; MAX_WORDS];
         let n = self.word_indices(&mut idx);
-        (0..n).map(move |i| ENGLISH[idx[i] as usize])
+        (0..n).map(move |i| word(idx[i] as usize))
     }
 
     /// Render the phrase into `out`, space-separated. Returns the byte length.
@@ -821,7 +821,7 @@ mod tests {
         let rendered: Vec<&str> = m.words().collect();
         assert_eq!(n, rendered.len());
         for (i, w) in rendered.iter().enumerate() {
-            assert_eq!(ENGLISH[idx[i] as usize], *w);
+            assert_eq!(word(idx[i] as usize), *w);
         }
     }
 
@@ -860,8 +860,8 @@ mod last_word_tests {
             let n = last_words(prefix, &mut out, &kw).unwrap();
             assert!(out[..n].contains(last), "{phrase}");
             for &w in &out[..n] {
-                let mut full: Vec<&str> = prefix.iter().map(|&i| ENGLISH[i as usize]).collect();
-                full.push(ENGLISH[w as usize]);
+                let mut full: Vec<&str> = prefix.iter().map(|&i| word(i as usize)).collect();
+                full.push(word(w as usize));
                 let joined = full.join(" ");
                 assert!(Mnemonic::parse(&joined, &kw).is_ok(), "{joined}");
             }
@@ -888,7 +888,7 @@ mod last_word_tests {
         assert_eq!(rejected, 2048 - 128);
         for w in (0..2048u16).filter(|w| !out[..n].contains(w)).take(50) {
             let mut full = vec!["abandon"; 11];
-            full.push(ENGLISH[w as usize]);
+            full.push(word(w as usize));
             assert_eq!(
                 Mnemonic::parse(&full.join(" "), &kw).err(),
                 Some(Error::BadChecksum)

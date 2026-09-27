@@ -35,8 +35,14 @@ pub fn prefix_of(word: &str) -> &str {
     &word[..word.len().min(UNIQUE_PREFIX_LEN)]
 }
 
+/// The list as published, for the compiler only: [`TEXT`] and [`STARTS`] are made from it
+/// while building, and nothing reads it at run time, so it takes no flash. A table of
+/// `&str` would be 16 KB of pointers and lengths for 11 KB of letters.
+///
+/// A `const` on purpose, which is what the lint objects to: a `static` would be kept.
+#[allow(clippy::large_const_arrays)]
 #[rustfmt::skip]
-pub static ENGLISH: [&str; WORD_COUNT] = [
+const LIST: [&str; WORD_COUNT] = [
     "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract",
     "absurd", "abuse", "access", "accident", "account", "accuse", "achieve", "acid",
     "acoustic", "acquire", "across", "act", "action", "actor", "actress", "actual",
@@ -295,6 +301,82 @@ pub static ENGLISH: [&str; WORD_COUNT] = [
     "yellow", "you", "young", "youth", "zebra", "zero", "zone", "zoo",
 ];
 
+/// Letters in the whole list.
+const TEXT_LEN: usize = {
+    let mut n = 0;
+    let mut i = 0;
+    while i < WORD_COUNT {
+        n += LIST[i].len();
+        i += 1;
+    }
+    n
+};
+
+/// Every word end to end, no separators: word `i` is `TEXT[STARTS[i]..STARTS[i + 1]]`.
+///
+/// Built from [`LIST`] at compile time, and refused at compile time unless every word is
+/// 1..=[`MAX_WORD_LEN`] lowercase ASCII letters -- which is also what makes every word
+/// boundary a character boundary.
+static TEXT: &str = {
+    const PACKED: [u8; TEXT_LEN] = {
+        let mut out = [0u8; TEXT_LEN];
+        let mut at = 0;
+        let mut i = 0;
+        while i < WORD_COUNT {
+            let w = LIST[i].as_bytes();
+            assert!(!w.is_empty() && w.len() <= MAX_WORD_LEN);
+            let mut j = 0;
+            while j < w.len() {
+                assert!(w[j].is_ascii_lowercase());
+                out[at] = w[j];
+                at += 1;
+                j += 1;
+            }
+            i += 1;
+        }
+        out
+    };
+    match core::str::from_utf8(&PACKED) {
+        Ok(s) => s,
+        Err(_) => panic!("the wordlist is not ASCII"),
+    }
+};
+
+/// Where each word starts in [`TEXT`], and one past the end of the last.
+static STARTS: [u16; WORD_COUNT + 1] = {
+    const { assert!(TEXT_LEN <= u16::MAX as usize) };
+    let mut out = [0u16; WORD_COUNT + 1];
+    let mut i = 0;
+    while i < WORD_COUNT {
+        out[i + 1] = out[i] + LIST[i].len() as u16;
+        i += 1;
+    }
+    out
+};
+
+/// Word `index`.
+///
+/// # Panics
+///
+/// If `index` is not below [`WORD_COUNT`], as indexing an array would. An 11-bit group
+/// always is; [`get`] is for an index that came from outside.
+///
+/// Two table reads whatever the word, like the array lookup this replaced: no search, no
+/// loop whose length depends on which word it is.
+pub fn word(index: usize) -> &'static str {
+    &TEXT[STARTS[index] as usize..STARTS[index + 1] as usize]
+}
+
+/// Word `index`, or `None` past the end of the list.
+pub fn get(index: usize) -> Option<&'static str> {
+    (index < WORD_COUNT).then(|| word(index))
+}
+
+/// Every word, in order: position `i` is word `i`.
+pub fn all() -> impl ExactSizeIterator<Item = &'static str> + Clone {
+    (0..WORD_COUNT).map(word)
+}
+
 /// Index of a word, or `None` if it is not in the list.
 ///
 /// A full scan with a fixed-length compare: every one of the 2048 words is looked at, and
@@ -318,7 +400,7 @@ pub fn index_of(word: &str) -> Option<u16> {
     wanted[..bytes.len()].copy_from_slice(bytes);
 
     let mut found = u16::MAX;
-    for (i, w) in ENGLISH.iter().enumerate() {
+    for (i, w) in all().enumerate() {
         let mut this = [0u8; MAX_WORD_LEN];
         this[..w.len()].copy_from_slice(w.as_bytes());
         let mut diff = 0u8;
@@ -341,7 +423,9 @@ mod tests {
 
     #[test]
     fn list_is_the_expected_size() {
-        assert_eq!(ENGLISH.len(), 2048);
+        assert_eq!(all().len(), 2048);
+        assert_eq!(TEXT.len(), TEXT_LEN);
+        assert_eq!(STARTS[WORD_COUNT] as usize, TEXT_LEN);
         assert_eq!(1usize << BITS_PER_WORD, WORD_COUNT);
     }
 
@@ -351,14 +435,14 @@ mod tests {
         // out of order here would give every phrase a different meaning from everywhere
         // else. (`index_of` no longer depends on the order -- it scans -- but the indices
         // it returns do.)
-        for pair in ENGLISH.windows(2) {
+        for pair in all().collect::<Vec<_>>().windows(2) {
             assert!(pair[0] < pair[1], "not sorted at {:?}", pair);
         }
     }
 
     #[test]
     fn four_letter_prefixes_are_unique() {
-        let mut prefixes: Vec<&str> = ENGLISH.iter().copied().map(prefix_of).collect();
+        let mut prefixes: Vec<&str> = all().map(prefix_of).collect();
         prefixes.sort_unstable();
         let before = prefixes.len();
         prefixes.dedup();
@@ -373,11 +457,7 @@ mod tests {
     fn short_words_exist_and_are_handled() {
         // The list really does contain words shorter than the prefix length; a naive
         // `&w[..4]` panics on them.
-        let short: Vec<&str> = ENGLISH
-            .iter()
-            .copied()
-            .filter(|w| w.len() < UNIQUE_PREFIX_LEN)
-            .collect();
+        let short: Vec<&str> = all().filter(|w| w.len() < UNIQUE_PREFIX_LEN).collect();
         assert!(
             !short.is_empty(),
             "expected some words shorter than 4 letters"
@@ -393,7 +473,7 @@ mod tests {
     fn every_word_is_lowercase_ascii() {
         // The seed derivation feeds these bytes to HMAC directly, so anything
         // non-ASCII would require NFKD normalisation we do not implement.
-        for w in ENGLISH {
+        for w in all() {
             assert!(w.is_ascii(), "{w} is not ASCII");
             assert!(
                 w.chars().all(|c| c.is_ascii_lowercase()),
@@ -405,7 +485,7 @@ mod tests {
 
     #[test]
     fn lookup_round_trips() {
-        for (i, w) in ENGLISH.iter().enumerate() {
+        for (i, w) in all().enumerate() {
             assert_eq!(index_of(w), Some(i as u16));
         }
         assert_eq!(index_of("abandon"), Some(0));
@@ -422,7 +502,7 @@ mod tests {
         // changes with it, so the list is checksummed rather than trusted.
         use purecrypto::hash::{Digest, Sha256};
         let mut h = Sha256::new();
-        for w in ENGLISH {
+        for w in all() {
             h.update(w.as_bytes());
             h.update(b"\n");
         }
@@ -430,6 +510,66 @@ mod tests {
             hex(&h.finalize()),
             "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
         );
+    }
+
+    #[test]
+    fn the_packed_list_is_the_published_list() {
+        // What the firmware reads is `TEXT` and `STARTS`; `LIST` is what a person can
+        // check against the BIP. They must agree word for word, and the words must tile
+        // the text with nothing between them.
+        for (i, w) in LIST.iter().enumerate() {
+            assert_eq!(word(i), *w, "word {i}");
+            assert_eq!(get(i), Some(*w));
+        }
+        assert_eq!(all().map(str::len).sum::<usize>(), TEXT.len());
+        assert_eq!(word(0), "abandon");
+        assert_eq!(word(WORD_COUNT - 1), "zoo");
+    }
+
+    #[test]
+    fn nothing_past_the_end() {
+        assert_eq!(get(WORD_COUNT), None);
+        assert_eq!(get(usize::MAX), None);
+        assert!(std::panic::catch_unwind(|| word(WORD_COUNT)).is_err());
+    }
+
+    #[test]
+    fn near_misses_are_not_words() {
+        // Every one of these sits right beside a real word: a prefix of one, one with a
+        // letter added, two run together, or the text either side of a boundary in
+        // `TEXT`. None of them may come back as an index.
+        for w in all() {
+            let longer = format!("{w}s");
+            if !all().any(|x| x == longer) {
+                assert_eq!(index_of(&longer), None, "{longer}");
+            }
+            let shorter = &w[..w.len() - 1];
+            if !shorter.is_empty() && !all().any(|x| x == shorter) {
+                assert_eq!(index_of(shorter), None, "{shorter}");
+            }
+        }
+        for i in 0..WORD_COUNT - 1 {
+            let joined = [word(i), word(i + 1)].concat();
+            if joined.len() <= MAX_WORD_LEN && !all().any(|x| x == joined) {
+                assert_eq!(index_of(&joined), None, "{joined}");
+            }
+            // The last letter of one word and the first of the next.
+            let straddle = &TEXT[STARTS[i + 1] as usize - 1..STARTS[i + 1] as usize + 1];
+            if !all().any(|x| x == straddle) {
+                assert_eq!(index_of(straddle), None, "{straddle}");
+            }
+        }
+        for junk in [
+            "abandonx",
+            "zooo",
+            "aaaaaaaaa",
+            "abandon ",
+            " abandon",
+            "ab\0ndon",
+            "é",
+        ] {
+            assert_eq!(index_of(junk), None, "{junk:?}");
+        }
     }
 
     fn hex(b: &[u8]) -> String {
