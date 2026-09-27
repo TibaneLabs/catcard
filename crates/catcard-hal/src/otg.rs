@@ -838,10 +838,10 @@ impl Otg {
                     None
                 }
                 pktsts::OUT_DONE if ep == EP_OUT_NUM && self.rx_len > 0 => Some(Event::Report),
-                // A CTAPHID report is always a whole 64 bytes; a short one is not a report.
-                pktsts::OUT_DONE
-                    if ep == FIDO_EP_NUM && self.fido_opened && self.fido_rx_len > 0 =>
-                {
+                // A CTAPHID report is always a whole 64 bytes; a short one -- or an empty
+                // one, which has no OUT_DATA before it -- is not a report. Either way the
+                // endpoint is armed again, so a stray packet cannot leave it deaf.
+                pktsts::OUT_DONE if ep == FIDO_EP_NUM && self.fido_opened => {
                     if self.fido_rx_len == fido::REPORT_LEN {
                         Some(Event::FidoReport)
                     } else {
