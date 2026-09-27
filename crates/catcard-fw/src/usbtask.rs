@@ -700,6 +700,7 @@ impl UsbTask {
         }
     }
 
+    #[inline(never)]
     fn on_report(&mut self, report: &[u8; REPORT_LEN]) {
         let progress = match self.frames.feed(report) {
             Ok(p) => p,
@@ -1424,6 +1425,7 @@ impl UsbTask {
     }
 
     /// The image is fully staged: inspect it and tell the host what we found.
+    #[inline(never)]
     fn finish_offer(&mut self) {
         // A deflated image becomes an ordinary staged one here: the last block has been
         // inflated and written, so from this line on there is nothing left that knows
@@ -1657,6 +1659,7 @@ impl UsbTask {
 
     /// One report in the ckcc mode: the protocol is [`crate::ckcc::Desk`]'s; an image it
     /// recognises goes in front of the person the same way a CatCard-mode offer does.
+    #[inline(never)]
     fn ck_report(&mut self, report: &[u8; REPORT_LEN]) {
         let upgrade_pending = self.answer_pending();
         let mut cx = crate::ckcc::Cx {
