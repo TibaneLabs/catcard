@@ -42,11 +42,9 @@ use crate::VERSION;
 use crate::debug_mem;
 
 /// What the task is in the middle of.
-// The unpacking variant is about a kilobyte larger than the rest: a deflate decoder
-// carries its current block's code tables, and they have to survive between USB frames.
-// Boxing is what clippy suggests and there is no allocator, so the choice is where the
-// kilobyte lives, not whether it exists. It lives here, in the task's own static, rather
-// than in a second static that would cost the same and be further from what uses it.
+// The offer carries its approval beside the staged image, which makes it the largest
+// variant by a hundred-odd bytes; that is the size of the answer the screen shows, and
+// it is only ever one of them.
 #[allow(clippy::large_enum_variant)]
 enum Stage {
     Idle,
@@ -55,9 +53,14 @@ enum Stage {
     /// A deflated image is arriving; each block is inflated and staged as it completes.
     /// It becomes [`Stage::Receiving`] at the end, so everything past the transfer --
     /// inspection, the offer, the approval -- is the one path.
+    ///
+    /// The decoder is leased from the heap for the length of the transfer. It carries a
+    /// deflate block's code tables, a kilobyte that has to survive between frames and is
+    /// needed only while an image is arriving compressed -- held in the task's static it
+    /// was a kilobyte of RAM taken from the boot stack for the life of the device.
     Unpacking {
         staged: Staged<'static, staging::Area>,
-        unpack: crate::unpack::Unpack,
+        unpack: crate::heap::Leased<crate::unpack::Unpack>,
     },
     /// An image arrived and passed inspection; the user has not yet been asked.
     Offered {
@@ -714,11 +717,13 @@ impl UsbTask {
                     // an absurd length costs nothing.
                     match Staged::begin(area, &BOARD, want) {
                         Ok(staged) => {
-                            // The inflate slab comes from the heap, and may not be
-                            // there. That is not a refusal of the image: the same one
-                            // sent uncompressed needs no slab, so the host is told to
-                            // do exactly that rather than being left to guess.
-                            let Some(unpack) = crate::unpack::Unpack::begin(want, block) else {
+                            // The inflate slab and the decoder both come from the heap,
+                            // and may not be there. That is not a refusal of the image:
+                            // the same one sent uncompressed needs neither, so the host
+                            // is told to do exactly that rather than being left to guess.
+                            let Some(unpack) = crate::unpack::Unpack::begin(want, block)
+                                .and_then(|u| crate::heap::Leased::new(u).ok())
+                            else {
                                 crate::catlog!(
                                     "upgrade: {} byte blocks refused (slab {}), or no heap for one; \
                                      asking for it uncompressed",
@@ -1325,7 +1330,7 @@ impl UsbTask {
         // published.
         let mut transfer = self.take_transfer();
         if let Some(Stage::Unpacking { staged, unpack }) = transfer {
-            match unpack.finish() {
+            match unpack.into_inner().finish() {
                 Ok(()) => transfer = Some(Stage::Receiving(staged)),
                 Err(r) => {
                     self.refuse(r);

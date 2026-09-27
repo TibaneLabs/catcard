@@ -46,10 +46,10 @@ use zeroize::Zeroize as _;
 /// The heap, in bytes.
 ///
 /// From the worst case the allocator's own tests measure: the largest screen (16 KiB of
-/// card blocks) with a compressed upload's 8 KiB inflate slab alongside it, which is
-/// 24,608 bytes once each block carries a header. 32 KiB leaves a quarter spare, and
-/// the heartbeat reports the high-water mark so this can be revisited with evidence
-/// rather than re-guessed.
+/// card blocks) with a compressed upload's 8 KiB inflate slab and its decoder alongside
+/// it, which is 25,712 bytes once each block carries a header. 32 KiB leaves a fifth
+/// spare, and the heartbeat reports the high-water mark so this can be revisited with
+/// evidence rather than re-guessed.
 pub const SIZE: usize = 32 * 1024;
 
 /// The region itself. Aligned, because blocks handed out of it are written as words.
@@ -246,9 +246,73 @@ impl<T> core::ops::Deref for Owned<T> {
     }
 }
 
+/// One value of type `T`, living in the heap rather than wherever its owner lives.
+///
+/// For state that is large, rarely in use, and has a type rather than a byte count: the
+/// decoder tables of an upload in flight, say. [`Block`] carries bytes; this carries a
+/// `T`, aligned for it, and reached through [`Deref`](core::ops::Deref) -- so moving a
+/// field out of a `static` into here changes its declaration and the line that creates
+/// it, not every line that reads it.
+///
+/// It is a `Box` that can be told no. [`new`](Self::new) hands the value back when the
+/// heap has no room, and the caller turns that into an answer -- where `Box::new` would
+/// abort, which on this device is the panic handler.
+///
+/// Dropping it runs `T`'s own drop and then wipes the extent, as a [`Block`] is wiped:
+/// the next [`take`] is never handed what this one held.
+pub struct Leased<T> {
+    ptr: NonNull<T>,
+}
+
+// SAFETY: a `Leased<T>` owns its `T` exclusively, as a `Box<T>` does, so it may move to
+// another task exactly when a `T` may; the heap it came from is locked on every access.
+unsafe impl<T: Send> Send for Leased<T> {}
+
+impl<T> Leased<T> {
+    /// Move `value` into the heap, or have it back if the heap has no room.
+    pub fn new(value: T) -> Result<Self, T> {
+        const { assert!(core::mem::size_of::<T>() > 0, "a lease of nothing") };
+        let Some(ptr) = alloc_from_anywhere(Layout::new::<T>()) else {
+            return Err(value);
+        };
+        let ptr = ptr.cast::<T>();
+        // SAFETY: freshly allocated with `T`'s own layout, so it is valid and aligned for
+        // one `T`, and nothing else refers to it.
+        unsafe { ptr.as_ptr().write(value) };
+        Ok(Self { ptr })
+    }
+
+    /// Take the value back out, wiping and freeing its extent.
+    pub fn into_inner(self) -> T {
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: the pointer holds an initialised `T` that this lease owns; `this` is
+        // never dropped, so the value is read out exactly once and not dropped in place.
+        let value = unsafe { this.ptr.as_ptr().read() };
+        // SAFETY: the value has been moved out, so the extent holds nothing live.
+        unsafe { release(this.ptr) };
+        value
+    }
+}
+
+impl<T> core::ops::Deref for Leased<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: initialised in `new`, owned by this lease, and borrowed for as long as
+        // the lease is.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
 impl<T> core::ops::DerefMut for Owned<T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: as `deref`, and `&mut self` makes this the only borrow.
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<T> core::ops::DerefMut for Leased<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as `deref`, and `&mut self` makes the borrow exclusive.
         unsafe { self.ptr.as_mut() }
     }
 }
@@ -259,6 +323,34 @@ impl<T> Drop for Owned<T> {
         // the block (dropped after this, as a field) only wipes the bytes.
         unsafe { core::ptr::drop_in_place(self.ptr.as_ptr()) };
     }
+}
+
+impl<T> Drop for Leased<T> {
+    fn drop(&mut self) {
+        // SAFETY: the value is initialised and owned by this lease, and this is its only
+        // drop; after it the extent holds nothing live, which is what `release` needs.
+        unsafe {
+            core::ptr::drop_in_place(self.ptr.as_ptr());
+            release(self.ptr);
+        }
+    }
+}
+
+/// Wipe a leased extent and give it back to the heap.
+///
+/// # Safety
+/// `ptr` came from [`Leased::new`], is released once, and holds no live value.
+unsafe fn release<T>(ptr: NonNull<T>) {
+    let bytes = ptr.as_ptr().cast::<u8>();
+    for i in 0..core::mem::size_of::<T>() {
+        // SAFETY: inside the extent allocated for one `T`. Volatile, as a block's wipe
+        // is, so the stores are not judged dead because the memory is about to be freed.
+        unsafe { core::ptr::write_volatile(bytes.add(i), 0) };
+    }
+    with(|heap| {
+        // SAFETY: the caller's contract -- it came from this heap and is freed once.
+        unsafe { heap.dealloc(ptr.cast()) };
+    });
 }
 
 /// Allocate out of the linked heap, and out of the spare bank if the linked heap cannot.

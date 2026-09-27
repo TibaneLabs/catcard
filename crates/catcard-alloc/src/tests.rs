@@ -359,9 +359,19 @@ const MULTISIG_IMPORT: &[usize] = &[4096, 4096, 4096]; // settings doc, rendered
 const NOTES: &[usize] = &[4096, 6144]; // the settings blob, and the decoded text
 const NICKNAME: &[usize] = &[4096, 4096]; // the doc being edited, and its seal
 const NVRAM_PAGE: &[usize] = &[8192]; // one settings page, read-modify-written
-/// The compressed upload's inflate slab, which is held across a whole transfer and so
-/// can be live while any of the screens above is open.
-const UPLOAD: usize = 8192;
+/// The compressed upload's inflate slab and its decoder, which are held across a whole
+/// transfer and so can be live while any of the screens above is open.
+///
+/// Two blocks in the firmware -- the 8 KiB slab and the decoder's code tables, leased
+/// out of the USB task's static -- modelled here as one, which asks more of the heap
+/// (one contiguous extent) than the firmware does. Nothing else the USB task leases is
+/// live during an upload: a sealed request's buffers (about 1.5 KiB) need a message of
+/// their own, and the frames of one message cannot interleave with another's.
+const UPLOAD: usize = 8192 + UPLOAD_DECODER;
+
+/// `unpack::Unpack`, which is mostly the deflate decoder's tables for the block in hand.
+/// From `-Zprint-type-sizes` on the Q1 build.
+const UPLOAD_DECODER: usize = 1104;
 
 /// The heap the firmware gives this allocator.
 ///
