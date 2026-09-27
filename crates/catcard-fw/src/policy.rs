@@ -149,8 +149,7 @@ pub(crate) use imp::*;
 mod imp {
     use super::{Mode, mode, set, state};
     use catcard_callgate::Callgate;
-    use catcard_settings::json::Doc;
-    use catcard_settings::policy::{self as engine, Allow, Checker, Out, Policy, Read, Violation};
+    use catcard_settings::policy::{self as engine, Allow, Checker, Out, Policy, Violation};
     use catcard_settings::store::{self, SCRATCH};
     use catcard_ui::scroll::Line as Row;
     use catcard_wallet::psbtview::{self, timelock};
@@ -176,13 +175,18 @@ mod imp {
     #[inline(never)]
     pub(crate) fn load(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         let typed = state().unlock_typed;
-        let read = {
+        let Some(mut p) = blank() else {
+            crate::catlog!("policy: no memory to read it; off");
+            set(Mode::Off, Allow::default());
+            return;
+        };
+        let found = {
             let Some(mut held) = crate::heap::take(SCRATCH) else {
                 crate::catlog!("policy: no memory to read it; off");
                 set(Mode::Off, Allow::default());
                 return;
             };
-            match read_root(gate, login, ui.panel, held.bytes()) {
+            match read_root(gate, login, ui.panel, held.bytes(), &mut p) {
                 Ok(r) => r,
                 Err(why) => {
                     crate::catlog!("policy: not read ({}); off", why);
@@ -191,9 +195,9 @@ mod imp {
                 }
             }
         };
-        let (mode, allow) = match read {
-            Read::Absent => (Mode::Off, Allow::default()),
-            Read::Policy(p) if p.active => {
+        let (mode, allow) = match found {
+            Found::Absent => (Mode::Off, Allow::default()),
+            Found::Policy if p.active => {
                 let allow = Allow {
                     notes: p.allow_notes,
                     related_keys: p.related_keys,
@@ -208,8 +212,8 @@ mod imp {
                 )
             }
             // Not active: an unlock PIN typed against nothing is nothing.
-            Read::Policy(_) => (Mode::Off, Allow::default()),
-            Read::Damaged => (
+            Found::Policy => (Mode::Off, Allow::default()),
+            Found::Damaged => (
                 if typed {
                     Mode::Suspended
                 } else {
@@ -259,20 +263,55 @@ mod imp {
         }
     }
 
-    /// The root wallet's policy, read through `buf` (one [`SCRATCH`]).
+    /// What the root wallet's settings hold under the policy's key. The policy itself, when
+    /// there is one, has been written into the caller's block.
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum Found {
+        Absent,
+        Policy,
+        Damaged,
+    }
+
+    /// A policy in a heap block, at its defaults: where [`read_root`] puts what it reads.
+    ///
+    /// A policy is two and a half kilobytes, mostly whitelist. On the stack it sat in
+    /// every frame between the menu and the store -- the screen, the editor, the reader
+    /// -- and those frames nest; here each holds a pointer.
+    fn blank() -> Option<crate::heap::Owned<Policy>> {
+        Some(crate::heap::room()?.fill(Policy::default()))
+    }
+
+    /// The root wallet's policy, read through `buf` (one [`SCRATCH`]) into `out`.
+    ///
+    /// `out` is `blank`'s: for [`Found::Absent`] and [`Found::Damaged`] it is left at the
+    /// defaults.
     fn read_root(
         gate: &Callgate,
         login: &mut catcard_pin::Login,
         panel: &mut crate::display::Panel,
         buf: &mut [u8],
-    ) -> Result<Read, &'static str> {
+        out: &mut Policy,
+    ) -> Result<Found, &'static str> {
         let key = root_settings_key(gate, login, panel)?;
-        // SAFETY: the region is mapped and readable; nothing is written through this.
-        let mut files = unsafe { crate::settings::Files::mount_read_only() }
-            .map_err(|_| "no settings store")?;
-        let n = store::read(&mut files, &key, buf).unwrap_or(0);
-        let doc = Doc::parse(&buf[..n]).unwrap_or_default();
-        Ok(engine::read(&doc))
+        let n = crate::settings::read_slot(&key, buf)?;
+        decode(&buf[..n], out)
+    }
+
+    /// The policy out of a settings object, into `out`.
+    ///
+    /// A leaf of its own: parsing the policy object holds a doc of its own, gone when
+    /// this returns. The policy is parsed straight into `out`, never built on the stack.
+    #[inline(never)]
+    fn decode(json: &[u8], out: &mut Policy) -> Result<Found, &'static str> {
+        let doc = crate::settings::parse_doc(json).ok_or("no memory")?;
+        let Some(raw) = doc.get(engine::KEY) else {
+            return Ok(Found::Absent);
+        };
+        Ok(if engine::parse_object_into(raw, out) {
+            Found::Policy
+        } else {
+            Found::Damaged
+        })
     }
 
     /// Read, change, write: the policy as stored, `edit` applied, saved back. Every
@@ -287,20 +326,21 @@ mod imp {
         ui: &mut Ui<'_>,
         edit: impl FnOnce(&mut Policy) -> Result<(), &'static str>,
     ) -> bool {
-        let mut policy = {
+        let Some(mut policy) = blank() else {
+            say(ui, "no memory");
+            return false;
+        };
+        {
             let Some(mut held) = crate::heap::take(SCRATCH) else {
                 say(ui, "no memory");
                 return false;
             };
-            match read_root(gate, login, ui.panel, held.bytes()) {
-                Ok(Read::Policy(p)) => p,
-                Ok(Read::Absent | Read::Damaged) => Policy::default(),
-                Err(why) => {
-                    say(ui, why);
-                    return false;
-                }
+            // Absent or damaged: `policy` is still the defaults, which is what is edited.
+            if let Err(why) = read_root(gate, login, ui.panel, held.bytes(), &mut policy) {
+                say(ui, why);
+                return false;
             }
-        };
+        }
         if let Err(why) = edit(&mut policy) {
             say(ui, why);
             return false;
@@ -401,14 +441,18 @@ mod imp {
             }
             Mode::Hobbled | Mode::TestDrive => {}
         }
-        let policy = {
+        let Some(mut policy) = blank() else {
+            say(ui, "no memory");
+            return false;
+        };
+        {
             let Some(mut held) = crate::heap::take(SCRATCH) else {
                 say(ui, "no memory");
                 return false;
             };
-            match read_root(gate, login, ui.panel, held.bytes()) {
-                Ok(Read::Policy(p)) => p,
-                Ok(Read::Absent | Read::Damaged) => {
+            match read_root(gate, login, ui.panel, held.bytes(), &mut policy) {
+                Ok(Found::Policy) => {}
+                Ok(Found::Absent | Found::Damaged) => {
                     refuse(ui, Violation::Damaged, false);
                     return false;
                 }
@@ -417,11 +461,12 @@ mod imp {
                     return false;
                 }
             }
-        };
+        }
+        let policy = &*policy;
 
         let height = lock_height(psbt);
-        let mut checker = Checker::new(&policy);
-        check_outputs(ui, psbt, owner, summary, &policy, &mut checker);
+        let mut checker = Checker::new(policy);
+        check_outputs(ui, psbt, owner, summary, policy, &mut checker);
         let verdict = checker.finish(summary.sending, height);
         let persist = mode == Mode::Hobbled;
         match verdict {
@@ -577,6 +622,7 @@ mod imp {
 
     /// The SSSPConfigMenu, in stock's order.
     /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SP1 [C]
+    #[inline(never)]
     fn single_signer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         const H: &str = "Single-Signer";
         loop {
@@ -658,17 +704,21 @@ mod imp {
 
     /// The policy as stored, or the defaults; `None` when the store cannot be read, which
     /// the screen has said.
-    fn current(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) -> Option<Policy> {
-        let Some(mut held) = crate::heap::take(SCRATCH) else {
+    fn current(
+        gate: &Callgate,
+        login: &mut catcard_pin::Login,
+        ui: &mut Ui<'_>,
+    ) -> Option<crate::heap::Owned<Policy>> {
+        let (Some(mut policy), Some(mut held)) = (blank(), crate::heap::take(SCRATCH)) else {
             say(ui, "no memory");
             return None;
         };
-        match read_root(gate, login, ui.panel, held.bytes()) {
-            Ok(Read::Policy(p)) => Some(p),
-            Ok(Read::Absent) => Some(Policy::default()),
-            Ok(Read::Damaged) => {
+        // Absent or damaged leave `policy` at the defaults, which is what is shown.
+        match read_root(gate, login, ui.panel, held.bytes(), &mut policy) {
+            Ok(Found::Policy | Found::Absent) => Some(policy),
+            Ok(Found::Damaged) => {
                 say(ui, "policy unreadable: shown as defaults");
-                Some(Policy::default())
+                Some(policy)
             }
             Err(why) => {
                 say(ui, why);
@@ -871,7 +921,7 @@ mod imp {
         gate: &Callgate,
         login: &mut catcard_pin::Login,
         ui: &mut Ui<'_>,
-    ) -> Option<Policy> {
+    ) -> Option<crate::heap::Owned<Policy>> {
         match t {
             Target::Sssp => current(gate, login, ui),
             Target::Ccc => crate::ccc::current_policy(gate, login, ui),

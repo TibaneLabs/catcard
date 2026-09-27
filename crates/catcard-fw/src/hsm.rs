@@ -664,6 +664,7 @@ pub(crate) fn start_from_host(
 }
 
 /// Main menu → Start HSM Mode: the stored policy, explained and approved.
+#[inline(never)]
 pub(crate) fn start_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     if !available() {
         return say(ui, "needs the stored wallet", "no passphrase in force");
@@ -1603,6 +1604,7 @@ pub(crate) fn status(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 
 /// Settings → Spending Policy → HSM Mode: whether the HSM commands are answered over USB
 /// (stock's `hsmcmd`). Off by default. Source: menu-map-mk4-mk5-q1-v5.6.2.md §ADV [C]
+#[inline(never)]
 pub(crate) fn commands_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const H: &str = "HSM Mode";
     let now = crate::prefs::current();
@@ -1648,6 +1650,7 @@ pub(crate) fn commands_screen(gate: &Callgate, login: &mut catcard_pin::Login, u
 
 /// Settings → Spending Policy → User Management: the users, and deleting one.
 /// Source: menu-map-mk4-mk5-q1-v5.6.2.md §U, help-and-warning-screens.md "Users" [C]
+#[inline(never)]
 pub(crate) fn users_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const H: &str = "User Management";
     loop {

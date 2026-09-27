@@ -40,9 +40,8 @@
 use catcard_callgate::Callgate;
 use catcard_callgate::abi::LogoutMode;
 use catcard_settings::ccc::{self as engine, Ccc, Read, SECRET_LEN};
-use catcard_settings::json::Doc;
 use catcard_settings::policy::{Checker, MAX_VIOLATION, Policy};
-use catcard_settings::store::{self, SCRATCH};
+use catcard_settings::store::SCRATCH;
 use catcard_ui::scroll::Line as Row;
 use catcard_wallet::bip32::ExtendedPrivKey;
 use catcard_wallet::psbtview;
@@ -73,25 +72,43 @@ fn xfp_hex(fp: [u8; 4]) -> Xfp {
 // Reading and writing
 // ---------------------------------------------------------------------------------------
 
+/// Key C's record in a heap block, empty: where [`read_now`] puts what it reads.
+///
+/// The record is three kilobytes -- key C's policy is a whole whitelist -- and it used to
+/// be returned by value through every frame between the signing review and the store,
+/// each of which kept its own copy. Here each keeps a pointer.
+fn blank() -> Option<crate::heap::Owned<Read>> {
+    Some(crate::heap::room()?.fill(Read::Absent))
+}
+
 /// Key C and the last co-signing refusal, as the root wallet's settings hold them, read
-/// through `buf` (one [`SCRATCH`]). The caller has checked the root wallet is in force.
+/// through `buf` (one [`SCRATCH`]) into `out` and `viol`. The caller has checked the root
+/// wallet is in force.
 fn read_now(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut crate::display::Panel,
     buf: &mut [u8],
-) -> Result<(Read, Violation), &'static str> {
+    out: &mut Read,
+    viol: &mut Violation,
+) -> Result<(), &'static str> {
     let key = crate::settings::wallet_key(gate, login, panel, HEAD)?;
-    // SAFETY: the region is mapped and readable; nothing is written through this.
-    let mut files =
-        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
-    let n = store::read(&mut files, &key, buf).unwrap_or(0);
-    let doc = Doc::parse(&buf[..n]).unwrap_or_default();
-    let mut viol = Violation::new();
+    let n = crate::settings::read_slot(&key, buf)?;
+    decode(&buf[..n], out, viol)
+}
+
+/// Key C's record and the last refusal out of a settings object.
+///
+/// A leaf of its own: the parse and the record as it is built are gone when it returns.
+#[inline(never)]
+fn decode(json: &[u8], out: &mut Read, viol: &mut Violation) -> Result<(), &'static str> {
+    let doc = crate::settings::parse_doc(json).ok_or("not enough memory")?;
+    viol.clear();
     if let Some(t) = doc.get_str(engine::VIOLATION_KEY) {
         let _ = viol.push_str(t);
     }
-    Ok((engine::read(&doc), viol))
+    engine::read_into(&doc, out);
+    Ok(())
 }
 
 /// [`read_now`] with its own lease; `None` once the screen has said why not.
@@ -99,14 +116,16 @@ fn load(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-) -> Option<(Read, Violation)> {
-    let Some(mut held) = crate::heap::take(SCRATCH) else {
+) -> Option<(crate::heap::Owned<Read>, Violation)> {
+    let (Some(mut held), Some(mut read)) = (crate::heap::take(SCRATCH), blank()) else {
         say(ui, "not enough memory");
         return None;
     };
-    match read_now(gate, login, ui.panel, held.bytes()) {
-        Ok(r) => Some(r),
+    let mut viol = Violation::new();
+    match read_now(gate, login, ui.panel, held.bytes(), &mut read, &mut viol) {
+        Ok(()) => Some((read, viol)),
         Err(why) => {
+            drop((held, read));
             say(ui, why);
             None
         }
@@ -152,34 +171,72 @@ fn update(
     ui: &mut Ui<'_>,
     edit: impl FnOnce(&mut Ccc) -> Result<(), &'static str>,
 ) -> bool {
-    let mut c = match load(gate, login, ui) {
-        Some((Read::Ccc(c), _)) => c,
-        Some(_) => {
-            say(ui, "no key C to change");
-            return false;
-        }
-        None => return false,
+    let Some((mut read, _)) = load(gate, login, ui) else {
+        return false;
     };
-    if let Err(why) = edit(&mut c) {
+    let Read::Ccc(c) = &mut *read else {
+        drop(read);
+        say(ui, "no key C to change");
+        return false;
+    };
+    if let Err(why) = edit(c) {
+        drop(read);
         say(ui, why);
         return false;
     }
-    save(gate, login, ui, &c)
+    save(gate, login, ui, c)
 }
 
-/// The CCC policy, for the shared editor (`crate::policy`, SP-POL).
+/// The CCC policy, for the shared editor (`crate::policy`, SP-POL), in a heap block of
+/// its own.
 pub(crate) fn current_policy(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-) -> Option<Policy> {
-    match load(gate, login, ui)? {
-        (Read::Ccc(c), _) => Some(c.policy.clone()),
-        _ => {
-            say(ui, "no key C");
-            None
-        }
+) -> Option<crate::heap::Owned<Policy>> {
+    let (read, _) = load(gate, login, ui)?;
+    let Read::Ccc(c) = &*read else {
+        drop(read);
+        say(ui, "no key C");
+        return None;
+    };
+    let Some(mut out) = crate::heap::room().map(|r| r.fill(Policy::default())) else {
+        drop(read);
+        say(ui, "not enough memory");
+        return None;
+    };
+    copy_policy(&mut out, &c.policy);
+    Some(out)
+}
+
+/// `dst = src.clone()`, field by field: a derived `clone_from` builds the whole policy on
+/// the stack first and copies it over.
+fn copy_policy(dst: &mut Policy, src: &Policy) {
+    let Policy {
+        magnitude,
+        velocity,
+        last_height,
+        word_check,
+        allow_notes,
+        related_keys,
+        active,
+        whitelist,
+        violation,
+    } = src;
+    dst.magnitude = *magnitude;
+    dst.velocity = *velocity;
+    dst.last_height = *last_height;
+    dst.word_check = *word_check;
+    dst.allow_notes = *allow_notes;
+    dst.related_keys = *related_keys;
+    dst.active = *active;
+    dst.whitelist.clear();
+    for a in whitelist {
+        // The same capacity on both sides: never refused.
+        let _ = dst.whitelist.push(a.clone());
     }
+    dst.violation.clear();
+    let _ = dst.violation.push_str(violation);
 }
 
 /// Change the CCC policy, for the shared editor.
@@ -288,13 +345,15 @@ pub(crate) fn decide(
     }
     // Judged with key C's record in scope; only what signing needs leaves it.
     let (verdict, fingerprint, mut ent, len) = {
-        let Some(mut held) = crate::heap::take(SCRATCH) else {
+        let (Some(mut held), Some(mut read)) = (crate::heap::take(SCRATCH), blank()) else {
             crate::catlog!("ccc: no memory to read key C");
             return Decision::Alone;
         };
-        let c = match read_now(gate, login, ui.panel, held.bytes()) {
-            Ok((Read::Ccc(c), _)) => c,
-            Ok((Read::Damaged, _)) => {
+        let mut viol = Violation::new();
+        let found = read_now(gate, login, ui.panel, held.bytes(), &mut read, &mut viol);
+        let c = match (found, &*read) {
+            (Ok(()), Read::Ccc(c)) => c,
+            (Ok(()), Read::Damaged) => {
                 crate::catlog!("ccc: key C's record will not read; not co-signing");
                 menu::message(
                     ui.panel,
@@ -320,13 +379,13 @@ pub(crate) fn decide(
             let mut checker = Checker::new(&c.policy);
             crate::policy::check_outputs(ui, psbt, owner, summary, &c.policy, &mut checker);
             engine::finish(
-                &c,
+                c,
                 checker,
                 summary.sending,
                 crate::policy::lock_height(psbt),
             )
         });
-        let (ent, len) = entropy_of(&c);
+        let (ent, len) = entropy_of(c);
         (verdict, c.xfp, ent, len)
     };
 
@@ -392,6 +451,7 @@ fn without(ui: &mut Ui<'_>, why: &str) -> Decision {
 /// when there is. `pool` is the boot entropy pool, for generating key C.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §ADV "Co-Sign Multisig (CCC)"
 /// (`is_not_tmp`), §SP2 [C]
+#[inline(never)]
 pub(crate) fn screen(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -405,25 +465,28 @@ pub(crate) fn screen(
     let Some((read, _)) = load(gate, login, ui) else {
         return;
     };
-    match read {
-        Read::Absent => {
+    // The record goes back to the heap before anything below reads it again.
+    let passed = match &*read {
+        Read::Ccc(c) => Some(challenge(gate, login, ui, c)),
+        Read::Absent | Read::Damaged => None,
+    };
+    let absent = matches!(*read, Read::Absent);
+    drop(read);
+    match passed {
+        Some(true) => config(gate, login, ui),
+        Some(false) => {}
+        None if absent => {
             if enable(gate, login, ui, pool) {
                 config(gate, login, ui);
             }
         }
-        Read::Damaged => damaged(gate, login, ui),
-        Read::Ccc(c) => {
-            let ok = challenge(gate, login, ui, &c);
-            drop(c);
-            if ok {
-                config(gate, login, ui);
-            }
-        }
+        None => damaged(gate, login, ui),
     }
 }
 
 /// Stock's enable story, then key C from one of three places, then stored.
 /// Source: hw-reference/help-and-warning-screens.md §12 "Enable CCC", "Provide key C" [C]
+#[inline(never)]
 fn enable(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -625,6 +688,7 @@ fn challenge(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, c
 }
 
 /// Key C's record will not read: say so, and offer only to remove it.
+#[inline(never)]
 fn damaged(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let rows = [
         Row::title("Key C damaged"),
@@ -642,6 +706,7 @@ fn damaged(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 
 /// The CCCConfigMenu, in stock's order.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SP2 [C]
+#[inline(never)]
 fn config(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const IDENT: u32 = 1000;
     const VIOL: u32 = 1001;
@@ -653,8 +718,11 @@ fn config(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 
     loop {
         let (xfp, viol) = match load(gate, login, ui) {
-            Some((Read::Ccc(c), viol)) => (c.xfp, viol),
-            _ => return,
+            Some((read, viol)) => match &*read {
+                Read::Ccc(c) => (c.xfp, viol),
+                Read::Absent | Read::Damaged => return,
+            },
+            None => return,
         };
         let related = crate::msimport::involving(gate, login, ui, xfp);
         let mut ident: heapless::String<24> = heapless::String::new();
@@ -725,7 +793,10 @@ fn config(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 
 /// `[XFP] Co-Signing`: which key C this is, and its policy at a glance.
 fn ident_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    let Some((Read::Ccc(c), _)) = load(gate, login, ui) else {
+    let Some((read, _)) = load(gate, login, ui) else {
+        return;
+    };
+    let Read::Ccc(c) = &*read else {
         return;
     };
     let mut fp: heapless::String<32> = heapless::String::new();
@@ -773,14 +844,17 @@ fn export(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     let Some(account) = menu::ask_number(ui, H, None, "account", "empty is account 0") else {
         return;
     };
-    let Some((Read::Ccc(c), _)) = load(gate, login, ui) else {
+    let Some((read, _)) = load(gate, login, ui) else {
         return;
     };
-    let master = match master_of(&c, ui.panel, H) {
+    let Read::Ccc(c) = &*read else {
+        return;
+    };
+    let master = match master_of(c, ui.panel, H) {
         Ok(m) => m,
         Err(why) => return say(ui, why),
     };
-    drop(c);
+    drop(read);
     crate::msimport::export_xpubs_of(ui, H, master, account);
 }
 
@@ -806,14 +880,17 @@ fn build(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     if !matches!(menu::show_doc(ui, &rows, false, true), DocExit::Confirmed) {
         return;
     }
-    let Some((Read::Ccc(c), _)) = load(gate, login, ui) else {
+    let Some((read, _)) = load(gate, login, ui) else {
         return;
     };
-    let master = match master_of(&c, ui.panel, "Build 2-of-N") {
+    let Read::Ccc(c) = &*read else {
+        return;
+    };
+    let master = match master_of(c, ui.panel, "Build 2-of-N") {
         Ok(m) => m,
         Err(why) => return say(ui, why),
     };
-    drop(c);
+    drop(read);
     crate::msimport::create_cosign(gate, login, ui, &master);
 }
 
@@ -835,11 +912,14 @@ fn load_temporary(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
     if !matches!(menu::show_doc(ui, &rows, false, true), DocExit::Confirmed) {
         return false;
     }
-    let Some((Read::Ccc(c), _)) = load(gate, login, ui) else {
+    let Some((read, _)) = load(gate, login, ui) else {
         return false;
     };
-    let (ent, len) = entropy_of(&c);
-    drop(c);
+    let Read::Ccc(c) = &*read else {
+        return false;
+    };
+    let (ent, len) = entropy_of(c);
+    drop(read);
     let was = crate::key::in_force();
     // Source: hw-reference/ccc-key-storage.md §1.3 "origin='Key C from CCC'" [C]
     let loaded = crate::key::set_temporary(&ent[..len], "Key C from CCC");

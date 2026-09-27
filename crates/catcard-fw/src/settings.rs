@@ -285,6 +285,37 @@ pub(crate) fn root_key(
     Ok(key)
 }
 
+/// The settings object under `key`, read into `buf` (one `store::SCRATCH`): its length,
+/// zero when there is none or it will not open.
+///
+/// Its own frame, never inlined into a reader: the mount and the slot scan are kilobytes
+/// of stack, and the readers that call this go on to prompt, derive or sign.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+#[inline(never)]
+pub(crate) fn read_slot(
+    key: &catcard_settings::nvstore::Key,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
+    // SAFETY: the region is mapped and readable; nothing is written through this.
+    let mut files = unsafe { Files::mount_read_only() }.map_err(|_| "no settings store")?;
+    Ok(catcard_settings::store::read(&mut files, key, buf).unwrap_or(0))
+}
+
+/// A settings object parsed into a heap block rather than onto the caller's stack: the
+/// table is a kilobyte and a half, and the readers that want it are already deep.
+///
+/// `None` when the heap has no room, which the caller answers as it answers any other
+/// unreadable store. A malformed object reads as an empty one, as `unwrap_or_default`
+/// on [`Doc::parse`](catcard_settings::json::Doc::parse) did.
+#[cfg_attr(feature = "board-mk3", allow(dead_code))]
+pub(crate) fn parse_doc(
+    json: &[u8],
+) -> Option<crate::heap::Owned<catcard_settings::json::Doc<'_>>> {
+    let mut doc = crate::heap::room()?.fill(catcard_settings::json::Doc::new());
+    let _ = doc.parse_into(json);
+    Some(doc)
+}
+
 /// Save `(name, raw)` into the wallet in force's own settings file.
 ///
 /// `raw` is the value as JSON text. Every per-wallet write goes through here, so the file
