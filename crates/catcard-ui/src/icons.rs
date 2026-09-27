@@ -130,6 +130,23 @@ pub fn key_hint_width<F: crate::face::Face + ?Sized>(
     }
 }
 
+/// A question's two answers on one centred line, `<yes mark> yes   <no mark> no`, each key
+/// shown as the board marks it ([`KeyMark`]): the moulded tick and cross on the numpad
+/// boards, the printed words on the Q1. `y` is the top of the line.
+pub fn draw_answer_row<C: crate::canvas::Canvas + ?Sized, F: crate::face::Face + ?Sized>(
+    fb: &mut C,
+    font: &F,
+    y: usize,
+    yes: (KeyMark, &str),
+    no: (KeyMark, &str),
+) {
+    let gap = 3 * font.advance(b' ');
+    let total = key_hint_width(font, yes.0, yes.1) + gap + key_hint_width(font, no.0, no.1);
+    let x = fb.width().saturating_sub(total) / 2;
+    let x = draw_key_hint(fb, font, x, y, yes.0, yes.1) + gap;
+    draw_key_hint(fb, font, x, y, no.0, no.1);
+}
+
 /// Width of an icon plus the gap before the word after it, at 1x.
 pub const ICON_ADVANCE: usize = 7;
 

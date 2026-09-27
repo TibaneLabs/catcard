@@ -478,13 +478,8 @@ fn screen_field(
 fn two_key_hint<C: Canvas + ?Sized>(c: &mut C, y: usize, yes: &str, no: &str) {
     use catcard_ui::icons;
     let f = display::LAYOUT.body;
-    let gap = 3 * f.advance(b' ');
-    let total = icons::key_hint_width(f, display::CONFIRM, yes)
-        + gap
-        + icons::key_hint_width(f, display::CANCEL, no);
-    let (mut x, y) = (c.width().saturating_sub(total) / 2, at(c, y));
-    x = icons::draw_key_hint(c, f, x, y, display::CONFIRM, yes) + gap;
-    icons::draw_key_hint(c, f, x, y, display::CANCEL, no);
+    let y = at(c, y);
+    icons::draw_answer_row(c, f, y, (display::CONFIRM, yes), (display::CANCEL, no));
 }
 
 fn screen_words(panel: &mut display::Panel, w: [&str; 2]) {

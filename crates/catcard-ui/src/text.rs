@@ -114,6 +114,57 @@ pub fn width_of<F: Face + ?Sized>(font: &F, text: &str) -> usize {
     text.as_bytes().iter().map(|&c| font.advance(c)).sum()
 }
 
+/// `text` broken into at most `N` lines that each fit `width` pixels in `font`: at spaces
+/// where it can, and inside a word where one word is wider than the line (a long domain
+/// name has no spaces). `true` alongside when something did not fit in `N` lines.
+///
+/// Every line borrows from `text`, so this needs no buffer. Byte-wise: the faces here are
+/// ASCII, and callers pass text they have already reduced to printable ASCII.
+pub fn wrap<'a, F: Face + ?Sized, const N: usize>(
+    font: &F,
+    text: &'a str,
+    width: usize,
+) -> (heapless::Vec<&'a str, N>, bool) {
+    let mut out = heapless::Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        // Skip the spaces a break left at the start of a line.
+        while start < bytes.len() && bytes[start] == b' ' {
+            start += 1;
+        }
+        if start >= bytes.len() {
+            break;
+        }
+        // As far as fits; then back to the last space inside that, if there is one.
+        let mut end = start;
+        let mut used = 0;
+        let mut last_space = None;
+        while end < bytes.len() {
+            let adv = font.advance(bytes[end]);
+            if used + adv > width && end > start {
+                break;
+            }
+            if bytes[end] == b' ' {
+                last_space = Some(end);
+            }
+            used += adv;
+            end += 1;
+        }
+        if end < bytes.len()
+            && let Some(sp) = last_space
+            && sp > start
+        {
+            end = sp;
+        }
+        if out.push(&text[start..end]).is_err() {
+            return (out, true);
+        }
+        start = end;
+    }
+    (out, false)
+}
+
 /// The x coordinate that centres `text` across `panel_width` pixels, clamped to 0.
 pub fn centred<F: Face + ?Sized>(font: &F, text: &str, panel_width: usize) -> usize {
     panel_width.saturating_sub(width_of(font, text)) / 2
@@ -128,6 +179,29 @@ mod tests {
 
     fn ink<const W: usize, const P: usize, const N: usize>(fb: &Framebuffer<W, P, N>) -> u32 {
         fb.as_bytes().iter().map(|b| b.count_ones()).sum()
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_inside_long_words() {
+        let f = &peep10x20::FONT;
+        let per = f.advance(b'a');
+        // Two words that each fit, not together: one per line.
+        let (l, cut) = wrap::<_, 4>(f, "hello world", per * 7);
+        assert_eq!(&l[..], &["hello", "world"]);
+        assert!(!cut);
+        // A domain longer than a line is split inside it, nothing lost.
+        let site = "accounts.some-very-long-domain.example.com";
+        let (l, cut) = wrap::<_, 4>(f, site, per * 20);
+        assert!(!cut);
+        assert_eq!(l.concat(), site);
+        assert!(l.iter().all(|s| width_of(f, s) <= per * 20));
+        // More than N lines: the first N, and the flag.
+        let (l, cut) = wrap::<_, 2>(f, "a b c d e f", per);
+        assert_eq!(l.len(), 2);
+        assert!(cut);
+        // Nothing, and only spaces: no lines.
+        assert!(wrap::<_, 2>(f, "", 100).0.is_empty());
+        assert!(wrap::<_, 2>(f, "   ", 100).0.is_empty());
     }
 
     #[test]

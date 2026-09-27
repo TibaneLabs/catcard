@@ -10052,14 +10052,8 @@ pub(crate) fn ask(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
     display::draw(panel, |c| {
         catcard_ui::widgets::message(c, &display::LAYOUT, head, a, b);
         let f = display::LAYOUT.body;
-        let gap = 3 * f.advance(b' ');
-        let total = icons::key_hint_width(f, display::CONFIRM, "yes")
-            + gap
-            + icons::key_hint_width(f, display::CANCEL, "no");
-        let mut x = c.width().saturating_sub(total) / 2;
         let y = c.height().saturating_sub(f.line_height() + 2);
-        x = icons::draw_key_hint(c, f, x, y, display::CONFIRM, "yes") + gap;
-        icons::draw_key_hint(c, f, x, y, display::CANCEL, "no");
+        icons::draw_answer_row(c, f, y, (display::CONFIRM, "yes"), (display::CANCEL, "no"));
     });
 }
 

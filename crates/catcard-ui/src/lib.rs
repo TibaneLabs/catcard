@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
 
+pub mod approval;
 pub mod art;
 pub mod calc;
 pub mod canvas;

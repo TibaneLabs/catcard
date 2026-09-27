@@ -35,7 +35,6 @@ use catcard_fido::hid::{self, Ctaphid, Event};
 use catcard_fido::keys::Master;
 use catcard_fido::u2f;
 use catcard_ui::keypad::{Event as KeyEvent, KEYS, Key};
-use catcard_ui::scroll::Line;
 use catcard_wallet::KeyWork;
 use core::fmt::Write as _;
 
@@ -490,6 +489,37 @@ fn wallet_line() -> heapless::String<40> {
     s
 }
 
+/// One question to the person: the action, what it is about, the fine print, and what
+/// each answer does. [`UiEnv::ask`] lays it out with the board's own key marks -- the
+/// moulded tick and cross on the numpad boards, ENTER and CANCEL on the Q1 -- so no
+/// question names a key itself.
+struct Question<'a> {
+    head: &'a str,
+    /// The page's main line: the site. Empty when the computer did not say (U2F).
+    main: &'a str,
+    small: heapless::Vec<&'a str, 4>,
+    /// What the yes key does: "allow".
+    yes: &'a str,
+    /// What cancel does: "refuse".
+    no: &'a str,
+}
+
+impl<'a> Question<'a> {
+    fn new(head: &'a str, main: &'a str, small: &[&'a str], yes: &'a str, no: &'a str) -> Self {
+        let mut v = heapless::Vec::new();
+        for l in small {
+            let _ = v.push(*l);
+        }
+        Question {
+            head,
+            main,
+            small: v,
+            yes,
+            no,
+        }
+    }
+}
+
 impl UiEnv<'_, '_> {
     fn alive(&self) -> bool {
         self.ticket.is_none_or(usbtask::fido_alive)
@@ -502,10 +532,13 @@ impl UiEnv<'_, '_> {
         }
     }
 
-    /// Put `lines` on the screen and wait for `yes` or cancel, a bounded time. Confirm
-    /// before the end of a document that does not fit pages down instead of answering,
-    /// as every review here does.
-    fn ask_lines(&mut self, lines: &[Line<'_>], yes: Key) -> Presence {
+    /// Put `q` on the screen and wait for `yes` or cancel, a bounded time.
+    ///
+    /// Every board shows it as an approval page ([`catcard_ui::approval`]): with the
+    /// security-key picture on the Q1, without on the 64-row panels. It never scrolls,
+    /// so the answers are always on it. `yes` is the key that says yes, and the page
+    /// shows that key as the board marks it.
+    fn ask(&mut self, q: &Question<'_>, yes: Key) -> Presence {
         if crate::ckcc::hsm_active() {
             return Presence::Denied;
         }
@@ -515,59 +548,52 @@ impl UiEnv<'_, '_> {
         if self.ticket.is_some() {
             usbtask::fido_status(true);
         }
-        let mut view = catcard_ui::scroll::ScrollView::build(
-            lines,
-            display::SCREEN_W,
-            display::Strip::Off.body_h(),
-            display::FONTS,
-        );
+        let yes_mark = match yes {
+            Key::Digit(7) => catcard_ui::icons::KeyMark::Word("7"),
+            _ => display::CONFIRM,
+        };
+        let page = catcard_ui::approval::Approval {
+            head: q.head,
+            #[cfg(feature = "board-q1")]
+            art: Some(&catcard_ui::art::menuicons::SECURE_KEY),
+            #[cfg(not(feature = "board-q1"))]
+            art: None,
+            main: q.main,
+            small: &q.small,
+            yes: (yes_mark, q.yes),
+            no: (display::CANCEL, q.no),
+        };
+        display::draw_field_page(self.ui.panel, |c| {
+            catcard_ui::approval::draw(c, &display::FONTS, &page)
+        });
+        menu::wait_for_release(self.ui);
         let started = now_ms();
         let mut events = [KeyEvent::Pressed(Key::Cancel); KEYS];
         let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
         let answer = 'ask: loop {
-            display::draw(self.ui.panel, |c| catcard_ui::scroll::render(c, &view));
-            menu::wait_for_release(self.ui);
-            loop {
-                let _ = usbtask::pump();
-                if !self.alive() {
-                    break 'ask self.gone();
-                }
-                if now_ms().wrapping_sub(started) >= PRESENCE_MS {
-                    break 'ask Presence::Timeout;
-                }
-                crate::pinentry::pressed_keys(
-                    self.ui.pad,
-                    self.ui.matrix,
-                    self.ui.drbg,
-                    &mut events,
-                    &mut keys,
-                );
-                let mut moved = false;
-                for k in keys.iter() {
-                    match *k {
-                        Key::Cancel => break 'ask Presence::Denied,
-                        k if k == yes && view.at_end() => break 'ask Presence::Allowed,
-                        Key::Confirm | Key::Digit(8) => {
-                            let step = if *k == Key::Confirm {
-                                view.line_step()
-                            } else {
-                                1
-                            };
-                            view.scroll(true, step);
-                            moved = true;
-                        }
-                        Key::Digit(5) => {
-                            view.scroll(false, 1);
-                            moved = true;
-                        }
-                        _ => {}
-                    }
-                }
-                if moved {
-                    continue 'ask;
-                }
-                display::idle(self.ui.panel);
+            let _ = usbtask::pump();
+            if !self.alive() {
+                break self.gone();
             }
+            if now_ms().wrapping_sub(started) >= PRESENCE_MS {
+                break Presence::Timeout;
+            }
+            crate::pinentry::pressed_keys(
+                self.ui.pad,
+                self.ui.matrix,
+                self.ui.drbg,
+                &mut events,
+                &mut keys,
+            );
+            for k in keys.iter() {
+                if *k == Key::Cancel {
+                    break 'ask Presence::Denied;
+                }
+                if *k == yes {
+                    break 'ask Presence::Allowed;
+                }
+            }
+            display::idle(self.ui.panel);
         };
         if self.ticket.is_some() {
             usbtask::fido_status(false);
@@ -578,31 +604,26 @@ impl UiEnv<'_, '_> {
 
     /// The two-question reset. See [`Env::reset`].
     fn reset_asked(&mut self) -> u8 {
-        let keys_line = keys_hint("reset", "keep it");
         let wallet = wallet_line();
-        let q1 = [
-            Line::title("Reset security key?"),
-            Line::body("Every site this wallet registered with stops accepting it.").wrapped(),
-            Line::body("This cannot be undone.").wrapped(),
-            Line::body(wallet.as_str()).wrapped(),
-            Line::body(keys_line.as_str()).small().wrapped(),
-        ];
-        match self.ask_lines(&q1, Key::Confirm) {
+        let q1 = Question::new(
+            "Reset security key?",
+            "Every site this wallet registered with stops accepting it.",
+            &["This cannot be undone.", wallet.as_str()],
+            "reset",
+            "keep it",
+        );
+        match self.ask(&q1, Key::Confirm) {
             Presence::Allowed => {}
             p => return p.refusal(),
         }
-        let mut last: heapless::String<48> = heapless::String::new();
-        let _ = write!(
-            last,
-            "Press 7 to reset, {} to keep it.",
-            display::CANCEL_KEY
+        let q2 = Question::new(
+            "Are you sure?",
+            "Logins made with this wallet's security key are lost for good.",
+            &[],
+            "reset",
+            "keep it",
         );
-        let q2 = [
-            Line::title("Are you sure?"),
-            Line::body("Logins made with this wallet's security key are lost for good.").wrapped(),
-            Line::body(last.as_str()).small().wrapped(),
-        ];
-        match self.ask_lines(&q2, Key::Digit(7)) {
+        match self.ask(&q2, Key::Digit(7)) {
             Presence::Allowed => {}
             p => return p.refusal(),
         }
@@ -645,26 +666,12 @@ impl UiEnv<'_, '_> {
     }
 }
 
-/// "<ok> <yes>, <cancel> <no>", with this board's key names.
-fn keys_hint(yes: &str, no: &str) -> heapless::String<48> {
-    let mut s: heapless::String<48> = heapless::String::new();
-    let _ = write!(
-        s,
-        "{} to {}, {} to {}.",
-        display::CONFIRM_KEY,
-        yes,
-        display::CANCEL_KEY,
-        no
-    );
-    s
-}
-
 impl Env for UiEnv<'_, '_> {
     fn presence(&mut self, ask: Ask<'_>) -> Presence {
         let wallet = wallet_line();
         let mut site: heapless::String<67> = heapless::String::new();
         let mut account: heapless::String<67> = heapless::String::new();
-        let mut hint = keys_hint("allow", "refuse");
+        let mut yes = "allow";
         let (what, note): (&str, &str) = match ask {
             Ask::Register {
                 rp_id,
@@ -679,7 +686,7 @@ impl Env for UiEnv<'_, '_> {
                     let _ = write!(account, "as {name}");
                 }
                 if excluded {
-                    hint = keys_hint("tell the site", "refuse");
+                    yes = "tell the site";
                     (
                         "Already registered",
                         "This wallet already has a login here.",
@@ -693,7 +700,7 @@ impl Env for UiEnv<'_, '_> {
                 if known {
                     ("Sign in", "")
                 } else {
-                    hint = keys_hint("tell the site", "refuse");
+                    yes = "tell the site";
                     ("Sign in", "This wallet has no login here.")
                 }
             }
@@ -701,22 +708,22 @@ impl Env for UiEnv<'_, '_> {
             Ask::U2fSignIn { .. } => ("Sign in", "Older U2F request: the site is not named."),
             Ask::Select => ("Security key", "The computer asks which key to use."),
         };
-        // The action is the heading, the site is what the page is about -- centred, on
-        // its own line -- and the account, the wallet and the keys are the fine print.
-        let mut lines: heapless::Vec<Line<'_>, 8> = heapless::Vec::new();
-        let _ = lines.push(Line::title(what).centered());
-        if !site.is_empty() {
-            let _ = lines.push(Line::body(site.as_str()).centered().wrapped());
+        // The action is the heading, the site is what the question is about, and the
+        // account, the wallet and the keys are the fine print.
+        let mut small: heapless::Vec<&str, 4> = heapless::Vec::new();
+        for l in [account.as_str(), note, wallet.as_str()] {
+            if !l.is_empty() {
+                let _ = small.push(l);
+            }
         }
-        if !account.is_empty() {
-            let _ = lines.push(Line::body(account.as_str()).small().centered().wrapped());
-        }
-        if !note.is_empty() {
-            let _ = lines.push(Line::body(note).small().centered().wrapped());
-        }
-        let _ = lines.push(Line::body(wallet.as_str()).small().centered().wrapped());
-        let _ = lines.push(Line::body(hint.as_str()).small().centered().wrapped());
-        self.ask_lines(&lines, Key::Confirm)
+        let q = Question {
+            head: what,
+            main: site.as_str(),
+            small,
+            yes,
+            no: "refuse",
+        };
+        self.ask(&q, Key::Confirm)
     }
 
     fn with_master<R>(&mut self, f: impl FnOnce(&Master, &KeyWork) -> R) -> Option<R> {
