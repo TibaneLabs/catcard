@@ -72,8 +72,8 @@ keepalives) for up to 30 s, then is answered as timed out.
 | `authenticatorSelection` | one press |
 
 GetInfo says: versions `U2F_V2`, `FIDO_2_0`, `FIDO_2_1`; AAGUID
-`8810d8de-f38f-2bfd-9896-58b6892cf447` (16 random bytes generated once for this firmware,
-2026-09-27 -- it identifies the model, never a unit or a wallet); options `rk: false`,
+`54a5d3d6-f9d6-4b05-bdac-7cc541efc8f1` (a random version-4 UUID generated once for this
+firmware, 2026-09-27 -- it identifies the model, never a unit or a wallet); options `rk: false`,
 `up: true`, `plat: false`, and no `uv` or `clientPin` key (absent means unsupported);
 `maxMsgSize` 1024; `maxCredentialCountInList` 8; `maxCredentialIdLength` 64 (ours are 33);
 transports `usb`; algorithms `[{alg: -7, type: "public-key"}]`.

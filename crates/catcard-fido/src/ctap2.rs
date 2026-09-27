@@ -39,11 +39,11 @@ use crate::cbor::{self, Key, Reader, Writer};
 use crate::der;
 use crate::keys::{CRED_ID_LEN, Master, NONCE_LEN};
 
-/// This device's AAGUID: 16 random bytes generated once (2026-09-27, Python's
-/// `secrets.token_hex(16)`) and fixed, so a relying party sees the same model identifier
+/// This device's AAGUID, `54a5d3d6-f9d6-4b05-bdac-7cc541efc8f1`: a random (version 4)
+/// UUID generated once (2026-09-27, Python's `uuid.uuid4()`) and fixed, so a relying party sees the same model identifier
 /// from every CatCard. It identifies the firmware, never the unit or the wallet.
 pub const AAGUID: [u8; 16] = [
-    0x88, 0x10, 0xd8, 0xde, 0xf3, 0x8f, 0x2b, 0xfd, 0x98, 0x96, 0x58, 0xb6, 0x89, 0x2c, 0xf4, 0x47,
+    0x54, 0xa5, 0xd3, 0xd6, 0xf9, 0xd6, 0x4b, 0x05, 0xbd, 0xac, 0x7c, 0xc5, 0x41, 0xef, 0xc8, 0xf1,
 ];
 
 /// Command bytes. Source: §6 [C]
@@ -747,6 +747,15 @@ const _: () = assert!(CRED_ID_LEN as u64 <= MAX_CRED_ID_LEN);
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::AAGUID;
+
+    /// The AAGUID is a version-4 UUID: version nibble 4, variant bits `10`.
+    #[test]
+    fn the_aaguid_is_a_version_4_uuid() {
+        assert_eq!(AAGUID[6] >> 4, 4, "version nibble");
+        assert_eq!(AAGUID[8] >> 6, 0b10, "variant bits");
+    }
+
     use super::*;
     use purecrypto::ec::ecdsa::{EcdsaPublicKey, Signature};
 
@@ -975,7 +984,7 @@ pub(crate) mod tests {
         let expect = concat!(
             "a8",
             "0183665532465f5632684649444f5f325f30684649444f5f325f31",
-            "03508810d8def38f2bfd989658b6892cf447",
+            "035054a5d3d6f9d64b05bdac7cc541efc8f1",
             "04a362726bf4627570f564706c6174f4",
             "05190400",
             "0708",

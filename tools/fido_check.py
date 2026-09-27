@@ -60,7 +60,7 @@ REPO = os.path.normpath(os.path.join(HERE, ".."))
 
 CATCARD_VID = 0x39F2
 CATCARD_PID = 0x0401
-AAGUID = bytes.fromhex("8810d8def38f2bfd989658b6892cf447")
+AAGUID = bytes.fromhex("54a5d3d6f9d64b05bdac7cc541efc8f1")
 RP = {"id": "catcard.example", "name": "CatCard check"}
 USER = {"id": b"fido-check-user", "name": "check@catcard.example", "displayName": "Check"}
 ES256 = {"type": "public-key", "alg": -7}
