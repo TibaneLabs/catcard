@@ -23,6 +23,7 @@ pub mod helpstrip;
 pub mod icons;
 pub mod keypad;
 pub mod menu;
+pub mod nav;
 pub mod pager;
 pub mod pinentry;
 pub mod qwerty;
