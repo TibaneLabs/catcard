@@ -856,6 +856,25 @@ Password`, and Confirm on a BIP-85 password child's screen under Derive → `BIP
 `catcard keyboard ok` into whatever window the host has focused, after asking. Open a
 text editor first.
 
+### The FIDO2 security key: another interface, off by default
+
+With **Settings → Hardware On/Off → Security key** on (per wallet, `cat_fido`, only a
+literal `"1"`; CatCard USB mode only), the composite gains a **CTAPHID interface** after
+the others -- interface 1, or 2 beside the keyboard -- with its own interrupt endpoints
+`0x83`/`0x03` and the FIDO usage page `0xF1D0`, so every browser finds it without a
+driver. It answers CTAP2 and U2F (`catcard-fido`); the whole story is `docs/FIDO.md`.
+
+The same rules as the keyboard: interface 0 is byte for byte unchanged (`catcard-usb`
+tests both composites), the switch is read after the PIN and applied by
+re-enumeration, and the disk and ckcc identities never carry it. One more, because it has
+an OUT endpoint and a FIFO of its own: **with the switch off, no register of endpoint 3 is
+ever written** -- `configure_fifos` sizes its TX FIFO only while it is on, and the
+endpoint is opened, closed and serviced only once it has been presented this session --
+so boot enumerates with exactly the register writes it always has.
+
+On Linux the hidraw node needs the usual `uaccess` rule (below); browsers ship their own
+FIDO rules for `0xF1D0` devices on most distributions.
+
 ### Host-wallet commands: a computer asks, the person decides
 
 Two things a computer may ask the wallet for, **only inside the encrypted channel**:

@@ -255,4 +255,6 @@ taproot signing (BIP-86/341), optional multichain with ETH and SOL transaction s
 (`crate::evmtx`, `crate::solanatx`), an encrypted USB channel (`ncry`), whole-card SD
 encryption, a preemptive kernel, multi-source entropy with live analysis (Utils → Analyze
 RNG), a WIF store that generates keys, a Verify backup that parses rather than CRCs, the
-Keystone export, a PNG viewer, the GPU busy bar and hardware scrolling, games.
+Keystone export, a PNG viewer, the GPU busy bar and hardware scrolling, games, and a
+FIDO2 / U2F security key whose credentials derive from the wallet in force
+(`docs/FIDO.md`).
