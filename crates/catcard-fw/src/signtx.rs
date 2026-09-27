@@ -734,6 +734,54 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
     menu::wait_for_any_key(ui);
 }
 
+/// Add to `ours[..signable]` the inputs a stored WIF key can sign that no seed key already
+/// covers; the new count. Public work: matching a key to a script needs no secret.
+///
+/// Its own frame, so the per-key scratch is not carried through the review and the signing
+/// that follow it in [`review_and_sign`], the deepest frame the UI has.
+#[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
+fn add_wif_inputs(
+    psbt: &Psbt<'_>,
+    bare_keys: &[[u8; 33]],
+    ours: &mut [usize; MAX_INPUTS],
+    mut signable: usize,
+) -> usize {
+    for k in bare_keys {
+        let mut hits = [0usize; MAX_INPUTS];
+        let m = psbtview::wif_inputs(psbt, k, &mut hits);
+        for &i in &hits[..m] {
+            if signable < ours.len() && !ours[..signable].contains(&i) {
+                ours[signable] = i;
+                signable += 1;
+            }
+        }
+    }
+    signable
+}
+
+/// A version-2 PSBT's v0 view, built into `tail`: its length. Its own frame, for the same
+/// reason as [`add_wif_inputs`] -- the conversion's working state is gone before the
+/// review starts.
+#[inline(never)]
+fn v0_view(head: &[u8], tail: &mut [u8]) -> Result<usize, psbtv2::Error> {
+    V2::parse(head)
+        .and_then(|v2| v2.check_for_signing().map(|()| v2))
+        .and_then(|v2| v2.to_v0(tail))
+}
+
+/// The review's judgement of the transaction, masked: it derives a key per input. Its
+/// own frame -- rebuilding a multisig input's wallet is kilobytes of working state, and
+/// it is all gone before the screens and the signing that follow.
+#[inline(never)]
+fn summarise(
+    psbt: &Psbt<'_>,
+    owner: &psbtview::Owner<'_>,
+    policy: &Policy,
+) -> Result<psbtview::Summary, Refusal> {
+    crate::keywork::run(|kw| psbtview::summarise(psbt, owner, policy, kw))
+}
+
 /// Review a PSBT already sitting in `buf`, and sign it if the owner approves.
 ///
 /// Split from [`sign_psbt`] because how the bytes arrived stops mattering here: a
@@ -780,10 +828,7 @@ pub(crate) fn review_and_sign(
         }
         let (head, tail) = buf.split_at_mut(at);
         let head: &[u8] = &head[..len];
-        let view = V2::parse(head)
-            .and_then(|v2| v2.check_for_signing().map(|()| v2))
-            .and_then(|v2| v2.to_v0(tail));
-        match view {
+        match v0_view(head, tail) {
             Ok(n) => {
                 crate::catlog!("sign: PSBT v2, {} bytes as its v0 view", n);
                 original_v2 = Some(head);
@@ -948,7 +993,7 @@ pub(crate) fn review_and_sign(
         sighash,
         ..Policy::default()
     };
-    let summary = crate::keywork::run(|kw| psbtview::summarise(&psbt, &owner, &policy, kw));
+    let summary = summarise(&psbt, &owner, &policy);
     busy.tick(ui.panel);
     let summary = match summary {
         Ok(s) => s,
@@ -1031,15 +1076,8 @@ pub(crate) fn review_and_sign(
     // signs. Only those a seed key does not already cover: an input both can sign is signed
     // once, by the seed. Matching a key to a script is public work, so no masking here.
     #[cfg(not(feature = "board-mk3"))]
-    for k in &bare_keys {
-        let mut hits = [0usize; MAX_INPUTS];
-        let m = psbtview::wif_inputs(&psbt, k, &mut hits);
-        for &i in &hits[..m] {
-            if signable < ours.len() && !ours[..signable].contains(&i) {
-                ours[signable] = i;
-                signable += 1;
-            }
-        }
+    {
+        signable = add_wif_inputs(&psbt, &bare_keys, &mut ours, signable);
     }
 
     // Under the warn policy, an input asking for an unusual sighash type is named -- the
@@ -1747,7 +1785,15 @@ fn review_page(
     const MAX_RELATIVE_SHOWN: usize = 4;
     type Text = heapless::String<72>;
 
-    let mut texts: heapless::Vec<Text, LINES> = heapless::Vec::new();
+    // Three kilobytes of text: in a heap block, not on the stack under the signing flow.
+    // No room is a review that cannot be shown, and what is not shown is not signed.
+    let Some(mut held) =
+        crate::heap::room::<heapless::Vec<Text, LINES>>().map(|r| r.fill(heapless::Vec::new()))
+    else {
+        crate::catlog!("sign: no memory for the review page");
+        return false;
+    };
+    let texts = &mut *held;
     let mut small: heapless::Vec<bool, LINES> = heapless::Vec::new();
     let mut wrapped: heapless::Vec<bool, LINES> = heapless::Vec::new();
     let say = |texts: &mut heapless::Vec<Text, LINES>,
@@ -1767,7 +1813,7 @@ fn review_page(
         btc(summary.sending, &mut amount);
         let mut line = Text::new();
         let _ = write!(line, "Sending {amount}");
-        say(&mut texts, &mut small, &mut wrapped, line, false, false);
+        say(texts, &mut small, &mut wrapped, line, false, false);
 
         // The fee, or that there is none to state. A foreign input priced on the host's
         // word alone -- a coinjoin's -- leaves the fee unknown, and "unknown" is what
@@ -1784,22 +1830,22 @@ fn review_page(
                 summary.fee_percent,
                 if summary.fee_warn { " HIGH" } else { "" }
             );
-            say(&mut texts, &mut small, &mut wrapped, line, false, false);
+            say(texts, &mut small, &mut wrapped, line, false, false);
         } else {
             let _ = write!(line, "Fee UNKNOWN");
-            say(&mut texts, &mut small, &mut wrapped, line, false, false);
+            say(texts, &mut small, &mut wrapped, line, false, false);
             let mut line = Text::new();
             let _ = write!(
                 line,
                 "{} input(s) unverified: fee cap not checked",
                 summary.unpriced
             );
-            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, &mut wrapped, line, true, true);
         }
 
         let mut line = Text::new();
         let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
-        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, &mut wrapped, line, true, false);
 
         // A computer's request signs only the keys it listed. Inputs this wallet could
         // sign with another key are left alone, and the review says how many, so a
@@ -1807,7 +1853,7 @@ fn review_page(
         if unlisted > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{unlisted} more of ours NOT signed: not asked for");
-            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, &mut wrapped, line, true, true);
         }
 
         // A bare P2PK input has no address to show, so the review says what it is.
@@ -1815,7 +1861,7 @@ fn review_page(
         if summary.p2pk_inputs > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{} P2PK input(s)", summary.p2pk_inputs);
-            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, &mut wrapped, line, true, false);
         }
 
         // An opted-in transaction is signed under the unified message, which only the
@@ -1826,7 +1872,7 @@ fn review_page(
         if summary.opted_in {
             let mut line = Text::new();
             let _ = write!(line, "OPT-IN sighash: fork only");
-            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, &mut wrapped, line, true, false);
         }
 
         // An unusual sighash type was already warned about on its own screen; the row
@@ -1834,7 +1880,7 @@ fn review_page(
         if summary.odd_total > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{} input(s) NOT SIGHASH_ALL", summary.odd_total);
-            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, &mut wrapped, line, true, false);
         }
 
         // Timelocks, only when set. An absolute lock the network will not enforce --
@@ -1850,7 +1896,7 @@ fn review_page(
             if !lock.effective {
                 let _ = write!(line, " (INEFFECTIVE)");
             }
-            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, &mut wrapped, line, true, true);
         }
         let tx = psbt.unsigned_tx();
         let mut relatives = 0usize;
@@ -1866,7 +1912,7 @@ fn review_page(
                 }
                 timelock::Relative::Seconds(s) => write!(line, "input {input}: wait {s} s"),
             };
-            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, &mut wrapped, line, true, false);
         }
         if relatives > MAX_RELATIVE_SHOWN {
             let mut line = Text::new();
@@ -1875,7 +1921,7 @@ fn review_page(
                 "and {} more timelocked input(s)",
                 relatives - MAX_RELATIVE_SHOWN
             );
-            say(&mut texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, &mut wrapped, line, true, false);
         }
     }
 
@@ -1889,7 +1935,7 @@ fn review_page(
             start + shown.len(),
             summary.outputs
         );
-        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, &mut wrapped, line, true, false);
     }
 
     for d in shown {
@@ -1911,11 +1957,11 @@ fn review_page(
                 ""
             }
         );
-        say(&mut texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, &mut wrapped, line, true, false);
         if d.address_len > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{}", d.address());
-            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, &mut wrapped, line, true, true);
         }
         // Stock's suspicious-change warning: proven change, on a path no wallet would
         // choose. Said with the path, so the owner can see for themselves; not a
@@ -1925,7 +1971,7 @@ fn review_page(
             let _ = write!(line, "unusual change path ");
             let _ = d.write_path(&mut line);
             let _ = write!(line, ": {}", why.text());
-            say(&mut texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, &mut wrapped, line, true, true);
         }
     }
 
@@ -1945,7 +1991,7 @@ fn review_page(
             display::CANCEL_KEY
         );
     }
-    say(&mut texts, &mut small, &mut wrapped, line, true, false);
+    say(texts, &mut small, &mut wrapped, line, true, false);
 
     let mut doc: heapless::Vec<Line, { LINES + 1 }> = heapless::Vec::new();
     let _ = doc.push(Line::title("Sign transaction"));

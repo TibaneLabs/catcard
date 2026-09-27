@@ -345,6 +345,12 @@ fn fit_prefix(face: &dyn Face, s: &str, avail: usize) -> usize {
 /// menu label is still one selectable item and a wrapped secret still one marked block.
 pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a> {
     let mut out = Lines::new();
+    wrap_into(lines, width, fonts, &mut out);
+    out
+}
+
+/// [`wrap`], appending to `out`.
+fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut Lines<'a>) {
     let avail = text_width(width, fonts);
     for line in lines {
         let face = fonts.face(line.size);
@@ -388,7 +394,6 @@ pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a
             }
         }
     }
-    out
 }
 
 /// A document laid out for a viewport, scrolled by the pixel.
@@ -432,8 +437,25 @@ impl<'a> ScrollView<'a> {
     }
 
     /// Wrap `src` to `width` and build a view -- the usual entry point.
+    ///
+    /// The lines are wrapped straight into the view rather than built apart and moved in:
+    /// they are two kilobytes on the device, and every list screen builds one of these.
     pub fn build(src: &[Line<'a>], width: usize, height: usize, fonts: Fonts<'a>) -> Self {
-        Self::new(wrap(src, width, &fonts), fonts, width, height)
+        let mut v = Self {
+            lines: Lines::new(),
+            fonts,
+            width,
+            height,
+            off: 0,
+            cursor: None,
+            scramble: None,
+            marquee: 0,
+            wrap_cursor: false,
+        };
+        wrap_into(src, width, &v.fonts, &mut v.lines);
+        v.cursor = v.lines.iter().position(|l| l.menu_item.is_some());
+        v.ensure_cursor_visible();
+        v
     }
 
     /// Turn on the sensitive-line marker with a per-viewing seed.

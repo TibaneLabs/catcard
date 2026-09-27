@@ -243,9 +243,8 @@ pub(crate) fn load(
     panel: &mut crate::display::Panel,
     head: &str,
 ) {
-    use catcard_settings::json::Doc;
     use catcard_settings::prefs;
-    use catcard_settings::store::{self, SCRATCH};
+    use catcard_settings::store::SCRATCH;
 
     let key = match crate::settings::wallet_key(gate, login, panel, head) {
         Ok(k) => k,
@@ -262,17 +261,20 @@ pub(crate) fn load(
     };
     let buf = held.bytes();
     // Read-only: nothing here writes, and a writable mount is a risk this has no use for.
-    // SAFETY: the region is mapped and readable; nothing is written.
-    let mut files = match unsafe { crate::settings::Files::mount_read_only() } {
-        Ok(f) => f,
-        Err(e) => {
-            crate::catlog!("prefs: mount failed ({:?}), using the defaults", e);
+    let n = match crate::settings::read_slot(&key, buf) {
+        Ok(n) => n,
+        Err(why) => {
+            crate::catlog!("prefs: {}, using the defaults", why);
             apply(Prefs::default());
             return;
         }
     };
-    let n = store::read(&mut files, &key, buf).unwrap_or(0);
-    let doc = Doc::parse(&buf[..n]).unwrap_or_default();
+    // The parsed table in the heap: this runs at login, under the whole session's menu.
+    let Some(doc) = crate::settings::parse_doc(&buf[..n]) else {
+        crate::catlog!("prefs: no memory to read them, using the defaults");
+        apply(Prefs::default());
+        return;
+    };
     let next = Prefs {
         idle_minutes: prefs::idle_minutes(&doc),
         battery_idle_minutes: prefs::battery_idle_minutes(&doc),

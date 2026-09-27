@@ -215,6 +215,7 @@ impl Drop for Registered {
 /// The list is the caller's own [`Registered`] lease: hold it as long as it is needed and
 /// drop it when done, which is when its memory goes back to the heap. Foreground only, like
 /// everything else in this module.
+#[inline(never)]
 pub(crate) fn registered(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -353,6 +354,7 @@ pub(crate) fn registered_named(
 /// there, so nothing would call it.
 #[cfg(not(feature = "board-mk3"))]
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 pub(crate) fn trust_from_psbt(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
@@ -492,19 +494,13 @@ fn load<'a>(
     doc_buf: &'a mut [u8],
     out: &mut [Wallet<'a>],
 ) -> Result<usize, &'static str> {
-    use catcard_settings::json::Doc;
-    use catcard_settings::store;
-
     // The wallet in force has its own settings file, so a registration made under a
     // BIP-85 child or a temporary seed belongs to that wallet and not to the root's.
     let key = crate::settings::wallet_key(gate, login, panel, "Multisig")?;
     // Read-only, as every read should be: see `vault::read_doc`.
-    // SAFETY: the region is mapped and readable; nothing is written.
-    let mut files =
-        unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| "no settings store")?;
-
-    let n = store::read(&mut files, &key, doc_buf).unwrap_or(0);
-    let doc = Doc::parse(&doc_buf[..n]).unwrap_or_default();
+    let n = crate::settings::read_slot(&key, doc_buf)?;
+    // The table in the heap: this is read from inside the signing review.
+    let doc = crate::settings::parse_doc(&doc_buf[..n]).ok_or("not enough memory")?;
     Ok(wallets::list(&doc, out))
 }
 

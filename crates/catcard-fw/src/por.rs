@@ -84,6 +84,7 @@ fn refusal(r: por::Refusal, line: &mut heapless::String<40>) -> &str {
 /// spend; the two alternate through the signatures and the finalisation.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "board-mk3", allow(unused_variables))]
+#[inline(never)]
 pub(crate) fn review(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

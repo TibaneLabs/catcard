@@ -743,6 +743,7 @@ fn alive(ticket: u32) -> bool {
 
 // ---- addresses ------------------------------------------------------------------------
 
+#[inline(never)]
 fn addresses(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -822,6 +823,7 @@ fn addresses(
 const _: () = assert!(crate::chains::MAX <= menu::TOGGLE_MAX);
 
 #[cfg(feature = "multichain")]
+#[inline(never)]
 fn pick_chains(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -992,6 +994,7 @@ fn build_addresses(
 
 // ---- signing --------------------------------------------------------------------------
 
+#[inline(never)]
 fn sign(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
