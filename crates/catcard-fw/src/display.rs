@@ -1046,6 +1046,79 @@ pub const SCREEN_W: usize = 128;
 #[cfg(feature = "board-q1")]
 pub const SCREEN_W: usize = 320;
 
+/// Whether a frame carries the help strip along its foot ([`catcard_ui::helpstrip`]), and
+/// whether the strip has the focus.
+///
+/// Only the Q1 draws one: the mono boards' help is a menu row, and on them every value
+/// of this takes no rows and draws nothing, so the screens that pass one need no cfg.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Strip {
+    Off,
+    // Named on every board so the screens that pass one need no cfg; only the Q1 makes one.
+    #[cfg_attr(not(feature = "board-q1"), allow(dead_code))]
+    Shown,
+    Focused,
+}
+
+impl Strip {
+    /// Rows the strip takes from the foot of the content area.
+    pub fn rows(self) -> usize {
+        #[cfg(feature = "board-q1")]
+        if self != Strip::Off {
+            return catcard_ui::helpstrip::height(FONTS.small);
+        }
+        0
+    }
+
+    /// What is left above it for the screen to lay itself out in.
+    pub fn body_h(self) -> usize {
+        SCREEN_H - self.rows()
+    }
+}
+
+/// The strip's label on an ordinary frame: a mid grey of [`SLATE`](catcard_ui::st7789::SLATE),
+/// there to be found rather than read past.
+#[cfg(feature = "board-q1")]
+pub const STRIP_INK: catcard_ui::canvas::Level = 9;
+
+/// Draw a frame's content above the help strip, and the strip under it: the one place the
+/// strip is put on a screen. `f` is handed the band above, whatever `strip` is -- with no
+/// strip the band is the whole area -- so a screen draws the same way either way. `ink`
+/// is the label's level in the frame's palette ([`STRIP_INK`] on an ordinary one).
+#[cfg(feature = "board-q1")]
+pub fn strip_frame<C: catcard_ui::canvas::Canvas + ?Sized>(
+    c: &mut C,
+    strip: Strip,
+    ink: catcard_ui::canvas::Level,
+    f: impl FnOnce(&mut catcard_ui::canvas::Inset<'_, C>),
+) {
+    if strip == Strip::Off {
+        f(&mut catcard_ui::canvas::Inset::band(c, 0, 0));
+        return;
+    }
+    let look = catcard_ui::helpstrip::Strip {
+        focused: strip == Strip::Focused,
+        ink,
+    };
+    catcard_ui::helpstrip::frame(c, FONTS.small, look, f);
+}
+
+/// Draw a scrolling list or document, with its marks, and the help strip under it.
+///
+/// `view` has to have been built [`Strip::body_h`] tall for the same `strip`.
+pub fn draw_list(panel: &mut Panel, view: &catcard_ui::scroll::ScrollView<'_>, strip: Strip) {
+    // Full-colour marks go out inside the frame, not after it; see `draw_with_marks`.
+    #[cfg(feature = "board-q1")]
+    draw_with_marks(panel, view, |c| {
+        strip_frame(c, strip, STRIP_INK, |b| catcard_ui::scroll::render(b, view))
+    });
+    #[cfg(not(feature = "board-q1"))]
+    {
+        let _ = strip;
+        draw(panel, |c| catcard_ui::scroll::render(c, view));
+    }
+}
+
 /// Whether scrolling is animated.
 ///
 /// On for every board. The Q1 used to jump instead, on the reasoning that a scroll dirties

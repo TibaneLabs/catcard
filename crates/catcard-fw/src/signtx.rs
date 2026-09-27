@@ -752,6 +752,11 @@ pub(crate) fn review_and_sign(
     sink: &mut Sink<'_, '_>,
 ) {
     const HEAD: &str = "Sign";
+    // No help strip under a transaction being reviewed, whichever feature it was reached
+    // from: the help armed there explains that feature, not the transaction, and this is
+    // the deepest the UI's stack goes -- no room to open a document here as well.
+    #[cfg(feature = "board-q1")]
+    let _no_help = crate::help::arm(None);
 
     // A version-2 file (BIP-370) is worked on through its v0 view: the transaction its
     // fields describe, built once here, is what the review and the signer read, so a v2

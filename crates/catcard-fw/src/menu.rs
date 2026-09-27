@@ -414,8 +414,10 @@ const MAIN_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-q1"))]
     "Type Passwords",
     "Settings",
-    // Stock puts Help on the boards without a keyboard; ours is on every board.
+    // Stock puts Help on the boards without a keyboard, as a row. The Q1's help is the
+    // strip along the foot of every screen instead (`crate::help`), not a cell here.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1/B2 "Help" [C]
+    #[cfg(not(feature = "board-q1"))]
     "Help",
     // Stock gates Secure Logout on `not has_battery`: a device with a power button does
     // not need a menu entry to stop, and the USB-powered boards have no other way to end
@@ -423,8 +425,8 @@ const MAIN_ITEMS: &[&str] = &[
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 [C]
     #[cfg(not(feature = "board-q1"))]
     "Logout",
-    // The same row on the Q1, last: the six tiles above are one page of the grid, and
-    // this seventh, which is there only while the keyboard is on, turns to a second.
+    // The same row on the Q1, last: the tiles above fit one page of the grid, and this
+    // one, which is there only while the keyboard is on, may turn to a second.
     #[cfg(feature = "board-q1")]
     "Type Passwords",
 ];
@@ -442,6 +444,8 @@ const MAIN_ITEMS_BLANK: &[&str] = &[
     "Scan QR",
     "Utils",
     "Settings",
+    // A row on the mono boards; the strip at the foot on the Q1.
+    #[cfg(not(feature = "board-q1"))]
     "Help",
     #[cfg(not(feature = "board-q1"))]
     "Logout",
@@ -630,13 +634,19 @@ const SETTINGS_ITEMS: &[&str] = &[
     // person came to do.
     "About",
     "Debug",
+    // A row on the mono boards; the strip at the foot on the Q1.
+    #[cfg(not(feature = "board-q1"))]
     "Help",
 ];
 const SETTINGS_ITEMS_BLANK: &[&str] = &[
     // Login and its nickname are here on a blank device too: both belong to the device
     // rather than to a wallet, and the nickname is stored under the pre-login key, which
     // exists either way.
-    "Login", "About", "Debug", "Help",
+    "Login",
+    "About",
+    "Debug",
+    #[cfg(not(feature = "board-q1"))]
+    "Help",
 ];
 
 /// The settings menu for the device in front of you.
@@ -858,6 +868,8 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "NFC Tools",
     "Upgrade Firmware",
+    // A row on the mono boards; the strip at the foot on the Q1.
+    #[cfg(not(feature = "board-q1"))]
     "Help",
 ];
 #[cfg(not(feature = "games"))]
@@ -892,6 +904,8 @@ const UTILS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "NFC Tools",
     "Upgrade Firmware",
+    // A row on the mono boards; the strip at the foot on the Q1.
+    #[cfg(not(feature = "board-q1"))]
     "Help",
 ];
 
@@ -1528,6 +1542,28 @@ pub fn run(session: Session<'_>) -> ! {
                 continue;
             }
 
+            // The Q1's help strip, before anything else a menu does with a key: `TAB` moves
+            // the focus to it and back, ENTER on it or `?` anywhere opens this menu's help,
+            // and every other key reaches the menu exactly as it would with no strip there.
+            // The help returns to this menu with the cursor where it was.
+            #[cfg(feature = "board-q1")]
+            if let Some(topic) = help_of(screen, v.blank()) {
+                use catcard_ui::helpstrip::Act;
+                match catcard_ui::helpstrip::key(v.menu.focus, *key) {
+                    Act::Pass => {}
+                    Act::Focus(f) => {
+                        v.menu.focus = f;
+                        continue;
+                    }
+                    Act::Open => {
+                        v.menu.focus = false;
+                        crate::help::show(&mut ui, topic);
+                        continue;
+                    }
+                    Act::Swallow => continue,
+                }
+            }
+
             // Cursor movement first: it stays on this screen, so it never reaches the
             // transition table below. The menu owns what moving means.
             // On the grid, left and right move between columns. Everywhere else they
@@ -1556,6 +1592,10 @@ pub fn run(session: Session<'_>) -> ! {
             let words = next.row();
             if let Some(action) = action_for(next) {
                 {
+                    // A feature with lists of its own offers its help under them while it
+                    // runs (`DocScreen`); disarmed again when it returns.
+                    #[cfg(feature = "board-q1")]
+                    let _help = crate::help::arm(feature_help(next));
                     let mut act = Act {
                         gate,
                         login,
@@ -2536,11 +2576,34 @@ struct MenuScreen {
     /// Pixel scroll offset, kept across redraws so the highlight pushes the view at the
     /// edges rather than the view snapping to the cursor each frame.
     off: usize,
+    /// The Q1's help strip has the focus (`TAB`): drawn inverted, and ENTER opens the
+    /// help rather than the row under the cursor, which stays where it was.
+    focus: bool,
 }
+
+/// How a menu's help strip is drawn when it does not have the focus: shown on the Q1,
+/// where every menu has help (`menu_of`), and absent where help is a menu row.
+#[cfg(feature = "board-q1")]
+const MENU_STRIP: display::Strip = display::Strip::Shown;
+#[cfg(not(feature = "board-q1"))]
+const MENU_STRIP: display::Strip = display::Strip::Off;
 
 impl MenuScreen {
     const fn new() -> Self {
-        Self { cursor: 0, off: 0 }
+        Self {
+            cursor: 0,
+            off: 0,
+            focus: false,
+        }
+    }
+
+    /// The strip as this frame draws it.
+    fn strip(&self) -> display::Strip {
+        if self.focus {
+            display::Strip::Focused
+        } else {
+            MENU_STRIP
+        }
     }
 
     /// Start a new list at the top. Carrying a cursor between menus of different lengths
@@ -2553,17 +2616,14 @@ impl MenuScreen {
         let items = items_of(screen, no_seed).unwrap_or(&[]);
         #[cfg(feature = "board-q1")]
         if is_grid_items(items) {
-            return draw_grid(panel, items, self.cursor, self.off);
+            return draw_grid(panel, items, self.cursor, self.off, self.strip());
         }
         let (title, note) = menu_head(screen);
         let view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
         // Through the marks path, like every other screen that renders a document: a
         // list menu can carry a colour mark too, and one drawn plain would leave its
         // space empty.
-        #[cfg(feature = "board-q1")]
-        display::draw_with_marks(panel, &view, |c| catcard_ui::scroll::render(c, &view));
-        #[cfg(not(feature = "board-q1"))]
-        display::draw(panel, |c| catcard_ui::scroll::render(c, &view));
+        display::draw_list(panel, &view, self.strip());
     }
 
     /// Take a movement key (`0`, `5` or `8`) and animate where it lands.
@@ -2584,7 +2644,7 @@ impl MenuScreen {
             if moved == 0 {
                 // The cursor moved inside the window: nothing travels, the frame is
                 // redrawn in place.
-                draw_grid(ui.panel, items, self.cursor, self.off);
+                draw_grid(ui.panel, items, self.cursor, self.off, self.strip());
             } else {
                 // The window moved: the picture slides exactly as far -- one column for
                 // an arrow, a whole screen for `0` back to the start from deep in the
@@ -2595,7 +2655,16 @@ impl MenuScreen {
                 } else {
                     moved * grid_column_pitch()
                 };
-                slide_grid(ui.panel, items, self.cursor, self.off, self.off > was, dist);
+                let right = self.off > was;
+                slide_grid(
+                    ui.panel,
+                    items,
+                    self.cursor,
+                    self.off,
+                    right,
+                    dist,
+                    self.strip(),
+                );
             }
             return;
         }
@@ -2613,7 +2682,7 @@ impl MenuScreen {
         }
         let new_off = view.off();
         // Animate the move, then let the loop's redraw paint the settled frame.
-        glide_view(ui.panel, &mut view, old, new_off);
+        glide_view(ui.panel, &mut view, old, new_off, self.strip());
         self.off = new_off;
     }
 }
@@ -2687,8 +2756,6 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         // A BIP-85 password child, typed rather than shown: the BIP-85 art, which is
         // not on this page otherwise.
         "Type Passwords" => &art::DERIVE_BIP85_INDEX,
-        // On the main menu, the blank one and Utils alike.
-        "Help" => &art::HELP,
         // The Derive grid.
         "Back to root" => &art::RETURN_ROOT_KEY,
         "Passphrase" => &art::DERIVE_PASSPHRASE,
@@ -2734,7 +2801,12 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
 /// the screen with the least room for it. (The boards with no bar put the row in the
 /// menu instead -- see `main_items`.)
 #[cfg(feature = "board-q1")]
-fn grid_frame(c: &mut display::Surface<'_>, items: &[&str], cursor: usize, off: usize) {
+fn grid_frame<C: catcard_ui::canvas::Canvas + ?Sized>(
+    c: &mut C,
+    items: &[&str],
+    cursor: usize,
+    off: usize,
+) {
     use catcard_ui::grid::{CELLS, Cell, ROWS};
     let (col, row) = catcard_ui::grid::place(cursor);
     let mut cells: heapless::Vec<Cell<'_>, CELLS> = heapless::Vec::new();
@@ -2762,15 +2834,51 @@ fn grid_frame(c: &mut display::Surface<'_>, items: &[&str], cursor: usize, off: 
 ///
 /// The art's own palette, not the text ramp: this screen is pictures.
 #[cfg(feature = "board-q1")]
-fn draw_grid(panel: &mut display::Panel, items: &[&str], cursor: usize, off: usize) {
+fn draw_grid(
+    panel: &mut display::Panel,
+    items: &[&str],
+    cursor: usize,
+    off: usize,
+    strip: display::Strip,
+) {
     // Scrolled or not: a slide left the panel's start where it ended, and a redraw in
     // place goes out through that origin rather than putting it back.
     display::draw_scrolled(
         panel,
         &catcard_ui::art::menuicons::PALETTE,
         catcard_ui::grid::EDGE,
-        |c| grid_frame(c, items, cursor, off),
+        |c| grid_strip_frame(c, items, cursor, off, strip),
     );
+}
+
+/// The label ink of the help strip under a grid. The grid draws through the art's
+/// palette, which has no ramp to take a grey from; entry 4 is its slate blue-grey, the
+/// quietest thing in it that still reads on the background.
+#[cfg(feature = "board-q1")]
+const GRID_STRIP_INK: catcard_ui::canvas::Level = 4;
+
+/// A grid page with the help strip under it.
+#[cfg(feature = "board-q1")]
+fn grid_strip_frame(
+    c: &mut display::Surface<'_>,
+    items: &[&str],
+    cursor: usize,
+    off: usize,
+    strip: display::Strip,
+) {
+    display::strip_frame(c, strip, GRID_STRIP_INK, |band| {
+        grid_frame(band, items, cursor, off)
+    });
+}
+
+/// The rows of a grid that hold still while it slides: the page dots, when there are
+/// any, and the help strip under them. They are one run -- the dots end where the strip
+/// starts -- which is what the slide can hold still.
+#[cfg(feature = "board-q1")]
+fn grid_still_rows(len: usize, strip: display::Strip) -> Option<(usize, usize)> {
+    let body = strip.body_h();
+    let first = catcard_ui::grid::dots_rows(body, len).map_or(body, |(y, _)| y);
+    (first < display::SCREEN_H).then(|| (first, display::SCREEN_H - first))
 }
 
 /// Draw the page the cursor has moved to, sliding it in from the side it is on.
@@ -2786,17 +2894,19 @@ fn slide_grid(
     off: usize,
     right: bool,
     dist: usize,
+    strip: display::Strip,
 ) {
-    // The edge hints and the page dots belong to the screen, not the strip: the panel
-    // holds the edge columns still, and the dots' rows are repainted where they are.
+    // The edge hints, the page dots and the help strip belong to the screen, not the
+    // strip of columns: the panel holds the edge columns still, and the rows of the dots
+    // and the help are repainted where they are.
     display::slide_frame_by(
         panel,
         &catcard_ui::art::menuicons::PALETTE,
         right,
         dist,
         catcard_ui::grid::EDGE,
-        catcard_ui::grid::dots_rows(display::SCREEN_H, items.len()),
-        |c| grid_frame(c, items, cursor, off),
+        grid_still_rows(items.len(), strip),
+        |c| grid_strip_frame(c, items, cursor, off, strip),
     );
 }
 
@@ -2810,28 +2920,68 @@ fn grid_column_pitch() -> usize {
 
 /// The list on this screen, if it is a menu.
 fn items_of(screen: Screen, no_seed: bool) -> Option<&'static [&'static str]> {
-    match screen {
-        Screen::Main => Some(main_items(no_seed)),
-        Screen::Debug => Some(DEBUG_ITEMS),
-        Screen::Utils => Some(utils_items()),
-        Screen::BackupMenu => Some(BACKUP_ITEMS),
-        Screen::SignMenu => Some(SIGN_ITEMS),
-        Screen::NewSeedMenu => Some(NEW_SEED_ITEMS),
-        Screen::ImportMenu => Some(IMPORT_ITEMS),
-        Screen::Settings => Some(settings_items(no_seed)),
-        Screen::Login => Some(LOGIN_ITEMS),
-        Screen::Hardware => Some(HARDWARE_ITEMS),
+    menu_of(screen, no_seed).map(|(items, _)| items)
+}
+
+/// The help this screen's strip opens, if it is a menu. Every menu has one.
+#[cfg(feature = "board-q1")]
+fn help_of(screen: Screen, no_seed: bool) -> Option<crate::help::Topic> {
+    menu_of(screen, no_seed).map(|(_, help)| help)
+}
+
+/// Every menu: its rows, and the help its strip opens on the Q1.
+///
+/// **One table, so a menu cannot be added without its help.** The strip is on every menu
+/// the Q1 draws, and a menu listed here with nothing to open would be a strip that lies;
+/// a row in this table without a topic does not compile. On the mono boards the topic is
+/// `()` -- their help is a row -- so the pairing costs them nothing.
+fn menu_of(screen: Screen, no_seed: bool) -> Option<(&'static [&'static str], crate::help::Topic)> {
+    use crate::help as h;
+    Some(match screen {
+        Screen::Main if no_seed => (main_items(no_seed), h::MAIN_BLANK),
+        Screen::Main => (main_items(no_seed), h::MAIN),
+        Screen::Debug => (DEBUG_ITEMS, h::DEBUG),
+        Screen::Utils => (utils_items(), h::UTILS),
+        Screen::BackupMenu => (BACKUP_ITEMS, h::BACKUP),
+        Screen::SignMenu => (SIGN_ITEMS, h::SIGN),
+        Screen::NewSeedMenu => (NEW_SEED_ITEMS, h::NEW_SEED),
+        Screen::ImportMenu => (IMPORT_ITEMS, h::IMPORT),
+        Screen::Settings if no_seed => (settings_items(no_seed), h::SETTINGS_BLANK),
+        Screen::Settings => (settings_items(no_seed), h::SETTINGS),
+        Screen::Login => (LOGIN_ITEMS, h::LOGIN),
+        Screen::Hardware => (HARDWARE_ITEMS, h::HARDWARE),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTools => Some(NFC_TOOLS_ITEMS),
-        Screen::DangerZone => Some(DANGER_ITEMS),
-        Screen::SeedTools => Some(seed_tools_items()),
-        Screen::KeyMenu => Some(key_items()),
-        Screen::ExportMenu => Some(EXPORT_ITEMS),
-        Screen::XpubMenu => Some(XPUB_ITEMS),
+        Screen::NfcTools => (NFC_TOOLS_ITEMS, h::NFC_TOOLS),
+        Screen::DangerZone => (DANGER_ITEMS, h::DANGER),
+        Screen::SeedTools => (seed_tools_items(), h::SEED_TOOLS),
+        Screen::KeyMenu => (key_items(), h::DERIVE),
+        Screen::ExportMenu => (EXPORT_ITEMS, h::EXPORT),
+        Screen::XpubMenu => (XPUB_ITEMS, h::XPUB),
         #[cfg(feature = "games")]
-        Screen::Games => Some(GAMES_ITEMS),
-        _ => None,
-    }
+        Screen::Games => (GAMES_ITEMS, h::GAMES),
+        _ => return None,
+    })
+}
+
+/// The help a full-screen feature reached from a menu offers while it runs: the strip
+/// under its lists opens it (`DocScreen`). Q1 only, like the strip.
+///
+/// Not every feature is here -- a screen that is one question and its answer is its own
+/// help -- but every one that is a menu of its own is.
+#[cfg(feature = "board-q1")]
+fn feature_help(screen: Screen) -> Option<crate::help::Doc> {
+    use crate::help as h;
+    Some(match screen {
+        Screen::KeyTeleport => h::KEY_TELEPORT,
+        Screen::CardMenu => h::SD_CARD,
+        Screen::SpendingPolicy => h::SPENDING_POLICY,
+        Screen::TrickPins => h::TRICK_PINS,
+        Screen::KeyVault => h::KEY_VAULT,
+        Screen::WifStore => h::WIF_STORE,
+        Screen::Notes => h::NOTES,
+        Screen::Multisig => h::MULTISIG,
+        _ => return None,
+    })
 }
 
 /// Draw whichever screen we are on.
@@ -3122,7 +3272,13 @@ fn build_menu_view<'a>(
     for (i, item) in items.iter().enumerate() {
         let _ = lines.push(DLine::item(item, i as u32).wrapped());
     }
-    let mut view = ScrollView::build(&lines, display::SCREEN_W, display::SCREEN_H, display::FONTS);
+    // Above the help strip, where there is one: the rows under it are not the list's.
+    let mut view = ScrollView::build(
+        &lines,
+        display::SCREEN_W,
+        MENU_STRIP.body_h(),
+        display::FONTS,
+    );
     // Menu wrapping, from the owner's settings. Set here rather than inside the scroll
     // view's constructor because the preference is a property of this device, and
     // `catcard-ui` is a library that knows nothing about settings.
@@ -13031,11 +13187,14 @@ const MARQUEE_BEATS: u32 = 8;
 /// intermediate frames. The final frame at exactly `to` is left to the caller's next draw,
 /// so this only ever paints the in-between steps. On boards that don't animate it just
 /// leaves the view at `to`.
+///
+/// `strip` is the help strip under the view, which holds still while the view glides.
 fn glide_view(
     panel: &mut display::Panel,
     view: &mut catcard_ui::scroll::ScrollView<'_>,
     from: usize,
     to: usize,
+    strip: display::Strip,
 ) {
     if display::SMOOTH_SCROLL && from != to {
         let frames = display::GLIDE_FRAMES as isize;
@@ -13045,10 +13204,7 @@ fn glide_view(
             view.set_off(off);
             // With its marks: drawn plain, every glide frame would drop the logos and
             // the list would scroll with blank holes where they belong.
-            #[cfg(feature = "board-q1")]
-            display::draw_with_marks(panel, view, |c| catcard_ui::scroll::render(c, view));
-            #[cfg(not(feature = "board-q1"))]
-            display::draw(panel, |c| catcard_ui::scroll::render(c, view));
+            display::draw_list(panel, view, strip);
             let _ = usbtask::pump();
             catcard_hal::dwt::delay_cycles(display::GLIDE_PAUSE_CYCLES);
         }
@@ -13153,6 +13309,31 @@ struct DocScreen<'a> {
     is_menu: bool,
     /// Refuse Confirm until the last line has been on screen: the seed backup's gate.
     require_end: bool,
+    /// The Q1's help strip under a list, while a feature has help armed
+    /// (`crate::help::arm`): what it opens, whether it has the focus, and -- while the help
+    /// is on screen in this view's place -- where the list was, to put it back.
+    #[cfg(feature = "board-q1")]
+    help: DocHelp<'a>,
+}
+
+/// A [`DocScreen`]'s help strip, on the Q1.
+///
+/// The help opens **in place of the list**, in the same screen, rather than as a document
+/// on top of it: a list inside a feature is already deep in the UI task's stack, and a
+/// second view on top of the first is another few kilobytes there. So the help's view
+/// replaces the list's, and the list is built again from its lines when the help closes,
+/// at the row and scroll it was left at.
+#[cfg(feature = "board-q1")]
+struct DocHelp<'a> {
+    /// What the strip opens; `None` draws no strip.
+    doc: Option<crate::help::Doc>,
+    focus: bool,
+    /// The list's lines, to build it again from.
+    lines: &'a [catcard_ui::scroll::Line<'a>],
+    /// Whether the list wraps at its ends, to set again.
+    wrap: bool,
+    /// While the help is showing: the list's scroll and selected row.
+    saved: Option<(usize, Option<u32>)>,
 }
 
 /// What one key did to a [`DocScreen`].
@@ -13176,10 +13357,24 @@ impl<'a> DocScreen<'a> {
         require_end: bool,
         wrap: bool,
     ) -> Self {
+        // A list inside a feature that armed its help gets the strip, and lays itself out
+        // above it. Not a reading screen -- it has no rows to put the strip beside -- and
+        // not a secret one, whose view is not rebuilt as the help needs.
+        #[cfg(feature = "board-q1")]
+        let doc = crate::help::armed()
+            .filter(|_| !scramble && wrap && lines.iter().any(|l| l.menu_item.is_some()));
+        #[cfg(feature = "board-q1")]
+        let strip = if doc.is_some() {
+            display::Strip::Shown
+        } else {
+            display::Strip::Off
+        };
+        #[cfg(not(feature = "board-q1"))]
+        let strip = display::Strip::Off;
         let mut view = catcard_ui::scroll::ScrollView::build(
             lines,
             display::SCREEN_W,
-            display::SCREEN_H,
+            strip.body_h(),
             display::FONTS,
         );
         if scramble {
@@ -13191,22 +13386,97 @@ impl<'a> DocScreen<'a> {
         // A document with selectable rows is a menu, and wraps like one; a reading screen
         // has no cursor to bring round, so the setting cannot affect it. A caller that
         // refuses wrapping (`wrap` false) has action rows at the bottom; see `show_doc_nowrap`.
-        view.set_wrap(wrap && is_menu && crate::prefs::current().menu_wrap);
+        let wraps = wrap && is_menu && crate::prefs::current().menu_wrap;
+        view.set_wrap(wraps);
         Self {
             view,
             is_menu,
             require_end,
+            #[cfg(feature = "board-q1")]
+            help: DocHelp {
+                doc,
+                focus: false,
+                lines,
+                wrap: wraps,
+                saved: None,
+            },
         }
     }
 
-    fn draw(&self, ui: &mut Ui<'_>) {
-        // Full-colour marks go out inside the frame, not after it; see `draw_with_marks`.
+    /// The help strip as this frame draws it.
+    fn strip(&self) -> display::Strip {
         #[cfg(feature = "board-q1")]
-        display::draw_with_marks(ui.panel, &self.view, |c| {
-            catcard_ui::scroll::render(c, &self.view)
-        });
-        #[cfg(not(feature = "board-q1"))]
-        display::draw(ui.panel, |c| catcard_ui::scroll::render(c, &self.view));
+        if self.help.doc.is_some() && self.help.saved.is_none() {
+            return if self.help.focus {
+                display::Strip::Focused
+            } else {
+                display::Strip::Shown
+            };
+        }
+        display::Strip::Off
+    }
+
+    fn draw(&self, ui: &mut Ui<'_>) {
+        display::draw_list(ui.panel, &self.view, self.strip());
+    }
+
+    /// Put the help in the list's place: a reading screen, the whole height.
+    #[cfg(feature = "board-q1")]
+    fn open_help(&mut self, doc: crate::help::Doc) {
+        self.help.saved = Some((self.view.off(), self.view.selected()));
+        self.help.focus = false;
+        self.is_menu = false;
+        self.view = catcard_ui::scroll::ScrollView::build(
+            doc,
+            display::SCREEN_W,
+            display::Strip::Off.body_h(),
+            display::FONTS,
+        );
+    }
+
+    /// Put the list back where it was left.
+    #[cfg(feature = "board-q1")]
+    fn close_help(&mut self, (off, selected): (usize, Option<u32>)) {
+        self.help.saved = None;
+        self.is_menu = true;
+        self.view = catcard_ui::scroll::ScrollView::build(
+            self.help.lines,
+            display::SCREEN_W,
+            display::Strip::Shown.body_h(),
+            display::FONTS,
+        );
+        self.view.set_wrap(self.help.wrap);
+        self.view.set_off(off);
+        if let Some(id) = selected {
+            self.view.select(id);
+        }
+    }
+
+    /// The strip's keys, before the list's. `None` lets the key through to the list.
+    #[cfg(feature = "board-q1")]
+    fn help_key(&mut self, k: Key) -> Option<DocFlow> {
+        use catcard_ui::helpstrip::{Act, key};
+        let doc = self.help.doc?;
+        if let Some(saved) = self.help.saved {
+            // The help is showing: it scrolls like any reading screen, and ENTER or
+            // CANCEL closes it -- back to the list, not out of it.
+            return matches!(k, Key::Confirm | Key::Cancel).then(|| {
+                self.close_help(saved);
+                DocFlow::Redraw
+            });
+        }
+        match key(self.help.focus, k) {
+            Act::Pass => None,
+            Act::Focus(f) => {
+                self.help.focus = f;
+                Some(DocFlow::Redraw)
+            }
+            Act::Open => {
+                self.open_help(doc);
+                Some(DocFlow::Redraw)
+            }
+            Act::Swallow => Some(DocFlow::Ignored),
+        }
     }
 
     fn needs_marquee(&self) -> bool {
@@ -13222,11 +13492,16 @@ impl<'a> DocScreen<'a> {
         let old = self.view.off();
         f(&mut self.view);
         let new = self.view.off();
-        glide_view(ui.panel, &mut self.view, old, new);
+        let strip = self.strip();
+        glide_view(ui.panel, &mut self.view, old, new, strip);
     }
 
     /// Take one key.
     fn key(&mut self, ui: &mut Ui<'_>, k: Key) -> DocFlow {
+        #[cfg(feature = "board-q1")]
+        if let Some(flow) = self.help_key(k) {
+            return flow;
+        }
         match k {
             // The up/down arrows: move a menu cursor, or scroll a reading screen.
             Key::Digit(0) => {
