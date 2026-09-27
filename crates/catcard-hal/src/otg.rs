@@ -166,6 +166,39 @@ const EP2_TX_WORDS: u32 = 16;
 const EP3_TX_WORDS: u32 = 64;
 const _: () = assert!(RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS + EP3_TX_WORDS <= 320);
 
+/// Endpoint zero's packet size, as the device descriptor advertises it.
+const EP0_MPS: usize = 64;
+
+/// The most endpoint zero can send in one transfer: `XFRSIZ` is 7 bits and `PKTCNT` 2.
+/// Source: RM0432 §56.15.48 OTG_DIEPTSIZ0 [C]
+const EP0_REPLY_MAX: usize = 127;
+
+// The longest reply this device gives -- a configuration with the keyboard and the
+// security key -- fits one transfer, and in the endpoint-zero TX FIFO.
+const _: () = assert!(fido::CONFIGURATION_WITH_KBD.len() <= EP0_REPLY_MAX);
+const _: () = assert!(EP0_REPLY_MAX.div_ceil(EP0_MPS) <= 3);
+const _: () = assert!(fido::CONFIGURATION_WITH_KBD.len() <= EP0_TX_WORDS as usize * 4);
+
+/// `OTG_DIEPTSIZ0` for an endpoint-zero reply of `len` bytes: the packet count it takes
+/// (one for an empty reply) and the byte count. `None` past what one transfer carries.
+const fn ep0_in_size(len: usize) -> Option<u32> {
+    if len > EP0_REPLY_MAX {
+        return None;
+    }
+    let packets = if len == 0 { 1 } else { len.div_ceil(EP0_MPS) };
+    Some(((packets as u32) << 19) | len as u32)
+}
+
+// A reply that fits one packet is written exactly as it always was.
+const _: () = {
+    assert!(matches!(ep0_in_size(0), Some(v) if v == 1 << 19));
+    assert!(matches!(ep0_in_size(18), Some(v) if v == (1 << 19) | 18));
+    assert!(matches!(ep0_in_size(64), Some(v) if v == (1 << 19) | 64));
+    assert!(matches!(ep0_in_size(73), Some(v) if v == (2 << 19) | 73));
+    assert!(matches!(ep0_in_size(98), Some(v) if v == (2 << 19) | 98));
+    assert!(ep0_in_size(128).is_none());
+};
+
 /// Endpoint numbers, from the addresses the descriptors advertise.
 const EP_IN_NUM: u32 = (EP_IN & 0x0F) as u32;
 const EP_OUT_NUM: u32 = (EP_OUT & 0x0F) as u32;
@@ -874,8 +907,25 @@ impl Otg {
             flush_tx(0);
             match action {
                 Action::Data(data) => {
-                    let len = data.len();
-                    reg::write(DIEPTSIZ, (1 << 19) | len as u32);
+                    // As many packets as the reply takes, not always one. With one, a
+                    // reply longer than the 64-byte packet went out as its first 64
+                    // bytes and the core called the transfer done: the security key's
+                    // 73-byte configuration (98 with the keyboard, 66 for the keyboard
+                    // alone) reached the host cut short, and macOS configured none of
+                    // the device's interfaces. Every reply of 64 bytes or fewer -- all
+                    // of the default identity's -- writes the same value as before.
+                    // Source: RM0432 §56.15.48 OTG_DIEPTSIZ0 -- PKTCNT[1:0] bits 20:19,
+                    // XFRSIZ[6:0] bits 6:0 [C]
+                    let Some(tsiz) = ep0_in_size(data.len()) else {
+                        // Longer than one endpoint-0 transfer can carry. Nothing this
+                        // device describes is (`EP0_REPLY_MAX` below); refuse rather than
+                        // send a reply the host would read as a different one.
+                        reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
+                        reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
+                        arm_ep0_out();
+                        return;
+                    };
+                    reg::write(DIEPTSIZ, tsiz);
                     reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
                     write_fifo_bytes(0, data);
                     // The host's status stage is an OUT; arm for it.
