@@ -77,6 +77,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
 // ---------------------------------------------------------------------------
 
 /// Start (or resume) a receive: the `R` code and the receiver password.
+#[inline(never)]
 fn receive_start(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     if crate::policy::hobbled() {
         // Source: help-and-warning-screens.md §18 "hobbled mode restriction" [C]
@@ -240,6 +241,7 @@ pub(crate) fn received_text(
 }
 
 /// Open an `S` payload with the kept receiver key, then land what it holds.
+#[inline(never)]
 fn open_tx(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -286,6 +288,7 @@ fn open_tx(
 /// Open an `E` payload by trying every co-signer of every registered multisig wallet
 /// this device is in, then hand the PSBT to the signer.
 /// Source: key-teleport-protocol.md §1b `kt_search_rxkey` [C]
+#[inline(never)]
 fn open_psbt(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -583,6 +586,7 @@ fn send_start(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
 }
 
 /// The owner has scanned a receiver's `R`: its password, the warning, and the choice.
+#[inline(never)]
 fn send_to(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -838,6 +842,7 @@ fn put_stash(ui: &mut Ui<'_>, stash: &[u8; SECRET_LEN], out: &mut [u8]) -> Optio
 /// Stock's `Teleport Multisig PSBT`. The keys are the wallets' own, derived at
 /// `…/20250317/ri`, so no receiver code is scanned; the teleport password still is read
 /// out. Source: key-teleport-protocol.md §1b, §4c `E` [C]
+#[inline(never)]
 fn psbt_send(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const H: &str = "Teleport PSBT";
     /// Where the PSBT is read to: `ri` at 3..7, the dtype at 7, the PSBT from 8, which is
