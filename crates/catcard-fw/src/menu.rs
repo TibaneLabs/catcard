@@ -17,7 +17,8 @@
 //!
 //! Navigation follows the arrows **printed on the keypad**: `5` up, `7` left, `8` down,
 //! `9` right. So `5`/`8` move the cursor, `9` and `y` both select, and `7` and `x` both
-//! go back.
+//! go back -- to the screen this one was opened from, with the row that opened it still
+//! selected, however it was reached (the run loop's navigation stack, [`Nav`]).
 //!
 //! That is a fact about the hardware rather than a convention worth arguing over — the
 //! legend is on the keys, in front of whoever is holding the device, and a menu that
@@ -57,10 +58,13 @@ const LOG_COLS: usize = display::LOG_COLS;
 // a window to scroll, and a zero- or one-row window makes `top` meaningless.
 const _: () = assert!(MAX_LINES >= 2, "the panel must fit at least two menu rows");
 
-/// Where we are. Flat rather than a stack: the tree is two deep, and a stack would be
-/// state to get wrong for no gain.
+/// Where we are. The way here is the run loop's navigation stack ([`Nav`]): a screen
+/// does not know its parent, because several are reached from more than one place.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Screen {
+    /// Not a screen: [`step`]'s answer for "go back where you came from". The run loop
+    /// pops the navigation stack instead of landing here.
+    Back,
     Main,
     About,
     /// About's second page: the STM32 itself.
@@ -1138,6 +1142,8 @@ pub fn run(session: Session<'_>) -> ! {
         mut pool,
     } = session;
     let mut screen = Screen::Main;
+    // The way back from `screen`: every level above it, with the row each had selected.
+    let mut nav = Nav::new(Screen::Main);
     let mut showing_offer = false;
     // The USB pairing prompt on the screen, if one is: see `crate::pairing`.
     let mut showing_pair: Option<usbtask::PairPrompt> = None;
@@ -1219,6 +1225,10 @@ pub fn run(session: Session<'_>) -> ! {
                 display::wipe(ui.panel);
             }
             crate::hsm::run(gate, login, &mut ui);
+            // HSM mode replaced the menus rather than opening from one: it lands on the
+            // main menu, at the top, with nothing to go back to.
+            nav.clear();
+            v.reset_menu();
             screen = Screen::Main;
             showing_offer = false;
             redraw = true;
@@ -1533,8 +1543,7 @@ pub fn run(session: Session<'_>) -> ! {
                     _ => *key == Key::Cancel,
                 };
                 if leave {
-                    v.reset_menu();
-                    screen = Screen::Debug;
+                    go_back(&mut nav, &mut screen, &mut v);
                 }
                 continue;
             }
@@ -1588,6 +1597,9 @@ pub fn run(session: Session<'_>) -> ! {
             // way to see the whole set at once.
             let words = next.row();
             if let Some(action) = action_for(next) {
+                // An action does not touch the stack: the menu that opened it is still
+                // `screen`, cursor and all, which is exactly where it returns to.
+                let was_blank = v.blank();
                 {
                     // A feature with lists of its own offers its help under them while it
                     // runs (`DocScreen`); disarmed again when it returns.
@@ -1618,13 +1630,38 @@ pub fn run(session: Session<'_>) -> ! {
                         );
                     }
                 }
-                if let Some(back) = action.back {
+                if v.blank() != was_blank {
+                    // The flow made a wallet or destroyed one. Every menu the way back
+                    // leads through belonged to the device as it was -- New and Import on
+                    // a blank one, Settings' seed rows on a wallet -- so the person lands
+                    // on the new main menu, at the top, with nothing behind them.
+                    nav.clear();
                     v.reset_menu();
-                    screen = back;
+                    screen = Screen::Main;
+                } else if action.leaves {
+                    go_back(&mut nav, &mut screen, &mut v);
+                } else {
+                    // Back where it was opened, on the row that opened it -- clamped, since
+                    // a setting it changed can hide a row of the menu under it.
+                    v.menu = MenuScreen::at(screen, v.blank(), v.menu.cursor, v.menu.off);
                 }
                 break;
             }
+            // The colour chart painted the panel directly, behind the canvas and its row
+            // cache, so the next frame has to go out whole or the chart stays under it.
+            if screen == Screen::Colours && next != Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            if next == Screen::Back {
+                go_back(&mut nav, &mut screen, &mut v);
+                continue;
+            }
             if next != screen {
+                // Deeper: this screen, with its row, is the way back. A page of the same
+                // screen replaces it instead, so flipping pages never grows the stack.
+                if !same_place(screen, next) {
+                    nav.push(screen, v.menu.cursor);
+                }
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
                 v.reset_menu();
@@ -1641,14 +1678,44 @@ pub fn run(session: Session<'_>) -> ! {
                     v.rtc = RtcWatch::default();
                 }
             }
-            // The colour chart painted the panel directly, behind the canvas and its row
-            // cache, so the next frame has to go out whole or the chart stays under it.
-            if screen == Screen::Colours && next != Screen::Colours {
-                display::wipe(ui.panel);
-            }
             screen = next;
         }
     }
+}
+
+/// How many levels the way back remembers. The deepest walk in the tree today is Settings
+/// -> Danger zone -> Seed tools under the main menu, four levels; twice that is room for
+/// a tree that grows, and a walk deeper still loses its *oldest* levels, never a panic.
+const NAV_DEPTH: usize = 8;
+
+/// The way back: a screen and its selected row per level, [`catcard_ui::nav`]. Three
+/// bytes a level (a `Screen` is two -- the id and the row a payload-carrying variant
+/// holds -- and the cursor one), so a local of the run loop rather than a static.
+type Nav = catcard_ui::nav::NavStack<Screen, NAV_DEPTH>;
+
+/// Back where `screen` was opened from, on the row that was selected there. On a screen
+/// with nothing above it -- the main menu -- nothing happens.
+fn go_back(nav: &mut Nav, screen: &mut Screen, v: &mut View<'_>) {
+    let Some(place) = nav.pop() else {
+        return;
+    };
+    *screen = place.screen;
+    let len = items_of(place.screen, v.blank()).map_or(0, <[_]>::len);
+    v.menu = MenuScreen::at(place.screen, v.blank(), place.cursor(len), 0);
+}
+
+/// Whether moving from `from` to `to` is turning a page of one screen rather than
+/// opening another: the page replaces the one on screen instead of being pushed over it,
+/// so back from any page leaves the screen, and flipping never grows the stack.
+///
+/// About's pages are the only such pair: its splash and its chip page step to each other
+/// (`Cancel` on the chip page goes back a page). The Q1's grid turns its pages inside
+/// [`MenuScreen`] -- the cursor moves, the screen does not -- so it never reaches here.
+fn same_place(from: Screen, to: Screen) -> bool {
+    matches!(
+        (from, to),
+        (Screen::About, Screen::AboutChip) | (Screen::AboutChip, Screen::About)
+    )
 }
 
 /// What a full-screen action is handed.
@@ -1674,9 +1741,12 @@ struct Act<'a, 'u> {
 struct Action {
     /// Runs it.
     run: fn(&mut Act<'_, '_>),
-    /// Where the menu lands when it returns, cursor at the top. `None` goes back to the
-    /// menu it was opened from with the cursor left on the row that opened it.
-    back: Option<Screen>,
+    /// Where the menu lands when it returns. Every action goes back to the menu it was
+    /// opened from, cursor still on the row that opened it -- that menu is still the
+    /// run loop's screen, so an action is a push and a pop without touching the stack.
+    /// `true` pops once more: the action was the last page of a screen, and finishing it
+    /// leaves that screen too.
+    leaves: bool,
     /// Re-read the secret slot afterwards: this action can create or destroy a wallet,
     /// and that reorders the main menu.
     seed_may_change: bool,
@@ -1686,241 +1756,139 @@ struct Action {
 ///
 /// `None` means the screen is a menu or an info page, which the run loop draws and
 /// leaves on a key -- no routine to call.
+///
+/// **No row names where it goes back to.** The way out is the way in, which the run
+/// loop's navigation stack knows and a table cannot: Notes is opened from three places,
+/// and a fixed "back to Settings" here was how the main menu's Notes tile came to return
+/// to Settings. The one place an action does not return to its opener is a flow that
+/// made or destroyed the wallet -- the main menu it would return under is not the one
+/// the person left -- and the run loop decides that from the wallet, not from the row.
 fn action_for(screen: Screen) -> Option<Action> {
-    fn to(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
-        Action {
-            run,
-            back: Some(back),
-            seed_may_change: false,
-        }
-    }
     /// Back to whichever menu opened it, cursor still on the row it was on.
     fn returns(run: fn(&mut Act<'_, '_>)) -> Action {
         Action {
             run,
-            back: None,
+            leaves: false,
             seed_may_change: false,
         }
     }
-    /// For the three that can leave the device holding a different wallet than before.
-    fn reseeds(run: fn(&mut Act<'_, '_>), back: Screen) -> Action {
+    /// The last page of a screen: back to where that screen was opened from.
+    fn leaves(run: fn(&mut Act<'_, '_>)) -> Action {
         Action {
             run,
-            back: Some(back),
+            leaves: true,
+            seed_may_change: false,
+        }
+    }
+    /// For those that can leave the device holding a different wallet than before.
+    fn reseeds(run: fn(&mut Act<'_, '_>)) -> Action {
+        Action {
+            run,
+            leaves: false,
             seed_may_change: true,
         }
     }
 
     Some(match screen {
-        // Back to Utils, which is where it is now reached from: a screen's way out
-        // belongs to the way in.
-        Screen::SdInstall => to(|a| install_firmware(a.gate, a.login, a.ui), Screen::Utils),
-        Screen::WarmReset => to(|a| warm_reset(a.gate, a.login, a.ui), Screen::Debug),
+        Screen::SdInstall => returns(|a| install_firmware(a.gate, a.login, a.ui)),
+        Screen::WarmReset => returns(|a| warm_reset(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SpendingPolicy => to(
-            |a| crate::policy::screen(a.gate, a.login, a.ui, a.pool.as_deref_mut()),
-            Screen::Settings,
-        ),
+        Screen::SpendingPolicy => {
+            returns(|a| crate::policy::screen(a.gate, a.login, a.ui, a.pool.as_deref_mut()))
+        }
         #[cfg(not(feature = "board-mk3"))]
         Screen::ExitTestDrive => returns(|a| crate::policy::exit_test_drive(a.ui)),
         #[cfg(not(any(feature = "board-q1", feature = "board-mk3")))]
-        Screen::HsmStart => to(
-            |a| crate::hsm::start_screen(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
+        Screen::HsmStart => returns(|a| crate::hsm::start_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::HsmWipe => to(|a| crate::hsm::wipe_screen(a.ui), Screen::DangerZone),
+        Screen::HsmWipe => returns(|a| crate::hsm::wipe_screen(a.ui)),
         #[cfg(feature = "multichain")]
-        Screen::ChainSettings => to(|a| chain_settings(a.gate, a.login, a.ui), Screen::Settings),
+        Screen::ChainSettings => returns(|a| chain_settings(a.gate, a.login, a.ui)),
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::DumpState => to(
-            |a| crate::statedump::screen(a.gate, a.login, a.ui),
-            Screen::Debug,
-        ),
+        Screen::DumpState => returns(|a| crate::statedump::screen(a.gate, a.login, a.ui)),
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::RestoreSettings => to(
-            |a| crate::restore::screen(a.gate, a.login, a.ui),
-            Screen::Debug,
-        ),
+        Screen::RestoreSettings => returns(|a| crate::restore::screen(a.gate, a.login, a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::QrProbe => to(|a| crate::qrscan::probe(a.ui), Screen::Debug),
+        Screen::QrProbe => returns(|a| crate::qrscan::probe(a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::SweepTest => to(|a| sweep_test(a.gate, a.login, a.ui), Screen::Debug),
-        Screen::SaveLog => to(|a| save_log_to_card(a.ui), Screen::Debug),
-        Screen::Logs => to(
-            |a| {
-                page_through(a.ui, "Logs", &LogLines, false, &display::LAYOUT, false);
-            },
-            Screen::Debug,
-        ),
-        Screen::AnalyzeRng => to(|a| analyze_rng(a.gate, a.ui), Screen::Utils),
-        Screen::UsbDrive => to(|a| usb_drive(a.gate, a.login, a.ui), Screen::Utils),
+        Screen::SweepTest => returns(|a| sweep_test(a.gate, a.login, a.ui)),
+        Screen::SaveLog => returns(|a| save_log_to_card(a.ui)),
+        Screen::Logs => returns(|a| {
+            page_through(a.ui, "Logs", &LogLines, false, &display::LAYOUT, false);
+        }),
+        Screen::AnalyzeRng => returns(|a| analyze_rng(a.gate, a.ui)),
+        Screen::UsbDrive => returns(|a| usb_drive(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::PaperWallet => to(
-            |a| crate::paperwallet::create(a.ui, a.pool.take()),
-            Screen::Utils,
-        ),
-        Screen::ViewTrngWords => to(|a| view_trng_words(a.gate, a.ui), Screen::Debug),
+        Screen::PaperWallet => returns(|a| crate::paperwallet::create(a.ui, a.pool.take())),
+        Screen::ViewTrngWords => returns(|a| view_trng_words(a.gate, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTest => to(|a| crate::nfc::probe_screen(a.ui), Screen::Debug),
-        Screen::KbdTest => to(|a| crate::usbkbd::self_test(a.ui), Screen::Debug),
+        Screen::NfcTest => returns(|a| crate::nfc::probe_screen(a.ui)),
+        Screen::KbdTest => returns(|a| crate::usbkbd::self_test(a.ui)),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
-        Screen::ExportOne(_) => to(
-            |a| export_one(a.gate, a.login, a.ui, a.words),
-            Screen::ExportMenu,
-        ),
-        Screen::ExportKeyExpr => to(
-            |a| export_key_expression(a.gate, a.login, a.ui),
-            Screen::ExportMenu,
-        ),
-        Screen::KeyPick(_) => to(
-            |a| choose_key(a.gate, a.login, a.ui, a.words),
-            Screen::KeyMenu,
-        ),
-        Screen::DumpSummary => to(|a| dump_summary(a.gate, a.login, a.ui), Screen::ExportMenu),
+        Screen::ExportOne(_) => returns(|a| export_one(a.gate, a.login, a.ui, a.words)),
+        Screen::ExportKeyExpr => returns(|a| export_key_expression(a.gate, a.login, a.ui)),
+        Screen::KeyPick(_) => returns(|a| choose_key(a.gate, a.login, a.ui, a.words)),
+        Screen::DumpSummary => returns(|a| dump_summary(a.gate, a.login, a.ui)),
         #[cfg(feature = "multichain")]
-        Screen::Keystone => to(
-            |a| export_keystone(a.gate, a.login, a.ui),
-            Screen::ExportMenu,
-        ),
+        Screen::Keystone => returns(|a| export_keystone(a.gate, a.login, a.ui)),
         #[cfg(all(feature = "board-q1", feature = "multichain"))]
-        Screen::AccountUr => to(
-            |a| export_account_ur(a.gate, a.login, a.ui),
-            Screen::ExportMenu,
-        ),
-        Screen::AddressCsv => to(
-            |a| export_address_csv(a.gate, a.login, a.ui),
-            Screen::ExportMenu,
-        ),
-        Screen::Xpub(_) => to(
-            |a| export_xpub(a.gate, a.login, a.ui, a.words),
-            Screen::XpubMenu,
-        ),
-        Screen::GenericJson(_) => to(
-            |a| export_generic_json(a.gate, a.login, a.ui, a.words),
-            Screen::ExportMenu,
-        ),
-        Screen::BrowseSd => to(
-            |a| {
-                browse_files(a.ui);
-            },
-            Screen::Utils,
-        ),
-        Screen::Format => to(|a| format_media(a.ui), Screen::Utils),
-        Screen::DeletePsbts => to(|a| crate::filemgmt::delete_psbts(a.ui), Screen::Utils),
-        Screen::CardMenu => to(|a| card_menu(a.gate, a.login, a.ui), Screen::Utils),
-        Screen::BackupSave => to(
-            |a| crate::backup::save(a.gate, a.login, a.ui),
-            Screen::BackupMenu,
-        ),
+        Screen::AccountUr => returns(|a| export_account_ur(a.gate, a.login, a.ui)),
+        Screen::AddressCsv => returns(|a| export_address_csv(a.gate, a.login, a.ui)),
+        Screen::Xpub(_) => returns(|a| export_xpub(a.gate, a.login, a.ui, a.words)),
+        Screen::GenericJson(_) => returns(|a| export_generic_json(a.gate, a.login, a.ui, a.words)),
+        Screen::BrowseSd => returns(|a| {
+            browse_files(a.ui);
+        }),
+        Screen::Format => returns(|a| format_media(a.ui)),
+        Screen::DeletePsbts => returns(|a| crate::filemgmt::delete_psbts(a.ui)),
+        Screen::CardMenu => returns(|a| card_menu(a.gate, a.login, a.ui)),
+        Screen::BackupSave => returns(|a| crate::backup::save(a.gate, a.login, a.ui)),
         // A restore replaces the stored secret, so the session has to re-read it.
-        Screen::BackupRestore => reseeds(
-            |a| crate::backup::restore(a.gate, a.login, a.ui),
-            Screen::BackupMenu,
-        ),
+        Screen::BackupRestore => reseeds(|a| crate::backup::restore(a.gate, a.login, a.ui)),
         // Verify only reads the file and compares; nothing stored or in force changes.
-        Screen::BackupVerify => to(
-            |a| crate::backup::verify(a.gate, a.login, a.ui),
-            Screen::BackupMenu,
-        ),
+        Screen::BackupVerify => returns(|a| crate::backup::verify(a.gate, a.login, a.ui)),
         // Export reads the wallet out; it does not change the stored secret.
-        Screen::CloneExport => to(
-            |a| crate::backup::clone_export(a.gate, a.login, a.ui),
-            Screen::BackupMenu,
-        ),
+        Screen::CloneExport => returns(|a| crate::backup::clone_export(a.gate, a.login, a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::KeyTeleport => to(
-            |a| crate::teleport::screen(a.gate, a.login, a.ui),
-            Screen::BackupMenu,
-        ),
-        Screen::SignPsbt => to(
-            |a| crate::signtx::sign_psbt(a.gate, a.login, a.ui),
-            Screen::SignMenu,
-        ),
-        Screen::BatchSign => to(
-            |a| crate::signtx::batch_sign(a.gate, a.login, a.ui),
-            Screen::SignMenu,
-        ),
+        Screen::KeyTeleport => returns(|a| crate::teleport::screen(a.gate, a.login, a.ui)),
+        Screen::SignPsbt => returns(|a| crate::signtx::sign_psbt(a.gate, a.login, a.ui)),
+        Screen::BatchSign => returns(|a| crate::signtx::batch_sign(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SignNfc => to(
-            |a| crate::nfc::receive_screen(a.gate, a.login, a.ui),
-            Screen::SignMenu,
-        ),
+        Screen::SignNfc => returns(|a| crate::nfc::receive_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTool(_) => to(
-            |a| crate::nfc::tool(a.gate, a.login, a.ui, a.words),
-            Screen::NfcTools,
-        ),
+        Screen::NfcTool(_) => returns(|a| crate::nfc::tool(a.gate, a.login, a.ui, a.words)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcSharing => to(
-            |a| crate::nfc::sharing_screen(a.gate, a.login, a.ui),
-            Screen::Hardware,
-        ),
+        Screen::NfcSharing => returns(|a| crate::nfc::sharing_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::PushTx => to(
-            |a| crate::nfc::pushtx_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        Screen::SignMessage => to(
-            |a| crate::signmsg::screen(a.gate, a.login, a.ui),
-            Screen::SignMenu,
-        ),
-        Screen::SignTextFile => to(
-            |a| crate::signmsg::text_file(a.gate, a.login, a.ui),
-            Screen::SignMenu,
-        ),
+        Screen::PushTx => returns(|a| crate::nfc::pushtx_screen(a.gate, a.login, a.ui)),
+        Screen::SignMessage => returns(|a| crate::signmsg::screen(a.gate, a.login, a.ui)),
+        Screen::SignTextFile => returns(|a| crate::signmsg::text_file(a.gate, a.login, a.ui)),
         // No key, no login: checking a signature is arithmetic on public values.
-        Screen::VerifySig => to(|a| crate::verifysig::screen(a.ui), Screen::SignMenu),
-        Screen::Passphrase => to(
-            |a| crate::passphrase::screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        // The same screen, reached from `Derive` -- and going back there rather than
-        // to Settings. A screen's way out belongs to the way in, and this one has two.
-        Screen::KeyPassphrase => to(
-            |a| crate::passphrase::screen(a.gate, a.login, a.ui),
-            Screen::KeyMenu,
-        ),
-        Screen::XorSplit => to(
-            |a| crate::seedxor::split(a.gate, a.login, a.ui, a.pool.take()),
-            Screen::KeyMenu,
-        ),
+        Screen::VerifySig => returns(|a| crate::verifysig::screen(a.ui)),
+        Screen::Passphrase => returns(|a| crate::passphrase::screen(a.gate, a.login, a.ui)),
+        // The same screen, reached from `Derive`.
+        Screen::KeyPassphrase => returns(|a| crate::passphrase::screen(a.gate, a.login, a.ui)),
+        Screen::XorSplit => {
+            returns(|a| crate::seedxor::split(a.gate, a.login, a.ui, a.pool.take()))
+        }
         // A join can leave a seed stored where there was none, which is the one thing
         // that reorders the main menu.
-        Screen::XorJoin => reseeds(
-            |a| crate::seedxor::join(a.gate, a.login, a.ui),
-            Screen::KeyMenu,
-        ),
-        Screen::KeyVault => to(
-            |a| crate::vault::screen(a.gate, a.login, a.ui),
-            Screen::KeyMenu,
-        ),
-        Screen::SecureLogout => to(|a| secure_logout(a.gate, a.login, a.ui), Screen::Main),
+        Screen::XorJoin => reseeds(|a| crate::seedxor::join(a.gate, a.login, a.ui)),
+        Screen::KeyVault => returns(|a| crate::vault::screen(a.gate, a.login, a.ui)),
+        Screen::SecureLogout => returns(|a| secure_logout(a.gate, a.login, a.ui)),
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
-        Screen::ScrollTest => to(|a| scroll_test(a.ui), Screen::Debug),
-        Screen::SettingsStore => to(
-            |a| crate::settings::inspect(a.gate, a.login, a.ui),
-            Screen::Debug,
-        ),
-        Screen::Nickname => to(|a| crate::settings::edit_nickname(a.ui), Screen::Settings),
+        Screen::ScrollTest => returns(|a| scroll_test(a.ui)),
+        Screen::SettingsStore => returns(|a| crate::settings::inspect(a.gate, a.login, a.ui)),
+        Screen::Nickname => returns(|a| crate::settings::edit_nickname(a.ui)),
         #[cfg(feature = "board-q1")]
         // A main-menu tile on a blank device, and the QR key from any menu.
         Screen::ScanQr => returns(|a| crate::qrscan::screen(a.gate, a.login, a.ui)),
-        Screen::Multisig => to(
-            |a| crate::msimport::manage(a.gate, a.login, a.ui),
-            Screen::Utils,
-        ),
-        Screen::WifStore => to(
-            |a| crate::wifstore::manage(a.gate, a.login, a.ui),
-            Screen::Utils,
-        ),
+        Screen::Multisig => returns(|a| crate::msimport::manage(a.gate, a.login, a.ui)),
+        Screen::WifStore => returns(|a| crate::wifstore::manage(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::SettingsToSd => to(|a| crate::settings::backup_to_card(a.ui), Screen::Debug),
-        Screen::NickPreview => to(
-            |a| crate::settings::show_nickname_screen(a.ui),
-            Screen::Debug,
-        ),
+        Screen::SettingsToSd => returns(|a| crate::settings::backup_to_card(a.ui)),
+        Screen::NickPreview => returns(|a| crate::settings::show_nickname_screen(a.ui)),
         // Reached from the main-menu tile, from Settings and from the Debug drawer, so it
         // goes back to whichever opened it.
         #[cfg(feature = "board-q1")]
@@ -1929,156 +1897,83 @@ fn action_for(screen: Screen) -> Option<Action> {
             crate::derive::type_password_screen(a.gate, a.login, a.ui);
         }),
         #[cfg(feature = "games")]
-        Screen::BlockMine => to(|a| crate::game::block_mine(a.ui), Screen::Games),
+        Screen::BlockMine => returns(|a| crate::game::block_mine(a.ui)),
         #[cfg(feature = "games")]
-        Screen::BlockCutter => to(|a| crate::game::block_cutter(a.ui), Screen::Games),
+        Screen::BlockCutter => returns(|a| crate::game::block_cutter(a.ui)),
         #[cfg(all(feature = "games", feature = "board-q1"))]
-        Screen::FlappyCat => to(|a| crate::flappy::flappy_cat(a.ui), Screen::Games),
-        Screen::NewSeed(_) => reseeds(
-            |a| {
-                new_seed(
-                    a.gate,
-                    a.login,
-                    a.ui,
-                    a.pool.as_deref_mut(),
-                    a.words,
-                    SeedTarget::Store,
-                    None,
-                )
-            },
-            Screen::Main,
-        ),
+        Screen::FlappyCat => returns(|a| crate::flappy::flappy_cat(a.ui)),
+        Screen::NewSeed(_) => reseeds(|a| {
+            new_seed(
+                a.gate,
+                a.login,
+                a.ui,
+                a.pool.as_deref_mut(),
+                a.words,
+                SeedTarget::Store,
+                None,
+            )
+        }),
         // The same generator, but what comes out is a session key: nothing stored, so
         // the slot is as it was.
-        Screen::KeyNewSeed => to(
-            |a| new_temp_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut()),
-            Screen::KeyMenu,
-        ),
-        Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui), Screen::Main),
-        Screen::ImportXprv => reseeds(|a| import_xprv(a.gate, a.login, a.ui), Screen::Main),
-        // The join itself offers to store on a blank device; from here it goes back to
-        // the blank main menu, which is where the owner came from.
-        Screen::ImportXor => reseeds(
-            |a| crate::seedxor::join(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
+        Screen::KeyNewSeed => {
+            returns(|a| new_temp_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut()))
+        }
+        Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui)),
+        Screen::ImportXprv => reseeds(|a| import_xprv(a.gate, a.login, a.ui)),
+        // The join itself offers to store on a blank device; one stored lands on the
+        // wallet's main menu, one declined goes back to Import.
+        Screen::ImportXor => reseeds(|a| crate::seedxor::join(a.gate, a.login, a.ui)),
         // Both put a seed on a blank device, so the session re-reads the slot afterwards.
-        Screen::CloneImport => reseeds(
-            |a| crate::backup::clone_import(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
-        Screen::TapsignerImport => reseeds(
-            |a| crate::tapsigner::import(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
-        Screen::WipeSeed => reseeds(
-            |a| {
-                wipe_seed(a.gate, a.login, a.ui);
-            },
-            Screen::Main,
-        ),
-        Screen::ChangePin => to(|a| change_pin_screen(a.gate, a.login, a.ui), Screen::Login),
+        Screen::CloneImport => reseeds(|a| crate::backup::clone_import(a.gate, a.login, a.ui)),
+        Screen::TapsignerImport => reseeds(|a| crate::tapsigner::import(a.gate, a.login, a.ui)),
+        Screen::WipeSeed => reseeds(|a| {
+            wipe_seed(a.gate, a.login, a.ui);
+        }),
+        Screen::ChangePin => returns(|a| change_pin_screen(a.gate, a.login, a.ui)),
         // May leave a duress wallet in force (Activate Wallet).
         #[cfg(not(feature = "board-mk3"))]
-        Screen::TrickPins => reseeds(
-            |a| crate::trickpin::screen(a.gate, a.login, a.ui),
-            Screen::Login,
-        ),
-        Screen::TestLogin => to(|a| test_login_screen(a.gate, a.login, a.ui), Screen::Login),
-        Screen::ScrambleKeys => to(
-            |a| scramble_keys_screen(a.gate, a.login, a.ui),
-            Screen::Login,
-        ),
-        Screen::LoginCountdown => to(|a| login_countdown_screen(a.ui), Screen::Login),
+        Screen::TrickPins => reseeds(|a| crate::trickpin::screen(a.gate, a.login, a.ui)),
+        Screen::TestLogin => returns(|a| test_login_screen(a.gate, a.login, a.ui)),
+        Screen::ScrambleKeys => returns(|a| scramble_keys_screen(a.gate, a.login, a.ui)),
+        Screen::LoginCountdown => returns(|a| login_countdown_screen(a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::CalcLogin => to(|a| calc_login_screen(a.gate, a.login, a.ui), Screen::Login),
+        Screen::CalcLogin => returns(|a| calc_login_screen(a.gate, a.login, a.ui)),
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
-        Screen::KillKey => to(
-            |a| crate::guard::kill_key_screen(a.gate, a.login, a.ui),
-            Screen::Login,
-        ),
+        Screen::KillKey => returns(|a| crate::guard::kill_key_screen(a.gate, a.login, a.ui)),
         #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
-        Screen::Sd2fa => to(|a| crate::guard::sd2fa_screen(a.ui), Screen::Login),
-        Screen::IdleTimeout => to(
-            |a| idle_timeout_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        Screen::DisplayUnits => to(
-            |a| display_units_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        Screen::MaxFee => to(|a| max_fee_screen(a.gate, a.login, a.ui), Screen::Settings),
-        Screen::Slip132Export => to(
-            |a| slip132_export_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        Screen::SighashChecks => to(
-            |a| sighash_checks_screen(a.gate, a.login, a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::UsbPort => to(|a| crate::ckcc::usb_mode_screen(a.ui), Screen::Hardware),
+        Screen::Sd2fa => returns(|a| crate::guard::sd2fa_screen(a.ui)),
+        Screen::IdleTimeout => returns(|a| idle_timeout_screen(a.gate, a.login, a.ui)),
+        Screen::DisplayUnits => returns(|a| display_units_screen(a.gate, a.login, a.ui)),
+        Screen::MaxFee => returns(|a| max_fee_screen(a.gate, a.login, a.ui)),
+        Screen::Slip132Export => returns(|a| slip132_export_screen(a.gate, a.login, a.ui)),
+        Screen::SighashChecks => returns(|a| sighash_checks_screen(a.gate, a.login, a.ui)),
+        Screen::UsbPort => returns(|a| crate::ckcc::usb_mode_screen(a.ui)),
         #[cfg(not(feature = "board-mk3"))]
-        Screen::VirtualDisk => to(
-            |a| virtual_disk_screen(a.gate, a.login, a.ui),
-            Screen::Hardware,
-        ),
-        Screen::KeyboardEmu => to(
-            |a| keyboard_emu_screen(a.gate, a.login, a.ui),
-            Screen::Hardware,
-        ),
-        Screen::MenuWrap => to(
-            |a| menu_wrap_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
+        Screen::VirtualDisk => returns(|a| virtual_disk_screen(a.gate, a.login, a.ui)),
+        Screen::KeyboardEmu => returns(|a| keyboard_emu_screen(a.gate, a.login, a.ui)),
+        Screen::MenuWrap => returns(|a| menu_wrap_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-q1"))]
-        Screen::HomeXfp => to(|a| home_xfp_screen(a.gate, a.login, a.ui), Screen::Settings),
-        Screen::TestnetMode => to(
-            |a| testnet_mode_screen(a.gate, a.login, a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::B85Index => to(
-            |a| crate::derive::index_values_screen(a.gate, a.login, a.ui),
-            Screen::DangerZone,
-        ),
+        Screen::HomeXfp => returns(|a| home_xfp_screen(a.gate, a.login, a.ui)),
+        Screen::TestnetMode => returns(|a| testnet_mode_screen(a.gate, a.login, a.ui)),
+        Screen::B85Index => returns(|a| crate::derive::index_values_screen(a.gate, a.login, a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::Brightness => to(
-            |a| brightness_screen(a.gate, a.login, a.ui),
-            Screen::Settings,
-        ),
-        Screen::ViewWords => to(|a| view_words(a.gate, a.login, a.ui), Screen::SeedTools),
+        Screen::Brightness => returns(|a| brightness_screen(a.gate, a.login, a.ui)),
+        Screen::ViewWords => returns(|a| view_words(a.gate, a.login, a.ui)),
         #[cfg(feature = "board-q1")]
-        Screen::SeedQrShow => to(
-            |a| crate::seedqr::export(a.gate, a.login, a.ui),
-            Screen::SeedTools,
-        ),
-        Screen::LockDown => to(|a| lock_down(a.gate, a.login, a.ui), Screen::SeedTools),
-        Screen::Identity => to(
-            |a| crate::identity::view_identity(a.gate, a.login, a.ui),
-            Screen::Main,
-        ),
-        Screen::HelpMain => to(|a| crate::help::main(a.ui), Screen::Main),
-        Screen::HelpSettings => to(|a| crate::help::settings(a.ui), Screen::Settings),
-        Screen::HelpUtils => to(|a| crate::help::utils(a.ui), Screen::Utils),
-        Screen::BlessFirmware => to(
-            |a| crate::identity::bless_firmware(a.gate, a.login, a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::SetHighWater => to(
-            |a| crate::identity::set_high_water(a.gate, a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::DfuUpgrade => to(
-            |a| crate::identity::dfu_upgrade(a.gate, a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::SettingsSpace => to(
-            |a| crate::identity::settings_space(a.ui),
-            Screen::DangerZone,
-        ),
-        Screen::FactoryReset => to(
-            |a| crate::factoryreset::run(a.gate, a.login, a.ui),
-            Screen::Debug,
-        ),
+        Screen::SeedQrShow => returns(|a| crate::seedqr::export(a.gate, a.login, a.ui)),
+        Screen::LockDown => returns(|a| lock_down(a.gate, a.login, a.ui)),
+        // About's third page: finishing it leaves About, back to where About was opened.
+        Screen::Identity => leaves(|a| crate::identity::view_identity(a.gate, a.login, a.ui)),
+        Screen::HelpMain => returns(|a| crate::help::main(a.ui)),
+        Screen::HelpSettings => returns(|a| crate::help::settings(a.ui)),
+        Screen::HelpUtils => returns(|a| crate::help::utils(a.ui)),
+        Screen::BlessFirmware => {
+            returns(|a| crate::identity::bless_firmware(a.gate, a.login, a.ui))
+        }
+        Screen::SetHighWater => returns(|a| crate::identity::set_high_water(a.gate, a.ui)),
+        Screen::DfuUpgrade => returns(|a| crate::identity::dfu_upgrade(a.gate, a.ui)),
+        Screen::SettingsSpace => returns(|a| crate::identity::settings_space(a.ui)),
+        Screen::FactoryReset => returns(|a| crate::factoryreset::run(a.gate, a.login, a.ui)),
         _ => return None,
     })
 }
@@ -2173,6 +2068,13 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
     if key == Key::Qr && items_of(screen, no_seed).is_some() {
         return Screen::ScanQr;
     }
+    // Back is the same on every screen, so no screen says it: the run loop's navigation
+    // stack knows where this one was opened from, and a per-screen parent could only
+    // ever be right about one of the ways in. The About pages step back a page at a time
+    // instead, below. On the main menu, with nowhere to go back to, it does nothing.
+    if key == Key::Cancel && screen != Screen::AboutChip {
+        return Screen::Back;
+    }
     match screen {
         // Dispatched by name rather than by cursor index, because this list reorders:
         // a device with no seed puts "New wallet" first. An index table silently points
@@ -2212,7 +2114,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::NewSeedMenu => match (key, NEW_SEED_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("24 words")) => Screen::NewSeed(24),
             (Key::Confirm, Some("12 words")) => Screen::NewSeed(12),
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::NewSeedMenu,
         },
         // By name, like the menus above it: the list is short and reorder-safe.
@@ -2222,7 +2123,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("TAPSIGNER")) => Screen::TapsignerImport,
             (Key::Confirm, Some("XPRV")) => Screen::ImportXprv,
             (Key::Confirm, Some("Seed XOR")) => Screen::ImportXor,
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::ImportMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
@@ -2251,7 +2151,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::Settings,
         },
         Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
@@ -2261,7 +2160,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Keyboard EMU")) => Screen::KeyboardEmu,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Sharing")) => Screen::NfcSharing,
-            (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Hardware,
         },
         // By name, as the other lists: `Sign PSBT` and `Show Address` are screens that
@@ -2271,7 +2169,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Sign PSBT")) => Screen::SignNfc,
             (Key::Confirm, Some("Show Address")) => Screen::AddressExplorer,
             (Key::Confirm, Some(_)) => Screen::NfcTool(cursor as u8),
-            (Key::Cancel, _) => Screen::Utils,
             _ => Screen::NfcTools,
         },
         Screen::DangerZone => match (key, DANGER_ITEMS.get(cursor).copied()) {
@@ -2285,7 +2182,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("DFU Upgrade")) => Screen::DfuUpgrade,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Wipe HSM Policy")) => Screen::HsmWipe,
-            (Key::Cancel, _) => Screen::Settings,
             _ => Screen::DangerZone,
         },
         Screen::SeedTools => match (key, seed_tools_items().get(cursor).copied()) {
@@ -2294,7 +2190,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("SeedQR")) => Screen::SeedQrShow,
             (Key::Confirm, Some("Destroy seed")) => Screen::WipeSeed,
             (Key::Confirm, Some("Lock down seed")) => Screen::LockDown,
-            (Key::Cancel, _) => Screen::DangerZone,
             _ => Screen::SeedTools,
         },
         // The export drawer. Its rows were briefly handled inside `Utils`, where none of
@@ -2307,7 +2202,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("New words")) => Screen::KeyNewSeed,
             (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::KeyMenu,
         },
         Screen::SignMenu => match (key, SIGN_ITEMS.get(cursor).copied()) {
@@ -2320,7 +2214,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Message")) => Screen::SignMessage,
             (Key::Confirm, Some("Text file")) => Screen::SignTextFile,
             (Key::Confirm, Some("Verify")) => Screen::VerifySig,
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::SignMenu,
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
@@ -2342,12 +2235,10 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Keystone")) => Screen::Keystone,
             (Key::Confirm, Some("Dump Summary")) => Screen::DumpSummary,
             (Key::Confirm, Some("Address CSV")) => Screen::AddressCsv,
-            (Key::Cancel, _) => Screen::Utils,
             _ => Screen::ExportMenu,
         },
         Screen::XpubMenu => match key {
             Key::Confirm => Screen::Xpub(cursor as u8),
-            Key::Cancel => Screen::ExportMenu,
             _ => Screen::XpubMenu,
         },
         Screen::Login => match (key, LOGIN_ITEMS.get(cursor).copied()) {
@@ -2364,15 +2255,11 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(all(not(feature = "dev"), not(feature = "board-mk3")))]
             (Key::Confirm, Some("MicroSD 2FA")) => Screen::Sd2fa,
             (Key::Confirm, Some("Nickname")) => Screen::Nickname,
-            (Key::Cancel, _) => Screen::Settings,
             _ => Screen::Login,
         },
         // The splash: any key but cancel turns to the chip page, which any key but cancel
-        // leaves. Cancel steps back a page.
-        Screen::About => match key {
-            Key::Cancel => Screen::Main,
-            _ => Screen::AboutChip,
-        },
+        // leaves for the identity page. Cancel steps back a page, and off the first one.
+        Screen::About => Screen::AboutChip,
         Screen::AboutChip => match key {
             Key::Cancel => Screen::About,
             _ => Screen::Identity,
@@ -2395,7 +2282,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("NFC Tools")) => Screen::NfcTools,
             (Key::Confirm, Some("Upgrade Firmware")) => Screen::SdInstall,
             (Key::Confirm, Some("Help")) => Screen::HelpUtils,
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::Utils,
         },
         Screen::BackupMenu => match (key, BACKUP_ITEMS.get(cursor).copied()) {
@@ -2405,7 +2291,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Clone Coldcard")) => Screen::CloneExport,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Key Teleport")) => Screen::KeyTeleport,
-            (Key::Cancel, _) => Screen::Utils,
             _ => Screen::BackupMenu,
         },
         #[cfg(feature = "games")]
@@ -2414,7 +2299,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Block Cutter")) => Screen::BlockCutter,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Flappy Cat")) => Screen::FlappyCat,
-            (Key::Cancel, _) => Screen::Utils,
             _ => Screen::Games,
         },
         // By name, like Main: the list reorders -- Install from SD sat at the top of it
@@ -2456,7 +2340,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Colours")) => Screen::Colours,
             (Key::Confirm, Some("Warm Reset")) => Screen::WarmReset,
             (Key::Confirm, Some("Factory Reset")) => Screen::FactoryReset,
-            (Key::Cancel, _) => Screen::Main,
             _ => Screen::Debug,
         },
         // The probe is reached by pressing the tick on the PSRAM screen, never by
@@ -2464,17 +2347,17 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // the risk is worth taking deliberately and not by navigation.
         Screen::Psram => match key {
             Key::Confirm => Screen::PsramProbe,
-            _ => Screen::Debug,
+            _ => Screen::Back,
         },
-        // Every info screen leaves on any key, back to the drawer it was opened from.
+        // Every info screen leaves on any key, back to where it was opened from.
         //
         // A **menu** that reaches here has simply forgotten to say what its keys do, and
-        // sending it to Debug is how the export drawer put people in the Debug menu
+        // sending it somewhere is how the export drawer put people in the Debug menu
         // instead of exporting anything. A menu with no arm stays where it is: a screen
         // that does nothing is a bug someone can describe, and one that moves them
         // somewhere else is a bug they cannot.
         other if items_of(other, no_seed).is_some() => other,
-        _ => Screen::Debug,
+        _ => Screen::Back,
     }
 }
 
@@ -2607,6 +2490,32 @@ impl MenuScreen {
     /// is how you land on an item nobody chose.
     fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// `screen`'s list, with the cursor on `cursor` -- clamped to the list as it is now --
+    /// and scrolled so that row is in view, moving the view from `off` no further than it
+    /// must. How the way back puts a person on the row they left (`off` zero: the view is
+    /// worked out afresh), and how an action hands back to the menu that opened it (`off`
+    /// where it was: nothing on the screen moves unless its row went).
+    ///
+    /// The list keeps `off` as given: every draw and every key rebuilds its view with
+    /// [`ScrollView::select`](catcard_ui::scroll::ScrollView::select), which clamps the
+    /// offset and scrolls the cursor into view, so building one here only to read that
+    /// back would be a whole wrapped list on the stack for nothing. The grid draws from
+    /// its window directly, so that one is worked out here.
+    fn at(screen: Screen, no_seed: bool, cursor: usize, off: usize) -> Self {
+        let items = items_of(screen, no_seed).unwrap_or(&[]);
+        #[allow(unused_mut)]
+        let mut m = Self {
+            cursor: catcard_ui::nav::clamp(cursor, items.len()),
+            off,
+            focus: false,
+        };
+        #[cfg(feature = "board-q1")]
+        if is_grid_items(items) {
+            m.off = catcard_ui::grid::window(m.cursor, items.len(), off);
+        }
+        m
     }
 
     fn draw(&self, panel: &mut display::Panel, screen: Screen, no_seed: bool) {
@@ -3174,6 +3083,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::TrickPins => {}
         // Handled in `run`: it confirms, collects the PIN, and drives the panel itself.
         Screen::FactoryReset => {}
+        // Never the screen: `run` pops the navigation stack instead.
+        Screen::Back => {}
     }
 }
 
