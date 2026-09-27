@@ -585,6 +585,8 @@ pub struct Paths<'a> {
 impl<'a> Paths<'a> {
     /// `pop_deriv_list`: each item a path pattern, or the literal `any`, or `extra` where
     /// one is allowed (`p2sh` in `share_addrs`). Source: §1.2 [C]
+    // A leaf of its own: its scratch is gone before the next key is read.
+    #[inline(never)]
     fn load(raw: &'a str, extra: Option<&str>) -> Result<Self, Problem> {
         let len = list(raw, MAX_PATHS)?;
         let mut bad = None;
@@ -702,6 +704,8 @@ pub struct Whitelist<'a> {
 }
 
 impl<'a> Whitelist<'a> {
+    // A leaf of its own: its scratch is gone before the next key is read.
+    #[inline(never)]
     fn load(raw: &'a str, env: &dyn Env) -> Result<Self, Problem> {
         let len = list(raw, MAX_WHITELIST)?;
         let mut bad = None;
@@ -841,6 +845,8 @@ impl<'a> Rule<'a> {
         }
     }
 
+    // A leaf of its own: its scratch is gone before the next key is read.
+    #[inline(never)]
     fn load(raw: &'a str, index: usize, env: &dyn Env) -> Result<Self, Refusal<'a>> {
         let at = Some(index + 1);
         if !raw.starts_with('{') {
@@ -1131,6 +1137,52 @@ impl<'a> Policy<'a> {
     /// `HSMPolicy.load`: every key read, every bound checked, anything unknown refused.
     /// Source: hsm-policy-format.md §1 [C]
     pub fn load(text: &'a str, env: &dyn Env) -> Result<Self, Refusal<'a>> {
+        let mut me = Policy::default();
+        me.load_into(text, env)?;
+        Ok(me)
+    }
+
+    /// [`load`](Self::load), into this policy rather than a new one: for a caller whose
+    /// policy lives off the stack, where a returned one would be built on it first and
+    /// copied. A refusal leaves it back at the default -- no rules, nothing allowed -- and
+    /// never half loaded.
+    pub fn load_into(&mut self, text: &'a str, env: &dyn Env) -> Result<(), Refusal<'a>> {
+        self.reset();
+        let got = self.fill(text, env);
+        if got.is_err() {
+            self.reset();
+        }
+        got
+    }
+
+    /// Back to [`Policy::default`], in place.
+    fn reset(&mut self) {
+        let Policy {
+            rules,
+            period,
+            never_log,
+            priv_over_ux,
+            warnings_ok,
+            msg_paths,
+            share_xpubs,
+            share_addrs,
+            notes,
+            boot_to_hsm,
+        } = self;
+        rules.clear();
+        *period = None;
+        *never_log = false;
+        *priv_over_ux = false;
+        *warnings_ok = false;
+        *msg_paths = Paths::default();
+        *share_xpubs = Paths::default();
+        *share_addrs = Paths::default();
+        *notes = None;
+        *boot_to_hsm = None;
+    }
+
+    fn fill(&mut self, text: &'a str, env: &dyn Env) -> Result<(), Refusal<'a>> {
+        let me = self;
         let mut o = Obj::parse(text).map_err(|p| Refusal {
             problem: p,
             key: "",
@@ -1144,7 +1196,6 @@ impl<'a> Policy<'a> {
             key: k,
             rule: None,
         };
-        let mut me = Policy::default();
 
         if let Some(v) = o.take("rules") {
             let n = list(v, MAX_RULES).map_err(|p| match p {
@@ -1224,7 +1275,7 @@ impl<'a> Policy<'a> {
         {
             return refuse(Problem::NeedsPeriod, "period", Some(i + 1));
         }
-        Ok(me)
+        Ok(())
     }
 
     /// The `notes` text, unescaped into `buf`.

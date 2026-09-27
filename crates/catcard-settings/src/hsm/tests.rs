@@ -87,6 +87,30 @@ fn the_worked_example_loads() {
     );
 }
 
+/// Loading into a policy that held another replaces it whole; a refused one leaves the
+/// default -- no rules, no boot code, nothing shared -- not the rules read before the
+/// refusal, nor the ones held before.
+#[test]
+fn load_into_replaces_and_a_refusal_leaves_the_default() {
+    let mut p = load(EXAMPLE).unwrap();
+    p.load_into(r#"{"period": 60}"#, &Dev).unwrap();
+    assert!(p.rules.is_empty());
+    assert_eq!(p.period, Some(60));
+    assert!(!p.boots_to_hsm());
+
+    let mut p = load(EXAMPLE).unwrap();
+    let refused = r#"{"period": 60, "msg_paths": ["m/84h/0h/0h/*"], "no_such_key": 1}"#;
+    assert_eq!(
+        p.load_into(refused, &Dev).unwrap_err().problem,
+        Problem::UnknownKey
+    );
+    assert!(p.rules.is_empty());
+    assert_eq!(p.period, None);
+    assert!(!p.boots_to_hsm());
+    assert_eq!(p.msg_paths.len, 0);
+    assert!(!p.msg_paths.allows(&[84 | 1 << 31, 1 << 31, 1 << 31, 0]));
+}
+
 #[test]
 fn the_canonical_form_reloads_to_the_same_form() {
     let p = load(EXAMPLE).unwrap();

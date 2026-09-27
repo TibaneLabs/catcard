@@ -96,10 +96,7 @@ fn newest<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Option<Best> {
         let Ok(range) = nvstore::open(&mut buf[..len], key, pos) else {
             continue;
         };
-        let age = Doc::parse(&buf[range.clone()])
-            .ok()
-            .and_then(|d| d.get_u64("_age"))
-            .unwrap_or(0);
+        let age = stored_age(&buf[range.clone()]).unwrap_or(0);
         if best.as_ref().is_none_or(|b| age > b.age) {
             best = Some(Best { index, age });
         }
@@ -273,7 +270,8 @@ pub fn set<S: Slots, V: emjson::ToJson + ?Sized>(
         }
         Err(e) => return Err(e),
     };
-    let age = Doc::parse(&doc[..len]).map(|d| next_age(&d)).unwrap_or(1);
+    // Unreadable or unaged reads as zero, so the save carries one.
+    let age = stored_age(&doc[..len]).unwrap_or(0).saturating_add(1);
 
     {
         // The editor moves the document's tail through this; a small window is enough, and
@@ -327,7 +325,8 @@ pub fn set_many<S: Slots>(
         }
         Err(e) => return Err(e),
     };
-    let age = Doc::parse(&doc[..len]).map(|d| next_age(&d)).unwrap_or(1);
+    // Unreadable or unaged reads as zero, so the save carries one.
+    let age = stored_age(&doc[..len]).unwrap_or(0).saturating_add(1);
     {
         let mut window = [0u8; 64];
         let mut editor = Editor::new(MemStorage::new(doc, len), &mut window);
@@ -342,6 +341,17 @@ pub fn set_many<S: Slots>(
         len = editor.storage().doc_len();
     }
     write(slots, key, &doc[..len], choose, scratch)
+}
+
+/// The `_age` a settings object carries; `None` when it is not one or has none.
+///
+/// Its own frame: the table it parses is a kilobyte and a half, and neither the slot scan
+/// nor the save it serves should carry that while they go on to read, decrypt and write.
+#[inline(never)]
+fn stored_age(json: &[u8]) -> Option<u64> {
+    let mut doc = Doc::new();
+    doc.parse_into(json).ok()?;
+    doc.get_u64("_age")
 }
 
 /// The `_age` a save should carry: one past what is stored.
