@@ -1,0 +1,26 @@
+[package]
+name = "catcard-fido"
+description = "FIDO2 security key: CTAPHID transport, CTAP2 and U2F (CTAP1) over it, CBOR and the credential keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+# P-256 ECDSA (ES256) with RFC 6979 nonces, SHA-256 and HMAC. `ec` only: the P-256
+# fixed-base table (`p256-table`) is 60 KB of flash and stays off.
+purecrypto = { workspace = true, features = ["ec", "hash"] }
+zeroize = { workspace = true, features = ["derive"] }
+# `KeyWork` and `ExtendedPrivKey`: every function here that touches a credential key takes
+# the token, so the firmware can only reach them inside `keywork::run`, interrupts masked.
+catcard-wallet = { workspace = true }
+
+[dev-dependencies]
+catcard-wallet = { workspace = true, features = ["std"] }

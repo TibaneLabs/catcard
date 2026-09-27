@@ -14,6 +14,7 @@ members = [
     "crates/catcard-pin",
     "crates/catcard-png",
     "crates/catcard-evm",
+    "crates/catcard-fido",
     "crates/catcard-solana",
     "crates/catcard-hal",
     "crates/catcard-kernel",
@@ -45,6 +46,7 @@ default-members = [
     "crates/catcard-pin",
     "crates/catcard-png",
     "crates/catcard-evm",
+    "crates/catcard-fido",
     "crates/catcard-solana",
     "crates/catcard-settings",
     "crates/catcard-upgrade",
@@ -75,6 +77,7 @@ catcard-flash = { path = "crates/catcard-flash", default-features = false }
 catcard-settings = { path = "crates/catcard-settings", default-features = false }
 catcard-sign = { path = "crates/catcard-sign", default-features = false }
 catcard-wallet = { path = "crates/catcard-wallet", default-features = false }
+catcard-fido = { path = "crates/catcard-fido", default-features = false }
 catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-pin = { path = "crates/catcard-pin", default-features = false }

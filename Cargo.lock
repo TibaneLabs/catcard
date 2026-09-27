@@ -156,6 +156,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-fido"
+version = "7.0.0"
+dependencies = [
+ "catcard-wallet",
+ "purecrypto",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-flash"
 version = "7.0.0"
 
