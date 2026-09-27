@@ -497,3 +497,23 @@ mod wallet {
         assert!(want.contains(core::str::from_utf8(&a[..na]).unwrap()));
     }
 }
+
+/// Reading into a record that already held key C replaces it: a damaged value leaves
+/// `Damaged`, not the key C that was there, and an absent one leaves `Absent`.
+#[test]
+fn read_into_replaces_what_the_record_held() {
+    let good = settings(&stock_value());
+    let torn = settings(&stock_value().replace("\"mag\":1", "\"mag\":\"x\""));
+    let none = settings("null");
+    let mut out = read_value(&stock_value());
+    assert!(matches!(out, Read::Ccc(_)));
+    read_into(&Doc::parse(torn.as_bytes()).unwrap(), &mut out);
+    assert!(matches!(out, Read::Damaged), "{out:?}");
+    read_into(&Doc::parse(good.as_bytes()).unwrap(), &mut out);
+    match &out {
+        Read::Ccc(c) => assert_eq!(c.xfp, XFP),
+        other => panic!("{other:?}"),
+    }
+    read_into(&Doc::parse(none.as_bytes()).unwrap(), &mut out);
+    assert!(matches!(out, Read::Absent));
+}

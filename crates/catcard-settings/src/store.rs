@@ -153,6 +153,10 @@ pub fn census<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Census {
 /// Read the settings under `key` into `buf`, returning the JSON's length.
 ///
 /// `buf` must be at least [`SLOT_LEN`]; the JSON is left at its start.
+///
+/// Never inlined: the medium's read and the decryption are kilobytes of frame, and a
+/// caller that goes on to parse, prompt or derive should not carry them while it does.
+#[inline(never)]
 pub fn read<S: Slots>(slots: &mut S, key: &Key, buf: &mut [u8]) -> Result<usize, Error> {
     let best = newest(slots, key, buf).ok_or(Error::Absent)?;
     let pos = slots.pos(best.index);

@@ -158,9 +158,30 @@ impl<'a> Doc<'a> {
 
     /// Read an object's keys and the raw text of each value, in order.
     pub fn parse(json: &'a [u8]) -> Result<Self, Error> {
+        let mut doc = Self::new();
+        doc.parse_into(json)?;
+        Ok(doc)
+    }
+
+    /// [`parse`](Self::parse), into this doc rather than a new one.
+    ///
+    /// For a doc that lives somewhere other than the caller's stack -- a heap block, say:
+    /// the table is a kilobyte and a half on a 32-bit target, and `parse` hands it back by
+    /// value. What the doc held before is forgotten first, and on an error it is left
+    /// empty, so a failed parse never leaves half an object to be read as a whole one.
+    pub fn parse_into(&mut self, json: &'a [u8]) -> Result<(), Error> {
+        self.entries.clear();
+        let got = self.fill(json);
+        if got.is_err() {
+            self.entries.clear();
+        }
+        got
+    }
+
+    fn fill(&mut self, json: &'a [u8]) -> Result<(), Error> {
+        let entries = &mut self.entries;
         let mut p = Slice::from_slice(json);
         p.begin_object().map_err(failed)?;
-        let mut entries = heapless::Vec::new();
         while p.has_next().map_err(failed)? {
             // The key's own bytes, between its quotes: `skip_key` steps over it, and the
             // offsets either side of that are where it was.
@@ -180,7 +201,7 @@ impl<'a> Doc<'a> {
         // the blob it claims to be, and reading half of it is worse than refusing it.
         p.end_object().map_err(failed)?;
         p.finish().map_err(failed)?;
-        Ok(Self { entries })
+        Ok(())
     }
 
     /// How many keys it holds.
@@ -228,6 +249,20 @@ impl<'a> Doc<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// Parsing into a doc that held another object replaces it, and a malformed object
+    /// leaves it empty rather than holding the keys read before the fault.
+    #[test]
+    fn parse_into_replaces_and_a_failure_leaves_nothing() {
+        let mut doc = Doc::parse(br#"{"a": 1, "b": 2}"#).unwrap();
+        doc.parse_into(br#"{"c": true}"#).unwrap();
+        assert_eq!(doc.len(), 1);
+        assert_eq!(doc.get("a"), None);
+        assert_eq!(doc.get_bool("c"), Some(true));
+        assert!(doc.parse_into(br#"{"d": 4, "e": "#).is_err());
+        assert!(doc.is_empty(), "the keys before the fault must not survive");
+        assert_eq!(doc.get("d"), None);
+    }
+
     /// `notes` is a list of objects, and each one has to come back whole.
     #[test]
     fn a_list_of_notes_walks_element_by_element() {

@@ -147,12 +147,27 @@ pub enum Read {
 /// Read `ccc` out of a wallet's settings object. Stock's `null` (a removed key written
 /// back) and `false` read as absent, as stock's own truth test on the value does.
 pub fn read(doc: &Doc<'_>) -> Read {
+    let mut out = Read::Absent;
+    read_into(doc, &mut out);
+    out
+}
+
+/// [`read`], into `out` rather than a new value: for a caller whose record lives off the
+/// stack. Key C's record is three kilobytes, and returned by value it is built on the
+/// stack and copied at every level it passes through.
+pub fn read_into(doc: &Doc<'_>, out: &mut Read) {
+    *out = Read::Absent;
     match doc.get(KEY) {
-        None | Some("null") | Some("false") | Some("{}") => Read::Absent,
-        Some(raw) => match parse_object(raw) {
-            Some(c) => Read::Ccc(c),
-            None => Read::Damaged,
-        },
+        None | Some("null") | Some("false") | Some("{}") => {}
+        Some(raw) => {
+            *out = Read::Ccc(Ccc::blank());
+            if let Read::Ccc(c) = out
+                && fill(raw, c).is_none()
+            {
+                // Dropping the half-read record wipes whatever of the secret it holds.
+                *out = Read::Damaged;
+            }
+        }
     }
 }
 
@@ -173,31 +188,46 @@ pub fn words_of(secret: &[u8]) -> Option<usize> {
 
 /// Parse a `ccc` object's text. `None` if anything present is malformed.
 pub fn parse_object(raw: &str) -> Option<Ccc> {
-    let doc = Doc::parse(raw.as_bytes()).ok()?;
+    let mut c = Ccc::blank();
+    fill(raw, &mut c)?;
+    Some(c)
+}
+
+impl Ccc {
+    /// Nothing yet: a zero secret, which no check accepts, and the default policy. Only
+    /// ever the start of [`fill`], never a record anyone reads.
+    fn blank() -> Ccc {
+        Ccc {
+            secret: [0; SECRET_LEN],
+            xfp: [0; 4],
+            xpub: heapless::String::new(),
+            policy: Policy::default(),
+            web2fa: heapless::String::new(),
+        }
+    }
+}
+
+/// Parse a `ccc` object's text into `c`, which is [`Ccc::blank`]. `None` if anything
+/// present is malformed; `c` is then half filled, and the caller drops it, which wipes the
+/// secret.
+///
+/// One doc, reused: the `pol` object is read into the same table once the outer object's
+/// fields are out of it. Its text is a slice of `raw`, not of the table, so nothing it
+/// borrows is overwritten.
+fn fill(raw: &str, c: &mut Ccc) -> Option<()> {
+    let mut doc = Doc::parse(raw.as_bytes()).ok()?;
 
     let hex = doc.get_str("secret")?;
     if hex.is_empty() || !hex.len().is_multiple_of(2) || hex.len() > 2 * SECRET_LEN {
         return None;
     }
-    let mut secret = [0u8; SECRET_LEN];
     for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
         let d = |c: u8| (c as char).to_digit(16);
         match (d(pair[0]), d(pair[1])) {
-            (Some(h), Some(l)) => secret[i] = (h * 16 + l) as u8,
-            _ => {
-                secret.zeroize();
-                return None;
-            }
+            (Some(h), Some(l)) => c.secret[i] = (h * 16 + l) as u8,
+            _ => return None,
         }
     }
-    let mut c = Ccc {
-        secret,
-        xfp: [0; 4],
-        xpub: heapless::String::new(),
-        policy: Policy::default(),
-        web2fa: heapless::String::new(),
-    };
-    secret.zeroize();
     // Key C is a phrase: nothing else can be challenged for, or re-encoded to compare.
     words_of(&c.secret)?;
 
@@ -209,7 +239,9 @@ pub fn parse_object(raw: &str) -> Option<Ccc> {
     }
     c.xpub.push_str(xpub).ok()?;
 
-    let pol = Doc::parse(doc.get("pol")?.as_bytes()).ok()?;
+    let pol_raw = doc.get("pol")?;
+    doc.parse_into(pol_raw.as_bytes()).ok()?;
+    let pol = &doc;
     c.policy.magnitude = match pol.get("mag") {
         None | Some("null") => 0,
         Some(t) => parse_magnitude(t)?,
@@ -248,7 +280,7 @@ pub fn parse_object(raw: &str) -> Option<Ccc> {
             c.policy.whitelist.push(owned).ok()?;
         }
     }
-    Some(c)
+    Some(())
 }
 
 impl Ccc {

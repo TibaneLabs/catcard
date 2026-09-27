@@ -144,8 +144,52 @@ pub fn read(doc: &Doc<'_>) -> Read {
 /// Lenient on what is missing and strict on what is malformed, so a policy written by a
 /// later version with a field this one does not know still reads, and a torn one does not.
 pub fn parse_object(raw: &str) -> Option<Policy> {
-    let inner = Doc::parse(raw.as_bytes()).ok()?;
     let mut p = Policy::default();
+    parse_object_into(raw, &mut p).then_some(p)
+}
+
+/// [`parse_object`], into `p` rather than a new policy: for a caller whose policy lives
+/// off the stack, where a returned one would be built on it first.
+///
+/// False when it will not read, and `p` is then back at the defaults: a torn policy never
+/// leaves half its rules behind to be enforced as if they were all of them.
+pub fn parse_object_into(raw: &str, p: &mut Policy) -> bool {
+    p.reset();
+    let ok = fill(raw, p).is_some();
+    if !ok {
+        p.reset();
+    }
+    ok
+}
+
+impl Policy {
+    /// Back to [`Policy::default`], in place.
+    fn reset(&mut self) {
+        let Policy {
+            magnitude,
+            velocity,
+            last_height,
+            word_check,
+            allow_notes,
+            related_keys,
+            active,
+            whitelist,
+            violation,
+        } = self;
+        *magnitude = 0;
+        *velocity = 0;
+        *last_height = 0;
+        *word_check = false;
+        *allow_notes = false;
+        *related_keys = false;
+        *active = false;
+        whitelist.clear();
+        violation.clear();
+    }
+}
+
+fn fill(raw: &str, p: &mut Policy) -> Option<()> {
+    let inner = Doc::parse(raw.as_bytes()).ok()?;
 
     let number = |key: &str| -> Option<Option<u64>> {
         match inner.get(key) {
@@ -195,7 +239,7 @@ pub fn parse_object(raw: &str) -> Option<Policy> {
         }
         p.violation.push_str(text).ok()?;
     }
-    Some(p)
+    Some(())
 }
 
 impl Policy {
@@ -647,6 +691,34 @@ mod tests {
     }
 
     // --- storage ---------------------------------------------------------------------
+
+    /// Parsing into a policy that held another one reads exactly what `parse_object`
+    /// reads, and a torn object leaves the defaults -- not the rules read before the tear,
+    /// and not the ones the policy held before.
+    #[test]
+    fn parse_into_matches_parse_and_a_torn_one_leaves_defaults() {
+        let mut held = Policy {
+            magnitude: 7,
+            velocity: 3,
+            last_height: 9,
+            word_check: true,
+            allow_notes: true,
+            related_keys: true,
+            active: true,
+            ..Policy::default()
+        };
+        held.add_address(A3).unwrap();
+        let _ = held.violation.push_str("old");
+
+        let raw = format!(r#"{{"mag":{BTC},"vel":6,"active":true,"addrs":["{A1}","{A2}"]}}"#);
+        assert!(parse_object_into(&raw, &mut held));
+        assert_eq!(Some(held.clone()), parse_object(&raw));
+
+        let torn = format!(r#"{{"mag":5,"addrs":["{A1}","not an address"]}}"#);
+        assert!(!parse_object_into(&torn, &mut held));
+        assert_eq!(held, Policy::default());
+        assert_eq!(parse_object(&torn), None);
+    }
 
     #[test]
     fn absent_is_absent_and_a_policy_round_trips() {
