@@ -203,7 +203,8 @@ switch:
 - Non-hardware sources (timing, typed symbols) are unaffected -- and are never hardware
   sources, so they cannot stand in for a pending one.
 
-**Where it is enforced today:** New wallet (`new_seed`, and View TRNG Words) calls
+**Where it is enforced today:** New wallet (`new_seed`, and View TRNG Words, both in
+[`newseed.rs`](../crates/catcard-fw/src/newseed.rs)) calls
 `enforce_startup` and reads 1,024 fresh bytes from every source, so every source's window
 is complete before `check` and `draw`. Boot does not enforce it yet; see
 [Start-up test at boot](#start-up-test-at-boot-what-is-left).
@@ -295,11 +296,13 @@ first spending one independent draw on each DRBG it starts (`spawn_drbg`: `domai
 `domain::PROTOCOL`, `domain::USB` -- see [`HmacDrbg`](#hmacdrbg--everything-else)), then
 hands the pool to the menu task through [`crates/catcard-fw/src/ktest.rs`](../crates/catcard-fw/src/ktest.rs) (`start_menu`).
 [`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): the menu reaches it as `Act::pool`; `Screen::NewSeed`
-calls `new_seed` with it.
+calls `newseed::new_seed` with it. Everything from here to the read-back in step 10 is in
+one file, [`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs), so the seed path can be read in one sitting; the menu
+only calls in.
 
 ### 6. New wallet: fresh hardware noise on top
 
-[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed`.
+[`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs): `new_seed`.
 
 The boot pool already met its policy, but a wallet is not made from boot-time noise
 alone. `new_seed` first calls `pool.enforce_startup()`, then reads **1,024 fresh bytes
@@ -314,7 +317,7 @@ they arrive.
 
 ### 7. Optional: your own dice, coins or mash
 
-[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `add_user_entropy`, `collect_symbols`, `mix_user_run`;
+[`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs): `add_user_entropy`, `collect_symbols`, `mix_user_run`;
 [`crates/catcard-entropy/src/user.rs`](../crates/catcard-entropy/src/user.rs) and `EntropyPool::add_user`.
 
 Your symbols enter as SHA-256 over their ASCII digits -- the published dice convention,
@@ -325,7 +328,7 @@ its cycle-counter timestamp.
 
 ### 8. The draw
 
-[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed`, the `keywork::run` block;
+[`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs): `new_seed`, the `keywork::run` block;
 [`crates/catcard-entropy/src/pool.rs`](../crates/catcard-entropy/src/pool.rs): `EntropyPool::draw`.
 
 `pool.check()` is asked first and its verdict shown and logged (`seed: N bits from M
@@ -352,8 +355,8 @@ The drawn bytes are zeroized as soon as both exist.
 
 ### 10. Shown, confirmed, then stored -- and read back
 
-[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed` (`show_words`, `quiz`, then `set_secret` and
-`verify_secret`); [`crates/catcard-pin/src/lib.rs`](../crates/catcard-pin/src/lib.rs): `Login::set_secret`, `verify_secret`.
+[`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs): `new_seed` (`show_words` -- the menu's shared
+pager, which backups use too -- then `quiz`, then `set_secret` and `verify_secret`); [`crates/catcard-pin/src/lib.rs`](../crates/catcard-pin/src/lib.rs): `Login::set_secret`, `verify_secret`.
 
 The words are shown and quizzed **before** anything is written, so a power cut never
 leaves a wallet nobody has the words for. Then gate 18 method 3 (`CHANGE_SECRET`) writes
@@ -417,9 +420,15 @@ printed in its run's toolchain step), are open items in
 
 - Every `pool.add` / `add_user` / `add_timing` call site: `git grep -n 'pool\.add'` in
   `crates/catcard-fw`. Each names its `Source`; none passes a narrowed integer.
-- The only calls that take material *out* of the pool: `git grep -n 'draw_seed\|\.draw('`
-  -- the New wallet flow, the Debug TRNG-words screen (shown, never stored), and
-  `spawn_drbg` at session start.
+- The only calls that take material *out* of the pool: `git grep -n 'draw_seed\|\.draw(\|spawn_drbg('`
+  -- in [`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs) the New wallet flow (and the temporary seed and CCC's key C
+  it also makes) and the Debug TRNG-words screen (shown, never stored);
+  [`crates/catcard-fw/src/seedxor.rs`](../crates/catcard-fw/src/seedxor.rs) for the
+  noise parts of a random Seed XOR split; and `spawn_drbg`, one draw a DRBG, at session
+  start ([`session.rs`](../crates/catcard-fw/src/session.rs)) and for the paper wallet
+  ([`paperwallet.rs`](../crates/catcard-fw/src/paperwallet.rs)). That list is enforced:
+  [`tools/pooldraw-lint.sh`](../tools/pooldraw-lint.sh), run by `make lint` and CI,
+  fails if a draw or a `spawn_drbg` appears in any other file of `crates/catcard-fw`.
 - `EntropyPool` has no method that returns a random number. The DRBGs are separate types
   seeded by one draw each and cannot write back.
 - The log after a wallet is made (`Debug → Logs`, or [`tools/usbclient.py`](../tools/usbclient.py) on a bench
