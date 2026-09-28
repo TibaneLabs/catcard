@@ -128,6 +128,8 @@ enum Screen {
     #[cfg(not(feature = "board-mk3"))]
     PaperWallet,
     ViewTrngWords,
+    /// Debug: the SP 800-90B start-up test on every source, on demand (`crate::trngtest`).
+    TrngStartup,
     /// Debug: write a fixed URL to the NFC tag and hold the screen.
     #[cfg(not(feature = "board-mk3"))]
     NfcTest,
@@ -1088,6 +1090,8 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
     // The TRNG's raw output as words: for checking the generator, not for keeping.
     "View TRNG Words",
+    // The start-up health test, run here before it is trusted on the boot path.
+    "TRNG startup test",
     #[cfg(not(feature = "board-mk3"))]
     "NFC test",
     "Keyboard EMU test",
@@ -1851,6 +1855,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(not(feature = "board-mk3"))]
         Screen::PaperWallet => returns(|a| crate::paperwallet::create(a.ui, a.pool.take())),
         Screen::ViewTrngWords => returns(|a| view_trng_words(a.gate, a.ui)),
+        Screen::TrngStartup => returns(|a| crate::trngtest::screen(a.gate, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => returns(|a| crate::nfc::probe_screen(a.ui)),
         Screen::KbdTest => returns(|a| crate::usbkbd::self_test(a.ui)),
@@ -2338,6 +2343,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
+            (Key::Confirm, Some("TRNG startup test")) => Screen::TrngStartup,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
             (Key::Confirm, Some("Keyboard EMU test")) => Screen::KbdTest,
@@ -3006,6 +3012,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         #[cfg(not(feature = "board-mk3"))]
         Screen::PaperWallet => {}
         Screen::ViewTrngWords => {}
+        Screen::TrngStartup => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
         Screen::KbdTest => {}
@@ -5353,14 +5360,16 @@ fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
     // A fresh pool, filled only from the hardware sources -- no boot material, no user
     // entropy -- so the words are exactly what the TRNGs produce right now.
     let mut pool = EntropyPool::new(crate::entropy_policy());
+    // Held to the start-up test, as New wallet is.
+    pool.enforce_startup();
 
     // The same collection effort as generating a real seed, from the same sources: a full
     // byte target from each, and a pause so the counts are legible. A "watch the generator
     // work" screen that finished in a blink would be reading a handful of bytes and calling
     // it done -- which is exactly the shortcut this project exists to replace, so it is not
     // one this screen is allowed to take either.
-    const TARGET: usize = 512;
-    const MAX_PASSES: usize = 160;
+    const TARGET: usize = catcard_entropy::STARTUP_SAMPLES;
+    const MAX_PASSES: usize = 320;
     const STEP_PAUSE_CYCLES: u32 = 4_000_000;
 
     let mut trngs = crate::trng::Trngs::new(Some(gate));
@@ -10433,6 +10442,12 @@ fn new_seed(
 
     let policy = crate::entropy_policy();
     let kinds = crate::trng::kinds();
+    // SP 800-90B §4.3: from here a hardware source counts only once its start-up test --
+    // its first 1,024 bytes this session through the health tests, boot's 64 included --
+    // has passed; one that fails it counts for nothing for the rest of the session. Boot
+    // does not enforce this yet (docs/ENTROPY.md, "Start-up test"); a wallet does, so the
+    // reads below take at least that many bytes from every source.
+    pool.enforce_startup();
     let mut g = Gathered {
         read: kinds.iter().map(|&k| (k, 0usize)).collect(),
         bits: pool.credited_bits(),
@@ -10446,11 +10461,13 @@ fn new_seed(
     // lockstep once collected `SE1 512 B, SE2 128 B`, which reads like a broken element and
     // is really a slower one. The chip TRNG is part of this on every board: it once sat
     // inside a check for the mk4+ callgate, and on mk3 a wallet was generated without a
-    // single fresh byte from it.
-    const TARGET: usize = 512;
+    // single fresh byte from it. At least the start-up test's window, so every source's
+    // test has completed on fresh bytes alone by the time the pool is asked.
+    const TARGET: usize = catcard_entropy::STARTUP_SAMPLES;
     // Bounded, because a source that never answers must not hang a wallet. At SE2's
-    // observed rate 512 bytes wants roughly 64 turns; this leaves room and still ends.
-    const MAX_PASSES: usize = 160;
+    // observed rate 512 bytes wanted roughly 64 turns, so 1,024 wants about 130; this
+    // leaves room and still ends.
+    const MAX_PASSES: usize = 320;
 
     let mut trngs = crate::trng::Trngs::new(Some(gate));
     // A source can decline two ways: `Some(0)` is "nothing ready", `None` a refusal.
@@ -10498,6 +10515,9 @@ fn new_seed(
             empty[i],
             failed[i]
         );
+        if let Some(st) = pool.startup(kind.source()) {
+            crate::catlog!("seed: {} startup {:?}", kind.label(), st);
+        }
     }
 
     // With the hardware collected, offer the owner the choice: this device's entropy, or

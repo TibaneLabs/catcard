@@ -206,6 +206,8 @@ mod torch;
 #[cfg(not(feature = "board-mk3"))]
 mod trickpin;
 mod trng;
+/// Debug -> TRNG startup test: the SP 800-90B start-up test, run on demand.
+mod trngtest;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod txreview;

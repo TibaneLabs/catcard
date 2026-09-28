@@ -109,6 +109,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | — | `Buried Settings` → the rest | not implemented; `Menu wrapping` is above |
 | *(Hardware On/Off → `Keyboard EMU`)* | `Keyboard EMU` (top-level Settings row; adds `Type Passwords`) | 🔀 under Hardware On/Off with the other USB switches; used by the main menu's `Type Passwords`, Notes → `Send Password` and the BIP-85 password child's "type into host" (Confirm on its screen), all through one screen that offers Enter and asks before typing |
 | `Debug` → `Keyboard EMU test` | `Debug Functions` → `Keyboard Test` | 🔀 stock's tests the device's own keys; ours types a fixed line into the host to prove the emulated keyboard |
+| `Debug` → `TRNG startup test` | — | 🔀 CatCard only; the SP 800-90B start-up health test over 1,024 bytes from every random source, with a verdict per source, whether the entropy policy would be met with it enforced, and how long the reads took. A throwaway pool; nothing is drawn or stored. It is how the test is proven before it moves onto the boot path (`docs/ENTROPY.md`) |
 
 Every preference above is kept in the **wallet in force's own** settings file, under our
 own `cat_*` key rather than stock's -- the reference names stock's keys but not the shape
