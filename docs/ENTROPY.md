@@ -213,7 +213,7 @@ below says where.
 
 ### 1. The chip's TRNG, read from its registers
 
-`crates/catcard-hal/src/rng.rs`: `Rng::word`, then `Rng::fill`.
+[`crates/catcard-hal/src/rng.rs`](../crates/catcard-hal/src/rng.rs): `Rng::word`, then `Rng::fill`.
 
 `word` reads `RNG_DR` only after `RNG_SR.DRDY`, and checks `SR` again *after* the read. A
 clock error (`CECS`/`CEIS`) is an error, never a word; a seed error (`SECS`/`SEIS`) restarts
@@ -223,21 +223,21 @@ bounded number of polls. So a dead or unclocked TRNG produces an error here, not
 
 ### 2. The secure elements' TRNGs, through the bootloader
 
-`crates/catcard-fw/src/trng.rs`: `Trngs::read`, and the `Kind` list from `kinds()`.
+[`crates/catcard-fw/src/trng.rs`](../crates/catcard-fw/src/trng.rs): `Trngs::read`, and the `Kind` list from `kinds()`.
 
 - **SE1 and SE2** (mk4, mk5, Q1): callgate 26, `Callgate::se_rng`, 32 bytes per call from
   a 33-byte buffer whose first byte is the length.
 - **The bootloader's own read of the chip TRNG**: callgate 17, `Callgate::bootloader_rng`.
-- **SE1's raw bus** (mk3): the single-wire driver in `crates/catcard-hal/src/se1swi.rs`.
+- **SE1's raw bus** (mk3): the single-wire driver in [`crates/catcard-hal/src/se1swi.rs`](../crates/catcard-hal/src/se1swi.rs).
 
 `Kind::source` maps each to the pool `Source` it is absorbed as, and that decides its
 credit (step 4). Every temporary buffer is zeroized after the copy.
 
 ### 3. Boot: the pool is created and fed
 
-`crates/catcard-fw/src/boot.rs`: `bring_up`, then `feed_secure_elements`.
+[`crates/catcard-fw/src/boot.rs`](../crates/catcard-fw/src/boot.rs): `bring_up`, then `feed_secure_elements`.
 
-In order: the unique ID (`crates/catcard-hal/src/uid.rs`, `feed_pool`, as `NonSecret`),
+In order: the unique ID ([`crates/catcard-hal/src/uid.rs`](../crates/catcard-hal/src/uid.rs), `feed_pool`, as `NonSecret`),
 64 bytes of chip TRNG (`Rng::feed_pool`, as `Stm32Trng`), 64 bytes from each secure
 element where the board has them (as `Se1Trng` / `Se2Trng`), and 16 cycle-counter samples
 (`add_timing`, as `UserTiming`). Then `pool.check()` records whether the policy was met.
@@ -245,8 +245,8 @@ The pool travels out of boot in `BootReport::pool`.
 
 ### 4. Inside the pool: health test, absorb, credit
 
-`crates/catcard-entropy/src/pool.rs`: `EntropyPool::add`, `absorb`, `bits_per_byte`,
-`is_hardware_trng`; the tests themselves in `crates/catcard-entropy/src/health.rs`.
+[`crates/catcard-entropy/src/pool.rs`](../crates/catcard-entropy/src/pool.rs): `EntropyPool::add`, `absorb`, `bits_per_byte`,
+`is_hardware_trng`; the tests themselves in [`crates/catcard-entropy/src/health.rs`](../crates/catcard-entropy/src/health.rs).
 
 - **Health test first**, for the hardware sources only (`is_hardware_trng`: chip, SE1,
   SE2): repetition count and adaptive proportion, with state kept per source across reads.
@@ -263,16 +263,16 @@ Nothing here returns randomness. The pool's only outputs are `check` and `draw`.
 
 ### 5. From boot to the New wallet screen
 
-`crates/catcard-fw/src/session.rs`: the session takes the pool with `report.pool.take()`,
+[`crates/catcard-fw/src/session.rs`](../crates/catcard-fw/src/session.rs): the session takes the pool with `report.pool.take()`,
 first spending one independent draw on each DRBG it starts (`spawn_drbg`: `domain::UI`,
 `domain::PROTOCOL`, `domain::USB` -- see [`HmacDrbg`](#hmacdrbg--everything-else)), then
-hands the pool to the menu task through `crates/catcard-fw/src/ktest.rs` (`start_menu`).
-`crates/catcard-fw/src/menu.rs`: the menu reaches it as `Act::pool`; `Screen::NewSeed`
+hands the pool to the menu task through [`crates/catcard-fw/src/ktest.rs`](../crates/catcard-fw/src/ktest.rs) (`start_menu`).
+[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): the menu reaches it as `Act::pool`; `Screen::NewSeed`
 calls `new_seed` with it.
 
 ### 6. New wallet: fresh hardware noise on top
 
-`crates/catcard-fw/src/menu.rs`: `new_seed`.
+[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed`.
 
 The boot pool already met its policy, but a wallet is not made from boot-time noise
 alone. `new_seed` reads **512 fresh bytes from every source the board has** (`kinds()`:
@@ -284,8 +284,8 @@ loop instead of hanging it. The per-source byte counts are written to the log
 
 ### 7. Optional: your own dice, coins or mash
 
-`crates/catcard-fw/src/menu.rs`: `add_user_entropy`, `collect_symbols`, `mix_user_run`;
-`crates/catcard-entropy/src/user.rs` and `EntropyPool::add_user`.
+[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `add_user_entropy`, `collect_symbols`, `mix_user_run`;
+[`crates/catcard-entropy/src/user.rs`](../crates/catcard-entropy/src/user.rs) and `EntropyPool::add_user`.
 
 Your symbols enter as SHA-256 over their ASCII digits -- the published dice convention,
 so `printf '%s' <rolls> | sha256sum` reproduces the 32 bytes, and the screen shows the
@@ -295,8 +295,8 @@ its cycle-counter timestamp.
 
 ### 8. The draw
 
-`crates/catcard-fw/src/menu.rs`: `new_seed`, the `keywork::run` block;
-`crates/catcard-entropy/src/pool.rs`: `EntropyPool::draw`.
+[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed`, the `keywork::run` block;
+[`crates/catcard-entropy/src/pool.rs`](../crates/catcard-entropy/src/pool.rs): `EntropyPool::draw`.
 
 `pool.check()` is asked first and its verdict shown and logged (`seed: N bits from M
 chips, policy ok`). Then, **with interrupts masked** (`keywork::run`), `draw` refuses unless
@@ -309,10 +309,10 @@ screen; there is no second path to a seed.
 
 Still inside the masked block:
 
-- `crates/catcard-callgate/src/pin.rs`: `encode_bip39` -- the 72-byte secure-element slot
+- [`crates/catcard-callgate/src/pin.rs`](../crates/catcard-callgate/src/pin.rs): `encode_bip39` -- the 72-byte secure-element slot
   image: a marker byte for the length, then the entropy, then zeros.
   Source: `hw-reference/secret-stash-format.md`.
-- `crates/catcard-wallet/src/bip39/mod.rs`: `Mnemonic::from_entropy` keeps the entropy;
+- [`crates/catcard-wallet/src/bip39/mod.rs`](../crates/catcard-wallet/src/bip39/mod.rs): `Mnemonic::from_entropy` keeps the entropy;
   the words are its bits plus the first `ENT/32` bits of SHA-256(entropy) as checksum, in
   11-bit groups, looked up in the BIP-39 English list (`bip39::wordlist`, pinned to the
   reference list's SHA-256). This is BIP-39 exactly, so the words can be checked with any
@@ -322,8 +322,8 @@ The drawn bytes are zeroized as soon as both exist.
 
 ### 10. Shown, confirmed, then stored -- and read back
 
-`crates/catcard-fw/src/menu.rs`: `new_seed` (`show_words`, `quiz`, then `set_secret` and
-`verify_secret`); `crates/catcard-pin/src/lib.rs`: `Login::set_secret`, `verify_secret`.
+[`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed` (`show_words`, `quiz`, then `set_secret` and
+`verify_secret`); [`crates/catcard-pin/src/lib.rs`](../crates/catcard-pin/src/lib.rs): `Login::set_secret`, `verify_secret`.
 
 The words are shown and quizzed **before** anything is written, so a power cut never
 leaves a wallet nobody has the words for. Then gate 18 method 3 (`CHANGE_SECRET`) writes
@@ -335,6 +335,54 @@ A **temporary seed** and CCC's **key C** take the same path to step 9 and then s
 the entropy goes into RAM for the session (`key::set_temporary`) or to the caller, not
 into the slot.
 
+### Checking that a published binary is this code
+
+Reading the source only helps if the image on the device was built from it. The build is
+designed so that a release can be rebuilt and compared byte for byte, with no key and no
+trust in whoever ran CI:
+
+- The header timestamp is `SOURCE_DATE_EPOCH`, set to the tagged commit's time and printed
+  in the release notes; the version string is in the notes too.
+- `Cargo.lock` is committed, and nothing in the build reads the ambient environment (no
+  `rustflags` table; the linker script comes from
+  [`crates/catcard-fw/build.rs`](../crates/catcard-fw/build.rs)).
+- The image is signed with the published developer key using RFC 6979, which is
+  deterministic: the same image signs to the same bytes
+  ([`tools/catcard-image/src/sign.rs`](../tools/catcard-image/src/sign.rs)).
+
+To rebuild, for example, the all-chains Q1 image of `v7.0.0-alpha3` (the other shapes differ
+only in `--features` and `--board`; the release workflow,
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), lists all twelve):
+
+```sh
+git clone https://github.com/TibaneLabs/catcard && cd catcard
+git checkout v7.0.0-alpha3
+export SOURCE_DATE_EPOCH=1790503883 CATCARD_VERSION=7.0.0a3   # from the release notes
+cargo build --release -p catcard-fw --target thumbv7em-none-eabihf \
+  --no-default-features --features board-q1,multichain
+cargo run --release -q -p catcard-image -- build \
+  target/thumbv7em-none-eabihf/release/catcard-fw \
+  --board q1 --version "$CATCARD_VERSION" \
+  --bin out/q1.bin --dfu out/catcard-q1-7.0.0-alpha3.dfu
+shasum -a 256 out/catcard-q1-7.0.0-alpha3.dfu   # compare with the release's SHA256SUMS
+```
+
+The mk4/mk5 image adds `--hw-compat mk4,mk5` and uses `--board mk5`; `-games` images add
+`games` to the features; `-bitcoin` images leave out `multichain`.
+
+**Where this stands today -- not yet reproducible across machines.** Rebuilding
+`v7.0.0-alpha3` with the recipe above on macOS (arm64), with the same Rust the release used
+(1.98.1, 2026-09-01), does **not** reproduce the published digest: the code is the same,
+but it is laid out in a different order in the image, so the bytes and the hash differ.
+The release was built on GitHub's Linux x86_64 runners, and CI's own check -- two builds
+of every push, compared -- runs on one such machine, which is why it has not caught this.
+Until it is fixed, a matching digest can only be expected from a rebuild on the same
+platform the release used, and even that has not yet been confirmed independently. Making
+the image identical across build hosts, and pinning the exact compiler version
+(`rust-toolchain.toml` names only the `stable` channel; the version a release used is
+printed in its run's toolchain step), are open items in
+[`docs/RELEASING.md`](RELEASING.md#reproducible-builds).
+
 ### What to check when reading
 
 - Every `pool.add` / `add_user` / `add_timing` call site: `git grep -n 'pool\.add'` in
@@ -344,7 +392,7 @@ into the slot.
   `spawn_drbg` at session start.
 - `EntropyPool` has no method that returns a random number. The DRBGs are separate types
   seeded by one draw each and cannot write back.
-- The log after a wallet is made (`Debug → Logs`, or `tools/usbclient.py` on a bench
+- The log after a wallet is made (`Debug → Logs`, or [`tools/usbclient.py`](../tools/usbclient.py) on a bench
   build) shows the fresh bytes read per source and the policy verdict.
 
 ## Testing

@@ -8,8 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Fixed build timestamp so image digests are comparable across runs.
-  SOURCE_DATE_EPOCH: "1785628800"
+  # The build timestamp is not fixed here: each job that builds an image sets
+  # SOURCE_DATE_EPOCH to the commit's own time (the step after checkout), the way the
+  # release workflow stamps a tag. So a CI image says when its code was committed, two
+  # runs of one commit still produce the same digest, and a later commit always carries
+  # a later timestamp -- which the device's own "is this older?" check relies on.
 
 jobs:
   host:
@@ -45,6 +48,8 @@ jobs:
         games: [true, false]
     steps:
       - uses: actions/checkout@v6
+      - name: Build timestamp from the commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
@@ -175,6 +180,8 @@ jobs:
         chains: [bitcoin, multichain]
     steps:
       - uses: actions/checkout@v6
+      - name: Build timestamp from the commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -205,12 +212,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Build timestamp from the commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
 
-      # With SOURCE_DATE_EPOCH fixed, the same tree must produce the same digest. If
+      # With SOURCE_DATE_EPOCH set (the commit's time), the same tree must produce the same digest. If
       # this fails, something nondeterministic leaked into the image.
       - name: Build twice and compare digests
         run: |

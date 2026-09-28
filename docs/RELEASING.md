@@ -58,8 +58,19 @@ the person who ran the compiler. The pieces already in place:
   locally and a different one under CI. The linker script is emitted from
   `catcard-fw/build.rs`, which `RUSTFLAGS` cannot override. CI asserts both properties.
 
-Still open: pinning the exact toolchain *version* rather than `stable`, and a container
-recipe so the build environment is reproducible too.
+Still open:
+
+- **Identical images across build hosts.** A rebuild of `v7.0.0-alpha3` on macOS arm64
+  with the same rustc (1.98.1) as the release's Linux x86_64 runner differs from the
+  published image: same strings, different layout, a 512-byte size difference
+  (2026-09-28). CI's check builds twice on one runner, so it cannot see this; it needs a
+  cross-host check, and the cause (something whose order depends on the build host)
+  found and fixed.
+- Pinning the exact toolchain *version* rather than `stable`, and a container recipe so
+  the build environment is reproducible too.
+
+CI builds (not only tags) now take `SOURCE_DATE_EPOCH` from their commit, so each CI
+image's header timestamp says when its code was committed.
 
 ## Release signing
 
