@@ -168,8 +168,8 @@ pub enum Opcode {
     /// `[u8 source][u8 flags][u16 n][u32 chunk][n bytes]`. Each `Ok` starts the next
     /// chunk of the same shape, so a host that keeps asking is kept busy.
     ///
-    /// Sources: 1 the MCU TRNG, 2 SE1 (callgate 26), 3 SE2 (callgate 26), 4 the
-    /// bootloader's read (callgate 17), 5 SE1's raw bus (mk3). The bytes are exactly what
+    /// Sources: 1 the MCU TRNG, 2 SE1 (callgate 26), 3 SE2 (callgate 26), 5 SE1's raw bus
+    /// (mk3). 4 is retired: it was the bootloader's read (callgate 17), no longer read. The bytes are exactly what
     /// the firmware would pass to the entropy pool -- and never the pool itself.
     ///
     /// **Bench only** (`usb-trng-capture`, stripped by `SHIP=1`). See `docs/USB.md`.

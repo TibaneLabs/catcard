@@ -8,8 +8,8 @@
 //!
 //! ```ignore
 //! let gate = unsafe { Callgate::discover(&BOARD) }?;
-//! let mut buf = [0u8; 32];
-//! unsafe { gate.bootloader_rng(&mut buf) }?;
+//! let mut buf = [0u8; 33];
+//! let n = unsafe { gate.se_rng(RngSource::Se1, &mut buf) }?;
 //! ```
 //!
 //! Two things about this interface are easy to get wrong and fatal in different ways:
@@ -274,16 +274,6 @@ impl Callgate {
     pub unsafe fn has_608(&self) -> bool {
         // SAFETY: this method takes no buffer. Returns 0 when present, ENOENT if not.
         matches!(unsafe { self.call_no_buf(Method::Has608, 0) }, Ok(0))
-    }
-
-    /// Callgate 17: 32 bytes from the bootloader's STM32 TRNG.
-    ///
-    /// # Safety
-    /// See [`Self::call`].
-    pub unsafe fn bootloader_rng(&self, out: &mut [u8; 32]) -> Result<(), Error> {
-        // SAFETY: exactly the documented 32-byte output buffer.
-        unsafe { self.call(Method::GetBootloaderRng, out.as_mut_slice(), 0)? };
-        Ok(())
     }
 
     /// Callgate 26: TRNG bytes from a secure element (mk4+).

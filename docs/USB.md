@@ -645,7 +645,7 @@ sources, so they can be assessed off the device with the NIST SP 800-90B estimat
 | 1 | `chip` | the MCU's TRNG, `RNG_DR`, read directly (every board) |
 | 2 | `se1` | SE1 through callgate 26 (mk4, mk5, Q1) |
 | 3 | `se2` | SE2 through callgate 26 (mk4, mk5, Q1) |
-| 4 | `bootloader` | the bootloader's read of the MCU TRNG, callgate 17 (every board) |
+| 4 | -- | retired: was the bootloader's read of the MCU TRNG (callgate 17), which is no longer read; the number is not reused |
 | 5 | `se1wire` | SE1's `Random` over its raw single-wire bus (mk3) |
 
 - **Empty payload** lists what this board has: `[u16 chunk_max][u8 count][u8 source]...`.

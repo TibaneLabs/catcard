@@ -39,7 +39,8 @@ DEBUG_TRNG = 0x0035
 OK, UNKNOWN_OPCODE, NOT_NOW, BAD_REQUEST, REFUSED, BUSY = 0, 1, 2, 3, 5, 6
 
 # Wire numbers, `trngcap::wire_id`.
-SOURCES = {1: "chip", 2: "se1", 3: "se2", 4: "bootloader", 5: "se1wire"}
+# 4 was the bootloader's read (callgate 17), no longer read; the number stays retired.
+SOURCES = {1: "chip", 2: "se1", 3: "se2", 5: "se1wire"}
 BY_NAME = {v: k for k, v in SOURCES.items()}
 
 # Chunk flags, `trngcap::flags`.

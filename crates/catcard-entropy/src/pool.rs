@@ -36,15 +36,6 @@ use crate::health::{Startup, StartupTest};
 pub enum Source {
     /// STM32 hardware TRNG (`RNG_DR`), read directly by us.
     Stm32Trng,
-    /// The bootloader's own read of the STM32 TRNG, via callgate 17.
-    ///
-    /// Mixed, **credited zero, and not counted as a hardware source.** It is the same
-    /// generator as [`Source::Stm32Trng`] -- the callgate returns the MCU TRNG
-    /// (`rng_buffer`), not a secure element -- so counting it would let one chip satisfy a
-    /// two-source policy on its own. It is also not known whether that buffer is filled per
-    /// call or once. Mixing it can only help; trusting it could only mislead.
-    /// Source: hw-reference/platform.md §3 "Reading the SE1 RNG on mk3" [C]
-    BootloaderTrng,
     /// ATECC608 `Random`, via callgate 26 source 1.
     Se1Trng,
     /// Second secure element TRNG, via callgate 26 source 2 (mk4+).
@@ -104,7 +95,7 @@ impl Source {
         match self {
             Source::Stm32Trng | Source::Se1Trng | Source::Se2Trng => 4,
             // Real noise, but not trusted to count: see the variants.
-            Source::BootloaderTrng | Source::Se1TrngUnauthenticated => 0,
+            Source::Se1TrngUnauthenticated => 0,
             // A keypress timestamp is a handful of unpredictable low bits at best.
             Source::UserTiming => 1,
             // Typed symbols are credited per *run*, by `add_user`, not per byte. Zero
@@ -119,7 +110,6 @@ impl Source {
     const fn tag(self) -> &'static [u8] {
         match self {
             Source::Stm32Trng => b"catcard/src/stm32-trng",
-            Source::BootloaderTrng => b"catcard/src/bl-trng",
             Source::Se1Trng => b"catcard/src/se1-trng",
             Source::Se2Trng => b"catcard/src/se2-trng",
             Source::Se1TrngUnauthenticated => b"catcard/src/se1-trng-unauthenticated",
@@ -135,26 +125,24 @@ impl Source {
     const fn index(self) -> usize {
         match self {
             Source::Stm32Trng => 0,
-            Source::BootloaderTrng => 1,
-            Source::Se1Trng => 2,
-            Source::Se2Trng => 3,
-            Source::UserTiming => 4,
-            Source::UserKeypad => 7,
-            Source::UserDice => 8,
-            Source::UserCoin => 9,
-            Source::Se1TrngUnauthenticated => 10,
-            Source::Auxiliary => 5,
-            Source::NonSecret => 6,
+            Source::Se1Trng => 1,
+            Source::Se2Trng => 2,
+            Source::UserTiming => 3,
+            Source::Auxiliary => 4,
+            Source::NonSecret => 5,
+            Source::UserKeypad => 6,
+            Source::UserDice => 7,
+            Source::UserCoin => 8,
+            Source::Se1TrngUnauthenticated => 9,
         }
     }
 }
 
-const NUM_SOURCES: usize = 11;
+const NUM_SOURCES: usize = 10;
 
 /// Every source, once each, for sums over the per-source counters.
 const ALL_SOURCES: [Source; NUM_SOURCES] = [
     Source::Stm32Trng,
-    Source::BootloaderTrng,
     Source::Se1Trng,
     Source::Se2Trng,
     Source::Se1TrngUnauthenticated,
@@ -680,21 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn one_chip_read_twice_is_still_one_chip() {
-        // Callgate 17 hands back the same MCU TRNG this firmware reads directly. Counted
-        // as its own source, one generator would satisfy a two-source policy by being
-        // asked twice -- so it is mixed and nothing more.
-        let mut p = EntropyPool::new(Policy::STRICT);
-        p.add(Source::Stm32Trng, &noise(3, 128));
-        p.add(Source::BootloaderTrng, &noise(4, 128));
-        assert_eq!(p.hardware_sources(), 1);
-        assert!(
-            p.check().is_err(),
-            "a single generator passed a two-source policy"
-        );
-    }
-
-    #[test]
     fn an_unauthenticated_wire_can_add_but_never_vouch() {
         // SE1 read over the raw single-wire bus on mk3: anything on that wire can supply
         // the bytes. Whatever it sends must change the pool -- more material never hurts --
@@ -971,7 +944,7 @@ mod tests {
             p.startup(Source::Se1Trng),
             Some(Startup::Pending { tested: 64 })
         );
-        assert_eq!(p.startup(Source::BootloaderTrng), None);
+        assert_eq!(p.startup(Source::UserTiming), None);
     }
 
     #[test]

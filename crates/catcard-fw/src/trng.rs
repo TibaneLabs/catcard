@@ -9,8 +9,12 @@
 //!
 //! What each source is *worth* is not decided here. [`Kind::source`] names the pool
 //! [`Source`], and `catcard-entropy` owns the crediting: a source that cannot be trusted
-//! (the bootloader's second read of the MCU TRNG) is still read and mixed, but counts for
-//! nothing.
+//! (SE1 over its unauthenticated raw bus) is still read and mixed, but counts for nothing.
+//!
+//! The bootloader's read of the MCU TRNG (callgate 17) is deliberately not a source. It
+//! is the same generator this module reads directly, through a call that reports no
+//! error: the direct read sees the RNG's clock and seed faults (`CECS`/`SECS`) and
+//! refuses, where the callgate would hand back whatever its buffer held.
 
 use catcard_callgate::Callgate;
 use catcard_callgate::abi::RngSource;
@@ -27,8 +31,6 @@ pub enum Kind {
     /// SE1's `Random` over its raw single-wire bus (mk3, which has no callgate for it).
     /// Unauthenticated, so mixed and credited zero.
     Se1Wire,
-    /// The bootloader's read of the MCU TRNG, callgate 17. Every board.
-    Bootloader,
     /// The STM32's own TRNG, read directly. Every board.
     Chip,
 }
@@ -40,7 +42,6 @@ impl Kind {
             Kind::Se1 => Source::Se1Trng,
             Kind::Se2 => Source::Se2Trng,
             Kind::Se1Wire => Source::Se1TrngUnauthenticated,
-            Kind::Bootloader => Source::BootloaderTrng,
             Kind::Chip => Source::Stm32Trng,
         }
     }
@@ -50,7 +51,6 @@ impl Kind {
         match self {
             Kind::Se1 | Kind::Se1Wire => "SE1",
             Kind::Se2 => "SE2",
-            Kind::Bootloader => "BL",
             Kind::Chip => "S32",
         }
     }
@@ -62,8 +62,8 @@ impl Kind {
     }
 }
 
-/// The sources this board has, in the order screens list them: the secure elements, the
-/// bootloader's read, then the chip.
+/// The sources this board has, in the order screens list them: the secure elements, then
+/// the chip.
 pub fn kinds() -> heapless::Vec<Kind, 4> {
     let mut v = heapless::Vec::new();
     if catcard_board::BOARD.has_callgate_se_rng {
@@ -72,7 +72,6 @@ pub fn kinds() -> heapless::Vec<Kind, 4> {
     } else if catcard_board::BOARD.se1_swi.is_some() {
         let _ = v.push(Kind::Se1Wire);
     }
-    let _ = v.push(Kind::Bootloader);
     let _ = v.push(Kind::Chip);
     v
 }
@@ -115,18 +114,6 @@ impl<'a> Trngs<'a> {
                 let n = got.map(|n| n.min(out.len()));
                 if let Some(n) = n {
                     out[..n].copy_from_slice(&buf[1..1 + n]);
-                }
-                buf.zeroize();
-                n
-            }
-            Kind::Bootloader => {
-                let gate = self.gate?;
-                let mut buf = [0u8; 32];
-                // SAFETY: exactly the documented 32-byte output buffer for callgate 17.
-                let ok = unsafe { gate.bootloader_rng(&mut buf) }.is_ok();
-                let n = ok.then(|| buf.len().min(out.len()));
-                if let Some(n) = n {
-                    out[..n].copy_from_slice(&buf[..n]);
                 }
                 buf.zeroize();
                 n

@@ -251,7 +251,9 @@ bounded number of polls. So a dead or unclocked TRNG produces an error here, not
 
 - **SE1 and SE2** (mk4, mk5, Q1): callgate 26, `Callgate::se_rng`, 32 bytes per call from
   a 33-byte buffer whose first byte is the length.
-- **The bootloader's own read of the chip TRNG**: callgate 17, `Callgate::bootloader_rng`.
+- **Not the bootloader's read of the chip TRNG** (callgate 17). It is the same generator
+  as step 1, through a call that reports no error, where step 1 sees the RNG's clock and
+  seed faults and refuses. It used to be mixed in, credited zero; it is no longer read.
 - **SE1's raw bus** (mk3): the single-wire driver in [`crates/catcard-hal/src/se1swi.rs`](../crates/catcard-hal/src/se1swi.rs).
 
 `Kind::source` maps each to the pool `Source` it is absorbed as, and that decides its

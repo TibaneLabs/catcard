@@ -48,13 +48,14 @@ pub mod flags {
     pub const REFUSED: u8 = 1 << 1;
 }
 
-/// The wire number of a source. Fixed: a host keeps captures by it.
+/// The wire number of a source. Fixed: a host keeps captures by it. 4 was the
+/// bootloader's read (callgate 17), which is no longer read; the number stays retired
+/// rather than reused, so an old capture file is never mistaken for a new source.
 const fn wire_id(kind: Kind) -> u8 {
     match kind {
         Kind::Chip => 1,
         Kind::Se1 => 2,
         Kind::Se2 => 3,
-        Kind::Bootloader => 4,
         Kind::Se1Wire => 5,
     }
 }

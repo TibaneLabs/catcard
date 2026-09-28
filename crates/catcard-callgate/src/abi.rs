@@ -27,6 +27,11 @@ pub enum Method {
     /// Anti-phishing words: HMAC over a PIN prefix, in place in `buf_io`.
     AntiPhishingWords = 16,
     /// 32 bytes from the bootloader's own STM32 TRNG.
+    ///
+    /// **Not used by this firmware**, and it has no wrapper here. It is the same
+    /// generator the firmware reads directly (`catcard_hal::rng`), and the direct read
+    /// sees the RNG's clock and seed faults and refuses, where this call reports no error.
+    /// Listed so the table of methods stays complete.
     GetBootloaderRng = 17,
     /// The PIN/secret API. `arg2` selects a [`PinOp`]; `buf_io` is a
     /// [`PinAttempt`](crate::pin::PinAttempt).
