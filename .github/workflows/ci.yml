@@ -27,6 +27,8 @@ jobs:
       - run: cargo fmt --all -- --check
       # Drawing callgates only through crate::gatecall; waiting-screen guards held.
       - run: sh tools/gatecall-lint.sh
+      # Pool draws and DRBG seeding only in the files docs/ENTROPY.md names.
+      - run: sh tools/pooldraw-lint.sh
       # `catcard-kernel` is ARM-only for the same reason `catcard-fw` is -- its context
       # switch is Cortex-M assembly, and cortex-m's register access does not build for a
       # host at all. The Makefile has excluded it all along and this had not, so the host

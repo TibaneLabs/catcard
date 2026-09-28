@@ -105,6 +105,9 @@ lint:
 # Drawing callgates only through crate::gatecall, and no waiting-screen guard dropped at
 # once: tools/gatecall-lint.sh says why.
 	sh tools/gatecall-lint.sh
+# Seed material leaves the entropy pool only where docs/ENTROPY.md says it does:
+# tools/pooldraw-lint.sh lists the files.
+	sh tools/pooldraw-lint.sh
 	$(CARGO) clippy --workspace --exclude catcard-fw --exclude catcard-kernel --all-targets
 	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std
 	$(CARGO) clippy -p catcard-wallet --all-targets --no-default-features --features std,multichain

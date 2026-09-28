@@ -11,6 +11,9 @@
 //! ([`new_key_c`]), and Debug -> View TRNG Words ([`view_trng_words`]) runs the same
 //! collection and draw on a throwaway pool and only shows the words.
 //!
+//! Outside this module the pool is drawn from only by Seed XOR's random split
+//! (`seedxor.rs`) and by `spawn_drbg`, which seeds a DRBG (`session.rs`, `paperwallet.rs`);
+//! `tools/pooldraw-lint.sh` fails the build if a draw appears anywhere else.
 //! The screens it borrows -- `message`, `ask`, `show_words` and the rest -- are the menu's
 //! shared ones, used by imports and backups as well.
 
