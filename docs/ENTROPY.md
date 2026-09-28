@@ -426,12 +426,23 @@ never replaces*:
 - `fifty_fair_rolls_are_credited_129_bits`, `a_run_cannot_be_worth_more_than_its_digest`
 - `a_die_stuck_on_one_face_is_not_credited`, `a_mash_of_one_key_is_not_counted`
 
-The DRBG is pinned to vectors cross-checked against an independent implementation of
-SP 800-90A written separately from the spec text
-([`tools/reference/drbg_ref.py`](../tools/reference/drbg_ref.py)). That catches a
-refactor changing the generator, but it validates against a second reading of the
-standard rather than against the standard itself — importing the NIST CAVP
-`HMAC_DRBG.rsp` SHA-256 vectors is still open (`TODO(#1)` in `drbg.rs`).
+The DRBG is validated against the standard itself: `crates/catcard-entropy/tests/cavp_hmac_drbg.rs`
+runs **every SHA-256 case** of NIST's CAVP `HMAC_DRBG.rsp` -- 720 in all, 240 from each of
+the three files in `drbgtestvectors.zip` (no reseed; reseed without prediction resistance;
+prediction resistance), covering all four personalization / additional-input
+combinations. Prediction resistance is not a mode of `HmacDrbg`, but SP 800-90A §9.3.1
+defines it as a reseed with fresh entropy right before the generate, which is how those
+cases run. No SHA-256 case is left out. The cases live in
+`tests/data/hmac_drbg_sha256.txt`, extracted by
+[`tools/reference/cavp_hmac_drbg_extract.py`](../tools/reference/cavp_hmac_drbg_extract.py),
+whose header records the SHA-256 of the zip and of each `.rsp` it read and the section
+headers it took cases from. The other hash sections (SHA-1, -224, -384, -512, -512/224,
+-512/256) are not imported: this generator is SHA-256 only.
+
+A second set of vectors, cross-checked against an independent implementation written
+separately from the spec text ([`tools/reference/drbg_ref.py`](../tools/reference/drbg_ref.py)),
+pins the exact outputs the firmware's own call shapes produce (no nonce, the test
+fixture, an unaligned length).
 
 ## Not yet done
 

@@ -255,10 +255,8 @@ mod tests {
     /// Cross-checked byte-for-byte against an independent implementation of
     /// SP 800-90A §10.1.2, written separately from the spec text
     /// (`tools/reference/drbg_ref.py`). These pin the exact generator behaviour so a
-    /// refactor cannot silently change it.
-    ///
-    /// TODO(#1): also import the NIST CAVP `HMAC_DRBG.rsp` SHA-256 vectors, which
-    /// validate against the standard rather than against a second reading of it.
+    /// refactor cannot silently change it. The validation against the standard itself is
+    /// `tests/cavp_hmac_drbg.rs`: every NIST CAVP `HMAC_DRBG.rsp` SHA-256 case.
     #[test]
     fn matches_the_cross_checked_reference_vectors() {
         // Instantiate with 32 zero bytes, no nonce, no personalization.

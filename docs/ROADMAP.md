@@ -259,7 +259,8 @@ with no MetaMask changes and no USB, and it keeps the device air-gapped.
 - **Security review.** Every milestone that touches secrets needs one before it lands.
 - **Reproducible builds.** `SOURCE_DATE_EPOCH` is honoured; the rest of the toolchain
   pinning is [`RELEASING.md`](RELEASING.md).
-- **NIST CAVP DRBG vectors** — `TODO(#1)`.
+- ~~**NIST CAVP DRBG vectors**~~ — done: every HMAC_DRBG SHA-256 case runs in
+  `catcard-entropy/tests/cavp_hmac_drbg.rs`.
 - **Entropy estimation from real captures**, to replace the conservative credit rates
   with measured ones.
 - **Constant-time review** of every comparison and arithmetic path that touches key
