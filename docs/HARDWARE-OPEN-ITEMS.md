@@ -550,6 +550,38 @@ each element separately — a column that lags is visible rather than hidden.
 Worth knowing before designing around it: whether the rate is constant or a burst
 followed by a slower refill, and whether it resets across a reboot.
 
+## Does a secure element's `Random` write its EEPROM? `[?]` on mk4/mk5/Q1
+
+It matters because a paired computer can ask for samples (`RngSample`, docs/USB.md), and
+EEPROM has a write rating: 400,000 cycles per byte on the ATECC608A/B/C (summary
+datasheets, Table 2-1 / 3-1) [C], 100,000 on the DS28C36 (abridged datasheet, "W/E
+Endurance") [C].
+
+- **ATECC508A, `Random` mode 0**: the stored RNG seed "is normally updated once after
+  every power-up or sleep/wake cycle", and mode 0 "Automatically update[s] EEPROM seed
+  only if necessary prior to random number generation" (DS20005927A §3.3.2, §9.15 Table
+  9-44) [C]. The 608A summary calls the part compatible with the 508A but lists an
+  "Updated NIST SP800-90 A/B/C Random Number Generator" (§3.1.1), and the 608's full
+  datasheet is under NDA, so for the 608 the same behaviour is **[I]**.
+- **mk3** (`catcard_hal::se1swi`): we send mode 0 (`p1 = 0`, platform.md §3 [C]) and put
+  the chip to sleep after every read, so each read is a wake and, on the 508A's rule, a
+  seed write **[I]**.
+- **mk4/mk5/Q1, callgate 26**: which mode the bootloader's `ae_secure_random` uses, and
+  whether it sleeps SE1 between calls, is not in the reference **[?]**. Nor is whether the
+  DS28C36's RNG (SE2, `se2_read_rng`) touches EEPROM at all **[?]**.
+
+What the firmware does meanwhile: the paired `RngSample` counts every secure-element read
+as a write and allows 128 a session and 256 a power-up per element
+(`catcard_usb::rng::SE_CALLS_PER_SESSION` / `SE_CALLS_PER_BOOT`) -- at most 0.03% / 0.13% of
+the two ratings per session. The bench's `DebugTrng`, New wallet (1,024 bytes a source for
+the start-up test) and Utils -> Analyze RNG (a read of each element per frame while it is
+open) are not limited by it.
+
+To settle it: a vendor statement for the 608B/608C and the DS28C36 (the full datasheets),
+or the bootloader's documented mode for callgate 26. A confirmed "no EEPROM write per
+read" is what would lift the paired limit; a confirmed per-read write would argue for
+capping Analyze RNG too.
+
 ## Fast wipe (callgate 23) through the ordinary gate entry `[I]`
 
 `Callgate::fast_wipe` calls method 23 with `0xBEEF` (silent) or `0xDEAD` (noisy), which the

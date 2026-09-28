@@ -447,6 +447,8 @@ it is the signature.
 | `0x0044` | `PairConfirm` | **sealed only**, inside `NcryMsg`: the host's user accepted the code. Inner reply `Ok` once paired, `NotNow` while the device's user is still deciding |
 | `0x0045` | `PairAbort` | the host's user refused or gave up: tears down any handshake or session, always `Ok` |
 | `0x0050`..`0x0055` | `Host*` | host-wallet commands, **inside a paired `NcryMsg` only** -- see "Host-wallet commands" below |
+| `0x0060` | `RngSample` | raw samples of the random sources, **inside a paired `NcryMsg` only**, every build, asked of the person once per session -- see "Raw RNG samples and health for a paired computer" below |
+| `0x0061` | `RngHealth` | the random sources' health report, **inside a paired `NcryMsg` only**, every build |
 
 `0x0040` was v1's `NcryStart`. It is retired, not reused: a v1 host gets `UnknownOpcode`.
 `Identify` reports protocol version **2** and the capability `caps::PAIRING` (bit 7); bit 5,
@@ -662,7 +664,7 @@ sources, so they can be assessed off the device with the NIST SP 800-90B estimat
   `UnknownOpcode` from a build without the feature.
 
 **Where the reads happen is the safety property.** The USB task never reads a source. The
-reads run in `trngcap::serve`, which only the **main menu loop** calls, on the UI task.
+reads run in `rngread::serve`, which only the **main menu loop** calls, on the UI task.
 Every seed flow -- New wallet, a temporary seed, key C -- runs on that task, synchronously,
 from that loop, so while one is running the menu loop is not and no capture can happen;
 the device answers `NotNow` until the person is back on a menu. For the same reason the MCU
@@ -676,8 +678,10 @@ the bytes the pool sees; 90B's non-IID estimators do not assume more.
 
 It is a bench feature like the memory monitor: `usb-trng-capture` is a default feature,
 `SHIP=1` (`--no-default-features`) strips it, and CI fails a published image whose strings
-contain `trngcap:`, the prefix of the log lines it writes (one per 256 chunks, and every
-short one).
+contain `trngcap:` -- the line the bench front end (`trngcap`) logs on its first request,
+and its module's name. The reader itself is `rngread`, shared with the paired
+`RngSample` below and present in every build; `DebugTrng` adds nothing to it but the
+plaintext door, which is why only the door is stripped.
 
 ```sh
 tools/trng_capture.py hid --list                   # this board's sources
@@ -688,6 +692,113 @@ tools/trng_assess.py captures/*.bin                # SP 800-90B, see docs/ENTROP
 
 A capture resumes: an existing `captures/<board>-<source>.bin` is appended to until it
 holds `--bytes` (`--fresh` starts over).
+
+### Raw RNG samples and health for a paired computer: `RngSample`, `RngHealth`
+
+A release build has no `DebugTrng`, but its owner may still want to see their device's
+random sources for themselves -- that is the point of this firmware (`docs/ENTROPY.md`).
+Two commands give a paired computer that, in **every** build. Both are **sealed only**:
+they exist only as the inner opcode of an `NcryMsg` on a **paired** session (the six-digit
+code compared on both screens, `ncry` v2 above). In the clear, or on a session still in its
+handshake, they are `UnknownOpcode`. `Identify` has no capability bit for them (every bit
+is taken); a host finds out by asking: an older firmware answers `UnknownOpcode`.
+
+They are in a range of their own, `0x0060`.., after the host-wallet commands: they are not
+wallet commands and ask nothing of the wallet.
+
+#### `RngSample` (`0x0060`)
+
+The same request and chunk as `DebugTrng` (source numbers, list query, `[u8 source][u16
+len]`, `NotNow` until ready, `[u8 source][u8 flags][u16 n][u32 chunk][n bytes]`), from the
+same reader in the same place -- the main menu loop, never inside a seed flow, never the
+pool. What differs:
+
+- **The person at the device is asked, once per session.** The first chunk request of a
+  paired session puts an approval page on the device -- "Share RNG samples?", main line
+  "Raw bytes from this device's random generators, for the paired computer.", small print
+  "Never your seed or keys; these bytes are not used for any wallet." / "Asked once while
+  this computer stays paired." -- with the Utils grid's *Analyze RNG* picture on the Q1
+  (none on the 64-row panels). It is asked from the main menu loop, like the security
+  key's questions, so it waits for the person to be back on a menu. Until they answer,
+  chunk requests are `NotNow` + `[2]` (`rng::wait::ASKING`); a chunk being read is
+  `NotNow` + `[1]` (`READING`). **Yes** lets chunks leave for the rest of that session.
+  **No**, or no answer within a minute, makes every chunk request in that session
+  `Declined`. The session ending -- `PairAbort`, a torn-down channel, a bus reset, an
+  unplug -- forgets the answer (and takes a question still on the screen down); the next
+  session is asked afresh. The list query needs no answer. HSM mode answers no.
+- **The secure elements are read only so often.** Each `Random` a secure element answers
+  may write its EEPROM (below), so a paired session may make at most **128** reads of each
+  secure element, and all sessions together **256** per power-up (`rng::SE_CALLS_PER_SESSION`,
+  `SE_CALLS_PER_BOOT`; counted in calls, declined ones too). The chunk that spends the last
+  carries flags bit 2, *limit*; a request after that is `Refused` + `[1]` (session) or `[2]`
+  (power-up). SE1 through the callgate and SE1 over its own bus are one chip and share an
+  allowance. The MCU TRNG, a register read, has no allowance. The bench's `DebugTrng` does
+  not spend it and is not limited by it.
+- **A secure element's chunk is read a few calls at a time** -- at most four per chunk, so
+  the menu loop is back reading keys within about a tenth of a second -- and is never read
+  ahead of a request: collecting one does not start the next. Expect short chunks (flags bit
+  0) and a round trip each. The MCU TRNG's chunks are read whole and queued as `DebugTrng`'s
+  are.
+
+**Why the secure elements are limited.** The ATECC508A's datasheet (the 608A/B/C's full
+datasheets are under NDA; the 608A's public summary calls it compatible with the 508A,
+§3.1, with an "updated" RNG):
+"Random numbers are generated from a combination of the output of a hardware RNG and an
+internal seed value ... The internal seed is stored in the EEPROM and is normally updated
+once after every power-up or sleep/wake cycle", and its `Random` mode 0 -- the one the mk3
+driver sends -- "Automatically update[s] EEPROM seed only if necessary" (DS20005927A §3.3.2,
+§9.15 Table 9-44) [C for the 508A, I for the 608]. The mk3's own bus driver
+(`catcard_hal::se1swi`) wakes the chip for every read and sends it back to sleep, so on the
+mk3 **every read is a seed write** against the 400,000-cycle rating (summary datasheets,
+Table 2-1/3-1). Whether callgate 26 does the same on mk4/mk5/Q1 -- its mode, whether it
+sleeps the chip between calls -- is not documented [?], nor is whether the DS28C36's RNG
+writes its EEPROM (abridged datasheet; 100,000-cycle rating) [?]. Until they are known,
+each read is counted as a write: 128 reads a session is at most 0.03% of the ATECC's rating
+and 0.13% of the DS28C36's, 256 a power-up twice that. Both unknowns are in
+`docs/HARDWARE-OPEN-ITEMS.md`; a confirmed "no EEPROM write" there is what would lift the
+limit. A paired capture of a secure element is therefore a few kilobytes: enough to see a
+stuck, biased or repeating generator, not the million samples a full SP 800-90B assessment
+takes -- that stays the bench's job.
+
+#### `RngHealth` (`0x0061`)
+
+No payload, no question on the device: `Ok` + the report, which carries verdicts and counts
+of verdicts, never a byte any source produced and nothing of the pool's state:
+
+```text
+[u8 version = 1][u8 pool flags][u8 hardware sources counted][u8 count]
+count x [u8 source][u8 start-up][u8 failure][u8 last read][u16 tested][u16 trips]
+```
+
+| field | meaning |
+|---|---|
+| pool flags bit 0 | *published*: the menu has run since power-up. Without it every other field is zero and means nothing |
+| bit 1 | *pool*: there is a boot entropy pool -- it met its policy at power-up (without one, no wallet can be made this session) |
+| bit 2 | *policy met*: the pool meets its policy now (enough credited bits from enough distinct hardware sources) |
+| bit 3 | *start-up enforced*: a New wallet has run, so a hardware source counts only once its start-up test passed |
+| hardware sources counted | distinct hardware TRNGs the pool counts now |
+| start-up | 0 pending, 1 passed, 2 failed (the source counts for nothing until power-off), 3 not tested (SE1's raw bus on mk3: mixed, credited zero) |
+| failure | why the start-up test failed: 1 repetition count, 2 adaptive proportion, 3 constant output, 4 read too short |
+| last read | the last read's continuous tests (SP 800-90B §4.4): 0 not read yet, 1 passed, 2 tripped |
+| tested | bytes through the start-up window so far (1,024 once passed) |
+| trips | reads that tripped a continuous test since power-up |
+
+The pool lives in the UI task's frame and is never handed to the USB task: the menu loop
+publishes this snapshot on every pass (`rngshare::publish`, a few comparisons per source),
+and `RngHealth` returns the last one. The credited bit count, byte counts and the pool's
+state are deliberately not in it. The value that tripped a test is not either.
+
+```sh
+tools/trng_capture.py hid --paired --list
+tools/trng_capture.py hid --paired --source chip --bytes 1000000   # any build
+tools/rng_report.py hid                                            # the health report
+tools/rng_report.py hid --json
+```
+
+Both pair afresh (compare the code on both screens), and `trng_capture.py --paired` says
+when the device is asking its owner. CatCard Manager (`TibaneLabs/catcard-mgr`, a separate
+project) can offer the same to people who would rather not use a terminal: these two
+commands need nothing but a paired session, the one its host-wallet features pair for.
 
 ### Talking to a real device
 

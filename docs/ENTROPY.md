@@ -523,6 +523,26 @@ tools/trng_capture.py hid --bytes 1000000          # every source -> captures/<b
 a sample is one byte. An interrupted capture resumes where it stopped. The secure elements
 are the slow part (SE2 declines most calls), so expect minutes per source, not seconds.
 
+**Anyone with a release build and a paired computer can do this for their own device.** A
+release has no `DebugTrng`, but it answers the same samples, from the same reader, inside
+a paired session (`RngSample`, `docs/USB.md`): the computer pairs (the six-digit code
+compared on both screens), the device asks its owner once whether to share samples, and
+the capture runs as above:
+
+```sh
+tools/trng_capture.py hid --paired --source chip --bytes 1000000
+tools/rng_report.py hid       # what the pool itself says about each source
+```
+
+The MCU TRNG can be captured in full this way. The secure elements cannot: a paired session
+reads each at most 128 times, and a power-up 256 times, because every read may write their
+EEPROM (`docs/HARDWARE-OPEN-ITEMS.md`) -- a few kilobytes, enough for a quick look at a stuck
+or biased generator, not for a full assessment. `rng_report.py` needs no answer on the
+device: it prints the start-up test's state, the continuous tests' last verdict and how many
+reads have tripped them for each source, and whether the pool met and still meets its
+policy -- verdicts only, never a byte or the pool's state. CatCard Manager
+(`TibaneLabs/catcard-mgr`) can offer both over the same paired session.
+
 **2. Assess.**
 
 ```sh
