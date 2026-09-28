@@ -289,12 +289,18 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
         Opcode::HostSignCommit,
         Opcode::HostResult,
         Opcode::HostAbort,
+        Opcode::RngSample,
+        Opcode::RngHealth,
+        Opcode::DebugTrng,
     ] {
         assert_eq!(Opcode::from_u16(op as u16), Some(op));
     }
     // The host-wallet opcodes are the published numbers.
     assert_eq!(Opcode::HostAddresses as u16, 0x0050);
     assert_eq!(Opcode::HostAbort as u16, 0x0055);
+    // So are the paired RNG ones.
+    assert_eq!(Opcode::RngSample as u16, 0x0060);
+    assert_eq!(Opcode::RngHealth as u16, 0x0061);
     // The retired v1 handshake is unknown, not quietly some other command.
     assert_eq!(Opcode::from_u16(0x0040), None);
     // An unknown opcode has to reach the caller as a number so it can be answered with

@@ -53,6 +53,7 @@ pub mod hostwallet;
 pub mod kbd;
 pub mod msc;
 pub mod ncry;
+pub mod rng;
 
 /// Every report is exactly this long, in both directions.
 pub const REPORT_LEN: usize = 64;
@@ -248,6 +249,24 @@ pub enum Opcode {
     /// Drop an upload that was not committed, or a result nobody will fetch. Cannot
     /// withdraw a request already waiting for the person. Only inside the channel.
     HostAbort = 0x0055,
+    /// Raw, unmixed samples from one of the board's random sources, for a paired
+    /// computer to show its owner. **Only inside [`Opcode::NcryMsg`]**, in every build.
+    ///
+    /// The same request and reply as [`Opcode::DebugTrng`] ([`rng`] has the shapes), with
+    /// three differences. The first chunk request of a session puts a question on the
+    /// device, and until the person answers it is `NotNow` + [`rng::wait::ASKING`]; a
+    /// "no" (or no answer) makes every chunk request in that session `Declined`. A
+    /// secure element may be read only so many times a session and a power-up
+    /// ([`rng::SE_CALLS_PER_SESSION`], [`rng::SE_CALLS_PER_BOOT`]): the chunk that spends
+    /// the last carries [`rng::flags::LIMIT`], and after it `Refused` + [`rng::limit`].
+    /// And a secure element's chunk is read a few calls at a time, so the menu keeps
+    /// answering keys: expect short chunks. The list query needs no answer from the
+    /// person. See `docs/USB.md`.
+    RngSample = 0x0060,
+    /// The random sources' health, as the entropy pool judges them: [`rng::Health`].
+    /// **Only inside [`Opcode::NcryMsg`]**. Verdicts and counts of verdicts only -- no
+    /// byte any source produced, no pool state. No payload; no question on the device.
+    RngHealth = 0x0061,
 }
 
 impl Opcode {
@@ -274,6 +293,8 @@ impl Opcode {
             0x0053 => Opcode::HostSignCommit,
             0x0054 => Opcode::HostResult,
             0x0055 => Opcode::HostAbort,
+            0x0060 => Opcode::RngSample,
+            0x0061 => Opcode::RngHealth,
             0x0020 => Opcode::InjectKey,
             0x0021 => Opcode::UnlockPin,
             0x0030 => Opcode::DebugPeek,
