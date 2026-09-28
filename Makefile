@@ -90,6 +90,7 @@ q1:
 # on the host.
 test:
 	$(CARGO) test --workspace --exclude catcard-fw --exclude catcard-kernel
+	python3 tools/test_trng_assess.py
 
 # What CI runs, so a green tree here means a green tree there.
 #

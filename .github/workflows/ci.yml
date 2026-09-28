@@ -33,6 +33,8 @@ jobs:
       # job failed on `invalid register r0` before reaching a single test of ours.
       - run: cargo clippy --workspace --exclude catcard-fw --exclude catcard-kernel --all-targets
       - run: cargo test --workspace --exclude catcard-fw --exclude catcard-kernel
+      # The SP 800-90B estimators behind tools/trng_assess.py, against known inputs.
+      - run: python3 tools/test_trng_assess.py
 
   firmware:
     name: ${{ matrix.board }} ${{ matrix.chains }}${{ matrix.games && ' +games' || '' }}

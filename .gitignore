@@ -7,6 +7,8 @@
 # linker map, emitted next to the invocation by catcard-fw/build.rs
 catcard.map
 *.bin
+# ...except the reference samples the tool tests run against
+!tools/testdata/*.bin
 *.dfu
 *.elf
 *.hex
