@@ -101,6 +101,8 @@ mod menu;
 mod msc_drive;
 /// Registering a multisig wallet from a descriptor on the card.
 mod msimport;
+/// New wallet: fresh TRNG bytes to a seed stored and read back (docs/ENTROPY.md).
+mod newseed;
 /// The NFC tag, where a board has one: handing a phone a URL by tap.
 #[cfg(not(feature = "board-mk3"))]
 mod nfc;

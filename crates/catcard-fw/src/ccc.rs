@@ -541,7 +541,7 @@ fn provide_key_c(
     }
     let row = menu::pick_row(ui, "Key C", "where key C comes from", &rows)?;
     match rows[row] {
-        "New 12 words" => menu::new_key_c(gate, login, ui, pool, 12),
+        "New 12 words" => crate::newseed::new_key_c(gate, login, ui, pool, 12),
         "Import 12 words" | "Import 24 words" => {
             let n = if row == 1 { 12 } else { 24 };
             let m = menu::read_phrase_of(ui, Some(n))?;
