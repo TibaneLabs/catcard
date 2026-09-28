@@ -161,6 +161,11 @@ mod recovery;
 /// Debug: write a settings image staged by the memory monitor back over the region.
 #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
 mod restore;
+/// Raw TRNG samples over USB: the one reader behind the bench's `DebugTrng` and the
+/// paired `RngSample`.
+mod rngread;
+/// A paired computer reading the random sources' samples and health.
+mod rngshare;
 /// Device-bound whole-card SD encryption (AES-128-XTS): session unlock state and the
 /// Encrypt/Unlock/Remove operations.
 mod sdcrypt;
@@ -208,7 +213,7 @@ mod torch;
 #[cfg(not(feature = "board-mk3"))]
 mod trickpin;
 mod trng;
-/// Raw TRNG capture over USB, for SP 800-90B assessment. Bench builds only.
+/// The bench's plaintext raw TRNG capture (`DebugTrng`). Bench builds only.
 #[cfg(feature = "usb-trng-capture")]
 mod trngcap;
 /// Debug -> TRNG startup test: the SP 800-90B start-up test, run on demand.

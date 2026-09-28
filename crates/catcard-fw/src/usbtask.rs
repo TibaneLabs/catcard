@@ -1007,10 +1007,10 @@ impl UsbTask {
                 }
             }
             // Raw TRNG bytes for offline assessment. Recorded here, read by the menu loop:
-            // see `trngcap` for why the reads never happen on this side.
+            // see `rngread` for why the reads never happen on this side.
             #[cfg(feature = "usb-trng-capture")]
             Some(Opcode::DebugTrng) => {
-                let mut body = [0u8; crate::trngcap::REPLY_LEN];
+                let mut body = [0u8; crate::rngread::REPLY_LEN];
                 let (status, n) = crate::trngcap::request(progress.payload, &mut body);
                 self.begin_reply(status, &body[..n]);
                 body.zeroize();
@@ -1077,7 +1077,9 @@ impl UsbTask {
                 | Opcode::HostSignData
                 | Opcode::HostSignCommit
                 | Opcode::HostResult
-                | Opcode::HostAbort,
+                | Opcode::HostAbort
+                | Opcode::RngSample
+                | Opcode::RngHealth,
             ) => self.begin_reply(Status::UnknownOpcode, &[]),
             Some(Opcode::PairCommit) => self.pair_commit(progress.payload),
             Some(Opcode::PairReveal) => self.pair_reveal(progress.payload),
@@ -1206,6 +1208,7 @@ impl UsbTask {
     fn end_session(&mut self, bus_reset: bool) {
         self.chan.close();
         self.host.session_ended(bus_reset);
+        crate::rngshare::session_ended();
     }
 
     /// A sealed request that fitted one frame: copied off the frame, then opened.
@@ -1404,6 +1407,20 @@ impl UsbTask {
                     upgrade_busy,
                 };
                 self.host.dispatch(op, payload, out, &cx)
+            }
+            // Raw RNG samples and the sources' health, for a paired computer. The reads
+            // happen in the menu loop, after the person has said yes: `rngshare`.
+            Some(Opcode::RngSample) => {
+                if !self.chan.host_wallet_allowed() {
+                    return (Status::UnknownOpcode, 0);
+                }
+                crate::rngshare::sample(self.chan.id(), payload, out)
+            }
+            Some(Opcode::RngHealth) => {
+                if !self.chan.host_wallet_allowed() {
+                    return (Status::UnknownOpcode, 0);
+                }
+                crate::rngshare::health(out)
             }
             Some(Opcode::Ping) => {
                 let n = payload.len().min(out.len());

@@ -1283,10 +1283,11 @@ pub fn run(session: Session<'_>) -> ! {
         }
 
         let _ = usbtask::pump();
-        // A bench build's raw TRNG capture reads here and nowhere else, so it can never
-        // run inside a seed flow (`trngcap`).
-        #[cfg(feature = "usb-trng-capture")]
-        crate::trngcap::serve(gate);
+        // Raw TRNG samples for a computer (the bench's capture, or a paired one's) are
+        // read here and nowhere else, so they can never run inside a seed flow
+        // (`rngread`). And the pool's health, for a paired computer to ask about.
+        crate::rngread::serve(gate);
+        crate::rngshare::publish(pool.as_deref());
         display::idle(ui.panel);
 
         // The RTC screen redraws on a clock rather than on input: it is showing something
@@ -1375,6 +1376,16 @@ pub fn run(session: Session<'_>) -> ! {
                 display::wipe(ui.panel);
             }
             crate::ckcc::serve(gate, login, &mut ui);
+            redraw = true;
+            continue;
+        }
+        // A paired computer asking to read the random sources (`crate::rngshare`).
+        if !showing_offer && receiving.is_none() && crate::rngshare::pending() {
+            keys.clear();
+            if screen == Screen::Colours {
+                display::wipe(ui.panel);
+            }
+            crate::rngshare::serve(&mut ui);
             redraw = true;
             continue;
         }

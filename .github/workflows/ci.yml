@@ -119,7 +119,8 @@ jobs:
           # Markers that track the features rather than the vocabulary: `debug_mem` is
           # the module, gated on `usb-debug-mem`; `injected`/`inject_key` are the key
           # path; the boot warning is printed only by a build that has the monitor; and
-          # `trngcap:` is the log prefix of the raw TRNG capture (`usb-trng-capture`).
+          # `trngcap:` is logged only by the plaintext raw TRNG capture's front end
+          # (`usb-trng-capture`; the paired `RngSample` shares its reader, not the marker).
           # Deliberately *not* "peek" or "poke", which also match `Peekable` from the
           # filesystem iterators and `DebugPeek`, an opcode name that exists in every
           # build because only its handler is compiled out.

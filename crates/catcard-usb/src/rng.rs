@@ -27,6 +27,10 @@ pub const HEADER: usize = 8;
 /// The largest body a sample reply has.
 pub const REPLY_LEN: usize = HEADER + CHUNK_MAX;
 
+// A chunk fits a sealed reply: the device's 512-byte reply, less the inner status and
+// the tag.
+const _: () = assert!(REPLY_LEN <= 512 - 2 - crate::ncry::TAG_LEN);
+
 /// Wire numbers of the sources. Fixed: a host keeps captures by them.
 pub mod source {
     /// The MCU's own TRNG.
@@ -439,7 +443,7 @@ impl Health {
             hw_sources: b[2],
             ..Health::default()
         };
-        for o in b[health::HEAD..].chunks_exact(health::PER_SOURCE) {
+        for o in b[health::HEAD..].as_chunks::<{ health::PER_SOURCE }>().0 {
             h.push(SourceHealth {
                 source: o[0],
                 startup: o[1],
@@ -484,12 +488,6 @@ mod tests {
         let mut out = [0u8; 8];
         let n = list_body(&[source::SE1, source::SE2, source::CHIP], &mut out);
         assert_eq!(&out[..n], &[0xC0, 0x01, 3, 2, 3, 1]);
-    }
-
-    #[test]
-    fn a_chunk_fits_a_sealed_reply() {
-        // 512-byte reply, less the inner status and the 16-byte tag.
-        assert!(REPLY_LEN <= 512 - 2 - crate::ncry::TAG_LEN);
     }
 
     #[test]

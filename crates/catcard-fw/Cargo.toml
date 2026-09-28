@@ -29,10 +29,11 @@ default = ["usb-key-injection", "usb-debug-mem", "usb-trng-capture", "games", "d
 dev = []
 usb-key-injection = []
 usb-debug-mem = []
-# `DebugTrng`: raw, unmixed bytes from each hardware random source over USB, for NIST
-# SP 800-90B assessment off the device (`tools/trng_capture.py`, `tools/trng_assess.py`).
-# Never the pool, never during a seed operation -- but still a bench tool, so a release
-# strips it like the other two. See docs/USB.md.
+# `DebugTrng`: raw, unmixed bytes from each hardware random source over plaintext USB,
+# for NIST SP 800-90B assessment off the device (`tools/trng_capture.py`,
+# `tools/trng_assess.py`). Never the pool, never during a seed operation -- but plaintext,
+# unasked and unlimited, so a release strips it like the other two. A release keeps the
+# same reader behind the paired, consented, rate-limited `RngSample`. See docs/USB.md.
 usb-trng-capture = []
 # The Games menu under Utils (Block Mine, ...). On by default; a build can drop it to
 # save flash without touching the rest of the UI.
