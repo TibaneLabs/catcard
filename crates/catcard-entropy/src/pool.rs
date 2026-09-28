@@ -29,7 +29,7 @@ use core::fmt;
 use purecrypto::hash::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::health::{Startup, StartupTest};
+use crate::health::{HealthError, Startup, StartupTest};
 
 /// Where a contribution came from. The variant decides how much entropy is credited.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -204,6 +204,18 @@ impl Default for Policy {
     }
 }
 
+/// One hardware TRNG's health, from [`EntropyPool::status`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SourceStatus {
+    /// Where its SP 800-90B start-up test stands.
+    pub startup: Startup,
+    /// Whether its last read passed the continuous tests; `None` before any read the
+    /// tests could judge.
+    pub last_ok: Option<bool>,
+    /// Reads that tripped a continuous test since the pool was made.
+    pub trips: u32,
+}
+
 /// Why a draw was refused.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Insufficient {
@@ -242,6 +254,13 @@ pub struct EntropyPool {
     /// Start-up and continuous health tests, one per hardware TRNG.
     #[zeroize(skip)]
     health: [StartupTest; HW_SOURCES.len()],
+    /// Per hardware TRNG: the last read's continuous verdict (`None` before any read
+    /// that could be judged) and how many reads have tripped. Verdicts only -- kept for
+    /// [`EntropyPool::status`], which is all a caller outside the pool may see of it.
+    #[zeroize(skip)]
+    last_ok: [Option<bool>; HW_SOURCES.len()],
+    #[zeroize(skip)]
+    trips: [u32; HW_SOURCES.len()],
     /// Whether a hardware source counts only once its start-up test has passed. One-way.
     #[zeroize(skip)]
     startup_enforced: bool,
@@ -263,6 +282,8 @@ impl EntropyPool {
             credit_from: [0; NUM_SOURCES],
             bytes_from: [0; NUM_SOURCES],
             health: core::array::from_fn(|_| StartupTest::new()),
+            last_ok: [None; HW_SOURCES.len()],
+            trips: [0; HW_SOURCES.len()],
             startup_enforced: false,
             draw_counter: 0,
             policy,
@@ -281,13 +302,23 @@ impl EntropyPool {
         // Health-test the real noise sources. Derived and public values are not noise
         // and would fail these tests for legitimate reasons.
         // Every read of a hardware source also advances its start-up test.
-        if let Some(i) = hw_index(source)
-            && self.health[i].feed(data).is_err()
-        {
-            // Absorb it for whatever unpredictability it holds, but credit nothing and do
-            // not count it as a healthy source.
-            self.absorb(source, data);
-            return;
+        if let Some(i) = hw_index(source) {
+            let verdict = self.health[i].feed(data);
+            match verdict {
+                Ok(()) => self.last_ok[i] = Some(true),
+                // Too short to judge is not a verdict on the source.
+                Err(HealthError::TooShort { .. }) => {}
+                Err(_) => {
+                    self.last_ok[i] = Some(false);
+                    self.trips[i] = self.trips[i].saturating_add(1);
+                }
+            }
+            if verdict.is_err() {
+                // Absorb it for whatever unpredictability it holds, but credit nothing
+                // and do not count it as a healthy source.
+                self.absorb(source, data);
+                return;
+            }
         }
 
         self.absorb(source, data);
@@ -330,6 +361,18 @@ impl EntropyPool {
     /// A hardware TRNG's start-up test state; `None` for a source that is not one.
     pub fn startup(&self, source: Source) -> Option<Startup> {
         hw_index(source).map(|i| self.health[i].state())
+    }
+
+    /// A hardware TRNG's health as the pool has judged it; `None` for a source that is
+    /// not one. Verdicts and counts of verdicts only: nothing here is derived from the
+    /// pool's state or from the value of any byte, so it may be shown to anyone -- it is
+    /// what a paired computer's health report carries.
+    pub fn status(&self, source: Source) -> Option<SourceStatus> {
+        hw_index(source).map(|i| SourceStatus {
+            startup: self.health[i].state(),
+            last_ok: self.last_ok[i],
+            trips: self.trips[i],
+        })
     }
 
     /// Whether `source`'s contribution counts right now.
@@ -1034,6 +1077,32 @@ mod tests {
             p.check(),
             Err(Insufficient::HardwareSources { have: 0, .. })
         ));
+    }
+
+    #[test]
+    fn status_reports_verdicts_for_hardware_sources_only() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        let fresh = p.status(Source::Stm32Trng).unwrap();
+        assert_eq!(fresh.last_ok, None);
+        assert_eq!(fresh.trips, 0);
+        assert_eq!(fresh.startup, Startup::Pending { tested: 0 });
+        assert_eq!(p.status(Source::UserTiming), None);
+        assert_eq!(p.status(Source::Se1TrngUnauthenticated), None);
+
+        p.add(Source::Stm32Trng, &noise(1, 64));
+        let s = p.status(Source::Stm32Trng).unwrap();
+        assert_eq!(s.last_ok, Some(true));
+        assert_eq!(s.startup, Startup::Pending { tested: 64 });
+
+        // A stuck read trips, and says so; a short one is not a verdict.
+        p.add(Source::Se2Trng, &[0u8; 32]);
+        p.add(Source::Se2Trng, &[7u8; 1]);
+        let s = p.status(Source::Se2Trng).unwrap();
+        assert_eq!(s.last_ok, Some(false));
+        assert_eq!(s.trips, 1);
+        assert!(matches!(s.startup, Startup::Failed(_)));
+        // The other sources are untouched.
+        assert_eq!(p.status(Source::Se1Trng).unwrap().last_ok, None);
     }
 
     #[test]

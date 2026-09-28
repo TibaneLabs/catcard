@@ -28,7 +28,7 @@ pub mod user;
 
 pub use drbg::{DrbgStats, HmacDrbg};
 pub use health::{ContinuousTest, HealthError, STARTUP_SAMPLES, Startup, StartupTest};
-pub use pool::{EntropyPool, Insufficient, Policy, Source};
+pub use pool::{EntropyPool, Insufficient, Policy, Source, SourceStatus};
 pub use user::{Alphabet, Rejected, UserSymbols, Weak};
 
 /// Personalization strings for [`HmacDrbg`] instances.
