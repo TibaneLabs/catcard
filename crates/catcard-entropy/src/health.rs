@@ -124,9 +124,189 @@ pub fn check_once(sample: &[u8]) -> Result<(), HealthError> {
     ContinuousTest::new().check(sample)
 }
 
+/// Consecutive samples the start-up test must see pass before a source's output is used.
+///
+/// SP 800-90B §4.3: the start-up tests use the §4.4 health tests "on at least 1024
+/// consecutive samples" before the first use of the noise source. A sample here is one
+/// byte, as it is for the continuous tests.
+pub const STARTUP_SAMPLES: usize = 1024;
+
+/// Where a source's start-up test stands.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Startup {
+    /// Still collecting: `tested` consecutive bytes have passed so far.
+    Pending { tested: usize },
+    /// [`STARTUP_SAMPLES`] consecutive bytes passed the continuous tests.
+    Passed,
+    /// A continuous test tripped inside the start-up window. Sticky: a source that fails
+    /// its start-up test stays failed for the rest of the session, however well it
+    /// behaves afterwards.
+    Failed(HealthError),
+}
+
+/// The SP 800-90B §4.3 start-up test for one source: the §4.4 continuous tests (same
+/// cutoffs, same state carried across reads) run over the first [`STARTUP_SAMPLES`]
+/// bytes the source produces, and a verdict on those.
+///
+/// The continuous tests keep running after the verdict, so one instance is all a source
+/// needs; [`feed`](Self::feed) returns the continuous verdict for each read.
+#[derive(Clone, Debug)]
+pub struct StartupTest {
+    continuous: ContinuousTest,
+    state: Startup,
+}
+
+impl Default for StartupTest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StartupTest {
+    pub const fn new() -> Self {
+        Self {
+            continuous: ContinuousTest::new(),
+            state: Startup::Pending { tested: 0 },
+        }
+    }
+
+    pub fn state(&self) -> Startup {
+        self.state
+    }
+
+    pub fn passed(&self) -> bool {
+        self.state == Startup::Passed
+    }
+
+    /// Feed the source's next read. Runs the continuous tests on it and advances the
+    /// start-up verdict; returns the continuous verdict for this read, which is what
+    /// decides whether *this read* is credited.
+    ///
+    /// A read too short to judge ([`HealthError::TooShort`]) neither advances nor fails
+    /// the start-up test: it was not tested, so it cannot count as a tested sample, and a
+    /// short answer is not evidence of a fault.
+    pub fn feed(&mut self, sample: &[u8]) -> Result<(), HealthError> {
+        let verdict = self.continuous.check(sample);
+        if let Startup::Pending { tested } = self.state {
+            self.state = match verdict {
+                Ok(()) => {
+                    let tested = tested.saturating_add(sample.len());
+                    if tested >= STARTUP_SAMPLES {
+                        Startup::Passed
+                    } else {
+                        Startup::Pending { tested }
+                    }
+                }
+                Err(HealthError::TooShort { .. }) => self.state,
+                Err(e) => Startup::Failed(e),
+            };
+        }
+        verdict
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream(tag: u8, n: usize) -> Vec<u8> {
+        use purecrypto::hash::{Digest, Sha256};
+        let mut out = Vec::new();
+        let mut h = [tag; 32];
+        while out.len() < n {
+            h = Sha256::digest(&h);
+            out.extend_from_slice(&h);
+        }
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn startup_needs_the_full_window_before_it_passes() {
+        let mut t = StartupTest::new();
+        let s = stream(1, STARTUP_SAMPLES);
+        let (a, b) = s.split_at(STARTUP_SAMPLES - 32);
+        assert!(t.feed(a).is_ok());
+        assert_eq!(
+            t.state(),
+            Startup::Pending {
+                tested: STARTUP_SAMPLES - 32
+            }
+        );
+        assert!(!t.passed());
+        assert!(t.feed(b).is_ok());
+        assert!(t.passed());
+    }
+
+    #[test]
+    fn a_fault_inside_the_window_fails_startup_for_good() {
+        let mut t = StartupTest::new();
+        t.feed(&stream(2, 256)).unwrap();
+        assert!(t.feed(&[0u8; 32]).is_err());
+        assert_eq!(
+            t.state(),
+            Startup::Failed(HealthError::Constant { value: 0 })
+        );
+        // Behaving afterwards does not bring it back.
+        for i in 0..8 {
+            assert!(t.feed(&stream(10 + i, 512)).is_ok());
+        }
+        assert!(matches!(t.state(), Startup::Failed(_)));
+    }
+
+    #[test]
+    fn a_fault_after_startup_is_a_continuous_failure_only() {
+        let mut t = StartupTest::new();
+        t.feed(&stream(3, STARTUP_SAMPLES)).unwrap();
+        assert!(t.passed());
+        assert!(
+            t.feed(&[0xffu8; 32]).is_err(),
+            "the read itself still fails"
+        );
+        assert!(
+            t.passed(),
+            "the start-up verdict is about the start-up window"
+        );
+    }
+
+    #[test]
+    fn a_run_straddling_reads_inside_the_window_fails_startup() {
+        let mut t = StartupTest::new();
+        let mut a = stream(4, 64);
+        a[61..].fill(0x33);
+        t.feed(&a).unwrap();
+        let mut b = stream(5, 64);
+        b[..2].fill(0x33);
+        assert!(t.feed(&b).is_err());
+        assert!(matches!(
+            t.state(),
+            Startup::Failed(HealthError::Repetition { value: 0x33, .. })
+        ));
+    }
+
+    #[test]
+    fn short_reads_neither_advance_nor_fail_startup() {
+        let mut t = StartupTest::new();
+        assert!(t.feed(&[1, 2, 3]).is_err());
+        assert_eq!(t.state(), Startup::Pending { tested: 0 });
+    }
+
+    #[test]
+    fn a_biased_source_fails_startup_on_the_adaptive_test() {
+        let mut s = Vec::new();
+        for i in 0..STARTUP_SAMPLES / 2 {
+            s.push(0x42);
+            s.push((i % 97) as u8 | 1);
+        }
+        let mut t = StartupTest::new();
+        for chunk in s.chunks(32) {
+            let _ = t.feed(chunk);
+        }
+        assert!(matches!(
+            t.state(),
+            Startup::Failed(HealthError::AdaptiveProportion { value: 0x42, .. })
+        ));
+    }
 
     /// Deterministic non-random-looking-but-varied filler for the happy paths.
     fn counter(n: usize) -> Vec<u8> {

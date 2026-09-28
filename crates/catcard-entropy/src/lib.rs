@@ -27,7 +27,7 @@ pub mod pool;
 pub mod user;
 
 pub use drbg::{DrbgStats, HmacDrbg};
-pub use health::{ContinuousTest, HealthError};
+pub use health::{ContinuousTest, HealthError, STARTUP_SAMPLES, Startup, StartupTest};
 pub use pool::{EntropyPool, Insufficient, Policy, Source};
 pub use user::{Alphabet, Rejected, UserSymbols, Weak};
 

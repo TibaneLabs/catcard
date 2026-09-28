@@ -29,7 +29,7 @@ use core::fmt;
 use purecrypto::hash::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::health::ContinuousTest;
+use crate::health::{Startup, StartupTest};
 
 /// Where a contribution came from. The variant decides how much entropy is credited.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -151,6 +151,34 @@ impl Source {
 
 const NUM_SOURCES: usize = 11;
 
+/// Every source, once each, for sums over the per-source counters.
+const ALL_SOURCES: [Source; NUM_SOURCES] = [
+    Source::Stm32Trng,
+    Source::BootloaderTrng,
+    Source::Se1Trng,
+    Source::Se2Trng,
+    Source::Se1TrngUnauthenticated,
+    Source::UserTiming,
+    Source::UserKeypad,
+    Source::UserDice,
+    Source::UserCoin,
+    Source::Auxiliary,
+    Source::NonSecret,
+];
+
+/// The hardware TRNGs, which are the sources that run health tests. Their slot in
+/// [`EntropyPool`]'s per-source test state.
+const HW_SOURCES: [Source; 3] = [Source::Stm32Trng, Source::Se1Trng, Source::Se2Trng];
+
+const fn hw_index(source: Source) -> Option<usize> {
+    match source {
+        Source::Stm32Trng => Some(0),
+        Source::Se1Trng => Some(1),
+        Source::Se2Trng => Some(2),
+        _ => None,
+    }
+}
+
 /// The bar a pool must clear before it may produce wallet-seed material.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
@@ -217,12 +245,18 @@ impl std::error::Error for Insufficient {}
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct EntropyPool {
     state: [u8; 64],
+    /// Bits credited per source, so a source whose start-up test fails can have its
+    /// whole contribution withdrawn (see [`EntropyPool::enforce_startup`]).
     #[zeroize(skip)]
-    credited_bits: u32,
+    credit_from: [u32; NUM_SOURCES],
     #[zeroize(skip)]
     bytes_from: [u32; NUM_SOURCES],
+    /// Start-up and continuous health tests, one per hardware TRNG.
     #[zeroize(skip)]
-    health: [ContinuousTest; NUM_SOURCES],
+    health: [StartupTest; HW_SOURCES.len()],
+    /// Whether a hardware source counts only once its start-up test has passed. One-way.
+    #[zeroize(skip)]
+    startup_enforced: bool,
     #[zeroize(skip)]
     draw_counter: u64,
     #[zeroize(skip)]
@@ -238,9 +272,10 @@ impl EntropyPool {
         state.copy_from_slice(&seed);
         Self {
             state,
-            credited_bits: 0,
+            credit_from: [0; NUM_SOURCES],
             bytes_from: [0; NUM_SOURCES],
-            health: core::array::from_fn(|_| ContinuousTest::new()),
+            health: core::array::from_fn(|_| StartupTest::new()),
+            startup_enforced: false,
             draw_counter: 0,
             policy,
         }
@@ -257,7 +292,10 @@ impl EntropyPool {
     pub fn add(&mut self, source: Source, data: &[u8]) {
         // Health-test the real noise sources. Derived and public values are not noise
         // and would fail these tests for legitimate reasons.
-        if source.is_hardware_trng() && self.health[source.index()].check(data).is_err() {
+        // Every read of a hardware source also advances its start-up test.
+        if let Some(i) = hw_index(source)
+            && self.health[i].feed(data).is_err()
+        {
             // Absorb it for whatever unpredictability it holds, but credit nothing and do
             // not count it as a healthy source.
             self.absorb(source, data);
@@ -267,11 +305,51 @@ impl EntropyPool {
         self.absorb(source, data);
 
         let bits = (data.len() as u64).saturating_mul(source.bits_per_byte() as u64);
-        self.credited_bits = self
-            .credited_bits
-            .saturating_add(bits.min(u32::MAX as u64) as u32);
+        self.credit(source, bits.min(u32::MAX as u64) as u32);
         self.bytes_from[source.index()] =
             self.bytes_from[source.index()].saturating_add(data.len() as u32);
+    }
+
+    fn credit(&mut self, source: Source, bits: u32) {
+        let c = &mut self.credit_from[source.index()];
+        *c = c.saturating_add(bits);
+    }
+
+    /// From now on, a hardware TRNG counts -- its bits and its place toward the
+    /// hardware-source requirement -- only once its SP 800-90B §4.3 start-up test has
+    /// passed: [`STARTUP_SAMPLES`](crate::health::STARTUP_SAMPLES) consecutive bytes, the
+    /// first the pool saw from it, through the continuous tests without a trip.
+    ///
+    /// - A source still **pending** has its bytes absorbed and its credit held: none of it
+    ///   counts until the test passes, and then all of it does.
+    /// - A source that **failed** its start-up test counts for nothing for the rest of
+    ///   the pool's life, including anything it was credited before this call.
+    /// - Sources that are not hardware TRNGs are unaffected.
+    ///
+    /// One-way: there is no call to turn it off again. The start-up test itself runs on
+    /// every pool from its first read; this only decides whether the verdict is enforced.
+    /// Boot does not enforce it (its reads are 64 bytes a source, well short of the
+    /// window); a New wallet does, after reading enough. See `docs/ENTROPY.md`.
+    pub fn enforce_startup(&mut self) {
+        self.startup_enforced = true;
+    }
+
+    /// Whether [`enforce_startup`](Self::enforce_startup) has been called.
+    pub fn startup_enforced(&self) -> bool {
+        self.startup_enforced
+    }
+
+    /// A hardware TRNG's start-up test state; `None` for a source that is not one.
+    pub fn startup(&self, source: Source) -> Option<Startup> {
+        hw_index(source).map(|i| self.health[i].state())
+    }
+
+    /// Whether `source`'s contribution counts right now.
+    fn counts(&self, source: Source) -> bool {
+        match hw_index(source) {
+            Some(i) => !self.startup_enforced || self.health[i].passed(),
+            None => true,
+        }
     }
 
     /// Absorb a single timing observation (e.g. `DWT_CYCCNT` at a keypress edge).
@@ -306,7 +384,7 @@ impl EntropyPool {
         digest.zeroize();
 
         let bits = run.credited_bits();
-        self.credited_bits = self.credited_bits.saturating_add(bits);
+        self.credit(source, bits);
         // Count the symbols, not the digest's 32 bytes: the report should say how many
         // times the owner rolled.
         self.bytes_from[source.index()] =
@@ -325,16 +403,23 @@ impl EntropyPool {
         self.state.copy_from_slice(&h.finalize());
     }
 
-    /// Total credited entropy.
+    /// Total credited entropy that counts right now. Once the start-up test is enforced,
+    /// a hardware source that has not passed it contributes nothing here.
     pub fn credited_bits(&self) -> u32 {
-        self.credited_bits
+        ALL_SOURCES
+            .iter()
+            .filter(|&&s| self.counts(s))
+            .fold(0u32, |acc, s| {
+                acc.saturating_add(self.credit_from[s.index()])
+            })
     }
 
-    /// Distinct hardware TRNGs that have contributed at least one byte.
+    /// Distinct hardware TRNGs that have contributed at least one healthy byte (and,
+    /// once enforced, passed their start-up test).
     pub fn hardware_sources(&self) -> u32 {
-        [Source::Stm32Trng, Source::Se1Trng, Source::Se2Trng]
+        HW_SOURCES
             .iter()
-            .filter(|s| self.bytes_from[s.index()] > 0)
+            .filter(|&&s| self.bytes_from[s.index()] > 0 && self.counts(s))
             .count() as u32
     }
 
@@ -346,15 +431,16 @@ impl EntropyPool {
     /// refuse.
     pub fn check(&self) -> Result<(), Insufficient> {
         let hw = self.hardware_sources();
+        let credited_bits = self.credited_bits();
         if hw < self.policy.min_hw_sources {
             return Err(Insufficient::HardwareSources {
                 have: hw,
                 need: self.policy.min_hw_sources,
             });
         }
-        if self.credited_bits < self.policy.min_bits {
+        if credited_bits < self.policy.min_bits {
             return Err(Insufficient::Bits {
-                have: self.credited_bits,
+                have: credited_bits,
                 need: self.policy.min_bits,
             });
         }
@@ -849,5 +935,141 @@ mod tests {
         }
         assert_eq!(p.add_user(&mash), 0);
         assert_eq!(p.credited_bits(), 0);
+    }
+
+    // -- SP 800-90B §4.3 start-up test ------------------------------------------------
+
+    use crate::health::{HealthError, STARTUP_SAMPLES};
+
+    /// Feed `n` good bytes from `source` in 32-byte reads, as the firmware does.
+    fn feed(p: &mut EntropyPool, source: Source, tag: u8, n: usize) {
+        for chunk in noise(tag, n).chunks(32) {
+            p.add(source, chunk);
+        }
+    }
+
+    /// What boot does today: 64 bytes from each hardware source.
+    fn boot_pool() -> EntropyPool {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        feed(&mut p, Source::Stm32Trng, 1, 64);
+        feed(&mut p, Source::Se1Trng, 2, 64);
+        feed(&mut p, Source::Se2Trng, 3, 64);
+        p
+    }
+
+    #[test]
+    fn the_boot_pool_is_unchanged_until_startup_is_enforced() {
+        // Boot reads 64 bytes a source, far short of the start-up window. Without
+        // enforcement the pool credits them exactly as before, so boot's policy check and
+        // the session DRBGs drawn from it behave as they always have.
+        let p = boot_pool();
+        assert_eq!(p.credited_bits(), 3 * 64 * 4);
+        assert_eq!(p.hardware_sources(), 3);
+        assert!(p.check().is_ok());
+        assert!(!p.startup_enforced());
+        assert_eq!(
+            p.startup(Source::Se1Trng),
+            Some(Startup::Pending { tested: 64 })
+        );
+        assert_eq!(p.startup(Source::BootloaderTrng), None);
+    }
+
+    #[test]
+    fn a_source_is_not_credited_until_its_startup_test_has_passed() {
+        let mut p = boot_pool();
+        p.enforce_startup();
+        // Boot's 64 bytes a source are absorbed but their credit is held.
+        assert_eq!(p.credited_bits(), 0);
+        assert_eq!(p.hardware_sources(), 0);
+        assert!(p.check().is_err());
+
+        // One source completes its window: it counts, the others still do not.
+        feed(&mut p, Source::Se1Trng, 4, STARTUP_SAMPLES - 64);
+        assert_eq!(p.startup(Source::Se1Trng), Some(Startup::Passed));
+        assert_eq!(p.hardware_sources(), 1);
+        assert_eq!(p.credited_bits(), (STARTUP_SAMPLES * 4) as u32);
+        assert!(matches!(
+            p.check(),
+            Err(Insufficient::HardwareSources { have: 1, need: 2 })
+        ));
+
+        // A second does, and the held credit -- boot's bytes included -- is released.
+        feed(&mut p, Source::Stm32Trng, 5, STARTUP_SAMPLES - 64);
+        assert_eq!(p.hardware_sources(), 2);
+        assert!(p.check().is_ok());
+    }
+
+    #[test]
+    fn a_source_that_fails_startup_is_never_credited() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.enforce_startup();
+        feed(&mut p, Source::Se2Trng, 6, 256);
+        p.add(Source::Se2Trng, &[0u8; 32]); // stuck inside the window
+        assert_eq!(
+            p.startup(Source::Se2Trng),
+            Some(Startup::Failed(HealthError::Constant { value: 0 }))
+        );
+        // However much good output follows, it is not counted for the rest of the session.
+        feed(&mut p, Source::Se2Trng, 7, 8 * STARTUP_SAMPLES);
+        assert_eq!(p.hardware_sources(), 0);
+        assert_eq!(p.credited_bits(), 0);
+    }
+
+    #[test]
+    fn a_failed_startup_withdraws_what_boot_had_credited() {
+        // Boot credited SE1's 64 bytes without a verdict; the rest of its window, read at
+        // New wallet time, goes stuck. Enforced, none of SE1 counts -- not even boot's part.
+        let mut p = boot_pool();
+        feed(&mut p, Source::Se1Trng, 8, 128);
+        p.add(Source::Se1Trng, &[0xffu8; 32]);
+        assert!(p.check().is_ok(), "not enforced yet: boot behaviour");
+        p.enforce_startup();
+        feed(&mut p, Source::Stm32Trng, 9, STARTUP_SAMPLES);
+        feed(&mut p, Source::Se2Trng, 10, STARTUP_SAMPLES);
+        assert!(matches!(
+            p.startup(Source::Se1Trng),
+            Some(Startup::Failed(_))
+        ));
+        assert_eq!(p.hardware_sources(), 2);
+        let expected = ((64 + STARTUP_SAMPLES) * 4 * 2) as u32;
+        assert_eq!(p.credited_bits(), expected, "SE1 contributes nothing");
+    }
+
+    #[test]
+    fn one_source_failing_startup_does_not_block_two_that_passed() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.enforce_startup();
+        p.add(Source::Se2Trng, &[0u8; 32]);
+        feed(&mut p, Source::Se1Trng, 11, STARTUP_SAMPLES);
+        feed(&mut p, Source::Stm32Trng, 12, STARTUP_SAMPLES);
+        assert!(p.check().is_ok());
+        assert!(p.draw_seed().is_ok());
+    }
+
+    #[test]
+    fn non_hardware_credit_cannot_stand_in_for_a_pending_startup() {
+        // Timing and a user's dice still count while the hardware is pending -- but they
+        // are not hardware sources, so the pool still refuses without passed TRNGs.
+        let mut p = boot_pool();
+        p.enforce_startup();
+        for i in 0..64u32 {
+            p.add_timing(i.wrapping_mul(0x9e37_79b9));
+        }
+        p.add_user(&rolls(100));
+        assert!(p.credited_bits() > 0);
+        assert!(matches!(
+            p.check(),
+            Err(Insufficient::HardwareSources { have: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn every_source_is_in_the_sum_once() {
+        let mut seen = [false; NUM_SOURCES];
+        for s in ALL_SOURCES {
+            assert!(!seen[s.index()], "{s:?} listed twice");
+            seen[s.index()] = true;
+        }
+        assert!(seen.iter().all(|&b| b));
     }
 }
