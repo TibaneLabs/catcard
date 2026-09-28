@@ -1006,6 +1006,19 @@ impl UsbTask {
                     None => self.begin_reply(Status::BadRequest, &[]),
                 }
             }
+            // Raw TRNG bytes for offline assessment. Recorded here, read by the menu loop:
+            // see `trngcap` for why the reads never happen on this side.
+            #[cfg(feature = "usb-trng-capture")]
+            Some(Opcode::DebugTrng) => {
+                let mut body = [0u8; crate::trngcap::REPLY_LEN];
+                let (status, n) = crate::trngcap::request(progress.payload, &mut body);
+                self.begin_reply(status, &body[..n]);
+                body.zeroize();
+            }
+            #[cfg(not(feature = "usb-trng-capture"))]
+            Some(Opcode::DebugTrng) => {
+                self.begin_reply(Status::UnknownOpcode, &[]);
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
             Some(
                 Opcode::DebugPeek

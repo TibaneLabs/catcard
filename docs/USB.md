@@ -633,6 +633,62 @@ back in one round trip rather than one byte at a time. Poke is paged one frame p
 request by the client, because the device reassembles a multi-frame message only for a
 firmware upgrade and a sealed `NcryMsg` record (see "Sealed requests may span frames").
 
+### Raw TRNG capture: `DebugTrng` (`usb-trng-capture`, bench only)
+
+`DebugTrng` (`0x0035`) hands out raw, **unmixed** bytes from one of the board's random
+sources, so they can be assessed off the device with the NIST SP 800-90B estimators
+(`docs/ENTROPY.md`, "Measuring the sources"). The bytes are exactly what
+`trng::Trngs::read` returns -- what New wallet passes to `pool.add` -- before any mixing.
+
+| source | | what |
+|---|---|---|
+| 1 | `chip` | the MCU's TRNG, `RNG_DR`, read directly (every board) |
+| 2 | `se1` | SE1 through callgate 26 (mk4, mk5, Q1) |
+| 3 | `se2` | SE2 through callgate 26 (mk4, mk5, Q1) |
+| 4 | `bootloader` | the bootloader's read of the MCU TRNG, callgate 17 (every board) |
+| 5 | `se1wire` | SE1's `Random` over its raw single-wire bus (mk3) |
+
+- **Empty payload** lists what this board has: `[u16 chunk_max][u8 count][u8 source]...`.
+  `chunk_max` is 448 (fourteen 32-byte secure-element answers).
+- **`[u8 source][u16 len]`**, `len` 1..=`chunk_max`, asks for a chunk. The first answer is
+  `NotNow`: the USB side only records the request. The host asks again with the same
+  payload until the reply is `Ok` + `[u8 source][u8 flags][u16 n][u32 chunk][n bytes]`.
+  Collecting a chunk queues the next one of the same shape at once, so a host that keeps
+  asking is not paying a round trip per chunk. A different request replaces a waiting
+  one. `flags` bit 0 is *short* (`n < len`: the source went quiet within the read bound),
+  bit 1 *refused* (a read failed; nothing more is queued). `chunk` counts every chunk read
+  since boot, so a gap shows chunks that were read and discarded (a replaced request).
+- `BadRequest` for a malformed payload, `Refused` for a source this board does not have,
+  `UnknownOpcode` from a build without the feature.
+
+**Where the reads happen is the safety property.** The USB task never reads a source. The
+reads run in `trngcap::serve`, which only the **main menu loop** calls, on the UI task.
+Every seed flow -- New wallet, a temporary seed, key C -- runs on that task, synchronously,
+from that loop, so while one is running the menu loop is not and no capture can happen;
+the device answers `NotNow` until the person is back on a menu. For the same reason the MCU
+TRNG's registers are never read by two tasks at once. It never touches the entropy pool,
+reads nothing from it and feeds nothing into it. Each chunk is bounded (eight reads per 32
+bytes asked), so a silent source ends a chunk short rather than holding the menu.
+
+The samples are consecutive *within* a chunk. Between chunks the device keeps running --
+the secure elements are asked for other things, the menu redraws -- which is also true of
+the bytes the pool sees; 90B's non-IID estimators do not assume more.
+
+It is a bench feature like the memory monitor: `usb-trng-capture` is a default feature,
+`SHIP=1` (`--no-default-features`) strips it, and CI fails a published image whose strings
+contain `trngcap:`, the prefix of the log lines it writes (one per 256 chunks, and every
+short one).
+
+```sh
+tools/trng_capture.py hid --list                   # this board's sources
+tools/trng_capture.py hid                          # every source, 1,000,000 bytes each
+tools/trng_capture.py hid --source se2 --bytes 2000000
+tools/trng_assess.py captures/*.bin                # SP 800-90B, see docs/ENTROPY.md
+```
+
+A capture resumes: an existing `captures/<board>-<source>.bin` is appended to until it
+holds `--bytes` (`--fresh` starts over).
+
 ### Talking to a real device
 
 `tools/usbclient.py` speaks to both the emulator and hardware, over the same protocol

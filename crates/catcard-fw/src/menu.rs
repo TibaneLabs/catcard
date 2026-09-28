@@ -1283,6 +1283,10 @@ pub fn run(session: Session<'_>) -> ! {
         }
 
         let _ = usbtask::pump();
+        // A bench build's raw TRNG capture reads here and nowhere else, so it can never
+        // run inside a seed flow (`trngcap`).
+        #[cfg(feature = "usb-trng-capture")]
+        crate::trngcap::serve(gate);
         display::idle(ui.panel);
 
         // The RTC screen redraws on a clock rather than on input: it is showing something

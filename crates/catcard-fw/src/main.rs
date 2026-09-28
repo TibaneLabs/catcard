@@ -206,6 +206,9 @@ mod torch;
 #[cfg(not(feature = "board-mk3"))]
 mod trickpin;
 mod trng;
+/// Raw TRNG capture over USB, for SP 800-90B assessment. Bench builds only.
+#[cfg(feature = "usb-trng-capture")]
+mod trngcap;
 /// Debug -> TRNG startup test: the SP 800-90B start-up test, run on demand.
 mod trngtest;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.

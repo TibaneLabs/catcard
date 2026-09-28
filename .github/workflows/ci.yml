@@ -114,7 +114,8 @@ jobs:
           elf=target/thumbv7em-none-eabihf/release/catcard-fw
           # Markers that track the features rather than the vocabulary: `debug_mem` is
           # the module, gated on `usb-debug-mem`; `injected`/`inject_key` are the key
-          # path; and the boot warning is printed only by a build that has the monitor.
+          # path; the boot warning is printed only by a build that has the monitor; and
+          # `trngcap:` is the log prefix of the raw TRNG capture (`usb-trng-capture`).
           # Deliberately *not* "peek" or "poke", which also match `Peekable` from the
           # filesystem iterators and `DebugPeek`, an opcode name that exists in every
           # build because only its handler is compiled out.
@@ -122,7 +123,7 @@ jobs:
           # A dev build trips this (25 matches when last checked); a published one must
           # have none.
           if strings -a "$elf" \
-               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled"; then
+               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled|trngcap:"; then
             echo "::error::bench features leaked into a published image"
             exit 1
           fi

@@ -21,7 +21,7 @@ authors.workspace = true
 # address, call any address -- the most dangerous thing in this firmware. On a provisioned
 # device it would read the seed and PIN out of RAM and run arbitrary code, so it must
 # never ship. Each is its own feature so a release drops them cleanly. See docs/USB.md.
-default = ["usb-key-injection", "usb-debug-mem", "games", "dev"]
+default = ["usb-key-injection", "usb-debug-mem", "usb-trng-capture", "games", "dev"]
 # A development build, which the bench units run. It leaves out everything that can erase
 # or brick a device on its own -- the kill key and microSD 2FA today -- so a bench unit
 # (RDP=2, no recovery) can never be lost to one. A release (`SHIP=1`, no default features)
@@ -29,6 +29,11 @@ default = ["usb-key-injection", "usb-debug-mem", "games", "dev"]
 dev = []
 usb-key-injection = []
 usb-debug-mem = []
+# `DebugTrng`: raw, unmixed bytes from each hardware random source over USB, for NIST
+# SP 800-90B assessment off the device (`tools/trng_capture.py`, `tools/trng_assess.py`).
+# Never the pool, never during a seed operation -- but still a bench tool, so a release
+# strips it like the other two. See docs/USB.md.
+usb-trng-capture = []
 # The Games menu under Utils (Block Mine, ...). On by default; a build can drop it to
 # save flash without touching the rest of the UI.
 games = []

@@ -172,7 +172,7 @@ jobs:
           set -euo pipefail
           elf=target/thumbv7em-none-eabihf/release/catcard-fw
           if strings -a "$elf" \
-               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled"; then
+               | grep -niE "debug_mem|inject_key|injected|debug memory monitor is enabled|trngcap:"; then
             echo "::error::bench features leaked into a release image"
             exit 1
           fi

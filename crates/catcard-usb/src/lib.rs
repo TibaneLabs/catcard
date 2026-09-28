@@ -158,6 +158,22 @@ pub enum Opcode {
     /// It exists to find out what real cards do -- which of them answer CMD42, what
     /// their CID says -- on a device kept for that, not on anybody's.
     DebugSdRaw = 0x0034,
+    /// Raw, unmixed bytes from one of the board's hardware random sources, for offline
+    /// entropy assessment (NIST SP 800-90B).
+    ///
+    /// Empty payload: the reply is `[u16 chunk_max][u8 count][u8 source]...`, the sources
+    /// this board has. `[u8 source][u16 len]` asks for `len` (1..=`chunk_max`) bytes; the
+    /// device reads them from its main menu, so the first answer is `NotNow` and the host
+    /// asks again with the same request until it gets `Ok` +
+    /// `[u8 source][u8 flags][u16 n][u32 chunk][n bytes]`. Each `Ok` starts the next
+    /// chunk of the same shape, so a host that keeps asking is kept busy.
+    ///
+    /// Sources: 1 the MCU TRNG, 2 SE1 (callgate 26), 3 SE2 (callgate 26), 4 the
+    /// bootloader's read (callgate 17), 5 SE1's raw bus (mk3). The bytes are exactly what
+    /// the firmware would pass to the entropy pool -- and never the pool itself.
+    ///
+    /// **Bench only** (`usb-trng-capture`, stripped by `SHIP=1`). See `docs/USB.md`.
+    DebugTrng = 0x0035,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -265,6 +281,7 @@ impl Opcode {
             0x0032 => Opcode::DebugJsr,
             0x0033 => Opcode::DebugSd,
             0x0034 => Opcode::DebugSdRaw,
+            0x0035 => Opcode::DebugTrng,
             _ => return None,
         })
     }
