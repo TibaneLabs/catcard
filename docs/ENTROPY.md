@@ -185,6 +185,29 @@ A pool with two healthy TRNGs and one dead element still draws; a pool left with
 healthy TRNG under `STRICT` refuses — for lack of a second source, not because it is
 "poisoned".
 
+**Start-up test (SP 800-90B §4.3).** Before a source's output is first used, the same two
+tests run over at least **1,024 consecutive samples** (`STARTUP_SAMPLES`) -- the first
+1,024 bytes the pool sees from that source this session. Every pool runs it from its first
+read (`health::StartupTest`, one per hardware TRNG, which is also where the continuous
+state lives); whether its verdict is *enforced* is the pool's `enforce_startup`, a one-way
+switch:
+
+- A source still **pending** is absorbed but its credit is held: none of it counts, bits or
+  place in the hardware-source count, until the test passes -- and then all of it does,
+  boot's bytes included.
+- A source that **fails** inside its window is not counted for the rest of the session --
+  not even what it was credited before enforcement began. Sticky: behaving afterwards does
+  not bring it back.
+- After the window, a trip is a continuous-test failure as before: that read is not
+  credited, the source's earlier credit stands.
+- Non-hardware sources (timing, typed symbols) are unaffected -- and are never hardware
+  sources, so they cannot stand in for a pending one.
+
+**Where it is enforced today:** New wallet (`new_seed`, and View TRNG Words) calls
+`enforce_startup` and reads 1,024 fresh bytes from every source, so every source's window
+is complete before `check` and `draw`. Boot does not enforce it yet; see
+[Start-up test at boot](#start-up-test-at-boot-what-is-left).
+
 ## Boot sequence
 
 `catcard-fw/src/boot.rs`, in order:
@@ -249,7 +272,9 @@ The pool travels out of boot in `BootReport::pool`.
 `is_hardware_trng`; the tests themselves in [`crates/catcard-entropy/src/health.rs`](../crates/catcard-entropy/src/health.rs).
 
 - **Health test first**, for the hardware sources only (`is_hardware_trng`: chip, SE1,
-  SE2): repetition count and adaptive proportion, with state kept per source across reads.
+  SE2): repetition count and adaptive proportion, with state kept per source across reads,
+  and the first 1,024 bytes of each also counted as its start-up window
+  (`health::StartupTest`).
 - **Absorb always**: `state ← SHA-512(state ‖ tag ‖ len_be64 ‖ data)`. The tag is the
   source's (`Source::tag`); the length prefix keeps two short adds from equalling one long
   one. A source that failed its health test is still absorbed, because mixing cannot
@@ -257,7 +282,9 @@ The pool travels out of boot in `BootReport::pool`.
 - **Credit only if healthy**: `bits_per_byte` is 4 for the chip and both secure elements,
   1 for timing, 0 for everything else -- the bootloader's read, SE1's raw bus, the unique
   ID, typed symbols. `bytes_from` counts which hardware sources have contributed, for the
-  "how many chips" half of the policy.
+  "how many chips" half of the policy. Credit is kept per source (`credit_from`), so once
+  `enforce_startup` has been called, a source that has not passed its start-up test counts
+  for neither half.
 
 Nothing here returns randomness. The pool's only outputs are `check` and `draw`.
 
@@ -275,12 +302,15 @@ calls `new_seed` with it.
 [`crates/catcard-fw/src/menu.rs`](../crates/catcard-fw/src/menu.rs): `new_seed`.
 
 The boot pool already met its policy, but a wallet is not made from boot-time noise
-alone. `new_seed` reads **512 fresh bytes from every source the board has** (`kinds()`:
-both secure elements or SE1's bus, the bootloader's read, and the chip), the same number
-of bytes from each, through `Trngs::read` into `pool.add` -- so every byte goes through
-step 4's health test and credit again. Bounded at 160 passes, so a silent source ends the
-loop instead of hanging it. The per-source byte counts are written to the log
-(`seed: SE1 512B/...`), and the screen shows them as they arrive.
+alone. `new_seed` first calls `pool.enforce_startup()`, then reads **1,024 fresh bytes
+from every source the board has** (`kinds()`: both secure elements or SE1's bus, the
+bootloader's read, and the chip), the same number of bytes from each, through
+`Trngs::read` into `pool.add` -- so every byte goes through step 4's health test and
+credit again, and every hardware source's start-up window is complete on fresh bytes
+alone. Bounded at 320 passes, so a silent source ends the loop instead of hanging it. The
+per-source byte counts and start-up verdicts are written to the log
+(`seed: SE1 1024B/...`, `seed: SE1 startup Passed`), and the screen shows the counts as
+they arrive.
 
 ### 7. Optional: your own dice, coins or mash
 
@@ -411,6 +441,22 @@ rather than as coverage:
 - `ui_randomness_does_not_disturb_the_seed_pool`
 - `below_is_not_modulo_biased`
 
+The start-up test, the same way:
+
+- `the_boot_pool_is_unchanged_until_startup_is_enforced` -- boot's 64 bytes a source
+  still meet the policy while the test is not enforced
+- `a_source_is_not_credited_until_its_startup_test_has_passed`,
+  `startup_needs_the_full_window_before_it_passes`
+- `a_source_that_fails_startup_is_never_credited`,
+  `a_fault_inside_the_window_fails_startup_for_good`
+- `a_failed_startup_withdraws_what_boot_had_credited`
+- `one_source_failing_startup_does_not_block_two_that_passed`
+- `non_hardware_credit_cannot_stand_in_for_a_pending_startup`
+- `a_run_straddling_reads_inside_the_window_fails_startup`,
+  `a_biased_source_fails_startup_on_the_adaptive_test`,
+  `short_reads_neither_advance_nor_fail_startup`,
+  `a_fault_after_startup_is_a_continuous_failure_only`
+
 For user-supplied entropy the statement under test is always the same one — *it adds, it
 never replaces*:
 
@@ -444,11 +490,103 @@ separately from the spec text ([`tools/reference/drbg_ref.py`](../tools/referenc
 pins the exact outputs the firmware's own call shapes produce (no nonce, the test
 fixture, an unaligned length).
 
-## Not yet done
+## Measuring the sources
 
-- **Entropy accounting is a policy, not a measurement.** The credit rates are chosen
-  conservatively; they are not derived from an SP 800-90B entropy estimate of these
-  specific sources. Doing that properly needs long raw captures from real hardware.
-- **Startup health test.** SP 800-90B also specifies an on-demand test at boot, over a
-  larger sample than the continuous tests see.
-- **Reseed on wake.** No sleep support yet, so nothing to reseed after.
+**The credit rates are a policy, not a measurement.** 4 bits a byte for the chip and each
+secure element is a deliberate haircut, not an estimate of these sources. They stay as
+they are until a measured min-entropy either supports or contradicts them; what follows is
+how to get that measurement.
+
+**1. Capture.** A bench build (the default `make`; `SHIP=1` strips it) answers `DebugTrng`
+(`docs/USB.md`), which hands out the exact bytes `Trngs::read` returns -- what `pool.add`
+would be given -- before any mixing, from one source at a time. Unlock the device, leave it
+on a menu (the reads happen only from the main menu loop, never during a seed flow), and:
+
+```sh
+# On the Mac the transport is hidapi: use a python with the `hid` module (tools/machid.py).
+tools/trng_capture.py hid --list                   # what this board has
+tools/trng_capture.py hid --bytes 1000000          # every source -> captures/<board>-<source>.bin
+```
+
+**1,000,000 samples per source** is SP 800-90B's minimum for a non-IID assessment (§3.1.1);
+a sample is one byte. An interrupted capture resumes where it stopped. The secure elements
+are the slow part (SE2 declines most calls), so expect minutes per source, not seconds.
+
+**2. Assess.**
+
+```sh
+git clone https://github.com/usnistgov/SP800-90B_EntropyAssessment ~/src/ea90b
+tools/trng_assess.py --nist ~/src/ea90b captures/*.bin
+```
+
+`trng_assess.py` builds and runs NIST's reference implementation (`ea_non_iid`, all ten
+§6.3 estimators; it needs OpenMP and a few libraries, see its README -- Apple's clang has
+no OpenMP, so on a Mac use GCC from Homebrew, its Dockerfile, or a Linux host) and reports
+its figure. It also runs its own Python Most Common Value (§6.3.1) and Markov (§6.3.3)
+estimates, checked against the values NIST documents for its own sample
+(`tools/test_trng_assess.py`). **That Python figure is not a lower bound**: the 90B
+assessment is the minimum over all its estimators, so a subset can only read the same or
+higher. It is a quick upper bound -- a source that scores low there is low -- and the
+NIST figure is the one a credit rate rests on.
+
+What is captured is each chip's RNG *output*: the secure elements' is already the output of
+their own internal generator, so an assessment of it catches a stuck, biased or repeating
+generator but cannot certify the noise underneath. `--conditioned` runs the NIST tool on
+it as conditioned output (`-c`).
+
+**3. Record the result here.** A credit rate changes only with a capture behind it.
+
+| board | source | samples | NIST `ea_non_iid` (bits/byte) | Python MCV / Markov (bits/byte) | credited today |
+|---|---|---|---|---|---|
+| Q1 | chip | | pending a capture on hardware | | 4 |
+| Q1 | SE1 | | pending a capture on hardware | | 4 |
+| Q1 | SE2 | | pending a capture on hardware | | 4 |
+| Q1 | bootloader | | pending a capture on hardware | | 0 |
+| mk4/mk5 | chip, SE1, SE2, bootloader | | pending a capture on hardware | | 4, 4, 4, 0 |
+| mk3 | chip, SE1 bus, bootloader | | pending a capture on hardware | | 4, 0, 0 |
+
+## Start-up test at boot: what is left
+
+The start-up test is enforced when a wallet is made, not at boot. At boot the pool is fed
+64 bytes a source, far short of the 1,024-byte window, so enforcing it there as boot stands
+would leave every hardware source pending, the pool at 0 credited bits, `pool.check()`
+failing -- and with it every session DRBG (`spawn_drbg` for `domain::UI`, `PROTOCOL`,
+`USB`). A device in that state parks at the selftest screen with no keypad scramble and no
+USB channel: on a locked bench unit, a device nobody can log into.
+
+So today the DRBGs seeded at session start rest on boot's pool **without** a start-up
+verdict: 64 bytes a source through the continuous tests, as before. The start-up test
+still runs on those bytes (the pool counts them into each source's window), and the first
+New wallet completes and enforces it.
+
+Moving it onto the boot path needs, in `crates/catcard-fw/src/boot.rs`:
+
+1. Read `STARTUP_SAMPLES` bytes from the chip and from each secure element instead of 64
+   (`bring_up`, `feed_secure_elements`); the reads are the same `Trngs::read` calls, more
+   of them.
+2. Call `pool.enforce_startup()` before `pool.check()`.
+
+And it waits on one thing: **proof on hardware that the same reads and the same test pass
+on every board, and how long they take**, because every bench unit is locked and a boot
+that hangs or parks cannot be recovered. That proof is `Debug -> TRNG startup test`
+(`crates/catcard-fw/src/trngtest.rs`): a throwaway pool with the test enforced, fed
+1,024 bytes from every source through the same readers, reporting each source's verdict,
+whether the policy is met, and the read time (also in the log as `trngtest:` lines). When
+that has passed on a Q1, an mk4/mk5 and the mk3, and the read time is acceptable on the
+boot splash, the two changes above go in.
+
+## Reseed on wake: not applicable
+
+There is no sleep or suspend state to wake from. The firmware never enters a low-power
+mode that keeps RAM (`SLEEPDEEP` is never set; the only `wfi` is an unreachable branch in
+`ktest.rs`). Every way a session ends goes through the bootloader's callgate 3, which wipes
+SRAM -- the pool, the DRBGs and the seed with it:
+
+- idle logout: `crates/catcard-fw/src/idle.rs`, `tick` -> `gatecall::logout(LogoutMode::Logout)`;
+- battery idle power-off (Q1) and the power button: `crates/catcard-fw/src/power.rs`,
+  `power_down` -> `gatecall::logout(LogoutMode::PowerDown)`.
+
+The next session is a full boot (`boot.rs`, `bring_up`) that builds a new pool from fresh
+TRNG reads. There is nothing to reseed: no generator state survives from one session to
+the next. If a sleep mode that keeps RAM is ever added, this is where reseeding every DRBG
+from fresh hardware reads on wake would have to go.

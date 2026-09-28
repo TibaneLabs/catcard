@@ -262,6 +262,9 @@ with no MetaMask changes and no USB, and it keeps the device air-gapped.
 - ~~**NIST CAVP DRBG vectors**~~ — done: every HMAC_DRBG SHA-256 case runs in
   `catcard-entropy/tests/cavp_hmac_drbg.rs`.
 - **Entropy estimation from real captures**, to replace the conservative credit rates
-  with measured ones.
+  with measured ones. The tooling is in (`DebugTrng`, `tools/trng_capture.py`,
+  `tools/trng_assess.py`; `ENTROPY.md` "Measuring the sources"); the captures are not.
+- **SP 800-90B start-up test at boot**: enforced at New wallet today; boot waits on
+  `Debug -> TRNG startup test` passing on hardware (`ENTROPY.md`).
 - **Constant-time review** of every comparison and arithmetic path that touches key
   material.
