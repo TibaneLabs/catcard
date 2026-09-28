@@ -37,6 +37,8 @@ jobs:
       - run: cargo test --workspace --exclude catcard-fw --exclude catcard-kernel
       # The SP 800-90B estimators behind tools/trng_assess.py, against known inputs.
       - run: python3 tools/test_trng_assess.py
+      # The RngHealth report as tools/rng_report.py reads it, against the firmware's vector.
+      - run: python3 tools/test_rng_report.py
 
   firmware:
     name: ${{ matrix.board }} ${{ matrix.chains }}${{ matrix.games && ' +games' || '' }}

@@ -91,6 +91,7 @@ q1:
 test:
 	$(CARGO) test --workspace --exclude catcard-fw --exclude catcard-kernel
 	python3 tools/test_trng_assess.py
+	python3 tools/test_rng_report.py
 
 # What CI runs, so a green tree here means a green tree there.
 #
