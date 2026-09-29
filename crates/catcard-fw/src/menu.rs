@@ -10711,10 +10711,10 @@ fn format_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
 /// [`Entry`]: catcard_ui::textentry::Entry
 /// [`Entry::clear`]: catcard_ui::textentry::Entry::clear
 fn read_card_pwd(ui: &mut Ui<'_>, prompt: &str) -> Option<catcard_ui::textentry::Entry> {
-    let mut entry = crate::passphrase::read(ui, prompt)?;
-    // Byte length, not character count: the card's `PWDS_LEN` counts bytes, so a short
-    // string of multi-byte characters can still be too long for it.
-    if entry.is_empty() || entry.as_str().len() > catcard_sd::MAX_LOCK_PWD {
+    // The field stops at the card's limit, which counts bytes (`PWDS_LEN`), so a password
+    // the card cannot take is never typed.
+    let mut entry = crate::passphrase::read_at_most(ui, prompt, catcard_sd::MAX_LOCK_PWD)?;
+    if entry.is_empty() {
         message(
             ui.panel,
             "Card password",

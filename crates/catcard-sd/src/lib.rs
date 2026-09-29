@@ -520,7 +520,7 @@ fn build_lock_payload(op: LockOp<'_>, buf: &mut [u8]) -> Result<usize, Error> {
 /// structure, send CMD42, then write the structure as a short payload. See the
 /// [`Transport::arm_data`] doc comment for why the length is a power of two.
 ///
-/// The structure is short — at most `2 + 16` bytes — but the controller can only move a
+/// The structure is short — at most `2 + 16` bytes, sent as a 32-byte block — but the controller can only move a
 /// power-of-two block, and its FIFO writer takes a length that is a multiple of four
 /// words-wide, so the payload is zero-padded up to the next power of two that is at least
 /// four. The card reads `command` and `PWDS_LEN` from the front and ignores the padding.
@@ -531,16 +531,18 @@ fn build_lock_payload(op: LockOp<'_>, buf: &mut [u8]) -> Result<usize, Error> {
 /// The scratch buffer that briefly holds the password is [`zeroize::Zeroizing`], so it is
 /// wiped on every path out, error included.
 pub fn lock_unlock<T: Transport>(t: &mut T, op: LockOp<'_>) -> Result<(), Error> {
-    // header (command byte + length) + the longest password, room for the whole structure
-    // before padding. Wiped on drop.
-    let mut buf = zeroize::Zeroizing::new([0u8; 2 + MAX_LOCK_PWD]);
+    // Sized for the padded block, not the structure: a 15- or 16-byte password makes a 17-
+    // or 18-byte structure that goes out as a 32-byte block, and a buffer of only `2 +
+    // MAX_LOCK_PWD` made that slice panic. Wiped on drop.
+    const BUF_LEN: usize = (2 + MAX_LOCK_PWD).next_power_of_two();
+    let mut buf = zeroize::Zeroizing::new([0u8; BUF_LEN]);
     let len = build_lock_payload(op, buf.as_mut_slice())?;
 
     // The controller moves only a power-of-two block, and its FIFO writer wants a length
     // that is a multiple of four bytes; four is the smallest block that satisfies both, so
-    // a one-byte FORCE_ERASE still goes out as a four-byte padded block.
+    // a one-byte FORCE_ERASE still goes out as a four-byte padded block. `len` is at most
+    // `2 + MAX_LOCK_PWD`, so `block` is at most `BUF_LEN`.
     let block = len.next_power_of_two().max(4);
-    debug_assert!(block <= buf.len());
 
     t.arm_data(block, false)?;
     // Stuff bits: the argument to CMD42 carries no operand. Source: SD Physical Layer

@@ -473,7 +473,13 @@ fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
 /// another key, or confirming, settles the one before it. Cancel removes a character, and
 /// cancel on an empty field backs out.
 pub(crate) fn read(ui: &mut Ui<'_>, head: &str) -> Option<Entry> {
-    let mut entry = Entry::new();
+    read_at_most(ui, head, MAX_LEN)
+}
+
+/// [`read`], for a destination that holds at most `limit` bytes: the field stops taking
+/// keys there, and its counter shows the limit.
+pub(crate) fn read_at_most(ui: &mut Ui<'_>, head: &str, limit: usize) -> Option<Entry> {
+    let mut entry = Entry::with_limit(limit);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
 
@@ -540,7 +546,7 @@ fn draw(ui: &mut Ui<'_>, head: &str, entry: &Entry) {
     const LINES: usize = 3;
     let top_y = display::FIELD_TOP;
     let mut count = heapless::String::<24>::new();
-    let _ = write!(count, "{} of {} characters", entry.len(), MAX_LEN);
+    let _ = write!(count, "{} of {} characters", entry.len(), entry.limit());
 
     let body = display::LAYOUT.body;
     let fields = [Field::text("", entry.as_str()).lines(LINES).live(true)];

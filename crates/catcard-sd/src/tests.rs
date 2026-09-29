@@ -1199,6 +1199,34 @@ mod lock_unlock_sequence {
     }
 
     #[test]
+    fn every_password_length_goes_out_whole_and_zero_padded() {
+        // 15 and 16 bytes make a 17- or 18-byte structure and a 32-byte block; the scratch
+        // buffer used to be 18 bytes, and those lengths -- every passphrase-derived card
+        // password among them -- panicked the firmware.
+        for n in 1..=MAX_LOCK_PWD {
+            let pwd = [b'p'; MAX_LOCK_PWD];
+            for op in [
+                LockOp::SetPassword(&pwd[..n]),
+                LockOp::ClearPassword(&pwd[..n]),
+                LockOp::Lock(&pwd[..n]),
+                LockOp::Unlock(&pwd[..n]),
+            ] {
+                let mut t = LockFake::default();
+                lock_unlock(&mut t, op).expect("sent");
+                let block = (2 + n).next_power_of_two().max(4);
+                assert_eq!(t.armed_len, block, "{n}-byte password");
+                assert_eq!(t.payload_len, block, "{n}-byte password");
+                assert_eq!(t.payload[1] as usize, n);
+                assert_eq!(&t.payload[2..2 + n], &pwd[..n]);
+                assert!(
+                    t.payload[2 + n..block].iter().all(|&b| b == 0),
+                    "padding is zero"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_short_structure_is_padded_to_a_multiple_of_four() {
         // FORCE_ERASE is one byte; the FIFO writer needs a multiple of four, so it goes
         // out as a four-byte padded block with the tail zeroed.

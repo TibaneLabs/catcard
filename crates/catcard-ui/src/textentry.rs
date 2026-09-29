@@ -37,19 +37,43 @@ pub const KEYS: [&str; 10] = [
 pub const MAX_LEN: usize = 100;
 
 /// Text being typed on a keypad.
-#[derive(Default)]
 pub struct Entry {
     text: heapless::String<MAX_LEN>,
     /// The key being cycled and how far along its characters, if one is.
     pending: Option<(usize, usize)>,
+    /// Most bytes this field takes, at most [`MAX_LEN`].
+    limit: usize,
+}
+
+impl Default for Entry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Entry {
     pub const fn new() -> Self {
+        Self::with_limit(MAX_LEN)
+    }
+
+    /// A field that takes at most `limit` bytes (capped at [`MAX_LEN`]): past it, keys do
+    /// nothing, so text the destination cannot hold is never typed at all. Bytes, not
+    /// characters -- the limits this serves (an SD card's 16-byte password) count bytes.
+    pub const fn with_limit(limit: usize) -> Self {
         Self {
             text: heapless::String::new(),
             pending: None,
+            limit: if limit < MAX_LEN { limit } else { MAX_LEN },
         }
+    }
+
+    /// Most bytes this field takes.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn fits(&self, c: char) -> bool {
+        self.text.len() + c.len_utf8() <= self.limit
     }
 
     pub fn as_str(&self) -> &str {
@@ -89,19 +113,23 @@ impl Entry {
                 self.pending = Some((key, next));
             }
             _ => {
-                if self.text.len() == MAX_LEN {
+                let first = chars.chars().next().unwrap_or(' ');
+                if !self.fits(first) {
                     return;
                 }
-                let _ = self.text.push(chars.chars().next().unwrap_or(' '));
+                let _ = self.text.push(first);
                 self.pending = Some((digit as usize, 0));
             }
         }
     }
 
-    /// Put `c` in directly, for a board with a keyboard. Commits any cycling key first.
+    /// Put `c` in directly, for a board with a keyboard. Commits any cycling key first; a
+    /// full field ignores it.
     pub fn put(&mut self, c: char) {
         self.pending = None;
-        let _ = self.text.push(c);
+        if self.fits(c) {
+            let _ = self.text.push(c);
+        }
     }
 
     /// Commit the character being cycled, so the next press of the same key adds another.
@@ -153,6 +181,30 @@ mod tests {
             e.commit();
         }
         e.as_str().to_string()
+    }
+
+    #[test]
+    fn a_limited_field_takes_no_more_than_its_limit() {
+        let mut e = Entry::with_limit(3);
+        for c in "abcdef".chars() {
+            e.put(c);
+        }
+        assert_eq!(e.as_str(), "abc");
+        e.put('é');
+        assert_eq!(
+            e.as_str(),
+            "abc",
+            "a two-byte character does not fit in zero bytes"
+        );
+        let mut e = Entry::with_limit(2);
+        e.press(2);
+        e.press(3);
+        e.press(4);
+        assert_eq!(e.as_str(), "ad", "a new key past the limit is ignored");
+        e.press(3);
+        assert_eq!(e.as_str(), "ae", "the last key still cycles");
+        assert_eq!(Entry::with_limit(500).limit(), MAX_LEN);
+        assert_eq!(Entry::default().limit(), MAX_LEN);
     }
 
     #[test]
