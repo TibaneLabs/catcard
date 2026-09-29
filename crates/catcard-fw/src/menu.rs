@@ -4423,6 +4423,10 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
                 return Err(());
             }
         };
+        if card.locked {
+            why = "card is locked";
+            return Err(());
+        }
         // Transparent decryption: if this card was unlocked this session, every read and
         // write through the mounted volume now decrypts/encrypts. A plaintext card is
         // untouched. mk3 has no such feature.
@@ -13031,11 +13035,10 @@ fn card_detail_lines() -> heapless::Vec<Line, MAX_LINES> {
     let _ = write!(l, "made {}-{:02}", cid.mdt_year(), cid.mdt_month());
     let _ = lines.push(l);
 
-    // Capacity in MiB, plus the marketing GB (10^9 bytes) the card's own label uses.
+    // Capacity in MiB, plus the size on the card's own label.
     let mut l = Line::new();
-    let bytes = card.blocks as u64 * catcard_sd::BLOCK_LEN as u64;
-    let gb = (bytes + 500_000_000) / 1_000_000_000;
-    let _ = write!(l, "{} MiB (~{} GB)", card.mib(), gb);
+    let (size, unit) = card.label_size();
+    let _ = write!(l, "{} MiB ({} {})", card.mib(), size, unit);
     let _ = lines.push(l);
 
     // Filesystem: mount FAT then exFAT only to name the format. This re-initialises the
@@ -13103,6 +13106,7 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
         E::Busy => "card stayed busy",
         E::Unsupported => "not done here",
         E::Refused => "refused",
+        E::Locked => "card is locked",
     }
 }
 

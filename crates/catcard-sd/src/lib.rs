@@ -56,6 +56,8 @@ pub enum Error {
     /// nothing written to it, and a firmware that cannot write the card cannot corrupt
     /// someone's files either.
     ReadOnly,
+    /// The card is password-locked (CMD42), so no data command is sent to it.
+    Locked,
     /// The card carried out a lock or unlock command and refused it
     /// (`LOCK_UNLOCK_FAILED`): a wrong password, most often.
     Refused,
@@ -177,6 +179,10 @@ pub struct Card {
     pub blocks: u32,
     /// Whether the bus is running four bits wide.
     pub wide: bool,
+    /// The card came up locked (`CARD_IS_LOCKED` after select): it has a password and has
+    /// not been unlocked since power-up. [`read_block`] and [`write_block`] refuse it with
+    /// [`Error::Locked`] without sending anything; only CMD42 is any use until then.
+    pub locked: bool,
     /// The card's CID register, captured during bring-up (CMD2), as four words most
     /// significant first. Never changes over the life of the card; decode it with
     /// [`Card::cid`]. Kept raw because most of it is only ever shown on a screen, and the
@@ -199,6 +205,7 @@ impl core::fmt::Debug for Card {
             .field("addressing", &self.addressing)
             .field("blocks", &self.blocks)
             .field("wide", &self.wide)
+            .field("locked", &self.locked)
             .field("cid", &self.cid)
             .field("encrypted", &self.crypto.is_some())
             .finish()
@@ -209,6 +216,14 @@ impl Card {
     /// Capacity in whole mebibytes, for a screen.
     pub fn mib(&self) -> u32 {
         self.blocks / 2048
+    }
+
+    /// The size printed on the card's label: the smallest of the sizes cards are sold in
+    /// that holds its capacity, as `(number, "MB" | "GB" | "TB")`. Labels count decimal
+    /// bytes and a card is always somewhat smaller than its label, so rounding to the
+    /// nearest size is wrong -- a 512 MB card holds 480 MiB, 503 MB, which is nearer 1 GB.
+    pub fn label_size(&self) -> (u32, &'static str) {
+        label_size(self.blocks as u64 * BLOCK_LEN as u64)
     }
 
     /// The decoded CID.
@@ -274,6 +289,9 @@ const STATUS_READY_FOR_DATA: u32 = 1 << 8;
 /// operation the card's state does not allow. Set by the command, reported by the next.
 /// Source: SD Physical Layer Simplified Specification, "Card Status" [C]
 const STATUS_LOCK_UNLOCK_FAILED: u32 = 1 << 24;
+/// `CARD_IS_LOCKED`, bit 25: the card has a password and is locked.
+/// Source: SD Physical Layer Simplified Specification, "Card Status" [C]
+const STATUS_CARD_IS_LOCKED: u32 = 1 << 25;
 const STATUS_STATE_SHIFT: u32 = 9;
 const STATE_TRANSFER: u32 = 4;
 
@@ -297,8 +315,10 @@ const OCR_HCS: u32 = 1 << 30;
 const OCR_BUSY_DONE: u32 = 1 << 31;
 /// Card is high capacity, so blocks are addressed by number.
 const OCR_CCS: u32 = 1 << 30;
-/// 3.2-3.4 V, which is the rail these boards run the slot at.
-const OCR_VOLTAGE: u32 = 1 << 20;
+/// 3.2-3.4 V, which is the rail these boards run the slot at: OCR bit 20 is 3.2-3.3 V and
+/// bit 21 3.3-3.4 V. Only bit 20 was sent, for a 3.3 V rail on the boundary of the two.
+/// Source: SD Physical Layer Simplified Specification, "OCR register" [C]
+const OCR_VOLTAGE: u32 = (1 << 20) | (1 << 21);
 
 /// How many times ACMD41 may say "still busy".
 ///
@@ -362,6 +382,14 @@ pub fn init<T: Transport>(t: &mut T) -> Result<Card, Error> {
     // until this happens, and a missed CMD7 shows up as every later read timing out.
     t.command(CMD_SELECT, (rca as u32) << 16, Response::Short)?;
 
+    // A card with a password comes up locked. It still answers everything above -- which
+    // is how a locked card's size and vendor can be shown -- but refuses data commands
+    // until it is unlocked, and a read sent to it anyway has left a card answering "busy"
+    // to every later bring-up until it was pulled: the slot's power is never switched off.
+    // So the lock is found here, before anything reads, and the block calls refuse.
+    let [status, ..] = t.command(CMD_SEND_STATUS, (rca as u32) << 16, Response::Short)?;
+    let locked = status & STATUS_CARD_IS_LOCKED != 0;
+
     let wide = t.set_bus_width_4().is_ok();
     t.set_fast_clock();
 
@@ -371,6 +399,7 @@ pub fn init<T: Transport>(t: &mut T) -> Result<Card, Error> {
         blocks,
         wide,
         cid,
+        locked,
         // A freshly brought-up card is always plaintext; firmware turns encryption on with
         // [`Card::unlock`] once it has verified the password.
         crypto: None,
@@ -384,6 +413,9 @@ pub fn read_block<T: Transport>(
     lba: u32,
     out: &mut [u8; BLOCK_LEN],
 ) -> Result<(), Error> {
+    if card.locked {
+        return Err(Error::Locked);
+    }
     if lba >= card.blocks {
         return Err(Error::DataError { block: lba });
     }
@@ -419,6 +451,9 @@ pub fn write_block<T: Transport>(
     lba: u32,
     data: &[u8; BLOCK_LEN],
 ) -> Result<(), Error> {
+    if card.locked {
+        return Err(Error::Locked);
+    }
     if lba >= card.blocks {
         return Err(Error::DataError { block: lba });
     }
@@ -589,6 +624,25 @@ pub fn lock_unlock<T: Transport>(t: &mut T, card: &Card, op: LockOp<'_>) -> Resu
         return Err(Error::Refused);
     }
     restored.map(|_| ())
+}
+
+/// [`Card::label_size`] for a capacity in bytes. Sizes are powers of two from 8 MB, in
+/// decimal megabytes; past the largest (2 TB, SDXC's ceiling) the size is given in whole
+/// terabytes, rounded up.
+fn label_size(bytes: u64) -> (u32, &'static str) {
+    const MB: u64 = 1_000_000;
+    let mut mb: u64 = 8;
+    while mb < 2_000_000 && mb * MB < bytes {
+        mb *= 2;
+    }
+    // 1024 MB is sold as 1 GB, 2048 as 2 GB, and so on up.
+    if mb * MB >= bytes && mb < 1024 {
+        (mb as u32, "MB")
+    } else if mb * MB >= bytes && mb < 1024 * 1024 {
+        ((mb / 1024) as u32, "GB")
+    } else {
+        (bytes.div_ceil(1_000_000_000_000) as u32, "TB")
+    }
 }
 
 /// Capacity in 512-byte blocks, from a 136-bit CSD.

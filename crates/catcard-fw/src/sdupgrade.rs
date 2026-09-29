@@ -134,6 +134,10 @@ fn mount_card(slot: catcard_hal::sdmmc::Slot) -> Result<crate::media::Volume, &'
                 return Err(());
             }
         };
+        if card.locked {
+            why = "card is locked";
+            return Err(());
+        }
         Ok(crate::media::Media::Card(catcard_sd::Sectors::new(
             dev, card,
         )))

@@ -20,6 +20,8 @@ struct FakeCard {
     last_read_arg: u32,
     /// Whether the data path was armed before the read command went out.
     armed_before_cmd: bool,
+    /// Answer CMD13 with `CARD_IS_LOCKED`.
+    locked: bool,
 }
 
 /// A tiny growable vector, so the test file needs no dependency.
@@ -62,6 +64,7 @@ impl Default for FakeCard {
             selected: false,
             last_read_arg: 0,
             armed_before_cmd: false,
+            locked: false,
         }
     }
 }
@@ -89,6 +92,19 @@ impl Transport for FakeCard {
             CMD_SELECT => {
                 self.selected = true;
                 Ok([0; 4])
+            }
+            CMD_SEND_STATUS => {
+                let lock = if self.locked {
+                    STATUS_CARD_IS_LOCKED
+                } else {
+                    0
+                };
+                Ok([
+                    (STATE_TRANSFER << STATUS_STATE_SHIFT) | STATUS_READY_FOR_DATA | lock,
+                    0,
+                    0,
+                    0,
+                ])
             }
             CMD_READ_SINGLE => {
                 if !self.selected {
@@ -156,8 +172,32 @@ fn the_commands_go_out_in_the_order_the_spec_requires() {
         CMD_SEND_RCA,
         CMD_SEND_CSD,
         CMD_SELECT,
+        CMD_SEND_STATUS,
     ];
     assert_eq!(seen, &expected, "bring-up order changed");
+}
+
+/// A password-locked card still comes up -- its size and CID are there to show -- but is
+/// marked locked, and no read or write is sent to it: a read sent to a locked card has
+/// left one wedged until it was pulled.
+#[test]
+fn a_locked_card_comes_up_marked_and_is_never_read_or_written() {
+    let mut c = FakeCard {
+        locked: true,
+        ..Default::default()
+    };
+    let card = init(&mut c).expect("a locked card still comes up");
+    assert!(card.locked);
+    let sent = c.log.as_slice().len();
+    let mut block = [0u8; BLOCK_LEN];
+    assert_eq!(read_block(&mut c, &card, 0, &mut block), Err(Error::Locked));
+    assert_eq!(write_block(&mut c, &card, 1, &block), Err(Error::Locked));
+    assert_eq!(
+        c.log.as_slice().len(),
+        sent,
+        "a command went to a locked card"
+    );
+    assert!(!init(&mut FakeCard::default()).expect("init").locked);
 }
 
 /// Bring-up keeps the CID from CMD2 rather than discarding it, and the serial accessor
@@ -389,6 +429,7 @@ mod fat_round_trip {
 
     fn mounted(card: ImageCard) -> fat::Volume<Sectors<ImageCard>, 512> {
         let c = Card {
+            locked: false,
             rca: 1,
             addressing: Addressing::BlockAddressed,
             blocks: SECTORS,
@@ -439,6 +480,7 @@ mod fat_round_trip {
         let mut dev = Sectors::new(
             card,
             Card {
+                locked: false,
                 rca: 1,
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
@@ -546,6 +588,7 @@ mod fat_round_trip {
     }
 
     const SMALL_CARD: Card = Card {
+        locked: false,
         rca: 1,
         addressing: Addressing::BlockAddressed,
         blocks: 64,
@@ -637,6 +680,7 @@ mod fat_round_trip {
         Sectors::new(
             RwImageCard { image, at: 0 },
             Card {
+                locked: false,
                 rca: 1,
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
@@ -740,6 +784,7 @@ mod fat_round_trip {
                 reads: 0,
             },
             Card {
+                locked: false,
                 rca: 1,
                 addressing: Addressing::BlockAddressed,
                 blocks: SECTORS,
@@ -758,6 +803,7 @@ mod fat_round_trip {
 
     fn encrypted_card(blocks: u32) -> Card {
         Card {
+            locked: false,
             rca: 1,
             addressing: Addressing::BlockAddressed,
             blocks,
@@ -872,6 +918,7 @@ mod fat_round_trip {
             at: 0,
         };
         let card = Card {
+            locked: false,
             rca: 1,
             addressing: Addressing::BlockAddressed,
             blocks: N,
@@ -1205,6 +1252,7 @@ mod lock_unlock_sequence {
 
     fn card() -> Card {
         Card {
+            locked: false,
             rca: 0x1234,
             addressing: Addressing::BlockAddressed,
             blocks: 1 << 20,
@@ -1340,4 +1388,22 @@ mod lock_unlock_sequence {
         assert_eq!(t.arm_data(0, false), Err(Error::Unsupported));
         assert_eq!(t.arm_data(MAX_ODD_LEN + 1, false), Err(Error::Unsupported));
     }
+}
+
+/// The label size, not the nearest round number: a 512 MB card holds 480 MiB (503 MB),
+/// which rounds to 1 GB and was shown that way.
+#[test]
+fn label_size_is_the_smallest_sold_size_that_holds_the_card() {
+    use super::label_size;
+    let mib = |m: u64| m * 1024 * 1024;
+    assert_eq!(label_size(mib(480)), (512, "MB"));
+    assert_eq!(label_size(mib(243)), (256, "MB"));
+    // An "8 GB" card: 7580 MiB, the fake's CSD.
+    assert_eq!(label_size(mib(7580)), (8, "GB"));
+    assert_eq!(label_size(mib(967)), (1, "GB"));
+    assert_eq!(label_size(29_825_171_456), (32, "GB"));
+    assert_eq!(label_size(63_864_569_856), (64, "GB"));
+    assert_eq!(label_size(1_000_000_000_000 - 1), (1, "TB"));
+    assert_eq!(label_size(1_999_000_000_000), (2, "TB"));
+    assert_eq!(label_size(2_100_000_000_000), (3, "TB"));
 }
