@@ -1131,29 +1131,49 @@ mod lock_unlock_payload {
     }
 }
 
-/// The order around CMD42 matters as much as the payload: the data path is armed for a
-/// power-of-two block before the command goes out, and the padded structure is what the
-/// card is given. A fake transport records exactly what `lock_unlock` did.
+/// The order around CMD42 matters as much as the payload: CMD16 sets the block to the
+/// structure's exact length, the data path is armed for that length before CMD42 goes out,
+/// the card is waited on, and CMD16 puts 512 back whatever happened. A fake transport
+/// records exactly what `lock_unlock` did.
 mod lock_unlock_sequence {
+    extern crate std;
     use super::super::*;
+
+    /// Transfer state, ready for data: what CMD13 answers once a card is idle.
+    const IDLE: u32 = (STATE_TRANSFER << STATUS_STATE_SHIFT) | STATUS_READY_FOR_DATA;
 
     #[derive(Default)]
     struct LockFake {
+        /// Every command, with its argument, in order.
+        cmds: std::vec::Vec<(u8, u32)>,
+        /// The command count when the data path was armed.
+        armed_after: Option<usize>,
         armed_len: usize,
         armed_to_host: bool,
-        cmd: Option<u8>,
-        cmd_before_arm: bool,
-        payload: [u8; 32],
-        payload_len: usize,
+        payload: std::vec::Vec<u8>,
+        /// CMD13s that answer busy before the card is back in transfer.
+        busy_for: u32,
+        /// Put `LOCK_UNLOCK_FAILED` in the first status after CMD42.
+        refuse: bool,
+        /// Fail the data write.
+        write_fails: bool,
     }
 
     impl Transport for LockFake {
-        fn command(&mut self, cmd: u8, _arg: u32, _resp: Response) -> Result<[u32; 4], Error> {
-            if self.armed_len == 0 {
-                self.cmd_before_arm = true;
+        fn command(&mut self, cmd: u8, arg: u32, _resp: Response) -> Result<[u32; 4], Error> {
+            self.cmds.push((cmd, arg));
+            if cmd != CMD_SEND_STATUS {
+                return Ok([0; 4]);
             }
-            self.cmd = Some(cmd);
-            Ok([0; 4])
+            let mut status = IDLE;
+            if self.busy_for > 0 {
+                self.busy_for -= 1;
+                status = 7 << STATUS_STATE_SHIFT; // prg
+            }
+            if core::mem::take(&mut self.refuse) {
+                status |= STATUS_LOCK_UNLOCK_FAILED;
+            }
+            Ok([status, 0, 0, 0])
         }
         fn read_data(&mut self, _out: &mut [u8; BLOCK_LEN]) -> Result<(), Error> {
             Err(Error::Unsupported)
@@ -1166,45 +1186,64 @@ mod lock_unlock_sequence {
             true
         }
         fn arm_data(&mut self, len: usize, to_host: bool) -> Result<(), Error> {
-            if len == 0 || !len.is_power_of_two() {
+            if len == 0 || !(len.is_power_of_two() || len <= MAX_ODD_LEN) {
                 return Err(Error::Unsupported);
             }
+            self.armed_after = Some(self.cmds.len());
             self.armed_len = len;
             self.armed_to_host = to_host;
             Ok(())
         }
         fn write_short(&mut self, data: &[u8]) -> Result<(), Error> {
-            self.payload[..data.len()].copy_from_slice(data);
-            self.payload_len = data.len();
+            if self.write_fails {
+                return Err(Error::DataError { block: u32::MAX });
+            }
+            self.payload = data.to_vec();
             Ok(())
         }
     }
 
-    #[test]
-    fn cmd42_goes_out_after_the_data_path_is_armed_outbound() {
-        let mut t = LockFake::default();
-        lock_unlock(&mut t, LockOp::SetPassword(b"secret")).expect("lock");
-        assert!(
-            !t.cmd_before_arm,
-            "CMD42 went out before arming the data path"
-        );
-        assert_eq!(t.cmd, Some(42));
-        assert!(!t.armed_to_host, "the structure is written host-to-card");
-        // 2 + 6 = 8 is already a power of two, so no padding.
-        assert_eq!(t.armed_len, 8);
-        assert_eq!(t.payload_len, 8);
-        assert_eq!(t.payload[0], 0b0001);
-        assert_eq!(t.payload[1], 6);
-        assert_eq!(&t.payload[2..8], b"secret");
+    fn card() -> Card {
+        Card {
+            rca: 0x1234,
+            addressing: Addressing::BlockAddressed,
+            blocks: 1 << 20,
+            wide: true,
+            cid: [0; 4],
+            crypto: None,
+        }
+    }
+
+    fn names(t: &LockFake) -> std::vec::Vec<u8> {
+        t.cmds.iter().map(|&(c, _)| c).collect()
     }
 
     #[test]
-    fn every_password_length_goes_out_whole_and_zero_padded() {
-        // 15 and 16 bytes make a 17- or 18-byte structure and a 32-byte block; the scratch
-        // buffer used to be 18 bytes, and those lengths -- every passphrase-derived card
-        // password among them -- panicked the firmware.
+    fn cmd16_sets_the_exact_length_then_cmd42_then_512_again() {
+        let mut t = LockFake::default();
+        lock_unlock(&mut t, &card(), LockOp::SetPassword(b"secret")).expect("lock");
+        assert_eq!(
+            t.cmds,
+            [
+                (CMD_SET_BLOCKLEN, 8),
+                (CMD_LOCK_UNLOCK, 0),
+                (CMD_SEND_STATUS, 0x1234 << 16),
+                (CMD_SET_BLOCKLEN, 512),
+            ]
+        );
+        assert_eq!(t.armed_after, Some(1), "armed after CMD16, before CMD42");
+        assert!(!t.armed_to_host, "the structure is written host-to-card");
+        assert_eq!(t.armed_len, 8);
+        assert_eq!(t.payload, b"\x01\x06secret");
+    }
+
+    #[test]
+    fn every_password_length_goes_out_at_exactly_its_length() {
+        // The card takes the structure at the length CMD16 set; a 16-byte password is an
+        // 18-byte block, not 32 bytes of padded one. 15 and 16 bytes also once panicked
+        // the firmware, on a buffer sized for the structure and sliced for the padding.
+        let pwd = [b'p'; MAX_LOCK_PWD];
         for n in 1..=MAX_LOCK_PWD {
-            let pwd = [b'p'; MAX_LOCK_PWD];
             for op in [
                 LockOp::SetPassword(&pwd[..n]),
                 LockOp::ClearPassword(&pwd[..n]),
@@ -1212,53 +1251,93 @@ mod lock_unlock_sequence {
                 LockOp::Unlock(&pwd[..n]),
             ] {
                 let mut t = LockFake::default();
-                lock_unlock(&mut t, op).expect("sent");
-                let block = (2 + n).next_power_of_two().max(4);
-                assert_eq!(t.armed_len, block, "{n}-byte password");
-                assert_eq!(t.payload_len, block, "{n}-byte password");
-                assert_eq!(t.payload[1] as usize, n);
-                assert_eq!(&t.payload[2..2 + n], &pwd[..n]);
-                assert!(
-                    t.payload[2 + n..block].iter().all(|&b| b == 0),
-                    "padding is zero"
+                lock_unlock(&mut t, &card(), op).expect("sent");
+                assert_eq!(
+                    t.cmds[0],
+                    (CMD_SET_BLOCKLEN, 2 + n as u32),
+                    "{n}-byte password"
                 );
+                assert_eq!(t.armed_len, 2 + n, "{n}-byte password");
+                assert_eq!(t.payload.len(), 2 + n, "{n}-byte password");
+                assert_eq!(t.payload[1] as usize, n);
+                assert_eq!(&t.payload[2..], &pwd[..n]);
             }
         }
     }
 
     #[test]
-    fn a_short_structure_is_padded_to_a_multiple_of_four() {
-        // FORCE_ERASE is one byte; the FIFO writer needs a multiple of four, so it goes
-        // out as a four-byte padded block with the tail zeroed.
+    fn force_erase_is_one_byte() {
         let mut t = LockFake::default();
-        lock_unlock(&mut t, LockOp::ForceErase).expect("erase");
-        assert_eq!(t.armed_len, 4);
-        assert_eq!(t.payload_len, 4);
-        assert_eq!(t.payload[0], 0b1000);
-        assert_eq!(&t.payload[1..4], &[0, 0, 0], "padding is zero");
+        lock_unlock(&mut t, &card(), LockOp::ForceErase).expect("erase");
+        assert_eq!(t.cmds[0], (CMD_SET_BLOCKLEN, 1));
+        assert_eq!(t.payload, [0b1000]);
     }
 
     #[test]
-    fn an_odd_length_password_rounds_up_to_the_next_power_of_two() {
-        // 2 + 5 = 7 bytes of structure -> an 8-byte block, tail zeroed.
-        let mut t = LockFake::default();
-        lock_unlock(&mut t, LockOp::Unlock(b"hello")).expect("unlock");
-        assert_eq!(t.armed_len, 8);
-        assert_eq!(t.payload_len, 8);
-        assert_eq!(t.payload[0], 0);
-        assert_eq!(t.payload[1], 5);
-        assert_eq!(&t.payload[2..7], b"hello");
-        assert_eq!(t.payload[7], 0, "the pad byte is zero");
+    fn the_card_is_waited_on_until_it_is_back_in_transfer() {
+        let mut t = LockFake {
+            busy_for: 5,
+            ..Default::default()
+        };
+        lock_unlock(&mut t, &card(), LockOp::Unlock(b"hello")).expect("unlock");
+        let polls = names(&t).iter().filter(|&&c| c == CMD_SEND_STATUS).count();
+        assert_eq!(polls, 6, "five busy answers, then transfer");
+        assert_eq!(
+            t.cmds.last(),
+            Some(&(CMD_SET_BLOCKLEN, 512)),
+            "512 only once idle"
+        );
+    }
+
+    #[test]
+    fn a_refused_command_is_refused_and_512_still_goes_back() {
+        // A wrong password: the card runs CMD42, refuses it, and says so in the status
+        // of the command after.
+        let mut t = LockFake {
+            refuse: true,
+            busy_for: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            lock_unlock(&mut t, &card(), LockOp::ClearPassword(b"wrong")),
+            Err(Error::Refused)
+        );
+        assert_eq!(t.cmds.last(), Some(&(CMD_SET_BLOCKLEN, 512)));
+    }
+
+    #[test]
+    fn a_failed_write_still_puts_512_back() {
+        // A standard-capacity card reads and writes at the length CMD16 last set, so an
+        // 18 left behind would break every block after.
+        let mut t = LockFake {
+            write_fails: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            lock_unlock(&mut t, &card(), LockOp::Unlock(b"hello")),
+            Err(Error::DataError { block: u32::MAX })
+        );
+        assert_eq!(t.cmds.last(), Some(&(CMD_SET_BLOCKLEN, 512)));
     }
 
     #[test]
     fn too_long_a_password_never_touches_the_card() {
         let mut t = LockFake::default();
         assert_eq!(
-            lock_unlock(&mut t, LockOp::SetPassword(&[b'x'; 17])),
+            lock_unlock(&mut t, &card(), LockOp::SetPassword(&[b'x'; 17])),
             Err(Error::Unsupported)
         );
-        assert_eq!(t.cmd, None, "no command was sent");
-        assert_eq!(t.armed_len, 0, "the data path was never armed");
+        assert!(t.cmds.is_empty(), "no command was sent");
+        assert_eq!(t.armed_after, None, "the data path was never armed");
+    }
+
+    #[test]
+    fn arm_data_takes_odd_lengths_up_to_a_block_and_powers_of_two_beyond() {
+        let mut t = LockFake::default();
+        assert!(t.arm_data(18, false).is_ok());
+        assert!(t.arm_data(MAX_ODD_LEN, false).is_ok());
+        assert!(t.arm_data(1024, true).is_ok());
+        assert_eq!(t.arm_data(0, false), Err(Error::Unsupported));
+        assert_eq!(t.arm_data(MAX_ODD_LEN + 1, false), Err(Error::Unsupported));
     }
 }

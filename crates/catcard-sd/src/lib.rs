@@ -18,6 +18,12 @@
 /// internal page size, and SDHC/SDXC address *in* blocks rather than bytes.
 pub const BLOCK_LEN: usize = 512;
 
+/// The longest transfer [`Transport::arm_data`] takes at a length that is not a power of
+/// two, as one block of exactly that many bytes: a CMD42 structure is at most 18. Capped
+/// at a block, the most the L4+'s SDIO multibyte mode moves in one go.
+/// Source: RM0432 §SDMMC data length register, SDIO multibyte mode [I]
+pub const MAX_ODD_LEN: usize = BLOCK_LEN;
+
 pub mod cid;
 pub use cid::Cid;
 
@@ -50,6 +56,9 @@ pub enum Error {
     /// nothing written to it, and a firmware that cannot write the card cannot corrupt
     /// someone's files either.
     ReadOnly,
+    /// The card carried out a lock or unlock command and refused it
+    /// (`LOCK_UNLOCK_FAILED`): a wrong password, most often.
+    Refused,
     /// Something this transport does not do at all -- a short transfer on a transport
     /// that only models blocks, for instance.
     Unsupported,
@@ -107,18 +116,18 @@ pub trait Transport {
     /// Arm the data path for a transfer of `len` bytes, before the command is sent.
     ///
     /// The general form of the two calls above, for the commands whose payload is not a
-    /// block: a lock/unlock structure, a card's SCR, a status register. `len` must be a
-    /// power of two -- the controller's block size is an exponent, not a length -- which
-    /// is a real constraint on what a caller may ask for and not a detail of this
-    /// driver.
+    /// block: a lock/unlock structure, a card's SCR, a status register. `len` is a power
+    /// of two, or any length up to [`MAX_ODD_LEN`] sent as one block of exactly that many
+    /// bytes -- a lock structure is as long as its password, and the card wants exactly
+    /// the length CMD16 gave it.
     ///
-    /// A length that is not a power of two, or zero, is refused with
+    /// Zero, or a longer length that is not a power of two, is refused with
     /// [`Error::Unsupported`] and nothing is armed. The default does only that check --
     /// a transport that models a fake card has nothing to arm, but it should refuse what
     /// the real controller refuses, so a caller is told the same thing on both.
     fn arm_data(&mut self, len: usize, to_host: bool) -> Result<(), Error> {
         let _ = to_host;
-        if len == 0 || !len.is_power_of_two() {
+        if len == 0 || !(len.is_power_of_two() || len <= MAX_ODD_LEN) {
             return Err(Error::Unsupported);
         }
         Ok(())
@@ -247,6 +256,9 @@ const CMD_SELECT: u8 = 7;
 const CMD_SEND_STATUS: u8 = 13;
 const CMD_SEND_IF_COND: u8 = 8;
 const CMD_SEND_CSD: u8 = 9;
+/// SET_BLOCKLEN: the length of the next CMD42 structure, and on a standard-capacity card
+/// of every read and write. Source: SD Physical Layer Simplified Specification, CMD16 [C]
+const CMD_SET_BLOCKLEN: u8 = 16;
 const CMD_READ_SINGLE: u8 = 17;
 const CMD_WRITE_SINGLE: u8 = 24;
 const CMD_APP: u8 = 55;
@@ -258,6 +270,10 @@ const CMD_LOCK_UNLOCK: u8 = 42;
 /// Card status (the R1 response to CMD13): `CURRENT_STATE` in bits 12:9, and
 /// `READY_FOR_DATA` in bit 8. Source: SD Physical Layer Specification, "Card Status" [C]
 const STATUS_READY_FOR_DATA: u32 = 1 << 8;
+/// `LOCK_UNLOCK_FAILED`, bit 24: the last CMD42 was refused -- a wrong password, or an
+/// operation the card's state does not allow. Set by the command, reported by the next.
+/// Source: SD Physical Layer Simplified Specification, "Card Status" [C]
+const STATUS_LOCK_UNLOCK_FAILED: u32 = 1 << 24;
 const STATUS_STATE_SHIFT: u32 = 9;
 const STATE_TRANSFER: u32 = 4;
 
@@ -265,6 +281,13 @@ const STATE_TRANSFER: u32 = 4;
 /// command exchange of well under a millisecond; the specification's write timeout is
 /// 250 ms on standard cards, 500 ms on SDXC, so this is many times what any card takes.
 const BUSY_POLLS: u32 = 20_000;
+/// CMD13 polls after a FORCE_ERASE, which erases the whole card: the specification
+/// allows it three minutes. A CMD13 exchange is about a hundred bits at the 12 MHz
+/// transfer clock plus the driver's own time, tens of microseconds, so this is several
+/// minutes: past the spec's limit, still a bound.
+/// Source: SD Physical Layer Simplified Specification, "Lock/Unlock Card", force erase
+/// timeout [C]
+const ERASE_POLLS: u32 = 20_000_000;
 
 /// CMD8 check pattern, echoed back by a card that understood the question.
 const IF_COND_PATTERN: u32 = 0x1AA;
@@ -427,13 +450,22 @@ pub fn write_block<T: Transport>(
 /// CMD17 timing out right after a write, and a file write failing half way. The spec's
 /// answer is to ask the card's state until it is back in *transfer* and ready for data.
 fn wait_until_ready<T: Transport>(t: &mut T, card: &Card) -> Result<(), Error> {
+    wait_for_transfer(t, card, BUSY_POLLS).map(|_| ())
+}
+
+/// [`wait_until_ready`], at most `polls` CMD13s, returning every status bit the card
+/// reported along the way. An error bit is cleared once a response has carried it, so it
+/// may be in any one of them rather than the last.
+fn wait_for_transfer<T: Transport>(t: &mut T, card: &Card, polls: u32) -> Result<u32, Error> {
     let rca = u32::from(card.rca) << 16;
-    for _ in 0..BUSY_POLLS {
+    let mut seen = 0;
+    for _ in 0..polls {
         let [status, ..] = t.command(CMD_SEND_STATUS, rca, Response::Short)?;
+        seen |= status;
         if status & STATUS_READY_FOR_DATA != 0
             && (status >> STATUS_STATE_SHIFT) & 0xF == STATE_TRANSFER
         {
-            return Ok(());
+            return Ok(seen);
         }
     }
     Err(Error::Busy)
@@ -516,39 +548,47 @@ fn build_lock_payload(op: LockOp<'_>, buf: &mut [u8]) -> Result<usize, Error> {
 
 /// Run one CMD42 (LOCK_UNLOCK) operation against the card.
 ///
-/// The `Transport` trait was shaped for exactly this: arm the data path for the outgoing
-/// structure, send CMD42, then write the structure as a short payload. See the
-/// [`Transport::arm_data`] doc comment for why the length is a power of two.
+/// The card takes the lock structure as one data block of the length CMD16 last set, so
+/// the sequence is:
 ///
-/// The structure is short — at most `2 + 16` bytes, sent as a 32-byte block — but the controller can only move a
-/// power-of-two block, and its FIFO writer takes a length that is a multiple of four
-/// words-wide, so the payload is zero-padded up to the next power of two that is at least
-/// four. The card reads `command` and `PWDS_LEN` from the front and ignores the padding.
-/// Whether real cards tolerate that padding (rather than a `CMD16 SET_BLOCKLEN` set to
-/// the exact structure length) is unproven on hardware — see
-/// `docs/HARDWARE-OPEN-ITEMS.md`. `[?]`
+/// 1. CMD16 with the structure's exact length -- 18 bytes for a 16-byte password, one
+///    for FORCE_ERASE. A structure padded out to a block of any other length is not what
+///    the card was told to expect, and it does not take it.
+/// 2. Arm the data path for that many bytes, send CMD42, write the structure.
+/// 3. CMD13 until the card is back in *transfer*: it is busy while it applies the
+///    operation (minutes, for a force-erase), and CMD16 is not accepted meanwhile.
+/// 4. CMD16 back to [`BLOCK_LEN`], whatever happened before. A standard-capacity card
+///    uses the set length for every read and write after this.
+///
+/// A card that ran CMD42 and refused it -- a wrong password, above all -- reports
+/// `LOCK_UNLOCK_FAILED` in the status of the command after it, which step 3 reads; that
+/// is [`Error::Refused`].
+///
+/// Source: SD Physical Layer Simplified Specification, "Lock/Unlock Card" and "Card
+/// Status" [C]
 ///
 /// The scratch buffer that briefly holds the password is [`zeroize::Zeroizing`], so it is
 /// wiped on every path out, error included.
-pub fn lock_unlock<T: Transport>(t: &mut T, op: LockOp<'_>) -> Result<(), Error> {
-    // Sized for the padded block, not the structure: a 15- or 16-byte password makes a 17-
-    // or 18-byte structure that goes out as a 32-byte block, and a buffer of only `2 +
-    // MAX_LOCK_PWD` made that slice panic. Wiped on drop.
-    const BUF_LEN: usize = (2 + MAX_LOCK_PWD).next_power_of_two();
-    let mut buf = zeroize::Zeroizing::new([0u8; BUF_LEN]);
+pub fn lock_unlock<T: Transport>(t: &mut T, card: &Card, op: LockOp<'_>) -> Result<(), Error> {
+    let mut buf = zeroize::Zeroizing::new([0u8; 2 + MAX_LOCK_PWD]);
     let len = build_lock_payload(op, buf.as_mut_slice())?;
+    let erase = matches!(op, LockOp::ForceErase);
 
-    // The controller moves only a power-of-two block, and its FIFO writer wants a length
-    // that is a multiple of four bytes; four is the smallest block that satisfies both, so
-    // a one-byte FORCE_ERASE still goes out as a four-byte padded block. `len` is at most
-    // `2 + MAX_LOCK_PWD`, so `block` is at most `BUF_LEN`.
-    let block = len.next_power_of_two().max(4);
-
-    t.arm_data(block, false)?;
-    // Stuff bits: the argument to CMD42 carries no operand. Source: SD Physical Layer
-    // Simplified Specification, CMD42 [C]
-    t.command(CMD_LOCK_UNLOCK, 0, Response::Short)?;
-    t.write_short(&buf[..block])
+    t.command(CMD_SET_BLOCKLEN, len as u32, Response::Short)?;
+    let sent = (|| {
+        t.arm_data(len, false)?;
+        // Stuff bits: the argument to CMD42 carries no operand. Source: SD Physical Layer
+        // Simplified Specification, CMD42 [C]
+        t.command(CMD_LOCK_UNLOCK, 0, Response::Short)?;
+        t.write_short(&buf[..len])?;
+        let polls = if erase { ERASE_POLLS } else { BUSY_POLLS };
+        wait_for_transfer(t, card, polls)
+    })();
+    let restored = t.command(CMD_SET_BLOCKLEN, BLOCK_LEN as u32, Response::Short);
+    if sent? & STATUS_LOCK_UNLOCK_FAILED != 0 {
+        return Err(Error::Refused);
+    }
+    restored.map(|_| ())
 }
 
 /// Capacity in 512-byte blocks, from a 136-bit CSD.

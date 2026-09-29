@@ -10816,8 +10816,8 @@ fn card_password(ui: &mut Ui<'_>) {
     };
     // A locked card still answers identification -- it refuses only data transfers -- so
     // bring-up succeeds on one, which is what lets "Unlock card" be offered at all.
-    let cid = match catcard_sd::init(&mut dev) {
-        Ok(card) => card.cid,
+    let card = match catcard_sd::init(&mut dev) {
+        Ok(card) => card,
         Err(catcard_sd::Error::NoCard) => {
             message(ui.panel, HEAD, "no card in slot", "press a key");
             wait_any_key(ui);
@@ -10830,6 +10830,8 @@ fn card_password(ui: &mut Ui<'_>) {
             return;
         }
     };
+
+    let cid = card.cid;
 
     const WHAT: &[&str] = &[
         "Set password",
@@ -10859,7 +10861,7 @@ fn card_password(ui: &mut Ui<'_>) {
                 return;
             };
             let op = LockOp::SetPassword(&new);
-            run_lock_op(ui, &mut dev, op, "Setting password", "password set");
+            run_lock_op(ui, &mut dev, &card, op, "Setting password", "password set");
         }
         // Change: clear the old password, then set the new. Two CMD42s -- the card is left
         // with no password if the new one never goes on, rather than with both half-applied.
@@ -10871,13 +10873,20 @@ fn card_password(ui: &mut Ui<'_>) {
                 return;
             };
             message(ui.panel, HEAD, "changing password", "do not remove card");
-            match catcard_sd::lock_unlock(&mut dev, LockOp::ClearPassword(&old)) {
+            match catcard_sd::lock_unlock(&mut dev, &card, LockOp::ClearPassword(&old)) {
                 Ok(()) => {
                     let op = LockOp::SetPassword(&new);
-                    run_lock_op(ui, &mut dev, op, "Setting password", "password changed");
+                    run_lock_op(
+                        ui,
+                        &mut dev,
+                        &card,
+                        op,
+                        "Setting password",
+                        "password changed",
+                    );
                 }
                 Err(e) => {
-                    crate::catlog!("sd: CMD42 CLR_PWD failed: {:?}", e);
+                    log_lock_failure("CLR_PWD", &e);
                     message(ui.panel, HEAD, "wrong password?", "press a key");
                     wait_any_key(ui);
                 }
@@ -10889,7 +10898,14 @@ fn card_password(ui: &mut Ui<'_>) {
                 return;
             };
             let op = LockOp::ClearPassword(&pwd);
-            run_lock_op(ui, &mut dev, op, "Removing password", "password removed");
+            run_lock_op(
+                ui,
+                &mut dev,
+                &card,
+                op,
+                "Removing password",
+                "password removed",
+            );
         }
         // Unlock: open a locked card for this session. The password stays set, so the card
         // locks again when it next loses power; "Remove" is how it is cleared for good.
@@ -10898,7 +10914,7 @@ fn card_password(ui: &mut Ui<'_>) {
                 return;
             };
             let op = LockOp::Unlock(&pwd);
-            run_lock_op(ui, &mut dev, op, "Unlocking", "card unlocked");
+            run_lock_op(ui, &mut dev, &card, op, "Unlocking", "card unlocked");
         }
         // Force-erase: the forgotten-password recovery. Wipes the password AND every byte
         // on the card, cannot be undone, and is never a default -- two confirmations.
@@ -10921,7 +10937,14 @@ fn card_password(ui: &mut Ui<'_>) {
             if !confirmed(ui) {
                 return;
             }
-            run_lock_op(ui, &mut dev, LockOp::ForceErase, "Erasing", "card erased");
+            run_lock_op(
+                ui,
+                &mut dev,
+                &card,
+                LockOp::ForceErase,
+                "Erasing",
+                "card erased",
+            );
         }
         _ => {}
     }
@@ -10935,19 +10958,43 @@ fn card_password(ui: &mut Ui<'_>) {
 fn run_lock_op(
     ui: &mut Ui<'_>,
     dev: &mut catcard_hal::sdmmc::Sdmmc,
+    card: &catcard_sd::Card,
     op: catcard_sd::LockOp<'_>,
     working: &str,
     ok: &str,
 ) {
     message(ui.panel, "Card password", working, "do not remove card");
-    match catcard_sd::lock_unlock(dev, op) {
+    match catcard_sd::lock_unlock(dev, card, op) {
         Ok(()) => message(ui.panel, "Card password", ok, "press a key"),
+        Err(catcard_sd::Error::Refused) => {
+            log_lock_failure("op", &catcard_sd::Error::Refused);
+            message(ui.panel, "Card password", "wrong password?", "press a key");
+        }
         Err(e) => {
-            crate::catlog!("sd: CMD42 failed: {:?}", e);
+            log_lock_failure("op", &e);
             message(ui.panel, "Card password", "card refused it", "press a key");
         }
     }
     wait_any_key(ui);
+}
+
+/// Log a failed CMD42, with where the controller's data path stopped when that is the
+/// failure: "data error" alone does not say whether the card rejected the block or never
+/// answered it.
+fn log_lock_failure(what: &str, e: &catcard_sd::Error) {
+    if let catcard_sd::Error::DataError { .. } = e {
+        let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
+        crate::catlog!(
+            "sd: CMD42 {} failed: {:?}; sd last {} sta {:08x} detail {}",
+            what,
+            e,
+            catcard_hal::sdmmc::last_failure::name(phase),
+            sta,
+            detail
+        );
+    } else {
+        crate::catlog!("sd: CMD42 {} failed: {:?}", what, e);
+    }
 }
 
 /// Destroy the stored seed.
@@ -13055,6 +13102,7 @@ fn describe_sd(e: &catcard_sd::Error) -> &'static str {
         E::ReadOnly => "read only",
         E::Busy => "card stayed busy",
         E::Unsupported => "not done here",
+        E::Refused => "refused",
     }
 }
 

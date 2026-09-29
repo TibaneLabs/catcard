@@ -153,6 +153,14 @@ const ICR_CMD: u32 = STA_CCRCFAIL | STA_CTIMEOUT | STA_CMDREND | STA_CMDSENT;
 
 const DCTRL_DTEN: u32 = 1 << 0;
 const DCTRL_DTDIR_CARD_TO_HOST: u32 = 1 << 1;
+/// `DCTRL.DTMODE = 01`, SDIO multibyte: one block of exactly `DLEN` bytes, any length,
+/// with its CRC -- what a CMD42 structure of 18 bytes needs. L4+ only; on the L4 bit 2 is
+/// `DTMODE` = stream, which carries no CRC.
+/// Source: RM0432 §SDMMC data control register (SDMMC_DCTRL), `DTMODE[1:0]` [I]
+const DCTRL_DTMODE_SDIO_MULTIBYTE: u32 = 0b01 << 2;
+/// `DCTRL.FIFORST` (L4+): flush the FIFO. Writable only with the data path idle.
+/// Source: RM0432 §SDMMC data control register (SDMMC_DCTRL), bit 13 [I]
+const DCTRL_FIFORST: u32 = 1 << 13;
 
 /// Polls before a command is called lost.
 ///
@@ -328,6 +336,85 @@ impl Sdmmc {
         // SAFETY: a read of a peripheral this type owns.
         unsafe { reg::read(self.base + DCOUNT) }
     }
+
+    /// [`Transport::write_short`]'s transfer, without the flush after it.
+    fn write_fifo(&mut self, data: &[u8]) -> Result<(), Error> {
+        let want = data.len();
+        let b = self.base;
+        // SAFETY: this type owns SDMMC1 for its lifetime.
+        unsafe {
+            let mut at = 0usize;
+            let mut tries = 0u32;
+            // Feed the FIFO an eight-word burst at a time, only when `TXFIFOHE` says there
+            // is room for one. a block is a multiple of 32, so the bursts divide it
+            // evenly. Writing per word against `TXFIFOF` instead races on the L4+ IP: the
+            // "full" flag lags a word behind, the extra write is dropped, and the transfer
+            // then stalls with `DCOUNT` short of zero -- exactly what a partial write was.
+            while at < want {
+                let sta = reg::read(b + STA);
+                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    last_failure::record(
+                        last_failure::WRITE_FILL_ERROR,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
+                    reg::write(b + ICR, self.bits.icr_all);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+                if sta & STA_TXFIFOHE != 0 {
+                    let mut n = 0;
+                    while n < 8 && at < want {
+                        let mut w = [0u8; 4];
+                        let take = (want - at).min(4);
+                        w[..take].copy_from_slice(&data[at..at + take]);
+                        reg::write(b + FIFO, u32::from_le_bytes(w));
+                        at += take;
+                        n += 1;
+                    }
+                }
+                tries += 1;
+                if tries >= DATA_TRIES {
+                    last_failure::record(
+                        last_failure::WRITE_FILL_STALLED,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
+                    reg::write(b + ICR, self.bits.icr_all);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+            }
+            // The block is queued; the card still has to program it. `DATAEND` is that,
+            // and a CRC or underrun in the meantime is the card rejecting what it got.
+            let mut tries = 0u32;
+            loop {
+                let sta = reg::read(b + STA);
+                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
+                    last_failure::record(last_failure::WRITE_END_ERROR, sta, reg::read(b + DCOUNT));
+                    reg::write(b + ICR, self.bits.icr_all);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+                if sta & STA_DATAEND != 0 {
+                    break;
+                }
+                tries += 1;
+                if tries >= DATA_TRIES {
+                    last_failure::record(
+                        last_failure::WRITE_END_STALLED,
+                        sta,
+                        reg::read(b + DCOUNT),
+                    );
+                    reg::write(b + ICR, self.bits.icr_all);
+                    return Err(Error::DataError { block: u32::MAX });
+                }
+            }
+            reg::write(b + ICR, self.bits.icr_all);
+            // Take the data path out of transmit. After a block the mk3's controller still
+            // reported `TXACT`, and the next command found it that way; `DTEN` is clear on
+            // the L4+ anyway, so this costs that controller nothing.
+            reg::write(b + DCTRL, 0);
+        }
+        Ok(())
+    }
 }
 
 impl Transport for Sdmmc {
@@ -480,86 +567,19 @@ impl Transport for Sdmmc {
 
     /// The writer, over however many bytes were armed.
     ///
-    /// As `read_short`: one loop for a block and for a lock structure. Four bytes at a
-    /// time, so a payload that is not a multiple of four is refused rather than padded --
-    /// padding would send the card bytes the caller did not write.
+    /// As `read_short`: one loop for a block and for a lock structure. The FIFO takes four
+    /// bytes at a time, so a length that is not a multiple of four ends on a partial word
+    /// padded with zeros; the controller sends `DLEN` bytes and no more, and the padding is
+    /// flushed with the FIFO afterwards rather than left to lead the next transfer.
     fn write_short(&mut self, data: &[u8]) -> Result<(), Error> {
-        let want = data.len();
-        if !want.is_multiple_of(4) {
-            return Err(Error::Unsupported);
+        let sent = self.write_fifo(data);
+        if !data.len().is_multiple_of(4) && self.new_ip {
+            // SAFETY: this type owns SDMMC1. After the transfer, done or failed, the data
+            // path is idle, which is when `FIFORST` may be written; a write while it is
+            // not is ignored, so a stalled transfer is no worse off.
+            unsafe { reg::write(self.base + DCTRL, DCTRL_FIFORST) };
         }
-        let b = self.base;
-        // SAFETY: this type owns SDMMC1 for its lifetime.
-        unsafe {
-            let mut at = 0usize;
-            let mut tries = 0u32;
-            // Feed the FIFO an eight-word burst at a time, only when `TXFIFOHE` says there
-            // is room for one. a block is a multiple of 32, so the bursts divide it
-            // evenly. Writing per word against `TXFIFOF` instead races on the L4+ IP: the
-            // "full" flag lags a word behind, the extra write is dropped, and the transfer
-            // then stalls with `DCOUNT` short of zero -- exactly what a partial write was.
-            while at < want {
-                let sta = reg::read(b + STA);
-                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
-                    last_failure::record(
-                        last_failure::WRITE_FILL_ERROR,
-                        sta,
-                        reg::read(b + DCOUNT),
-                    );
-                    reg::write(b + ICR, self.bits.icr_all);
-                    return Err(Error::DataError { block: u32::MAX });
-                }
-                if sta & STA_TXFIFOHE != 0 {
-                    let mut n = 0;
-                    while n < 8 && at < want {
-                        let w = [data[at], data[at + 1], data[at + 2], data[at + 3]];
-                        reg::write(b + FIFO, u32::from_le_bytes(w));
-                        at += 4;
-                        n += 1;
-                    }
-                }
-                tries += 1;
-                if tries >= DATA_TRIES {
-                    last_failure::record(
-                        last_failure::WRITE_FILL_STALLED,
-                        sta,
-                        reg::read(b + DCOUNT),
-                    );
-                    reg::write(b + ICR, self.bits.icr_all);
-                    return Err(Error::DataError { block: u32::MAX });
-                }
-            }
-            // The block is queued; the card still has to program it. `DATAEND` is that,
-            // and a CRC or underrun in the meantime is the card rejecting what it got.
-            let mut tries = 0u32;
-            loop {
-                let sta = reg::read(b + STA);
-                if sta & (STA_DCRCFAIL | STA_DTIMEOUT | STA_TXUNDERR) != 0 {
-                    last_failure::record(last_failure::WRITE_END_ERROR, sta, reg::read(b + DCOUNT));
-                    reg::write(b + ICR, self.bits.icr_all);
-                    return Err(Error::DataError { block: u32::MAX });
-                }
-                if sta & STA_DATAEND != 0 {
-                    break;
-                }
-                tries += 1;
-                if tries >= DATA_TRIES {
-                    last_failure::record(
-                        last_failure::WRITE_END_STALLED,
-                        sta,
-                        reg::read(b + DCOUNT),
-                    );
-                    reg::write(b + ICR, self.bits.icr_all);
-                    return Err(Error::DataError { block: u32::MAX });
-                }
-            }
-            reg::write(b + ICR, self.bits.icr_all);
-            // Take the data path out of transmit. After a block the mk3's controller still
-            // reported `TXACT`, and the next command found it that way; `DTEN` is clear on
-            // the L4+ anyway, so this costs that controller nothing.
-            reg::write(b + DCTRL, 0);
-        }
-        Ok(())
+        sent
     }
 
     fn set_bus_width_4(&mut self) -> Result<(), Error> {
@@ -629,30 +649,44 @@ pub unsafe fn arm_block_read(b: u32, dten: bool) {
 
 /// Arm the data path for one transfer of `len` bytes.
 ///
-/// **`len` must be a power of two.** `DCTRL.DBLOCKSIZE` is an exponent, not a length --
-/// the controller can move 1, 2, 4 ... 16384 bytes and nothing between. That is not a
-/// limit anybody meets reading blocks, which are 512, but it decides how a lock/unlock
-/// payload has to be shaped: the structure is two bytes plus the password, so a password
-/// of six or fourteen bytes gives a transfer the controller can express and one of
-/// sixteen does not.
+/// A power of two is a block, which both controllers express directly: `DCTRL.DBLOCKSIZE`
+/// is an exponent, 1, 2, 4 ... 16384 bytes. Every block read and write is one of those.
 ///
-/// A length the controller cannot express is refused before any register is written --
-/// `trailing_zeros` of a non-power-of-two names a *smaller* block than `DLEN` says, and
-/// zero has thirty-two of them, which lands a stray bit in `DCTRL`.
+/// Any other length up to [`catcard_sd::MAX_ODD_LEN`] is one block of exactly `len`
+/// bytes, which is what CMD42 needs: the card takes a lock structure of the length CMD16
+/// set -- 18 bytes for a 16-byte password -- and a padded one is not that. The L4+ has a
+/// mode for it (SDIO multibyte). The L4 does not; there `DLEN` is set to the exact length
+/// under the next power of two as the block size, on the reading that the data path ends
+/// when `DLEN` runs out, block boundary or not -- unproven, see
+/// `docs/HARDWARE-OPEN-ITEMS.md` §SD CMD42 `[?]`.
+///
+/// A length neither can express is refused before any register is written --
+/// `trailing_zeros` of a stray length names the wrong block, and zero has thirty-two of
+/// them, which lands a stray bit in `DCTRL`.
 ///
 /// # Safety
 /// Caller owns SDMMC1.
 pub unsafe fn arm_data(b: u32, dten: bool, len: usize, to_host: bool) -> Result<(), Error> {
-    if len == 0 || !len.is_power_of_two() || len > MAX_TRANSFER_LEN {
+    let block = len.is_power_of_two() && len <= MAX_TRANSFER_LEN;
+    if len == 0 || !(block || len <= catcard_sd::MAX_ODD_LEN) {
         return Err(Error::Unsupported);
     }
-    let exponent = len.trailing_zeros();
+    // `DTEN` starts the data path on the L4; the L4+ starts it from `CMDTRANS` instead, so
+    // the caller's `dten` also says which controller this is.
+    let new_ip = !dten;
+    let mode = if block {
+        len.trailing_zeros() << 4
+    } else if new_ip {
+        DCTRL_DTMODE_SDIO_MULTIBYTE
+    } else {
+        len.next_power_of_two().trailing_zeros() << 4
+    };
     // SAFETY: as documented.
     unsafe {
         reg::write(b + DLEN, len as u32);
         let en = if dten { DCTRL_DTEN } else { 0 };
         let dir = if to_host { DCTRL_DTDIR_CARD_TO_HOST } else { 0 };
-        reg::write(b + DCTRL, en | dir | (exponent << 4));
+        reg::write(b + DCTRL, en | dir | mode);
     }
     Ok(())
 }

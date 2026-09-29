@@ -900,7 +900,7 @@ Two CatCards clone to each other; a CatCard and a **stock** Coldcard do **not**.
 cross-vendor clone is ever wanted, the stock format has to be obtained from a sanctioned
 source — not the firmware tree — and this replaced with it.
 
-## SD CMD42 (LOCK_UNLOCK) — the block framing and card quirks are unproven
+## SD CMD42 (LOCK_UNLOCK) — the exact-length block and card quirks are unproven
 
 `crates/catcard-sd/src/lib.rs` (`lock_unlock`) drives the SD card's own controller
 password lock (menu: `Utils → SD card → Card password`). The command byte, the flag bits (ERASE=3,
@@ -908,25 +908,29 @@ LOCK=2, CLR_PWD=1, SET_PWD=0) and the `[command][pwd_len][password]` data struct
 confirmed from the **public** SD Physical Layer Simplified Specification, "Lock/Unlock
 Card" `[C]`. What is not confirmed on real hardware:
 
-- **Padding vs. `CMD16 SET_BLOCKLEN`** `[?]`. The STM32 SDMMC controller moves only a
-  power-of-two block and its FIFO writer wants a length that is a multiple of four bytes,
-  so `lock_unlock` zero-pads the structure up to the next such block and sends that. The
-  spec's own procedure sets the block length to the *exact* structure length with CMD16
-  first. We rely on the card reading `command`/`pwd_len` from the front and ignoring the
-  padding. Whether real cards accept that — or require the CMD16 — needs a card and a
-  scope. If they do not, add a `CMD16` before the CMD42 and set the block to the exact
-  length; the payload builder already returns that exact length.
-- **Busy handling after CMD42** `[?]`. `write_short` waits for `DATAEND`, which covers a
-  SET/CLR/UNLOCK. FORCE_ERASE can hold the card busy far longer while it wipes; the
-  controller's data-transfer timeout may expire before the erase finishes on a large card.
-  Whether a `CMD13` busy-poll (as `write_block` does) is needed after CMD42 is unknown
-  until timed against a real card.
+- **Padding is out: CMD16 sets the exact length** `[C]`. A 16-byte password zero-padded
+  to a 32-byte block was refused on a real card (Q1, 2026-09-30: `DataError` on the
+  CMD42 data block). `lock_unlock` now sends `CMD16` with the structure's exact length
+  (18 bytes for a 16-byte password, one for FORCE_ERASE), the structure at exactly that
+  length, and `CMD16 512` afterwards on every path.
+- **An exact odd-length block on the controller** `[I]` on the L4+, `[?]` on the L4. The
+  L4+ (mk4/mk5/Q1) sends it in `DCTRL.DTMODE = 01`, SDIO multibyte: one block of `DLEN`
+  bytes with its CRC (RM0432 §SDMMC_DCTRL). The final FIFO word is zero-padded and the
+  FIFO flushed with `FIFORST` afterwards. The L4 (mk3) has no such mode; it is given
+  `DLEN` = the exact length under the next power of two as `DBLOCKSIZE`, on the reading
+  that its data path ends when `DLEN` runs out. Confirm on a card: an 18-byte CMD42
+  accepted on the Q1, and the same on the mk3.
+- **Busy handling after CMD42** `[I]`. After the data block, `lock_unlock` polls CMD13
+  until the card is back in *transfer* (20 000 polls; 20 million after FORCE_ERASE, which
+  the spec allows three minutes), and reads `LOCK_UNLOCK_FAILED` from those statuses as
+  the refusal. Whether `write_short`'s own wait for `DATAEND` outlasts a large card's
+  force-erase before the CMD13 poll is reached is untimed.
 - **Whether SET_PWD auto-locks** `[?]`. The UI states the card locks when it next loses
   power (the standard behaviour), rather than issuing a combined `SET_PWD|LOCK`. Confirm
   the power-cycle lock on a real card, or switch "Set password" to the combined command.
 
 Resolve with a real SD card on a bench: set/lock/unlock/clear and force-erase, confirming
-the block framing, the busy timing and the auto-lock. Do **not** read the stock firmware
+the exact-length block on both controllers, the busy timing and the auto-lock. Do **not** read the stock firmware
 for this — the SD spec is the sanctioned source.
 
 ## Bag number (gate 19/0): read as text `[I]`
