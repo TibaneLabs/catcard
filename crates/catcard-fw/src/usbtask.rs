@@ -2639,13 +2639,14 @@ fn sd_raw(req: &[u8], out: &mut [u8]) -> Option<usize> {
     };
     let to_host = flags & 0b100 != 0;
     let to_card = flags & 0b1000 != 0;
-    // A transfer's length is an exponent in the controller, so only powers of two can be
-    // asked for, and the reply carries twelve bytes of header inside one message. 256 is
-    // the largest power of two that leaves room -- enough for every register a probe
-    // wants (a CID is in the response words, an SD status is 64 bytes, a lock structure
-    // is 16). A whole 512-byte block is what the drive and `DebugSd` are for.
+    // Any length the controller's `arm_data` takes, up to what one message carries beside
+    // the reply's twelve-byte header: 256, enough for every register a probe wants (a CID
+    // is in the response words, an SD status is 64 bytes) and for a CMD42 structure, which
+    // is as long as its password plus two -- 18 for a 16-byte one, and exactly that, since
+    // the card takes it at the length CMD16 set. A whole 512-byte block is what the drive
+    // and `DebugSd` are for.
     const DATA_MAX: usize = 256;
-    if (to_host || to_card) && (len == 0 || !len.is_power_of_two() || len > DATA_MAX) {
+    if (to_host || to_card) && (len == 0 || len > DATA_MAX) {
         return None;
     }
     if to_card && req.len() < 8 + len {
@@ -2659,7 +2660,15 @@ fn sd_raw(req: &[u8], out: &mut [u8]) -> Option<usize> {
         // SAFETY: as above.
         let mut dev = unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) }.ok()?;
         let card = catcard_sd::init(&mut dev).ok()?;
-        crate::catlog!("sdraw: card up, {} blocks, wide={}", card.blocks, card.wide);
+        // The RCA is what every addressed command (CMD13 above all) needs, and the host
+        // has no other way to learn it.
+        crate::catlog!(
+            "sdraw: card up, {} blocks, wide={}, rca {:04x}, locked={}",
+            card.blocks,
+            card.wide,
+            card.rca,
+            card.locked
+        );
         *held = Some((dev, card));
     }
     let (dev, _card) = held.as_mut()?;
