@@ -11,7 +11,7 @@
 //!
 //! Nothing here touches the wallet.
 
-use catcard_ui::art::flappy::GAME_OVER;
+use catcard_ui::art::flappy::{Art, GAME_OVER};
 use catcard_ui::flappy::{self as fl, Column, Game};
 use catcard_ui::keypad::{Event, KEYS, Key};
 
@@ -37,6 +37,7 @@ const CHUNK: usize = 40;
 /// the ring of frame memory.
 fn paint_world(
     panel: &mut display::Panel,
+    art: &Art<'_>,
     x0: u32,
     w: usize,
     y0: usize,
@@ -52,7 +53,7 @@ fn paint_world(
         for (i, c) in cols[..run].iter_mut().enumerate() {
             *c = column(x + i as u32);
         }
-        let _ = panel.paint(col, y0, run, h, |dx, dy| cols[dx].colour(y0 + dy));
+        let _ = panel.paint(col, y0, run, h, |dx, dy| cols[dx].colour(art, y0 + dy));
         done += run;
     }
 }
@@ -77,8 +78,8 @@ fn paint_world_pixels(
 }
 
 /// The whole scene, every column on the glass.
-fn paint_scene(panel: &mut display::Panel, g: &Game) {
-    paint_world(panel, g.scroll, fl::PLAY_W, 0, fl::HEIGHT, |x| {
+fn paint_scene(panel: &mut display::Panel, art: &Art<'_>, g: &Game) {
+    paint_world(panel, art, g.scroll, fl::PLAY_W, 0, fl::HEIGHT, |x| {
         g.shown_column(x)
     });
 }
@@ -101,13 +102,30 @@ pub(crate) fn flappy_cat(ui: &mut Ui<'_>) {
     crate::menu::message(ui.panel, "Flappy Cat", "any key flaps", "cancel quits");
     crate::menu::wait_for_any_key(ui);
 
+    // The sprites are in flash deflated; they are inflated here, into a block the heap has
+    // back the moment the game is left.
+    let Some(mut block) = crate::heap::take(catcard_ui::art::flappy::UNPACKED_LEN) else {
+        crate::menu::message(ui.panel, "Flappy Cat", "not enough memory", "press a key");
+        crate::menu::wait_for_any_key(ui);
+        return;
+    };
+    let art = match catcard_ui::art::flappy::unpack(block.bytes()) {
+        Ok(art) => art,
+        Err(e) => {
+            crate::catlog!("flappy: art would not unpack: {:?}", e);
+            crate::menu::message(ui.panel, "Flappy Cat", "game data damaged", "press a key");
+            crate::menu::wait_for_any_key(ui);
+            return;
+        }
+    };
+
     // The game scrolls the panel itself, at raw lines: from origin 0.
     display::reset_origin(ui.panel);
     let _ = ui.panel.set_scroll_area(0, 0);
     loop {
         let mut seed = [0u8; 4];
         let _ = ui.drbg.generate(&mut seed);
-        if !play(ui, u32::from_le_bytes(seed)) {
+        if !play(ui, &art, u32::from_le_bytes(seed)) {
             break;
         }
     }
@@ -115,10 +133,10 @@ pub(crate) fn flappy_cat(ui: &mut Ui<'_>) {
 }
 
 /// One game. True to play again, false to leave.
-fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
+fn play(ui: &mut Ui<'_>, art: &Art<'_>, seed: u32) -> bool {
     let mut g = Game::new(seed);
     let _ = ui.panel.set_scroll_start(fl::scroll_start(0));
-    paint_scene(ui.panel, &g);
+    paint_scene(ui.panel, art, &g);
 
     let mut started = false;
     let mut score = 0;
@@ -149,7 +167,7 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         let (old_scroll, old_x, old_y) = (g.scroll, g.cat_x(), g.cat_y());
         let old_score = g.score();
         if started {
-            g.step();
+            g.step(art);
         } else {
             g.idle();
         }
@@ -160,13 +178,15 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         let incoming = (g.scroll - old_scroll) as usize;
         if incoming > 0 {
             let x = old_scroll + fl::PLAY_W as u32;
-            paint_world(ui.panel, x, incoming, 0, fl::HEIGHT, |x| g.shown_column(x));
+            paint_world(ui.panel, art, x, incoming, 0, fl::HEIGHT, |x| {
+                g.shown_column(x)
+            });
         }
         // The cat: where it was and where it is, as one patch.
         let top = old_y.min(g.cat_y());
         let bottom = (old_y.max(g.cat_y()) + fl::CAT_H).min(fl::HEIGHT);
         let width = (g.cat_x() - old_x) as usize + fl::CAT_W;
-        paint_world(ui.panel, old_x, width, top, bottom - top, |x| {
+        paint_world(ui.panel, art, old_x, width, top, bottom - top, |x| {
             g.shown_column(x)
         });
         // The score: where it was on the world and where it is now, which is a column on
@@ -177,6 +197,7 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         let to = (old_scroll + (old_left + old_w) as u32).max(g.scroll + (new_left + new_w) as u32);
         paint_world(
             ui.panel,
+            art,
             from,
             (to - from) as usize,
             fl::SCORE_TOP,
@@ -223,8 +244,8 @@ fn play(ui: &mut Ui<'_>, seed: u32) -> bool {
         GAME_OVER.height as usize,
         |x, y| {
             GAME_OVER
-                .at((x - banner_x) as usize, y - BANNER_Y)
-                .unwrap_or_else(|| g.shown(x, y))
+                .at(art, (x - banner_x) as usize, y - BANNER_Y)
+                .unwrap_or_else(|| g.shown(art, x, y))
         },
     );
 

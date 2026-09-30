@@ -29,7 +29,7 @@
 //! Everything is integer arithmetic, and the pipes come from a seed, so a world column can
 //! be redrawn at any time and come out the same.
 
-use crate::art::flappy::{BACKGROUND, BASE, CAT_DOWN, CAT_MID, CAT_UP, DIGITS, PIPE, Sprite};
+use crate::art::flappy::{Art, BACKGROUND, BASE, CAT_DOWN, CAT_MID, CAT_UP, DIGITS, PIPE, Sprite};
 
 /// The scrolling area: the whole width of the panel.
 pub const PLAY_W: usize = 320;
@@ -107,21 +107,23 @@ impl Column {
     /// The pipe sprite has its lip at the top, so the lower pipe draws it as it is from the
     /// gap down, and the upper pipe draws it flipped from the gap up. A pipe longer than the
     /// sprite repeats its last row, which is plain body.
-    pub fn colour(&self, y: usize) -> u16 {
+    pub fn colour(&self, art: &Art<'_>, y: usize) -> u16 {
         if let Some((digit, dx)) = self.score
             && (SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y)
-            && let Some(c) = digit.at(dx as usize, y - SCORE_TOP)
+            && let Some(c) = digit.at(art, dx as usize, y - SCORE_TOP)
         {
             return c;
         }
         if let Some((cat, dx, top)) = self.cat
             && y >= top
-            && let Some(c) = cat.at(dx as usize, y - top)
+            && let Some(c) = cat.at(art, dx as usize, y - top)
         {
             return c;
         }
         if y >= GROUND_Y {
-            return BASE.at(self.base_x as usize, y - GROUND_Y).unwrap_or(0);
+            return BASE
+                .at(art, self.base_x as usize, y - GROUND_Y)
+                .unwrap_or(0);
         }
         if let Some((into, top)) = self.pipe {
             let yi = y as i32;
@@ -134,12 +136,14 @@ impl Column {
             };
             if let Some(r) = row {
                 let r = (r as usize).min(PIPE.height as usize - 1);
-                if let Some(c) = PIPE.at(into as usize, r) {
+                if let Some(c) = PIPE.at(art, into as usize, r) {
                     return c;
                 }
             }
         }
-        BACKGROUND.at(self.background_x as usize, y).unwrap_or(0)
+        BACKGROUND
+            .at(art, self.background_x as usize, y)
+            .unwrap_or(0)
     }
 }
 
@@ -196,8 +200,8 @@ impl World {
     }
 
     /// The colour of world pixel `(x, y)`, the cat not included.
-    pub fn colour(&self, x: u32, y: usize) -> u16 {
-        self.column(x).colour(y)
+    pub fn colour(&self, art: &Art<'_>, x: u32, y: usize) -> u16 {
+        self.column(x).colour(art, y)
     }
 }
 
@@ -258,7 +262,7 @@ impl Game {
     }
 
     /// One frame: fall, move on, and see what the cat hit.
-    pub fn step(&mut self) {
+    pub fn step(&mut self, art: &Art<'_>) {
         if self.over {
             return;
         }
@@ -271,11 +275,11 @@ impl Game {
             self.vy = 0;
         }
         self.scroll += SPEED;
-        self.over = self.hit();
+        self.over = self.hit(art);
     }
 
     /// Whether the cat's opaque pixels touch the ground or a pipe.
-    fn hit(&self) -> bool {
+    fn hit(&self, art: &Art<'_>) -> bool {
         let (bx, by) = (self.cat_x(), self.cat_y());
         if by + CAT_H > GROUND_Y {
             return true;
@@ -288,7 +292,7 @@ impl Game {
             let top = self.world.gap_top(i);
             (0..CAT_H).any(|dy| {
                 let y = (by + dy) as i32;
-                (y < top || y >= top + GAP) && sprite.at(dx, dy).is_some()
+                (y < top || y >= top + GAP) && sprite.at(art, dx, dy).is_some()
             })
         })
     }
@@ -314,8 +318,8 @@ impl Game {
     }
 
     /// What world pixel `(x, y)` looks like with the cat drawn in.
-    pub fn pixel(&self, x: u32, y: usize) -> u16 {
-        self.column_with_cat(x).colour(y)
+    pub fn pixel(&self, art: &Art<'_>, x: u32, y: usize) -> u16 {
+        self.column_with_cat(x).colour(art, y)
     }
 }
 
@@ -369,12 +373,12 @@ fn score_digit(score: u32, sx: usize) -> Option<(&'static Sprite, u16)> {
 }
 
 /// The score's colour at glass column `sx`, row `y`, or `None` where it does not cover.
-pub fn score_colour(score: u32, sx: usize, y: usize) -> Option<u16> {
+pub fn score_colour(art: &Art<'_>, score: u32, sx: usize, y: usize) -> Option<u16> {
     if !(SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y) {
         return None;
     }
     let (digit, dx) = score_digit(score, sx)?;
-    digit.at(dx as usize, y - SCORE_TOP)
+    digit.at(art, dx as usize, y - SCORE_TOP)
 }
 
 impl Game {
@@ -393,8 +397,8 @@ impl Game {
     }
 
     /// World pixel `(x, y)` as the glass shows it. See [`shown_column`](Self::shown_column).
-    pub fn shown(&self, x: u32, y: usize) -> u16 {
-        self.shown_column(x).colour(y)
+    pub fn shown(&self, art: &Art<'_>, x: u32, y: usize) -> u16 {
+        self.shown_column(x).colour(art, y)
     }
 }
 
@@ -403,15 +407,23 @@ mod tests {
     use super::*;
     use crate::art::flappy::GAME_OVER;
 
+    /// The sprites, unpacked the way the game does it, into a buffer the tests keep.
+    fn art() -> Art<'static> {
+        let buf = Vec::leak(vec![0u8; crate::art::flappy::UNPACKED_LEN]);
+        crate::art::flappy::unpack(buf).expect("the baked art inflates")
+    }
+
     /// Background and ground alone at `(x, y)`.
     fn scenery(x: u32, y: usize) -> u16 {
+        let a = art();
         let mut c = World::new(0).column(x);
         c.pipe = None;
-        c.colour(y)
+        c.colour(&a, y)
     }
 
     #[test]
     fn the_art_is_the_size_the_layout_assumes() {
+        let a = art();
         assert_eq!((BACKGROUND.width, BACKGROUND.height), (144, 200));
         assert_eq!(BASE.height as usize, HEIGHT - GROUND_Y);
         assert_eq!((PIPE.width, PIPE.height), (26, 160));
@@ -423,14 +435,16 @@ mod tests {
         assert!(GAME_OVER.width as usize <= PLAY_W);
         assert!((GAP_TOP_MIN + GAP_TOP_SPAN as i32 - 1 + GAP) < GROUND_Y as i32);
         // The longest pipe the gaps can ask for still has sprite rows or its body to repeat.
-        assert!(PIPE.at(13, PIPE.height as usize - 1).is_some());
+        assert!(PIPE.at(&a, 13, PIPE.height as usize - 1).is_some());
     }
 
     #[test]
     fn the_pixels_are_the_ones_baked() {
+        let a = art();
         // FNV-1a over every sprite's size and palette indices, row by row, then the
         // palette: pinned from the one-byte-per-pixel tables before the sprites were
-        // stored as distinct rows, so a change of storage cannot change a pixel.
+        // stored as distinct rows, and kept through their deflating, so a change of
+        // storage cannot change a pixel.
         use crate::art::flappy::{DIGITS, GAME_OVER, PALETTE};
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut feed = |bytes: &[u8]| {
@@ -444,17 +458,15 @@ mod tests {
             .chain(DIGITS.iter())
             .chain([&CAT_UP, &CAT_MID, &CAT_DOWN]);
         for s in sprites {
-            assert_eq!(s.rows.len(), s.height as usize);
-            assert_eq!(s.pixels.len() % s.width as usize, 0);
             feed(&s.width.to_le_bytes());
             feed(&s.height.to_le_bytes());
             for y in 0..s.height as usize {
                 for x in 0..s.width as usize {
-                    feed(&[s.index(x, y).unwrap()]);
+                    feed(&[s.index(&a, x, y).unwrap()]);
                 }
             }
-            assert_eq!(s.index(s.width as usize, 0), None);
-            assert_eq!(s.index(0, s.height as usize), None);
+            assert_eq!(s.index(&a, s.width as usize, 0), None);
+            assert_eq!(s.index(&a, 0, s.height as usize), None);
         }
         for c in PALETTE {
             feed(&c.to_le_bytes());
@@ -485,24 +497,26 @@ mod tests {
 
     #[test]
     fn a_pipe_is_open_at_its_gap_and_solid_above_and_below() {
+        let a = art();
         let w = World::new(9);
         let x = FIRST_PIPE + PIPE_W / 2;
         let top = w.gap_top(0) as usize;
-        let open = w.colour(x, top + 10);
+        let open = w.colour(&a, x, top + 10);
         assert_eq!(open, scenery(x, top + 10));
-        assert_ne!(w.colour(x, top - 20), scenery(x, top - 20));
+        assert_ne!(w.colour(&a, x, top - 20), scenery(x, top - 20));
         assert_ne!(
-            w.colour(x, top + GAP as usize + 20),
+            w.colour(&a, x, top + GAP as usize + 20),
             scenery(x, top + GAP as usize + 20)
         );
     }
 
     #[test]
     fn a_cat_left_alone_falls_to_the_ground_and_the_game_ends() {
+        let a = art();
         let mut g = Game::new(7);
         let mut frames = 0;
         while !g.over {
-            g.step();
+            g.step(&a);
             frames += 1;
             assert!(frames < 300, "never landed");
         }
@@ -512,6 +526,7 @@ mod tests {
 
     #[test]
     fn every_gap_can_be_flown_through_with_this_physics() {
+        let a = art();
         // An autopilot aiming at the middle of the first pipe not yet passed, flapping when
         // below it and falling. It proves the gaps are passable with this physics -- the
         // steepest climb and drop between neighbours included -- not just that pipes exist.
@@ -539,7 +554,7 @@ mod tests {
                 if centre > target && g.vy >= 0 {
                     g.flap();
                 }
-                g.step();
+                g.step(&a);
                 assert!(!g.over, "seed {seed}: hit something at score {}", g.score());
             }
             // Every pipe the world scrolled past, less the open sky before the first.
@@ -553,15 +568,19 @@ mod tests {
 
     #[test]
     fn the_cat_is_drawn_over_the_world_and_nowhere_else() {
+        let a = art();
         let g = Game::new(3);
         let (bx, by) = (g.cat_x(), g.cat_y());
         let sprite = g.cat();
         let (dx, dy) = (0..CAT_W)
             .flat_map(|x| (0..CAT_H).map(move |y| (x, y)))
-            .find(|&(x, y)| sprite.at(x, y).is_some())
+            .find(|&(x, y)| sprite.at(&a, x, y).is_some())
             .unwrap();
-        assert_eq!(g.pixel(bx + dx as u32, by + dy), sprite.at(dx, dy).unwrap());
-        assert_eq!(g.pixel(bx + 200, by), g.world.colour(bx + 200, by));
+        assert_eq!(
+            g.pixel(&a, bx + dx as u32, by + dy),
+            sprite.at(&a, dx, dy).unwrap()
+        );
+        assert_eq!(g.pixel(&a, bx + 200, by), g.world.colour(&a, bx + 200, by));
     }
 
     #[test]
@@ -577,25 +596,34 @@ mod tests {
 
     #[test]
     fn the_score_stays_on_the_glass_as_the_world_moves_under_it() {
+        let a = art();
         let mut g = Game::new(5);
         let sx = (0..PLAY_W)
-            .find(|&sx| score_colour(0, sx, SCORE_TOP + 4).is_some())
+            .find(|&sx| score_colour(&a, 0, sx, SCORE_TOP + 4).is_some())
             .unwrap();
-        let ink = score_colour(0, sx, SCORE_TOP + 4).unwrap();
+        let ink = score_colour(&a, 0, sx, SCORE_TOP + 4).unwrap();
         for _ in 0..3 {
-            assert_eq!(g.shown(g.scroll + sx as u32, SCORE_TOP + 4), ink);
+            assert_eq!(g.shown(&a, g.scroll + sx as u32, SCORE_TOP + 4), ink);
             g.flap();
-            g.step();
+            g.step(&a);
         }
         // Where the score was, a frame ago, the world shows through again.
         let x = g.scroll - 1 + sx as u32;
-        if score_colour(0, sx - 1, SCORE_TOP + 4).is_none() {
-            assert_eq!(g.shown(x, SCORE_TOP + 4), g.pixel(x, SCORE_TOP + 4));
+        if score_colour(&a, 0, sx - 1, SCORE_TOP + 4).is_none() {
+            assert_eq!(g.shown(&a, x, SCORE_TOP + 4), g.pixel(&a, x, SCORE_TOP + 4));
         }
         // Off the glass, nothing.
         assert_eq!(
-            g.shown(g.scroll + PLAY_W as u32, SCORE_TOP + 4),
-            g.pixel(g.scroll + PLAY_W as u32, SCORE_TOP + 4)
+            g.shown(&a, g.scroll + PLAY_W as u32, SCORE_TOP + 4),
+            g.pixel(&a, g.scroll + PLAY_W as u32, SCORE_TOP + 4)
         );
+    }
+
+    #[test]
+    fn the_art_will_not_unpack_into_too_small_a_buffer() {
+        let mut short = vec![0u8; crate::art::flappy::UNPACKED_LEN - 1];
+        assert!(crate::art::flappy::unpack(&mut short).is_err());
+        let mut roomy = vec![0u8; crate::art::flappy::UNPACKED_LEN + 100];
+        assert!(crate::art::flappy::unpack(&mut roomy).is_ok());
     }
 }
