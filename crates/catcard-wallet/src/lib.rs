@@ -64,6 +64,7 @@ pub mod bip322;
 pub mod bip39;
 pub mod bip85;
 pub mod chain;
+pub mod codex32;
 pub mod csv;
 pub mod descriptor;
 pub mod encoding;
