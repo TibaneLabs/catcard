@@ -27,62 +27,60 @@
 //! Settings → Hardware On/Off → NFC Sharing ([`enabled`]). Off, every entry point says
 //! so in one line and the tag is neither written nor read.
 //!
-//! # What is confirmed
+//! # The part
 //!
-//! - The tag sits on I²C1, which the MCU bit-bangs rather than drives from the I²C
-//!   peripheral: `NFC_SCL=PB6`, `NFC_SDA=PB7`, open drain with external pull-ups, 7-bit
-//!   address `0x53` for user memory. Its event line is `NFC_ED=PC4` on mk4/mk5 and `PD6`
-//!   on the Q1, and the Q1 alone has an `NFC_ACTIVE=PE4` LED output; neither is driven
-//!   here. mk3 has no tag.
-//!   Source: hw-reference/gpio.md §"I²C buses (mk4 / mk5 / Q1)", §"Indicator LEDs" [C];
-//!   hw-reference/generations-mk2-q-mk5.md §"Bill-of-materials" [C];
-//!   hw-reference/secure-elements.md §NFC [C]
-//! - Device select `0xA6`/`0xA7` -- 7-bit `0x53` -- for user memory, two address bytes,
-//!   most significant first; sequential write of up to 256 bytes provided they stay in one
-//!   area; user memory organised in rows of 16, one write time `tW` (5 ms, 5.5 ms over
-//!   85 °C) per row touched.
-//!   Source: hw-reference/datasheets/ST25DV64KC-st.pdf §6.3, §6.4.2, Tables 89, 249-251 [C]
-//! - A read is a dummy write of the two address bytes, a **repeated** start, and then
-//!   bytes out until the controller does not acknowledge one. The counter walks forwards
-//!   on its own and does not roll over at the end of user memory.
-//!   Source: same, §6.5.1 "Random address read", §6.5.3 "Sequential read access" [C]
+//! An ST25DV64KC on I²C1, which the MCU bit-bangs: `NFC_SCL=PB6`, `NFC_SDA=PB7`. Its event
+//! line is `NFC_ED=PC4` on mk4/mk5 and `PD6` on the Q1, and the Q1 alone has an
+//! `NFC_ACTIVE=PE4` LED; neither is driven here. mk3 has no tag.
+//! Source: hw-reference/gpio.md §"I²C buses (mk4 / mk5 / Q1)", §"Indicator LEDs" [C];
+//! hw-reference/secure-elements.md §"NFC — ST25DV dynamic tag", §"Part, bus, pins" [C]
 //!
-//! Writes here go a row at a time and wait out `tW` afterwards, which is the slow and
-//! obviously-correct reading of the above -- and then the whole image is read back and
-//! compared, so a write the part silently dropped is reported rather than tapped.
+//! Everything about the part itself -- addresses, identification, the configuration, RF
+//! on and off, write cycles, and the wipe -- is [`catcard_nfc::tag`], written against a
+//! bus trait and tested on the host against a simulated part. This module is the screens
+//! around it.
 //!
-//! # Why receiving polls the memory instead of asking the tag
+//! # RF is on only while a screen says "tap"
 //!
-//! The part has two mechanisms that would say "a phone just wrote", and neither is usable
-//! without first reprogramming the tag:
+//! A Coldcard's tag is set up at the factory with `RF_MNGT = RF_SLEEP`, so it is silent
+//! from power-up, and it answers a phone only after the I²C side switches RF on
+//! (secure-elements.md §"Configuration Coldcard writes", §"RF on/off control" [C]). So
+//! every screen here is one [`Session`]: the image is written with RF off, RF goes on for
+//! the "tap your phone" screen and nothing else, and goes off again before the tag is
+//! wiped. With the NFC Sharing switch off the tag is never spoken to at all, and stays
+//! silent.
 //!
-//! - The **fast transfer mode mailbox** is a 256-byte RAM buffer shared between the two
-//!   interfaces. It is too small for a transaction, it is only reachable from RF through
-//!   ST's own custom commands rather than through anything a phone's NDEF stack does, and
-//!   it works only while fast transfer mode is enabled in the `FTM` **system** register.
-//!   Source: same, §4.5 "Fast transfer mode mailbox", Table 15 [C]
-//! - The **`RF_WRITE` interrupt** is reported in `IT_STS_Dyn` only when it has been
-//!   enabled in `GPO1`, whose factory value for that bit is 0 -- and `GPO1` is system
-//!   memory, writable over I²C only with the security session open, which means presenting
-//!   the I²C password.
-//!   Source: same, Table 31 (GPO1, factory values), Table 37 (IT_STS_Dyn) and its notes,
-//!   §5.4.5 "Configuring GPO" [C]
+//! # Nothing is left behind
 //!
-//! Both would have this firmware write configuration registers on a part nobody here has
-//! tried, to save a poll of a memory it is already able to read. So the tag is left exactly
-//! as it was found, and the receive screen watches the first bytes of user memory change.
-//! `[I]` -- that a phone's write lands in user memory in a way this poll notices is
-//! reasoning from the format, not something measured; see `docs/HARDWARE-OPEN-ITEMS.md`.
+//! When a session ends, everything it may have put on the tag is zeroed -- its own image,
+//! and whatever a phone wrote, which the part reports in `IT_STS_Dyn`. The first session
+//! after power-up also zeroes whatever an earlier session or an earlier firmware left,
+//! **before** RF goes on: stock zeroes only the first 512 bytes, so an older transaction
+//! can sit past that (secure-elements.md §"Data left in tag EEPROM" [C]). How the extent
+//! is tracked and why that beats wiping all 8 KB every time is in [`catcard_nfc::tag`].
+//!
+//! # Why receiving polls the memory
+//!
+//! The part does report a phone's write -- `IT_STS_Dyn` bit 7, enabled by `GPO1`, which
+//! the driver uses to size the wipe -- but a write is many RF blocks, and the flag says
+//! one landed, not that the message is whole. The receive screen watches the first bytes
+//! of user memory change and then settle, which is the thing it actually needs. `[I]` --
+//! that a phone's write lands in a way this poll notices is reasoning from the format,
+//! not something measured; see `docs/HARDWARE-OPEN-ITEMS.md`.
 //!
 //! # What a shared file goes out as `[?]`
 //!
 //! A PSBT goes out as its base64 in a text record, a UTF-8 file as a text record, and
-//! anything else as a MIME record of `application/octet-stream`. Those are the record
-//! types any phone's reader shows and this device's own receive path takes back; which
-//! record a given wallet app registers for has not been checked against one. See
+//! anything else as a MIME record of `application/octet-stream`, all with the container
+//! marked read-only (`0x43`, as stock does when sharing). Those are the record types any
+//! phone's reader shows and this device's own receive path takes back; which record a
+//! given wallet app registers for has not been checked against one. See
 //! `docs/HARDWARE-OPEN-ITEMS.md`.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use catcard_hal::softi2c::{GpioLines, SoftI2c};
+use catcard_nfc::tag::{self, Tag, TagError, USER_MEMORY};
 
 use crate::menu;
 use crate::sniff::{Content, sniff};
@@ -93,102 +91,95 @@ use catcard_nfc::pushtx;
 use catcard_settings::prefs::PushTx;
 use zeroize::Zeroize as _;
 
-/// User memory, dynamic registers and the mailbox. `0xA6 >> 1`. [C]
-const USER: u8 = 0x53;
-/// The part's user memory. [C]
-const USER_MEMORY: usize = 8192;
 /// The T5T area a phone is told it has: everything past the capability container.
 const AREA: usize = USER_MEMORY - catcard_nfc::CC_LEN;
-/// The row an EEPROM write programs at once. [C]
-const ROW: usize = 16;
-/// Write time for one row, rounded up from the datasheet's 5.5 ms. [C]
-const ROW_MS: u32 = 6;
-/// Bytes compared per read while checking a write. Any size works; this keeps the stack
-/// buffer small and the number of transfers reasonable.
-const VERIFY_CHUNK: usize = 64;
 
 /// The most a shared file can be: the tag itself. Whether a given file fits depends on
 /// the record around it and is answered by the builder, not guessed here.
 pub(crate) const SHARE_MAX: usize = USER_MEMORY;
 
+/// The tag's bus, as the driver wants it.
+struct I2cBus(SoftI2c<GpioLines>);
+
+impl tag::Bus for I2cBus {
+    fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), tag::Nack> {
+        self.0.write(addr, bytes).map_err(|_| tag::Nack)
+    }
+    fn write_read(&mut self, addr: u8, bytes: &[u8], out: &mut [u8]) -> Result<(), tag::Nack> {
+        self.0.write_read(addr, bytes, out).map_err(|_| tag::Nack)
+    }
+    fn delay_ms(&mut self, ms: u32) {
+        // SAFETY: reads RCC only.
+        unsafe { catcard_hal::dwt::delay_ms(ms) };
+    }
+}
+
 /// The tag's bus, or `None` on a board without one.
-fn bus() -> Option<SoftI2c<GpioLines>> {
+fn bus() -> Option<I2cBus> {
     let nfc = BOARD.nfc?;
     // SAFETY: I²C1's two pins; the co-processor driver takes the same bus the same way,
     // and the menu runs one screen at a time.
-    Some(SoftI2c::new(unsafe { GpioLines::new(nfc.scl, nfc.sda?) }))
+    Some(I2cBus(SoftI2c::new(unsafe {
+        GpioLines::new(nfc.scl, nfc.sda?)
+    })))
 }
 
-/// Write `bytes` into user memory from address zero, and read them back.
+/// How far into the tag something may still be: the driver's high-water mark, carried
+/// from one session to the next. The whole part at power-up, when nothing is known.
+static DIRTY: AtomicUsize = AtomicUsize::new(USER_MEMORY);
+
+/// One RF session, from a tag with nothing on it to a tag with nothing on it.
 ///
-/// A row at a time: each write carries its own address, so a row that is refused stops the
-/// whole thing rather than leaving the tag holding half of one image and half of another.
-/// Then every byte is read back and compared, because an EEPROM write the part did not
-/// take -- a phone in the field holding the RF side, a row that timed out -- looks exactly
-/// like one it did until somebody taps it.
-fn write_user_memory(bytes: &[u8]) -> Result<(), &'static str> {
-    if bytes.len() > USER_MEMORY {
-        return Err("too big for the tag");
+/// Dropping it keeps the high-water mark for the next one, so a wipe that failed is
+/// retried before RF is next switched on.
+struct Session(Tag<I2cBus>);
+
+impl Session {
+    /// Identify and configure the tag, RF off, and zero whatever may be left from before.
+    fn open() -> Result<Self, &'static str> {
+        let bus = bus().ok_or("no NFC on this board")?;
+        let mut s = Session(Tag::new(bus, DIRTY.load(Ordering::Relaxed)));
+        s.0.begin().map_err(TagError::message)?;
+        Ok(s)
     }
-    let mut i2c = bus().ok_or("no NFC on this board")?;
-    let mut buf = [0u8; 2 + ROW];
-    for (n, chunk) in bytes.chunks(ROW).enumerate() {
-        let at = (n * ROW) as u16;
-        buf[0] = (at >> 8) as u8;
-        buf[1] = at as u8;
-        buf[2..2 + chunk.len()].copy_from_slice(chunk);
-        i2c.write(USER, &buf[..2 + chunk.len()])
-            .map_err(|_| "the tag did not answer")?;
-        // The write is in EEPROM: programming starts at the stop condition and the tag
-        // answers nothing until it finishes.
-        // SAFETY: reads RCC only.
-        unsafe { catcard_hal::dwt::delay_ms(ROW_MS) };
+
+    /// Put `image` on the tag, read it back, and switch RF on.
+    fn show(&mut self, image: &[u8]) -> Result<(), &'static str> {
+        self.0.write(0, image).map_err(TagError::message)?;
+        self.0.go_live().map_err(TagError::message)
     }
-    let mut back = [0u8; VERIFY_CHUNK];
-    for (n, chunk) in bytes.chunks(VERIFY_CHUNK).enumerate() {
-        let at = (n * VERIFY_CHUNK) as u16;
-        i2c.write_read(USER, &[(at >> 8) as u8, at as u8], &mut back[..chunk.len()])
-            .map_err(|_| "the tag did not answer")?;
-        if back[..chunk.len()] != *chunk {
-            return Err("the tag did not take the write");
+
+    /// RF off and the tag wiped, under the working screen. A failure is said, since it
+    /// means something may still be on the tag until the next session clears it.
+    fn end(mut self, ui: &mut Ui<'_>, head: &str) {
+        let done = {
+            let _busy = menu::blocking_screen(ui.panel, head, "clearing the tag");
+            self.0.finish()
+        };
+        drop(self);
+        if let Err(why) = done {
+            crate::catlog!("nfc: tag not cleared: {:?}", why);
+            menu::message(ui.panel, head, "could not clear the tag", why.message());
+            menu::wait_for_any_key(ui);
         }
     }
-    Ok(())
 }
 
-/// Fill `out` from user memory, starting at `at`.
-///
-/// One transfer: the address goes out as a dummy write, a repeated start turns the bus
-/// around, and the tag's own counter walks forwards from there.
-fn read_user_memory(at: u16, out: &mut [u8]) -> Result<(), &'static str> {
-    if at as usize + out.len() > USER_MEMORY {
-        return Err("past the end of the tag");
+impl Drop for Session {
+    fn drop(&mut self) {
+        DIRTY.store(self.0.dirty(), Ordering::Relaxed);
     }
-    let mut i2c = bus().ok_or("no NFC on this board")?;
-    i2c.write_read(USER, &[(at >> 8) as u8, at as u8], out)
-        .map_err(|_| "the tag did not answer")
 }
 
-/// Whether a tag answers at all: one byte read from address zero.
+/// Whether the tag answers and is the part it should be.
 pub(crate) fn present() -> bool {
-    let mut one = [0u8; 1];
-    read_user_memory(0, &mut one).is_ok()
+    bus().is_some_and(|b| Tag::new(b, 0).identify().is_ok())
 }
 
-/// Leave the tag formatted and empty.
-///
-/// Called when a screen that put something on the tag is done with it. An address or a
-/// signed transaction left sitting there is readable by the next phone that comes near the
-/// device, for as long as it stays there -- which is until something else overwrites it,
-/// and nothing might.
-fn clear() {
-    let mut blank = [0u8; catcard_nfc::CC_LEN + 3];
-    let Ok(n) = catcard_nfc::empty_image(&mut blank, AREA) else {
-        return;
-    };
-    if let Err(why) = write_user_memory(&blank[..n]) {
-        crate::catlog!("nfc: could not clear the tag: {}", why);
-    }
+/// Say why not, and wait for a key.
+fn say(ui: &mut Ui<'_>, head: &str, why: &str) {
+    menu::message(ui.panel, head, why, "any key to go back");
+    menu::wait_for_any_key(ui);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,24 +220,44 @@ fn refused_absent(ui: &mut Ui<'_>, head: &str) -> bool {
     false
 }
 
-/// Put `image` on the tag, hold the screen while a phone reads it, then blank the tag.
-///
-/// `note` is the second line of the "tap your phone" screen: what the phone gets.
-fn present_image(ui: &mut Ui<'_>, head: &str, image: &[u8], note: &str) {
-    let _busy = menu::blocking_screen(ui.panel, head, "writing the tag");
-    match write_user_memory(image) {
-        Ok(()) => {
-            crate::catlog!("nfc: {} bytes on the tag", image.len());
-            menu::message(ui.panel, "Tap your phone", note, "any key when done");
-            menu::wait_for_any_key(ui);
-            clear();
-        }
+/// Open a session, put `image` on the tag and switch RF on, under the working screen
+/// captioned `working`. `None` after saying why not, with the tag wiped again if anything
+/// reached it.
+fn go_live(ui: &mut Ui<'_>, head: &str, image: &[u8], working: &str) -> Option<Session> {
+    let busy = menu::blocking_screen(ui.panel, head, working);
+    let mut s = match Session::open() {
+        Ok(s) => s,
         Err(why) => {
-            crate::catlog!("nfc: write failed: {}", why);
-            menu::message(ui.panel, head, why, "any key to go back");
-            menu::wait_for_any_key(ui);
+            drop(busy);
+            crate::catlog!("nfc: no session: {}", why);
+            say(ui, head, why);
+            return None;
         }
+    };
+    let shown = s.show(image);
+    drop(busy);
+    if let Err(why) = shown {
+        crate::catlog!("nfc: write failed: {}", why);
+        s.end(ui, head);
+        say(ui, head, why);
+        return None;
     }
+    Some(s)
+}
+
+/// Put `image` on the tag, hold the screen while a phone reads it, then wipe the tag.
+///
+/// The image goes out marked read-only: it is for reading. `note` is the second line of
+/// the "tap your phone" screen: what the phone gets.
+fn present_image(ui: &mut Ui<'_>, head: &str, image: &mut [u8], note: &str) {
+    catcard_nfc::set_read_only(image);
+    let Some(s) = go_live(ui, head, image, "writing the tag") else {
+        return;
+    };
+    crate::catlog!("nfc: {} bytes on the tag", image.len());
+    menu::message(ui.panel, "Tap your phone", note, "any key when done");
+    menu::wait_for_any_key(ui);
+    s.end(ui, head);
 }
 
 /// Put an `https://` link on the tag as an NDEF URI record, and hold the screen while a
@@ -276,7 +287,7 @@ pub(crate) fn share_link(ui: &mut Ui<'_>, head: &str, tail: &str, note: &str) {
             return;
         }
     };
-    present_image(ui, head, &out[..n], note);
+    present_image(ui, head, &mut out[..n], note);
     held.bytes().zeroize();
 }
 
@@ -380,7 +391,7 @@ fn push_raw(ui: &mut Ui<'_>, head: &str, service: &str, raw: &[u8]) {
             return;
         }
     };
-    present_image(ui, head, &out[..n], "to send it");
+    present_image(ui, head, &mut out[..n], "to send it");
 }
 
 /// Build the tag image for `raw`: the service URL with the transaction in its fragment,
@@ -580,7 +591,7 @@ pub(crate) fn offer_solana_link(ui: &mut Ui<'_>, raw: &[u8], missing: usize) {
             return;
         }
     };
-    present_image(ui, HEAD, &out[..n], "to take it");
+    present_image(ui, HEAD, &mut out[..n], "to take it");
 }
 
 /// Build the tag image for `raw`: the studio link, with the transaction base64'd in its
@@ -624,7 +635,7 @@ const SHARE_ADDRESS_MAX: usize = catcard_nfc::image_len(catcard_wallet::address:
 /// `extras` is the amount and label the owner chose to attach (`crate::payuri`), written
 /// into the URI as BIP-21 parameters; `None` is the bare address.
 ///
-/// The tag is blanked when the screen is left, so an address is not left on a device's
+/// The tag is wiped when the screen is left, so an address is not left on a device's
 /// doorstep for the next phone that passes.
 pub(crate) fn share_address(
     ui: &mut Ui<'_>,
@@ -655,7 +666,7 @@ pub(crate) fn share_address(
             return;
         }
     };
-    present_image(ui, HEAD, &image[..n], "to read the address");
+    present_image(ui, HEAD, &mut image[..n], "to read the address");
 }
 
 // ---------------------------------------------------------------------------
@@ -780,7 +791,7 @@ pub(crate) fn share_bytes(ui: &mut Ui<'_>, name: &str, bytes: &[u8]) {
             return;
         }
     };
-    present_image(ui, HEAD, &out[..n], "to read the file");
+    present_image(ui, HEAD, &mut out[..n], "to read the file");
 }
 
 /// NFC Tools → File Share: the file browser, whose file screen has the share rows.
@@ -867,7 +878,7 @@ impl Received {
     }
 }
 
-/// Mark the tag, wait for a phone to write to it, read it, blank it, and say what the
+/// Mark the tag, wait for a phone to write to it, read it, wipe it, and say what the
 /// first usable record holds. `None` after saying why not.
 ///
 /// Every wait in here is bounded: [`WAIT_MS`] of polling, a read of at most the part's
@@ -892,54 +903,48 @@ fn receive_with(ui: &mut Ui<'_>, head: &str, pick: Pick<'_>) -> Option<Received>
     let Ok(n) = catcard_nfc::text_image(&mut marker, AREA, READY_TEXT) else {
         return None;
     };
-    let _busy = menu::blocking_screen(ui.panel, head, "marking the tag");
-    if let Err(why) = write_user_memory(&marker[..n]) {
-        crate::catlog!("nfc: could not mark the tag: {}", why);
-        menu::message(ui.panel, head, why, "any key to go back");
-        menu::wait_for_any_key(ui);
-        return None;
-    }
+    let mut s = go_live(ui, head, &marker[..n], "marking the tag")?;
     let mut baseline = [0u8; WATCH];
     let keep = n.min(WATCH);
     baseline[..keep].copy_from_slice(&marker[..keep]);
 
-    match wait_for_write(ui, head, &baseline) {
-        Waited::Written => {}
-        Waited::Cancelled => {
-            clear();
-            return None;
-        }
-        Waited::TimedOut => {
-            clear();
-            menu::message(ui.panel, head, "no phone wrote to it", "any key to go back");
-            menu::wait_for_any_key(ui);
-            return None;
-        }
-        Waited::Failed(why) => {
-            menu::message(ui.panel, head, why, "any key to go back");
-            menu::wait_for_any_key(ui);
-            return None;
-        }
-    }
-
+    let why = match wait_for_write(ui, head, &mut s, &baseline) {
+        Waited::Written => None,
+        Waited::Cancelled => Some(""),
+        Waited::TimedOut => Some("no phone wrote to it"),
+        Waited::Failed(why) => Some(why),
+    };
     // The whole of user memory, in the heap: it is eight kilobytes, which no screen's
     // stack has, and the records parsed out of it borrow it until the payload is copied
     // somewhere the signer can use.
-    let Some(mut held) = crate::heap::take(USER_MEMORY) else {
-        menu::message(ui.panel, head, "not enough memory", "any key to go back");
-        menu::wait_for_any_key(ui);
+    let held = match why {
+        None => crate::heap::take(USER_MEMORY),
+        Some(_) => None,
+    };
+    let Some(mut held) = held else {
+        // A phone that wrote part of something is reported by the tag, and the wipe in
+        // `end` widens to cover it.
+        s.end(ui, head);
+        match why {
+            Some("") => {}
+            Some(why) => say(ui, head, why),
+            None => say(ui, head, "not enough memory"),
+        }
         return None;
     };
-    let _busy = menu::blocking_screen(ui.panel, head, "reading the tag");
-    if let Err(why) = read_user_memory(0, held.bytes()) {
-        crate::catlog!("nfc: read failed: {}", why);
+    // RF off and every byte read: the wipe then reaches exactly as far as the phone wrote.
+    let read = {
+        let _busy = menu::blocking_screen(ui.panel, head, "reading the tag");
+        s.0.read_whole(&mut held.bytes()[..USER_MEMORY])
+    };
+    s.end(ui, head);
+    if let Err(why) = read {
+        crate::catlog!("nfc: read failed: {:?}", why);
+        held.bytes().zeroize();
         drop(held);
-        menu::message(ui.panel, head, why, "any key to go back");
-        menu::wait_for_any_key(ui);
+        say(ui, head, why.message());
         return None;
     }
-    // The tag has been read; whatever a phone left on it does not need to stay there.
-    clear();
 
     let Some((what, at, len)) = pick(held.bytes()) else {
         drop(held);
@@ -984,7 +989,7 @@ enum Waited {
 
 /// Watch the head of user memory until it is not `baseline` any more and has stopped
 /// moving, or the owner leaves, or the budget runs out.
-fn wait_for_write(ui: &mut Ui<'_>, head: &str, baseline: &[u8; WATCH]) -> Waited {
+fn wait_for_write(ui: &mut Ui<'_>, head: &str, s: &mut Session, baseline: &[u8; WATCH]) -> Waited {
     let _busy = menu::blocking_screen(ui.panel, head, "tap your phone to write");
     let mut last = *baseline;
     let mut quiet = 0u32;
@@ -999,7 +1004,7 @@ fn wait_for_write(ui: &mut Ui<'_>, head: &str, baseline: &[u8; WATCH]) -> Waited
             return Waited::Cancelled;
         }
         let mut now = [0u8; WATCH];
-        if let Err(why) = read_user_memory(0, &mut now) {
+        if let Err(why) = s.0.read_user(0, &mut now).map_err(TagError::message) {
             // A phone holding the tag's RF side busy is a read that did not happen, not a
             // tag that has gone -- and a phone is exactly what this is waiting for. Only a
             // run of them says the part has stopped answering.
@@ -1493,7 +1498,7 @@ fn load_words(
             })
         })
     };
-    // The words were on the tag (blanked in `receive`) and are in this block: gone before
+    // The words were on the tag (wiped in `receive`) and are in this block: gone before
     // any screen goes up.
     got.wipe();
     drop(got);
@@ -1678,15 +1683,5 @@ pub(crate) fn probe_screen(ui: &mut Ui<'_>) {
         Ok(n) => n,
         Err(_) => return,
     };
-    match write_user_memory(&image[..n]) {
-        Ok(()) => {
-            crate::catlog!("nfc: test tag written, {} bytes", n);
-            menu::message(ui.panel, HEAD, "written: tap a phone", "any key when done");
-        }
-        Err(why) => {
-            crate::catlog!("nfc: test write failed: {}", why);
-            menu::message(ui.panel, HEAD, why, "any key to go back");
-        }
-    }
-    menu::wait_for_any_key(ui);
+    present_image(ui, HEAD, &mut image[..n], "to open the test link");
 }

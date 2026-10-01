@@ -736,34 +736,69 @@ Nunchuk's NFC import expects a MIME type of its own, and which -- has not been c
 against one. Settled by tapping a phone running such a wallet; until then a phone that
 shows the record is the claim, and a wallet that opens it is a bonus.
 
-## Writing the NFC tag has not been tried on hardware
+## The NFC driver has not been tried on hardware
 
-The driver follows the datasheet -- device select `0xA6`, two address bytes, one 16-byte
-row per write, `tW` waited out afterwards -- but no tag has answered it yet. It is off the
-boot path: Debug → NFC test writes a fixed URL and says whether the tag answered, the
-broadcast offer only appears after a transaction is fully signed, Addresses → `2` writes
-the address on screen, and Sign → By NFC is a menu action.
+`catcard_nfc::tag` now follows hw-reference/secure-elements.md §"NFC — ST25DV dynamic
+tag" and the ST25DV64KC datasheet (DS13519): user memory and dynamic registers at
+`0x53`, the system area at `0x57`, RFSwitchOn/Off at `0x51`/`0x55`; the part identified by
+`UID[7] = 0xE0` and `MEM_SIZE` = 8 KB; the one-time `I2C_CFG = 0x3A` / `RF_MNGT = 0x02`
+setup and `GPO1 = 0x85` written only when they differ, behind the all-zero I²C password;
+RF on (RFSwitchOn, `RF_MNGT_Dyn = 0`, read back) and off (RFSwitchOff, `RF_OFF` read back),
+ten tries 25 ms apart. Every one of those facts is `[C]`. Before this, the driver never
+switched RF on at all -- and since the factory leaves the tag asleep (`RF_MNGT = RF_SLEEP`),
+no phone could have read anything it wrote. It is off the boot path: Debug → NFC test runs
+one whole session with a fixed link.
 
-Unknown until then: whether the factory capability container differs from the one written
-here, whether a phone reads the image back as a URL, and whether the co-processor sharing
-this bus needs to be quiet during the write.
+What the part has not yet confirmed, all `[I]`:
+
+- **Write-cycle polling by an address-only write.** After each row, the driver polls with
+  START, `0x53`+W, STOP until it is acknowledged (≤100 polls, 1 ms apart) -- DS13519 §6.4.3,
+  Figure 34. hw-reference says stock polls with a zero-length *read*; both should end the
+  same way, but only one has been watched on this part.
+- **`IT_STS_Dyn` bit 7 after a phone's write.** The end of a share reads `IT_STS_Dyn`;
+  `RF_WRITE` set (or the read failing) widens the wipe to a scan of the whole part. That the
+  bit is latched with `GPO1 = 0x85` is the datasheet's Table 37 note; not yet seen.
+- **Whether presenting the password has a busy period.** Nothing says it does; the driver
+  polls for the acknowledge anyway, so either answer works. Only reached on a tag that was
+  never set up, or whose `GPO1` differs.
+- **Timings.** About 7 ms per 16-byte row written (`tW` 5.5 ms plus the bit-banged
+  transfer), about 0.75 s to scan all 8 KB. Arithmetic, not measured.
+- **The capability container's MLEN.** Stock writes `0x0400`; this writes the Type 5
+  value for an 8 KB part with an 8-byte container, `0x03FF`. Whether every phone takes it
+  is settled by tapping one.
+- **The receive marker.** Stock's blank receive image is an empty NDEF message
+  (`E2 40 00 01 00 00 04 00 03 00 FE`); this writes a short text record instead, so the
+  poll has a baseline no phone writes by accident. A phone overwrites either.
+- **The co-processor on the same bus** (Q1): whether it needs to be quiet during a write.
+
+## Nothing is left on the NFC tag `[C]` by construction, `[I]` on the part
+
+hw-reference §"Data left in tag EEPROM" records that stock zeroes only the first 512 bytes
+after a non-secret share or any receive, so an older PSBT or transaction stays readable
+past byte 512 -- over I²C, and by any RF reader in the next RF session, since no area
+protection is set. CatCard carries a high-water mark instead (`catcard_nfc::tag::Tag`):
+it starts at the whole part at power-up, the first session scans and zeroes the whole part
+**before** RF goes on, and every later session zeroes exactly what it wrote, or what a
+phone wrote (from the whole read after a receive, or the whole part when `RF_WRITE` was
+seen during a share). A wipe that fails keeps its mark and is retried before RF is next
+switched on. The host tests in `catcard-nfc/src/tag_tests.rs` state each case; what is
+`[I]` is the same list as above, the part answering.
 
 ## Reading the NFC tag back has not been tried either `[I]`
 
-Receiving works the other way round -- `crate::nfc::read_user_memory` loads the address
-counter with a dummy write, turns the bus around with a **repeated** start
-(`SoftI2c::write_read`), and reads 8192 bytes out in one transfer. Both halves are
-datasheet-confirmed (§6.5.1 random address read, §6.5.3 sequential read access), and the
-repeated start is tested on the host against the bit-bang mock. What is not confirmed is
-the part answering it.
+Receiving works the other way round -- the screen switches RF on with a marker on the
+tag, polls the first 24 bytes of user memory with RF on, and when they have changed and
+settled switches RF off and reads all 8192 bytes in one transfer: the address counter
+loaded with a dummy write, the bus turned around with a **repeated** start
+(`SoftI2c::write_read`). Both halves are datasheet-confirmed (§6.5.1 random address read,
+§6.5.3 sequential read access), and the repeated start is tested on the host against the
+bit-bang mock. What is not confirmed is the part answering it.
 
 Unknown until a tag is in front of it:
 
-- **Whether the poll sees a phone's write.** `Sign → By NFC` marks the tag with a text
-  record and then watches the first 24 bytes of user memory until they change and settle.
-  That a phone's NDEF write lands in those bytes, and that an I²C read taken during an RF
-  field returns either the old value or the new one rather than something else, is `[I]` --
-  read off the format and the bus, not measured.
+- **Whether the poll sees a phone's write.** That a phone's NDEF write lands in the first
+  24 bytes, and that an I²C read taken during an RF session returns either the old value
+  or the new one -- or a NACK, which the poll counts as a miss -- is `[I]`.
 - **How long a full read takes.** ~74 000 bit times at the bit-bang's quarter period, so
   under a second by arithmetic, with the screen held. Not timed.
 - **Whether a phone's write arrives whole.** The settle window is two quiet polls, about
@@ -771,12 +806,9 @@ Unknown until a tag is in front of it:
   be read -- which `catcard_nfc::read` refuses as `Truncated` rather than signing, so the
   failure is "nothing this can use" and another tap, not a wrong transaction.
 
-The two mechanisms the part has for announcing an RF write are deliberately **not** used,
-and why is in the module header: the fast transfer mode mailbox is 256 bytes and needs
-ST's own RF commands (§4.5, Table 15), and the `RF_WRITE` bit of `IT_STS_Dyn` is only
-reported once it is enabled in the `GPO1` *system* register, which needs the I²C security
-session open (Table 31, Table 37, §5.4.5). Both would mean writing configuration registers
-on a part nobody here has tried.
+`IT_STS_Dyn` could say *that* a phone wrote, but not that the message is whole, so it sizes
+the wipe and the poll decides when to read. The fast transfer mode mailbox is not used: it
+is 256 bytes and needs ST's own RF commands (§4.5, Table 15).
 
 ## The Q1 backlight PWM timer/channel behind `BL_ENABLE=PE3` `[?]`
 
