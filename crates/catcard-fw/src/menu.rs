@@ -167,6 +167,9 @@ enum Screen {
     XorSplit,
     /// Seed XOR: parts typed back in, and the seed they make put in force.
     XorJoin,
+    /// Codex32 from Derive: split the wallet in force, or recover, import, generate or
+    /// derive shares for the session. See `crate::codex32`.
+    KeyCodex32,
     /// The Seed Vault: keys kept in the settings, and the one in force.
     KeyVault,
     /// The export drawer: which shape of the same keys to write out.
@@ -293,6 +296,8 @@ enum Screen {
     /// Join Seed XOR parts from the blank device's Import menu, where the result is
     /// offered for keeping.
     ImportXor,
+    /// Codex32 from the blank device's Import menu, where a secret may be stored.
+    ImportCodex32,
     /// Device settings: the login submenu and, when a seed exists, destroying it.
     Settings,
     /// Login settings, currently just changing the main PIN.
@@ -834,11 +839,13 @@ pub(crate) const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 ///
 /// "Words" is the plain BIP-39 restore; "Clone" migrates from another Coldcard with no
 /// memorized password; "TAPSIGNER" decrypts a card's `.aes` backup; "XPRV" types a node in
-/// and stores it as the master; "Seed XOR" joins parts and offers to keep what they make.
-/// Stock's Import Existing has the same five (its backup restore is Utils -> Backup here).
+/// and stores it as the master; "Seed XOR" joins parts and offers to keep what they make;
+/// "Codex32" imports, recovers or generates a BIP-93 secret. Stock's Import Existing has
+/// the first five (its backup restore is Utils -> Backup here); its Codex32 is a top-level
+/// menu of the blank device. Source: hw-reference/codex32-format.md §Device operations [C]
 /// Dispatched by name in [`step`], so appending another needs only a matching arm.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1 "Import Existing" [C]
-const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER", "XPRV", "Seed XOR"];
+const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER", "XPRV", "Seed XOR", "Codex32"];
 
 /// The tool drawer, stock's `Advanced/Tools`.
 ///
@@ -1027,6 +1034,9 @@ const KEY_ITEMS_ROOT: &[&str] = &[
     "New words",
     "XOR split",
     "XOR join",
+    // Codex32 (BIP-93) shares, beside Seed XOR's parts: stock's Shamir Split and its
+    // Temporary Seed -> Codex32. Source: hw-reference/codex32-format.md §Device operations [C]
+    "Codex32",
     "Key vault",
 ];
 /// The same, from anywhere else: there is now somewhere to go back to.
@@ -1038,6 +1048,7 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "New words",
     "XOR split",
     "XOR join",
+    "Codex32",
     "Key vault",
 ];
 
@@ -1977,6 +1988,15 @@ fn action_for(screen: Screen) -> Option<Action> {
         // The join itself offers to store on a blank device; one stored lands on the
         // wallet's main menu, one declined goes back to Import.
         Screen::ImportXor => reseeds(|a| crate::seedxor::join(a.gate, a.login, a.ui)),
+        // Either can store a wallet on a blank device, or put one in force.
+        Screen::ImportCodex32 => reseeds(|a| {
+            let pool = a.pool.as_deref_mut();
+            crate::codex32::screen(a.gate, a.login, a.ui, pool, crate::codex32::Place::Blank);
+        }),
+        Screen::KeyCodex32 => reseeds(|a| {
+            let pool = a.pool.as_deref_mut();
+            crate::codex32::screen(a.gate, a.login, a.ui, pool, crate::codex32::Place::Derive);
+        }),
         // Both put a seed on a blank device, so the session re-reads the slot afterwards.
         Screen::CloneImport => reseeds(|a| crate::backup::clone_import(a.gate, a.login, a.ui)),
         Screen::TapsignerImport => reseeds(|a| crate::tapsigner::import(a.gate, a.login, a.ui)),
@@ -2178,6 +2198,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("TAPSIGNER")) => Screen::TapsignerImport,
             (Key::Confirm, Some("XPRV")) => Screen::ImportXprv,
             (Key::Confirm, Some("Seed XOR")) => Screen::ImportXor,
+            (Key::Confirm, Some("Codex32")) => Screen::ImportCodex32,
             _ => Screen::ImportMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
@@ -2255,6 +2276,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Passphrase")) => Screen::KeyPassphrase,
             (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
             (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
+            (Key::Confirm, Some("Codex32")) => Screen::KeyCodex32,
             (Key::Confirm, Some("New words")) => Screen::KeyNewSeed,
             (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
@@ -2273,7 +2295,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             _ => Screen::SignMenu,
         },
         Screen::KeyPick(_) => Screen::KeyMenu,
-        Screen::XorSplit | Screen::XorJoin => Screen::KeyMenu,
+        Screen::XorSplit | Screen::XorJoin | Screen::KeyCodex32 => Screen::KeyMenu,
         Screen::LockDown => Screen::SeedTools,
         Screen::KeyVault => Screen::KeyMenu,
         Screen::ExportMenu => match (key, EXPORT_ITEMS.get(cursor).copied()) {
@@ -2746,6 +2768,8 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "Import key" => &art::IMPORT_PASSPHRASE,
         "XOR split" => &art::XOR_SPLIT,
         "XOR join" => &art::XOR_JOIN,
+        // A key in shares: the secure-key art, which this grid does not otherwise use.
+        "Codex32" => &art::SECURE_KEY,
         "Key vault" => &art::KEY_VAULT,
         "New words" => &art::NEW_WORDS,
         // The Sign grid.
@@ -3102,7 +3126,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it derives, which needs the login struct.
         Screen::KeyPick(_) => {}
         // Handled in `run`: both drive their own screens from the keypad.
-        Screen::XorSplit | Screen::XorJoin => {}
+        Screen::XorSplit | Screen::XorJoin | Screen::KeyCodex32 => {}
         Screen::KeyVault => {}
         #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
         Screen::DumpState => {}
@@ -3116,7 +3140,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // and the keypad itself.
         Screen::NewSeed(_) | Screen::KeyNewSeed => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
-        Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor => {}
+        Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor | Screen::ImportCodex32 => {}
         // Handled in `run`: each drives its own file picker, key entry and progress.
         Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
         #[cfg(feature = "board-q1")]
@@ -7900,7 +7924,7 @@ pub(crate) fn seed_entropy(
 /// The reading-seed screen first, then the fetch -- one callgate call during which the
 /// bootloader runs the PIN key-stretch inside the secure element, about 1.6 s on an mk4,
 /// with the CPU unable to repaint.
-fn root_stored(
+pub(crate) fn root_stored(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     panel: &mut display::Panel,

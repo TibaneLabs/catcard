@@ -429,10 +429,15 @@ printed in its run's toolchain step), are open items in
 - Every `pool.add` / `add_user` / `add_timing` call site: `git grep -n 'pool\.add'` in
   `crates/catcard-fw`. Each names its `Source`; none passes a narrowed integer.
 - The only calls that take material *out* of the pool: `git grep -n 'draw_seed\|\.draw(\|spawn_drbg('`
-  -- in [`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs) the New wallet flow (and the temporary seed and CCC's key C
-  it also makes) and the Debug TRNG-words screen (shown, never stored);
+  -- in [`crates/catcard-fw/src/newseed.rs`](../crates/catcard-fw/src/newseed.rs) the New wallet flow (and the temporary seed, CCC's key C
+  and a generated Codex32 `ms1` seed, all through its `gather_and_draw`) and the Debug
+  TRNG-words screen (shown, never stored);
   [`crates/catcard-fw/src/seedxor.rs`](../crates/catcard-fw/src/seedxor.rs) for the
-  noise parts of a random Seed XOR split; and `spawn_drbg`, one draw a DRBG, at session
+  noise parts of a random Seed XOR split;
+  [`crates/catcard-fw/src/codex32.rs`](../crates/catcard-fw/src/codex32.rs) for a Codex32
+  split's identifier and its `k - 1` free shares, drawn and split in one masked region
+  (with a predictable source one share would give the wallet away, so these are seed
+  material, never DRBG output); and `spawn_drbg`, one draw a DRBG, at session
   start ([`session.rs`](../crates/catcard-fw/src/session.rs)) and for the paper wallet
   ([`paperwallet.rs`](../crates/catcard-fw/src/paperwallet.rs)). That list is enforced:
   [`tools/pooldraw-lint.sh`](../tools/pooldraw-lint.sh), run by `make lint` and CI,

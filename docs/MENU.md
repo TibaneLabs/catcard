@@ -40,8 +40,10 @@ the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no n
 `Import` holds stock's Import Existing: `Words` (12/18/24 asked first, and the last word
 offered from the checksum-valid set alone, as stock does), `Clone`, `TAPSIGNER` (stored,
 or used for this session only), `XPRV` (stored as the master, in the stash's own node
-shape) and `Seed XOR` (joined, then offered for keeping). Stock's `Restore Backup` row is
-`Utils` → `Backup` here.
+shape), `Seed XOR` (joined, then offered for keeping) and `Codex32` (import, recover,
+generate or derive shares; a secret is stored or used for the session). Stock's
+`Restore Backup` row is `Utils` → `Backup` here, and its blank-device top-level `Codex32`
+menu is this row.
 
 ## Settings
 
@@ -91,6 +93,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Danger zone` → `Seed tools` → `Lock down seed` | `… Seed Functions` → `Lock Down Seed` (`is_tmp`) | ✅ same gate; a words key or an XPRV, stored in the stash's own node shape -- not a WIF key |
 | `Danger zone` → `B85 Idx Values` | `Danger Zone` → `B85 Idx Values` | ✅ own key `cat_b85idx`; the BIP-85 index is capped at 9999 until this lifts it to 2^31-1, after a warning |
 | Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet; `XOR join` is also `Import` → `Seed XOR` on a blank device |
+| Derive → `Codex32` → `Split this wallet`, `Recover`, `Import`, `Generate`, `Derive shares` | `… Seed Functions` → `Shamir Split`; `Temporary Seed` → `Codex32` (v5.6.3 / 1.5.3Q) | 🔀 beside Seed XOR, as `XOR split` is; what comes out is a temporary seed; Split, Generate and Derive shares are dropped under a spending policy, as stock drops them; also `Import` → `Codex32` on a blank device |
 | Derive → `Import key` → `Words`, `XPRV`, `WIF key`, `TAPSIGNER` | `Temporary Seed` → `Import Words`, `Import XPRV`, `Tapsigner Backup` | ✅ in force for the session, nothing stored; `Lock down seed` keeps one |
 | Derive → `New words` | `Temporary Seed` → `Generate Words` → `12 Words` / `24 Words` | ✅ the same generator as `New`, same entropy sources and optional dice/coin/mash, into the session rather than the slot |
 | `Danger zone` → `Seed tools` → `SeedQR` | `… Seed Functions` → `Export SeedQR` | ✅ Q1 only; both shapes, Standard and Compact, and the scanner reads either back |

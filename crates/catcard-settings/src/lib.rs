@@ -25,6 +25,7 @@
 pub mod ccc;
 pub mod ccenc;
 pub mod chains;
+pub mod codex32;
 pub mod hsm;
 pub mod hsmusers;
 pub mod json;

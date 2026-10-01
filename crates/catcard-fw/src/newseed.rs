@@ -391,6 +391,177 @@ pub(crate) fn new_seed(
         return;
     }
 
+    let made = gather_and_draw(gate, ui, pool, entropy_len, |bytes, kw| {
+        (
+            catcard_callgate::pin::encode_bip39(bytes),
+            Mnemonic::from_entropy(bytes, kw),
+        )
+    });
+    let Some((encoded, mnemonic)) = made else {
+        return;
+    };
+    let (Ok(mut secret), Ok(mnemonic)) = (encoded, mnemonic) else {
+        // Both accept 16 and 32 bytes, which is all `entropy_len` can be, so this is
+        // unreachable today. It is written out rather than unwrapped because this is
+        // the one function that holds a wallet, and a panic here would carry the seed
+        // to the panic screen with it.
+        message(ui.panel, "Failed", "could not encode", "that seed length");
+        wait_for_any_key(ui);
+        return;
+    };
+
+    // Words first, the quiz second, the secure element last.
+    //
+    // That order is the safe one, and it is worth being explicit about why, because the
+    // obvious ordering is the wrong way round. Commit first and a power loss between
+    // the write and the words leaves a wallet in the element that nobody has a backup
+    // of. Commit last and the same power loss leaves nothing at all: the user starts
+    // again and draws fresh words, having lost only their time.
+    //
+    // A failed quiz is therefore free. No wallet exists yet, so it costs nothing to
+    // send them back to the list rather than discarding twenty-four hand-written words
+    // over one mistaken key.
+    loop {
+        show_words(ui, &mnemonic);
+        if quiz(ui, &mnemonic) {
+            break;
+        }
+        ask(ui.panel, "Not confirmed", "read them again", "and retry?");
+        if !confirmed(ui) {
+            secret.zeroize();
+            crate::catlog!("seed: words not confirmed, nothing stored");
+            message(ui.panel, "Nothing stored", "no wallet was", "created");
+            wait_for_any_key(ui);
+            return;
+        }
+    }
+
+    // A key handed to another feature (CCC's key C) stops here too: the words are written
+    // down and confirmed, and the encoding goes to the caller, which stores it.
+    if target == SeedTarget::Handoff {
+        if let Some(out) = handoff {
+            out.copy_from_slice(&secret);
+        }
+        secret.zeroize();
+        drop(mnemonic);
+        return;
+    }
+
+    // A temporary seed stops here: the words are written down, and the entropy goes in
+    // force for the session instead of into the slot. Locking it down later is the way
+    // to keep it, and that screen has its own warnings.
+    if target == SeedTarget::Temporary {
+        secret.zeroize();
+        let was = crate::key::in_force();
+        let loaded = crate::key::set_temporary(mnemonic.entropy(), "TRNG Words");
+        drop(mnemonic);
+        if !loaded {
+            message(ui.panel, "Not loaded", "that seed length", "is not usable");
+            wait_for_any_key(ui);
+            return;
+        }
+        crate::catlog!("seed: temporary, {} words", words);
+        announce_key(gate, login, ui, "Temporary seed", was);
+        return;
+    }
+
+    message(ui.panel, "Applying", "do not disconnect", "");
+    // `Login` is driven through the `PinGate` seam, so that the same sequencing runs
+    // against a model on the host and the callgate here.
+    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
+    let outcome = login.set_secret(&pin_gate, &secret);
+    if let Err(f) = outcome {
+        secret.zeroize();
+        crate::catlog!("seed: store failed");
+        message(ui.panel, "Not stored", why_failed(f), "any key to go back");
+        wait_for_any_key(ui);
+        return;
+    }
+
+    // Read it back. The words are already written down by this point, so a slot that
+    // did not keep them has to be reported rather than assumed good.
+    let kept = login.verify_secret(&pin_gate, &secret).unwrap_or(false);
+    secret.zeroize();
+    if !kept {
+        crate::catlog!("seed: read-back mismatch");
+        message(
+            ui.panel,
+            "Not stored",
+            "the slot did not keep",
+            "what was written",
+        );
+        wait_for_any_key(ui);
+        return;
+    }
+
+    crate::catlog!("seed: stored, {} words", mnemonic.word_count());
+    message(
+        ui.panel,
+        "Wallet created",
+        "keep those words",
+        "somewhere safe",
+    );
+    wait_for_any_key(ui);
+}
+
+/// The generator itself: top the pool up from every hardware source, offer the owner's own
+/// dice, coins or mash, report what the draw rests on, then draw `len` bytes (at most 64)
+/// with interrupts masked and hand them to `then` inside the same masked region. The bytes
+/// are wiped before this returns. `None` once a refusal has been shown.
+///
+/// Shared by everything that makes a new secret -- a wallet's words, a temporary seed,
+/// CCC's key C, and a Codex32 `ms1` seed -- so they cannot differ in how much they collect
+/// or in what they credit. The screens before and after are the callers' own.
+pub(crate) fn gather_and_draw<T>(
+    gate: &Callgate,
+    ui: &mut Ui<'_>,
+    pool: &mut catcard_entropy::EntropyPool,
+    len: usize,
+    then: impl FnOnce(&[u8], &catcard_wallet::KeyWork) -> T,
+) -> Option<T> {
+    use zeroize::Zeroize;
+
+    gather(gate, ui, pool);
+
+    // Exactly as much as the caller asked for, rather than 256 bits with half thrown away.
+    // Stock draws a full seed and truncates for twelve words; the pool can be asked for
+    // the length actually wanted, and a draw that is all used is easier to reason about
+    // than one that is half discarded.
+    let mut entropy = [0u8; 64];
+    let len = len.min(entropy.len());
+    // The draw is the moment the wallet's key comes into existence, so it runs masked
+    // together with everything computed from it: nothing a host can time happens between
+    // the entropy appearing and its being encoded. A refusal is reported only once the
+    // region has closed.
+    let made = crate::keywork::run(|kw| {
+        let out = pool
+            .draw(&mut entropy[..len])
+            .map(|()| then(&entropy[..len], kw));
+        entropy.zeroize();
+        out
+    });
+    match made {
+        Ok(got) => Some(got),
+        Err(e) => {
+            // The pool refusing is the entropy design working as intended, so report
+            // which way it refused rather than a generic failure.
+            crate::catlog!("seed: pool refused");
+            let mut l = Line::new();
+            let _ = write!(l, "{e}");
+            info(ui.panel, "Refused", &[l]);
+            wait_for_any_key(ui);
+            None
+        }
+    }
+}
+
+/// The collection half of [`gather_and_draw`]: every hardware source topped up, the
+/// owner's own entropy offered, and the report the draw will rest on. Not generic, and
+/// never inlined, so the generators that share it share one copy of it.
+#[inline(never)]
+fn gather(gate: &Callgate, ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyPool) {
+    use zeroize::Zeroize;
+
     // Fresh noise from both secure elements, on top of what the boot pool already
     // holds. The boot pool has met its policy or we would not be here; this is added
     // material, not a substitute for it.
@@ -509,142 +680,6 @@ pub(crate) fn new_seed(
     );
     entropy_report(ui.panel, &g, passed);
     wait_for_any_key(ui);
-
-    // Exactly as much as those words carry, rather than 256 bits with half thrown away.
-    // Stock draws a full seed and truncates for twelve words; the pool can be asked for
-    // the length actually wanted, and a draw that is all used is easier to reason about
-    // than one that is half discarded.
-    let mut entropy = [0u8; 32];
-    // The draw is the moment the wallet's key comes into existence, so it runs masked
-    // together with everything computed from it: nothing a host can time happens between
-    // the entropy appearing and its being encoded. A refusal is reported only once the
-    // region has closed.
-    let made = crate::keywork::run(|kw| {
-        let out = pool.draw(&mut entropy[..entropy_len]).map(|()| {
-            (
-                catcard_callgate::pin::encode_bip39(&entropy[..entropy_len]),
-                Mnemonic::from_entropy(&entropy[..entropy_len], kw),
-            )
-        });
-        entropy.zeroize();
-        out
-    });
-    let (encoded, mnemonic) = match made {
-        Ok(pair) => pair,
-        Err(e) => {
-            // The pool refusing is the entropy design working as intended, so report
-            // which way it refused rather than a generic failure.
-            crate::catlog!("seed: pool refused");
-            let mut l = Line::new();
-            let _ = write!(l, "{e}");
-            info(ui.panel, "Refused", &[l]);
-            wait_for_any_key(ui);
-            return;
-        }
-    };
-
-    let (Ok(mut secret), Ok(mnemonic)) = (encoded, mnemonic) else {
-        // Both accept 16 and 32 bytes, which is all `entropy_len` can be, so this is
-        // unreachable today. It is written out rather than unwrapped because this is
-        // the one function that holds a wallet, and a panic here would carry the seed
-        // to the panic screen with it.
-        message(ui.panel, "Failed", "could not encode", "that seed length");
-        wait_for_any_key(ui);
-        return;
-    };
-
-    // Words first, the quiz second, the secure element last.
-    //
-    // That order is the safe one, and it is worth being explicit about why, because the
-    // obvious ordering is the wrong way round. Commit first and a power loss between
-    // the write and the words leaves a wallet in the element that nobody has a backup
-    // of. Commit last and the same power loss leaves nothing at all: the user starts
-    // again and draws fresh words, having lost only their time.
-    //
-    // A failed quiz is therefore free. No wallet exists yet, so it costs nothing to
-    // send them back to the list rather than discarding twenty-four hand-written words
-    // over one mistaken key.
-    loop {
-        show_words(ui, &mnemonic);
-        if quiz(ui, &mnemonic) {
-            break;
-        }
-        ask(ui.panel, "Not confirmed", "read them again", "and retry?");
-        if !confirmed(ui) {
-            secret.zeroize();
-            crate::catlog!("seed: words not confirmed, nothing stored");
-            message(ui.panel, "Nothing stored", "no wallet was", "created");
-            wait_for_any_key(ui);
-            return;
-        }
-    }
-
-    // A key handed to another feature (CCC's key C) stops here too: the words are written
-    // down and confirmed, and the encoding goes to the caller, which stores it.
-    if target == SeedTarget::Handoff {
-        if let Some(out) = handoff {
-            out.copy_from_slice(&secret);
-        }
-        secret.zeroize();
-        drop(mnemonic);
-        return;
-    }
-
-    // A temporary seed stops here: the words are written down, and the entropy goes in
-    // force for the session instead of into the slot. Locking it down later is the way
-    // to keep it, and that screen has its own warnings.
-    if target == SeedTarget::Temporary {
-        secret.zeroize();
-        let was = crate::key::in_force();
-        let loaded = crate::key::set_temporary(mnemonic.entropy(), "TRNG Words");
-        drop(mnemonic);
-        if !loaded {
-            message(ui.panel, "Not loaded", "that seed length", "is not usable");
-            wait_for_any_key(ui);
-            return;
-        }
-        crate::catlog!("seed: temporary, {} words", words);
-        announce_key(gate, login, ui, "Temporary seed", was);
-        return;
-    }
-
-    message(ui.panel, "Applying", "do not disconnect", "");
-    // `Login` is driven through the `PinGate` seam, so that the same sequencing runs
-    // against a model on the host and the callgate here.
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    let outcome = login.set_secret(&pin_gate, &secret);
-    if let Err(f) = outcome {
-        secret.zeroize();
-        crate::catlog!("seed: store failed");
-        message(ui.panel, "Not stored", why_failed(f), "any key to go back");
-        wait_for_any_key(ui);
-        return;
-    }
-
-    // Read it back. The words are already written down by this point, so a slot that
-    // did not keep them has to be reported rather than assumed good.
-    let kept = login.verify_secret(&pin_gate, &secret).unwrap_or(false);
-    secret.zeroize();
-    if !kept {
-        crate::catlog!("seed: read-back mismatch");
-        message(
-            ui.panel,
-            "Not stored",
-            "the slot did not keep",
-            "what was written",
-        );
-        wait_for_any_key(ui);
-        return;
-    }
-
-    crate::catlog!("seed: stored, {} words", mnemonic.word_count());
-    message(
-        ui.panel,
-        "Wallet created",
-        "keep those words",
-        "somewhere safe",
-    );
-    wait_for_any_key(ui);
 }
 
 /// Where a freshly generated seed goes.
@@ -719,34 +754,65 @@ pub(crate) fn new_temp_seed(
 /// Returns false on a wrong answer or a cancel; the caller stores nothing either way.
 fn quiz(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) -> bool {
     use catcard_wallet::bip39::wordlist::{WORD_COUNT, word};
+    let mut items: heapless::Vec<&str, 24> = heapless::Vec::new();
+    for w in m.words() {
+        let _ = items.push(w);
+    }
+    quiz_items(ui, "word", &items, &mut |ui| {
+        let pick = ui.drbg.below(WORD_COUNT as u32).ok()?;
+        let mut d = Pick::new();
+        let _ = d.push_str(word(pick as usize));
+        Some(d)
+    })
+}
+
+/// One option at a quiz question: a word, or a four-character group.
+pub(crate) type Pick = heapless::String<12>;
+
+/// [`quiz`] over any numbered list the owner was shown -- words, or the groups of a
+/// Codex32 string -- with `decoy` making a wrong option of the same shape.
+///
+/// Three questions, three options each, the right one shuffled in by the DRBG. A DRBG
+/// failure means it wants reseeding; refusing is the only safe answer, since a quiz whose
+/// questions are predictable proves nothing. `noun` names an item in the questions.
+#[inline(never)]
+pub(crate) fn quiz_items(
+    ui: &mut Ui<'_>,
+    noun: &str,
+    items: &[&str],
+    decoy: &mut dyn FnMut(&mut Ui<'_>) -> Option<Pick>,
+) -> bool {
     const ASKS: usize = 3;
     const CHOICES: usize = 3;
 
-    let total = m.word_count();
     for _ in 0..ASKS {
-        // A DRBG failure means it wants reseeding. Refusing is the only safe answer: a
-        // quiz whose questions are predictable proves nothing.
-        let Ok(pos) = ui.drbg.below(total as u32) else {
+        let Ok(pos) = ui.drbg.below(items.len() as u32) else {
             return false;
         };
         let pos = pos as usize;
-        let Some(correct) = m.words().nth(pos) else {
+        let Some(&correct) = items.get(pos) else {
             return false;
         };
 
-        let mut choices = [correct; CHOICES];
+        let mut choices: [Pick; CHOICES] = Default::default();
+        let _ = choices[0].push_str(correct);
         for i in 1..CHOICES {
-            loop {
-                let Ok(pick) = ui.drbg.below(WORD_COUNT as u32) else {
+            // Bounded: a decoy that keeps colliding is a generator that is not working.
+            let mut found = false;
+            for _ in 0..64 {
+                let Some(d) = decoy(ui) else {
                     return false;
                 };
-                let w = word(pick as usize);
                 // Distinct from the answer and from the other decoys, or the question
                 // has two right answers or fewer than three options.
-                if w != correct && !choices[..i].contains(&w) {
-                    choices[i] = w;
+                if d.as_str() != correct && !choices[..i].contains(&d) {
+                    choices[i] = d;
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                return false;
             }
         }
         let _ = ui.drbg.shuffle(&mut choices);
@@ -761,23 +827,20 @@ fn quiz(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) -> bool {
         let _ = hint.push_str("y = skip");
         let _ = lines.push(hint);
         let mut title = Line::new();
-        let _ = write!(title, "Which is word {}?", pos + 1);
+        let _ = write!(title, "Which is {noun} {}?", pos + 1);
 
         // Loop this one question so a declined skip re-asks it rather than failing.
         loop {
             info(ui.panel, &title, &lines);
             match read_choice(ui, CHOICES) {
-                Choice::Pick(i) if choices[i] == correct => break,
+                Choice::Pick(i) if choices[i].as_str() == correct => break,
                 // A wrong pick or a cancel fails the quiz -- the caller offers the list
                 // again, and nothing is stored yet, so it costs only time.
                 Choice::Pick(_) | Choice::Cancel => return false,
                 Choice::Skip => {
-                    ask(
-                        ui.panel,
-                        "Skip the check?",
-                        "store without",
-                        "confirming words?",
-                    );
+                    let mut what = Line::new();
+                    let _ = write!(what, "confirming {noun}s?");
+                    ask(ui.panel, "Skip the check?", "store without", &what);
                     if confirmed(ui) {
                         return true;
                     }

@@ -313,6 +313,24 @@ pub fn encode_xprv(chain_code: &[u8; 32], privkey: &[u8; 32]) -> [u8; SECRET_LEN
     out
 }
 
+/// Pack a raw BIP-32 master seed into the 72-byte secret slot: its length as the marker,
+/// then the bytes.
+///
+/// What an imported or recovered codex32 `ms1` secret is stored as. Refuses a length
+/// [`raw_master`] would not read back -- outside 16 to 64 bytes. The returned array is
+/// key material; zeroize it once the gate has taken it.
+///
+/// Source: hw-reference/secret-stash-format.md §Layout, §Codex32 [C]
+pub fn encode_raw_master(seed: &[u8]) -> Result<[u8; SECRET_LEN], UnsupportedEntropyLen> {
+    if !(16..=64).contains(&seed.len()) {
+        return Err(UnsupportedEntropyLen { len: seed.len() });
+    }
+    let mut out = [0u8; SECRET_LEN];
+    out[0] = seed.len() as u8;
+    out[1..1 + seed.len()].copy_from_slice(seed);
+    Ok(out)
+}
+
 /// The entropy inside a BIP-39 secret, or `None` if this is not one.
 ///
 /// Source: hw-reference/secret-stash-format.md §Layout [C]
@@ -371,6 +389,22 @@ mod tests {
             classify_secret(&raw),
             SecretKind::Unknown { marker: 32 }
         ));
+    }
+
+    /// A codex32 `ms1` seed is stored under its own length, and reads back as exactly the
+    /// bytes it was. Lengths the reader would not take are refused at the writer.
+    #[test]
+    fn a_raw_master_round_trips_at_every_codex32_length() {
+        for len in [16usize, 32, 64] {
+            let seed: std::vec::Vec<u8> = (0..len as u8).map(|b| b ^ 0xa5).collect();
+            let s = encode_raw_master(&seed).unwrap();
+            assert_eq!(s[0] as usize, len);
+            assert_eq!(raw_master(&s), Some(&seed[..]));
+            assert_eq!(bip39_entropy(&s), None);
+        }
+        for len in [0usize, 15, 65] {
+            assert!(encode_raw_master(&std::vec![1u8; len]).is_err());
+        }
     }
 
     /// Lengths outside 16..=64 are not raw master secrets -- 0 is an empty slot, and the

@@ -640,12 +640,19 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
         // Reached only under Related Keys: passphrase wallets, temporary seeds and the
         // vault (stock's EphemeralSeedMenu and Seed Vault). BIP-85 and Seed XOR derive
         // *from* the seed and are stock's Derive Seeds / Seed Functions, which hobbled
-        // mode does not offer.
+        // mode does not offer. Codex32 stays as a temporary-seed source: its screen drops
+        // Generate, Split and Derive Shares itself while hobbled, as stock does.
+        // Source: hw-reference/codex32-format.md §Device operations [C]
         Menu::Derive => {
             allow.related_keys
                 && matches!(
                     label,
-                    "Back to root" | "Passphrase" | "Import key" | "New words" | "Key vault"
+                    "Back to root"
+                        | "Passphrase"
+                        | "Import key"
+                        | "New words"
+                        | "Codex32"
+                        | "Key vault"
                 )
         }
     }

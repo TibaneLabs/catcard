@@ -36,12 +36,17 @@ pub const KEYS: [&str; 10] = [
 /// habit rather than of format.
 pub const MAX_LEN: usize = 100;
 
+/// Most text any field holds: a 127-character codex32 string, the longest thing anyone
+/// is asked to type. Only a field made with [`Entry::with_limit`] reaches past
+/// [`MAX_LEN`]. Source: hw-reference/codex32-format.md §Three prefixes [C]
+pub const CAPACITY: usize = 127;
+
 /// Text being typed on a keypad.
 pub struct Entry {
-    text: heapless::String<MAX_LEN>,
+    text: heapless::String<CAPACITY>,
     /// The key being cycled and how far along its characters, if one is.
     pending: Option<(usize, usize)>,
-    /// Most bytes this field takes, at most [`MAX_LEN`].
+    /// Most bytes this field takes, at most [`CAPACITY`].
     limit: usize,
 }
 
@@ -56,14 +61,14 @@ impl Entry {
         Self::with_limit(MAX_LEN)
     }
 
-    /// A field that takes at most `limit` bytes (capped at [`MAX_LEN`]): past it, keys do
+    /// A field that takes at most `limit` bytes (capped at [`CAPACITY`]): past it, keys do
     /// nothing, so text the destination cannot hold is never typed at all. Bytes, not
     /// characters -- the limits this serves (an SD card's 16-byte password) count bytes.
     pub const fn with_limit(limit: usize) -> Self {
         Self {
             text: heapless::String::new(),
             pending: None,
-            limit: if limit < MAX_LEN { limit } else { MAX_LEN },
+            limit: if limit < CAPACITY { limit } else { CAPACITY },
         }
     }
 
@@ -203,7 +208,7 @@ mod tests {
         assert_eq!(e.as_str(), "ad", "a new key past the limit is ignored");
         e.press(3);
         assert_eq!(e.as_str(), "ae", "the last key still cycles");
-        assert_eq!(Entry::with_limit(500).limit(), MAX_LEN);
+        assert_eq!(Entry::with_limit(500).limit(), CAPACITY);
         assert_eq!(Entry::default().limit(), MAX_LEN);
     }
 

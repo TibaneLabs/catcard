@@ -150,7 +150,7 @@ mod imp {
     use super::{Mode, mode, set, state};
     use catcard_callgate::Callgate;
     use catcard_settings::policy::{self as engine, Allow, Checker, Out, Policy, Violation};
-    use catcard_settings::store::{self, SCRATCH};
+    use catcard_settings::store::SCRATCH;
     use catcard_ui::scroll::Line as Row;
     use catcard_wallet::psbtview::{self, timelock};
     use core::fmt::Write as _;
@@ -249,20 +249,6 @@ mod imp {
     // Reading and writing the root wallet's policy
     // -----------------------------------------------------------------------------------
 
-    /// The root wallet's settings key: the cached one while the root is in force, a
-    /// fetch otherwise.
-    fn root_settings_key(
-        gate: &Callgate,
-        login: &mut catcard_pin::Login,
-        panel: &mut crate::display::Panel,
-    ) -> Result<catcard_settings::nvstore::Key, &'static str> {
-        if crate::key::is_root() {
-            crate::settings::wallet_key(gate, login, panel, HEAD)
-        } else {
-            crate::settings::root_key(gate, login, panel, HEAD)
-        }
-    }
-
     /// What the root wallet's settings hold under the policy's key. The policy itself, when
     /// there is one, has been written into the caller's block.
     #[derive(Copy, Clone, PartialEq, Eq)]
@@ -292,7 +278,7 @@ mod imp {
         buf: &mut [u8],
         out: &mut Policy,
     ) -> Result<Found, &'static str> {
-        let key = root_settings_key(gate, login, panel)?;
+        let key = crate::settings::master_key(gate, login, panel, HEAD)?;
         let n = crate::settings::read_slot(&key, buf)?;
         decode(&buf[..n], out)
     }
@@ -373,45 +359,16 @@ mod imp {
         else {
             return false;
         };
-        if crate::key::is_root() {
-            return crate::settings::save_wallet(
-                gate,
-                login,
-                ui,
-                HEAD,
-                (engine::KEY, raw),
-                doc_held.bytes(),
-                seal_held.bytes(),
-            )
-            .is_ok();
-        }
-        // Another key is in force: the root file by its own key, the object alone.
-        let Ok(key) = crate::settings::root_key(gate, login, ui.panel, HEAD) else {
-            return false;
-        };
-        let _busy = menu::blocking_screen(ui.panel, HEAD, "saving");
-        // SAFETY: foreground only; the caller holds the display while this runs.
-        let Ok(mut files) = (unsafe { crate::settings::Files::mount() }) else {
-            return false;
-        };
-        let choose = ui.drbg.below(crate::settings::SLOT_COUNT).unwrap_or(0);
-        match store::set_many(
-            &mut files,
-            &key,
-            &[(engine::KEY, raw)],
-            choose,
+        crate::settings::save_master(
+            gate,
+            login,
+            ui,
+            HEAD,
+            (engine::KEY, raw),
             doc_held.bytes(),
             seal_held.bytes(),
-        ) {
-            Ok(slot) => {
-                crate::catlog!("policy: saved to {:03x}.aes (root file)", slot);
-                true
-            }
-            Err(e) => {
-                crate::catlog!("policy: save failed: {:?}", e);
-                false
-            }
-        }
+        )
+        .is_ok()
     }
 
     // -----------------------------------------------------------------------------------

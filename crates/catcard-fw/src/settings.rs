@@ -285,6 +285,68 @@ pub(crate) fn root_key(
     Ok(key)
 }
 
+/// The settings key of the **master's** file, whatever wallet is in force: the cached key
+/// while the root is in force, a fetch of the stored stash otherwise.
+///
+/// For what stock keeps under the master whatever key is in force (its `MASTER_FIELDS`:
+/// the spending policy, a saved Codex32 share set), so a temporary-seed session reads and
+/// writes the same object the root does. On a blank device the stash is all zeros and so
+/// is what the key is derived from -- which is stock's key there too, and no secret.
+/// Source: hw-reference/settings-nvstore-format.md §5 MASTER_FIELDS [C]
+pub(crate) fn master_key(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    panel: &mut crate::display::Panel,
+    head: &str,
+) -> Result<catcard_settings::nvstore::Key, &'static str> {
+    if crate::key::is_root() {
+        wallet_key(gate, login, panel, head)
+    } else {
+        root_key(gate, login, panel, head)
+    }
+}
+
+/// Save `(name, raw)` into the master's file ([`master_key`]), whatever wallet is in force.
+///
+/// The root in force goes through [`save_wallet`], identity keys and all. Any other key
+/// writes the one object into the root's file by the root's own key, and nothing about the
+/// wallet in force -- that file is not its file.
+pub(crate) fn save_master(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    pair: (&str, &str),
+    doc: &mut [u8],
+    seal: &mut [u8],
+) -> Result<(), &'static str> {
+    use catcard_settings::store;
+
+    if crate::key::is_root() {
+        return save_wallet(gate, login, ui, head, pair, doc, seal);
+    }
+    // The same refusal `save_wallet_many` makes, for the same reason.
+    if crate::policy::hobbled() && !catcard_settings::policy::may_save(pair.0) {
+        crate::catlog!("settings: {} not saved: spending policy active", pair.0);
+        return Err("spending policy active");
+    }
+    let key = root_key(gate, login, ui.panel, head)?;
+    let _busy = crate::menu::blocking_screen(ui.panel, head, "saving");
+    // SAFETY: foreground only; the caller holds the display while this runs.
+    let mut files = unsafe { Files::mount() }.map_err(|_| "no settings store")?;
+    let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
+    match store::set_many(&mut files, &key, &[pair], choose, doc, seal) {
+        Ok(slot) => {
+            crate::catlog!("settings: {} saved to {:03x}.aes (root file)", pair.0, slot);
+            Ok(())
+        }
+        Err(e) => {
+            crate::catlog!("settings: saving {} failed: {:?}", pair.0, e);
+            Err("could not save")
+        }
+    }
+}
+
 /// The settings object under `key`, read into `buf` (one `store::SCRATCH`): its length,
 /// zero when there is none or it will not open.
 ///

@@ -47,6 +47,8 @@ mod ccc;
 mod chains;
 /// Stock Coldcard's host protocol, for the ckcc USB mode.
 mod ckcc;
+/// Codex32 (BIP-93): generate, import, split, recover and derive shares.
+mod codex32;
 mod derive;
 mod display;
 /// Wallet-export file formats.

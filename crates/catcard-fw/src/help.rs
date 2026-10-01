@@ -164,7 +164,7 @@ topic!(
     MAIN_BLANK = "Help",
     [
         "New: make a wallet from this device's own random sources, 24 or 12 words.",
-        "Import: bring in a wallet you already have -- words, a Coldcard clone, a TAPSIGNER backup, an XPRV, Seed XOR.",
+        "Import: bring in a wallet you already have -- words, a Coldcard clone, a TAPSIGNER backup, an XPRV, Seed XOR, Codex32.",
         "Scan QR: read a code with the scanner -- seed words, a teleport, a file.",
         "Utils: restore a backup file, files on the card, USB drive, firmware upgrade.",
         "Settings: the PIN and nickname, About, and diagnostics.",
@@ -207,6 +207,7 @@ topic!(
         "New words: a fresh seed for this session only, until you store it.",
         "XOR split: cut the words in force into parts that all have to come back together.",
         "XOR join: type the parts back in to work in the wallet they make.",
+        "Codex32: split this wallet into BIP-93 shares, any K of which bring it back; or recover, import or make one for this session.",
         "Key vault: keys kept in this device's settings, to switch to later.",
         "A wallet other than the root shows its fingerprint in the bar at the top.",
     ]
@@ -271,6 +272,7 @@ topic!(
         "TAPSIGNER: open a TAPSIGNER backup with the Backup Password printed on the card.",
         "XPRV: type in an extended private key and keep it as this device's wallet.",
         "Seed XOR: join the parts of a split seed back into the words they make.",
+        "Codex32: import a BIP-93 secret, recover one from its shares, or generate a new one.",
     ]
 );
 

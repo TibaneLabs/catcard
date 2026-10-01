@@ -102,7 +102,8 @@ each step landed, then what is left.
 | SLIP-132 | ✅ | ✅ | every form read on import (`bip32::serialize::Slip132`); export behind Settings → SLIP-132 export (`cat_slip132`), off by default like stock |
 | SLIP-44 | ✅ | ✅ | coin type 0 / 1 from the network (`chain`) |
 | BIP-86 taproot | ❌ (EDGE only) | ✅ | addresses, `tr()` export, BIP-341 key-path signing -- beyond parity |
-| BIP-93, BIP-129, BIP-388, SLIP-39, SLIP-32 | ❌ | ❌ | beyond parity |
+| BIP-93 (codex32) | ✅ (v5.6.3 / 1.5.3Q) | ✅ | `ms1` plus Coldcard's `cw1`/`cx1`, both checksums, GF(32) split / recover / derive against every BIP-93 vector and hw-reference's extension vectors (`catcard_wallet::codex32`); screens in `crate::codex32` (below); untested on hardware |
+| BIP-129, BIP-388, SLIP-39, SLIP-32 | ❌ | ❌ | beyond parity |
 
 ## 2. Seed and entropy
 
@@ -116,6 +117,7 @@ each step landed, then what is left.
 | Import words (12/18/24) | ✅ | ✅ | length asked first; the last word offered from the checksum-valid set (`531ea2e`) |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ✅ | Import → XPRV, Clone (`backup::clone_import`), TAPSIGNER (`crate::tapsigner`, `catcard-backup::tapsigner`), Seed XOR; a stored raw master or xprv node is worked in as is; backup via Utils → Backup → Restore; SeedQR through the scanner (`crate::seedqr`); untested on hardware |
 | Seed XOR split and join | ✅ | ✅ | 2--4 parts, deterministic or from the TRNGs; a part can be typed, this device's seed, or a Seed Vault entry (`crate::seedxor`, `seedxor::Join`); untested on hardware |
+| Codex32: generate, import, Shamir split, recover, derive shares | ✅ (v5.6.3 / 1.5.3Q) | 🟡 | Import → Codex32 on a blank device (stored or for the session), Derive → Codex32 otherwise (`crate::codex32`): a generated `ms1` seed comes from the same collection and draw as New (`newseed::gather_and_draw`) and is group-quizzed; a split draws its identifier and free shares from the entropy pool, never the DRBG, and checks it recombines before showing a share; recover / derive take typed, file or (Q1) QR strings and Save & Exit into the master's `c32_shares` (left out of backups); a stored `ms1` writes `c32`. Missing: dice-only Generate, Calculate Checksum, NFC in/out, the signature file beside an exported share; owner entropy is offered, not mandatory (`docs/ENTROPY.md`); untested on hardware |
 | BIP-85 | ✅ | ✅ | as §1; words, XPRV and WIF children can be put in force |
 | BIP-39 passphrase | ✅ | ✅ | Settings → Passphrase, RAM only; Save to card / Restore saved / delete in `catcard-passphrases.bin` under a key only these words make (`pwsave`, `680d6a8`); NFKD is the ➖ in §1; untested on hardware |
 | Temporary seeds, Seed Vault, Lock Down Seed | ✅ | ✅ | Derive → Import key (words, XPRV, WIF, TAPSIGNER, Coldcard backup) and New words for the session; Key vault (`crate::vault`, stock's `seeds` format); Danger zone → Seed tools → Lock down seed |

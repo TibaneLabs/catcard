@@ -597,7 +597,14 @@ fn write_preferences(w: &mut body::BodyWriter<'_>, secret: &[u8; SECRET_LEN]) {
     let Ok(doc) = Doc::parse(&buf[..n]) else {
         return;
     };
-    for e in doc.entries() {
+    // Codex32's flag and its saved partial share set stay behind: the flag is recomputed
+    // from the secret, and a half-collected set of shares is not a backup of anything.
+    // Source: hw-reference/codex32-format.md §Storage [C]
+    for e in doc
+        .entries()
+        .iter()
+        .filter(|e| !catcard_settings::codex32::NOT_IN_BACKUPS.contains(&e.key))
+    {
         w.setting(e.key, e.raw);
     }
 }
