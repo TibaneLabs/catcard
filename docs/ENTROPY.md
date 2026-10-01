@@ -249,8 +249,14 @@ bounded number of polls. So a dead or unclocked TRNG produces an error here, not
 
 [`crates/catcard-fw/src/trng.rs`](../crates/catcard-fw/src/trng.rs): `Trngs::read`, and the `Kind` list from `kinds()`.
 
-- **SE1 and SE2** (mk4, mk5, Q1): callgate 26, `Callgate::se_rng`, 32 bytes per call from
-  a 33-byte buffer whose first byte is the length.
+- **SE1 and SE2** (mk4, mk5, Q1): callgate 26, `Callgate::se_rng`, a 33-byte buffer whose
+  first byte is the length: **32 bytes a call from SE1, 8 from SE2** (bytes 4–11 of its
+  page 28). Source: hw-reference/bootloader-callgate-abi.md §"RNG gates" [C]. Neither is
+  secret from someone on the board: SE1's answer is `SHA-256(TempKey)` over values that
+  cross its bus in cleartext, recomputable by anyone who also holds the pairing secret;
+  SE2's 8 bytes cross the I²C bus in cleartext. Both are tamper-checked by the
+  bootloader, and the STM32's own TRNG (step 1), which never leaves the chip, is always
+  mixed in beside them.
 - **Not the bootloader's read of the chip TRNG** (callgate 17). It is the same generator
   as step 1, through a call that reports no error, where step 1 sees the RNG's clock and
   seed faults and refuses. It used to be mixed in, credited zero; it is no longer read.
@@ -521,7 +527,7 @@ tools/trng_capture.py hid --bytes 1000000          # every source -> captures/<b
 
 **1,000,000 samples per source** is SP 800-90B's minimum for a non-IID assessment (§3.1.1);
 a sample is one byte. An interrupted capture resumes where it stopped. The secure elements
-are the slow part (SE2 declines most calls), so expect minutes per source, not seconds.
+are the slow part (SE2 answers 8 bytes a call to SE1's 32), so expect minutes per source, not seconds.
 
 **Anyone with a release build and a paired computer can do this for their own device.** A
 release has no `DebugTrng`, but it answers the same samples, from the same reader, inside
@@ -569,9 +575,9 @@ it as conditioned output (`-c`).
 
 | board | source | samples | NIST `ea_non_iid` (bits/byte) | Python MCV / Markov (bits/byte) | credited today |
 |---|---|---|---|---|---|
-| Q1 | chip | | pending a capture on hardware | | 4 |
-| Q1 | SE1 | | pending a capture on hardware | | 4 |
-| Q1 | SE2 | | pending a capture on hardware | | 4 |
+| Q1 | chip | 1,000,000 B (2026-09-28) | pending | 7.880 (partial) | 4 |
+| Q1 | SE1 | 148,128 B (2026-09-28; stopped early, see EEPROM wear in HARDWARE-OPEN-ITEMS) | pending | 7.689 (partial) | 4 |
+| Q1 | SE2 | 1,000,000 B (2026-09-28): 125,000 reads of 8 bytes, all distinct | pending | 7.881 (partial) | 4 |
 | Q1 | bootloader | | pending a capture on hardware | | 0 |
 | mk4/mk5 | chip, SE1, SE2, bootloader | | pending a capture on hardware | | 4, 4, 4, 0 |
 | mk3 | chip, SE1 bus, bootloader | | pending a capture on hardware | | 4, 0, 0 |

@@ -130,6 +130,7 @@ enum Screen {
     ViewTrngWords,
     /// Debug: the SP 800-90B start-up test on every source, on demand (`crate::trngtest`).
     TrngStartup,
+    GateCheck,
     /// Debug: write a fixed URL to the NFC tag and hold the screen.
     #[cfg(not(feature = "board-mk3"))]
     NfcTest,
@@ -1092,6 +1093,8 @@ const DEBUG_ITEMS: &[&str] = &[
     "View TRNG Words",
     // The start-up health test, run here before it is trusted on the boot path.
     "TRNG startup test",
+    // What the bootloader returns from the gates read as "0 is success".
+    "Bootloader replies",
     #[cfg(not(feature = "board-mk3"))]
     "NFC test",
     "Keyboard EMU test",
@@ -1871,6 +1874,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::PaperWallet => returns(|a| crate::paperwallet::create(a.ui, a.pool.take())),
         Screen::ViewTrngWords => returns(|a| crate::newseed::view_trng_words(a.gate, a.ui)),
         Screen::TrngStartup => returns(|a| crate::trngtest::screen(a.gate, a.ui)),
+        Screen::GateCheck => returns(|a| crate::gatecheck::screen(a.gate, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => returns(|a| crate::nfc::probe_screen(a.ui)),
         Screen::KbdTest => returns(|a| crate::usbkbd::self_test(a.ui)),
@@ -2359,6 +2363,7 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("TRNG startup test")) => Screen::TrngStartup,
+            (Key::Confirm, Some("Bootloader replies")) => Screen::GateCheck,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
             (Key::Confirm, Some("Keyboard EMU test")) => Screen::KbdTest,
@@ -3028,6 +3033,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::PaperWallet => {}
         Screen::ViewTrngWords => {}
         Screen::TrngStartup => {}
+        Screen::GateCheck => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTest => {}
         Screen::KbdTest => {}

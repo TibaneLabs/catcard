@@ -240,9 +240,9 @@ pub fn serve(gate: &Callgate) {
     let mut trngs = Trngs::new(Some(gate));
     let mut n = 0usize;
     let mut fl = 0u8;
-    // Bounded: a secure element answers 32 bytes a call when it answers at all, and the
-    // slower one declines about three calls in four. Eight tries per 32 bytes covers that
-    // and still ends when a source goes quiet. A paired secure-element chunk is bounded
+    // Bounded: SE1 answers 32 bytes a call and SE2 8 (hw-reference/bootloader-callgate-abi.md
+    // §"RNG gates" [C]), so 32 bytes take at most four calls. Eight tries per 32 bytes
+    // covers that twice over and still ends when a source goes quiet. A paired secure-element chunk is bounded
     // tighter, by what its allowance and [`PAIRED_SE_CALLS`] leave.
     let max_tries = match allowed {
         Some(a) => a as usize,

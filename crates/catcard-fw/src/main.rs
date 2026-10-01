@@ -67,6 +67,8 @@ mod flappy;
 mod game;
 /// Callgates that draw or do not return, each behind the display backstop.
 mod gatecall;
+/// Debug -> Bootloader replies: the raw return of each "0 is success" callgate.
+mod gatecheck;
 #[cfg(feature = "board-q1")]
 mod gpu;
 /// Login protections that erase the seed on their own. Release builds, mk4 and later.

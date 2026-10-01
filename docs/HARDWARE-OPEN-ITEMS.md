@@ -517,38 +517,50 @@ mk4/Q `[?]`. SE2's I2C pins are confirmed on Q1 only; see the mk4 item above.
 
 ---
 
-## SE2 produces about four times slower than SE1 `[?]`
+## SE2 gives 8 bytes a call, not 32 — RESOLVED `[C]`; its field is live on silicon
 
-On Utils → Analyze RNG, which reads both elements once per frame, **SE1 completes four
-rounds in the time SE2 takes for one** (observed on a real Q1).
+**The 4:1.** Utils → Analyze RNG showed SE1 completing four rounds while SE2 completed
+one, and the first seed generation logged `SE1 512 B, SE2 128 B`. That is not a slow or
+declining element: callgate 26 returns **32 bytes from SE1 and 8 from SE2** (SE2's are
+bytes 4–11 of its page 28). Source: hw-reference/bootloader-callgate-abi.md §"RNG gates"
+[C]. Every caller already takes the length from the buffer's first byte, so nothing read
+past what arrived; only our explanations were wrong (an earlier revision of this entry
+said SE2 "stops answering under sustained polling", a later one "declines most calls").
 
-That rate difference explains the first seed generation, which took sixteen turns each
-and logged `SE1 512 B, SE2 128 B` — the same 4:1. An earlier revision of this entry
-called it "SE2 stops answering under sustained polling", which was **wrong**: a chip
-that stopped would give a sharp cutoff after four calls, not a steady quarter rate, and
-nothing here ever stopped. That misreading came from taking our own lockstep loop's
-output as a fact about the hardware.
+**Is the field fresh on every read? Yes, on a real Q1.** hw-reference lists this as open
+(`secure-elements.md` §"SE2 page-28 RNG field" `[?]`): the claim came only from the
+bootloader's comment and from an emulator whose SE2 model re-rolls it by construction,
+and it asks for a check on hardware — read gate 26/2 repeatedly and compare. Our
+2026-09-28 capture is that check: 1,000,000 bytes from a real Q1 in one power cycle
+(`tools/trng_capture.py`, source SE2) are **125,000 consecutive 8-byte reads, all
+125,000 distinct**, none equal to the one before. A per-device or per-power-up constant
+would repeat every read. The Python estimators put it at 7.88 bits/byte (docs/ENTROPY.md).
+Not yet done: the same on an mk4/mk5, and across a power cycle (which a field that
+changes on every read already implies).
 
-SE2 is healthy. At boot it delivers its full 64 bytes like SE1 — `entropy 832` is
-exactly 256 (STM32) + 256 (SE1) + 256 (SE2) + 64 (DWT timing), where a missing element
-would give 576.
+**Still worth knowing, and not resolved by the capture:** the bytes cross the I²C2 bus
+**in cleartext** before the bootloader authenticates them, so a bus sniffer reads them
+exactly [C]. Whether that should lower SE2's credit is an entropy-policy question, not a
+hardware one; see docs/ENTROPY.md.
 
-**Still unmeasured: how it declines.** `se_rng` can return `Ok(0)` (asked too soon,
-nothing ready) or `Err` (refused), and every caller so far has treated them alike, so we
-cannot yet say which one a too-early SE2 read produces. Seed generation now counts them
-separately and logs `SE1 <bytes>B/<turns>t <empty>e <failed>f, SE2 …`, which settles it
-on the next run. If they are `Ok(0)`, the element simply needs time and the fix is
-pacing; if they are `Err`, something in the bootloader's SE2 path is refusing and that
-is a different question.
+## Callgate refusals read as success for gates 16, 19/0 and 26 `[C]`, fix pending a bench run
 
-**What already accounts for it.** Generation asks each element for a byte *target*
-rather than a fixed number of turns, so a slower element takes longer instead of
-contributing less, bounded so a dead one cannot hang a wallet. The pool credits what
-actually arrived, the policy is checked against the real total, and the screen counts
-each element separately — a column that lags is visible rather than hidden.
+The bootloader refuses a call with a **positive** code (`EPERM` buffer outside its
+window, `ERANGE` bad length or `arg2`, `ENOENT` no such method) and leaves the buffer
+untouched; for every method whose success value is 0, any nonzero return is a failure.
+Source: hw-reference/bootloader-callgate-abi.md §0.1 "Refusal codes" [C].
 
-Worth knowing before designing around it: whether the rate is constant or a burst
-followed by a slower refill, and whether it resets across a reboot.
+`Callgate::decode` lets every non-negative value through, because gate 0 returns a
+length. Gate 18 checks for exactly 0 itself. Gates 16 (anti-phishing words), 19/0 (bag
+number), 21/2 (record the downgrade mark) and 26 (SE randomness) do not, so a refusal
+reads as success over an unwritten buffer: gate 16 would turn the PIN prefix itself into
+the two words, gate 26 would return a zero length.
+
+The fix — `rv != 0` is an error in those wrappers — changes the login path and boot's
+entropy reads on locked units, so it waits for **Debug → Bootloader replies**, which
+calls each of these gates harmlessly (16 over a fixed prefix, 19/0 and 21/0 reads, 26
+eight times per element) and logs the raw return. All zero on every board means the fix
+cannot change a working path; anything else is the thing to understand first.
 
 ## Does a secure element's `Random` write its EEPROM? `[?]` on mk4/mk5/Q1
 

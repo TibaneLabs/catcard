@@ -30,9 +30,10 @@ use crate::ui::Ui;
 
 type Text = heapless::String<48>;
 
-/// Passes over the sources before giving up on one that is too slow or silent. Every
-/// source answers at most 64 bytes a pass and SE2 declines about three in four, so 1,024
-/// bytes wants about 130 passes from it; this leaves room and still ends.
+/// Passes over the sources before giving up on one that is too slow or silent. A pass
+/// reads one call from each source, and SE2 answers 8 bytes a call (SE1 32, the chip up
+/// to 64), so 1,024 bytes wants 128 passes from it; this leaves room and still ends.
+/// Source: hw-reference/bootloader-callgate-abi.md §"RNG gates" [C]
 const MAX_PASSES: usize = 320;
 
 /// Most sources a board has (`trng::kinds`).

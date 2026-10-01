@@ -423,9 +423,10 @@ pub(crate) fn new_seed(
     };
 
     // Every source this board can read, the same number of *bytes* from each -- not the
-    // same number of turns. SE2 produces about a quarter as fast as SE1, so taking turns in
+    // same number of turns. SE2 answers 8 bytes a call to SE1's 32, so taking turns in
     // lockstep once collected `SE1 512 B, SE2 128 B`, which reads like a broken element and
-    // is really a slower one. The chip TRNG is part of this on every board: it once sat
+    // is only a smaller answer (hw-reference/bootloader-callgate-abi.md §"RNG gates" [C]).
+    // The chip TRNG is part of this on every board: it once sat
     // inside a check for the mk4+ callgate, and on mk3 a wallet was generated without a
     // single fresh byte from it. At least the start-up test's window, so every source's
     // test has completed on fresh bytes alone by the time the pool is asked.
