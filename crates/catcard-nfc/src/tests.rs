@@ -418,3 +418,47 @@ fn a_type_name_over_255_bytes_is_refused() {
         Err(Error::TypeTooLong)
     );
 }
+
+/// What is shared goes out marked read-only (`0x43`); the blank receive image stays
+/// read/write (`0x40`), since inviting a phone to write is its whole point.
+#[test]
+fn a_shared_image_tells_the_phone_not_to_write_and_a_receive_image_does_not() {
+    let mut out = [0u8; 64];
+    let n = uri_image(&mut out, PART, "a.example", prefix::HTTPS).unwrap();
+    set_read_only(&mut out[..n]);
+    assert_eq!(&out[..4], &[0xE2, 0x43, 0x00, 0x01]);
+    // Still a tag this crate reads.
+    assert!(read(&out[..n]).unwrap().next().unwrap().is_ok());
+
+    let mut blank = [0u8; CC_LEN + 3];
+    let n = empty_image(&mut blank, PART).unwrap();
+    assert_eq!(
+        &blank[..n],
+        &[
+            0xE2, 0x40, 0x00, 0x01, 0x00, 0x00, 0x03, 0xFF, 0x03, 0x00, 0xFE
+        ]
+    );
+}
+
+/// A container of a later major version is a layout this does not know, and is refused
+/// rather than guessed at; a later minor version of 1.x is read.
+#[test]
+fn a_container_of_another_major_version_is_not_read() {
+    let mut out = [0u8; 64];
+    let n = uri_image(&mut out, PART, "a.example", prefix::HTTPS).unwrap();
+    out[1] = 0x80; // version 2.0
+    assert_eq!(read(&out[..n]).err(), Some(ReadError::NoContainer));
+    out[1] = 0x50; // version 1.1
+    assert!(read(&out[..n]).is_ok());
+}
+
+/// `E1` with a zero one-byte MLEN is the eight-byte container, as a phone formatting a
+/// large tag may write it: the message is found after eight bytes, not four.
+#[test]
+fn an_e1_container_with_the_long_length_is_eight_bytes() {
+    let mut out = [0u8; 64];
+    let n = uri_image(&mut out, PART, "a.example", prefix::HTTPS).unwrap();
+    out[0] = 0xE1;
+    let record = read(&out[..n]).unwrap().next().unwrap().unwrap();
+    assert_eq!(record.uri(), Some(("https://", "a.example")));
+}

@@ -259,6 +259,7 @@ name = "catcard-nfc"
 version = "7.0.0"
 dependencies = [
  "purecrypto",
+ "zeroize",
 ]
 
 [[package]]

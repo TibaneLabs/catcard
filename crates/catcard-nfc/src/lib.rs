@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod pushtx;
+pub mod tag;
 
 /// The eight-byte capability container, for a tag whose T5T area is `area` bytes.
 ///
@@ -49,6 +50,12 @@ pub mod pushtx;
 /// bytes needs; `40` is version 1.0 with read and write always allowed; `01` says the tag
 /// answers a multiple-block read. MLEN counts the area in eight-byte blocks and excludes
 /// the container itself.
+///
+/// Stock writes the same container (`E2 4x 00 01 00 00 04 00`) except for MLEN, where it
+/// puts `0x0400` -- the whole 8 KB, container included. This keeps the Type 5 reading,
+/// `0x03FF` on the 8 KB part, which is eight bytes less than stock announces and never
+/// more than the part has. Source: hw-reference/secure-elements.md §"Tag memory image"
+/// [C]; that a phone takes `0x03FF` is untested (docs/HARDWARE-OPEN-ITEMS.md) [I]
 pub fn capability_container(area: usize) -> [u8; CC_LEN] {
     let blocks = (area / 8) as u16;
     [
@@ -65,6 +72,21 @@ pub fn capability_container(area: usize) -> [u8; CC_LEN] {
 
 /// Length of the capability container this writes.
 pub const CC_LEN: usize = 8;
+
+/// The container's access byte for an image a phone only reads: version 1.0, read always,
+/// write **never** (`0x43`). Source: hw-reference/secure-elements.md §"Tag memory image"
+/// ("0x43 = read-only (sharing), 0x40 = read/write (receiving)") [C]
+pub const ACCESS_READ_ONLY: u8 = 0x43;
+
+/// Mark a built image as one a phone should not write to: what is shared is for reading,
+/// and a phone that took the offer to write over it would be putting its own bytes on a
+/// tag this device has to wipe afterwards. The part itself does not enforce it -- no area
+/// protection is set -- which is why the driver still watches for RF writes.
+pub fn set_read_only(image: &mut [u8]) {
+    if let Some(access) = image.get_mut(1) {
+        *access = ACCESS_READ_ONLY;
+    }
+}
 
 /// The URI prefixes NDEF abbreviates to one byte. Only the two this device writes.
 pub mod prefix {
@@ -445,11 +467,21 @@ pub fn read(image: &[u8]) -> Result<Records<'_>, ReadError> {
     // The container's first byte says which form it is: four bytes for a small memory,
     // eight for anything past 2040 bytes. Both are read, because a phone may reformat a
     // tag with either.
-    let head = match image.first() {
-        Some(0xE1) => 4,
-        Some(0xE2) => CC_LEN,
+    //
+    // An `E1` container is eight bytes too when its one-byte MLEN is zero -- the long form
+    // with the length in its last two bytes -- and four otherwise. Source: NFC Forum Type 5
+    // Tag specification, capability container (public standard) [C]
+    let head = match (image.first(), image.get(2)) {
+        (Some(0xE1), Some(0)) | (Some(0xE2), _) => CC_LEN,
+        (Some(0xE1), _) => 4,
         _ => return Err(ReadError::NoContainer),
     };
+    // Major version 1 (the top two bits `01`): a later major version is a layout this does
+    // not know. Source: same; hw-reference/secure-elements.md §"Tag memory image" ("The
+    // version nibble must be `4`") [C]
+    if image.get(1).map(|v| v >> 6) != Some(1) {
+        return Err(ReadError::NoContainer);
+    }
     let mut rest = image.get(head..).ok_or(ReadError::NoContainer)?;
     loop {
         let (&t, tail) = rest.split_first().ok_or(ReadError::NoMessage)?;

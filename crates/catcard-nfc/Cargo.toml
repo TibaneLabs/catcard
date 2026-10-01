@@ -12,3 +12,5 @@ std = []
 [dependencies]
 # SHA-256 for the PushTx checksum, and nothing else.
 purecrypto = { workspace = true, features = ["hash"] }
+# The driver's scratch buffers, wiped on the way out.
+zeroize = { workspace = true }
