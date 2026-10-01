@@ -2204,10 +2204,7 @@ fn add_from_scan(
     let Some(mut file) = crate::heap::take(MAX_FILE) else {
         return Err("not enough memory");
     };
-    let mut sink = HeapSink {
-        buf: file.bytes(),
-        len: 0,
-    };
+    let mut sink = crate::qrload::SliceSink::new(file.bytes());
     let got = match crate::qrload::collect_any(ui, HEAD, &mut sink) {
         Ok(got) => got,
         Err(Some(why)) => return Err(why),
@@ -2221,37 +2218,6 @@ fn add_from_scan(
     let cosigner = multisig::export::read_ccxp(text, kind).map_err(describe_ccxp)?;
     keys.push(&cosigner)?;
     Ok(Some(cosigner.fingerprint))
-}
-
-/// A scan destination that is a leased heap block: for the small files this screen reads.
-#[cfg(feature = "board-q1")]
-struct HeapSink<'a> {
-    buf: &'a mut [u8],
-    len: usize,
-}
-
-#[cfg(feature = "board-q1")]
-impl crate::qrload::Sink for HeapSink<'_> {
-    fn expect(&mut self, about: usize) -> Result<(), &'static str> {
-        if about > self.buf.len() {
-            return Err("too large for a key file");
-        }
-        Ok(())
-    }
-
-    fn place(&mut self, offset: usize, bytes: &[u8]) -> Result<(), &'static str> {
-        let end = offset.checked_add(bytes.len()).ok_or("bad offset")?;
-        self.buf
-            .get_mut(offset..end)
-            .ok_or("too large for a key file")?
-            .copy_from_slice(bytes);
-        self.len = self.len.max(end);
-        Ok(())
-    }
-
-    fn compressed(&mut self) -> Result<(), &'static str> {
-        Err("compressed codes are not read here")
-    }
 }
 
 /// Why a descriptor was refused, in words rather than a variant name.

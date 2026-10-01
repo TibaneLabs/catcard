@@ -268,7 +268,7 @@ topic!(
     [
         "Words: type your BIP-39 seed words; the device knows when the last one is in.",
         "Clone: take a wallet from another Coldcard through the card.",
-        "TAPSIGNER: decrypt a TAPSIGNER backup file with the key printed on its card.",
+        "TAPSIGNER: open a TAPSIGNER backup with the Backup Password printed on the card.",
         "XPRV: type in an extended private key and keep it as this device's wallet.",
         "Seed XOR: join the parts of a split seed back into the words they make.",
     ]

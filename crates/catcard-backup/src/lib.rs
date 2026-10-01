@@ -108,8 +108,16 @@ pub enum Error {
     NotABackup,
     /// A TAPSIGNER backup key was not the expected 32 hex characters (16 bytes).
     BadBackupKey,
-    /// A decrypted TAPSIGNER backup held no recognisable `xprv`/`tprv` master key.
+    /// A decrypted TAPSIGNER backup failed the acceptance check: characters `1..4` are
+    /// not `prv`. With CTR and no MAC, that is what a wrong Backup Password looks like.
     NoXprv,
+    /// A decrypted TAPSIGNER backup passed the acceptance check but is not exactly two
+    /// lines (`xprv`, then a path).
+    NotTwoLines,
+    /// A TAPSIGNER backup arrived as text that is neither hex nor Base64.
+    NotBackupText,
+    /// A TAPSIGNER backup is empty, or longer than any card's backup can be.
+    BackupSize,
     /// A clone file's magic does not match -- it is not a CatCard clone container.
     CloneBadMagic,
     /// The X25519 key agreement for a clone failed: the peer's public key is a
@@ -139,7 +147,10 @@ impl core::fmt::Display for Error {
             Error::NotHex => "value is not hex",
             Error::NotABackup => "missing backup marker line",
             Error::BadBackupKey => "backup key is not 32 hex characters",
-            Error::NoXprv => "no master key in the decrypted backup",
+            Error::NoXprv => "decryption failed - wrong key?",
+            Error::NotTwoLines => "not an xprv and a path",
+            Error::NotBackupText => "neither hex nor Base64",
+            Error::BackupSize => "not the size of a TAPSIGNER backup",
             Error::CloneBadMagic => "not a CatCard clone file",
             Error::CloneKeyAgreement => "clone key agreement failed",
         };

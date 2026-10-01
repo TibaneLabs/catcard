@@ -873,6 +873,15 @@ impl Received {
 /// Every wait in here is bounded: [`WAIT_MS`] of polling, a read of at most the part's
 /// memory, and record lengths checked by [`catcard_nfc::read`] against what was read.
 fn receive(ui: &mut Ui<'_>, head: &str) -> Option<Received> {
+    receive_with(ui, head, &first_usable)
+}
+
+/// Where in the tag's image the wanted payload is, and what it is: [`first_usable`]'s
+/// shape, so a caller wanting something else can pick by its own rule.
+type Pick<'a> = &'a dyn Fn(&[u8]) -> Option<(Content, usize, usize)>;
+
+/// [`receive`], with `pick` choosing the record instead of [`first_usable`].
+fn receive_with(ui: &mut Ui<'_>, head: &str, pick: Pick<'_>) -> Option<Received> {
     if refused_off(ui, head) || refused_absent(ui, head) {
         return None;
     }
@@ -932,7 +941,7 @@ fn receive(ui: &mut Ui<'_>, head: &str) -> Option<Received> {
     // The tag has been read; whatever a phone left on it does not need to stay there.
     clear();
 
-    let Some((what, at, len)) = first_usable(held.bytes()) else {
+    let Some((what, at, len)) = pick(held.bytes()) else {
         drop(held);
         menu::message(ui.panel, head, "nothing this can use", "any key to go back");
         menu::wait_for_any_key(ui);
@@ -1030,32 +1039,12 @@ fn wait_for_write(ui: &mut Ui<'_>, head: &str, baseline: &[u8; WATCH]) -> Waited
 fn first_usable(image: &[u8]) -> Option<(Content, usize, usize)> {
     let base = image.as_ptr() as usize;
     let mut fallback = None;
-    for record in catcard_nfc::read(image).ok()? {
-        let Ok(record) = record else {
-            // A malformed record stops the walk: after a length that cannot be trusted,
-            // where the next record starts is a guess.
-            break;
-        };
-        // A text record's text, a URI record's URI, or -- for a MIME or external record --
-        // the payload exactly as it is. A phone handing over a `.psbt` uses one of the
-        // three depending on which app it is.
-        let bytes = match (record.text(), record.uri()) {
-            // What this screen wrote a moment ago, still on the tag because a phone added
-            // a record rather than replacing the message. Offering it back would be the
-            // device reading out its own note.
-            (Some(READY_TEXT), _) => continue,
-            (Some(text), _) => text.as_bytes(),
-            (_, Some(("", tail))) => tail.as_bytes(),
-            // An abbreviated URI keeps its scheme in one byte of the record, and the
-            // two halves are never joined -- that would need a buffer. The tail alone is
-            // enough for the one link this device reads: a transaction lives after the
-            // `#`, so what identifies it is in the half the record spells out.
-            (_, Some((_, tail))) => tail.as_bytes(),
-            _ => record.payload,
-        };
-        if bytes.is_empty() {
+    // A malformed record stops the walk: after a length that cannot be trusted, where the
+    // next record starts is a guess.
+    for record in catcard_nfc::read(image).ok()?.map_while(Result::ok) {
+        let Some(bytes) = record_bytes(record) else {
             continue;
-        }
+        };
         let at = bytes.as_ptr() as usize - base;
         match sniff(bytes) {
             // Text is the weakest match -- base64 that is not a PSBT is text, and so is
@@ -1068,6 +1057,63 @@ fn first_usable(image: &[u8]) -> Option<(Content, usize, usize)> {
         }
     }
     fallback
+}
+
+/// What a record holds for this device: a text record's text, a URI record's URI, or --
+/// for a MIME or external record -- the payload exactly as it is. A phone handing over a
+/// file uses one of the three depending on which app it is. `None` for an empty record
+/// and for the receive screen's own marker.
+fn record_bytes(record: catcard_nfc::Record<'_>) -> Option<&[u8]> {
+    let bytes = match (record.text(), record.uri()) {
+        // What the receive screen wrote a moment ago, still on the tag because a phone
+        // added a record rather than replacing the message. Offering it back would be the
+        // device reading out its own note.
+        (Some(READY_TEXT), _) => return None,
+        (Some(text), _) => text.as_bytes(),
+        (_, Some(("", tail))) => tail.as_bytes(),
+        // An abbreviated URI keeps its scheme in one byte of the record, and the two
+        // halves are never joined -- that would need a buffer. The tail alone is enough
+        // for the one link this device reads: a transaction lives after the `#`, so what
+        // identifies it is in the half the record spells out.
+        (_, Some((_, tail))) => tail.as_bytes(),
+        _ => record.payload,
+    };
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+/// Take one record off the tag into `out`: the receive screen, then the **first** record
+/// whose bytes ([`record_bytes`]) are a length in `sizes`, every other record skipped.
+///
+/// For a caller that knows how long what it wants is and nothing else -- a TAPSIGNER
+/// backup's Base64 is identified by its length alone. `None` after saying why not,
+/// including when no record was in range. The tag is blanked in [`receive_with`], and the
+/// heap block that held its image is wiped here either way, since what it held may be a
+/// key in some wrapping.
+#[inline(never)]
+pub(crate) fn receive_sized(
+    ui: &mut Ui<'_>,
+    head: &str,
+    sizes: core::ops::RangeInclusive<usize>,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut got = receive_with(ui, head, &|image| {
+        let base = image.as_ptr() as usize;
+        catcard_nfc::read(image)
+            .ok()?
+            .map_while(Result::ok)
+            .filter_map(record_bytes)
+            .find(|b| sizes.contains(&b.len()))
+            .map(|b| (Content::Text, b.as_ptr() as usize - base, b.len()))
+    })?;
+    let n = got.len;
+    let kept = out.get_mut(..n).map(|o| o.copy_from_slice(got.bytes()));
+    got.wipe();
+    if kept.is_none() {
+        menu::message(ui.panel, head, "too large", "any key to go back");
+        menu::wait_for_any_key(ui);
+        return None;
+    }
+    Some(n)
 }
 
 /// Say what arrived and do the one thing worth doing with it.

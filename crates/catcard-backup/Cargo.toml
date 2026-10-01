@@ -14,5 +14,11 @@ std = []
 
 [dependencies]
 emjson = { workspace = true }
+# Base64, for a TAPSIGNER backup that arrives as NFC or QR text.
+outscript = { workspace = true }
 purecrypto = { workspace = true, features = ["hash", "cipher", "kdf", "ec"] }
 zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+# The TAPSIGNER test vector is pinned down to the master fingerprint it must produce.
+catcard-wallet = { workspace = true, features = ["std"] }

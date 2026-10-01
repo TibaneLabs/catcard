@@ -465,6 +465,44 @@ fn progress(ui: &mut Ui<'_>, head: &str, have: u32, total: u32) -> crate::displa
     menu::blocking_screen(ui.panel, head, &note)
 }
 
+/// A scan destination that is a plain buffer -- a leased heap block, a small stack array --
+/// for the small files a screen reads whole: a cosigner's key file, a TAPSIGNER backup.
+/// A compressed transfer is refused, since there is nowhere here to expand it.
+pub(crate) struct SliceSink<'a> {
+    buf: &'a mut [u8],
+    /// The furthest byte placed so far.
+    pub len: usize,
+}
+
+impl<'a> SliceSink<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        SliceSink { buf, len: 0 }
+    }
+}
+
+impl Sink for SliceSink<'_> {
+    fn expect(&mut self, about: usize) -> Result<(), &'static str> {
+        if about > self.buf.len() {
+            return Err("too large to read here");
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, offset: usize, bytes: &[u8]) -> Result<(), &'static str> {
+        let end = offset.checked_add(bytes.len()).ok_or("bad offset")?;
+        self.buf
+            .get_mut(offset..end)
+            .ok_or("too large to read here")?
+            .copy_from_slice(bytes);
+        self.len = self.len.max(end);
+        Ok(())
+    }
+
+    fn compressed(&mut self) -> Result<(), &'static str> {
+        Err("compressed codes are not read here")
+    }
+}
+
 /// The PSRAM staging area, which is where everything scanned goes.
 ///
 /// # Why everything, and not just an image

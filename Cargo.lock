@@ -105,7 +105,9 @@ version = "7.0.0"
 name = "catcard-backup"
 version = "7.0.0"
 dependencies = [
+ "catcard-wallet",
  "emjson",
+ "outscript",
  "purecrypto",
  "zeroize",
 ]

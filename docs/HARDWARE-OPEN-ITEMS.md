@@ -874,26 +874,24 @@ hardware fact.
 
 Consequence of being wrong about the `[?]`: none to safety, and none even to
 interoperability, since no other firmware reads or writes an `ccenc`-encrypted card.
-## TAPSIGNER backup format — the block mode and the framing are inferred
+## TAPSIGNER backup format — RESOLVED `[C]`; the channels are unproven on hardware
 
-`crates/catcard-backup/src/tapsigner.rs` decrypts a TAPSIGNER `.aes` card backup and
-recovers the `xprv` master inside it (menu: `Import → TAPSIGNER`). The format is taken
-from the **publicly documented** TAPSIGNER/coinkite backup, not measured against a card:
+`hw-reference/tapsigner-backup-import.md` now gives the format, and
+`crates/catcard-backup/src/tapsigner.rs` follows it: **AES-128-CTR, all-zero initial
+counter**, no MAC or padding, over `<xprv>\n<path>`; accepted when characters `1..4` of
+the stripped plaintext are `prv`, then split into exactly two lines. The reference's own
+test vector is a host test. The earlier guesses here (CBC, a searched-for `xprv` inside
+unknown framing) were both wrong and are gone.
 
-- **AES-128-CBC with an all-zero IV** `[?]`. The backup key is the 32 hex characters the
-  card shows its owner once. Some public notes describe the mode as CTR rather than CBC;
-  the two produce different plaintext, so this needs a real card's file to settle. The
-  code is structured so only the one `Cbc::new(Aes128::new(key), &IV)` line changes if it
-  turns out to be CTR.
-- **The plaintext is an `xprv`/`tprv` base58 string** `[I]`. Where exactly it sits inside
-  the decrypted block — leading offset, trailing padding, any surrounding fields — is not
-  pinned, so `find_master` *searches* for the version prefix and takes the base58 run
-  rather than assuming offset zero. A wrong key (or the wrong mode) decrypts to noise with
-  no prefix in it, which surfaces as "wrong key, or not a TAPSIGNER backup" — never a
-  scrambled key reaching the secure element.
+One correction to the reference, pinned in the tests: its vector's `xprv` is **not** the
+BIP-32 test vector 1 master it says it is (same version, depth and chain code, a different
+key), so it opens to fingerprint `87adb3e5`, not the `3442193e` it claims. The ciphertext
+matches the `xprv` it prints, so it is still the right compatibility check.
 
-Resolve by decrypting a known TAPSIGNER backup whose `xprv` is known, off a real card,
-and confirming the mode, IV and framing. Do **not** read the stock firmware for this.
+What is not proven: the three channels (card file, NFC record, QR) on a real device with a
+real card's backup, and in particular that a phone app's NFC write lands as a text record
+whose text is the Base64 (`crate::nfc::receive_sized` measures the record's text, URI tail
+or raw payload, whichever it is, against the 150–280 limit) `[I]`.
 
 ## Clone Coldcard file — a CatCard format, not stock's wire format
 
