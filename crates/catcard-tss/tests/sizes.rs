@@ -53,7 +53,8 @@ fn show(label: &str, rows: &[(u8, Option<usize>, Option<usize>)], peers: usize) 
 #[test]
 fn print_sizes() {
     println!();
-    for (n, t) in [(2u8, 2u8), (3, 2), (5, 3)] {
+    // Shapes that can be created together (2-of-2 cannot; see `can_create_together`).
+    for (n, t) in [(3u8, 2u8), (4, 2), (5, 3)] {
         let records = create(n, t, &format!("sizes-{n}-{t}"));
         let rec = records[0].to_bytes(&KW).unwrap();
         println!("{t}-of-{n}: share record {} bytes", rec.len());

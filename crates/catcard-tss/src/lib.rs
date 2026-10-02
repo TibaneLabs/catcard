@@ -93,6 +93,17 @@ pub use share::{JointSecret, MAX_PATH, Origin, ShareBundle, ShareRecord, combine
 /// Most members a TSS wallet has: Codex32's nine share indices.
 pub const MAX_MEMBERS: u8 = 9;
 
+/// Whether `t`-of-`n` may be *created together*.
+///
+/// tsslib's DKLs key generation lets colluding members bias the joint key when
+/// `n <= 2t - 2` -- 2-of-2, 3-of-3, 3-of-4 and so on (tsslib `dklstss` module docs). Those
+/// shapes are refused for a new wallet; the usual ones (2-of-3, 3-of-5, 2-of-4) pass. An
+/// export splits a key that already exists, so nothing can be biased and any
+/// `2 <= t <= n` is fine there.
+pub const fn can_create_together(n: u8, t: u8) -> bool {
+    n >= 2 && t >= 2 && t <= n && n <= MAX_MEMBERS && (n as u16) > 2 * (t as u16) - 2
+}
+
 /// A compressed secp256k1 public key.
 pub const PUBKEY_LEN: usize = 33;
 
@@ -121,6 +132,9 @@ pub enum Error {
     /// Shares of different wallets or splits, or a combination that does not give the
     /// wallet's public key.
     Mismatch,
+    /// `t`-of-`n` cannot be created together: colluding members could bias the key (see
+    /// [`can_create_together`]).
+    BiasedShape,
 }
 
 impl From<Refused> for Error {

@@ -337,6 +337,9 @@ impl Session {
         _kw: &KeyWork,
     ) -> Result<Self, Error> {
         check_params(n, t)?;
+        if !crate::can_create_together(n, t) {
+            return Err(Error::BiasedShape);
+        }
         if me == 0 || me > n {
             return Err(Error::Parameters);
         }

@@ -161,6 +161,8 @@ adds 61 bytes and the 48-character Codex32 string.
 - The session code is 8 words (88 bits). An attacker between the members during round 0
   can grind substitute keys for a birthday match, about 2^44 work; a commit-then-reveal
   round 0 would remove that, at the cost of one more pass of the cards.
-- tsslib's DKG lets colluding members bias the key when `n <= 2t - 2` (2-of-2, 3-of-3,
-  3-of-4...). Export is not affected. Refuse those shapes for *Create together*, or warn.
+- ~~tsslib's DKG lets colluding members bias the key when `n <= 2t - 2`~~ — settled
+  (2026-10-02): *Create together* refuses those shapes (2-of-2, 3-of-3, 3-of-4...;
+  `catcard_tss::can_create_together`). 2-of-3 is the expected minimum and is not affected.
+  Export splits an existing key, so it keeps any `2 <= t <= n`.
 - Encryption of share files on SD (a password per file, or none and the card is the secret).

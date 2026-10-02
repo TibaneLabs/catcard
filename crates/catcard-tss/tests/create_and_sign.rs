@@ -38,13 +38,17 @@ fn every_member_agrees(n: u8, t: u8) -> Vec<catcard_tss::ShareRecord> {
 }
 
 #[test]
-fn two_of_two_creates_one_key_and_both_sign_for_it() {
-    let records = every_member_agrees(2, 2);
-    let req = [request(&[0, 0], "2-of-2")];
-    let sigs = sign(&records, &[1, 2], &req, SignMode::Plain);
-    let child = records[0].child_public_key(&[0, 0]).unwrap();
-    assert_eq!(sigs[0].child_public_key, child);
-    assert!(verifies(&child, &req[0].sighash, &sigs[0]));
+fn shapes_whose_key_colluders_could_bias_are_not_created_together() {
+    // tsslib's DKG can be biased by colluding members when n <= 2t - 2. Those shapes are
+    // refused before anything is sent; the usual ones are not.
+    for (n, t) in [(2, 2), (3, 3), (4, 3), (4, 4), (6, 4)] {
+        assert!(!catcard_tss::can_create_together(n, t), "{t}-of-{n}");
+        let refused = Session::keygen([7; 8], n, t, 1, &mut TestRng::new("shape"), &KW);
+        assert!(matches!(refused, Err(Error::BiasedShape)), "{t}-of-{n}");
+    }
+    for (n, t) in [(3, 2), (4, 2), (5, 3), (7, 4), (9, 5)] {
+        assert!(catcard_tss::can_create_together(n, t), "{t}-of-{n}");
+    }
 }
 
 #[test]
