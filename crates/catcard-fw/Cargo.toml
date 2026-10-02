@@ -78,7 +78,7 @@ board-q1 = [
 ]
 
 [dependencies]
-tsslib = { version = "0.2.11", default-features = false, features = ["dklstss"], optional = true }
+tsslib = { workspace = true, optional = true }
 app-games = { path = "../../apps/games", features = ["linked"], optional = true }
 purecrypto = { workspace = true, features = ["hash"] }
 catcard-settings = { path = "../catcard-settings", default-features = false }
