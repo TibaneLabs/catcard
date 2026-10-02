@@ -220,6 +220,9 @@ mod trng;
 mod trngcap;
 /// Debug -> TRNG startup test: the SP 800-90B start-up test, run on demand.
 mod trngtest;
+/// Bench: a DKLs keygen and signature on the device, timed (docs/TSS.md).
+#[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+mod tssbench;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 mod txreview;

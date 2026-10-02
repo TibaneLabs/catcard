@@ -21,7 +21,7 @@ authors.workspace = true
 # address, call any address -- the most dangerous thing in this firmware. On a provisioned
 # device it would read the seed and PIN out of RAM and run arbitrary code, so it must
 # never ship. Each is its own feature so a release drops them cleanly. See docs/USB.md.
-default = ["usb-key-injection", "usb-debug-mem", "usb-trng-capture", "games", "dev"]
+default = ["usb-key-injection", "usb-debug-mem", "usb-trng-capture", "games", "dev", "tss"]
 # A development build, which the bench units run. It leaves out everything that can erase
 # or brick a device on its own -- the kill key and microSD 2FA today -- so a bench unit
 # (RDP=2, no recovery) can never be lost to one. A release (`SHIP=1`, no default features)
@@ -41,6 +41,9 @@ usb-trng-capture = []
 # spare RAM, linked in on the mk3. The crate is only called on the mk3; elsewhere the
 # linker drops it.
 games = ["dep:app-games"]
+# Threshold signing (docs/TSS.md): tsslib's DKLs23. In bench builds for now, while it is
+# being built and measured; compiled in on mk4/mk5/Q1 only (the mk3 has no flash for it).
+tss = ["dep:tsslib"]
 # Every chain rather than Bitcoin alone: Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto,
 # Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
 # Bitcoin-only build is the one whose image carries no other chain's parser at all --
@@ -75,6 +78,7 @@ board-q1 = [
 ]
 
 [dependencies]
+tsslib = { version = "0.2.11", default-features = false, features = ["dklstss"], optional = true }
 app-games = { path = "../../apps/games", features = ["linked"], optional = true }
 purecrypto = { workspace = true, features = ["hash"] }
 catcard-settings = { path = "../catcard-settings", default-features = false }

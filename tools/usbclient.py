@@ -1398,6 +1398,26 @@ def main(path, image=None):
                 print(f"  data         {data.hex()}")
         return 0
 
+    if "--tss-bench" in sys.argv:
+        # DebugTssBench: a DKLs keygen and one signature with every party on the device.
+        a = arg_after("--tss-bench")
+        n, t = (int(a[0]), int(a[1])) if len(a) >= 2 else (2, 1)
+        st, _ = request(s, 0x003A, bytes([n, t]))
+        if st != 0:
+            raise SystemExit(f"tss bench: {STATUS.get(st, st)}")
+        t0 = time.time()
+        while True:
+            time.sleep(0.5)
+            st, body = request(s, 0x003A)
+            if st == 0 and body and body[0] == 3:
+                break
+            if time.time() - t0 > 600:
+                raise SystemExit("tss bench: no result after 10 minutes")
+        ok, kg, sg, used, peak, share, n, t = struct.unpack("<8I", body[1:33])
+        print(f"tss bench {n} parties, sign with {t + 1}: keygen {kg} ms, sign {sg} ms "
+              f"({'ok' if ok else 'FAILED'}), share {share} B, heap {used} -> peak {peak}")
+        return 0
+
     if "--gate-check" in sys.argv:
         # The bootloader's raw returns from each "0 is success" gate (DebugGateCheck).
         st, body = request(s, 0x0039)

@@ -1079,6 +1079,34 @@ impl UsbTask {
                     Err(_) => self.begin_reply(Status::BadRequest, &[]),
                 }
             }
+            #[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+            Some(Opcode::DebugTssBench) => {
+                let p = progress.payload;
+                if p.len() >= 2 {
+                    let st = if crate::tssbench::request(p[0], p[1]) {
+                        Status::Ok
+                    } else {
+                        Status::NotNow
+                    };
+                    self.begin_reply(st, &[]);
+                } else {
+                    let (state, r) = crate::tssbench::status();
+                    let mut body = [0u8; 33];
+                    body[0] = state;
+                    for (i, w) in r.iter().enumerate() {
+                        body[1 + 4 * i..5 + 4 * i].copy_from_slice(&w.to_le_bytes());
+                    }
+                    self.begin_reply(Status::Ok, &body);
+                }
+            }
+            #[cfg(not(all(
+                feature = "tss",
+                feature = "usb-debug-mem",
+                not(feature = "board-mk3")
+            )))]
+            Some(Opcode::DebugTssBench) => {
+                self.begin_reply(Status::UnknownOpcode, &[]);
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
             Some(
                 Opcode::DebugPeek

@@ -1302,6 +1302,9 @@ pub fn run(session: Session<'_>) -> ! {
         // (`rngread`). And the pool's health, for a paired computer to ask about.
         crate::rngread::serve(gate);
         crate::rngshare::publish(pool.as_deref());
+        // The TSS bench runs here too, for the same reason: it needs the UI task's stack.
+        #[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+        crate::tssbench::serve(&mut ui);
         // An app sent over USB on a bench build runs here, on the UI task (docs/APPS.md).
         #[cfg(feature = "usb-debug-mem")]
         if crate::apps::serve(&mut ui) {

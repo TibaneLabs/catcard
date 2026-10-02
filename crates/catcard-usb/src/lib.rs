@@ -197,6 +197,12 @@ pub enum Opcode {
     ///
     /// **Bench only** (`usb-debug-mem`).
     DebugGateCheck = 0x0039,
+    /// TSS bench (docs/TSS.md): `[u8 n][u8 t]` queues a DKLs keygen and one signature
+    /// with every party on the device; sent empty, it answers `[u8 state][8 x u32]` (see
+    /// the firmware's `tssbench`).
+    ///
+    /// **Bench only** (`usb-debug-mem` with `tss`).
+    DebugTssBench = 0x003A,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -329,6 +335,7 @@ impl Opcode {
             0x0037 => Opcode::DebugAppRun,
             0x0038 => Opcode::DebugAppStatus,
             0x0039 => Opcode::DebugGateCheck,
+            0x003A => Opcode::DebugTssBench,
             _ => return None,
         })
     }
