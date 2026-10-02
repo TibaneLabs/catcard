@@ -147,3 +147,92 @@ pub(crate) fn pixels(art: &Rgba, mut each: impl FnMut(usize, usize, [u8; 4])) {
         }
     }
 }
+
+// --- indexed icons ----------------------------------------------------------------------
+
+/// The largest indexed picture kept: a 64 x 64 menu icon, two pixels a byte.
+const INDEXED_SIDE: usize = 64;
+const INDEXED_SLOT: usize = INDEXED_SIDE * INDEXED_SIDE / 2;
+/// A screenful of the menu grid and its neighbours.
+const INDEXED_SLOTS: usize = 16;
+
+/// The menu grid's icons, decoded once: the same idea as the colour marks above, for the
+/// 4-bit [`Indexed`](catcard_ui::art::Indexed) art the grid draws. Without it the grid
+/// inflated every icon on every frame, which at `opt-level = "z"` doubled its draw time.
+struct IndexedCache {
+    block: Option<crate::heap::Block>,
+    keys: [Option<Key>; INDEXED_SLOTS],
+    next: usize,
+    refused: bool,
+}
+
+static mut INDEXED: IndexedCache = IndexedCache {
+    block: None,
+    keys: [None; INDEXED_SLOTS],
+    next: 0,
+    refused: false,
+};
+
+/// Run `each(x, y, index)` over `art`'s pixels, background included, from the cache where
+/// possible. The shape [`catcard_ui::art::indexed::decode`] takes.
+pub(crate) fn indexed(art: &catcard_ui::art::Indexed, mut each: impl FnMut(usize, usize, u8)) {
+    // SAFETY: foreground only, single core, never from an interrupt: icons are drawn
+    // inside a draw, and `display` refuses a nested one.
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(INDEXED) };
+    let (w, h) = (art.width as usize, art.height as usize);
+    let row = art.row_len();
+    let key = Key {
+        at: art.deflated.as_ptr() as usize,
+        len: art.deflated.len(),
+    };
+    if cache.block.is_none() && !cache.refused {
+        match crate::heap::take(INDEXED_SLOT * INDEXED_SLOTS) {
+            Some(block) => {
+                cache.block = Some(block);
+                crate::catlog!(
+                    "art: {} bytes of grid icon cache",
+                    INDEXED_SLOT * INDEXED_SLOTS
+                );
+            }
+            None => cache.refused = true,
+        }
+    }
+    let Some(block) = cache.block.as_mut() else {
+        let _ = catcard_ui::art::indexed::decode(art, each);
+        return;
+    };
+    if w > INDEXED_SIDE || h > INDEXED_SIDE {
+        let _ = catcard_ui::art::indexed::decode(art, each);
+        return;
+    }
+    let slot = match cache.keys.iter().position(|k| *k == Some(key)) {
+        Some(slot) => slot,
+        None => {
+            let slot = cache.next;
+            cache.next = (cache.next + 1) % INDEXED_SLOTS;
+            cache.keys[slot] = None;
+            let store = &mut block.bytes()[slot * INDEXED_SLOT..(slot + 1) * INDEXED_SLOT];
+            store.fill(0);
+            // As for the marks: the key is written only once the whole picture decoded.
+            let ok = catcard_ui::art::indexed::decode(art, |x, y, index| {
+                if let Some(b) = store.get_mut(y * row + x / 2) {
+                    *b |= if x % 2 == 0 { index << 4 } else { index & 0x0F };
+                }
+            })
+            .is_ok();
+            if !ok {
+                let _ = catcard_ui::art::indexed::decode(art, each);
+                return;
+            }
+            cache.keys[slot] = Some(key);
+            slot
+        }
+    };
+    let store = &block.bytes()[slot * INDEXED_SLOT..(slot + 1) * INDEXED_SLOT];
+    for y in 0..h {
+        for x in 0..w {
+            let b = store[y * row + x / 2];
+            each(x, y, if x % 2 == 0 { b >> 4 } else { b & 0x0F });
+        }
+    }
+}

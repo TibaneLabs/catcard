@@ -2842,7 +2842,8 @@ fn grid_frame<C: catcard_ui::canvas::Canvas + ?Sized>(
     // Where the cursor is *within the window*, counted the way the window is filled:
     // down each column in turn.
     let within = col.saturating_sub(off) * ROWS + row;
-    catcard_ui::grid::render_page(
+    // Icons through the art cache: decoded once, copied every frame after.
+    catcard_ui::grid::render_page_with(
         c,
         display::LAYOUT.title,
         display::LAYOUT.body,
@@ -2850,6 +2851,13 @@ fn grid_frame<C: catcard_ui::canvas::Canvas + ?Sized>(
         within,
         off,
         items.len(),
+        |c, art, x, y| {
+            crate::artcache::indexed(art, |ax, ay, index| {
+                if index != 0 {
+                    c.put(x.saturating_add(ax), y.saturating_add(ay), index);
+                }
+            })
+        },
     );
 }
 

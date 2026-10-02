@@ -201,6 +201,32 @@ pub fn render_page<C: Canvas + ?Sized>(
     off: usize,
     len: usize,
 ) {
+    render_page_with(
+        canvas,
+        font,
+        small,
+        cells,
+        selected,
+        off,
+        len,
+        crate::art::indexed::draw_indexed,
+    );
+}
+
+/// [`render_page`], with the icons drawn by `draw_icon(canvas, art, x, y)` instead of
+/// straight out of the decoder -- so a caller that keeps decoded icons (the firmware's
+/// art cache) can copy them rather than inflate every icon on every frame.
+#[allow(clippy::too_many_arguments)] // as render_page, and the icon drawer
+pub fn render_page_with<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    font: &dyn Face,
+    small: &dyn Face,
+    cells: &[Cell<'_>],
+    selected: usize,
+    off: usize,
+    len: usize,
+    mut draw_icon: impl FnMut(&mut C, &crate::art::Indexed, usize, usize),
+) {
     let (w, h) = (canvas.width(), canvas.height());
     canvas.fill_rect(0, 0, w, h, PAPER);
     let columns = columns(len);
@@ -218,6 +244,7 @@ pub fn render_page<C: Canvas + ?Sized>(
             &cell_rect(slot(i), w, body),
             cell,
             i == selected,
+            &mut draw_icon,
         );
     }
     if more {
@@ -322,6 +349,7 @@ fn dots<C: Canvas + ?Sized>(canvas: &mut C, page: usize, pages: usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // as render_page_with
 fn draw_cell<C: Canvas + ?Sized>(
     canvas: &mut C,
     font: &dyn Face,
@@ -329,6 +357,7 @@ fn draw_cell<C: Canvas + ?Sized>(
     at: &Rect,
     cell: &Cell<'_>,
     selected: bool,
+    draw_icon: &mut impl FnMut(&mut C, &crate::art::Indexed, usize, usize),
 ) {
     // How the label is going to be set, which decides how tall the block is.
     let room = at.w.saturating_sub(2 * LABEL_GAP);
@@ -342,7 +371,7 @@ fn draw_cell<C: Canvas + ?Sized>(
 
     if let Some(art) = cell.icon {
         let ix = at.x + at.w.saturating_sub(art.width as usize) / 2;
-        crate::art::indexed::draw_indexed(canvas, art, ix, top);
+        draw_icon(canvas, art, ix, top);
     }
 
     let mut y = top + ICON + LABEL_GAP;
