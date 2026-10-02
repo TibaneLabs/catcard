@@ -543,7 +543,7 @@ changes on every read already implies).
 exactly [C]. Whether that should lower SE2's credit is an entropy-policy question, not a
 hardware one; see docs/ENTROPY.md.
 
-## Callgate refusals read as success for gates 16, 19/0 and 26 `[C]`, fix pending a bench run
+## Callgate refusals read as success — fixed on mk4/mk5/Q1 `[C]`, mk3 pending a readout
 
 The bootloader refuses a call with a **positive** code (`EPERM` buffer outside its
 window, `ERANGE` bad length or `arg2`, `ENOENT` no such method) and leaves the buffer
@@ -551,16 +551,19 @@ untouched; for every method whose success value is 0, any nonzero return is a fa
 Source: hw-reference/bootloader-callgate-abi.md §0.1 "Refusal codes" [C].
 
 `Callgate::decode` lets every non-negative value through, because gate 0 returns a
-length. Gate 18 checks for exactly 0 itself. Gates 16 (anti-phishing words), 19/0 (bag
-number), 21/2 (record the downgrade mark) and 26 (SE randomness) do not, so a refusal
-reads as success over an unwritten buffer: gate 16 would turn the PIN prefix itself into
-the two words, gate 26 would return a zero length.
+length. Gates 16 (anti-phishing words), 19/0 (bag number), 21/2 (record the downgrade
+mark) and 26 (SE randomness) therefore read a refusal as success over an unwritten
+buffer: gate 16 would have turned the PIN prefix itself into the two words.
 
-The fix — `rv != 0` is an error in those wrappers — changes the login path and boot's
-entropy reads on locked units, so it waits for **Debug → Bootloader replies**, which
-calls each of these gates harmlessly (16 over a fixed prefix, 19/0 and 21/0 reads, 26
-eight times per element) and logs the raw return. All zero on every board means the fix
-cannot change a working path; anything else is the thing to understand first.
+**Read on hardware** (`usbclient.py hid --gate-check`, bench opcode `DebugGateCheck`),
+2026-10-02, a Q1 and an mk5: gates 16, 19/0, 21/0 return exactly 0; gate 26 returns 0 on
+every call, with 32 bytes from SE1 and 8 from SE2; gate 0 returns 46, its string's length.
+So `catcard_callgate::zero_success` now holds those wrappers to exactly 0 on the boards
+with the SE randomness gate (mk4/mk5/Q1).
+
+**mk3: not yet read.** Its wrappers keep the old reading until its bootloader has been
+read the same way. Expected there: gate 26 refused with `ENOENT` (it has no SE randomness
+gate), the rest 0.
 
 ## Does a secure element's `Random` write its EEPROM? `[?]` on mk4/mk5/Q1
 

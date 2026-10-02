@@ -124,6 +124,29 @@ pub struct Callgate {
     sram1_base: u32,
     /// How much of SRAM1 this bootloader accepts a buffer in; see [`check_buffer`].
     gate_buf_len: u32,
+    /// Whether a method whose success value is 0 is held to exactly 0 (see
+    /// [`zero_success`]). True on the boards whose bootloader has been read doing so.
+    strict_zero: bool,
+}
+
+/// The verdict on a method whose success value is 0: any other return is a refusal.
+///
+/// The bootloader refuses with a **positive** code -- `EPERM` buffer outside its window,
+/// `ERANGE` bad length or `arg2`, `ENOENT` no such method -- and leaves the buffer as it
+/// was. [`Callgate::call`] lets non-negative values through because gate 0 returns a
+/// length, so without this a refused gate 16 read as success over the PIN prefix still in
+/// its buffer, and a refused gate 26 as an empty answer.
+/// Source: hw-reference/bootloader-callgate-abi.md §0.1 "Refusal codes" [C]
+///
+/// `strict` is per board: on mk4/mk5/Q1 every such gate has been read returning exactly 0
+/// on success (`DebugGateCheck`, a real Q1 and mk5, 2026-10-02). The mk3's bootloader has
+/// not been read yet, and until it is its wrappers behave as they always have.
+pub const fn zero_success(rv: i32, strict: bool) -> Result<(), Error> {
+    if rv == 0 || !strict {
+        Ok(())
+    } else {
+        Err(Error::Failed(rv))
+    }
 }
 
 impl Callgate {
@@ -153,6 +176,8 @@ impl Callgate {
             info,
             sram1_base: board.memory.sram1_base,
             gate_buf_len: board.gate_buf_len,
+            // The boards with the SE randomness gate are mk4, mk5 and Q1: the ones read.
+            strict_zero: board.has_callgate_se_rng,
         }
     }
 
@@ -284,7 +309,8 @@ impl Callgate {
     /// See [`Self::call`].
     pub unsafe fn se_rng(&self, source: RngSource, out: &mut [u8; 33]) -> Result<usize, Error> {
         // SAFETY: exactly the documented 33-byte output buffer.
-        unsafe { self.call(Method::ReadSeRng, out.as_mut_slice(), source as u32)? };
+        let rv = unsafe { self.call(Method::ReadSeRng, out.as_mut_slice(), source as u32)? };
+        zero_success(rv, self.strict_zero)?;
         let n = out[0] as usize;
         if n > 32 {
             // A length byte larger than the buffer means we did not get what the ABI
@@ -322,7 +348,7 @@ impl Callgate {
         // as it found it -- which is the PIN prefix. Wiped before this returns, whichever
         // way the call went, so the prefix does not outlive the call in a dead frame.
         buf.zeroize();
-        outcome?;
+        zero_success(outcome?, self.strict_zero)?;
         Ok(words)
     }
 
@@ -436,8 +462,8 @@ impl Callgate {
     pub unsafe fn bag_number(&self, out: &mut [u8; 32]) -> Result<(), Error> {
         out.fill(0);
         // SAFETY: exactly the documented 32-byte in/out buffer, and a read-only op.
-        unsafe { self.call(Method::BagNumber, out.as_mut_slice(), BagOp::Read as u32)? };
-        Ok(())
+        let rv = unsafe { self.call(Method::BagNumber, out.as_mut_slice(), BagOp::Read as u32)? };
+        zero_success(rv, self.strict_zero)
     }
 
     /// Callgate 19/2 (mk4 and later): is the MCU at RDP level 2?
@@ -528,8 +554,8 @@ impl Callgate {
     pub unsafe fn high_water_record(&self, timestamp: &[u8; 8]) -> Result<(), Error> {
         let mut buf = *timestamp;
         // SAFETY: the documented 8-byte buffer. The caller has taken the decision.
-        unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Record as u32)? };
-        Ok(())
+        let rv = unsafe { self.call(Method::Downgrade, buf.as_mut_slice(), OtpOp::Record as u32)? };
+        zero_success(rv, self.strict_zero)
     }
 
     /// Callgate 18 with a [`PinAttempt`] buffer.
@@ -621,6 +647,25 @@ impl Callgate {
         back.zeroize();
         buf.zeroize();
         rv
+    }
+}
+
+#[cfg(test)]
+mod zero_success_tests {
+    use super::*;
+
+    #[test]
+    fn a_positive_refusal_is_a_failure_where_the_board_has_been_read() {
+        assert_eq!(zero_success(0, true), Ok(()));
+        // EPERM, ERANGE, ENOENT: refusals, with the buffer untouched.
+        for rv in [1, 34, 2] {
+            assert_eq!(zero_success(rv, true), Err(Error::Failed(rv)));
+        }
+    }
+
+    #[test]
+    fn a_board_not_yet_read_keeps_the_old_reading() {
+        assert_eq!(zero_success(1, false), Ok(()));
     }
 }
 
