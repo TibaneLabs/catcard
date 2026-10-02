@@ -1966,23 +1966,19 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::TypePasswords => returns(|a| {
             crate::derive::type_password_screen(a.gate, a.login, a.ui);
         }),
-        #[cfg(feature = "games")]
-        Screen::BlockMine => returns(|a| crate::game::block_mine(a.ui)),
-        #[cfg(feature = "games")]
-        Screen::BlockCutter => returns(|a| crate::game::block_cutter(a.ui)),
+        // The games are written once against `catcard-app` (apps/games). The mk3 has no
+        // RAM to run apps in and links them; every other board carries them compressed in
+        // the image and runs them unprivileged (docs/APPS.md).
+        #[cfg(all(feature = "games", feature = "board-mk3"))]
+        Screen::BlockMine => returns(|a| crate::apps::run_linked(a.ui, app_games::block_mine)),
+        #[cfg(all(feature = "games", feature = "board-mk3"))]
+        Screen::BlockCutter => returns(|a| crate::apps::run_linked(a.ui, app_games::block_cutter)),
+        #[cfg(all(feature = "games", not(feature = "board-mk3")))]
+        Screen::BlockMine => returns(|a| launch_app(a.ui, "games", 0, "Block Mine")),
+        #[cfg(all(feature = "games", not(feature = "board-mk3")))]
+        Screen::BlockCutter => returns(|a| launch_app(a.ui, "games", 1, "Block Cutter")),
         #[cfg(all(feature = "games", feature = "board-q1"))]
-        // An app since docs/APPS.md phase 2: carried compressed in the image, unpacked
-        // into the app area when chosen, and run unprivileged.
-        Screen::FlappyCat => returns(|a| {
-            if let Err(why) = crate::apps::launch("flappy", a.ui) {
-                let line = match why {
-                    crate::apps::Refused::NotFound => "not in this image",
-                    _ => "could not start",
-                };
-                message(a.ui.panel, "Flappy Cat", line, "press a key");
-                wait_for_any_key(a.ui);
-            }
-        }),
+        Screen::FlappyCat => returns(|a| launch_app(a.ui, "flappy", 0, "Flappy Cat")),
         Screen::NewSeed(_) => reseeds(|a| {
             crate::newseed::new_seed(
                 a.gate,
@@ -13370,6 +13366,19 @@ fn serve_usb_drive(ui: &mut Ui<'_>, backend: &mut dyn crate::msc_drive::BlockDev
     });
 
     crate::usbtask::msc_exit();
+}
+
+/// Run the app called `name` from the image with `arg`, or say why it cannot start.
+#[cfg(all(feature = "games", not(feature = "board-mk3")))]
+fn launch_app(ui: &mut Ui<'_>, name: &str, arg: u32, title: &str) {
+    if let Err(why) = crate::apps::launch(name, arg, ui) {
+        let line = match why {
+            crate::apps::Refused::NotFound => "not in this image",
+            _ => "could not start",
+        };
+        message(ui.panel, title, line, "press a key");
+        wait_for_any_key(ui);
+    }
 }
 
 pub(crate) fn message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {

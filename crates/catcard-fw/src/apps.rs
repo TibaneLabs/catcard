@@ -17,10 +17,14 @@
 //! UI task. Nothing here runs at boot; the area is claimed the first time it is written.
 
 // The loader's callers are the bench's USB opcodes (`usb-debug-mem`) and the apps this
-// board's menu launches (Flappy Cat: Q1 with games). A build with neither still links the
-// area's carve-out (`heap_parts`), which every build uses, and nothing else from here.
+// board's menu launches (the games, on every board but the mk3, which links them). A build
+// with neither still links the area's carve-out (`heap_parts`), which every build uses.
 #![cfg_attr(
-    not(all(feature = "usb-debug-mem", feature = "games", feature = "board-q1")),
+    not(all(
+        feature = "usb-debug-mem",
+        feature = "games",
+        not(feature = "board-mk3")
+    )),
     allow(dead_code)
 )]
 
@@ -334,6 +338,8 @@ fn on_privilege(unprivileged: bool) {
 }
 
 /// Services an app may ask for. The numbers are the ABI; never renumber one.
+// The panel's numbers are only served on the Q1.
+#[cfg_attr(not(feature = "board-q1"), allow(dead_code))]
 pub mod service {
     /// `log(ptr, len)`: one line in the device log, at most [`super::LOG_MAX`] bytes.
     pub const LOG: u32 = 0;
@@ -369,6 +375,45 @@ pub mod service {
     pub const KV_GET: u32 = 15;
     /// `kv_set(i, word)`.
     pub const KV_SET: u32 = 16;
+    /// `present(ptr, len)`: the app's canvas, in the firmware's own layout, onto the panel.
+    pub const PRESENT: u32 = 17;
+    /// `keys_held() -> count`.
+    pub const KEYS_HELD: u32 = 18;
+}
+
+/// A feature linked into the firmware is running through the same services (docs/APPS.md,
+/// "One source, two builds"). Its pointers are the firmware's own memory, not the app
+/// area's, and it is the firmware's own code: the checks that guard an app's arguments
+/// pass it through.
+static LINKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Run `f` -- a feature built against `catcard-app` and linked in -- with the services
+/// pointed at `ui`, as [`run`] does for an app. Only the mk3 links features in today.
+#[cfg(feature = "board-mk3")]
+pub fn run_linked<R>(ui: &mut Ui<'_>, f: impl FnOnce() -> R) -> R {
+    // SAFETY: UI task only; cleared again below, before `ui` is used by anyone else.
+    unsafe { *core::ptr::addr_of_mut!(UI) = (ui as *mut Ui<'_>).cast() };
+    LINKED.store(true, Ordering::Relaxed);
+    let r = f();
+    LINKED.store(false, Ordering::Relaxed);
+    // SAFETY: as above.
+    unsafe { *core::ptr::addr_of_mut!(UI) = core::ptr::null_mut() };
+    r
+}
+
+/// The SDK's service call, linked in: the same dispatcher an app's `SVC` reaches.
+#[unsafe(no_mangle)]
+pub fn catcard_linked_service(id: u32, a: u32, b: u32, c: u32) -> u32 {
+    dispatch(id, a, b, c)
+}
+
+/// The SDK's `screen::draw`, linked in: a frame of the firmware's own, drawn in place.
+#[unsafe(no_mangle)]
+pub fn catcard_linked_draw(f: &mut dyn FnMut(&mut dyn catcard_ui::canvas::Canvas)) {
+    // SAFETY: inside `run_linked`, on the UI task.
+    if let Some(ui) = unsafe { ui() } {
+        crate::display::draw(ui.panel, |c| f(c));
+    }
 }
 
 /// The panel is the app's: `panel_begin` without `panel_end` yet.
@@ -390,8 +435,12 @@ unsafe fn ui<'a>() -> Option<&'a mut Ui<'a>> {
 const LOG_MAX: usize = 96;
 const SLEEP_MAX_MS: u32 = 10_000;
 
-/// Whether `ptr..ptr+len` lies inside the area: the only memory an app may name.
+/// Whether `ptr..ptr+len` lies inside the area: the only memory an app may name. A
+/// linked-in feature names the firmware's own memory and passes ([`LINKED`]).
 fn in_arena(ptr: u32, len: u32) -> bool {
+    if LINKED.load(Ordering::Relaxed) {
+        return true;
+    }
     match ARENA {
         Some((base, size)) => {
             ptr >= base && ptr.checked_add(len).is_some_and(|end| end <= base + size)
@@ -509,6 +558,14 @@ extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
             }
             0
         }
+        service::KEYS_HELD => {
+            // SAFETY: a service, on the UI task, while the app runs.
+            match unsafe { ui() } {
+                Some(ui) => ui.pad.held_count() as u32,
+                None => 0,
+            }
+        }
+        service::PRESENT => present(a, b),
         service::CYCLES => catcard_hal::dwt::cycles(),
         // SAFETY: reads RCC.
         service::CLOCK_HZ => unsafe { catcard_hal::clock::hclk_hz() },
@@ -527,6 +584,54 @@ extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
         | service::PAINT => panel_service(id, a, b, c),
         _ => u32::MAX,
     }
+}
+
+/// Copy the app's canvas -- `len` bytes at `ptr`, in the layout of the firmware's own
+/// [`display::Screen`](crate::display) -- into a frame and show it.
+fn present(ptr: u32, len: u32) -> u32 {
+    use catcard_ui::canvas::Canvas as _;
+    // The firmware's canvas: the Q1's 4-bit 320x240, or the mono boards' 128x64 pages.
+    #[cfg(feature = "board-q1")]
+    const BYTES: u32 = 320 * 240 / 2;
+    #[cfg(not(feature = "board-q1"))]
+    const BYTES: u32 = 128 * 64 / 8;
+    if len != BYTES || !in_arena(ptr, len) {
+        return u32::MAX;
+    }
+    // SAFETY: a service, on the UI task, while the app runs.
+    let Some(ui) = (unsafe { ui() }) else {
+        return u32::MAX;
+    };
+    // SAFETY: checked to be inside the area just above; read only.
+    let px = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    crate::display::draw(ui.panel, |c| {
+        #[cfg(feature = "board-q1")]
+        for y in 0..c.height() {
+            // The surface starts below the status bar; the app's canvas is the whole panel,
+            // so its rows are read from the same place the firmware's would be.
+            let row = &px[(y + crate::display::BAR_H) * 160..][..160];
+            for x in 0..c.width().min(320) {
+                let b = row[x / 2];
+                c.put(x, y, if x % 2 == 0 { b >> 4 } else { b & 0x0F });
+            }
+        }
+        #[cfg(not(feature = "board-q1"))]
+        for y in 0..c.height().min(64) {
+            for x in 0..c.width().min(128) {
+                let on = px[(y / 8) * 128 + x] & (1 << (y % 8)) != 0;
+                c.put(
+                    x,
+                    y,
+                    if on {
+                        catcard_ui::canvas::INK
+                    } else {
+                        catcard_ui::canvas::PAPER
+                    },
+                );
+            }
+        }
+    });
+    0
 }
 
 /// The colour panel's services (Q1).
@@ -615,8 +720,8 @@ fn bundle() -> Option<(u32, u32)> {
 }
 
 /// Unpack the app called `name` from the image into the area, check it, and run it.
-pub fn launch(name: &str, ui: &mut Ui<'_>) -> Result<Exit, Refused> {
-    let outcome = unpack(name).and_then(|()| run(0, ui));
+pub fn launch(name: &str, arg: u32, ui: &mut Ui<'_>) -> Result<Exit, Refused> {
+    let outcome = unpack(name).and_then(|()| run(arg, ui));
     report(&outcome);
     outcome
 }

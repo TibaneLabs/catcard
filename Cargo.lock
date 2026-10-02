@@ -65,6 +65,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "app-games"
+version = "0.1.0"
+dependencies = [
+ "catcard-app",
+ "catcard-ui",
+ "heapless",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -104,6 +113,9 @@ version = "7.0.0"
 [[package]]
 name = "catcard-app"
 version = "7.0.0"
+dependencies = [
+ "catcard-ui",
+]
 
 [[package]]
 name = "catcard-backup"
@@ -179,6 +191,7 @@ name = "catcard-fw"
 version = "7.0.0"
 dependencies = [
  "anyd",
+ "app-games",
  "catcard-alloc",
  "catcard-backup",
  "catcard-bbqr",

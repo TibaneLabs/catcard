@@ -67,11 +67,27 @@ pub mod sys {
     const CLOCK_HZ: u32 = 14;
     const KV_GET: u32 = 15;
     const KV_SET: u32 = 16;
+    #[cfg_attr(feature = "linked", allow(dead_code))]
+    pub(crate) const PRESENT: u32 = 17;
+    const KEYS_HELD: u32 = 18;
+
+    /// Linked into the firmware: the service is a plain call (the firmware's
+    /// `apps::catcard_linked_service`), with no privilege change.
+    #[cfg(feature = "linked")]
+    #[inline(always)]
+    pub(crate) fn call(id: u32, a: u32, b: u32, c: u32) -> u32 {
+        unsafe extern "Rust" {
+            fn catcard_linked_service(id: u32, a: u32, b: u32, c: u32) -> u32;
+        }
+        // SAFETY: the firmware defines it whenever it links an app in; arguments are
+        // checked there exactly as an app's would be.
+        unsafe { catcard_linked_service(id, a, b, c) }
+    }
 
     /// `SVC CALL`: service `id` with three arguments, one result.
-    #[cfg(target_arch = "arm")]
+    #[cfg(all(target_arch = "arm", not(feature = "linked")))]
     #[inline(always)]
-    fn call(id: u32, a: u32, b: u32, c: u32) -> u32 {
+    pub(crate) fn call(id: u32, a: u32, b: u32, c: u32) -> u32 {
         let r: u32;
         // SAFETY: `SVC #2` is the kernel's service call (catcard-kernel `app::SVC_CALL`):
         // arguments in r0-r3, the result in r0, and the kernel preserves r4-r11 and
@@ -100,8 +116,8 @@ pub mod sys {
         r
     }
 
-    #[cfg(not(target_arch = "arm"))]
-    fn call(_id: u32, _a: u32, _b: u32, _c: u32) -> u32 {
+    #[cfg(all(not(target_arch = "arm"), not(feature = "linked")))]
+    pub(crate) fn call(_id: u32, _a: u32, _b: u32, _c: u32) -> u32 {
         unimplemented!("CatCard services exist only on the device")
     }
 
@@ -215,15 +231,37 @@ pub mod sys {
         call(KV_SET, i, v, 0);
     }
 
+    /// How many keys are held down right now.
+    pub fn keys_held() -> u32 {
+        call(KEYS_HELD, 0, 0, 0)
+    }
+
+    /// A number in `0..n`, uniform, from [`random`]. `n` of 0 gives 0.
+    pub fn below(n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        // Rejection sampling: drop the top partial range so every value is equally likely.
+        let zone = u32::MAX - (u32::MAX % n);
+        loop {
+            let mut b = [0u8; 4];
+            random(&mut b);
+            let v = u32::from_le_bytes(b);
+            if v < zone {
+                return v % n;
+            }
+        }
+    }
+
     /// End the app with `code`. Never returns.
-    #[cfg(target_arch = "arm")]
+    #[cfg(all(target_arch = "arm", not(feature = "linked")))]
     pub fn exit(code: i32) -> ! {
         // SAFETY: `SVC #1` is the kernel's exit (catcard-kernel `app::SVC_EXIT`); it does
         // not come back.
         unsafe { core::arch::asm!("svc #1", in("r0") code, options(noreturn)) }
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(any(not(target_arch = "arm"), feature = "linked"))]
     pub fn exit(_code: i32) -> ! {
         unimplemented!("CatCard services exist only on the device")
     }
@@ -274,7 +312,71 @@ impl core::fmt::Write for Line {
     }
 }
 
-#[cfg(target_os = "none")]
+/// The screen an app draws on, the same canvas the firmware draws on.
+///
+/// [`screen::draw`] hands the app a `&mut dyn Canvas` -- the board's canvas, its
+/// coordinates the firmware's own -- and shows the result. As an app the canvas lives in
+/// the app's memory and the frame is copied to the panel by the kernel (`present`); linked
+/// in, it is the firmware's frame, drawn in place.
+pub mod screen {
+    use catcard_ui::canvas::Canvas;
+
+    /// Draw a frame with `f` and show it. The canvas keeps what the last frame drew, as
+    /// the firmware's does: clear it first for a fresh one.
+    #[cfg(feature = "linked")]
+    pub fn draw(f: impl FnOnce(&mut dyn Canvas)) {
+        unsafe extern "Rust" {
+            fn catcard_linked_draw(f: &mut dyn FnMut(&mut dyn Canvas));
+        }
+        let mut f = Some(f);
+        let mut once = |c: &mut dyn Canvas| {
+            if let Some(f) = f.take() {
+                f(c)
+            }
+        };
+        // SAFETY: the firmware defines it whenever it links an app in.
+        unsafe { catcard_linked_draw(&mut once) }
+    }
+
+    /// The Q1's content area: the 4-bit 320x240 canvas below the 16-row status bar, as
+    /// the firmware's `display::Surface` is.
+    #[cfg(all(feature = "board-q1", not(feature = "linked")))]
+    mod board {
+        pub type Screen = catcard_ui::canvas::Gray4<320, 240, 38400>;
+        pub const BAR_H: usize = 16;
+        pub fn with_view(s: &mut Screen, f: impl FnOnce(&mut dyn catcard_ui::canvas::Canvas)) {
+            f(&mut catcard_ui::canvas::Inset::new(s, BAR_H))
+        }
+    }
+
+    /// The mono boards: the 128x64 framebuffer.
+    #[cfg(all(not(feature = "board-q1"), not(feature = "linked")))]
+    mod board {
+        pub type Screen = catcard_ui::framebuffer::Framebuffer<128, 8, 1024>;
+        pub fn with_view(s: &mut Screen, f: impl FnOnce(&mut dyn catcard_ui::canvas::Canvas)) {
+            f(s)
+        }
+    }
+
+    #[cfg(not(feature = "linked"))]
+    static mut SCREEN: board::Screen = board::Screen::new();
+
+    #[cfg(not(feature = "linked"))]
+    pub fn draw(f: impl FnOnce(&mut dyn Canvas)) {
+        // SAFETY: one thread of execution in an app.
+        let s = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+        board::with_view(s, f);
+        let bytes = s.as_bytes();
+        super::sys::call(
+            super::sys::PRESENT,
+            bytes.as_ptr() as u32,
+            bytes.len() as u32,
+            0,
+        );
+    }
+}
+
+#[cfg(all(target_os = "none", not(feature = "linked")))]
 mod start {
     unsafe extern "C" {
         /// The app's own entry, defined by the app.

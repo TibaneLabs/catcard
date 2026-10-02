@@ -66,8 +66,6 @@ mod failsafe;
 /// The FIDO2 security key (CTAP2 / U2F): the USB task's desk and the UI task's answers.
 mod fido;
 mod filemgmt;
-#[cfg(feature = "games")]
-mod game;
 mod gatecall;
 /// Debug -> Bootloader replies: the raw return of each "0 is success" callgate.
 mod gatecheck;

@@ -74,23 +74,32 @@ mk3:
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk3 $(VER) --bin $(OUT)/catcard-mk3.bin --dfu $(OUT)/catcard-mk3.dfu
 
-mk4-mk5:
+mk4-mk5: $(if $(SHIP),,apps)
 	$(FW) $(NODEF) --features board-mk5$(CHAINS)
 	@mkdir -p $(OUT)
-	$(PACKAGE) --board mk5 $(VER) --hw-compat mk4,mk5 \
+	$(PACKAGE) --board mk5 $(VER) --hw-compat mk4,mk5 $(MONO_APPS) \
 	  --bin $(OUT)/catcard-mk4-mk5.bin --dfu $(OUT)/catcard-mk4-mk5.dfu
 
 # Apps (docs/APPS.md): thumb-only binaries in their own workspace under apps/, linked to
 # run in the app area. Bench use for now: tools/usbclient.py hid --run-app <elf> [arg].
 # The exported RUSTFLAGS below would make cargo ignore apps/.cargo/config.toml's rustflags,
 # so the layout is passed here as well.
+#
+# Built twice: every app for the mono boards' 128x64 screen, then the games again for the
+# Q1's (an app that draws through `catcard_app::screen` is built for one panel). Flappy
+# drives the Q1 panel through its own services, so the one build serves.
+APPS_RUSTFLAGS = $(RUSTFLAGS) -C link-arg=-Tlink.x
 apps:
-	cd apps && RUSTFLAGS="$(RUSTFLAGS) -C link-arg=-Tlink.x" $(CARGO) build --release
+	cd apps && RUSTFLAGS="$(APPS_RUSTFLAGS)" $(CARGO) build --release
+	cd apps && RUSTFLAGS="$(APPS_RUSTFLAGS)" $(CARGO) build --release -p app-games \
+	  --features board-q1 --target-dir target/q1
 
 # Apps the Q1 image carries (docs/APPS.md). Flappy Cat is a game, and games are a default
 # feature that SHIP drops, so it goes in exactly when the firmware's games menu does.
-APPS_DIR := apps/target/thumbv7em-none-eabihf/release
-Q1_APPS   = $(if $(SHIP),,--app flappy=$(APPS_DIR)/app-flappy)
+APPS_DIR    := apps/target/thumbv7em-none-eabihf/release
+APPS_DIR_Q1 := apps/target/q1/thumbv7em-none-eabihf/release
+Q1_APPS      = $(if $(SHIP),,--app flappy=$(APPS_DIR)/app-flappy --app games=$(APPS_DIR_Q1)/app-games)
+MONO_APPS    = $(if $(SHIP),,--app games=$(APPS_DIR)/app-games)
 
 # The Q1 firmware is built for size (`opt-level = "z"`, about 200 KB smaller): its games are
 # apps now, compiled on their own, so nothing slow is left in the firmware's hot paths --

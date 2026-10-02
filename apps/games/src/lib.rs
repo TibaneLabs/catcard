@@ -1,4 +1,13 @@
-//! Block Mine -- a Boulder Dash-style micro game on 8x8 tiles.
+#![no_std]
+//! Block Mine and Block Cutter, the device's two small games (docs/APPS.md).
+//!
+//! Written against `catcard-app` only, so the same source is an app on the boards with
+//! spare RAM (unpacked and run unprivileged) and linked into the firmware on the mk3,
+//! which has none. Nothing here touches the wallet.
+//!
+//! # Block Mine
+//!
+//! A Boulder Dash-style micro game on 8x8 tiles.
 //!
 //! Dig through dirt with the arrow keys (`5` up, `8` down, `7` left, `9` right), collect
 //! bitcoins, and reach the exit once you have enough. Boulders and coins fall when you dig
@@ -8,11 +17,8 @@
 //!
 //! Nothing here touches the wallet: no secret is read and the grid is a fixed level.
 
-use crate::ui::Ui;
-use crate::{display, usbtask};
-use catcard_entropy::HmacDrbg;
+use catcard_app::{Key, screen, sys};
 use catcard_ui::canvas::{Canvas, INK};
-use catcard_ui::keypad::{Event, KEYS, Key};
 use core::fmt::Write as _;
 
 /// Level dimensions, in tiles.
@@ -383,57 +389,42 @@ fn render<C: Canvas + ?Sized>(c: &mut C, g: &Game) {
 }
 
 /// Show a centered end-of-game message and wait for a key.
-fn end_screen(ui: &mut Ui<'_>, head: &str, line: &str) {
-    display::draw(ui.panel, |c| {
-        catcard_ui::widgets::message(c, &display::LAYOUT, head, line, "any key");
-    });
-    // Drain the key that ended the game, then wait for a fresh press.
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    loop {
-        let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-        if ui.pad.held_count() == 0 {
-            break;
-        }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+fn end_screen(head: &str, line: &str) {
+    sys::message(head, line, "any key");
+    // Let go of the key that ended the game, then wait for a fresh press.
+    while sys::keys_held() > 0 {
+        sys::sleep_ms(IDLE_MS);
     }
-    loop {
-        let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-        if !keys.is_empty() {
-            return;
-        }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+    while sys::key().is_none() {
+        sys::sleep_ms(IDLE_MS);
     }
 }
 
+/// How long a game loop rests between polls, letting the rest of the device run.
+const IDLE_MS: u32 = 2;
+
 /// Play one round of Block Mine, returning to the menu when it ends or `x` is pressed.
-pub(crate) fn block_mine(ui: &mut Ui<'_>) {
+pub fn block_mine() {
     let mut g = Game::load();
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    let mut last_gravity = catcard_hal::dwt::cycles();
+    let mut last_gravity = sys::cycles();
     let mut last_enemy = last_gravity;
     let mut redraw = true;
 
     loop {
         if redraw {
-            display::draw(ui.panel, |c| render(c, &g));
+            screen::draw(|c| render(c, &g));
             redraw = false;
         }
         if g.won {
-            end_screen(ui, "You win!", "exit reached");
+            end_screen("You win!", "exit reached");
             return;
         }
         if g.dead {
-            end_screen(ui, "Game over", "you were caught");
+            end_screen("Game over", "you were caught");
             return;
         }
 
-        let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-        for k in keys.iter() {
+        while let Some(k) = sys::key() {
             match k {
                 Key::Cancel => return,
                 Key::Digit(5) => {
@@ -456,7 +447,7 @@ pub(crate) fn block_mine(ui: &mut Ui<'_>) {
             }
         }
 
-        let now = catcard_hal::dwt::cycles();
+        let now = sys::cycles();
         if now.wrapping_sub(last_gravity) >= GRAVITY_CYCLES {
             g.gravity();
             last_gravity = now;
@@ -467,7 +458,7 @@ pub(crate) fn block_mine(ui: &mut Ui<'_>) {
             last_enemy = now;
             redraw = true;
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        sys::sleep_ms(IDLE_MS);
     }
 }
 
@@ -529,7 +520,7 @@ impl Cutter {
         }
     }
 
-    fn new_level(&mut self, drbg: &mut HmacDrbg) {
+    fn new_level(&mut self) {
         self.grid = [CB_BLACK; CN];
         for x in 0..CW {
             self.grid[x] = CB_FILLED;
@@ -547,18 +538,10 @@ impl Cutter {
         self.enemies.clear();
         let n = self.level.min(self.enemies.capacity() as u32);
         for _ in 0..n {
-            let x = 1 + drbg.below((CW - 2) as u32).unwrap_or(0) as u8;
-            let y = 1 + drbg.below((CH - 2) as u32).unwrap_or(0) as u8;
-            let vx = if drbg.below(2).unwrap_or(0) == 0 {
-                -1
-            } else {
-                1
-            };
-            let vy = if drbg.below(2).unwrap_or(0) == 0 {
-                -1
-            } else {
-                1
-            };
+            let x = 1 + sys::below((CW - 2) as u32) as u8;
+            let y = 1 + sys::below((CH - 2) as u32) as u8;
+            let vx = if sys::below(2) == 0 { -1 } else { 1 };
+            let vy = if sys::below(2) == 0 { -1 } else { 1 };
             let _ = self.enemies.push(Mover { x, y, vx, vy });
         }
     }
@@ -860,7 +843,7 @@ fn cutter_render<C: Canvas + ?Sized>(c: &mut C, g: &Cutter) {
 }
 
 /// Play Block Cutter until the player runs out of lives or presses `x`.
-pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
+pub fn block_cutter() {
     let interior = (CW - 2) * (CH - 2);
     let clear_below = interior * CLEAR_BLACK_PCT / 100;
 
@@ -877,17 +860,15 @@ pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
         dead: false,
         won_level: false,
     };
-    g.new_level(ui.drbg);
+    g.new_level();
 
-    let mut events = [Event::Pressed(Key::Cancel); KEYS];
-    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
-    let mut last_move = catcard_hal::dwt::cycles();
+    let mut last_move = sys::cycles();
     let mut last_enemy = last_move;
     let mut redraw = true;
 
     loop {
         if redraw {
-            display::draw(ui.panel, |c| cutter_render(c, &g));
+            screen::draw(|c| cutter_render(c, &g));
             redraw = false;
         }
 
@@ -895,7 +876,7 @@ pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
             g.dead = false;
             g.lives = g.lives.saturating_sub(1);
             if g.lives == 0 {
-                end_screen(ui, "Game over", "line was cut");
+                end_screen("Game over", "line was cut");
                 return;
             }
             g.respawn();
@@ -905,14 +886,12 @@ pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
         if g.won_level {
             g.won_level = false;
             g.level += 1;
-            g.new_level(ui.drbg);
+            g.new_level();
             redraw = true;
             continue;
         }
 
-        let _ = usbtask::pump();
-        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-        for k in keys.iter() {
+        while let Some(k) = sys::key() {
             match k {
                 Key::Cancel => return,
                 Key::Digit(5) => {
@@ -935,7 +914,7 @@ pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
             }
         }
 
-        let now = catcard_hal::dwt::cycles();
+        let now = sys::cycles();
         if now.wrapping_sub(last_move) >= CUT_MOVE_CYCLES {
             g.step_player();
             last_move = now;
@@ -949,6 +928,6 @@ pub(crate) fn block_cutter(ui: &mut Ui<'_>) {
             last_enemy = now;
             redraw = true;
         }
-        catcard_hal::dwt::delay_cycles(usbtask::IDLE_PAUSE_CYCLES);
+        sys::sleep_ms(IDLE_MS);
     }
 }

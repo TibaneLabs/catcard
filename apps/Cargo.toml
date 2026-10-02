@@ -2,7 +2,7 @@
 # workspace so host builds never try to link them.
 [workspace]
 resolver = "3"
-members = ["flappy", "hello", "probe", "spin"]
+members = ["flappy", "games", "hello", "probe", "spin"]
 
 [workspace.package]
 version = "0.1.0"

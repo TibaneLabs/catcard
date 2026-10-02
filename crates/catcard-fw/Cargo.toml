@@ -37,7 +37,10 @@ usb-debug-mem = []
 usb-trng-capture = []
 # The Games menu under Utils (Block Mine, ...). On by default; a build can drop it to
 # save flash without touching the rest of the UI.
-games = []
+# The games are written against `catcard-app` (apps/games): an app on the boards with
+# spare RAM, linked in on the mk3. The crate is only called on the mk3; elsewhere the
+# linker drops it.
+games = ["dep:app-games"]
 # Every chain rather than Bitcoin alone: Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto,
 # Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
 # Bitcoin-only build is the one whose image carries no other chain's parser at all --
@@ -72,6 +75,7 @@ board-q1 = [
 ]
 
 [dependencies]
+app-games = { path = "../../apps/games", features = ["linked"], optional = true }
 purecrypto = { workspace = true, features = ["hash"] }
 catcard-settings = { path = "../catcard-settings", default-features = false }
 fstool = { workspace = true, default-features = false, features = ["littlefs"] }

@@ -11,6 +11,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-games"
+version = "0.1.0"
+dependencies = [
+ "catcard-app",
+ "catcard-ui",
+ "heapless",
+]
+
+[[package]]
 name = "app-hello"
 version = "0.1.0"
 dependencies = [
@@ -40,6 +49,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "catcard-app"
 version = "7.0.0"
+dependencies = [
+ "catcard-ui",
+]
 
 [[package]]
 name = "catcard-board"

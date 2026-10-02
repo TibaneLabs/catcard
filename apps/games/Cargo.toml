@@ -1,0 +1,25 @@
+[package]
+name = "app-games"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Block Mine and Block Cutter (docs/APPS.md): an app on mk4/mk5/Q1, linked into the firmware on the mk3."
+
+[lib]
+name = "app_games"
+path = "src/lib.rs"
+
+[[bin]]
+name = "app-games"
+path = "src/main.rs"
+
+[features]
+# Build shapes, passed through to the SDK.
+board-q1 = ["catcard-app/board-q1"]
+linked = ["catcard-app/linked"]
+
+[dependencies]
+catcard-app = { path = "../../crates/catcard-app" }
+catcard-ui = { path = "../../crates/catcard-ui" }
+heapless = "0.9.3"

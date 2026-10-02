@@ -6,4 +6,14 @@ license.workspace = true
 publish = false
 description = "The app side of CatCard's kernel/app split: entry point, services, panic (docs/APPS.md)."
 
+[features]
+# The app runs on the Q1: its screen is the Q1's 4-bit canvas below the status bar.
+# Without it, the mono boards' 128x64 framebuffer.
+board-q1 = []
+# Linked into the firmware instead of run as an app (docs/APPS.md, "One source, two
+# builds"): every service and every frame is a plain call into the firmware, which
+# defines the `catcard_linked_*` functions. No entry point, no panic handler of its own.
+linked = []
+
 [dependencies]
+catcard-ui = { path = "../catcard-ui" }
