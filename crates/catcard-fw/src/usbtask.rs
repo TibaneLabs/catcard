@@ -1019,13 +1019,62 @@ impl UsbTask {
             Some(Opcode::DebugTrng) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);
             }
+            // Apps over USB (docs/APPS.md): write the image, queue it for the menu loop,
+            // read how it ended. The run itself is on the UI task, never here.
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugAppWrite) => {
+                let p = progress.payload;
+                let ok = p.len() >= 4 && {
+                    let off = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                    crate::apps::write(off, &p[4..])
+                };
+                let st = if ok { Status::Ok } else { Status::BadRequest };
+                self.begin_reply(st, &[]);
+            }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugAppRun) => {
+                let p = progress.payload;
+                let arg = match p.first_chunk::<4>() {
+                    Some(a) => u32::from_le_bytes(*a),
+                    None => 0,
+                };
+                crate::catlog!("apps: run requested, arg {:#x}", arg);
+                let st = if crate::apps::request(arg) {
+                    Status::Ok
+                } else {
+                    Status::NotNow
+                };
+                self.begin_reply(st, &[]);
+            }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugAppStatus) => {
+                use catcard_kernel::app::Exit;
+                let mut body = [0u8; 18];
+                body[0] = crate::apps::state() as u8;
+                if crate::apps::state() == crate::apps::State::Done {
+                    let (kind, code, pc, cfsr, addr) = match crate::apps::last() {
+                        Ok(Exit::Code(c)) => (0u8, c, 0, 0, 0),
+                        Ok(Exit::Fault { pc, cfsr, addr }) => (1, 0, pc, cfsr, addr),
+                        Err(why) => (2, why as i32, 0, 0, 0),
+                    };
+                    body[1] = kind;
+                    body[2..6].copy_from_slice(&code.to_le_bytes());
+                    body[6..10].copy_from_slice(&pc.to_le_bytes());
+                    body[10..14].copy_from_slice(&cfsr.to_le_bytes());
+                    body[14..18].copy_from_slice(&addr.to_le_bytes());
+                }
+                self.begin_reply(Status::Ok, &body);
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
             Some(
                 Opcode::DebugPeek
                 | Opcode::DebugPoke
                 | Opcode::DebugJsr
                 | Opcode::DebugSd
-                | Opcode::DebugSdRaw,
+                | Opcode::DebugSdRaw
+                | Opcode::DebugAppWrite
+                | Opcode::DebugAppRun
+                | Opcode::DebugAppStatus,
             ) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);
             }

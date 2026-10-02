@@ -1302,6 +1302,9 @@ pub fn run(session: Session<'_>) -> ! {
         // (`rngread`). And the pool's health, for a paired computer to ask about.
         crate::rngread::serve(gate);
         crate::rngshare::publish(pool.as_deref());
+        // An app sent over USB on a bench build runs here, on the UI task (docs/APPS.md).
+        #[cfg(feature = "usb-debug-mem")]
+        crate::apps::serve();
         display::idle(ui.panel);
 
         // The RTC screen redraws on a clock rather than on input: it is showing something

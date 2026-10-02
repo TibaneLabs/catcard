@@ -102,6 +102,10 @@ name = "catcard-alloc"
 version = "7.0.0"
 
 [[package]]
+name = "catcard-app"
+version = "7.0.0"
+
+[[package]]
 name = "catcard-backup"
 version = "7.0.0"
 dependencies = [

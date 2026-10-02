@@ -158,6 +158,36 @@ pub const fn rasr_no_access(size: u8) -> u32 {
     RASR_XN | RASR_AP_NONE | ((size as u32) << RASR_SIZE_SHIFT) | RASR_ENABLE
 }
 
+/// `MPU_RASR.AP = 0b010`: privileged read-write, unprivileged read-only. Source: ARMv7-M
+/// ARM §B3.5.9 Table B3-15 [C]
+const RASR_AP_PRIV_RW_USER_RO: u32 = 0b010 << 24;
+/// `MPU_RASR.AP = 0b011`: read-write at both privilege levels. Same table [C]
+const RASR_AP_FULL: u32 = 0b011 << 24;
+/// `TEX = 0b001, C = 1, B = 1`, not shareable: normal memory, write-back, write and read
+/// allocate -- what the default map gives SRAM, so an app region changes who may touch
+/// the memory and nothing about how it behaves. Source: ARMv7-M ARM §B3.5.9 Table B3-13,
+/// §B3.1.1 Table B3-1 (default map, SRAM "WBWA") [C]
+const RASR_NORMAL_WBWA: u32 = (0b001 << 19) | (1 << 17) | (1 << 16);
+
+/// Regions the app layout uses. Higher numbers win where regions overlap, so the code
+/// region sits above the data region that contains it. Region 0 stays the stack fence.
+/// Source: ARMv7-M ARM §B3.5.3 ("the region with the highest number takes priority") [C]
+pub const APP_DATA_REGION: u8 = 1;
+pub const APP_CODE_REGION: u8 = 2;
+// The code region must outrank the data region it sits in, and neither may be the fence's.
+const _: () = assert!(APP_CODE_REGION > APP_DATA_REGION && APP_DATA_REGION > GUARD_REGION);
+
+/// `MPU_RASR` for an app's code: read and execute for the app, read-write for the
+/// firmware (which loaded it), normal memory.
+pub const fn rasr_app_code(size: u8) -> u32 {
+    RASR_AP_PRIV_RW_USER_RO | RASR_NORMAL_WBWA | ((size as u32) << RASR_SIZE_SHIFT) | RASR_ENABLE
+}
+
+/// `MPU_RASR` for an app's data, heap and stack: read-write for everyone, never executed.
+pub const fn rasr_app_data(size: u8) -> u32 {
+    RASR_XN | RASR_AP_FULL | RASR_NORMAL_WBWA | ((size as u32) << RASR_SIZE_SHIFT) | RASR_ENABLE
+}
+
 /// `MPU_RBAR` selecting `region` at `base`, which must already be aligned to the region
 /// size ([`arm_guard`] checks; this only encodes).
 pub const fn rbar(base: u32, region: u8) -> u32 {
@@ -240,6 +270,79 @@ pub unsafe fn disarm() {
     FENCE_ARMED.store(false, Ordering::Relaxed);
 }
 
+/// Program the app layout: `data_len` bytes at `base`, read-write and never executed, with
+/// the first `code_len` of them read-only and executable over it. Both lengths must be
+/// powers of two of at least 32, and `base` aligned to `data_len` (which covers
+/// `code_len`'s alignment too). The regions only bind while [`app_mode`] has the MPU on.
+///
+/// # Safety
+/// `base..base + data_len` must be the app's memory and nothing else, and no app may be
+/// running.
+pub unsafe fn set_app_regions(base: u32, code_len: u32, data_len: u32) -> Result<(), Error> {
+    if region_count() <= APP_CODE_REGION {
+        return Err(Error::NoRegions);
+    }
+    let (Some(code), Some(data)) = (size_field(code_len), size_field(data_len)) else {
+        return Err(Error::Misaligned);
+    };
+    if code_len > data_len || !base.is_multiple_of(data_len) {
+        return Err(Error::Misaligned);
+    }
+    // SAFETY: the MPU registers exist (DREGION checked); the regions only restrict
+    // unprivileged access, and the caller says no app is running.
+    unsafe {
+        reg::write(MPU_RNR, APP_DATA_REGION as u32);
+        reg::write(MPU_RBAR, rbar(base, APP_DATA_REGION));
+        reg::write(MPU_RASR, rasr_app_data(data));
+        reg::write(MPU_RNR, APP_CODE_REGION as u32);
+        reg::write(MPU_RBAR, rbar(base, APP_CODE_REGION));
+        reg::write(MPU_RASR, rasr_app_code(code));
+        barrier();
+    }
+    Ok(())
+}
+
+/// Turn the MPU on for an app (`true`) -- the default map for privileged code, only the
+/// app regions for unprivileged -- or back to what the firmware has otherwise (`false`):
+/// on with the fence if it is armed, off if not.
+///
+/// Called from handler mode, at every change of thread privilege, so it is two stores and
+/// the barriers.
+///
+/// # Safety
+/// [`set_app_regions`] must have programmed the app's regions before `true`: with the MPU
+/// on and no region, unprivileged code can reach nothing, which is safe, but an app
+/// region left over from another app would be wrong.
+#[inline(always)]
+pub unsafe fn app_mode(on: bool) {
+    let ctrl = if on || fence_armed() {
+        CTRL_ENABLE | CTRL_PRIVDEFENA
+    } else {
+        0
+    };
+    // SAFETY: a single store to a core register; privileged code keeps the default map
+    // either way.
+    unsafe {
+        reg::write(MPU_CTRL, ctrl);
+        barrier();
+    }
+}
+
+/// Route MemManage, BusFault and UsageFault to their own handlers instead of HardFault, so
+/// a fault in an app can end the app. `SHCSR` bits 16, 17, 18. Source: ARMv7-M ARM
+/// §B3.2.13 [C]
+///
+/// # Safety
+/// The image must define all three handlers, and each must end the app or never return
+/// into the faulting context.
+pub unsafe fn enable_app_faults() {
+    // SAFETY: read-modify-write of SHCSR, a core register.
+    unsafe {
+        reg::set_bits(SHCSR, SHCSR_MEMFAULTENA | (1 << 17) | (1 << 18));
+        barrier();
+    }
+}
+
 /// Route MemManage faults to the `MemoryManagement` handler.
 ///
 /// With this clear the fault escalates to HardFault instead, which in this firmware ends
@@ -288,6 +391,25 @@ mod tests {
         // static.
         assert_eq!(guard_floor(0x2000_0021, 0), 0x2000_0040);
         assert_eq!(guard_floor(0x2000_003F, 0), 0x2000_0040);
+    }
+
+    #[test]
+    fn app_code_is_read_and_execute_for_the_app_and_writable_only_by_the_firmware() {
+        let r = rasr_app_code(size_field(64 * 1024).unwrap());
+        assert_eq!(r & RASR_XN, 0, "code must be executable");
+        assert_eq!((r >> 24) & 0b111, 0b010, "privileged RW, unprivileged RO");
+        assert_eq!((r >> RASR_SIZE_SHIFT) & 0x1F, 15, "64 KiB is SIZE 15");
+        assert_eq!(r & RASR_ENABLE, RASR_ENABLE);
+    }
+
+    #[test]
+    fn app_data_is_read_write_for_everyone_and_never_executed() {
+        let r = rasr_app_data(size_field(256 * 1024).unwrap());
+        assert_eq!(r & RASR_XN, RASR_XN, "data must never execute");
+        assert_eq!((r >> 24) & 0b111, 0b011, "full access");
+        assert_eq!((r >> RASR_SIZE_SHIFT) & 0x1F, 17, "256 KiB is SIZE 17");
+        // Same memory type as the default map gives SRAM: TEX 001, C, B, not shared.
+        assert_eq!((r >> 16) & 0x3F, 0b001_011);
     }
 
     #[test]

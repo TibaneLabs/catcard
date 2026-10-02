@@ -175,6 +175,22 @@ pub enum Opcode {
     ///
     /// **Bench only** (`usb-trng-capture`, stripped by `SHIP=1`). See `docs/USB.md`.
     DebugTrng = 0x0035,
+    /// Write bytes into the app area: `[u32 offset][bytes]`. Refused while an app runs or
+    /// waits to. See docs/APPS.md.
+    ///
+    /// **Bench only** (`usb-debug-mem`).
+    DebugAppWrite = 0x0036,
+    /// Run the app now in the app area: `[u32 arg]`. The menu loop runs it on the UI
+    /// task; this only queues it. Poll [`Opcode::DebugAppStatus`] for the outcome.
+    ///
+    /// **Bench only** (`usb-debug-mem`).
+    DebugAppRun = 0x0037,
+    /// How the last app run went: `[u8 state][u8 kind][i32 code][u32 pc][u32 cfsr]
+    /// [u32 addr]`. `state` 0 idle, 1 pending, 2 running, 3 done; `kind` 0 exit (code), 1
+    /// fault (pc, cfsr, addr), 2 refused (code is the reason).
+    ///
+    /// **Bench only** (`usb-debug-mem`).
+    DebugAppStatus = 0x0038,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -303,6 +319,9 @@ impl Opcode {
             0x0033 => Opcode::DebugSd,
             0x0034 => Opcode::DebugSdRaw,
             0x0035 => Opcode::DebugTrng,
+            0x0036 => Opcode::DebugAppWrite,
+            0x0037 => Opcode::DebugAppRun,
+            0x0038 => Opcode::DebugAppStatus,
             _ => return None,
         })
     }

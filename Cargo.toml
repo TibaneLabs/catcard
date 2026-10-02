@@ -1,7 +1,10 @@
 [workspace]
+# Apps are thumb-only binaries with their own workspace (docs/APPS.md).
+exclude = ["apps"]
 resolver = "2"
 members = [
     "crates/catcard-alloc",
+    "crates/catcard-app",
     "crates/catcard-backup",
     "crates/catcard-bbqr",
     "crates/catcard-bcur",

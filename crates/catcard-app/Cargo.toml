@@ -1,0 +1,9 @@
+[package]
+name = "catcard-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The app side of CatCard's kernel/app split: entry point, services, panic (docs/APPS.md)."
+
+[dependencies]

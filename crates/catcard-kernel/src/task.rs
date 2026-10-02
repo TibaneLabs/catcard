@@ -37,6 +37,10 @@ struct Tcb {
     lo: *mut u32,
     len: usize,
     name: &'static str,
+    /// Whether this task was running unprivileged -- an app -- when it was switched out.
+    /// Only kept once an app has run ([`crate::app`]); until then every task is privileged
+    /// and the switch does not touch `CONTROL`.
+    unpriv: bool,
 }
 
 static mut TASKS: [Option<Tcb>; MAX_TASKS] = [const { None }; MAX_TASKS];
@@ -118,6 +122,7 @@ pub unsafe fn spawn(
         lo,
         len,
         name,
+        unpriv: false,
     });
     *count += 1;
     Ok(TaskId(id))
@@ -166,6 +171,12 @@ pub(crate) fn switch(sp: u32) -> u32 {
             crate::overflow();
         }
         t.sp = sp;
+        // `CONTROL.nPRIV` belongs to thread mode, not to a task: whoever runs next gets
+        // whatever was last written. Once an app exists, each task's own goes with it.
+        if crate::app::seen() {
+            t.unpriv = cortex_m::register::control::read().npriv()
+                == cortex_m::register::control::Npriv::Unprivileged;
+        }
         // The switch pushed r4-r11 then EXC_RETURN, so EXC_RETURN sits eight words above
         // `sp` whether or not FP registers were stacked beneath it. Bit 4 clear means
         // this task had an extended frame and `s16-s31` were just saved.
@@ -190,6 +201,9 @@ pub(crate) fn switch(sp: u32) -> u32 {
         Some(t) => {
             if checks && !guard_intact(t) {
                 crate::overflow();
+            }
+            if crate::app::seen() {
+                crate::app::set_thread_unprivileged(t.unpriv);
             }
             t.sp
         }

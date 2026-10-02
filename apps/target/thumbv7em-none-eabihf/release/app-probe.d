@@ -1,0 +1,1 @@
+/Users/magicaltux/projects/coldcard/catcard/apps/target/thumbv7em-none-eabihf/release/app-probe: /Users/magicaltux/projects/coldcard/catcard/apps/probe/src/main.rs /Users/magicaltux/projects/coldcard/catcard/crates/catcard-app/build.rs /Users/magicaltux/projects/coldcard/catcard/crates/catcard-app/link.x /Users/magicaltux/projects/coldcard/catcard/crates/catcard-app/src/lib.rs

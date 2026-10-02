@@ -1,0 +1,8 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# `link.x` comes from catcard-app's build script (it puts its directory on the search
+# path). Apps are not the firmware, so the reproducibility concerns behind the main
+# workspace's no-rustflags rule do not apply here.
+rustflags = ["-C", "link-arg=-Tlink.x"]

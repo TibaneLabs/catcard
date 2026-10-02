@@ -28,6 +28,9 @@ use cortex_m_rt::entry;
 // module docs there, and `Vec::try_reserve_exact` at the call sites.
 extern crate alloc;
 
+/// Callgates that draw or do not return, each behind the display backstop.
+/// Apps: unprivileged code run from the spare RAM (docs/APPS.md).
+mod apps;
 /// Decoded colour icons, kept between frames.
 #[cfg(feature = "board-q1")]
 mod artcache;
@@ -67,7 +70,6 @@ mod filemgmt;
 mod flappy;
 #[cfg(feature = "games")]
 mod game;
-/// Callgates that draw or do not return, each behind the display backstop.
 mod gatecall;
 /// Debug -> Bootloader replies: the raw return of each "0 is success" callgate.
 mod gatecheck;

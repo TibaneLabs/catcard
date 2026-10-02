@@ -419,24 +419,34 @@ fn claim_spare() -> bool {
         Spare::None => return false,
         Spare::Untried => {}
     }
+    // The heap gets the spare RAM around the app area, never the area itself
+    // (`apps::heap_parts`): an app is loaded there by address, and a heap block inside it
+    // would be overwritten by the next one.
     let outcome = match catcard_board::BOARD.memory.spare_ram {
-        Some(spare) if looks_like_memory(spare) => {
-            with(|heap| {
-                // SAFETY: the bank is real (just checked), word-aligned, outside every
-                // linked section, below what the bootloader reserves, and added once --
-                // `SPARE` makes sure of the last part.
-                unsafe { heap.add_region(spare.base as *mut u8, spare.len as usize) };
-            });
-            crate::catlog!(
-                "heap: +{} bytes of spare RAM at {:#010x}",
-                spare.len,
-                spare.base
-            );
-            Spare::Added
-        }
         Some(spare) => {
-            crate::catlog!("heap: spare RAM at {:#010x} did not answer", spare.base);
-            Spare::None
+            let mut added = false;
+            for part in crate::apps::heap_parts(spare) {
+                if part.len < 4096 {
+                    continue;
+                }
+                if !looks_like_memory(part) {
+                    crate::catlog!("heap: spare RAM at {:#010x} did not answer", part.base);
+                    continue;
+                }
+                with(|heap| {
+                    // SAFETY: the bank is real (just checked), word-aligned, outside every
+                    // linked section and the app area, below what the bootloader reserves,
+                    // and added once -- `SPARE` makes sure of the last part.
+                    unsafe { heap.add_region(part.base as *mut u8, part.len as usize) };
+                });
+                crate::catlog!(
+                    "heap: +{} bytes of spare RAM at {:#010x}",
+                    part.len,
+                    part.base
+                );
+                added = true;
+            }
+            if added { Spare::Added } else { Spare::None }
         }
         None => Spare::None,
     };
@@ -454,7 +464,7 @@ fn claim_spare() -> bool {
 /// two probes collide, and the second pass sees a word it did not write. The last word
 /// of the bank is always one of them, because a short bank is the case that would
 /// otherwise corrupt whatever it wraps onto.
-fn looks_like_memory(spare: catcard_board::memory::SpareRam) -> bool {
+pub(crate) fn looks_like_memory(spare: catcard_board::memory::SpareRam) -> bool {
     /// Far enough apart to land in different banks and different 64 KiB pages, and few
     /// enough that the whole check is a few dozen instructions.
     const STEP: u32 = 32 * 1024;

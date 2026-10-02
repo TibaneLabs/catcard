@@ -65,7 +65,7 @@ CHAINS   = $(if $(MULTICHAIN),$(comma)multichain,)
 
 # The firmware ELF has one path, so a build must be packaged before the next overwrites it.
 .NOTPARALLEL:
-.PHONY: all mk3 mk4-mk5 q1 test lint clean
+.PHONY: all mk3 mk4-mk5 q1 test lint clean apps
 
 all: mk3 mk4-mk5 q1
 
@@ -79,6 +79,11 @@ mk4-mk5:
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board mk5 $(VER) --hw-compat mk4,mk5 \
 	  --bin $(OUT)/catcard-mk4-mk5.bin --dfu $(OUT)/catcard-mk4-mk5.dfu
+
+# Apps (docs/APPS.md): thumb-only binaries in their own workspace under apps/, linked to
+# run in the app area. Bench use for now: tools/usbclient.py hid --run-app <elf> [arg].
+apps:
+	cd apps && $(CARGO) build --release
 
 q1:
 	$(FW) $(NODEF) --features board-q1$(CHAINS)

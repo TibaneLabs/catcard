@@ -694,6 +694,81 @@ def fetch_log(s):
     return bytes(out), total, wrapped
 
 
+# --- apps over USB (docs/APPS.md), bench builds only ---
+#
+# The image is written into the app area a frame at a time, then queued; the menu loop
+# runs it on the UI task, and DebugAppStatus says how it ended.
+
+DEBUG_APP_WRITE, DEBUG_APP_RUN, DEBUG_APP_STATUS = 0x0036, 0x0037, 0x0038
+APP_AREA = 0x2004_0000
+APP_STATES = {0: "idle", 1: "pending", 2: "running", 3: "done"}
+APP_REFUSED = ["NoArena", "BadMagic", "BadVersion", "BadLayout", "WrongBuild", "Mpu"]
+
+
+def elf_segments(path):
+    """The loadable bytes of a 32-bit little-endian ELF: [(address, bytes)], file-backed
+    parts only (`.bss` is zeroed by the loader)."""
+    data = open(path, "rb").read()
+    if data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
+        raise SystemExit(f"{path}: not a 32-bit little-endian ELF")
+    phoff, = struct.unpack_from("<I", data, 0x1C)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x2A)
+    out = []
+    for i in range(phnum):
+        p_type, p_offset, _vaddr, p_paddr, p_filesz = struct.unpack_from(
+            "<IIIII", data, phoff + i * phentsize)
+        if p_type == 1 and p_filesz:  # PT_LOAD
+            out.append((p_paddr, data[p_offset:p_offset + p_filesz]))
+    return out
+
+
+def run_app(s, path, arg=0, timeout=60):
+    """Load the app at `path` (an ELF linked with catcard-app's link.x) and run it.
+
+    Returns (state, kind, code, pc, cfsr, addr) from the final status."""
+    per = 56 - 4
+    total = 0
+    t0 = time.time()
+    for addr, blob in elf_segments(path):
+        off = addr - APP_AREA
+        if off < 0:
+            raise SystemExit(f"segment at {addr:#x} is below the app area")
+        for at in range(0, len(blob), per):
+            chunk = blob[at:at + per]
+            st, _ = request(s, DEBUG_APP_WRITE, struct.pack("<I", off + at) + chunk)
+            if st != 0:
+                raise SystemExit(f"app write at +{off + at:#x}: {STATUS.get(st, st)}")
+        total += len(blob)
+    print(f"app       wrote {total} B in {time.time() - t0:.1f} s")
+    st, _ = request(s, DEBUG_APP_RUN, struct.pack("<I", arg))
+    if st != 0:
+        raise SystemExit(f"app run: {STATUS.get(st, st)}")
+    t0 = time.time()
+    while True:
+        st, body = request(s, DEBUG_APP_STATUS)
+        state = body[0] if body else 0
+        if state == 3 or time.time() - t0 > timeout:
+            break
+        time.sleep(0.2)
+    kind = body[1]
+    code, pc, cfsr, addr = struct.unpack("<iIII", body[2:18])
+    took = time.time() - t0
+    if state != 3:
+        print(f"app       still {APP_STATES.get(state, state)} after {timeout} s")
+    elif kind == 0:
+        print(f"app       exited {code} after {took:.1f} s")
+    elif kind == 1:
+        print(f"app       FAULT at pc {pc:#010x}, cfsr {cfsr:#010x}, addr {addr:#010x}")
+    else:
+        why = APP_REFUSED[code] if 0 <= code < len(APP_REFUSED) else code
+        print(f"app       refused: {why}")
+    text, _, _ = fetch_log(s)
+    for line in text.decode(errors="replace").splitlines()[-40:]:
+        if line.startswith(("app:", "apps:")):
+            print("  | " + line)
+    return state, kind, code, pc, cfsr, addr
+
+
 def print_log(s):
     text, total, wrapped = fetch_log(s)
     if total is None:
@@ -1321,6 +1396,11 @@ def main(path, image=None):
             print("  resp         " + " ".join(f"{w:08x}" for w in words))
             if data:
                 print(f"  data         {data.hex()}")
+        return 0
+
+    if "--run-app" in sys.argv:
+        a = arg_after("--run-app")
+        run_app(s, a[0], int(a[1], 0) if len(a) > 1 else 0)
         return 0
 
     if "--log" in sys.argv:
