@@ -220,8 +220,17 @@ mod trng;
 mod trngcap;
 /// Debug -> TRNG startup test: the SP 800-90B start-up test, run on demand.
 mod trngtest;
+/// Threshold signing (docs/TSS.md): TSS wallets, created together or split, over the
+/// SD card. mk4 and later: the mk3 has no flash for tsslib.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+mod tss;
 /// Bench: a DKLs keygen and signature on the device, timed (docs/TSS.md).
-#[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+#[cfg(all(
+    feature = "tss",
+    feature = "usb-debug-mem",
+    not(feature = "board-mk3"),
+    not(feature = "board-q1")
+))]
 mod tssbench;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]

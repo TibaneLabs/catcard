@@ -862,6 +862,29 @@ impl Files {
         file.sync(&mut self.vol).map_err(|_| MediumError)
     }
 
+    /// Call `f` with the name of each file in the volume's root (no leading `/`).
+    #[cfg(feature = "tss")]
+    pub(crate) fn each_root_file(&mut self, mut f: impl FnMut(&str)) -> Result<(), MediumError> {
+        let dir = self.vol.open_dir("/").map_err(|_| MediumError)?;
+        let mut it = self.vol.iter_dir(dir);
+        // Bounded by the directory, which the iterator ends; the count is a backstop
+        // against a damaged one that never does.
+        for _ in 0..1024 {
+            match it.next() {
+                Ok(Some(entry)) => {
+                    if !entry.is_dir()
+                        && let Some(name) = entry.name_str()
+                    {
+                        f(name);
+                    }
+                }
+                Ok(None) => return Ok(()),
+                Err(_) => return Err(MediumError),
+            }
+        }
+        Ok(())
+    }
+
     /// Remove `path`. Already gone is success.
     pub(crate) fn remove_file(&mut self, path: &str) -> Result<(), MediumError> {
         match self.vol.remove_file(path) {

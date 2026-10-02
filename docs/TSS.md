@@ -1,7 +1,10 @@
 # Threshold signing (TSS)
 
-Status: **protocol layer built, 2026-10-02** (`crates/catcard-tss`, host-tested; not yet
-wired into the firmware). Screens, SD/QR transport and settings storage are still to do.
+Status: **protocol layer built, 2026-10-02** (`crates/catcard-tss`, host-tested). **Stage 1
+screens built, 2026-10-03** (`crates/catcard-fw/src/tss/`, mk4/mk5/Q1 bench builds, not yet
+run on a device): create together, export, import, restore from shares, restore a
+created-together key, and the kept shares -- all over the SD card. Signing a PSBT and QR as
+a transport are stage 2. See "On the device" below.
 
 A wallet whose key is held in **shares** by several CatCards: any `t` of the `n` can sign
 together without the key ever being put back together, and `t` shares can also restore it.
@@ -124,6 +127,85 @@ before it is done.
   before a maximum `n` is fixed.
 - Boards: mk4, mk5, Q1. The mk3 has no flash left for it.
 
+## On the device (stage 1, 2026-10-03)
+
+Settings → **TSS wallets** (beside `Multisig`, docs/MENU.md) lists the shares kept here
+(`2-of-3 #2 1A2B3C4D`: t, n, member, fingerprint) and offers *Create together*, *Import a
+share*, *Split this wallet* (the export), *Restore from shares* and *What is this?*. A kept
+share opens to *Details* (n, t, member, origin, three receive addresses, the xpub, a
+watch-only descriptor), *Descriptor to card*, *Copy share to card*, *Restore the whole key*
+(created-together only) and *Delete this share*. On a blank device, Import → **TSS shares**
+is *Restore from shares*.
+
+- **Create together.** Member 1 picks n and t (the shapes `can_create_together` refuses
+  are refused with "too many needed: a few could bias the key"; fewer than 3 members
+  with "2-of-3 is the usual minimum") and starts a session: its id is from the UI DRBG, its
+  folder `TSS/<id>/` gets the round-0 file and `invite.txt` (n and t as text). The others
+  choose *Join*, pick the session from those on the card, and a member number not yet
+  taken. Then every device runs the same loop over the card, driven only by the session's
+  outbox and `awaiting()`: write what it has, read what it waits for, show the 8-word code
+  when every identity is in (and go on only on "the same on all"), and otherwise say
+  "Step k of 5. Pass the card to member m (waiting for members ...), then put it back
+  here." At the end each member keeps its share and shows the wallet's fingerprint, first
+  addresses, xpub and descriptor to compare across the devices. The session is in memory
+  only: leaving the screen abandons it.
+- **Split this wallet.** The words of the wallet in force (refused with a passphrase: the
+  shares carry the words alone), n and t (any `2 <= t <= n` the memory allows), native
+  SegWit / nested SegWit / legacy (and "Why not Taproot?"), the account number, then how
+  to protect the files. The account key is derived from the master in `keywork::run`, the
+  export runs in one masked region and is checked by recombining the first t Codex32 halves
+  before anything is written; then "Share i of n: insert its card, or keep this one" for
+  each file, `tss-<FP>-<i>of<n>.7z`.
+- **Share files** are 7-Zip archives of one stored file, as a backup is: AES-256 under a
+  password typed twice and stretched once per export (7-Zip's KDF, 2^19 rounds, a fresh
+  IV per file from the protocol DRBG), or -- asked twice, never the default -- in the
+  clear. A password per export rather than per file: the cards are kept apart, and one
+  stretch rather than n keeps the export to one wait.
+- **Import a share** takes a bundle (keeping its signing half) or a lone record (from
+  *Copy share to card*), checks the DKLs share decodes before keeping it, and refuses a
+  share already kept.
+- **Restore from shares** reads t bundles one card after another, using only their Codex32
+  halves (no DKLs decode, so no extra memory), recovers the words, shows the fingerprint
+  and word count, warns before replacing a stored wallet, and stores the words as the
+  seed-import path does.
+- **Restore the whole key** says twice -- an approval page, then "3 = yes" -- that the
+  device will hold the whole key, then gathers t records (the ones kept here, the rest from
+  cards), recombines them (`combine`) and stores the key as an XPRV. Its addresses are
+  then `m/0/*` and `m/1/*` of that XPRV, and the device says so.
+
+### Storage
+
+Each kept share is its own file in the settings volume, `/tss-<16 hex>.ts`
+(`catcard_settings::tss`): `"CTSe" ‖ iv ‖ HMAC tag ‖ AES-256-CTR(record)`, encrypt-then-MAC
+as the FIDO passkey file is, under keys made by HMAC from the **root wallet's settings key**
+(whichever wallet is in force). The name is an HMAC of the wallet key and member number, so
+it says nothing without the key, and a file of another wallet is skipped. A device with no
+stored wallet keeps no shares (its settings key would be all zeros). Listing and showing a
+share read only the record's fixed header; nothing decodes the DKLs half to show it.
+
+### Memory
+
+tsslib's key save format costs far more heap than the key: measured on the host with
+32-bit pointers (wasm32, counting allocator, 2026-10-02), encoding one member's key peaks
+at 116 / 231 / 445 / 462 KB for 2 / 3 / 4 / 5 members, decoding at 88 / 150 / 213 /
+276 KB; a DKG member's own rounds peak at 118 KB (2-of-3). The heap is 216 KB in three
+pieces, so every flow that touches a DKLs key borrows the 256 KB app area for its duration
+(`crate::heap::borrow_app_area`: apps refuse to start meanwhile, and on return every free
+heap byte is wiped -- which also clears what tsslib freed without wiping), then checks the
+measured need against what is free and offers only the `n` that fits. In practice **at most
+3 members** on the device today: 2-of-3 create together, 2-of-2 / 2-of-3 / 3-of-3 export.
+Larger shapes want tsslib's encode and decode to stop building the whole JSON document.
+
+### Flash
+
+The screens bring in all of catcard-tss and tsslib's DKLs parties (a session dispatches over
+keygen and both signing kinds) and serde_json's parser: about 200 KB at `opt-level = "z"`.
+To fit, the workspace builds `tsslib`, `catcard-tss` and `serde_json` at `"z"` on every
+board (purecrypto, which does the heavy arithmetic, stays at `"s"`; the bench times above
+were at `"s"` and want re-measuring), and the Q1 image leaves out the `DebugTssBench`
+bench (mk4/mk5 keep it). Images (dev builds): mk4/mk5 1,208,320 → 1,419,264 bytes, Q1
+1,250,816 → 1,440,256 bytes of a 1,441,792-byte ceiling -- **the Q1 has 1.5 KB left**.
+
 ## Measured on an mk5 (2026-10-02, `usbclient.py --tss-bench`)
 
 Both parties of a 2-member wallet in one process, mk4/mk5 image at `opt-level = "s"`:
@@ -169,9 +251,15 @@ adds 61 bytes and the 48-character Codex32 string.
 
 ## Open
 
-- Heap per member with one party per device: the bench above holds every party at once.
+- ~~Heap per member with one party per device~~ — measured on the host (2026-10-02, "On
+  the device / Memory"): tsslib's key encode, not the protocol, sets the limit, at 3
+  members today. Wants checking on a device.
 - Maximum `n` given the record sizes above (settings space), and QR part counts for the
   signing unicasts (12-35 KB per input per peer).
+- The Q1's flash: 1.5 KB left with the TSS screens in (see "Flash").
+- An exported share's xpub carries a zero parent fingerprint: the record does not keep the
+  account's parent. The key, chain code and addresses are the account's; the xpub text
+  differs from the one the whole wallet exports.
 - ~~Plain or checked signing by default (`SignMode`)~~ — settled (2026-10-02): checked is
   the default (`SignMode::default()`). It costs twice the signing unicasts and the work, and
   catches one form of a selective-failure attack (see the crate docs); `Plain` stays
@@ -188,4 +276,5 @@ adds 61 bytes and the 48-character Codex32 string.
   (2026-10-02): *Create together* refuses those shapes (2-of-2, 3-of-3, 3-of-4...;
   `catcard_tss::can_create_together`). 2-of-3 is the expected minimum and is not affected.
   Export splits an existing key, so it keeps any `2 <= t <= n`.
-- Encryption of share files on SD (a password per file, or none and the card is the secret).
+- ~~Encryption of share files on SD~~ — settled (2026-10-03): a 7-Zip archive under a
+  password per export, as a backup is, or in the clear when the owner insists twice.

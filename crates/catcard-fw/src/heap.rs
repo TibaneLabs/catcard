@@ -455,6 +455,65 @@ fn claim_spare() -> bool {
     outcome == Spare::Added
 }
 
+/// The app area, lent to the heap for one large job: see [`borrow_app_area`].
+///
+/// Dropping it wipes every free byte of the heap -- what the job freed without wiping
+/// is gone with it -- and takes the area back for the apps. If something the job did not
+/// own still sits in the area, it stays the heap's (and the apps refuse to start) until
+/// the next restart, which is logged.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub struct AppArea {
+    base: u32,
+    len: u32,
+}
+
+/// Lend the app area to the heap, for work that needs more memory than the heap has: the
+/// threshold-signing screens (`crate::tss`), whose library allocates a few hundred
+/// kilobytes at its peak.
+///
+/// `None` when the board has no area, an app is running or waiting to, or the area is
+/// already lent. While the lease lives, every way into the area (`crate::apps`) refuses.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub fn borrow_app_area() -> Option<AppArea> {
+    let (base, len) = crate::apps::ARENA?;
+    if !crate::apps::lend() {
+        return None;
+    }
+    // The banks beside the area first, so the area joins them rather than the reverse.
+    claim_spare();
+    with(|heap| {
+        // SAFETY: the area is real memory (`apps::lend` probed it), word-aligned, outside
+        // every linked section and the spare parts already added, and no app can touch it
+        // while it is lent.
+        unsafe { heap.add_region(base as *mut u8, len as usize) };
+    });
+    crate::catlog!("heap: +{} bytes of app area lent", len);
+    Some(AppArea { base, len })
+}
+
+/// The heap's free space, and its largest block, right now.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub fn free() -> (usize, usize) {
+    with(|heap| (heap.size() - heap.used(), heap.largest_free()))
+}
+
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+impl Drop for AppArea {
+    fn drop(&mut self) {
+        let back = with(|heap| {
+            heap.wipe_free();
+            // SAFETY: exactly the region `borrow_app_area` added.
+            unsafe { heap.remove_region(self.base as *mut u8, self.len as usize) }
+        });
+        if back {
+            crate::apps::give_back();
+            crate::catlog!("heap: app area returned");
+        } else {
+            crate::catlog!("heap: app area still in use; apps wait for a restart");
+        }
+    }
+}
+
 /// Whether a bank really holds what is written to it, before any of it is handed out.
 ///
 /// A bus fault is not what this catches -- nothing in software can. What it catches is

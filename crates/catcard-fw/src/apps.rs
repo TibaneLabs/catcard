@@ -162,8 +162,34 @@ fn layout(base: u32, len: u32) -> Result<Layout, Refused> {
 /// Whether the area has been probed and handed over. 0 untried, 1 claimed, 2 not memory.
 static CLAIMED: AtomicU8 = AtomicU8::new(0);
 
+/// Whether the area is lent to the heap (`crate::heap::borrow_app_area`). While it is,
+/// [`claim`] says no, and with it every way an app gets into the area: an upload, an
+/// unpack, a run.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+static LENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Lend the area to the heap. False if an app is running or waiting to, the area is
+/// already lent, or it is not memory.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub fn lend() -> bool {
+    if matches!(state(), State::Pending | State::Running) || !claim() {
+        return false;
+    }
+    !LENT.swap(true, Ordering::AcqRel)
+}
+
+/// The heap has the area back: apps may use it again.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub fn give_back() {
+    LENT.store(false, Ordering::Release);
+}
+
 /// Probe the area once and keep it. False on a board with none, or if it did not answer.
 pub fn claim() -> bool {
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if LENT.load(Ordering::Acquire) {
+        return false;
+    }
     match CLAIMED.load(Ordering::Relaxed) {
         1 => return true,
         2 => return false,
@@ -192,18 +218,25 @@ pub fn write(offset: u32, bytes: &[u8]) -> bool {
         return false;
     };
     if busy
-        || !claim()
         || offset
             .checked_add(bytes.len() as u32)
             .is_none_or(|e| e > len)
     {
         return false;
     }
-    for (i, b) in bytes.iter().enumerate() {
-        // SAFETY: inside the area, which nothing else uses while no app runs.
-        unsafe { ((base + offset + i as u32) as *mut u8).write_volatile(*b) };
-    }
-    true
+    // Checked and written with interrupts masked, so the area cannot be lent to the heap
+    // (`lend`, on the UI task) between the check and the last byte.
+    cortex_m::interrupt::free(|_| {
+        if !claim() {
+            return false;
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            // SAFETY: inside the area, which nothing else uses while no app runs and it
+            // is not lent.
+            unsafe { ((base + offset + i as u32) as *mut u8).write_volatile(*b) };
+        }
+        true
+    })
 }
 
 /// Where a USB-loaded app is.

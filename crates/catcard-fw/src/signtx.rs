@@ -355,7 +355,7 @@ pub(crate) fn read_source_file(
 ///
 /// Generic over the backing driver so the card and the Virtual Disk share the one read
 /// loop; the size cap is `buf`, which on a PSRAM board is a half of the signing lease.
-fn read_file<D: catcard_sd::fat::SectorDriver>(
+pub(crate) fn read_file<D: catcard_sd::fat::SectorDriver>(
     vol: &mut catcard_sd::AnyVolume<D, 512>,
     path: &str,
     buf: &mut [u8],

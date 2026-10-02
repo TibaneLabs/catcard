@@ -1,0 +1,341 @@
+//! Shares coming in: one taken into this device to sign with, `t` of a split put back
+//! into its words, `t` of a created-together wallet put back into its key.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use catcard_callgate::Callgate;
+use catcard_settings::tss::{self as fmt, FileKey, Summary};
+use catcard_tss::ShareRecord;
+use core::fmt::Write as _;
+use zeroize::{Zeroize as _, Zeroizing};
+
+use super::store::{self, Kept};
+use super::{Buf, Room, Work, approve, card, describe, hex4, say, view};
+use crate::menu::{self, Line};
+use crate::ui::Ui;
+
+/// The record a share file holds: the whole of a lone record, or a bundle's signing half.
+fn record_of(file: &[u8]) -> Option<&[u8]> {
+    if let Some(parts) = fmt::bundle_parts(file) {
+        return Some(parts.record);
+    }
+    fmt::summary(file).map(|_| file)
+}
+
+/// Import a share: read a share file and keep its record, to sign with.
+#[inline(never)]
+pub(super) fn import(ui: &mut Ui<'_>, key: &FileKey) {
+    const HEAD: &str = "Import a share";
+    let Some(_room) = Room::take(ui, HEAD) else {
+        return;
+    };
+    let Some(mut file) = card::read_share(ui, HEAD) else {
+        return;
+    };
+    let bytes = file.as_slice();
+    let Some(record) = record_of(bytes) else {
+        return say(ui, HEAD, "not a TSS share", "");
+    };
+    let Some(s) = fmt::summary(record) else {
+        return say(ui, HEAD, "not a TSS share", "");
+    };
+    if store::holds(key, &s) {
+        return say(ui, HEAD, "this share is", "kept here already");
+    }
+    let mut main: Line = Line::new();
+    let _ = write!(main, "Member {} of {}, {} needed", s.member, s.n, s.t);
+    let wallet = view::origin_line(&s);
+    if !approve(
+        ui,
+        "Keep this share?",
+        &main,
+        &[wallet.as_str(), "It is sealed under this device's wallet."],
+        "keep",
+        "back",
+    ) {
+        return;
+    }
+    if !Room::fits(ui, HEAD, Work::Decode, s.n, 2 * record.len()) {
+        return;
+    }
+    // The secret half is checked before it is kept: a share that will not sign is
+    // refused now, not when the others are waiting for it.
+    let mut busy = Some(menu::blocking_screen(ui.panel, HEAD, "checking the share"));
+    let checked = crate::keywork::run(|kw| ShareRecord::from_bytes(record, kw).map(|_| ()));
+    busy.take();
+    if let Err(e) = checked {
+        return say(ui, HEAD, "refused:", describe(&e));
+    }
+    match store::save(ui, key, record) {
+        Ok(()) => say(ui, HEAD, "share kept", "on this device"),
+        Err(why) => say(ui, HEAD, "not kept:", why),
+    }
+}
+
+/// The blank device's Import -> TSS shares: the words back from a split's share files.
+pub(crate) fn restore_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    restore_words(gate, login, ui);
+}
+
+/// Restore from shares: read `t` share files of one split, one card after another, put
+/// the words back together from their Codex32 halves, and store them as the wallet.
+///
+/// Only the Codex32 halves are read (`catcard_settings::tss::bundle_parts`); nothing here
+/// decodes a DKLs share, so this needs no more memory than a Codex32 recovery.
+#[inline(never)]
+pub(super) fn restore_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const HEAD: &str = "Restore from shares";
+    let mut texts: Vec<Zeroizing<String>> = Vec::new();
+    let mut members: heapless::Vec<u8, 9> = heapless::Vec::new();
+    let mut needed: Option<u8> = None;
+    while needed.is_none_or(|t| texts.len() < usize::from(t)) {
+        let mut note: Line = Line::new();
+        match needed {
+            Some(t) => {
+                let _ = write!(note, "{} of {} shares in", texts.len(), t);
+            }
+            None => {
+                let _ = note.push_str("insert a card with a share");
+            }
+        }
+        match menu::pick_row(ui, HEAD, &note, &["Read a share file", "Stop"]) {
+            Some(0) => {}
+            _ => return,
+        }
+        let Some(mut file) = card::read_share(ui, HEAD) else {
+            continue;
+        };
+        let bytes = file.as_slice();
+        let Some(parts) = fmt::bundle_parts(bytes) else {
+            if fmt::summary(bytes).is_some_and(|s| s.created) {
+                say(
+                    ui,
+                    HEAD,
+                    "a created-together share",
+                    "has no words to restore",
+                );
+            } else {
+                say(ui, HEAD, "not a share file", "of a split wallet");
+            }
+            continue;
+        };
+        if needed.is_some_and(|t| t != parts.t) {
+            say(ui, HEAD, "that share is from", "another split");
+            continue;
+        }
+        if members.contains(&parts.member) {
+            say(ui, HEAD, "that share is", "in already");
+            continue;
+        }
+        needed = Some(parts.t);
+        let _ = members.push(parts.member);
+        texts.push(Zeroizing::new(String::from(parts.codex32)));
+        crate::catlog!("tss: restore, share {} in", parts.member);
+    }
+
+    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let got = crate::keywork::run(|kw| catcard_tss::restore_entropy_from_codex32(&refs, kw));
+    drop(refs);
+    drop(texts);
+    let entropy = match got {
+        Ok(e) => e,
+        Err(e) => return say(ui, HEAD, "cannot restore:", describe(&e)),
+    };
+    let Ok(mut stash) = catcard_callgate::pin::encode_bip39(&entropy) else {
+        return say(ui, HEAD, "cannot restore:", "not a length of words");
+    };
+    let busy = menu::blocking_screen(ui.panel, HEAD, "deriving the key");
+    let fp = crate::backup::fingerprint_of(&stash);
+    drop(busy);
+    stash.zeroize();
+    let Some(fp) = fp else {
+        return say(ui, HEAD, "cannot restore:", "not a usable key");
+    };
+    // Matching headers do not prove the shares belong together (BIP-93): the owner
+    // checks the fingerprint, and an address, before using the wallet.
+    let fps = hex4(fp);
+    let mut words: Line = Line::new();
+    let words_n = catcard_wallet::bip39::words_for_entropy(entropy.len()).unwrap_or(0);
+    let _ = write!(words, "{words_n} words: check an address");
+    menu::ask(ui.panel, "Store this wallet?", &fps, &words);
+    if !menu::confirmed(ui) {
+        return say(ui, HEAD, "cancelled", "nothing was stored");
+    }
+    if crate::key::stored_wallet(login) {
+        menu::ask(
+            ui.panel,
+            "Wallet exists",
+            "an import DESTROYS",
+            "the one stored now",
+        );
+        if !menu::confirmed(ui) {
+            return say(ui, HEAD, "cancelled", "nothing was stored");
+        }
+    }
+    if !menu::store_seed(gate, login, ui, &entropy) {
+        // It has already said why.
+        return;
+    }
+    crate::key::to_root();
+    #[cfg(feature = "board-q1")]
+    crate::pubkeys::note_fingerprint(Some(fp));
+    crate::catlog!("tss: wallet {} restored from shares", fps.as_str());
+    say(ui, "Wallet stored", &fps, "is the master now");
+}
+
+/// Put a created-together wallet's key back together from `t` shares -- this device's
+/// and others read from cards -- and store it as this device's wallet, an XPRV.
+///
+/// **This ends the "nobody holds the key" property**, and the owner is told so twice,
+/// in plain words, before anything is read (docs/TSS.md, "Restore a created-together
+/// wallet").
+#[inline(never)]
+pub(super) fn combine(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    key: &FileKey,
+    kept: &Kept,
+) {
+    const HEAD: &str = "Restore the key";
+    let s = &kept.summary;
+    if !s.created {
+        return say(ui, HEAD, "a split wallet comes", "back from its words");
+    }
+    let mut need: Line = Line::new();
+    let _ = write!(
+        need,
+        "It needs {} shares: this one, and the rest from cards.",
+        s.t
+    );
+    if !approve(
+        ui,
+        "Put the key together?",
+        "Then nobody holding a share is needed: this device alone holds the whole key.",
+        &[
+            need.as_str(),
+            "That ends what a TSS wallet is for, and cannot be undone.",
+        ],
+        "go on",
+        "back",
+    ) {
+        return;
+    }
+    menu::ask(
+        ui.panel,
+        "Are you sure?",
+        "this device will hold",
+        "the whole key: 3 = yes",
+    );
+    if !menu::confirmed_by_digit(ui, 3) {
+        return;
+    }
+    let Some(_room) = Room::take(ui, HEAD) else {
+        return;
+    };
+    let t = usize::from(s.t);
+    if !Room::fits(ui, HEAD, Work::Decode, s.n, 2 * t * super::record_len(s.n)) {
+        return;
+    }
+
+    // Every share of this wallet kept here, then the rest from cards.
+    let mut records: Vec<Buf> = Vec::new();
+    let mut members: heapless::Vec<u8, 9> = heapless::Vec::new();
+    if let Ok(all) = store::list(key) {
+        for k in all.iter().filter(|k| same_wallet(&k.summary, s)) {
+            if let Ok(r) = store::read(key, &k.path) {
+                let _ = members.push(k.summary.member);
+                records.push(r);
+            }
+        }
+    }
+    while records.len() < t {
+        let mut note: Line = Line::new();
+        let _ = write!(note, "{} of {} shares in", records.len(), t);
+        match menu::pick_row(ui, HEAD, &note, &["Read a share file", "Stop"]) {
+            Some(0) => {}
+            _ => return,
+        }
+        let Some(mut file) = card::read_share(ui, HEAD) else {
+            continue;
+        };
+        let Some(record) = record_of(file.as_slice()) else {
+            say(ui, HEAD, "not a TSS share", "");
+            continue;
+        };
+        match fmt::summary(record) {
+            Some(r) if !same_wallet(&r, s) => say(ui, HEAD, "a share of", "another wallet"),
+            Some(r) if members.contains(&r.member) => say(ui, HEAD, "that share is", "in already"),
+            Some(r) => match Buf::copy_of(record) {
+                Some(b) => {
+                    let _ = members.push(r.member);
+                    records.push(b);
+                }
+                None => return say(ui, HEAD, "no memory", "for the share"),
+            },
+            None => say(ui, HEAD, "not a TSS share", ""),
+        }
+    }
+
+    let mut busy = Some(menu::blocking_screen(
+        ui.panel,
+        HEAD,
+        "putting the key together",
+    ));
+    let joined = crate::keywork::run(|kw| {
+        let mut decoded = Vec::with_capacity(records.len());
+        for r in records.iter_mut() {
+            decoded.push(ShareRecord::from_bytes(r.as_slice(), kw)?);
+        }
+        let refs: Vec<&ShareRecord> = decoded.iter().collect();
+        let secret = catcard_tss::combine(&refs, kw)?;
+        Ok::<_, catcard_tss::Error>(catcard_callgate::pin::encode_xprv(
+            secret.chain_code(),
+            secret.private_key(),
+        ))
+    });
+    busy.take();
+    drop(records);
+    let mut stash = match joined {
+        Ok(x) => x,
+        Err(e) => return say(ui, HEAD, "cannot put it together:", describe(&e)),
+    };
+    let fps = hex4(s.fingerprint);
+    menu::ask(ui.panel, "Store as the wallet?", &fps, "an XPRV, no words");
+    if !menu::confirmed(ui) {
+        stash.zeroize();
+        return say(ui, HEAD, "cancelled", "nothing was stored");
+    }
+    if crate::key::stored_wallet(login) {
+        menu::ask(
+            ui.panel,
+            "Wallet exists",
+            "this DESTROYS",
+            "the one stored now",
+        );
+        if !menu::confirmed(ui) {
+            stash.zeroize();
+            return say(ui, HEAD, "cancelled", "nothing was stored");
+        }
+    }
+    let res = crate::backup::store_secret(gate, login, ui, &stash);
+    stash.zeroize();
+    match res {
+        Ok(()) => {
+            crate::key::to_root();
+            #[cfg(feature = "board-q1")]
+            crate::pubkeys::note_fingerprint(Some(s.fingerprint));
+            crate::catlog!(
+                "tss: created wallet {} put together and stored",
+                fps.as_str()
+            );
+            // Its addresses are the master's own 0/* and 1/*, not an account's.
+            say(ui, "Wallet stored", "its addresses are", "m/0/* and m/1/*");
+        }
+        Err(why) => say(ui, "Not stored", why, "any key to go back"),
+    }
+}
+
+fn same_wallet(a: &Summary, b: &Summary) -> bool {
+    a.joint_public == b.joint_public && a.chain_code == b.chain_code && a.n == b.n && a.t == b.t
+}

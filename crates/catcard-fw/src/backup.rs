@@ -988,7 +988,7 @@ pub(crate) fn load_temporary(ui: &mut Ui<'_>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Run the key derivation to the end, ticking the bar between slices.
-fn stretch(
+pub(crate) fn stretch(
     ui: &mut Ui<'_>,
     phrase: &str,
     head: &str,

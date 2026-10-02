@@ -235,6 +235,14 @@ enum Screen {
     /// The WIF store: individual private keys, listed, viewed, generated, imported and
     /// deleted, each able to sign a matching input. Needs the settings store.
     WifStore,
+    /// Settings -> TSS wallets: the threshold-signing shares this device keeps, and
+    /// making, splitting, taking in and restoring them (`crate::tss`).
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    Tss,
+    /// Import -> TSS shares on a blank device: a split wallet's words back from `t`
+    /// share files.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    ImportTss,
     /// Typing the nickname shown before the PIN prompt.
     Nickname,
     /// Copying the settings region to a card, before anything writes to it. Reads the
@@ -597,6 +605,10 @@ const SETTINGS_ITEMS: &[&str] = &[
     // than beside the one-shot tools. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
     // §SET "Multisig Wallets (has_secrets)" [C]
     "Multisig",
+    // Threshold-signing wallets, beside the other wallets shared between devices: the
+    // shares kept here and the ways to make one (`crate::tss`). Ours; stock has none.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    "TSS wallets",
     // The Single-Signer Spending Policy and, later, CCC. Stock keeps the drawer under
     // Advanced/Tools; ours is a setting, beside Multisig, and only in the root wallet
     // (`settings_items`), whose file the policy lives in. Needs the store: not on the mk3.
@@ -845,7 +857,19 @@ pub(crate) const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 /// menu of the blank device. Source: hw-reference/codex32-format.md §Device operations [C]
 /// Dispatched by name in [`step`], so appending another needs only a matching arm.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1 "Import Existing" [C]
-const IMPORT_ITEMS: &[&str] = &["Words", "Clone", "TAPSIGNER", "XPRV", "Seed XOR", "Codex32"];
+///
+/// "TSS shares" puts a split wallet's words back from its threshold-signing share files
+/// (`crate::tss`), beside the other ways of joining shares.
+const IMPORT_ITEMS: &[&str] = &[
+    "Words",
+    "Clone",
+    "TAPSIGNER",
+    "XPRV",
+    "Seed XOR",
+    "Codex32",
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    "TSS shares",
+];
 
 /// The tool drawer, stock's `Advanced/Tools`.
 ///
@@ -1303,7 +1327,12 @@ pub fn run(session: Session<'_>) -> ! {
         crate::rngread::serve(gate);
         crate::rngshare::publish(pool.as_deref());
         // The TSS bench runs here too, for the same reason: it needs the UI task's stack.
-        #[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+        #[cfg(all(
+            feature = "tss",
+            feature = "usb-debug-mem",
+            not(feature = "board-mk3"),
+            not(feature = "board-q1")
+        ))]
         crate::tssbench::serve(&mut ui);
         // An app sent over USB on a bench build runs here, on the UI task (docs/APPS.md).
         #[cfg(feature = "usb-debug-mem")]
@@ -1959,6 +1988,14 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::ScanQr => returns(|a| crate::qrscan::screen(a.gate, a.login, a.ui)),
         Screen::Multisig => returns(|a| crate::msimport::manage(a.gate, a.login, a.ui)),
         Screen::WifStore => returns(|a| crate::wifstore::manage(a.gate, a.login, a.ui)),
+        // Restoring from shares can store a wallet where there was another, or none.
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        Screen::Tss => reseeds(|a| {
+            let pool = a.pool.as_deref_mut();
+            crate::tss::screen(a.gate, a.login, a.ui, pool);
+        }),
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        Screen::ImportTss => reseeds(|a| crate::tss::restore_screen(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => returns(|a| crate::settings::backup_to_card(a.ui)),
         Screen::NickPreview => returns(|a| crate::settings::show_nickname_screen(a.ui)),
@@ -2214,10 +2251,14 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("XPRV")) => Screen::ImportXprv,
             (Key::Confirm, Some("Seed XOR")) => Screen::ImportXor,
             (Key::Confirm, Some("Codex32")) => Screen::ImportCodex32,
+            #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+            (Key::Confirm, Some("TSS shares")) => Screen::ImportTss,
             _ => Screen::ImportMenu,
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
             (Key::Confirm, Some("Multisig")) => Screen::Multisig,
+            #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+            (Key::Confirm, Some("TSS wallets")) => Screen::Tss,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Help")) => Screen::HelpSettings,
@@ -3164,6 +3205,9 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::NewSeed(_) | Screen::KeyNewSeed => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
         Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor | Screen::ImportCodex32 => {}
+        // Handled in `run`: each drives its own lists, files and progress.
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        Screen::Tss | Screen::ImportTss => {}
         // Handled in `run`: each drives its own file picker, key entry and progress.
         Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
         #[cfg(feature = "board-q1")]

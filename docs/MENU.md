@@ -43,7 +43,9 @@ or used for this session only), `XPRV` (stored as the master, in the stash's own
 shape), `Seed XOR` (joined, then offered for keeping) and `Codex32` (import, recover,
 generate or derive shares; a secret is stored or used for the session). Stock's
 `Restore Backup` row is `Utils` → `Backup` here, and its blank-device top-level `Codex32`
-menu is this row.
+menu is this row. On mk4/mk5/Q1 bench builds a seventh row, `TSS shares`, puts a split
+wallet's words back from `t` of its threshold-signing share files (docs/TSS.md), beside
+the other ways of joining shares; stock has no counterpart.
 
 ## Settings
 
@@ -79,6 +81,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | `Multisig` → `Trust policy` | `Trust PSBT?` | 🔀 own key `cat_mstrust`; verify / offer / trust |
 | `Multisig` → `Unsorted Multisig?` | `Unsorted Multisig?` | 🔀 own key `cat_msunsorted`; off by default, and a `multi()` wallet is refused at every import path while it is |
 | `Multisig` → `Full Address View?` | `Full Address View?` | 🔀 own key `cat_msfulladdr`; off by default, and the Address Explorer then shows a registered wallet's addresses as eight characters at each end |
+| `TSS wallets` (mk4/mk5/Q1, bench builds) → ‹each kept share› (`Details`, `Descriptor to card`, `Copy share to card`, `Restore the whole key` for a created-together wallet, `Delete this share`), `Create together`, `Import a share`, `Split this wallet`, `Restore from shares`, `What is this?` | — | 🔀 CatCard only (docs/TSS.md). Beside `Multisig` because it is the other kind of wallet held across devices, and a drawer of wallets with their details, like it; not under `Utils`, whose Q1 grid has no art for it. The shares are sealed under the stored (root) wallet's settings key whichever wallet is in force, so a blank device has no drawer, only Import → `TSS shares` |
 | — | `Skip Checks?` | not implemented |
 | `Idle timeout` | `Idle Timeout` (`idle_to`, `batt_to`, in seconds) | 🔀 own key `cat_idle`, in **minutes** -- a separate key rather than the same name in another unit; same off/1/2/5/15/30/60 range. Honoured by `crate::idle`, which logs out through the same callgate as the power button. On the Q1 it first asks `Log out` or `Power off on battery`: the second is stock's battery timeout -- 30 s / 60 s / 2 / 5 / 10 / 15 / 30 min / 1 h / 4 h / Never, default 10 min -- device-wide in the pre-login settings (`cat_bto`, seconds) so it runs at the PIN prompt too, held off while the scanner is mid-scan or a progress bar moved in the last minute, and powering off through the power button's path. A wallet's old `cat_bidle` is carried over once, at login, when no device value is set |
 | `Display units` | `Display Units` (`rz`) | 🔀 own key `cat_units` (`btc`/`mbtc`/`bits`/`sats`) rather than stock's decimal count; the rows show the same amount written four ways. Honoured by `crate::signtx::btc`, the only place that turns satoshis into text |

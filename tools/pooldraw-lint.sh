@@ -11,7 +11,10 @@
 #    Debug -> View TRNG Words; a Codex32 ms1 seed goes through its `gather_and_draw`),
 #    `crates/catcard-fw/src/seedxor.rs` (the noise parts of a random Seed XOR split, which
 #    become phrases of their own) and `crates/catcard-fw/src/codex32.rs` (a Codex32 split's
-#    identifier and its k-1 free shares, which are the whole of the split's secrecy).
+#    identifier and its k-1 free shares, which are the whole of the split's secrecy) and
+#    `crates/catcard-fw/src/tss/rand.rs` (threshold signing: a DKG member's share of the
+#    new key, an export's Codex32 noise and reshare, the session identity key and the
+#    seed of the session's protocol DRBG -- all seed-grade, docs/TSS.md "Randomness").
 #
 # 2. `spawn_drbg` -- one draw that seeds a DRBG, which cannot write back -- only in
 #    `crates/catcard-fw/src/session.rs` (the UI, protocol and USB DRBGs) and
@@ -30,9 +33,9 @@ draws=$(git grep --untracked -nE \
   '(\.draw_seed[[:space:]]*\(|EntropyPool::draw|[Pp]ool[[:alnum:]_]*[[:space:]]*\)?[[:space:]]*\.draw[[:space:]]*\(|\.draw[[:space:]]*\([[:space:]]*&mut)' \
   -- 'crates/catcard-fw/src' \
   ':!crates/catcard-fw/src/newseed.rs' ':!crates/catcard-fw/src/seedxor.rs' \
-  ':!crates/catcard-fw/src/codex32.rs' || true)
+  ':!crates/catcard-fw/src/codex32.rs' ':!crates/catcard-fw/src/tss/rand.rs' || true)
 if [ -n "$draws" ]; then
-  echo "pooldraw-lint: seed material is drawn from the pool only in newseed.rs, seedxor.rs and codex32.rs:"
+  echo "pooldraw-lint: seed material is drawn from the pool only in newseed.rs, seedxor.rs, codex32.rs and tss/rand.rs:"
   echo "$draws"
   fail=1
 fi

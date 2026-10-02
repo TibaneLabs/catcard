@@ -204,5 +204,21 @@ opt-level = "s"    # firmware is flash-bound, not compute-bound
 overflow-checks = true
 panic = "abort"
 
+# Threshold signing's protocol code, built for size. The TSS screens bring in all of
+# tsslib's DKLs parties (a session dispatches over keygen and both signing kinds),
+# catcard-tss and serde_json's parser: about 250 KB at "s", which took the mk4/mk5 image
+# past its ceiling. At "z" these three are about 50 KB smaller. Nothing on the boot path is
+# in them, and the heavy arithmetic -- EC multiplications, AES, hashing -- is purecrypto's,
+# which stays at "s". Measured 2026-10-03; the keygen and signing times in docs/TSS.md were
+# taken at "s" and want re-measuring on the device.
+[profile.release.package.tsslib]
+opt-level = "z"
+
+[profile.release.package.catcard-tss]
+opt-level = "z"
+
+[profile.release.package.serde_json]
+opt-level = "z"
+
 [profile.dev]
 opt-level = 1      # -O0 thumb builds do not fit comfortably and run too slowly

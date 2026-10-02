@@ -43,7 +43,7 @@ usb-trng-capture = []
 games = ["dep:app-games"]
 # Threshold signing (docs/TSS.md): tsslib's DKLs23. In bench builds for now, while it is
 # being built and measured; compiled in on mk4/mk5/Q1 only (the mk3 has no flash for it).
-tss = ["dep:tsslib"]
+tss = ["dep:tsslib", "dep:catcard-tss"]
 # Every chain rather than Bitcoin alone: Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto,
 # Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
 # Bitcoin-only build is the one whose image carries no other chain's parser at all --
@@ -79,6 +79,7 @@ board-q1 = [
 
 [dependencies]
 tsslib = { workspace = true, optional = true }
+catcard-tss = { workspace = true, optional = true }
 app-games = { path = "../../apps/games", features = ["linked"], optional = true }
 purecrypto = { workspace = true, features = ["hash"] }
 catcard-settings = { path = "../catcard-settings", default-features = false }
