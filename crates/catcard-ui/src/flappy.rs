@@ -107,6 +107,9 @@ impl Column {
     /// The pipe sprite has its lip at the top, so the lower pipe draws it as it is from the
     /// gap down, and the upper pipe draws it flipped from the gap up. A pipe longer than the
     /// sprite repeats its last row, which is plain body.
+    // Every pixel of every frame comes through here: `always`, or `opt-level = "z"` makes
+    // each one a call.
+    #[inline(always)]
     pub fn colour(&self, art: &Art<'_>, y: usize) -> u16 {
         if let Some((digit, dx)) = self.score
             && (SCORE_TOP..SCORE_TOP + SCORE_H).contains(&y)

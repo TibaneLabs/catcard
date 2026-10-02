@@ -24,6 +24,7 @@ pub struct Sprite {
 
 impl Sprite {
     /// The palette index at `(x, y)`, [`TRANSPARENT`] included, or `None` outside.
+    #[inline(always)]
     pub fn index(&self, art: &Art<'_>, x: usize, y: usize) -> Option<u8> {
         if x >= self.width as usize || y >= self.height as usize {
             return None;
@@ -35,6 +36,7 @@ impl Sprite {
     }
 
     /// The RGB565 colour at `(x, y)`, or `None` where it is transparent or outside.
+    #[inline(always)]
     pub fn at(&self, art: &Art<'_>, x: usize, y: usize) -> Option<u16> {
         match self.index(art, x, y)? {
             TRANSPARENT => None,

@@ -37,6 +37,7 @@ impl<const W: usize, const PAGES: usize, const N: usize> Framebuffer<W, PAGES, N
 
     /// Set or clear one pixel. Out-of-range coordinates are ignored, so drawing code
     /// can clip by simply drawing.
+    #[inline(always)]
     pub fn set(&mut self, x: usize, y: usize, on: bool) {
         if x >= W || y >= Self::HEIGHT {
             return;
@@ -50,6 +51,7 @@ impl<const W: usize, const PAGES: usize, const N: usize> Framebuffer<W, PAGES, N
         }
     }
 
+    #[inline(always)]
     pub fn get(&self, x: usize, y: usize) -> bool {
         if x >= W || y >= Self::HEIGHT {
             return false;

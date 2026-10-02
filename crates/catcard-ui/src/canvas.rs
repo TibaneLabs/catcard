@@ -67,9 +67,11 @@ impl<const W: usize, const P: usize, const N: usize> Canvas for Framebuffer<W, P
     fn height(&self) -> usize {
         P * 8
     }
+    #[inline(always)]
     fn put(&mut self, x: usize, y: usize, level: Level) {
         self.set(x, y, level >= 8);
     }
+    #[inline(always)]
     fn get(&self, x: usize, y: usize) -> Level {
         if Framebuffer::get(self, x, y) {
             INK
@@ -127,7 +129,9 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
     fn height(&self) -> usize {
         H
     }
-    #[inline]
+    // Per pixel: `always`, because at `opt-level = "z"` a plain hint is dropped and every
+    // pixel of every frame becomes a call.
+    #[inline(always)]
     fn put(&mut self, x: usize, y: usize, level: Level) {
         if x >= W || y >= H {
             return;
@@ -135,7 +139,7 @@ impl<const W: usize, const H: usize, const N: usize> Canvas for Gray4<W, H, N> {
         let (i, shift) = Self::at(x, y);
         self.buf[i] = (self.buf[i] & !(0x0F << shift)) | (level.min(INK) << shift);
     }
-    #[inline]
+    #[inline(always)]
     fn get(&self, x: usize, y: usize) -> Level {
         if x >= W || y >= H {
             return PAPER;
@@ -351,7 +355,7 @@ impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
             .saturating_sub(self.bottom)
     }
 
-    #[inline]
+    #[inline(always)]
     fn put(&mut self, x: usize, y: usize, level: Level) {
         // Clipped against the *inset* height, not the panel's: without this a widget
         // drawing one row past its canvas would land on the far side of the offset and
@@ -372,7 +376,7 @@ impl<C: Canvas + ?Sized> Canvas for Inset<'_, C> {
             .fill_rect(x, y + self.top, w, h.min(band - y), level);
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, x: usize, y: usize) -> Level {
         if y < self.height() {
             self.inner.get(x, y + self.top)

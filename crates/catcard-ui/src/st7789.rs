@@ -54,6 +54,7 @@ pub const WHITE: u16 = 0xFFFF;
 
 /// Pack red (5 bits), green (6 bits) and blue (5 bits) into RGB565. Bits beyond each
 /// component's width are dropped rather than bleeding into the next.
+#[inline(always)]
 pub const fn rgb565(r: u8, g: u8, b: u8) -> u16 {
     ((r as u16 & 0x1F) << 11) | ((g as u16 & 0x3F) << 5) | (b as u16 & 0x1F)
 }
