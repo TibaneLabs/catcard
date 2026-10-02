@@ -92,8 +92,12 @@ apps:
 APPS_DIR := apps/target/thumbv7em-none-eabihf/release
 Q1_APPS   = $(if $(SHIP),,--app flappy=$(APPS_DIR)/app-flappy)
 
+# The Q1 firmware is built for size (`opt-level = "z"`, about 200 KB smaller): its games are
+# apps now, compiled on their own, so nothing slow is left in the firmware's hot paths --
+# the per-pixel drawing is `#[inline(always)]`. Q1 only until the other boards have each
+# booted a "z" build: it changes the code on their boot path too.
 q1: $(if $(SHIP),,apps)
-	$(FW) $(NODEF) --features board-q1$(CHAINS)
+	CARGO_PROFILE_RELEASE_OPT_LEVEL=z $(FW) $(NODEF) --features board-q1$(CHAINS)
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board q1 $(VER) $(Q1_APPS) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 

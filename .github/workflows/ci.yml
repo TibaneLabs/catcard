@@ -91,6 +91,19 @@ jobs:
             feats="$feats,games"
             name="$name-games"
           fi
+          # The Q1 firmware is built for size and carries its games as apps (docs/APPS.md),
+          # as `make q1` does: other boards stay at the profile's "s" until each has booted
+          # a "z" build.
+          opt=s
+          apps=""
+          if [ "$board" = q1 ]; then
+            opt=z
+            if [ "${{ matrix.games }}" = true ]; then
+              apps="--app flappy=apps/target/thumbv7em-none-eabihf/release/app-flappy"
+            fi
+          fi
+          echo "opt=$opt" >> "$GITHUB_OUTPUT"
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
           echo "features=$feats" >> "$GITHUB_OUTPUT"
           echo "package=$pkg" >> "$GITHUB_OUTPUT"
           echo "compat=$compat" >> "$GITHUB_OUTPUT"
@@ -105,6 +118,8 @@ jobs:
             --no-default-features --features ${{ steps.shape.outputs.features }}
 
       - name: Build
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ steps.shape.outputs.opt }}
         run: |
           cargo build --release -p catcard-fw \
             --target thumbv7em-none-eabihf \
@@ -154,6 +169,14 @@ jobs:
       # The build only proves it links. This proves the image the bootloader would
       # actually see is well-formed: header at 0x3F80, 512-aligned, signature over the
       # double-SHA256 digest, hw_compat permitting this board.
+      # RUSTFLAGS is set for the whole workflow, which makes cargo ignore
+      # apps/.cargo/config.toml's rustflags, so the app layout is passed here too.
+      - name: Build apps
+        if: steps.shape.outputs.apps != ''
+        run: |
+          cd apps
+          RUSTFLAGS="$RUSTFLAGS -C link-arg=-Tlink.x" cargo build --release
+
       - name: Assemble, sign and verify the image
         run: |
           set -euo pipefail
@@ -161,7 +184,7 @@ jobs:
           cargo run --release -p catcard-image -- build \
             target/thumbv7em-none-eabihf/release/catcard-fw \
             --board ${{ steps.shape.outputs.package }} \
-            --version 0.0.1 ${{ steps.shape.outputs.compat }} \
+            --version 0.0.1 ${{ steps.shape.outputs.compat }} ${{ steps.shape.outputs.apps }} \
             --bin out/${{ steps.shape.outputs.name }}.bin \
             --dfu out/${{ steps.shape.outputs.name }}.dfu
           cargo run --release -p catcard-image -- verify \
