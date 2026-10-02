@@ -191,6 +191,12 @@ pub enum Opcode {
     ///
     /// **Bench only** (`usb-debug-mem`).
     DebugAppStatus = 0x0038,
+    /// The bootloader's raw returns from each read-only gate whose success value is 0, in
+    /// `gatecheck::encode`'s layout. Proof, before the callgate wrappers stop treating a
+    /// positive refusal as success.
+    ///
+    /// **Bench only** (`usb-debug-mem`).
+    DebugGateCheck = 0x0039,
     /// Install the image offered, once the user has approved it on the device.
     ///
     /// **Irreversible**: the device reboots and the bootloader overwrites the running
@@ -322,6 +328,7 @@ impl Opcode {
             0x0036 => Opcode::DebugAppWrite,
             0x0037 => Opcode::DebugAppRun,
             0x0038 => Opcode::DebugAppStatus,
+            0x0039 => Opcode::DebugGateCheck,
             _ => return None,
         })
     }

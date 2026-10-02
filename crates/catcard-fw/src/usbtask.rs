@@ -1065,6 +1065,20 @@ impl UsbTask {
                 }
                 self.begin_reply(Status::Ok, &body);
             }
+            #[cfg(feature = "usb-debug-mem")]
+            Some(Opcode::DebugGateCheck) => {
+                // SAFETY: discovering the gate reads its published entry; each call masks
+                // interrupts for its whole length, so the UI task cannot interleave one.
+                match unsafe { catcard_callgate::Callgate::discover(&catcard_board::BOARD) } {
+                    Ok(gate) => {
+                        let r = crate::gatecheck::collect(&gate);
+                        let mut body = [0u8; 96];
+                        let n = crate::gatecheck::encode(&r, &mut body);
+                        self.begin_reply(Status::Ok, &body[..n.min(body.len())]);
+                    }
+                    Err(_) => self.begin_reply(Status::BadRequest, &[]),
+                }
+            }
             #[cfg(not(feature = "usb-debug-mem"))]
             Some(
                 Opcode::DebugPeek
@@ -1074,7 +1088,8 @@ impl UsbTask {
                 | Opcode::DebugSdRaw
                 | Opcode::DebugAppWrite
                 | Opcode::DebugAppRun
-                | Opcode::DebugAppStatus,
+                | Opcode::DebugAppStatus
+                | Opcode::DebugGateCheck,
             ) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);
             }

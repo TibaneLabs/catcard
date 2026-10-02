@@ -1398,6 +1398,24 @@ def main(path, image=None):
                 print(f"  data         {data.hex()}")
         return 0
 
+    if "--gate-check" in sys.argv:
+        # The bootloader's raw returns from each "0 is success" gate (DebugGateCheck).
+        st, body = request(s, 0x0039)
+        if st != 0:
+            raise SystemExit(f"gate check: {STATUS.get(st, st)}")
+        show = lambda v: "-" if v == -2**31 else str(v)
+        rvs = struct.unpack_from("<4i", body, 0)
+        for name, v in zip(["0 version", "16 words", "19/0 bag", "21/0 min version"], rvs):
+            print(f"{name:<18}rv {show(v)}")
+        at = 16
+        for label in ("26/1 SE1", "26/2 SE2"):
+            rv, ln = [], []
+            for _ in range(8):
+                v, = struct.unpack_from("<i", body, at)
+                rv.append(show(v)); ln.append(str(body[at + 4])); at += 5
+            print(f"{label:<18}rv {' '.join(rv)}   len {' '.join(ln)}")
+        return 0
+
     if "--run-app" in sys.argv:
         a = arg_after("--run-app")
         run_app(s, a[0], int(a[1], 0) if len(a) > 1 else 0)
