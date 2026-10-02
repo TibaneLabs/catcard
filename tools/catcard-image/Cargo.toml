@@ -13,6 +13,8 @@ name = "catcard-image"
 path = "src/main.rs"
 
 [dependencies]
+# Packs apps into the image with the same library the device unpacks them with.
+minizlib = { workspace = true, features = ["compress"] }
 anyd.workspace = true
 catcard-board.workspace = true
 catcard-bbqr.workspace = true

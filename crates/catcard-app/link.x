@@ -32,7 +32,7 @@ SECTIONS
     LONG(__data_start)
     LONG(__data_end)
     LONG(__bss_end)
-    LONG(0)            /* kernel build ID: phase 2 */
+    LONG(1)            /* services ABI (catcard_app::ABI) */
   } > APP
 
   .text : { *(.text .text.*) } > APP

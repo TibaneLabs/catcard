@@ -87,10 +87,15 @@ mk4-mk5:
 apps:
 	cd apps && RUSTFLAGS="$(RUSTFLAGS) -C link-arg=-Tlink.x" $(CARGO) build --release
 
-q1:
+# Apps the Q1 image carries (docs/APPS.md). Flappy Cat is a game, and games are a default
+# feature that SHIP drops, so it goes in exactly when the firmware's games menu does.
+APPS_DIR := apps/target/thumbv7em-none-eabihf/release
+Q1_APPS   = $(if $(SHIP),,--app flappy=$(APPS_DIR)/app-flappy)
+
+q1: $(if $(SHIP),,apps)
 	$(FW) $(NODEF) --features board-q1$(CHAINS)
 	@mkdir -p $(OUT)
-	$(PACKAGE) --board q1 $(VER) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
+	$(PACKAGE) --board q1 $(VER) $(Q1_APPS) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
 
 # `catcard-kernel` is excluded for the same reason as `catcard-fw`: it is ARM-only --
 # the context switch is Cortex-M assembly and cortex-m's register access does not exist

@@ -15,6 +15,7 @@
 //!     --version 7.0.0 --dfu out/catcard-mk4.dfu
 //! ```
 
+mod apps;
 mod dfuse;
 mod elf;
 mod image;
@@ -63,6 +64,9 @@ enum Cmd {
         /// `YYYY-MM-DDTHH:MM:SS` UTC. Defaults to `SOURCE_DATE_EPOCH` or now.
         #[arg(long)]
         timestamp: Option<String>,
+        /// Carry an app in the image, compressed, as `NAME=ELF` (docs/APPS.md). Repeatable.
+        #[arg(long = "app", value_name = "NAME=ELF")]
+        apps: Vec<String>,
         /// Set the anti-downgrade high-water mark on install.
         ///
         /// IRREVERSIBLE on the device: images with an older timestamp stop being
@@ -173,8 +177,10 @@ fn main() -> Result<()> {
             timestamp,
             high_water,
             hw_compat,
+            apps,
         } => cmd_build(
             &elf, &board, &version, bin, dfu, key, pubkey_num, timestamp, high_water, hw_compat,
+            &apps,
         ),
         Cmd::Sign {
             bin,
@@ -230,6 +236,7 @@ fn cmd_build(
     timestamp: Option<String>,
     high_water: bool,
     hw_compat: Option<String>,
+    app_args: &[String],
 ) -> Result<()> {
     let board = find_board(board_name)?;
     if bin.is_none() && dfu.is_none() {
@@ -241,7 +248,40 @@ fn cmd_build(
         .with_context(|| format!("reading firmware ELF {}", elf_path.display()))?;
     let segments =
         elf::load_segments(&raw).with_context(|| format!("parsing {}", elf_path.display()))?;
-    let flat = elf::flatten(&segments, board.memory.firmware_base, image::FILL)?;
+    let mut flat = elf::flatten(&segments, board.memory.firmware_base, image::FILL)?;
+
+    if !app_args.is_empty() {
+        ensure!(
+            board.memory.spare_ram.is_some(),
+            "{} has no spare RAM to run apps in",
+            board.name
+        );
+        let mut list = Vec::new();
+        for a in app_args {
+            let (name, path) = a
+                .split_once('=')
+                .with_context(|| format!("--app {a:?}: expected NAME=ELF"))?;
+            let bytes = std::fs::read(path).with_context(|| format!("reading app ELF {path}"))?;
+            list.push(apps::load(name, &bytes)?);
+        }
+        let bundle = apps::bundle(&list)?;
+        let (marker, size) = elf::symbol(&raw, apps::MARKER_SYMBOL)?.with_context(|| {
+            format!(
+                "the firmware has no {} symbol to point at the apps",
+                apps::MARKER_SYMBOL
+            )
+        })?;
+        ensure!(
+            size == 8,
+            "{} is {size} bytes, expected 8",
+            apps::MARKER_SYMBOL
+        );
+        let at = apps::attach(&mut flat, board.memory.firmware_base, marker, &bundle)?;
+        for a in &list {
+            println!("app           {} ({} bytes)", a.name, a.image.len());
+        }
+        println!("apps bundle   {} bytes at {at:#010x}", bundle.len());
+    }
 
     ensure_gate_buf_in_window(board, &raw)?;
 

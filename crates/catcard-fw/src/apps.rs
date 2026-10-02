@@ -16,14 +16,19 @@
 //! `DebugAppStatus`): the image is written into the area, then run by the menu loop on the
 //! UI task. Nothing here runs at boot; the area is claimed the first time it is written.
 
-// Phase 1 loads apps only over USB on bench builds, so without `usb-debug-mem` the loader
-// has no caller yet; the area's carve-out (`heap_parts`) is used by every build. Phase 2's
-// packaged apps give the rest a caller and this goes.
-#![cfg_attr(not(feature = "usb-debug-mem"), allow(dead_code))]
+// The loader's callers are the bench's USB opcodes (`usb-debug-mem`) and the apps this
+// board's menu launches (Flappy Cat: Q1 with games). A build with neither still links the
+// area's carve-out (`heap_parts`), which every build uses, and nothing else from here.
+#![cfg_attr(
+    not(all(feature = "usb-debug-mem", feature = "games", feature = "board-q1")),
+    allow(dead_code)
+)]
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use catcard_kernel::app::Exit;
+
+use crate::ui::Ui;
 
 /// Where apps run, if this board has the RAM for it: the largest power-of-two block,
 /// aligned to its own size, inside `spare_ram`. Power of two and aligned, because the MPU
@@ -70,6 +75,9 @@ pub const fn heap_parts(
 pub const MAGIC: u32 = u32::from_le_bytes(*b"CAPP");
 /// The header format this loader reads.
 pub const VERSION: u32 = 1;
+/// The services ABI this firmware serves (`catcard_app::ABI`, the header's last word). An
+/// app made for another one is refused: its service numbers may mean something else here.
+pub const ABI: u32 = 1;
 /// Words in the header at the start of the image (see docs/APPS.md).
 const HEADER_WORDS: usize = 8;
 /// Least stack an app is started with, above its `.bss`.
@@ -92,8 +100,10 @@ pub enum Refused {
     BadMagic,
     BadVersion,
     BadLayout,
-    WrongBuild,
+    WrongAbi,
     Mpu,
+    NotFound,
+    Damaged,
 }
 
 /// Read and check the header of the image at `base`. Every address in it must be inside the
@@ -112,7 +122,7 @@ fn layout(base: u32, len: u32) -> Result<Layout, Refused> {
         data_start,
         data_end,
         bss_end,
-        build,
+        abi,
     ] = h;
     if magic != MAGIC {
         return Err(Refused::BadMagic);
@@ -120,9 +130,8 @@ fn layout(base: u32, len: u32) -> Result<Layout, Refused> {
     if version != VERSION {
         return Err(Refused::BadVersion);
     }
-    // Phase 2 checks this against the kernel's own build ID; until then, apps say 0.
-    if build != 0 {
-        return Err(Refused::WrongBuild);
+    if abi != ABI {
+        return Err(Refused::WrongAbi);
     }
     let end = base + len;
     let header_end = base + 4 * HEADER_WORDS as u32;
@@ -233,15 +242,25 @@ pub fn last() -> Result<Exit, Refused> {
     unsafe { *core::ptr::addr_of!(LAST) }
 }
 
-/// From the menu loop: run the pending app, if there is one.
-pub fn serve() {
+/// From the menu loop: run the pending app, if there is one. True if one ran, so the
+/// caller redraws what the app may have drawn over.
+pub fn serve(ui: &mut Ui<'_>) -> bool {
     if state() != State::Pending {
-        return;
+        return false;
     }
     STATE.store(State::Running as u8, Ordering::Release);
     // SAFETY: written by `request` before it published `Pending`.
     let arg = unsafe { *core::ptr::addr_of!(ARG) };
-    let outcome = run(arg);
+    let outcome = run(arg, ui);
+    report(&outcome);
+    // SAFETY: `Running`, so nobody else reads or writes it.
+    unsafe { *core::ptr::addr_of_mut!(LAST) = outcome };
+    STATE.store(State::Done as u8, Ordering::Release);
+    true
+}
+
+/// One log line for how a run ended.
+fn report(outcome: &Result<Exit, Refused>) {
     match outcome {
         Ok(Exit::Code(c)) => crate::catlog!("apps: exited {}", c),
         Ok(Exit::Fault { pc, cfsr, addr }) => crate::catlog!(
@@ -252,13 +271,14 @@ pub fn serve() {
         ),
         Err(why) => crate::catlog!("apps: refused {:?}", why),
     }
-    // SAFETY: `Running`, so nobody else reads or writes it.
-    unsafe { *core::ptr::addr_of_mut!(LAST) = outcome };
-    STATE.store(State::Done as u8, Ordering::Release);
 }
 
+/// The launching screen's `Ui`, for the services, while an app runs. The launcher is
+/// suspended inside [`run`] meanwhile, so the services are its only user.
+static mut UI: *mut () = core::ptr::null_mut();
+
 /// Check the image in the area, lay out its memory, and run it.
-fn run(arg: u32) -> Result<Exit, Refused> {
+fn run(arg: u32, ui: &mut Ui<'_>) -> Result<Exit, Refused> {
     let Some((base, len)) = ARENA else {
         return Err(Refused::NoArena);
     };
@@ -289,10 +309,20 @@ fn run(arg: u32) -> Result<Exit, Refused> {
         l.bss_end,
         arg
     );
+    // SAFETY: UI task only; cleared again below, before `ui` is used by anyone else.
+    unsafe { *core::ptr::addr_of_mut!(UI) = (ui as *mut Ui<'_>).cast() };
     // SAFETY: from the UI task, privileged, interrupts enabled; the entry and stack are in
     // the area the MPU makes the app's; the fault handlers in `interrupts.rs` hand an app's
     // faults to the kernel.
     let exit = unsafe { catcard_kernel::app::run(l.entry, base + len, arg, dispatch) };
+    // SAFETY: UI task only; the app has ended, so no service can be reading it.
+    unsafe { *core::ptr::addr_of_mut!(UI) = core::ptr::null_mut() };
+    // An app that took the panel and did not give it back -- it faulted, or forgot -- must
+    // not leave the rest of the firmware drawing into a scrolled panel.
+    #[cfg(feature = "board-q1")]
+    if PANEL_TAKEN.swap(false, Ordering::Relaxed) {
+        crate::display::end_scroll(ui.panel);
+    }
     Ok(exit)
 }
 
@@ -313,6 +343,48 @@ pub mod service {
     pub const YIELD: u32 = 2;
     /// `sleep(ms)`: at most [`super::SLEEP_MAX_MS`].
     pub const SLEEP: u32 = 3;
+    /// `panel_begin() -> 0`: raw panel, no origin, scrolling at raw lines (Q1 only).
+    pub const PANEL_BEGIN: u32 = 4;
+    /// `panel_end()`: scrolling back as the firmware expects it.
+    pub const PANEL_END: u32 = 5;
+    /// `scroll_start(line)`.
+    pub const SCROLL_START: u32 = 6;
+    /// `wait_tear() -> 1 on time, 0 late`.
+    pub const WAIT_TEAR: u32 = 7;
+    /// `paint(x | y << 16, w | h << 16, ptr)`: `w * h` RGB565 pixels from the app.
+    pub const PAINT: u32 = 8;
+    /// `key() -> 0 none, 1 cancel, 2 confirm, 3 qr, 0x100|digit, 0x200|char`.
+    pub const KEY: u32 = 9;
+    /// `random(ptr, len)`: at most 256 bytes from the UI's DRBG, never a key source.
+    pub const RANDOM: u32 = 10;
+    /// `message(ptr, len)`: "title\na\nb" on a plain screen.
+    pub const MESSAGE: u32 = 11;
+    /// `wait_any_key()`.
+    pub const WAIT_ANY_KEY: u32 = 12;
+    /// `cycles() -> DWT cycle counter`.
+    pub const CYCLES: u32 = 13;
+    /// `clock_hz() -> HCLK`.
+    pub const CLOCK_HZ: u32 = 14;
+    /// `kv_get(i) -> word`: one of eight words kept for the life of the power-up.
+    pub const KV_GET: u32 = 15;
+    /// `kv_set(i, word)`.
+    pub const KV_SET: u32 = 16;
+}
+
+/// The panel is the app's: `panel_begin` without `panel_end` yet.
+#[cfg(feature = "board-q1")]
+static PANEL_TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The eight words [`service::KV_GET`] serves.
+static mut KV: [u32; 8] = [0; 8];
+
+/// The launching screen's `Ui`. Only from a service, while an app runs.
+///
+/// # Safety
+/// From [`dispatch`]: on the UI task, while [`run`] has `UI` set.
+unsafe fn ui<'a>() -> Option<&'a mut Ui<'a>> {
+    // SAFETY: the caller's contract; the launcher is suspended in `run`.
+    unsafe { (*core::ptr::addr_of!(UI)).cast::<Ui<'a>>().as_mut() }
 }
 
 const LOG_MAX: usize = 96;
@@ -329,7 +401,10 @@ fn in_arena(ptr: u32, len: u32) -> bool {
 }
 
 /// Serve one `SVC CALL`. Runs privileged, on the UI task's stack, preemptible.
-extern "C" fn dispatch(id: u32, a: u32, b: u32, _c: u32) -> u32 {
+extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
+    // Only the panel's services take a fourth argument.
+    #[cfg(not(feature = "board-q1"))]
+    let _ = c;
     match id {
         service::LOG => {
             let len = (b as usize).min(LOG_MAX);
@@ -362,6 +437,244 @@ extern "C" fn dispatch(id: u32, a: u32, b: u32, _c: u32) -> u32 {
             }
             0
         }
+        service::KEY => {
+            // SAFETY: a service, on the UI task, while the app runs.
+            let Some(ui) = (unsafe { ui() }) else {
+                return 0;
+            };
+            use catcard_ui::keypad::{Event, KEYS, Key};
+            let mut events = [Event::Pressed(Key::Cancel); KEYS];
+            let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+            let _ = crate::usbtask::pump();
+            crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+            // Cancel wins over anything pressed with it.
+            let k = keys
+                .iter()
+                .copied()
+                .find(|&k| k == Key::Cancel)
+                .or(keys.first().copied());
+            match k {
+                None => 0,
+                Some(Key::Cancel) => 1,
+                Some(Key::Confirm) => 2,
+                Some(Key::Qr) => 3,
+                Some(Key::Digit(d)) => 0x100 | d as u32,
+                Some(Key::Char(ch)) => 0x200 | ch as u32,
+            }
+        }
+        service::RANDOM => {
+            let len = b.min(256);
+            if !in_arena(a, len) {
+                return u32::MAX;
+            }
+            // SAFETY: a service, on the UI task, while the app runs.
+            let Some(ui) = (unsafe { ui() }) else {
+                return u32::MAX;
+            };
+            let mut buf = [0u8; 256];
+            let _ = ui.drbg.generate(&mut buf[..len as usize]);
+            for (i, byte) in buf[..len as usize].iter().enumerate() {
+                // SAFETY: checked to be inside the area just above.
+                unsafe { ((a + i as u32) as *mut u8).write_volatile(*byte) };
+            }
+            0
+        }
+        service::MESSAGE => {
+            let len = b.min(128);
+            if !in_arena(a, len) {
+                return u32::MAX;
+            }
+            let mut text = [0u8; 128];
+            for (i, byte) in text[..len as usize].iter_mut().enumerate() {
+                // SAFETY: checked to be inside the area just above.
+                *byte = unsafe { ((a + i as u32) as *const u8).read_volatile() };
+            }
+            let text = core::str::from_utf8(&text[..len as usize]).unwrap_or("");
+            let mut parts = text.splitn(3, '\n');
+            let (t, x, y) = (
+                parts.next().unwrap_or(""),
+                parts.next().unwrap_or(""),
+                parts.next().unwrap_or(""),
+            );
+            // SAFETY: a service, on the UI task, while the app runs.
+            if let Some(ui) = unsafe { ui() } {
+                crate::menu::message(ui.panel, t, x, y);
+            }
+            0
+        }
+        service::WAIT_ANY_KEY => {
+            // SAFETY: a service, on the UI task, while the app runs.
+            if let Some(ui) = unsafe { ui() } {
+                crate::menu::wait_for_any_key(ui);
+            }
+            0
+        }
+        service::CYCLES => catcard_hal::dwt::cycles(),
+        // SAFETY: reads RCC.
+        service::CLOCK_HZ => unsafe { catcard_hal::clock::hclk_hz() },
+        // SAFETY: services run one at a time, on the UI task.
+        service::KV_GET if a < 8 => unsafe { (*core::ptr::addr_of!(KV))[a as usize] },
+        service::KV_SET if a < 8 => {
+            // SAFETY: as above.
+            unsafe { (*core::ptr::addr_of_mut!(KV))[a as usize] = b };
+            0
+        }
+        #[cfg(feature = "board-q1")]
+        service::PANEL_BEGIN
+        | service::PANEL_END
+        | service::SCROLL_START
+        | service::WAIT_TEAR
+        | service::PAINT => panel_service(id, a, b, c),
         _ => u32::MAX,
     }
+}
+
+/// The colour panel's services (Q1).
+#[cfg(feature = "board-q1")]
+fn panel_service(id: u32, a: u32, b: u32, c: u32) -> u32 {
+    // SAFETY: a service, on the UI task, while the app runs.
+    let Some(ui) = (unsafe { ui() }) else {
+        return u32::MAX;
+    };
+    match id {
+        service::PANEL_BEGIN => {
+            crate::display::reset_origin(ui.panel);
+            let _ = ui.panel.set_scroll_area(0, 0);
+            PANEL_TAKEN.store(true, Ordering::Relaxed);
+            0
+        }
+        service::PANEL_END => {
+            if PANEL_TAKEN.swap(false, Ordering::Relaxed) {
+                crate::display::end_scroll(ui.panel);
+            }
+            0
+        }
+        service::SCROLL_START => {
+            let _ = ui.panel.set_scroll_start(a as usize);
+            0
+        }
+        service::WAIT_TEAR => crate::display::wait_tear() as u32,
+        service::PAINT => {
+            let (x, y) = ((a & 0xFFFF) as usize, (a >> 16) as usize);
+            let (w, h) = ((b & 0xFFFF) as usize, (b >> 16) as usize);
+            let bytes = (w * h * 2) as u32;
+            if !PANEL_TAKEN.load(Ordering::Relaxed) || !c.is_multiple_of(2) || !in_arena(c, bytes) {
+                return u32::MAX;
+            }
+            let px = |dx: usize, dy: usize| -> u16 {
+                // SAFETY: inside the app's pixels, checked against the area just above.
+                unsafe { ((c as usize + 2 * (dy * w + dx)) as *const u16).read_volatile() }
+            };
+            match ui.panel.paint(x, y, w, h, px) {
+                Ok(()) => 0,
+                Err(_) => u32::MAX,
+            }
+        }
+        _ => u32::MAX,
+    }
+}
+
+// --- apps carried in the image ---------------------------------------------------------
+
+/// Where `catcard-image` records the apps bundle: `[BUNDLE_SET, flash address]` once it has
+/// appended one, `[BUNDLE_UNSET, 0]` as linked. Patched by name, so it keeps its name; read
+/// volatile, so the compiler cannot fold the linked value.
+#[used]
+#[unsafe(no_mangle)]
+static CATCARD_APPS_BUNDLE: [u32; 2] = [BUNDLE_UNSET, 0];
+const BUNDLE_UNSET: u32 = 0xFFFF_FFFF;
+/// `CAPB`: both the patched marker and the bundle's own first word.
+const BUNDLE_SET: u32 = u32::from_le_bytes(*b"CAPB");
+/// The bundle's header (magic, version, count, total length) and one entry (16-byte name,
+/// offset from the bundle, packed length, unpacked length, reserved), in bytes.
+const BUNDLE_HEADER: u32 = 16;
+const ENTRY: u32 = 32;
+
+/// The bundle's flash address and entry count, if this image carries one.
+fn bundle() -> Option<(u32, u32)> {
+    // SAFETY: a static in flash; volatile so the linked value is not folded in.
+    let [tag, at] = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CATCARD_APPS_BUNDLE)) };
+    if tag != BUNDLE_SET {
+        return None;
+    }
+    let lo = catcard_board::BOARD.memory.firmware_base;
+    let hi = lo + catcard_board::BOARD.image_ceiling();
+    if at < lo || at.saturating_add(BUNDLE_HEADER) > hi {
+        return None;
+    }
+    // SAFETY: inside the image, as just checked.
+    let w = |i: u32| unsafe { ((at + 4 * i) as *const u32).read_volatile() };
+    let (magic, version, count) = (w(0), w(1), w(2));
+    if magic != BUNDLE_SET || version != 1 || count > 64 {
+        return None;
+    }
+    if at + BUNDLE_HEADER + count * ENTRY > hi {
+        return None;
+    }
+    Some((at, count))
+}
+
+/// Unpack the app called `name` from the image into the area, check it, and run it.
+pub fn launch(name: &str, ui: &mut Ui<'_>) -> Result<Exit, Refused> {
+    let outcome = unpack(name).and_then(|()| run(0, ui));
+    report(&outcome);
+    outcome
+}
+
+/// Inflate `name`'s image from the bundle into the area.
+fn unpack(name: &str) -> Result<(), Refused> {
+    let Some((at, count)) = bundle() else {
+        return Err(Refused::NotFound);
+    };
+    let Some((base, len)) = ARENA else {
+        return Err(Refused::NoArena);
+    };
+    if matches!(state(), State::Pending | State::Running) || !claim() {
+        return Err(Refused::NoArena);
+    }
+    let hi = catcard_board::BOARD.memory.firmware_base + catcard_board::BOARD.image_ceiling();
+    for i in 0..count {
+        let e = at + BUNDLE_HEADER + i * ENTRY;
+        // SAFETY: inside the bundle, bounded by `bundle`.
+        let entry_name = unsafe { core::slice::from_raw_parts(e as *const u8, 16) };
+        let n = entry_name.iter().position(|&b| b == 0).unwrap_or(16);
+        if &entry_name[..n] != name.as_bytes() {
+            continue;
+        }
+        // SAFETY: as above.
+        let w = |k: u32| unsafe { ((e + 16 + 4 * k) as *const u32).read_volatile() };
+        let (offset, packed, unpacked) = (w(0), w(1), w(2));
+        let src = at.saturating_add(offset);
+        if src.saturating_add(packed) > hi || unpacked > len {
+            return Err(Refused::Damaged);
+        }
+        let t0 = catcard_hal::dwt::cycles();
+        // SAFETY: the packed bytes are inside the image (checked); the area is the app's and
+        // no app runs.
+        let (input, out) = unsafe {
+            (
+                core::slice::from_raw_parts(src as *const u8, packed as usize),
+                core::slice::from_raw_parts_mut(base as *mut u8, len as usize),
+            )
+        };
+        let got = minizlib::unzlib(input, minizlib::Buffer::new(out));
+        // SAFETY: reads RCC.
+        let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
+        let us = catcard_hal::dwt::cycles().wrapping_sub(t0) / per_us;
+        return match got {
+            Ok(n) if n == unpacked as u64 => {
+                crate::catlog!("apps: {} unpacked {} -> {} B in {} us", name, packed, n, us);
+                Ok(())
+            }
+            other => {
+                crate::catlog!(
+                    "apps: {} did not unpack: {:?}",
+                    name,
+                    other.map(|n| n as u32)
+                );
+                Err(Refused::Damaged)
+            }
+        };
+    }
+    Err(Refused::NotFound)
 }

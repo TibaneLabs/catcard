@@ -1304,7 +1304,9 @@ pub fn run(session: Session<'_>) -> ! {
         crate::rngshare::publish(pool.as_deref());
         // An app sent over USB on a bench build runs here, on the UI task (docs/APPS.md).
         #[cfg(feature = "usb-debug-mem")]
-        crate::apps::serve();
+        if crate::apps::serve(&mut ui) {
+            redraw = true;
+        }
         display::idle(ui.panel);
 
         // The RTC screen redraws on a clock rather than on input: it is showing something
@@ -1969,7 +1971,18 @@ fn action_for(screen: Screen) -> Option<Action> {
         #[cfg(feature = "games")]
         Screen::BlockCutter => returns(|a| crate::game::block_cutter(a.ui)),
         #[cfg(all(feature = "games", feature = "board-q1"))]
-        Screen::FlappyCat => returns(|a| crate::flappy::flappy_cat(a.ui)),
+        // An app since docs/APPS.md phase 2: carried compressed in the image, unpacked
+        // into the app area when chosen, and run unprivileged.
+        Screen::FlappyCat => returns(|a| {
+            if let Err(why) = crate::apps::launch("flappy", a.ui) {
+                let line = match why {
+                    crate::apps::Refused::NotFound => "not in this image",
+                    _ => "could not start",
+                };
+                message(a.ui.panel, "Flappy Cat", line, "press a key");
+                wait_for_any_key(a.ui);
+            }
+        }),
         Screen::NewSeed(_) => reseeds(|a| {
             crate::newseed::new_seed(
                 a.gate,

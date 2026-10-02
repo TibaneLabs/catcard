@@ -243,6 +243,7 @@ dependencies = [
  "catcard-fwhdr",
  "clap",
  "hex",
+ "minizlib",
  "outscript",
  "purecrypto",
 ]

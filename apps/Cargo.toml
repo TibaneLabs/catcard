@@ -2,7 +2,7 @@
 # workspace so host builds never try to link them.
 [workspace]
 resolver = "3"
-members = ["hello", "probe", "spin"]
+members = ["flappy", "hello", "probe", "spin"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,8 +10,10 @@ edition = "2024"
 license = "MIT"
 
 [profile.release]
-# Apps choose their own trade-off; these test apps favour speed, like a game would.
-opt-level = 3
+# Apps live compressed in flash, so size counts. "s" keeps the hot paths fast as long as
+# they are marked `#[inline(always)]` (catcard-ui's per-pixel accessors are); an app that
+# needs more can take `opt-level = 3` for itself with [profile.release.package.<name>].
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

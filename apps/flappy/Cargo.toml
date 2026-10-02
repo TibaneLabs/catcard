@@ -1,0 +1,11 @@
+[package]
+name = "app-flappy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Flappy Cat, as an app (docs/APPS.md): the game from catcard-ui, drawn through the kernel's panel services."
+
+[dependencies]
+catcard-app = { path = "../../crates/catcard-app" }
+catcard-ui = { path = "../../crates/catcard-ui" }
