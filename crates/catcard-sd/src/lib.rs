@@ -896,6 +896,24 @@ impl<D: fat::SectorDriver, const S: usize> AnyVolume<D, S> {
         }
     }
 
+    /// Make `path` a directory if it is not one already. Its parent must exist.
+    pub fn ensure_dir(&mut self, path: &str) -> Result<(), ()> {
+        match self {
+            AnyVolume::Fat(v) => {
+                if v.open_dir(path).is_ok() {
+                    return Ok(());
+                }
+                v.create_dir(path).map(|_| ()).map_err(|_| ())
+            }
+            AnyVolume::Exfat(v) => {
+                if v.open_dir(path).is_ok() {
+                    return Ok(());
+                }
+                v.create_dir(path).map(|_| ()).map_err(|_| ())
+            }
+        }
+    }
+
     /// Flush the volume's own metadata.
     pub fn flush(&mut self) -> Result<(), ()> {
         match self {

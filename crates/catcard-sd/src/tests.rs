@@ -1096,6 +1096,37 @@ mod big_exfat {
             }
         }
     }
+
+    /// A session directory as threshold signing makes it: `TSS`, then a long name under
+    /// it, made once and found again, with a file written into it and listed back.
+    #[test]
+    fn directories_are_made_once_and_hold_files() {
+        use std::string::String;
+        let image = card_with(&payload(), 3);
+        let mut vol: AnyVolume<_, 512> =
+            AnyVolume::mount_with(|| Ok(RamDisk(image.clone()))).expect("mount");
+        for _ in 0..2 {
+            vol.ensure_dir("TSS").expect("TSS");
+            vol.ensure_dir("TSS/0011223344556677").expect("session");
+        }
+        let mut f = vol
+            .open_or_create_file("TSS/0011223344556677/r0-1-0.msg")
+            .expect("create");
+        f.write_all(&mut vol, b"hello").expect("write");
+        f.flush(&mut vol).expect("flush");
+        let mut seen = Vec::new();
+        vol.enumerate("TSS", |name, dir, _| seen.push((String::from(name), dir)))
+            .expect("list TSS");
+        assert_eq!(seen, [(String::from("0011223344556677"), true)]);
+        let mut files = Vec::new();
+        vol.enumerate("TSS/0011223344556677", |name, _, len| {
+            files.push((String::from(name), len))
+        })
+        .expect("list session");
+        assert_eq!(files, [(String::from("r0-1-0.msg"), 5)]);
+        // A file is not a directory, and is not replaced by one.
+        assert!(vol.ensure_dir("TSS/0011223344556677/r0-1-0.msg").is_err());
+    }
 }
 
 // ---------------------------------------------------------------------------

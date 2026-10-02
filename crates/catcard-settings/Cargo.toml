@@ -25,3 +25,5 @@ zeroize = { workspace = true, features = ["derive"] }
 # The co-signing key's stored value is checked end to end against the wallet code: the
 # phrase it holds, the fingerprint and xpub it names, and the `ccxp` bundle it exports.
 catcard-wallet = { path = "../catcard-wallet" }
+# The share files' headers are read against the crate that writes them (`tss`).
+catcard-tss = { workspace = true }

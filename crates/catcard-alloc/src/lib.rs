@@ -199,6 +199,99 @@ impl Heap {
         self.size += size;
     }
 
+    /// Take back a region lent with [`add_region`](Self::add_region), if nothing in it is
+    /// handed out. `true` when it is gone from the heap; `false`, with the heap unchanged,
+    /// when any byte of it is still allocated.
+    ///
+    /// For memory the heap may borrow for a while and must then return whole: on the L4+
+    /// boards the app area, which the heap uses while no app runs. A region the heap
+    /// merged with its neighbours is cut back out of the merged block, and the
+    /// neighbours stay free. A neighbour left smaller than a free block can track is
+    /// refused rather than leaked.
+    ///
+    /// # Safety
+    /// `start` and `len` must be exactly what was passed to `add_region`.
+    pub unsafe fn remove_region(&mut self, start: *mut u8, len: usize) -> bool {
+        let base = align_up(start as usize, ALIGN);
+        let end = (start as usize).saturating_add(len);
+        if end <= base || end - base < MIN_BLOCK {
+            // `add_region` left it out, so there is nothing to take back.
+            return true;
+        }
+        let size = (end - base) & !(ALIGN - 1);
+        let end = base + size;
+        let mut prev: Option<NonNull<Free>> = None;
+        let mut cur = self.head;
+        while let Some(node) = cur {
+            let at = node.as_ptr() as usize;
+            // SAFETY: a live node on the list.
+            let (n_size, next) = unsafe { (node.as_ref().size, node.as_ref().next) };
+            if at <= base && at + n_size >= end {
+                let before = base - at;
+                let after = at + n_size - end;
+                if (before != 0 && before < MIN_BLOCK) || (after != 0 && after < MIN_BLOCK) {
+                    return false;
+                }
+                // What follows the region becomes a block of its own, ahead of `next`.
+                let tail = if after != 0 {
+                    // SAFETY: `end` is inside this free block, aligned (sizes are
+                    // multiples of ALIGN), with `after >= MIN_BLOCK` bytes behind it.
+                    unsafe {
+                        let n = end as *mut Free;
+                        n.write(Free { size: after, next });
+                        Some(NonNull::new_unchecked(n))
+                    }
+                } else {
+                    next
+                };
+                if before != 0 {
+                    // The block keeps its start and ends where the region begins.
+                    // SAFETY: a live node on the list.
+                    unsafe {
+                        let mut n = node;
+                        n.as_mut().size = before;
+                        n.as_mut().next = tail;
+                    }
+                } else {
+                    match prev {
+                        // SAFETY: a live node on the list.
+                        Some(mut p) => unsafe { p.as_mut().next = tail },
+                        None => self.head = tail,
+                    }
+                }
+                self.size -= size;
+                return true;
+            }
+            if at >= end {
+                break;
+            }
+            prev = Some(node);
+            cur = next;
+        }
+        false
+    }
+
+    /// Overwrite every free byte with zeros, past each free block's own bookkeeping.
+    ///
+    /// Blocks freed by their owner are not wiped by this heap, and some code does not
+    /// wipe what it frees (a library's intermediate copies of a key). After work like
+    /// that, this leaves nothing of it in memory that is not still in use.
+    pub fn wipe_free(&mut self) {
+        let mut cur = self.head;
+        while let Some(node) = cur {
+            let at = node.as_ptr() as usize;
+            // SAFETY: a live node on the list.
+            let (size, next) = unsafe { (node.as_ref().size, node.as_ref().next) };
+            let skip = size_of::<Free>();
+            for i in skip..size {
+                // SAFETY: inside this free block, past its header; nothing else owns
+                // free bytes. Volatile, so the stores are not judged dead.
+                unsafe { core::ptr::write_volatile((at + i) as *mut u8, 0) };
+            }
+            cur = next;
+        }
+    }
+
     /// Bytes currently handed out, including headers and padding.
     pub fn used(&self) -> usize {
         self.used

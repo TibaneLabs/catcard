@@ -637,3 +637,75 @@ fn each_region_coalesces_on_its_own() {
         "a region did not come back whole"
     );
 }
+
+/// A region lent in the middle of another, as the app area sits between the two spare
+/// banks: it merges with both, and taking it back leaves the neighbours free and whole.
+#[test]
+fn a_lent_region_comes_back_out_of_its_merged_neighbours() {
+    const PART: usize = 16 * 1024;
+    let mut backing = vec![0u64; (3 * PART).div_ceil(8)];
+    let base = backing.as_mut_ptr().cast::<u8>();
+    let mut heap = Heap::empty();
+    // SAFETY: three disjoint, adjacent parts of a backing that outlives the heap.
+    unsafe {
+        heap.init(base, PART);
+        heap.add_region(base.add(2 * PART), PART);
+        heap.add_region(base.add(PART), PART);
+    }
+    assert_eq!(heap.size(), 3 * PART);
+    // One block across all three: the middle merged with both sides.
+    assert!(heap.largest_free() > 2 * PART);
+
+    // While something sits in the middle, it cannot go back.
+    let p = heap
+        .try_alloc(layout(40 * 1024, 8))
+        .expect("room across all three");
+    // SAFETY: the middle part, as it was added.
+    assert!(!unsafe { heap.remove_region(base.add(PART), PART) });
+    assert_eq!(heap.size(), 3 * PART);
+    // SAFETY: from this heap, freed once.
+    unsafe { heap.dealloc(p) };
+
+    // SAFETY: as above.
+    assert!(unsafe { heap.remove_region(base.add(PART), PART) });
+    assert_eq!(heap.size(), 2 * PART);
+    assert!(heap.largest_free() <= PART);
+    // Nothing is ever handed out of the middle again.
+    let mid = base as usize + PART;
+    let mut held = Vec::new();
+    while let Some(p) = heap.try_alloc(layout(1024, 8)) {
+        let at = p.as_ptr() as usize;
+        assert!(
+            at + 1024 <= mid || at >= mid + PART,
+            "allocated inside a returned region"
+        );
+        held.push(p);
+    }
+    assert!(held.len() >= 28);
+    for p in held {
+        // SAFETY: from this heap, freed once each.
+        unsafe { heap.dealloc(p) };
+    }
+    assert_eq!(heap.used(), 0);
+}
+
+/// Wiping the free space leaves live blocks alone and zeroes everything else.
+#[test]
+fn wiping_free_space_spares_live_blocks() {
+    let mut o = Owned::new(8 * 1024);
+    let keep = o.heap.try_alloc(layout(512, 8)).expect("room");
+    let gone = o.heap.try_alloc(layout(512, 8)).expect("room");
+    paint(keep, 512, 0x5A);
+    paint(gone, 512, 0xC3);
+    // SAFETY: from this heap, freed once.
+    unsafe { o.heap.dealloc(gone) };
+    o.heap.wipe_free();
+    assert!(check(keep, 512, 0x5A), "a live block was wiped");
+    // The freed block, past the free-list bookkeeping at its start, is zero now.
+    let skip = size_of::<Free>() - size_of::<Header>();
+    // SAFETY: inside the region the freed block occupied; read only.
+    let rest = unsafe { NonNull::new_unchecked(gone.as_ptr().add(skip)) };
+    assert!(check(rest, 512 - skip, 0), "freed bytes survived the wipe");
+    // SAFETY: from this heap, freed once.
+    unsafe { o.heap.dealloc(keep) };
+}

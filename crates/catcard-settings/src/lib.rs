@@ -36,6 +36,7 @@ pub mod policy;
 pub mod prefs;
 pub mod prelogin;
 pub mod store;
+pub mod tss;
 pub mod vault;
 pub mod wallets;
 pub mod wifs;
