@@ -179,6 +179,14 @@ pub struct Policy {
     /// relax this to 1 or make up the difference with user timing — see
     /// [`Policy::single_trng`].
     pub min_hw_sources: u32,
+    /// A source that must be among them, whatever the others did.
+    ///
+    /// The STM32's own TRNG, on every board: it is the one source whose bytes never cross
+    /// a bus. SE1's answer can be recomputed from a capture of its bus plus the pairing
+    /// secret, and SE2's eight bytes cross I2C in cleartext (hw-reference
+    /// bootloader-callgate-abi.md §"RNG gates" [C]). With only "two of three", a failed
+    /// chip TRNG left a pool made of those two alone.
+    pub required: Option<Source>,
 }
 
 impl Policy {
@@ -186,6 +194,7 @@ impl Policy {
     pub const STRICT: Policy = Policy {
         min_bits: 256,
         min_hw_sources: 2,
+        required: Some(Source::Stm32Trng),
     };
 
     /// For boards with exactly one reachable TRNG (mk3). Still demands 256 credited
@@ -194,6 +203,7 @@ impl Policy {
         Policy {
             min_bits: 256,
             min_hw_sources: 1,
+            required: Some(Source::Stm32Trng),
         }
     }
 }
@@ -223,6 +233,9 @@ pub enum Insufficient {
     Bits { have: u32, need: u32 },
     /// Not enough independent hardware noise sources.
     HardwareSources { have: u32, need: u32 },
+    /// The source the policy requires ([`Policy::required`]) has not contributed a healthy
+    /// byte, however many others have.
+    Missing(Source),
 }
 
 impl fmt::Display for Insufficient {
@@ -233,6 +246,9 @@ impl fmt::Display for Insufficient {
             }
             Insufficient::HardwareSources { have, need } => {
                 write!(f, "{have} hardware TRNG(s) contributed, need {need}")
+            }
+            Insufficient::Missing(source) => {
+                write!(f, "required source {source:?} has not contributed")
             }
         }
     }
@@ -469,6 +485,11 @@ impl EntropyPool {
                 need: self.policy.min_hw_sources,
             });
         }
+        if let Some(required) = self.policy.required
+            && !(self.bytes_from[required.index()] > 0 && self.counts(required))
+        {
+            return Err(Insufficient::Missing(required));
+        }
         if credited_bits < self.policy.min_bits {
             return Err(Insufficient::Bits {
                 have: credited_bits,
@@ -532,6 +553,48 @@ mod tests {
         p.add(Source::Stm32Trng, &noise(1, 32));
         p.add(Source::Se1Trng, &noise(2, 32));
         p
+    }
+
+    #[test]
+    fn the_two_secure_elements_alone_are_not_enough() {
+        // Both are readable by someone on the board (SE2's bytes cross the bus in the
+        // clear; SE1's can be recomputed with the pairing secret), so a seed must also
+        // hold the chip's own TRNG, which never leaves the MCU.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::Se1Trng, &noise(2, 64));
+        p.add(Source::Se2Trng, &noise(3, 64));
+        assert_eq!(p.check(), Err(Insufficient::Missing(Source::Stm32Trng)));
+        assert!(p.draw_seed().is_err());
+    }
+
+    #[test]
+    fn the_chip_plus_either_secure_element_is_enough() {
+        for se in [Source::Se1Trng, Source::Se2Trng] {
+            let mut p = EntropyPool::new(Policy::STRICT);
+            p.add(Source::Stm32Trng, &noise(1, 64));
+            p.add(se, &noise(2, 64));
+            assert_eq!(p.check(), Ok(()), "chip + {se:?}");
+        }
+    }
+
+    #[test]
+    fn the_chip_alone_is_not_two_sources() {
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::Stm32Trng, &noise(1, 128));
+        assert!(matches!(
+            p.check(),
+            Err(Insufficient::HardwareSources { have: 1, need: 2 })
+        ));
+    }
+
+    #[test]
+    fn a_chip_trng_that_failed_its_health_test_is_missing_not_present() {
+        // A stuck chip TRNG must not satisfy "required" by having written something.
+        let mut p = EntropyPool::new(Policy::STRICT);
+        p.add(Source::Stm32Trng, &[0u8; 64]);
+        p.add(Source::Se1Trng, &noise(2, 64));
+        p.add(Source::Se2Trng, &noise(3, 64));
+        assert_eq!(p.check(), Err(Insufficient::Missing(Source::Stm32Trng)));
     }
 
     #[test]
@@ -671,9 +734,15 @@ mod tests {
         // The same bytes from a different source must give a different pool state,
         // so a value an attacker controls in one channel cannot mimic another.
         let data = noise(7, 64);
-        let mut a = EntropyPool::new(Policy::single_trng());
+        // No required source: this compares pool states, and the second pool holds SE1's
+        // bytes only.
+        let any_one = Policy {
+            required: None,
+            ..Policy::single_trng()
+        };
+        let mut a = EntropyPool::new(any_one);
         a.add(Source::Stm32Trng, &data);
-        let mut b = EntropyPool::new(Policy::single_trng());
+        let mut b = EntropyPool::new(any_one);
         b.add(Source::Se1Trng, &data);
         assert_ne!(a.draw_seed().unwrap(), b.draw_seed().unwrap());
     }

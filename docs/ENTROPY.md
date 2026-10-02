@@ -257,6 +257,12 @@ bounded number of polls. So a dead or unclocked TRNG produces an error here, not
   SE2's 8 bytes cross the I²C bus in cleartext. Both are tamper-checked by the
   bootloader, and the STM32's own TRNG (step 1), which never leaves the chip, is always
   mixed in beside them.
+- **So the chip's TRNG is required, not just counted** (`Policy::required`, 2026-10-02).
+  The mk4/mk5/Q1 policy asks for two of the three hardware sources *and* names the
+  STM32's own TRNG as one of them: a seed is never made from the two secure elements
+  alone, the two a bus capture can observe. Either secure element is enough beside it.
+  Their credit stays at 4 bits a byte: with the chip required, neither can stand in for
+  the one source no bus carries.
 - **Not the bootloader's read of the chip TRNG** (callgate 17). It is the same generator
   as step 1, through a call that reports no error, where step 1 sees the RNG's clock and
   seed faults and refuses. It used to be mixed in, credited zero; it is no longer read.

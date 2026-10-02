@@ -43,6 +43,9 @@ struct Gathered {
     /// What this board's policy demands before a seed may be drawn at all.
     need_bits: u32,
     need_chips: u32,
+    /// The pool's policy requires a source that has not contributed (the chip's own TRNG):
+    /// said instead of the chip count, which can read "2 of 2" and still not be enough.
+    missing: bool,
 }
 
 impl Gathered {
@@ -60,7 +63,11 @@ impl Gathered {
             let _ = out.push(l);
         }
         let mut l = Line::new();
-        let _ = write!(l, "chips  {} of {} needed", self.chips, self.need_chips);
+        if self.missing {
+            let _ = write!(l, "{} required, missing", crate::trng::Kind::Chip.label());
+        } else {
+            let _ = write!(l, "chips  {} of {} needed", self.chips, self.need_chips);
+        }
         let _ = out.push(l);
         let mut l = Line::new();
         let _ = write!(l, "total {:5} / {} bits", self.bits, self.need_bits);
@@ -591,6 +598,7 @@ fn gather(gate: &Callgate, ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyP
         chips: pool.hardware_sources(),
         need_bits: policy.min_bits,
         need_chips: policy.min_hw_sources,
+        missing: false,
     };
 
     // Every source this board can read, the same number of *bytes* from each -- not the
@@ -668,7 +676,9 @@ fn gather(gate: &Callgate, ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyP
     // The pool's own verdict, not ours: enough credited bits from enough healthy hardware
     // TRNGs. A failed source counted for neither, so this is where too few healthy sources
     // becomes visible, before any word is shown.
-    let passed = pool.check().is_ok();
+    let verdict = pool.check();
+    let passed = verdict.is_ok();
+    g.missing = matches!(verdict, Err(catcard_entropy::Insufficient::Missing(_)));
     // The user's turn may have added bits; the report shows what the draw will rest on.
     g.bits = pool.credited_bits();
     g.chips = pool.hardware_sources();

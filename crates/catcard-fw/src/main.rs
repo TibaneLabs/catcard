@@ -410,8 +410,10 @@ pub fn own_header() -> Option<catcard_fwhdr::FirmwareHeader> {
 /// The entropy policy for this board.
 ///
 /// mk4 and Q reach three independent TRNGs (STM32 + SE1 + SE2) and must use at least
-/// two. mk3 can only reach the STM32 TRNG, so it uses the single-source policy — which
-/// still demands a full 256 credited bits from it.
+/// two, the STM32's own always among them (`Policy::required`): the secure elements'
+/// bytes can be observed on their buses, the chip's cannot. mk3 can only reach the STM32
+/// TRNG, so it uses the single-source policy — which still demands a full 256 credited
+/// bits from it.
 pub const fn entropy_policy() -> Policy {
     if BOARD.has_callgate_se_rng {
         Policy::STRICT
