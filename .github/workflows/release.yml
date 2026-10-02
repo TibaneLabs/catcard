@@ -156,13 +156,18 @@ jobs:
           # The Q1 firmware is built for size and carries its games as apps (docs/APPS.md),
           # as `make q1` does: other boards stay at the profile's "s" until each has booted
           # a "z" build.
+          # The games are apps on every board but the mk3, which links them in.
           opt=s
           apps=""
+          mono=apps/target/thumbv7em-none-eabihf/release
+          q1=apps/target/q1/thumbv7em-none-eabihf/release
           if [ "$board" = q1 ]; then
             opt=z
             if [ "${{ matrix.games }}" = true ]; then
-              apps="--app flappy=apps/target/thumbv7em-none-eabihf/release/app-flappy"
+              apps="--app flappy=$mono/app-flappy --app games=$q1/app-games"
             fi
+          elif [ "$board" = mk5 ] && [ "${{ matrix.games }}" = true ]; then
+            apps="--app games=$mono/app-games"
           fi
           echo "opt=$opt" >> "$GITHUB_OUTPUT"
           echo "apps=$apps" >> "$GITHUB_OUTPUT"
@@ -202,6 +207,9 @@ jobs:
         run: |
           cd apps
           RUSTFLAGS="$RUSTFLAGS -C link-arg=-Tlink.x" cargo build --release
+          # The games draw through catcard_app::screen, so the Q1 gets its own build.
+          RUSTFLAGS="$RUSTFLAGS -C link-arg=-Tlink.x" cargo build --release -p app-games \
+            --features board-q1 --target-dir target/q1
 
       - name: Assemble, sign and verify
         run: |
