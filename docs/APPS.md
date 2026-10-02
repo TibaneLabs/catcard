@@ -1,6 +1,6 @@
 # Apps: a small kernel, and everything else loaded on demand
 
-Status: **design, phase 1 in progress.** Nothing here is on the boot path yet.
+Status: **phase 1 proven on a Q1 (2026-10-02).** Nothing here is on the boot path yet.
 
 ## Why
 
@@ -90,6 +90,17 @@ can be tried without installing a new firmware.
    bit, the MPU layout, `DebugRunApp`, and a minimal SDK. Test apps from the Mac: log and
    exit; a service call; a read of kernel memory that must fault and return; a long run
    that is switched out mid-way while USB keeps working. Measures unpack speed.
+   **Result on a real Q1, 2026-10-02** (`tools/usbclient.py hid --run-app`):
+   - `hello` ran unprivileged, called log, ticks and a 250 ms sleep, found its `.data`
+     loaded and its `.bss` zeroed, and exited with `42 + arg`. Upload 4 KB in 0.3 s.
+   - `probe` was stopped every time, and the device carried on to the next app: firmware
+     RAM read (MemManage, `0x2000_0100`), write to its own code (`0x2004_0000`), execute
+     from its stack (instruction access), RCC read (`0x4002_1000`), flash read
+     (`0x0802_0000`), the kernel-only `SVC #0`; a panic exits -1 through its handler.
+   - `spin` busy-looped five seconds without yielding; the kernel preempted it on time
+     and USB answered throughout.
+   - SRAM2/SRAM3 at 0x2004_0000 hold and execute code. Still to measure: unpack speed.
+
 2. **Loader and packaging.** Apps carried in the image, the two-stage build (firmware
    first, then apps against its build ID), Flappy Cat as the first real app.
 3. **Leaf features**, one at a time, measuring flash and RAM after each.

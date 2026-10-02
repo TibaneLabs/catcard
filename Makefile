@@ -82,8 +82,10 @@ mk4-mk5:
 
 # Apps (docs/APPS.md): thumb-only binaries in their own workspace under apps/, linked to
 # run in the app area. Bench use for now: tools/usbclient.py hid --run-app <elf> [arg].
+# The exported RUSTFLAGS below would make cargo ignore apps/.cargo/config.toml's rustflags,
+# so the layout is passed here as well.
 apps:
-	cd apps && $(CARGO) build --release
+	cd apps && RUSTFLAGS="$(RUSTFLAGS) -C link-arg=-Tlink.x" $(CARGO) build --release
 
 q1:
 	$(FW) $(NODEF) --features board-q1$(CHAINS)
