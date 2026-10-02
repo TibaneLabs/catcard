@@ -99,7 +99,9 @@ can be tried without installing a new firmware.
      (`0x0802_0000`), the kernel-only `SVC #0`; a panic exits -1 through its handler.
    - `spin` busy-looped five seconds without yielding; the kernel preempted it on time
      and USB answered throughout.
-   - SRAM2/SRAM3 at 0x2004_0000 hold and execute code. Still to measure: unpack speed.
+   - SRAM2/SRAM3 at 0x2004_0000 hold and execute code.
+   - **mk5, 2026-10-02**: the same `hello` (exit 43, data and bss right) and `probe` 0 and 4
+     (firmware RAM, flash: both stopped) on the mk4/mk5 image at `opt-level = "s"`.
 
 2. **Loader and packaging.** Apps carried in the image, the two-stage build (firmware
    first, then apps against its build ID), Flappy Cat as the first real app.
