@@ -1,2 +1,0 @@
-cargo:rustc-link-search=/Users/magicaltux/projects/coldcard/catcard/crates/catcard-app
-cargo:rerun-if-changed=link.x

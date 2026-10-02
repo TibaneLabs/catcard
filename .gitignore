@@ -21,3 +21,4 @@ __pycache__/
 
 # agent worktrees and local session state
 /.claude/
+/apps/target/
