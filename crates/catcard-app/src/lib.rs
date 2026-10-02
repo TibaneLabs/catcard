@@ -314,28 +314,70 @@ impl core::fmt::Write for Line {
 
 /// The screen an app draws on, the same canvas the firmware draws on.
 ///
-/// [`screen::draw`] hands the app a `&mut dyn Canvas` -- the board's canvas, its
-/// coordinates the firmware's own -- and shows the result. As an app the canvas lives in
-/// the app's memory and the frame is copied to the panel by the kernel (`present`); linked
-/// in, it is the firmware's frame, drawn in place.
+/// [`screen::draw`] hands the app a [`screen::Frame`]: a [`Canvas`] in the firmware's own
+/// coordinates, plus text in the firmware's own fonts ([`screen::Frame::text`]). The fonts
+/// and the text drawing stay in the firmware, so an app does not carry its own copy. As
+/// an app the canvas lives in the app's memory and the kernel draws text into it and
+/// copies it to the panel (`present`); linked in, it is the firmware's frame, drawn in
+/// place.
+///
+/// [`Canvas`]: catcard_ui::canvas::Canvas
 pub mod screen {
-    use catcard_ui::canvas::Canvas;
+    use catcard_ui::canvas::{Canvas, INK, Level};
 
-    /// Draw a frame with `f` and show it. The canvas keeps what the last frame drew, as
-    /// the firmware's does: clear it first for a fresh one.
+    /// A face, named by its role: the firmware picks the board's own font for each.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub enum Font {
+        /// 4x6 on every board.
+        Tiny = 0,
+        /// Notes and dense values.
+        Small = 1,
+        /// Readable text.
+        Body = 2,
+        /// Headings.
+        Title = 3,
+    }
+
+    #[cfg(not(feature = "linked"))]
+    use super::sys::call;
+    #[cfg(not(feature = "linked"))]
+    const TEXT: u32 = 19;
+    #[cfg(not(feature = "linked"))]
+    const TEXT_WIDTH: u32 = 20;
+    #[cfg(not(feature = "linked"))]
+    const LINE_HEIGHT: u32 = 21;
+
     #[cfg(feature = "linked")]
-    pub fn draw(f: impl FnOnce(&mut dyn Canvas)) {
+    fn face(font: Font) -> Option<&'static dyn catcard_ui::face::Face> {
         unsafe extern "Rust" {
-            fn catcard_linked_draw(f: &mut dyn FnMut(&mut dyn Canvas));
+            fn catcard_linked_face(id: u32) -> Option<&'static dyn catcard_ui::face::Face>;
         }
-        let mut f = Some(f);
-        let mut once = |c: &mut dyn Canvas| {
-            if let Some(f) = f.take() {
-                f(c)
-            }
-        };
         // SAFETY: the firmware defines it whenever it links an app in.
-        unsafe { catcard_linked_draw(&mut once) }
+        unsafe { catcard_linked_face(font as u32) }
+    }
+
+    /// How wide `s` is in `font`, in pixels.
+    pub fn text_width(font: Font, s: &str) -> usize {
+        #[cfg(feature = "linked")]
+        {
+            face(font).map_or(0, |f| s.bytes().map(|c| f.advance(c)).sum())
+        }
+        #[cfg(not(feature = "linked"))]
+        {
+            call(TEXT_WIDTH, font as u32, s.as_ptr() as u32, s.len() as u32) as usize
+        }
+    }
+
+    /// One line of `font`, in pixels.
+    pub fn line_height(font: Font) -> usize {
+        #[cfg(feature = "linked")]
+        {
+            face(font).map_or(0, |f| f.line_height())
+        }
+        #[cfg(not(feature = "linked"))]
+        {
+            call(LINE_HEIGHT, font as u32, 0, 0) as usize
+        }
     }
 
     /// The Q1's content area: the 4-bit 320x240 canvas below the 16-row status bar, as
@@ -343,30 +385,124 @@ pub mod screen {
     #[cfg(all(feature = "board-q1", not(feature = "linked")))]
     mod board {
         pub type Screen = catcard_ui::canvas::Gray4<320, 240, 38400>;
-        pub const BAR_H: usize = 16;
-        pub fn with_view(s: &mut Screen, f: impl FnOnce(&mut dyn catcard_ui::canvas::Canvas)) {
-            f(&mut catcard_ui::canvas::Inset::new(s, BAR_H))
-        }
+        pub const TOP: usize = 16;
     }
 
-    /// The mono boards: the 128x64 framebuffer.
+    /// The mono boards: the 128x64 framebuffer, all of it.
     #[cfg(all(not(feature = "board-q1"), not(feature = "linked")))]
     mod board {
         pub type Screen = catcard_ui::framebuffer::Framebuffer<128, 8, 1024>;
-        pub fn with_view(s: &mut Screen, f: impl FnOnce(&mut dyn catcard_ui::canvas::Canvas)) {
-            f(s)
+        pub const TOP: usize = 0;
+    }
+
+    /// One frame being drawn. A [`Canvas`], plus text.
+    pub struct Frame<'a> {
+        #[cfg(not(feature = "linked"))]
+        screen: &'a mut board::Screen,
+        #[cfg(feature = "linked")]
+        canvas: &'a mut dyn Canvas,
+    }
+
+    impl Frame<'_> {
+        /// Draw `s` in `font` with its top-left at `(x, y)`, in full ink. Returns the x
+        /// just past the last glyph; stops at the right edge rather than wrapping.
+        pub fn text(&mut self, font: Font, x: usize, y: usize, s: &str) -> usize {
+            self.text_in(font, x, y, s, INK)
         }
+
+        /// [`text`](Self::text) at a chosen ink level.
+        pub fn text_in(&mut self, font: Font, x: usize, y: usize, s: &str, level: Level) -> usize {
+            #[cfg(feature = "linked")]
+            {
+                match face(font) {
+                    Some(f) => catcard_ui::text::draw_text_in(self.canvas, f, x, y, s, level),
+                    None => x,
+                }
+            }
+            #[cfg(not(feature = "linked"))]
+            {
+                let bytes: *mut board::Screen = self.screen;
+                let args: [u32; 8] = [
+                    bytes as u32,
+                    core::mem::size_of::<board::Screen>() as u32,
+                    x as u32,
+                    y as u32,
+                    font as u32,
+                    level as u32,
+                    s.as_ptr() as u32,
+                    s.len() as u32,
+                ];
+                call(TEXT, args.as_ptr() as u32, 0, 0) as usize
+            }
+        }
+    }
+
+    impl Canvas for Frame<'_> {
+        #[cfg(not(feature = "linked"))]
+        fn width(&self) -> usize {
+            Canvas::width(&*self.screen)
+        }
+        #[cfg(not(feature = "linked"))]
+        fn height(&self) -> usize {
+            Canvas::height(&*self.screen) - board::TOP
+        }
+        #[cfg(not(feature = "linked"))]
+        #[inline(always)]
+        fn put(&mut self, x: usize, y: usize, level: Level) {
+            Canvas::put(&mut *self.screen, x, y + board::TOP, level)
+        }
+        #[cfg(not(feature = "linked"))]
+        #[inline(always)]
+        fn get(&self, x: usize, y: usize) -> Level {
+            Canvas::get(&*self.screen, x, y + board::TOP)
+        }
+
+        #[cfg(feature = "linked")]
+        fn width(&self) -> usize {
+            self.canvas.width()
+        }
+        #[cfg(feature = "linked")]
+        fn height(&self) -> usize {
+            self.canvas.height()
+        }
+        #[cfg(feature = "linked")]
+        fn put(&mut self, x: usize, y: usize, level: Level) {
+            self.canvas.put(x, y, level)
+        }
+        #[cfg(feature = "linked")]
+        fn get(&self, x: usize, y: usize) -> Level {
+            self.canvas.get(x, y)
+        }
+    }
+
+    /// Draw a frame with `f` and show it. The canvas keeps what the last frame drew, as
+    /// the firmware's does: clear it first for a fresh one.
+    #[cfg(feature = "linked")]
+    pub fn draw(f: impl FnOnce(&mut Frame<'_>)) {
+        unsafe extern "Rust" {
+            fn catcard_linked_draw(f: &mut dyn FnMut(&mut dyn Canvas));
+        }
+        let mut f = Some(f);
+        let mut once = |c: &mut dyn Canvas| {
+            if let Some(f) = f.take() {
+                f(&mut Frame { canvas: c })
+            }
+        };
+        // SAFETY: the firmware defines it whenever it links an app in.
+        unsafe { catcard_linked_draw(&mut once) }
     }
 
     #[cfg(not(feature = "linked"))]
     static mut SCREEN: board::Screen = board::Screen::new();
 
     #[cfg(not(feature = "linked"))]
-    pub fn draw(f: impl FnOnce(&mut dyn Canvas)) {
+    pub fn draw(f: impl FnOnce(&mut Frame<'_>)) {
         // SAFETY: one thread of execution in an app.
-        let s = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
-        board::with_view(s, f);
-        let bytes = s.as_bytes();
+        let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
+        f(&mut Frame {
+            screen: &mut *screen,
+        });
+        let bytes = screen.as_bytes();
         super::sys::call(
             super::sys::PRESENT,
             bytes.as_ptr() as u32,

@@ -90,6 +90,10 @@ impl<const W: usize, const P: usize, const N: usize> Canvas for Framebuffer<W, P
 ///
 /// `N` is `H * W.div_ceil(2)`, passed explicitly because const generic arithmetic in an
 /// array length is not stable; [`Gray4::new`] checks it.
+///
+/// `repr(transparent)`: the struct *is* its byte buffer, so the firmware can draw into an
+/// app's canvas from the app's bytes (docs/APPS.md, the text service).
+#[repr(transparent)]
 pub struct Gray4<const W: usize, const H: usize, const N: usize> {
     buf: [u8; N],
 }

@@ -379,6 +379,97 @@ pub mod service {
     pub const PRESENT: u32 = 17;
     /// `keys_held() -> count`.
     pub const KEYS_HELD: u32 = 18;
+    /// `text(args)`: draw a string into the app's canvas with the firmware's fonts.
+    /// `args` is eight words in the app's memory: canvas, canvas length, x, y, font, ink
+    /// level, text, text length. Returns the x just past the last glyph.
+    pub const TEXT: u32 = 19;
+    /// `text_width(font, ptr, len) -> pixels`.
+    pub const TEXT_WIDTH: u32 = 20;
+    /// `line_height(font) -> pixels`.
+    pub const LINE_HEIGHT: u32 = 21;
+}
+
+/// The faces an app names by role: 0 tiny (4x6 everywhere), 1 small, 2 body, 3 title --
+/// the board's own choices (`display::FONTS`), so an app's text reads like the firmware's.
+pub fn face(id: u32) -> Option<&'static dyn catcard_ui::face::Face> {
+    let f = crate::display::FONTS;
+    Some(match id {
+        0 => &catcard_ui::font::misc4x6::FONT,
+        1 => f.small,
+        2 => f.body,
+        3 => f.title,
+        _ => return None,
+    })
+}
+
+/// The SDK's font lookup, linked in.
+#[unsafe(no_mangle)]
+pub fn catcard_linked_face(id: u32) -> Option<&'static dyn catcard_ui::face::Face> {
+    face(id)
+}
+
+/// Bytes of the firmware's canvas: what an app's canvas must be too.
+#[cfg(feature = "board-q1")]
+const SCREEN_BYTES: u32 = 320 * 240 / 2;
+#[cfg(not(feature = "board-q1"))]
+const SCREEN_BYTES: u32 = 128 * 64 / 8;
+
+/// Up to this many bytes of text a call.
+const TEXT_MAX: u32 = 256;
+
+/// Draw text into an app's canvas, after checking every pointer in the request.
+fn text_service(args: u32) -> u32 {
+    if !in_arena(args, 32) {
+        return u32::MAX;
+    }
+    // SAFETY: inside the area, checked just above.
+    let w = |i: u32| unsafe { ((args + 4 * i) as *const u32).read_volatile() };
+    let (canvas, canvas_len, x, y, font, level, text, text_len) =
+        (w(0), w(1), w(2), w(3), w(4), w(5), w(6), w(7));
+    let Some(face) = face(font) else {
+        return u32::MAX;
+    };
+    if canvas_len != SCREEN_BYTES
+        || !in_arena(canvas, canvas_len)
+        || text_len > TEXT_MAX
+        || !in_arena(text, text_len)
+    {
+        return u32::MAX;
+    }
+    let mut buf = [0u8; TEXT_MAX as usize];
+    for (i, b) in buf[..text_len as usize].iter_mut().enumerate() {
+        // SAFETY: inside the area, checked just above.
+        *b = unsafe { ((text + i as u32) as *const u8).read_volatile() };
+    }
+    let s = core::str::from_utf8(&buf[..text_len as usize]).unwrap_or("");
+    // SAFETY: `canvas` is `SCREEN_BYTES` inside the app's own area, and the canvas types
+    // are `repr(transparent)` over exactly that many bytes; nothing else holds it while
+    // the app waits on this call.
+    let screen = unsafe { &mut *(canvas as *mut crate::display::Screen) };
+    let level = (level as u8).min(catcard_ui::canvas::INK);
+    // The same view the app draws through: the Q1's area below the status bar.
+    #[cfg(feature = "board-q1")]
+    let end = {
+        let mut v = catcard_ui::canvas::Inset::new(screen, crate::display::BAR_H);
+        catcard_ui::text::draw_text_in(&mut v, face, x as usize, y as usize, s, level)
+    };
+    #[cfg(not(feature = "board-q1"))]
+    let end = catcard_ui::text::draw_text_in(screen, face, x as usize, y as usize, s, level);
+    end as u32
+}
+
+/// `text_width`: the sum of the advances, as `draw_text` moves the pen.
+fn text_width_service(font: u32, ptr: u32, len: u32) -> u32 {
+    let Some(face) = face(font) else {
+        return u32::MAX;
+    };
+    if len > TEXT_MAX || !in_arena(ptr, len) {
+        return u32::MAX;
+    }
+    (0..len)
+        // SAFETY: inside the area, checked just above.
+        .map(|i| face.advance(unsafe { ((ptr + i) as *const u8).read_volatile() }) as u32)
+        .sum()
 }
 
 /// A feature linked into the firmware is running through the same services (docs/APPS.md,
@@ -451,9 +542,6 @@ fn in_arena(ptr: u32, len: u32) -> bool {
 
 /// Serve one `SVC CALL`. Runs privileged, on the UI task's stack, preemptible.
 extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
-    // Only the panel's services take a fourth argument.
-    #[cfg(not(feature = "board-q1"))]
-    let _ = c;
     match id {
         service::LOG => {
             let len = (b as usize).min(LOG_MAX);
@@ -566,6 +654,9 @@ extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
             }
         }
         service::PRESENT => present(a, b),
+        service::TEXT => text_service(a),
+        service::TEXT_WIDTH => text_width_service(a, b, c),
+        service::LINE_HEIGHT => face(a).map_or(u32::MAX, |f| f.line_height() as u32),
         service::CYCLES => catcard_hal::dwt::cycles(),
         // SAFETY: reads RCC.
         service::CLOCK_HZ => unsafe { catcard_hal::clock::hclk_hz() },
@@ -590,12 +681,7 @@ extern "C" fn dispatch(id: u32, a: u32, b: u32, c: u32) -> u32 {
 /// [`display::Screen`](crate::display) -- into a frame and show it.
 fn present(ptr: u32, len: u32) -> u32 {
     use catcard_ui::canvas::Canvas as _;
-    // The firmware's canvas: the Q1's 4-bit 320x240, or the mono boards' 128x64 pages.
-    #[cfg(feature = "board-q1")]
-    const BYTES: u32 = 320 * 240 / 2;
-    #[cfg(not(feature = "board-q1"))]
-    const BYTES: u32 = 128 * 64 / 8;
-    if len != BYTES || !in_arena(ptr, len) {
+    if len != SCREEN_BYTES || !in_arena(ptr, len) {
         return u32::MAX;
     }
     // SAFETY: a service, on the UI task, while the app runs.

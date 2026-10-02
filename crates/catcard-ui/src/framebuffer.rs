@@ -8,6 +8,9 @@
 ///
 /// The three parameters are redundant, but const generic arithmetic in array lengths
 /// is not stable, so `N` is passed explicitly and checked.
+///
+/// `repr(transparent)`, like `Gray4`: the struct is its byte buffer.
+#[repr(transparent)]
 pub struct Framebuffer<const W: usize, const PAGES: usize, const N: usize> {
     buf: [u8; N],
 }

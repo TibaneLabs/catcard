@@ -334,7 +334,7 @@ fn blit<C: Canvas + ?Sized>(c: &mut C, sx: usize, sy: usize, pat: &[u8; 8]) {
     }
 }
 
-fn render<C: Canvas + ?Sized>(c: &mut C, g: &Game) {
+fn render(c: &mut screen::Frame<'_>, g: &Game) {
     c.clear();
     let cam_x = camera(g.px, VIEW_W, W);
     let cam_y = camera(g.py, VIEW_H, H);
@@ -385,7 +385,8 @@ fn render<C: Canvas + ?Sized>(c: &mut C, g: &Game) {
 
     let mut hud = heapless::String::<24>::new();
     let _ = write!(hud, "BTC {}/{}  x quit", g.coins, g.needed);
-    catcard_ui::text::draw_text(c, &catcard_ui::font::misc4x6::FONT, 1, 1, &hud);
+    // In the firmware's own 4x6, drawn by the firmware: the app carries no font.
+    c.text(screen::Font::Tiny, 1, 1, &hud);
 }
 
 /// Show a centered end-of-game message and wait for a key.
