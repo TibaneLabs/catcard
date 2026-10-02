@@ -1,6 +1,7 @@
 # Threshold signing (TSS)
 
-Status: **design, 2026-10-02.** Nothing implemented yet.
+Status: **protocol layer built, 2026-10-02** (`crates/catcard-tss`, host-tested; not yet
+wired into the firmware). Screens, SD/QR transport and settings storage are still to do.
 
 A wallet whose key is held in **shares** by several CatCards: any `t` of the `n` can sign
 together without the key ever being put back together, and `t` shares can also restore it.
@@ -48,6 +49,13 @@ governs signing and restoring.
   of the parameters and every identity key, as words — and the user checks the codes match
   on all devices before anything secret is sent. From then on each message is signed by its
   sender's session key, and anything unsigned or signed by someone else is refused.
+- **Unicasts are encrypted.** tsslib also assumes point-to-point messages are private, and
+  some are secret: a DKG's round-1 unicasts are Shamir shares, so whoever copied every
+  round-1 file off a shared card could rebuild the key. Each unicast is AES-256-GCM under a
+  one-message key from ECDH between the two members' session keys.
+- **One session, many sighashes.** A signing session runs one DKLs signing per input, and
+  every input's messages for a round travel in the same file: a PSBT of ten inputs takes
+  the same six passes of the cards as one.
 - **Randomness.** The DKG's secret contribution and every share made on export are seed-grade
   and come from the entropy pool, like a new wallet (the pool-draw lint allowlist names the
   TSS module). Protocol randomness (nonces, OT seeds) comes from a DRBG seeded from the pool
@@ -122,8 +130,37 @@ presigning, which moves the work before the transaction is known.
 The share grows with `n` (per-peer OT state), so it also sets the most members a device can
 hold shares for; binary instead of JSON roughly halves it.
 
-## Open before implementation
+## Measured (host, `cargo test -p catcard-tss --test sizes -- --nocapture`)
 
-- Share and message sizes for real `n` (settings space; QR part counts).
-- Heap per member with one party per device (the bench holds every party at once).
+Message envelope sizes, as one member sends them (SD file or BBQr payload). tsslib's JSON
+is re-encoded into a compact binary form first (base64 and byte arrays as raw bytes);
+signing messages are almost all OT-extension data and do not compress further.
+
+| | round 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| create together, broadcast | 118 | 250-318 | 142-250 | | | | |
+| create together, to each peer | | 410 | | 8.8 KB | | | |
+| sign, broadcast, one input | 118 | 176 | 142-178 | | | 173 | 142-178 |
+| sign (plain), to each peer, per input | | | | 11.8 KB | 17.5 KB | | |
+| sign (checked), to each peer, per input | | | | 23.5 KB | 35.0 KB | | |
+
+Ranges are over 2, 3 and 5 members; each further input adds about 90 bytes to a signing
+broadcast. Every envelope carries 85 bytes of header and signature.
+
+Share records (settings): **13.7 KB** for 2-of-2, **27.0 KB** for 2-of-3, **53.5 KB** for
+3-of-5 -- about 13.4 KB per other member (the pairwise OT state). An export's share bundle
+adds 61 bytes and the 48-character Codex32 string.
+
+## Open
+
+- Heap per member with one party per device: the bench above holds every party at once.
+- Maximum `n` given the record sizes above (settings space), and QR part counts for the
+  signing unicasts (12-35 KB per input per peer).
+- Plain or checked signing by default (`SignMode`): checked costs twice the wire and the
+  work, and catches one form of a selective-failure attack (see the crate docs).
+- The session code is 8 words (88 bits). An attacker between the members during round 0
+  can grind substitute keys for a birthday match, about 2^44 work; a commit-then-reveal
+  round 0 would remove that, at the cost of one more pass of the cards.
+- tsslib's DKG lets colluding members bias the key when `n <= 2t - 2` (2-of-2, 3-of-3,
+  3-of-4...). Export is not affected. Refuse those shapes for *Create together*, or warn.
 - Encryption of share files on SD (a password per file, or none and the card is the secret).

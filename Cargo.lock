@@ -347,6 +347,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-tss"
+version = "7.0.0"
+dependencies = [
+ "catcard-wallet",
+ "purecrypto",
+ "serde_json",
+ "spin",
+ "tsslib",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-ui"
 version = "7.0.0"
 dependencies = [

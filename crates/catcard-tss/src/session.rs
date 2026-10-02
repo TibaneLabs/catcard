@@ -1,0 +1,1054 @@
+//! A session: one run of a protocol among members, driven by the bytes handed to it.
+//!
+//! ```text
+//!   new ──► outbox: round-0 identity ──► receive every member's identity
+//!       ──► code() shown on every device, the user compares ──► confirm()
+//!       ──► outbox: round 1 ──► receive round 1 ──► outbox: round 2 ──► ...
+//!       ──► Finished: share() / signatures()
+//! ```
+//!
+//! The session never waits and never does I/O. [`Session::receive`] takes one envelope,
+//! checks it (framing, session, member, round, replay, signature, decryption, content)
+//! and hands its tsslib messages to the protocol, which may answer at once; whatever it
+//! answers is sealed into envelopes and queued for [`Session::take_outbox`].
+//! [`Session::awaiting`] says which messages the current round still needs, by the names
+//! their files have.
+//!
+//! A refused message ([`Error::Refused`]) leaves the session as it was. A message that
+//! passes every check and is then rejected by tsslib ends it ([`Status::Failed`]): it was
+//! signed by a member, so that member is cheating or broken, and the protocol cannot
+//! continue around it.
+
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use catcard_wallet::KeyWork;
+use purecrypto::ec::secp256k1::Scalar;
+use purecrypto::ec::secp256k1::ecdsa::{Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature};
+use purecrypto::hash::{Digest, Sha256};
+use tsslib::dklstss::{CheckedSigningParty, KeygenParty, SigningParty};
+use tsslib::tss::{JsonMessage, MessageBroker, Parameters, PartyId};
+use zeroize::Zeroizing;
+
+use crate::broker::Mailbox;
+use crate::code::SessionCode;
+use crate::envelope::{
+    Envelope, HEADER_LEN, Header, Protocol, Refused, SESSION_ID_LEN, file_name, frame,
+    signed_digest,
+};
+use crate::identity::{IdentityKey, UnicastContext, valid_public, verify};
+use crate::rng::{Armed, Entropy, draw};
+use crate::share::{Origin, SecretKey, ShareRecord, check_params, compress};
+use crate::{Error, PUBKEY_LEN, bjson, member_id};
+
+/// Most sighashes one signing session carries.
+pub const MAX_REQUESTS: usize = 64;
+
+/// The bytes of the header the unicast encryption authenticates: everything but the
+/// payload length, which the ciphertext fixes anyway.
+const AAD_LEN: usize = HEADER_LEN - 4;
+
+/// A fresh session id from `source` (the UI DRBG).
+pub fn new_session_id(source: &mut dyn Entropy) -> Result<[u8; SESSION_ID_LEN], Error> {
+    let mut id = [0u8; SESSION_ID_LEN];
+    draw(source, &mut id)?;
+    Ok(id)
+}
+
+/// Which DKLs signing protocol a signing session runs. Every signer must use the same;
+/// it is part of the session code.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SignMode {
+    /// tsslib's default `SigningParty`.
+    Plain = 1,
+    /// tsslib's `CheckedSigningParty`: each multiplication twice with a consistency
+    /// check, catching one form of selective-failure attack and naming the culprit.
+    /// About twice the messages and the work.
+    Checked = 2,
+}
+
+/// One thing to sign: a sighash, under the key at a non-hardened `path` below the
+/// wallet key (`[0, i]` for receive address `i`, `[1, i]` for change).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignRequest {
+    pub path: Vec<u32>,
+    pub sighash: [u8; 32],
+}
+
+/// A finished threshold signature: standard ECDSA, low-S.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcdsaSignature {
+    /// `r || s`, 32 bytes each.
+    pub compact: [u8; 64],
+    /// DER `SEQUENCE { INTEGER r, INTEGER s }`, without a sighash-type byte.
+    pub der: Vec<u8>,
+    /// The key it verifies under: the wallet key at the request's path.
+    pub child_public_key: [u8; PUBKEY_LEN],
+}
+
+/// Where a session is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Waiting for members' identities (round 0).
+    Introducing,
+    /// Every identity is in: show [`Session::code`] and wait for [`Session::confirm`].
+    Comparing,
+    /// Protocol rounds under way.
+    Running,
+    /// Done: [`Session::share`] or [`Session::signatures`].
+    Finished,
+    /// Ended by a failure: [`Session::failure`].
+    Failed,
+}
+
+/// A sealed envelope to deliver.
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub round: u8,
+    pub from: u8,
+    /// A member, or 0 for every member.
+    pub to: u8,
+    pub bytes: Vec<u8>,
+}
+
+impl Outgoing {
+    /// The name of the file it travels in.
+    pub fn file_name(&self) -> String {
+        file_name(self.round, self.from, self.to)
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The tsslib message types, by protocol and round
+// ---------------------------------------------------------------------------------------
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Family {
+    Keygen,
+    Sign,
+    CheckedSign,
+}
+
+struct MsgType {
+    family: Family,
+    /// What the type is called inside an envelope.
+    code: u8,
+    name: &'static str,
+    round: u8,
+    broadcast: bool,
+}
+
+/// tsslib's message types and their order.
+/// Source: tsslib 0.2.11 `src/dklstss/keygen_party.rs`, `signing_party.rs` and
+/// `signing_checked_party.rs` (`TYPE_*` constants and the module docs' round lists).
+/// The `broadcast` flags are what each party sends with `to == None`; a message that
+/// disagrees fails the session rather than being sealed under the wrong address.
+#[rustfmt::skip]
+const TYPES: &[MsgType] = &[
+    MsgType { family: Family::Keygen, code: 1, name: "dkls:keygen:r1bc", round: 1, broadcast: true },
+    MsgType { family: Family::Keygen, code: 2, name: "dkls:keygen:r1uc", round: 1, broadcast: false },
+    MsgType { family: Family::Keygen, code: 3, name: "dkls:keygen:echo", round: 2, broadcast: true },
+    MsgType { family: Family::Keygen, code: 4, name: "dkls:keygen:r2", round: 3, broadcast: false },
+    MsgType { family: Family::Sign, code: 1, name: "dkls:sign:r1", round: 1, broadcast: true },
+    MsgType { family: Family::Sign, code: 2, name: "dkls:sign:r1echo", round: 2, broadcast: true },
+    MsgType { family: Family::Sign, code: 3, name: "dkls:sign:r2", round: 3, broadcast: false },
+    MsgType { family: Family::Sign, code: 4, name: "dkls:sign:r3", round: 4, broadcast: false },
+    MsgType { family: Family::Sign, code: 5, name: "dkls:sign:r4", round: 5, broadcast: true },
+    MsgType { family: Family::Sign, code: 6, name: "dkls:sign:r4echo", round: 6, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 1, name: "dkls:csign:r1", round: 1, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 2, name: "dkls:csign:r1echo", round: 2, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 3, name: "dkls:csign:r2", round: 3, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 4, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 5, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 6, broadcast: true },
+];
+
+impl Family {
+    fn types(self) -> impl Iterator<Item = &'static MsgType> {
+        TYPES.iter().filter(move |t| t.family == self)
+    }
+    fn by_name(self, name: &str) -> Option<&'static MsgType> {
+        self.types().find(|t| t.name == name)
+    }
+    fn by_code(self, code: u8) -> Option<&'static MsgType> {
+        self.types().find(|t| t.code == code)
+    }
+    fn rounds(self) -> u8 {
+        self.types().map(|t| t.round).max().unwrap_or(0)
+    }
+    /// Whether `round` has broadcast types, unicast types.
+    fn shape(self, round: u8) -> (bool, bool) {
+        let mut shape = (false, false);
+        for t in self.types().filter(|t| t.round == round) {
+            if t.broadcast {
+                shape.0 = true;
+            } else {
+                shape.1 = true;
+            }
+        }
+        shape
+    }
+    fn protocol(self) -> Protocol {
+        match self {
+            Family::Keygen => Protocol::Keygen,
+            Family::Sign | Family::CheckedSign => Protocol::Sign,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The payload of a protocol round: tsslib messages, one per (instance, type)
+// ---------------------------------------------------------------------------------------
+//
+//   count u16 LE, then per message: instance u16 LE, type code u8, length u32 LE,
+//   compact JSON of the message's `data` (crate::bjson).
+//
+// `from` and `to` are not repeated: tsslib is told the envelope's, which are the ones
+// the signature vouches for.
+
+/// A received message: (instance, type, compact JSON data).
+type Message<'p> = (u16, &'static MsgType, &'p [u8]);
+
+struct Entry {
+    instance: u16,
+    code: u8,
+    data: Zeroizing<Vec<u8>>,
+}
+
+fn encode_entries(entries: &[Entry]) -> Zeroizing<Vec<u8>> {
+    let len = 2 + entries.iter().map(|e| 7 + e.data.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for e in entries {
+        out.extend_from_slice(&e.instance.to_le_bytes());
+        out.push(e.code);
+        out.extend_from_slice(&(e.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&e.data);
+    }
+    Zeroizing::new(out)
+}
+
+fn decode_entries(mut p: &[u8]) -> Option<Vec<(u16, u8, &[u8])>> {
+    fn take<'a>(p: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if p.len() < n {
+            return None;
+        }
+        let (h, t) = p.split_at(n);
+        *p = t;
+        Some(h)
+    }
+    let count = u16::from_le_bytes(take(&mut p, 2)?.try_into().ok()?);
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let instance = u16::from_le_bytes(take(&mut p, 2)?.try_into().ok()?);
+        let code = take(&mut p, 1)?[0];
+        let len = u32::from_le_bytes(take(&mut p, 4)?.try_into().ok()?) as usize;
+        out.push((instance, code, take(&mut p, len)?));
+    }
+    p.is_empty().then_some(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// The session
+// ---------------------------------------------------------------------------------------
+
+enum Party {
+    Keygen(KeygenParty),
+    Sign(SigningParty),
+    CheckedSign(CheckedSigningParty),
+}
+
+enum Outcome {
+    Key(tsslib::dklstss::Key),
+    Signature(tsslib::dklstss::Signature),
+}
+
+impl Party {
+    fn poll(&self) -> Option<Result<Outcome, String>> {
+        let err = |e: tsslib::dklstss::Error| format!("{e}");
+        match self {
+            Party::Keygen(p) => p.try_result().map(|r| r.map(Outcome::Key).map_err(err)),
+            Party::Sign(p) => p
+                .try_result()
+                .map(|r| r.map(Outcome::Signature).map_err(err)),
+            Party::CheckedSign(p) => p
+                .try_result()
+                .map(|r| r.map(Outcome::Signature).map_err(err)),
+        }
+    }
+}
+
+/// One tsslib party and its mailbox: the whole of a keygen, or one sighash of a signing.
+struct Lane {
+    mailbox: Arc<Mailbox>,
+    party: Option<Party>,
+}
+
+/// What a signing session signs with and checks against.
+struct SignJob {
+    mode: SignMode,
+    record: ShareRecord,
+    requests: Vec<SignRequest>,
+    tweaks: Vec<Scalar>,
+    children: Vec<[u8; PUBKEY_LEN]>,
+    results: Vec<Option<EcdsaSignature>>,
+}
+
+/// One run of create-together or sign, from this member's side.
+pub struct Session {
+    family: Family,
+    id: [u8; SESSION_ID_LEN],
+    n: u8,
+    t: u8,
+    me: u8,
+    /// Who takes part, ascending: `1..=n` for keygen, the signers for a signature.
+    members: Vec<u8>,
+    params: [u8; 32],
+    identity: IdentityKey,
+    roster: Vec<Option<[u8; PUBKEY_LEN]>>,
+    code: Option<SessionCode>,
+    confirmed: bool,
+    /// (round, from, to) of every message taken.
+    seen: Vec<(u8, u8, u8)>,
+    /// (round, to) of every envelope sealed.
+    sealed: Vec<(u8, u8)>,
+    outbox: Vec<Outgoing>,
+    lanes: Vec<Lane>,
+    sign: Option<SignJob>,
+    share: Option<ShareRecord>,
+    finished: bool,
+    failure: Option<String>,
+    _armed: Armed,
+}
+
+impl Session {
+    /// Create together: member `me` of `n`, threshold `t`.
+    ///
+    /// `source` arms the protocol DRBG (see [`crate::rng`]): it must be seed-grade, as
+    /// what the DRBG draws in a DKG is this member's share of the new key. It also makes
+    /// the identity key.
+    pub fn keygen(
+        id: [u8; SESSION_ID_LEN],
+        n: u8,
+        t: u8,
+        me: u8,
+        source: &mut dyn Entropy,
+        _kw: &KeyWork,
+    ) -> Result<Self, Error> {
+        check_params(n, t)?;
+        if me == 0 || me > n {
+            return Err(Error::Parameters);
+        }
+        Session::start(
+            Family::Keygen,
+            id,
+            n,
+            t,
+            me,
+            (1..=n).collect(),
+            [0; 32],
+            None,
+            source,
+        )
+    }
+
+    /// Sign `requests` with `record`'s share, together with the other `signers`.
+    ///
+    /// `signers` is exactly `t` distinct member numbers, this member's among them; every
+    /// signer passes the same set, the same requests in the same order and the same
+    /// mode, or the session codes differ. `source` arms the protocol DRBG for nonces and
+    /// makes the identity key.
+    pub fn sign(
+        id: [u8; SESSION_ID_LEN],
+        record: &ShareRecord,
+        signers: &[u8],
+        requests: &[SignRequest],
+        mode: SignMode,
+        source: &mut dyn Entropy,
+        _kw: &KeyWork,
+    ) -> Result<Self, Error> {
+        let mut members = signers.to_vec();
+        members.sort_unstable();
+        members.dedup();
+        if members.len() != signers.len()
+            || members.len() != usize::from(record.t)
+            || members.iter().any(|&m| m == 0 || m > record.n)
+            || !members.contains(&record.member)
+            || requests.is_empty()
+            || requests.len() > MAX_REQUESTS
+        {
+            return Err(Error::Parameters);
+        }
+        let mut tweaks = Vec::with_capacity(requests.len());
+        let mut children = Vec::with_capacity(requests.len());
+        let mut h = Sha256::new();
+        h.update(b"CatCard TSS sign parameters v1\0");
+        h.update(&[mode as u8]);
+        h.update(&record.joint_public);
+        h.update(&record.chain_code);
+        h.update(&(requests.len() as u16).to_be_bytes());
+        for r in requests {
+            if r.path.len() > crate::MAX_PATH {
+                return Err(Error::Parameters);
+            }
+            let (tweak, child) = tsslib::dklstss::derive_child(&record.key.0, &r.path)
+                .map_err(|_| Error::Parameters)?;
+            tweaks.push(tweak);
+            children.push(compress(&child).ok_or(Error::Parameters)?);
+            h.update(&[r.path.len() as u8]);
+            for i in &r.path {
+                h.update(&i.to_be_bytes());
+            }
+            h.update(&r.sighash);
+        }
+        let family = match mode {
+            SignMode::Plain => Family::Sign,
+            SignMode::Checked => Family::CheckedSign,
+        };
+        let job = SignJob {
+            mode,
+            record: record.clone(),
+            requests: requests.to_vec(),
+            tweaks,
+            children,
+            results: alloc::vec![None; requests.len()],
+        };
+        Session::start(
+            family,
+            id,
+            record.n,
+            record.t,
+            record.member,
+            members,
+            h.finalize(),
+            Some(job),
+            source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        family: Family,
+        id: [u8; SESSION_ID_LEN],
+        n: u8,
+        t: u8,
+        me: u8,
+        members: Vec<u8>,
+        params: [u8; 32],
+        sign: Option<SignJob>,
+        source: &mut dyn Entropy,
+    ) -> Result<Self, Error> {
+        let armed = Armed::new(source)?;
+        let identity = IdentityKey::generate(source)?;
+        let mut roster = alloc::vec![None; members.len()];
+        let mine = members
+            .iter()
+            .position(|&m| m == me)
+            .ok_or(Error::Parameters)?;
+        roster[mine] = Some(*identity.public());
+        let mut s = Session {
+            family,
+            id,
+            n,
+            t,
+            me,
+            members,
+            params,
+            identity,
+            roster,
+            code: None,
+            confirmed: false,
+            seen: Vec::new(),
+            sealed: Vec::new(),
+            outbox: Vec::new(),
+            lanes: Vec::new(),
+            sign,
+            share: None,
+            finished: false,
+            failure: None,
+            _armed: armed,
+        };
+        let hello = s.seal(0, 0, s.identity.public().to_vec())?;
+        s.outbox.push(hello);
+        Ok(s)
+    }
+
+    // --- what the UI asks ---------------------------------------------------------
+
+    pub fn protocol(&self) -> Protocol {
+        self.family.protocol()
+    }
+    pub fn id(&self) -> &[u8; SESSION_ID_LEN] {
+        &self.id
+    }
+    /// This member's number.
+    pub fn me(&self) -> u8 {
+        self.me
+    }
+    /// The members taking part, ascending.
+    pub fn members(&self) -> &[u8] {
+        &self.members
+    }
+    /// Protocol rounds after round 0.
+    pub fn rounds(&self) -> u8 {
+        self.family.rounds()
+    }
+
+    pub fn status(&self) -> Status {
+        if self.failure.is_some() {
+            Status::Failed
+        } else if self.finished {
+            Status::Finished
+        } else if self.confirmed {
+            Status::Running
+        } else if self.code.is_some() {
+            Status::Comparing
+        } else {
+            Status::Introducing
+        }
+    }
+
+    /// The session code, once every member's identity is in.
+    pub fn code(&self) -> Option<&SessionCode> {
+        self.code.as_ref()
+    }
+
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Envelopes to deliver, oldest first. Each is returned once.
+    pub fn take_outbox(&mut self) -> Vec<Outgoing> {
+        core::mem::take(&mut self.outbox)
+    }
+
+    /// The messages this member is waiting for, as (round, from, to): the identities
+    /// still missing, or the rest of the earliest protocol round not complete. Empty
+    /// while the code is being compared and once the session has ended.
+    pub fn awaiting(&self) -> Vec<(u8, u8, u8)> {
+        let mut out = Vec::new();
+        if self.failure.is_some() || self.finished {
+            return out;
+        }
+        if self.code.is_none() {
+            for (i, k) in self.roster.iter().enumerate() {
+                if k.is_none() {
+                    out.push((0, self.members[i], 0));
+                }
+            }
+            return out;
+        }
+        if !self.confirmed {
+            return out;
+        }
+        for round in 1..=self.rounds() {
+            let (bc, uc) = self.family.shape(round);
+            for &from in self.members.iter().filter(|&&m| m != self.me) {
+                for (wanted, to) in [(bc, 0), (uc, self.me)] {
+                    if wanted && !self.seen.contains(&(round, from, to)) {
+                        out.push((round, from, to));
+                    }
+                }
+            }
+            if !out.is_empty() {
+                break;
+            }
+        }
+        out
+    }
+
+    /// A created-together wallet's share, once finished. Store it, then drop the
+    /// session.
+    pub fn share(&self) -> Option<&ShareRecord> {
+        self.share.as_ref()
+    }
+
+    /// A signing session's signatures, in request order, once finished.
+    pub fn signatures(&self) -> Option<Vec<EcdsaSignature>> {
+        let job = self.sign.as_ref()?;
+        if !self.finished {
+            return None;
+        }
+        job.results.iter().cloned().collect()
+    }
+
+    // --- driving it ---------------------------------------------------------------
+
+    /// The user saw the same code on every device: start the protocol. Round 1 is in
+    /// the outbox when this returns.
+    pub fn confirm(&mut self, _kw: &KeyWork) -> Result<(), Error> {
+        if self.code.is_none() || self.confirmed || self.failure.is_some() {
+            return Err(Error::State("confirm"));
+        }
+        self.confirmed = true;
+        let threshold = usize::from(self.t) - 1;
+        let parties: Vec<PartyId> =
+            PartyId::sort(self.members.iter().map(|&m| member_id(m)).collect(), 0);
+        let me = member_id(self.me);
+        let started: Result<Vec<Lane>, String> = match self.sign.as_ref() {
+            None => {
+                let mailbox = Arc::new(Mailbox::default());
+                let params = Parameters::new(parties, &me, threshold, broker(&mailbox));
+                KeygenParty::new(params)
+                    .map(|p| {
+                        alloc::vec![Lane {
+                            mailbox,
+                            party: Some(Party::Keygen(p)),
+                        }]
+                    })
+                    .map_err(|e| format!("{e}"))
+            }
+            Some(job) => {
+                let mut lanes = Vec::with_capacity(job.requests.len());
+                let mut err = None;
+                for (req, tweak) in job.requests.iter().zip(&job.tweaks) {
+                    let mailbox = Arc::new(Mailbox::default());
+                    let params = Parameters::new(parties.clone(), &me, threshold, broker(&mailbox));
+                    // tsslib takes the key by value; its copy lives in the party.
+                    let key = job.record.key.0.clone();
+                    let hash = req.sighash.to_vec();
+                    let made = match job.mode {
+                        SignMode::Plain => SigningParty::new(
+                            params,
+                            key,
+                            hash,
+                            parties.clone(),
+                            Some(tweak.clone()),
+                        )
+                        .map(Party::Sign),
+                        SignMode::Checked => CheckedSigningParty::new(
+                            params,
+                            key,
+                            hash,
+                            parties.clone(),
+                            Some(tweak.clone()),
+                        )
+                        .map(Party::CheckedSign),
+                    };
+                    match made {
+                        Ok(p) => lanes.push(Lane {
+                            mailbox,
+                            party: Some(p),
+                        }),
+                        Err(e) => {
+                            mailbox.clear();
+                            err = Some(format!("{e}"));
+                            break;
+                        }
+                    }
+                }
+                match err {
+                    None => Ok(lanes),
+                    Some(e) => {
+                        for l in &lanes {
+                            l.mailbox.clear();
+                        }
+                        Err(e)
+                    }
+                }
+            }
+        };
+        match started {
+            Ok(lanes) => {
+                self.lanes = lanes;
+                self.advance()
+            }
+            Err(e) => Err(self.fail(e)),
+        }
+    }
+
+    /// Take one envelope.
+    pub fn receive(&mut self, bytes: &[u8], _kw: &KeyWork) -> Result<(), Error> {
+        if self.failure.is_some() || self.finished {
+            return Err(Error::State("session over"));
+        }
+        let env = Envelope::parse(bytes)?;
+        let h = env.header;
+        if h.protocol != self.family.protocol() {
+            return Err(Refused::WrongProtocol.into());
+        }
+        if h.session != self.id {
+            return Err(Refused::WrongSession.into());
+        }
+        let from = self
+            .members
+            .iter()
+            .position(|&m| m == h.from)
+            .ok_or(Refused::UnknownMember)?;
+        if h.from == self.me {
+            return Err(Refused::FromSelf.into());
+        }
+        if h.to != 0 && h.to != self.me {
+            return Err(Refused::NotForMe.into());
+        }
+        if h.round == 0 {
+            return self.receive_identity(from, &env);
+        }
+        if h.round > self.rounds() {
+            return Err(Refused::BadRound.into());
+        }
+        if !self.confirmed {
+            return Err(Refused::Early.into());
+        }
+        if self.seen.contains(&(h.round, h.from, h.to)) {
+            return Err(Refused::Replayed.into());
+        }
+        let roster = *self.code.as_ref().ok_or(Error::State("roster"))?.digest();
+        let peer = self.roster[from].ok_or(Error::State("roster"))?;
+        let sig = env.signature.ok_or(Refused::Unsigned)?;
+        if !verify(&peer, &signed_digest(&roster, env.signed), sig) {
+            return Err(Refused::BadSignature.into());
+        }
+        let payload = if h.to == 0 {
+            Zeroizing::new(env.payload.to_vec())
+        } else {
+            let ctx = UnicastContext {
+                session: &self.id,
+                roster: &roster,
+                round: h.round,
+                from: h.from,
+                to: h.to,
+            };
+            let aad = &env.signed[..AAD_LEN];
+            Zeroizing::new(
+                self.identity
+                    .open(&peer, &ctx, aad, env.payload)?
+                    .ok_or(Refused::Undecryptable)?,
+            )
+        };
+        let entries = self.check_entries(&h, &payload)?;
+        self.seen.push((h.round, h.from, h.to));
+
+        let sender = member_id(h.from);
+        let recipient = (h.to != 0).then(|| member_id(self.me));
+        for (instance, ty, data) in entries {
+            let text = match bjson::decode(data) {
+                Ok(t) => Zeroizing::new(t),
+                Err(_) => return Err(self.fail(format!("member {} sent bad data", h.from))),
+            };
+            let data: serde_json::Value = match serde_json::from_slice(&text) {
+                Ok(v) => v,
+                Err(_) => return Err(self.fail(format!("member {} sent bad JSON", h.from))),
+            };
+            let msg = JsonMessage {
+                typ: String::from(ty.name),
+                from: Some(sender.clone()),
+                to: recipient.clone(),
+                data,
+            };
+            if let Err(e) = self.lanes[usize::from(instance)].mailbox.deliver(&msg) {
+                return Err(self.fail(format!("{e}")));
+            }
+        }
+        self.advance()
+    }
+
+    // --- inside ---------------------------------------------------------------
+
+    fn receive_identity(&mut self, from: usize, env: &Envelope<'_>) -> Result<(), Error> {
+        if env.header.to != 0 || !valid_public(env.payload) {
+            return Err(Refused::Malformed.into());
+        }
+        let mut key = [0u8; PUBKEY_LEN];
+        key.copy_from_slice(env.payload);
+        let sig = env.signature.ok_or(Refused::Unsigned)?;
+        if !verify(&key, &signed_digest(&[0; 32], env.signed), sig) {
+            return Err(Refused::BadSignature.into());
+        }
+        if self.roster[from].is_some() {
+            return Err(Refused::Replayed.into());
+        }
+        self.roster[from] = Some(key);
+        if self.roster.iter().all(Option::is_some) {
+            let keys: Vec<[u8; PUBKEY_LEN]> = self.roster.iter().flatten().copied().collect();
+            self.code = Some(SessionCode::compute(
+                self.family.protocol(),
+                &self.id,
+                self.n,
+                self.t,
+                &self.members,
+                &self.params,
+                &keys,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The payload's messages, if they are exactly this round's: one of each of its
+    /// types for this direction, per instance.
+    fn check_entries<'p>(&self, h: &Header, payload: &'p [u8]) -> Result<Vec<Message<'p>>, Error> {
+        let bad = Error::Refused(Refused::UnexpectedContent);
+        let raw = decode_entries(payload).ok_or(bad.clone())?;
+        let broadcast = h.to == 0;
+        let wanted: Vec<&MsgType> = self
+            .family
+            .types()
+            .filter(|t| t.round == h.round && t.broadcast == broadcast)
+            .collect();
+        if raw.len() != wanted.len() * self.lanes.len() {
+            return Err(bad);
+        }
+        let mut out: Vec<Message<'p>> = Vec::with_capacity(raw.len());
+        for (instance, code, data) in raw {
+            let ty = self.family.by_code(code).ok_or(bad.clone())?;
+            if ty.round != h.round
+                || ty.broadcast != broadcast
+                || usize::from(instance) >= self.lanes.len()
+                || out.iter().any(|(i, t, _)| *i == instance && t.code == code)
+            {
+                return Err(bad);
+            }
+            out.push((instance, ty, data));
+        }
+        Ok(out)
+    }
+
+    /// Seal what the parties sent, collect what they finished with.
+    fn advance(&mut self) -> Result<(), Error> {
+        // Outbound, grouped by (round, to).
+        let mut groups: Vec<((u8, u8), Vec<Entry>)> = Vec::new();
+        for (lane_no, lane) in self.lanes.iter().enumerate() {
+            if let Some(e) = lane.mailbox.take_late_error() {
+                return Err(self.fail(e));
+            }
+            for msg in lane.mailbox.take_outbound() {
+                let Some(ty) = self.family.by_name(&msg.typ) else {
+                    return Err(self.fail(format!("unknown message type {}", msg.typ)));
+                };
+                let to = match &msg.to {
+                    None => 0,
+                    Some(p) => match p.key.as_slice() {
+                        [m] if self.members.contains(m) => *m,
+                        _ => return Err(self.fail(String::from("message to a non-member"))),
+                    },
+                };
+                if (to == 0) != ty.broadcast {
+                    return Err(self.fail(format!("{} sent with the wrong address", ty.name)));
+                }
+                let json = match serde_json::to_vec(&msg.data) {
+                    Ok(j) => Zeroizing::new(j),
+                    Err(_) => return Err(self.fail(String::from("message encoding"))),
+                };
+                let data = Zeroizing::new(bjson::encode(&json)?);
+                let entry = Entry {
+                    instance: lane_no as u16,
+                    code: ty.code,
+                    data,
+                };
+                match groups.iter_mut().find(|(k, _)| *k == (ty.round, to)) {
+                    Some((_, v)) => v.push(entry),
+                    None => groups.push(((ty.round, to), alloc::vec![entry])),
+                }
+            }
+        }
+        groups.sort_by_key(|(k, _)| *k);
+        for ((round, to), entries) in groups {
+            if self.sealed.contains(&(round, to)) {
+                return Err(self.fail(format!("round {round} sent twice")));
+            }
+            let payload = encode_entries(&entries);
+            let env = self.seal(round, to, payload.to_vec())?;
+            self.sealed.push((round, to));
+            self.outbox.push(env);
+        }
+
+        // Results.
+        let mut outcomes = Vec::new();
+        for (i, lane) in self.lanes.iter_mut().enumerate() {
+            if let Some(party) = &lane.party
+                && let Some(r) = party.poll()
+            {
+                lane.party = None;
+                lane.mailbox.clear();
+                outcomes.push((i, r));
+            }
+        }
+        for (i, r) in outcomes {
+            match r {
+                Ok(Outcome::Key(key)) => {
+                    let record = ShareRecord::from_key(
+                        Origin::Created,
+                        self.t,
+                        None,
+                        Vec::new(),
+                        SecretKey(key),
+                    );
+                    match record {
+                        Ok(r) => self.share = Some(r),
+                        Err(_) => {
+                            return Err(self.fail(String::from("keygen produced a bad share")));
+                        }
+                    }
+                }
+                Ok(Outcome::Signature(sig)) => {
+                    let Some(job) = self.sign.as_mut() else {
+                        return Err(self.fail(String::from("signature from a keygen")));
+                    };
+                    match finish_signature(&sig, &job.requests[i].sighash, &job.children[i]) {
+                        Some(s) => job.results[i] = Some(s),
+                        None => {
+                            return Err(self.fail(String::from("signature does not verify")));
+                        }
+                    }
+                }
+                Err(e) => return Err(self.fail(e)),
+            }
+        }
+        if !self.lanes.is_empty() && self.lanes.iter().all(|l| l.party.is_none()) {
+            self.finished = true;
+        }
+        Ok(())
+    }
+
+    fn seal(&self, round: u8, to: u8, payload: Vec<u8>) -> Result<Outgoing, Error> {
+        let header = Header {
+            protocol: self.family.protocol(),
+            session: self.id,
+            round,
+            from: self.me,
+            to,
+        };
+        let roster = match (&self.code, round) {
+            (_, 0) => [0u8; 32],
+            (Some(c), _) => *c.digest(),
+            (None, _) => return Err(Error::State("roster")),
+        };
+        let payload = if round > 0 && to != 0 {
+            let peer = self
+                .members
+                .iter()
+                .position(|&m| m == to)
+                .and_then(|i| self.roster[i])
+                .ok_or(Error::State("roster"))?;
+            let ctx = UnicastContext {
+                session: &self.id,
+                roster: &roster,
+                round,
+                from: self.me,
+                to,
+            };
+            let aad = frame(&header, &[]);
+            self.identity.seal(&peer, &ctx, &aad[..AAD_LEN], payload)?
+        } else {
+            payload
+        };
+        let mut bytes = frame(&header, &payload);
+        let sig = self.identity.sign(&signed_digest(&roster, &bytes))?;
+        bytes.extend_from_slice(&sig);
+        Ok(Outgoing {
+            round,
+            from: self.me,
+            to,
+            bytes,
+        })
+    }
+
+    /// End the session: drop every party (and with it its copy of the share).
+    fn fail(&mut self, why: String) -> Error {
+        for lane in &mut self.lanes {
+            lane.party = None;
+            lane.mailbox.clear();
+        }
+        let e = Error::Protocol(why.clone());
+        if self.failure.is_none() {
+            self.failure = Some(why);
+        }
+        e
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        for lane in &mut self.lanes {
+            lane.party = None;
+            lane.mailbox.clear();
+        }
+    }
+}
+
+fn broker(m: &Arc<Mailbox>) -> Arc<dyn MessageBroker + Send + Sync> {
+    Arc::clone(m) as Arc<dyn MessageBroker + Send + Sync>
+}
+
+/// tsslib's signature as standard ECDSA, checked independently of tsslib: low-S, and
+/// valid under the child key with purecrypto's verifier.
+fn finish_signature(
+    sig: &tsslib::dklstss::Signature,
+    sighash: &[u8; 32],
+    child: &[u8; PUBKEY_LEN],
+) -> Option<EcdsaSignature> {
+    let mut compact = [0u8; 64];
+    let (r, s) = (strip(&sig.r), strip(&sig.s));
+    if r.len() > 32 || s.len() > 32 {
+        return None;
+    }
+    compact[32 - r.len()..32].copy_from_slice(r);
+    compact[64 - s.len()..].copy_from_slice(s);
+    let parsed = Secp256k1EcdsaSignature::from_bytes(&compact);
+    let key = Secp256k1EcdsaPublicKey::from_sec1(child).ok()?;
+    if !parsed.is_low_s() || key.verify_prehash(sighash, &parsed).is_err() {
+        return None;
+    }
+    Some(EcdsaSignature {
+        der: der(&compact),
+        compact,
+        child_public_key: *child,
+    })
+}
+
+fn strip(b: &[u8]) -> &[u8] {
+    let i = b.iter().position(|&x| x != 0).unwrap_or(b.len());
+    &b[i..]
+}
+
+/// DER `SEQUENCE { INTEGER r, INTEGER s }` (X.690 §8.3, minimal two's complement; the
+/// form BIP-66 requires).
+fn der(compact: &[u8; 64]) -> Vec<u8> {
+    fn integer(out: &mut Vec<u8>, v: &[u8]) {
+        let v = strip(v);
+        let pad = v.first().is_none_or(|&b| b & 0x80 != 0);
+        out.push(0x02);
+        out.push((v.len() + usize::from(pad)) as u8);
+        if pad {
+            out.push(0);
+        }
+        out.extend_from_slice(v);
+    }
+    let mut body = Vec::with_capacity(70);
+    integer(&mut body, &compact[..32]);
+    integer(&mut body, &compact[32..]);
+    let mut out = Vec::with_capacity(body.len() + 2);
+    out.push(0x30);
+    out.push(body.len() as u8);
+    out.extend_from_slice(&body);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn der_pads_high_bits_and_strips_zeros() {
+        let mut c = [0u8; 64];
+        c[0] = 0x80;
+        c[31] = 1;
+        c[63] = 0x7f;
+        let d = der(&c);
+        assert_eq!(&d[..4], &[0x30, 2 + 33 + 2 + 1, 0x02, 33]);
+        assert_eq!(d[4], 0);
+        assert_eq!(&d[d.len() - 3..], &[0x02, 1, 0x7f]);
+    }
+
+    #[test]
+    fn every_round_of_every_protocol_has_messages() {
+        for f in [Family::Keygen, Family::Sign, Family::CheckedSign] {
+            for r in 1..=f.rounds() {
+                assert_ne!(f.shape(r), (false, false));
+            }
+        }
+        assert_eq!(Family::Keygen.rounds(), 3);
+        assert_eq!(Family::Sign.rounds(), 6);
+    }
+}

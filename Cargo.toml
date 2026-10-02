@@ -31,6 +31,7 @@ members = [
     "crates/catcard-sd",
     "crates/catcard-log",
     "crates/catcard-qr",
+    "crates/catcard-tss",
     "tools/catcard-image",
 ]
 
@@ -56,6 +57,7 @@ default-members = [
     "crates/catcard-usb",
     "crates/catcard-sign",
     "crates/catcard-wallet",
+    "crates/catcard-tss",
     "tools/catcard-image",
     "crates/catcard-nfc",
 ]
@@ -81,6 +83,7 @@ catcard-settings = { path = "crates/catcard-settings", default-features = false 
 catcard-sign = { path = "crates/catcard-sign", default-features = false }
 catcard-wallet = { path = "crates/catcard-wallet", default-features = false }
 catcard-fido = { path = "crates/catcard-fido", default-features = false }
+catcard-tss = { path = "crates/catcard-tss", default-features = false }
 catcard-fwhdr = { path = "crates/catcard-fwhdr", default-features = false }
 catcard-callgate = { path = "crates/catcard-callgate" }
 catcard-pin = { path = "crates/catcard-pin", default-features = false }
@@ -148,6 +151,16 @@ heapless = { version = "0.9.3", features = ["zeroize"] }
 # is about 60 KB of flash, and the security key (`catcard-fido`) signs a handful of
 # times per login, where the table-less ladder costs a fraction of a second.
 purecrypto = { version = "0.9.3", default-features = false }
+# --- tsslib: threshold signing, our own crate (docs/TSS.md) ---
+#
+# DKLs23 threshold ECDSA only. `std` stays off: the crate is then `no_std` + `alloc`,
+# takes its randomness from the source `catcard-tss` registers, and its sessions are
+# polled rather than waited on. Its JSON messages and key save format come with it, so
+# serde_json is named here with the same features to be the one copy in the build.
+tsslib = { version = "0.2.11", default-features = false, features = ["dklstss"] }
+serde_json = { version = "1", default-features = false, features = ["alloc", "arbitrary_precision"] }
+# The lock around the protocol DRBG tsslib draws from (tsslib already links it).
+spin = { version = "0.10", default-features = false, features = ["spin_mutex", "once"] }
 # Memory hygiene, not a primitive: kept.
 zeroize = { version = "1.9.0", default-features = false }
 

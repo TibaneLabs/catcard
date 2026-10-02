@@ -1,0 +1,25 @@
+[package]
+name = "catcard-tss"
+description = "Threshold signing (DKLs23): sessions, signed message envelopes, share records, export and restore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Always `no_std` + `alloc`: there is no `std` feature to turn on.
+
+[dependencies]
+catcard-wallet = { workspace = true }
+purecrypto = { workspace = true, features = ["alloc", "hash", "rng", "ec", "hazmat-secp256k1", "cipher"] }
+serde_json = { workspace = true }
+spin = { workspace = true }
+tsslib = { workspace = true }
+zeroize = { workspace = true, features = ["alloc", "derive"] }
+
+[dev-dependencies]
+# `KeyWork::host`, and BIP-39/32 to derive the wallet an export is checked against.
+catcard-wallet = { workspace = true, features = ["std"] }
+# The tests check the DER form with purecrypto's own strict parser.
+purecrypto = { workspace = true, features = ["der"] }
