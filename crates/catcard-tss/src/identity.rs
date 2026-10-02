@@ -4,8 +4,8 @@
 //! tsslib assumes a transport that authenticates senders and keeps point-to-point
 //! messages private (its module docs: "the broker is trusted to authenticate message
 //! origin"). An SD card or a QR code does neither, so each session makes its own: a
-//! fresh secp256k1 key per member, published in round 0 and pinned by the session code
-//! the user compares across devices.
+//! fresh secp256k1 key per member, committed to in round 0, published in round 1 and
+//! pinned by the session code the user compares across devices.
 //!
 //! - **Signing** is ECDSA with an RFC 6979 nonce over SHA-256, normalised to low-S;
 //!   verification refuses a high-S signature, so one message has one valid signature.

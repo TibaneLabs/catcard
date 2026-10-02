@@ -8,9 +8,10 @@
 //!   sign. It takes and produces **byte buffers** -- signed [`envelope`]s -- and never
 //!   touches a card or a camera; the firmware moves them by SD (named by
 //!   [`envelope::file_name`]) or QR.
-//! - Round 0 of every session authenticates the members: per-session identity keys and
-//!   a [`SessionCode`] the user compares across devices. After it every message is
-//!   signed, unicasts are encrypted, and a message out of place is [`Refused`].
+//! - Rounds 0 and 1 of every session authenticate the members: per-session identity
+//!   keys, committed to before any is revealed, and a [`SessionCode`] the user compares
+//!   across devices. After them every message is signed, unicasts are encrypted, and a
+//!   message out of place is [`Refused`].
 //! - [`ShareRecord`] is what a member stores; [`export`] splits a wallet the device holds
 //!   into [`ShareBundle`]s (Codex32 for restoring, DKLs for signing);
 //!   [`restore_entropy`] and [`combine`] put a wallet back together.
@@ -27,14 +28,19 @@
 //!
 //! # Rounds
 //!
-//! | protocol        | round 0    | rounds               | after          |
-//! |-----------------|------------|----------------------|----------------|
-//! | create together | identities | 3 (shares, echo, OT) | a share record |
-//! | sign            | identities | 6                    | signatures     |
+//! | protocol        | round 0     | round 1    | rounds 2..                 | after          |
+//! |-----------------|-------------|------------|----------------------------|----------------|
+//! | create together | commitments | identities | 2-4 (shares, echo, OT)     | a share record |
+//! | sign            | commitments | identities | 2-7                        | signatures     |
+//!
+//! Round 0 is a hash of each member's identity key; round 1 opens it, and is sent only
+//! once every commitment is in, so a key substituted in transit has to be chosen before
+//! the honest keys are seen (`code` module docs). The session code is shown after round
+//! 1 and confirmed before round 2.
 //!
 //! A signing session signs any number of sighashes at once, each its own tsslib party,
 //! with all their messages for a round in one envelope: a PSBT of ten inputs takes the
-//! same six passes of the cards as one input.
+//! same eight passes of the cards as one input.
 //!
 //! # Randomness
 //!
@@ -56,8 +62,8 @@
 //!   does not run a DKG and is not affected.
 //! - **Selective-failure aborts in signing.** A malicious co-signer can make a signing
 //!   session fail depending on one bit of another member's share. [`SignMode::Checked`]
-//!   catches the inconsistent form of the attack and names the culprit; neither mode
-//!   closes it fully. Repeated unexplained failures with the same co-signers are to be
+//!   (the default) catches the inconsistent form of the attack and names the culprit;
+//!   neither mode closes it fully. Repeated unexplained failures with the same co-signers are to be
 //!   treated as an attack.
 //! - tsslib copies key material into `serde_json` values and its own state that it does
 //!   not wipe; this crate wipes every buffer it owns.
@@ -82,7 +88,10 @@ mod session;
 mod share;
 
 pub use code::{SessionCode, WORDS as SESSION_CODE_WORDS};
-pub use envelope::{Protocol, Refused, SESSION_ID_LEN, file_name, parse_file_name, session_dir};
+pub use envelope::{
+    COMMIT_ROUND, FIRST_PROTOCOL_ROUND, Protocol, REVEAL_ROUND, Refused, SESSION_ID_LEN, file_name,
+    parse_file_name, session_dir,
+};
 pub use export::{AccountKey, export, restore_entropy, restore_entropy_from_codex32};
 pub use rng::{Entropy, NoEntropy};
 pub use session::{

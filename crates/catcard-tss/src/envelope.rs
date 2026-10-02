@@ -3,10 +3,10 @@
 //! ```text
 //!  off  len  field
 //!    0    4  magic "CTSm"
-//!    4    1  format version (1)
+//!    4    1  format version (2)
 //!    5    1  protocol: 1 create together (keygen), 2 sign
 //!    6    8  session id
-//!   14    1  round (0 = identities)
+//!   14    1  round (0 = commitments, 1 = identities)
 //!   15    1  from: member number, 1..=n
 //!   16    1  to: member number, or 0 for everyone
 //!   17    4  payload length, little-endian
@@ -17,13 +17,16 @@
 //! The format is ours (docs/TSS.md, "Members, sessions, messages"); nothing outside
 //! CatCard reads it. Every field before the signature is signed, and so is the
 //! session's *roster digest* -- which is not sent: both ends compute it from the
-//! identity keys of round 0, so a message only verifies inside the exact group whose
-//! code the user compared. Round 0 carries the sender's key and signs with it, over a
-//! roster digest of zeros (there is no roster yet).
+//! identity keys of rounds 0 and 1, so a message only verifies inside the exact group
+//! whose code the user compared. Rounds 0 and 1 are signed with the sender's identity
+//! key over a roster digest of zeros (there is no roster yet): round 1 carries the key,
+//! and the round-0 signature is checked once it has arrived.
 //!
 //! Payloads:
 //!
-//! - round 0: the sender's compressed identity public key, 33 bytes;
+//! - round 0: the sender's commitment to its identity key, 32 bytes (`crate::code`);
+//! - round 1: the sender's compressed identity public key, 33 bytes, then the 32
+//!   random bytes that open its commitment;
 //! - later rounds: a count, then per tsslib message its instance, type code and compact
 //!   JSON (`crate::bjson`). Addressed to one member (`to != 0`), the payload is
 //!   encrypted to that member first (see `crate::identity`): a DKG's round-1 unicasts
@@ -36,8 +39,15 @@ use purecrypto::hash::{Digest, Sha256};
 
 /// First four bytes of every envelope.
 pub const MAGIC: [u8; 4] = *b"CTSm";
-/// The envelope format this crate writes and reads.
-pub const VERSION: u8 = 1;
+/// The envelope format this crate writes and reads. 2: round 0 split into commitments
+/// (round 0) and identities (round 1), protocol rounds from 2.
+pub const VERSION: u8 = 2;
+/// The round of identity commitments.
+pub const COMMIT_ROUND: u8 = 0;
+/// The round that opens the commitments: identity keys.
+pub const REVEAL_ROUND: u8 = 1;
+/// The first round of the protocol proper, after the session code is confirmed.
+pub const FIRST_PROTOCOL_ROUND: u8 = 2;
 /// Bytes before the payload.
 pub const HEADER_LEN: usize = 21;
 /// The trailing signature.
@@ -99,10 +109,16 @@ pub enum Refused {
     Undecryptable,
     /// Already received: one message per round, sender and recipient.
     Replayed,
-    /// A protocol round before the session code was confirmed.
+    /// Too soon: an identity (round 1) before every member's commitment is in, or a
+    /// protocol round before the session code was confirmed. Not held: offer it again
+    /// once [`crate::Session::awaiting`] asks for it.
     Early,
     /// A payload that names a message type, instance or direction this round has none of.
     UnexpectedContent,
+    /// An identity that does not open the commitment its sender made in round 0: a key
+    /// substituted after the commitments were seen. Its sender's commitment stays, so
+    /// only the key it committed to can still be taken.
+    CommitmentMismatch,
 }
 
 /// The parsed fixed part of an envelope.
@@ -268,8 +284,10 @@ mod tests {
         assert!(Envelope::parse(&bytes).unwrap().signature.is_some());
         bytes.push(0);
         assert_eq!(Envelope::parse(&bytes).err(), Some(Refused::Malformed));
-        let mut v2 = frame(&h, b"");
-        v2[4] = 2;
-        assert_eq!(Envelope::parse(&v2).err(), Some(Refused::Version));
+        for other in [1, 3] {
+            let mut v = frame(&h, b"");
+            v[4] = other;
+            assert_eq!(Envelope::parse(&v).err(), Some(Refused::Version));
+        }
     }
 }

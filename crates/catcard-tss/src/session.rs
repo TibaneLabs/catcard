@@ -1,11 +1,19 @@
 //! A session: one run of a protocol among members, driven by the bytes handed to it.
 //!
 //! ```text
-//!   new ──► outbox: round-0 identity ──► receive every member's identity
+//!   new ──► outbox: round-0 commitment ──► receive every member's commitment
+//!       ──► outbox: round-1 identity   ──► receive every member's identity
 //!       ──► code() shown on every device, the user compares ──► confirm()
-//!       ──► outbox: round 1 ──► receive round 1 ──► outbox: round 2 ──► ...
+//!       ──► outbox: round 2 ──► receive round 2 ──► outbox: round 3 ──► ...
 //!       ──► Finished: share() / signatures()
 //! ```
+//!
+//! Rounds 0 and 1 are commit-then-reveal (see `crate::code`): a member's identity key
+//! leaves it only once it holds every other member's commitment, and an identity that
+//! arrives before then is refused ([`Refused::Early`]) rather than held, so the session
+//! never stores bytes it has not checked. [`Session::awaiting`] does not ask for
+//! identities until the commitments are complete, so a driver that follows it never
+//! sees that refusal.
 //!
 //! The session never waits and never does I/O. [`Session::receive`] takes one envelope,
 //! checks it (framing, session, member, round, replay, signature, decryption, content)
@@ -32,10 +40,10 @@ use tsslib::tss::{JsonMessage, MessageBroker, Parameters, PartyId};
 use zeroize::Zeroizing;
 
 use crate::broker::Mailbox;
-use crate::code::SessionCode;
+use crate::code::{COMMITMENT_LEN, Context, NONCE_LEN, SessionCode, commitment};
 use crate::envelope::{
-    Envelope, HEADER_LEN, Header, Protocol, Refused, SESSION_ID_LEN, file_name, frame,
-    signed_digest,
+    COMMIT_ROUND, Envelope, FIRST_PROTOCOL_ROUND, HEADER_LEN, Header, Protocol, REVEAL_ROUND,
+    Refused, SESSION_ID_LEN, SIG_LEN, file_name, frame, signed_digest,
 };
 use crate::identity::{IdentityKey, UnicastContext, valid_public, verify};
 use crate::rng::{Armed, Entropy, draw};
@@ -58,13 +66,18 @@ pub fn new_session_id(source: &mut dyn Entropy) -> Result<[u8; SESSION_ID_LEN], 
 
 /// Which DKLs signing protocol a signing session runs. Every signer must use the same;
 /// it is part of the session code.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+///
+/// [`SignMode::default()`] is [`Checked`](SignMode::Checked): a caller that does not
+/// choose gets the mode that catches a cheating co-signer. [`Plain`](SignMode::Plain)
+/// stays available for whoever decides half the wire and work is worth more.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SignMode {
     /// tsslib's default `SigningParty`.
     Plain = 1,
     /// tsslib's `CheckedSigningParty`: each multiplication twice with a consistency
     /// check, catching one form of selective-failure attack and naming the culprit.
-    /// About twice the messages and the work.
+    /// About twice the messages and the work. The default.
+    #[default]
     Checked = 2,
 }
 
@@ -90,7 +103,7 @@ pub struct EcdsaSignature {
 /// Where a session is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Status {
-    /// Waiting for members' identities (round 0).
+    /// Waiting for members' commitments (round 0), then their identities (round 1).
     Introducing,
     /// Every identity is in: show [`Session::code`] and wait for [`Session::confirm`].
     Comparing,
@@ -142,26 +155,28 @@ struct MsgType {
 /// tsslib's message types and their order.
 /// Source: tsslib 0.2.11 `src/dklstss/keygen_party.rs`, `signing_party.rs` and
 /// `signing_checked_party.rs` (`TYPE_*` constants and the module docs' round lists).
-/// The `broadcast` flags are what each party sends with `to == None`; a message that
-/// disagrees fails the session rather than being sealed under the wrong address.
+/// `round` is the envelope's: tsslib's round `r` travels in round `r + 1`, after the
+/// two rounds of identities. The `broadcast` flags are what each party sends with
+/// `to == None`; a message that disagrees fails the session rather than being sealed
+/// under the wrong address.
 #[rustfmt::skip]
 const TYPES: &[MsgType] = &[
-    MsgType { family: Family::Keygen, code: 1, name: "dkls:keygen:r1bc", round: 1, broadcast: true },
-    MsgType { family: Family::Keygen, code: 2, name: "dkls:keygen:r1uc", round: 1, broadcast: false },
-    MsgType { family: Family::Keygen, code: 3, name: "dkls:keygen:echo", round: 2, broadcast: true },
-    MsgType { family: Family::Keygen, code: 4, name: "dkls:keygen:r2", round: 3, broadcast: false },
-    MsgType { family: Family::Sign, code: 1, name: "dkls:sign:r1", round: 1, broadcast: true },
-    MsgType { family: Family::Sign, code: 2, name: "dkls:sign:r1echo", round: 2, broadcast: true },
-    MsgType { family: Family::Sign, code: 3, name: "dkls:sign:r2", round: 3, broadcast: false },
-    MsgType { family: Family::Sign, code: 4, name: "dkls:sign:r3", round: 4, broadcast: false },
-    MsgType { family: Family::Sign, code: 5, name: "dkls:sign:r4", round: 5, broadcast: true },
-    MsgType { family: Family::Sign, code: 6, name: "dkls:sign:r4echo", round: 6, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 1, name: "dkls:csign:r1", round: 1, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 2, name: "dkls:csign:r1echo", round: 2, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 3, name: "dkls:csign:r2", round: 3, broadcast: false },
-    MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 4, broadcast: false },
-    MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 5, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 6, broadcast: true },
+    MsgType { family: Family::Keygen, code: 1, name: "dkls:keygen:r1bc", round: 2, broadcast: true },
+    MsgType { family: Family::Keygen, code: 2, name: "dkls:keygen:r1uc", round: 2, broadcast: false },
+    MsgType { family: Family::Keygen, code: 3, name: "dkls:keygen:echo", round: 3, broadcast: true },
+    MsgType { family: Family::Keygen, code: 4, name: "dkls:keygen:r2", round: 4, broadcast: false },
+    MsgType { family: Family::Sign, code: 1, name: "dkls:sign:r1", round: 2, broadcast: true },
+    MsgType { family: Family::Sign, code: 2, name: "dkls:sign:r1echo", round: 3, broadcast: true },
+    MsgType { family: Family::Sign, code: 3, name: "dkls:sign:r2", round: 4, broadcast: false },
+    MsgType { family: Family::Sign, code: 4, name: "dkls:sign:r3", round: 5, broadcast: false },
+    MsgType { family: Family::Sign, code: 5, name: "dkls:sign:r4", round: 6, broadcast: true },
+    MsgType { family: Family::Sign, code: 6, name: "dkls:sign:r4echo", round: 7, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 1, name: "dkls:csign:r1", round: 2, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 2, name: "dkls:csign:r1echo", round: 3, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 3, name: "dkls:csign:r2", round: 4, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 5, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 6, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 7, broadcast: true },
 ];
 
 impl Family {
@@ -295,6 +310,15 @@ struct SignJob {
     results: Vec<Option<EcdsaSignature>>,
 }
 
+/// A member's round-0 message: the commitment, and the envelope's signature, which
+/// can only be checked once the key it is by has been revealed.
+#[derive(Copy, Clone)]
+struct Commitment {
+    hash: [u8; COMMITMENT_LEN],
+    /// What the round-0 signature covers, and the signature; `None` for our own.
+    signed: Option<([u8; 32], [u8; SIG_LEN])>,
+}
+
 /// One run of create-together or sign, from this member's side.
 pub struct Session {
     family: Family,
@@ -306,6 +330,11 @@ pub struct Session {
     members: Vec<u8>,
     params: [u8; 32],
     identity: IdentityKey,
+    /// The random bytes this member's commitment hides its key behind.
+    nonce: [u8; NONCE_LEN],
+    /// Every member's round-0 commitment, in `members` order.
+    commitments: Vec<Option<Commitment>>,
+    /// Every member's identity key, once it has opened its commitment.
     roster: Vec<Option<[u8; PUBKEY_LEN]>>,
     code: Option<SessionCode>,
     confirmed: bool,
@@ -444,12 +473,25 @@ impl Session {
     ) -> Result<Self, Error> {
         let armed = Armed::new(source)?;
         let identity = IdentityKey::generate(source)?;
+        let mut nonce = [0u8; NONCE_LEN];
+        draw(source, &mut nonce)?;
         let mut roster = alloc::vec![None; members.len()];
+        let mut commitments = alloc::vec![None; members.len()];
         let mine = members
             .iter()
             .position(|&m| m == me)
             .ok_or(Error::Parameters)?;
         roster[mine] = Some(*identity.public());
+        let ctx = Context {
+            protocol: family.protocol(),
+            session: &id,
+            n,
+            t,
+            members: &members,
+            params: &params,
+        };
+        let hash = commitment(&ctx, me, identity.public(), &nonce);
+        commitments[mine] = Some(Commitment { hash, signed: None });
         let mut s = Session {
             family,
             id,
@@ -459,6 +501,8 @@ impl Session {
             members,
             params,
             identity,
+            nonce,
+            commitments,
             roster,
             code: None,
             confirmed: false,
@@ -472,8 +516,8 @@ impl Session {
             failure: None,
             _armed: armed,
         };
-        let hello = s.seal(0, 0, s.identity.public().to_vec())?;
-        s.outbox.push(hello);
+        let commit = s.seal(COMMIT_ROUND, 0, hash.to_vec())?;
+        s.outbox.push(commit);
         Ok(s)
     }
 
@@ -493,7 +537,8 @@ impl Session {
     pub fn members(&self) -> &[u8] {
         &self.members
     }
-    /// Protocol rounds after round 0.
+    /// Rounds after round 0, which is also the number of the last one: round 1 is the
+    /// identities, rounds 2 and on the protocol's own.
     pub fn rounds(&self) -> u8 {
         self.family.rounds()
     }
@@ -512,7 +557,8 @@ impl Session {
         }
     }
 
-    /// The session code, once every member's identity is in.
+    /// The session code, once every member's identity is in and has opened its
+    /// commitment.
     pub fn code(&self) -> Option<&SessionCode> {
         self.code.as_ref()
     }
@@ -526,18 +572,27 @@ impl Session {
         core::mem::take(&mut self.outbox)
     }
 
-    /// The messages this member is waiting for, as (round, from, to): the identities
-    /// still missing, or the rest of the earliest protocol round not complete. Empty
-    /// while the code is being compared and once the session has ended.
+    /// The messages this member is waiting for, as (round, from, to): the commitments
+    /// still missing; once they are all in, the identities still missing; after that
+    /// the rest of the earliest protocol round not complete. Empty while the code is
+    /// being compared and once the session has ended.
     pub fn awaiting(&self) -> Vec<(u8, u8, u8)> {
         let mut out = Vec::new();
         if self.failure.is_some() || self.finished {
             return out;
         }
+        if !self.all_committed() {
+            for (i, c) in self.commitments.iter().enumerate() {
+                if c.is_none() {
+                    out.push((COMMIT_ROUND, self.members[i], 0));
+                }
+            }
+            return out;
+        }
         if self.code.is_none() {
             for (i, k) in self.roster.iter().enumerate() {
                 if k.is_none() {
-                    out.push((0, self.members[i], 0));
+                    out.push((REVEAL_ROUND, self.members[i], 0));
                 }
             }
             return out;
@@ -545,7 +600,7 @@ impl Session {
         if !self.confirmed {
             return out;
         }
-        for round in 1..=self.rounds() {
+        for round in FIRST_PROTOCOL_ROUND..=self.rounds() {
             let (bc, uc) = self.family.shape(round);
             for &from in self.members.iter().filter(|&&m| m != self.me) {
                 for (wanted, to) in [(bc, 0), (uc, self.me)] {
@@ -578,8 +633,8 @@ impl Session {
 
     // --- driving it ---------------------------------------------------------------
 
-    /// The user saw the same code on every device: start the protocol. Round 1 is in
-    /// the outbox when this returns.
+    /// The user saw the same code on every device: start the protocol. Round 2, its
+    /// first, is in the outbox when this returns.
     pub fn confirm(&mut self, _kw: &KeyWork) -> Result<(), Error> {
         if self.code.is_none() || self.confirmed || self.failure.is_some() {
             return Err(Error::State("confirm"));
@@ -685,7 +740,10 @@ impl Session {
         if h.to != 0 && h.to != self.me {
             return Err(Refused::NotForMe.into());
         }
-        if h.round == 0 {
+        if h.round == COMMIT_ROUND {
+            return self.receive_commitment(from, &env);
+        }
+        if h.round == REVEAL_ROUND {
             return self.receive_identity(from, &env);
         }
         if h.round > self.rounds() {
@@ -749,12 +807,63 @@ impl Session {
 
     // --- inside ---------------------------------------------------------------
 
-    fn receive_identity(&mut self, from: usize, env: &Envelope<'_>) -> Result<(), Error> {
-        if env.header.to != 0 || !valid_public(env.payload) {
+    fn all_committed(&self) -> bool {
+        self.commitments.iter().all(Option::is_some)
+    }
+
+    fn context(&self) -> Context<'_> {
+        Context {
+            protocol: self.family.protocol(),
+            session: &self.id,
+            n: self.n,
+            t: self.t,
+            members: &self.members,
+            params: &self.params,
+        }
+    }
+
+    /// Round 0: a member's commitment. Its signature is by a key nobody has seen yet,
+    /// so it is kept and checked when the key arrives in round 1. The last commitment
+    /// in releases this member's own identity.
+    fn receive_commitment(&mut self, from: usize, env: &Envelope<'_>) -> Result<(), Error> {
+        if env.header.to != 0 || env.payload.len() != COMMITMENT_LEN {
             return Err(Refused::Malformed.into());
         }
+        let sig = env.signature.ok_or(Refused::Unsigned)?;
+        if self.commitments[from].is_some() {
+            return Err(Refused::Replayed.into());
+        }
+        let mut hash = [0u8; COMMITMENT_LEN];
+        hash.copy_from_slice(env.payload);
+        self.commitments[from] = Some(Commitment {
+            hash,
+            signed: Some((signed_digest(&[0; 32], env.signed), *sig)),
+        });
+        if self.all_committed() {
+            let mut reveal = Vec::with_capacity(PUBKEY_LEN + NONCE_LEN);
+            reveal.extend_from_slice(self.identity.public());
+            reveal.extend_from_slice(&self.nonce);
+            let env = self.seal(REVEAL_ROUND, 0, reveal)?;
+            self.outbox.push(env);
+        }
+        Ok(())
+    }
+
+    /// Round 1: a member's identity key and the bytes that open its commitment.
+    fn receive_identity(&mut self, from: usize, env: &Envelope<'_>) -> Result<(), Error> {
+        if env.header.to != 0
+            || env.payload.len() != PUBKEY_LEN + NONCE_LEN
+            || !valid_public(&env.payload[..PUBKEY_LEN])
+        {
+            return Err(Refused::Malformed.into());
+        }
+        if !self.all_committed() {
+            return Err(Refused::Early.into());
+        }
         let mut key = [0u8; PUBKEY_LEN];
-        key.copy_from_slice(env.payload);
+        key.copy_from_slice(&env.payload[..PUBKEY_LEN]);
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&env.payload[PUBKEY_LEN..]);
         let sig = env.signature.ok_or(Refused::Unsigned)?;
         if !verify(&key, &signed_digest(&[0; 32], env.signed), sig) {
             return Err(Refused::BadSignature.into());
@@ -762,18 +871,22 @@ impl Session {
         if self.roster[from].is_some() {
             return Err(Refused::Replayed.into());
         }
+        let committed = self.commitments[from].ok_or(Error::State("commitment"))?;
+        if commitment(&self.context(), env.header.from, &key, &nonce) != committed.hash {
+            return Err(Refused::CommitmentMismatch.into());
+        }
+        // The commitment opened, so its envelope must be by the same key.
+        if let Some((digest, sig)) = &committed.signed
+            && !verify(&key, digest, sig)
+        {
+            return Err(Refused::BadSignature.into());
+        }
         self.roster[from] = Some(key);
         if self.roster.iter().all(Option::is_some) {
             let keys: Vec<[u8; PUBKEY_LEN]> = self.roster.iter().flatten().copied().collect();
-            self.code = Some(SessionCode::compute(
-                self.family.protocol(),
-                &self.id,
-                self.n,
-                self.t,
-                &self.members,
-                &self.params,
-                &keys,
-            ));
+            let hashes: Vec<[u8; COMMITMENT_LEN]> =
+                self.commitments.iter().flatten().map(|c| c.hash).collect();
+            self.code = Some(SessionCode::compute(&self.context(), &hashes, &keys));
         }
         Ok(())
     }
@@ -912,12 +1025,12 @@ impl Session {
             from: self.me,
             to,
         };
-        let roster = match (&self.code, round) {
-            (_, 0) => [0u8; 32],
-            (Some(c), _) => *c.digest(),
-            (None, _) => return Err(Error::State("roster")),
+        let roster = match &self.code {
+            _ if round < FIRST_PROTOCOL_ROUND => [0u8; 32],
+            Some(c) => *c.digest(),
+            None => return Err(Error::State("roster")),
         };
-        let payload = if round > 0 && to != 0 {
+        let payload = if round >= FIRST_PROTOCOL_ROUND && to != 0 {
             let peer = self
                 .members
                 .iter()
@@ -1047,11 +1160,19 @@ mod tests {
     #[test]
     fn every_round_of_every_protocol_has_messages() {
         for f in [Family::Keygen, Family::Sign, Family::CheckedSign] {
-            for r in 1..=f.rounds() {
+            for r in FIRST_PROTOCOL_ROUND..=f.rounds() {
                 assert_ne!(f.shape(r), (false, false));
             }
+            // Rounds 0 and 1 are the identities': no tsslib message travels in them.
+            assert!(f.types().all(|t| t.round >= FIRST_PROTOCOL_ROUND));
         }
-        assert_eq!(Family::Keygen.rounds(), 3);
-        assert_eq!(Family::Sign.rounds(), 6);
+        assert_eq!(Family::Keygen.rounds(), 4);
+        assert_eq!(Family::Sign.rounds(), 7);
+        assert_eq!(Family::CheckedSign.rounds(), 7);
+    }
+
+    #[test]
+    fn checked_signing_is_the_default() {
+        assert_eq!(SignMode::default(), SignMode::Checked);
     }
 }

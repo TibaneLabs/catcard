@@ -90,10 +90,11 @@ fn one_session_signs_many_sighashes_in_the_same_rounds() {
 }
 
 #[test]
-fn the_checked_signing_mode_also_produces_valid_signatures() {
+fn the_default_checked_signing_mode_also_produces_valid_signatures() {
+    assert_eq!(SignMode::default(), SignMode::Checked);
     let records = create(3, 2, "checked");
     let req = [request(&[0, 1], "checked")];
-    let sigs = sign(&records, &[2, 3], &req, SignMode::Checked);
+    let sigs = sign(&records, &[2, 3], &req, SignMode::default());
     let child = records[0].child_public_key(&[0, 1]).unwrap();
     assert!(verifies(&child, &req[0].sighash, &sigs[0]));
 }
