@@ -559,7 +559,8 @@ buffer: gate 16 would have turned the PIN prefix itself into the two words.
 2026-10-02, a Q1 and an mk5: gates 16, 19/0, 21/0 return exactly 0; gate 26 returns 0 on
 every call, with 32 bytes from SE1 and 8 from SE2; gate 0 returns 46, its string's length.
 So `catcard_callgate::zero_success` now holds those wrappers to exactly 0 on the boards
-with the SE randomness gate (mk4/mk5/Q1).
+with the SE randomness gate (mk4/mk5/Q1). Installed on the mk5 the same day: it booted,
+showed the right anti-phishing words (gate 16) and logged in.
 
 **mk3: not yet read.** Its wrappers keep the old reading until its bootloader has been
 read the same way. Expected there: gate 26 refused with `ENOENT` (it has no SE randomness
