@@ -102,8 +102,28 @@ before it is done.
   before a maximum `n` is fixed.
 - Boards: mk4, mk5, Q1. The mk3 has no flash left for it.
 
+## Measured on an mk5 (2026-10-02, `usbclient.py --tss-bench`)
+
+Both parties of a 2-member wallet in one process, mk4/mk5 image at `opt-level = "s"`:
+
+| | |
+|---|---|
+| keygen | 28.7 s |
+| one signature | 11.0 s (verified) |
+| one party's share, tsslib JSON | 45.6 KB |
+| peak heap | 145 KB |
+
+With one party per device the work splits, so roughly 14 s per device to create a 2-member
+wallet and 5-6 s per device per input to sign, before any card is carried. Keygen is mostly
+the pairwise OT setup (EC multiplications in software); signing mostly OT extension (AES and
+hashing in software). Ways down: the L4S5's AES peripheral for the OT PRG, and DKLs
+presigning, which moves the work before the transaction is known.
+
+The share grows with `n` (per-peer OT state), so it also sets the most members a device can
+hold shares for; binary instead of JSON roughly halves it.
+
 ## Open before implementation
 
 - Share and message sizes for real `n` (settings space; QR part counts).
-- Time and heap per DKLs round on the device.
+- Heap per member with one party per device (the bench holds every party at once).
 - Encryption of share files on SD (a password per file, or none and the card is the secret).
