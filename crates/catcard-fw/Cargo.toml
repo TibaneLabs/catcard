@@ -111,7 +111,7 @@ catcard-log.workspace = true
 catcard-wallet = { workspace = true, default-features = false }
 catcard-ui.workspace = true
 anyd.workspace = true
-minizlib.workspace = true
+compcol.workspace = true
 cortex-m.workspace = true
 heapless.workspace = true
 cortex-m-rt.workspace = true

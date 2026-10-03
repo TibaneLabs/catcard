@@ -881,7 +881,7 @@ fn unpack(name: &str) -> Result<(), Refused> {
                 core::slice::from_raw_parts_mut(base as *mut u8, len as usize),
             )
         };
-        let got = minizlib::unzlib(input, minizlib::Buffer::new(out));
+        let got = compcol::embed::flate::unzlib(input, compcol::embed::flate::Buffer::new(out));
         // SAFETY: reads RCC.
         let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
         let us = catcard_hal::dwt::cycles().wrapping_sub(t0) / per_us;

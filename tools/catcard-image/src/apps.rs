@@ -69,8 +69,12 @@ pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
     let mut table = vec![0u16; 1 << 15];
     // Stored blocks bound the worst case: five bytes per 64 KiB block, plus the wrapper.
     let mut out = vec![0u8; data.len() + data.len() / 16 + 64];
-    let n = minizlib::zlib(data, &mut table, minizlib::Buffer::new(&mut out))
-        .map_err(|e| anyhow::anyhow!("compressing: {e:?}"))?;
+    let n = compcol::embed::flate::zlib(
+        data,
+        &mut table,
+        compcol::embed::flate::Buffer::new(&mut out),
+    )
+    .map_err(|e| anyhow::anyhow!("compressing: {e:?}"))?;
     out.truncate(n as usize);
     Ok(out)
 }
@@ -169,8 +173,11 @@ mod tests {
             assert_eq!(off % 4, 0);
             assert_eq!(unpacked, a.image.len());
             let mut out = vec![0u8; unpacked];
-            let n =
-                minizlib::unzlib(&b[off..off + packed], minizlib::Buffer::new(&mut out)).unwrap();
+            let n = compcol::embed::flate::unzlib(
+                &b[off..off + packed],
+                compcol::embed::flate::Buffer::new(&mut out),
+            )
+            .unwrap();
             assert_eq!(n as usize, unpacked);
             assert_eq!(out, a.image);
         }

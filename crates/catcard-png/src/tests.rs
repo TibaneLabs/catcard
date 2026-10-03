@@ -87,7 +87,12 @@ fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
 fn zlib(data: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; data.len() * 2 + 1024];
     let mut table = vec![0u16; 32 * 1024];
-    let n = minizlib::zlib(data, &mut table, minizlib::Buffer::new(&mut out)).expect("compresses");
+    let n = compcol::embed::flate::zlib(
+        data,
+        &mut table,
+        compcol::embed::flate::Buffer::new(&mut out),
+    )
+    .expect("compresses");
     out.truncate(n as usize);
     out
 }

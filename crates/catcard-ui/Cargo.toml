@@ -21,8 +21,5 @@ catcard-entropy = { workspace = true, default-features = false }
 heapless.workspace = true
 zeroize.workspace = true
 # Inflates the baked art straight onto the canvas: see `art::indexed`.
-minizlib.workspace = true
+compcol.workspace = true
 
-[dev-dependencies]
-# The tests deflate pictures of their own to check the decoder against.
-minizlib = { version = "0.1.1", default-features = false, features = ["decompress", "compress", "fixed", "dynamic", "stored"] }

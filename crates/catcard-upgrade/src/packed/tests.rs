@@ -6,7 +6,8 @@ use super::*;
 fn squash(data: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; data.len() + 1024];
     let mut table = vec![0u16; 4096];
-    let n = minizlib::deflate(data, &mut table, Buffer::new(&mut out)).expect("deflate");
+    let n =
+        compcol::embed::flate::deflate(data, &mut table, Buffer::new(&mut out)).expect("deflate");
     out.truncate(n as usize);
     out
 }
@@ -246,7 +247,7 @@ fn a_pushed_block_cannot_overrun_the_image_either() {
 
 /// The bytes Python's zlib actually emits, decoded by the code that will meet them.
 ///
-/// Every other test here compresses with `minizlib` and decompresses with `minizlib`,
+/// Every other test here compresses with `compcol` and decompresses with `compcol`,
 /// which proves the two halves of one crate agree and nothing about the wire. The host
 /// tool compresses with Python's zlib, and two conforming deflate encoders make quite
 /// different streams -- different Huffman tables, different block types, different

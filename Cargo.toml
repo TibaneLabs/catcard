@@ -108,24 +108,15 @@ catcard-evm = { path = "crates/catcard-evm", default-features = false, features 
 # holding a transaction is not.
 evmabiless = { version = "0.1.17", default-features = false, features = ["decode"] }
 
-# --- minizlib: deflate for the USB upgrade transport, no_std and no alloc ---
+# --- compcol: deflate, no_std and no alloc (its `embed::flate`; minizlib, retired, was
+# the same code) ---
 #
-# Decompression only. The device never compresses anything: the host does that, and
-# linking a compressor into firmware would be paying flash for a direction that is
-# never travelled. The tests pull in `compress` as a dev-dependency to build their own
-# fixtures with the same code that will decode them.
-# `zlib` and `checksum` are for PNG: its image data is a zlib stream, and the Adler-32
-# at the end of it is the one check that the picture arrived whole. BBQr's `Z` is raw
-# deflate and needs neither, so this costs the upgrade path a header parser it will
-# never call.
-minizlib = { version = "0.1.1", default-features = false, features = [
-    "decompress",
-    "zlib",
-    "checksum",
-    "fixed",
-    "dynamic",
-    "stored",
-] }
+# The device decompresses: the upgrade transport (BBQr's `Z` is raw deflate), PNG (its
+# image data is a zlib stream, and the Adler-32 at its end is the one check that the
+# picture arrived whole), the baked art, and apps unpacked from the image. The
+# compressor is in the same module; firmware never calls it, so LTO leaves it out, and
+# the host tools and tests use it to build what the device reads.
+compcol = { version = "0.7.2", default-features = false, features = ["embed", "deflate", "zlib"] }
 catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }

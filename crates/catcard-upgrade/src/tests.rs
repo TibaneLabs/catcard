@@ -836,8 +836,8 @@ mod expanding {
     fn deflate(data: &[u8], window: usize) -> Vec<u8> {
         let mut out = vec![0u8; data.len() * 2 + 1024];
         let mut table = vec![0u16; window];
-        let mut c = minizlib::Compressor::<_, minizlib::Raw>::new(
-            minizlib::Buffer::new(&mut out),
+        let mut c = compcol::embed::flate::Compressor::<_, compcol::embed::flate::Raw>::new(
+            compcol::embed::flate::Buffer::new(&mut out),
             &mut table,
         );
         for block in data.chunks(window) {

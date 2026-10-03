@@ -56,13 +56,13 @@ pub const UNPACKED_LEN: usize = 14525;
 ///
 /// A stream that comes out any other length than the one baked is refused rather than
 /// drawn: that is flash that is not what was built.
-pub fn unpack(buf: &mut [u8]) -> Result<Art<'_>, minizlib::Error> {
+pub fn unpack(buf: &mut [u8]) -> Result<Art<'_>, compcol::embed::flate::Error> {
     let buf = buf
         .get_mut(..UNPACKED_LEN)
-        .ok_or(minizlib::Error::OutputFull)?;
-    let n = minizlib::inflate(&PACKED[..], minizlib::Buffer::new(buf))?;
+        .ok_or(compcol::embed::flate::Error::OutputFull)?;
+    let n = compcol::embed::flate::inflate(&PACKED[..], compcol::embed::flate::Buffer::new(buf))?;
     if n != UNPACKED_LEN as u64 {
-        return Err(minizlib::Error::OutputFull);
+        return Err(compcol::embed::flate::Error::OutputFull);
     }
     Ok(Art(buf))
 }

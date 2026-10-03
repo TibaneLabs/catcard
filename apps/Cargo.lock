@@ -71,10 +71,16 @@ version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
+ "compcol",
  "heapless",
- "minizlib",
  "zeroize",
 ]
+
+[[package]]
+name = "compcol"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "971c6ed76a2a81874d4d3e398e214df01ed1d2355cdc772bc26f16027c383cea"
 
 [[package]]
 name = "hash32"
@@ -95,12 +101,6 @@ dependencies = [
  "stable_deref_trait",
  "zeroize",
 ]
-
-[[package]]
-name = "minizlib"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b434635b7e6cad59a356a587405b3592e6bbac0fd5a0df6e8d13ec0e56fb18f"
 
 [[package]]
 name = "proc-macro2"

@@ -12,8 +12,8 @@
 //! byte stores and unpaced reads are the two things that part mis-issues. So the window
 //! lives in ordinary memory, and both ends of it cross to the medium in whole chunks
 //! through [`StagingArea`], which is the only thing that knows the timing.
-//! [`minizlib::Reader`] fetches compressed input a chunk at a time and
-//! [`minizlib::Stream`] hands finished output back a window at a time; between them the
+//! [`compcol::embed::flate::Reader`] fetches compressed input a chunk at a time and
+//! [`compcol::embed::flate::Stream`] hands finished output back a window at a time; between them the
 //! decompressor never touches the bus.
 //!
 //! # The two ends are the same area, so it is borrowed at runtime
@@ -26,7 +26,7 @@
 
 use core::cell::RefCell;
 
-use minizlib::{Error as ZError, Reader, Stream};
+use compcol::embed::flate::{Error as ZError, Reader, Stream};
 
 use crate::StagingArea;
 
@@ -130,7 +130,7 @@ pub fn inflate<A: StagingArea>(
             carry[..carried].copy_from_slice(&data[whole..]);
             Ok(())
         });
-        minizlib::inflate(reader, stream)
+        compcol::embed::flate::inflate(reader, stream)
     };
 
     // The last few bytes of the image, if it does not end on a word boundary. Nothing

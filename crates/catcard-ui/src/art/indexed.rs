@@ -74,8 +74,11 @@ impl Indexed {
 ///
 /// Background pixels included: [`draw_indexed`] is what skips them. Bounded by the
 /// picture's size -- a stream that decodes to more is stopped at the picture's edge
-/// with [`minizlib::Error::OutputFull`].
-pub fn decode(art: &Indexed, each: impl FnMut(usize, usize, u8)) -> Result<(), minizlib::Error> {
+/// with [`compcol::embed::flate::Error::OutputFull`].
+pub fn decode(
+    art: &Indexed,
+    each: impl FnMut(usize, usize, u8),
+) -> Result<(), compcol::embed::flate::Error> {
     let mut out = Painter {
         ring: [0; WINDOW],
         pos: 0,
@@ -85,7 +88,7 @@ pub fn decode(art: &Indexed, each: impl FnMut(usize, usize, u8)) -> Result<(), m
         width: art.width as usize,
         each,
     };
-    minizlib::inflate(art.deflated, &mut out).map(|_| ())
+    compcol::embed::flate::inflate(art.deflated, &mut out).map(|_| ())
 }
 
 /// A deflate output that paints: every byte is two pixels, handed on as it arrives, and
@@ -100,14 +103,14 @@ struct Painter<F> {
     each: F,
 }
 
-impl<F: FnMut(usize, usize, u8)> minizlib::Output for Painter<F> {
-    fn put<C: minizlib::Checksum>(
+impl<F: FnMut(usize, usize, u8)> compcol::embed::flate::Output for Painter<F> {
+    fn put<C: compcol::embed::flate::Checksum>(
         &mut self,
         byte: u8,
         check: &mut C,
-    ) -> Result<(), minizlib::Error> {
+    ) -> Result<(), compcol::embed::flate::Error> {
         if self.total >= self.limit {
-            return Err(minizlib::Error::OutputFull);
+            return Err(compcol::embed::flate::Error::OutputFull);
         }
         self.ring[self.pos] = byte;
         self.pos = (self.pos + 1) % WINDOW;
@@ -122,17 +125,17 @@ impl<F: FnMut(usize, usize, u8)> minizlib::Output for Painter<F> {
         Ok(())
     }
 
-    fn copy<C: minizlib::Checksum>(
+    fn copy<C: compcol::embed::flate::Checksum>(
         &mut self,
         dist: usize,
         len: usize,
         check: &mut C,
-    ) -> Result<(), minizlib::Error> {
+    ) -> Result<(), compcol::embed::flate::Error> {
         if dist > self.total {
-            return Err(minizlib::Error::InvalidDistance);
+            return Err(compcol::embed::flate::Error::InvalidDistance);
         }
         if dist > WINDOW || dist == 0 {
-            return Err(minizlib::Error::WindowTooSmall);
+            return Err(compcol::embed::flate::Error::WindowTooSmall);
         }
         for _ in 0..len {
             let byte = self.ring[(self.pos + WINDOW - dist) % WINDOW];
@@ -141,7 +144,10 @@ impl<F: FnMut(usize, usize, u8)> minizlib::Output for Painter<F> {
         Ok(())
     }
 
-    fn flush<C: minizlib::Checksum>(&mut self, _: &mut C) -> Result<(), minizlib::Error> {
+    fn flush<C: compcol::embed::flate::Checksum>(
+        &mut self,
+        _: &mut C,
+    ) -> Result<(), compcol::embed::flate::Error> {
         Ok(())
     }
 
@@ -175,7 +181,12 @@ mod tests {
     fn squeeze(packed: &[u8]) -> &'static [u8] {
         let mut out = vec![0u8; packed.len() * 2 + 64];
         let mut table = vec![0u16; 4096];
-        let n = minizlib::deflate(packed, &mut table, minizlib::Buffer::new(&mut out)).unwrap();
+        let n = compcol::embed::flate::deflate(
+            packed,
+            &mut table,
+            compcol::embed::flate::Buffer::new(&mut out),
+        )
+        .unwrap();
         out.truncate(n as usize);
         Box::leak(out.into_boxed_slice())
     }
@@ -268,7 +279,7 @@ mod tests {
         };
         assert_eq!(
             decode(&art, |_, _, _| {}),
-            Err(minizlib::Error::WindowTooSmall)
+            Err(compcol::embed::flate::Error::WindowTooSmall)
         );
     }
 
@@ -281,7 +292,10 @@ mod tests {
             palette: [0; 16],
             deflated: squeeze(&[0x11, 0x22, 0x33]),
         };
-        assert_eq!(decode(&art, |_, _, _| {}), Err(minizlib::Error::OutputFull));
+        assert_eq!(
+            decode(&art, |_, _, _| {}),
+            Err(compcol::embed::flate::Error::OutputFull)
+        );
     }
 
     #[test]

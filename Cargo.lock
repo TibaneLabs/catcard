@@ -224,11 +224,11 @@ dependencies = [
  "catcard-upgrade",
  "catcard-usb",
  "catcard-wallet",
+ "compcol",
  "cortex-m",
  "cortex-m-rt",
  "fstool",
  "heapless",
- "minizlib",
  "outscript",
  "purecrypto",
  "tsslib",
@@ -263,8 +263,8 @@ dependencies = [
  "catcard-board",
  "catcard-fwhdr",
  "clap",
+ "compcol",
  "hex",
- "minizlib",
  "outscript",
  "purecrypto",
 ]
@@ -303,7 +303,7 @@ dependencies = [
 name = "catcard-png"
 version = "7.0.0"
 dependencies = [
- "minizlib",
+ "compcol",
 ]
 
 [[package]]
@@ -366,8 +366,8 @@ version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
+ "compcol",
  "heapless",
- "minizlib",
  "zeroize",
 ]
 
@@ -379,7 +379,7 @@ dependencies = [
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-sign",
- "minizlib",
+ "compcol",
 ]
 
 [[package]]
@@ -453,6 +453,12 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "compcol"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "971c6ed76a2a81874d4d3e398e214df01ed1d2355cdc772bc26f16027c383cea"
 
 [[package]]
 name = "cortex-m"
@@ -621,9 +627,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "minizlib"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b434635b7e6cad59a356a587405b3592e6bbac0fd5a0df6e8d13ec0e56fb18f"
+checksum = "35537728a6fcdf5a83b4a98eeb4a821dfe7fb8015a89945a52647a7b2d69a155"
+dependencies = [
+ "compcol",
+]
 
 [[package]]
 name = "nb"

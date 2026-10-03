@@ -55,7 +55,7 @@
 //! length is what the signature was computed over, and a decompressor that can be talked
 //! into writing past its buffer is worth more to an attacker than any firmware.
 
-use minizlib::{Buffer, Decompressor, Raw};
+use compcol::embed::flate::{Buffer, Decompressor, Raw};
 
 /// Bytes each block holds once inflated.
 ///
@@ -83,12 +83,12 @@ pub enum Error {
     Short { got: u32, want: u32 },
 }
 
-impl From<minizlib::Error> for Error {
-    fn from(error: minizlib::Error) -> Self {
+impl From<compcol::embed::flate::Error> for Error {
+    fn from(error: compcol::embed::flate::Error) -> Self {
         match error {
             // The slab filling up is the interesting one: it means the block wanted to
             // write past what the image can hold, which is the case worth its own name.
-            minizlib::Error::OutputFull => Error::TooLong,
+            compcol::embed::flate::Error::OutputFull => Error::TooLong,
             // Everything else is a stream that does not decode, including one that
             // stopped early -- an upload cut short is corrupt, not a shorter image.
             _ => Error::Corrupt,

@@ -11,7 +11,7 @@
 //! # The shape of it
 //!
 //! [`render`] drives everything. It pulls bytes with the caller's `read`, walks the
-//! chunk structure, feeds `IDAT` into [`minizlib::Decompressor`], un-filters each
+//! chunk structure, feeds `IDAT` into [`compcol::embed::flate::Decompressor`], un-filters each
 //! scanline as it completes, and hands finished output rows to the caller's `sink` in
 //! top-to-bottom order. The caller sizes its buffers from [`Header`] and [`Plan`]
 //! beforehand, so a picture too wide to read is refused before anything is allocated
@@ -63,7 +63,7 @@ mod tests;
 
 pub use resize::{Plan, Scale, fit};
 
-use minizlib::{Decompressor, Error as ZError, Stream, Zlib};
+use compcol::embed::flate::{Decompressor, Error as ZError, Stream, Zlib};
 
 /// The eight bytes every PNG begins with. Source: PNG spec §5.2 [C]
 pub const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];

@@ -21,7 +21,10 @@ pub struct Rgba {
 }
 
 /// Inflate `art`, handing each pixel to `each(x, y, [r, g, b, a])` as it comes out.
-pub fn decode(art: &Rgba, each: impl FnMut(usize, usize, [u8; 4])) -> Result<(), minizlib::Error> {
+pub fn decode(
+    art: &Rgba,
+    each: impl FnMut(usize, usize, [u8; 4]),
+) -> Result<(), compcol::embed::flate::Error> {
     let mut out = Pixels {
         ring: [0; WINDOW],
         pos: 0,
@@ -31,7 +34,7 @@ pub fn decode(art: &Rgba, each: impl FnMut(usize, usize, [u8; 4])) -> Result<(),
         px: [0; 4],
         each,
     };
-    minizlib::inflate(art.deflated, &mut out).map(|_| ())
+    compcol::embed::flate::inflate(art.deflated, &mut out).map(|_| ())
 }
 
 /// A deflate output that groups bytes into pixels and hands them on.
@@ -45,14 +48,14 @@ struct Pixels<F> {
     each: F,
 }
 
-impl<F: FnMut(usize, usize, [u8; 4])> minizlib::Output for Pixels<F> {
-    fn put<C: minizlib::Checksum>(
+impl<F: FnMut(usize, usize, [u8; 4])> compcol::embed::flate::Output for Pixels<F> {
+    fn put<C: compcol::embed::flate::Checksum>(
         &mut self,
         byte: u8,
         check: &mut C,
-    ) -> Result<(), minizlib::Error> {
+    ) -> Result<(), compcol::embed::flate::Error> {
         if self.total >= self.limit {
-            return Err(minizlib::Error::OutputFull);
+            return Err(compcol::embed::flate::Error::OutputFull);
         }
         self.ring[self.pos] = byte;
         self.pos = (self.pos + 1) % WINDOW;
@@ -66,17 +69,17 @@ impl<F: FnMut(usize, usize, [u8; 4])> minizlib::Output for Pixels<F> {
         Ok(())
     }
 
-    fn copy<C: minizlib::Checksum>(
+    fn copy<C: compcol::embed::flate::Checksum>(
         &mut self,
         dist: usize,
         len: usize,
         check: &mut C,
-    ) -> Result<(), minizlib::Error> {
+    ) -> Result<(), compcol::embed::flate::Error> {
         if dist > self.total {
-            return Err(minizlib::Error::InvalidDistance);
+            return Err(compcol::embed::flate::Error::InvalidDistance);
         }
         if dist > WINDOW || dist == 0 {
-            return Err(minizlib::Error::WindowTooSmall);
+            return Err(compcol::embed::flate::Error::WindowTooSmall);
         }
         for _ in 0..len {
             let byte = self.ring[(self.pos + WINDOW - dist) % WINDOW];
@@ -85,7 +88,10 @@ impl<F: FnMut(usize, usize, [u8; 4])> minizlib::Output for Pixels<F> {
         Ok(())
     }
 
-    fn flush<C: minizlib::Checksum>(&mut self, _: &mut C) -> Result<(), minizlib::Error> {
+    fn flush<C: compcol::embed::flate::Checksum>(
+        &mut self,
+        _: &mut C,
+    ) -> Result<(), compcol::embed::flate::Error> {
         Ok(())
     }
 
@@ -114,7 +120,12 @@ mod tests {
     fn squeeze(raw: &[u8]) -> &'static [u8] {
         let mut out = vec![0u8; raw.len() * 2 + 64];
         let mut table = vec![0u16; 4096];
-        let n = minizlib::deflate(raw, &mut table, minizlib::Buffer::new(&mut out)).unwrap();
+        let n = compcol::embed::flate::deflate(
+            raw,
+            &mut table,
+            compcol::embed::flate::Buffer::new(&mut out),
+        )
+        .unwrap();
         out.truncate(n as usize);
         Box::leak(out.into_boxed_slice())
     }
