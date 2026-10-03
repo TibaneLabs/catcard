@@ -141,7 +141,7 @@ heapless = { version = "0.9.3", features = ["zeroize"] }
 # 0.9.3 puts the P-256 fixed-base comb table behind `p256-table`. **Leave it off**: it
 # is about 60 KB of flash, and the security key (`catcard-fido`) signs a handful of
 # times per login, where the table-less ladder costs a fraction of a second.
-purecrypto = { version = "0.9.3", default-features = false }
+purecrypto = { version = "0.9.9", default-features = false }
 # --- tsslib: threshold signing, our own crate (docs/TSS.md) ---
 #
 # DKLs23 threshold ECDSA only. `std` stays off: the crate is then `no_std` + `alloc`,
