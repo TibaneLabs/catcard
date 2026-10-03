@@ -3,7 +3,7 @@
 //! ```text
 //!  off  len  field
 //!    0    4  magic "CTSm"
-//!    4    1  format version (2)
+//!    4    1  format version (3)
 //!    5    1  protocol: 1 create together (keygen), 2 sign
 //!    6    8  session id
 //!   14    1  round (0 = commitments, 1 = identities)
@@ -27,8 +27,8 @@
 //! - round 0: the sender's commitment to its identity key, 32 bytes (`crate::code`);
 //! - round 1: the sender's compressed identity public key, 33 bytes, then the 32
 //!   random bytes that open its commitment;
-//! - later rounds: a count, then per tsslib message its instance, type code and compact
-//!   JSON (`crate::bjson`). Addressed to one member (`to != 0`), the payload is
+//! - later rounds: a count, then per tsslib message its instance, type code and
+//!   payload in tsslib's binary encoding (`tsslib::wire`). Addressed to one member (`to != 0`), the payload is
 //!   encrypted to that member first (see `crate::identity`): a DKG's round-1 unicasts
 //!   are Shamir shares, and an SD card is read by whoever holds it.
 
@@ -40,8 +40,10 @@ use purecrypto::hash::{Digest, Sha256};
 /// First four bytes of every envelope.
 pub const MAGIC: [u8; 4] = *b"CTSm";
 /// The envelope format this crate writes and reads. 2: round 0 split into commitments
-/// (round 0) and identities (round 1), protocol rounds from 2.
-pub const VERSION: u8 = 2;
+/// (round 0) and identities (round 1), protocol rounds from 2. 3: tsslib's messages in
+/// its binary encoding rather than re-encoded JSON. Older versions were never deployed
+/// and are refused ([`Refused::Version`]).
+pub const VERSION: u8 = 3;
 /// The round of identity commitments.
 pub const COMMIT_ROUND: u8 = 0;
 /// The round that opens the commitments: identity keys.
@@ -284,7 +286,7 @@ mod tests {
         assert!(Envelope::parse(&bytes).unwrap().signature.is_some());
         bytes.push(0);
         assert_eq!(Envelope::parse(&bytes).err(), Some(Refused::Malformed));
-        for other in [1, 3] {
+        for other in [1, 2, 4] {
             let mut v = frame(&h, b"");
             v[4] = other;
             assert_eq!(Envelope::parse(&v).err(), Some(Refused::Version));

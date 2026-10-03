@@ -29,7 +29,7 @@
 //! memory (docs/TSS.md, "Memory"). Listing the shares, showing a wallet's addresses or
 //! taking a share in from a bundle needs none of it: the record repeats the public half in
 //! its fixed header. [`summary`] and [`bundle_parts`] read those headers -- the layouts
-//! `catcard_tss` documents for its share record and share bundle (format 1) -- and check
+//! `catcard_tss` documents for its share record and share bundle (format 2) -- and check
 //! that the lengths add up, and nothing else. Whether the secret half is sound is for
 //! `catcard_tss` to say, when it is used.
 
@@ -175,12 +175,12 @@ pub struct Summary {
 
 /// A record's header, after checking that the record is as long as it says.
 ///
-/// Layout: `catcard_tss` share record format 1 -- magic `CTSk`, version 1, origin, member,
+/// Layout: `catcard_tss` share record format 2 -- magic `CTSk`, version 2, origin, member,
 /// n, t, 33-byte key, 32-byte chain code, 4-byte fingerprint, path depth and big-endian
 /// steps, then the DKLs share's length (LE) and the share.
 pub fn summary(record: &[u8]) -> Option<Summary> {
     let mut r = Reader(record);
-    if r.take(4)? != b"CTSk" || r.byte()? != 1 {
+    if r.take(4)? != b"CTSk" || r.byte()? != 2 {
         return None;
     }
     let created = match r.byte()? {
@@ -231,11 +231,11 @@ pub struct BundleParts<'a> {
 /// Split a bundle into its halves, checking only that the lengths add up and that the
 /// two halves name the same member of the same split.
 ///
-/// Layout: `catcard_tss` share bundle format 1 -- magic `CTSb`, version 1, member, n, t,
+/// Layout: `catcard_tss` share bundle format 2 -- magic `CTSb`, version 2, member, n, t,
 /// Codex32 length and text, record length (LE) and record.
 pub fn bundle_parts(bundle: &[u8]) -> Option<BundleParts<'_>> {
     let mut r = Reader(bundle);
-    if r.take(4)? != b"CTSb" || r.byte()? != 1 {
+    if r.take(4)? != b"CTSb" || r.byte()? != 2 {
         return None;
     }
     let (member, n, t) = (r.byte()?, r.byte()?, r.byte()?);

@@ -89,12 +89,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,7 +218,7 @@ dependencies = [
  "catcard-upgrade",
  "catcard-usb",
  "catcard-wallet",
- "compcol",
+ "compcol 0.7.2",
  "cortex-m",
  "cortex-m-rt",
  "fstool",
@@ -263,7 +257,7 @@ dependencies = [
  "catcard-board",
  "catcard-fwhdr",
  "clap",
- "compcol",
+ "compcol 0.7.2",
  "hex",
  "outscript",
  "purecrypto",
@@ -303,7 +297,7 @@ dependencies = [
 name = "catcard-png"
 version = "7.0.0"
 dependencies = [
- "compcol",
+ "compcol 0.7.2",
 ]
 
 [[package]]
@@ -354,7 +348,6 @@ version = "7.0.0"
 dependencies = [
  "catcard-wallet",
  "purecrypto",
- "serde_json",
  "spin",
  "tsslib",
  "zeroize",
@@ -366,7 +359,7 @@ version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
- "compcol",
+ "compcol 0.7.2",
  "heapless",
  "zeroize",
 ]
@@ -379,7 +372,7 @@ dependencies = [
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-sign",
- "compcol",
+ "compcol 0.7.2",
 ]
 
 [[package]]
@@ -453,6 +446,12 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "compcol"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f29da98742f258743e8bb44b09f0cc1cbca2591e709b1bb85ccd6e9111f431"
 
 [[package]]
 name = "compcol"
@@ -631,7 +630,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35537728a6fcdf5a83b4a98eeb4a821dfe7fb8015a89945a52647a7b2d69a155"
 dependencies = [
- "compcol",
+ "compcol 0.7.2",
 ]
 
 [[package]]
@@ -721,9 +720,12 @@ dependencies = [
 
 [[package]]
 name = "purecrypto"
-version = "0.9.3"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "019da58d8de31bdd679a92899b7ee3465cca3d890a67ebce0a111b2faf46d577"
+checksum = "d10f61755e4fcf225ab00ba50e77e30ac376f1ee1617a51720d7c54a3a37b1c2"
+dependencies = [
+ "compcol 0.6.11",
+]
 
 [[package]]
 name = "quote"
@@ -838,12 +840,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
-name = "subtle"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,17 +863,13 @@ dependencies = [
 
 [[package]]
 name = "tsslib"
-version = "0.2.11"
+version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "505231276b93c843f8a87e3457ee5aa3b68d4afc45373d089fcd5e16df8402b0"
+checksum = "ef2447bc714dc65c3900426587f9dfd6f8e57d1215388cc4bf4b77b70c92c4cf"
 dependencies = [
- "base64",
- "hex",
  "purecrypto",
  "serde",
- "serde_json",
  "spin",
- "subtle",
  "zeroize",
 ]
 

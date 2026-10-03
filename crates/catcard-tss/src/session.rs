@@ -36,8 +36,8 @@ use purecrypto::ec::secp256k1::Scalar;
 use purecrypto::ec::secp256k1::ecdsa::{Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature};
 use purecrypto::hash::{Digest, Sha256};
 use tsslib::dklstss::{CheckedSigningParty, KeygenParty, SigningParty};
-use tsslib::tss::{JsonMessage, MessageBroker, Parameters, PartyId};
-use zeroize::Zeroizing;
+use tsslib::tss::{Message as TssMessage, MessageBroker, Parameters, PartyId, Payload, WireFormat};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::broker::Mailbox;
 use crate::code::{COMMITMENT_LEN, Context, NONCE_LEN, SessionCode, commitment};
@@ -48,7 +48,7 @@ use crate::envelope::{
 use crate::identity::{IdentityKey, UnicastContext, valid_public, verify};
 use crate::rng::{Armed, Entropy, draw};
 use crate::share::{Origin, SecretKey, ShareRecord, check_params, compress};
-use crate::{Error, PUBKEY_LEN, bjson, member_id};
+use crate::{Error, PUBKEY_LEN, member_id};
 
 /// Most sighashes one signing session carries.
 pub const MAX_REQUESTS: usize = 64;
@@ -153,7 +153,7 @@ struct MsgType {
 }
 
 /// tsslib's message types and their order.
-/// Source: tsslib 0.2.11 `src/dklstss/keygen_party.rs`, `signing_party.rs` and
+/// Source: tsslib 0.2.12 `src/dklstss/keygen_party.rs`, `signing_party.rs` and
 /// `signing_checked_party.rs` (`TYPE_*` constants and the module docs' round lists).
 /// `round` is the envelope's: tsslib's round `r` travels in round `r + 1`, after the
 /// two rounds of identities. The `broadcast` flags are what each party sends with
@@ -217,12 +217,14 @@ impl Family {
 // ---------------------------------------------------------------------------------------
 //
 //   count u16 LE, then per message: instance u16 LE, type code u8, length u32 LE,
-//   compact JSON of the message's `data` (crate::bjson).
+//   the message's payload in tsslib's binary encoding (`tsslib::wire`, as every
+//   session's parties run with `WireFormat::Binary`).
 //
-// `from` and `to` are not repeated: tsslib is told the envelope's, which are the ones
-// the signature vouches for.
+// The rest of tsslib's `Message` is not sent: its type name travels as the one-byte
+// code, and `from` and `to` are not repeated -- tsslib is told the envelope's, which are
+// the ones the signature vouches for.
 
-/// A received message: (instance, type, compact JSON data).
+/// A received message: (instance, type, binary payload).
 type Message<'p> = (u16, &'static MsgType, &'p [u8]);
 
 struct Entry {
@@ -647,7 +649,8 @@ impl Session {
         let started: Result<Vec<Lane>, String> = match self.sign.as_ref() {
             None => {
                 let mailbox = Arc::new(Mailbox::default());
-                let params = Parameters::new(parties, &me, threshold, broker(&mailbox));
+                let params = Parameters::new(parties, &me, threshold, broker(&mailbox))
+                    .with_wire_format(WireFormat::Binary);
                 KeygenParty::new(params)
                     .map(|p| {
                         alloc::vec![Lane {
@@ -662,7 +665,8 @@ impl Session {
                 let mut err = None;
                 for (req, tweak) in job.requests.iter().zip(&job.tweaks) {
                     let mailbox = Arc::new(Mailbox::default());
-                    let params = Parameters::new(parties.clone(), &me, threshold, broker(&mailbox));
+                    let params = Parameters::new(parties.clone(), &me, threshold, broker(&mailbox))
+                        .with_wire_format(WireFormat::Binary);
                     // tsslib takes the key by value; its copy lives in the party.
                     let key = job.record.key.0.clone();
                     let hash = req.sighash.to_vec();
@@ -784,21 +788,18 @@ impl Session {
         let sender = member_id(h.from);
         let recipient = (h.to != 0).then(|| member_id(self.me));
         for (instance, ty, data) in entries {
-            let text = match bjson::decode(data) {
-                Ok(t) => Zeroizing::new(t),
-                Err(_) => return Err(self.fail(format!("member {} sent bad data", h.from))),
-            };
-            let data: serde_json::Value = match serde_json::from_slice(&text) {
-                Ok(v) => v,
-                Err(_) => return Err(self.fail(format!("member {} sent bad JSON", h.from))),
-            };
-            let msg = JsonMessage {
+            let mut msg = TssMessage {
                 typ: String::from(ty.name),
                 from: Some(sender.clone()),
                 to: recipient.clone(),
-                data,
+                data: Payload::Binary(data.to_vec()),
             };
-            if let Err(e) = self.lanes[usize::from(instance)].mailbox.deliver(&msg) {
+            let delivered = self.lanes[usize::from(instance)].mailbox.deliver(&msg);
+            // A DKG's round-2 unicasts are Shamir shares: wipe our copy.
+            if let Some(b) = binary_mut(&mut msg.data) {
+                b.zeroize();
+            }
+            if let Err(e) = delivered {
                 return Err(self.fail(format!("{e}")));
             }
         }
@@ -928,7 +929,7 @@ impl Session {
             if let Some(e) = lane.mailbox.take_late_error() {
                 return Err(self.fail(e));
             }
-            for msg in lane.mailbox.take_outbound() {
+            for mut msg in lane.mailbox.take_outbound() {
                 let Some(ty) = self.family.by_name(&msg.typ) else {
                     return Err(self.fail(format!("unknown message type {}", msg.typ)));
                 };
@@ -942,11 +943,11 @@ impl Session {
                 if (to == 0) != ty.broadcast {
                     return Err(self.fail(format!("{} sent with the wrong address", ty.name)));
                 }
-                let json = match serde_json::to_vec(&msg.data) {
-                    Ok(j) => Zeroizing::new(j),
-                    Err(_) => return Err(self.fail(String::from("message encoding"))),
+                // Moved out rather than copied, so the one copy is the one wiped.
+                let data = match binary_mut(&mut msg.data) {
+                    Some(b) => Zeroizing::new(core::mem::take(b)),
+                    None => return Err(self.fail(String::from("message not in binary"))),
                 };
-                let data = Zeroizing::new(bjson::encode(&json)?);
                 let entry = Entry {
                     instance: lane_no as u16,
                     code: ty.code,
@@ -1080,6 +1081,16 @@ impl Drop for Session {
             lane.party = None;
             lane.mailbox.clear();
         }
+    }
+}
+
+/// A payload's bytes, when it is in the binary encoding every session asks for.
+fn binary_mut(p: &mut Payload) -> Option<&mut Vec<u8>> {
+    match p {
+        Payload::Binary(b) => Some(b),
+        // `Payload::Json`, should anything turn tsslib's `json` feature on.
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 

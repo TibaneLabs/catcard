@@ -160,6 +160,19 @@ fn a_record_survives_its_own_serialisation() {
                 "flip at {at}"
             );
         }
+        // Format 1 (tsslib's JSON, never deployed) and anything later are refused, not
+        // misread; so is a record cut anywhere in its DKLs share.
+        for v in [0u8, 1, 3] {
+            let mut old = bytes.to_vec();
+            old[4] = v;
+            assert!(matches!(
+                catcard_tss::ShareRecord::from_bytes(&old, &KW),
+                Err(Error::Format(_))
+            ));
+        }
+        for cut in [90, bytes.len() / 2, bytes.len() - 1] {
+            assert!(catcard_tss::ShareRecord::from_bytes(&bytes[..cut], &KW).is_err());
+        }
     }
     // Reloaded records still sign.
     let reloaded: Vec<_> = records
@@ -188,6 +201,19 @@ fn t_created_shares_combine_into_the_joint_key_and_t_minus_one_do_not() {
             records[0].joint_public_key()
         );
         assert_eq!(joint.chain_code(), records[0].chain_code());
+        // The same from parts, each taken from a record decoded on its own and dropped.
+        let parts: Vec<_> = pick
+            .iter()
+            .map(|&i| {
+                let bytes = records[i].to_bytes(&KW).unwrap();
+                catcard_tss::ShareRecord::from_bytes(&bytes, &KW)
+                    .unwrap()
+                    .combine_part(&KW)
+            })
+            .collect();
+        let again = catcard_tss::combine_parts(&parts, &KW).unwrap();
+        assert_eq!(again.private_key(), joint.private_key());
+        assert_eq!(again.chain_code(), joint.chain_code());
     }
     let two: Vec<_> = records.iter().take(2).collect();
     assert!(matches!(combine(&two, &KW), Err(Error::NotEnoughShares)));

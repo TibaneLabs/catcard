@@ -131,6 +131,10 @@ fn bundles_round_trip_and_refuse_mismatched_halves() {
             b.record().joint_public_key()
         );
         assert_eq!(*back.to_bytes(&KW).unwrap(), *bytes);
+        // A bundle of format 1 (never deployed) is refused.
+        let mut old = bytes.to_vec();
+        old[4] = 1;
+        assert!(ShareBundle::from_bytes(&old, &KW).is_err());
     }
     // Member 1's Codex32 half glued onto member 2's DKLs half is not a bundle.
     let one = bundles[0].to_bytes(&KW).unwrap();

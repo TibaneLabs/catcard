@@ -65,7 +65,7 @@
 //!   (the default) catches the inconsistent form of the attack and names the culprit;
 //!   neither mode closes it fully. Repeated unexplained failures with the same co-signers are to be
 //!   treated as an attack.
-//! - tsslib copies key material into `serde_json` values and its own state that it does
+//! - tsslib copies key material into its own encoding structs and state that it does
 //!   not wipe; this crate wipes every buffer it owns.
 
 #![no_std]
@@ -77,7 +77,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use tsslib::tss::PartyId;
 
-mod bjson;
 mod broker;
 mod code;
 pub mod envelope;
@@ -97,7 +96,9 @@ pub use rng::{Entropy, NoEntropy};
 pub use session::{
     EcdsaSignature, MAX_REQUESTS, Outgoing, Session, SignMode, SignRequest, Status, new_session_id,
 };
-pub use share::{JointSecret, MAX_PATH, Origin, ShareBundle, ShareRecord, combine};
+pub use share::{
+    CombinePart, JointSecret, MAX_PATH, Origin, ShareBundle, ShareRecord, combine, combine_parts,
+};
 
 /// Most members a TSS wallet has: Codex32's nine share indices.
 pub const MAX_MEMBERS: u8 = 9;

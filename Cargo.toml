@@ -146,10 +146,10 @@ purecrypto = { version = "0.9.3", default-features = false }
 #
 # DKLs23 threshold ECDSA only. `std` stays off: the crate is then `no_std` + `alloc`,
 # takes its randomness from the source `catcard-tss` registers, and its sessions are
-# polled rather than waited on. Its JSON messages and key save format come with it, so
-# serde_json is named here with the same features to be the one copy in the build.
-tsslib = { version = "0.2.11", default-features = false, features = ["dklstss"] }
-serde_json = { version = "1", default-features = false, features = ["alloc", "arbitrary_precision"] }
+# polled rather than waited on. `json` stays off too: keys and messages use tsslib's
+# compact binary encoding (`tsslib::wire`), and nothing here links serde_json for it.
+# (0.2.12 also brings `frostsecp256k1tss`, FROST for Taproot: stage 2, not enabled.)
+tsslib = { version = "0.2.12", default-features = false, features = ["dklstss"] }
 # The lock around the protocol DRBG tsslib draws from (tsslib already links it).
 spin = { version = "0.10", default-features = false, features = ["spin_mutex", "once"] }
 # Memory hygiene, not a primitive: kept.
@@ -196,19 +196,16 @@ overflow-checks = true
 panic = "abort"
 
 # Threshold signing's protocol code, built for size. The TSS screens bring in all of
-# tsslib's DKLs parties (a session dispatches over keygen and both signing kinds),
-# catcard-tss and serde_json's parser: about 250 KB at "s", which took the mk4/mk5 image
-# past its ceiling. At "z" these three are about 50 KB smaller. Nothing on the boot path is
-# in them, and the heavy arithmetic -- EC multiplications, AES, hashing -- is purecrypto's,
-# which stays at "s". Measured 2026-10-03; the keygen and signing times in docs/TSS.md were
-# taken at "s" and want re-measuring on the device.
+# tsslib's DKLs parties (a session dispatches over keygen and both signing kinds) and
+# catcard-tss: at "s" that took the mk4/mk5 image past its ceiling (2026-10-03, when
+# serde_json's parser came with them). Nothing on the boot path is in them, and the heavy
+# arithmetic -- EC multiplications, AES, hashing -- is purecrypto's, which stays at "s".
+# The keygen and signing times in docs/TSS.md were taken at "s" and want re-measuring on
+# the device.
 [profile.release.package.tsslib]
 opt-level = "z"
 
 [profile.release.package.catcard-tss]
-opt-level = "z"
-
-[profile.release.package.serde_json]
 opt-level = "z"
 
 [profile.dev]

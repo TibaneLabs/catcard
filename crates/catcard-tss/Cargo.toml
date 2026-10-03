@@ -13,7 +13,6 @@ authors.workspace = true
 [dependencies]
 catcard-wallet = { workspace = true }
 purecrypto = { workspace = true, features = ["alloc", "hash", "rng", "ec", "hazmat-secp256k1", "cipher"] }
-serde_json = { workspace = true }
 spin = { workspace = true }
 tsslib = { workspace = true }
 zeroize = { workspace = true, features = ["alloc", "derive"] }

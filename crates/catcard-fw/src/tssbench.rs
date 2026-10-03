@@ -32,8 +32,8 @@ impl purecrypto::rng::CryptoRng for Drbg<'_> {}
 /// 0 idle, 1 pending, 2 running, 3 done.
 static STATE: AtomicU8 = AtomicU8::new(0);
 static mut ARGS: (u8, u8) = (0, 0);
-/// ok, keygen ms, sign ms, heap used before, heap peak after, share JSON bytes (party 1),
-/// n, t.
+/// ok, keygen ms, sign ms, heap used before, heap peak after, share bytes (party 1, in
+/// tsslib's binary key encoding), n, t.
 static mut RESULT: [u32; 8] = [0; 8];
 
 /// Queue a run; false if one is already queued or running.
@@ -106,7 +106,7 @@ fn run(ui: &mut Ui<'_>, n: usize, t: usize) -> [u32; 8] {
     let t2 = catcard_hal::dwt::cycles();
     let share = keys
         .first()
-        .and_then(|k| k.to_json().ok())
+        .and_then(|k| k.to_bytes().ok())
         .map_or(0, |j| j.len());
     let (_, peak, _) = crate::heap::stats();
     drop(keys);

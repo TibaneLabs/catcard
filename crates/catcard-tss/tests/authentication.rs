@@ -449,12 +449,16 @@ fn a_man_in_the_middle_must_commit_before_seeing_keys_and_the_codes_then_differ(
 #[test]
 fn unicasts_are_unreadable_to_other_members() {
     // Whoever holds the card sees member 2's first unicast to member 1, which carries a
-    // Shamir share. Payload field names travel as text, so the broadcast's are visible
-    // -- and the unicast's are not: it is ciphertext.
-    let (_, card) = at_round_one("sealed");
-    let has = |b: &[u8], word: &[u8]| b.windows(word.len()).any(|w| w == word);
-    assert!(has(&file(&card, R1, 2, 0), b"vss_commitments"));
+    // Shamir share. A broadcast's payload is in the clear: one tsslib message (count 1,
+    // instance 0, type code 1, then its length and bytes). The unicast's is ciphertext
+    // and a GCM tag, so the same framing (type code 2) is not where it would be.
+    let (mut s, card) = at_round_one("sealed");
+    let b = file(&card, R1, 2, 0);
+    assert_eq!(&b[HEADER_LEN..HEADER_LEN + 5], &[1, 0, 0, 0, 1]);
+    let len = u32::from_le_bytes(b[HEADER_LEN + 5..HEADER_LEN + 9].try_into().unwrap());
+    assert_eq!(HEADER_LEN + 9 + len as usize + SIG_LEN, b.len());
     let u = file(&card, R1, 2, 1);
-    assert!(!has(&u, b"share"));
-    assert!(!has(&u, b"ot_sender"));
+    assert_ne!(&u[HEADER_LEN..HEADER_LEN + 5], &[1, 0, 0, 0, 2]);
+    // ... and nobody but member 1 can open it.
+    assert_eq!(refused(s[2].receive(&u, &KW)), Refused::NotForMe);
 }

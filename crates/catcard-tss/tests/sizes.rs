@@ -53,8 +53,9 @@ fn show(label: &str, rows: &[(u8, Option<usize>, Option<usize>)], peers: usize) 
 #[test]
 fn print_sizes() {
     println!();
-    // Shapes that can be created together (2-of-2 cannot; see `can_create_together`).
-    for (n, t) in [(3u8, 2u8), (4, 2), (5, 3)] {
+    // Shapes that can be created together (2-of-2 cannot; see `can_create_together`),
+    // for 3, 4, 5 and 7 members.
+    for (n, t) in [(3u8, 2u8), (4, 2), (5, 3), (7, 4)] {
         let records = create(n, t, &format!("sizes-{n}-{t}"));
         let rec = records[0].to_bytes(&KW).unwrap();
         println!("{t}-of-{n}: share record {} bytes", rec.len());
@@ -106,7 +107,7 @@ fn print_bundle_sizes() {
         [1, 2, 3, 4],
         &[0x8000_0054, 0x8000_0000, 0x8000_0000],
     );
-    for (n, t) in [(2u8, 2u8), (3, 2), (5, 3)] {
+    for (n, t) in [(2u8, 2u8), (3, 2), (5, 3), (9, 5)] {
         let bundles = export(&[0x33; 16], &key, n, t, &mut TestRng::new("bundles"), &KW).unwrap();
         let b = bundles[0].to_bytes(&KW).unwrap();
         let r: &ShareRecord = bundles[0].record();

@@ -19,15 +19,15 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::mutex::SpinMutex;
-use tsslib::tss::{BrokerResult, JsonMessage, MessageBroker, MessageReceiver};
+use tsslib::tss::{BrokerResult, Message, MessageBroker, MessageReceiver};
 
 type Handler = Arc<dyn MessageReceiver + Send + Sync>;
 
 #[derive(Default)]
 struct Inner {
     handlers: Vec<(String, Handler)>,
-    pending: Vec<JsonMessage>,
-    outbound: Vec<JsonMessage>,
+    pending: Vec<Message>,
+    outbound: Vec<Message>,
     /// A handler's refusal of a message queued before it connected, which `connect`
     /// cannot return.
     late_error: Option<String>,
@@ -40,7 +40,7 @@ pub(crate) struct Mailbox {
 
 impl Mailbox {
     /// Hand an inbound message to its handler, or hold it for one.
-    pub(crate) fn deliver(&self, msg: &JsonMessage) -> BrokerResult {
+    pub(crate) fn deliver(&self, msg: &Message) -> BrokerResult {
         let handler = {
             let mut inner = self.inner.lock();
             match inner.handlers.iter().find(|(t, _)| *t == msg.typ) {
@@ -58,7 +58,7 @@ impl Mailbox {
     }
 
     /// What the party has sent since the last call.
-    pub(crate) fn take_outbound(&self) -> Vec<JsonMessage> {
+    pub(crate) fn take_outbound(&self) -> Vec<Message> {
         core::mem::take(&mut self.inner.lock().outbound)
     }
 
@@ -86,7 +86,7 @@ impl Mailbox {
 
 impl MessageReceiver for Mailbox {
     /// A party sending: queue it for the session.
-    fn receive(&self, msg: &JsonMessage) -> BrokerResult {
+    fn receive(&self, msg: &Message) -> BrokerResult {
         self.inner.lock().outbound.push(msg.clone());
         Ok(())
     }
