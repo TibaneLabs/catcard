@@ -21,7 +21,7 @@ use catcard_tss::{Outgoing, SESSION_ID_LEN, Session, Status};
 use core::fmt::Write as _;
 
 use super::rand::{Drbg, Pool};
-use super::{Room, Work, approve, card, describe, record_len, say, store, view};
+use super::{Room, Work, approve, card, describe, say, store, view};
 use crate::menu::{self, Line};
 use crate::ui::Ui;
 
@@ -43,7 +43,7 @@ pub(super) fn create(
     let Some((id, n, t, me, start)) = setup(ui) else {
         return;
     };
-    if !Room::fits(ui, HEAD, Work::Encode, n, 2 * record_len(n)) {
+    if !Room::fits(ui, HEAD, Work::Create, n, 0) {
         return;
     }
     let mut busy = Some(menu::blocking_screen(
@@ -79,7 +79,7 @@ pub(super) fn create(
 /// this device starts it.
 #[inline(never)]
 fn setup(ui: &mut Ui<'_>) -> Option<([u8; SESSION_ID_LEN], u8, u8, u8, bool)> {
-    let most = Room::most_members(Work::Encode, |n| 2 * record_len(n));
+    let most = Room::most_members(Work::Create, |_| 0);
     if most < 3 {
         say(ui, HEAD, "not enough memory", "for a new wallet");
         return None;

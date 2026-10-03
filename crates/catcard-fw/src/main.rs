@@ -225,12 +225,7 @@ mod trngtest;
 #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
 mod tss;
 /// Bench: a DKLs keygen and signature on the device, timed (docs/TSS.md).
-#[cfg(all(
-    feature = "tss",
-    feature = "usb-debug-mem",
-    not(feature = "board-mk3"),
-    not(feature = "board-q1")
-))]
+#[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
 mod tssbench;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]

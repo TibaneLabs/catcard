@@ -19,14 +19,18 @@
 //!
 //! # Memory
 //!
-//! tsslib's DKLs keys are large and its save format larger: on the host, with 32-bit
-//! pointers, encoding one 2-of-3 member's key peaks at about 231 KB of heap, decoding it at
-//! 150 KB, and both grow with `n` (docs/TSS.md, "Memory"). The device's heap is 216 KB in
-//! three pieces, so every flow that touches a DKLs key first borrows the app area
-//! ([`Room`], `crate::heap::borrow_app_area`) and checks what the work needs against what
-//! is free -- saying so on screen rather than letting an allocation fail, which on this
-//! device is the panic handler. The lease wipes every free byte of the heap when it
-//! ends, which also clears what tsslib freed without wiping.
+//! A DKLs key holds about 12.5 KB of pairwise OT state per other member, and everything
+//! that handles one grows with `n`: on the host, with 32-bit pointers and this heap's
+//! block headers, a member's whole create-together session peaks at 128 KB for 3 members
+//! and 382 KB for 9, and an export -- which holds every member's key at once -- at 155 KB
+//! for 3 and 398 KB for 5 (docs/TSS.md, "Memory"). The device's heap is 216 KB in three
+//! pieces, so every flow that touches a DKLs key first borrows the app area ([`Room`],
+//! `crate::heap::borrow_app_area`), which joins the pieces either side of it into one
+//! 440 KB run, and checks what the work needs against what is free -- saying so on screen
+//! rather than letting an allocation fail, which on this device is the panic handler.
+//! The lease wipes every free byte of the heap when it ends, which also clears what
+//! tsslib freed without wiping; that is why even the shapes that would fit without it
+//! (3 or 4 members creating together, an export to 3) take it.
 
 use catcard_ui::approval::Approval;
 
@@ -173,36 +177,48 @@ pub(super) fn hex4(fp: [u8; 4]) -> heapless::String<8> {
 // ---------------------------------------------------------------------------------------
 
 /// A share record's size per member besides the holder: the pairwise OT state, measured
-/// at 13.4 KB (docs/TSS.md, "Measured"), rounded up.
-const RECORD_PER_PEER: usize = 13_600;
+/// at 12,778 bytes (docs/TSS.md, "Measured"), rounded up.
+const RECORD_PER_PEER: usize = 12_800;
 
-/// A share record's size for an `n`-member wallet.
+/// A share record's size for an `n`-member wallet: 13,120 bytes at 2 members, 102,562 at
+/// 9 (measured), and this rounds up.
 pub(super) const fn record_len(n: u8) -> usize {
-    RECORD_PER_PEER * (n as usize).saturating_sub(1)
+    512 + RECORD_PER_PEER * (n as usize).saturating_sub(1)
 }
 
-/// The heap tsslib takes at its peak to encode (`Encode`) or decode (`Decode`) one
-/// member's key of an `n`-member wallet.
-///
-/// Measured on the host with 32-bit pointers (wasm32, a counting allocator), 2026-10-02,
-/// for 2 to 5 members: encode 116, 231, 445 and 462 KB; decode 88, 150, 213 and 276 KB.
-/// Past five members nothing was measured, and the guess -- 120 KB a member -- is
-/// already beyond any board's heap. A DKG member's own rounds peak below its encode
-/// (118 KB at 2-of-3), so the encode at the end is what a create needs.
+/// A flow's work on an `n`-member key, by what sets its peak.
 #[derive(Copy, Clone)]
 pub(super) enum Work {
-    Encode,
+    /// This member's whole create-together session: its DKG rounds, and the record
+    /// encoded and copied at the end while the session still lives.
+    Create,
+    /// An export: tsslib's reshare to `n` members, then every member's bundle held while
+    /// each in turn is encoded and sealed for its card.
+    Export,
+    /// Decoding one member's record.
     Decode,
 }
 
+/// The heap `work` takes at its peak on an `n`-member key, besides what the caller holds.
+///
+/// Measured on the host with 32-bit pointers (wasm32, a tagging allocator that charges
+/// each block as this heap does: a two-word header and the payload rounded to a word),
+/// 2026-10-04, tsslib 0.2.12 and its binary key encoding, 2 to 9 members (the shapes of
+/// docs/TSS.md, "Memory"). Rounded up to the next KB. Create together has no 2-member
+/// shape (`catcard_tss::can_create_together`).
 const fn peak(work: Work, n: u8) -> usize {
-    const ENCODE: [usize; 4] = [116_000, 231_300, 445_000, 462_200];
-    const DECODE: [usize; 4] = [88_500, 150_700, 212_600, 275_600];
-    let i = (n as usize).saturating_sub(2);
-    match work {
-        Work::Encode if i < ENCODE.len() => ENCODE[i],
-        Work::Decode if i < DECODE.len() => DECODE[i],
-        _ => 120_000 * n as usize,
+    const CREATE: [usize; 8] = [0, 126, 165, 207, 249, 291, 331, 374];
+    const EXPORT: [usize; 8] = [71, 152, 259, 389, 544, 724, 928, 1156];
+    const DECODE: [usize; 8] = [45, 65, 85, 105, 125, 145, 165, 185];
+    let i = (n as usize).wrapping_sub(2);
+    if i >= 8 {
+        return usize::MAX / 2;
+    }
+    1024 * match work {
+        Work::Create if n >= 3 => CREATE[i],
+        Work::Create => return usize::MAX / 2,
+        Work::Export => EXPORT[i],
+        Work::Decode => DECODE[i],
     }
 }
 

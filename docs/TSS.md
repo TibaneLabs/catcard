@@ -23,7 +23,8 @@ governs signing and restoring.
 - **DKLs23 threshold ECDSA on secp256k1** (tsslib `dklstss`, MIT, our own). The result is an
   ordinary ECDSA signature, so a TSS wallet is an ordinary single-signature wallet to the
   outside world: same address types, same fees, no visible multisig.
-- **No Taproot.** tsslib's FROST is Ed25519; there is no threshold Schnorr on secp256k1 here.
+- **No Taproot, yet.** DKLs signs ECDSA. tsslib 0.2.12 adds FROST on secp256k1 (BIP-340,
+  `frostsecp256k1tss`), which would give threshold Taproot; that is stage 2, not built.
   Address types are native SegWit (`wpkh`), nested SegWit (`sh(wpkh)`) and legacy (`pkh`).
 - **No hardened derivation under a shared key.** BIP-32's hardened step needs the private key;
   a threshold key only supports non-hardened steps (tsslib `dklstss::derive_child`). So:
@@ -123,8 +124,8 @@ before it is done.
 
 - Shares are kept in the device's encrypted settings, beside its own wallet, one record per
   TSS wallet: member number, `n`, `t`, the joint public key and chain code, the DKLs share.
-  The DKLs share includes per-peer setup state, so its size grows with `n`; it is measured
-  before a maximum `n` is fixed.
+  The DKLs share includes per-peer setup state, so its size grows with `n`: 26 KB at 3
+  members, 103 KB at 9 ("Measured" below).
 - Boards: mk4, mk5, Q1. The mk3 has no flash left for it.
 
 ## On the device (stage 1, 2026-10-03)
@@ -137,7 +138,8 @@ watch-only descriptor), *Descriptor to card*, *Copy share to card*, *Restore the
 (created-together only) and *Delete this share*. On a blank device, Import → **TSS shares**
 is *Restore from shares*.
 
-- **Create together.** Member 1 picks n and t (the shapes `can_create_together` refuses
+- **Create together.** Member 1 picks n and t (up to 9 members, as the memory allows; the
+  shapes `can_create_together` refuses
   are refused with "too many needed: a few could bias the key"; fewer than 3 members
   with "2-of-3 is the usual minimum") and starts a session: its id is from the UI DRBG, its
   folder `TSS/<id>/` gets the round-0 file and `invite.txt` (n and t as text). The others
@@ -185,26 +187,63 @@ share read only the record's fixed header; nothing decodes the DKLs half to show
 
 ### Memory
 
-tsslib's key save format costs far more heap than the key: measured on the host with
-32-bit pointers (wasm32, counting allocator, 2026-10-02), encoding one member's key peaks
-at 116 / 231 / 445 / 462 KB for 2 / 3 / 4 / 5 members, decoding at 88 / 150 / 213 /
-276 KB; a DKG member's own rounds peak at 118 KB (2-of-3). The heap is 216 KB in three
-pieces, so every flow that touches a DKLs key borrows the 256 KB app area for its duration
-(`crate::heap::borrow_app_area`: apps refuse to start meanwhile, and on return every free
-heap byte is wiped -- which also clears what tsslib freed without wiping), then checks the
-measured need against what is free and offers only the `n` that fits. In practice **at most
-3 members** on the device today: 2-of-3 create together, 2-of-2 / 2-of-3 / 3-of-3 export.
-Larger shapes want tsslib's encode and decode to stop building the whole JSON document.
+Since tsslib 0.2.12 (2026-10-04) keys and messages use its binary encoding
+(`tsslib::wire`), streamed: a record is written straight into a buffer sized by a counting
+pass and read straight from its bytes, with no JSON document built in between. Measured on
+the host with 32-bit pointers (wasm32-wasip1 under node, an allocator that tags every block
+with its member and charges it as the device heap does -- a two-word header, the payload
+rounded to a word), 2026-10-04:
+
+| members | record | encode one key | decode one key | create together, one member | export (all bundles held) |
+|---|---|---|---|---|---|
+| 2 | 13.1 KB | 45 KB | 45 KB | - | 71 KB |
+| 3 | 25.9 KB | 77 KB | 65 KB | 126 KB | 152 KB |
+| 4 | 38.7 KB | 109 KB | 85 KB | 165 KB | 259 KB |
+| 5 | 51.5 KB | 141 KB | 105 KB | 207 KB | 389 KB |
+| 6 | 64.2 KB | 173 KB | 125 KB | 249 KB | 544 KB |
+| 7 | 77.0 KB | 205 KB | 145 KB | 291 KB | 724 KB |
+| 8 | 89.8 KB | 237 KB | 165 KB | 331 KB | 928 KB |
+| 9 | 102.6 KB | 269 KB | 185 KB | 374 KB | 1156 KB |
+
+"Create together" is one member's whole session -- its DKG rounds, the messages it reads
+and writes, and the record encoded and copied at the end while the session still lives --
+with every member run in one process and only that member's blocks counted. "Export" is
+tsslib's reshare to `n` members, then every bundle held while each in turn is encoded:
+the larger of the two. Before (tsslib 0.2.11's JSON, raw allocation sizes), encoding one
+key peaked at 116 / 231 / 445 / 462 KB for 2-5 members and decoding at 88 / 150 / 213 /
+276 KB.
+
+The heap is 216 KB in three pieces (32 KB linked, 64 and 120 KB of spare RAM either side
+of the app area). Every flow that touches a DKLs key borrows the 256 KB app area for its
+duration (`crate::heap::borrow_app_area`), which joins the two spare pieces into one 440 KB
+run; apps refuse to start meanwhile, and on return every free heap byte is wiped -- which
+also clears what tsslib freed without wiping (its encoding structs, the messages it
+copied). Each flow then checks the peak above, plus 32 KB for the card and the screens,
+against what is free, and offers only the `n` that fits. With the area lent:
+
+- **create together: up to 9 members** (374 + 32 KB);
+- **split this wallet: up to 5 shares** -- an export holds every member's key at once, and
+  that grows with `n`²;
+- **import a share, restore the whole key: any `n` to 9.** Restoring the key decodes one
+  record at a time and keeps only its Shamir share (`catcard_tss::combine_parts`), so it
+  needs one decode, not `t`.
+
+Without the lease, 3 or 4 members would create together in 216 KB and an export to 3 would
+fit too; the lease is still taken for them, for the wipe on return.
 
 ### Flash
 
 The screens bring in all of catcard-tss and tsslib's DKLs parties (a session dispatches over
-keygen and both signing kinds) and serde_json's parser: about 200 KB at `opt-level = "z"`.
-To fit, the workspace builds `tsslib`, `catcard-tss` and `serde_json` at `"z"` on every
-board (purecrypto, which does the heavy arithmetic, stays at `"s"`; the bench times above
-were at `"s"` and want re-measuring), and the Q1 image leaves out the `DebugTssBench`
-bench (mk4/mk5 keep it). Images (dev builds): mk4/mk5 1,208,320 → 1,419,264 bytes, Q1
-1,250,816 → 1,440,256 bytes of a 1,441,792-byte ceiling -- **the Q1 has 1.5 KB left**.
+keygen and both signing kinds). The workspace builds `tsslib` and `catcard-tss` at
+`opt-level = "z"` on every board (purecrypto, which does the heavy arithmetic, stays at
+`"s"`; the bench times below were at `"s"` and want re-measuring).
+
+tsslib 0.2.12 without its `json` feature took serde_json out of the image, and with it
+catcard-tss's own JSON re-encoder: images (dev builds, 2026-10-04) mk4/mk5 1,419,264 →
+1,393,664 bytes, Q1 1,440,256 → 1,401,856. That put the `DebugTssBench` bench back on the
+Q1 (12 KB): **1,414,144 of 1,441,792 bytes, 27 KB left**. tsslib 0.2.12 needs purecrypto
+0.9.9, whose secp256k1 and safegcd inversion grew the mk3 image (which has no TSS)
+876,544 → 892,928 bytes of its 915,456-byte ceiling.
 
 ## Measured on an mk5 (2026-10-02, `usbclient.py --tss-bench`)
 
@@ -224,39 +263,51 @@ hashing in software). Ways down: the L4S5's AES peripheral for the OT PRG, and D
 presigning, which moves the work before the transaction is known.
 
 The share grows with `n` (per-peer OT state), so it also sets the most members a device can
-hold shares for; binary instead of JSON roughly halves it.
+hold shares for. tsslib's binary key encoding is 2-of-2's 45.6 KB of JSON in 13.1 KB.
 
 ## Measured (host, `cargo test -p catcard-tss --test sizes -- --nocapture`)
 
-Message envelope sizes, as one member sends them (SD file or BBQr payload). tsslib's JSON
-is re-encoded into a compact binary form first (base64 and byte arrays as raw bytes);
-signing messages are almost all OT-extension data and do not compress further.
+Message envelope sizes in bytes, as one member sends them (SD file or BBQr payload), for
+2-of-3 / 2-of-4 / 3-of-5 / 4-of-7 (2026-10-04, envelope format 3: tsslib's binary message
+payloads). Signing messages are almost all OT-extension data.
 
 | | round 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
-| create together, broadcast | 117 | 150 | 250-318 | 178-250 | | | | |
-| create together, to each peer | | | 410 | | 8.8 KB | | | |
-| sign, broadcast, one input | 117 | 150 | 176 | 142-178 | | | 173 | 142-178 |
-| sign (plain), to each peer, per input | | | | | 11.8 KB | 17.5 KB | | |
-| sign (checked, the default), to each peer, per input | | | | | 23.5 KB | 35.0 KB | | |
+| create together, broadcast | 117 | 150 | 227 / 227 / 293 / 359 | 165 / 200 / 235 / 305 | | | | |
+| create together, to each peer | | | 308 | | 8,560 | | | |
+| sign, broadcast, one input | 117 | 150 | 160 | 130 / 130 / 165 / 200 | | | 160 | 130 / 130 / 165 / 200 |
+| sign (plain), to each peer, per input | | | | | 11,310 | 17,010 | | |
+| sign (checked, the default), to each peer, per input | | | | | 22,510 | 33,975 | | |
 
 Rounds 0 and 1 are the introductions (a 32-byte commitment, then the 33-byte key and the
-32 bytes that open it); the protocol proper is rounds 2 and on. Ranges are over 2, 3, 4 and
-5 members; each further input adds about 90 bytes to a signing broadcast. Every envelope
-carries 85 bytes of header and signature.
+32 bytes that open it); the protocol proper is rounds 2 and on. A unicast's size does not
+depend on `n`; a broadcast's grows with `t` (round 2's commitments) and `n` (the echoes).
+Each further input adds about 75 bytes to a signing broadcast (four inputs: 379 bytes in
+round 2). Every envelope carries 85 bytes of header and signature. Against format 2
+(tsslib's JSON re-encoded by catcard-tss) these are 3-10% smaller.
 
-Share records (settings): **13.7 KB** for 2-of-2, **27.0 KB** for 2-of-3, **53.5 KB** for
-3-of-5 -- about 13.4 KB per other member (the pairwise OT state). An export's share bundle
-adds 61 bytes and the 48-character Codex32 string.
+Share records (settings), record format 2:
+
+| members | 2 | 3 | 4 | 5 | 7 | 9 |
+|---|---|---|---|---|---|---|
+| record | 13,120 | 25,894 | 38,672 | 51,450 | 77,006 | 102,562 |
+
+-- 12,778 bytes per other member (the pairwise OT state), against about 13.4 KB in format 1.
+An export's share bundle adds 61 bytes and the 48-character Codex32 string.
 
 ## Open
 
-- ~~Heap per member with one party per device~~ — measured on the host (2026-10-02, "On
-  the device / Memory"): tsslib's key encode, not the protocol, sets the limit, at 3
-  members today. Wants checking on a device.
-- Maximum `n` given the record sizes above (settings space), and QR part counts for the
-  signing unicasts (12-35 KB per input per peer).
-- The Q1's flash: 1.5 KB left with the TSS screens in (see "Flash").
+- ~~Heap per member with one party per device~~ — measured on the host (2026-10-04, "On
+  the device / Memory"): with tsslib's binary encoding, 9 members create together and 5
+  take an export. Wants checking on a device.
+- Settings space for a 9-member record (103 KB a share), and QR part counts for the
+  signing unicasts (11-34 KB per input per peer).
+- An export past 5 shares: tsslib's reshare makes every member's key at once, so the
+  export's memory grows with `n`² (1.16 MB at 9).
+- ~~The Q1's flash: 1.5 KB left with the TSS screens in~~ — 27 KB left with tsslib 0.2.12
+  and the bench back in (see "Flash").
+- Stage 2: tsslib 0.2.12 has `frostsecp256k1tss`, FROST on secp256k1 with BIP-340
+  signatures and the BIP-341 tweak -- threshold Taproot. Not enabled yet.
 - An exported share's xpub carries a zero parent fingerprint: the record does not keep the
   account's parent. The key, chain code and addresses are the account's; the xpub text
   differs from the one the whole wallet exports.

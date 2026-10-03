@@ -5,12 +5,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use catcard_callgate::Callgate;
 use catcard_settings::tss::{self as fmt, FileKey, Summary};
-use catcard_tss::ShareRecord;
+use catcard_tss::{CombinePart, ShareRecord};
 use core::fmt::Write as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::store::{self, Kept};
-use super::{Buf, Room, Work, approve, card, describe, hex4, say, view};
+use super::{Room, Work, approve, card, describe, hex4, say, view};
 use crate::menu::{self, Line};
 use crate::ui::Ui;
 
@@ -234,24 +234,27 @@ pub(super) fn combine(
         return;
     };
     let t = usize::from(s.t);
-    if !Room::fits(ui, HEAD, Work::Decode, s.n, 2 * t * super::record_len(s.n)) {
+    // One record at a time: each is decoded as it comes in, its Shamir share kept and the
+    // rest -- the pairwise OT state, most of it -- dropped before the next is read.
+    if !Room::fits(ui, HEAD, Work::Decode, s.n, 2 * super::record_len(s.n)) {
         return;
     }
 
     // Every share of this wallet kept here, then the rest from cards.
-    let mut records: Vec<Buf> = Vec::new();
-    let mut members: heapless::Vec<u8, 9> = heapless::Vec::new();
+    let mut parts: Vec<CombinePart> = Vec::new();
     if let Ok(all) = store::list(key) {
         for k in all.iter().filter(|k| same_wallet(&k.summary, s)) {
-            if let Ok(r) = store::read(key, &k.path) {
-                let _ = members.push(k.summary.member);
-                records.push(r);
+            if let Ok(mut r) = store::read(key, &k.path) {
+                match take_part(ui, HEAD, r.as_slice()) {
+                    Some(p) => parts.push(p),
+                    None => return,
+                }
             }
         }
     }
-    while records.len() < t {
+    while parts.len() < t {
         let mut note: Line = Line::new();
-        let _ = write!(note, "{} of {} shares in", records.len(), t);
+        let _ = write!(note, "{} of {} shares in", parts.len(), t);
         match menu::pick_row(ui, HEAD, &note, &["Read a share file", "Stop"]) {
             Some(0) => {}
             _ => return,
@@ -265,13 +268,12 @@ pub(super) fn combine(
         };
         match fmt::summary(record) {
             Some(r) if !same_wallet(&r, s) => say(ui, HEAD, "a share of", "another wallet"),
-            Some(r) if members.contains(&r.member) => say(ui, HEAD, "that share is", "in already"),
-            Some(r) => match Buf::copy_of(record) {
-                Some(b) => {
-                    let _ = members.push(r.member);
-                    records.push(b);
-                }
-                None => return say(ui, HEAD, "no memory", "for the share"),
+            Some(r) if parts.iter().any(|p| p.member() == r.member) => {
+                say(ui, HEAD, "that share is", "in already")
+            }
+            Some(_) => match take_part(ui, HEAD, record) {
+                Some(p) => parts.push(p),
+                None => return,
             },
             None => say(ui, HEAD, "not a TSS share", ""),
         }
@@ -283,19 +285,14 @@ pub(super) fn combine(
         "putting the key together",
     ));
     let joined = crate::keywork::run(|kw| {
-        let mut decoded = Vec::with_capacity(records.len());
-        for r in records.iter_mut() {
-            decoded.push(ShareRecord::from_bytes(r.as_slice(), kw)?);
-        }
-        let refs: Vec<&ShareRecord> = decoded.iter().collect();
-        let secret = catcard_tss::combine(&refs, kw)?;
+        let secret = catcard_tss::combine_parts(&parts, kw)?;
         Ok::<_, catcard_tss::Error>(catcard_callgate::pin::encode_xprv(
             secret.chain_code(),
             secret.private_key(),
         ))
     });
     busy.take();
-    drop(records);
+    drop(parts);
     let mut stash = match joined {
         Ok(x) => x,
         Err(e) => return say(ui, HEAD, "cannot put it together:", describe(&e)),
@@ -333,6 +330,22 @@ pub(super) fn combine(
             say(ui, "Wallet stored", "its addresses are", "m/0/* and m/1/*");
         }
         Err(why) => say(ui, "Not stored", why, "any key to go back"),
+    }
+}
+
+/// Decode one record and keep only what recombining needs of it. `None`, said on
+/// screen, for a record that will not decode.
+fn take_part(ui: &mut Ui<'_>, head: &str, record: &[u8]) -> Option<CombinePart> {
+    let mut busy = Some(menu::blocking_screen(ui.panel, head, "reading the share"));
+    let part =
+        crate::keywork::run(|kw| ShareRecord::from_bytes(record, kw).map(|r| r.combine_part(kw)));
+    busy.take();
+    match part {
+        Ok(p) => Some(p),
+        Err(e) => {
+            say(ui, head, "refused:", describe(&e));
+            None
+        }
     }
 }
 

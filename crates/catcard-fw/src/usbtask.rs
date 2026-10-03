@@ -1079,12 +1079,7 @@ impl UsbTask {
                     Err(_) => self.begin_reply(Status::BadRequest, &[]),
                 }
             }
-            #[cfg(all(
-                feature = "tss",
-                feature = "usb-debug-mem",
-                not(feature = "board-mk3"),
-                not(feature = "board-q1")
-            ))]
+            #[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
             Some(Opcode::DebugTssBench) => {
                 let p = progress.payload;
                 if p.len() >= 2 {
@@ -1107,8 +1102,7 @@ impl UsbTask {
             #[cfg(not(all(
                 feature = "tss",
                 feature = "usb-debug-mem",
-                not(feature = "board-mk3"),
-                not(feature = "board-q1")
+                not(feature = "board-mk3")
             )))]
             Some(Opcode::DebugTssBench) => {
                 self.begin_reply(Status::UnknownOpcode, &[]);

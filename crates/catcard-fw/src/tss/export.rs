@@ -14,7 +14,7 @@ use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
 use super::rand::Pool;
-use super::{Room, Work, approve, card, describe, hex4, record_len, say};
+use super::{Room, Work, approve, card, describe, hex4, say};
 use crate::menu::{self, Line};
 use crate::ui::Ui;
 
@@ -52,8 +52,8 @@ pub(super) fn export(
     let Some(_room) = Room::take(ui, HEAD) else {
         return;
     };
-    // Every bundle is in memory while each is encoded.
-    let most = Room::most_members(Work::Encode, |n| usize::from(n) * record_len(n));
+    // Every bundle is in memory while each is encoded (counted in the measured peak).
+    let most = Room::most_members(Work::Export, |_| 0);
     if most < 2 {
         return say(ui, HEAD, "not enough memory", "to split a wallet");
     }
