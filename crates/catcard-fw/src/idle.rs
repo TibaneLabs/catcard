@@ -255,13 +255,17 @@ pub fn tick() {
     // `wrapping_sub` because DWT_CYCCNT wraps; a gap long enough to have wrapped is
     // indistinguishable from a short one, which is what the clamp is for.
     let gap_ms = (now.wrapping_sub(prev) / per_ms).min(MAX_GAP_MS);
+    // `fetch_update` is deprecated from Rust 1.99 in favour of `try_update`, which the
+    // 1.89 this workspace supports does not have; the two are the same operation.
     #[cfg(feature = "board-q1")]
+    #[allow(deprecated)]
     let _ = PROGRESS_QUIET_MS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
         Some(q.saturating_add(gap_ms).min(PROGRESS_HOLD_MS))
     });
     // A read-modify-write, so a keypress's zero on either side of it is kept: stored
     // before, the total is this one gap; stored after, it is zero. Saturating, because
     // a timeout set to the largest value the preferences allow must not wrap to nothing.
+    #[allow(deprecated)]
     let before = QUIET_MS
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
             Some(q.saturating_add(gap_ms))
