@@ -160,9 +160,10 @@ fn a_record_survives_its_own_serialisation() {
                 "flip at {at}"
             );
         }
-        // Format 1 (tsslib's JSON, never deployed) and anything later are refused, not
-        // misread; so is a record cut anywhere in its DKLs share.
-        for v in [0u8, 1, 3] {
+        // Formats 1 (tsslib's JSON) and 2 (the whole key, pairs and all), never deployed,
+        // and anything later are refused, not misread; so is a record cut anywhere in its
+        // key core.
+        for v in [0u8, 1, 2, 4] {
             let mut old = bytes.to_vec();
             old[4] = v;
             assert!(matches!(
@@ -174,11 +175,18 @@ fn a_record_survives_its_own_serialisation() {
             assert!(catcard_tss::ShareRecord::from_bytes(&bytes[..cut], &KW).is_err());
         }
     }
-    // Reloaded records still sign.
-    let reloaded: Vec<_> = records
-        .iter()
-        .map(|r| catcard_tss::ShareRecord::from_bytes(&r.to_bytes(&KW).unwrap(), &KW).unwrap())
-        .collect();
+    // A record is the core: reloaded, it holds no pairs until its cache is read back.
+    let mut records = records;
+    let mut reloaded = Vec::new();
+    for r in records.iter_mut() {
+        let key = catcard_tss::CacheKey::new(&[9; 32], r, &KW);
+        let mut cache = r.write_pair_cache(&key, &[r.member(); 16], &KW).unwrap();
+        let mut back =
+            catcard_tss::ShareRecord::from_bytes(&r.to_bytes(&KW).unwrap(), &KW).unwrap();
+        assert!(back.pairs().is_empty());
+        back.read_pair_cache(&mut cache, &key, &KW).unwrap();
+        reloaded.push(back);
+    }
     let req = [request(&[0, 2], "reloaded")];
     let sigs = sign(&reloaded, &[1, 2], &req, SignMode::Plain);
     assert!(verifies(

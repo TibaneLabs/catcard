@@ -4,27 +4,30 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use catcard_callgate::Callgate;
-use catcard_settings::tss::{self as fmt, FileKey, Summary};
-use catcard_tss::{CombinePart, ShareRecord};
+use catcard_tss::{CombinePart, ShareRecord, bundle_parts, summary};
 use core::fmt::Write as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::store::{self, Kept};
+use super::store::{self, Kept, same_wallet};
 use super::{Room, Work, approve, card, describe, hex4, say, view};
 use crate::menu::{self, Line};
 use crate::ui::Ui;
 
 /// The record a share file holds: the whole of a lone record, or a bundle's signing half.
 fn record_of(file: &[u8]) -> Option<&[u8]> {
-    if let Some(parts) = fmt::bundle_parts(file) {
+    if let Some(parts) = bundle_parts(file) {
         return Some(parts.record);
     }
-    fmt::summary(file).map(|_| file)
+    summary(file).map(|_| file)
 }
 
-/// Import a share: read a share file and keep its record, to sign with.
+/// Import a share: read a share file and keep its record -- the key core -- to sign with.
+///
+/// Nothing about pairs comes in: a bundle carries none, and a record copied from another
+/// device names a cache only that device can open. The member sets its pairs up with its
+/// co-signers before it first signs (Rebuild setup).
 #[inline(never)]
-pub(super) fn import(ui: &mut Ui<'_>, key: &FileKey) {
+pub(super) fn import(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Import a share";
     let Some(_room) = Room::take(ui, HEAD) else {
         return;
@@ -36,10 +39,10 @@ pub(super) fn import(ui: &mut Ui<'_>, key: &FileKey) {
     let Some(record) = record_of(bytes) else {
         return say(ui, HEAD, "not a TSS share", "");
     };
-    let Some(s) = fmt::summary(record) else {
+    let Some(s) = summary(record) else {
         return say(ui, HEAD, "not a TSS share", "");
     };
-    if store::holds(key, &s) {
+    if store::holds(gate, login, ui, &s) {
         return say(ui, HEAD, "this share is", "kept here already");
     }
     let mut main: Line = Line::new();
@@ -49,7 +52,10 @@ pub(super) fn import(ui: &mut Ui<'_>, key: &FileKey) {
         ui,
         "Keep this share?",
         &main,
-        &[wallet.as_str(), "It is sealed under this device's wallet."],
+        &[
+            wallet.as_str(),
+            "Kept in this wallet's settings. Before it first signs, Rebuild setup with the members signing with it.",
+        ],
         "keep",
         "back",
     ) {
@@ -59,15 +65,22 @@ pub(super) fn import(ui: &mut Ui<'_>, key: &FileKey) {
         return;
     }
     // The secret half is checked before it is kept: a share that will not sign is
-    // refused now, not when the others are waiting for it.
+    // refused now, not when the others are waiting for it. What is kept is the record
+    // as this device writes it, naming no pair cache.
     let mut busy = Some(menu::blocking_screen(ui.panel, HEAD, "checking the share"));
-    let checked = crate::keywork::run(|kw| ShareRecord::from_bytes(record, kw).map(|_| ()));
+    let checked = crate::keywork::run(|kw| {
+        let mut r = ShareRecord::from_bytes(record, kw)?;
+        r.forget_cache();
+        r.to_bytes(kw)
+    });
     busy.take();
-    if let Err(e) = checked {
-        return say(ui, HEAD, "refused:", describe(&e));
-    }
-    match store::save(ui, key, record) {
-        Ok(()) => say(ui, HEAD, "share kept", "on this device"),
+    let kept = match checked {
+        Ok(k) => k,
+        Err(e) => return say(ui, HEAD, "refused:", describe(&e)),
+    };
+    drop(file);
+    match store::save(gate, login, ui, &kept) {
+        Ok(()) => say(ui, HEAD, "share kept: set up", "pairs before signing"),
         Err(why) => say(ui, HEAD, "not kept:", why),
     }
 }
@@ -80,8 +93,8 @@ pub(crate) fn restore_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui
 /// Restore from shares: read `t` share files of one split, one card after another, put
 /// the words back together from their Codex32 halves, and store them as the wallet.
 ///
-/// Only the Codex32 halves are read (`catcard_settings::tss::bundle_parts`); nothing here
-/// decodes a DKLs share, so this needs no more memory than a Codex32 recovery.
+/// Only the Codex32 halves are read (`catcard_tss::bundle_parts`); nothing here decodes a
+/// DKLs share, so this needs no more memory than a Codex32 recovery.
 #[inline(never)]
 pub(super) fn restore_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     const HEAD: &str = "Restore from shares";
@@ -106,8 +119,8 @@ pub(super) fn restore_words(gate: &Callgate, login: &mut catcard_pin::Login, ui:
             continue;
         };
         let bytes = file.as_slice();
-        let Some(parts) = fmt::bundle_parts(bytes) else {
-            if fmt::summary(bytes).is_some_and(|s| s.created) {
+        let Some(parts) = bundle_parts(bytes) else {
+            if summary(bytes).is_some_and(|s| s.created) {
                 say(
                     ui,
                     HEAD,
@@ -194,7 +207,6 @@ pub(super) fn combine(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-    key: &FileKey,
     kept: &Kept,
 ) {
     const HEAD: &str = "Restore the key";
@@ -235,16 +247,16 @@ pub(super) fn combine(
     };
     let t = usize::from(s.t);
     // One record at a time: each is decoded as it comes in, its Shamir share kept and the
-    // rest -- the pairwise OT state, most of it -- dropped before the next is read.
-    if !Room::fits(ui, HEAD, Work::Decode, s.n, 2 * super::record_len(s.n)) {
+    // rest dropped before the next is read. Records are cores, a kilobyte at most.
+    if !Room::fits(ui, HEAD, Work::Decode, s.n, 4096) {
         return;
     }
 
-    // Every share of this wallet kept here, then the rest from cards.
+    // Every share of this wallet kept here, then the rest from files.
     let mut parts: Vec<CombinePart> = Vec::new();
-    if let Ok(all) = store::list(key) {
+    if let Ok(all) = store::list(gate, login, ui) {
         for k in all.iter().filter(|k| same_wallet(&k.summary, s)) {
-            if let Ok(mut r) = store::read(key, &k.path) {
+            if let Ok(mut r) = store::read(gate, login, ui, k.index) {
                 match take_part(ui, HEAD, r.as_slice()) {
                     Some(p) => parts.push(p),
                     None => return,
@@ -266,7 +278,7 @@ pub(super) fn combine(
             say(ui, HEAD, "not a TSS share", "");
             continue;
         };
-        match fmt::summary(record) {
+        match summary(record) {
             Some(r) if !same_wallet(&r, s) => say(ui, HEAD, "a share of", "another wallet"),
             Some(r) if parts.iter().any(|p| p.member() == r.member) => {
                 say(ui, HEAD, "that share is", "in already")
@@ -347,8 +359,4 @@ fn take_part(ui: &mut Ui<'_>, head: &str, record: &[u8]) -> Option<CombinePart> 
             None
         }
     }
-}
-
-fn same_wallet(a: &Summary, b: &Summary) -> bool {
-    a.joint_public == b.joint_public && a.chain_code == b.chain_code && a.n == b.n && a.t == b.t
 }

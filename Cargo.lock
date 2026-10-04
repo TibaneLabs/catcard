@@ -319,7 +319,6 @@ name = "catcard-settings"
 version = "7.0.0"
 dependencies = [
  "catcard-nfc",
- "catcard-tss",
  "catcard-wallet",
  "emjson",
  "heapless",
@@ -863,9 +862,9 @@ dependencies = [
 
 [[package]]
 name = "tsslib"
-version = "0.2.12"
+version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef2447bc714dc65c3900426587f9dfd6f8e57d1215388cc4bf4b77b70c92c4cf"
+checksum = "a6f0566ebf252d7ab6d1ab4a145b84e72a3600e618e3332dfd5bcef0c7cfa2af"
 dependencies = [
  "purecrypto",
  "serde",

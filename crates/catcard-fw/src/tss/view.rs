@@ -1,9 +1,9 @@
-//! One kept share: what wallet it is a share of, its addresses and descriptor, and
-//! deleting it or taking a copy.
+//! One kept share: what wallet it is a share of, its addresses and descriptor, setting
+//! its pairs up again, and deleting it or taking a copy.
 //!
 //! Everything shown is public and comes from the record's header
-//! (`catcard_settings::tss::summary`): the wallet's key, its chain code, its origin. No
-//! DKLs share is decoded to show it.
+//! (`catcard_tss::summary`): the wallet's key, its chain code, its origin. No DKLs share
+//! is decoded to show it.
 //!
 //! # The wallet's extended public key
 //!
@@ -16,7 +16,7 @@
 //!   is zero: the key and every address are the account's, the xpub's text differs from
 //!   the one the whole wallet exports. Descriptors carry the origin themselves.
 
-use catcard_settings::tss::{FileKey, Summary};
+use catcard_tss::Summary;
 use catcard_wallet::address::{self, AddressKind, MAX_ADDRESS_LEN};
 use catcard_wallet::bip32::serialize::{MAX_BASE58_LEN, Slip132};
 use catcard_wallet::bip32::{ChildNumber, ExtendedPubKey, Network};
@@ -24,7 +24,7 @@ use catcard_wallet::descriptor::{self, SingleSig};
 use core::fmt::Write as _;
 
 use super::store::{self, Kept};
-use super::{approve, card, hex4, restore, say};
+use super::{approve, card, hex4, rebuild, restore, say};
 use crate::menu::{self, Line};
 use crate::ui::Ui;
 
@@ -194,17 +194,14 @@ fn details(ui: &mut Ui<'_>, title: &str, s: &Summary, closing: &str) {
 
 /// After a create: the new wallet, to compare across the members' devices.
 #[inline(never)]
-pub(super) fn created(ui: &mut Ui<'_>, record: &[u8]) {
-    let Some(s) = catcard_settings::tss::summary(record) else {
-        return say(ui, "Share kept", "", "");
-    };
+pub(super) fn created(ui: &mut Ui<'_>, s: &Summary) {
     let mut wallet: Line = Line::new();
     let _ = write!(wallet, "wallet {}", hex4(s.fingerprint));
     say(ui, "Share kept", &wallet, "compare on every device");
     details(
         ui,
         "New TSS wallet",
-        &s,
+        s,
         "Every member's device must show this same key and these addresses.",
     );
 }
@@ -215,18 +212,19 @@ pub(super) fn wallet(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-    key: &FileKey,
     kept: &Kept,
+    mut pool: Option<&mut catcard_entropy::EntropyPool>,
 ) {
     const DETAILS: &str = "Details";
-    const DESCRIPTOR: &str = "Descriptor to card";
-    const COPY: &str = "Copy share to card";
+    const REBUILD: &str = "Rebuild setup";
+    const DESCRIPTOR: &str = "Descriptor to file";
+    const COPY: &str = "Copy share to file";
     const COMBINE: &str = "Restore the whole key";
     const DELETE: &str = "Delete this share";
     let s = &kept.summary;
     let title = label(s);
-    let mut rows: heapless::Vec<&str, 5> = heapless::Vec::new();
-    for r in [DETAILS, DESCRIPTOR, COPY] {
+    let mut rows: heapless::Vec<&str, 6> = heapless::Vec::new();
+    for r in [DETAILS, REBUILD, DESCRIPTOR, COPY] {
         let _ = rows.push(r);
     }
     if s.created {
@@ -239,14 +237,15 @@ pub(super) fn wallet(
         };
         match rows[pick] {
             DETAILS => details(ui, &title, s, ""),
-            DESCRIPTOR => descriptor_to_card(ui, s),
-            COPY => copy_to_card(ui, key, kept),
+            REBUILD => rebuild::rebuild(gate, login, ui, kept, pool.as_deref_mut()),
+            DESCRIPTOR => descriptor_to_file(ui, s),
+            COPY => copy_to_file(gate, login, ui, kept),
             COMBINE => {
-                restore::combine(gate, login, ui, key, kept);
+                restore::combine(gate, login, ui, kept);
                 return;
             }
             _ => {
-                if delete(ui, kept) {
+                if delete(gate, login, ui, kept) {
                     return;
                 }
             }
@@ -256,7 +255,7 @@ pub(super) fn wallet(
 
 /// `tss-<fingerprint>.txt`: the descriptor, for a watch-only wallet.
 #[inline(never)]
-fn descriptor_to_card(ui: &mut Ui<'_>, s: &Summary) {
+fn descriptor_to_file(ui: &mut Ui<'_>, s: &Summary) {
     let mut desc = [0u8; descriptor::MAX_LEN + 1];
     let Some(n) = descriptor_of(s, &mut desc[..descriptor::MAX_LEN]) else {
         return say(ui, HEAD, "no descriptor", "for this wallet");
@@ -264,32 +263,43 @@ fn descriptor_to_card(ui: &mut Ui<'_>, s: &Summary) {
     desc[n] = b'\n';
     let mut name: heapless::String<24> = heapless::String::new();
     let _ = write!(name, "tss-{}.txt", hex4(s.fingerprint));
-    menu::card_wait(ui.panel, HEAD, "writing to the card");
-    match menu::write_card_file(&name, &desc[..n + 1]) {
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
+    };
+    card::wait(ui.panel, HEAD, storage, true);
+    match menu::write_storage_file(storage, &name, &desc[..n + 1]) {
         Ok(()) => say(ui, HEAD, "written as", &name),
         Err(why) => say(ui, HEAD, "not written:", why),
     }
 }
 
-/// Copy the share to a card, to take it into another CatCard (Import a share) or to put
-/// a created-together key back together on one.
+/// Copy the share -- its key core -- to a file, to take it into another CatCard (Import
+/// a share) or to put a created-together key back together on one.
 #[inline(never)]
-fn copy_to_card(ui: &mut Ui<'_>, key: &FileKey, kept: &Kept) {
+fn copy_to_file(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    kept: &Kept,
+) {
     let s = &kept.summary;
     if !approve(
         ui,
         "Copy this share?",
-        "To a file on the card. Whoever holds the file holds this member's share.",
-        &["Give it a password, and keep the card apart from the other shares."],
+        "To a file. Whoever holds the file holds this member's share.",
+        &["Give it a password, and keep the file apart from the other shares."],
         "copy",
         "back",
     ) {
         return;
     }
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
+    };
     let Some(protect) = card::ask_protection(ui, HEAD) else {
         return;
     };
-    let mut record = match store::read(key, &kept.path) {
+    let mut record = match store::read(gate, login, ui, kept.index) {
         Ok(r) => r,
         Err(why) => return say(ui, HEAD, "cannot read it:", why),
     };
@@ -298,7 +308,15 @@ fn copy_to_card(ui: &mut Ui<'_>, key: &FileKey, kept: &Kept) {
     let _ = write!(name, "tss-{fp}-m{}.7z", s.member);
     let mut inner: heapless::String<24> = heapless::String::new();
     let _ = write!(inner, "member-{}.tss", s.member);
-    match card::write_share(ui, HEAD, &name, &inner, record.as_slice(), &protect) {
+    match card::write_share(
+        ui,
+        storage,
+        HEAD,
+        &name,
+        &inner,
+        record.as_slice(),
+        &protect,
+    ) {
         Ok(()) => say(ui, HEAD, "written as", &name),
         Err(why) => say(ui, HEAD, "not written:", why),
     }
@@ -306,7 +324,12 @@ fn copy_to_card(ui: &mut Ui<'_>, key: &FileKey, kept: &Kept) {
 
 /// Delete a kept share, after asking. Whether it is gone.
 #[inline(never)]
-fn delete(ui: &mut Ui<'_>, kept: &Kept) -> bool {
+fn delete(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    kept: &Kept,
+) -> bool {
     let s = &kept.summary;
     let mut main: Line = Line::new();
     let _ = write!(
@@ -335,7 +358,7 @@ fn delete(ui: &mut Ui<'_>, kept: &Kept) -> bool {
     ) {
         return false;
     }
-    match store::delete(&kept.path) {
+    match store::delete(gate, login, ui, kept.index) {
         Ok(()) => {
             say(ui, HEAD, "share deleted", "");
             true

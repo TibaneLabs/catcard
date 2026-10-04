@@ -1,11 +1,25 @@
-//! What a member keeps: its share record, and the bundle an export writes per member.
+//! What a member keeps: its share record -- the key core, which a device holds in its
+//! settings -- and the bundle an export writes per member.
 //!
-//! # Share record (format 2)
+//! A DKLs key is two things of very different sizes (docs/TSS.md, "Where things live"):
+//!
+//! - the **core**: this member's Shamir share, the joint public key and chain code, and
+//!   every member's public share. A few hundred bytes. It cannot be made again: it
+//!   depends on every member's randomness (create together) or the exporter's (export).
+//! - the **pairs**: per other member, the OT-extension state set up between the two of
+//!   them, about 12.7 KB each. Only signing reads them, a pair only when both its members
+//!   sign, and two members can make theirs again at any time
+//!   ([`Session::pair_setup`](crate::Session::pair_setup)), changing nothing else.
+//!
+//! So a [`ShareRecord`] encodes the core alone, and the pairs travel apart, in a sealed
+//! pair cache ([`crate::cache`]) that the record names by its digest.
+//!
+//! # Share record (format 3)
 //!
 //! ```text
 //!  off  len  field
 //!    0    4  magic "CTSk"
-//!    4    1  format version (2)
+//!    4    1  format version (3)
 //!    5    1  origin: 1 created together, 2 exported
 //!    6    1  member number, 1..=n
 //!    7    1  n
@@ -15,61 +29,67 @@
 //!   74    4  origin fingerprint: of the joint key (created), of the master (exported)
 //!   78    1  origin path depth d, at most 10
 //!   79   4d  origin path, big-endian u32s (empty when created together)
-//!    .    4  DKLs share length, little-endian
-//!    .    L  DKLs share: tsslib's binary key encoding (`dklstss::Key::write_to`)
+//!    .   32  digest of this member's current pair cache; zeros when none was written
+//!    .    2  key core length L, little-endian
+//!    .    L  key core: tsslib's binary key encoding with no pairs
+//!            (`dklstss::Key::write_core_to`)
 //! ```
 //!
-//! Format 1 carried the share as tsslib's JSON save format, re-encoded token by token;
-//! it was never deployed, and a record of it is refused like any other version.
+//! Format 2 carried the whole key, pairs and all; format 1 was tsslib's JSON. Neither was
+//! deployed, and both are refused like any other version. A record whose key carries
+//! pairs is refused too: what is kept is the core.
 //!
-//! The joint key and chain code are repeated outside the DKLs share so a wallet's
-//! xpub, fingerprint and addresses can be shown without decoding the secret half; on
-//! decode the two copies must agree.
-//!
-//! The DKLs share holds this member's Shamir share and, per other member, the
-//! OT-extension state set up at key generation -- about 12.8 KB a peer, which is why the
-//! record grows with `n` (the crate's size test prints the numbers).
+//! The joint key and chain code are repeated outside the core so a wallet's xpub,
+//! fingerprint and addresses can be shown without decoding the secret half
+//! ([`crate::summary`]); on decode the two copies must agree.
 //!
 //! # Writing one without a second copy
 //!
 //! A record is written straight into the buffer it is returned in: one pass of tsslib's
 //! encoder counts the bytes, the buffer is made exactly that size, and a second pass
 //! fills it ([`Exact`]). The buffer never grows -- growing is what leaves unwiped copies
-//! of the share behind in freed heap -- and the key is never held twice in its encoded
-//! form. A bundle writes its record the same way, into its own buffer. Reading streams
-//! tsslib's decoder over the bytes in place.
+//! of the share behind in freed heap. Reading streams tsslib's decoder over the bytes in
+//! place.
 //!
-//! # Share bundle (format 2)
+//! # Share bundle (format 3)
 //!
 //! ```text
 //!    0    4  magic "CTSb"
-//!    4    1  format version (2)
+//!    4    1  format version (3)
 //!    5    1  member number
 //!    6    1  n
 //!    7    1  t
 //!    8    1  Codex32 string length C
 //!    9    C  this member's Codex32 `cw1` share of the BIP-39 entropy, lowercase
-//!    .    4  share record length, little-endian
-//!    .    R  share record (above)
+//!    .    2  share record length, little-endian
+//!    .    R  share record (above), with no pair cache named
 //! ```
+//!
+//! About 0.6 KB at 3 members: the core and the Codex32 half, no pairs. A member that
+//! takes one in makes its pairs with its co-signers before it first signs.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use catcard_wallet::KeyWork;
 use catcard_wallet::bip32::hash160;
 use purecrypto::ec::secp256k1::{ProjectivePoint, Scalar};
-use tsslib::dklstss::Key;
+use purecrypto::hash::{Digest, Sha256};
+use tsslib::dklstss::{Key, PairOTState};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{Error, MAX_MEMBERS, PUBKEY_LEN};
+use crate::{Error, MAX_MEMBERS, PUBKEY_LEN, member_id};
 
-const RECORD_MAGIC: [u8; 4] = *b"CTSk";
-const BUNDLE_MAGIC: [u8; 4] = *b"CTSb";
-/// The record and bundle format this crate writes and reads. 2: the DKLs share in
-/// tsslib's binary key encoding.
-const FORMAT: u8 = 2;
+pub(crate) const RECORD_MAGIC: [u8; 4] = *b"CTSk";
+pub(crate) const BUNDLE_MAGIC: [u8; 4] = *b"CTSb";
+/// The record and bundle format this crate writes and reads. 3: the key core alone, and
+/// the digest of the pair cache.
+pub(crate) const FORMAT: u8 = 3;
 /// Deepest origin path a record carries: BIP-32 allows 255, wallets use 3-5.
 pub const MAX_PATH: usize = 10;
+/// A pair-cache digest.
+pub const DIGEST_LEN: usize = 32;
+/// Bytes of a record before its path.
+pub(crate) const FIXED_HEAD: usize = 79;
 
 /// A DKLs key share, wiped when dropped: tsslib's `Key::zeroize` clears the Shamir share
 /// and every pairwise OT seed.
@@ -88,32 +108,64 @@ impl Drop for SecretKey {
 }
 
 impl SecretKey {
-    /// The length of the key's binary encoding: tsslib's encoder, run into a counter.
-    fn encoded_len(&self) -> Result<usize, Error> {
+    /// The length of the core's binary encoding: tsslib's encoder, run into a counter.
+    fn core_len(&self) -> Result<usize, Error> {
         let mut count = Count(0);
         self.0
-            .write_to(&mut count)
+            .write_core_to(&mut count)
             .map_err(|_| Error::Format("DKLs share"))?;
         Ok(count.0)
     }
 
-    /// Append the key's binary encoding, which must fit `out`'s capacity.
-    fn write(&self, out: &mut Exact<'_>) -> Result<(), Error> {
+    /// Append the core's binary encoding, which must fit `out`'s capacity.
+    fn write_core(&self, out: &mut Exact<'_>) -> Result<(), Error> {
         self.0
-            .write_to(out)
+            .write_core_to(out)
             .map_err(|_| Error::Format("DKLs share"))
     }
 
-    /// Read a key that spans all of `bytes`, streaming tsslib's decoder over them.
-    fn read(bytes: &[u8]) -> Result<Self, Error> {
-        Key::from_bytes(bytes)
+    /// Read a key core that spans all of `bytes`, streaming tsslib's decoder over them.
+    fn read_core(bytes: &[u8]) -> Result<Self, Error> {
+        let key = Key::from_bytes(bytes)
             .map(SecretKey)
-            .map_err(|_| Error::Format("DKLs share"))
+            .map_err(|_| Error::Format("DKLs share"))?;
+        if key.0.ot.iter().any(Option::is_some) {
+            // Dropped, and wiped, on the way out.
+            return Err(Error::Format("a record carries the key core alone"));
+        }
+        Ok(key)
+    }
+
+    /// A copy with no pairs: the core alone.
+    pub(crate) fn core_clone(&self) -> Self {
+        let k = &self.0;
+        SecretKey(Key {
+            n: k.n,
+            t: k.t,
+            idx: k.idx,
+            party_ids: k.party_ids.clone(),
+            xi: k.xi.clone(),
+            big_xj: k.big_xj.clone(),
+            ecdsa_pub: k.ecdsa_pub,
+            ot: alloc::vec![None; k.n],
+            chain_code: k.chain_code,
+        })
+    }
+}
+
+/// A pair's OT state, wiped when dropped (tsslib's `PairOTState` is not).
+pub(crate) struct SecretPair(pub(crate) Option<PairOTState>);
+
+impl Drop for SecretPair {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.as_mut() {
+            p.zeroize();
+        }
     }
 }
 
 /// A `wire::Write` that only counts.
-struct Count(usize);
+pub(crate) struct Count(pub(crate) usize);
 
 impl tsslib::wire::Write for Count {
     fn write_all(&mut self, buf: &[u8]) -> Result<(), tsslib::wire::Error> {
@@ -153,7 +205,7 @@ pub enum Origin {
     Exported = 2,
 }
 
-/// One member's share of a TSS wallet.
+/// One member's share of a TSS wallet: the key core, and whichever pairs are loaded.
 #[derive(Clone)]
 pub struct ShareRecord {
     pub(crate) origin: Origin,
@@ -164,6 +216,8 @@ pub struct ShareRecord {
     pub(crate) chain_code: [u8; 32],
     pub(crate) fingerprint: [u8; 4],
     pub(crate) path: Vec<u32>,
+    /// The digest of the pair cache last written for this record; zeros for none.
+    pub(crate) cache_digest: [u8; DIGEST_LEN],
     pub(crate) key: SecretKey,
 }
 
@@ -212,13 +266,14 @@ impl ShareRecord {
             chain_code: k.chain_code,
             fingerprint,
             path,
+            cache_digest: [0; DIGEST_LEN],
             key,
         };
         record.check()?;
         Ok(record)
     }
 
-    /// The record's fields against each other and against the DKLs share inside it.
+    /// The record's fields against each other and against the DKLs key inside it.
     fn check(&self) -> Result<(), Error> {
         check_params(self.n, self.t)?;
         let k = &self.key.0;
@@ -275,6 +330,21 @@ impl ShareRecord {
         &self.path
     }
 
+    /// What names this wallet among others: `SHA-256` over a domain, `n`, `t`, the joint
+    /// key, the chain code and every member's public share. Public: two splits of one
+    /// account have the same joint key and different public shares, so different ids.
+    pub fn wallet_id(&self) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"CatCard TSS wallet id v1\0");
+        h.update(&[self.n, self.t]);
+        h.update(&self.joint_public);
+        h.update(&self.chain_code);
+        for x in &self.key.0.big_xj {
+            h.update(&compress(x).unwrap_or([0; PUBKEY_LEN]));
+        }
+        h.finalize()
+    }
+
     /// The public key at a non-hardened `path` below the wallet key (BIP-32 CKDpub).
     pub fn child_public_key(&self, path: &[u32]) -> Result<[u8; PUBKEY_LEN], Error> {
         let (_, child) =
@@ -282,21 +352,107 @@ impl ShareRecord {
         compress(&child).ok_or(Error::Parameters)
     }
 
-    /// Serialise, secret share included.
+    // --- the pairs ------------------------------------------------------------------
+
+    /// The members this record holds a pair with, ascending.
+    pub fn pairs(&self) -> Vec<u8> {
+        (1..=self.n)
+            .filter(|&m| m != self.member && self.key.0.pair(&member_id(m)).is_some())
+            .collect()
+    }
+
+    /// The members of `signers` (other than this one) this record has no pair with:
+    /// what has to be set up before they can sign together. Members outside `signers`
+    /// are never needed.
+    pub fn missing_pairs(&self, signers: &[u8]) -> Vec<u8> {
+        (1..=self.n)
+            .filter(|&m| {
+                m != self.member && signers.contains(&m) && self.key.0.pair(&member_id(m)).is_none()
+            })
+            .collect()
+    }
+
+    /// A fingerprint of the pair with `peer`: SHA-256 of its encoding, to tell two states
+    /// apart without showing either.
+    pub fn pair_digest(&self, peer: u8) -> Option<[u8; 32]> {
+        let pair = self.key.0.pair(&member_id(peer))?;
+        let bytes = Zeroizing::new(pair.to_bytes().ok()?);
+        let mut h = Sha256::new();
+        h.update(b"CatCard TSS pair fingerprint v1\0");
+        h.update(&bytes);
+        Some(h.finalize())
+    }
+
+    /// Install `state` as the pair with `peer`, wiping the one it replaces.
+    pub(crate) fn set_pair(&mut self, peer: u8, state: PairOTState) -> Result<(), Error> {
+        if peer == self.member || peer == 0 || peer > self.n {
+            return Err(Error::Parameters);
+        }
+        let old = self
+            .key
+            .0
+            .set_pair(&member_id(peer), state)
+            .map_err(|_| Error::Parameters)?;
+        drop(SecretPair(old));
+        Ok(())
+    }
+
+    /// A copy with the core alone, no pairs.
+    pub(crate) fn core_clone(&self) -> ShareRecord {
+        ShareRecord {
+            origin: self.origin,
+            member: self.member,
+            n: self.n,
+            t: self.t,
+            joint_public: self.joint_public,
+            chain_code: self.chain_code,
+            fingerprint: self.fingerprint,
+            path: self.path.clone(),
+            cache_digest: self.cache_digest,
+            key: self.key.core_clone(),
+        }
+    }
+
+    /// Unload every pair, wiping it: the record keeps its core and the digest of the
+    /// cache that holds them.
+    pub fn drop_pairs(&mut self) {
+        for m in 1..=self.n {
+            if m != self.member {
+                drop(SecretPair(self.key.0.remove_pair(&member_id(m))));
+            }
+        }
+    }
+
+    /// The digest of the pair cache this record last wrote, if any
+    /// ([`Self::write_pair_cache`]).
+    pub fn cache_digest(&self) -> Option<[u8; DIGEST_LEN]> {
+        (self.cache_digest != [0; DIGEST_LEN]).then_some(self.cache_digest)
+    }
+
+    /// Forget which pair cache is current: for a record taken in from elsewhere, whose
+    /// caches are another device's.
+    pub fn forget_cache(&mut self) {
+        self.cache_digest = [0; DIGEST_LEN];
+    }
+
+    // --- encoding -------------------------------------------------------------------
+
+    /// Serialise the record: the core, secret share included, and no pairs.
     pub fn to_bytes(&self, _kw: &KeyWork) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let key_len = self.key.encoded_len()?;
-        let mut out = Zeroizing::new(Vec::with_capacity(self.header_len() + key_len));
-        self.write(&mut Exact(&mut out), key_len)?;
+        let core_len = self.key.core_len()?;
+        let mut out = Zeroizing::new(Vec::with_capacity(self.header_len() + core_len));
+        self.write(&mut Exact(&mut out), core_len)?;
         Ok(out)
     }
 
-    /// Everything before the DKLs share.
+    /// Everything before the key core.
     fn header_len(&self) -> usize {
-        83 + 4 * self.path.len()
+        FIXED_HEAD + 4 * self.path.len() + DIGEST_LEN + 2
     }
 
-    /// The record, its DKLs share `key_len` bytes long (from [`SecretKey::encoded_len`]).
-    fn write(&self, out: &mut Exact<'_>, key_len: usize) -> Result<(), Error> {
+    /// The record, its core `core_len` bytes long (from [`SecretKey::core_len`]).
+    fn write(&self, out: &mut Exact<'_>, core_len: usize) -> Result<(), Error> {
+        let len = u16::try_from(core_len).map_err(|_| Error::Format("DKLs share"))?;
         out.put(&RECORD_MAGIC)?;
         out.put(&[FORMAT, self.origin as u8, self.member, self.n, self.t])?;
         out.put(&self.joint_public)?;
@@ -306,16 +462,17 @@ impl ShareRecord {
         for i in &self.path {
             out.put(&i.to_be_bytes())?;
         }
-        out.put(&(key_len as u32).to_le_bytes())?;
+        out.put(&self.cache_digest)?;
+        out.put(&len.to_le_bytes())?;
         let start = out.0.len();
-        self.key.write(out)?;
-        if out.0.len() - start != key_len {
+        self.key.write_core(out)?;
+        if out.0.len() - start != core_len {
             return Err(Error::Format("DKLs share"));
         }
         Ok(())
     }
 
-    /// Parse and check a record [`Self::to_bytes`] wrote.
+    /// Parse and check a record [`Self::to_bytes`] wrote. It has no pairs loaded.
     pub fn from_bytes(bytes: &[u8], _kw: &KeyWork) -> Result<Self, Error> {
         let bad = Error::Format("share record");
         let mut r = Reader(bytes);
@@ -341,8 +498,9 @@ impl ShareRecord {
         for _ in 0..depth {
             path.push(u32::from_be_bytes(r.array()?));
         }
-        let len = u32::from_le_bytes(r.array()?) as usize;
-        let key = SecretKey::read(r.take(len)?)?;
+        let cache_digest: [u8; DIGEST_LEN] = r.array()?;
+        let len = usize::from(u16::from_le_bytes(r.array()?));
+        let key = SecretKey::read_core(r.take(len)?)?;
         if !r.0.is_empty() {
             return Err(bad);
         }
@@ -355,6 +513,7 @@ impl ShareRecord {
             chain_code,
             fingerprint,
             path,
+            cache_digest,
             key,
         };
         record.check()?;
@@ -383,7 +542,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// What an export writes for one member: the restore half and the signing half.
+/// What an export writes for one member: the restore half and the signing half's core.
 #[derive(Clone)]
 pub struct ShareBundle {
     pub(crate) member: u8,
@@ -407,7 +566,7 @@ impl ShareBundle {
     pub fn codex32(&self) -> &str {
         &self.codex32
     }
-    /// The signing half, to keep in a CatCard's settings.
+    /// The signing half -- the key core, no pairs -- to keep in a CatCard's settings.
     pub fn record(&self) -> &ShareRecord {
         &self.record
     }
@@ -415,16 +574,17 @@ impl ShareBundle {
     /// Serialise, both halves; the record is written in place, as
     /// [`ShareRecord::to_bytes`] writes it.
     pub fn to_bytes(&self, _kw: &KeyWork) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let key_len = self.record.key.encoded_len()?;
-        let record_len = self.record.header_len() + key_len;
+        let core_len = self.record.key.core_len()?;
+        let record_len = self.record.header_len() + core_len;
+        let rlen = u16::try_from(record_len).map_err(|_| Error::Format("share record"))?;
         let text = self.codex32.as_bytes();
-        let mut out = Zeroizing::new(Vec::with_capacity(13 + text.len() + record_len));
+        let mut out = Zeroizing::new(Vec::with_capacity(11 + text.len() + record_len));
         let mut w = Exact(&mut out);
         w.put(&BUNDLE_MAGIC)?;
         w.put(&[FORMAT, self.member, self.n, self.t, text.len() as u8])?;
         w.put(text)?;
-        w.put(&(record_len as u32).to_le_bytes())?;
-        self.record.write(&mut w, key_len)?;
+        w.put(&rlen.to_le_bytes())?;
+        self.record.write(&mut w, core_len)?;
         Ok(out)
     }
 
@@ -440,16 +600,18 @@ impl ShareBundle {
         let len = usize::from(r.byte()?);
         let text = core::str::from_utf8(r.take(len)?).map_err(|_| bad.clone())?;
         let codex32 = Zeroizing::new(String::from(text));
-        let rlen = u32::from_le_bytes(r.array()?) as usize;
+        let rlen = usize::from(u16::from_le_bytes(r.array()?));
         let record = ShareRecord::from_bytes(r.take(rlen)?, kw)?;
         if !r.0.is_empty() {
             return Err(bad);
         }
-        // The two halves must describe the same member of the same split.
+        // The two halves must describe the same member of the same split, and a bundle
+        // names no pair cache: whoever takes it in makes its own pairs.
         let share = catcard_wallet::codex32::Share::parse(&codex32, kw).map_err(Error::Codex32)?;
         if record.member != member
             || record.n != n
             || record.t != t
+            || record.cache_digest().is_some()
             || share.threshold() != t
             || share.is_secret()
             || share.index() != crate::export::codex32_index(member)?
@@ -486,10 +648,9 @@ impl JointSecret {
 /// What [`combine`] needs of one member's record, and nothing else: which member, which
 /// wallet, and its Shamir share. Wiped on drop.
 ///
-/// A decoded record holds its member's pairwise OT state too -- about 12.5 KB a peer --
-/// which recombining never reads. Taking the part and dropping the record before decoding
-/// the next lets a caller recombine `t` records in the memory of one
-/// ([`ShareRecord::combine_part`], then [`combine_parts`]).
+/// Taking the part and dropping the record before decoding the next lets a caller
+/// recombine `t` records holding only one at a time ([`ShareRecord::combine_part`], then
+/// [`combine_parts`]).
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct CombinePart {
     member: u8,
@@ -533,7 +694,7 @@ impl ShareRecord {
 /// only on the member numbers, which are public, and the sum is computed in purecrypto's
 /// constant-time scalar arithmetic. The result is checked against the joint public key,
 /// so a record of another wallet, or a tampered one, is refused rather than recombined
-/// into a wrong key.
+/// into a wrong key. Only the cores are read: no pair is needed.
 pub fn combine(records: &[&ShareRecord], kw: &KeyWork) -> Result<JointSecret, Error> {
     let parts: Vec<CombinePart> = records.iter().map(|r| r.combine_part(kw)).collect();
     combine_parts(&parts, kw)

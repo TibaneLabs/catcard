@@ -4,7 +4,7 @@
 //!  off  len  field
 //!    0    4  magic "CTSm"
 //!    4    1  format version (3)
-//!    5    1  protocol: 1 create together (keygen), 2 sign
+//!    5    1  protocol: 1 create together (keygen), 2 sign, 3 pair setup
 //!    6    8  session id
 //!   14    1  round (0 = commitments, 1 = identities)
 //!   15    1  from: member number, 1..=n
@@ -70,6 +70,8 @@ pub enum Protocol {
     Keygen = 1,
     /// Sign: DKLs23 threshold ECDSA.
     Sign = 2,
+    /// Set up the pairwise OT state between two members again.
+    PairSetup = 3,
 }
 
 impl Protocol {
@@ -77,6 +79,7 @@ impl Protocol {
         match b {
             1 => Some(Protocol::Keygen),
             2 => Some(Protocol::Sign),
+            3 => Some(Protocol::PairSetup),
             _ => None,
         }
     }

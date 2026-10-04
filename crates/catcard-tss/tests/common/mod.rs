@@ -182,3 +182,62 @@ pub fn verifies(public: &[u8; 33], hash: &[u8; 32], sig: &EcdsaSignature) -> boo
     let der = Secp256k1EcdsaSignature::from_der(&sig.der);
     s.is_low_s() && key.verify_prehash(hash, &s).is_ok() && der.map(|d| d == s).unwrap_or(false)
 }
+
+/// Set up the pair between members `a` and `b` again, as their two devices would: a
+/// pair-setup session each, over one card, then each installs its new pair.
+pub fn pair_setup(records: &mut [ShareRecord], a: u8, b: u8, label: &str) {
+    let id = [0x9a, a, b, 0, 0, 0, 0, 3];
+    let mut sessions = vec![
+        Session::pair_setup(
+            id,
+            &records[usize::from(a) - 1],
+            b,
+            &mut TestRng::new(&format!("{label}/pair/{a}")),
+            &KW,
+        )
+        .unwrap(),
+        Session::pair_setup(
+            id,
+            &records[usize::from(b) - 1],
+            a,
+            &mut TestRng::new(&format!("{label}/pair/{b}")),
+            &KW,
+        )
+        .unwrap(),
+    ];
+    let mut card = Card::default();
+    run(&mut sessions, &mut card);
+    for s in &sessions {
+        assert_eq!(s.status(), Status::Finished, "{:?}", s.failure());
+    }
+    assert_eq!(
+        sessions[0]
+            .install_pair(&mut records[usize::from(a) - 1], &KW)
+            .unwrap(),
+        b
+    );
+    assert_eq!(
+        sessions[1]
+            .install_pair(&mut records[usize::from(b) - 1], &KW)
+            .unwrap(),
+        a
+    );
+}
+
+/// Set up every pair `signers` lack between them.
+pub fn set_up_missing(records: &mut [ShareRecord], signers: &[u8], label: &str) {
+    for (i, &a) in signers.iter().enumerate() {
+        for &b in &signers[i + 1..] {
+            let lacking = !records[usize::from(a) - 1].missing_pairs(&[b]).is_empty()
+                || !records[usize::from(b) - 1].missing_pairs(&[a]).is_empty();
+            if lacking {
+                pair_setup(records, a, b, label);
+            }
+        }
+    }
+}
+
+/// A record as a device keeps it: the core alone, read back from its bytes.
+pub fn core_only(record: &ShareRecord) -> ShareRecord {
+    ShareRecord::from_bytes(&record.to_bytes(&KW).unwrap(), &KW).unwrap()
+}

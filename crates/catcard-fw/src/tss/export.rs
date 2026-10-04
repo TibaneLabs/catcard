@@ -1,12 +1,14 @@
 //! Split this wallet into `n` share files (docs/TSS.md, "Export").
 //!
 //! Each file holds one member's bundle: a Codex32 share of the wallet's words, any `t` of
-//! which give the words back, and a DKLs share of one account's key, any `t` of which
-//! sign for that account on CatCards. The account's hardened steps are done here first,
+//! which give the words back, and the core of a DKLs share of one account's key, any `t`
+//! of which sign for that account on CatCards -- once the members signing have set up
+//! their pairs together (Rebuild setup), which a bundle does not carry. The account's hardened steps are done here first,
 //! since a shared key can only derive non-hardened children; the shares then sign for
 //! the addresses the wallet already uses under that account.
 //!
-//! Written one file at a time, so each can go on its own card.
+//! Written one file at a time, so each can go on its own card -- or all to the Virtual
+//! Disk, to be taken off it over USB.
 
 use catcard_tss::{AccountKey, ShareBundle};
 use catcard_wallet::bip32::{ChildNumber, DerivationPath};
@@ -15,7 +17,7 @@ use zeroize::Zeroize as _;
 
 use super::rand::Pool;
 use super::{Room, Work, approve, card, describe, hex4, say};
-use crate::menu::{self, Line};
+use crate::menu::{self, Line, Storage};
 use crate::ui::Ui;
 
 const HEAD: &str = "Split this wallet";
@@ -79,6 +81,9 @@ pub(super) fn export(
     let account = match menu::ask_number(ui, HEAD, Some(("account", "empty is 0")), "number", "") {
         Some(a) if a < 0x8000_0000 => a,
         _ => return,
+    };
+    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+        return;
     };
     let Some(protect) = card::ask_protection(ui, HEAD) else {
         return;
@@ -145,7 +150,7 @@ pub(super) fn export(
 
     let mut written = 0u8;
     for b in bundles.iter() {
-        if write_one(ui, b, &fp, &protect) {
+        if write_one(ui, storage, b, &fp, &protect) {
             written += 1;
         }
     }
@@ -208,7 +213,13 @@ fn ask_kind(ui: &mut Ui<'_>) -> Option<u32> {
 
 /// Write bundle `b` to the card in the slot, after asking for it. Whether it was written.
 #[inline(never)]
-fn write_one(ui: &mut Ui<'_>, b: &ShareBundle, fp: &str, protect: &card::Protect) -> bool {
+fn write_one(
+    ui: &mut Ui<'_>,
+    storage: Storage,
+    b: &ShareBundle,
+    fp: &str,
+    protect: &card::Protect,
+) -> bool {
     let (m, n) = (b.member(), b.n());
     let mut head: heapless::String<24> = heapless::String::new();
     let _ = write!(head, "Share {m} of {n}");
@@ -217,10 +228,10 @@ fn write_one(ui: &mut Ui<'_>, b: &ShareBundle, fp: &str, protect: &card::Protect
     let mut inner: heapless::String<24> = heapless::String::new();
     let _ = write!(inner, "share-{m}of{n}.tss");
     loop {
-        let note = if m == 1 {
-            "insert the card for it"
-        } else {
-            "insert its card, or keep this one"
+        let note = match storage {
+            Storage::Vdisk => "to the Virtual Disk",
+            Storage::Sd if m == 1 => "insert the card for it",
+            Storage::Sd => "insert its card, or keep this one",
         };
         match menu::pick_row(ui, &head, note, &["Write it", "Skip this share"]) {
             Some(0) => {}
@@ -242,7 +253,7 @@ fn write_one(ui: &mut Ui<'_>, b: &ShareBundle, fp: &str, protect: &card::Protect
                 return false;
             }
         };
-        match card::write_share(ui, &head, &name, &inner, &bytes, protect) {
+        match card::write_share(ui, storage, &head, &name, &inner, &bytes, protect) {
             Ok(()) => {
                 crate::catlog!("tss: share {} of {} written", m, n);
                 say(ui, &head, "written as", &name);

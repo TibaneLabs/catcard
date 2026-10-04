@@ -44,11 +44,41 @@ fn do_export(entropy: &[u8], n: u8, t: u8) -> (Vec<ShareBundle>, ExtendedPrivKey
 }
 
 #[test]
-fn exported_shares_sign_for_the_original_wallets_addresses() {
+fn exported_shares_sign_for_the_original_wallets_addresses_once_their_pairs_are_set_up() {
     for (n, t) in [(2u8, 2u8), (3, 2), (5, 3)] {
         let (bundles, account) = do_export(&ENTROPY_16, n, t);
         assert_eq!(bundles.len(), usize::from(n));
-        let records: Vec<ShareRecord> = bundles.iter().map(|b| b.record().clone()).collect();
+        // What each holder takes in: the bundle's bytes, so the core alone.
+        let mut records: Vec<ShareRecord> = bundles
+            .iter()
+            .map(|b| {
+                let bytes = b.to_bytes(&KW).unwrap();
+                ShareBundle::from_bytes(&bytes, &KW)
+                    .unwrap()
+                    .record()
+                    .clone()
+            })
+            .collect();
+        let signers: Vec<u8> = (n - t + 1..=n).collect();
+        for r in &records {
+            assert!(r.pairs().is_empty(), "a bundle carries no pairs");
+            assert!(r.cache_digest().is_none());
+        }
+        // No pairs, no signature: the holders set theirs up with their co-signers first.
+        let refused = catcard_tss::Session::sign(
+            [3; 8],
+            &records[usize::from(signers[0]) - 1],
+            &signers,
+            &[SignRequest {
+                path: vec![0, 0],
+                sighash: [1; 32],
+            }],
+            SignMode::Plain,
+            &mut TestRng::new("too soon"),
+            &KW,
+        );
+        assert!(matches!(refused, Err(Error::MissingPairs(_))));
+        set_up_missing(&mut records, &signers, &format!("export {n} {t}"));
         for r in &records {
             assert_eq!(r.origin(), Origin::Exported);
             assert_eq!(r.joint_public_key(), &account.public_key(&KW));
@@ -67,7 +97,6 @@ fn exported_shares_sign_for_the_original_wallets_addresses() {
                 .derive_child(ChildNumber(path[1]), &KW)
                 .unwrap()
                 .public_key(&KW);
-            let signers: Vec<u8> = (n - t + 1..=n).collect();
             let req = [SignRequest {
                 path: path.to_vec(),
                 sighash: sighash(&format!("export {n} {t} {path:?}")),
@@ -131,10 +160,18 @@ fn bundles_round_trip_and_refuse_mismatched_halves() {
             b.record().joint_public_key()
         );
         assert_eq!(*back.to_bytes(&KW).unwrap(), *bytes);
-        // A bundle of format 1 (never deployed) is refused.
-        let mut old = bytes.to_vec();
-        old[4] = 1;
-        assert!(ShareBundle::from_bytes(&old, &KW).is_err());
+        // The core and the Codex32 half, small enough for a QR code or two.
+        assert!(
+            bytes.len() < 700,
+            "a 3-member bundle: {} bytes",
+            bytes.len()
+        );
+        // Bundles of formats 1 and 2 (never deployed) are refused.
+        for v in [1u8, 2] {
+            let mut old = bytes.to_vec();
+            old[4] = v;
+            assert!(ShareBundle::from_bytes(&old, &KW).is_err());
+        }
     }
     // Member 1's Codex32 half glued onto member 2's DKLs half is not a bundle.
     let one = bundles[0].to_bytes(&KW).unwrap();

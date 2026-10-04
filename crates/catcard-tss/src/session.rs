@@ -5,7 +5,7 @@
 //!       ──► outbox: round-1 identity   ──► receive every member's identity
 //!       ──► code() shown on every device, the user compares ──► confirm()
 //!       ──► outbox: round 2 ──► receive round 2 ──► outbox: round 3 ──► ...
-//!       ──► Finished: share() / signatures()
+//!       ──► Finished: share() / signatures() / install_pair()
 //! ```
 //!
 //! Rounds 0 and 1 are commit-then-reveal (see `crate::code`): a member's identity key
@@ -35,7 +35,9 @@ use catcard_wallet::KeyWork;
 use purecrypto::ec::secp256k1::Scalar;
 use purecrypto::ec::secp256k1::ecdsa::{Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature};
 use purecrypto::hash::{Digest, Sha256};
-use tsslib::dklstss::{CheckedSigningParty, KeygenParty, SigningParty};
+use tsslib::dklstss::{
+    CheckedSigningParty, KeygenParty, PairOTState, PairSetupParty, SigningParty,
+};
 use tsslib::tss::{Message as TssMessage, MessageBroker, Parameters, PartyId, Payload, WireFormat};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -47,7 +49,7 @@ use crate::envelope::{
 };
 use crate::identity::{IdentityKey, UnicastContext, valid_public, verify};
 use crate::rng::{Armed, Entropy, draw};
-use crate::share::{Origin, SecretKey, ShareRecord, check_params, compress};
+use crate::share::{Origin, SecretKey, SecretPair, ShareRecord, check_params, compress};
 use crate::{Error, PUBKEY_LEN, member_id};
 
 /// Most sighashes one signing session carries.
@@ -141,6 +143,7 @@ enum Family {
     Keygen,
     Sign,
     CheckedSign,
+    PairSetup,
 }
 
 struct MsgType {
@@ -153,8 +156,9 @@ struct MsgType {
 }
 
 /// tsslib's message types and their order.
-/// Source: tsslib 0.2.12 `src/dklstss/keygen_party.rs`, `signing_party.rs` and
-/// `signing_checked_party.rs` (`TYPE_*` constants and the module docs' round lists).
+/// Source: tsslib 0.2.13 `src/dklstss/keygen_party.rs`, `signing_party.rs`,
+/// `signing_checked_party.rs` and `pair_setup_party.rs` (`TYPE_*` constants and the
+/// module docs' round lists).
 /// `round` is the envelope's: tsslib's round `r` travels in round `r + 1`, after the
 /// two rounds of identities. The `broadcast` flags are what each party sends with
 /// `to == None`; a message that disagrees fails the session rather than being sealed
@@ -177,6 +181,8 @@ const TYPES: &[MsgType] = &[
     MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 5, broadcast: false },
     MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 6, broadcast: true },
     MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 7, broadcast: true },
+    MsgType { family: Family::PairSetup, code: 1, name: "dkls:pairsetup:r1", round: 2, broadcast: false },
+    MsgType { family: Family::PairSetup, code: 2, name: "dkls:pairsetup:r2", round: 3, broadcast: false },
 ];
 
 impl Family {
@@ -208,6 +214,7 @@ impl Family {
         match self {
             Family::Keygen => Protocol::Keygen,
             Family::Sign | Family::CheckedSign => Protocol::Sign,
+            Family::PairSetup => Protocol::PairSetup,
         }
     }
 }
@@ -274,11 +281,13 @@ enum Party {
     Keygen(KeygenParty),
     Sign(SigningParty),
     CheckedSign(CheckedSigningParty),
+    Pair(PairSetupParty),
 }
 
 enum Outcome {
     Key(tsslib::dklstss::Key),
     Signature(tsslib::dklstss::Signature),
+    Pair(PairOTState),
 }
 
 impl Party {
@@ -292,6 +301,7 @@ impl Party {
             Party::CheckedSign(p) => p
                 .try_result()
                 .map(|r| r.map(Outcome::Signature).map_err(err)),
+            Party::Pair(p) => p.try_result().map(|r| r.map(Outcome::Pair).map_err(err)),
         }
     }
 }
@@ -312,6 +322,21 @@ struct SignJob {
     results: Vec<Option<EcdsaSignature>>,
 }
 
+/// What a pair-setup session sets up, and what it ends with.
+struct PairJob {
+    /// The member's record, core only: the session reads its public half.
+    record: ShareRecord,
+    peer: u8,
+    result: Option<SecretPair>,
+}
+
+/// What a session is for, besides its members.
+enum Job {
+    Keygen,
+    Sign(SignJob),
+    Pair(PairJob),
+}
+
 /// A member's round-0 message: the commitment, and the envelope's signature, which
 /// can only be checked once the key it is by has been revealed.
 #[derive(Copy, Clone)]
@@ -321,7 +346,7 @@ struct Commitment {
     signed: Option<([u8; 32], [u8; SIG_LEN])>,
 }
 
-/// One run of create-together or sign, from this member's side.
+/// One run of create-together, sign or pair setup, from this member's side.
 pub struct Session {
     family: Family,
     id: [u8; SESSION_ID_LEN],
@@ -346,7 +371,7 @@ pub struct Session {
     sealed: Vec<(u8, u8)>,
     outbox: Vec<Outgoing>,
     lanes: Vec<Lane>,
-    sign: Option<SignJob>,
+    job: Job,
     share: Option<ShareRecord>,
     finished: bool,
     failure: Option<String>,
@@ -382,7 +407,7 @@ impl Session {
             me,
             (1..=n).collect(),
             [0; 32],
-            None,
+            Job::Keygen,
             source,
         )
     }
@@ -393,6 +418,10 @@ impl Session {
     /// signer passes the same set, the same requests in the same order and the same
     /// mode, or the session codes differ. `source` arms the protocol DRBG for nonces and
     /// makes the identity key.
+    ///
+    /// `record` must hold a pair with every other signer ([`ShareRecord::missing_pairs`]):
+    /// without one the session is refused with [`Error::MissingPairs`] before anything
+    /// is sent, and the missing pairs are set up with [`Session::pair_setup`] first.
     pub fn sign(
         id: [u8; SESSION_ID_LEN],
         record: &ShareRecord,
@@ -413,6 +442,10 @@ impl Session {
             || requests.len() > MAX_REQUESTS
         {
             return Err(Error::Parameters);
+        }
+        let missing = record.missing_pairs(&members);
+        if !missing.is_empty() {
+            return Err(Error::MissingPairs(missing));
         }
         let mut tweaks = Vec::with_capacity(requests.len());
         let mut children = Vec::with_capacity(requests.len());
@@ -456,7 +489,48 @@ impl Session {
             record.member,
             members,
             h.finalize(),
-            Some(job),
+            Job::Sign(job),
+            source,
+        )
+    }
+
+    /// Set up the pair between `record`'s member and `peer` again: both run this, each
+    /// naming the other, and each ends with a fresh pairwise OT state for the other
+    /// ([`Self::install_pair`]). No share, no other pair and no public key changes.
+    ///
+    /// For a pair lost with its cache, or one that should not be trusted any more. Both
+    /// members must install the result: a pair is usable only when the two hold the
+    /// states of the same run. `source` arms the protocol DRBG -- the new OT seeds are
+    /// secret -- and makes the identity key.
+    pub fn pair_setup(
+        id: [u8; SESSION_ID_LEN],
+        record: &ShareRecord,
+        peer: u8,
+        source: &mut dyn Entropy,
+        _kw: &KeyWork,
+    ) -> Result<Self, Error> {
+        if peer == 0 || peer > record.n || peer == record.member {
+            return Err(Error::Parameters);
+        }
+        let members = alloc::vec![record.member.min(peer), record.member.max(peer)];
+        let mut h = Sha256::new();
+        h.update(b"CatCard TSS pair setup parameters v1\0");
+        h.update(&record.wallet_id());
+        h.update(&members);
+        let job = PairJob {
+            record: record.core_clone(),
+            peer,
+            result: None,
+        };
+        Session::start(
+            Family::PairSetup,
+            id,
+            record.n,
+            record.t,
+            record.member,
+            members,
+            h.finalize(),
+            Job::Pair(job),
             source,
         )
     }
@@ -470,7 +544,7 @@ impl Session {
         me: u8,
         members: Vec<u8>,
         params: [u8; 32],
-        sign: Option<SignJob>,
+        job: Job,
         source: &mut dyn Entropy,
     ) -> Result<Self, Error> {
         let armed = Armed::new(source)?;
@@ -512,7 +586,7 @@ impl Session {
             sealed: Vec::new(),
             outbox: Vec::new(),
             lanes: Vec::new(),
-            sign,
+            job,
             share: None,
             finished: false,
             failure: None,
@@ -624,13 +698,52 @@ impl Session {
         self.share.as_ref()
     }
 
+    /// [`Self::share`], moved out rather than copied: one copy of the key with all its
+    /// pairs, not two. Once only.
+    pub fn take_share(&mut self, _kw: &KeyWork) -> Option<ShareRecord> {
+        self.share.take()
+    }
+
     /// A signing session's signatures, in request order, once finished.
     pub fn signatures(&self) -> Option<Vec<EcdsaSignature>> {
-        let job = self.sign.as_ref()?;
+        let Job::Sign(job) = &self.job else {
+            return None;
+        };
         if !self.finished {
             return None;
         }
         job.results.iter().cloned().collect()
+    }
+
+    /// A pair-setup session's other member.
+    pub fn peer(&self) -> Option<u8> {
+        match &self.job {
+            Job::Pair(job) => Some(job.peer),
+            _ => None,
+        }
+    }
+
+    /// A finished pair setup: install the new pair into `record` -- the same member of
+    /// the same wallet the session was started with -- replacing (and wiping) any it
+    /// had with the peer. The record's pair cache is then out of date: write a new one
+    /// ([`ShareRecord::write_pair_cache`]). Returns the peer. Once only.
+    pub fn install_pair(&mut self, record: &mut ShareRecord, _kw: &KeyWork) -> Result<u8, Error> {
+        let Job::Pair(job) = &mut self.job else {
+            return Err(Error::State("not a pair setup"));
+        };
+        if !self.finished {
+            return Err(Error::State("pair setup not finished"));
+        }
+        if record.member != job.record.member || record.wallet_id() != job.record.wallet_id() {
+            return Err(Error::Mismatch);
+        }
+        let state = job
+            .result
+            .as_mut()
+            .and_then(|p| p.0.take())
+            .ok_or(Error::State("pair already installed"))?;
+        record.set_pair(job.peer, state)?;
+        Ok(job.peer)
     }
 
     // --- driving it ---------------------------------------------------------------
@@ -646,8 +759,22 @@ impl Session {
         let parties: Vec<PartyId> =
             PartyId::sort(self.members.iter().map(|&m| member_id(m)).collect(), 0);
         let me = member_id(self.me);
-        let started: Result<Vec<Lane>, String> = match self.sign.as_ref() {
-            None => {
+        let started: Result<Vec<Lane>, String> = match &self.job {
+            Job::Pair(job) => {
+                let mailbox = Arc::new(Mailbox::default());
+                // Two parties; pair setup does not read the threshold.
+                let params = Parameters::new(parties, &me, 1, broker(&mailbox))
+                    .with_wire_format(WireFormat::Binary);
+                PairSetupParty::new(params, &job.record.key.0)
+                    .map(|p| {
+                        alloc::vec![Lane {
+                            mailbox,
+                            party: Some(Party::Pair(p)),
+                        }]
+                    })
+                    .map_err(|e| format!("{e}"))
+            }
+            Job::Keygen => {
                 let mailbox = Arc::new(Mailbox::default());
                 let params = Parameters::new(parties, &me, threshold, broker(&mailbox))
                     .with_wire_format(WireFormat::Binary);
@@ -660,7 +787,7 @@ impl Session {
                     })
                     .map_err(|e| format!("{e}"))
             }
-            Some(job) => {
+            Job::Sign(job) => {
                 let mut lanes = Vec::with_capacity(job.requests.len());
                 let mut err = None;
                 for (req, tweak) in job.requests.iter().zip(&job.tweaks) {
@@ -999,7 +1126,7 @@ impl Session {
                     }
                 }
                 Ok(Outcome::Signature(sig)) => {
-                    let Some(job) = self.sign.as_mut() else {
+                    let Job::Sign(job) = &mut self.job else {
                         return Err(self.fail(String::from("signature from a keygen")));
                     };
                     match finish_signature(&sig, &job.requests[i].sighash, &job.children[i]) {
@@ -1008,6 +1135,13 @@ impl Session {
                             return Err(self.fail(String::from("signature does not verify")));
                         }
                     }
+                }
+                Ok(Outcome::Pair(state)) => {
+                    let pair = SecretPair(Some(state));
+                    let Job::Pair(job) = &mut self.job else {
+                        return Err(self.fail(String::from("a pair from another protocol")));
+                    };
+                    job.result = Some(pair);
                 }
                 Err(e) => return Err(self.fail(e)),
             }
@@ -1170,7 +1304,12 @@ mod tests {
 
     #[test]
     fn every_round_of_every_protocol_has_messages() {
-        for f in [Family::Keygen, Family::Sign, Family::CheckedSign] {
+        for f in [
+            Family::Keygen,
+            Family::Sign,
+            Family::CheckedSign,
+            Family::PairSetup,
+        ] {
             for r in FIRST_PROTOCOL_ROUND..=f.rounds() {
                 assert_ne!(f.shape(r), (false, false));
             }
@@ -1180,6 +1319,7 @@ mod tests {
         assert_eq!(Family::Keygen.rounds(), 4);
         assert_eq!(Family::Sign.rounds(), 7);
         assert_eq!(Family::CheckedSign.rounds(), 7);
+        assert_eq!(Family::PairSetup.rounds(), 3);
     }
 
     #[test]

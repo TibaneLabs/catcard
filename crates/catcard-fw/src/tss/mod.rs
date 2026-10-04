@@ -1,21 +1,34 @@
 //! Threshold signing (TSS) on the device, stage 1: the screens of docs/TSS.md over the SD
-//! card. Signing a PSBT with a share, and QR as a transport, are stage 2.
+//! card or the Virtual Disk. Signing a PSBT with a share, and QR as a transport, are
+//! stage 2.
 //!
-//! [`screen`] is Settings -> `TSS wallets`: the shares this device keeps, and the ways to
-//! make, take in, split and put back a TSS wallet. [`restore_screen`] is the blank
+//! [`screen`] is Settings -> `TSS wallets`: the TSS wallets this device is a member of,
+//! and the ways to make, take in, split and put back one. [`restore_screen`] is the blank
 //! device's Import -> `TSS shares`, which puts a wallet's words back from `t` share files.
 //!
-//! The protocol -- sessions, envelopes, share records, export and restore -- is
-//! `catcard_tss`; this is the person, the card and the settings volume around it:
+//! The protocol -- sessions, envelopes, share records, pair caches, export and restore --
+//! is `catcard_tss`; this is the person, the files and the settings around it:
 //!
 //! - [`create`]: create together, `n` devices running a DKG over one card or several;
+//! - [`rebuild`]: set this member's pairs up again with the others;
 //! - [`export`]: split this wallet into `n` share files;
 //! - [`restore`]: take a share in, put words back from `t` shares, recombine a
 //!   created-together key;
-//! - [`view`]: the kept shares, one wallet's details, its descriptor, deleting one;
-//! - [`store`]: the share files in the settings volume, sealed under the root wallet;
-//! - [`card`]: the session's message files and the share files on the SD card;
+//! - [`view`]: the kept wallets, one wallet's details, its descriptor, deleting one;
+//! - [`store`]: the key cores in the settings of the wallet in force;
+//! - [`drive`]: a session's loop over the medium, whichever session it is;
+//! - [`card`]: the session's message files, pair caches and share files, on the card or
+//!   the Virtual Disk;
 //! - [`rand`]: the entropy pool and the UI DRBG, as `catcard_tss` draws from them.
+//!
+//! # Where a wallet lives
+//!
+//! The settings keep each member's key core, a few hundred bytes. Its pairwise state --
+//! about 12.7 KB per other member, which only signing reads -- is a sealed cache file on
+//! the medium a session used, named by a digest the core keeps ([`keep`]). A cache that
+//! is gone (a lost card, the Virtual Disk after a power-off, a share taken in from an
+//! export) is the ordinary case and costs a pair setup with the members signing, nothing
+//! more.
 //!
 //! # Memory
 //!
@@ -40,8 +53,10 @@ use crate::ui::Ui;
 
 mod card;
 mod create;
+mod drive;
 mod export;
 mod rand;
+mod rebuild;
 mod restore;
 mod store;
 mod view;
@@ -63,13 +78,13 @@ pub(crate) fn screen(
     const EXPORT: &str = "Split this wallet";
     const RESTORE: &str = "Restore from shares";
     const ABOUT: &str = "What is this?";
-    let Some(key) = store::key(gate, login, ui, HEAD) else {
+    if !store::ready(login, ui, HEAD) {
         return;
-    };
+    }
     loop {
-        let kept = match store::list(&key) {
+        let kept = match store::list(gate, login, ui) {
             Ok(k) => k,
-            Err(why) => return say(ui, HEAD, "cannot read the shares:", why),
+            Err(why) => return say(ui, HEAD, "cannot read the settings:", why),
         };
         let mut labels: heapless::Vec<menu::Line, { store::MAX_KEPT }> = heapless::Vec::new();
         for k in kept.iter() {
@@ -83,20 +98,20 @@ pub(crate) fn screen(
             let _ = rows.push(r);
         }
         let note = if kept.is_empty() {
-            "no shares kept here"
+            "none kept here"
         } else {
-            "shares kept here"
+            "kept here"
         };
         let Some(row) = menu::pick_row(ui, HEAD, note, &rows) else {
             return;
         };
         if let Some(k) = kept.get(row) {
-            view::wallet(gate, login, ui, &key, k);
+            view::wallet(gate, login, ui, k, pool.as_deref_mut());
             continue;
         }
         match rows[row] {
-            CREATE => create::create(ui, &key, pool.as_deref_mut()),
-            IMPORT => restore::import(ui, &key),
+            CREATE => create::create(gate, login, ui, pool.as_deref_mut()),
+            IMPORT => restore::import(gate, login, ui),
             EXPORT => export::export(gate, login, ui, pool.as_deref_mut()),
             RESTORE => restore::restore_words(gate, login, ui),
             _ => about(ui),
@@ -123,6 +138,12 @@ fn about(ui: &mut Ui<'_>) {
         Row::body(
             "Split this wallet: this device splits its words into n share files. Any t \
              of them can sign, and any t give the words back.",
+        )
+        .small(),
+        Row::body(
+            "This device keeps its share in its settings. To sign, two members also \
+             need a setup made together, kept on a card or the Virtual Disk; when it is \
+             gone, Rebuild setup makes it again with them.",
         )
         .small(),
         Row::body(
@@ -172,19 +193,55 @@ pub(super) fn hex4(fp: [u8; 4]) -> heapless::String<8> {
     s
 }
 
+/// Keep `record` -- a new one, or one whose pairs just changed: its pairs sealed into a
+/// cache written to `storage`, then its core, naming that cache, saved in the settings.
+/// Its header, once kept.
+///
+/// A cache that will not write is said, and the core is kept naming none: the pairs are
+/// then set up again before signing, which is what a lost cache costs anyway.
+#[inline(never)]
+pub(super) fn keep(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    storage: menu::Storage,
+    record: &mut catcard_tss::ShareRecord,
+    head: &str,
+) -> Result<catcard_tss::Summary, &'static str> {
+    if !record.pairs().is_empty() {
+        let written = (|| {
+            let key = store::cache_key(gate, login, ui, record)?;
+            let mut iv = [0u8; 16];
+            ui.protocol.generate(&mut iv).map_err(|_| "no random IV")?;
+            let mut busy = Some(menu::blocking_screen(ui.panel, head, "sealing the setup"));
+            let file = crate::keywork::run(|kw| record.write_pair_cache(&key, &iv, kw));
+            busy.take();
+            let file = file.map_err(|e| describe(&e))?;
+            card::wait(ui.panel, head, storage, true);
+            card::write_cache(storage, &catcard_tss::cache::file_name(record), &file)
+        })();
+        if let Err(why) = written {
+            record.forget_cache();
+            crate::catlog!("tss: pair cache not written: {}", why);
+            say(ui, head, "setup not written: set", "it up again to sign");
+        }
+    }
+    let bytes = crate::keywork::run(|kw| record.to_bytes(kw)).map_err(|e| describe(&e))?;
+    let summary = catcard_tss::summary(&bytes).ok_or("not a share record")?;
+    store::save(gate, login, ui, &bytes)?;
+    crate::catlog!(
+        "tss: member {} of {} kept, {} B, pairs with {} members",
+        summary.member,
+        summary.n,
+        bytes.len(),
+        record.pairs().len()
+    );
+    Ok(summary)
+}
+
 // ---------------------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------------------
-
-/// A share record's size per member besides the holder: the pairwise OT state, measured
-/// at 12,778 bytes (docs/TSS.md, "Measured"), rounded up.
-const RECORD_PER_PEER: usize = 12_800;
-
-/// A share record's size for an `n`-member wallet: 13,120 bytes at 2 members, 102,562 at
-/// 9 (measured), and this rounds up.
-pub(super) const fn record_len(n: u8) -> usize {
-    512 + RECORD_PER_PEER * (n as usize).saturating_sub(1)
-}
 
 /// A flow's work on an `n`-member key, by what sets its peak.
 #[derive(Copy, Clone)]
@@ -195,8 +252,14 @@ pub(super) enum Work {
     /// An export: tsslib's reshare to `n` members, then every member's bundle held while
     /// each in turn is encoded and sealed for its card.
     Export,
-    /// Decoding one member's record.
+    /// Decoding one member's record. Bounded by the measured decode of a whole key,
+    /// pairs and all; a record is now its core alone, far less.
     Decode,
+    /// A pair setup: the record and every pair it has, one pair-setup party, and the
+    /// cache sealed at the end. Not measured on its own; bounded by a create-together
+    /// session of the same size, which holds a whole key and runs a pair setup with
+    /// every other member besides its DKG.
+    Rebuild,
 }
 
 /// The heap `work` takes at its peak on an `n`-member key, besides what the caller holds.
@@ -217,6 +280,8 @@ const fn peak(work: Work, n: u8) -> usize {
     1024 * match work {
         Work::Create if n >= 3 => CREATE[i],
         Work::Create => return usize::MAX / 2,
+        // Two members have no create-together shape; three's bounds two.
+        Work::Rebuild => CREATE[if i == 0 { 1 } else { i }],
         Work::Export => EXPORT[i],
         Work::Decode => DECODE[i],
     }
@@ -285,14 +350,6 @@ impl Buf {
         })
     }
 
-    /// A copy of `bytes`.
-    pub(super) fn copy_of(bytes: &[u8]) -> Option<Buf> {
-        let mut b = Buf::with_capacity(bytes.len())?;
-        b.block.bytes()[..bytes.len()].copy_from_slice(bytes);
-        b.len = bytes.len();
-        Some(b)
-    }
-
     pub(super) fn as_slice(&mut self) -> &[u8] {
         &self.block.bytes()[..self.len]
     }
@@ -335,5 +392,7 @@ pub(super) fn describe(e: &catcard_tss::Error) -> &'static str {
         E::NotEnoughShares => "not enough shares",
         E::Mismatch => "shares of different wallets",
         E::BiasedShape => "not a safe shape to create",
+        E::MissingPairs(_) => "no setup with a co-signer",
+        E::Cache(r) => rebuild::refusal(*r),
     }
 }

@@ -1,13 +1,28 @@
-//! The SD card: a session's message files, and share files.
+//! The files TSS reads and writes, on whichever medium the owner picked: the SD card or
+//! the Virtual Disk (`menu::Storage`). Both mount as the same volume type
+//! (`crate::media`), so nothing here, and nothing that drives a session, knows which.
 //!
 //! # A session's folder
 //!
 //! `TSS/<session id>/` (`catcard_tss::session_dir`), one file per message named
 //! `r<round>-<from>-<to>.msg` (`catcard_tss::file_name`), and `invite.txt`, which the
-//! member who started the session writes so the others can find it: the number of
-//! members and how many are needed, as text a person can read too. The invitation is not
-//! trusted -- `n` and `t` are part of the session code every member compares -- it only
+//! member who started the session writes so the others can find it, as text a person can
+//! read too:
+//!
+//! - create together: `CatCard TSS session`, the number of members and how many are
+//!   needed;
+//! - pair setup: `CatCard TSS pair setup`, the wallet (the first 8 bytes of its id, in
+//!   hex) and the two members.
+//!
+//! The invitation is not trusted -- the session's parameters are part of the session code
+//! every member compares, and a pair setup's include the wallet's whole id -- it only
 //! saves typing them on each device.
+//!
+//! # Pair caches
+//!
+//! `TSS/<wallet>-m<member>.pairs` (`catcard_tss::cache::file_name`), sealed for this
+//! device. On the Virtual Disk it is gone at power off, which costs a pair setup the
+//! next time, nothing more.
 //!
 //! # Share files
 //!
@@ -23,7 +38,7 @@ use catcard_tss::{Outgoing, SESSION_ID_LEN};
 use core::fmt::Write as _;
 
 use super::{Buf, say};
-use crate::menu;
+use crate::menu::{self, Storage};
 use crate::ui::Ui;
 
 /// The invitation's name in a session's folder.
@@ -31,10 +46,34 @@ const INVITE: &str = "invite.txt";
 /// Largest message file read. A 3-member DKG's largest is about 9 KB; this only bounds
 /// what a damaged card can ask for.
 const MAX_MESSAGE: usize = 256 * 1024;
-/// Largest share file read: a 9-member bundle in its archive.
-const MAX_SHARE_FILE: usize = 160 * 1024;
-/// Most sessions offered from one card.
+/// Largest share file read: a 9-member bundle in its archive is about 1.2 KB.
+const MAX_SHARE_FILE: usize = 8 * 1024;
+/// Largest pair cache read: eight pairs of 12,701 bytes and the seal.
+pub(super) const MAX_CACHE: usize = 104 * 1024;
+/// Most sessions offered from one medium.
 pub(super) const MAX_SESSIONS: usize = 8;
+
+/// The medium, mounted.
+pub(super) fn mount(storage: Storage) -> Result<menu::CardVolume, &'static str> {
+    match storage {
+        Storage::Sd => menu::mount_card(),
+        Storage::Vdisk => {
+            crate::vdisk::ensure_formatted()?;
+            crate::vdisk::mount()
+        }
+    }
+}
+
+/// The waiting screen while the medium is read or written.
+pub(super) fn wait(panel: &mut crate::display::Panel, head: &str, storage: Storage, write: bool) {
+    let note = match (storage, write) {
+        (Storage::Sd, false) => "reading the card",
+        (Storage::Sd, true) => "writing to the card",
+        (Storage::Vdisk, false) => "reading the disk",
+        (Storage::Vdisk, true) => "writing to the disk",
+    };
+    menu::card_wait(panel, head, note);
+}
 
 /// A session's folder: `TSS/` and the id in hex.
 pub(super) fn folder(id: &[u8; SESSION_ID_LEN]) -> heapless::String<24> {
@@ -69,7 +108,7 @@ fn read_whole(
         Err(()) => return Ok(None),
     };
     if len > cap {
-        return Err("a file on the card is too large");
+        return Err("a file is too large");
     }
     let mut buf = Buf::with_capacity(len).ok_or("no memory for the file")?;
     let n = crate::signtx::read_file(vol, path, &mut buf.space()[..len])?;
@@ -77,22 +116,96 @@ fn read_whole(
     Ok(Some(buf))
 }
 
+/// What a session's invitation says.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(super) enum Invitation {
+    /// Create together: `n` members, `t` needed.
+    Create { n: u8, t: u8 },
+    /// Set up the pair between members `a < b` of the wallet whose id starts `wallet`.
+    Pair { wallet: [u8; 8], a: u8, b: u8 },
+}
+
+impl Invitation {
+    fn write(&self, out: &mut heapless::String<96>) {
+        match *self {
+            Invitation::Create { n, t } => {
+                let _ = write!(out, "CatCard TSS session\nmembers {n}\nneeded {t}\n");
+            }
+            Invitation::Pair { wallet, a, b } => {
+                let _ = out.push_str("CatCard TSS pair setup\nwallet ");
+                for x in wallet {
+                    let _ = write!(out, "{x:02x}");
+                }
+                let _ = write!(out, "\nmembers {a} {b}\n");
+            }
+        }
+    }
+
+    fn parse(text: &[u8]) -> Option<Invitation> {
+        let text = core::str::from_utf8(text).ok()?;
+        let mut lines = text.lines();
+        let kind = lines.next()?;
+        let (mut n, mut t, mut wallet, mut pair) = (None, None, None, None);
+        for l in lines {
+            if let Some(v) = l.strip_prefix("members ") {
+                let mut it = v.split_whitespace().map(|x| x.parse::<u8>().ok());
+                match (it.next(), it.next()) {
+                    (Some(a), None) => n = a,
+                    (Some(Some(a)), Some(Some(b))) => pair = Some((a, b)),
+                    _ => {}
+                }
+            } else if let Some(v) = l.strip_prefix("needed ") {
+                t = v.trim().parse::<u8>().ok();
+            } else if let Some(v) = l.strip_prefix("wallet ") {
+                wallet = parse_hex::<8>(v.trim());
+            }
+        }
+        match kind {
+            "CatCard TSS session" => {
+                let (n, t) = (n?, t?);
+                catcard_tss::can_create_together(n, t).then_some(Invitation::Create { n, t })
+            }
+            "CatCard TSS pair setup" => {
+                let (a, b) = pair?;
+                (a >= 1 && a < b && b <= catcard_tss::MAX_MEMBERS).then_some(Invitation::Pair {
+                    wallet: wallet?,
+                    a,
+                    b,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn parse_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Write a session's outgoing messages, making its folder if it is new.
 #[inline(never)]
 pub(super) fn write_messages(
+    storage: Storage,
     id: &[u8; SESSION_ID_LEN],
     out: &[Outgoing],
-    invite: Option<(u8, u8)>,
+    invite: Option<Invitation>,
 ) -> Result<(), &'static str> {
     let dir = folder(id);
-    let mut vol = menu::mount_card()?;
+    let mut vol = mount(storage)?;
     vol.ensure_dir("TSS")
         .map_err(|_| "cannot make the TSS folder")?;
     vol.ensure_dir(&dir)
         .map_err(|_| "cannot make the session folder")?;
-    if let Some((n, t)) = invite {
-        let mut text: heapless::String<64> = heapless::String::new();
-        let _ = write!(text, "CatCard TSS session\nmembers {n}\nneeded {t}\n");
+    if let Some(inv) = invite {
+        let mut text: heapless::String<96> = heapless::String::new();
+        inv.write(&mut text);
         menu::write_into(&mut vol, &path_in(&dir, INVITE), text.as_bytes())?;
     }
     for o in out {
@@ -101,17 +214,18 @@ pub(super) fn write_messages(
     vol.flush().map_err(|_| "flush failed")
 }
 
-/// A message read off the card: its (round, from, to), and its bytes.
+/// A message read off the medium: its (round, from, to), and its bytes.
 pub(super) type Message = ((u8, u8, u8), Buf);
 
-/// The messages among `wanted` that are on the card, read. What is missing is left out.
+/// The messages among `wanted` that are on the medium, read. What is missing is left out.
 #[inline(never)]
 pub(super) fn read_messages(
+    storage: Storage,
     id: &[u8; SESSION_ID_LEN],
     wanted: &[(u8, u8, u8)],
 ) -> Result<Vec<Message>, &'static str> {
     let dir = folder(id);
-    let mut vol = menu::mount_card()?;
+    let mut vol = mount(storage)?;
     let mut got = Vec::new();
     for &(r, f, t) in wanted {
         let path = path_in(&dir, &catcard_tss::file_name(r, f, t));
@@ -122,23 +236,24 @@ pub(super) fn read_messages(
     Ok(got)
 }
 
-/// A session found on the card.
-pub(super) struct Invite {
+/// A session found on the medium.
+pub(super) struct Found {
     pub(super) id: [u8; SESSION_ID_LEN],
-    pub(super) n: u8,
-    pub(super) t: u8,
+    pub(super) invite: Invitation,
     /// Bit `m` set: member `m` has written its first message already.
     pub(super) taken: u16,
 }
 
-/// The sessions on the card that an invitation describes.
+/// The sessions on the medium that an invitation describes.
 #[inline(never)]
-pub(super) fn sessions() -> Result<heapless::Vec<Invite, MAX_SESSIONS>, &'static str> {
-    let mut vol = menu::mount_card()?;
+pub(super) fn sessions(
+    storage: Storage,
+) -> Result<heapless::Vec<Found, MAX_SESSIONS>, &'static str> {
+    let mut vol = mount(storage)?;
     let mut ids: heapless::Vec<[u8; SESSION_ID_LEN], MAX_SESSIONS> = heapless::Vec::new();
     // No folder at all is no session, not an error.
     let _ = vol.enumerate("TSS", |name, dir, _| {
-        if let (true, Some(id)) = (dir, parse_id(name)) {
+        if let (true, Some(id)) = (dir, parse_hex::<SESSION_ID_LEN>(name)) {
             let _ = ids.push(id);
         }
     });
@@ -148,50 +263,41 @@ pub(super) fn sessions() -> Result<heapless::Vec<Invite, MAX_SESSIONS>, &'static
         let Ok(Some(mut text)) = read_whole(&mut vol, &path_in(&dir, INVITE), 256) else {
             continue;
         };
-        let Some((n, t)) = parse_invite(text.as_slice()) else {
+        let Some(invite) = Invitation::parse(text.as_slice()) else {
             continue;
         };
         let mut taken = 0u16;
         let _ = vol.enumerate(&dir, |name, _, _| {
             if let Some((0, from, 0)) = catcard_tss::parse_file_name(name)
-                && from <= n
+                && from <= catcard_tss::MAX_MEMBERS
             {
                 taken |= 1 << from;
             }
         });
-        let _ = out.push(Invite { id, n, t, taken });
+        let _ = out.push(Found { id, invite, taken });
     }
     Ok(out)
 }
 
-fn parse_id(name: &str) -> Option<[u8; SESSION_ID_LEN]> {
-    if name.len() != 2 * SESSION_ID_LEN {
-        return None;
-    }
-    let mut id = [0u8; SESSION_ID_LEN];
-    for (i, b) in id.iter_mut().enumerate() {
-        *b = u8::from_str_radix(name.get(2 * i..2 * i + 2)?, 16).ok()?;
-    }
-    Some(id)
+// ---------------------------------------------------------------------------------------
+// Pair caches
+// ---------------------------------------------------------------------------------------
+
+/// The pair cache at `path`, read; `None` when there is none.
+#[inline(never)]
+pub(super) fn read_cache(storage: Storage, path: &str) -> Result<Option<Buf>, &'static str> {
+    let mut vol = mount(storage)?;
+    read_whole(&mut vol, path, MAX_CACHE)
 }
 
-fn parse_invite(text: &[u8]) -> Option<(u8, u8)> {
-    let text = core::str::from_utf8(text).ok()?;
-    let mut lines = text.lines();
-    if lines.next()? != "CatCard TSS session" {
-        return None;
-    }
-    let mut n = None;
-    let mut t = None;
-    for l in lines {
-        if let Some(v) = l.strip_prefix("members ") {
-            n = v.trim().parse::<u8>().ok();
-        } else if let Some(v) = l.strip_prefix("needed ") {
-            t = v.trim().parse::<u8>().ok();
-        }
-    }
-    let (n, t) = (n?, t?);
-    catcard_tss::can_create_together(n, t).then_some((n, t))
+/// Write a pair cache at `path`, replacing the one there.
+#[inline(never)]
+pub(super) fn write_cache(storage: Storage, path: &str, file: &[u8]) -> Result<(), &'static str> {
+    let mut vol = mount(storage)?;
+    vol.ensure_dir("TSS")
+        .map_err(|_| "cannot make the TSS folder")?;
+    menu::write_into(&mut vol, path, file)?;
+    vol.flush().map_err(|_| "flush failed")
 }
 
 // ---------------------------------------------------------------------------------------
@@ -219,7 +325,7 @@ pub(super) fn ask_protection(ui: &mut Ui<'_>, head: &str) -> Option<Protect> {
             menu::ask(
                 ui.panel,
                 "No password?",
-                "whoever holds a card",
+                "whoever holds a file",
                 "holds that share",
             );
             if menu::confirmed(ui) {
@@ -245,10 +351,11 @@ pub(super) fn ask_protection(ui: &mut Ui<'_>, head: &str) -> Option<Protect> {
     }
 }
 
-/// Write `body` to the card as `name`, a 7-Zip archive holding it as `inner`.
+/// Write `body` to the medium as `name`, a 7-Zip archive holding it as `inner`.
 #[inline(never)]
 pub(super) fn write_share(
     ui: &mut Ui<'_>,
+    storage: Storage,
     head: &str,
     name: &str,
     inner: &str,
@@ -280,17 +387,24 @@ pub(super) fn write_share(
             .len(),
     };
     buf.set_len(len);
-    menu::card_wait(ui.panel, head, "writing to the card");
-    menu::write_card_file(name, buf.as_slice())
+    wait(ui.panel, head, storage, true);
+    menu::write_storage_file(storage, name, buf.as_slice())
 }
 
-/// Pick a share file on the card and open it: the bundle or record inside, in the clear.
-/// `None` when the owner backed out or it would not open (already said).
+/// Pick a medium, then a share file on it, and open it: the bundle or record inside, in
+/// the clear. `None` when the owner backed out or it would not open (already said).
 #[inline(never)]
 pub(super) fn read_share(ui: &mut Ui<'_>, head: &str) -> Option<Buf> {
-    let path = menu::browse_sd(ui, "Pick a share file", Some("7z"), menu::Browse::File)?;
-    menu::card_wait(ui.panel, head, "reading the card");
-    let read = menu::mount_card().and_then(|mut vol| read_whole(&mut vol, &path, MAX_SHARE_FILE));
+    let storage = menu::pick_storage(ui, head)?;
+    let path = menu::browse_storage(
+        ui,
+        storage,
+        "Pick a share file",
+        Some("7z"),
+        menu::Browse::File,
+    )?;
+    wait(ui.panel, head, storage, false);
+    let read = mount(storage).and_then(|mut vol| read_whole(&mut vol, &path, MAX_SHARE_FILE));
     let mut buf = match read {
         Ok(Some(b)) => b,
         Ok(None) => {

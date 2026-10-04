@@ -6,7 +6,8 @@
 //!
 //! - **Restore**: a Codex32 `cw1` share of the BIP-39 entropy (BIP-93 Shamir over
 //!   GF(32), `catcard_wallet::codex32`). Any `t` give back the words.
-//! - **Sign**: a DKLs share of the *account* key. The caller does the hardened steps
+//! - **Sign**: the core of a DKLs share of the *account* key -- no pairwise OT state,
+//!   which its holder sets up with its co-signers (`Session::pair_setup`). The caller does the hardened steps
 //!   (`m/84'/0'/0'` and so on) and hands over the account key and chain code; this module
 //!   wraps it as a 1-of-1 DKLs key (`tsslib::dklstss::import_key`) and reshares it to a
 //!   `t`-of-`n` committee, playing the old party and every new one itself. The chain
@@ -119,13 +120,16 @@ pub fn export(
     let mut out = Vec::with_capacity(usize::from(n));
     for mut key in keys {
         key.0.chain_code = account.chain_code;
-        let record = ShareRecord::from_key(
+        let mut record = ShareRecord::from_key(
             Origin::Exported,
             t,
             Some(account.master_fingerprint),
             account.path.clone(),
             key,
         )?;
+        // A bundle carries the core alone: the pairs the reshare set up are wiped here,
+        // and each holder sets up its own with its co-signers before it first signs.
+        record.drop_pairs();
         if record.joint_public != account_public {
             return Err(Error::Protocol(String::from(
                 "reshare changed the public key",

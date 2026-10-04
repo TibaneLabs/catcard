@@ -1,5 +1,5 @@
-//! How big things are: share records (settings space) and messages per round (QR parts,
-//! SD files). `cargo test -p catcard-tss --test sizes -- --nocapture` prints the table.
+//! How big things are: share records (settings space), pair caches (card space) and
+//! messages per round (QR parts, SD files). `cargo test -p catcard-tss --test sizes -- --nocapture` prints the table.
 //!
 //! The assertions are loose ceilings, there to notice a format change that multiplies a
 //! size, not to pin today's numbers.
@@ -56,10 +56,17 @@ fn print_sizes() {
     // Shapes that can be created together (2-of-2 cannot; see `can_create_together`),
     // for 3, 4, 5 and 7 members.
     for (n, t) in [(3u8, 2u8), (4, 2), (5, 3), (7, 4)] {
-        let records = create(n, t, &format!("sizes-{n}-{t}"));
+        let mut records = create(n, t, &format!("sizes-{n}-{t}"));
+        let key = catcard_tss::CacheKey::new(&[1; 32], &records[0], &KW);
+        let cache = records[0].write_pair_cache(&key, &[2; 16], &KW).unwrap();
         let rec = records[0].to_bytes(&KW).unwrap();
-        println!("{t}-of-{n}: share record {} bytes", rec.len());
-        assert!(rec.len() < 14_000 * usize::from(n));
+        println!(
+            "{t}-of-{n}: share record (core) {} bytes, pair cache {} bytes",
+            rec.len(),
+            cache.len()
+        );
+        assert!(rec.len() < 300 + 100 * usize::from(n));
+        assert!(cache.len() < 13_000 * usize::from(n));
 
         // Keygen messages, re-run to keep the card.
         let id = [n, t, 0, 0, 0, 0, 0, 9];
@@ -97,6 +104,34 @@ fn print_sizes() {
             }
         }
     }
+}
+
+#[test]
+fn print_pair_setup_sizes() {
+    let records = create(3, 2, "sizes-pair");
+    let id = [0x9a, 1, 2, 0, 0, 0, 0, 9];
+    let mut sessions: Vec<_> = [(1u8, 2u8), (2, 1)]
+        .iter()
+        .map(|&(me, peer)| {
+            catcard_tss::Session::pair_setup(
+                id,
+                &records[usize::from(me) - 1],
+                peer,
+                &mut TestRng::new(&format!("ps{me}")),
+                &KW,
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut card = Card::default();
+    run(&mut sessions, &mut card);
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s.status() == catcard_tss::Status::Finished)
+    );
+    let total = show("pair setup", &per_round(&card, 1), 1);
+    assert!(total < 40_000);
 }
 
 #[test]

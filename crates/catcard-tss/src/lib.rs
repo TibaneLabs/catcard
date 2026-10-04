@@ -4,17 +4,21 @@
 //! (DKLs23 threshold ECDSA, tsslib's `dklstss`), and `t` can restore it. This crate is
 //! everything about that which is not a screen or a file:
 //!
-//! - [`Session`] runs one protocol among numbered members: create together (DKG) or
-//!   sign. It takes and produces **byte buffers** -- signed [`envelope`]s -- and never
+//! - [`Session`] runs one protocol among numbered members: create together (DKG), sign,
+//!   or set up one pair again. It takes and produces **byte buffers** -- signed [`envelope`]s -- and never
 //!   touches a card or a camera; the firmware moves them by SD (named by
 //!   [`envelope::file_name`]) or QR.
 //! - Rounds 0 and 1 of every session authenticate the members: per-session identity
 //!   keys, committed to before any is revealed, and a [`SessionCode`] the user compares
 //!   across devices. After them every message is signed, unicasts are encrypted, and a
 //!   message out of place is [`Refused`].
-//! - [`ShareRecord`] is what a member stores; [`export`] splits a wallet the device holds
-//!   into [`ShareBundle`]s (Codex32 for restoring, DKLs for signing);
-//!   [`restore_entropy`] and [`combine`] put a wallet back together.
+//! - [`ShareRecord`] is what a member stores: the key core, a few hundred bytes. The
+//!   pairwise OT state signing also needs travels apart, in a sealed pair cache
+//!   ([`cache`]) the record names by its digest; a pair lost with its cache is made
+//!   again by its two members ([`Session::pair_setup`]).
+//! - [`export`] splits a wallet the device holds into [`ShareBundle`]s (Codex32 for
+//!   restoring, the DKLs core for signing); [`restore_entropy`] and [`combine`] put a
+//!   wallet back together.
 //!
 //! # Members and thresholds
 //!
@@ -32,6 +36,7 @@
 //! |-----------------|-------------|------------|----------------------------|----------------|
 //! | create together | commitments | identities | 2-4 (shares, echo, OT)     | a share record |
 //! | sign            | commitments | identities | 2-7                        | signatures     |
+//! | pair setup      | commitments | identities | 2-3 (base OT, both ways)   | one new pair   |
 //!
 //! Round 0 is a hash of each member's identity key; round 1 opens it, and is sent only
 //! once every commitment is in, so a key substituted in transit has to be chosen before
@@ -78,26 +83,31 @@ use alloc::vec::Vec;
 use tsslib::tss::PartyId;
 
 mod broker;
+pub mod cache;
 mod code;
 pub mod envelope;
 mod export;
+mod header;
 mod identity;
 pub mod rng;
 mod session;
 mod share;
 
+pub use cache::{CacheKey, CacheRefused};
 pub use code::{SessionCode, WORDS as SESSION_CODE_WORDS};
 pub use envelope::{
     COMMIT_ROUND, FIRST_PROTOCOL_ROUND, Protocol, REVEAL_ROUND, Refused, SESSION_ID_LEN, file_name,
     parse_file_name, session_dir,
 };
 pub use export::{AccountKey, export, restore_entropy, restore_entropy_from_codex32};
+pub use header::{BundleParts, Summary, bundle_parts, summary};
 pub use rng::{Entropy, NoEntropy};
 pub use session::{
     EcdsaSignature, MAX_REQUESTS, Outgoing, Session, SignMode, SignRequest, Status, new_session_id,
 };
 pub use share::{
-    CombinePart, JointSecret, MAX_PATH, Origin, ShareBundle, ShareRecord, combine, combine_parts,
+    CombinePart, DIGEST_LEN, JointSecret, MAX_PATH, Origin, ShareBundle, ShareRecord, combine,
+    combine_parts,
 };
 
 /// Most members a TSS wallet has: Codex32's nine share indices.
@@ -145,6 +155,12 @@ pub enum Error {
     /// `t`-of-`n` cannot be created together: colluding members could bias the key (see
     /// [`can_create_together`]).
     BiasedShape,
+    /// Signing needs a pair between every two signers, and this member has none with
+    /// these (ascending): load its pair cache, or set the pairs up again with them
+    /// ([`Session::pair_setup`]).
+    MissingPairs(Vec<u8>),
+    /// A pair cache was not taken; the record is unchanged.
+    Cache(CacheRefused),
 }
 
 impl From<Refused> for Error {
