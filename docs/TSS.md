@@ -106,6 +106,22 @@ governs signing and restoring.
    *Restore from TSS shares* reads `t` share files, one card after another, combines the
    Codex32 halves and stores the wallet's words.
 
+### Sign without a card (Q1, by QR)
+
+Users with no SD card can sign air-gapped (decided 2026-10-04):
+
+- The **Virtual Disk** stands in for the card. Session files and the pair cache live there as
+  they would on a card; the firmware already treats both as one media type.
+- **QR carries the files**, round by round: each Q1 shows its outgoing messages as animated
+  BBQr and scans the others'.
+- The Virtual Disk is gone at power off, so the **pairwise setup is rebuilt from scratch at
+  the start of each signing** (the missing-pairs path, `PairSetupParty`). That is a normal
+  path, not an error.
+- Q1 only: an mk4/mk5 can show codes but has no camera, so a group with one needs a card for
+  that member.
+- Cost per round, as QR: a pair setup is about 8.5 KB each way per pair; a checked signing
+  22-34 KB per input per co-signer (plain about half). Expect a few animated codes per round.
+
 ### Sign
 
 1. Each signing member loads the same PSBT (SD, QR) and approves it on its own screen, after
