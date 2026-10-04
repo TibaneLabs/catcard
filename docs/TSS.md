@@ -122,11 +122,30 @@ before it is done.
 
 ## Where things live
 
-- Shares are kept in the device's encrypted settings, beside its own wallet, one record per
-  TSS wallet: member number, `n`, `t`, the joint public key and chain code, the DKLs share.
-  The DKLs share includes per-peer setup state, so its size grows with `n`: 26 KB at 3
-  members, 103 KB at 9 ("Measured" below).
+Decided 2026-10-04, pending tsslib support
+([KarpelesLab/tsslib-rs#16](https://github.com/KarpelesLab/tsslib-rs/issues/16)):
+
+- **Inside the device: only the core.** The 32-byte share, the joint public key and chain
+  code, `n`, `t`, the member number and the members' public shares: well under 1 KB even at 9
+  members. It goes in the current key's own settings (records take about 4 KB of JSON),
+  under the settings encryption like everything else there.
+- **On the card: the pairwise OT state**, about 12.8 KB per other member, as a cache:
+  encrypted under a key derived from the device's root secret and the wallet's id, and
+  checked against a hash kept in the core, so a swapped or stale cache is refused and a copied
+  card is useless without the device. Signing already travels over the card, so the cache
+  comes with it.
+- **A lost cache is rebuilt, not fatal.** A member with a fresh card re-runs the pairwise
+  setup with the members it is signing with: a short exchange at the start of a signing,
+  changing no share, no address and no other pair. (tsslib's `refresh` would also do it, but it
+  rotates every share and needs every member, so it is kept for periodic proactive refresh.)
+- The share itself cannot be derived from the root secret: it depends on the other members'
+  randomness (create together) or the exporting device's (export). An exporter could derive
+  its polynomial from its own seed, so that it can re-issue a lost share while it still holds
+  the seed.
 - Boards: mk4, mk5, Q1. The mk3 has no flash left for it.
+
+Until tsslib#16 lands, stage 1 stores the whole share record as its own encrypted file in the
+settings volume.
 
 ## On the device (stage 1, 2026-10-03)
 
