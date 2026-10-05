@@ -64,6 +64,10 @@ multichain = [
     # not carry a format it never uses, not because it is large.
     "dep:catcard-bcur",
 ]
+# The rescue image: boots straight into the headless USB reflash and nothing else, so it
+# stays small enough to stage where a full image cannot (docs/RESCUE.md). Needs the bench
+# features its loop is built on, and the monitor, so a staging fault can be repaired by hand.
+rescue = ["dev", "usb-key-injection", "usb-debug-mem"]
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]

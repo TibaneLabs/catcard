@@ -17,6 +17,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 // The panic handler needs raw asm and linker symbols; everything else stays safe.
 #![allow(clippy::missing_safety_doc)]
+// The rescue image reaches only the boot and the headless reflash; the rest is compiled
+// and dropped, and is not dead in any other build.
+#![cfg_attr(feature = "rescue", allow(dead_code, unused_imports, unused_variables))]
 
 use catcard_board::BOARD;
 use catcard_entropy::{EntropyPool, Policy};
@@ -380,19 +383,33 @@ fn main() -> ! {
     // counter.
     let hal = unsafe { catcard_hal::init_core() };
 
+    // The rescue image: nothing but the headless USB reflash, mostly padding, for a device
+    // whose own staging gives out part way through a full image. See docs/RESCUE.md.
+    #[cfg(feature = "rescue")]
+    {
+        let _ = hal;
+        failsafe::run()
+    }
+
     // A dev build whose normal boot is broken can be reflashed without opening the case:
     // hold CANCEL at power-on and drop into the USB recovery loop before entropy, the
     // secure elements or the display are touched -- the point a validly-signed-but-broken
     // image hangs, and where a locked unit otherwise has no way back. Not held: the
     // ordinary boot below, re-initialising the matrix this read touched.
-    #[cfg(all(feature = "dev", feature = "usb-key-injection"))]
+    #[cfg(all(
+        feature = "dev",
+        feature = "usb-key-injection",
+        not(feature = "rescue")
+    ))]
     if failsafe::cancel_held_at_boot() {
         failsafe::run();
     }
 
     // SAFETY: bring-up is single-threaded and nothing else has claimed the panel.
+    #[cfg(not(feature = "rescue"))]
     let mut panel = unsafe { display::init() };
 
+    #[cfg(not(feature = "rescue"))]
     let report = boot::bring_up(hal, panel.as_mut());
 
     // Selftest screen, then the PIN prompt. A device missing anything that needs --
@@ -402,6 +419,7 @@ fn main() -> ! {
     // image that boots and then hangs has no bootrom recovery, and a wrong context switch
     // is exactly that image. The scheduler starts only when someone chooses it from
     // Debug, so a failed test is cured by a power cycle.
+    #[cfg(not(feature = "rescue"))]
     session::run(report, panel)
 }
 

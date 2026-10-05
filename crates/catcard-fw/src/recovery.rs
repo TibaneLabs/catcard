@@ -47,10 +47,13 @@ pub fn run(report: BootReport, panel: Option<display::Panel>, gate: Callgate) ->
 
 #[cfg(feature = "usb-key-injection")]
 pub(crate) fn headless(gate: Callgate) -> ! {
+    #[cfg(not(feature = "rescue"))]
     use catcard_hal::sdmmc::Slot;
     use catcard_ui::keypad::Key;
 
     use crate::pinentry::BootloaderGate;
+    // The rescue image has no card path: it exists to be small (docs/RESCUE.md).
+    #[cfg(not(feature = "rescue"))]
     use crate::sdupgrade::{Outcome, stage_from_card};
     use crate::usbtask;
 
@@ -155,6 +158,7 @@ pub(crate) fn headless(gate: Callgate) -> ! {
                         from_card = None;
                         crate::catlog!("sd: declined");
                     }
+                    #[cfg(not(feature = "rescue"))]
                     (Key::Digit(d @ (1 | 2)), false, _) => {
                         let (slot, name) = if d == 1 {
                             (Slot::A, "A")

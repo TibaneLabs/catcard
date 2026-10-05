@@ -65,7 +65,7 @@ CHAINS   = $(if $(MULTICHAIN),$(comma)multichain,)
 
 # The firmware ELF has one path, so a build must be packaged before the next overwrites it.
 .NOTPARALLEL:
-.PHONY: all mk3 mk4-mk5 q1 test lint clean apps
+.PHONY: q1-rescue all mk3 mk4-mk5 q1 test lint clean apps
 
 all: mk3 mk4-mk5 q1
 
@@ -109,6 +109,18 @@ q1: $(if $(SHIP),,apps)
 	CARGO_PROFILE_RELEASE_OPT_LEVEL=z $(FW) $(NODEF) --features board-q1$(CHAINS)
 	@mkdir -p $(OUT)
 	$(PACKAGE) --board q1 $(VER) $(Q1_APPS) --bin $(OUT)/catcard-q1.bin --dfu $(OUT)/catcard-q1.dfu
+
+# The Q1 rescue image: boot straight into the headless USB reflash, nothing else (~110 KB),
+# for a device whose own staging gives out before a full image is in. docs/RESCUE.md.
+# Its own target dir, so it never leaves a rescue ELF where `q1` packages from.
+RESCUE_ELF := target/rescue/thumbv7em-none-eabihf/release/catcard-fw
+q1-rescue:
+	CATCARD_VERSION=7.0.0r CARGO_PROFILE_RELEASE_OPT_LEVEL=z $(CARGO) build --release -p catcard-fw \
+	  --target thumbv7em-none-eabihf --target-dir target/rescue --no-default-features \
+	  --features board-q1,rescue
+	@mkdir -p $(OUT)
+	$(CARGO) run --release -q -p catcard-image -- build $(RESCUE_ELF) --board q1 --version 7.0.0r \
+	  --bin $(OUT)/catcard-q1-rescue.bin --dfu $(OUT)/catcard-q1-rescue.dfu
 
 # `catcard-kernel` is excluded for the same reason as `catcard-fw`: it is ARM-only --
 # the context switch is Cortex-M assembly and cortex-m's register access does not exist

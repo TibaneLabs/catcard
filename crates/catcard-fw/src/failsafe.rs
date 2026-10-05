@@ -38,6 +38,7 @@ use crate::{BOARD, display, keypad, usbtask};
 /// cannot trip it and someone meaning it cannot miss it. A throwaway DRBG feeds the
 /// scan-order scramble, which carries nothing here: no PIN is being typed, and the pool
 /// does not exist yet. `session` re-initialises the matrix from scratch afterwards.
+#[cfg(not(feature = "rescue"))]
 pub fn cancel_held_at_boot() -> bool {
     // SAFETY: single-threaded bring-up; nothing else has claimed the matrix yet, and the
     // ordinary boot below re-initialises it from scratch (edge path and all).
