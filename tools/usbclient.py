@@ -303,7 +303,9 @@ def offer(sock, blob, caps):
     Returns `(status, body, sent)` -- `sent` being the bytes that actually crossed the
     wire, which is the number worth printing next to the time.
     """
-    if caps & CAP_UPGRADE_PACKED:
+    # CATCARD_NO_PACK=1 sends the image uncompressed even to a device that takes it
+    # packed: to tell a fault in the device's inflate path from one anywhere else.
+    if caps & CAP_UPGRADE_PACKED and not os.environ.get("CATCARD_NO_PACK"):
         packed = pack_image(blob)
         # Only if it is actually smaller. An image that does not compress -- already
         # packed, or encrypted -- would otherwise pay the deflate overhead for nothing.
