@@ -63,6 +63,8 @@ governs signing and restoring.
       0.5 s per part.
     - **A Bitcoin-only build sends a BBQr of type `B`.** It has no BC-UR, and shows 0.8 s
       per part.
+    - **A code too big for BC-UR also goes as BBQr, at 0.8 s.** BC-UR numbers at most 256
+      parts, about 19 KB at this symbol size, and a signing round's code is 22-34 KB.
 
     Either build reads both. A Q1 reading another Q1's BBQr missed parts at the 0.25 s a
     phone gets. The arrows change the speed: up is slower, down is faster. The time per

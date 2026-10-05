@@ -144,17 +144,20 @@ impl Exchange {
     /// Show the code for member `to`, until the owner presses a key.
     pub(super) fn show(&self, ui: &mut Ui<'_>, head: &str, to: u8) {
         let code = self.code_for(to);
-        // BC-UR where it is built in: its fountain parts let a reader that missed one fill
-        // it from the next. A Bitcoin-only build has BBQr alone.
+        // BC-UR where it is built in and the code fits it: its fountain parts let a reader
+        // that missed one fill it from the next. A Bitcoin-only build has BBQr alone, and
+        // a code past BC-UR's part count (a signing round, 22-34 KB) goes as BBQr too.
         #[cfg(feature = "multichain")]
-        crate::qrshow::animate_bytes_ur_at(ui, head, &code, crate::qrshow::DEVICE_FRAME_MS);
-        #[cfg(not(feature = "multichain"))]
+        if crate::qrshow::fits_bytes_ur(&code) {
+            crate::qrshow::animate_bytes_ur_at(ui, head, &code, crate::qrshow::DEVICE_FRAME_MS);
+            return;
+        }
         crate::qrshow::animate_bbqr_at(
             ui,
             head,
             &code,
             catcard_bbqr::FileType::BINARY,
-            crate::qrshow::DEVICE_FRAME_MS,
+            crate::qrshow::BBQR_DEVICE_FRAME_MS,
         );
     }
 

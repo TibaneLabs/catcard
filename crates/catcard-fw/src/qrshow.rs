@@ -64,9 +64,10 @@ const FRAME_MS: u32 = 250;
 /// a Bitcoin-only build has no BC-UR and sends BBQr, slower.
 #[cfg(all(feature = "board-q1", feature = "tss", feature = "multichain"))]
 pub(crate) const DEVICE_FRAME_MS: u32 = 500;
-/// As above, for BBQr.
-#[cfg(all(feature = "board-q1", feature = "tss", not(feature = "multichain")))]
-pub(crate) const DEVICE_FRAME_MS: u32 = 800;
+/// As above, for BBQr: a Bitcoin-only build's codes, and any build's code too big for
+/// BC-UR.
+#[cfg(all(feature = "board-q1", feature = "tss"))]
+pub(crate) const BBQR_DEVICE_FRAME_MS: u32 = 800;
 
 /// The range `5`/`8` move a BBQr animation's frame time within, and the step: a half
 /// again slower, or two thirds the time.
@@ -86,7 +87,7 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
 }
 
 /// [`animate_bbqr`], starting at `frame_ms` a part: slower for a reader that needs it.
-#[cfg(all(feature = "board-q1", feature = "tss", not(feature = "multichain")))]
+#[cfg(all(feature = "board-q1", feature = "tss"))]
 pub(crate) fn animate_bbqr_at(
     ui: &mut Ui<'_>,
     head: &str,
@@ -117,6 +118,25 @@ pub(crate) fn animate_bbqr_padded(ui: &mut Ui<'_>, head: &str, payload: &[u8], f
 #[cfg(feature = "multichain")]
 pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
     animate_bytes_ur_at(ui, head, payload, FRAME_MS)
+}
+
+/// Whether `payload` can go out as an animated `ur:bytes` at all.
+///
+/// The fountain code numbers at most [`catcard_bcur::fountain::MAX_FRAGMENTS`] pure
+/// parts -- about 19 KB at this symbol size -- so a larger payload has to go as BBQr.
+#[cfg(all(feature = "board-q1", feature = "multichain", feature = "tss"))]
+pub(crate) fn fits_bytes_ur(payload: &[u8]) -> bool {
+    use catcard_bcur::encode as ur;
+    use catcard_bcur::registry::{Kind, bytestring};
+
+    let ty = Kind::Bytes.written_as();
+    let len = bytestring::encoded_len(payload.len());
+    if ur::single_len(ty, len) <= CHARS {
+        return true;
+    }
+    let guess = len.div_ceil(ur::fits(ty, CHARS, 1).max(1)) as u32;
+    let per = ur::fits(ty, CHARS, guess.max(1));
+    per > 0 && len.div_ceil(per) <= catcard_bcur::fountain::MAX_FRAGMENTS
 }
 
 /// [`animate_bytes_ur`], starting at `frame_ms` a part.
