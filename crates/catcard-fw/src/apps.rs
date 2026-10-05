@@ -785,11 +785,11 @@ fn panel_service(id: u32, a: u32, b: u32, c: u32) -> u32 {
             if !PANEL_TAKEN.load(Ordering::Relaxed) || !c.is_multiple_of(2) || !in_arena(c, bytes) {
                 return u32::MAX;
             }
-            let px = |dx: usize, dy: usize| -> u16 {
-                // SAFETY: inside the app's pixels, checked against the area just above.
-                unsafe { ((c as usize + 2 * (dy * w + dx)) as *const u16).read_volatile() }
-            };
-            match ui.panel.paint(x, y, w, h, px) {
+            // SAFETY: `c` is 2-aligned and `w * h` pixels from it lie inside the app's
+            // area, both checked just above; the app is stopped while its service runs,
+            // so nothing writes them while this slice is alive.
+            let px = unsafe { core::slice::from_raw_parts(c as *const u16, w * h) };
+            match ui.panel.paint_pixels(x, y, w, h, px) {
                 Ok(()) => 0,
                 Err(_) => u32::MAX,
             }

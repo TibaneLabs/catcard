@@ -484,6 +484,53 @@ impl<B: DisplayBus> St7789<B> {
         Ok(())
     }
 
+    /// [`paint`](Self::paint) from a row-major slice of `w * h` pixels rather than a
+    /// closure: the copy is a plain loop over memory, with no call a pixel -- which in a
+    /// size build is what a closure costs. For an app's pixels (`crate` users of the
+    /// Q1's `PAINT` service), which are already laid out this way. A slice shorter than
+    /// `w * h` paints nothing.
+    pub fn paint_pixels(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        px: &[u16],
+    ) -> Result<(), B::Error> {
+        if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 || px.len() < w * h {
+            return Ok(());
+        }
+        let stride = w;
+        let (w, h) = (w.min(WIDTH - x), h.min(HEIGHT - y));
+        let mut line = [0u8; WIDTH * 2];
+        let (parts, n) = spans(self.origin, self.fixed, x, w);
+        for &(mx, len, from) in &parts[..n] {
+            self.window(mx, y, mx + len - 1, y + h - 1)?;
+            // As in `paint`: as many rows as fit one transfer.
+            let rows = (WIDTH / len).max(1);
+            let mut dy = 0;
+            while dy < h {
+                let take = rows.min(h - dy);
+                let mut i = 0;
+                for r in 0..take {
+                    let row = &px[(dy + r) * stride + from..][..len];
+                    for (out, p) in line[i..i + len * 2]
+                        .as_chunks_mut::<2>()
+                        .0
+                        .iter_mut()
+                        .zip(row)
+                    {
+                        *out = p.to_be_bytes();
+                    }
+                    i += len * 2;
+                }
+                self.bus.data(&line[..i])?;
+                dy += take;
+            }
+        }
+        Ok(())
+    }
+
     /// [`paint`](Self::paint) at raw frame-memory lines, ignoring the origin: for a slide,
     /// which fills the lines about to scroll into view before it moves the start.
     pub fn paint_memory(
@@ -798,6 +845,25 @@ mod tests {
         // CASET, its data, RASET, its data, RAMWR, then the rows in one transfer, in order.
         assert_eq!(log[5], (true, vec![0, 0, 0, 1, 0, 16, 0, 17]));
         assert_eq!(log.len(), 6);
+    }
+
+    /// The slice form sends exactly what the closure form does, clipping included.
+    #[test]
+    fn paint_pixels_matches_paint() {
+        for (x, w, h) in [
+            (318usize, 4usize, 2usize),
+            (100, 2, HEIGHT),
+            (0, WIDTH, 3),
+            (7, 33, 41),
+        ] {
+            let px: Vec<u16> = (0..w * h).map(|i| (i * 31 + 7) as u16).collect();
+            let mut a = St7789::new(MockBus::default());
+            a.paint(x, 5.min(HEIGHT - 1), w, h, |dx, dy| px[dy * w + dx])
+                .unwrap();
+            let mut b = St7789::new(MockBus::default());
+            b.paint_pixels(x, 5.min(HEIGHT - 1), w, h, &px).unwrap();
+            assert_eq!(a.bus_mut().log, b.bus_mut().log, "x {x}, {w}x{h}");
+        }
     }
 
     /// A narrow, tall patch -- a game's incoming column -- goes in a handful of transfers,
