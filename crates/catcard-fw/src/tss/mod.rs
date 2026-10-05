@@ -65,6 +65,7 @@ mod view;
 
 pub(crate) use restore::restore_screen;
 pub(crate) use view::explorer as explorer_key;
+pub(crate) use view::{Export, export_in_force};
 
 const HEAD: &str = "TSS wallets";
 

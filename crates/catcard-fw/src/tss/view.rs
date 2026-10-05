@@ -219,6 +219,113 @@ pub(super) fn use_wallet(
     true
 }
 
+/// What the Export menu writes for the TSS wallet in force.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Export {
+    /// The generic JSON a watch-only wallet imports (Sparrow, and the others that read
+    /// it), with this wallet's one address type.
+    Json,
+    /// The watch-only descriptor.
+    Descriptor,
+    /// The extended public key.
+    Xpub,
+}
+
+/// Write the export `what` of the TSS wallet in force and offer it, under `file` (the
+/// row's own name for JSON; the others are named by the wallet). Everything in it is
+/// public and comes from the share's header: no member, card or session is involved,
+/// and nothing is signed -- the file signature an export carries is made with a
+/// private key, which a TSS wallet has nowhere.
+pub(crate) fn export_in_force(ui: &mut Ui<'_>, head: &str, what: Export, file: &str) {
+    let Some((s, _)) = crate::key::tss() else {
+        return;
+    };
+    let mut text: heapless::String<{ crate::export::MAX_LEN }> = heapless::String::new();
+    let mut name: heapless::String<32> = heapless::String::new();
+    let built = match what {
+        Export::Json => {
+            let _ = name.push_str(file);
+            json(s, &mut text)
+        }
+        Export::Descriptor => {
+            let _ = write!(name, "/tss-{}.txt", hex4(s.fingerprint));
+            let mut desc = [0u8; descriptor::MAX_LEN];
+            descriptor_of(s, &mut desc).and_then(|n| {
+                text.push_str(core::str::from_utf8(&desc[..n]).ok()?).ok()?;
+                text.push('\n').ok()
+            })
+        }
+        Export::Xpub => {
+            let _ = write!(name, "/tss-{}-xpub.txt", hex4(s.fingerprint));
+            let mut raw = [0u8; MAX_BASE58_LEN];
+            xpub(s)
+                .write_base58_as(Slip132::Classic, &mut raw)
+                .ok()
+                .and_then(|n| {
+                    text.push_str(core::str::from_utf8(&raw[..n]).ok()?).ok()?;
+                    text.push('\n').ok()
+                })
+        }
+    };
+    if built.is_none() {
+        return say(ui, head, "cannot write", "this wallet's export");
+    }
+    let kind = match what {
+        Export::Json => catcard_bbqr::FileType::JSON,
+        Export::Descriptor | Export::Xpub => catcard_bbqr::FileType::UNICODE,
+    };
+    menu::offer_export(ui, head, &name, text.as_bytes(), kind, None);
+}
+
+/// The generic JSON (`hw-reference/wallet-export-formats.md` §A) for a TSS wallet: the
+/// top level names the wallet's fingerprint and key, and one entry -- the address type
+/// its descriptor names -- carries the origin path (`m` for a key created together), the
+/// xpub, the descriptor and the first receive address.
+fn json(s: &Summary, out: &mut heapless::String<{ crate::export::MAX_LEN }>) -> Option<()> {
+    let (kind, net) = kind_and_network(s);
+    let key = xpub(s);
+    let mut raw = [0u8; MAX_BASE58_LEN];
+    let n = key.write_base58_as(Slip132::Classic, &mut raw).ok()?;
+    let x = core::str::from_utf8(&raw[..n]).ok()?;
+    let [a, b, c, d] = s.fingerprint;
+    let ticker = crate::prefs::current().net.ticker();
+    let account = s.path.get(2).map_or(0, |p| p & 0x7FFF_FFFF);
+    write!(
+        out,
+        "{{\"chain\":\"{ticker}\",\"xfp\":\"{a:02X}{b:02X}{c:02X}{d:02X}\",\"account\":{account},\"xpub\":\"{x}\""
+    )
+    .ok()?;
+    let (entry, name) = match kind {
+        AddressKind::P2shP2wpkh => ("bip49", "p2sh-p2wpkh"),
+        AddressKind::P2pkh => ("bip44", "p2pkh"),
+        _ => ("bip84", "p2wpkh"),
+    };
+    let [e, f, g, h] = key.fingerprint();
+    let mut deriv = Line::new();
+    write_path(&mut deriv, &s.path).ok()?;
+    write!(
+        out,
+        ",\"{entry}\":{{\"name\":\"{name}\",\"xfp\":\"{e:02X}{f:02X}{g:02X}{h:02X}\",\"deriv\":\"{deriv}\",\"xpub\":\"{x}\",\"desc\":\""
+    )
+    .ok()?;
+    let mut desc = [0u8; descriptor::MAX_LEN];
+    let dn = descriptor_of(s, &mut desc)?;
+    out.push_str(core::str::from_utf8(&desc[..dn]).ok()?).ok()?;
+    out.push('"').ok()?;
+    let first = key
+        .derive_child(ChildNumber::normal(0).ok()?)
+        .and_then(|k| k.derive_child(ChildNumber(0)))
+        .ok()?;
+    let mut addr = [0u8; catcard_wallet::address::MAX_ADDRESS_LEN];
+    let an = catcard_wallet::address::encode(kind, net, &first.public_key, &mut addr).ok()?;
+    write!(
+        out,
+        ",\"first\":\"{}\"}}}}",
+        core::str::from_utf8(&addr[..an]).ok()?
+    )
+    .ok()
+}
+
 /// What the Address Explorer needs of the TSS wallet in force: the key the addresses are
 /// below (non-hardened only), the one address type its descriptor names, the network
 /// its path says, and the path to that key as text (`m` when created together).

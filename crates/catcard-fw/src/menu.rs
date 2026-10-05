@@ -6198,6 +6198,22 @@ fn export_one(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, 
     let Some(row) = one_off(label) else {
         return;
     };
+    // A TSS wallet: the descriptor, from its public half; the formats built on hardened
+    // account paths do not apply to it.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        if row.format == Format::Descriptor {
+            return crate::tss::export_in_force(ui, label, crate::tss::Export::Descriptor, "");
+        }
+        message(
+            ui.panel,
+            label,
+            "not for a TSS wallet:",
+            "use Descriptor or Sparrow",
+        );
+        wait_for_any_key(ui);
+        return;
+    }
 
     // The script type first, before the PIN: backing out of a submenu should not have
     // cost an unlock.
@@ -6304,6 +6320,11 @@ fn export_generic_json(
     let Some(file) = generic_json_file(label) else {
         return;
     };
+    // A TSS wallet's file is written from its public half.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        return crate::tss::export_in_force(ui, label, crate::tss::Export::Json, file);
+    }
     let Some(master) = unlock_master(gate, login, ui, label) else {
         return;
     };
@@ -6341,6 +6362,12 @@ fn export_xpub(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>,
     use catcard_wallet::bip32::ChildNumber;
 
     const HEAD: &str = "Export XPUB";
+    // A TSS wallet has one key to give, whichever row.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        let _ = which;
+        return crate::tss::export_in_force(ui, HEAD, crate::tss::Export::Xpub, "");
+    }
     // The rows of `XPUB_ITEMS`, in order. `None` is the master key, which is not
     // derived at all, and the last row writes the fingerprint on its own.
     let purpose = match which {
