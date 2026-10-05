@@ -1201,10 +1201,14 @@ pub fn run(session: Session<'_>) -> ! {
         crate::hsm::at_login(gate, login, &mut ui);
         // The mono boards name the wallet in the home menu's title, and need its number
         // before the first frame. Login primed it (`session::prime_session`); this is for
-        // when that could not.
+        // when that could not. Quietly, and only with a wallet stored: a blank device has
+        // no number to show, and the title says "CatCard" -- it must not stop to say so.
         #[cfg(not(feature = "board-q1"))]
-        if crate::key::is_root() && crate::pubkeys::known_fingerprint().is_none() {
-            let _ = crate::pubkeys::fingerprint(gate, login, &mut ui, "Wallet");
+        if crate::key::is_root()
+            && crate::pubkeys::known_fingerprint().is_none()
+            && crate::key::stored_wallet(login)
+        {
+            crate::pubkeys::warm_fingerprint(gate, login, ui.panel);
         }
     }
 
