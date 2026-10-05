@@ -60,11 +60,14 @@ mod qr;
 mod rand;
 mod rebuild;
 mod restore;
+mod sign;
 mod store;
 mod view;
 
 pub(crate) use restore::restore_screen;
+pub(crate) use sign::{sign_psbt, together};
 pub(crate) use view::explorer as explorer_key;
+pub(crate) use view::xpub as wallet_xpub;
 pub(crate) use view::{Export, export_in_force};
 
 const HEAD: &str = "TSS wallets";

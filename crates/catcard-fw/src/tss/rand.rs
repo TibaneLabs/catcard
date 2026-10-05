@@ -34,6 +34,20 @@ impl Fresh {
     }
 }
 
+impl Fresh {
+    /// [`gather`](Self::gather) into a pool of the session's own, filled only from the
+    /// chips now -- for a flow that holds no pool (signing together is reached from
+    /// every way a PSBT arrives), and so that a signing session's nonces rest on nothing
+    /// read before it started.
+    pub(super) fn gather_own(
+        gate: &catcard_callgate::Callgate,
+        ui: &mut crate::ui::Ui<'_>,
+    ) -> Option<Fresh> {
+        let mut pool = catcard_entropy::EntropyPool::new(crate::entropy_policy());
+        Self::gather(gate, ui, &mut pool)
+    }
+}
+
 impl Entropy for Fresh {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), NoEntropy> {
         // One generate call returns at most 8 KiB; ask in pieces.

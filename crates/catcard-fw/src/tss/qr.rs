@@ -21,7 +21,8 @@
 //! # The code
 //!
 //! One BBQr of type `B` (binary): `CTQ1`, the session id (8 bytes), the invitation (a
-//! kind byte: 0 none, 1 create `n t`, 2 pair setup `wallet[8] a b`), the number of
+//! kind byte: 0 none, 1 create `n t`, 2 pair setup `wallet[8] a b`, 3 signing
+//! `wallet[8] signers` -- a u16, bit `m` for member `m`), the number of
 //! envelopes, then each as `round from to`, its length (u32, little-endian) and its
 //! bytes.
 
@@ -100,6 +101,11 @@ impl Exchange {
                 out.push(2);
                 out.extend_from_slice(&wallet);
                 out.extend_from_slice(&[a, b]);
+            }
+            Some(Invitation::Sign { wallet, signers }) => {
+                out.push(3);
+                out.extend_from_slice(&wallet);
+                out.extend_from_slice(&signers.to_le_bytes());
             }
         }
         out.push(picked.len() as u8);
@@ -224,6 +230,15 @@ fn parse(code: &[u8]) -> Result<Parsed<'_>, &'static str> {
                 wallet,
                 a: v[8],
                 b: v[9],
+            })
+        }
+        3 => {
+            let v = take(10)?;
+            let mut wallet = [0u8; 8];
+            wallet.copy_from_slice(&v[..8]);
+            Some(Invitation::Sign {
+                wallet,
+                signers: u16::from_le_bytes([v[8], v[9]]),
             })
         }
         _ => return Err(BAD),

@@ -194,6 +194,29 @@ pub fn sign_raw_digest(
     sign_digest(digest, secret, AddressKind::P2pkh, kw)
 }
 
+/// The 65-byte signature for a signature made elsewhere -- `compact` is `r || s`, over
+/// `digest`, by `pubkey` (a TSS wallet's members, signing together) -- as an address of
+/// `kind` would carry it. The recovery id is found by recovering each candidate and
+/// keeping the one that gives `pubkey`; none does if the signature is not `pubkey`'s
+/// over `digest`, which is [`Error::BadKey`].
+pub fn from_signature(
+    digest: &[u8; 32],
+    compact: &[u8; 64],
+    pubkey: &[u8; 33],
+    kind: AddressKind,
+) -> Result<[u8; SIG_LEN], Error> {
+    let base = header_base(kind)?;
+    let mut sig = [0u8; SIG_LEN];
+    sig[1..].copy_from_slice(compact);
+    for recid in 0..4 {
+        sig[0] = base + recid;
+        if recover_digest(digest, &sig).is_ok_and(|(key, _)| key == *pubkey) {
+            return Ok(sig);
+        }
+    }
+    Err(Error::BadKey)
+}
+
 /// Base64 of a signature, as the armoured form used everywhere.
 pub fn armour(sig: &[u8; SIG_LEN], out: &mut [u8]) -> Result<usize, Error> {
     outscript::base64::encode_to_slice(sig, out).map_err(|_| Error::BufferTooSmall)
@@ -373,6 +396,35 @@ mod tests {
     ];
     const ARMOURED_P2WPKH: &str =
         "J0w2VKe84xIt6nMsi4HBwRdXrRJKo5WBZ8VZKJvOVDxPQ1v1EO7XB8GMgebEHVedoSPc8rNG9l6vBsRLBdjgz68=";
+
+    /// A signature made elsewhere, `r || s` only, gets the header -- recovery id and
+    /// address type -- the device's own signer gives it, for every kind; and a signature
+    /// that is not the key's over the digest gets none.
+    #[test]
+    fn a_signature_made_elsewhere_gets_the_same_header() {
+        let kw = KeyWork::host();
+        for kind in [
+            AddressKind::P2wpkh,
+            AddressKind::P2shP2wpkh,
+            AddressKind::P2pkh,
+        ] {
+            let ours = sign("CatCard", &SECRET, kind, &kw).unwrap();
+            let mut compact = [0u8; 64];
+            compact.copy_from_slice(&ours[1..]);
+            assert_eq!(
+                from_signature(&DIGEST, &compact, &PUBKEY, kind),
+                Ok(ours),
+                "{kind:?}"
+            );
+            let mut other = DIGEST;
+            other[0] ^= 1;
+            assert_eq!(
+                from_signature(&other, &compact, &PUBKEY, kind),
+                Err(Error::BadKey),
+                "{kind:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_digest_matches_the_documented_construction() {

@@ -22,3 +22,5 @@ zeroize = { workspace = true, features = ["alloc", "derive"] }
 catcard-wallet = { workspace = true, features = ["std"] }
 # The tests check the DER form with purecrypto's own strict parser.
 purecrypto = { workspace = true, features = ["der"] }
+# A PSBT signed together, end to end (tests/psbt.rs).
+outscript = { workspace = true }

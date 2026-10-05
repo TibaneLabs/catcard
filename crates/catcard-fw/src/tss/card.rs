@@ -123,6 +123,9 @@ pub(super) enum Invitation {
     Create { n: u8, t: u8 },
     /// Set up the pair between members `a < b` of the wallet whose id starts `wallet`.
     Pair { wallet: [u8; 8], a: u8, b: u8 },
+    /// Sign together with the wallet whose id starts `wallet`: bit `m` of `signers` set,
+    /// member `m` signs.
+    Sign { wallet: [u8; 8], signers: u16 },
 }
 
 impl Invitation {
@@ -138,6 +141,19 @@ impl Invitation {
                 }
                 let _ = write!(out, "\nmembers {a} {b}\n");
             }
+            Invitation::Sign { wallet, signers } => {
+                let _ = out.push_str("CatCard TSS signing\nwallet ");
+                for x in wallet {
+                    let _ = write!(out, "{x:02x}");
+                }
+                let _ = out.push_str("\nsigners");
+                for m in 1..=catcard_tss::MAX_MEMBERS {
+                    if signers & (1 << m) != 0 {
+                        let _ = write!(out, " {m}");
+                    }
+                }
+                let _ = out.push('\n');
+            }
         }
     }
 
@@ -146,6 +162,7 @@ impl Invitation {
         let mut lines = text.lines();
         let kind = lines.next()?;
         let (mut n, mut t, mut wallet, mut pair) = (None, None, None, None);
+        let mut signers = 0u16;
         for l in lines {
             if let Some(v) = l.strip_prefix("members ") {
                 let mut it = v.split_whitespace().map(|x| x.parse::<u8>().ok());
@@ -158,6 +175,12 @@ impl Invitation {
                 t = v.trim().parse::<u8>().ok();
             } else if let Some(v) = l.strip_prefix("wallet ") {
                 wallet = parse_hex::<8>(v.trim());
+            } else if let Some(v) = l.strip_prefix("signers ") {
+                for m in v.split_whitespace().filter_map(|x| x.parse::<u8>().ok()) {
+                    if (1..=catcard_tss::MAX_MEMBERS).contains(&m) {
+                        signers |= 1 << m;
+                    }
+                }
             }
         }
         match kind {
@@ -173,6 +196,10 @@ impl Invitation {
                     b,
                 })
             }
+            "CatCard TSS signing" => (signers.count_ones() >= 2).then_some(Invitation::Sign {
+                wallet: wallet?,
+                signers,
+            }),
             _ => None,
         }
     }

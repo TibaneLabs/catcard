@@ -89,7 +89,7 @@ fn kind_and_network(s: &Summary) -> (AddressKind, Network) {
 }
 
 /// The wallet's extended public key (see the module documentation).
-fn xpub(s: &Summary) -> ExtendedPubKey {
+pub(crate) fn xpub(s: &Summary) -> ExtendedPubKey {
     let (_, network) = kind_and_network(s);
     ExtendedPubKey {
         network,

@@ -462,7 +462,7 @@ fn write_back_v2(original: &[u8], signed_v0: &[u8], out: &mut [u8]) -> Result<us
 }
 
 /// Why the review stopped, in the few words a screen has.
-fn refusal_text(r: Refusal) -> &'static str {
+pub(crate) fn refusal_text(r: Refusal) -> &'static str {
     match r {
         Refusal::NothingOfOurs => "no input is ours",
         Refusal::Sighash { .. } => "unsupported sighash",
@@ -777,7 +777,7 @@ fn v0_view(head: &[u8], tail: &mut [u8]) -> Result<usize, psbtv2::Error> {
 /// own frame -- rebuilding a multisig input's wallet is kilobytes of working state, and
 /// it is all gone before the screens and the signing that follow.
 #[inline(never)]
-fn summarise(
+pub(crate) fn summarise(
     psbt: &Psbt<'_>,
     owner: &psbtview::Owner<'_>,
     policy: &Policy,
@@ -803,6 +803,11 @@ pub(crate) fn review_and_sign(
     sink: &mut Sink<'_, '_>,
 ) {
     const HEAD: &str = "Sign";
+    // A TSS wallet's key is on no device: its members sign together.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        return crate::tss::sign_psbt(gate, login, ui, buf, spare, len, sink);
+    }
     // No help strip under a transaction being reviewed, whichever feature it was reached
     // from: the help armed there explains that feature, not the transaction, and this is
     // the deepest the UI's stack goes -- no room to open a document here as well.
@@ -1288,6 +1293,26 @@ pub(crate) fn review_and_sign(
     #[cfg(not(feature = "board-mk3"))]
     drop(wif_keys);
 
+    deliver(ui, sink, original_v2, from, into, at, signed, signable);
+}
+
+/// What a signing pass ends with, however it signed: the signed PSBT in `from[..at]`
+/// (`signed` of `signable` inputs) back to the computer, or written beside the original
+/// -- merged into `original_v2` when one came in -- finalised when every input is
+/// complete, and offered by QR or the tag where the board has them. `into` is free
+/// scratch. Shared by the seed's signer and a TSS wallet's signing together.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver(
+    ui: &mut Ui<'_>,
+    sink: &mut Sink<'_, '_>,
+    original_v2: Option<&[u8]>,
+    from: &mut [u8],
+    into: &mut [u8],
+    at: usize,
+    signed: usize,
+    signable: usize,
+) {
+    const HEAD: &str = "Sign";
     if signed == 0 {
         sink.refuse("nothing could be signed");
         menu::message(
@@ -1726,7 +1751,7 @@ fn write_output(storage: Storage, path: &str, bytes: &[u8]) -> Result<(), &'stat
 /// page turns it, and cancel on any page refuses the whole transaction. Every output is
 /// therefore on a screen -- read to its end, since `scroll_choice` takes confirm only at
 /// the end of a page -- before the key that signs them all exists.
-fn review(
+pub(crate) fn review(
     ui: &mut Ui<'_>,
     psbt: &Psbt<'_>,
     summary: &psbtview::Summary,

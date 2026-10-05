@@ -346,6 +346,7 @@ name = "catcard-tss"
 version = "7.0.0"
 dependencies = [
  "catcard-wallet",
+ "outscript",
  "purecrypto",
  "spin",
  "tsslib",

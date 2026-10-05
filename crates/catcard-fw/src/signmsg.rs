@@ -431,6 +431,15 @@ pub(crate) const fn kind_label(kind: AddressKind) -> &'static str {
 /// `m/{purpose}h/{coin}h/0h/0/0`. The coin type follows the network, as it does for the
 /// address explorer and the exports -- not a hardcoded 0.
 fn default_path(kind: AddressKind) -> Option<DerivationPath> {
+    // A TSS wallet's first receive key: its origin, then `0/0`.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if let Some((s, _)) = crate::key::tss() {
+        let mut steps: heapless::Vec<ChildNumber, 16> =
+            s.path.iter().map(|&p| ChildNumber(p)).collect();
+        steps.push(ChildNumber::normal(0).ok()?).ok()?;
+        steps.push(ChildNumber::normal(0).ok()?).ok()?;
+        return DerivationPath::from_slice(&steps).ok();
+    }
     let coin = crate::prefs::network().coin_type();
     DerivationPath::from_slice(&[
         ChildNumber::hardened(kind.bip44_purpose()).ok()?,
@@ -590,6 +599,11 @@ fn sign_with_key(
     choice: &Choice,
     ask: bool,
 ) -> Option<Signed> {
+    // A TSS wallet's key is on no device: its members sign together.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        return sign_together(gate, login, ui, head, text, choice, ask);
+    }
     let master = menu::unlock_master(gate, login, ui, head)?;
 
     // Only the leaf is kept past this point: the master is the whole wallet, and the
@@ -649,6 +663,94 @@ fn sign_with_key(
             None
         }
     }
+}
+
+/// [`sign_with_key`] for the TSS wallet in force: the address is derived from the
+/// wallet's public half (the path has to be its origin and unhardened steps), shown and
+/// approved as any other, and the message's digest is signed together with the other
+/// members (`crate::tss::together`). The legacy format only: its signature is one
+/// ECDSA signature over the digest, where BIP-322's is a whole transaction.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+fn sign_together(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    choice: &Choice,
+    ask: bool,
+) -> Option<Signed> {
+    if !matches!(choice.format, Format::Legacy) {
+        complain(ui, head, "TSS: legacy format only");
+        return None;
+    }
+    // Nobody is at the other devices for a request that is approved by policy.
+    if !ask {
+        complain(ui, head, "a TSS wallet signs together");
+        return None;
+    }
+    let (s, _) = crate::key::tss()?;
+    let steps: heapless::Vec<u32, 16> = choice.path.iter().map(|c| c.0).collect();
+    let Some(rest) = steps.strip_prefix(&s.path[..]) else {
+        complain(ui, head, "not a path of this wallet");
+        return None;
+    };
+    let mut key = crate::tss::wallet_xpub(s);
+    for &step in rest {
+        match key.derive_child(ChildNumber(step)) {
+            Ok(k) => key = k,
+            Err(_) => {
+                complain(ui, head, "a TSS path is unhardened");
+                return None;
+            }
+        }
+    }
+    let pubkey = key.public_key;
+    let network = crate::prefs::network();
+    let address = match address_of(&pubkey, choice.kind, network) {
+        Ok(a) => a,
+        Err(why) => {
+            complain(ui, head, why);
+            return None;
+        }
+    };
+    let mut path: heapless::String<PATH_CHARS> = heapless::String::new();
+    let _ = write!(path, "{}", choice.path);
+    let mut how: heapless::String<48> = heapless::String::new();
+    let _ = write!(how, "{}, signed together", kind_label(choice.kind));
+    if !confirm(ui, head, text, &address, &path, &how) {
+        return None;
+    }
+    let digest = match message::digest(text) {
+        Ok(d) => d,
+        Err(e) => {
+            complain(ui, head, describe(e));
+            return None;
+        }
+    };
+    let request = [catcard_tss::SignRequest {
+        path: rest.to_vec(),
+        sighash: digest,
+    }];
+    let sigs = crate::tss::together(gate, login, ui, &request)?;
+    let sig = match message::from_signature(&digest, &sigs[0].compact, &pubkey, choice.kind) {
+        Ok(sig) => sig,
+        Err(e) => {
+            complain(ui, head, describe(e));
+            return None;
+        }
+    };
+    let mut buf = [0u8; SIG_TEXT];
+    let n = match message::armour(&sig, &mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            complain(ui, head, describe(e));
+            return None;
+        }
+    };
+    let mut armoured: heapless::String<SIG_TEXT> = heapless::String::new();
+    let _ = armoured.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
+    Some(Signed { armoured, address })
 }
 
 /// [`sign_with`] as this device's share of a registered multisig wallet.
