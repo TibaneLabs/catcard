@@ -276,12 +276,17 @@ def pack_image(blob):
     The device stops there, so a stream that would produce more is refused rather than
     quietly truncated.
     """
-    out = [struct.pack("<II", len(blob), PACK_BLOCK)]
-    for at in range(0, len(blob), PACK_BLOCK):
+    # CATCARD_PACK_BLOCK=<bytes> picks a smaller block (a multiple of 4, at most the
+    # device's 8 KB): each block is one staging write on the device.
+    block = int(os.environ.get("CATCARD_PACK_BLOCK", PACK_BLOCK))
+    if block % 4 or not 0 < block <= PACK_BLOCK:
+        raise ValueError(f"CATCARD_PACK_BLOCK must be a multiple of 4 up to {PACK_BLOCK}")
+    out = [struct.pack("<II", len(blob), block)]
+    for at in range(0, len(blob), block):
         # `wbits=-15`: raw deflate, no zlib or gzip wrapper. The window is the block,
         # which is all a block's matches can reach anyway.
         c = zlib.compressobj(9, zlib.DEFLATED, -15)
-        out.append(c.compress(blob[at:at + PACK_BLOCK]) + c.flush())
+        out.append(c.compress(blob[at:at + block]) + c.flush())
     return b"".join(out)
 
 
@@ -442,9 +447,16 @@ def recv_report(sock):
             return buf
 
 
+# CATCARD_FRAME_DELAY=<ms> pauses after each report sent: slow pacing for a device whose
+# receive path gives out under a full-speed upload (7.0.0a3 on a Q1).
+FRAME_DELAY = float(os.environ.get("CATCARD_FRAME_DELAY", "0")) / 1000
+
+
 def request(sock, opcode, payload=b""):
     for f in frames(opcode, payload):
         sock.sendall(f)
+        if FRAME_DELAY:
+            time.sleep(FRAME_DELAY)
     r = recv_report(sock)
     if r[0] != KIND_START:
         raise ValueError(f"expected a START frame, got kind {r[0]}")
