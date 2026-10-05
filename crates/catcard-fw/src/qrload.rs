@@ -251,14 +251,12 @@ pub(crate) fn collect_any(
 
 /// The most of a message this will hold a second copy of, to reduce mixtures against.
 ///
-/// Forty-eight kilobytes is the largest threshold-signing session code (`tss::qr`), which
-/// is the biggest thing a Q1 reads from another device. That is past the 32 KiB linked
-/// heap, and the heap takes the Q1's spare RAM bank when it needs more (`heap`), which is
-/// also where the session code's own buffer lands. Past it -- a firmware image being
-/// staged into PSRAM -- there is nowhere to keep a copy, so pure parts only, and a sender
-/// of something that big can be expected to loop.
+/// Sixteen kilobytes covers every transaction and key this device is asked to sign, out
+/// of a 32 KiB heap that the scan screen is otherwise nearly alone in. Past it -- a
+/// firmware image being staged into PSRAM -- there is nowhere to keep a copy, so pure
+/// parts only, and a sender of something that big can be expected to loop.
 #[cfg(feature = "multichain")]
-const UNMIX_MAX: usize = 48 * 1024;
+const UNMIX_MAX: usize = 16 * 1024;
 
 /// Take the room to reduce mixtures, once the message's size is known.
 ///
