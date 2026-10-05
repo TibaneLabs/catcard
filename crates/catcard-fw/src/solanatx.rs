@@ -1024,6 +1024,9 @@ pub(crate) fn sign_request(
 /// The upload sits at `tx_at` in the PSRAM lease `held`; the transaction with its
 /// signatures in place, and the result around it, are written into the lease past it.
 #[allow(clippy::too_many_arguments)]
+// Its own frame: inlined into `hostwallet::sign` beside the other chains', the three made
+// one 13 KB frame held under a TSS session, which ran past the UI task's stack.
+#[inline(never)]
 pub(crate) fn host_sign(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

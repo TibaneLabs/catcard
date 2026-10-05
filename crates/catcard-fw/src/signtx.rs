@@ -804,12 +804,28 @@ pub(crate) fn review_and_sign(
     len: usize,
     sink: &mut Sink<'_, '_>,
 ) {
-    const HEAD: &str = "Sign";
-    // A TSS wallet's key is on no device: its members sign together.
+    // A TSS wallet's key is on no device: its members sign together. Decided before the
+    // review's own frame exists: that is 7.8 KB, and a session held under it ran past the
+    // UI task's stack.
     #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
     if crate::key::tss().is_some() {
         return crate::tss::sign_psbt(gate, login, ui, buf, spare, len, sink);
     }
+    review_and_sign_here(gate, login, ui, buf, spare, len, sink)
+}
+
+/// [`review_and_sign`] with this device's own key.
+#[inline(never)]
+fn review_and_sign_here(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    buf: &mut [u8],
+    spare: &mut [u8],
+    len: usize,
+    sink: &mut Sink<'_, '_>,
+) {
+    const HEAD: &str = "Sign";
     // No help strip under a transaction being reviewed, whichever feature it was reached
     // from: the help armed there explains that feature, not the transaction, and this is
     // the deepest the UI's stack goes -- no room to open a document here as well.
@@ -1534,6 +1550,9 @@ pub(crate) fn hand_to_host(
 /// signing buffers and the upload's heap block given back, and the result gets a block of
 /// its own, sized when it is known.
 #[allow(clippy::too_many_arguments)]
+// Its own frame: inlined into `hostwallet::sign` beside the other chains', the three made
+// one 13 KB frame held under a TSS session, which ran past the UI task's stack.
+#[inline(never)]
 pub(crate) fn host_sign(
     gate: &Callgate,
     login: &mut catcard_pin::Login,

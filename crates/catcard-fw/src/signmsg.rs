@@ -599,11 +599,26 @@ fn sign_with_key(
     choice: &Choice,
     ask: bool,
 ) -> Option<Signed> {
-    // A TSS wallet's key is on no device: its members sign together.
+    // A TSS wallet's key is on no device: its members sign together. Decided before the
+    // single-key frame below exists, so a session is not held under it.
     #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
     if crate::key::tss().is_some() {
         return sign_together(gate, login, ui, head, text, choice, ask);
     }
+    sign_with_own_key(gate, login, ui, head, text, choice, ask)
+}
+
+/// [`sign_with_key`] with this device's own seed.
+#[inline(never)]
+fn sign_with_own_key(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    choice: &Choice,
+    ask: bool,
+) -> Option<Signed> {
     let master = menu::unlock_master(gate, login, ui, head)?;
 
     // Only the leaf is kept past this point: the master is the whole wallet, and the
@@ -671,6 +686,7 @@ fn sign_with_key(
 /// BIP-322's virtual transaction's sighash, simple or full -- is signed together with
 /// the other members (`crate::tss::together`), then checked as a verifier would.
 #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+#[inline(never)]
 fn sign_together(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -815,8 +831,30 @@ fn together_as(
         },
     };
     let sigs = crate::tss::together(gate, login, ui, &request, how)?;
-    let sig = &sigs[0];
-    // Written, then checked as a verifier would check it, as `sign_secret` does.
+    match armour_together(text, choice, &pubkey, &digest, &sigs[0]) {
+        Ok(armoured) => Some(Signed { armoured, address }),
+        Err(why) => {
+            complain(ui, head, why);
+            None
+        }
+    }
+}
+
+/// The signature the members made, written in `choice`'s format and checked as a verifier
+/// would check it, as `sign_secret` does.
+///
+/// A frame of its own, entered only once the session is over: its buffers held across
+/// [`crate::tss::together`] were part of what ran the UI task's stack out.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+#[inline(never)]
+fn armour_together(
+    text: &str,
+    choice: &Choice,
+    pubkey: &[u8; 33],
+    digest: &[u8; 32],
+    sig: &catcard_tss::EcdsaSignature,
+) -> Result<heapless::String<SIG_TEXT>, &'static str> {
+    let (pubkey, digest) = (*pubkey, *digest);
     let mut buf = [0u8; SIG_TEXT];
     let written: Result<usize, &'static str> = match choice.format {
         Format::Legacy => message::from_signature(&digest, &sig.compact, &pubkey, choice.kind)
@@ -842,16 +880,10 @@ fn together_as(
                 s.armour(&mut buf).map_err(describe322)
             }),
     };
-    let n = match written {
-        Ok(n) => n,
-        Err(why) => {
-            complain(ui, head, why);
-            return None;
-        }
-    };
+    let n = written?;
     let mut armoured: heapless::String<SIG_TEXT> = heapless::String::new();
     let _ = armoured.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
-    Some(Signed { armoured, address })
+    Ok(armoured)
 }
 
 /// [`sign_with`] as this device's share of a registered multisig wallet.
@@ -862,6 +894,9 @@ fn together_as(
 /// wallet is 1-of-N, in which case it has to verify outright.
 #[cfg(not(feature = "board-mk3"))]
 #[allow(clippy::too_many_arguments)]
+// Its own frame: inlined, it made `sign_with` 8.7 KB, held under every message signed --
+// a TSS wallet's session included, which then ran past the UI task's stack.
+#[inline(never)]
 fn sign_as_cosigner(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
