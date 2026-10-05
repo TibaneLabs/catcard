@@ -20,8 +20,7 @@
 //!
 //! # The code
 //!
-//! One `ur:bytes` from a multichain build, or a BBQr of type `B` from a Bitcoin-only
-//! one; both are read: `CTQ1`, the session id (8 bytes), the invitation (a
+//! One BBQr of type `B` (binary): `CTQ1`, the session id (8 bytes), the invitation (a
 //! kind byte: 0 none, 1 create `n t`, 2 pair setup `wallet[8] members`, 3 signing
 //! `wallet[8] signers` -- each set a u16, bit `m` for member `m`), the number of
 //! envelopes, then each as `round from to`, its length (u32, little-endian) and its
@@ -144,20 +143,15 @@ impl Exchange {
     /// Show the code for member `to`, until the owner presses a key.
     pub(super) fn show(&self, ui: &mut Ui<'_>, head: &str, to: u8) {
         let code = self.code_for(to);
-        // BC-UR where it is built in and the code fits it: its fountain parts let a reader
-        // that missed one fill it from the next. A Bitcoin-only build has BBQr alone, and
-        // a code past BC-UR's part count (a signing round, 22-34 KB) goes as BBQr too.
-        #[cfg(feature = "multichain")]
-        if crate::qrshow::fits_bytes_ur(&code) {
-            crate::qrshow::animate_bytes_ur_at(ui, head, &code, crate::qrshow::DEVICE_FRAME_MS);
-            return;
-        }
+        // BBQr on every build. BC-UR's fountain would cover a missed part, but it numbers
+        // at most 256 of them (about 19 KB here) and a signing round's code is 22-34 KB;
+        // BBQr takes them all, and one format is one less way for two builds to disagree.
         crate::qrshow::animate_bbqr_at(
             ui,
             head,
             &code,
             catcard_bbqr::FileType::BINARY,
-            crate::qrshow::BBQR_DEVICE_FRAME_MS,
+            crate::qrshow::DEVICE_FRAME_MS,
         );
     }
 
@@ -239,29 +233,6 @@ fn read(ui: &mut Ui<'_>, head: &str) -> Result<Option<Buf>, &'static str> {
         Err(None) => return Ok(None),
     };
     let len = got.len.min(sink.len);
-    // A `ur:bytes`, as a multichain build sends: check the CRC every part carried against the
-    // assembled message, then take the byte string out of its CBOR wrapper.
-    #[cfg(feature = "multichain")]
-    if got.kind == Some(catcard_bcur::registry::Kind::Bytes) {
-        let message = &buf.space()[..len];
-        if got
-            .checksum
-            .is_some_and(|c| catcard_bcur::crc32(message) != c)
-        {
-            return Err("the parts did not add up");
-        }
-        let inner = catcard_bcur::registry::bytestring::decode(message)
-            .map_err(|_| "not a TSS session code")?;
-        // The payload sits inside the message: move it to the front.
-        let (at, n) = (
-            inner.as_ptr() as usize - message.as_ptr() as usize,
-            inner.len(),
-        );
-        buf.space().copy_within(at..at + n, 0);
-        buf.set_len(n);
-        return Ok(Some(buf));
-    }
-    // A BBQr of type `B`, as a Bitcoin-only build (or an earlier one) sends.
     if got.compressed || got.file_type != Some('B') {
         return Err("not a TSS session code");
     }

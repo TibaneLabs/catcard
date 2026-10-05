@@ -59,15 +59,9 @@ const ENCODING: Encoding = Encoding::Base32;
 const FRAME_MS: u32 = 250;
 
 /// Milliseconds a part is shown for when another device's scanner is reading it, as the
-/// threshold-signing exchange does. A Q1 reading a Q1's BBQr missed parts at
-/// [`FRAME_MS`]. A multichain build sends BC-UR there, whose fountain parts cover a miss;
-/// a Bitcoin-only build has no BC-UR and sends BBQr, slower.
-#[cfg(all(feature = "board-q1", feature = "tss", feature = "multichain"))]
-pub(crate) const DEVICE_FRAME_MS: u32 = 500;
-/// As above, for BBQr: a Bitcoin-only build's codes, and any build's code too big for
-/// BC-UR.
+/// threshold-signing exchange does. A Q1 reading a Q1 missed parts at [`FRAME_MS`].
 #[cfg(all(feature = "board-q1", feature = "tss"))]
-pub(crate) const BBQR_DEVICE_FRAME_MS: u32 = 800;
+pub(crate) const DEVICE_FRAME_MS: u32 = 800;
 
 /// The range `5`/`8` move a BBQr animation's frame time within, and the step: a half
 /// again slower, or two thirds the time.
@@ -117,32 +111,6 @@ pub(crate) fn animate_bbqr_padded(ui: &mut Ui<'_>, head: &str, payload: &[u8], f
 #[cfg(feature = "board-q1")]
 #[cfg(feature = "multichain")]
 pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
-    animate_bytes_ur_at(ui, head, payload, FRAME_MS)
-}
-
-/// Whether `payload` can go out as an animated `ur:bytes` at all.
-///
-/// The fountain code numbers at most [`catcard_bcur::fountain::MAX_FRAGMENTS`] pure
-/// parts -- about 19 KB at this symbol size -- so a larger payload has to go as BBQr.
-#[cfg(all(feature = "board-q1", feature = "multichain", feature = "tss"))]
-pub(crate) fn fits_bytes_ur(payload: &[u8]) -> bool {
-    use catcard_bcur::encode as ur;
-    use catcard_bcur::registry::{Kind, bytestring};
-
-    let ty = Kind::Bytes.written_as();
-    let len = bytestring::encoded_len(payload.len());
-    if ur::single_len(ty, len) <= CHARS {
-        return true;
-    }
-    let guess = len.div_ceil(ur::fits(ty, CHARS, 1).max(1)) as u32;
-    let per = ur::fits(ty, CHARS, guess.max(1));
-    per > 0 && len.div_ceil(per) <= catcard_bcur::fountain::MAX_FRAGMENTS
-}
-
-/// [`animate_bytes_ur`], starting at `frame_ms` a part.
-#[cfg(feature = "board-q1")]
-#[cfg(feature = "multichain")]
-pub(crate) fn animate_bytes_ur_at(ui: &mut Ui<'_>, head: &str, payload: &[u8], frame_ms: u32) {
     use catcard_bcur::registry::{Kind, bytestring};
 
     let Some(mut mem) = crate::heap::take(bytestring::encoded_len(payload.len())) else {
@@ -156,7 +124,7 @@ pub(crate) fn animate_bytes_ur_at(ui: &mut Ui<'_>, head: &str, payload: &[u8], f
         return;
     };
     let message = &mem.bytes()[..n];
-    animate_bcur_at(ui, head, Kind::Bytes.written_as(), message, frame_ms);
+    animate_bcur_at(ui, head, Kind::Bytes.written_as(), message, FRAME_MS);
 }
 
 /// Show a signed transaction as `ur:crypto-psbt`.
