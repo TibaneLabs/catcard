@@ -35,9 +35,9 @@ use catcard_wallet::KeyWork;
 use purecrypto::ec::secp256k1::Scalar;
 use purecrypto::ec::secp256k1::ecdsa::{Secp256k1EcdsaPublicKey, Secp256k1EcdsaSignature};
 use purecrypto::hash::{Digest, Sha256};
-use tsslib::dklstss::{
-    CheckedSigningParty, KeygenParty, PairOTState, PairSetupParty, SigningParty,
-};
+#[cfg(feature = "plain-signing")]
+use tsslib::dklstss::SigningParty;
+use tsslib::dklstss::{CheckedSigningParty, KeygenParty, PairOTState, PairSetupParty};
 use tsslib::tss::{Message as TssMessage, MessageBroker, Parameters, PartyId, Payload, WireFormat};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -280,6 +280,7 @@ fn decode_entries(mut p: &[u8]) -> Option<Vec<(u16, u8, &[u8])>> {
 
 enum Party {
     Keygen(KeygenParty),
+    #[cfg(feature = "plain-signing")]
     Sign(SigningParty),
     CheckedSign(CheckedSigningParty),
     Pair(PairSetupParty),
@@ -296,6 +297,7 @@ impl Party {
         let err = |e: tsslib::dklstss::Error| format!("{e}");
         match self {
             Party::Keygen(p) => p.try_result().map(|r| r.map(Outcome::Key).map_err(err)),
+            #[cfg(feature = "plain-signing")]
             Party::Sign(p) => p
                 .try_result()
                 .map(|r| r.map(Outcome::Signature).map_err(err)),
@@ -442,6 +444,11 @@ impl Session {
             || requests.is_empty()
             || requests.len() > MAX_REQUESTS
         {
+            return Err(Error::Parameters);
+        }
+        // Built without the unchecked party (`plain-signing`): only `Checked` signs.
+        #[cfg(not(feature = "plain-signing"))]
+        if mode == SignMode::Plain {
             return Err(Error::Parameters);
         }
         let missing = record.missing_pairs(&members);
@@ -799,6 +806,7 @@ impl Session {
                     let key = job.record.key.0.clone();
                     let hash = req.sighash.to_vec();
                     let made = match job.mode {
+                        #[cfg(feature = "plain-signing")]
                         SignMode::Plain => SigningParty::new(
                             params,
                             key,
@@ -807,6 +815,9 @@ impl Session {
                             Some(tweak.clone()),
                         )
                         .map(Party::Sign),
+                        // Refused in `Session::sign` before a job exists.
+                        #[cfg(not(feature = "plain-signing"))]
+                        SignMode::Plain => unreachable!("plain signing is not built"),
                         SignMode::Checked => CheckedSigningParty::new(
                             params,
                             key,

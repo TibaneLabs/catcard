@@ -10,6 +10,13 @@ authors.workspace = true
 
 # Always `no_std` + `alloc`: there is no `std` feature to turn on.
 
+[features]
+default = ["plain-signing"]
+# `SignMode::Plain`, tsslib's unchecked `SigningParty`. The firmware signs `Checked` only
+# and builds without it: the plain party is about 15 KB of flash it would never run.
+# Without the feature a `Plain` request is refused (`Error::Parameters`).
+plain-signing = []
+
 [dependencies]
 catcard-wallet = { workspace = true }
 purecrypto = { workspace = true, features = ["alloc", "hash", "rng", "ec", "hazmat-secp256k1", "cipher"] }
