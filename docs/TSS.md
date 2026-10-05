@@ -382,6 +382,12 @@ With a TSS wallet in force (Derive → TSS wallets → the wallet → Use this w
 after creating one), the device works from the wallet's public half: the extended public key
 at its origin (`m` when created together), below which only unhardened steps are followed.
 
+- **Other chains' addresses** (Ethereum, Litecoin, Dogecoin, Tron...) come from the same key,
+  each chain on its own unhardened branch at its SLIP-44 coin type:
+  `{origin}/{coin}/{account}/{change}/{index}` -- Ethereum `m/60/0/0/i`, Litecoin `m/2/0/0/i`
+  for a key created together (`tss::chain_key`; a convention of this firmware's, since a TSS
+  key has no hardened steps to separate chains with). Solana needs ed25519 and is refused.
+  Bitcoin keeps `m/0/i`, which its descriptor names.
 - **Addresses and exports** come from that key on the device alone: the Address Explorer;
   Export → Sparrow / Generic JSON (and the other generic-JSON rows), Descriptor, Export XPUB.
   The formats built on hardened account paths say so.

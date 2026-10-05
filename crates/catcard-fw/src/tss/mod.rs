@@ -66,6 +66,8 @@ mod view;
 
 pub(crate) use restore::restore_screen;
 pub(crate) use sign::{sign_psbt, together};
+#[cfg(feature = "multichain")]
+pub(crate) use view::chain_key;
 pub(crate) use view::explorer as explorer_key;
 pub(crate) use view::xpub as wallet_xpub;
 pub(crate) use view::{Export, export_in_force};

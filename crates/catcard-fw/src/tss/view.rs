@@ -326,6 +326,29 @@ fn json(s: &Summary, out: &mut heapless::String<{ crate::export::MAX_LEN }>) -> 
     .ok()
 }
 
+/// The key the TSS wallet in force gives a chain other than Bitcoin, and its path as text:
+/// its own unhardened branch at the chain's SLIP-44 `coin` type, then `account` --
+/// `{origin}/{coin}/{account}`, with change and index below it as for any account. A
+/// convention of this firmware's: a TSS key has no hardened steps to follow, so each
+/// chain is kept apart by an unhardened one instead, and every address is still made on
+/// the device from the public key alone.
+#[cfg(feature = "multichain")]
+pub(crate) fn chain_key(coin: u32, account: u32) -> Option<(ExtendedPubKey, Line)> {
+    let (s, _) = crate::key::tss()?;
+    let (coin_step, account_step) = (
+        ChildNumber::normal(coin).ok()?,
+        ChildNumber::normal(account).ok()?,
+    );
+    let key = xpub(s)
+        .derive_child(coin_step)
+        .and_then(|k| k.derive_child(account_step))
+        .ok()?;
+    let mut path = Line::new();
+    write_path(&mut path, &s.path).ok()?;
+    write!(path, "/{coin}/{account}").ok()?;
+    Some((key, path))
+}
+
 /// What the Address Explorer needs of the TSS wallet in force: the key the addresses are
 /// below (non-hardened only), the one address type its descriptor names, the network
 /// its path says, and the path to that key as text (`m` when created together).

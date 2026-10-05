@@ -8798,7 +8798,23 @@ fn chain_explorer(
         let f = formats[fmt.min(formats.len() - 1)];
         let mut buf = [0u8; caddr::MAX_LEN];
         let mut path = Line::new();
+        // A TSS wallet: the chain's own unhardened branch under the wallet's key
+        // (`tss::chain_key`), and no ed25519 key at all.
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        let tss = crate::key::tss().is_some();
+        #[cfg(not(all(feature = "tss", not(feature = "board-mk3"))))]
+        let tss = false;
         let addr: Option<usize> = match f.encoding {
+            Encoding::Solana if tss => {
+                message(
+                    ui.panel,
+                    chain.name,
+                    "not for a TSS wallet:",
+                    "its key is ECDSA",
+                );
+                wait_for_any_key(ui);
+                return;
+            }
             Encoding::Solana => {
                 let _ = write!(
                     path,
@@ -8826,20 +8842,32 @@ fn chain_explorer(
             _ => {
                 // The account key once, from this session or the seed; then the public
                 // steps, which need no key material and no masking.
+                #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+                let tss_key = tss
+                    .then(|| {
+                        crate::tss::chain_key(chain.coin_type_on(crate::prefs::network()), account)
+                    })
+                    .flatten();
+                #[cfg(not(all(feature = "tss", not(feature = "board-mk3"))))]
+                let tss_key: Option<(ExtendedPubKey, Line)> = None;
                 if !matches!(cached, Some((a, b, c, _)) if (a, b, c) == (fmt, account, change)) {
-                    let acct = (refused_at != Some((fmt, account)))
-                        .then(|| {
-                            crate::pubkeys::account_key_at(
-                                gate,
-                                login,
-                                ui,
-                                "Addresses",
-                                f.purpose,
-                                chain.coin_type_on(crate::prefs::network()),
-                                account,
-                            )
-                        })
-                        .flatten();
+                    let acct = match &tss_key {
+                        Some((k, _)) => Some(*k),
+                        None if tss => None,
+                        None => (refused_at != Some((fmt, account)))
+                            .then(|| {
+                                crate::pubkeys::account_key_at(
+                                    gate,
+                                    login,
+                                    ui,
+                                    "Addresses",
+                                    f.purpose,
+                                    chain.coin_type_on(crate::prefs::network()),
+                                    account,
+                                )
+                            })
+                            .flatten(),
+                    };
                     refused_at = acct.is_none().then_some((fmt, account));
                     cached = acct
                         .and_then(|k| {
@@ -8849,12 +8877,19 @@ fn chain_explorer(
                         })
                         .map(|k| (fmt, account, change, k));
                 }
-                let _ = write!(
-                    path,
-                    "m/{}h/{}h/{account}h/{change}/{index}",
-                    f.purpose,
-                    chain.coin_type_on(crate::prefs::network())
-                );
+                match &tss_key {
+                    Some((_, at)) => {
+                        let _ = write!(path, "{at}/{change}/{index}");
+                    }
+                    None => {
+                        let _ = write!(
+                            path,
+                            "m/{}h/{}h/{account}h/{change}/{index}",
+                            f.purpose,
+                            chain.coin_type_on(crate::prefs::network())
+                        );
+                    }
+                }
                 cached.as_ref().map(|(_, _, _, k)| *k).and_then(|k| {
                     ChildNumber::normal(index)
                         .ok()
