@@ -667,9 +667,9 @@ fn sign_with_key(
 
 /// [`sign_with_key`] for the TSS wallet in force: the address is derived from the
 /// wallet's public half (the path has to be its origin and unhardened steps), shown and
-/// approved as any other, and the message's digest is signed together with the other
-/// members (`crate::tss::together`). The legacy format only: its signature is one
-/// ECDSA signature over the digest, where BIP-322's is a whole transaction.
+/// approved as any other, and the format's digest -- the legacy message hash, or
+/// BIP-322's virtual transaction's sighash, simple or full -- is signed together with
+/// the other members (`crate::tss::together`), then checked as a verifier would.
 #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
 fn sign_together(
     gate: &Callgate,
@@ -680,10 +680,6 @@ fn sign_together(
     choice: &Choice,
     ask: bool,
 ) -> Option<Signed> {
-    if !matches!(choice.format, Format::Legacy) {
-        complain(ui, head, "TSS: legacy format only");
-        return None;
-    }
     // Nobody is at the other devices for a request that is approved by policy.
     if !ask {
         complain(ui, head, "a TSS wallet signs together");
@@ -721,10 +717,19 @@ fn sign_together(
     if !confirm(ui, head, text, &address, &path, &how) {
         return None;
     }
-    let digest = match message::digest(text) {
+    // The digest the format signs: the "Bitcoin Signed Message" hash, or BIP-322's
+    // virtual transaction's sighash, simple or full -- all of them ECDSA by this key.
+    let digest = match choice.format {
+        Format::Legacy => message::digest(text).map_err(describe),
+        Format::Bip322 => bip322::simple_digest(text.as_bytes(), &pubkey).map_err(describe322),
+        Format::Bip322Full => {
+            full::full_digest(text.as_bytes(), &pubkey, choice.kind).map_err(describe322)
+        }
+    };
+    let digest = match digest {
         Ok(d) => d,
-        Err(e) => {
-            complain(ui, head, describe(e));
+        Err(why) => {
+            complain(ui, head, why);
             return None;
         }
     };
@@ -733,18 +738,37 @@ fn sign_together(
         sighash: digest,
     }];
     let sigs = crate::tss::together(gate, login, ui, &request)?;
-    let sig = match message::from_signature(&digest, &sigs[0].compact, &pubkey, choice.kind) {
-        Ok(sig) => sig,
-        Err(e) => {
-            complain(ui, head, describe(e));
-            return None;
-        }
-    };
+    let sig = &sigs[0];
+    // Written, then checked as a verifier would check it, as `sign_secret` does.
     let mut buf = [0u8; SIG_TEXT];
-    let n = match message::armour(&sig, &mut buf) {
+    let written: Result<usize, &'static str> = match choice.format {
+        Format::Legacy => message::from_signature(&digest, &sig.compact, &pubkey, choice.kind)
+            .map_err(describe)
+            .and_then(|s| message::armour(&s, &mut buf).map_err(describe)),
+        Format::Bip322 => bip322::simple_from_der(&pubkey, &sig.der)
+            .map_err(describe322)
+            .and_then(|s| {
+                let mut script = [0u8; bip322::MAX_SCRIPT];
+                let n =
+                    bip322::challenge(choice.kind, &pubkey, &mut script).map_err(describe322)?;
+                bip322::verify(text.as_bytes(), &script[..n], s.as_bytes())
+                    .map_err(|_| "signature did not verify")?;
+                s.armour(&mut buf).map_err(describe322)
+            }),
+        Format::Bip322Full => full::full_from_der(text.as_bytes(), &pubkey, choice.kind, &sig.der)
+            .map_err(describe322)
+            .and_then(|s| {
+                let mut script = [0u8; bip322::MAX_SCRIPT];
+                let n = full::challenge(choice.kind, &pubkey, &mut script).map_err(describe322)?;
+                full::verify_full(text.as_bytes(), &script[..n], s.as_bytes())
+                    .map_err(|_| "signature did not verify")?;
+                s.armour(&mut buf).map_err(describe322)
+            }),
+    };
+    let n = match written {
         Ok(n) => n,
-        Err(e) => {
-            complain(ui, head, describe(e));
+        Err(why) => {
+            complain(ui, head, why);
             return None;
         }
     };

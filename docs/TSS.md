@@ -397,9 +397,12 @@ at its origin (`m` when created together), below which only unhardened steps are
   them together, and writes the signatures in as partial-signature records
   (`signer::apply_signature`); the result is delivered like any signed PSBT
   (`signtx::deliver`). `SIGHASH_ALL` only; PSBT v2 is refused for now.
-- **Sign message** signs the legacy (BIP-137) digest together; the recovery id is found
-  from the key (`message::from_signature`). BIP-322 needs a whole transaction signed and is
-  not offered with a TSS wallet yet.
+- **Sign message** signs together in every ECDSA format: legacy (BIP-137; the recovery id is
+  found from the key, `message::from_signature`), BIP-322 simple (P2WPKH) and BIP-322 full
+  (P2WPKH, P2SH-P2WPKH). The BIP-322 signers are split into a digest half and an assembly
+  half (`bip322::simple_digest`/`simple_from_der`, `full::full_digest`/`full_from_der`),
+  which the seed's own signers are built on too; each result is checked by the verifier a
+  counterparty would use before it is shown.
 - **The session** (`tss::sign::together`): one member starts it and picks its `t - 1`
   co-signers; the others join from the card or the starting member's first code (invitation
   `CatCard TSS signing`, wallet and signers). Every digest and path is in the session code.

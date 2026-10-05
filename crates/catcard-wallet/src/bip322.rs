@@ -449,15 +449,39 @@ impl SigBytes {
 
 /// Sign `digest` with `key`, and append `SIGHASH_ALL`.
 pub(crate) fn ecdsa_sig(key: &SecpPrivateKey, digest: &[u8; 32]) -> Result<SigBytes, Error> {
-    let der = key.sign_der(digest);
+    sig_from_der(key.sign_der(digest).as_bytes())
+}
+
+/// A DER signature made anywhere, with `SIGHASH_ALL` after it.
+pub(crate) fn sig_from_der(der: &[u8]) -> Result<SigBytes, Error> {
     let mut buf = [0u8; MAX_SIG];
-    let len = der.as_bytes().len();
+    let len = der.len();
     if len + 1 > buf.len() {
         return Err(Error::BadKey);
     }
-    buf[..len].copy_from_slice(der.as_bytes());
+    buf[..len].copy_from_slice(der);
     buf[len] = SIGHASH_ALL as u8;
     Ok(SigBytes { buf, len: len + 1 })
+}
+
+/// The digest a *simple* signature for the P2WPKH address of `pubkey` signs `message`
+/// under -- for a key that signs elsewhere (a TSS wallet's members, together). With the
+/// signature made, [`simple_from_der`] finishes it. P2WPKH only: the one ECDSA kind with
+/// a simple signature.
+pub fn simple_digest(message: &[u8], pubkey: &[u8; 33]) -> Result<[u8; 32], Error> {
+    let mut script = [0u8; MAX_SCRIPT];
+    let n = challenge(AddressKind::P2wpkh, pubkey, &mut script)?;
+    let tx = FixedToSign::new(message, &script[..n]);
+    let engine = full::Engine::new(&tx, &tx, 0);
+    let code = crate::tx::sighash::p2wpkh_script_code(&hash160(pubkey));
+    engine.digest(Sighash::SegwitV0 { script_code: &code })
+}
+
+/// The *simple* signature from `der`, a signature over [`simple_digest`] by `pubkey`: the
+/// witness any P2WPKH spend has, the signature with its sighash byte and then the key.
+pub fn simple_from_der(pubkey: &[u8; 33], der: &[u8]) -> Result<Simple, Error> {
+    let sig = sig_from_der(der)?;
+    Ok(encode_witness(&[sig.as_bytes(), pubkey]))
 }
 
 /// Sign `message` for the address of `kind` behind `secret`, in the *simple* variant.
@@ -480,14 +504,11 @@ pub fn sign(
     let engine = full::Engine::new(&tx, &tx, 0);
 
     match kind {
+        // The witness of any P2WPKH spend: the signature with its sighash byte, then the
+        // key it is checked against. The same two halves a key signing elsewhere uses.
         AddressKind::P2wpkh => {
-            let key_hash = hash160(&pubkey);
-            let code = crate::tx::sighash::p2wpkh_script_code(&key_hash);
-            let sighash = engine.digest(Sighash::SegwitV0 { script_code: &code })?;
-            // The witness of any P2WPKH spend: the signature with its sighash byte, then
-            // the key it is checked against.
-            let sig = ecdsa_sig(&key, &sighash)?;
-            Ok(encode_witness(&[sig.as_bytes(), &pubkey]))
+            let sighash = simple_digest(message, &pubkey)?;
+            simple_from_der(&pubkey, key.sign_der(&sighash).as_bytes())
         }
         AddressKind::P2tr => {
             // SIGHASH_DEFAULT: the 64-byte form, with no type byte to get wrong.

@@ -594,21 +594,10 @@ pub fn sign_full(
 
     let mut buf = [0u8; MAX_SINGLE_TX];
     let len = match kind {
+        // The same two halves a key signing elsewhere uses.
         AddressKind::P2wpkh | AddressKind::P2shP2wpkh => {
-            let key_hash = hash160(&pubkey);
-            let code = crate::tx::sighash::p2wpkh_script_code(&key_hash);
-            let sighash = engine.digest(Sighash::SegwitV0 { script_code: &code })?;
-            let sig = ecdsa_sig(&key, &sighash)?;
-            // Nested: the scriptSig is one push of the redeem script.
-            let mut script_sig = [0u8; 23];
-            let script_sig: &[u8] = if kind == AddressKind::P2shP2wpkh {
-                script_sig[0] = 22;
-                script_sig[1..].copy_from_slice(&address::p2wpkh_redeem_script(&pubkey));
-                &script_sig
-            } else {
-                &[]
-            };
-            write_to_sign(&prev, script_sig, &[sig.as_bytes(), &pubkey], &mut buf)?
+            let sighash = full_digest(message, &pubkey, kind)?;
+            return full_from_der(message, &pubkey, kind, key.sign_der(&sighash).as_bytes());
         }
         AddressKind::P2tr => {
             let sighash = engine.digest(Sighash::Taproot { hash_type: 0x00 })?;
@@ -617,6 +606,57 @@ pub fn sign_full(
         }
         AddressKind::P2pkh => return Err(Error::UnsupportedKind),
     };
+    Ok(Full { buf, len })
+}
+
+/// The digest a *full* signature for the address of `kind` (P2WPKH or P2SH-P2WPKH) of
+/// `pubkey` signs `message` under -- for a key that signs elsewhere (a TSS wallet's
+/// members, together). With the signature made, [`full_from_der`] finishes it.
+pub fn full_digest(
+    message: &[u8],
+    pubkey: &[u8; 33],
+    kind: AddressKind,
+) -> Result<[u8; 32], Error> {
+    if !matches!(kind, AddressKind::P2wpkh | AddressKind::P2shP2wpkh) {
+        return Err(Error::UnsupportedKind);
+    }
+    let mut script = [0u8; MAX_SCRIPT];
+    let n = challenge(kind, pubkey, &mut script)?;
+    let script = &script[..n];
+    let tx = ToSignFixed::new(to_spend_txid(message, script));
+    let sole = SoleChallenge(script);
+    let engine = Engine::new(&tx, &sole, 0);
+    let code = crate::tx::sighash::p2wpkh_script_code(&hash160(pubkey));
+    engine.digest(Sighash::SegwitV0 { script_code: &code })
+}
+
+/// The *full* signature from `der`, a signature over [`full_digest`] by `pubkey`: the
+/// default `to_sign` with the signature and key as its witness, and for a nested address
+/// the push of the redeem script as its `scriptSig`.
+pub fn full_from_der(
+    message: &[u8],
+    pubkey: &[u8; 33],
+    kind: AddressKind,
+    der: &[u8],
+) -> Result<Full<MAX_SINGLE_TX>, Error> {
+    if !matches!(kind, AddressKind::P2wpkh | AddressKind::P2shP2wpkh) {
+        return Err(Error::UnsupportedKind);
+    }
+    let mut script = [0u8; MAX_SCRIPT];
+    let n = challenge(kind, pubkey, &mut script)?;
+    let prev = to_spend_txid(message, &script[..n]);
+    let sig = super::sig_from_der(der)?;
+    // Nested: the scriptSig is one push of the redeem script.
+    let mut script_sig = [0u8; 23];
+    let script_sig: &[u8] = if kind == AddressKind::P2shP2wpkh {
+        script_sig[0] = 22;
+        script_sig[1..].copy_from_slice(&address::p2wpkh_redeem_script(pubkey));
+        &script_sig
+    } else {
+        &[]
+    };
+    let mut buf = [0u8; MAX_SINGLE_TX];
+    let len = write_to_sign(&prev, script_sig, &[sig.as_bytes(), pubkey], &mut buf)?;
     Ok(Full { buf, len })
 }
 
