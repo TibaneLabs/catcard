@@ -5,8 +5,8 @@
     python3 tools/stackdepth.py fw.dis catcard_fw::menu::run [substring]
     EXCLUDE=hsm::run python3 tools/stackdepth.py fw.dis catcard_fw::menu::run together_as
 
-Each function's frame is its / and  amounts; edges are direct /
-calls. With a substring, the path is the deepest one that passes through a function whose
+Each function's frame is its `push`/`vpush` and `sub sp` amounts; edges are direct
+`bl`/`b` calls. With a substring, the path is the deepest one that passes through a function whose
 name contains it. Calls through function pointers and trait objects are not followed, so
 this is a floor on what such a path uses, not a ceiling.
 
