@@ -1681,6 +1681,15 @@ pub fn run(session: Session<'_>) -> ! {
                     // leads through belonged to the device as it was -- New and Import on
                     // a blank one, Settings' seed rows on a wallet -- so the person lands
                     // on the new main menu, at the top, with nothing behind them.
+                    //
+                    // A new wallet's fingerprint, quietly, so the title (mono) or the
+                    // status bar (Q1) names it from the first frame of that menu.
+                    if !v.blank()
+                        && crate::key::is_root()
+                        && crate::pubkeys::known_fingerprint().is_none()
+                    {
+                        crate::pubkeys::warm_fingerprint(gate, login, ui.panel);
+                    }
                     nav.clear();
                     v.reset_menu();
                     screen = Screen::Main;
@@ -12224,6 +12233,7 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         Ok(_) if kept => {
             // Once stored it *is* the root. Keeping the loaded selection would be the same
             // wallet under two names.
+            crate::key::note_stored_seed(true);
             crate::key::to_root();
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             crate::catlog!("lockdown: the loaded key is the stored seed");

@@ -501,6 +501,9 @@ pub(crate) fn new_seed(
         return;
     }
 
+    // The stored slot holds a wallet now, whatever the menu last believed -- login may
+    // have looked and found it empty, and the main menu goes by that.
+    crate::key::note_stored_seed(true);
     crate::catlog!("seed: stored, {} words", mnemonic.word_count());
     message(
         ui.panel,
