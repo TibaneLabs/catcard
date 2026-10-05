@@ -461,16 +461,24 @@ impl<B: DisplayBus> St7789<B> {
         let (parts, n) = spans(self.origin, self.fixed, x, w);
         for &(mx, len, from) in &parts[..n] {
             self.window(mx, y, mx + len - 1, y + h - 1)?;
-            for dy in 0..h {
-                for (dx, px) in line[..len * 2]
-                    .as_chunks_mut::<2>()
-                    .0
-                    .iter_mut()
-                    .enumerate()
-                {
-                    *px = f(from + dx, dy).to_be_bytes();
+            // The window takes its pixels as one stream, row after row, so as many rows
+            // as fit the buffer go in one transfer. A transfer has a fixed cost (select,
+            // drain, deselect); a row each made a narrow patch -- a game's incoming
+            // column, two pixels wide and 240 tall -- 240 of them a frame, which cost
+            // Flappy Cat half its frame rate on a Q1.
+            let rows = (WIDTH / len).max(1);
+            let mut dy = 0;
+            while dy < h {
+                let take = rows.min(h - dy);
+                let mut i = 0;
+                for r in 0..take {
+                    for dx in 0..len {
+                        line[i..i + 2].copy_from_slice(&f(from + dx, dy + r).to_be_bytes());
+                        i += 2;
+                    }
                 }
-                self.bus.data(&line[..len * 2])?;
+                self.bus.data(&line[..i])?;
+                dy += take;
             }
         }
         Ok(())
@@ -787,10 +795,28 @@ mod tests {
         let log = &p.bus_mut().log;
         // Clipped to two columns at the right edge.
         assert_eq!(log[1], (true, vec![0x01, 0x3E, 0x01, 0x3F]));
-        // CASET, its data, RASET, its data, RAMWR, then one transfer per row.
-        assert_eq!(log[5], (true, vec![0, 0, 0, 1]));
-        assert_eq!(log[6], (true, vec![0, 16, 0, 17]));
-        assert_eq!(log.len(), 7);
+        // CASET, its data, RASET, its data, RAMWR, then the rows in one transfer, in order.
+        assert_eq!(log[5], (true, vec![0, 0, 0, 1, 0, 16, 0, 17]));
+        assert_eq!(log.len(), 6);
+    }
+
+    /// A narrow, tall patch -- a game's incoming column -- goes in a handful of transfers,
+    /// not one per row, and every pixel arrives in row order.
+    #[test]
+    fn a_narrow_patch_is_sent_in_few_transfers() {
+        let mut p = St7789::new(MockBus::default());
+        p.paint(100, 0, 2, HEIGHT, |dx, dy| (dy * 2 + dx) as u16)
+            .unwrap();
+        let log = &p.bus_mut().log;
+        let data: Vec<u8> = log[5..]
+            .iter()
+            .flat_map(|(_, b)| b.iter().copied())
+            .collect();
+        let want: Vec<u8> = (0..HEIGHT * 2)
+            .flat_map(|i| (i as u16).to_be_bytes())
+            .collect();
+        assert_eq!(data, want);
+        assert!(log.len() - 5 <= 2, "{} transfers", log.len() - 5);
     }
 
     #[test]
