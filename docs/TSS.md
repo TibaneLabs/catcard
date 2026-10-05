@@ -376,6 +376,33 @@ choice; dev builds, rustc 1.99, 2026-10-04): mk4/mk5 1,392,128 → 1,422,848 byt
 signing now checks pairs). The `DebugTssBench` bench (12 KB) is the obvious room if the
 Q1 needs more.
 
+## Signing together (built 2026-10-05)
+
+With a TSS wallet in force (Derive → TSS wallets → the wallet → Use this wallet, or straight
+after creating one), the device works from the wallet's public half: the extended public key
+at its origin (`m` when created together), below which only unhardened steps are followed.
+
+- **Addresses and exports** come from that key on the device alone: the Address Explorer;
+  Export → Sparrow / Generic JSON (and the other generic-JSON rows), Descriptor, Export XPUB.
+  The formats built on hardened account paths say so.
+- **Sign (a PSBT, any way it arrives)** reviews it as the seed's signer does -- inputs and
+  change recognised from the public key (`signer::Keys::Public`) -- then takes each input's
+  digest from `outscript` itself (`signer::digest_for_input`, a recording signer), signs
+  them together, and writes the signatures in as partial-signature records
+  (`signer::apply_signature`); the result is delivered like any signed PSBT
+  (`signtx::deliver`). `SIGHASH_ALL` only; PSBT v2 is refused for now.
+- **Sign message** signs the legacy (BIP-137) digest together; the recovery id is found
+  from the key (`message::from_signature`). BIP-322 needs a whole transaction signed and is
+  not offered with a TSS wallet yet.
+- **The session** (`tss::sign::together`): one member starts it and picks its `t - 1`
+  co-signers; the others join from the card or the starting member's first code (invitation
+  `CatCard TSS signing`, wallet and signers). Every digest and path is in the session code.
+  Missing pairs are said and made with Rebuild setup first. Its randomness is a pool of its
+  own, gathered from every chip (`Fresh::gather_own`). Not for a computer (USB host
+  signing) nor an HSM policy: nobody is at the other devices.
+- **Checked only** in the firmware: `catcard-tss` builds the plain party under
+  `plain-signing`, which the firmware leaves off (15 KB).
+
 ## Testing with fewer CatCards than members
 
 `tools/tss-member` (`cargo run -p catcard-tss-member --`) plays members from a computer. It
