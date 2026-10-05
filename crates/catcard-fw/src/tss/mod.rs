@@ -55,6 +55,8 @@ mod card;
 mod create;
 mod drive;
 mod export;
+#[cfg(feature = "board-q1")]
+mod qr;
 mod rand;
 mod rebuild;
 mod restore;

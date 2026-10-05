@@ -21,6 +21,7 @@ use catcard_tss::{CacheKey, CacheRefused, Error, SESSION_ID_LEN, Session, ShareR
 use core::fmt::Write as _;
 
 use super::card::{self, Invitation};
+use super::drive::{Medium, Way};
 use super::rand::{Drbg, Fresh};
 use super::store::{self, Kept};
 use super::{Room, Work, approve, describe, drive, keep, say};
@@ -113,9 +114,12 @@ pub(super) fn rebuild(
     if !Room::fits(ui, HEAD, Work::Rebuild, n, 0) {
         return;
     }
-    let Some(storage) = menu::pick_storage(ui, HEAD) else {
+    let Some(way) = drive::pick_way(ui, HEAD) else {
         return;
     };
+    // Where this member's pair cache is: on the card passed round, or by QR on this
+    // device's own Virtual Disk.
+    let storage = way.files();
     let mut bytes = match store::read(gate, login, ui, kept.index) {
         Ok(b) => b,
         Err(why) => return say(ui, HEAD, "cannot read it:", why),
@@ -181,7 +185,7 @@ pub(super) fn rebuild(
             alloc::vec![peers[at]]
         };
         for peer in chosen {
-            if !with_peer(gate, login, ui, storage, &mut record, peer, pool) {
+            if !with_peer(gate, login, ui, way, &mut record, peer, pool) {
                 break;
             }
         }
@@ -196,7 +200,7 @@ fn with_peer(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
-    storage: Storage,
+    way: Way,
     record: &mut ShareRecord,
     peer: u8,
     pool: &mut catcard_entropy::EntropyPool,
@@ -211,7 +215,7 @@ fn with_peer(
         a,
         b,
     };
-    let Some((id, start)) = find_or_start(ui, storage, invitation, me, peer) else {
+    let Some((id, start, mut medium)) = find_or_start(ui, way, invitation, me, peer) else {
         return false;
     };
     // The pair's new OT seeds are secret: gathered from every chip as for a new wallet.
@@ -239,7 +243,7 @@ fn with_peer(
         me,
         peer
     );
-    if !drive::run(ui, storage, &mut session, start.then_some(invitation)) {
+    if !drive::run(ui, &mut medium, &mut session, start.then_some(invitation)) {
         return false;
     }
     let installed = crate::keywork::run(|kw| session.install_pair(record, kw));
@@ -248,8 +252,10 @@ fn with_peer(
         say(ui, HEAD, "not installed:", describe(&e));
         return false;
     }
-    let kept = keep(gate, login, ui, storage, record, HEAD);
-    drive::pass_on(ui, storage, peer);
+    let kept = keep(gate, login, ui, way.files(), record, HEAD);
+    if way == Way::Sd {
+        drive::pass_on(ui, peer);
+    }
     match kept {
         Ok(_) => {
             let mut a: Line = Line::new();
@@ -265,31 +271,56 @@ fn with_peer(
 }
 
 /// The session to run with `peer`: the lower member starts one, the higher finds it on
-/// the medium. `(id, whether this device starts it)`.
+/// the card, or scans the lower's first code. `(id, whether this device starts it, the
+/// medium)`.
 #[inline(never)]
 fn find_or_start(
     ui: &mut Ui<'_>,
-    storage: Storage,
+    way: Way,
     invitation: Invitation,
     me: u8,
     peer: u8,
-) -> Option<([u8; SESSION_ID_LEN], bool)> {
+) -> Option<([u8; SESSION_ID_LEN], bool, Medium)> {
     if me < peer {
         let id = catcard_tss::new_session_id(&mut Drbg(ui.drbg)).ok()?;
         let mut main: Line = Line::new();
         let _ = write!(main, "Session {}", card::short_id(&id));
         let mut a: Line = Line::new();
         let _ = write!(a, "With member {peer}, who picks member {me} there.");
-        return approve(
+        if !approve(
             ui,
             "Start the setup?",
             &main,
             &[a.as_str(), "This device starts it."],
             "start",
             "back",
-        )
-        .then_some((id, true));
+        ) {
+            return None;
+        }
+        let medium = match way {
+            Way::Sd => Medium::Sd,
+            #[cfg(feature = "board-q1")]
+            Way::Qr => Medium::Qr(super::qr::Exchange::new(id, Some(invitation))),
+        };
+        return Some((id, true, medium));
     }
+    #[cfg(feature = "board-q1")]
+    if way == Way::Qr {
+        let mut found = match super::qr::find(ui, HEAD) {
+            Ok(Some(f)) => f,
+            Ok(None) => return None,
+            Err(why) => {
+                say(ui, HEAD, "not read:", why);
+                return None;
+            }
+        };
+        if found.invite != invitation {
+            say(ui, HEAD, "not this pair's", "setup code");
+            return None;
+        }
+        return Some((found.id, false, Medium::Qr(found.exchange(me))));
+    }
+    let storage = Storage::Sd;
     loop {
         card::wait(ui.panel, HEAD, storage, false);
         let found = card::sessions(storage).unwrap_or_default();
@@ -299,7 +330,7 @@ fn find_or_start(
             .map(|s| s.id)
             .collect();
         if ids.len() == 1 {
-            return Some((ids[0], false));
+            return Some((ids[0], false, Medium::Sd));
         }
         if ids.len() > 1 {
             let labels: heapless::Vec<heapless::String<8>, { card::MAX_SESSIONS }> =
@@ -307,7 +338,7 @@ fn find_or_start(
             let rows: heapless::Vec<&str, { card::MAX_SESSIONS }> =
                 labels.iter().map(|l| l.as_str()).collect();
             let pick = menu::pick_row(ui, HEAD, "which session? (on its screen)", &rows)?;
-            return Some((ids[pick], false));
+            return Some((ids[pick], false, Medium::Sd));
         }
         let mut wait: heapless::String<96> = heapless::String::new();
         let _ = write!(

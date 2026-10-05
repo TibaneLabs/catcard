@@ -43,16 +43,23 @@ governs signing and restoring.
 - A **session** is one run of a protocol (create, sign, pair setup) among numbered
   **members** `1..n`.
   Its id is random, from the UI DRBG, and shown on every member's screen.
-- **Messages travel by SD card, the Virtual Disk or, on the Q1, by QR** (stage 2). Each
-  device writes what it has to say
-  and reads what is addressed to it. The screen always says what to do next ("Member 2 of 3 —
-  round 2: give this card to member 3", or a QR to show to member 3).
-  - SD or Virtual Disk: one directory per session, `TSS/<session id>/`, one file per
-    message, named `r<round>-<from>-<to>.msg` (`to` 0 for a broadcast). One card can
-    circulate among the members, or each member can have its own; with no card, the files
-    go between the devices' Virtual Disks over USB.
-  - QR (Q1 only): the same messages, as BBQr. A Q1 can scan what another Q1 shows; a mixed
-    group uses SD.
+- **Messages travel by SD card or, between Q1s, by QR** -- never by the Virtual Disk, which
+  cannot move from one device to another (it is only where a member keeps its own files,
+  the pair cache, when there is no card). Each device writes what it has to say and reads
+  what is addressed to it. The screen always says what to do next ("Step 2 of 4. Pass the
+  card to member 3", or "Scan the code of member 3, and show them yours"). The mono boards
+  have the card only and are not asked.
+  - SD: one directory per session, `TSS/<session id>/`, one file per message, named
+    `r<round>-<from>-<to>.msg` (`to` 0 for a broadcast). One card circulates among the
+    members.
+  - QR (Q1 only, `tss::qr`): each Q1 keeps what it sent and what it scanned in memory. On
+    the waiting screen it offers "Scan a code" and "Show my code to m" for each other
+    member; a code for `m` is one animated BBQr (type `B`) holding the broadcasts and `m`'s
+    unicasts of the last two rounds it produced, with the session id and, from member 1,
+    the invitation -- a member joins by scanning member 1's first code, and picks its
+    number itself. A member that finishes keeps showing its codes until the owner says
+    everyone is done. Its pair cache goes to its own Virtual Disk (gone at power off; set
+    up again before signing). A mixed group uses SD.
 - **Messages are authenticated.** tsslib leaves peer authentication to the transport, and an
   SD card or a QR is not one. So every session opens with two rounds of introductions, as
   **commit, then reveal**:
@@ -91,12 +98,12 @@ governs signing and restoring.
 
 ### Create together
 
-1. On every member: choose *Create TSS wallet*, the medium (SD card or Virtual Disk), `n`,
-   `t`, and its member number.
+1. On every member: choose *Create together*, the way (SD card, or on the Q1 by QR code);
+   member 1 picks `n` and `t`, the others join and take a member number.
 2. Rounds 0 and 1: identity commitments out, then identity keys; session code shown and
    compared.
 3. DKLs keygen rounds 2-3 (shares; then the echo with the base-OT replies), by SD or the
-   Virtual Disks' files (QR in stage 2), until every member has its share. With one SD card
+   QR codes, until every member has its share. With one SD card
    passed member to member that is 5n - 4 insertions: 11 for 2-of-3, 21 for 3-of-5 (tsslib
    0.2.14 sends the base-OT replies with the echo, KarpelesLab/tsslib-rs#18; 0.2.13 took
    6n - 5).
@@ -151,10 +158,9 @@ needed.
 
 Users with no SD card can sign air-gapped (decided 2026-10-04):
 
-- The **Virtual Disk** stands in for the card. Session files and the pair cache live there as
-  they would on a card; the firmware already treats both as one media type.
-- **QR carries the files**, round by round: each Q1 shows its outgoing messages as animated
-  BBQr and scans the others'.
+- **QR carries the messages**, round by round: each Q1 shows its outgoing messages as
+  animated BBQr and scans the others' (as for create together, above). The pair cache lives
+  on each device's own Virtual Disk.
 - The Virtual Disk is gone at power off, so the **pairwise setup is rebuilt from scratch at
   the start of each signing** (the missing-pairs path, `PairSetupParty`). That is a normal
   path, not an error.
@@ -240,12 +246,13 @@ xpub, a watch-only descriptor), *Rebuild setup*, *Descriptor to file*, *Copy sha
 *Restore the whole key* (created-together only) and *Delete this share*. On a blank device,
 Import → **TSS shares** is *Restore from shares*.
 
-Every flow that reads or writes a file asks which medium first, wherever a card can be
-picked: the **SD card** or the **Virtual Disk (temporary)**, through `menu::Storage` and the
-one volume type both mount as (`crate::media`). A session only produces and takes envelope
-bytes under their file names (`catcard_tss::Session`), and one loop drives every session
-kind over the medium (`tss::drive`), so QR (stage 2) is another way of moving the same
-bytes.
+A flow that only reads or writes a file (a share file, a descriptor) asks which medium,
+wherever a card can be picked: the **SD card** or the **Virtual Disk (temporary)**, through
+`menu::Storage`. A **session** -- create together, Rebuild setup -- asks instead how the
+devices exchange messages (`tss::drive::pick_way`): the SD card, or on the Q1 also **By QR
+code**; never the Virtual Disk, which cannot move between devices. A session only produces
+and takes envelope bytes under their names (`catcard_tss::Session`), and one loop drives
+every session kind over either (`tss::drive::Medium`).
 
 - **Create together.** The medium, then member 1 picks n and t (up to 9 members, as the
   memory allows; the shapes `can_create_together` refuses are refused with "too many
@@ -255,11 +262,12 @@ bytes.
   session from those on the medium, and a member number not yet taken. Then every device
   runs the same loop, driven only by the session's outbox and `awaiting()`: write what it
   has, read what it waits for, show the 8-word code when every identity is in (and go on
-  only on "the same on all"), and otherwise say "Step k of 4. Pass the card to member m
-  (waiting for members ...), then put it back here." -- or, on the Virtual Disk, to copy
-  the TSS folder between this disk and member m's. At the end each member keeps its core in
-  its settings, writes its pair cache to the medium, and shows the wallet's fingerprint,
-  first addresses, xpub and descriptor to compare across the devices. A cache that will
+  only once the words are the same as written down on the first device), and otherwise
+  say "Step k of 4. Pass the card to member m, then put it back here." -- or, by QR, "Scan
+  the code of member m, and show them yours". At the end each member keeps its core in its
+  settings, writes its pair cache (to the card, or by QR to its own Virtual Disk), switches
+  to the new wallet, and shows its fingerprint to compare across the devices; its
+  addresses are the Address Explorer's. A cache that will
   not write is said ("set it up again to sign") and the core kept naming none. The session
   is in memory only: leaving the screen abandons it.
 - **Rebuild setup.** See the flow above. The invitation of a pair setup names the wallet

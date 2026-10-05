@@ -224,8 +224,14 @@ mod trngtest;
 /// SD card. mk4 and later: the mk3 has no flash for tsslib.
 #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
 mod tss;
-/// Bench: a DKLs keygen and signature on the device, timed (docs/TSS.md).
-#[cfg(all(feature = "tss", feature = "usb-debug-mem", not(feature = "board-mk3")))]
+/// Bench: a DKLs keygen and signature on the device, timed (docs/TSS.md). Not on the Q1,
+/// whose flash it does not fit beside the TSS screens; mk4/mk5 measure the same code.
+#[cfg(all(
+    feature = "tss",
+    feature = "usb-debug-mem",
+    not(feature = "board-mk3"),
+    not(feature = "board-q1")
+))]
 mod tssbench;
 /// Laying a transaction out for the person deciding about it, whichever chain it is on.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
