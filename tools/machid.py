@@ -37,6 +37,12 @@ class MacHid:
         # has a FIDO interface (usage page 0xF1D0), and opening by VID/PID alone can land
         # on that one, where our protocol gets no answer.
         ours = [d for d in hid.enumerate(vid, pid) if d.get("usage_page") == 0xFF00]
+        # With several plugged in, CATCARD_SERIAL (the USB serial number) picks one.
+        want = os.environ.get("CATCARD_SERIAL")
+        if want:
+            ours = [d for d in ours if d.get("serial_number") == want]
+            if not ours:
+                raise SystemExit(f"no CatCard with USB serial {want}")
         if ours:
             self.h.open_path(ours[0]["path"])
         else:
