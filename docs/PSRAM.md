@@ -106,11 +106,44 @@ bootloader at `gate 18/7` -- so corruption is caught either way. What the per-ch
 added was an earlier, more precise complaint; what it cost was causing the corruption it
 was there to find.
 
+## 5. Partial words must not be read-merged inside a write run  [C, 2026-10-05]
+
+`PsramArea::write` used to write a word the span covered only partly by **reading** it
+from the part, merging and writing it back. Staging hits that constantly -- USB frames are
+62 bytes, a DfuSe image starts 293 bytes into its file, an inflated block ends wherever the
+decoder stops -- and each such read sat inside a run of stores with no change of direction
+around it: the §4 fault again. Read back over the monitor from a Q1 whose installs were all
+refused with `gate 18/7 -112`, a staged image had **20,021 words wrong, one at every second
+62-byte frame boundary**: the word that should have been at `+0x3c` sat at `+0x40`, and
+`+0x3c` held whatever was there before. The digest taken as the bytes arrived was right, so
+our own check passed; the bootloader, reading the part, refused. Rewriting the wrong words
+through the monitor (whole words, nothing read) made the image byte-identical, and the same
+`gate 18/7` installed it.
+
+Now a partial word is held in RAM (`Assembler`) until the next span completes it and goes
+out whole; a staging stream is stores only. The part is read for a write only for a word a
+stream starts or ends in the middle of, once, with a direction change on either side
+(`PsramArea::settle`, before any read or publish). Tests: any piece size from any start is
+whole aligned words with no read inside the stream; 62-byte frames of an aligned image read
+nothing; and the module's source has no access to the part narrower than 32 bits.
+
+It showed on the Q1 only, the one board built at `opt-level = "z"`; the same code staged on
+mk4/mk5 that day. Timing, not a different rule.
+
 ## Open
 
 - If a read-back is ever wanted again, it belongs **after** the whole image is staged, not per
   chunk — one switch instead of thousands — and the image is verified by digest anyway.
 - We do not configure OCTOSPI at all; the bootloader's setup is inherited, including the
-  `TimeOutPeriod=16` that releases CS periodically for the part's refresh. If corruption ever
-  returns under sustained access, that setting and the part's `tCEM` limit are where to look
-  next: `storage.md` calls it a separate, latent risk.
+  `TimeOutPeriod=16` that releases CS periodically for the part's refresh. **There is no
+  hardware lever left to bound CS-low time on this silicon**: the refresh counter
+  (`DCR4.REFRESH`) and communication regulation (`DCR3.MAXTRAN`) are STM32L4P5/Q5 only
+  (RM0432 Table 119) -- on a Q1 a write to `DCR4` reads back 0 even after an abort, while
+  `DCR1` takes one -- and `CSBOUND` is ruled out by ES0393 erratum 2.8.1. The live registers
+  on a Q1 (2026-10-05): `DCR1=0x00170008` (CSHT 1 cycle), `DCR2=1` (60 MHz), `DCR3=DCR4=0`,
+  `LPTR=0x10`. `CSHT=1` is below the part's `tCPH` of 50 ns (3 cycles); raising it to 4
+  cycles did not change the -112 above, which §5 explained.
+- `crate::psram::Lease::bytes` hands out the region as a byte slice, which its users
+  (signing a PSBT, a QR being reassembled, a settings restore) write with ordinary stores.
+  That is the byte-store hazard of §1 on paths that are not staging; they need the same
+  word discipline.

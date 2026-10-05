@@ -63,6 +63,8 @@ pub struct PsramArea {
     way: Way,
     /// CPU cycles to idle between bursts, from [`gap_cycles`] and this board's clocks.
     gap: u32,
+    /// A partial word waiting for the rest of its bytes ([`Assembler`]).
+    pending: Assembler,
     /// Words touched since CE# was last allowed to rise.
     ///
     /// **State of the part, not of one call.** The chip does not know where a `write`
@@ -117,6 +119,15 @@ impl Burst {
     }
 }
 
+impl Drop for PsramArea {
+    /// A word still held would otherwise never reach the part.
+    fn drop(&mut self) {
+        if self.pending.open.is_some() {
+            self.settle();
+        }
+    }
+}
+
 /// Writing outside the region this area was built for.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct OutOfRange;
@@ -147,6 +158,7 @@ impl PsramArea {
             capacity: psram.staging_header - image_base,
             header_at: psram.staging_header,
             way: Way::Nothing,
+            pending: Assembler { open: None },
             // Both from this board's clocks, not from a constant that happened to suit
             // the board it was worked out on.
             burst: Burst::new(words_per_burst(psram.ospi_hz)),
@@ -189,6 +201,7 @@ impl PsramArea {
             capacity,
             header_at,
             way: Way::Nothing,
+            pending: Assembler { open: None },
             burst: Burst::new(words_per_burst(ospi_hz)),
             gap: gap_cycles(ospi_hz, mmap_timeout_clocks, cpu_hz),
         }
@@ -200,6 +213,57 @@ impl PsramArea {
             return Err(OutOfRange);
         }
         Ok(self.image_base + offset)
+    }
+
+    /// Merge a partial word still held, if any. Called before anything reads the area
+    /// or acts on it.
+    pub fn settle(&mut self) {
+        let mut pending = core::mem::take(&mut self.pending);
+        pending.flush(&mut |op| self.issue(op));
+        self.pending = pending;
+    }
+
+    /// Put one [`Op`] on the bus, paced.
+    fn issue(&mut self, op: Op) {
+        match op {
+            Op::Store { at, value } => {
+                if self.way == Way::Reading {
+                    // A change of direction is a new burst; `tCPH` wants CE# high.
+                    burst_gap(self.gap);
+                    self.burst.turned();
+                }
+                self.way = Way::Writing;
+                // CE# has to rise before `tCEM`, or the part stops refreshing itself.
+                if self.burst.word() {
+                    burst_gap(self.gap);
+                }
+                // SAFETY: `Assembler` only yields 4-aligned addresses of words inside a
+                // span `in_range` bounded to the region claimed in `claim`, whose safety
+                // contract is that it is mapped and ours.
+                unsafe { core::ptr::write_volatile(at as *mut u32, value) };
+                recover();
+            }
+            Op::Merge(o) => {
+                // The one read a write causes, turned round on both sides like any other
+                // change of direction, so it never sits inside a run of stores.
+                burst_gap(self.gap);
+                self.burst.turned();
+                // SAFETY: as for a store: an aligned word inside the claimed region.
+                let mut bytes =
+                    unsafe { core::ptr::read_volatile(o.at as *const u32) }.to_le_bytes();
+                burst_gap(self.gap);
+                self.burst.turned();
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    if o.have & (1 << i) != 0 {
+                        *b = o.bytes[i];
+                    }
+                }
+                self.way = Way::Writing;
+                // SAFETY: as above.
+                unsafe { core::ptr::write_volatile(o.at as *mut u32, u32::from_le_bytes(bytes)) };
+                recover();
+            }
+        }
     }
 }
 
@@ -414,6 +478,100 @@ impl Iterator for WordPlan {
     }
 }
 
+/// A word only part of which has been written so far: its bytes, held in RAM until the
+/// rest arrive.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Open {
+    at: u32,
+    bytes: [u8; 4],
+    /// Bit `i` set: byte `i` is here.
+    have: u8,
+}
+
+/// What a write turns into on the bus.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Op {
+    /// A whole word, stored as is.
+    Store { at: u32, value: u32 },
+    /// A word that was never completed and has to go out anyway: its missing bytes come
+    /// from the part, by a read -- the only read a write ever causes.
+    Merge(Open),
+}
+
+/// Turns spans of bytes into whole-word stores, **without reading the part**.
+///
+/// # Why
+///
+/// A partial word used to be read from PSRAM, merged and written back, inside the run of
+/// writes. A read in a write run is the fault `docs/PSRAM.md` §4 describes -- the next
+/// store is mis-issued four bytes along -- and staging hits it all the time: USB hands
+/// over 62-byte frames, a DfuSe image starts 293 bytes into its file, an inflated block
+/// ends wherever the decoder stops. Read back from a Q1 (2026-10-05), an image staged over
+/// USB had a word wrong at every second frame boundary, 20,021 of them, and every install
+/// was refused with -112 although the digest taken as the bytes arrived was right.
+///
+/// So the bytes of a partial word wait here, and the next span -- which in staging is
+/// always the continuation -- completes the word, which then goes out whole. A word left
+/// incomplete is merged only when it has to be: another partial word arrives elsewhere,
+/// or the area is read or published ([`PsramArea::settle`]).
+#[derive(Default)]
+struct Assembler {
+    open: Option<Open>,
+}
+
+impl Assembler {
+    /// The stores for `data` at `addr`, in order, into `out`.
+    fn write(&mut self, addr: u32, data: &[u8], out: &mut dyn FnMut(Op)) {
+        for word in WordPlan::new(addr, data.len()) {
+            if word.whole() {
+                // Written whole: whatever was held for it is superseded.
+                if self.open.is_some_and(|o| o.at == word.at) {
+                    self.open = None;
+                }
+                let s = word.src;
+                out(Op::Store {
+                    at: word.at,
+                    value: u32::from_le_bytes([data[s], data[s + 1], data[s + 2], data[s + 3]]),
+                });
+                continue;
+            }
+            let mut o = match self.open {
+                Some(o) if o.at == word.at => o,
+                other => {
+                    if let Some(o) = other {
+                        out(Op::Merge(o));
+                    }
+                    Open {
+                        at: word.at,
+                        bytes: [0; 4],
+                        have: 0,
+                    }
+                }
+            };
+            for i in word.lo..word.hi {
+                o.bytes[i as usize] = data[word.src + (i - word.lo) as usize];
+                o.have |= 1 << i;
+            }
+            if o.have == 0xF {
+                self.open = None;
+                out(Op::Store {
+                    at: o.at,
+                    value: u32::from_le_bytes(o.bytes),
+                });
+            } else {
+                self.open = Some(o);
+            }
+        }
+    }
+
+    /// Whatever is held, merged now.
+    fn flush(&mut self, out: &mut dyn FnMut(Op)) {
+        if let Some(o) = self.open.take() {
+            out(Op::Merge(o));
+        }
+    }
+}
+
 impl StagingArea for PsramArea {
     type Error = OutOfRange;
 
@@ -429,43 +587,14 @@ impl StagingArea for PsramArea {
     /// firmware image read off a microSD card staged with one byte too many in the odd
     /// block and failed its signature check.
     ///
-    /// A partial word at either end is read, merged and written whole, so the bytes outside
-    /// the span keep their values.
+    /// A partial word is not read from the part: its bytes are held until the next span
+    /// completes it ([`Assembler`]), so a stream written in pieces of any size is all
+    /// stores. One never completed is merged by [`settle`](Self::settle).
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, data.len())?;
-        // A change of direction is a new burst, and `tCPH` wants CE# high between bursts.
-        if self.way == Way::Reading {
-            burst_gap(self.gap);
-            self.burst.turned();
-        }
-        self.way = Way::Writing;
-        for word in WordPlan::new(addr, data.len()) {
-            // CE# has to rise before `tCEM`, or the part stops refreshing itself.
-            if self.burst.word() {
-                burst_gap(self.gap);
-            }
-            let value = if word.whole() {
-                u32::from_le_bytes([
-                    data[word.src],
-                    data[word.src + 1],
-                    data[word.src + 2],
-                    data[word.src + 3],
-                ])
-            } else {
-                // SAFETY: `in_range` bounded the span, and a partial word at the edge lies
-                // in the same word as bytes that are in it, so the word is mapped.
-                let mut bytes =
-                    unsafe { core::ptr::read_volatile(word.at as *const u32) }.to_le_bytes();
-                bytes[word.lo as usize..word.hi as usize]
-                    .copy_from_slice(&data[word.src..word.src + word.len()]);
-                u32::from_le_bytes(bytes)
-            };
-            // SAFETY: `WordPlan` only yields 4-aligned addresses inside the span's words,
-            // and `in_range` bounded the span to the region claimed in `claim`, whose
-            // safety contract is that it is mapped and ours.
-            unsafe { core::ptr::write_volatile(word.at as *mut u32, value) };
-            recover();
-        }
+        let mut pending = core::mem::take(&mut self.pending);
+        pending.write(addr, data, &mut |op| self.issue(op));
+        self.pending = pending;
         Ok(())
     }
 
@@ -473,6 +602,8 @@ impl StagingArea for PsramArea {
     /// digesting a staged image a byte at a time is four times the bus traffic.
     fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<(), OutOfRange> {
         let addr = self.in_range(offset, out.len())?;
+        // What is read has to be what was written, held bytes included.
+        self.settle();
         // As in `write`: turning the bus round starts a new burst.
         if self.way == Way::Writing {
             burst_gap(self.gap);
@@ -504,6 +635,8 @@ impl StagingArea for PsramArea {
     }
 
     fn publish(&mut self, len: u32) -> Result<(), OutOfRange> {
+        // The image's last bytes may still be held: they go out before the marker does.
+        self.settle();
         // Turning the bus round starts a new burst, exactly as in `write`. This matters
         // now that `commit` reads the whole image back first: without it, the header --
         // the sixteen bytes the bootloader acts on -- would be the first write after a
@@ -730,6 +863,160 @@ mod tests {
                 assert_eq!(words, expect, "{addr:#x}+{len}");
             }
         }
+    }
+
+    /// Replays `ops` onto `mem` (a model of the part, base `base`); counts merges.
+    fn replay(mem: &mut [u8], base: u32, ops: &[Op]) -> usize {
+        let mut merges = 0;
+        for op in ops {
+            let (at, bytes, have) = match *op {
+                Op::Store { at, value } => (at, value.to_le_bytes(), 0xF),
+                Op::Merge(o) => {
+                    merges += 1;
+                    (o.at, o.bytes, o.have)
+                }
+            };
+            assert_eq!(at % 4, 0, "unaligned {at:#x}");
+            for i in 0..4 {
+                if have & (1 << i) != 0 {
+                    mem[(at - base) as usize + i] = bytes[i];
+                }
+            }
+        }
+        merges
+    }
+
+    /// A stream cut into pieces of any size -- 62-byte USB frames, a DfuSe body starting
+    /// 293 bytes in, inflated blocks ending anywhere -- goes out as **whole aligned 32-bit
+    /// words**, and the part is read only for the stream's own first or last word, when
+    /// the stream starts or ends mid-word. Never for a word inside it: a read in a run of
+    /// stores is what mis-issued the next store on a Q1 (`Assembler`).
+    #[test]
+    fn a_stream_in_pieces_of_any_size_is_whole_words_with_no_read_inside_it() {
+        let base = 0x9040_0000u32;
+        let data: Vec<u8> = (0..4099u32).map(|i| (i * 7 + 3) as u8).collect();
+        for start in 0u32..4 {
+            for piece in [1usize, 2, 3, 5, 61, 62, 293, 512, 4099] {
+                let mut a = Assembler::default();
+                let mut ops = Vec::new();
+                for (k, chunk) in data.chunks(piece).enumerate() {
+                    a.write(base + start + (k * piece) as u32, chunk, &mut |op| {
+                        ops.push(op)
+                    });
+                }
+                a.flush(&mut |op| ops.push(op));
+                let first = (base + start) & !3;
+                let last = (base + start + data.len() as u32 - 1) & !3;
+                for op in &ops {
+                    match op {
+                        Op::Store { at, .. } => assert_eq!(at % 4, 0, "unaligned store"),
+                        Op::Merge(o) => assert!(
+                            o.at == first || o.at == last,
+                            "start {start}, pieces of {piece}: a read inside the stream at {:#x}",
+                            o.at
+                        ),
+                    }
+                }
+                let mut mem = vec![0xEEu8; data.len() + 8];
+                replay(&mut mem, base, &ops);
+                assert_eq!(
+                    &mem[start as usize..start as usize + data.len()],
+                    &data[..],
+                    "start {start}, pieces of {piece}"
+                );
+                // Bytes outside the stream keep their values.
+                assert!(mem[..start as usize].iter().all(|&b| b == 0xEE));
+                assert!(
+                    mem[start as usize + data.len()..]
+                        .iter()
+                        .all(|&b| b == 0xEE)
+                );
+            }
+        }
+    }
+
+    /// The case that failed on a Q1: an image arriving in 62-byte USB frames from an
+    /// aligned start. Every word is stored whole and **nothing is read at all**.
+    #[test]
+    fn usb_frames_of_an_aligned_image_never_read_the_part() {
+        let data: Vec<u8> = (0..1_432_064u32).map(|i| (i ^ (i >> 8)) as u8).collect();
+        let mut a = Assembler::default();
+        let mut stores = 0usize;
+        let mut reads = 0usize;
+        for (k, chunk) in data.chunks(62).enumerate() {
+            a.write(0x9040_0000 + (k * 62) as u32, chunk, &mut |op| match op {
+                Op::Store { .. } => stores += 1,
+                Op::Merge(_) => reads += 1,
+            });
+        }
+        a.flush(&mut |_| reads += 1);
+        assert_eq!(reads, 0);
+        assert_eq!(stores, data.len() / 4);
+    }
+
+    /// Every access this module makes to the part is a 32-bit word: no pointer to PSRAM
+    /// of any narrower type, and no bulk copy (`memcpy` and friends may store bytes).
+    /// Checked on the source, because the accesses themselves cannot run on a host.
+    #[test]
+    fn this_module_only_touches_the_part_in_32_bit_words() {
+        let src = include_str!("psram.rs");
+        // The code that runs on the device: everything before the tests.
+        let src = &src[..src
+            .find(["#[cfg(", "test)]"].concat().as_str())
+            .unwrap_or(src.len())];
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Assembled from pieces so this test does not find itself.
+        for banned in [
+            ["*mut ", "u8"].concat(),
+            ["*mut ", "u16"].concat(),
+            ["*const ", "u8"].concat(),
+            ["*const ", "u16"].concat(),
+            ["copy_", "nonoverlapping"].concat(),
+            ["write_", "bytes"].concat(),
+            ["ptr::", "copy("].concat(),
+        ] {
+            assert!(
+                !code.contains(&banned),
+                "psram.rs uses `{banned}` on the part"
+            );
+        }
+        // Not vacuous: the stores are there to be checked.
+        assert!(code.contains("write_volatile(at as *mut u32"));
+        for (i, l) in code.lines().enumerate() {
+            for call in ["write_volatile(", "read_volatile("] {
+                if let Some(at) = l.find(call) {
+                    let rest = &l[at..];
+                    assert!(
+                        rest.contains("u32") || rest.contains("at.add(") || rest.contains("(at,"),
+                        "line {}: a volatile access that is not plainly a 32-bit word: {l}",
+                        i + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// A partial word written elsewhere before the held one is completed merges the held
+    /// one, keeping exactly its own bytes.
+    #[test]
+    fn an_abandoned_partial_word_is_merged_with_only_its_own_bytes() {
+        let mut a = Assembler::default();
+        let mut ops = Vec::new();
+        a.write(0x1001, &[0xAA, 0xBB], &mut |op| ops.push(op));
+        assert!(ops.is_empty(), "held, not written");
+        a.write(0x2002, &[0xCC], &mut |op| ops.push(op));
+        assert_eq!(
+            ops,
+            [Op::Merge(Open {
+                at: 0x1000,
+                bytes: [0, 0xAA, 0xBB, 0],
+                have: 0b0110
+            })]
+        );
     }
 
     /// Only the words at the ends of a span can be partial, and only they need a merge.
