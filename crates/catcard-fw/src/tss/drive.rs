@@ -139,22 +139,24 @@ fn compare(ui: &mut Ui<'_>, s: &mut Session, who: &str) -> bool {
         return false;
     };
     let words = code.words();
-    let mut pairs: heapless::Vec<Line, 4> = heapless::Vec::new();
-    for (i, w) in words.chunks(2).enumerate() {
+    // Numbered, two a line on the Q1; one a line on the mono boards, whose screen is too
+    // narrow for two.
+    #[cfg(feature = "board-q1")]
+    const PER_LINE: usize = 2;
+    #[cfg(not(feature = "board-q1"))]
+    const PER_LINE: usize = 1;
+    let mut lines: heapless::Vec<Line, 8> = heapless::Vec::new();
+    for (i, w) in words.chunks(PER_LINE).enumerate() {
         let mut l = Line::new();
-        let _ = write!(
-            l,
-            "{}. {}  {}. {}",
-            2 * i + 1,
-            w[0],
-            2 * i + 2,
-            w.get(1).unwrap_or(&"")
-        );
-        let _ = pairs.push(l);
+        for (j, word) in w.iter().enumerate() {
+            let sep = if j == 0 { "" } else { "  " };
+            let _ = write!(l, "{sep}{}. {word}", PER_LINE * i + j + 1);
+        }
+        let _ = lines.push(l);
     }
-    let mut rows: heapless::Vec<Row<'_>, 8> = heapless::Vec::new();
+    let mut rows: heapless::Vec<Row<'_>, 11> = heapless::Vec::new();
     let _ = rows.push(Row::title("Session code"));
-    for l in pairs.iter() {
+    for l in lines.iter() {
         let _ = rows.push(Row::body(l.as_str()));
     }
     // The devices reach this one at a time, as the card comes round: the first cannot
@@ -166,7 +168,8 @@ fn compare(ui: &mut Ui<'_>, s: &mut Session, who: &str) -> bool {
             "The first device to show these words: write them down. Every other device \
              must show the same words, in this order, when the card reaches it.",
         )
-        .small(),
+        .small()
+        .wrapped(),
     );
     loop {
         let _ = menu::show_doc(ui, &rows, false, false);
@@ -241,30 +244,26 @@ fn wait_for_files(
         .or_else(|| from.first().copied())
         .unwrap_or(1);
     let step = wanted.first().map_or(0, |w| w.0) + 1;
+    // Where the files go first, so it is what a small screen shows before anything else.
     let mut note: heapless::String<160> = heapless::String::new();
     let _ = write!(note, "Step {step} of {}. ", s.rounds() + 1);
-    match storage {
-        Storage::Sd => {
-            let _ = write!(note, "Pass the card to member {next}");
-        }
-        Storage::Vdisk => {
-            let _ = write!(
-                note,
-                "Copy the TSS folder between this Virtual Disk and member {next}'s"
-            );
-        }
-    }
+    let _ = match storage {
+        Storage::Sd => write!(
+            note,
+            "Pass the card to member {next}, then put it back here."
+        ),
+        Storage::Vdisk => write!(
+            note,
+            "Copy the TSS folder between this Virtual Disk and member {next}'s, then go on here."
+        ),
+    };
     if from.len() > 1 {
-        let _ = note.push_str(" (waiting for members");
+        let _ = note.push_str(" Waiting for members");
         for m in from.iter() {
             let _ = write!(note, " {m}");
         }
-        let _ = note.push(')');
+        let _ = note.push('.');
     }
-    let _ = note.push_str(match storage {
-        Storage::Sd => ", then put it back here.",
-        Storage::Vdisk => ", then go on here.",
-    });
     if !refused.is_empty() {
         let _ = write!(note, " Note: {refused}.");
     }
@@ -308,7 +307,10 @@ pub(super) fn pass_on(ui: &mut Ui<'_>, storage: Storage, next: u8) {
              showing a step."
         ),
     };
-    let rows = [Row::title("Done here"), Row::body(note.as_str()).small()];
+    let rows = [
+        Row::title("Done here"),
+        Row::body(note.as_str()).small().wrapped(),
+    ];
     let _ = menu::show_doc(ui, &rows, false, false);
 }
 

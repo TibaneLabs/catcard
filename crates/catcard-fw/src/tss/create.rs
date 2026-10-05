@@ -134,22 +134,26 @@ fn explain(ui: &mut Ui<'_>) {
              others'. Without a card, the files can go between the devices' Virtual \
              Disks instead.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "Member 1 starts the session. The others join it, each with its own \
              member number.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "When every member is in, each device shows the same eight words. Check \
              they match on every device before going on.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "Then pass the files round as the screen says until every device has its \
              share. Keep every device on this screen until then.",
         )
-        .small(),
+        .small()
+        .wrapped(),
     ];
     let _ = menu::show_doc(ui, &rows, false, false);
 }

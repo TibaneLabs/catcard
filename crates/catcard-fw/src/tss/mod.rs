@@ -129,28 +129,33 @@ fn about(ui: &mut Ui<'_>) {
             "A wallet whose key is held in shares by several CatCards. Any t of the n \
              shares sign together; the key is never put back together to do it.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "Create together: n devices make a new key between them. No device ever \
              holds the whole key.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "Split this wallet: this device splits its words into n share files. Any t \
              of them can sign, and any t give the words back.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "This device keeps its share in its settings. To sign, two members also \
              need a setup made together, kept on a card or the Virtual Disk; when it is \
              gone, Rebuild setup makes it again with them.",
         )
-        .small(),
+        .small()
+        .wrapped(),
         Row::body(
             "No Taproot: a threshold key here signs ECDSA, so the addresses are native \
              SegWit, nested SegWit or legacy.",
         )
-        .small(),
+        .small()
+        .wrapped(),
     ];
     let _ = menu::show_doc(ui, &rows, false, false);
 }

@@ -7308,8 +7308,10 @@ pub(crate) fn pick_row(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) 
     use catcard_ui::scroll::Line as DLine;
     let mut lines: heapless::Vec<DLine, 20> = heapless::Vec::new();
     let _ = lines.push(DLine::title(head));
+    // Wrapped: a note that says where to go next must not lose its end at the edge of
+    // the screen. Up from the first row brings back whatever scrolled off above it.
     if !note.is_empty() {
-        let _ = lines.push(DLine::body(note).small());
+        let _ = lines.push(DLine::body(note).small().wrapped());
     }
     for (i, s) in items.iter().enumerate() {
         let _ = lines.push(DLine::item(s, i as u32));
