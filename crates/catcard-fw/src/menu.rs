@@ -7530,8 +7530,8 @@ pub(crate) struct Toggle<'a> {
 }
 
 /// Most rows a [`toggle_list`] takes. Every chain this firmware knows fits, with room.
-// Generic, with one caller today -- the host-wallet chain picker, which only a
-// multichain build has. Kept in every build rather than gated to that one caller.
+// Generic: the host-wallet chain picker (multichain builds) and TSS Rebuild setup's
+// "who is here" use it; a Bitcoin-only mk3 has neither.
 #[cfg_attr(not(feature = "multichain"), allow(dead_code))]
 pub(crate) const TOGGLE_MAX: usize = 24;
 
@@ -7543,8 +7543,8 @@ pub(crate) const TOGGLE_MAX: usize = 24;
 /// person last set them. Each row shows its state as a box at its right edge
 /// ([`catcard_ui::scroll::Line::toggled`]), in the same list, faces and marks every other
 /// menu here draws.
-// Generic, with one caller today -- the host-wallet chain picker, which only a
-// multichain build has. Kept in every build rather than gated to that one caller.
+// Generic: the host-wallet chain picker (multichain builds) and TSS Rebuild setup's
+// "who is here" use it; a Bitcoin-only mk3 has neither.
 #[cfg_attr(not(feature = "multichain"), allow(dead_code))]
 pub(crate) fn toggle_list(
     ui: &mut Ui<'_>,

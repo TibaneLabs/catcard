@@ -136,18 +136,22 @@ governs signing and restoring.
 
 Signing needs, between every two signers, the pairwise OT state their devices set up
 together, and a member keeps its own in its pair cache -- which a lost card, a power-off
-of the Virtual Disk or an import leaves it without. Two members make their pair again:
+of the Virtual Disk or an import leaves it without. The members present make every pair
+among them again, **in one session** (2026-10-05; it was one pair a session before):
 
-1. On each of the two: the kept wallet → *Rebuild setup*, the medium, then the other member
-   (or *Every missing member*, which takes them one after another). The device first reads
-   its cache from that medium, if there, and lists who it has no pair with.
-2. The lower member number starts a pair-setup session and writes its invitation; the
-   other finds it on the medium.
-3. Rounds 0 and 1 as in every session (commitments, identities, the session code compared on
-   both screens), then rounds 2 and 3: the base-OT exchange both ways (tsslib
-   `PairSetupParty`), unicast, encrypted and signed.
-4. Each installs its new pair, writes a new cache with every pair it holds, and saves the
-   new digest in its settings. No share, no other pair and no address changes.
+1. On each: the kept wallet → *Rebuild setup*, the medium. The device first reads its cache
+   from that medium, if there, and says who it has no pair with.
+2. One member chooses **Start** and ticks who is here -- every other member to begin with
+   (`menu::toggle_list`); its invitation names the wallet and that set. The others choose
+   **Join**: each takes its member number from its own share, so there is nothing to pick.
+3. Rounds 0 and 1 as in every session (commitments, identities, one session code compared
+   on every screen), then rounds 2 and 3: for **every pair** among them, the base-OT
+   exchange both ways (tsslib `PairSetupParty`, one lane per pair,
+   `Session::pairs_setup`), unicast, encrypted and signed, each round's messages for every
+   pair in the same pass of the card.
+4. Each installs its new pairs, writes its cache once, and saves the new digest in its
+   settings. No share and no address changes. With one card, three members take about
+   9 insertions where pair-by-pair took about 12.
 
 Signing (stage 2) does the same for the pairs it lacks before the signing rounds:
 `catcard_tss` refuses a signing session whose member lacks a pair with another signer
@@ -271,10 +275,9 @@ every session kind over either (`tss::drive::Medium`).
   not write is said ("set it up again to sign") and the core kept naming none. The session
   is in memory only: leaving the screen abandons it.
 - **Rebuild setup.** See the flow above. The invitation of a pair setup names the wallet
-  (the first 8 bytes of its id) and the two members, so the second device finds the right
-  session among several; it is not trusted, the session code covers the whole wallet id.
-  After each pair the cache and the record are written again, so a pair made is kept even
-  if the next is not.
+  (the first 8 bytes of its id) and the members taking part (`members 1 2 3`), so a joining
+  device finds the right session among several; it is not trusted, the session code covers
+  the whole wallet id and the set.
 - **Split this wallet.** The words of the wallet in force (refused with a passphrase: the
   shares carry the words alone), n and t (any `2 <= t <= n` the memory allows), native
   SegWit / nested SegWit / legacy (and "Why not Taproot?"), the account number, the
@@ -429,7 +432,8 @@ cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject create --as 2,3
 cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject create --start 3 2 --as 1,2
 
 # Rebuild setup between the device (member 1) and member 2 kept here:
-cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject pair --as 2 --with 1
+# Rebuild setup among members 1 (the device, which started it), 2 and 3 kept here:
+cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject pair --as 2 --with 1,3
 
 cargo run -p catcard-tss-member -- --dir /Volumes/CARD show
 ```

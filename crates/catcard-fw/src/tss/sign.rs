@@ -22,14 +22,14 @@
 //! its own, gathered from every chip for this session ([`Fresh::gather_own`]).
 
 use alloc::vec::Vec;
-use catcard_tss::{EcdsaSignature, SESSION_ID_LEN, Session, ShareRecord, SignMode, SignRequest};
+use catcard_tss::{EcdsaSignature, Session, ShareRecord, SignMode, SignRequest};
 use catcard_wallet::psbtview;
 use catcard_wallet::signer::{self, Digest, Keys};
 use core::fmt::Write as _;
 use outscript::psbt::Psbt;
 
 use super::card::{self, Invitation};
-use super::drive::{self, Medium, Way};
+use super::drive::{self, Way};
 use super::rand::{Drbg, Fresh};
 use super::{Room, Work, describe, rebuild, say, store};
 use crate::menu::{self, Line, Storage};
@@ -72,18 +72,17 @@ pub(crate) fn together(
             let id = catcard_tss::new_session_id(&mut Drbg(ui.drbg)).ok()?;
             let invite = Invitation::Sign {
                 wallet,
-                signers: mask(&signers),
+                signers: drive::set_of(&signers),
             };
-            #[cfg(not(feature = "board-q1"))]
-            let _ = invite;
-            let medium = match way {
-                Way::Sd => Medium::Sd,
-                #[cfg(feature = "board-q1")]
-                Way::Qr => Medium::Qr(super::qr::Exchange::new(id, Some(invite))),
-            };
-            (id, signers, true, medium)
+            (id, signers, true, drive::start_medium(way, id, invite))
         }
-        _ => join(ui, way, wallet, me)?,
+        _ => {
+            let (id, set, medium) = drive::join(ui, HEAD, way, me, |inv| match inv {
+                Invitation::Sign { wallet: w, signers } if w == wallet => Some(signers),
+                _ => None,
+            })?;
+            (id, drive::members_of(set), false, medium)
+        }
     };
 
     let missing = record.missing_pairs(&signers);
@@ -135,7 +134,7 @@ pub(crate) fn together(
     );
     let invite = start.then_some(Invitation::Sign {
         wallet,
-        signers: mask(&signers),
+        signers: drive::set_of(&signers),
     });
     if !drive::run(ui, &mut medium, &mut session, invite) {
         return None;
@@ -213,82 +212,6 @@ fn choose_signers(ui: &mut Ui<'_>, record: &ShareRecord) -> Option<Vec<u8>> {
     }
     chosen.sort_unstable();
     Some(chosen)
-}
-
-fn mask(signers: &[u8]) -> u16 {
-    signers.iter().fold(0u16, |m, &s| m | (1 << s))
-}
-
-fn members_of(mask: u16) -> Vec<u8> {
-    (1..=catcard_tss::MAX_MEMBERS)
-        .filter(|m| mask & (1 << m) != 0)
-        .collect()
-}
-
-/// Join the session another member started for this wallet, with this member among its
-/// signers: on the card, or by its first code.
-fn join(
-    ui: &mut Ui<'_>,
-    way: Way,
-    wallet: [u8; 8],
-    me: u8,
-) -> Option<([u8; SESSION_ID_LEN], Vec<u8>, bool, Medium)> {
-    #[cfg(feature = "board-q1")]
-    if way == Way::Qr {
-        let mut found = match super::qr::find(ui, HEAD) {
-            Ok(Some(f)) => f,
-            Ok(None) => return None,
-            Err(why) => {
-                say(ui, HEAD, "not read:", why);
-                return None;
-            }
-        };
-        let Invitation::Sign { wallet: w, signers } = found.invite else {
-            say(ui, HEAD, "not a signing", "session's code");
-            return None;
-        };
-        if w != wallet || signers & (1 << me) == 0 {
-            say(ui, HEAD, "not a session this", "member signs in");
-            return None;
-        }
-        let medium = Medium::Qr(found.exchange(me));
-        return Some((found.id, members_of(signers), false, medium));
-    }
-    let _ = way;
-    card::wait(ui.panel, HEAD, Storage::Sd, false);
-    let found = match card::sessions(Storage::Sd) {
-        Ok(f) => f,
-        Err(why) => {
-            say(ui, HEAD, "cannot read the files:", why);
-            return None;
-        }
-    };
-    let mine: heapless::Vec<([u8; SESSION_ID_LEN], u16), { card::MAX_SESSIONS }> = found
-        .iter()
-        .filter_map(|s| match s.invite {
-            Invitation::Sign { wallet: w, signers }
-                if w == wallet && signers & (1 << me) != 0 && s.taken & (1 << me) == 0 =>
-            {
-                Some((s.id, signers))
-            }
-            _ => None,
-        })
-        .collect();
-    let (id, signers) = match mine.len() {
-        0 => {
-            say(ui, HEAD, "no signing session", "for this member here");
-            return None;
-        }
-        1 => mine[0],
-        _ => {
-            let labels: heapless::Vec<heapless::String<8>, { card::MAX_SESSIONS }> =
-                mine.iter().map(|(id, _)| card::short_id(id)).collect();
-            let rows: heapless::Vec<&str, { card::MAX_SESSIONS }> =
-                labels.iter().map(|l| l.as_str()).collect();
-            mine[menu::pick_row(ui, HEAD, "which session?", &rows)?]
-        }
-    };
-    Some((id, members_of(signers), false, Medium::Sd))
 }
 
 /// Sign a PSBT with the TSS wallet in force: reviewed here exactly as the seed's are --

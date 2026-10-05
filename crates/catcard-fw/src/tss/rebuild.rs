@@ -1,5 +1,5 @@
-//! Rebuild setup: make this member's pairs again with the other members, one at a time
-//! (docs/TSS.md, "Where things live").
+//! Rebuild setup: make this member's pairs again with the other members present, all in
+//! one session (docs/TSS.md, "Where things live").
 //!
 //! Signing needs, between every two signers, the pairwise state their two devices set up
 //! together. A member keeps its own in a pair cache on a card or the Virtual Disk, so it
@@ -8,23 +8,22 @@
 //! again in a short session of their own, which changes no share, no address and no other
 //! pair.
 //!
-//! The owner picks another member -- or every one this device has no pair with -- and
-//! that member's device runs the same action and picks this one. Of the two, the lower
-//! member number starts the session and writes its invitation; the other finds it. The
-//! session is the same as any other (`super::drive`): commitments, identities, a session
-//! code compared on both screens, signed and encrypted messages, over the card or the
-//! Virtual Disk. After each pair the cache is written again and the record's digest of it
-//! saved, so a pair that is made is kept even if the next one is not.
+//! One member starts it and ticks who is here -- every other member to begin with; the
+//! others join, each with the member number its share already says. Every pair among
+//! them is made again in the one session (`catcard_tss::Session::pairs_setup`): each its
+//! own two-party base-OT exchange, all under one set of introductions and one session
+//! code, every pair's messages for a round in the same pass of the card or code. At the
+//! end each member installs its new pairs and writes its cache once.
 
 use alloc::vec::Vec;
-use catcard_tss::{CacheKey, CacheRefused, Error, SESSION_ID_LEN, Session, ShareRecord};
+use catcard_tss::{CacheKey, CacheRefused, Error, Session, ShareRecord};
 use core::fmt::Write as _;
 
 use super::card::{self, Invitation};
-use super::drive::{Medium, Way};
+use super::drive::Way;
 use super::rand::{Drbg, Fresh};
 use super::store::{self, Kept};
-use super::{Room, Work, approve, describe, drive, keep, say};
+use super::{Room, Work, describe, drive, keep, say};
 use crate::menu::{self, Line, Storage};
 use crate::ui::Ui;
 
@@ -145,209 +144,135 @@ pub(super) fn rebuild(
         Err(why) => say(ui, HEAD, "no setup read:", why),
     }
 
-    loop {
-        let lacking = missing(&record);
-        let mut note: heapless::String<64> = heapless::String::new();
-        if lacking.is_empty() {
-            let _ = note.push_str("set up with every member");
-        } else {
-            let _ = note.push_str("missing with ");
-            members_text(&mut note, &lacking);
-        }
-        const ALL: &str = "Every missing member";
-        let mut labels: heapless::Vec<Line, 9> = heapless::Vec::new();
-        let mut peers: heapless::Vec<u8, 9> = heapless::Vec::new();
-        for m in (1..=n).filter(|&m| m != record.member()) {
-            let mut l = Line::new();
-            let state = if lacking.contains(&m) {
-                "missing"
-            } else {
-                "redo"
-            };
-            let _ = write!(l, "With member {m} ({state})");
-            let _ = labels.push(l);
-            let _ = peers.push(m);
-        }
-        let mut rows: heapless::Vec<&str, 10> = heapless::Vec::new();
-        if !lacking.is_empty() {
-            let _ = rows.push(ALL);
-        }
-        for l in labels.iter() {
-            let _ = rows.push(l.as_str());
-        }
-        let Some(pick) = menu::pick_row(ui, HEAD, &note, &rows) else {
-            return;
-        };
-        let chosen: Vec<u8> = if rows[pick] == ALL {
-            lacking
-        } else {
-            let at = pick - usize::from(rows[0] == ALL);
-            alloc::vec![peers[at]]
-        };
-        for peer in chosen {
-            if !with_peer(gate, login, ui, way, &mut record, peer, pool) {
-                break;
-            }
-        }
-    }
-}
-
-/// One pair setup with `peer`, then the cache written and the record saved. Whether it
-/// was all done (already said, either way).
-#[allow(clippy::too_many_arguments)]
-#[inline(never)]
-fn with_peer(
-    gate: &catcard_callgate::Callgate,
-    login: &mut catcard_pin::Login,
-    ui: &mut Ui<'_>,
-    way: Way,
-    record: &mut ShareRecord,
-    peer: u8,
-    pool: &mut catcard_entropy::EntropyPool,
-) -> bool {
     let me = record.member();
-    let (a, b) = (me.min(peer), me.max(peer));
-    let wallet = record.wallet_id();
-    let mut short = [0u8; 8];
-    short.copy_from_slice(&wallet[..8]);
-    let invitation = Invitation::Pair {
-        wallet: short,
-        a,
-        b,
+    let lacking = missing(&record);
+    let mut note: heapless::String<64> = heapless::String::new();
+    if lacking.is_empty() {
+        let _ = note.push_str("set up with every member");
+    } else {
+        let _ = note.push_str("missing with ");
+        members_text(&mut note, &lacking);
+    }
+    let mut wallet = [0u8; 8];
+    wallet.copy_from_slice(&record.wallet_id()[..8]);
+    let (id, members, start, mut medium) = match menu::pick_row(
+        ui,
+        HEAD,
+        &note,
+        &["Start: choose who is here", "Join a session"],
+    ) {
+        Some(0) => {
+            let Some(members) = choose_members(ui, &record) else {
+                return;
+            };
+            let Some(id) = catcard_tss::new_session_id(&mut Drbg(ui.drbg)).ok() else {
+                return;
+            };
+            let invite = Invitation::Pairs {
+                wallet,
+                members: drive::set_of(&members),
+            };
+            (id, members, true, drive::start_medium(way, id, invite))
+        }
+        Some(_) => {
+            let Some((id, set, medium)) = drive::join(ui, HEAD, way, me, |inv| match inv {
+                Invitation::Pairs { wallet: w, members } if w == wallet => Some(members),
+                _ => None,
+            }) else {
+                return;
+            };
+            (id, drive::members_of(set), false, medium)
+        }
+        None => return,
     };
-    let Some((id, start, mut medium)) = find_or_start(ui, way, invitation, me, peer) else {
-        return false;
-    };
-    // The pair's new OT seeds are secret: gathered from every chip as for a new wallet.
+
+    // The pairs' new OT seeds are secret: gathered from every chip as for a new wallet.
     let Some(mut fresh) = Fresh::gather(gate, ui, pool) else {
-        return false;
+        return;
     };
     let mut busy = Some(menu::blocking_screen(
         ui.panel,
         HEAD,
         "making this member's keys",
     ));
-    let made = crate::keywork::run(|kw| Session::pair_setup(id, record, peer, &mut fresh, kw));
+    let made =
+        crate::keywork::run(|kw| Session::pairs_setup(id, &record, &members, &mut fresh, kw));
     drop(fresh);
     busy.take();
     let mut session = match made {
         Ok(s) => s,
-        Err(e) => {
-            say(ui, HEAD, "cannot start:", describe(&e));
-            return false;
-        }
+        Err(e) => return say(ui, HEAD, "cannot start:", describe(&e)),
     };
     crate::catlog!(
-        "tss: pair setup {} member {} with {}",
+        "tss: pair setup {} member {} of {} members",
         card::short_id(&id).as_str(),
         me,
-        peer
+        members.len()
     );
-    if !drive::run(ui, &mut medium, &mut session, start.then_some(invitation)) {
-        return false;
+    let invite = start.then_some(Invitation::Pairs {
+        wallet,
+        members: drive::set_of(&members),
+    });
+    if !drive::run(ui, &mut medium, &mut session, invite) {
+        return;
     }
-    let installed = crate::keywork::run(|kw| session.install_pair(record, kw));
+    let installed = crate::keywork::run(|kw| session.install_pairs(&mut record, kw));
     drop(session);
-    if let Err(e) = installed {
-        say(ui, HEAD, "not installed:", describe(&e));
-        return false;
-    }
-    let kept = keep(gate, login, ui, way.files(), record, HEAD);
-    if way == Way::Sd {
-        drive::pass_on(ui, peer);
+    let peers = match installed {
+        Ok(p) => p,
+        Err(e) => return say(ui, HEAD, "not installed:", describe(&e)),
+    };
+    let kept = keep(gate, login, ui, storage, &mut record, HEAD);
+    if way == Way::Sd
+        && let Some(&next) = members.iter().find(|&&m| m > me).or(members.first())
+    {
+        drive::pass_on(ui, next);
     }
     match kept {
         Ok(_) => {
-            let mut a: Line = Line::new();
-            let _ = write!(a, "set up with member {peer}");
+            let mut a: heapless::String<64> = heapless::String::new();
+            let _ = a.push_str("set up with ");
+            members_text(&mut a, &peers);
             say(ui, HEAD, &a, "and kept");
-            true
         }
-        Err(why) => {
-            say(ui, HEAD, why, "set it up again");
-            false
-        }
+        Err(why) => say(ui, HEAD, why, "set it up again"),
     }
 }
 
-/// The session to run with `peer`: the lower member starts one, the higher finds it on
-/// the card, or scans the lower's first code. `(id, whether this device starts it, the
-/// medium)`.
-#[inline(never)]
-fn find_or_start(
-    ui: &mut Ui<'_>,
-    way: Way,
-    invitation: Invitation,
-    me: u8,
-    peer: u8,
-) -> Option<([u8; SESSION_ID_LEN], bool, Medium)> {
-    if me < peer {
-        let id = catcard_tss::new_session_id(&mut Drbg(ui.drbg)).ok()?;
-        let mut main: Line = Line::new();
-        let _ = write!(main, "Session {}", card::short_id(&id));
-        let mut a: Line = Line::new();
-        let _ = write!(a, "With member {peer}, who picks member {me} there.");
-        if !approve(
-            ui,
-            "Start the setup?",
-            &main,
-            &[a.as_str(), "This device starts it."],
-            "start",
-            "back",
-        ) {
-            return None;
-        }
-        let medium = match way {
-            Way::Sd => Medium::Sd,
-            #[cfg(feature = "board-q1")]
-            Way::Qr => Medium::Qr(super::qr::Exchange::new(id, Some(invitation))),
-        };
-        return Some((id, true, medium));
-    }
-    #[cfg(feature = "board-q1")]
-    if way == Way::Qr {
-        let mut found = match super::qr::find(ui, HEAD) {
-            Ok(Some(f)) => f,
-            Ok(None) => return None,
-            Err(why) => {
-                say(ui, HEAD, "not read:", why);
-                return None;
-            }
-        };
-        if found.invite != invitation {
-            say(ui, HEAD, "not this pair's", "setup code");
-            return None;
-        }
-        return Some((found.id, false, Medium::Qr(found.exchange(me))));
-    }
-    let storage = Storage::Sd;
+/// Who takes part: this member and those ticked -- every other member to begin with,
+/// untick the ones not here. At least one other.
+fn choose_members(ui: &mut Ui<'_>, record: &ShareRecord) -> Option<Vec<u8>> {
+    let me = record.member();
+    let others: heapless::Vec<u8, 9> = (1..=record.n()).filter(|&m| m != me).collect();
+    let labels: heapless::Vec<Line, 9> = others
+        .iter()
+        .map(|m| {
+            let mut l = Line::new();
+            let _ = write!(l, "Member {m}");
+            l
+        })
+        .collect();
+    let mut rows: heapless::Vec<menu::Toggle<'_>, 9> = labels
+        .iter()
+        .map(|l| menu::Toggle {
+            line: catcard_ui::scroll::Line::body(l.as_str()),
+            on: true,
+        })
+        .collect();
     loop {
-        card::wait(ui.panel, HEAD, storage, false);
-        let found = card::sessions(storage).unwrap_or_default();
-        let ids: heapless::Vec<[u8; SESSION_ID_LEN], { card::MAX_SESSIONS }> = found
-            .iter()
-            .filter(|s| s.invite == invitation && s.taken & (1 << me) == 0)
-            .map(|s| s.id)
-            .collect();
-        if ids.len() == 1 {
-            return Some((ids[0], false, Medium::Sd));
-        }
-        if ids.len() > 1 {
-            let labels: heapless::Vec<heapless::String<8>, { card::MAX_SESSIONS }> =
-                ids.iter().map(card::short_id).collect();
-            let rows: heapless::Vec<&str, { card::MAX_SESSIONS }> =
-                labels.iter().map(|l| l.as_str()).collect();
-            let pick = menu::pick_row(ui, HEAD, "which session? (on its screen)", &rows)?;
-            return Some((ids[pick], false, Medium::Sd));
-        }
-        let mut wait: heapless::String<96> = heapless::String::new();
-        let _ = write!(
-            wait,
-            "Member {peer} starts it: run Rebuild setup there, pick member {me}, then bring the files here."
+        menu::toggle_list(ui, HEAD, "who is here", &mut rows, "Start")?;
+        let mut chosen: Vec<u8> = alloc::vec![me];
+        chosen.extend(
+            others
+                .iter()
+                .zip(rows.iter())
+                .filter(|(_, r)| r.on)
+                .map(|(&m, _)| m),
         );
-        match menu::pick_row(ui, HEAD, &wait, &["Look again", "Back"]) {
-            Some(0) => continue,
-            _ => return None,
+        if chosen.len() >= 2 {
+            chosen.sort_unstable();
+            return Some(chosen);
         }
+        say(ui, HEAD, "choose at least one", "other member");
     }
 }

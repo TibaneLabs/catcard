@@ -71,6 +71,96 @@ pub(super) fn pick_way(ui: &mut Ui<'_>, head: &str) -> Option<Way> {
     }
 }
 
+/// Join a session another member started for a wallet this member is in: `wanted` reads
+/// an invitation and gives back the set of members it names (bit `m` for member `m`)
+/// when it is one for this member to join. From the card, choosing among several, or by
+/// the starting member's first code. The session's id, its member set, and the medium
+/// to run it over; `None` once the reason has been said.
+pub(super) fn join(
+    ui: &mut Ui<'_>,
+    head: &str,
+    way: Way,
+    me: u8,
+    wanted: impl Fn(Invitation) -> Option<u16>,
+) -> Option<([u8; catcard_tss::SESSION_ID_LEN], u16, Medium)> {
+    #[cfg(feature = "board-q1")]
+    if way == Way::Qr {
+        let mut found = match super::qr::find(ui, head) {
+            Ok(Some(f)) => f,
+            Ok(None) => return None,
+            Err(why) => {
+                super::say(ui, head, "not read:", why);
+                return None;
+            }
+        };
+        let Some(set) = wanted(found.invite).filter(|set| set & (1 << me) != 0) else {
+            super::say(ui, head, "not a session for", "this member");
+            return None;
+        };
+        let medium = Medium::Qr(found.exchange(me));
+        return Some((found.id, set, medium));
+    }
+    let _ = way;
+    card::wait(ui.panel, head, Storage::Sd, false);
+    let found = match card::sessions(Storage::Sd) {
+        Ok(f) => f,
+        Err(why) => {
+            super::say(ui, head, "cannot read the files:", why);
+            return None;
+        }
+    };
+    let mine: heapless::Vec<([u8; catcard_tss::SESSION_ID_LEN], u16), { card::MAX_SESSIONS }> =
+        found
+            .iter()
+            .filter(|s| s.taken & (1 << me) == 0)
+            .filter_map(|s| wanted(s.invite).map(|set| (s.id, set)))
+            .filter(|(_, set)| set & (1 << me) != 0)
+            .collect();
+    let (id, set) = match mine.len() {
+        0 => {
+            super::say(ui, head, "no session here", "for this member");
+            return None;
+        }
+        1 => mine[0],
+        _ => {
+            let labels: heapless::Vec<heapless::String<8>, { card::MAX_SESSIONS }> =
+                mine.iter().map(|(id, _)| card::short_id(id)).collect();
+            let rows: heapless::Vec<&str, { card::MAX_SESSIONS }> =
+                labels.iter().map(|l| l.as_str()).collect();
+            mine[menu::pick_row(ui, head, "which session?", &rows)?]
+        }
+    };
+    Some((id, set, Medium::Sd))
+}
+
+/// The members of a set, ascending (bit `m` for member `m`).
+pub(super) fn members_of(set: u16) -> Vec<u8> {
+    (1..=catcard_tss::MAX_MEMBERS)
+        .filter(|m| set & (1 << m) != 0)
+        .collect()
+}
+
+/// A set of members as bits.
+pub(super) fn set_of(members: &[u8]) -> u16 {
+    members.iter().fold(0u16, |m, &s| m | (1 << s))
+}
+
+/// The medium for a session this device starts, with its invitation.
+pub(super) fn start_medium(
+    way: Way,
+    id: [u8; catcard_tss::SESSION_ID_LEN],
+    invite: Invitation,
+) -> Medium {
+    match way {
+        Way::Sd => {
+            let _ = (id, invite);
+            Medium::Sd
+        }
+        #[cfg(feature = "board-q1")]
+        Way::Qr => Medium::Qr(super::qr::Exchange::new(id, Some(invite))),
+    }
+}
+
 /// Run `s` over `medium` until it finishes: `true` then, `false` when it failed or the
 /// owner left (already said). `invite` is written with the first messages to the card,
 /// by the member who starts the session (by QR, the exchange carries it).

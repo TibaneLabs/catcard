@@ -325,12 +325,14 @@ struct SignJob {
     results: Vec<Option<EcdsaSignature>>,
 }
 
-/// What a pair-setup session sets up, and what it ends with.
+/// What a pair-setup session sets up, and what it ends with: one pair with each of
+/// `peers`, made in a lane of its own.
 struct PairJob {
     /// The member's record, core only: the session reads its public half.
     record: ShareRecord,
-    peer: u8,
-    result: Option<SecretPair>,
+    /// The other members, ascending; lane `i` is the pair with `peers[i]`.
+    peers: Vec<u8>,
+    results: Vec<Option<SecretPair>>,
 }
 
 /// What a session is for, besides its members.
@@ -515,20 +517,49 @@ impl Session {
         record: &ShareRecord,
         peer: u8,
         source: &mut dyn Entropy,
-        _kw: &KeyWork,
+        kw: &KeyWork,
     ) -> Result<Self, Error> {
-        if peer == 0 || peer > record.n || peer == record.member {
+        if peer == record.member {
             return Err(Error::Parameters);
         }
-        let members = alloc::vec![record.member.min(peer), record.member.max(peer)];
+        Self::pairs_setup(id, record, &[record.member, peer], source, kw)
+    }
+
+    /// [`Self::pair_setup`] for every pair among `members` that includes this one, in
+    /// one session: each member runs it naming the same set, and each ends with a fresh
+    /// pair with every other ([`Self::install_pairs`]). Each pair is still its own
+    /// two-party base-OT exchange, in a lane of its own; one set of introductions and one
+    /// session code cover them all, and one pass of the card carries every pair's
+    /// messages for the round.
+    pub fn pairs_setup(
+        id: [u8; SESSION_ID_LEN],
+        record: &ShareRecord,
+        members: &[u8],
+        source: &mut dyn Entropy,
+        _kw: &KeyWork,
+    ) -> Result<Self, Error> {
+        let mut members = members.to_vec();
+        members.sort_unstable();
+        members.dedup();
+        if members.len() < 2
+            || members.iter().any(|&m| m == 0 || m > record.n)
+            || !members.contains(&record.member)
+        {
+            return Err(Error::Parameters);
+        }
         let mut h = Sha256::new();
         h.update(b"CatCard TSS pair setup parameters v1\0");
         h.update(&record.wallet_id());
         h.update(&members);
+        let peers: Vec<u8> = members
+            .iter()
+            .copied()
+            .filter(|&m| m != record.member)
+            .collect();
         let job = PairJob {
             record: record.core_clone(),
-            peer,
-            result: None,
+            results: peers.iter().map(|_| None).collect(),
+            peers,
         };
         Session::start(
             Family::PairSetup,
@@ -723,10 +754,10 @@ impl Session {
         job.results.iter().cloned().collect()
     }
 
-    /// A pair-setup session's other member.
+    /// A pair-setup session's other member, when there is one only.
     pub fn peer(&self) -> Option<u8> {
         match &self.job {
-            Job::Pair(job) => Some(job.peer),
+            Job::Pair(job) if job.peers.len() == 1 => Some(job.peers[0]),
             _ => None,
         }
     }
@@ -735,7 +766,20 @@ impl Session {
     /// the same wallet the session was started with -- replacing (and wiping) any it
     /// had with the peer. The record's pair cache is then out of date: write a new one
     /// ([`ShareRecord::write_pair_cache`]). Returns the peer. Once only.
-    pub fn install_pair(&mut self, record: &mut ShareRecord, _kw: &KeyWork) -> Result<u8, Error> {
+    pub fn install_pair(&mut self, record: &mut ShareRecord, kw: &KeyWork) -> Result<u8, Error> {
+        match self.install_pairs(record, kw)?.as_slice() {
+            [peer] => Ok(*peer),
+            _ => Err(Error::State("more than one pair")),
+        }
+    }
+
+    /// A finished pair setup: install every new pair into `record`, as
+    /// [`Self::install_pair`] does one. Returns the peers, ascending. Once only.
+    pub fn install_pairs(
+        &mut self,
+        record: &mut ShareRecord,
+        _kw: &KeyWork,
+    ) -> Result<Vec<u8>, Error> {
         let Job::Pair(job) = &mut self.job else {
             return Err(Error::State("not a pair setup"));
         };
@@ -745,13 +789,18 @@ impl Session {
         if record.member != job.record.member || record.wallet_id() != job.record.wallet_id() {
             return Err(Error::Mismatch);
         }
-        let state = job
-            .result
-            .as_mut()
-            .and_then(|p| p.0.take())
-            .ok_or(Error::State("pair already installed"))?;
-        record.set_pair(job.peer, state)?;
-        Ok(job.peer)
+        let mut states = Vec::with_capacity(job.peers.len());
+        for slot in job.results.iter_mut() {
+            states.push(
+                slot.as_mut()
+                    .and_then(|p| p.0.take())
+                    .ok_or(Error::State("pair already installed"))?,
+            );
+        }
+        for (&peer, state) in job.peers.iter().zip(states) {
+            record.set_pair(peer, state)?;
+        }
+        Ok(job.peers.clone())
     }
 
     // --- driving it ---------------------------------------------------------------
@@ -768,19 +817,32 @@ impl Session {
             PartyId::sort(self.members.iter().map(|&m| member_id(m)).collect(), 0);
         let me = member_id(self.me);
         let started: Result<Vec<Lane>, String> = match &self.job {
+            // One lane a pair, each a two-party exchange with its own peer.
             Job::Pair(job) => {
-                let mailbox = Arc::new(Mailbox::default());
-                // Two parties; pair setup does not read the threshold.
-                let params = Parameters::new(parties, &me, 1, broker(&mailbox))
-                    .with_wire_format(WireFormat::Binary);
-                PairSetupParty::new(params, &job.record.key.0)
-                    .map(|p| {
-                        alloc::vec![Lane {
+                let _ = parties;
+                let mut lanes = Vec::with_capacity(job.peers.len());
+                let mut err = None;
+                for &peer in &job.peers {
+                    let mailbox = Arc::new(Mailbox::default());
+                    let two = PartyId::sort(alloc::vec![member_id(self.me), member_id(peer)], 0);
+                    // Pair setup does not read the threshold.
+                    let params = Parameters::new(two, &me, 1, broker(&mailbox))
+                        .with_wire_format(WireFormat::Binary);
+                    match PairSetupParty::new(params, &job.record.key.0) {
+                        Ok(p) => lanes.push(Lane {
                             mailbox,
                             party: Some(Party::Pair(p)),
-                        }]
-                    })
-                    .map_err(|e| format!("{e}"))
+                        }),
+                        Err(e) => {
+                            err = Some(format!("{e}"));
+                            break;
+                        }
+                    }
+                }
+                match err {
+                    None => Ok(lanes),
+                    Some(e) => Err(e),
+                }
             }
             Job::Keygen => {
                 let mailbox = Arc::new(Mailbox::default());
@@ -926,14 +988,21 @@ impl Session {
 
         let sender = member_id(h.from);
         let recipient = (h.to != 0).then(|| member_id(self.me));
+        // A pair setup's lanes are by peer: the sender's numbering of its own lanes means
+        // nothing here, and its message is for the lane of the pair with it.
+        let pair_lane = match &self.job {
+            Job::Pair(job) => job.peers.iter().position(|&p| p == h.from),
+            _ => None,
+        };
         for (instance, ty, data) in entries {
+            let lane = pair_lane.unwrap_or(usize::from(instance));
             let mut msg = TssMessage {
                 typ: String::from(ty.name),
                 from: Some(sender.clone()),
                 to: recipient.clone(),
                 data: Payload::Binary(data.to_vec()),
             };
-            let delivered = self.lanes[usize::from(instance)].mailbox.deliver(&msg);
+            let delivered = self.lanes[lane].mailbox.deliver(&msg);
             // A DKG's round-2 unicasts are Shamir shares: wipe our copy.
             if let Some(b) = binary_mut(&mut msg.data) {
                 b.zeroize();
@@ -1042,7 +1111,13 @@ impl Session {
             .types()
             .filter(|t| t.round == h.round && t.broadcast == broadcast)
             .collect();
-        if raw.len() != wanted.len() * self.lanes.len() {
+        // Every lane writes to every member in signing; a pair setup's sender has one
+        // lane for this member, the pair, so one instance's worth.
+        let instances = match &self.job {
+            Job::Pair(_) => 1,
+            _ => self.lanes.len(),
+        };
+        if raw.len() != wanted.len() * instances {
             return Err(bad);
         }
         let mut out: Vec<Message<'p>> = Vec::with_capacity(raw.len());
@@ -1050,8 +1125,9 @@ impl Session {
             let ty = self.family.by_code(code).ok_or(bad.clone())?;
             if ty.round != h.round
                 || ty.broadcast != broadcast
-                || usize::from(instance) >= self.lanes.len()
+                || (instances > 1 && usize::from(instance) >= self.lanes.len())
                 || out.iter().any(|(i, t, _)| *i == instance && t.code == code)
+                || (instances == 1 && out.iter().any(|(i, _, _)| *i != instance))
             {
                 return Err(bad);
             }
@@ -1153,7 +1229,7 @@ impl Session {
                     let Job::Pair(job) = &mut self.job else {
                         return Err(self.fail(String::from("a pair from another protocol")));
                     };
-                    job.result = Some(pair);
+                    job.results[i] = Some(pair);
                 }
                 Err(e) => return Err(self.fail(e)),
             }

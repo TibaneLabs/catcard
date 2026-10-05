@@ -58,15 +58,19 @@ enum Cmd {
         #[arg(long, num_args = 2, value_names = ["N", "T"])]
         start: Option<Vec<u8>>,
     },
-    /// Set up the pair between a member kept here and another member again (the device's
-    /// "Rebuild setup").
+    /// Set up every pair between a member kept here and other members again, in one
+    /// session (the device's "Rebuild setup").
     Pair {
         /// The member kept here.
         #[arg(long = "as")]
         me: u8,
-        /// The other member.
+        /// The other members taking part, e.g. `1,3` -- the same set the starting device
+        /// ticked.
+        #[arg(long, value_delimiter = ',', required = true)]
+        with: Vec<u8>,
+        /// Start the session (otherwise join the one on the medium).
         #[arg(long)]
-        with: u8,
+        start: bool,
         /// The wallet, by the first 8 hex digits of its fingerprint as `show` lists it;
         /// optional when only one is kept.
         #[arg(long)]
@@ -91,7 +95,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Create { members, start } => create(&cli, members, start.as_deref()),
-        Cmd::Pair { me, with, wallet } => pair(&cli, *me, *with, wallet.as_deref()),
+        Cmd::Pair {
+            me,
+            with,
+            start,
+            wallet,
+        } => pair(&cli, *me, with, *start, wallet.as_deref()),
         Cmd::Show => show(&cli),
     }
 }
@@ -102,10 +111,12 @@ fn invite_text(n: u8, t: u8) -> String {
     format!("CatCard TSS session\nmembers {n}\nneeded {t}\n")
 }
 
-fn pair_invite_text(wallet: &[u8; 32], a: u8, b: u8) -> String {
+fn pair_invite_text(wallet: &[u8; 32], members: &[u8]) -> String {
+    let list: Vec<String> = members.iter().map(|m| m.to_string()).collect();
     format!(
-        "CatCard TSS pair setup\nwallet {}\nmembers {a} {b}\n",
-        hex::encode(&wallet[..8])
+        "CatCard TSS pair setup\nwallet {}\nmembers {}\n",
+        hex::encode(&wallet[..8]),
+        list.join(" ")
     )
 }
 
@@ -414,30 +425,33 @@ fn create(cli: &Cli, members: &[u8], start: Option<&[u8]>) -> Result<()> {
     Ok(())
 }
 
-fn pair(cli: &Cli, me: u8, with: u8, wallet: Option<&str>) -> Result<()> {
+fn pair(cli: &Cli, me: u8, with: &[u8], start: bool, wallet: Option<&str>) -> Result<()> {
     let all = kept(cli)?;
     let mut mine: Vec<_> = all
         .into_iter()
         .filter(|(_, r)| r.member() == me)
         .filter(|(_, r)| wallet.is_none_or(|w| hex::encode(r.fingerprint()).starts_with(w)))
         .collect();
-    let (path, mut record) = match mine.len() {
+    let (_, mut record) = match mine.len() {
         1 => mine.remove(0),
         0 => bail!("no member {me} kept in {}", cli.keep.display()),
         _ => bail!("several wallets kept with member {me}: say which with --wallet"),
     };
-    let (a, b) = (me.min(with), me.max(with));
+    let mut members: Vec<u8> = with.to_vec();
+    members.push(me);
+    members.sort_unstable();
+    members.dedup();
     let wid = record.wallet_id();
-    let want = pair_invite_text(&wid, a, b);
-    // The lower member starts, as on the device.
-    let id = if me == a {
+    let want = pair_invite_text(&wid, &members);
+    let id = if start {
         let id = catcard_tss::new_session_id(&mut Os).map_err(|e| anyhow!("{e:?}"))?;
         let folder = cli.dir.join(session_dir(&id));
         fs::create_dir_all(&folder)?;
         write_synced(&folder.join("invite.txt"), want.as_bytes())?;
         println!(
-            "started pair setup {} with member {with}",
-            hex::encode(&id[..4])
+            "started pair setup {} with members {:?}",
+            hex::encode(&id[..4]),
+            members
         );
         id
     } else {
@@ -455,21 +469,21 @@ fn pair(cli: &Cli, me: u8, with: u8, wallet: Option<&str>) -> Result<()> {
         found.sort();
         match found.pop() {
             Some((_, id)) => id,
-            None => bail!("no pair setup for these members on the medium: member {a} starts it"),
+            None => bail!("no pair setup for members {members:?} on the medium: start one"),
         }
     };
     let mut s =
-        [Session::pair_setup(id, &record, with, &mut Os, &KW).map_err(|e| anyhow!("{e:?}"))?];
+        [Session::pairs_setup(id, &record, &members, &mut Os, &KW)
+            .map_err(|e| anyhow!("{e:?}"))?];
     drive(cli, &mut s, &id)?;
-    s[0].install_pair(&mut record, &KW)
+    let peers = s[0]
+        .install_pairs(&mut record, &KW)
         .map_err(|e| anyhow!("{e:?}"))?;
     println!(
-        "member {me}: pair with {with} set up again; {}",
+        "member {me}: pairs with {peers:?} set up again; {}",
         describe(&record)
     );
-    save(cli, &mut record)?;
-    let _ = path;
-    Ok(())
+    save(cli, &mut record)
 }
 
 fn show(cli: &Cli) -> Result<()> {

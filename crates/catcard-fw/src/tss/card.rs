@@ -121,8 +121,9 @@ fn read_whole(
 pub(super) enum Invitation {
     /// Create together: `n` members, `t` needed.
     Create { n: u8, t: u8 },
-    /// Set up the pair between members `a < b` of the wallet whose id starts `wallet`.
-    Pair { wallet: [u8; 8], a: u8, b: u8 },
+    /// Set up every pair among some members of the wallet whose id starts `wallet`: bit
+    /// `m` of `members` set, member `m` takes part.
+    Pairs { wallet: [u8; 8], members: u16 },
     /// Sign together with the wallet whose id starts `wallet`: bit `m` of `signers` set,
     /// member `m` signs.
     Sign { wallet: [u8; 8], signers: u16 },
@@ -134,12 +135,18 @@ impl Invitation {
             Invitation::Create { n, t } => {
                 let _ = write!(out, "CatCard TSS session\nmembers {n}\nneeded {t}\n");
             }
-            Invitation::Pair { wallet, a, b } => {
+            Invitation::Pairs { wallet, members } => {
                 let _ = out.push_str("CatCard TSS pair setup\nwallet ");
                 for x in wallet {
                     let _ = write!(out, "{x:02x}");
                 }
-                let _ = write!(out, "\nmembers {a} {b}\n");
+                let _ = out.push_str("\nmembers");
+                for m in 1..=catcard_tss::MAX_MEMBERS {
+                    if members & (1 << m) != 0 {
+                        let _ = write!(out, " {m}");
+                    }
+                }
+                let _ = out.push('\n');
             }
             Invitation::Sign { wallet, signers } => {
                 let _ = out.push_str("CatCard TSS signing\nwallet ");
@@ -161,15 +168,22 @@ impl Invitation {
         let text = core::str::from_utf8(text).ok()?;
         let mut lines = text.lines();
         let kind = lines.next()?;
-        let (mut n, mut t, mut wallet, mut pair) = (None, None, None, None);
-        let mut signers = 0u16;
+        let (mut n, mut t, mut wallet) = (None, None, None);
+        let (mut signers, mut members) = (0u16, 0u16);
         for l in lines {
             if let Some(v) = l.strip_prefix("members ") {
-                let mut it = v.split_whitespace().map(|x| x.parse::<u8>().ok());
-                match (it.next(), it.next()) {
-                    (Some(a), None) => n = a,
-                    (Some(Some(a)), Some(Some(b))) => pair = Some((a, b)),
-                    _ => {}
+                // One number is how many (create together); several, which (pair setup).
+                let list: heapless::Vec<u8, 9> = v
+                    .split_whitespace()
+                    .filter_map(|x| x.parse::<u8>().ok())
+                    .collect();
+                if let [only] = list[..] {
+                    n = Some(only);
+                }
+                for &m in &list {
+                    if (1..=catcard_tss::MAX_MEMBERS).contains(&m) {
+                        members |= 1 << m;
+                    }
                 }
             } else if let Some(v) = l.strip_prefix("needed ") {
                 t = v.trim().parse::<u8>().ok();
@@ -188,14 +202,10 @@ impl Invitation {
                 let (n, t) = (n?, t?);
                 catcard_tss::can_create_together(n, t).then_some(Invitation::Create { n, t })
             }
-            "CatCard TSS pair setup" => {
-                let (a, b) = pair?;
-                (a >= 1 && a < b && b <= catcard_tss::MAX_MEMBERS).then_some(Invitation::Pair {
-                    wallet: wallet?,
-                    a,
-                    b,
-                })
-            }
+            "CatCard TSS pair setup" => (members.count_ones() >= 2).then_some(Invitation::Pairs {
+                wallet: wallet?,
+                members,
+            }),
             "CatCard TSS signing" => (signers.count_ones() >= 2).then_some(Invitation::Sign {
                 wallet: wallet?,
                 signers,

@@ -21,8 +21,8 @@
 //! # The code
 //!
 //! One BBQr of type `B` (binary): `CTQ1`, the session id (8 bytes), the invitation (a
-//! kind byte: 0 none, 1 create `n t`, 2 pair setup `wallet[8] a b`, 3 signing
-//! `wallet[8] signers` -- a u16, bit `m` for member `m`), the number of
+//! kind byte: 0 none, 1 create `n t`, 2 pair setup `wallet[8] members`, 3 signing
+//! `wallet[8] signers` -- each set a u16, bit `m` for member `m`), the number of
 //! envelopes, then each as `round from to`, its length (u32, little-endian) and its
 //! bytes.
 
@@ -97,10 +97,10 @@ impl Exchange {
         match self.invite {
             None => out.push(0),
             Some(Invitation::Create { n, t }) => out.extend_from_slice(&[1, n, t]),
-            Some(Invitation::Pair { wallet, a, b }) => {
+            Some(Invitation::Pairs { wallet, members }) => {
                 out.push(2);
                 out.extend_from_slice(&wallet);
-                out.extend_from_slice(&[a, b]);
+                out.extend_from_slice(&members.to_le_bytes());
             }
             Some(Invitation::Sign { wallet, signers }) => {
                 out.push(3);
@@ -226,10 +226,9 @@ fn parse(code: &[u8]) -> Result<Parsed<'_>, &'static str> {
             let v = take(10)?;
             let mut wallet = [0u8; 8];
             wallet.copy_from_slice(&v[..8]);
-            Some(Invitation::Pair {
+            Some(Invitation::Pairs {
                 wallet,
-                a: v[8],
-                b: v[9],
+                members: u16::from_le_bytes([v[8], v[9]]),
             })
         }
         3 => {
