@@ -124,9 +124,16 @@ pub(super) enum Invitation {
     /// Set up every pair among some members of the wallet whose id starts `wallet`: bit
     /// `m` of `members` set, member `m` takes part.
     Pairs { wallet: [u8; 8], members: u16 },
-    /// Sign together with the wallet whose id starts `wallet`: bit `m` of `signers` set,
-    /// member `m` signs.
-    Sign { wallet: [u8; 8], signers: u16 },
+    /// Sign together with the wallet whose id starts `wallet`, `needed` signers, started by
+    /// member `starter`. `signers` is the set when the starter chose it (by QR, bit `m`
+    /// for member `m`); 0 on a card, where the first `needed - 1` members to join
+    /// ([`joined`]) sign with the starter.
+    Sign {
+        wallet: [u8; 8],
+        needed: u8,
+        starter: u8,
+        signers: u16,
+    },
 }
 
 impl Invitation {
@@ -148,18 +155,26 @@ impl Invitation {
                 }
                 let _ = out.push('\n');
             }
-            Invitation::Sign { wallet, signers } => {
+            Invitation::Sign {
+                wallet,
+                needed,
+                starter,
+                signers,
+            } => {
                 let _ = out.push_str("CatCard TSS signing\nwallet ");
                 for x in wallet {
                     let _ = write!(out, "{x:02x}");
                 }
-                let _ = out.push_str("\nsigners");
-                for m in 1..=catcard_tss::MAX_MEMBERS {
-                    if signers & (1 << m) != 0 {
-                        let _ = write!(out, " {m}");
+                let _ = write!(out, "\nneeded {needed}\nstarter {starter}\n");
+                if signers != 0 {
+                    let _ = out.push_str("signers");
+                    for m in 1..=catcard_tss::MAX_MEMBERS {
+                        if signers & (1 << m) != 0 {
+                            let _ = write!(out, " {m}");
+                        }
                     }
+                    let _ = out.push('\n');
                 }
-                let _ = out.push('\n');
             }
         }
     }
@@ -168,7 +183,7 @@ impl Invitation {
         let text = core::str::from_utf8(text).ok()?;
         let mut lines = text.lines();
         let kind = lines.next()?;
-        let (mut n, mut t, mut wallet) = (None, None, None);
+        let (mut n, mut t, mut wallet, mut starter) = (None, None, None, None);
         let (mut signers, mut members) = (0u16, 0u16);
         for l in lines {
             if let Some(v) = l.strip_prefix("members ") {
@@ -189,6 +204,8 @@ impl Invitation {
                 t = v.trim().parse::<u8>().ok();
             } else if let Some(v) = l.strip_prefix("wallet ") {
                 wallet = parse_hex::<8>(v.trim());
+            } else if let Some(v) = l.strip_prefix("starter ") {
+                starter = v.trim().parse::<u8>().ok();
             } else if let Some(v) = l.strip_prefix("signers ") {
                 for m in v.split_whitespace().filter_map(|x| x.parse::<u8>().ok()) {
                     if (1..=catcard_tss::MAX_MEMBERS).contains(&m) {
@@ -206,10 +223,18 @@ impl Invitation {
                 wallet: wallet?,
                 members,
             }),
-            "CatCard TSS signing" => (signers.count_ones() >= 2).then_some(Invitation::Sign {
-                wallet: wallet?,
-                signers,
-            }),
+            "CatCard TSS signing" => {
+                let (needed, starter) = (t?, starter?);
+                let ok = (2..=catcard_tss::MAX_MEMBERS).contains(&needed)
+                    && (1..=catcard_tss::MAX_MEMBERS).contains(&starter)
+                    && (signers == 0 || signers.count_ones() == u32::from(needed));
+                ok.then_some(Invitation::Sign {
+                    wallet: wallet?,
+                    needed,
+                    starter,
+                    signers,
+                })
+            }
             _ => None,
         }
     }
@@ -314,6 +339,104 @@ pub(super) fn sessions(
         let _ = out.push(Found { id, invite, taken });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// A signing session's request and who joined it
+// ---------------------------------------------------------------------------------------
+
+/// What is to be signed, beside the session's invitation: the starter writes it, every
+/// signer reads it and reviews it itself (`super::sign`). Named by its kind.
+const REQUEST_PSBT: &str = "request.psbt";
+const REQUEST_MESSAGE: &str = "request.txt";
+/// Largest request read: a PSBT of many inputs.
+pub(super) const MAX_REQUEST: usize = 128 * 1024;
+
+/// Write a signing session's invitation and request, making its folder.
+#[inline(never)]
+pub(super) fn write_request(
+    storage: Storage,
+    id: &[u8; SESSION_ID_LEN],
+    invite: Invitation,
+    kind: super::sign::Kind,
+    body: &[u8],
+) -> Result<(), &'static str> {
+    write_messages(storage, id, &[], Some(invite))?;
+    let name = match kind {
+        super::sign::Kind::Psbt => REQUEST_PSBT,
+        super::sign::Kind::Message => REQUEST_MESSAGE,
+    };
+    let mut vol = mount(storage)?;
+    menu::write_into(&mut vol, &path_in(&folder(id), name), body)?;
+    vol.flush().map_err(|_| "flush failed")
+}
+
+/// A signing session's request, read whole, its kind's code first (as a code carries
+/// it, `super::sign::Kind`).
+#[inline(never)]
+pub(super) fn read_request(
+    storage: Storage,
+    id: &[u8; SESSION_ID_LEN],
+) -> Result<Option<Buf>, &'static str> {
+    let mut vol = mount(storage)?;
+    for (code, name) in [(1u8, REQUEST_PSBT), (2, REQUEST_MESSAGE)] {
+        if let Some(mut body) = read_whole(&mut vol, &path_in(&folder(id), name), MAX_REQUEST)? {
+            let bytes = body.as_slice();
+            let mut out = Buf::with_capacity(bytes.len() + 1).ok_or("no memory")?;
+            out.space()[0] = code;
+            out.space()[1..=bytes.len()].copy_from_slice(bytes);
+            out.set_len(bytes.len() + 1);
+            return Ok(Some(out));
+        }
+    }
+    Ok(None)
+}
+
+/// The members who joined a signing session on the card, in the order they joined:
+/// `j1.txt`, `j2.txt`... each holding a member number. Not trusted -- the signer set is
+/// in every member's session code -- only the way a card gathers who is here.
+#[inline(never)]
+pub(super) fn joined(
+    storage: Storage,
+    id: &[u8; SESSION_ID_LEN],
+) -> Result<heapless::Vec<u8, 9>, &'static str> {
+    let mut vol = mount(storage)?;
+    let dir = folder(id);
+    let mut out = heapless::Vec::new();
+    for k in 1..=catcard_tss::MAX_MEMBERS {
+        let mut name: heapless::String<8> = heapless::String::new();
+        let _ = write!(name, "j{k}.txt");
+        let Some(mut b) = read_whole(&mut vol, &path_in(&dir, &name), 8)? else {
+            break;
+        };
+        let m = core::str::from_utf8(b.as_slice())
+            .ok()
+            .and_then(|t| t.trim().parse::<u8>().ok());
+        match m {
+            Some(m) if (1..=catcard_tss::MAX_MEMBERS).contains(&m) && !out.contains(&m) => {
+                let _ = out.push(m);
+            }
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Mark this member as having joined: the next `j<k>.txt`.
+#[inline(never)]
+pub(super) fn write_joined(
+    storage: Storage,
+    id: &[u8; SESSION_ID_LEN],
+    k: usize,
+    me: u8,
+) -> Result<(), &'static str> {
+    let mut vol = mount(storage)?;
+    let mut name: heapless::String<8> = heapless::String::new();
+    let _ = write!(name, "j{k}.txt");
+    let mut text: heapless::String<4> = heapless::String::new();
+    let _ = writeln!(text, "{me}");
+    menu::write_into(&mut vol, &path_in(&folder(id), &name), text.as_bytes())?;
+    vol.flush().map_err(|_| "flush failed")
 }
 
 // ---------------------------------------------------------------------------------------

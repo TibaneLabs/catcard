@@ -685,6 +685,75 @@ fn sign_together(
         complain(ui, head, "a TSS wallet signs together");
         return None;
     }
+    together_as(gate, login, ui, head, text, choice, None)
+}
+
+/// Sign -> Join signing found a message another member started: read what it signs,
+/// show it for approval here as any message, sign it together, then write or show the
+/// signature as a typed message's is.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub(crate) fn tss_join(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    body: &[u8],
+    joining: crate::tss::Joining,
+) {
+    const HEAD: &str = "Sign message";
+    let Some((choice, text)) = tss_request_read(body) else {
+        return complain(ui, HEAD, "a request this cannot read");
+    };
+    let Some(signed) = together_as(gate, login, ui, HEAD, text, &choice, Some(joining)) else {
+        return;
+    };
+    show(ui, text, &signed);
+    deliver(ui, HEAD, text, &signed, Target::Fresh);
+}
+
+/// A message to sign together, as the session carries it to every signer: the format,
+/// the address type and the path, one a line, then the text.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+fn tss_request(choice: &Choice, text: &str) -> alloc::string::String {
+    let format = match choice.format {
+        Format::Legacy => "legacy",
+        Format::Bip322 => "bip322",
+        Format::Bip322Full => "bip322-full",
+    };
+    alloc::format!(
+        "{format}\n{}\n{}\n{text}",
+        message::kind_name(choice.kind),
+        choice.path
+    )
+}
+
+/// [`tss_request`] read back.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+fn tss_request_read(body: &[u8]) -> Option<(Choice, &str)> {
+    let all = core::str::from_utf8(body).ok()?;
+    let mut parts = all.splitn(4, '\n');
+    let format = match parts.next()? {
+        "legacy" => Format::Legacy,
+        "bip322" => Format::Bip322,
+        "bip322-full" => Format::Bip322Full,
+        _ => return None,
+    };
+    let kind = message::kind_named(parts.next()?)?;
+    let path = parts.next()?.parse::<DerivationPath>().ok()?;
+    let text = parts.next()?;
+    Some((Choice { kind, path, format }, text))
+}
+
+/// [`sign_together`], starting the session (`joining` none) or joining one.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+fn together_as(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    head: &str,
+    text: &str,
+    choice: &Choice,
+    joining: Option<crate::tss::Joining>,
+) -> Option<Signed> {
     let (s, _) = crate::key::tss()?;
     let steps: heapless::Vec<u32, 16> = choice.path.iter().map(|c| c.0).collect();
     let Some(rest) = steps.strip_prefix(&s.path[..]) else {
@@ -737,7 +806,15 @@ fn sign_together(
         path: rest.to_vec(),
         sighash: digest,
     }];
-    let sigs = crate::tss::together(gate, login, ui, &request)?;
+    let body = tss_request(choice, text);
+    let how = match joining {
+        Some(j) => crate::tss::How::Join(alloc::boxed::Box::new(j)),
+        None => crate::tss::How::Start {
+            kind: crate::tss::Kind::Message,
+            body: body.as_bytes(),
+        },
+    };
+    let sigs = crate::tss::together(gate, login, ui, &request, how)?;
     let sig = &sigs[0];
     // Written, then checked as a verifier would check it, as `sign_secret` does.
     let mut buf = [0u8; SIG_TEXT];

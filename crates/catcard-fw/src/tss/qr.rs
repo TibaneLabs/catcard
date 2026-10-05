@@ -43,6 +43,9 @@ pub(super) struct Exchange {
     pub(super) id: [u8; SESSION_ID_LEN],
     /// Shown in every code this device makes, when it started the session.
     invite: Option<Invitation>,
+    /// What a signing session signs, carried with the invitation so a member joining
+    /// reviews it from the code (`super::sign`).
+    request: Option<Vec<u8>>,
     sent: Vec<Outgoing>,
     inbox: Vec<((u8, u8, u8), Vec<u8>)>,
 }
@@ -52,9 +55,16 @@ impl Exchange {
         Exchange {
             id,
             invite,
+            request: None,
             sent: Vec::new(),
             inbox: Vec::new(),
         }
+    }
+
+    /// [`Self::new`] for a signing session's starter: every code carries `request`.
+    pub(super) fn with_request(mut self, request: Vec<u8>) -> Self {
+        self.request = Some(request);
+        self
     }
 
     /// Keep what the session has to say, to show it.
@@ -102,9 +112,15 @@ impl Exchange {
                 out.extend_from_slice(&wallet);
                 out.extend_from_slice(&members.to_le_bytes());
             }
-            Some(Invitation::Sign { wallet, signers }) => {
+            Some(Invitation::Sign {
+                wallet,
+                needed,
+                starter,
+                signers,
+            }) => {
                 out.push(3);
                 out.extend_from_slice(&wallet);
+                out.extend_from_slice(&[needed, starter]);
                 out.extend_from_slice(&signers.to_le_bytes());
             }
         }
@@ -113,6 +129,13 @@ impl Exchange {
             out.extend_from_slice(&[o.round, o.from, o.to]);
             out.extend_from_slice(&(o.bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(&o.bytes);
+        }
+        // The request last, with its length: the rest of the code.
+        if self.invite.is_some()
+            && let Some(r) = &self.request
+        {
+            out.extend_from_slice(&(r.len() as u32).to_le_bytes());
+            out.extend_from_slice(r);
         }
         out
     }
@@ -156,6 +179,14 @@ pub(super) struct Found {
 }
 
 impl Found {
+    /// A signing session's request, as the starter's code carried it.
+    pub(super) fn request(&mut self) -> Option<Vec<u8>> {
+        parse(self.code.as_slice())
+            .ok()?
+            .request
+            .map(<[u8]>::to_vec)
+    }
+
     /// The exchange for member `me` of the session found, holding what its first code
     /// already carried.
     pub(super) fn exchange(&mut self, me: u8) -> Exchange {
@@ -204,6 +235,8 @@ struct Parsed<'a> {
     id: [u8; SESSION_ID_LEN],
     invite: Option<Invitation>,
     envelopes: Vec<((u8, u8, u8), &'a [u8])>,
+    /// A signing session's request, from the starter's code.
+    request: Option<&'a [u8]>,
 }
 
 fn parse(code: &[u8]) -> Result<Parsed<'_>, &'static str> {
@@ -232,12 +265,14 @@ fn parse(code: &[u8]) -> Result<Parsed<'_>, &'static str> {
             })
         }
         3 => {
-            let v = take(10)?;
+            let v = take(12)?;
             let mut wallet = [0u8; 8];
             wallet.copy_from_slice(&v[..8]);
             Some(Invitation::Sign {
                 wallet,
-                signers: u16::from_le_bytes([v[8], v[9]]),
+                needed: v[8],
+                starter: v[9],
+                signers: u16::from_le_bytes([v[10], v[11]]),
             })
         }
         _ => return Err(BAD),
@@ -249,10 +284,18 @@ fn parse(code: &[u8]) -> Result<Parsed<'_>, &'static str> {
         let len = u32::from_le_bytes([h[3], h[4], h[5], h[6]]) as usize;
         envelopes.push(((h[0], h[1], h[2]), take(len)?));
     }
+    let request = match take(4) {
+        Ok(h) => {
+            let len = u32::from_le_bytes([h[0], h[1], h[2], h[3]]) as usize;
+            Some(take(len)?)
+        }
+        Err(_) => None,
+    };
     Ok(Parsed {
         id,
         invite,
         envelopes,
+        request,
     })
 }
 

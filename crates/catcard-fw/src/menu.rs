@@ -243,6 +243,10 @@ enum Screen {
     /// share files.
     #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
     ImportTss,
+    /// Sign -> Join signing, with a TSS wallet in force: sign what another member started
+    /// signing together, after reviewing it here (`crate::tss::join_signing`).
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    TssJoin,
     /// Typing the nickname shown before the PIN prompt.
     Nickname,
     /// Copying the settings region to a card, before anything writes to it. Reads the
@@ -974,6 +978,30 @@ const SIGN_ITEMS: &[&str] = &[
     // Signing every transaction on the card in one pass, each still reviewed on its own.
     "Batch sign",
     #[cfg(not(feature = "board-mk3"))]
+    "By NFC",
+    "Message",
+    "Text file",
+    "Verify",
+];
+
+/// The Sign menu: with a TSS wallet in force, "Join signing" first -- the row every
+/// signer but the one who started picks (`crate::tss::join_signing`).
+fn sign_items() -> &'static [&'static str] {
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::tss().is_some() {
+        return SIGN_ITEMS_TSS;
+    }
+    SIGN_ITEMS
+}
+
+/// [`SIGN_ITEMS`] with "Join signing" first.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+const SIGN_ITEMS_TSS: &[&str] = &[
+    "Join signing",
+    #[cfg(feature = "board-q1")]
+    "Scan",
+    "From SD",
+    "Batch sign",
     "By NFC",
     "Message",
     "Text file",
@@ -1951,6 +1979,8 @@ fn action_for(screen: Screen) -> Option<Action> {
         }),
         #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
         Screen::ImportTss => reseeds(|a| crate::tss::restore_screen(a.gate, a.login, a.ui)),
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        Screen::TssJoin => returns(|a| crate::tss::join_signing(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => returns(|a| crate::settings::backup_to_card(a.ui)),
         Screen::NickPreview => returns(|a| crate::settings::show_nickname_screen(a.ui)),
@@ -2288,7 +2318,9 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
             _ => Screen::KeyMenu,
         },
-        Screen::SignMenu => match (key, SIGN_ITEMS.get(cursor).copied()) {
+        Screen::SignMenu => match (key, sign_items().get(cursor).copied()) {
+            #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+            (Key::Confirm, Some("Join signing")) => Screen::TssJoin,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Scan")) => Screen::ScanQr,
             (Key::Confirm, Some("From SD")) => Screen::SignPsbt,
@@ -2784,6 +2816,9 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         // The Sign grid.
         "Scan" => &art::SIGN_QR,
         "From SD" => &art::SIGN_SD,
+        // Joining a signature another member started, from the card or a code: the card
+        // art, which is where a session is found.
+        "Join signing" => &art::SIGN_SD,
         // Batch reuses the SD icon: it is the same source, done for every file at once.
         "Batch sign" => &art::SIGN_SD,
         "By NFC" => &art::SIGN_NFC,
@@ -2967,7 +3002,7 @@ fn menu_of(screen: Screen, no_seed: bool) -> Option<(&'static [&'static str], cr
         Screen::Debug => (DEBUG_ITEMS, h::DEBUG),
         Screen::Utils => (utils_items(), h::UTILS),
         Screen::BackupMenu => (BACKUP_ITEMS, h::BACKUP),
-        Screen::SignMenu => (SIGN_ITEMS, h::SIGN),
+        Screen::SignMenu => (sign_items(), h::SIGN),
         Screen::NewSeedMenu => (NEW_SEED_ITEMS, h::NEW_SEED),
         Screen::ImportMenu => (IMPORT_ITEMS, h::IMPORT),
         Screen::Settings if no_seed => (settings_items(no_seed), h::SETTINGS_BLANK),
@@ -3160,7 +3195,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor | Screen::ImportCodex32 => {}
         // Handled in `run`: each drives its own lists, files and progress.
         #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
-        Screen::Tss | Screen::ImportTss => {}
+        Screen::Tss | Screen::ImportTss | Screen::TssJoin => {}
         // Handled in `run`: each drives its own file picker, key entry and progress.
         Screen::CloneExport | Screen::CloneImport | Screen::TapsignerImport => {}
         #[cfg(feature = "board-q1")]

@@ -29,9 +29,9 @@ use core::fmt::Write as _;
 use outscript::psbt::Psbt;
 
 use super::card::{self, Invitation};
-use super::drive::{self, Way};
+use super::drive::{self, Medium, Way};
 use super::rand::{Drbg, Fresh};
-use super::{Room, Work, describe, rebuild, say, store};
+use super::{Buf, Room, Work, describe, rebuild, say, store};
 use crate::menu::{self, Line, Storage};
 use crate::signtx::Sink;
 use crate::ui::Ui;
@@ -41,49 +41,159 @@ const HEAD: &str = "Sign together";
 /// Most inputs signed together at once: the session's limit.
 const MAX_INPUTS: usize = catcard_tss::MAX_REQUESTS;
 
-/// Sign `requests` together with the other members of the TSS wallet in force: the
-/// signatures, in the order of `requests`, or `None` once the reason has been said.
+/// What a signing session signs, as the starter writes it beside the invitation and every
+/// other signer reads and reviews it: a PSBT, or a message request
+/// (`signmsg::tss_request`).
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Psbt,
+    Message,
+}
+
+impl Kind {
+    /// Its byte, first in a request a code carries (a card names it by file instead).
+    #[cfg(feature = "board-q1")]
+    fn code(self) -> u8 {
+        match self {
+            Kind::Psbt => 1,
+            Kind::Message => 2,
+        }
+    }
+    fn of(code: u8) -> Option<Kind> {
+        match code {
+            1 => Some(Kind::Psbt),
+            2 => Some(Kind::Message),
+            _ => None,
+        }
+    }
+}
+
+/// How this member comes to a signing session.
+pub(crate) enum How<'a> {
+    /// It starts one for `body`, of `kind`: what every signer will review.
+    Start { kind: Kind, body: &'a [u8] },
+    /// It joins one another member started ([`join_signing`]), whose request it has just
+    /// reviewed here.
+    Join(alloc::boxed::Box<Joining>),
+}
+
+/// A session found to join, and everything already read with it.
+pub(crate) struct Joining {
+    way: Way,
+    id: [u8; catcard_tss::SESSION_ID_LEN],
+    needed: u8,
+    starter: u8,
+    /// The set the starter chose, by QR; 0 on a card, where it is who joins first.
+    signers: u16,
+    medium: Medium,
+    record: ShareRecord,
+}
+
+/// The way messages move and this member's record with its pairs, for a session about
+/// to start or be joined.
+fn prepare(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) -> Option<(Way, ShareRecord)> {
+    let (_, index) = crate::key::tss()?;
+    let index = *index;
+    let way = drive::pick_way(ui, HEAD)?;
+    let record = record_with_pairs(gate, login, ui, index, way.files())?;
+    Some((way, record))
+}
+
+/// Sign `requests` together with the other members of the TSS wallet in force, starting
+/// the session or joining one ([`How`]): the signatures, in the order of `requests`, or
+/// `None` once the reason has been said.
+///
+/// On a card the starter names no signers: it writes the request and waits, and the
+/// first `t - 1` members to join -- each having reviewed the request on its own screen --
+/// sign with it ([`lobby`]). By QR the starter has chosen them, and its code carries the
+/// request.
 #[inline(never)]
 pub(crate) fn together(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut Ui<'_>,
     requests: &[SignRequest],
+    how: How<'_>,
 ) -> Option<Vec<EcdsaSignature>> {
-    let (summary, index) = crate::key::tss()?.clone();
+    let (summary, _) = crate::key::tss()?.clone();
     let _room = Room::take(ui, HEAD)?;
     if !Room::fits(ui, HEAD, Work::Create, summary.n, 0) {
         return None;
     }
-    let way = drive::pick_way(ui, HEAD)?;
-    let mut record = record_with_pairs(gate, login, ui, index, way.files())?;
-    let me = record.member();
-    let mut wallet = [0u8; 8];
-    wallet.copy_from_slice(&record.wallet_id()[..8]);
-
-    let (id, signers, start, mut medium) = match menu::pick_row(
-        ui,
-        HEAD,
-        "every signer does this",
-        &["Start: choose co-signers", "Join a session"],
-    )? {
-        0 => {
-            let signers = choose_signers(ui, &record)?;
+    let (way, id, signers, mut medium, mut record) = match how {
+        How::Start { kind, body } => {
+            let (way, record) = prepare(gate, login, ui)?;
+            let me = record.member();
+            let mut wallet = [0u8; 8];
+            wallet.copy_from_slice(&record.wallet_id()[..8]);
             let id = catcard_tss::new_session_id(&mut Drbg(ui.drbg)).ok()?;
-            let invite = Invitation::Sign {
-                wallet,
-                signers: drive::set_of(&signers),
-            };
-            (id, signers, true, drive::start_medium(way, id, invite))
+            match way {
+                Way::Sd => {
+                    let invite = Invitation::Sign {
+                        wallet,
+                        needed: record.t(),
+                        starter: me,
+                        signers: 0,
+                    };
+                    card::wait(ui.panel, HEAD, Storage::Sd, true);
+                    if let Err(why) = card::write_request(Storage::Sd, &id, invite, kind, body) {
+                        say(ui, HEAD, "cannot write it:", why);
+                        return None;
+                    }
+                    let signers = lobby(ui, &id, me, me, record.t())?;
+                    (way, id, signers, Medium::Sd, record)
+                }
+                #[cfg(feature = "board-q1")]
+                Way::Qr => {
+                    let signers = choose_signers(ui, &record)?;
+                    let invite = Invitation::Sign {
+                        wallet,
+                        needed: record.t(),
+                        starter: me,
+                        signers: drive::set_of(&signers),
+                    };
+                    let mut request = alloc::vec![kind.code()];
+                    request.extend_from_slice(body);
+                    let ex = super::qr::Exchange::new(id, Some(invite)).with_request(request);
+                    (way, id, signers, Medium::Qr(ex), record)
+                }
+            }
         }
-        _ => {
-            let (id, set, medium) = drive::join(ui, HEAD, way, me, |inv| match inv {
-                Invitation::Sign { wallet: w, signers } if w == wallet => Some(signers),
-                _ => None,
-            })?;
-            (id, drive::members_of(set), false, medium)
+        How::Join(j) => {
+            let j = *j;
+            let me = j.record.member();
+            let signers = if j.signers != 0 {
+                drive::members_of(j.signers)
+            } else {
+                // Join on the card: the next mark, unless this member is in already.
+                card::wait(ui.panel, HEAD, Storage::Sd, true);
+                let have = match card::joined(Storage::Sd, &j.id) {
+                    Ok(h) => h,
+                    Err(why) => {
+                        say(ui, HEAD, "cannot read the card:", why);
+                        return None;
+                    }
+                };
+                if !have.contains(&me) {
+                    if have.len() + 1 >= usize::from(j.needed) {
+                        say(ui, HEAD, "enough signers", "have joined already");
+                        return None;
+                    }
+                    if let Err(why) = card::write_joined(Storage::Sd, &j.id, have.len() + 1, me) {
+                        say(ui, HEAD, "cannot write it:", why);
+                        return None;
+                    }
+                }
+                lobby(ui, &j.id, j.starter, me, j.needed)?
+            };
+            (j.way, j.id, signers, j.medium, j.record)
         }
     };
+    let me = record.member();
 
     let missing = record.missing_pairs(&signers);
     if !missing.is_empty() {
@@ -132,11 +242,8 @@ pub(crate) fn together(
         signers.len(),
         requests.len()
     );
-    let invite = start.then_some(Invitation::Sign {
-        wallet,
-        signers: drive::set_of(&signers),
-    });
-    if !drive::run(ui, &mut medium, &mut session, invite) {
+    // The invitation is on the card already, or in the starter's codes.
+    if !drive::run(ui, &mut medium, &mut session, None) {
         return None;
     }
     if way == Way::Sd
@@ -150,6 +257,211 @@ pub(crate) fn together(
         return None;
     }
     sigs
+}
+
+/// On the card, until the starter and `needed - 1` joined members are known: the signer
+/// set, ascending, once it is -- `None` if the owner leaves, or the set filled without
+/// this member.
+fn lobby(
+    ui: &mut Ui<'_>,
+    id: &[u8; catcard_tss::SESSION_ID_LEN],
+    starter: u8,
+    me: u8,
+    needed: u8,
+) -> Option<Vec<u8>> {
+    let needed = usize::from(needed);
+    // Bounded: each pass waits for the owner, who can leave.
+    for _ in 0..256 {
+        card::wait(ui.panel, HEAD, Storage::Sd, false);
+        let have = card::joined(Storage::Sd, id).unwrap_or_default();
+        let mut set: Vec<u8> = alloc::vec![starter];
+        set.extend(
+            have.iter()
+                .copied()
+                .filter(|&m| m != starter)
+                .take(needed - 1),
+        );
+        if set.len() == needed {
+            if !set.contains(&me) {
+                say(ui, HEAD, "enough signers", "have joined already");
+                return None;
+            }
+            set.sort_unstable();
+            return Some(set);
+        }
+        let mut note: heapless::String<120> = heapless::String::new();
+        let more = needed - set.len();
+        let _ = write!(
+            note,
+            "Waiting for {more} more signer{}. Pass the card to them -- each chooses Sign, \
+             Join signing -- then put it back here.",
+            if more == 1 { "" } else { "s" }
+        );
+        match menu::pick_row(ui, HEAD, &note, &["The card is back", "Leave"]) {
+            Some(0) => {}
+            _ => {
+                if drive::leave(ui) {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Sign -> Join signing, with a TSS wallet in force: find the session another member
+/// started, read what it signs, review it here exactly as if this device had been handed
+/// it, and sign it together (`How::Join`).
+#[inline(never)]
+pub(crate) fn join_signing(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+) {
+    let Some((way, record)) = prepare(gate, login, ui) else {
+        return;
+    };
+    let me = record.member();
+    let mut wallet = [0u8; 8];
+    wallet.copy_from_slice(&record.wallet_id()[..8]);
+    let found: Option<(Joining, Buf)> = match way {
+        Way::Sd => join_from_card(ui, wallet, me, record),
+        #[cfg(feature = "board-q1")]
+        Way::Qr => join_from_code(ui, wallet, me, record),
+    };
+    let Some((joining, mut request)) = found else {
+        return;
+    };
+    let bytes = request.as_slice();
+    let Some((&code, body)) = bytes.split_first() else {
+        return say(ui, HEAD, "an empty request", "");
+    };
+    match Kind::of(code) {
+        Some(Kind::Psbt) => join_psbt(gate, login, ui, body, joining),
+        Some(Kind::Message) => crate::signmsg::tss_join(gate, login, ui, body, joining),
+        None => say(ui, HEAD, "a request this", "does not know"),
+    }
+}
+
+/// A signing session on the card for this wallet that this member can join, and its
+/// request (kind byte first).
+fn join_from_card(
+    ui: &mut Ui<'_>,
+    wallet: [u8; 8],
+    me: u8,
+    record: ShareRecord,
+) -> Option<(Joining, Buf)> {
+    card::wait(ui.panel, HEAD, Storage::Sd, false);
+    let found = match card::sessions(Storage::Sd) {
+        Ok(f) => f,
+        Err(why) => {
+            say(ui, HEAD, "cannot read the files:", why);
+            return None;
+        }
+    };
+    let open: heapless::Vec<([u8; catcard_tss::SESSION_ID_LEN], u8, u8), { card::MAX_SESSIONS }> =
+        found
+            .iter()
+            .filter_map(|s| match s.invite {
+                Invitation::Sign {
+                    wallet: w,
+                    needed,
+                    starter,
+                    signers: 0,
+                } if w == wallet && starter != me => Some((s.id, needed, starter)),
+                _ => None,
+            })
+            .collect();
+    let (id, needed, starter) = match open.len() {
+        0 => {
+            say(ui, HEAD, "no signing session", "on this card");
+            return None;
+        }
+        1 => open[0],
+        _ => {
+            let labels: heapless::Vec<heapless::String<8>, { card::MAX_SESSIONS }> =
+                open.iter().map(|(id, _, _)| card::short_id(id)).collect();
+            let rows: heapless::Vec<&str, { card::MAX_SESSIONS }> =
+                labels.iter().map(|l| l.as_str()).collect();
+            open[menu::pick_row(ui, HEAD, "which session?", &rows)?]
+        }
+    };
+    let request = match card::read_request(Storage::Sd, &id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            say(ui, HEAD, "the session has", "no request");
+            return None;
+        }
+        Err(why) => {
+            say(ui, HEAD, "cannot read it:", why);
+            return None;
+        }
+    };
+    Some((
+        Joining {
+            way: Way::Sd,
+            id,
+            needed,
+            starter,
+            signers: 0,
+            medium: Medium::Sd,
+            record,
+        },
+        request,
+    ))
+}
+
+/// The starting member's first code, for this wallet with this member among the
+/// signers it chose, and the request it carries.
+#[cfg(feature = "board-q1")]
+fn join_from_code(
+    ui: &mut Ui<'_>,
+    wallet: [u8; 8],
+    me: u8,
+    record: ShareRecord,
+) -> Option<(Joining, Buf)> {
+    let mut found = match super::qr::find(ui, HEAD) {
+        Ok(Some(f)) => f,
+        Ok(None) => return None,
+        Err(why) => {
+            say(ui, HEAD, "not read:", why);
+            return None;
+        }
+    };
+    let Invitation::Sign {
+        wallet: w,
+        needed,
+        starter,
+        signers,
+    } = found.invite
+    else {
+        say(ui, HEAD, "not a signing", "session's code");
+        return None;
+    };
+    if w != wallet || signers & (1 << me) == 0 {
+        say(ui, HEAD, "not a session this", "member signs in");
+        return None;
+    }
+    let Some(bytes) = found.request() else {
+        say(ui, HEAD, "the code has", "no request");
+        return None;
+    };
+    let mut request = Buf::with_capacity(bytes.len())?;
+    request.space()[..bytes.len()].copy_from_slice(&bytes);
+    request.set_len(bytes.len());
+    let medium = Medium::Qr(found.exchange(me));
+    Some((
+        Joining {
+            way: Way::Qr,
+            id: found.id,
+            needed,
+            starter,
+            signers,
+            medium,
+            record,
+        },
+        request,
+    ))
 }
 
 /// The kept record at `index`, decoded, with its pairs from the cache on `storage`.
@@ -190,7 +502,9 @@ fn record_with_pairs(
     Some(record)
 }
 
-/// This member and `t - 1` others, chosen one at a time, ascending.
+/// This member and `t - 1` others, chosen one at a time, ascending: by QR, where there is
+/// no card for signers to join on.
+#[cfg(feature = "board-q1")]
 fn choose_signers(ui: &mut Ui<'_>, record: &ShareRecord) -> Option<Vec<u8>> {
     let me = record.member();
     let mut chosen: Vec<u8> = alloc::vec![me];
@@ -227,6 +541,56 @@ pub(crate) fn sign_psbt(
     spare: &mut [u8],
     len: usize,
     sink: &mut Sink<'_, '_>,
+) {
+    psbt_flow(gate, login, ui, buf, spare, len, sink, None);
+}
+
+/// Join signing a PSBT another member started: its bytes from the session into the
+/// signing workspace, then the same review and the same delivery as any PSBT.
+fn join_psbt(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    body: &[u8],
+    joining: Joining,
+) {
+    let mut work = match crate::signtx::Workspace::take() {
+        Ok(w) => w,
+        Err(why) => return say(ui, HEAD, why, ""),
+    };
+    let (buf, spare) = work.split();
+    if body.len() > buf.len() {
+        return say(ui, HEAD, "too big for", "this board");
+    }
+    buf[..body.len()].copy_from_slice(body);
+    let mut sink = Sink::Files {
+        dest: &crate::signtx::SignDest::SINGLE,
+        storage: Storage::Sd,
+    };
+    psbt_flow(
+        gate,
+        login,
+        ui,
+        buf,
+        spare,
+        body.len(),
+        &mut sink,
+        Some(joining),
+    );
+}
+
+/// [`sign_psbt`], starting the session (`joining` none) or joining one.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn psbt_flow(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    buf: &mut [u8],
+    spare: &mut [u8],
+    len: usize,
+    sink: &mut Sink<'_, '_>,
+    joining: Option<Joining>,
 ) {
     let refuse = |ui: &mut Ui<'_>, sink: &mut Sink<'_, '_>, why: &'static str| {
         sink.refuse(why);
@@ -306,7 +670,8 @@ pub(crate) fn sign_psbt(
         match d {
             Ok(d) => digests.push((index, d)),
             Err(e) => {
-                crate::catlog!("tss: input {} not signable: {:?}", index, e);
+                let _ = e;
+                crate::catlog!("tss: input {} not signable", index);
                 return refuse(ui, sink, "an input cannot be signed together");
             }
         }
@@ -319,7 +684,14 @@ pub(crate) fn sign_psbt(
         })
         .collect();
 
-    let Some(sigs) = together(gate, login, ui, &requests) else {
+    let how = match joining {
+        Some(j) => How::Join(alloc::boxed::Box::new(j)),
+        None => How::Start {
+            kind: Kind::Psbt,
+            body: &buf[..len],
+        },
+    };
+    let Some(sigs) = together(gate, login, ui, &requests, how) else {
         sink.decline();
         return;
     };

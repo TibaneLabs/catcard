@@ -65,7 +65,7 @@ mod store;
 mod view;
 
 pub(crate) use restore::restore_screen;
-pub(crate) use sign::{sign_psbt, together};
+pub(crate) use sign::{How, Joining, Kind, join_signing, sign_psbt, together};
 #[cfg(feature = "multichain")]
 pub(crate) use view::chain_key;
 pub(crate) use view::explorer as explorer_key;

@@ -156,7 +156,7 @@ static mut BUF_B: [u8; STATIC_BUF] = [0; STATIC_BUF];
 ///
 /// On mk3, which has no PSRAM, they are two static buffers and there is nothing to hold:
 /// nothing else on that board wants them.
-enum Workspace {
+pub(crate) enum Workspace {
     #[cfg(feature = "board-mk3")]
     Static,
     #[cfg(not(feature = "board-mk3"))]
@@ -165,7 +165,7 @@ enum Workspace {
 
 impl Workspace {
     /// Take the memory, or say in a few words why not.
-    fn take() -> Result<Self, &'static str> {
+    pub(crate) fn take() -> Result<Self, &'static str> {
         #[cfg(feature = "board-mk3")]
         {
             Ok(Workspace::Static)
@@ -181,7 +181,7 @@ impl Workspace {
     }
 
     /// The two halves, for as long as the workspace lives.
-    fn split(&mut self) -> (&mut [u8], &mut [u8]) {
+    pub(crate) fn split(&mut self) -> (&mut [u8], &mut [u8]) {
         #[cfg(feature = "board-mk3")]
         {
             let Workspace::Static = self;
