@@ -33,6 +33,7 @@ members = [
     "crates/catcard-qr",
     "crates/catcard-tss",
     "tools/catcard-image",
+    "tools/tss-member",
 ]
 
 # `cargo build` / `cargo test` with no `-p` operates on host-buildable crates only.
@@ -59,6 +60,7 @@ default-members = [
     "crates/catcard-wallet",
     "crates/catcard-tss",
     "tools/catcard-image",
+    "tools/tss-member",
     "crates/catcard-nfc",
 ]
 

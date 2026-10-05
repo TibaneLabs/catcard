@@ -353,6 +353,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-tss-member"
+version = "7.0.0"
+dependencies = [
+ "anyhow",
+ "catcard-tss",
+ "catcard-wallet",
+ "clap",
+ "hex",
+]
+
+[[package]]
 name = "catcard-ui"
 version = "7.0.0"
 dependencies = [

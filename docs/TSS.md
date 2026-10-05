@@ -364,6 +364,35 @@ choice; dev builds, rustc 1.99, 2026-10-04): mk4/mk5 1,392,128 → 1,422,848 byt
 signing now checks pairs). The `DebugTssBench` bench (12 KB) is the obvious room if the
 Q1 needs more.
 
+## Testing with fewer CatCards than members
+
+`tools/tss-member` (`cargo run -p catcard-tss-member --`) plays members from a computer. It
+reads and writes the same files a CatCard does, in the folder a card or a CatCard's Virtual
+Disk is mounted at, and waits while the card goes to the device and back. **Test wallets
+only**: its shares are kept in the clear in `--keep` (default `tss-keep/`), and its pair
+caches are sealed under a fixed key.
+
+```sh
+# The device starts (Create together > Start: I am member 1, 3 members, 2 needed),
+# writes its first file and says "Pass the card to member 2". Card into the Mac:
+cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject create --as 2,3
+
+# Or the computer starts and the device joins as member 3:
+cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject create --start 3 2 --as 1,2
+
+# Rebuild setup between the device (member 1) and member 2 kept here:
+cargo run -p catcard-tss-member -- --dir /Volumes/CARD --eject pair --as 2 --with 1
+
+cargo run -p catcard-tss-member -- --dir /Volumes/CARD show
+```
+
+`--eject` ejects the volume at each hand-over and waits for it to come back. Without it,
+the tool only asks for Enter. With a Virtual Disk, the computer may keep showing its cached
+view of the disk, so unmount and mount it again before pressing Enter; this path has not
+been tried on a device yet. The tool prints the session code at the same
+point as the device and asks whether the words match. At the end, compare the wallet
+fingerprint and key it prints with the device's "New TSS wallet" screen.
+
 ## Measured on an mk5 (2026-10-02, `usbclient.py --tss-bench`)
 
 Both parties of a 2-member wallet in one process, mk4/mk5 image at `opt-level = "s"`:
