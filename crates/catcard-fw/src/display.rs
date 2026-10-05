@@ -219,26 +219,28 @@ pub fn wipe(panel: &mut Panel) {
     unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
 }
 
-/// Put a picture on the panel: `w` x `h` RGB565 pixels at `(x, y)`, on a cleared screen.
+/// Clear the panel to [`SURROUND`] for a picture, whose rows then arrive one at a time
+/// through [`picture_row`].
 ///
 /// Straight to the panel rather than through the canvas, because the canvas is four bits
 /// a pixel through a sixteen-entry palette and a photograph is neither. The row cache is
-/// invalidated afterwards, so whatever menu comes next is sent whole and none of the
-/// picture is left behind under it.
-///
-/// `surround` fills everything the picture does not cover, which is where the proportions
-/// it was resized to leave a gap.
+/// invalidated, so whatever screen comes next -- the menu, or an error over half a
+/// picture -- is sent whole and none of the picture is left behind under it.
 #[cfg(feature = "board-q1")]
-pub fn show_picture(panel: &mut Panel, x: usize, y: usize, w: usize, h: usize, px: &[u16]) {
+pub fn picture_start(panel: &mut Panel) {
     reclaim_bus();
     reset_origin(panel);
     let _ = panel.clear(SURROUND);
-    let _ = panel.paint(x, y, w, h, |dx, dy| {
-        px.get(dy * w + dx).copied().unwrap_or(SURROUND)
-    });
     // Painted behind the row cache's back, so the next frame must be sent whole.
     // SAFETY: foreground only, single core, and not while `draw` holds the cache.
     unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
+}
+
+/// One row of a picture, `row.len()` RGB565 pixels at `(x, y)`, after [`picture_start`].
+#[cfg(feature = "board-q1")]
+pub fn picture_row(panel: &mut Panel, x: usize, y: usize, row: &[u16]) {
+    reclaim_bus();
+    let _ = panel.paint_pixels(x, y, row.len(), 1, row);
 }
 
 /// What surrounds a picture, and what a transparent pixel in one is composited onto.

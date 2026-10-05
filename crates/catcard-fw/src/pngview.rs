@@ -4,19 +4,18 @@
 //! scanlines. This is the part that knows what this device can spend on it, where the
 //! bytes come from, and what a person sees while it happens.
 //!
-//! # The picture is finished before any of it is shown
+//! # Rows go straight to the panel
 //!
-//! Rows could go straight to the panel as they are decoded, which would need no frame
-//! buffer at all. They do not, for two reasons. A file that turns out to be damaged
-//! half way down would leave half a picture on the glass with an error message over it,
-//! and there is no honest way to take it back. And a photograph takes seconds to
-//! inflate, during which something has to say that the device is working -- a bar that
-//! fills is a better answer than a picture that creeps.
+//! Each resized row is painted as soon as it is decoded; no frame is held. A whole frame
+//! is 150 KB, which once came out of the spare SRAM bank -- until the apps' 256 KB area
+//! was placed in the middle of it and no piece that size was left, and "not enough
+//! memory" was all a picture got. The decode needs a few kilobytes: two scanlines, the
+//! inflate window and one output row.
 //!
-//! So the resized picture is assembled in memory, at most 320x240 in 16-bit colour,
-//! which is 150 KB. That is what the spare SRAM bank is for: it does not fit in the
-//! linked heap, and asking for it is what makes the allocator go and claim the rest of
-//! the RAM (see [`crate::heap`]).
+//! The picture filling in from the top is what says the device is working. A file that
+//! turns out to be damaged half way down leaves part of a picture, and the error screen
+//! that follows is drawn whole over it (the row cache is invalidated when the picture
+//! starts), so nothing of it stays behind.
 //!
 //! # Q1 only
 //!
@@ -99,11 +98,8 @@ fn show<D: catcard_sd::fat::SectorDriver>(
         plan.h
     );
 
-    // Everything the decode needs, from the heap. The frame is the large one and is
-    // asked for first: if it cannot be had, nothing else was allocated for nothing.
-    let frame_len = plan.w * plan.h * 2;
-    let (Some(mut frame), Some(mut window), Some(mut lines), Some(mut acc), Some(mut out)) = (
-        crate::heap::take(frame_len),
+    // Everything the decode needs, from the heap: no frame, the rows go to the panel.
+    let (Some(mut window), Some(mut lines), Some(mut acc), Some(mut out)) = (
         crate::heap::take(catcard_png::WINDOW),
         crate::heap::take(hdr.lines_needed()),
         crate::heap::take(Buffers::acc_needed(plan.w) * 4),
@@ -112,11 +108,19 @@ fn show<D: catcard_sd::fat::SectorDriver>(
         return Err("not enough memory for this picture");
     };
 
+    // Centred, on the surround it was composited against, so the edges of a logo match
+    // what is behind them.
+    let x0 = (PANEL_W - plan.w) / 2;
+    let y0 = (PANEL_H - plan.h) / 2;
     let mut at = 0u64;
     let mut shown = u8::MAX;
+    // The bar until the first row: a large file can take a moment before one comes out.
+    let started = core::cell::Cell::new(false);
     bar(ui, 0);
     {
-        let frame = frame.pixels();
+        // Both callbacks draw, one at a time: the decoder calls them in turn, never
+        // together, so the screen is shared rather than split between them.
+        let screen = core::cell::RefCell::new(&mut *ui);
         let outcome = catcard_png::render(
             &hdr,
             &plan,
@@ -137,33 +141,28 @@ fn show<D: catcard_sd::fat::SectorDriver>(
                 let pct = (at * 100)
                     .checked_div(total)
                     .map_or(100, |p| p.min(100) as u8);
-                if pct != shown {
+                if !started.get() && pct != shown {
                     shown = pct;
-                    bar(ui, pct);
+                    bar(&mut screen.borrow_mut(), pct);
                 }
                 Ok(n)
             },
             |y, row| {
-                let from = y * plan.w;
-                match frame.get_mut(from..from + row.len()) {
-                    Some(dst) => {
-                        dst.copy_from_slice(row);
-                        Ok(())
-                    }
-                    // The renderer promises rows in range; this is the check that says
-                    // so rather than trusting it with a slice index.
-                    None => Err(()),
+                // The renderer promises rows in range; this is the check that says so
+                // rather than painting off the edge.
+                if y >= plan.h || row.len() > plan.w {
+                    return Err(());
                 }
+                let mut ui = screen.borrow_mut();
+                if !started.replace(true) {
+                    display::picture_start(ui.panel);
+                }
+                display::picture_row(ui.panel, x0, y0 + y, row);
+                Ok(())
             },
         );
         outcome.map_err(Error::why)?;
     }
-
-    // Centred, on the surround it was composited against, so the edges of a logo match
-    // what is behind them.
-    let x = (PANEL_W - plan.w) / 2;
-    let y = (PANEL_H - plan.h) / 2;
-    display::show_picture(ui.panel, x, y, plan.w, plan.h, frame.pixels());
     menu::wait_for_any_key(ui);
     // The picture was painted behind the canvas's back; the caller's next draw has to
     // put the menu back, and `show_picture` invalidated the row cache so that it will.
