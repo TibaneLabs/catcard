@@ -244,7 +244,9 @@ fn with_peer(
         say(ui, HEAD, "not installed:", describe(&e));
         return false;
     }
-    match keep(gate, login, ui, storage, record, HEAD) {
+    let kept = keep(gate, login, ui, storage, record, HEAD);
+    drive::pass_on(ui, storage, peer);
+    match kept {
         Ok(_) => {
             let mut a: Line = Line::new();
             let _ = write!(a, "set up with member {peer}");

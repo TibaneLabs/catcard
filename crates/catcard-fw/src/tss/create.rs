@@ -73,7 +73,10 @@ pub(super) fn create(
     let Some(mut record) = record else {
         return say(ui, HEAD, "the session ended", "with no share");
     };
-    match keep(gate, login, ui, storage, &mut record, HEAD) {
+    let kept = keep(gate, login, ui, storage, &mut record, HEAD);
+    // The pair cache is on the medium now: it can move on.
+    drive::pass_on(ui, storage, me % n + 1);
+    match kept {
         Ok(summary) => view::created(ui, &summary),
         Err(why) => say(ui, "Not kept", why, "the share is lost"),
     }

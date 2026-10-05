@@ -157,17 +157,25 @@ fn compare(ui: &mut Ui<'_>, s: &mut Session, who: &str) -> bool {
     for l in pairs.iter() {
         let _ = rows.push(Row::body(l.as_str()));
     }
+    // The devices reach this one at a time, as the card comes round: the first cannot
+    // be compared with anything yet. Its words are written down, and every later device
+    // is checked against them before it sends anything secret. A device that went on
+    // ahead of a mismatch has only sent its part of a session that then stops.
     let _ = rows.push(
-        Row::body("Every member's device must show these same words, in this order.").small(),
+        Row::body(
+            "The first device to show these words: write them down. Every other device \
+             must show the same words, in this order, when the card reaches it.",
+        )
+        .small(),
     );
     loop {
         let _ = menu::show_doc(ui, &rows, false, false);
         match menu::pick_row(
             ui,
             who,
-            "same words on every device?",
+            "same as written down?",
             &[
-                "Yes, the same on all",
+                "Yes, or written now",
                 "Show them again",
                 "No: stop the session",
             ],
@@ -179,7 +187,9 @@ fn compare(ui: &mut Ui<'_>, s: &mut Session, who: &str) -> bool {
                     ui,
                     "Stop the session?",
                     "The words differ, or you are not sure.",
-                    &["Someone may be between the devices. Start a new session."],
+                    &[
+                        "Someone may be between the devices. Leave it on every device and start a new session.",
+                    ],
                     "stop",
                     "back",
                 ) {
@@ -279,6 +289,27 @@ fn wait_for_files(
             }
         }
     }
+}
+
+/// This member is done, but the others may still be waiting for the files: say where
+/// they go next. `next` is the next member round the circle.
+#[inline(never)]
+pub(super) fn pass_on(ui: &mut Ui<'_>, storage: Storage, next: u8) {
+    use catcard_ui::scroll::Line as Row;
+    let mut note: heapless::String<120> = heapless::String::new();
+    let _ = match storage {
+        Storage::Sd => write!(
+            note,
+            "Pass the card to member {next}, then on to any member still showing a step."
+        ),
+        Storage::Vdisk => write!(
+            note,
+            "Copy the TSS folder to member {next}'s Virtual Disk, and to any member still \
+             showing a step."
+        ),
+    };
+    let rows = [Row::title("Done here"), Row::body(note.as_str()).small()];
+    let _ = menu::show_doc(ui, &rows, false, false);
 }
 
 /// A medium that would not take what was written: try again, or give up.
