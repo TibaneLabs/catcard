@@ -508,10 +508,7 @@ fn store(
         return say(ui, "Not stored", why, "any key to go back");
     }
     crate::key::to_root();
-    #[cfg(feature = "board-q1")]
     crate::pubkeys::note_fingerprint(Some(fp));
-    #[cfg(not(feature = "board-q1"))]
-    let _ = fp;
     crate::catlog!("codex32: wallet stored");
     if raw {
         // Best effort: the flag only steers a later split's prefix, which this firmware

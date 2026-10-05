@@ -332,3 +332,17 @@ pub(crate) fn label() -> &'static str {
         }
     }
 }
+
+/// [`label`] in a few letters, for the mono boards' home-menu title, where it sits beside
+/// the fingerprint in a line of eighteen characters: `Mstr [0123ABCD]`.
+#[cfg(not(feature = "board-q1"))]
+pub(crate) fn short_label() -> &'static str {
+    match (in_force(), crate::passphrase::is_set()) {
+        (Source::Root, false) => "Mstr",
+        (Source::Root, true) => "PP",
+        (Source::Bip85 { .. }, false) => "B85",
+        (Source::Bip85 { .. }, true) => "B85+PP",
+        (Source::Temporary, false) => "Temp",
+        (Source::Temporary, true) => "Tmp+PP",
+    }
+}

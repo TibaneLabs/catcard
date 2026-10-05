@@ -293,11 +293,10 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
     let key = crate::keywork::run(|_| catcard_settings::nvstore::hash_key(&secret));
     crate::settings::install_wallet_key(key);
 
-    // On the Q1, classify the same fetch and keep the (public) master fingerprint for the
-    // status bar. The classification copies the bytes it needs out of `secret`, so the raw
+    // Classify the same fetch and keep the (public) master fingerprint, for the Q1's status
+    // bar and the mono boards' home-menu title. The classification copies the bytes it needs out of `secret`, so the raw
     // stash can be -- and is -- wiped before the seed stretch, which is where the second
     // and a half of PBKDF2 happens.
-    #[cfg(feature = "board-q1")]
     let stored = if crate::pubkeys::known_fingerprint().is_none() {
         crate::menu::stored_from_secret(&secret).ok()
     } else {
@@ -306,7 +305,6 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
 
     secret.zeroize();
 
-    #[cfg(feature = "board-q1")]
     if let Some(stored) = stored {
         match crate::menu::master_from_stored(stored, panel, "Wallet") {
             Ok(master) => {

@@ -273,7 +273,6 @@ fn use_seed(
                 method
             );
             crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
-            #[cfg(feature = "board-q1")]
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             menu::message(ui.panel, HEAD, &said, "in force until reboot");
         }

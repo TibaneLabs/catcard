@@ -611,8 +611,6 @@ pub fn hobbled_row(menu: Menu, label: &str, allow: Allow) -> bool {
             // `Type Passwords` under `emu` and `sssp_related_keys`; `Passphrase` and
             // `Temporary Seed` under `sssp_related_keys` -- both are under Derive here.
             "Type Passwords" | "Derive" => allow.related_keys,
-            // The wallet-in-force header row, on the boards that show one.
-            l if l.starts_with(['[', '<']) => true,
             _ => false,
         },
         // Stock's hobbled menu has no Settings drawer at all. Ours keeps the drawer for
@@ -1065,8 +1063,6 @@ mod tests {
         for l in ["Derive", "Notes", "Type Passwords", "New", "Import"] {
             assert!(!hobbled_row(Menu::Main, l, none), "{l}");
         }
-        assert!(hobbled_row(Menu::Main, "[0123ABCD]", none));
-        assert!(hobbled_row(Menu::Main, "<0123ABCD>", none));
         assert!(hobbled_row(Menu::Main, "EXIT TEST DRIVE", none));
         let notes = Allow {
             notes: true,

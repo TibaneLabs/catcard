@@ -136,7 +136,6 @@ fn enter(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
         crate::catlog!("passphrase: cleared");
         // The status bar names the wallet in force, and the plain one's fingerprint is
         // not what was cached a moment ago. Derive it rather than leave the bar blank.
-        #[cfg(feature = "board-q1")]
         crate::pubkeys::warm_fingerprint(gate, login, ui.panel);
         menu::message(ui.panel, HEAD, "cleared", "the plain wallet");
         menu::wait_for_any_key(ui);
@@ -211,7 +210,6 @@ fn put_in_force(
     expect: Option<[u8; 4]>,
 ) -> Option<[u8; 4]> {
     // What the status bar is naming now, to put back if this is not applied.
-    #[cfg(feature = "board-q1")]
     let previous = crate::pubkeys::known_fingerprint();
 
     // Derive with it and show where it lands, before it is in force anywhere else.
@@ -219,7 +217,6 @@ fn put_in_force(
     let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
         // The seed could not be read, so nothing was proven: leave no passphrase in force.
         clear();
-        #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(previous);
         return None;
     };
@@ -252,7 +249,6 @@ fn put_in_force(
     if menu::confirmed(ui) {
         // This wallet is the one in force now, and its fingerprint was just derived --
         // so the bar gets it without a second stretch.
-        #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some(fingerprint));
         crate::settings::open_wallet(gate, login, ui.panel, HEAD, fingerprint);
         menu::message(ui.panel, HEAD, "in force", "until reboot");
@@ -260,7 +256,6 @@ fn put_in_force(
         Some(fingerprint)
     } else {
         clear();
-        #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(previous);
         menu::message(ui.panel, HEAD, "not applied", "the plain wallet");
         menu::wait_for_any_key(ui);

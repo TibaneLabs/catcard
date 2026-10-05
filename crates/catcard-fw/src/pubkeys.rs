@@ -209,7 +209,6 @@ pub(crate) fn account_key_at(
 /// For a screen that derived one as part of its own work, so the status bar gets it
 /// without a second stretch -- and for putting back the one that was in force when a
 /// passphrase is typed and then declined.
-#[cfg(feature = "board-q1")]
 pub(crate) fn note_fingerprint(fp: Option<[u8; 4]>) {
     // SAFETY: foreground only; the write finishes within this statement.
     unsafe { *core::ptr::addr_of_mut!(FINGERPRINT) = fp };
@@ -225,7 +224,6 @@ pub(crate) fn note_fingerprint(fp: Option<[u8; 4]>) {
 ///
 /// Costs one seed stretch, once, at the point the owner has just entered their PIN and
 /// is waiting for the menu anyway. Everything derived from it afterwards is free.
-#[cfg(feature = "board-q1")]
 pub(crate) fn warm_fingerprint(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,

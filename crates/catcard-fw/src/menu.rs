@@ -387,10 +387,6 @@ enum Screen {
     SecurityKey,
     /// Whether the menu cursor comes round at the ends of a list.
     MenuWrap,
-    /// Whether the home menu names the wallet's fingerprint even in the root wallet.
-    /// Only where the home menu is a list with a header row: the Q1's bar always shows it.
-    #[cfg(not(feature = "board-q1"))]
-    HomeXfp,
     /// The Q1 LCD backlight level. Q1-only: the mono boards have no backlight to dim.
     #[cfg(feature = "board-q1")]
     Brightness,
@@ -504,13 +500,6 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
     if no_seed {
         return MAIN_ITEMS_BLANK;
     }
-    // Another key in force always names itself; the root wallet does when the owner
-    // asked for it (stock's "Home Menu XFP: Always Show").
-    #[cfg(not(feature = "board-q1"))]
-    let head = (!crate::key::is_root() || crate::prefs::current().home_xfp).then(key_row);
-    #[cfg(feature = "board-q1")]
-    let head: Option<&'static str> = None;
-
     /// The list handed back, rebuilt each time: the fingerprint and the switches can
     /// change between two draws, and a menu is a slice of `&'static`. A row's worth of
     /// `&str`s in `.bss`; nothing to lease. One more than the rows for the header, and
@@ -523,9 +512,10 @@ fn main_items(no_seed: bool) -> &'static [&'static str] {
     // Stock's row while the spending policy is on trial, last, as stock places it.
     // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B4 "EXIT TEST DRIVE" [C]
     let tail = crate::policy::test_driving().then_some("EXIT TEST DRIVE");
-    for label in head
-        .into_iter()
-        .chain(MAIN_ITEMS.iter().copied().filter(|l| main_row_shown(l)))
+    for label in MAIN_ITEMS
+        .iter()
+        .copied()
+        .filter(|l| main_row_shown(l))
         .filter(|l| crate::policy::row_allowed(catcard_settings::policy::Menu::Main, l))
         .chain(tail)
     {
@@ -550,50 +540,6 @@ fn main_row_shown(label: &str) -> bool {
         return crate::usbtask::keyboard_on();
     }
     true
-}
-
-/// [`MAIN_ITEMS`] with the wallet in force named at the top, as `[0123ABCD]` -- or
-/// `<0123ABCD>` for the root wallet, which stock spells in angle brackets and shows only
-/// when Home Menu XFP is set to always.
-///
-/// **For the boards with no status bar.** The Q1 says this along its top edge on every
-/// screen; mk4 and mk5 have sixty-four rows of monochrome and no room for a bar, so the
-/// only place to put it is the menu -- which is where stock puts it too, as a header
-/// item that selects the same thing this one does.
-///
-/// It matters more here than on the Q1, not less: without it there is nothing anywhere
-/// to distinguish a passphrase wallet from the one whose words are written down, and
-/// the first sign of being in the wrong one is an export that names a stranger.
-///
-/// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B3 "XFP header item" [C]
-#[cfg(not(feature = "board-q1"))]
-fn key_row() -> &'static str {
-    use core::fmt::Write as _;
-
-    /// The row's text, which has to outlive the call: a menu is a slice of `&'static`.
-    static mut ROW: heapless::String<12> = heapless::String::new();
-
-    // SAFETY: foreground only. The menu is redrawn from one place and holds no borrow
-    // of the row across a rebuild.
-    let row = unsafe { &mut *core::ptr::addr_of_mut!(ROW) };
-    row.clear();
-    // Angle brackets for the master, square for anything else, as stock spells them.
-    let (open, close) = if crate::key::is_root() {
-        ('<', '>')
-    } else {
-        ('[', ']')
-    };
-    match crate::pubkeys::known_fingerprint() {
-        Some([a, b, c, d]) => {
-            let _ = write!(row, "{open}{a:02X}{b:02X}{c:02X}{d:02X}{close}");
-        }
-        // Nothing has derived its fingerprint yet. Name the kind rather than invent
-        // a number.
-        None => {
-            let _ = write!(row, "{open}{}{close}", crate::key::label());
-        }
-    }
-    row.as_str()
 }
 
 /// Settings on a device with a seed. The seed tools, "Destroy seed" among them, are in
@@ -627,12 +573,6 @@ const SETTINGS_ITEMS: &[&str] = &[
     #[cfg(not(feature = "board-mk3"))]
     "NFC Push Tx",
     "Menu wrapping",
-    // Stock's Buried Settings → Home Menu XFP, flat here like Menu wrapping beside it.
-    // Only the mono boards, whose home menu is the list that carries the header row; the
-    // Q1's status bar names the wallet on every screen already.
-    // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §SET "Buried Settings" [C]
-    #[cfg(not(feature = "board-q1"))]
-    "Home menu XFP",
     // The colour panel's backlight level. Q1-only: the mono boards have no backlight PWM.
     // Source: hw-reference/firmware-features.md §9 "LCD brightness on battery" [C]
     #[cfg(feature = "board-q1")]
@@ -1259,13 +1199,11 @@ pub fn run(session: Session<'_>) -> ! {
         // `crate::hsm::at_login`; the screen itself is entered at the top of the loop.
         #[cfg(not(feature = "board-mk3"))]
         crate::hsm::at_login(gate, login, &mut ui);
-        // Home Menu XFP "always": the header row needs the number before the first
-        // frame, and the login fetch is still warm. Only where that row exists.
+        // The mono boards name the wallet in the home menu's title, and need its number
+        // before the first frame. Login primed it (`session::prime_session`); this is for
+        // when that could not.
         #[cfg(not(feature = "board-q1"))]
-        if crate::prefs::current().home_xfp
-            && crate::key::is_root()
-            && crate::pubkeys::known_fingerprint().is_none()
-        {
+        if crate::key::is_root() && crate::pubkeys::known_fingerprint().is_none() {
             let _ = crate::pubkeys::fingerprint(gate, login, &mut ui, "Wallet");
         }
     }
@@ -1683,7 +1621,7 @@ pub fn run(session: Session<'_>) -> ! {
             if let Some(items) = items_of(screen, v.blank())
                 && (matches!(key, Key::Digit(5) | Key::Digit(8) | Key::Digit(0)) || sideways)
             {
-                v.menu.key(&mut ui, screen, items, *key);
+                v.menu.key(&mut ui, screen, items, v.blank(), *key);
                 continue;
             }
 
@@ -2078,8 +2016,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::KeyboardEmu => returns(|a| keyboard_emu_screen(a.gate, a.login, a.ui)),
         Screen::SecurityKey => returns(|a| crate::fido::switch_screen(a.gate, a.login, a.ui)),
         Screen::MenuWrap => returns(|a| menu_wrap_screen(a.gate, a.login, a.ui)),
-        #[cfg(not(feature = "board-q1"))]
-        Screen::HomeXfp => returns(|a| home_xfp_screen(a.gate, a.login, a.ui)),
         Screen::TestnetMode => returns(|a| testnet_mode_screen(a.gate, a.login, a.ui)),
         Screen::B85Index => returns(|a| crate::derive::index_values_screen(a.gate, a.login, a.ui)),
         #[cfg(feature = "board-q1")]
@@ -2225,7 +2161,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Derive")) => Screen::KeyMenu,
             // The first row when a wallet other than the root is in force: it names the
             // one you are in, and selecting it is how you leave.
-            (Key::Confirm, Some(name)) if name.starts_with(['[', '<']) => Screen::KeyMenu,
             (Key::Confirm, Some("Settings")) => Screen::Settings,
             (Key::Confirm, Some("Help")) => Screen::HelpMain,
             // Handled in `run`, where the login struct is in scope to be zeroized first.
@@ -2274,8 +2209,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("NFC Push Tx")) => Screen::PushTx,
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
-            #[cfg(not(feature = "board-q1"))]
-            (Key::Confirm, Some("Home menu XFP")) => Screen::HomeXfp,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
             #[cfg(feature = "board-q1")]
@@ -2659,7 +2592,7 @@ impl MenuScreen {
         if is_grid_items(items) {
             return draw_grid(panel, items, self.cursor, self.off, self.strip());
         }
-        let (title, note) = menu_head(screen);
+        let (title, note) = menu_head(screen, no_seed);
         let view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
         // Through the marks path, like every other screen that renders a document: a
         // list menu can carry a colour mark too, and one drawn plain would leave its
@@ -2673,7 +2606,7 @@ impl MenuScreen {
     /// and only pushes the view at an edge, and so pressing past the first or last item
     /// keeps scrolling to reveal the title.
     #[inline(never)]
-    fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], k: Key) {
+    fn key(&mut self, ui: &mut Ui<'_>, screen: Screen, items: &[&str], blank: bool, k: Key) {
         #[cfg(feature = "board-q1")]
         if is_grid_items(items) {
             self.cursor = grid_move(self.cursor, items.len(), k);
@@ -2712,7 +2645,7 @@ impl MenuScreen {
         }
         #[cfg(feature = "dev")]
         let t0 = catcard_hal::dwt::cycles();
-        let (title, note) = menu_head(screen);
+        let (title, note) = menu_head(screen, blank);
         let mut view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
         #[cfg(feature = "dev")]
         let t1 = catcard_hal::dwt::cycles();
@@ -3247,8 +3180,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         | Screen::B85Index => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::VirtualDisk => {}
-        #[cfg(not(feature = "board-q1"))]
-        Screen::HomeXfp => {}
         // Handled in `run`: picks a level through `pick_row` and drives the panel itself.
         #[cfg(feature = "board-q1")]
         Screen::Brightness => {}
@@ -3263,12 +3194,41 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
     }
 }
 
+/// The mono home menu's title: the wallet in force, by [`crate::key::short_label`], and
+/// its fingerprint once this session knows it (never derived here: the title is drawn on
+/// every frame). Built into a static, as a title is `&'static`.
+#[cfg(not(feature = "board-q1"))]
+fn home_title() -> &'static str {
+    use core::fmt::Write as _;
+    static mut TITLE: heapless::String<20> = heapless::String::new();
+    // SAFETY: foreground only. The menu is drawn from one place and holds no borrow of
+    // the title across a rebuild.
+    let t = unsafe { &mut *core::ptr::addr_of_mut!(TITLE) };
+    t.clear();
+    let _ = t.push_str(crate::key::short_label());
+    if let Some([a, b, c, d]) = crate::pubkeys::known_fingerprint() {
+        let _ = write!(t, " [{a:02X}{b:02X}{c:02X}{d:02X}]");
+    }
+    t.as_str()
+}
+
 /// The title and note line for a menu screen -- the single place each is defined, used by
 /// both the draw path and the arrow handler so the two never diverge. The note is owned so
 /// a screen that wants a dynamic one can build it here.
-fn menu_head(screen: Screen) -> (&'static str, Line) {
+#[cfg_attr(feature = "board-q1", allow(unused_variables))]
+fn menu_head(screen: Screen, blank: bool) -> (&'static str, Line) {
     let mut note = Line::new();
     let title = match screen {
+        // The mono boards have no status bar: the home menu's title names the wallet in
+        // force and its fingerprint, `Mstr [0123ABCD]`. Only a device with no wallet yet
+        // is called "CatCard". The Q1's bar names the wallet on every screen instead.
+        #[cfg(not(feature = "board-q1"))]
+        Screen::Main if !blank => {
+            if !crate::key::is_root() {
+                let _ = note.push_str(crate::key::label());
+            }
+            home_title()
+        }
         Screen::Main => {
             // Another wallet looks exactly like the root otherwise, and the difference
             // is which coins the device can spend. Say so where it is always visible.
@@ -7233,7 +7193,6 @@ pub(crate) fn announce_key(
         let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
         // The label, never the fingerprint: the log is readable by any host.
         crate::catlog!("key: now WIF ({})", crate::key::label());
-        #[cfg(feature = "board-q1")]
         crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
         message(ui.panel, head, &said, crate::key::label());
         wait_for_any_key(ui);
@@ -10132,7 +10091,6 @@ fn import_xprv(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     match res {
         Ok(()) => {
             crate::key::to_root();
-            #[cfg(feature = "board-q1")]
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             crate::catlog!("seed: xprv stored");
             message(ui.panel, "Wallet stored", &said, "is the master now");
@@ -11990,54 +11948,6 @@ fn menu_wrap_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     );
 }
 
-/// Settings → Home menu XFP: name the master fingerprint at the top of the home menu
-/// even in the root wallet. Stock's Buried Settings → Home Menu XFP, "Only Tmp" /
-/// "Always Show".
-///
-/// The fingerprint is derived the moment the setting goes on, so the row it adds names
-/// a number rather than "MASTER" until some other screen happens to derive it.
-#[cfg(not(feature = "board-q1"))]
-fn home_xfp_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    const HEAD: &str = "Home menu XFP";
-    let now = crate::prefs::current();
-    let note = if now.home_xfp {
-        "now: always shown"
-    } else {
-        "now: only another key"
-    };
-    let Some(row) = pick_row(ui, HEAD, note, &["Always show", "Only another key"]) else {
-        return;
-    };
-    let want = row == 0;
-    if want == now.home_xfp {
-        message(ui.panel, HEAD, "unchanged", note);
-        wait_for_any_key(ui);
-        return;
-    }
-    save_pref(
-        gate,
-        login,
-        ui,
-        HEAD,
-        (
-            catcard_settings::prefs::HOME_XFP,
-            if want { "1" } else { "0" },
-        ),
-        crate::prefs::Prefs {
-            home_xfp: want,
-            ..now
-        },
-        if want {
-            "always shown"
-        } else {
-            "only another key"
-        },
-    );
-    if want && crate::key::is_root() {
-        let _ = crate::pubkeys::fingerprint(gate, login, ui, HEAD);
-    }
-}
-
 /// Danger zone → Testnet mode.
 ///
 /// Picks the Bitcoin network the whole device works in: mainnet (BTC), testnet4 (XTN) or
@@ -12244,7 +12154,6 @@ fn lock_down(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
             // Once stored it *is* the root. Keeping the loaded selection would be the same
             // wallet under two names.
             crate::key::to_root();
-            #[cfg(feature = "board-q1")]
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             crate::catlog!("lockdown: the loaded key is the stored seed");
             message(ui.panel, "Locked down", &said, "is the stored seed");

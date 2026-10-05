@@ -94,9 +94,6 @@ pub(crate) struct Prefs {
     /// Whether the Address Explorer shows a registered wallet's addresses whole rather
     /// than with the middle elided. Honoured by the explorer in [`crate::menu`].
     pub ms_full_addr: bool,
-    /// Name the fingerprint at the top of the home menu even in the root wallet.
-    /// Honoured by `crate::menu::main_items` on the boards whose menu carries that row.
-    pub home_xfp: bool,
     /// Whether the ckcc HSM commands are answered (Spending Policy → HSM Mode). Honoured by
     /// `crate::ckcc`'s dispatch, through [`crate::ckcc::set_hsm_commands`].
     pub hsm_commands: bool,
@@ -151,7 +148,6 @@ impl Default for Prefs {
             pushtx: PushTx::DEFAULT,
             ms_unsorted: false,
             ms_full_addr: false,
-            home_xfp: false,
             hsm_commands: false,
             fido: false,
             fido_gen: Some(0),
@@ -181,7 +177,6 @@ static mut CURRENT: Prefs = Prefs {
     pushtx: PushTx::DEFAULT,
     ms_unsorted: false,
     ms_full_addr: false,
-    home_xfp: false,
     hsm_commands: false,
     fido: false,
     fido_gen: Some(0),
@@ -303,14 +298,13 @@ pub(crate) fn load(
         pushtx: prefs::pushtx(&doc),
         ms_unsorted: prefs::ms_unsorted(&doc),
         ms_full_addr: prefs::ms_full_addr(&doc),
-        home_xfp: prefs::home_xfp(&doc),
         hsm_commands: prefs::hsm_commands(&doc),
         fido: prefs::fido(&doc),
         fido_gen: prefs::fido_generation(&doc),
         fido_pin: prefs::fido_pin(&doc) != prefs::FidoPin::Unset,
     };
     crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}, xfp {}",
+        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}",
         next.idle_minutes,
         next.battery_idle_minutes,
         next.units.code(),
@@ -326,7 +320,6 @@ pub(crate) fn load(
         next.slip132,
         next.nfc_sharing,
         next.pushtx.label(),
-        next.home_xfp
     );
     apply(next);
 }
