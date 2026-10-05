@@ -1,27 +1,44 @@
 //! Where threshold signing's randomness comes from (docs/TSS.md, "Randomness").
 //!
 //! - **Seed-grade**: a DKG member's contribution to the new key, an export's Codex32 noise
-//!   and reshare polynomials, and the per-session identity key. These come from the
-//!   entropy pool through [`Pool`], which refuses whenever the pool does: the pool is the
-//!   one thing on this device that hands out seed material, and this file is on its
-//!   allowlist (`tools/pooldraw-lint.sh`, docs/ENTROPY.md).
-//! - **The protocol DRBG** -- tsslib's nonces and OT seeds -- is `catcard_tss::rng`'s,
-//!   armed for the session with 48 bytes from the same [`Pool`] and wiped after it.
+//!   and reshare polynomials, the per-session identity key, and the seed of the protocol
+//!   DRBG (tsslib's nonces and OT seeds). All of it comes from the session's own
+//!   generator, [`Fresh`], made the way a new wallet's words are: every hardware TRNG read
+//!   afresh into the pool, the owner's own dice offered, the report shown, then one draw
+//!   (`newseed::gather_and_draw`). Nothing here draws from the boot pool as it stands.
 //! - **A session's id** is public (it names the card's folder) and comes from the UI
 //!   DRBG through [`Drbg`].
 
 use catcard_tss::{Entropy, NoEntropy};
 
-/// The entropy pool, as `catcard_tss` draws from it.
-pub(super) struct Pool<'a> {
-    pub(super) pool: &'a mut catcard_entropy::EntropyPool,
+/// A session's own generator: HMAC-DRBG instantiated from one draw of a freshly gathered
+/// pool, under its own personalisation. Wiped on drop.
+pub(super) struct Fresh(catcard_entropy::HmacDrbg);
+
+impl Fresh {
+    /// Gather from every chip, as for a new wallet, and seed the session's generator from
+    /// it: 48 bytes of entropy input and a 16-byte nonce, drawn and used with interrupts
+    /// masked. `None` once the pool's refusal has been shown.
+    pub(super) fn gather(
+        gate: &catcard_callgate::Callgate,
+        ui: &mut crate::ui::Ui<'_>,
+        pool: &mut catcard_entropy::EntropyPool,
+    ) -> Option<Fresh> {
+        crate::newseed::gather_and_draw(gate, ui, pool, 64, |seed, _kw| {
+            Fresh(catcard_entropy::HmacDrbg::new(
+                &seed[..48],
+                &seed[48..],
+                catcard_entropy::domain::TSS,
+            ))
+        })
+    }
 }
 
-impl Entropy for Pool<'_> {
+impl Entropy for Fresh {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), NoEntropy> {
-        // The pool hands out at most 64 bytes a draw, each from a fresh counter.
-        for chunk in out.chunks_mut(64) {
-            self.pool.draw(chunk).map_err(|_| NoEntropy)?;
+        // One generate call returns at most 8 KiB; ask in pieces.
+        for chunk in out.chunks_mut(catcard_entropy::drbg::MAX_BYTES_PER_REQUEST) {
+            self.0.generate(chunk).map_err(|_| NoEntropy)?;
         }
         Ok(())
     }

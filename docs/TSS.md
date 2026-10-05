@@ -78,10 +78,14 @@ governs signing and restoring.
 - **One session, many sighashes.** A signing session runs one DKLs signing per input, and
   every input's messages for a round travel in the same file: a PSBT of ten inputs takes
   the same seven passes of the cards (two of introductions, five of signing) as one.
-- **Randomness.** The DKG's secret contribution and every share made on export are seed-grade
-  and come from the entropy pool, like a new wallet (the pool-draw lint allowlist names the
-  TSS module). Protocol randomness (nonces, OT seeds) comes from a DRBG seeded from the pool
-  for the session and wiped after it.
+- **Randomness.** Each session gathers its own, as a new wallet's words are made: every
+  hardware TRNG (the STM32's, SE1, SE2) read afresh into the pool and health-tested, the
+  owner's dice or coins offered, the report shown, then one 64-byte draw with interrupts
+  masked that seeds the session's own HMAC-DRBG (`domain::TSS`, `tss::rand::Fresh`). That
+  generator makes the identity key, the member's share of a new key, an export's noise and
+  the seed of tsslib's protocol DRBG (nonces, OT seeds); it is wiped once the session has
+  started. Create together, a split and a pair setup each gather; the session id, public,
+  comes from the UI DRBG.
 
 ## The flows
 

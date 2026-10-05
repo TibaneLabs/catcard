@@ -15,7 +15,7 @@ use catcard_wallet::bip32::{ChildNumber, DerivationPath};
 use core::fmt::Write as _;
 use zeroize::Zeroize as _;
 
-use super::rand::Pool;
+use super::rand::Fresh;
 use super::{Room, Work, approve, card, describe, hex4, say};
 use crate::menu::{self, Line, Storage};
 use crate::ui::Ui;
@@ -88,6 +88,11 @@ pub(super) fn export(
     let Some(protect) = card::ask_protection(ui, HEAD) else {
         return;
     };
+    // The split's own randomness, gathered from every chip as for a new wallet, before
+    // the words are in memory.
+    let Some(mut fresh) = Fresh::gather(gate, ui, pool) else {
+        return;
+    };
 
     // The words, and the account key from them, with no passphrase (refused above).
     let (mut entropy, len) = match menu::seed_entropy(gate, login, ui.panel, HEAD) {
@@ -126,8 +131,7 @@ pub(super) fn export(
 
     let mut busy = Some(menu::blocking_screen(ui.panel, HEAD, "making the shares"));
     let made = crate::keywork::run(|kw| {
-        let bundles =
-            catcard_tss::export(&entropy[..len], &account_key, n, t, &mut Pool { pool }, kw)?;
+        let bundles = catcard_tss::export(&entropy[..len], &account_key, n, t, &mut fresh, kw)?;
         // A split is a backup only if it adds back up: the first t give the words.
         let refs: alloc::vec::Vec<&ShareBundle> = bundles.iter().take(usize::from(t)).collect();
         let back = catcard_tss::restore_entropy(&refs, kw)?;
@@ -137,6 +141,7 @@ pub(super) fn export(
     busy.take();
     entropy.zeroize();
     drop(account_key);
+    drop(fresh);
     let bundles = match made {
         Ok((b, true)) => b,
         Ok((_, false)) => {

@@ -51,6 +51,10 @@ pub mod domain {
     /// domain so the standalone key a paper wallet hands out on paper can never coincide
     /// with a value drawn for any other purpose, even though it is real key material.
     pub const PAPER: &[u8] = b"catcard/drbg/paper/v1";
+    /// A threshold-signing session's own generator: its identity key, its share of a new
+    /// key, an export's noise, and the seed of tsslib's protocol DRBG. Seeded from a
+    /// freshly gathered pool for each session, never from another DRBG.
+    pub const TSS: &[u8] = b"catcard/drbg/tss/v1";
 }
 
 /// Build the per-purpose DRBGs from a pool that has met its policy.

@@ -21,7 +21,7 @@ use catcard_tss::{CacheKey, CacheRefused, Error, SESSION_ID_LEN, Session, ShareR
 use core::fmt::Write as _;
 
 use super::card::{self, Invitation};
-use super::rand::{Drbg, Pool};
+use super::rand::{Drbg, Fresh};
 use super::store::{self, Kept};
 use super::{Room, Work, approve, describe, drive, keep, say};
 use crate::menu::{self, Line, Storage};
@@ -214,13 +214,17 @@ fn with_peer(
     let Some((id, start)) = find_or_start(ui, storage, invitation, me, peer) else {
         return false;
     };
+    // The pair's new OT seeds are secret: gathered from every chip as for a new wallet.
+    let Some(mut fresh) = Fresh::gather(gate, ui, pool) else {
+        return false;
+    };
     let mut busy = Some(menu::blocking_screen(
         ui.panel,
         HEAD,
         "making this member's keys",
     ));
-    let made =
-        crate::keywork::run(|kw| Session::pair_setup(id, record, peer, &mut Pool { pool }, kw));
+    let made = crate::keywork::run(|kw| Session::pair_setup(id, record, peer, &mut fresh, kw));
+    drop(fresh);
     busy.take();
     let mut session = match made {
         Ok(s) => s,

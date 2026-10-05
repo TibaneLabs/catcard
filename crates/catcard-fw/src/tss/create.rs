@@ -16,7 +16,7 @@ use catcard_tss::{SESSION_ID_LEN, Session};
 use core::fmt::Write as _;
 
 use super::card::{self, Invitation};
-use super::rand::{Drbg, Pool};
+use super::rand::{Drbg, Fresh};
 use super::{Room, Work, approve, describe, drive, keep, say, view};
 use crate::menu::{self, Line, Storage};
 use crate::ui::Ui;
@@ -46,12 +46,18 @@ pub(super) fn create(
     if !Room::fits(ui, HEAD, Work::Create, n, 0) {
         return;
     }
+    // This member's randomness -- its share of the new key among it -- gathered from
+    // every chip as for a new wallet.
+    let Some(mut fresh) = Fresh::gather(gate, ui, pool) else {
+        return;
+    };
     let mut busy = Some(menu::blocking_screen(
         ui.panel,
         HEAD,
         "making this member's keys",
     ));
-    let made = crate::keywork::run(|kw| Session::keygen(id, n, t, me, &mut Pool { pool }, kw));
+    let made = crate::keywork::run(|kw| Session::keygen(id, n, t, me, &mut fresh, kw));
+    drop(fresh);
     busy.take();
     let mut session = match made {
         Ok(s) => s,

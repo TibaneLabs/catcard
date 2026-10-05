@@ -443,13 +443,13 @@ printed in its run's toolchain step), are open items in
   [`crates/catcard-fw/src/codex32.rs`](../crates/catcard-fw/src/codex32.rs) for a Codex32
   split's identifier and its `k - 1` free shares, drawn and split in one masked region
   (with a predictable source one share would give the wallet away, so these are seed
-  material, never DRBG output);
-  [`crates/catcard-fw/src/tss/rand.rs`](../crates/catcard-fw/src/tss/rand.rs) for
-  threshold signing (docs/TSS.md): a create-together member's identity key and the seed of
-  the session's protocol DRBG -- which draws that member's share of the new key -- and an
-  export's Codex32 noise and the seed of its reshare, all seed-grade; and `spawn_drbg`, one draw a DRBG, at session
+  material, never DRBG output); and `spawn_drbg`, one draw a DRBG, at session
   start ([`session.rs`](../crates/catcard-fw/src/session.rs)) and for the paper wallet
-  ([`paperwallet.rs`](../crates/catcard-fw/src/paperwallet.rs)). That list is enforced:
+  ([`paperwallet.rs`](../crates/catcard-fw/src/paperwallet.rs)). Threshold signing
+  (docs/TSS.md) takes none directly: each session -- create together, a split, a pair
+  setup -- gathers from every chip through `gather_and_draw`, as a new wallet does, and
+  seeds its own DRBG (`domain::TSS`) from that one draw
+  ([`tss/rand.rs`](../crates/catcard-fw/src/tss/rand.rs)). That list is enforced:
   [`tools/pooldraw-lint.sh`](../tools/pooldraw-lint.sh), run by `make lint` and CI,
   fails if a draw or a `spawn_drbg` appears in any other file of `crates/catcard-fw`.
 - `EntropyPool` has no method that returns a random number. The DRBGs are separate types
