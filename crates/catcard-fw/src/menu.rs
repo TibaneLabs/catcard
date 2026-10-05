@@ -605,10 +605,6 @@ const SETTINGS_ITEMS: &[&str] = &[
     // than beside the one-shot tools. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md
     // §SET "Multisig Wallets (has_secrets)" [C]
     "Multisig",
-    // Threshold-signing wallets, beside the other wallets shared between devices: the
-    // shares kept here and the ways to make one (`crate::tss`). Ours; stock has none.
-    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
-    "TSS wallets",
     // The Single-Signer Spending Policy and, later, CCC. Stock keeps the drawer under
     // Advanced/Tools; ours is a setting, beside Multisig, and only in the root wallet
     // (`settings_items`), whose file the policy lives in. Needs the store: not on the mk3.
@@ -1061,6 +1057,12 @@ const KEY_ITEMS_ROOT: &[&str] = &[
     // Codex32 (BIP-93) shares, beside Seed XOR's parts: stock's Shamir Split and its
     // Temporary Seed -> Codex32. Source: hw-reference/codex32-format.md §Device operations [C]
     "Codex32",
+    // Threshold-signing wallets: the shares kept in this wallet's settings and the ways
+    // to make one -- together with other CatCards, or by splitting this wallet
+    // (`crate::tss`). Beside Codex32, the other way a key is held in shares. Ours; stock
+    // has none.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    "TSS wallets",
     "Key vault",
 ];
 /// The same, from anywhere else: there is now somewhere to go back to.
@@ -1073,6 +1075,8 @@ const KEY_ITEMS_DERIVED: &[&str] = &[
     "XOR split",
     "XOR join",
     "Codex32",
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    "TSS wallets",
     "Key vault",
 ];
 
@@ -2252,8 +2256,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         },
         Screen::Settings => match (key, settings_items(no_seed).get(cursor).copied()) {
             (Key::Confirm, Some("Multisig")) => Screen::Multisig,
-            #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
-            (Key::Confirm, Some("TSS wallets")) => Screen::Tss,
             (Key::Confirm, Some("About")) => Screen::About,
             (Key::Confirm, Some("Debug")) => Screen::Debug,
             (Key::Confirm, Some("Help")) => Screen::HelpSettings,
@@ -2328,6 +2330,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("XOR split")) => Screen::XorSplit,
             (Key::Confirm, Some("XOR join")) => Screen::XorJoin,
             (Key::Confirm, Some("Codex32")) => Screen::KeyCodex32,
+            #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+            (Key::Confirm, Some("TSS wallets")) => Screen::Tss,
             (Key::Confirm, Some("New words")) => Screen::KeyNewSeed,
             (Key::Confirm, Some("Key vault")) => Screen::KeyVault,
             (Key::Confirm, Some(_)) => Screen::KeyPick(cursor as u8),
@@ -2821,6 +2825,9 @@ fn grid_icon(label: &str) -> Option<&'static catcard_ui::art::indexed::Indexed> 
         "XOR join" => &art::XOR_JOIN,
         // A key in shares: the secure-key art, which this grid does not otherwise use.
         "Codex32" => &art::SECURE_KEY,
+        // A key held by several devices: the card-details art, which this grid does not
+        // otherwise use.
+        "TSS wallets" => &art::CARD_DETAILS,
         "Key vault" => &art::KEY_VAULT,
         "New words" => &art::NEW_WORDS,
         // The Sign grid.

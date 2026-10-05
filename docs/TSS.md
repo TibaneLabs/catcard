@@ -228,7 +228,7 @@ deployed, so nothing migrates: record and bundle formats 1 and 2 are refused.
 
 ## On the device (stage 1, 2026-10-03; storage 2026-10-04)
 
-Settings → **TSS wallets** (beside `Multisig`, docs/MENU.md) lists the TSS wallets this
+Derive → **TSS wallets** (beside `Codex32`, docs/MENU.md) lists the TSS wallets this
 wallet keeps (`2-of-3 #2 1A2B3C4D`: t, n, member, fingerprint) and offers *Create together*,
 *Import a share*, *Split this wallet* (the export), *Restore from shares* and *What is
 this?*. A kept wallet opens to *Details* (n, t, member, origin, three receive addresses, the
