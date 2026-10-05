@@ -104,8 +104,19 @@ pub(super) fn run(
                 &who,
                 "working: a few seconds",
             ));
+            let t0 = catcard_kernel::ticks();
             let taken = crate::keywork::run(|kw| s.receive(bytes.as_slice(), kw));
             busy.take();
+            // How long each message took, to find where a session spends its time.
+            crate::catlog!(
+                "tss: r{}-{}-{} took {} ms",
+                name.0,
+                name.1,
+                name.2,
+                catcard_kernel::ticks()
+                    .wrapping_sub(t0)
+                    .wrapping_mul(catcard_kernel::TICK_MS)
+            );
             match taken {
                 Ok(()) => moved = true,
                 Err(e) => {
@@ -206,8 +217,15 @@ fn compare(ui: &mut Ui<'_>, s: &mut Session, who: &str) -> bool {
         who,
         "working: a few seconds",
     ));
+    let t0 = catcard_kernel::ticks();
     let done = crate::keywork::run(|kw| s.confirm(kw));
     busy.take();
+    crate::catlog!(
+        "tss: confirm took {} ms",
+        catcard_kernel::ticks()
+            .wrapping_sub(t0)
+            .wrapping_mul(catcard_kernel::TICK_MS)
+    );
     match done {
         Ok(()) => true,
         Err(e) => {
