@@ -58,6 +58,16 @@ const ENCODING: Encoding = Encoding::Base32;
 /// enough that a hundred parts do not take all afternoon. Stock uses a comparable rate.
 const FRAME_MS: u32 = 250;
 
+/// Milliseconds a part is shown for when another device's scanner is reading it, as the
+/// threshold-signing exchange does. A Q1 reading a Q1 missed parts at [`FRAME_MS`].
+#[cfg(all(feature = "board-q1", feature = "tss"))]
+pub(crate) const DEVICE_FRAME_MS: u32 = 800;
+
+/// The range `5`/`8` move a BBQr animation's frame time within, and the step: a half
+/// again slower, or two thirds the time.
+#[cfg(feature = "board-q1")]
+const FRAME_MS_RANGE: (u32, u32) = (100, 3000);
+
 /// Show `payload` as animated BBQr.
 ///
 /// The denser of the two and the right choice for anything Bitcoin: base32 is five bits
@@ -68,7 +78,19 @@ const FRAME_MS: u32 = 250;
 /// would have taken the same bytes as `JSON`.
 #[cfg(feature = "board-q1")]
 pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
-    animate(ui, head, payload, filetype, false)
+    animate(ui, head, payload, filetype, false, FRAME_MS)
+}
+
+/// [`animate_bbqr`], starting at `frame_ms` a part: slower for a reader that needs it.
+#[cfg(all(feature = "board-q1", feature = "tss"))]
+pub(crate) fn animate_bbqr_at(
+    ui: &mut Ui<'_>,
+    head: &str,
+    payload: &[u8],
+    filetype: FileType,
+    frame_ms: u32,
+) {
+    animate(ui, head, payload, filetype, false, frame_ms)
 }
 
 /// [`animate_bbqr`] with the last part's base32 padded with `=` to a multiple of eight,
@@ -76,7 +98,7 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
 /// have shown itself. Source: hw-reference/key-teleport-protocol.md §5a, §7 [C]
 #[cfg(feature = "board-q1")]
 pub(crate) fn animate_bbqr_padded(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType) {
-    animate(ui, head, payload, filetype, true)
+    animate(ui, head, payload, filetype, true, FRAME_MS)
 }
 
 /// Show an opaque payload as `ur:bytes`.
@@ -227,7 +249,7 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
         // then sat full -- or worse, kept filling -- would be answering "how far through
         // is this?" with a number that means nothing. What a reader has caught is on the
         // reader's screen, which is where that question belongs.
-        show(ui, grid.width(), |x, y| grid.get(x, y), None);
+        show(ui, grid.width(), |x, y| grid.get(x, y), None, None);
         if lone {
             // Nothing to animate. Redrawing the one code four times a second would
             // only make it flicker at the camera trying to read it -- but the wait
@@ -250,8 +272,18 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
 ///
 /// Returns when the user leaves. There is nothing to report: a QR that was shown may or
 /// may not have been read, and only the thing reading it knows.
+///
+/// `5` and `8` (the arrows) make it slower and faster, and the time a part is shown for
+/// is written beside the code; any other key leaves.
 #[cfg(feature = "board-q1")]
-fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType, pad: bool) {
+fn animate(
+    ui: &mut Ui<'_>,
+    head: &str,
+    payload: &[u8],
+    filetype: FileType,
+    pad: bool,
+    frame_ms: u32,
+) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
 
     const MAX_VERSION: Version = match Version::new(VERSION) {
@@ -284,6 +316,7 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType, pad:
 
     let encoder = QrEncoder::new();
     let mut at = 0usize;
+    let mut frame_ms = frame_ms.clamp(FRAME_MS_RANGE.0, FRAME_MS_RANGE.1);
 
     loop {
         let start = at * per;
@@ -325,13 +358,18 @@ fn animate(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype: FileType, pad:
             grid.width(),
             |x, y| grid.get(x, y),
             Some((at as u32 + 1, total as u32)),
+            (total > 1).then_some(frame_ms),
         );
 
-        // A key leaves, checked while this frame is up rather than between cycles.
-        if key_within(ui, FRAME_MS) {
-            return;
+        // Checked while this frame is up rather than between cycles. The arrows change
+        // the speed and stay on this part, so the new time is on screen at once; any
+        // other key leaves.
+        match key_in(ui, frame_ms) {
+            None => at = (at + 1) % total,
+            Some(Key::Digit(5)) => frame_ms = (frame_ms * 3 / 2).min(FRAME_MS_RANGE.1),
+            Some(Key::Digit(8)) => frame_ms = (frame_ms * 2 / 3).max(FRAME_MS_RANGE.0),
+            Some(_) => return,
         }
-        at = (at + 1) % total;
     }
 }
 
@@ -353,11 +391,27 @@ fn show(
     modules: usize,
     get: impl Fn(usize, usize) -> bool,
     progress: Option<(u32, u32)>,
+    frame_ms: Option<u32>,
 ) {
     use catcard_ui::canvas::{Canvas, INK, PAPER};
 
     display::draw_with(ui.panel, &catcard_ui::st7789::GREYS, |c| {
         catcard_ui::widgets::qr(c, modules, &get);
+
+        // The time each part is up, in the left-hand gutter: what the arrows change.
+        if let Some(ms) = frame_ms {
+            let side = c.height().min(c.width());
+            let gutter = c.width().saturating_sub(side) / 2;
+            let mut t: heapless::String<8> = heapless::String::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut t,
+                format_args!("{}.{}s", ms / 1000, (ms % 1000) / 100),
+            );
+            let face = display::LAYOUT.body;
+            let tw = catcard_ui::text::width_of(face, &t);
+            let x = gutter.saturating_sub(tw) / 2;
+            catcard_ui::text::draw_text(c, face, x, c.height() / 2, &t);
+        }
 
         // The symbol is square and centred, so on a 320-wide panel showing 224 rows it
         // leaves about fifty pixels each side. The bar lives in the right-hand one and
@@ -390,6 +444,11 @@ fn show(
 /// waiting screen pumps it: a polled bus nobody services is a device the host cannot
 /// reach, and this screen can be up for minutes.
 fn key_within(ui: &mut Ui<'_>, ms: u32) -> bool {
+    key_in(ui, ms).is_some()
+}
+
+/// [`key_within`], saying which key.
+fn key_in(ui: &mut Ui<'_>, ms: u32) -> Option<Key> {
     use catcard_hal::dwt;
 
     let hz = unsafe { catcard_hal::clock::hclk_hz() };
@@ -399,11 +458,11 @@ fn key_within(ui: &mut Ui<'_>, ms: u32) -> bool {
     loop {
         let _ = crate::usbtask::pump();
         crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
-        if !keys.is_empty() {
-            return true;
+        if let Some(&k) = keys.first() {
+            return Some(k);
         }
         if dwt::cycles().wrapping_sub(until) < u32::MAX / 2 {
-            return false;
+            return None;
         }
     }
 }

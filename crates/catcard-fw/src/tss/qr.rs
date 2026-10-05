@@ -143,7 +143,13 @@ impl Exchange {
     /// Show the code for member `to`, until the owner presses a key.
     pub(super) fn show(&self, ui: &mut Ui<'_>, head: &str, to: u8) {
         let code = self.code_for(to);
-        crate::qrshow::animate_bbqr(ui, head, &code, catcard_bbqr::FileType::BINARY);
+        crate::qrshow::animate_bbqr_at(
+            ui,
+            head,
+            &code,
+            catcard_bbqr::FileType::BINARY,
+            crate::qrshow::DEVICE_FRAME_MS,
+        );
     }
 
     /// Scan another member's code into the inbox. Only this session's, and only what is

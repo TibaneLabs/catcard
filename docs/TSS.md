@@ -57,7 +57,10 @@ governs signing and restoring.
     member; a code for `m` is one animated BBQr (type `B`) holding the broadcasts and `m`'s
     unicasts of the last two rounds it produced, with the session id and, from member 1,
     the invitation -- a member joins by scanning member 1's first code, and picks its
-    number itself. A member that finishes keeps showing its codes until the owner says
+    number itself. Each part is shown for 0.8 s, which is slower than the 0.25 s
+    used for a phone. A Q1 reading another Q1 missed parts at the faster rate. The arrows
+    change the speed: up is slower, down is faster. The time per part is shown left of
+    the code. A member that finishes keeps showing its codes until the owner says
     everyone is done. Its pair cache goes to its own Virtual Disk (gone at power off; set
     up again before signing). A mixed group uses SD.
 - **Messages are authenticated.** tsslib leaves peer authentication to the transport, and an
