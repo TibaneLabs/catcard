@@ -55,6 +55,12 @@ pub(crate) enum Source {
     /// no business being `Copy`, being compared with `==`, or being returned by value from
     /// [`in_force`] to whoever asks what wallet this is.
     Temporary,
+    /// A threshold-signing wallet this device is a member of (`crate::tss`). It has no
+    /// private key here, only its public half ([`tss`]): addresses and exports come from
+    /// that, and every signature is made together with the other members. Its settings
+    /// are those of the wallet that keeps its share (`crate::settings::wallet_key`).
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    Tss,
 }
 
 /// What shape a loaded key is. See the module notes.
@@ -88,6 +94,34 @@ static mut TEMP_METHOD_PP: heapless::String<20> = heapless::String::new();
 
 /// The selection in force. Foreground only, single core.
 static mut SOURCE: Source = Source::Root;
+
+/// The TSS wallet in force: its public half, as its share record's header says, and where
+/// the record is in the list of the wallet that keeps it. Public, so nothing to wipe;
+/// dropped whenever the selection leaves it.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+static mut TSS: Option<(catcard_tss::Summary, usize)> = None;
+
+/// The TSS wallet in force, if one is: its header, and its index in the keeping wallet's
+/// list.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub(crate) fn tss() -> Option<&'static (catcard_tss::Summary, usize)> {
+    if in_force() != Source::Tss {
+        return None;
+    }
+    // SAFETY: foreground only; the only writers are `set_tss` and `set`, which hold no
+    // borrow across their writes.
+    unsafe { (*core::ptr::addr_of!(TSS)).as_ref() }
+}
+
+/// Work in the TSS wallet `summary` (at `index` in the keeping wallet's list) from now on.
+/// No passphrase applies to it: a passphrase is a BIP-39 thing, and this key has no words.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub(crate) fn set_tss(summary: catcard_tss::Summary, index: usize) {
+    crate::passphrase::clear();
+    set(Source::Tss);
+    // SAFETY: as in `tss`.
+    unsafe { *core::ptr::addr_of_mut!(TSS) = Some((summary, index)) };
+}
 
 /// Whether the secure element's slot holds a wallet, once something has looked.
 ///
@@ -264,6 +298,8 @@ pub(crate) fn method() -> &'static str {
         // one wallet the vault has no reason to hold.
         Source::Root => "Master",
         Source::Bip85 { .. } => "BIP85",
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        Source::Tss => "TSS",
         // SAFETY: as in `loaded_bytes`; the only writer is `load`.
         Source::Temporary => {
             let m: &'static heapless::String<16> = unsafe { &*core::ptr::addr_of!(TEMP_METHOD) };
@@ -283,6 +319,11 @@ pub(crate) fn set(source: Source) {
             (*core::ptr::addr_of_mut!(TEMP)).zeroize();
             *core::ptr::addr_of_mut!(TEMP_LEN) = 0;
         }
+    }
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if source != Source::Tss {
+        // SAFETY: as in `tss`.
+        unsafe { *core::ptr::addr_of_mut!(TSS) = None };
     }
     // SAFETY: as in `in_force`.
     unsafe { *core::ptr::addr_of_mut!(SOURCE) = source };
@@ -319,6 +360,8 @@ pub(crate) fn label() -> &'static str {
         (Source::Root, true) => "PASSPHRASE",
         (Source::Bip85 { .. }, false) => "BIP85",
         (Source::Bip85 { .. }, true) => "BIP85+PP",
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        (Source::Tss, _) => "TSS",
         (Source::Temporary, false) => method(),
         (Source::Temporary, true) => {
             // SAFETY: as in `loaded_bytes`; the only writer is `load`.
@@ -342,6 +385,8 @@ pub(crate) fn short_label() -> &'static str {
         (Source::Root, true) => "PP",
         (Source::Bip85 { .. }, false) => "B85",
         (Source::Bip85 { .. }, true) => "B85+PP",
+        #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+        (Source::Tss, _) => "TSS",
         (Source::Temporary, false) => "Temp",
         (Source::Temporary, true) => "Tmp+PP",
     }

@@ -124,7 +124,7 @@ const _: () = assert!(core::mem::align_of::<Multisig>() <= crate::heap::ALIGN);
 
 impl Registered {
     /// No wallets, and no block.
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             block: None,
             slots: core::ptr::NonNull::dangling(),

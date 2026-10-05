@@ -7906,6 +7906,11 @@ pub(crate) fn seed_entropy(
 ) -> Result<([u8; 32], usize), &'static str> {
     use crate::key::Loaded;
 
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::in_force() == crate::key::Source::Tss {
+        return Err(TSS_NO_KEY);
+    }
+
     // A key the owner brought in for this session is the wallet, and it is already
     // here: nothing to fetch, and no child to derive -- it is not a child of anything.
     match crate::key::loaded() {
@@ -8109,6 +8114,10 @@ pub(crate) fn bip85_parent(
 /// stretch and no passphrase to apply, so one in force is refused rather than silently
 /// ignored. A loaded WIF key has no master at all: every HD screen stops here, with the
 /// reason, rather than inventing a chain code to derive something nobody else would find.
+/// Why a screen that needs the wallet's private key cannot have it in a TSS wallet.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub(crate) const TSS_NO_KEY: &str = "a TSS wallet signs together";
+
 pub(crate) fn master_quietly(
     gate: &Callgate,
     login: &mut catcard_pin::Login,
@@ -8118,6 +8127,11 @@ pub(crate) fn master_quietly(
     use crate::key::{Loaded, Source};
     use catcard_wallet::bip32::ExtendedPrivKey;
     let net = crate::prefs::network();
+    // No private key of a TSS wallet is on any one device: it signs together.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::in_force() == Source::Tss {
+        return Err(TSS_NO_KEY);
+    }
     match crate::key::loaded() {
         Some(Loaded::Xprv) => {
             let (chain_code, key) = crate::key::temporary_xprv().ok_or("no key loaded")?;
@@ -9514,8 +9528,31 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     // Their addresses come out of the wallet record, not out of this seed: that is the
     // point of looking at them here, since an address a cosigner cannot reproduce is one
     // nobody can spend from.
-    let wallets = crate::msimport::registered(gate, login, ui.panel);
-    let entries = PROTOCOLS.len() + wallets.len();
+    // A TSS wallet in force: one key, below which everything is unhardened -- no account
+    // axis, the one address type its descriptor names, and no registered wallets, which
+    // belong to the keeping wallet's seed rather than to this key.
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    let tss = crate::tss::explorer_key();
+    #[cfg(not(all(feature = "tss", not(feature = "board-mk3"))))]
+    let tss: Option<(
+        catcard_wallet::bip32::ExtendedPubKey,
+        catcard_wallet::address::AddressKind,
+        catcard_wallet::bip32::Network,
+        Line,
+    )> = None;
+    let wallets = if tss.is_some() {
+        crate::msimport::Registered::empty()
+    } else {
+        crate::msimport::registered(gate, login, ui.panel)
+    };
+    let entries = if tss.is_some() {
+        1
+    } else {
+        PROTOCOLS.len() + wallets.len()
+    };
+    let net = tss
+        .as_ref()
+        .map_or_else(crate::prefs::network, |&(_, _, n, _)| n);
     // The chain key for the type, account and chain on screen, kept so that walking the
     // index does not redo the one unhardened step each frame.
     let mut cached: Option<(usize, u32, u32, catcard_wallet::bip32::ExtendedPubKey)> = None;
@@ -9548,7 +9585,13 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             .checked_sub(PROTOCOLS.len())
             .and_then(|i| wallets.get(i));
         // Only read when `wallet` is none; clamped so the index cannot leave the table.
-        let kind = PROTOCOLS[proto.min(PROTOCOLS.len() - 1)];
+        let kind = match &tss {
+            Some((_, k, _, _)) => *k,
+            None => PROTOCOLS[proto.min(PROTOCOLS.len() - 1)],
+        };
+        // No account to change: a registered wallet's is its cosigners', a TSS wallet's
+        // is its key.
+        let fixed = wallet.is_some() || tss.is_some();
         let mut buf = [0u8; address::MAX_ADDRESS_LEN];
         let mut path = Line::new();
         let mut title: heapless::String<24> = heapless::String::new();
@@ -9569,11 +9612,14 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
             // once to the chain. That step is public and quick; the seed is what is slow,
             // and `pubkeys` pays for it at most once per account.
             if !matches!(cached, Some((p, a, c, _)) if (p, a, c) == (proto, account, chain)) {
-                let account_key = (refused_at != Some((proto, account)))
-                    .then(|| {
-                        crate::pubkeys::account_key(gate, login, ui, "Addresses", kind, account)
-                    })
-                    .flatten();
+                let account_key = match &tss {
+                    Some((key, _, _, _)) => Some(*key),
+                    None => (refused_at != Some((proto, account)))
+                        .then(|| {
+                            crate::pubkeys::account_key(gate, login, ui, "Addresses", kind, account)
+                        })
+                        .flatten(),
+                };
                 refused_at = account_key.is_none().then_some((proto, account));
                 cached = account_key
                     .and_then(|acct| {
@@ -9584,13 +9630,20 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     .map(|key| (proto, account, chain, key));
             }
             let _ = title.push_str(kind_name(kind));
-            // The coin level is the one `pubkeys::account_key` derived under.
-            let _ = write!(
-                path,
-                "m/{}h/{}h/{account}h/{chain}/{index}",
-                kind.bip44_purpose(),
-                crate::prefs::network().coin_type()
-            );
+            match &tss {
+                Some((_, _, _, origin)) => {
+                    let _ = write!(path, "{origin}/{chain}/{index}");
+                }
+                // The coin level is the one `pubkeys::account_key` derived under.
+                None => {
+                    let _ = write!(
+                        path,
+                        "m/{}h/{}h/{account}h/{chain}/{index}",
+                        kind.bip44_purpose(),
+                        crate::prefs::network().coin_type()
+                    );
+                }
+            }
             // Public derivation from the chain's extended public key: no private key is
             // involved, so this needs no masked region and costs the host nothing to
             // watch. The index moves with the type, so the same position can be compared
@@ -9599,9 +9652,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                 ChildNumber::normal(index)
                     .ok()
                     .and_then(|c| chain.derive_child(c).ok())
-                    .and_then(|k| {
-                        address::encode(kind, crate::prefs::network(), &k.public_key, &mut buf).ok()
-                    })
+                    .and_then(|k| address::encode(kind, net, &k.public_key, &mut buf).ok())
             })
         };
         let mut shown = Line::new();
@@ -9655,7 +9706,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // descriptor its cosigners agreed on, so offering to change it would be offering
         // a different wallet's addresses under this one's name.
         let _ = doc.push(
-            catcard_ui::scroll::Line::body(match (wallet.is_some(), chain) {
+            catcard_ui::scroll::Line::body(match (fixed, chain) {
                 (true, 0) => "0 change chain",
                 (true, _) => "0 receive chain",
                 (false, 0) => "1/3 account  0 change chain",
@@ -9669,7 +9720,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         // reaching account 100 in one screen and in a hundred presses.
         // Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE [C]
         let _ = doc.push(
-            catcard_ui::scroll::Line::body(if wallet.is_some() {
+            catcard_ui::scroll::Line::body(if fixed {
                 "4 start idx"
             } else {
                 "2 account  4 start idx  6 to card"
@@ -9729,12 +9780,12 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     // Accounts are separate wallets under one seed; the chain is receive or
                     // change. Both restart the index, because address 5 of one account has
                     // nothing to do with address 5 of another.
-                    Key::Digit(3) if wallet.is_none() => {
+                    Key::Digit(3) if !fixed => {
                         account = account.saturating_add(1);
                         index = 0;
                         break 'wait;
                     }
-                    Key::Digit(1) if wallet.is_none() => {
+                    Key::Digit(1) if !fixed => {
                         account = account.saturating_sub(1);
                         index = 0;
                         break 'wait;
@@ -9743,7 +9794,7 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                     // "Account Number" row does: account 100 is one screen away instead
                     // of a hundred presses, and the number is read back before it is
                     // used. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §AE [C]
-                    Key::Digit(2) if wallet.is_none() => {
+                    Key::Digit(2) if !fixed => {
                         if let Some(n) =
                             ask_number(ui, "Addresses", None, "account", "empty is account 0")
                         {
@@ -9787,6 +9838,17 @@ fn address_explorer(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
                             }
                         }
                         match (wallet, cached.as_ref().map(|(_, _, _, k)| *k)) {
+                            // The file's path column is the BIP-44 one; a TSS wallet's
+                            // addresses are not under it.
+                            (None, Some(_)) if tss.is_some() => {
+                                message(
+                                    ui.panel,
+                                    "Addresses",
+                                    "a TSS wallet's paths",
+                                    "are not BIP-44's",
+                                );
+                                wait_for_any_key(ui);
+                            }
                             (None, Some(chain_key)) => export_chain_csv(
                                 ui,
                                 "Addresses",

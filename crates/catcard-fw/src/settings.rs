@@ -47,6 +47,21 @@ pub enum MountFailed {
 /// Cleared by [`forget_key`] whenever the key changes.
 static mut WALLET_KEY: Option<catcard_settings::nvstore::Key> = None;
 
+/// The settings key of the wallet that keeps the TSS wallet in force: a TSS wallet has no
+/// secret of its own to key a file with, and its share lives in that wallet's settings,
+/// so that is the file it works in. Set by [`enter_tss`]; only read while a TSS wallet is
+/// in force.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+static mut TSS_KEEPER: Option<catcard_settings::nvstore::Key> = None;
+
+/// Remember the settings key of the wallet in force -- the one keeping a TSS wallet's
+/// share -- before switching to that TSS wallet, which then works in the same file.
+#[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+pub(crate) fn enter_tss(keeper: catcard_settings::nvstore::Key) {
+    // SAFETY: foreground only, single core; the write finishes within this statement.
+    unsafe { *core::ptr::addr_of_mut!(TSS_KEEPER) = Some(keeper) };
+}
+
 /// Forget the cached settings key. Called whenever the wallet in force changes.
 ///
 /// The preferences go with it: they belong to the wallet whose file they came out of, and
@@ -122,6 +137,12 @@ pub(crate) fn wallet_key(
     // SAFETY: foreground only, single core; the borrow ends within this statement.
     if let Some(key) = unsafe { (*core::ptr::addr_of!(WALLET_KEY)).clone() } {
         return Ok(key);
+    }
+    #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
+    if crate::key::in_force() == crate::key::Source::Tss {
+        // SAFETY: as above.
+        return unsafe { (*core::ptr::addr_of!(TSS_KEEPER)).clone() }
+            .ok_or("the TSS wallet's keeper is unknown");
     }
 
     use crate::key::Loaded;

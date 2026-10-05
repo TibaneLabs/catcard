@@ -83,7 +83,7 @@ pub(super) fn create(
     // The pair cache is on the medium now: it can move on.
     drive::pass_on(ui, storage, me % n + 1);
     match kept {
-        Ok(summary) => view::created(ui, &summary),
+        Ok(summary) => view::created(gate, login, ui, &summary),
         Err(why) => say(ui, "Not kept", why, "the share is lost"),
     }
 }

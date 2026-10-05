@@ -17,7 +17,7 @@
 //!   the one the whole wallet exports. Descriptors carry the origin themselves.
 
 use catcard_tss::Summary;
-use catcard_wallet::address::{self, AddressKind, MAX_ADDRESS_LEN};
+use catcard_wallet::address::AddressKind;
 use catcard_wallet::bip32::serialize::{MAX_BASE58_LEN, Slip132};
 use catcard_wallet::bip32::{ChildNumber, ExtendedPubKey, Network};
 use catcard_wallet::descriptor::{self, SingleSig};
@@ -101,17 +101,6 @@ fn xpub(s: &Summary) -> ExtendedPubKey {
     }
 }
 
-/// Receive address `index` (`0/index`).
-#[inline(never)]
-fn address(s: &Summary, index: u32, out: &mut [u8; MAX_ADDRESS_LEN]) -> Option<usize> {
-    let (kind, net) = kind_and_network(s);
-    let key = xpub(s)
-        .derive_child(ChildNumber::normal(0).ok()?)
-        .and_then(|k| k.derive_child(ChildNumber(index)))
-        .ok()?;
-    address::encode(kind, net, &key.public_key, out).ok()
-}
-
 /// The descriptor a watch-only wallet imports: both chains, checksummed.
 #[inline(never)]
 fn descriptor_of(s: &Summary, out: &mut [u8]) -> Option<usize> {
@@ -144,7 +133,8 @@ fn descriptor_of(s: &Summary, out: &mut [u8]) -> Option<usize> {
     .ok()
 }
 
-/// The wallet's details: who holds what, its key, its first addresses, its descriptor.
+/// The wallet's details: who holds what, its key and its descriptor. Its addresses are in
+/// the Address Explorer, with the wallet in force ("Use this wallet").
 #[inline(never)]
 fn details(ui: &mut Ui<'_>, title: &str, s: &Summary, closing: &str) {
     use catcard_ui::scroll::Line as Row;
@@ -158,11 +148,6 @@ fn details(ui: &mut Ui<'_>, title: &str, s: &Summary, closing: &str) {
         .write_base58_as(Slip132::Classic, &mut raw)
         .unwrap_or(0);
     let x = core::str::from_utf8(&raw[..xn]).unwrap_or("");
-    let mut addrs = [[0u8; MAX_ADDRESS_LEN]; 3];
-    let mut lens = [0usize; 3];
-    for (i, (a, l)) in addrs.iter_mut().zip(lens.iter_mut()).enumerate() {
-        *l = address(s, i as u32, a).unwrap_or(0);
-    }
     let mut desc = [0u8; descriptor::MAX_LEN];
     let dn = descriptor_of(s, &mut desc).unwrap_or(0);
     let mut rows: heapless::Vec<Row<'_>, 16> = heapless::Vec::new();
@@ -170,14 +155,6 @@ fn details(ui: &mut Ui<'_>, title: &str, s: &Summary, closing: &str) {
     let _ = rows.push(Row::body(shape.as_str()));
     let _ = rows.push(Row::body(mine.as_str()).small());
     let _ = rows.push(Row::body(origin.as_str()).small().wrapped());
-    let _ = rows.push(Row::body("Receive addresses:").small());
-    for (a, &l) in addrs.iter().zip(lens.iter()) {
-        let _ = rows.push(
-            Row::body(core::str::from_utf8(&a[..l]).unwrap_or(""))
-                .small()
-                .wrapped(),
-        );
-    }
     let _ = rows.push(Row::body("Extended public key:").small());
     let _ = rows.push(Row::body(x).small().wrapped());
     let _ = rows.push(Row::body("Watch-only descriptor:").small());
@@ -192,18 +169,65 @@ fn details(ui: &mut Ui<'_>, title: &str, s: &Summary, closing: &str) {
     let _ = menu::show_doc(ui, &rows, false, false);
 }
 
-/// After a create: the new wallet, to compare across the members' devices.
+/// After a create: switch to the new wallet, and name it, to compare across the members'
+/// devices. Its addresses are the Address Explorer's from here.
 #[inline(never)]
-pub(super) fn created(ui: &mut Ui<'_>, s: &Summary) {
+pub(super) fn created(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    s: &Summary,
+) {
     let mut wallet: Line = Line::new();
-    let _ = write!(wallet, "wallet {}", hex4(s.fingerprint));
-    say(ui, "Share kept", &wallet, "compare on every device");
-    details(
-        ui,
-        "New TSS wallet",
-        s,
-        "Every member's device must show this same key and these addresses.",
-    );
+    let _ = write!(wallet, "TSS wallet {}", hex4(s.fingerprint));
+    let index = store::list(gate, login, ui)
+        .ok()
+        .and_then(|k| k.into_iter().find(|k| store::same_member(&k.summary, s)));
+    match index {
+        Some(kept) if use_wallet(gate, login, ui, &kept) => say(
+            ui,
+            &wallet,
+            "in force: the same number",
+            "on every member's device",
+        ),
+        _ => say(ui, "Share kept", &wallet, "compare on every device"),
+    }
+}
+
+/// Put `kept`'s wallet in force: the status bar (or the mono home menu) says `TSS` and
+/// its fingerprint, the Address Explorer walks its addresses, and a signature is made
+/// together. Its settings stay those of the wallet keeping the share. `false` if the
+/// keeping wallet's settings key cannot be had (said).
+#[inline(never)]
+pub(super) fn use_wallet(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    kept: &Kept,
+) -> bool {
+    let keeper = match crate::settings::wallet_key(gate, login, ui.panel, HEAD) {
+        Ok(k) => k,
+        Err(why) => {
+            say(ui, HEAD, "cannot switch:", why);
+            return false;
+        }
+    };
+    crate::key::set_tss(kept.summary.clone(), kept.index);
+    crate::settings::enter_tss(keeper);
+    crate::pubkeys::note_fingerprint(Some(kept.summary.fingerprint));
+    crate::catlog!("key: now {}", crate::key::label());
+    true
+}
+
+/// What the Address Explorer needs of the TSS wallet in force: the key the addresses are
+/// below (non-hardened only), the one address type its descriptor names, the network
+/// its path says, and the path to that key as text (`m` when created together).
+pub(crate) fn explorer() -> Option<(ExtendedPubKey, AddressKind, Network, Line)> {
+    let (s, _) = crate::key::tss()?;
+    let (kind, net) = kind_and_network(s);
+    let mut path = Line::new();
+    write_path(&mut path, &s.path).ok()?;
+    Some((xpub(s), kind, net, path))
 }
 
 /// One kept share: its details, and what can be done with it.
@@ -215,6 +239,7 @@ pub(super) fn wallet(
     kept: &Kept,
     mut pool: Option<&mut catcard_entropy::EntropyPool>,
 ) {
+    const USE: &str = "Use this wallet";
     const DETAILS: &str = "Details";
     const REBUILD: &str = "Rebuild setup";
     const DESCRIPTOR: &str = "Descriptor to file";
@@ -223,8 +248,8 @@ pub(super) fn wallet(
     const DELETE: &str = "Delete this share";
     let s = &kept.summary;
     let title = label(s);
-    let mut rows: heapless::Vec<&str, 6> = heapless::Vec::new();
-    for r in [DETAILS, REBUILD, DESCRIPTOR, COPY] {
+    let mut rows: heapless::Vec<&str, 7> = heapless::Vec::new();
+    for r in [USE, DETAILS, REBUILD, DESCRIPTOR, COPY] {
         let _ = rows.push(r);
     }
     if s.created {
@@ -236,6 +261,14 @@ pub(super) fn wallet(
             return;
         };
         match rows[pick] {
+            USE => {
+                if use_wallet(gate, login, ui, kept) {
+                    let mut l: Line = Line::new();
+                    let _ = write!(l, "TSS wallet {}", hex4(s.fingerprint));
+                    say(ui, HEAD, &l, "in force until reboot");
+                    return;
+                }
+            }
             DETAILS => details(ui, &title, s, ""),
             REBUILD => rebuild::rebuild(gate, login, ui, kept, pool.as_deref_mut()),
             DESCRIPTOR => descriptor_to_file(ui, s),
