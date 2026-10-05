@@ -294,6 +294,9 @@ enum Screen {
     ImportMenu,
     /// Restoring a seed: word count is not asked, the owner types until done.
     ImportSeed,
+    /// Import -> BitCan: [`ImportSeed`](Screen::ImportSeed), each word drawn as a glyph.
+    #[cfg(not(feature = "board-mk3"))]
+    ImportBitcan,
     /// Write the wallet as a clone file, answering another Coldcard's start file.
     CloneExport,
     /// Key Teleport: receive, send, or teleport a multisig PSBT (`crate::teleport`).
@@ -798,10 +801,14 @@ pub(crate) const NEW_SEED_ITEMS: &[&str] = &["24 words", "12 words"];
 /// Dispatched by name in [`step`], so appending another needs only a matching arm.
 /// Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §B1 "Import Existing" [C]
 ///
+/// "BitCan" is "Words" with each word entered as its BitCan glyph (`crate::bitcan`).
+///
 /// "TSS shares" puts a split wallet's words back from its threshold-signing share files
 /// (`crate::tss`), beside the other ways of joining shares.
 const IMPORT_ITEMS: &[&str] = &[
     "Words",
+    #[cfg(not(feature = "board-mk3"))]
+    "BitCan",
     "Clone",
     "TAPSIGNER",
     "XPRV",
@@ -2020,7 +2027,11 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::KeyNewSeed => {
             returns(|a| crate::newseed::new_temp_seed(a.gate, a.login, a.ui, a.pool.as_deref_mut()))
         }
-        Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui)),
+        Screen::ImportSeed => reseeds(|a| import_seed(a.gate, a.login, a.ui, read_word)),
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::ImportBitcan => {
+            reseeds(|a| import_seed(a.gate, a.login, a.ui, crate::bitcan::read_word))
+        }
         Screen::ImportXprv => reseeds(|a| import_xprv(a.gate, a.login, a.ui)),
         // The join itself offers to store on a blank device; one stored lands on the
         // wallet's main menu, one declined goes back to Import.
@@ -2228,6 +2239,8 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // By name, like the menus above it: the list is short and reorder-safe.
         Screen::ImportMenu => match (key, IMPORT_ITEMS.get(cursor).copied()) {
             (Key::Confirm, Some("Words")) => Screen::ImportSeed,
+            #[cfg(not(feature = "board-mk3"))]
+            (Key::Confirm, Some("BitCan")) => Screen::ImportBitcan,
             (Key::Confirm, Some("Clone")) => Screen::CloneImport,
             (Key::Confirm, Some("TAPSIGNER")) => Screen::TapsignerImport,
             (Key::Confirm, Some("XPRV")) => Screen::ImportXprv,
@@ -3193,6 +3206,8 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::NewSeed(_) | Screen::KeyNewSeed => {}
         // Handled in `run`: it reads words from the keypad and drives the panel itself.
         Screen::ImportSeed | Screen::ImportXprv | Screen::ImportXor | Screen::ImportCodex32 => {}
+        #[cfg(not(feature = "board-mk3"))]
+        Screen::ImportBitcan => {}
         // Handled in `run`: each drives its own lists, files and progress.
         #[cfg(all(feature = "tss", not(feature = "board-mk3")))]
         Screen::Tss | Screen::ImportTss | Screen::TssJoin => {}
@@ -7064,13 +7079,23 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
     // backup file, for this session; the fifth its TAPSIGNER backup, beside the typed
     // shapes. Source: hw-reference/menu-map-mk4-mk5-q1-v5.6.2.md §S1 "Coldcard Backup",
     // "Tapsigner Backup" [C]
-    const ROWS: &[&str] = &["Words", "XPRV", "WIF key", "Coldcard backup", "TAPSIGNER"];
+    const ROWS: &[&str] = &[
+        "Words",
+        "XPRV",
+        "WIF key",
+        "Coldcard backup",
+        "TAPSIGNER",
+        #[cfg(not(feature = "board-mk3"))]
+        "BitCan",
+    ];
     let Some(row) = pick_row(ui, HEAD, "for this session", ROWS) else {
         return false;
     };
     match row {
         3 => crate::backup::load_temporary(ui),
-        0 => temporary_words(ui),
+        0 => temporary_words(ui, read_word),
+        #[cfg(not(feature = "board-mk3"))]
+        5 => temporary_words(ui, crate::bitcan::read_word),
         1 => temporary_xprv(ui),
         4 => crate::tapsigner::import_temporary(ui),
         _ => temporary_wif(ui),
@@ -7082,7 +7107,7 @@ fn import_key(ui: &mut Ui<'_>) -> bool {
 // of them -- or the TAPSIGNER import beside them -- was running.
 
 #[inline(never)]
-fn temporary_words(ui: &mut Ui<'_>) -> bool {
+fn temporary_words(ui: &mut Ui<'_>, reader: WordReader) -> bool {
     const HEAD: &str = "Import key";
     let Some(expect) = ask_word_count(ui, HEAD) else {
         return false;
@@ -7098,7 +7123,7 @@ fn temporary_words(ui: &mut Ui<'_>) -> bool {
         },
     );
     wait_for_any_key(ui);
-    let Some(mnemonic) = read_phrase_of(ui, expect) else {
+    let Some(mnemonic) = read_phrase_with(ui, expect, reader) else {
         return false;
     };
     let mut what = Line::new();
@@ -10602,6 +10627,19 @@ pub(crate) fn read_phrase_of(
     ui: &mut Ui<'_>,
     expect: Option<usize>,
 ) -> Option<catcard_wallet::bip39::Mnemonic> {
+    read_phrase_with(ui, expect, read_word)
+}
+
+/// How one word of a phrase is read: typed ([`read_word`]) or drawn
+/// (`crate::bitcan::read_word`). Arguments as `read_word`'s.
+pub(crate) type WordReader = fn(&mut Ui<'_>, usize, Option<&[u16]>) -> WordPick;
+
+/// [`read_phrase_of`], with each word read by `reader`.
+pub(crate) fn read_phrase_with(
+    ui: &mut Ui<'_>,
+    expect: Option<usize>,
+    reader: WordReader,
+) -> Option<catcard_wallet::bip39::Mnemonic> {
     use catcard_wallet::bip39::{MAX_LAST_WORDS, Mnemonic, wordlist::word};
 
     // The phrase as word indices -- the seed, in another spelling. Zeroizing, so every way
@@ -10615,7 +10653,7 @@ pub(crate) fn read_phrase_of(
     // backing off the first word abandons the restore.
     loop {
         let n = last_word_filter(&idx, expect, &mut allowed);
-        match read_word(ui, idx.len() + 1, n.map(|n| &allowed[..n])) {
+        match reader(ui, idx.len() + 1, n.map(|n| &allowed[..n])) {
             WordPick::Word(i) => {
                 if idx.push(i).is_err() {
                     // 24 words is the most a phrase can be; stop taking more and verify.
@@ -10660,8 +10698,7 @@ pub(crate) fn read_phrase_of(
                     EditChoice::Edit(pos) => {
                         // The last word gets its filter again when the count is known.
                         let n = last_word_filter(&idx[..pos], expect, &mut allowed);
-                        if let WordPick::Word(i) = read_word(ui, pos + 1, n.map(|n| &allowed[..n]))
-                        {
+                        if let WordPick::Word(i) = reader(ui, pos + 1, n.map(|n| &allowed[..n])) {
                             idx[pos] = i;
                         }
                     }
@@ -10669,7 +10706,7 @@ pub(crate) fn read_phrase_of(
                         let n = last_word_filter(&idx, expect, &mut allowed);
                         if idx.len() < 24
                             && let WordPick::Word(i) =
-                                read_word(ui, idx.len() + 1, n.map(|n| &allowed[..n]))
+                                reader(ui, idx.len() + 1, n.map(|n| &allowed[..n]))
                         {
                             let _ = idx.push(i);
                         }
@@ -10692,7 +10729,12 @@ pub(crate) fn read_phrase_of(
 ///
 /// The same write-then-read-back-then-claim order as [`new_seed`], and for the same
 /// reason: a slot that did not keep the words must be reported, not assumed.
-fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+fn import_seed(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    reader: WordReader,
+) {
     fn cancelled(ui: &mut Ui<'_>) {
         message(ui.panel, "Import cancelled", "nothing was", "stored");
         wait_for_any_key(ui);
@@ -10729,7 +10771,7 @@ fn import_seed(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     );
     wait_for_any_key(ui);
 
-    let Some(mnemonic) = read_phrase_of(ui, expect) else {
+    let Some(mnemonic) = read_phrase_with(ui, expect, reader) else {
         cancelled(ui);
         return;
     };
@@ -12396,14 +12438,29 @@ fn stored_key_shown(
 /// how a held key walked through a page of someone's backup before they could read it.
 pub(crate) fn show_words(ui: &mut Ui<'_>, m: &catcard_wallet::bip39::Mnemonic) {
     let texts = word_texts(m);
-    let mut lines: heapless::Vec<catcard_ui::scroll::Line, 26> = heapless::Vec::new();
+    let mut lines: heapless::Vec<catcard_ui::scroll::Line, 27> = heapless::Vec::new();
     let _ = lines.push(catcard_ui::scroll::Line::title("Write these down"));
+    // The same words as BitCan glyphs, for an owner who keeps them that way.
+    let alt = cfg!(not(feature = "board-mk3"));
+    if alt {
+        let _ = lines.push(catcard_ui::scroll::Line::body("1: show as BitCan").small());
+    }
     for s in &texts {
         // Secret, so each word carries the ragged sensitive-line marker.
         let _ = lines.push(catcard_ui::scroll::Line::body(s).secret());
     }
-    // `require_end`: Confirm will not finish until every word has been on screen.
-    show_doc(ui, &lines, true, true);
+    // `require_end`: Confirm will not finish until every word has been on screen. The
+    // glyphs have the same gate, and finishing them finishes this; backing out of them
+    // comes back to the words.
+    while matches!(
+        run_doc(ui, &lines, true, true, true, alt),
+        DocExit::Selected(DOC_ALT)
+    ) {
+        #[cfg(not(feature = "board-mk3"))]
+        if crate::bitcan::show(ui, m) {
+            return;
+        }
+    }
 }
 
 /// The numbered words of a mnemonic as `"NN  word"` strings, for a document.
@@ -12534,6 +12591,10 @@ pub(crate) enum DocExit {
     Cancelled,
 }
 
+/// What a document with its alternative view armed returns when `1` asks for it: no
+/// menu row carries this id, since an alternative view only goes on a reading screen.
+const DOC_ALT: u32 = u32::MAX;
+
 /// Idle beats between marquee steps for an over-long selected name -- how fast it scrolls
 /// sideways. One `IDLE_PAUSE_CYCLES` beat is the loop's natural tick.
 const MARQUEE_BEATS: u32 = 8;
@@ -12580,7 +12641,7 @@ pub(crate) fn show_doc(
     scramble: bool,
     require_end: bool,
 ) -> DocExit {
-    run_doc(ui, lines, scramble, require_end, true)
+    run_doc(ui, lines, scramble, require_end, true, false)
 }
 
 /// [`show_doc`] for a list whose last rows are actions: the cursor never wraps.
@@ -12593,7 +12654,7 @@ pub(crate) fn show_doc(
 /// Its one caller is the transaction review, which is not built on the mk3.
 #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
 pub(crate) fn show_doc_nowrap(ui: &mut Ui<'_>, lines: &[catcard_ui::scroll::Line<'_>]) -> DocExit {
-    run_doc(ui, lines, false, false, false)
+    run_doc(ui, lines, false, false, false, false)
 }
 
 /// The document loop behind [`show_doc`] and [`show_doc_nowrap`]. `wrap` is whether the
@@ -12604,12 +12665,13 @@ fn run_doc(
     scramble: bool,
     require_end: bool,
     wrap: bool,
+    alt: bool,
 ) -> DocExit {
     // HSM mode: as `confirmed` -- nobody reads, nobody answers.
     if crate::ckcc::hsm_active() {
         return DocExit::Cancelled;
     }
-    let mut screen = DocScreen::new(ui, lines, scramble, require_end, wrap);
+    let mut screen = DocScreen::new(ui, lines, scramble, require_end, wrap, alt);
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
     loop {
@@ -12664,6 +12726,8 @@ struct DocScreen<'a> {
     is_menu: bool,
     /// Refuse Confirm until the last line has been on screen: the seed backup's gate.
     require_end: bool,
+    /// `1` leaves with [`DOC_ALT`]: the seed words' "show as BitCan".
+    alt: bool,
     /// The Q1's help strip under a list, while a feature has help armed
     /// (`crate::help::arm`): what it opens, whether it has the focus, and -- while the help
     /// is on screen in this view's place -- where the list was, to put it back.
@@ -12711,6 +12775,7 @@ impl<'a> DocScreen<'a> {
         scramble: bool,
         require_end: bool,
         wrap: bool,
+        alt: bool,
     ) -> Self {
         // A list inside a feature that armed its help gets the strip, and lays itself out
         // above it. Not a reading screen -- it has no rows to put the strip beside -- and
@@ -12747,6 +12812,7 @@ impl<'a> DocScreen<'a> {
             view,
             is_menu,
             require_end,
+            alt,
             #[cfg(feature = "board-q1")]
             help: DocHelp {
                 doc,
@@ -12901,6 +12967,7 @@ impl<'a> DocScreen<'a> {
                 }
             }
             Key::Cancel => DocFlow::Done(DocExit::Cancelled),
+            Key::Digit(1) if self.alt => DocFlow::Done(DocExit::Selected(DOC_ALT)),
             Key::Digit(_) => DocFlow::Ignored,
             Key::Char(_) | Key::Qr => DocFlow::Ignored,
         }

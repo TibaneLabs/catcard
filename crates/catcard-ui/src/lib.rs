@@ -11,6 +11,7 @@
 
 pub mod approval;
 pub mod art;
+pub mod bitcan;
 pub mod calc;
 pub mod canvas;
 pub mod display;

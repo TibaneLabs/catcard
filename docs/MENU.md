@@ -38,7 +38,8 @@ the two tiles whose jobs do not exist yet (Sign and Addresses), which is the sam
 the grid's shape. `Notes` is dropped there too, as stock drops it: no seed, no notes.
 
 `Import` holds stock's Import Existing: `Words` (12/18/24 asked first, and the last word
-offered from the checksum-valid set alone, as stock does), `Clone`, `TAPSIGNER` (stored,
+offered from the checksum-valid set alone, as stock does), `BitCan` (mk4/mk5/Q1: the same
+import with each word entered as its BitCan glyph, docs/BITCAN.md), `Clone`, `TAPSIGNER` (stored,
 or used for this session only), `XPRV` (stored as the master, in the stash's own node
 shape), `Seed XOR` (joined, then offered for keeping) and `Codex32` (import, recover,
 generate or derive shares; a secret is stored or used for the session). Stock's
@@ -97,7 +98,7 @@ to one. `make lint` still type-checks them through the release-shape clippy runs
 | Derive → `XOR split`, `XOR join` | `… Seed Functions` → `Seed XOR` | 🔀 with the other ways to reach a wallet; `XOR join` is also `Import` → `Seed XOR` on a blank device |
 | Derive → `Codex32` → `Split this wallet`, `Recover`, `Import`, `Generate`, `Derive shares` | `… Seed Functions` → `Shamir Split`; `Temporary Seed` → `Codex32` (v5.6.3 / 1.5.3Q) | 🔀 beside Seed XOR, as `XOR split` is; what comes out is a temporary seed; Split, Generate and Derive shares are dropped under a spending policy, as stock drops them; also `Import` → `Codex32` on a blank device |
 | Derive → `TSS wallets` (mk4/mk5/Q1, bench builds) → ‹each kept share› (`Details`, `Rebuild setup`, `Descriptor to file`, `Copy share to file`, `Restore the whole key` for a created-together wallet, `Delete this share`), `Create together`, `Import a share`, `Split this wallet`, `Restore from shares`, `What is this?` | — | 🔀 CatCard only (docs/TSS.md). Under Derive, beside `Codex32`: the other way a key is held in shares, and where an owner looks for the ways to reach or make a wallet. Each share's key core is kept in the settings of the wallet in force, and its pairwise setup in a cache on the SD card or the Virtual Disk sealed under the stored wallet's secret, so a blank device has no drawer, only Import → `TSS shares`. Every file flow offers the SD card or the Virtual Disk |
-| Derive → `Import key` → `Words`, `XPRV`, `WIF key`, `TAPSIGNER` | `Temporary Seed` → `Import Words`, `Import XPRV`, `Tapsigner Backup` | ✅ in force for the session, nothing stored; `Lock down seed` keeps one |
+| Derive → `Import key` → `Words`, `XPRV`, `WIF key`, `TAPSIGNER`, `BitCan` (mk4/mk5/Q1) | `Temporary Seed` → `Import Words`, `Import XPRV`, `Tapsigner Backup` | ✅ in force for the session, nothing stored; `Lock down seed` keeps one |
 | Derive → `New words` | `Temporary Seed` → `Generate Words` → `12 Words` / `24 Words` | ✅ the same generator as `New`, same entropy sources and optional dice/coin/mash, into the session rather than the slot |
 | `Danger zone` → `Seed tools` → `SeedQR` | `… Seed Functions` → `Export SeedQR` | ✅ Q1 only; both shapes, Standard and Compact, and the scanner reads either back |
 | `Danger zone` → `Sighash checks` | `Danger Zone` → `Sighash Checks` (Block / Warn) | ✅ own key `cat_sighash`, default Block; Warn is asked twice. Under Warn a non-ALL sighash on our input is named (input and type) on a warning before the review, a consolidation under one is still refused, and the signature is made over the digest the type defines |

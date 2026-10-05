@@ -38,6 +38,9 @@ mod backup;
 /// Battery sensing exists only on the Q1; the other boards are USB-powered.
 #[cfg(feature = "board-q1")]
 mod battery;
+/// Seed words as BitCan glyphs, shown and entered.
+#[cfg(not(feature = "board-mk3"))]
+mod bitcan;
 mod boot;
 /// Coldcard Co-Sign: key C, its spending policy, and the co-signature. Kept in the
 /// settings store, which the mk3 does not have.
