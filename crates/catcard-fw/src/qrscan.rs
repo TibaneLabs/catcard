@@ -1077,6 +1077,10 @@ fn sign(
             return;
         }
     };
+    // The signed result goes to the card: on the Q1, the owner says which slot.
+    if !menu::pick_card(ui, "Sign") {
+        return;
+    }
     crate::signtx::review_and_sign(
         gate,
         login,

@@ -34,6 +34,7 @@ use core::fmt::Write as _;
 use catcard_callgate::Callgate;
 use catcard_callgate::abi::LogoutMode;
 use catcard_entropy::HmacDrbg;
+use catcard_hal::sdmmc::Slot;
 use catcard_ui::Mono128x64;
 use catcard_ui::font::misc4x6;
 use catcard_ui::keypad::{Event, KEYS, Key};
@@ -4138,11 +4139,7 @@ fn stage_and_offer(
         });
     };
     let outcome = match storage {
-        Storage::Sd => stage_from_card(
-            catcard_hal::sdmmc::card_slot(&catcard_board::BOARD),
-            Some(chosen),
-            &mut tick,
-        ),
+        Storage::Sd => stage_from_card(card_slot(), Some(chosen), &mut tick),
         #[cfg(not(feature = "board-mk3"))]
         Storage::Vdisk => crate::sdupgrade::stage_from_vdisk(Some(chosen), &mut tick),
     };
@@ -4393,6 +4390,9 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
     let mut buf = [0u8; crate::logbuf::LOG_LEN];
     let n = crate::logbuf::read(0, &mut buf);
 
+    if !pick_card(ui, "Save log") {
+        return;
+    }
     match write_card_file("/CATCARD.LOG", &buf[..n]) {
         Ok(()) => {
             crate::catlog!("sd: wrote {} bytes to /CATCARD.LOG", n);
@@ -4440,21 +4440,72 @@ impl Storage {
 /// `None` if the owner cancels the chooser.
 #[cfg_attr(feature = "board-mk3", allow(unused_variables))]
 pub(crate) fn pick_storage(ui: &mut Ui<'_>, head: &str) -> Option<Storage> {
+    pick_storage_as(ui, head, "which storage?")
+}
+
+/// [`pick_storage`], with its question worded by the caller.
+///
+/// On the Q1 each SD slot is its own row, and the one chosen is the slot every card
+/// operation in this flow uses ([`card_slot`]). Nothing is guessed from which slot
+/// happens to hold a card: the owner says which.
+pub(crate) fn pick_storage_as(ui: &mut Ui<'_>, head: &str, note: &str) -> Option<Storage> {
     #[cfg(not(feature = "board-mk3"))]
     if catcard_board::BOARD.psram.is_some() {
-        let pick = choose(
-            ui,
-            head,
-            "which storage?",
-            &["SD card", "Virtual Disk (temporary)"],
-        )?;
-        return Some(if pick == 0 {
-            Storage::Sd
+        let two = catcard_board::BOARD.sdmmc.slot_b.is_some();
+        let rows: &[&str] = if two {
+            &[SLOT_A_ROW, SLOT_B_ROW, "Virtual Disk (temporary)"]
         } else {
-            Storage::Vdisk
-        });
+            &["SD card", "Virtual Disk (temporary)"]
+        };
+        let pick = choose(ui, head, note, rows)?;
+        let cards = if two { 2 } else { 1 };
+        if pick >= cards {
+            return Some(Storage::Vdisk);
+        }
+        set_card_slot(if pick == 1 { Slot::B } else { Slot::A });
+        return Some(Storage::Sd);
     }
+    let _ = (ui, head, note);
     Some(Storage::Sd)
+}
+
+/// The Q1's two SD slots as rows of a list, named by where they are.
+const SLOT_A_ROW: &str = "SD card A (top)";
+const SLOT_B_ROW: &str = "SD card B (bottom)";
+
+/// Which SD slot "the card" is, as the owner last chose it. Slot A until asked.
+static CARD_SLOT_B: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The slot every card operation uses: the one the owner chose in this flow
+/// ([`pick_storage`], [`pick_card`]), or A on a board with one slot.
+pub(crate) fn card_slot() -> Slot {
+    if catcard_board::BOARD.sdmmc.slot_b.is_some()
+        && CARD_SLOT_B.load(core::sync::atomic::Ordering::Relaxed)
+    {
+        Slot::B
+    } else {
+        Slot::A
+    }
+}
+
+/// Make `slot` the card's slot from here on.
+pub(crate) fn set_card_slot(slot: Slot) {
+    CARD_SLOT_B.store(slot == Slot::B, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// For a flow that uses the SD card and nothing else: on the Q1, ask which slot (false if
+/// the owner backed out); elsewhere there is one slot and nothing to ask.
+pub(crate) fn pick_card(ui: &mut Ui<'_>, head: &str) -> bool {
+    if catcard_board::BOARD.sdmmc.slot_b.is_none() {
+        return true;
+    }
+    match choose(ui, head, "which SD card?", &[SLOT_A_ROW, SLOT_B_ROW]) {
+        Some(pick) => {
+            set_card_slot(if pick == 1 { Slot::B } else { Slot::A });
+            true
+        }
+        None => false,
+    }
 }
 
 /// Pick a file from the chosen storage's file browser.
@@ -4534,7 +4585,9 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
     catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins, and the menu waits for this
         // to return before it can be chosen again.
-        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+        let mut dev = match unsafe {
+            catcard_hal::sdmmc::Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot())
+        } {
             Ok(d) => d,
             Err(_) => {
                 why = "controller failed";
@@ -4921,18 +4974,14 @@ fn browse_fail(ui: &mut Ui<'_>, head: &str, why: &str) {
 fn browse_files(ui: &mut Ui<'_>) {
     #[cfg(not(feature = "board-mk3"))]
     if catcard_board::BOARD.psram.is_some() {
-        let Some(pick) = choose(
-            ui,
-            "Browse Files",
-            "look at which storage?",
-            &["SD card", "Virtual Disk (temporary)"],
-        ) else {
-            return;
-        };
-        if pick == 0 {
-            browse_sd(ui, "SD card", None, Browse::View);
-        } else {
-            browse_vdisk(ui, "Virtual Disk", None, Browse::View);
+        match pick_storage_as(ui, "Browse Files", "look at which storage?") {
+            Some(Storage::Sd) => {
+                browse_sd(ui, "SD card", None, Browse::View);
+            }
+            Some(Storage::Vdisk) => {
+                browse_vdisk(ui, "Virtual Disk", None, Browse::View);
+            }
+            None => {}
         }
         return;
     }
@@ -11092,7 +11141,8 @@ fn card_password(ui: &mut Ui<'_>) {
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user
     // and the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+    let mut dev = match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot()) }
+    {
         Ok(d) => d,
         Err(_) => {
             message(ui.panel, HEAD, "no SD controller", "press a key");
@@ -13068,7 +13118,7 @@ fn sd_screen(panel: &mut display::Panel) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
 
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is the only user.
-    let dev = unsafe { Sdmmc::init(&catcard_board::BOARD) };
+    let dev = unsafe { Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot()) };
     let mut dev = match dev {
         Ok(d) => d,
         Err(e) => {
@@ -13187,6 +13237,9 @@ fn card_menu(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
     // Hobbled mode keeps the card's details and lock but not its encryption, whose
     // parameters are a wallet-settings save.
     let encrypt = crate::policy::row_allowed(catcard_settings::policy::Menu::Utils, "Encrypt card");
+    if !pick_card(ui, "SD card") {
+        return;
+    }
     loop {
         message(ui.panel, "SD card", "reading the card", "");
         let exit = card_details_screen(ui, encrypt);
@@ -13235,15 +13288,16 @@ fn card_detail_lines() -> heapless::Vec<Line, MAX_LINES> {
     // filesystem probe below can claim SDMMC1 for itself.
     let card = {
         // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is the only user.
-        let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
-            Ok(d) => d,
-            Err(e) => {
-                let mut l = Line::new();
-                let _ = write!(l, "controller: {}", describe_sd(&e));
-                let _ = lines.push(l);
-                return lines;
-            }
-        };
+        let mut dev =
+            match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot()) } {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut l = Line::new();
+                    let _ = write!(l, "controller: {}", describe_sd(&e));
+                    let _ = lines.push(l);
+                    return lines;
+                }
+            };
         match catcard_sd::init(&mut dev) {
             Ok(c) => c,
             Err(e) => {
@@ -13305,13 +13359,14 @@ fn card_detail_lines() -> heapless::Vec<Line, MAX_LINES> {
     let mut why = "card error";
     let mount: Result<catcard_sd::AnyVolume<_, 512>, _> = catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: the phase-1 controller was dropped; nothing else holds SDMMC1 now.
-        let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
-            Ok(d) => d,
-            Err(_) => {
-                why = "controller failed";
-                return Err(());
-            }
-        };
+        let mut dev =
+            match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot()) } {
+                Ok(d) => d,
+                Err(_) => {
+                    why = "controller failed";
+                    return Err(());
+                }
+            };
         let card = match catcard_sd::init(&mut dev) {
             Ok(c) => c,
             Err(_) => {

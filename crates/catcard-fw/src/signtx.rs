@@ -240,7 +240,9 @@ fn with_card<T>(
     let mut why: &'static str = "card error";
     let mut vol: catcard_sd::AnyVolume<_, 512> = catcard_sd::AnyVolume::mount_with(|| {
         // SAFETY: nothing else has claimed SDMMC1 or its pins while this screen is open.
-        let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&catcard_board::BOARD) } {
+        let mut dev = match unsafe {
+            catcard_hal::sdmmc::Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot())
+        } {
             Ok(d) => d,
             Err(_) => {
                 why = "controller failed";

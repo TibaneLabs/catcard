@@ -1171,6 +1171,9 @@ pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
     };
 
     // The target's public key, out of the start file it left on the card.
+    if !menu::pick_card(ui, CLONE_HEAD) {
+        return;
+    }
     let Some(path) = menu::browse_sd(ui, "Pick clone start", Some("bin"), menu::Browse::File)
     else {
         secret.zeroize();
@@ -1300,6 +1303,9 @@ pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
     let mut start = [0u8; clone::START_LEN];
     if clone::write_start(&mut start, target.public()).is_err() {
         return say(ui, "Clone start", "could not be built");
+    }
+    if !menu::pick_card(ui, CLONE_HEAD) {
+        return;
     }
     menu::card_wait(ui.panel, CLONE_HEAD, "writing the start file");
     let start_name = match menu::write_card_export(CLONE_START_FILE, &start[..], None) {

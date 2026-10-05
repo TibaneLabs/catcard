@@ -42,6 +42,9 @@ pub(crate) fn kill(gate: &Callgate) -> ! {
 /// not taken for a missing one. A list that is present but will not read matches no card:
 /// failing open there would be the feature not working.
 pub(crate) fn check_card(gate: &Callgate, login: &mut catcard_pin::Login) {
+    // The 2FA card is always slot A (the top one on the Q1): it is read at login, before
+    // anyone could say which, so the slot it was enrolled in has to be the one checked.
+    crate::menu::set_card_slot(catcard_hal::sdmmc::Slot::A);
     let (state, digests) = crate::settings::sd2fa();
     let enrolled = match state {
         Sd2fa::Off => return,
@@ -156,6 +159,9 @@ pub(crate) fn kill_key_screen(gate: &Callgate, login: &mut catcard_pin::Login, u
 
 /// Settings → Login → MicroSD 2FA: enrol the card in the slot, check one, or stop.
 pub(crate) fn sd2fa_screen(ui: &mut Ui<'_>) {
+    // The 2FA card is always slot A (the top one on the Q1): it is read at login, before
+    // anyone could say which, so the slot it was enrolled in has to be the one checked.
+    crate::menu::set_card_slot(catcard_hal::sdmmc::Slot::A);
     const HEAD: &str = "MicroSD 2FA";
     let (state, digests) = crate::settings::sd2fa();
     let mut note: heapless::String<24> = heapless::String::new();
@@ -204,6 +210,9 @@ pub(crate) fn sd2fa_screen(ui: &mut Ui<'_>) {
 
 /// Write a fresh token to the card in the slot, read it back, and enrol its digest.
 fn add_card(ui: &mut Ui<'_>, enrolled: &[[u8; 32]]) {
+    // The 2FA card is always slot A (the top one on the Q1): it is read at login, before
+    // anyone could say which, so the slot it was enrolled in has to be the one checked.
+    crate::menu::set_card_slot(catcard_hal::sdmmc::Slot::A);
     const HEAD: &str = "MicroSD 2FA";
     if enrolled.len() >= prelogin::SD2FA_MAX {
         menu::message(

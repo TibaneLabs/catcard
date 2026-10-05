@@ -2756,7 +2756,9 @@ fn sd_raw(req: &[u8], out: &mut [u8]) -> Option<usize> {
     let held = unsafe { &mut *core::ptr::addr_of_mut!(BRIDGE) };
     if held.is_none() {
         // SAFETY: as above.
-        let mut dev = unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) }.ok()?;
+        let mut dev =
+            unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, crate::menu::card_slot()) }
+                .ok()?;
         let card = catcard_sd::init(&mut dev).ok()?;
         // The RCA is what every addressed command (CMD13 above all) needs, and the host
         // has no other way to learn it.
@@ -2823,13 +2825,14 @@ fn sd_diag() -> (u8, u32, u32) {
 
     // SAFETY: on a device under test nothing else touches SDMMC1 or the slot; this
     // bring-up probe is the only user for the length of the call.
-    let mut dev = match unsafe { catcard_hal::sdmmc::Sdmmc::init(&BOARD) } {
-        Ok(d) => d,
-        Err(_) => {
-            crate::catlog!("sddiag: controller init FAIL");
-            return (0, 0, 0);
-        }
-    };
+    let mut dev =
+        match unsafe { catcard_hal::sdmmc::Sdmmc::init_slot(&BOARD, crate::menu::card_slot()) } {
+            Ok(d) => d,
+            Err(_) => {
+                crate::catlog!("sddiag: controller init FAIL");
+                return (0, 0, 0);
+            }
+        };
     crate::catlog!("sddiag: ctrl up present={}", Transport::card_present(&dev));
     let card = match catcard_sd::init(&mut dev) {
         Ok(c) => c,

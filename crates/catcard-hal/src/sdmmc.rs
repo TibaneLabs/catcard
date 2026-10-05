@@ -270,15 +270,14 @@ pub enum Slot {
 }
 
 impl Sdmmc {
-    /// Bring the controller up on the slot holding a card ([`card_slot`]): the only slot
-    /// on mk3/mk4/mk5, and on the Q1 the top one unless only the bottom one has a card.
-    /// Does not talk to the card — `catcard_sd::init` does.
+    /// Bring the controller up on the board's first (or only) slot. Does not talk to the
+    /// card — `catcard_sd::init` does.
     ///
     /// # Safety
     /// Claims SDMMC1 and its pins. Call once.
     pub unsafe fn init(spec: &BoardSpec) -> Result<Self, Error> {
         // SAFETY: forwarding the caller's guarantee.
-        unsafe { Self::init_slot(spec, card_slot(spec)) }
+        unsafe { Self::init_slot(spec, Slot::A) }
     }
 
     /// Bring the controller up on `slot`, steering the board's slot multiplexer to it
@@ -734,19 +733,6 @@ unsafe fn select_slot(spec: &BoardSpec, slot: Slot) {
         // An analog switch settles in well under this; the pause is so the detect read
         // that follows does not race it.
         crate::dwt::delay_cycles(1_000);
-    }
-}
-
-/// The slot to use for "the card": A if it reports one, else B if that does, else A (so
-/// "no card" is reported against the first slot). Read from the detect lines alone --
-/// nothing is powered or clocked -- so a card works in whichever slot it was put in.
-///
-/// Source: gpio-peripherals.md §SDMMC1 (Q1: separate detect lines per slot) [C]
-pub fn card_slot(spec: &BoardSpec) -> Slot {
-    if spec.sdmmc.slot_b.is_some() && !card_detect(spec, Slot::A) && card_detect(spec, Slot::B) {
-        Slot::B
-    } else {
-        Slot::A
     }
 }
 

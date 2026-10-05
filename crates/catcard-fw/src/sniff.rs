@@ -380,8 +380,9 @@ pub(crate) fn save_to_card(ui: &mut crate::ui::Ui<'_>, bytes: &[u8], what: Conte
     const HEAD: &str = "Save to card";
     let ext = what.extension();
 
-    let Some(folder) =
-        crate::menu::browse_sd(ui, "Where to save", None, crate::menu::Browse::Folder)
+    let Some(folder) = crate::menu::pick_card(ui, "Save")
+        .then(|| crate::menu::browse_sd(ui, "Where to save", None, crate::menu::Browse::Folder))
+        .flatten()
     else {
         return;
     };

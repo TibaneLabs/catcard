@@ -1351,6 +1351,9 @@ pub(crate) fn backup_to_card(ui: &mut crate::ui::Ui<'_>) {
         }
     };
 
+    if !crate::menu::pick_card(ui, "Settings to SD") {
+        return;
+    }
     crate::menu::card_wait(ui.panel, "Settings to SD", "copying to the card");
     // SAFETY: internal flash is memory-mapped and readable; the region is the board
     // table's, and this only reads it.

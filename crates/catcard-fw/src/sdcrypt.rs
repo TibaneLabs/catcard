@@ -101,7 +101,8 @@ pub(crate) fn screen(gate: &Callgate, login: &mut Login, ui: &mut Ui<'_>) {
     // encrypted card still identifies (only its *data* is ciphertext), so init succeeds.
     // SAFETY: nothing else has claimed SDMMC1 or its pins; this screen is its only user and
     // the menu waits for it to return before it can be chosen again.
-    let mut dev = match unsafe { Sdmmc::init(&catcard_board::BOARD) } {
+    let mut dev = match unsafe { Sdmmc::init_slot(&catcard_board::BOARD, crate::menu::card_slot()) }
+    {
         Ok(d) => d,
         Err(_) => return say(ui, "no SD controller"),
     };

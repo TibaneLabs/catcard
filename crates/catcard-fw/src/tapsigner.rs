@@ -253,13 +253,19 @@ fn pick_channel(ui: &mut Ui<'_>) -> Option<Channel> {
     #[cfg(not(feature = "board-mk3"))]
     {
         use catcard_board::BOARD;
-        let mut rows: heapless::Vec<&str, 4> = heapless::Vec::new();
-        let mut ways: heapless::Vec<Channel, 4> = heapless::Vec::new();
+        let mut rows: heapless::Vec<&str, 6> = heapless::Vec::new();
+        let mut ways: heapless::Vec<Channel, 6> = heapless::Vec::new();
         let mut offer = |row, way| {
             let _ = rows.push(row);
             let _ = ways.push(way);
         };
-        offer("SD card", Channel::Storage(menu::Storage::Sd));
+        // On the Q1 each SD slot is a row of its own; the slot is set when it is chosen.
+        if BOARD.sdmmc.slot_b.is_some() {
+            offer("SD card A (top)", Channel::Storage(menu::Storage::Sd));
+            offer("SD card B (bottom)", Channel::Storage(menu::Storage::Sd));
+        } else {
+            offer("SD card", Channel::Storage(menu::Storage::Sd));
+        }
         if BOARD.psram.is_some() {
             offer("Virtual Disk", Channel::Storage(menu::Storage::Vdisk));
         }
@@ -271,6 +277,14 @@ fn pick_channel(ui: &mut Ui<'_>) -> Option<Channel> {
             offer("Scan QR", Channel::Qr);
         }
         let i = menu::choose(ui, HEAD, "where is the backup?", &rows)?;
+        // The first two rows are the slots, where there are two.
+        if BOARD.sdmmc.slot_b.is_some() && i < 2 {
+            menu::set_card_slot(if i == 1 {
+                catcard_hal::sdmmc::Slot::B
+            } else {
+                catcard_hal::sdmmc::Slot::A
+            });
+        }
         ways.get(i).copied()
     }
 }

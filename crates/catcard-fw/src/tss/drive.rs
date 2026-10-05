@@ -59,8 +59,22 @@ impl Way {
 pub(super) fn pick_way(ui: &mut Ui<'_>, head: &str) -> Option<Way> {
     #[cfg(feature = "board-q1")]
     {
-        match menu::pick_row(ui, head, "between the devices", &["SD card", "By QR code"])? {
-            0 => Some(Way::Sd),
+        // Each SD slot is its own row: the card is passed between devices, and which
+        // slot this one reads it in is the owner's to say.
+        match menu::pick_row(
+            ui,
+            head,
+            "between the devices",
+            &["SD card A (top)", "SD card B (bottom)", "By QR code"],
+        )? {
+            0 => {
+                menu::set_card_slot(catcard_hal::sdmmc::Slot::A);
+                Some(Way::Sd)
+            }
+            1 => {
+                menu::set_card_slot(catcard_hal::sdmmc::Slot::B);
+                Some(Way::Sd)
+            }
             _ => Some(Way::Qr),
         }
     }

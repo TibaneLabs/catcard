@@ -338,6 +338,9 @@ fn write_file(ui: &mut Ui<'_>, file: &[u8]) -> bool {
 
 /// Seal `text` into the card's file under the words in force, labelled `fp`.
 fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, text: &str, fp: [u8; 4]) {
+    if !menu::pick_card(ui, HEAD) {
+        return;
+    }
     let Some((mut held, len)) = read_file(ui) else {
         return;
     };
@@ -383,6 +386,9 @@ fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>, text: 
 
 /// Restore saved: the entries by fingerprint, then restore or delete the one chosen.
 fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    if !menu::pick_card(ui, HEAD) {
+        return;
+    }
     let Some((mut held, len)) = read_file(ui) else {
         return;
     };

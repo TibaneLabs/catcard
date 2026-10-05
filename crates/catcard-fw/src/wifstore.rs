@@ -622,6 +622,9 @@ fn generate(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, u
 
 /// Import a WIF from a file on the card.
 fn import(gate: &catcard_callgate::Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    if !menu::pick_card(ui, "Import WIF") {
+        return;
+    }
     let Some(path) = menu::browse_sd(ui, "Pick a WIF file", None, menu::Browse::File) else {
         return;
     };

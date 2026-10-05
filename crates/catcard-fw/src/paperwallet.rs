@@ -193,8 +193,13 @@ pub(crate) fn create(ui: &mut Ui<'_>, pool: Option<&mut EntropyPool>) {
         return;
     };
 
-    menu::card_wait(ui.panel, "Paper wallet", "writing to the card");
-    let result = menu::write_card_export(FILE_NAME, &block.bytes()[..body_len], None);
+    // Asked before the card is touched; backing out wipes as a failure below does.
+    let result = if menu::pick_card(ui, "Paper wallet") {
+        menu::card_wait(ui.panel, "Paper wallet", "writing to the card");
+        menu::write_card_export(FILE_NAME, &block.bytes()[..body_len], None)
+    } else {
+        Err("not written")
+    };
     // The buffer held the WIF; wipe both it and the WIF string before the screen changes.
     block.bytes().zeroize();
     wif.zeroize();

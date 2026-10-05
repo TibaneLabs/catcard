@@ -147,11 +147,9 @@ fn stage(gate: &Callgate, ui: &mut Ui<'_>, storage: Storage, path: &str) -> Opti
         }
     };
     let outcome = match storage {
-        Storage::Sd => crate::sdupgrade::stage_from_card(
-            catcard_hal::sdmmc::card_slot(&catcard_board::BOARD),
-            Some(path),
-            &mut tick,
-        ),
+        Storage::Sd => {
+            crate::sdupgrade::stage_from_card(crate::menu::card_slot(), Some(path), &mut tick)
+        }
         #[cfg(not(feature = "board-mk3"))]
         Storage::Vdisk => crate::sdupgrade::stage_from_vdisk(Some(path), &mut tick),
     };
