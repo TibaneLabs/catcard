@@ -4138,7 +4138,11 @@ fn stage_and_offer(
         });
     };
     let outcome = match storage {
-        Storage::Sd => stage_from_card(catcard_hal::sdmmc::Slot::A, Some(chosen), &mut tick),
+        Storage::Sd => stage_from_card(
+            catcard_hal::sdmmc::card_slot(&catcard_board::BOARD),
+            Some(chosen),
+            &mut tick,
+        ),
         #[cfg(not(feature = "board-mk3"))]
         Storage::Vdisk => crate::sdupgrade::stage_from_vdisk(Some(chosen), &mut tick),
     };
