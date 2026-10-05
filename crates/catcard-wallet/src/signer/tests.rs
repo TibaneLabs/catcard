@@ -10,7 +10,7 @@ use outscript::psbt::{Psbt, input as in_key};
 
 use super::*;
 use crate::address::AddressKind;
-use crate::bip32::{ChildNumber, ExtendedPrivKey, Network};
+use crate::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, Network};
 use crate::bip39::{Mnemonic, SEED_LEN};
 
 const PHRASE: &str =
@@ -1327,5 +1327,107 @@ fn a_signature_that_was_already_there_is_not_touched() {
     assert_eq!(
         spoil_new_signature(&psbt, 0, &unsigned_before, &mut spoiled).unwrap(),
         None
+    );
+}
+
+// --- a key held by no one device (TSS) ---------------------------------------------------
+
+/// The account key's public half, as a TSS wallet split from this seed holds it.
+fn account_public() -> ExtendedPubKey {
+    derive(&PATH[..3]).to_extended_pub(&KeyWork::host())
+}
+
+/// The digest a public key asks for, signed elsewhere and applied, gives byte for byte
+/// the PSBT the private master signs -- for every single-signature kind `outscript`
+/// signs. ECDSA here is deterministic (RFC 6979), so the two signatures are the same.
+#[test]
+fn a_digest_signed_elsewhere_gives_the_same_psbt_as_the_master() {
+    let kw = KeyWork::host();
+    let account = account_public();
+    let keys = Keys::Public {
+        key: &account,
+        origin: &PATH[..3],
+    };
+    for kind in [
+        AddressKind::P2wpkh,
+        AddressKind::P2shP2wpkh,
+        AddressKind::P2pkh,
+    ] {
+        let mut buf = vec![0u8; 4096];
+        let n = psbt_for_kind(kind, &PATH, &mut buf);
+        let psbt = Psbt::parse(&buf[..n]).unwrap();
+
+        let mut scratch = vec![0u8; 8192];
+        let d = digest_for_input(&psbt, 0, keys, FINGERPRINT, &mut scratch, &kw).unwrap();
+        assert_eq!(d.steps(), &PATH[3..], "{kind:?}: the path below the origin");
+        assert_eq!(d.pubkey, pubkey_at(&PATH), "{kind:?}");
+
+        let child = derive(&PATH);
+        let signer = Signer::from_secret(child.secret_bytes(), &kw).unwrap();
+        let der = signer.sign_ecdsa(&d.digest).unwrap();
+        let mut applied = vec![0u8; 8192];
+        let a = apply_signature(&psbt, 0, &d.pubkey, &der, &mut applied).unwrap();
+
+        let mut direct = vec![0u8; 8192];
+        let b = sign_input(&psbt, 0, &master(), FINGERPRINT, &mut direct, &kw).unwrap();
+        assert_eq!(&applied[..a], &direct[..b], "{kind:?}");
+    }
+}
+
+/// Below the origin a public key follows unhardened steps only; a record that wants a
+/// hardened one, starts elsewhere, or is taproot is not ours.
+#[test]
+fn a_public_key_owns_only_unhardened_paths_below_its_origin() {
+    let kw = KeyWork::host();
+    let account = account_public();
+    let mut buf = vec![0u8; 4096];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let mut requests = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    let found = key_requests(&psbt, 0, FINGERPRINT, &mut requests).unwrap();
+    let request = &requests[..found][0];
+
+    let right = Keys::Public {
+        key: &account,
+        origin: &PATH[..3],
+    };
+    assert_eq!(right.match_public(request, &kw).unwrap(), pubkey_at(&PATH));
+    // The same key one level up: the step below it is hardened, so it cannot be followed.
+    let coin = derive(&PATH[..2]).to_extended_pub(&kw);
+    let above = Keys::Public {
+        key: &coin,
+        origin: &PATH[..2],
+    };
+    assert!(above.match_public(request, &kw).is_err());
+    // An origin the record does not start with.
+    let elsewhere = Keys::Public {
+        key: &account,
+        origin: &[49 | 0x8000_0000, 0x8000_0000, 0x8000_0000],
+    };
+    assert_eq!(elsewhere.match_public(request, &kw), Err(Error::NotOurs));
+}
+
+/// Only `SIGHASH_ALL`: a type the members did not agree to is refused, not computed.
+#[test]
+fn a_digest_is_refused_for_a_sighash_type_other_than_all() {
+    let kw = KeyWork::host();
+    let account = account_public();
+    let keys = Keys::Public {
+        key: &account,
+        origin: &PATH[..3],
+    };
+    let mut buf = vec![0u8; 4096];
+    let n = psbt_for(&PATH, FINGERPRINT, &mut buf);
+    let psbt = Psbt::parse(&buf[..n]).unwrap();
+    let mut out = vec![0u8; 4096];
+    let key = [in_key::SIGHASH_TYPE as u8];
+    let m = psbt
+        .set_input_record(0, &key, &3u32.to_le_bytes(), &mut out)
+        .unwrap();
+    let odd = Psbt::parse(&out[..m]).unwrap();
+    let mut scratch = vec![0u8; 8192];
+    assert_eq!(
+        digest_for_input(&odd, 0, keys, FINGERPRINT, &mut scratch, &kw),
+        Err(Error::Sighash { kind: 3 })
     );
 }

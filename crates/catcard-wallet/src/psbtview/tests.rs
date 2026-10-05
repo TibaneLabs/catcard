@@ -9,6 +9,7 @@ use outscript::psbt::{Psbt, input as in_key};
 
 use super::*;
 use crate::bip32::ChildNumber;
+use crate::bip32::ExtendedPrivKey;
 use crate::bip39::{Mnemonic, SEED_LEN};
 
 const OURS: &str =
@@ -34,7 +35,7 @@ fn accounts_of(psbt: &Psbt<'_>, master: &ExtendedPrivKey) -> Vec<Account> {
 /// multisig wallets the test has registered.
 fn owner<'a>(master: &'a ExtendedPrivKey, wallets: &'a [crate::multisig::Multisig]) -> Owner<'a> {
     Owner {
-        master,
+        keys: crate::signer::Keys::Master(master),
         fingerprint: OUR_FP,
         wallets,
         bare_keys: &[],
@@ -416,7 +417,7 @@ fn a_wif_store_key_makes_its_input_ours_in_the_review() {
     // With the store: the input is ours, and no change account is invented for it -- the
     // output paying STRANGER's own change key is money leaving, not change.
     let owner = Owner {
-        master: &master,
+        keys: crate::signer::Keys::Master(&master),
         fingerprint: OUR_FP,
         wallets: &[],
         bare_keys: &bare,
@@ -2136,7 +2137,7 @@ fn a_wif_store_key_makes_a_p2pk_input_ours() {
     );
     let bare = [key];
     let with_store = Owner {
-        master: &master,
+        keys: crate::signer::Keys::Master(&master),
         fingerprint: OUR_FP,
         wallets: &[],
         bare_keys: &bare,

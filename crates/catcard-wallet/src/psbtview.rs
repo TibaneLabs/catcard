@@ -26,7 +26,7 @@ use outscript::psbt::{Psbt, global, input as in_key, output as out_key};
 
 use crate::KeyWork;
 use crate::address::{self, AddressKind};
-use crate::bip32::{ExtendedPrivKey, ExtendedPubKey, FINGERPRINT_LEN, Network};
+use crate::bip32::{ExtendedPubKey, FINGERPRINT_LEN, Network};
 use crate::multisig::{self, Cosigner, Kind, MAX_COSIGNERS, MAX_ORIGIN, Multisig};
 use crate::signer::{self, KeyRequest, MAX_KEYS_PER_INPUT};
 
@@ -418,7 +418,9 @@ pub const MAX_ODD_SIGHASH: usize = 4;
 /// signs a stranger's script or prices someone else's output as change.
 #[derive(Copy, Clone)]
 pub struct Owner<'a> {
-    pub master: &'a ExtendedPrivKey,
+    /// Where its keys come from: the master, or a TSS wallet's public half
+    /// ([`signer::Keys`]).
+    pub keys: signer::Keys<'a>,
     pub fingerprint: [u8; FINGERPRINT_LEN],
     /// Multisig wallets the owner has registered on this device. Empty means this device
     /// signs no multisig input at all, which is the correct answer before any import.
@@ -444,7 +446,7 @@ pub fn summarise(
     policy: &Policy,
     kw: &KeyWork,
 ) -> Result<Summary, Refusal> {
-    let (master, fingerprint, wallets) = (owner.master, owner.fingerprint, owner.wallets);
+    let (owned, fingerprint, wallets) = (owner.keys, owner.fingerprint, owner.wallets);
     if psbt.is_finalized() {
         return Err(Refusal::AlreadyFinal);
     }
@@ -481,7 +483,7 @@ pub fn summarise(
         // only rebuilding the script from our key tells them apart.
         let mut single_sig = false;
         for request in keys[..found].iter() {
-            let Ok(signer) = signer::match_key(master, request, kw) else {
+            let Ok(pubkey) = owned.match_public(request, kw) else {
                 continue;
             };
             mine = true;
@@ -499,7 +501,6 @@ pub fn summarise(
             let Ok(spent) = psbt.utxo(index) else {
                 continue;
             };
-            let pubkey = signer.public_key_bytes();
             // Bare P2PK: single-signature, ours, and of no account -- a wallet does not
             // make P2PK change, so the path it was found at names nothing an output may
             // call itself change against. Source: hw-reference/firmware-features.md §3
@@ -890,7 +891,7 @@ pub fn change_of(
     spent: &Spent<'_>,
     kw: &KeyWork,
 ) -> Option<ChangePath> {
-    let (master, fingerprint) = (owner.master, owner.fingerprint);
+    let (owned, fingerprint) = (owner.keys, owner.fingerprint);
     let map = psbt.output(index).map(|o| o.map())?;
     let (accounts, wallets) = (spent.accounts, spent.wallets);
     let found = |request: &KeyRequest| {
@@ -941,12 +942,11 @@ pub fn change_of(
             let Some(account) = account_for(request.steps(), accounts) else {
                 continue;
             };
-            let Ok(signer) = signer::match_key(master, &request, kw) else {
+            let Ok(pubkey) = owned.match_public(&request, kw) else {
                 continue;
             };
             // Only the kind that account's inputs used. A BIP-84 wallet does not make
             // P2PKH change, and a host saying otherwise is describing a different wallet.
-            let pubkey = signer.public_key_bytes();
             let mut ours = [0u8; 34];
             if let Ok(n) = address::script_pubkey(account.kind, &pubkey, &mut ours)
                 && ours[..n] == *script
@@ -1058,13 +1058,14 @@ fn write_hex(bytes: &[u8], out: &mut [u8]) -> usize {
 }
 
 /// Inputs of `psbt` this wallet can sign, written into `out` as indices; returns how many.
-pub fn our_inputs(
+pub fn our_inputs<'k>(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
+    owned: impl Into<signer::Keys<'k>>,
     fingerprint: [u8; FINGERPRINT_LEN],
     out: &mut [usize],
     kw: &KeyWork,
 ) -> usize {
+    let owned: signer::Keys<'k> = owned.into();
     let mut n = 0;
     for index in 0..psbt.unsigned_tx().input_count() {
         if n == out.len() {
@@ -1074,7 +1075,7 @@ pub fn our_inputs(
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
         if keys[..found]
             .iter()
-            .any(|r| signer::match_key(master, r, kw).is_ok())
+            .any(|r| owned.match_public(r, kw).is_ok())
         {
             out[n] = index;
             n += 1;
@@ -1096,14 +1097,15 @@ pub struct Listed {
 /// [`our_inputs`], for a request that listed the keys it wants: the inputs a listed key
 /// signs are written into `out`, and the ones only an unlisted key of ours could sign
 /// are counted.
-pub fn our_inputs_listed(
+pub fn our_inputs_listed<'k>(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
+    owned: impl Into<signer::Keys<'k>>,
     fingerprint: [u8; FINGERPRINT_LEN],
     listed: &[crate::hostkeys::KeyPath],
     out: &mut [usize],
     kw: &KeyWork,
 ) -> Listed {
+    let owned: signer::Keys<'k> = owned.into();
     let mut got = Listed::default();
     for index in 0..psbt.unsigned_tx().input_count() {
         let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
@@ -1111,7 +1113,7 @@ pub fn our_inputs_listed(
         let mut ours = false;
         let mut asked = false;
         for r in &keys[..found] {
-            if signer::match_key(master, r, kw).is_ok() {
+            if owned.match_public(r, kw).is_ok() {
                 ours = true;
                 if signer::is_listed(r, Some(listed)) {
                     asked = true;
@@ -1133,7 +1135,7 @@ pub fn our_inputs_listed(
 /// to.
 fn names_key(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
+    owned: signer::Keys<'_>,
     fingerprint: [u8; FINGERPRINT_LEN],
     want: &crate::hostkeys::KeyPath,
     kw: &KeyWork,
@@ -1143,7 +1145,7 @@ fn names_key(
         let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
         keys[..found]
             .iter()
-            .any(|r| r.steps() == want.steps() && signer::match_key(master, r, kw).is_ok())
+            .any(|r| r.steps() == want.steps() && owned.match_public(r, kw).is_ok())
     })
 }
 
@@ -1151,16 +1153,17 @@ fn names_key(
 ///
 /// A listed key that matches nothing is a host asking for a signature the transaction has
 /// no place for, and the request is refused whole rather than signed around it.
-pub fn unmatched_key(
+pub fn unmatched_key<'k>(
     psbt: &Psbt<'_>,
-    master: &ExtendedPrivKey,
+    owned: impl Into<signer::Keys<'k>>,
     fingerprint: [u8; FINGERPRINT_LEN],
     listed: &[crate::hostkeys::KeyPath],
     kw: &KeyWork,
 ) -> Option<usize> {
+    let owned: signer::Keys<'k> = owned.into();
     listed
         .iter()
-        .position(|want| !names_key(psbt, master, fingerprint, want, kw))
+        .position(|want| !names_key(psbt, owned, fingerprint, want, kw))
 }
 
 /// Inputs of `psbt` that a WIF-store key `pubkey` (compressed) can sign, as indices,
@@ -1184,20 +1187,21 @@ pub fn wif_inputs(psbt: &Psbt<'_>, pubkey: &[u8; address::PUBKEY_LEN], out: &mut
 
 /// Whether input `index` already carries a signature from one of our keys, so a second
 /// signing pass would add nothing.
-pub fn already_signed(
+pub fn already_signed<'k>(
     psbt: &Psbt<'_>,
     index: usize,
-    master: &ExtendedPrivKey,
+    owned: impl Into<signer::Keys<'k>>,
     fingerprint: [u8; FINGERPRINT_LEN],
     kw: &KeyWork,
 ) -> bool {
+    let owned: signer::Keys<'k> = owned.into();
     let Some(inp) = psbt.input(index) else {
         return false;
     };
     let mut keys = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
     let found = signer::key_requests(psbt, index, fingerprint, &mut keys).unwrap_or(0);
     for request in &keys[..found] {
-        if signer::match_key(master, request, kw).is_err() {
+        if owned.match_public(request, kw).is_err() {
             continue;
         }
         if request.taproot {

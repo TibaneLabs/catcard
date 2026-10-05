@@ -968,7 +968,7 @@ pub(crate) fn review_and_sign(
     });
 
     let owner = psbtview::Owner {
-        master: &master,
+        keys: catcard_wallet::signer::Keys::Master(&master),
         fingerprint,
         wallets,
         #[cfg(not(feature = "board-mk3"))]

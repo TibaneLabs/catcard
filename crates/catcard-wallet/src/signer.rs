@@ -26,7 +26,7 @@ use outscript::psbt::{Psbt, PsbtSigner, input as in_key};
 use zeroize::Zeroize;
 
 use crate::KeyWork;
-use crate::bip32::{ChildNumber, ExtendedPrivKey, FINGERPRINT_LEN};
+use crate::bip32::{ChildNumber, ExtendedPrivKey, ExtendedPubKey, FINGERPRINT_LEN};
 use crate::tx::sighash::SIGHASH_ALL;
 
 /// Whether `kind` is a sighash type this device will produce.
@@ -836,6 +836,196 @@ pub fn spoil_new_signature(
         )?));
     }
     Ok(None)
+}
+
+// --- keys held by no one device ------------------------------------------------------
+
+/// Where a wallet's keys come from, for deciding which records of a PSBT are ours.
+///
+/// Usually its private master. A threshold (TSS) wallet has none on any device -- its
+/// members sign together -- so all a device holds is its public half: the extended
+/// public key at `origin`, the path from the master the fingerprint names (empty for a
+/// key created together, whose fingerprint is its own). Below `origin` only unhardened
+/// steps can be followed, which is how such a wallet's addresses are made.
+#[derive(Clone, Copy)]
+pub enum Keys<'a> {
+    Master(&'a ExtendedPrivKey),
+    Public {
+        key: &'a ExtendedPubKey,
+        origin: &'a [u32],
+    },
+}
+
+impl<'a> From<&'a ExtendedPrivKey> for Keys<'a> {
+    fn from(master: &'a ExtendedPrivKey) -> Self {
+        Keys::Master(master)
+    }
+}
+
+impl Keys<'_> {
+    /// The compressed public key `request` names, if it really is ours: derived down the
+    /// path and compared, as [`match_key`] does. A taproot record is not ours under a
+    /// public key -- a TSS wallet signs ECDSA only -- nor is a path that does not start at
+    /// `origin` or goes on with a hardened step.
+    pub fn match_public(&self, request: &KeyRequest, kw: &KeyWork) -> Result<[u8; 33], Error> {
+        match *self {
+            Keys::Master(master) => match_key(master, request, kw).map(|s| s.public_key_bytes()),
+            Keys::Public { key, origin } => {
+                if request.taproot {
+                    return Err(Error::NotOurs);
+                }
+                let rest = request.steps().strip_prefix(origin).ok_or(Error::NotOurs)?;
+                let mut here = *key;
+                for &step in rest {
+                    here = here
+                        .derive_child(ChildNumber(step))
+                        .map_err(|_| Error::Derivation)?;
+                }
+                let ours = here.public_key;
+                let matches = if request.uncompressed() {
+                    SecpPublicKey::from_sec1(&ours)
+                        .is_ok_and(|pk| pk.serialize_uncompressed()[..] == *request.pubkey())
+                } else {
+                    ours[..] == *request.pubkey()
+                };
+                if !matches {
+                    return Err(Error::KeyMismatch);
+                }
+                Ok(ours)
+            }
+        }
+    }
+}
+
+/// What a key that signs elsewhere -- a TSS session -- has to sign for one input: the
+/// digest, the key, and the path to it below the wallet's origin.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Digest {
+    pub digest: [u8; 32],
+    pub pubkey: [u8; 33],
+    /// The steps after `origin`: what the TSS key derives along (all unhardened).
+    pub steps: [u32; MAX_STEPS],
+    pub depth: usize,
+}
+
+impl Digest {
+    pub fn steps(&self) -> &[u32] {
+        &self.steps[..self.depth]
+    }
+}
+
+/// Asks `outscript` for an input's signature and keeps the digest it was asked to sign,
+/// instead of signing it: the digest is then signed somewhere else. The signature handed
+/// back is a throwaway key's, made only because the trait wants one; what `outscript`
+/// writes with it is discarded.
+struct Recorder {
+    pubkey: SecpPublicKey,
+    throwaway: SecpPrivateKey,
+    seen: core::cell::Cell<Option<[u8; 32]>>,
+}
+
+impl PsbtSigner for Recorder {
+    fn public_key(&self) -> SecpPublicKey {
+        self.pubkey.clone()
+    }
+
+    fn sign_ecdsa(&self, digest: &[u8; 32]) -> Result<DerSignature, SignerError> {
+        // One signature an input: a second digest would mean a script needing this key
+        // twice, which no single-signature input does.
+        if self.seen.get().is_some() {
+            return Err(SignerError);
+        }
+        self.seen.set(Some(*digest));
+        Ok(self.throwaway.sign_der(digest))
+    }
+}
+
+/// The digest input `index` needs from the key `keys` holds there, computed by
+/// `outscript` exactly as it would sign it -- every script kind it signs, BIP-143 or
+/// legacy -- without a private key. `scratch` takes the PSBT `outscript` writes on the
+/// way, which is thrown away. Only `SIGHASH_ALL` (or no type): a TSS signature is made
+/// once for a digest the members agreed on, and the odd types are refused rather than
+/// computed a second way.
+pub fn digest_for_input(
+    psbt: &Psbt<'_>,
+    index: usize,
+    keys: Keys<'_>,
+    fingerprint: [u8; FINGERPRINT_LEN],
+    scratch: &mut [u8],
+    kw: &KeyWork,
+) -> Result<Digest, Error> {
+    let kind = psbt.input(index).and_then(|i| i.sighash_type());
+    if let Some(kind) = kind
+        && kind != SIGHASH_ALL
+    {
+        return Err(Error::Sighash { kind });
+    }
+    let origin_len = match keys {
+        Keys::Public { origin, .. } => origin.len(),
+        Keys::Master(_) => 0,
+    };
+    let mut requests = [KeyRequest::EMPTY; MAX_KEYS_PER_INPUT];
+    let found = key_requests(psbt, index, fingerprint, &mut requests)?;
+    let mut last = Error::NotOurs;
+    for request in &requests[..found] {
+        let pubkey = match keys.match_public(request, kw) {
+            Ok(pk) => pk,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        let recorder = Recorder {
+            pubkey: SecpPublicKey::from_sec1(&pubkey).map_err(|_| Error::Derivation)?,
+            throwaway: SecpPrivateKey::from_bytes(&THROWAWAY).map_err(|_| Error::Derivation)?,
+            seen: core::cell::Cell::new(None),
+        };
+        psbt.sign_input_to_slice(index, &recorder, scratch)?;
+        let digest = recorder.seen.get().ok_or(Error::NotOurs)?;
+        let rest = &request.steps()[origin_len..];
+        let mut steps = [0u32; MAX_STEPS];
+        steps[..rest.len()].copy_from_slice(rest);
+        return Ok(Digest {
+            digest,
+            pubkey,
+            steps,
+            depth: rest.len(),
+        });
+    }
+    Err(last)
+}
+
+/// A scalar for [`Recorder`]'s throwaway signatures: any valid one, never a key of anyone.
+const THROWAWAY: [u8; 32] = {
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    b
+};
+
+/// Write a signature made elsewhere for input `index` -- `der`, low-S, over the digest
+/// [`digest_for_input`] gave for `pubkey` -- as the input's partial-signature record
+/// (BIP-174), with the input's sighash type. Into `out`, like the other signers.
+pub fn apply_signature(
+    psbt: &Psbt<'_>,
+    index: usize,
+    pubkey: &[u8; 33],
+    der: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let kind = psbt
+        .input(index)
+        .and_then(|i| i.sighash_type())
+        .unwrap_or(SIGHASH_ALL);
+    if der.len() > 72 {
+        return Err(Error::Derivation);
+    }
+    let mut value = [0u8; 73];
+    value[..der.len()].copy_from_slice(der);
+    value[der.len()] = kind as u8;
+    let mut record_key = [0u8; 34];
+    record_key[0] = in_key::PARTIAL_SIG as u8;
+    record_key[1..].copy_from_slice(pubkey);
+    Ok(psbt.set_input_record(index, &record_key, &value[..der.len() + 1], out)?)
 }
 
 #[cfg(test)]
