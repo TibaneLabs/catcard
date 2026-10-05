@@ -156,31 +156,32 @@ struct MsgType {
 }
 
 /// tsslib's message types and their order.
-/// Source: tsslib 0.2.13 `src/dklstss/keygen_party.rs`, `signing_party.rs`,
+/// Source: tsslib 0.2.14 `src/dklstss/keygen_party.rs`, `signing_party.rs`,
 /// `signing_checked_party.rs` and `pair_setup_party.rs` (`TYPE_*` constants and the
 /// module docs' round lists).
-/// `round` is the envelope's: tsslib's round `r` travels in round `r + 1`, after the
-/// two rounds of identities. The `broadcast` flags are what each party sends with
-/// `to == None`; a message that disagrees fails the session rather than being sealed
-/// under the wrong address.
+/// `round` is the envelope's, after the two rounds of identities: tsslib's message
+/// rounds in order from round 2. Since 0.2.14 the keygen base-OT responses (`r2`) travel
+/// with the echo, and so do the signing Alice envelopes (`r2`): one round fewer for
+/// each. The `broadcast` flags are what each party sends with `to == None`; a message
+/// that disagrees fails the session rather than being sealed under the wrong address.
 #[rustfmt::skip]
 const TYPES: &[MsgType] = &[
     MsgType { family: Family::Keygen, code: 1, name: "dkls:keygen:r1bc", round: 2, broadcast: true },
     MsgType { family: Family::Keygen, code: 2, name: "dkls:keygen:r1uc", round: 2, broadcast: false },
     MsgType { family: Family::Keygen, code: 3, name: "dkls:keygen:echo", round: 3, broadcast: true },
-    MsgType { family: Family::Keygen, code: 4, name: "dkls:keygen:r2", round: 4, broadcast: false },
+    MsgType { family: Family::Keygen, code: 4, name: "dkls:keygen:r2", round: 3, broadcast: false },
     MsgType { family: Family::Sign, code: 1, name: "dkls:sign:r1", round: 2, broadcast: true },
     MsgType { family: Family::Sign, code: 2, name: "dkls:sign:r1echo", round: 3, broadcast: true },
-    MsgType { family: Family::Sign, code: 3, name: "dkls:sign:r2", round: 4, broadcast: false },
-    MsgType { family: Family::Sign, code: 4, name: "dkls:sign:r3", round: 5, broadcast: false },
-    MsgType { family: Family::Sign, code: 5, name: "dkls:sign:r4", round: 6, broadcast: true },
-    MsgType { family: Family::Sign, code: 6, name: "dkls:sign:r4echo", round: 7, broadcast: true },
+    MsgType { family: Family::Sign, code: 3, name: "dkls:sign:r2", round: 3, broadcast: false },
+    MsgType { family: Family::Sign, code: 4, name: "dkls:sign:r3", round: 4, broadcast: false },
+    MsgType { family: Family::Sign, code: 5, name: "dkls:sign:r4", round: 5, broadcast: true },
+    MsgType { family: Family::Sign, code: 6, name: "dkls:sign:r4echo", round: 6, broadcast: true },
     MsgType { family: Family::CheckedSign, code: 1, name: "dkls:csign:r1", round: 2, broadcast: true },
     MsgType { family: Family::CheckedSign, code: 2, name: "dkls:csign:r1echo", round: 3, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 3, name: "dkls:csign:r2", round: 4, broadcast: false },
-    MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 5, broadcast: false },
-    MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 6, broadcast: true },
-    MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 7, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 3, name: "dkls:csign:r2", round: 3, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 4, name: "dkls:csign:r3", round: 4, broadcast: false },
+    MsgType { family: Family::CheckedSign, code: 5, name: "dkls:csign:r4", round: 5, broadcast: true },
+    MsgType { family: Family::CheckedSign, code: 6, name: "dkls:csign:r4echo", round: 6, broadcast: true },
     MsgType { family: Family::PairSetup, code: 1, name: "dkls:pairsetup:r1", round: 2, broadcast: false },
     MsgType { family: Family::PairSetup, code: 2, name: "dkls:pairsetup:r2", round: 3, broadcast: false },
 ];
@@ -1316,9 +1317,9 @@ mod tests {
             // Rounds 0 and 1 are the identities': no tsslib message travels in them.
             assert!(f.types().all(|t| t.round >= FIRST_PROTOCOL_ROUND));
         }
-        assert_eq!(Family::Keygen.rounds(), 4);
-        assert_eq!(Family::Sign.rounds(), 7);
-        assert_eq!(Family::CheckedSign.rounds(), 7);
+        assert_eq!(Family::Keygen.rounds(), 3);
+        assert_eq!(Family::Sign.rounds(), 6);
+        assert_eq!(Family::CheckedSign.rounds(), 6);
         assert_eq!(Family::PairSetup.rounds(), 3);
     }
 

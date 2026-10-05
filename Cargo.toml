@@ -149,7 +149,7 @@ purecrypto = { version = "0.9.9", default-features = false }
 # polled rather than waited on. `json` stays off too: keys and messages use tsslib's
 # compact binary encoding (`tsslib::wire`), and nothing here links serde_json for it.
 # (0.2.12 also brings `frostsecp256k1tss`, FROST for Taproot: stage 2, not enabled.)
-tsslib = { version = "0.2.13", default-features = false, features = ["dklstss"] }
+tsslib = { version = "0.2.14", default-features = false, features = ["dklstss"] }
 # The lock around the protocol DRBG tsslib draws from (tsslib already links it).
 spin = { version = "0.10", default-features = false, features = ["spin_mutex", "once"] }
 # Memory hygiene, not a primitive: kept.

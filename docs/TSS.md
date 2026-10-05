@@ -5,7 +5,7 @@ screens built, 2026-10-03** (`crates/catcard-fw/src/tss/`, mk4/mk5/Q1 bench buil
 run on a device): create together, export, import, restore from shares, restore a
 created-together key, and the kept shares -- over the SD card or the Virtual Disk. **Key
 core in settings, pairs in a sealed cache on the medium, and Rebuild setup, 2026-10-04**
-(tsslib 0.2.13; "Where things live"). Signing a PSBT and QR as a transport are stage 2.
+(tsslib 0.2.14; "Where things live"). Signing a PSBT and QR as a transport are stage 2.
 See "On the device" below.
 
 A wallet whose key is held in **shares** by several CatCards: any `t` of the `n` can sign
@@ -77,7 +77,7 @@ governs signing and restoring.
   one-message key from ECDH between the two members' session keys.
 - **One session, many sighashes.** A signing session runs one DKLs signing per input, and
   every input's messages for a round travel in the same file: a PSBT of ten inputs takes
-  the same eight passes of the cards (two of introductions, six of signing) as one.
+  the same seven passes of the cards (two of introductions, five of signing) as one.
 - **Randomness.** The DKG's secret contribution and every share made on export are seed-grade
   and come from the entropy pool, like a new wallet (the pool-draw lint allowlist names the
   TSS module). Protocol randomness (nonces, OT seeds) comes from a DRBG seeded from the pool
@@ -91,8 +91,11 @@ governs signing and restoring.
    `t`, and its member number.
 2. Rounds 0 and 1: identity commitments out, then identity keys; session code shown and
    compared.
-3. DKLs keygen rounds 2-4, by SD or the Virtual Disks' files (QR in stage 2), until every
-   member has its share.
+3. DKLs keygen rounds 2-3 (shares; then the echo with the base-OT replies), by SD or the
+   Virtual Disks' files (QR in stage 2), until every member has its share. With one SD card
+   passed member to member that is 5n - 4 insertions: 11 for 2-of-3, 21 for 3-of-5 (tsslib
+   0.2.14 sends the base-OT replies with the echo, KarpelesLab/tsslib-rs#18; 0.2.13 took
+   6n - 5).
 4. Each member keeps its **key core** in its settings and writes its **pair cache** beside
    the session's files (`TSS/<wallet>-m<member>.pairs`), then shows the wallet's fingerprint
    and first address; the user checks they are the same on every device. On the Virtual
@@ -162,7 +165,7 @@ Users with no SD card can sign air-gapped (decided 2026-10-04):
    checking the outputs as for any signature.
 2. Each loads its pair cache; a pair it lacks with another signer is set up first (*Rebuild
    setup*).
-3. Rounds 0 and 1 as above, then the DKLs signing rounds 2-7 for every input. Signing is
+3. Rounds 0 and 1 as above, then the DKLs signing rounds 2-6 for every input. Signing is
    **checked** unless the caller asks otherwise (`SignMode::default()` is `Checked`).
 4. The first member writes the signed PSBT.
 
@@ -248,7 +251,7 @@ bytes.
   session from those on the medium, and a member number not yet taken. Then every device
   runs the same loop, driven only by the session's outbox and `awaiting()`: write what it
   has, read what it waits for, show the 8-word code when every identity is in (and go on
-  only on "the same on all"), and otherwise say "Step k of 5. Pass the card to member m
+  only on "the same on all"), and otherwise say "Step k of 4. Pass the card to member m
   (waiting for members ...), then put it back here." -- or, on the Virtual Disk, to copy
   the TSS folder between this disk and member m's. At the end each member keeps its core in
   its settings, writes its pair cache to the medium, and shows the wallet's fingerprint,

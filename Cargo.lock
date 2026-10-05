@@ -862,9 +862,9 @@ dependencies = [
 
 [[package]]
 name = "tsslib"
-version = "0.2.13"
+version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6f0566ebf252d7ab6d1ab4a145b84e72a3600e618e3332dfd5bcef0c7cfa2af"
+checksum = "14077cfbc7c85c784bc9986f5e188ff8065bbc19edbb4d79289bded55d1ae9a5"
 dependencies = [
  "purecrypto",
  "serde",

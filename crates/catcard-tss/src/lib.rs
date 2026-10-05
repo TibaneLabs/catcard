@@ -34,8 +34,8 @@
 //!
 //! | protocol        | round 0     | round 1    | rounds 2..                 | after          |
 //! |-----------------|-------------|------------|----------------------------|----------------|
-//! | create together | commitments | identities | 2-4 (shares, echo, OT)     | a share record |
-//! | sign            | commitments | identities | 2-7                        | signatures     |
+//! | create together | commitments | identities | 2-3 (shares, echo + OT)    | a share record |
+//! | sign            | commitments | identities | 2-6                        | signatures     |
 //! | pair setup      | commitments | identities | 2-3 (base OT, both ways)   | one new pair   |
 //!
 //! Round 0 is a hash of each member's identity key; round 1 opens it, and is sent only
@@ -45,7 +45,7 @@
 //!
 //! A signing session signs any number of sighashes at once, each its own tsslib party,
 //! with all their messages for a round in one envelope: a PSBT of ten inputs takes the
-//! same eight passes of the cards as one input.
+//! same seven passes of the cards as one input.
 //!
 //! # Randomness
 //!
