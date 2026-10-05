@@ -59,13 +59,17 @@ const ENCODING: Encoding = Encoding::Base32;
 const FRAME_MS: u32 = 250;
 
 /// Milliseconds a part is shown for when another device's scanner is reading it, as the
-/// threshold-signing exchange does. A Q1 reading a Q1 missed parts at [`FRAME_MS`].
-#[cfg(all(feature = "board-q1", feature = "tss"))]
+/// threshold-signing exchange does. A Q1 reading a Q1's BBQr missed parts at
+/// [`FRAME_MS`]. A multichain build sends BC-UR there, whose fountain parts cover a miss;
+/// a Bitcoin-only build has no BC-UR and sends BBQr, slower.
+#[cfg(all(feature = "board-q1", feature = "tss", feature = "multichain"))]
+pub(crate) const DEVICE_FRAME_MS: u32 = 500;
+/// As above, for BBQr.
+#[cfg(all(feature = "board-q1", feature = "tss", not(feature = "multichain")))]
 pub(crate) const DEVICE_FRAME_MS: u32 = 800;
 
 /// The range `5`/`8` move a BBQr animation's frame time within, and the step: a half
 /// again slower, or two thirds the time.
-#[cfg(feature = "board-q1")]
 const FRAME_MS_RANGE: (u32, u32) = (100, 3000);
 
 /// Show `payload` as animated BBQr.
@@ -82,7 +86,7 @@ pub(crate) fn animate_bbqr(ui: &mut Ui<'_>, head: &str, payload: &[u8], filetype
 }
 
 /// [`animate_bbqr`], starting at `frame_ms` a part: slower for a reader that needs it.
-#[cfg(all(feature = "board-q1", feature = "tss"))]
+#[cfg(all(feature = "board-q1", feature = "tss", not(feature = "multichain")))]
 pub(crate) fn animate_bbqr_at(
     ui: &mut Ui<'_>,
     head: &str,
@@ -112,6 +116,13 @@ pub(crate) fn animate_bbqr_padded(ui: &mut Ui<'_>, head: &str, payload: &[u8], f
 #[cfg(feature = "board-q1")]
 #[cfg(feature = "multichain")]
 pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
+    animate_bytes_ur_at(ui, head, payload, FRAME_MS)
+}
+
+/// [`animate_bytes_ur`], starting at `frame_ms` a part.
+#[cfg(feature = "board-q1")]
+#[cfg(feature = "multichain")]
+pub(crate) fn animate_bytes_ur_at(ui: &mut Ui<'_>, head: &str, payload: &[u8], frame_ms: u32) {
     use catcard_bcur::registry::{Kind, bytestring};
 
     let Some(mut mem) = crate::heap::take(bytestring::encoded_len(payload.len())) else {
@@ -125,7 +136,7 @@ pub(crate) fn animate_bytes_ur(ui: &mut Ui<'_>, head: &str, payload: &[u8]) {
         return;
     };
     let message = &mem.bytes()[..n];
-    animate_bcur(ui, head, Kind::Bytes.written_as(), message);
+    animate_bcur_at(ui, head, Kind::Bytes.written_as(), message, frame_ms);
 }
 
 /// Show a signed transaction as `ur:crypto-psbt`.
@@ -184,6 +195,13 @@ pub(crate) fn animate_psbt_ur(ui: &mut Ui<'_>, head: &str, psbt: &[u8], scratch:
 /// padding are gone. [C] BCR-2020-005 §"Types"
 #[cfg(feature = "multichain")]
 pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]) {
+    animate_bcur_at(ui, head, ty, message, FRAME_MS)
+}
+
+/// [`animate_bcur`], starting at `frame_ms` a part. The arrows change the speed as on
+/// [`animate`].
+#[cfg(feature = "multichain")]
+fn animate_bcur_at(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8], frame_ms: u32) {
     use anyd::codes::qr::{EcLevel, QrEncoder, Version};
     use catcard_bcur::encode as ur;
 
@@ -225,6 +243,7 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
 
     let encoder = QrEncoder::new();
     let mut at = 1u32;
+    let mut frame_ms = frame_ms.clamp(FRAME_MS_RANGE.0, FRAME_MS_RANGE.1);
     loop {
         let written = if lone {
             ur::single(ty, message, line_mem.bytes())
@@ -249,7 +268,13 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
         // then sat full -- or worse, kept filling -- would be answering "how far through
         // is this?" with a number that means nothing. What a reader has caught is on the
         // reader's screen, which is where that question belongs.
-        show(ui, grid.width(), |x, y| grid.get(x, y), None, None);
+        show(
+            ui,
+            grid.width(),
+            |x, y| grid.get(x, y),
+            None,
+            (!lone).then_some(frame_ms),
+        );
         if lone {
             // Nothing to animate. Redrawing the one code four times a second would
             // only make it flicker at the camera trying to read it -- but the wait
@@ -257,8 +282,18 @@ pub(crate) fn animate_bcur(ui: &mut Ui<'_>, head: &str, ty: &str, message: &[u8]
             while !key_within(ui, FRAME_MS) {}
             return;
         }
-        if key_within(ui, FRAME_MS) {
-            return;
+        // As in `animate`: the arrows change the speed and stay on this part.
+        match key_in(ui, frame_ms) {
+            None => {}
+            Some(Key::Digit(5)) => {
+                frame_ms = (frame_ms * 3 / 2).min(FRAME_MS_RANGE.1);
+                continue;
+            }
+            Some(Key::Digit(8)) => {
+                frame_ms = (frame_ms * 2 / 3).max(FRAME_MS_RANGE.0);
+                continue;
+            }
+            Some(_) => return,
         }
         // **Onwards, not back to one.** Past `total` the parts are fountain mixtures,
         // and a reader that missed one fills the gap from the next mixture that covers
@@ -438,6 +473,7 @@ fn show(
     });
 }
 
+#[cfg(feature = "multichain")]
 /// Wait up to `ms`, returning true if a key was pressed in that time.
 ///
 /// The animation's clock. USB is pumped while it waits, for the same reason every other

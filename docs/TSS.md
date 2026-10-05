@@ -54,13 +54,19 @@ governs signing and restoring.
     members.
   - QR (Q1 only, `tss::qr`): each Q1 keeps what it sent and what it scanned in memory. On
     the waiting screen it offers "Scan a code" and "Show my code to m" for each other
-    member; a code for `m` is one animated BBQr (type `B`) holding the broadcasts and `m`'s
+    member. A code for `m` is one animated code holding the broadcasts and `m`'s
     unicasts of the last two rounds it produced, with the session id and, from member 1,
     the invitation -- a member joins by scanning member 1's first code, and picks its
-    number itself. Each part is shown for 0.8 s, which is slower than the 0.25 s
-    used for a phone. A Q1 reading another Q1 missed parts at the faster rate. The arrows
-    change the speed: up is slower, down is faster. The time per part is shown left of
-    the code. A member that finishes keeps showing its codes until the owner says
+    number itself. The format depends on the build:
+    - **A multichain build sends a `ur:bytes`.** Its fountain parts let a reader that
+      missed one rebuild it from a later frame, instead of waiting a whole cycle. It shows
+      0.5 s per part.
+    - **A Bitcoin-only build sends a BBQr of type `B`.** It has no BC-UR, and shows 0.8 s
+      per part.
+
+    Either build reads both. A Q1 reading another Q1's BBQr missed parts at the 0.25 s a
+    phone gets. The arrows change the speed: up is slower, down is faster. The time per
+    part is shown left of the code. A member that finishes keeps showing its codes until the owner says
     everyone is done. Its pair cache goes to its own Virtual Disk (gone at power off; set
     up again before signing). A mixed group uses SD.
 - **Messages are authenticated.** tsslib leaves peer authentication to the transport, and an

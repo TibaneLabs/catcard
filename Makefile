@@ -152,6 +152,9 @@ lint:
 	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-mk5
 	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5
 	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1,multichain
+# The Bitcoin-only Q1 (`make q1 BITCOIN=1`): bench features, no chains, so BBQr where
+# the default build has BC-UR.
+	$(CARGO) clippy -p catcard-fw --target thumbv7em-none-eabihf --features board-q1
 # The mk3 compiles out whole modules the others have -- no PSRAM, no settings store -- so
 # it is the shape that breaks when something new is wired in unconditionally. CI builds it
 # either way; linting it here is what stops that being found a push later.
