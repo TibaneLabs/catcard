@@ -1134,6 +1134,10 @@ bytes still waiting, 255 meaning that many or more), the rest through `GET RESPO
 chunks at 255 bytes and pages replies at 256, which `tools/ccidclient.py --short`
 exercises. A new message drops a reply still being paged.
 
+**For the app's author**, `docs/PHONE-APP.md` walks from a `TKSmartCard` to a signed
+transaction with the bytes of every exchange: this APDU, `Identify`, the pairing
+handshake and its vector, the host-wallet requests and results.
+
 **What iOS needs.** CryptoTokenKit (`TKSmartCardSlotManager`) finds the reader by its
 USB class, powers the card on itself, and `TKSmartCard.transmit` sends the bytes above
 as given; the app should send extended APDUs (one exchange per message) and compare the
