@@ -33,7 +33,7 @@ use catcard_upgrade::{Approval, Reject, Staged};
 use crate::staging;
 use catcard_entropy::HmacDrbg;
 use catcard_usb::{
-    FrameError, Opcode, PROTOCOL_VERSION, REPORT_LEN, Reassembler, Status, Writer, ncry,
+    FrameError, Opcode, PROTOCOL_VERSION, Progress, REPORT_LEN, Reassembler, Status, Writer, ncry,
 };
 use zeroize::Zeroize;
 
@@ -163,6 +163,12 @@ pub struct UsbTask {
     /// The FIDO security key's CTAPHID state and the request it has out. Idle unless
     /// [`set_fido`] has presented the interface.
     fido: crate::fido::Desk,
+    /// The CCID smart-card reader: the command it is taking or answering. Part of
+    /// CatCard's identity from boot; idle in stock's and the disk's.
+    ccid: crate::ccid::Desk,
+    /// A message from the reader is being dispatched: its reply is to be held for the
+    /// reader rather than framed into the HID outbox.
+    reply_to_ccid: bool,
 }
 
 /// A single-producer/single-consumer ring of received bulk-OUT packets: the OTG interrupt
@@ -271,10 +277,10 @@ const REENUM_DETACH_MS: u32 = 20;
 /// would make this self-referential. The framing state travels alongside it so each
 /// `next_reply_frame` resumes where the last left off. Sized for a bulk peek: a debug
 /// read that could only return one frame would not be worth having.
-struct ReplyState {
-    status: Status,
-    body: ReplyBody,
-    len: usize,
+pub(crate) struct ReplyState {
+    pub(crate) status: Status,
+    pub(crate) body: ReplyBody,
+    pub(crate) len: usize,
     /// Framing progress: bytes sent, next sequence number, whether the START frame went.
     sent: usize,
     seq: u8,
@@ -287,13 +293,13 @@ struct ReplyState {
 /// few that are longer -- a sealed answer from the encrypted channel, a bench peek --
 /// are held in a heap block for as long as they take to send, rather than the task
 /// reserving [`REPLY_MAX`] for them for the life of the device.
-enum ReplyBody {
+pub(crate) enum ReplyBody {
     Inline([u8; REPLY_INLINE]),
     Leased(crate::heap::Block),
 }
 
 impl ReplyBody {
-    fn bytes(&mut self) -> &mut [u8] {
+    pub(crate) fn bytes(&mut self) -> &mut [u8] {
         match self {
             ReplyBody::Inline(b) => b,
             ReplyBody::Leased(b) => b.bytes(),
@@ -392,6 +398,8 @@ impl UsbTask {
             ckcc: false,
             ck: crate::ckcc::Desk::new(),
             fido: crate::fido::Desk::new(),
+            ccid: crate::ccid::Desk::new(),
+            reply_to_ccid: false,
         })
     }
 
@@ -559,6 +567,24 @@ impl UsbTask {
                     self.end_session(true);
                     self.ck.reset();
                     self.fido.reset();
+                    self.ccid.reset();
+                }
+                Event::CcidPacket => {
+                    led::saw_traffic();
+                    let mut pkt = [0u8; catcard_usb::ccid::MAX_PACKET];
+                    let n = {
+                        let rx = self.otg.ccid_packet();
+                        let n = rx.len().min(pkt.len());
+                        pkt[..n].copy_from_slice(&rx[..n]);
+                        n
+                    };
+                    // The endpoint is armed again only while more of the command is
+                    // coming; a whole command holds the host off until it is answered.
+                    self.ccid.armed = false;
+                    if self.ccid.feed(&pkt[..n]) == crate::ccid::Fed::Receiving {
+                        self.otg.ccid_receive_next();
+                        self.ccid.armed = true;
+                    }
                 }
                 Event::FidoReport => {
                     led::saw_traffic();
@@ -613,9 +639,105 @@ impl UsbTask {
             }
 
             self.fido_pump();
+            self.ccid_pump();
 
-            event != Event::Idle || self.outbox_len > 0 || self.fido.busy()
+            event != Event::Idle || self.outbox_len > 0 || self.fido.busy() || self.ccid.busy()
         }
+    }
+
+    /// The smart-card reader's side of a poll: a control abort to act on, a whole
+    /// command to dispatch, the next packet of an answer out, and the endpoint armed
+    /// again once the answer has gone. Nothing while the reader is not presented.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    unsafe fn ccid_pump(&mut self) {
+        if !self.otg.ccid_present() {
+            return;
+        }
+        if let Some((seq, _slot)) = self.otg.take_ccid_abort() {
+            crate::catlog!("ccid: abort {}", seq);
+            self.ccid.control_abort(seq);
+        }
+        // A command is dispatched only while no HID reply is still being framed out:
+        // the dispatch writes `self.reply`, and the frames of one still going would be
+        // lost under it.
+        if self.ccid.dispatch_wanted() && self.reply.is_none() {
+            self.ccid_dispatch();
+        }
+        let mut pkt = [0u8; catcard_usb::ccid::MAX_PACKET];
+        if let Some(n) = self.ccid.next_packet(&mut pkt)
+            // SAFETY: as documented.
+            && unsafe { self.otg.ccid_send(&pkt[..n]) }
+        {
+            led::saw_traffic();
+            self.ccid.sent();
+        }
+        if self.ccid.idle() && !self.ccid.armed {
+            // SAFETY: as documented.
+            unsafe { self.otg.ccid_receive_next() };
+            self.ccid.armed = true;
+        }
+    }
+
+    /// Dispatch the APDU the reader holds: our one instruction carries a message chunk,
+    /// which goes through [`on_progress`](Self::on_progress) exactly as a HID frame's
+    /// would; `GET RESPONSE` pages a held reply; anything else is a status word.
+    #[inline(never)]
+    fn ccid_dispatch(&mut self) {
+        use crate::ccid::Answer;
+        use catcard_usb::ccid::apdu::{self, Request};
+
+        let Some((seq, len, mut block)) = self.ccid.take_pending() else {
+            return;
+        };
+        let answer = {
+            let bytes = &block.bytes()[..len];
+            match apdu::parse(bytes).and_then(|c| apdu::classify(&c)) {
+                Err(sw) => Answer::Sw(sw),
+                Ok(Request::GetResponse { le }) => Answer::Page(le),
+                Ok(Request::Chunk { more, data, le }) => {
+                    // A new message: whatever reply was still being paged is dropped.
+                    self.ccid.forget_reply();
+                    // The reply this produces is for the reader, not the HID outbox.
+                    self.reply_to_ccid = true;
+                    match self.ccid.chain.feed(more, data) {
+                        Err(e) => {
+                            // Framing is broken, as a bad HID frame is: a partial image
+                            // or sealed record is dropped rather than resynchronised onto.
+                            self.frame_errors = self.frame_errors.saturating_add(1);
+                            self.drop_transfer();
+                            self.ncry_rx = None;
+                            self.begin_reply(Status::BadRequest, &[e as u8]);
+                        }
+                        Ok(progress) => {
+                            // A message starting here interrupts one the HID transport
+                            // was in the middle of, as a START frame would.
+                            if progress.started.is_some() && self.frames.in_progress() {
+                                self.frames.reset();
+                                self.drop_transfer();
+                                self.ncry_rx = None;
+                            }
+                            self.on_progress(progress);
+                        }
+                    }
+                    self.reply_to_ccid = false;
+                    match self.reply.take() {
+                        Some(r) => {
+                            // An answer to a chunk that was not the last is a refusal of
+                            // the message; the chain is over.
+                            if more {
+                                self.ccid.chain.reset();
+                            }
+                            Answer::Reply(r, le)
+                        }
+                        None => Answer::Ack,
+                    }
+                }
+            }
+        };
+        self.ccid.give_buf(block);
+        self.ccid.answer(seq, answer);
     }
 
     /// The security key's side of a poll: its timers, and the next report out. Nothing
@@ -678,8 +800,9 @@ impl UsbTask {
                     // A bus reset voids anything queued: a fresh CBW must not be read as
                     // the tail of an abandoned transfer.
                     Event::Reset => self.msc_rx.clear(),
-                    // The disk identity has no security key; nothing arrives here.
-                    Event::FidoReport => {}
+                    // The disk identity has neither security key nor reader; nothing
+                    // arrives here.
+                    Event::FidoReport | Event::CcidPacket => {}
                     Event::Idle => break,
                 }
             }
@@ -720,7 +843,22 @@ impl UsbTask {
                 return;
             }
         };
+        // A message starting here interrupts one the reader was in the middle of, as
+        // it would interrupt one of this transport's own.
+        if progress.started.is_some() && self.ccid.chain.in_progress() {
+            self.ccid.chain.reset();
+            self.drop_transfer();
+            self.ncry_rx = None;
+        }
+        self.on_progress(progress);
+    }
 
+    /// What one frame's worth of a message does, whichever transport it came by: the
+    /// HID reports feed it through [`on_report`](Self::on_report), the smart-card
+    /// reader's APDU chunks through [`ccid_dispatch`](Self::ccid_dispatch). Every
+    /// reply goes through `begin_reply`, which the caller has pointed at its transport.
+    #[inline(never)]
+    fn on_progress(&mut self, progress: Progress<'_>) {
         // The packed offer eats a four-byte length off the front of its first frame, so
         // what reaches the staging area below is not always what arrived.
         let mut payload = progress.payload;
@@ -1782,7 +1920,11 @@ impl UsbTask {
             seq: 0,
             started: false,
         });
-        self.next_reply_frame();
+        // A reply for the reader is held whole and taken by `ccid_dispatch`; only a
+        // HID reply is framed out.
+        if !self.reply_to_ccid {
+            self.next_reply_frame();
+        }
     }
 
     /// One report in the ckcc mode: the protocol is [`crate::ckcc::Desk`]'s; an image it
@@ -1827,6 +1969,7 @@ impl UsbTask {
         }
         self.end_session(true);
         self.ck.reset();
+        self.ccid.reset();
         self.otg.set_ckcc(ckcc);
         // SAFETY: as documented.
         unsafe {

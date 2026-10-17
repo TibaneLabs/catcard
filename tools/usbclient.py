@@ -453,6 +453,11 @@ FRAME_DELAY = float(os.environ.get("CATCARD_FRAME_DELAY", "0")) / 1000
 
 
 def request(sock, opcode, payload=b""):
+    # A port that carries whole messages itself -- the smart-card reader in
+    # ccidclient.py, where the APDU does the framing -- answers the request directly, so
+    # every flow here (pairing, the log, host-wallet) runs over it unchanged.
+    if hasattr(sock, "request"):
+        return sock.request(opcode, payload)
     for f in frames(opcode, payload):
         sock.sendall(f)
         if FRAME_DELAY:

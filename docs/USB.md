@@ -39,7 +39,7 @@ whole device:
 
 | mode | the host sees | protocol |
 |---|---|---|
-| **CatCard** (default) | `39F2:0401`, "CatCard" | ours: everything above this section -- framing, pairing, host-wallet commands, upgrades, key injection and the monitor on bench builds |
+| **CatCard** (default) | `39F2:0401`, "CatCard": the vendor HID interface and a CCID smart-card reader beside it | ours: everything above this section -- framing, pairing, host-wallet commands, upgrades, key injection and the monitor on bench builds -- over HID, and the same messages in an APDU through the reader (for phones; "The CCID smart-card reader" below) |
 | **ckcc** | `D13E:CC10`, "CatCard" | stock Coldcard's, so the `ckcc` command line, HWI and Sparrow work unchanged |
 | **Off** | nothing: a real soft-disconnect | none |
 
@@ -1041,6 +1041,133 @@ so boot enumerates with exactly the register writes it always has.
 
 On Linux the hidraw node needs the usual `uaccess` rule (below); browsers ship their own
 FIDO rules for `0xF1D0` devices on most distributions.
+
+### The CCID smart-card reader: the interface a phone can open
+
+A phone or tablet has no way to open a vendor HID device -- iOS gives an app no HID API
+at all -- but it does drive any **class-compliant CCID smart-card reader** on its USB-C
+port, through CryptoTokenKit, and lets an app exchange APDUs with the card in it. So in
+CatCard mode the device is also a reader: one slot, one card that is always inserted,
+answering exactly one proprietary APDU, which carries a CatCard wire message. The same
+`[opcode][payload]` the HID interface carries, dispatched by the same code
+(`usbtask::on_progress`), so pairing, the host-wallet commands, the log and the rest
+behave exactly as they do over HID. CatCard Manager on a phone pairs, compares the code,
+and asks for addresses or a signature through it; the person at the device sees the same
+screens.
+
+**It has no switch, and it is part of CatCard's identity from boot.** Unlike the keyboard
+and the security key it adds no capability a host did not already have over interface 0:
+a reader with a card that only answers our own APDU is the HID interface by another
+route, gated by the same PIN and the same compared code. It is the last interface, after
+the keyboard and the security key when those are on (interface 1 alone; 2 or 3 beside
+them), with its own bulk endpoints `0x84`/`0x04`, and it is never part of stock's
+identity (ckcc mode) or the USB Drive's. The failsafe and recovery present it too, since
+they present CatCard's identity.
+
+| | |
+|---|---|
+| interface | class `0x0B` (smart card), subclass 0, protocol 0; a 54-byte class descriptor |
+| endpoints | `0x84` bulk IN, `0x04` bulk OUT, 64 bytes; no interrupt endpoint (nothing is ever inserted or removed) |
+| `dwFeatures` | `0x000400FE`: everything automatic, **short and extended APDU level** exchange |
+| `dwMaxCCIDMessageLength` | 1088 bytes, header included: a sealed `NcryMsg` record with room to spare |
+| protocol | T=1 only; ATR `3B 87 81 31 FE 45 43 61 74 43 61 72 64 TCK` (`CatCard` as the historical bytes) |
+| code | `catcard_usb::ccid` (descriptors, the reader's messages, the APDU; host-tested), `catcard_fw::ccid` (the transport loop), `catcard_hal::otg` (endpoint 4) |
+| check | `tools/ccidclient.py` (pyscard) |
+
+Source: USB CCID Rev 1.1 §5.1, §5.3, §6.1-6.2 and Table 6.2-2; ISO/IEC 7816-3 §8 and
+7816-4 §5 [C].
+
+**The reader's messages.** `IccPowerOn` answers the ATR and powers the card;
+`IccPowerOff`, `GetSlotStatus`, `GetParameters` / `SetParameters` / `ResetParameters`
+(always the T=1 parameters in force, whatever was asked) and
+`SetDataRateAndClockFrequency` (always the one clock and the one rate) are answered;
+`XfrBlock` carries an APDU, and before power-on is `ICC_MUTE`; `Escape`, `IccClock`,
+`T0APDU`, `Secure`, `Mechanical` and anything unknown are `CMD_NOT_SUPPORTED`. A command
+longer than the message buffer is read to its end, dropped, and refused with the offset
+of its length field; `wLevelParameter` other than zero (a host chaining an APDU across
+messages) is refused the same way. The control `ABORT` request drops the command in hand
+and, as the specification has it, every command but the matching bulk `Abort` is
+`CMD_ABORTED` until that arrives. The class requests `GET_CLOCK_FREQUENCIES` and
+`GET_DATA_RATES` answer the one value each.
+
+**One command at a time.** CCID is a command followed by its answer, so the reader's
+OUT endpoint is armed only while a command is being received: from the moment one is
+whole until the last packet of its answer has gone the host is NAKed, which is bulk flow
+control and costs nothing. The command is gathered into a 1088-byte heap block, taken the
+first time a host powers the card on and kept for the session, so a device that never
+sees a phone never pays for it. A message is dispatched only while no HID reply is still
+being framed out, and a message starting on one transport interrupts one the other was
+in the middle of (an upgrade image, a sealed record), as a `START` frame interrupts
+another.
+
+**The one APDU.** Only this is answered; `SELECT` and every other interindustry or
+proprietary instruction is refused with the ISO status word that says so (`6E00` for
+another class, `6D00` for another instruction, `6A86` for P1 P2 not zero, `6700` for a
+body that is none of ISO 7816-4's cases), and a host probing the card for a known
+application learns nothing.
+
+```text
+CLA  0x80   a whole message, or the last chunk of one
+     0x90   a chunk with more to follow (ISO 7816-4 command chaining, bit 0x10)
+INS  0xCC
+P1 P2  0x00 0x00
+data   first chunk: [u16 opcode LE][u32 total LE][payload...]
+       later chunks: [payload...]
+Le     always send one: 00 (256) short, or 00 00 (65536) extended
+
+reply  [u16 status LE][u32 total LE][payload...]   SW 9000
+       a chunk that is not the last: no data, 9000
+```
+
+The six-byte header is the HID `START` frame's without the kind and sequence bytes,
+which the APDU supplies; `total` is what lets a firmware image stream to staging as it
+arrives, exactly as over HID, a chunk at a time. The same rules apply as to frames: every
+request but an image and a sealed `NcryMsg` fits one chunk (`BadRequest` otherwise), and a
+chunk that does not fit its message -- no header, more payload than the total, a last
+chunk that leaves it short, more announced when it is whole -- is `BadRequest` with a
+one-byte reason, and ends the message.
+
+A reply longer than `Le` comes back a page at a time: the first page with `61 xx` (`xx`
+bytes still waiting, 255 meaning that many or more), the rest through `GET RESPONSE`
+(`00 C0 00 00 Le`). With the extended `Le` of 65536 every reply this firmware gives
+(at most 512 bytes of body) fits the first page; a host limited to short APDUs chains its
+chunks at 255 bytes and pages replies at 256, which `tools/ccidclient.py --short`
+exercises. A new message drops a reply still being paged.
+
+**What iOS needs.** CryptoTokenKit (`TKSmartCardSlotManager`) finds the reader by its
+USB class, powers the card on itself, and `TKSmartCard.transmit` sends the bytes above
+as given; the app should send extended APDUs (one exchange per message) and compare the
+pairing code on both screens as any other host does. The device enumerates the reader
+from boot, so an app sees the slot before the PIN is typed and gets `NotNow` for pairing
+until it is, as a computer does. `[I]`: this has been written to the CCID specification
+and tested on the host against the message layer; it has not yet been exercised against
+an iPhone, nor on hardware at all -- the first run on a device is a bench item, like the
+long control replies below.
+
+**Control replies longer than one transfer.** Endpoint zero's transfer size register
+carries at most 127 bytes, which every configuration before the reader fit. With the
+reader beside the keyboard or the security key the configuration is 143 to 175 bytes, so
+the HAL now holds a long reply and sends it a transfer at a time -- one full packet each,
+the last carrying the rest, the next started when the previous completes
+(`Otg::ep0_continue`) -- so no transfer ends in a short packet before the last, which is
+what would end the data stage early for the host. A reply of 127 bytes or fewer, which is
+every reply of the ckcc and disk identities and of CatCard's without the keyboard or the
+security key, writes exactly the registers it always did. The FIFO layout gains a
+16-word TX FIFO for endpoint 4 after the security key's, which takes the last of the
+core's 320 words.
+
+```sh
+pip install pyscard
+tools/ccidclient.py                 # the reader, its ATR, Identify, Ping
+tools/ccidclient.py --log           # the device's log through the card
+tools/ccidclient.py --pair          # pair (compare the code), Identify and Ping sealed
+tools/ccidclient.py --short         # as a host without extended APDUs
+tools/ccidclient.py --selftest      # the APDU bytes, no device
+```
+
+On Linux `pcscd` must be running with the CCID driver (`libccid`), which binds any
+reader of class `0x0B`; macOS and Windows have theirs built in. The reader is listed
+under the device's product string, "CatCard".
 
 ### Host-wallet commands: a computer asks, the person decides
 

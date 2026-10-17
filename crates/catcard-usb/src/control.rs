@@ -186,6 +186,11 @@ pub struct Device {
     pub fido: bool,
     /// The security key interface's own idle rate, for the same reason as `idle_kbd`.
     pub idle_fido: u8,
+    /// A CCID `ABORT` class request the firmware has not yet acted on: `(bSeq, bSlot)`.
+    /// Set here, where the control transfer is decoded, and taken by the reader's
+    /// transport loop ([`Device::take_ccid_abort`]), which is what has to drop the
+    /// command in progress.
+    pub ccid_abort: Option<(u8, u8)>,
 }
 
 impl Device {
@@ -203,6 +208,7 @@ impl Device {
             ckcc: false,
             fido: false,
             idle_fido: 0,
+            ccid_abort: None,
         }
     }
 
@@ -215,6 +221,8 @@ impl Device {
         self.configuration = 0;
         // A reset puts a boot interface back into report protocol (HID 1.11 §7.2.6).
         self.protocol_kbd = hid_protocol::REPORT;
+        // An abort the reader never got to: the command it named is gone with the bus.
+        self.ccid_abort = None;
     }
 
     /// Choose which identity to enumerate as. Takes effect on the next enumeration, so
@@ -271,6 +279,33 @@ impl Device {
     /// Whether `index` names the security key's interface, while it is enumerated.
     fn is_fido_interface(&self, index: u16) -> bool {
         self.fido_present() && index == self.fido_interface()
+    }
+
+    /// Whether the CCID smart-card reader ([`crate::ccid`]) is part of what the host
+    /// enumerated. It has no switch: it is part of CatCard's own identity, presented
+    /// from boot beside the wallet's interface -- the same protocol reaching the same
+    /// handlers, for hosts that cannot open a HID device. Never in stock's identity,
+    /// never in the mass-storage one.
+    pub fn ccid_present(&self) -> bool {
+        self.mode == DeviceMode::Hid && !self.ckcc
+    }
+
+    /// The reader's interface number: after the wallet, the keyboard and the security
+    /// key, whichever of those are there. Meaningful only while [`ccid_present`].
+    ///
+    /// [`ccid_present`]: Self::ccid_present
+    pub fn ccid_interface(&self) -> u16 {
+        1 + u16::from(self.keyboard_present()) + u16::from(self.fido_present())
+    }
+
+    /// Whether `index` names the reader's interface, while it is enumerated.
+    fn is_ccid_interface(&self, index: u16) -> bool {
+        self.ccid_present() && index == self.ccid_interface()
+    }
+
+    /// A CCID `ABORT` class request received since the last call: `(bSeq, bSlot)`.
+    pub fn take_ccid_abort(&mut self) -> Option<(u8, u8)> {
+        self.ccid_abort.take()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -398,6 +433,8 @@ fn is_data_endpoint(dev: &Device, index: u16) -> bool {
         || (dev.keyboard_present() && index == crate::kbd::EP_IN as u16)
         || (dev.fido_present()
             && (index == crate::fido::EP_IN as u16 || index == crate::fido::EP_OUT as u16))
+        || (dev.ccid_present()
+            && (index == crate::ccid::EP_IN as u16 || index == crate::ccid::EP_OUT as u16))
 }
 
 /// Whether `wIndex` names any endpoint this device has: the data endpoints, or the
@@ -407,10 +444,35 @@ fn endpoint_exists(dev: &Device, index: u16) -> bool {
 }
 
 /// Whether `wIndex` names an interface the host was told about: 0 always, the
-/// keyboard's and the security key's only while they are enumerated. The high byte is
-/// reserved and must be zero.
+/// keyboard's, the security key's and the reader's only while they are enumerated. The
+/// high byte is reserved and must be zero.
 fn interface_exists(dev: &Device, index: u16) -> bool {
-    index == 0 || dev.is_kbd_interface(index) || dev.is_fido_interface(index)
+    index == 0
+        || dev.is_kbd_interface(index)
+        || dev.is_fido_interface(index)
+        || dev.is_ccid_interface(index)
+}
+
+/// The configuration descriptor for the HID identity as currently switched: the
+/// wallet's interface first, then the keyboard and the security key, each only while
+/// it is on, then the reader, which in CatCard's own identity is always there. Stock's
+/// identity (ckcc) is the wallet's interface alone, or with the keyboard -- the tables
+/// without the reader are what it answers with.
+fn configuration_table(dev: &Device) -> &'static [u8] {
+    match (
+        dev.keyboard_present(),
+        dev.fido_present(),
+        dev.ccid_present(),
+    ) {
+        (false, false, false) => &descriptor::CONFIGURATION,
+        (true, false, false) => &crate::kbd::CONFIGURATION,
+        (false, true, false) => &crate::fido::CONFIGURATION,
+        (true, true, false) => &crate::fido::CONFIGURATION_WITH_KBD,
+        (false, false, true) => &crate::ccid::CONFIGURATION,
+        (true, false, true) => &crate::ccid::CONFIGURATION_WITH_KBD,
+        (false, true, true) => &crate::ccid::CONFIGURATION_WITH_FIDO,
+        (true, true, true) => &crate::ccid::CONFIGURATION_WITH_KBD_FIDO,
+    }
 }
 
 /// EP0's max packet size, taken from the device descriptor rather than restated.
@@ -436,21 +498,12 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
             Action::Data(trim_static(&descriptor::DEVICE_CKCC, setup.wLength))
         }
         kind::DEVICE => Action::Data(trim_static(&descriptor::DEVICE, setup.wLength)),
-        // With the keyboard on, the composite table: the same interface 0 at the same
-        // offset, then the keyboard. The host re-enumerated to read it -- see
-        // `Device::set_keyboard` -- so it is never a surprise mid-session.
-        // The security key goes last, after the keyboard if that is on too; see
-        // `crate::fido`. Off, these two arms never match and nothing below changes.
-        kind::CONFIGURATION if dev.fido_present() && dev.keyboard_present() => Action::Data(
-            trim_static(&crate::fido::CONFIGURATION_WITH_KBD, setup.wLength),
-        ),
-        kind::CONFIGURATION if dev.fido_present() => {
-            Action::Data(trim_static(&crate::fido::CONFIGURATION, setup.wLength))
-        }
-        kind::CONFIGURATION if dev.keyboard_present() => {
-            Action::Data(trim_static(&crate::kbd::CONFIGURATION, setup.wLength))
-        }
-        kind::CONFIGURATION => Action::Data(trim_static(&descriptor::CONFIGURATION, setup.wLength)),
+        // With a switch on, the composite table: the same interface 0 at the same
+        // offset, then the keyboard, the security key and the reader in that order,
+        // each only while it is on (`configuration_table`). The host re-enumerated to
+        // read it -- see `Device::set_keyboard` -- so it is never a surprise
+        // mid-session. With every switch off this is the single-interface table.
+        kind::CONFIGURATION => Action::Data(trim_static(configuration_table(dev), setup.wLength)),
         kind::HID_REPORT if iface == 0 => {
             Action::Data(trim_static(&descriptor::REPORT_DESCRIPTOR, setup.wLength))
         }
@@ -501,6 +554,12 @@ fn get_descriptor<'a>(dev: &Device, setup: &Setup, scratch: &'a mut [u8]) -> Act
                 setup.wLength,
             ))
         }
+        // The smart-card class descriptor has HID's type code (0x21) and, like the HID
+        // descriptor, comes inside the configuration; a host that asks for it on the
+        // reader's interface gets the same 54 bytes.
+        kind::HID if dev.is_ccid_interface(iface) => {
+            Action::Data(trim_static(&crate::ccid::CLASS_DESCRIPTOR, setup.wLength))
+        }
         _ => Action::Stall,
     }
 }
@@ -530,6 +589,26 @@ fn class<'a>(dev: &mut Device, setup: &Setup, scratch: &'a mut [u8]) -> Action<'
     // was never told about is a Request Error.
     if !interface_exists(dev, setup.wIndex) {
         return Action::Stall;
+    }
+    // The reader's three requests (CCID 1.1 §5.3 [C]) share their numbers with HID's
+    // `GET_REPORT`..`GET_PROTOCOL`, so its interface is sorted out before those are
+    // read. `ABORT` is recorded for the transport loop to act on; the two lists are
+    // the one value each the class descriptor already states.
+    if dev.is_ccid_interface(setup.wIndex) {
+        use crate::ccid::request as ccid;
+        return match setup.bRequest {
+            ccid::ABORT if !setup.is_in() && setup.wLength == 0 => {
+                dev.ccid_abort = Some(((setup.wValue >> 8) as u8, setup.wValue as u8));
+                Action::Ack
+            }
+            ccid::GET_CLOCK_FREQUENCIES if setup.is_in() => {
+                Action::Data(trim_static(&crate::ccid::CLOCK_FREQUENCIES, setup.wLength))
+            }
+            ccid::GET_DATA_RATES if setup.is_in() => {
+                Action::Data(trim_static(&crate::ccid::DATA_RATES, setup.wLength))
+            }
+            _ => Action::Stall,
+        };
     }
     // Which interface, by what it is rather than by number: with the keyboard off, the
     // security key is interface 1, the number the keyboard has when it is on.
@@ -929,9 +1008,12 @@ mod tests {
             d.set_mode(mode);
             d.set_keyboard(kbd);
             let kbd_ep = mode == DeviceMode::Hid && kbd;
+            // The reader's bulk pair is part of the HID identity, never the disk's.
+            let ccid_ep = mode == DeviceMode::Hid;
             for index in 0..=0xFFFFu16 {
                 let ours = matches!(index, 0x0000 | 0x0080 | 0x0001 | 0x0081)
-                    || (kbd_ep && index == 0x0082);
+                    || (kbd_ep && index == 0x0082)
+                    || (ccid_ep && matches!(index, 0x0004 | 0x0084));
                 let clear = handle(
                     &mut d,
                     &setup(0x02, request::CLEAR_FEATURE, 0, index, 0),
@@ -946,7 +1028,10 @@ mod tests {
                 // HAL does not have a register for.
                 if let Action::AckThenClearHalt(ep) = clear {
                     assert!(
-                        ep == 0x81 || ep == 0x01 || (kbd_ep && ep == 0x82),
+                        ep == 0x81
+                            || ep == 0x01
+                            || (kbd_ep && ep == 0x82)
+                            || (ccid_ep && (ep == 0x84 || ep == 0x04)),
                         "clear-halt on {ep:#04x}"
                     );
                 }
@@ -1022,8 +1107,9 @@ mod tests {
         assert_eq!(s.wLength, 64);
     }
 
-    /// With the keyboard off -- the default -- nothing about enumeration changes: the
-    /// same configuration bytes, and interface 1 does not exist to be asked about.
+    /// With the keyboard off -- the default -- the device is the wallet's interface and
+    /// the reader: interface 1 is the reader, which answers no HID request, and
+    /// interface 2 does not exist to be asked about.
     #[test]
     fn with_the_keyboard_off_the_device_enumerates_exactly_as_before() {
         let mut d = dev();
@@ -1033,20 +1119,24 @@ mod tests {
             &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
             &mut s,
         );
-        assert_eq!(a, Action::Data(&descriptor::CONFIGURATION[..]));
+        assert_eq!(a, Action::Data(&crate::ccid::CONFIGURATION[..]));
+        assert_eq!(d.ccid_interface(), 1);
         for (bm, req, value, index, len) in [
             (0x81, request::GET_DESCRIPTOR, 0x2200, 1, 255),
-            (0x81, request::GET_DESCRIPTOR, 0x2100, 1, 9),
-            (0x81, request::GET_INTERFACE, 0, 1, 1),
-            (0x01, request::SET_INTERFACE, 0, 1, 0),
             (0x21, hid_request::SET_IDLE, 0, 1, 0),
-            (0xA1, hid_request::GET_PROTOCOL, 0, 1, 1),
             (0xA1, hid_request::GET_REPORT, 0x0100, 1, 8),
+            (0x81, request::GET_DESCRIPTOR, 0x2200, 2, 255),
+            (0x81, request::GET_DESCRIPTOR, 0x2100, 2, 9),
+            (0x81, request::GET_INTERFACE, 0, 2, 1),
+            (0x01, request::SET_INTERFACE, 0, 2, 0),
+            (0x21, hid_request::SET_IDLE, 0, 2, 0),
+            (0xA1, hid_request::GET_PROTOCOL, 0, 2, 1),
+            (0xA1, hid_request::GET_REPORT, 0x0100, 2, 8),
         ] {
             assert_eq!(
                 handle(&mut d, &setup(bm, req, value, index, len), &mut s),
                 Action::Stall,
-                "request {req:#04x} on interface 1"
+                "request {req:#04x} on interface {index}"
             );
         }
     }
@@ -1098,7 +1188,7 @@ mod tests {
             &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
             &mut s,
         );
-        assert_eq!(a, Action::Data(&crate::kbd::CONFIGURATION[..]));
+        assert_eq!(a, Action::Data(&crate::ccid::CONFIGURATION_WITH_KBD[..]));
 
         // Report descriptors, by interface.
         let a = handle(
@@ -1234,12 +1324,14 @@ mod tests {
                 &mut s,
             );
             let want: &[u8] = if kbd {
-                &crate::kbd::CONFIGURATION
+                &crate::ccid::CONFIGURATION_WITH_KBD
             } else {
-                &descriptor::CONFIGURATION
+                &crate::ccid::CONFIGURATION
             };
             assert_eq!(a, Action::Data(want));
-            let iface = if kbd { 2 } else { 1 };
+            // The reader takes the interface after the keyboard; the one after that
+            // is the one that does not exist.
+            let iface = if kbd { 3 } else { 2 };
             assert_eq!(
                 handle(
                     &mut d,
@@ -1269,8 +1361,8 @@ mod tests {
     fn with_the_security_key_on_it_is_the_last_interface_and_answers_for_itself() {
         let mut s = [0u8; 64];
         for (kbd, iface, table) in [
-            (false, 1u16, &crate::fido::CONFIGURATION[..]),
-            (true, 2, &crate::fido::CONFIGURATION_WITH_KBD[..]),
+            (false, 1u16, &crate::ccid::CONFIGURATION_WITH_FIDO[..]),
+            (true, 2, &crate::ccid::CONFIGURATION_WITH_KBD_FIDO[..]),
         ] {
             let mut d = dev();
             d.set_keyboard(kbd);
@@ -1402,6 +1494,131 @@ mod tests {
             &setup(0x80, request::GET_DESCRIPTOR, 0x0200, 0, 255),
             &mut s,
         );
-        assert_eq!(a, Action::Data(&crate::kbd::CONFIGURATION[..]));
+        assert_eq!(a, Action::Data(&crate::ccid::CONFIGURATION_WITH_KBD[..]));
+    }
+
+    /// The reader is part of CatCard's identity from boot: the last interface after
+    /// whichever of the keyboard and the security key are on, with its own class
+    /// descriptor and endpoints; and it is never part of stock's identity or the disk.
+    #[test]
+    fn the_reader_is_always_the_last_interface_of_the_catcard_identity() {
+        let mut s = [0u8; 64];
+        for (kbd, fido, iface) in [
+            (false, false, 1u16),
+            (true, false, 2),
+            (false, true, 2),
+            (true, true, 3),
+        ] {
+            let mut d = dev();
+            d.set_keyboard(kbd);
+            d.set_fido(fido);
+            assert!(d.ccid_present());
+            assert_eq!(d.ccid_interface(), iface);
+            let a = handle(
+                &mut d,
+                &setup(0x81, request::GET_DESCRIPTOR, 0x2100, iface, 54),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(&crate::ccid::CLASS_DESCRIPTOR[..]));
+            // The interface exists, and its HID-numbered requests do not.
+            let a = handle(
+                &mut d,
+                &setup(0x81, request::GET_INTERFACE, 0, iface, 1),
+                &mut s,
+            );
+            assert_eq!(a, Action::Data(&[0]));
+            for ep in [0x84u16, 0x04] {
+                assert_eq!(
+                    handle(
+                        &mut d,
+                        &setup(0x02, request::CLEAR_FEATURE, 0, ep, 0),
+                        &mut s
+                    ),
+                    Action::AckThenClearHalt(ep as u8)
+                );
+            }
+            // (`GET_IDLE` and `GET_PROTOCOL` have the reader's two list requests'
+            // numbers and the same direction, so on this interface they *are* those.)
+            for (bm, req) in [
+                (0x21, hid_request::SET_IDLE),
+                (0xA1, hid_request::GET_REPORT),
+                (0x21, hid_request::SET_REPORT),
+                (0x21, hid_request::SET_PROTOCOL),
+            ] {
+                assert_eq!(
+                    handle(&mut d, &setup(bm, req, 0, iface, 1), &mut s),
+                    Action::Stall
+                );
+            }
+        }
+        let mut d = dev();
+        d.set_ckcc(true);
+        assert!(!d.ccid_present());
+        d.set_ckcc(false);
+        d.set_mode(DeviceMode::Msc);
+        assert!(!d.ccid_present());
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x02, request::CLEAR_FEATURE, 0, 0x84, 0),
+                &mut s
+            ),
+            Action::Stall
+        );
+    }
+
+    /// The reader's three class requests: the abort is recorded with its slot and
+    /// sequence for the transport loop, the two lists are the one value each.
+    #[test]
+    fn the_readers_class_requests_are_answered_on_its_interface_only() {
+        use crate::ccid::request as cr;
+        let mut s = [0u8; 64];
+        let mut d = dev();
+        let iface = d.ccid_interface();
+        let a = handle(&mut d, &setup(0x21, cr::ABORT, 0x0700, iface, 0), &mut s);
+        assert_eq!(a, Action::Ack);
+        assert_eq!(d.take_ccid_abort(), Some((7, 0)));
+        assert_eq!(d.take_ccid_abort(), None);
+        let a = handle(
+            &mut d,
+            &setup(0xA1, cr::GET_CLOCK_FREQUENCIES, 0, iface, 64),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::ccid::CLOCK_FREQUENCIES[..]));
+        let a = handle(
+            &mut d,
+            &setup(0xA1, cr::GET_DATA_RATES, 0, iface, 4),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&crate::ccid::DATA_RATES[..]));
+        // Wrong direction, or a data stage on the abort: a Request Error.
+        assert_eq!(
+            handle(&mut d, &setup(0xA1, cr::ABORT, 0, iface, 1), &mut s),
+            Action::Stall
+        );
+        assert_eq!(
+            handle(&mut d, &setup(0x21, cr::ABORT, 0, iface, 2), &mut s),
+            Action::Stall
+        );
+        assert_eq!(
+            handle(
+                &mut d,
+                &setup(0x21, cr::GET_DATA_RATES, 0, iface, 0),
+                &mut s
+            ),
+            Action::Stall
+        );
+        assert_eq!(d.take_ccid_abort(), None);
+        // On the wallet's interface these numbers are HID's, and mean something else.
+        let a = handle(
+            &mut d,
+            &setup(0xA1, cr::GET_CLOCK_FREQUENCIES, 0, 0, 1),
+            &mut s,
+        );
+        assert_eq!(a, Action::Data(&[0]), "GET_IDLE");
+        // And a bus reset forgets an abort the loop never took.
+        handle(&mut d, &setup(0x21, cr::ABORT, 0x0300, iface, 0), &mut s);
+        d.reset();
+        assert_eq!(d.take_ccid_abort(), None);
     }
 }

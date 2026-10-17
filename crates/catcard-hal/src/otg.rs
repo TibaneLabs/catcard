@@ -22,7 +22,7 @@ use catcard_board::Pin;
 use catcard_usb::REPORT_LEN;
 use catcard_usb::control::{self, Action, Device, Setup};
 use catcard_usb::descriptor::{EP_IN, EP_OUT};
-use catcard_usb::{fido, kbd};
+use catcard_usb::{ccid, fido, kbd};
 
 use crate::gpio::{self, OutputType, Pull, Speed};
 use crate::reg;
@@ -164,7 +164,14 @@ const EP2_TX_WORDS: u32 = 16;
 /// device with the switch off -- every device at boot -- programs exactly the FIFOs it
 /// always has. It sits after the keyboard's, in the space the layout above left spare.
 const EP3_TX_WORDS: u32 = 64;
-const _: () = assert!(RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS + EP3_TX_WORDS <= 320);
+/// The smart-card reader's IN FIFO: one 64-byte bulk packet, the smallest the core allows
+/// and all a polled transport needs -- a packet goes out per poll, after the previous
+/// one was taken. It sits after the security key's, whether or not that is on, so the
+/// layout never moves; it takes the last of the 320 words.
+const EP4_TX_WORDS: u32 = 16;
+const _: () = assert!(
+    RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS + EP3_TX_WORDS + EP4_TX_WORDS <= 320
+);
 
 /// Endpoint zero's packet size, as the device descriptor advertises it.
 const EP0_MPS: usize = 64;
@@ -173,11 +180,18 @@ const EP0_MPS: usize = 64;
 /// Source: RM0432 §56.15.48 OTG_DIEPTSIZ0 [C]
 const EP0_REPLY_MAX: usize = 127;
 
-// The longest reply this device gives -- a configuration with the keyboard and the
-// security key -- fits one transfer, and in the endpoint-zero TX FIFO.
-const _: () = assert!(fido::CONFIGURATION_WITH_KBD.len() <= EP0_REPLY_MAX);
+/// A reply longer than one endpoint-zero transfer is held here and sent a transfer at a
+/// time, one packet each, the last transfer carrying whatever is left (see `answer`).
+/// Sized for the longest reply this device gives: the configuration with the keyboard,
+/// the security key and the smart-card reader all on.
+const EP0_HOLD: usize = 192;
+const _: () = assert!(ccid::CONFIGURATION_MAX <= EP0_HOLD);
 const _: () = assert!(EP0_REPLY_MAX.div_ceil(EP0_MPS) <= 3);
-const _: () = assert!(fido::CONFIGURATION_WITH_KBD.len() <= EP0_TX_WORDS as usize * 4);
+// Each transfer fits the endpoint-zero TX FIFO; and every reply of the identities that
+// existed before the reader -- stock's, the disk's -- still fits one transfer, so their
+// control path writes exactly what it always has.
+const _: () = assert!(EP0_REPLY_MAX <= EP0_TX_WORDS as usize * 4);
+const _: () = assert!(fido::CONFIGURATION_WITH_KBD.len() <= EP0_REPLY_MAX);
 
 /// `OTG_DIEPTSIZ0` for an endpoint-zero reply of `len` bytes: the packet count it takes
 /// (one for an empty reply) and the byte count. `None` past what one transfer carries.
@@ -214,6 +228,17 @@ const _: () = assert!(
         && FIDO_EP_NUM >= 1
         && FIDO_EP_NUM <= 5
 );
+/// The smart-card reader's bulk endpoints, one number both ways.
+const CCID_EP_NUM: u32 = (ccid::EP_IN & 0x0F) as u32;
+const _: () = assert!(
+    CCID_EP_NUM == (ccid::EP_OUT & 0x0F) as u32
+        && CCID_EP_NUM != EP_IN_NUM
+        && CCID_EP_NUM != KBD_EP_NUM
+        && CCID_EP_NUM != FIDO_EP_NUM
+        && CCID_EP_NUM >= 1
+        && CCID_EP_NUM <= 5
+);
+const _: () = assert!(ccid::MAX_PACKET == REPORT_LEN);
 
 /// How long to wait for a core reset or an AHB idle, in poll iterations.
 ///
@@ -242,6 +267,11 @@ pub enum Event {
     /// A 64-byte report arrived on the security key's OUT endpoint, in
     /// [`Otg::fido_rx`].
     FidoReport,
+    /// A bulk packet of 1 to 64 bytes arrived on the smart-card reader's OUT endpoint:
+    /// [`Otg::ccid_packet`]. The endpoint is not armed again until the caller asks
+    /// ([`Otg::ccid_receive_next`]), which is how the reader holds the host off while it
+    /// answers.
+    CcidPacket,
 }
 
 /// The device side of the OTG FS core.
@@ -274,6 +304,18 @@ pub struct Otg {
     /// register of endpoint 3 is touched at all -- not even to close it -- so a device
     /// with the switch off runs exactly the register sequence it always did.
     fido_opened: bool,
+    /// The most recent packet on the smart-card reader's OUT endpoint, valid when `poll`
+    /// returned [`Event::CcidPacket`].
+    ccid_rx: [u8; ccid::MAX_PACKET],
+    ccid_rx_len: usize,
+    /// Whether the reader's endpoints are open in the current configuration. They are
+    /// part of CatCard's own identity; stock's and the disk's never open them.
+    ccid_opened: bool,
+    /// An endpoint-zero reply longer than one transfer, and how much of it has gone.
+    /// `ep0_len` is zero whenever nothing is in progress.
+    ep0_hold: [u8; EP0_HOLD],
+    ep0_len: usize,
+    ep0_sent: usize,
 }
 
 impl Otg {
@@ -319,6 +361,12 @@ impl Otg {
             fido_rx: [0; fido::REPORT_LEN],
             fido_rx_len: 0,
             fido_opened: false,
+            ccid_rx: [0; ccid::MAX_PACKET],
+            ccid_rx_len: 0,
+            ccid_opened: false,
+            ep0_hold: [0; EP0_HOLD],
+            ep0_len: 0,
+            ep0_sent: 0,
         };
         // SAFETY: the clock is enabled and the data pins are configured just above.
         unsafe { this.configure()? };
@@ -358,7 +406,7 @@ impl Otg {
             reg::write(PCGCCTL, 0);
             reg::write(DCFG, DCFG_DSPD_FS | DCFG_NZLSOHSK);
 
-            configure_fifos(self.dev.fido_present());
+            configure_fifos(self.dev.fido_present(), self.dev.ccid_present());
             // Flush the TX and RX FIFOs after sizing them. A core soft-reset resets the
             // state machine but does not clear FIFO *contents*, so on a part whose
             // bootloader left USB running (the mk3 L496 -- unlike the L4S5, which is why
@@ -753,6 +801,77 @@ impl Otg {
         }
     }
 
+    /// Whether the smart-card reader is part of the current identity.
+    pub fn ccid_present(&self) -> bool {
+        self.dev.ccid_present()
+    }
+
+    /// Bytes of the most recent packet on the reader's OUT endpoint.
+    pub fn ccid_packet(&self) -> &[u8] {
+        &self.ccid_rx[..self.ccid_rx_len]
+    }
+
+    /// A CCID `ABORT` class request received since the last call: `(bSeq, bSlot)`.
+    pub fn take_ccid_abort(&mut self) -> Option<(u8, u8)> {
+        self.dev.take_ccid_abort()
+    }
+
+    /// Send one bulk packet of up to 64 bytes -- none at all for the empty packet that
+    /// closes a message of whole packets -- on the reader's IN endpoint.
+    ///
+    /// Returns false, having sent nothing, when the reader is not enumerated, the host
+    /// has not configured us, the previous packet has not been taken, or the FIFO has
+    /// no room. Never blocks; the caller retries on a later poll.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn ccid_send(&mut self, data: &[u8]) -> bool {
+        // SAFETY: as documented.
+        unsafe {
+            if !self.dev.is_configured() || !self.dev.ccid_present() || !self.ccid_opened {
+                return false;
+            }
+            let ctl = DIEPCTL + CCID_EP_NUM * EP_STRIDE;
+            if reg::read(ctl) & EPCTL_EPENA != 0 {
+                return false;
+            }
+            let len = data.len().min(ccid::MAX_PACKET);
+            let words = (len as u32).div_ceil(4);
+            if reg::read(DTXFSTS + CCID_EP_NUM * EP_STRIDE) & 0xFFFF < words {
+                return false;
+            }
+            reg::write(DIEPTSIZ + CCID_EP_NUM * EP_STRIDE, (1 << 19) | len as u32);
+            reg::modify(ctl, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+            write_fifo_bytes(CCID_EP_NUM, &data[..len]);
+            true
+        }
+    }
+
+    /// Arm the reader's OUT endpoint for the next packet. Until this is called after
+    /// an [`Event::CcidPacket`], the host's next packet is NAKed -- bulk flow control,
+    /// which is how the reader finishes answering one command before taking the next.
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS.
+    pub unsafe fn ccid_receive_next(&mut self) {
+        if !self.ccid_opened {
+            return;
+        }
+        self.ccid_rx_len = 0;
+        // SAFETY: as documented.
+        unsafe {
+            reg::write(
+                DOEPTSIZ + CCID_EP_NUM * EP_STRIDE,
+                (1 << 19) | ccid::MAX_PACKET as u32,
+            );
+            reg::modify(
+                DOEPCTL + CCID_EP_NUM * EP_STRIDE,
+                EPCTL_COMMANDS,
+                EPCTL_EPENA | EPCTL_CNAK,
+            );
+        }
+    }
+
     /// The identity currently enumerating.
     pub fn mode(&self) -> control::DeviceMode {
         self.dev.mode
@@ -795,6 +914,7 @@ impl Otg {
     unsafe fn on_reset(&mut self) {
         self.resets = self.resets.saturating_add(1);
         self.dev.reset();
+        self.ep0_len = 0;
         // SAFETY: as documented.
         unsafe {
             // `CGINAK`/`CGONAK` are write-1 commands: clearing them did nothing at all.
@@ -858,6 +978,13 @@ impl Otg {
                     self.fido_rx_len = n;
                     None
                 }
+                pktsts::OUT_DATA if ep == CCID_EP_NUM && self.ccid_opened => {
+                    let n = bytes.min(ccid::MAX_PACKET);
+                    read_fifo(&mut self.ccid_rx[..n]);
+                    discard_fifo(bytes - n);
+                    self.ccid_rx_len = n;
+                    None
+                }
                 pktsts::OUT_DATA => {
                     // A data stage on endpoint zero. Nothing here has an OUT data
                     // stage, but the bytes still have to leave the FIFO or the core
@@ -879,6 +1006,16 @@ impl Otg {
                         Some(Event::FidoReport)
                     } else {
                         self.fido_receive_next();
+                        None
+                    }
+                }
+                // A bulk packet is any length up to 64; an empty one carries nothing
+                // and is simply armed past.
+                pktsts::OUT_DONE if ep == CCID_EP_NUM && self.ccid_opened => {
+                    if self.ccid_rx_len > 0 {
+                        Some(Event::CcidPacket)
+                    } else {
+                        self.ccid_receive_next();
                         None
                     }
                 }
@@ -905,6 +1042,8 @@ impl Otg {
             // descriptor with another descriptor stuck to the front of it, and the host
             // rejects the device with no indication why.
             flush_tx(0);
+            // A new SETUP ends whatever long reply the last one was still sending.
+            self.ep0_len = 0;
             match action {
                 Action::Data(data) => {
                     // As many packets as the reply takes, not always one. With one, a
@@ -916,19 +1055,33 @@ impl Otg {
                     // of the default identity's -- writes the same value as before.
                     // Source: RM0432 §56.15.48 OTG_DIEPTSIZ0 -- PKTCNT[1:0] bits 20:19,
                     // XFRSIZ[6:0] bits 6:0 [C]
-                    let Some(tsiz) = ep0_in_size(data.len()) else {
-                        // Longer than one endpoint-0 transfer can carry. Nothing this
-                        // device describes is (`EP0_REPLY_MAX` below); refuse rather than
-                        // send a reply the host would read as a different one.
+                    if let Some(tsiz) = ep0_in_size(data.len()) {
+                        reg::write(DIEPTSIZ, tsiz);
+                        reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+                        write_fifo_bytes(0, data);
+                        // The host's status stage is an OUT; arm for it.
+                        arm_ep0_out();
+                        return;
+                    }
+                    // Longer than one endpoint-zero transfer carries (127 bytes): the
+                    // configurations with the smart-card reader beside the keyboard or
+                    // the security key. Held, and sent a transfer at a time -- one full
+                    // packet each, so no transfer ends in a short packet before the last,
+                    // which is what would end the data stage early for the host -- with
+                    // each next transfer started when the previous one completes
+                    // (`service_in_endpoints`). Longer than the hold: nothing this device
+                    // describes is (`EP0_HOLD`); refuse rather than send a reply the host
+                    // would read as a different one.
+                    if data.len() > EP0_HOLD {
                         reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
                         reg::modify(DOEPCTL, EPCTL_COMMANDS, EPCTL_STALL);
                         arm_ep0_out();
                         return;
-                    };
-                    reg::write(DIEPTSIZ, tsiz);
-                    reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
-                    write_fifo_bytes(0, data);
-                    // The host's status stage is an OUT; arm for it.
+                    }
+                    self.ep0_hold[..data.len()].copy_from_slice(data);
+                    self.ep0_len = data.len();
+                    self.ep0_sent = 0;
+                    self.ep0_continue();
                     arm_ep0_out();
                 }
                 Action::Ack => {
@@ -994,6 +1147,41 @@ impl Otg {
                     self.fido_opened = fido;
                     self.fido_receive_next();
                 }
+                // The smart-card reader's bulk pair: open in CatCard's identity, closed
+                // in the others.
+                let ccid = self.dev.ccid_present();
+                if ccid || self.ccid_opened {
+                    open_ccid_endpoints(ccid);
+                    self.ccid_opened = ccid;
+                    self.ccid_receive_next();
+                }
+            }
+        }
+    }
+
+    /// Send the next transfer of a held endpoint-zero reply: one packet while more than
+    /// a transfer is left, else everything left (up to two packets, the second short).
+    ///
+    /// # Safety
+    /// Exclusive access to OTG_FS; endpoint zero IN idle.
+    unsafe fn ep0_continue(&mut self) {
+        let left = self.ep0_len - self.ep0_sent;
+        if left == 0 {
+            self.ep0_len = 0;
+            return;
+        }
+        let n = if left <= EP0_REPLY_MAX { left } else { EP0_MPS };
+        let chunk = &self.ep0_hold[self.ep0_sent..self.ep0_sent + n];
+        self.ep0_sent += n;
+        if self.ep0_sent == self.ep0_len {
+            self.ep0_len = 0;
+        }
+        // SAFETY: as documented; `n` is at most `EP0_REPLY_MAX`, so the size is `Some`.
+        unsafe {
+            if let Some(tsiz) = ep0_in_size(n) {
+                reg::write(DIEPTSIZ, tsiz);
+                reg::modify(DIEPCTL, EPCTL_COMMANDS, EPCTL_EPENA | EPCTL_CNAK);
+                write_fifo_bytes(0, chunk);
             }
         }
     }
@@ -1018,6 +1206,9 @@ impl Otg {
             if self.fido_opened {
                 clear_ep_interrupts(DOEPINT + FIDO_EP_NUM * EP_STRIDE);
             }
+            if self.ccid_opened {
+                clear_ep_interrupts(DOEPINT + CCID_EP_NUM * EP_STRIDE);
+            }
         }
     }
 
@@ -1034,9 +1225,16 @@ impl Otg {
                 if v != 0 {
                     reg::write(at, v);
                 }
+                // A long control reply goes on from where its last transfer ended.
+                if ep == 0 && v & EPINT_XFRC != 0 && self.ep0_len != 0 {
+                    self.ep0_continue();
+                }
             }
             if self.fido_opened {
                 clear_ep_interrupts(DIEPINT + FIDO_EP_NUM * EP_STRIDE);
+            }
+            if self.ccid_opened {
+                clear_ep_interrupts(DIEPINT + CCID_EP_NUM * EP_STRIDE);
             }
         }
     }
@@ -1101,7 +1299,7 @@ unsafe fn core_reset() -> Result<(), Error> {
 
 /// # Safety
 /// Exclusive access to OTG_FS.
-unsafe fn configure_fifos(fido: bool) {
+unsafe fn configure_fifos(fido: bool, ccid: bool) {
     // SAFETY: as documented. Each TX FIFO's start address is the sum of everything
     // allocated before it, which is why these are written in order.
     unsafe {
@@ -1109,6 +1307,14 @@ unsafe fn configure_fifos(fido: bool) {
             reg::write(
                 DIEPTXF + (FIDO_EP_NUM - 1) * 4,
                 (EP3_TX_WORDS << 16) | (RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS),
+            );
+        }
+        // The reader's, after the security key's slot whether or not that is in use.
+        if ccid {
+            reg::write(
+                DIEPTXF + (CCID_EP_NUM - 1) * 4,
+                (EP4_TX_WORDS << 16)
+                    | (RX_WORDS + EP0_TX_WORDS + EP1_TX_WORDS + EP2_TX_WORDS + EP3_TX_WORDS),
             );
         }
         reg::write(GRXFSIZ, RX_WORDS);
@@ -1270,6 +1476,40 @@ unsafe fn open_fido_endpoints(on: bool) {
                     | EPCTL_SD0PID
                     | EPCTL_SNAK
                     | fido::REPORT_LEN as u32,
+            );
+        } else {
+            reg::write(ictl, 0);
+            reg::write(octl, 0);
+        }
+    }
+}
+
+/// Open the smart-card reader's two bulk endpoints, or close them.
+///
+/// # Safety
+/// Exclusive access to OTG_FS.
+unsafe fn open_ccid_endpoints(on: bool) {
+    let ictl = DIEPCTL + CCID_EP_NUM * EP_STRIDE;
+    let octl = DOEPCTL + CCID_EP_NUM * EP_STRIDE;
+    // SAFETY: as documented.
+    unsafe {
+        if on {
+            reg::write(
+                ictl,
+                EPCTL_USBAEP
+                    | EPCTL_EPTYP_BULK
+                    | EPCTL_SD0PID
+                    | EPCTL_SNAK
+                    | (CCID_EP_NUM << EPCTL_TXFNUM_SHIFT)
+                    | ccid::MAX_PACKET as u32,
+            );
+            reg::write(
+                octl,
+                EPCTL_USBAEP
+                    | EPCTL_EPTYP_BULK
+                    | EPCTL_SD0PID
+                    | EPCTL_SNAK
+                    | ccid::MAX_PACKET as u32,
             );
         } else {
             reg::write(ictl, 0);

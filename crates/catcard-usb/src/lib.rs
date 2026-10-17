@@ -45,6 +45,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod ccid;
 pub mod ckcc;
 pub mod control;
 pub mod descriptor;

@@ -49,6 +49,8 @@ mod boot;
 /// settings store, which the mk3 does not have.
 #[cfg(not(feature = "board-mk3"))]
 mod ccc;
+/// The CCID smart-card reader: CatCard's own protocol in an APDU, for phones.
+mod ccid;
 /// Which chains the owner sees, from the root wallet's settings.
 ///
 /// A multichain question: the one build that carries a single chain has nothing to ask.
