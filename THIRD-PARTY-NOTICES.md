@@ -134,3 +134,15 @@ device visually familiar. They are **upstream public fonts, not Coinkite assets*
 glyphs coincide because both projects convert the same freely licensed BDFs, not because
 anything was taken from the firmware. Sourced here from upstream and verified
 byte-identical to the published files. See `CLEANROOM.md`.
+
+## betrusted-soc register descriptions
+
+`crates/catcard-precursor/gateware/csr-v0.9.5.csv` and `csr-v0.9.14.csv` are the
+control-register descriptions emitted by the betrusted-soc build for those releases,
+extracted unmodified from the `soc_csr.bin` images (the v0.9.5 copy read off a device's
+flash, the v0.9.14 one from the published stable release). They list register names and
+addresses; `build.rs` turns them into constants.
+
+By Sutajio Ko-Usagi Pte. Ltd. and the betrusted.io contributors.
+Upstream: <https://github.com/betrusted-io/betrusted-soc>, under the CERN Open Hardware
+Licence v1.2.

@@ -32,6 +32,7 @@ members = [
     "crates/catcard-log",
     "crates/catcard-qr",
     "crates/catcard-tss",
+    "crates/catcard-precursor",
     "tools/catcard-image",
     "tools/tss-member",
 ]

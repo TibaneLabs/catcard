@@ -301,6 +301,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-precursor"
+version = "7.0.0"
+
+[[package]]
 name = "catcard-qr"
 version = "7.0.0"
 

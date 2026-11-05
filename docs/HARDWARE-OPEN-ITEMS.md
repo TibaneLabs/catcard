@@ -1019,3 +1019,16 @@ mk3 is not affected: its staged image installs on the next boot with no gate cal
 To settle it: on the disposable mk5 only, reset with "Install another" and see whether it
 installs or reports "login went stale".
 
+
+## Precursor: memory LCD pixel placement through `memlcd` `[I]`
+
+`catcard-precursor/src/lcd.rs` puts pixel (x, y), origin top left as the device is held,
+at bit `x % 32` of framebuffer word `y * 11 + x / 32`. Two halves, each confirmed on its
+own: the gateware block shifts each word out least significant bit first and sends
+framebuffer line `i` as panel line `i + 1` (memlcd.py `[C]`); and the panel's line 1 is
+the top and its first pixel the leftmost (a CPU-less test design driving the panel
+directly, bench unit, 2026-11-05 `[C]`). Their combination through the block has not been
+seen yet. The block's own documentation says the opposite (MSB leftmost, bottom line at
+the lowest address), which the panel test contradicts -- so this stays `[I]` until the
+milestone-1 test card is looked at: black triangle top left, checkerboard bottom right.
+Blocks nothing; a wrong answer is a transform in one function.

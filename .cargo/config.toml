@@ -35,5 +35,10 @@ fw-mk4-ship = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no
 fw-mk5-ship = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-mk5"
 fw-q1-ship  = "build --release -p catcard-fw --target thumbv7em-none-eabihf --no-default-features --features board-q1"
 
+# Precursor (RV32IMAC, stock betrusted-soc gateware). Not a Coldcard board, so not a
+# catcard-fw feature: its own crate, see docs/PRECURSOR.md. Default gateware is the
+# bench unit's v0.9.5; add `--no-default-features --features gw-v0_9_14` for stable.
+fw-precursor = "build --release -p catcard-precursor --target riscv32imac-unknown-none-elf"
+
 # Host-side: unit tests for the portable crates and the image tool.
-t        = "test --workspace --exclude catcard-fw"
+t        = "test --workspace --exclude catcard-fw --exclude catcard-kernel --exclude catcard-precursor"

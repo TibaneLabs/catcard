@@ -1,0 +1,28 @@
+[package]
+name = "catcard-precursor"
+description = "CatCard firmware for the Precursor (pvt2) on its stock betrusted-soc gateware: RV32IMAC, bare metal"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "catcard-precursor"
+test = false
+bench = false
+
+[features]
+# The stock gateware release the image is built against. Register addresses move
+# between releases (v0.9.14 put `usbdev` where v0.9.5 had `d11ctime`), so the
+# register table is generated from that release's own csr.csv. Exactly one.
+#
+# v0.9.5 is what the bench unit runs today; v0.9.14 is the current stable release,
+# the first with the USB device core this firmware will eventually need.
+default = ["gw-v0_9_5"]
+gw-v0_9_5 = []
+gw-v0_9_14 = []
+
+[dependencies]
