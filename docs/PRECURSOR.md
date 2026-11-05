@@ -184,16 +184,39 @@ With the avalanche source stalled (before the fix above) the pool refused the dr
 ## Booting from flash
 
 The CPU resets into a 64 KiB boot ROM in the gateware (`0x8000_0000`), which checks an
-Ed25519 signature over the loader slot (signature at `0x2050_0000`, image at
-`0x2050_1000`) before jumping to it. It tries the device's self-signing key, then a
-third-party key, then the developer key, and marks the screen with a strike-through when
-it boots on anything but a self-signing key.
+Ed25519 signature over the loader slot and jumps to it. It tries the device's
+self-signing key, then a third-party key, then the developer key, and marks the screen
+with a strike-through when it boots on anything but a self-signing key.
 
-The bench unit boots with the **developer key** (`1c9beae3...58bb`, the public half of
-betrusted-soc's `devkey/dev.key`, read off its boot log), i.e. root keys were never
-initialised. A CatCard image signed with that published key will boot on it, with the
-strike-through. Nothing is written to flash before milestone 5, and not before a verified
-full backup of the unit exists.
+`tools/precursor/mkloader.py IMAGE.bin KEY.pem OUT.bin` packages the same SRAM image
+`run.py` loads for that slot:
+
+```text
+flash 0x500000  SignatureInFlash { version 1, signed_len, Ed25519 signature }   (4 KiB page)
+flash 0x501000  64-byte stub | IMAGE.bin | version (1) | signed_len - 4
+```
+
+The stub copies the image into SRAM at `0x4000_0000`, runs `fence.i` and jumps there, so
+what boots from flash is byte for byte what `run.py` runs. Written with stock tooling:
+
+```sh
+sudo python3 usb_update.py -i catcard-loader.bin 0x500000 --verify
+```
+
+(betrusted-scripts `usb_update.py`: halts the CPU over the debug bridge, erases and
+programs only the blocks the image covers, reads them back, resets the SoC.)
+
+The bench unit boots on the **developer key** (`1c9beae3...58bb`, the public half of
+betrusted-soc's `devkey/dev.key`): its root keys were never initialised. Signed with that
+key, CatCard boots on it -- done on 2026-11-06: boot ROM "Signature check passed", then
+CatCard, from a SoC reset and from a full FPGA reload (PROG_B). Without Xous nothing arms
+the watchdog, and CatCard does not arm it either. The strike-through stays, as it should:
+the screen is telling the truth about which key the boot was signed with.
+
+**Restoring Xous** is writing the original loader slot back: `0x500000`-`0x980000` of a
+backup of the unit's flash, with the same command. Nothing else was changed -- gateware,
+kernel and the PDDB are where Xous left them. Take the backup first (tools in
+precursor_pvt2/tools: `flash_dump.py`, resumable in 8 MiB segments, each read twice).
 
 ## Hardware facts and their sources
 
