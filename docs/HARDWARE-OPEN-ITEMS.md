@@ -1020,7 +1020,7 @@ To settle it: on the disposable mk5 only, reset with "Install another" and see w
 installs or reports "login went stale".
 
 
-## Precursor: memory LCD pixel placement through `memlcd` `[I]`
+## Precursor: memory LCD pixel placement through `memlcd` — RESOLVED `[C]`
 
 `catcard-precursor/src/lcd.rs` puts pixel (x, y), origin top left as the device is held,
 at bit `x % 32` of framebuffer word `y * 11 + x / 32`. Two halves, each confirmed on its
@@ -1032,3 +1032,9 @@ seen yet. The block's own documentation says the opposite (MSB leftmost, bottom 
 the lowest address), which the panel test contradicts -- so this stays `[I]` until the
 milestone-1 test card is looked at: black triangle top left, checkerboard bottom right.
 Blocks nothing; a wrong answer is a transform in one function.
+
+**Resolved 2026-11-06.** The test card, photographed on the bench unit, has the triangle
+top left and the checkerboard bottom right; the framebuffer read back over the USB bridge
+matches what was drawn bit for bit. The 4-pixel black frame is drawn but sits against the
+bezel's dark edge and does not stand out -- worth remembering before calling a missing
+edge a bug: test patterns should keep their markers a few pixels in from the panel edge.

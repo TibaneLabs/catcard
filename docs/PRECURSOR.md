@@ -12,7 +12,8 @@ element, no Coldcard bootloader, no callgate -- so it is its own crate,
 board feature.
 
 **Status: milestone 1.** The image runs from SRAM on a bench unit: it takes over from
-Xous, feeds the watchdog, prints on the UART and draws a test card. No wallet yet.
+Xous, feeds the watchdog, prints on the UART and draws a test card, which comes out the
+right way up. No wallet yet.
 
 [betrusted-soc]: https://github.com/betrusted-io/betrusted-soc
 [Xous]: https://github.com/betrusted-io/xous-core
@@ -99,5 +100,6 @@ Facts are tagged as elsewhere in the repo.
 | ticktimer | `+0x04` high word, `+0x08` low word, 1 ms per tick | csr.csv [C]; measured on the unit [C] |
 | watchdog | armed by Xous (`wdt_state = 0x9`), cannot be disarmed, ~2.5-7.5 s; feed = write 1 | wdt.py [C]; read on the unit [C] |
 | LCD | 336x536, 11 words per line, 1 = white, `UpdateAll` = command bit 1, `Busy` bit 0 | memlcd.py [C] |
-| LCD pixel placement | (x, y) top-left origin = bit `x % 32` of word `y * 11 + x / 32` | memlcd.py + panel test [I], see open items |
+| LCD pixel placement | (x, y) top-left origin = bit `x % 32` of word `y * 11 + x / 32` | memlcd.py + test card on the unit [C] |
+| devboot marker | dashed line forced on framebuffer line 7 after a developer-key boot | memlcd.py [C]; seen on the unit [C] |
 | boot key | developer key `1c9beae3...58bb` | boot ROM log on the unit [C] |

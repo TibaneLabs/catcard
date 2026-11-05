@@ -16,8 +16,13 @@
 //! bottom line first) does not describe this panel as mounted. So pixel (x, y), origin
 //! top left, is bit `x % 32` of word `y * 11 + x / 32`.
 //! Source: memlcd.py fetch/shift logic [C]; panel orientation, hw test 2026-11-05 [C];
-//! the combination through this block [I] until this firmware's own test card is seen
-//! the right way up -- tracked in docs/HARDWARE-OPEN-ITEMS.md.
+//! the combination through this block [C]: this firmware's test card, photographed on the
+//! bench unit 2026-11-06, has the triangle top left and the checkerboard bottom right, and
+//! a framebuffer read back over the USB bridge matches what was drawn.
+//!
+//! Also visible on the panel and not ours: a dashed line on framebuffer line 7. The block
+//! forces it when the boot ROM booted on a developer or third-party key ("devboot"), and
+//! it cannot be cleared short of a full reset -- see memlcd.py `devboot`.
 
 use crate::csr::{self, mem, reg};
 
