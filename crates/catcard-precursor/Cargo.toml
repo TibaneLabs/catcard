@@ -21,12 +21,21 @@ bench = false
 #
 # v0.9.5 is what the bench unit runs today; v0.9.14 is the current stable release,
 # the first with the USB device core this firmware will eventually need.
-default = ["gw-v0_9_5"]
+default = ["gw-v0_9_5", "uart-keys"]
 gw-v0_9_5 = []
 gw-v0_9_14 = []
+# Bench crutch: characters received on the debug UART act as key presses, so flows can
+# be driven from the Raspberry Pi with no one at the device. Same standing as
+# catcard-fw's `usb-key-injection`: it removes physical presence, so an image anyone
+# else runs is built without it (`--no-default-features --features gw-...`).
+uart-keys = []
 
 [dependencies]
+anyd.workspace = true
+catcard-alloc.workspace = true
+catcard-wallet.workspace = true
+outscript.workspace = true
 catcard-entropy.workspace = true
 catcard-ui.workspace = true
 heapless.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["alloc"] }

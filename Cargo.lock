@@ -304,9 +304,13 @@ dependencies = [
 name = "catcard-precursor"
 version = "7.0.0"
 dependencies = [
+ "anyd",
+ "catcard-alloc",
  "catcard-entropy",
  "catcard-ui",
+ "catcard-wallet",
  "heapless",
+ "outscript",
  "zeroize",
 ]
 

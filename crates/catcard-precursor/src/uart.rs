@@ -40,6 +40,18 @@ impl Uart {
     }
 }
 
+/// One received byte, if any. LiteX: `rxempty` bit 0 clear means a byte waits in `rxtx`;
+/// writing bit 1 of `ev_pending` acknowledges it and advances the FIFO.
+/// Source: LiteX soc/cores/uart.py and libbase uart.c `uart_read` [C].
+pub fn read_byte() -> Option<u8> {
+    if csr::read(reg::UART_RXEMPTY) & 1 != 0 {
+        return None;
+    }
+    let b = csr::read(reg::UART_RXTX) as u8;
+    csr::write(reg::UART_EV_PENDING, 1 << 1);
+    Some(b)
+}
+
 impl core::fmt::Write for Uart {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for b in s.bytes() {

@@ -456,9 +456,11 @@ printed in its run's toolchain step), are open items in
   sources -- avalanche diode and ring oscillators -- are read *apart* and absorbed as
   `PrecursorAvalanche` and `PrecursorRingOsc`, each health-tested and credited on its own;
   `Policy::precursor()` demands both. The gateware's default output XORs them and keeps
-  refilling while either passes its own tests, which would hide a dead one. The one draw is
+  refilling while either passes its own tests, which would hide a dead one. Two files draw:
   the boot self-test ([`rngcheck.rs`](../crates/catcard-precursor/src/rngcheck.rs)), wiped
-  unread; the lint covers that crate too.
+  unread, and New wallet ([`newseed.rs`](../crates/catcard-precursor/src/newseed.rs)), which
+  reads 2 KiB from each source into a fresh pool with the start-up test enforced and refuses
+  rather than draw short; the lint covers that crate too.
 - `EntropyPool` has no method that returns a random number. The DRBGs are separate types
   seeded by one draw each and cannot write back.
 - The log after a wallet is made (`Debug → Logs`, or [`tools/usbclient.py`](../tools/usbclient.py) on a bench

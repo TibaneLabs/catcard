@@ -11,8 +11,12 @@ element, no Coldcard bootloader, no callgate -- so it is its own crate,
 `crates/catcard-precursor`, built on the portable crates, rather than a `catcard-fw`
 board feature.
 
-**Status: milestone 1 done; milestone 2 under way (TRNG, UI and keyboard done; seed
-creation next).** The image runs from SRAM on a bench unit: it takes over from
+**Status: a working wallet for one power cycle.** New (12/24 words from both TRNG
+sources), Import, Addresses with QR codes (segwit, taproot, nested, legacy), Export xpub,
+View seed words and Sign PSBT, all on the device's own screen and keyboard -- checked
+against the BIP-44/49/84/86 test vectors, and a signed PSBT byte-identical to the host
+library's. Not yet: storage (the wallet is forgotten at reset), a PIN, USB (PSBTs come
+over the debug UART for now). **Not for funds.** The image runs from SRAM on a bench unit: it takes over from
 Xous, feeds the watchdog, prints on the UART and draws a test card, which comes out the
 right way up. No wallet yet.
 
@@ -73,6 +77,41 @@ for a GDB load would be reset under the debugger 2.5-7.5 s later.
 
 The debug hat carries the gateware's UART (115200 8N1) to the Raspberry Pi's
 `/dev/ttyAMA0`, so output is readable without anyone at the bench.
+
+## The wallet
+
+`src/app.rs` holds the menus; flows are built on the portable crates rather than on
+catcard-fw's menus, which are written against the Coldcard boards.
+
+- **New**: `src/newseed.rs` reads 2 KiB from each noise source into a fresh pool with
+  the start-up test enforced, and draws 16 or 32 bytes; a pool that has not earned it
+  refuses and the screen says why. Words are shown a page at a time and never sent to
+  the UART.
+- **Import**: type a few letters per word, pick from the BIP-39 matches, checksum
+  checked by `Mnemonic::parse`.
+- **Session** (`src/session.rs`): the mnemonic and master key, zeroized on Logout. All
+  private-key work goes through `src/keywork.rs`, which masks interrupts (`mstatus.MIE`)
+  and lends catcard-wallet its `KeyWork` token.
+- **Addresses / Export xpub**: account 0 of BIP-84/86/49/44, receive addresses 0-19,
+  QR codes drawn for this panel (portrait, dark modules on a light quiet zone).
+- **Sign PSBT** (`src/sign.rs`): catcard-wallet's `summarise` and `destinations` for the
+  review -- amounts proven against the previous transaction (a bare `witness_utxo` is
+  refused), change proven by re-deriving it, the fee policy -- then `sign_input_under`
+  for every input that is ours. Transport for now: one line of hex on the debug UART,
+  answered with `signed <hex>`. USB would replace only that part.
+
+Checked on the bench unit (BIP-84 test mnemonic, imported by UART-driven keys):
+fingerprint `73c5da0a`; `m/84'/0'/0'/0/0` `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`,
+`m/86'/0'/0'/0/0` `bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr`,
+`m/49'/...` `37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf`, `m/44'/...`
+`1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA`, account xpub `xpub6CatWdiZ...PW6V` -- all as the
+BIPs publish; the QR codes decode (zbar) to the same strings; a PSBT spending
+`m/84'/0'/0'/0/0` with change to `/1/0` reviews correctly and its signed form is
+byte-identical to catcard-wallet's on the host.
+
+**Bench crutches** (default features, never in an image for anyone else): `uart-keys`,
+UART bytes as key presses (`tools/precursor/drive.py` sends them). Build without:
+`cargo fw-precursor --no-default-features --features gw-v0_9_5`.
 
 ## Screens
 
