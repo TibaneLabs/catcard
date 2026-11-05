@@ -11,7 +11,7 @@ element, no Coldcard bootloader, no callgate -- so it is its own crate,
 `crates/catcard-precursor`, built on the portable crates, rather than a `catcard-fw`
 board feature.
 
-**Status: milestone 1.** The image runs from SRAM on a bench unit: it takes over from
+**Status: milestone 1 done; milestone 2 under way (TRNG done).** The image runs from SRAM on a bench unit: it takes over from
 Xous, feeds the watchdog, prints on the UART and draws a test card, which comes out the
 right way up. No wallet yet.
 
@@ -22,8 +22,8 @@ right way up. No wallet yet.
 
 1. **Board layer and toolchain** -- RV32IMAC image entered from SRAM, UART, LCD,
    watchdog, timer. Done.
-2. Keyboard; the gateware TRNG as an entropy source for `catcard-entropy`, with its own
-   health tests; the UI layout engine at 336x536; seed creation, not yet stored.
+2. The gateware TRNG as two entropy sources for `catcard-entropy` (done, see "TRNG");
+   the UI layout engine at 336x536; keyboard; seed creation, not yet stored.
 3. Menus and wallet flows that need no storage.
 4. Storage on the SPI-NOR and a PIN / secret design. Precursor has no secure element, so
    this is a real design decision (FPGA key ROM, BBRAM key, PIN-stretched keys), taken
@@ -72,6 +72,34 @@ for a GDB load would be reset under the debugger 2.5-7.5 s later.
 The debug hat carries the gateware's UART (115200 8N1) to the Raspberry Pi's
 `/dev/ttyAMA0`, so output is readable without anyone at the bench.
 
+## TRNG
+
+The gateware has two noise sources -- an avalanche diode sampled by the XADC and a bank of
+ring oscillators -- each folded into 32-bit words and run through NIST SP 800-90B
+repetition-count and adaptive-proportion tests in gateware, feeding a FIFO.
+
+Its default output is the two XORed, refilled whenever **either** passes its tests: a dead
+source would be carried silently by the other. So `src/trng.rs` reads them **apart**
+(the `ro_dis` / `av_dis` control bits), and the pool absorbs them as two hardware sources,
+`PrecursorAvalanche` and `PrecursorRingOsc`, each through `catcard-entropy`'s own start-up
+and continuous tests. `Policy::precursor()` demands both and 256 credited bits.
+
+One trap, found on the bench unit and documented in `trng.rs`: the gateware's `clr_err`
+also resets its tests' readiness, and the avalanche tests only sample while a refill is
+consuming words. Pulse `clr_err` (or let the source power down) with one source selected
+alone and nothing can start a refill again -- a permanent stall. Errors are cleared, and
+readiness rebuilt, with both sources on; then one is selected.
+
+The boot self-test (`src/rngcheck.rs`) on the bench unit, three runs in a row:
+
+| | warm-up | rate | start-up test | test sample (4 KiB, not absorbed) |
+|---|---|---|---|---|
+| avalanche | 51 ms from power-down (the 50 ms power-on delay) | ~58 KB/s | passed, 0 trips | ones 49.7-50.0 %, chi2 224-232 (df 255) |
+| ring-osc | 1-2 ms | ~85 KB/s | passed, 0 trips | ones 49.4-50.1 %, chi2 236-261 (df 255) |
+
+With the avalanche source stalled (before the fix above) the pool refused the draw --
+"1 hardware TRNG(s) contributed, need 2" -- which is the behaviour the design is for.
+
 ## Booting from flash
 
 The CPU resets into a 64 KiB boot ROM in the gateware (`0x8000_0000`), which checks an
@@ -103,3 +131,6 @@ Facts are tagged as elsewhere in the repo.
 | LCD pixel placement | (x, y) top-left origin = bit `x % 32` of word `y * 11 + x / 32` | memlcd.py + test card on the unit [C] |
 | devboot marker | dashed line forced on framebuffer line 7 after a developer-key boot | memlcd.py [C]; seen on the unit [C] |
 | boot key | developer key `1c9beae3...58bb` | boot ROM log on the unit [C] |
+| TRNG output | `merged = av ^ ro`, single source when the other is disabled; refill gated on `av_pass \| ro_pass` | trng_managed.py [C] |
+| TRNG `clr_err` | resets test readiness; with one source selected, stalls refills for good | trng_managed.py [C]; bench unit [C] |
+| TRNG rates | avalanche ~58 KB/s after 51 ms power-up, rings ~85 KB/s | bench unit [C] |

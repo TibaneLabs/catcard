@@ -19,6 +19,10 @@
 #    `crates/catcard-fw/src/session.rs` (the UI, protocol and USB DRBGs) and
 #    `crates/catcard-fw/src/paperwallet.rs` (the paper wallet's own DRBG).
 #
+# 3. The Precursor firmware (`crates/catcard-precursor`, docs/PRECURSOR.md) draws only in
+#    `src/rngcheck.rs`, its boot self-test, which wipes the draw unread. It has no wallet
+#    flow yet; when it does, its seed path is added here the same way.
+#
 # A new consumer is added here deliberately, with docs/ENTROPY.md updated to match, or
 # it goes through one of these modules.
 #
@@ -30,17 +34,18 @@ fail=0
 
 draws=$(git grep --untracked -nE \
   '(\.draw_seed[[:space:]]*\(|EntropyPool::draw|[Pp]ool[[:alnum:]_]*[[:space:]]*\)?[[:space:]]*\.draw[[:space:]]*\(|\.draw[[:space:]]*\([[:space:]]*&mut)' \
-  -- 'crates/catcard-fw/src' \
+  -- 'crates/catcard-fw/src' 'crates/catcard-precursor/src' \
   ':!crates/catcard-fw/src/newseed.rs' ':!crates/catcard-fw/src/seedxor.rs' \
-  ':!crates/catcard-fw/src/codex32.rs' || true)
+  ':!crates/catcard-fw/src/codex32.rs' ':!crates/catcard-precursor/src/rngcheck.rs' || true)
 if [ -n "$draws" ]; then
-  echo "pooldraw-lint: seed material is drawn from the pool only in newseed.rs, seedxor.rs and codex32.rs:"
+  echo "pooldraw-lint: seed material is drawn from the pool only in newseed.rs, seedxor.rs, codex32.rs"
+  echo "and (Precursor) rngcheck.rs:"
   echo "$draws"
   fail=1
 fi
 
 drbgs=$(git grep --untracked -nE 'spawn_drbg[[:space:]]*\(' \
-  -- 'crates/catcard-fw/src' \
+  -- 'crates/catcard-fw/src' 'crates/catcard-precursor/src' \
   ':!crates/catcard-fw/src/session.rs' ':!crates/catcard-fw/src/paperwallet.rs' || true)
 if [ -n "$drbgs" ]; then
   echo "pooldraw-lint: DRBGs are seeded from the pool only in session.rs and paperwallet.rs:"

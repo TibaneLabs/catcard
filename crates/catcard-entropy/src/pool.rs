@@ -78,12 +78,32 @@ pub enum Source {
     /// only. Credited **zero** — the device unique ID is the textbook example, since
     /// it is published as the USB serial number.
     NonSecret,
+    /// Precursor: the avalanche-diode noise source, sampled by the FPGA's XADC and read
+    /// alone (ring oscillator disabled) from the gateware TRNG's raw FIFO.
+    ///
+    /// Read alone on purpose. The gateware's default output is the two Precursor sources
+    /// XORed together, refilled whenever *either* passes its own health tests -- so one
+    /// that failed would be silently carried by the other. Read apart, each runs this
+    /// crate's tests and earns its own credit, and a policy can demand both.
+    /// Source: betrusted gateware trng_managed.py `merged_trng`, `control.ro_dis` [C]
+    PrecursorAvalanche,
+    /// Precursor: the FPGA's ring-oscillator noise source, read alone (avalanche
+    /// disabled) from the same FIFO. On-die: its bits never leave the FPGA.
+    /// Source: trng_managed.py `merged_trng`, `control.av_dis` [C]
+    PrecursorRingOsc,
 }
 
 impl Source {
     /// A dedicated hardware noise source, as opposed to a derived or public value.
     pub const fn is_hardware_trng(self) -> bool {
-        matches!(self, Source::Stm32Trng | Source::Se1Trng | Source::Se2Trng)
+        matches!(
+            self,
+            Source::Stm32Trng
+                | Source::Se1Trng
+                | Source::Se2Trng
+                | Source::PrecursorAvalanche
+                | Source::PrecursorRingOsc
+        )
     }
 
     /// Bits of entropy credited per byte absorbed.
@@ -93,7 +113,14 @@ impl Source {
     /// 256-bit policy cannot be satisfied by a single 32-byte read from a single chip.
     const fn bits_per_byte(self) -> u32 {
         match self {
-            Source::Stm32Trng | Source::Se1Trng | Source::Se2Trng => 4,
+            // The Precursor's sources reach us already folded by the gateware (32 ADC
+            // samples per avalanche word, oversampled rings), as the STM32's does; the
+            // same haircut applies.
+            Source::Stm32Trng
+            | Source::Se1Trng
+            | Source::Se2Trng
+            | Source::PrecursorAvalanche
+            | Source::PrecursorRingOsc => 4,
             // Real noise, but not trusted to count: see the variants.
             Source::Se1TrngUnauthenticated => 0,
             // A keypress timestamp is a handful of unpredictable low bits at best.
@@ -119,6 +146,8 @@ impl Source {
             Source::UserCoin => b"catcard/src/user-coin",
             Source::Auxiliary => b"catcard/src/aux",
             Source::NonSecret => b"catcard/src/non-secret",
+            Source::PrecursorAvalanche => b"catcard/src/precursor-avalanche",
+            Source::PrecursorRingOsc => b"catcard/src/precursor-ring-osc",
         }
     }
 
@@ -134,11 +163,13 @@ impl Source {
             Source::UserDice => 7,
             Source::UserCoin => 8,
             Source::Se1TrngUnauthenticated => 9,
+            Source::PrecursorAvalanche => 10,
+            Source::PrecursorRingOsc => 11,
         }
     }
 }
 
-const NUM_SOURCES: usize = 10;
+const NUM_SOURCES: usize = 12;
 
 /// Every source, once each, for sums over the per-source counters.
 const ALL_SOURCES: [Source; NUM_SOURCES] = [
@@ -152,17 +183,27 @@ const ALL_SOURCES: [Source; NUM_SOURCES] = [
     Source::UserCoin,
     Source::Auxiliary,
     Source::NonSecret,
+    Source::PrecursorAvalanche,
+    Source::PrecursorRingOsc,
 ];
 
 /// The hardware TRNGs, which are the sources that run health tests. Their slot in
 /// [`EntropyPool`]'s per-source test state.
-const HW_SOURCES: [Source; 3] = [Source::Stm32Trng, Source::Se1Trng, Source::Se2Trng];
+const HW_SOURCES: [Source; 5] = [
+    Source::Stm32Trng,
+    Source::Se1Trng,
+    Source::Se2Trng,
+    Source::PrecursorAvalanche,
+    Source::PrecursorRingOsc,
+];
 
 const fn hw_index(source: Source) -> Option<usize> {
     match source {
         Source::Stm32Trng => Some(0),
         Source::Se1Trng => Some(1),
         Source::Se2Trng => Some(2),
+        Source::PrecursorAvalanche => Some(3),
+        Source::PrecursorRingOsc => Some(4),
         _ => None,
     }
 }
@@ -204,6 +245,22 @@ impl Policy {
             min_bits: 256,
             min_hw_sources: 1,
             required: Some(Source::Stm32Trng),
+        }
+    }
+}
+
+impl Policy {
+    /// The Precursor: its two noise sources, both required, 256 credited bits.
+    ///
+    /// Two of two rather than the mk4's two of three, because two is all there is. The
+    /// ring oscillator is named as the required one for the reason the STM32's TRNG is
+    /// elsewhere -- it is on-die and its bits cross no wire -- though with both demanded
+    /// it changes which error a refusal reports, not whether there is one.
+    pub const fn precursor() -> Policy {
+        Policy {
+            min_bits: 256,
+            min_hw_sources: 2,
+            required: Some(Source::PrecursorRingOsc),
         }
     }
 }
@@ -639,6 +696,38 @@ mod tests {
         ));
         p.add(Source::Stm32Trng, &noise(9, 32));
         assert!(p.draw_seed().is_ok());
+    }
+
+    #[test]
+    fn precursor_policy_needs_both_of_its_sources() {
+        // Plenty of bits from the avalanche source alone is not enough: the policy wants
+        // both, and names the ring oscillator.
+        let mut p = EntropyPool::new(Policy::precursor());
+        p.add(Source::PrecursorAvalanche, &noise(4, 128));
+        assert!(p.credited_bits() >= 256);
+        assert!(matches!(
+            p.draw_seed(),
+            Err(Insufficient::HardwareSources { have: 1, need: 2 })
+                | Err(Insufficient::Missing(Source::PrecursorRingOsc))
+        ));
+        p.add(Source::PrecursorRingOsc, &noise(5, 32));
+        assert_eq!(p.hardware_sources(), 2);
+        assert!(p.draw_seed().is_ok());
+    }
+
+    #[test]
+    fn a_stuck_precursor_source_is_mixed_but_not_counted() {
+        // The failure the gateware's merged output would hide: one source stuck. Read
+        // apart, it trips the continuous test, earns nothing and does not count.
+        let mut p = EntropyPool::new(Policy::precursor());
+        p.add(Source::PrecursorAvalanche, &noise(6, 64));
+        p.add(Source::PrecursorRingOsc, &[0u8; 64]);
+        assert_eq!(
+            p.status(Source::PrecursorRingOsc).unwrap().last_ok,
+            Some(false)
+        );
+        assert_eq!(p.hardware_sources(), 1);
+        assert!(p.draw_seed().is_err());
     }
 
     #[test]

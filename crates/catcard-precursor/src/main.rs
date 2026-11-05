@@ -20,9 +20,13 @@ mod csr;
 #[cfg(target_arch = "riscv32")]
 mod lcd;
 #[cfg(target_arch = "riscv32")]
+mod rngcheck;
+#[cfg(target_arch = "riscv32")]
 mod start;
 #[cfg(target_arch = "riscv32")]
 mod timer;
+#[cfg(target_arch = "riscv32")]
+mod trng;
 #[cfg(target_arch = "riscv32")]
 mod uart;
 #[cfg(target_arch = "riscv32")]
@@ -41,7 +45,10 @@ extern "C" fn rust_main() -> ! {
     wdt::feed();
 
     let mut out = uart::Uart::take();
-    let _ = writeln!(out, "\n\nCatCard for Precursor -- milestone 1");
+    let _ = writeln!(
+        out,
+        "\n\nCatCard for Precursor -- milestone 2 (in progress)"
+    );
     let _ = writeln!(out, "built against gateware {}", csr::GATEWARE_REV);
     let _ = writeln!(
         out,
@@ -62,6 +69,8 @@ extern "C" fn rust_main() -> ! {
             let _ = writeln!(out, "lcd: {e}");
         }
     }
+
+    rngcheck::run(&mut out);
 
     let mut next_print = timer::now_ms() + 1000;
     let mut seconds = 0u32;

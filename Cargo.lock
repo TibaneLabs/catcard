@@ -303,6 +303,10 @@ dependencies = [
 [[package]]
 name = "catcard-precursor"
 version = "7.0.0"
+dependencies = [
+ "catcard-entropy",
+ "zeroize",
+]
 
 [[package]]
 name = "catcard-qr"
