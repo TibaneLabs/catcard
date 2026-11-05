@@ -30,6 +30,7 @@ pub mod menu;
 pub mod nav;
 pub mod pager;
 pub mod pinentry;
+pub mod precursorkeys;
 pub mod qwerty;
 pub mod scramble;
 pub mod scroll;

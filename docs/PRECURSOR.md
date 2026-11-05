@@ -11,7 +11,8 @@ element, no Coldcard bootloader, no callgate -- so it is its own crate,
 `crates/catcard-precursor`, built on the portable crates, rather than a `catcard-fw`
 board feature.
 
-**Status: milestone 1 done; milestone 2 under way (TRNG and UI done, keyboard next).** The image runs from SRAM on a bench unit: it takes over from
+**Status: milestone 1 done; milestone 2 under way (TRNG, UI and keyboard done; seed
+creation next).** The image runs from SRAM on a bench unit: it takes over from
 Xous, feeds the watchdog, prints on the UART and draws a test card, which comes out the
 right way up. No wallet yet.
 
@@ -23,8 +24,8 @@ right way up. No wallet yet.
 1. **Board layer and toolchain** -- RV32IMAC image entered from SRAM, UART, LCD,
    watchdog, timer. Done.
 2. The gateware TRNG as two entropy sources for `catcard-entropy` (done, see "TRNG");
-   catcard-ui on the 336x536 panel (done, see "Screens"); keyboard; seed creation, not
-   yet stored.
+   catcard-ui on the 336x536 panel (done, see "Screens"); keyboard (done, see
+   "Keyboard"); seed creation, not yet stored.
 3. Menus and wallet flows that need no storage.
 4. Storage on the SPI-NOR and a PIN / secret design. Precursor has no secure element, so
    this is a real design decision (FPGA key ROM, BBRAM key, PIN-stretched keys), taken
@@ -82,11 +83,36 @@ faces doubled through `face::Scaled` (20x40 titles over 14x28 body text): at 200
 unscaled 7x14 is under a millimetre wide. It fits 23 columns and fifteen menu rows.
 
 Boot currently shows a splash, the entropy self-test's verdicts, then a blank device's
-main menu (New, Import, Utils, Settings, Help), not yet wired to keys.
+main menu (New, Import, Utils, Settings, Help), driven by the keyboard; items open a
+placeholder until their flows exist here.
 
 `tools/precursor/screenshot.py` reads the framebuffer back over the USB bridge and writes
 a PBM, so what is on the panel can be checked without being at the bench (it shows what
 was sent, not what the gateware overlays -- the devboot line is not in it).
+
+## Keyboard
+
+The gateware scans and debounces the 9x10 matrix and publishes a column mask per row
+(`keyboard_row0dat..8dat`); `src/kbd.rs` reads the nine words, and
+`catcard_ui::precursorkeys` turns changes into the screens' `Event`s. Which key is where
+was established twice, independently: on the bench unit, every key pressed once in reading
+order with its position logged, and Xous's own QWERTY map -- all 54 agree.
+
+Meaning follows the Q1's convention so every existing screen works unchanged: the number
+row types digits, letters type characters, the navigation pad's arrows act as the
+numpad's arrow digits (5 up, 8 down, 7 left, 9 right), its centre and ENTER confirm,
+backspace cancels. F1-F4, the shifts, SYM and the emoji key are scanned but mean nothing
+yet. Unlike the Q1 there is no scan order for firmware to shuffle: the gateware drives it.
+
+```text
+Tab/F1/pwr F2   [pad]   F3  F4/Ctrl/pwr     (8,0) (8,1)         (3,8) (3,9)
+pad: up (6,4) down (8,2) left (8,3) right (3,6) centre (5,2)
+1-5 (0,0..4)   6-0 (4,5..9)
+q-t (1,0..4)   y-p (5,5..9)
+a-g (2,0..4)   h-l, backspace (6,5..9)
+!,z-v (3,0..4) b-m, ?, enter (7,5..9)
+shift SYM space emoji shift (8,5..9)
+```
 
 ## TRNG
 
@@ -150,3 +176,4 @@ Facts are tagged as elsewhere in the repo.
 | TRNG output | `merged = av ^ ro`, single source when the other is disabled; refill gated on `av_pass \| ro_pass` | trng_managed.py [C] |
 | TRNG `clr_err` | resets test readiness; with one source selected, stalls refills for good | trng_managed.py [C]; bench unit [C] |
 | TRNG rates | avalanche ~58 KB/s after 51 ms power-up, rings ~85 KB/s | bench unit [C] |
+| keyboard | 9x10 matrix, gateware-scanned, one column mask per row; map above | keyboard.py [C]; key test + xous qwerty.rs [C] |

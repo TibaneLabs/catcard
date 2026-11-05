@@ -18,6 +18,8 @@
 #[cfg(target_arch = "riscv32")]
 mod csr;
 #[cfg(target_arch = "riscv32")]
+mod kbd;
+#[cfg(target_arch = "riscv32")]
 mod lcd;
 #[cfg(target_arch = "riscv32")]
 mod rngcheck;
@@ -96,17 +98,7 @@ extern "C" fn rust_main() -> ! {
     );
     show(&mut out, &frame, "main menu");
 
-    let mut next_print = timer::now_ms() + 1000;
-    let mut seconds = 0u32;
-    loop {
-        wdt::feed();
-        let now = timer::now_ms();
-        if now >= next_print {
-            seconds += 1;
-            next_print += 1000;
-            let _ = writeln!(out, "alive {seconds}s (ticktimer {now} ms)");
-        }
-    }
+    main_menu(&mut out, &layout, &mut frame, &items);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -119,5 +111,58 @@ fn show(out: &mut uart::Uart, frame: &catcard_ui::memlcd::MemLcd, what: &str) {
         Err(e) => {
             let _ = writeln!(out, "lcd: {what}: {e}");
         }
+    }
+}
+
+/// The blank device's main menu, driven by the keyboard. Items open a placeholder until
+/// their flows exist on this board. Runs forever, feeding the watchdog.
+#[cfg(target_arch = "riscv32")]
+fn main_menu(
+    out: &mut uart::Uart,
+    layout: &catcard_ui::widgets::Layout<'_>,
+    frame: &mut catcard_ui::memlcd::MemLcd,
+    items: &[&str],
+) -> ! {
+    use catcard_ui::keypad::{Event, Key};
+    use core::fmt::Write as _;
+
+    let rows = layout.rows(catcard_ui::memlcd::HEIGHT);
+    let mut sc = catcard_ui::menu::Scroll::default();
+    let mut open: Option<usize> = None;
+    let mut prev = kbd::scan();
+    loop {
+        wdt::feed();
+        let now = kbd::scan();
+        let mut events = [Event::Released(Key::Cancel); 8];
+        let n = catcard_ui::precursorkeys::events(&prev, &now, &mut events);
+        prev = now;
+
+        let mut redraw = false;
+        for ev in &events[..n] {
+            let _ = writeln!(out, "key {ev:?}");
+            let Event::Pressed(key) = *ev else { continue };
+            match (open, key) {
+                (None, Key::Digit(5)) => sc = sc.step(items.len(), rows, false),
+                (None, Key::Digit(8)) => sc = sc.step(items.len(), rows, true),
+                (None, Key::Confirm) => open = Some(sc.cursor),
+                (Some(_), Key::Cancel) => open = None,
+                _ => continue,
+            }
+            redraw = true;
+        }
+        if redraw {
+            match open {
+                None => catcard_ui::widgets::menu(frame, layout, "CatCard", "no seed", items, sc),
+                Some(i) => catcard_ui::widgets::message(
+                    frame,
+                    layout,
+                    items[i],
+                    "not on Precursor yet",
+                    "backspace: back",
+                ),
+            }
+            show(out, frame, "menu");
+        }
+        timer::delay_ms(10);
     }
 }
