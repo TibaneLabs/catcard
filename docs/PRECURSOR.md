@@ -58,6 +58,66 @@ v0.9.5 has no USB device core: its only USB function is the debug bridge. In v0.
 switches the pins between the bridge and `usbdev`, so while CatCard is a USB device the
 bridge (and the development loop below) is gone; JTAG and the UART remain.
 
+## Recovery
+
+Two independent ways back, both tested on the bench unit (2026-11-06):
+
+- **USB debug bridge** (as long as the stock gateware configures): `usb_update.py`
+  halts the CPU through the debug port whatever firmware is running, and rewrites any
+  flash region -- the loader slot back to Xous, for instance.
+- **JTAG, with no working gateware at all**: OpenOCD on the debug hat loads
+  betrusted-scripts' `bscan_spi_xc7s50.bit` (a JTAG-to-SPI bridge) into the FPGA and
+  reaches the flash (Macronix MX66UM1G45G) through it: probed, and the first 4 KiB read
+  back identical to the backup in 81 ms. Load the bridge with `pld load` and probe by
+  hand -- `jtagspi_init` issues `reset halt`, which on a setup where reset is PROG_B
+  wipes the bridge it has just loaded.
+
+**Power trap.** While the FPGA is unconfigured nothing drives `fpga_sys_on`, and after
+roughly half a minute the EC powers the board off; only the power key (top-left) brings
+it back -- not an EC reset, not cycling USB power. Loading a full SoC bitstream over the
+hat's GPIO JTAG takes ~30 s, so test a new gateware by writing it to flash and booting
+it, not by a long JTAG load. Short loads (the bridge, test designs) are fine.
+
+## Gateware v0.9.14 and USB (next)
+
+Both the bench unit's v0.9.5 and the published v0.9.14 `soc_csr.bin` are **encrypted**
+bitstreams (each carries the AES CBC IV write), and the unit boots its own, so its FPGA
+holds the matching key -- presumably the dummy key betrusted's CI builds with. Plain
+bitstreams load too. Whether v0.9.14's image configures on this unit is not known yet:
+the JTAG test of it ended in the power trap above.
+
+USB on this board needs, in order:
+
+1. Gateware v0.9.14 (or later) in flash -- the first release with the SpinalHDL
+   `usbdev` core. Plan: write it with `usb_update.py -i soc_csr.bin 0x0 --verify`, with
+   the JTAG path above as the way back if it does not configure. Xous's kernel in flash
+   would then mismatch it, which does not matter while CatCard is the loader.
+2. A driver for SpinalHDL's `UsbDeviceCtrl` (`usbdev` region, 64 KiB at 0xE004_0000):
+   16 endpoint status words at the base, setup packet at +0x40, transfer descriptors
+   chained in the core's RAM, control registers at +0xFF00 (frame, address, interrupts,
+   halt, config/pull-up, RAM size). Register model: SpinalHDL's UsbDeviceCtrl docs and
+   xous-core `services/usb-device-xous/src/spinal_udc.rs`. In v0.9.14 a mux switches the
+   pins between this core and the debug bridge -- while CatCard is a USB device the
+   bridge, and `run.py`, are gone; JTAG and the UART remain.
+3. CatCard's HID transport (`catcard-usb`) and its command handlers. catcard-fw's are
+   written against its STM32 driver and its menus (`usbtask.rs`), so they need the same
+   separation from the board the wallet flows here got. Sign PSBT would then take its
+   PSBT over USB instead of the UART; nothing else about it changes.
+
+## Not decided: storage and PIN
+
+The wallet is per power cycle because what keeps a seed safe at rest on this board is a
+design decision, not a port. The Precursor has no secure element and no Coldcard
+bootloader callgate; what it does have: an FPGA bitstream key (BBRAM or eFuse) that
+keeps the gateware -- and a key ROM inside it -- secret, a 128 MiB SPI flash outside the
+FPGA, and a keyboard for a long passphrase. Options to weigh: a PIN/passphrase-stretched
+key encrypting the seed in flash (portable, but offline-guessable without rate limits
+from hardware); a device key in the bitstream's key ROM mixed in (binds the seed to this
+unit, safe only once the bitstream is encrypted to a key this unit generated -- which
+also means owning the gateware build); attempt counters (in flash, so resettable by
+anyone with a programmer). catcard-settings already gives an authenticated, power-fail-
+safe store over SPI-NOR once the key question is settled.
+
 ## Development loop (no flash writes)
 
 ```sh
