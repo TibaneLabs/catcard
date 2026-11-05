@@ -27,4 +27,6 @@ gw-v0_9_14 = []
 
 [dependencies]
 catcard-entropy.workspace = true
+catcard-ui.workspace = true
+heapless.workspace = true
 zeroize.workspace = true

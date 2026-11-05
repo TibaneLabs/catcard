@@ -26,11 +26,42 @@ const CHUNK: usize = 256;
 /// The throwaway sample the statistics are computed on.
 const TEST_BYTES: usize = 4096;
 
-pub fn run(out: &mut impl Write) {
+/// One source's outcome, for the screen: verdicts and a rate, nothing about values.
+#[derive(Copy, Clone)]
+pub struct SourceLine {
+    pub which: Which,
+    /// The read completed (gateware health included).
+    pub read_ok: bool,
+    /// Bytes per second once warm, 0 if the read failed.
+    pub rate: u64,
+    /// The pool's SP 800-90B start-up test passed on this source's bytes.
+    pub startup_passed: bool,
+    /// Continuous-test trips the pool recorded.
+    pub trips: u32,
+}
+
+/// What the self-test concluded.
+pub struct Summary {
+    pub sources: [SourceLine; 2],
+    pub hardware_sources: u32,
+    pub credited_bits: u32,
+    /// Whether the pool would hand out seed material.
+    pub granted: bool,
+}
+
+pub fn run(out: &mut impl Write) -> Summary {
     let mut pool = EntropyPool::new(Policy::precursor());
     pool.enforce_startup();
+    let mut lines = [Which::Avalanche, Which::RingOsc].map(|which| SourceLine {
+        which,
+        read_ok: false,
+        rate: 0,
+        startup_passed: false,
+        trips: 0,
+    });
 
-    for which in [Which::Avalanche, Which::RingOsc] {
+    for line in lines.iter_mut() {
+        let which = line.which;
         let mut buf = [0u8; POOL_BYTES];
         let t0 = crate::timer::now_ms();
         let read = trng::read(which, &mut buf);
@@ -49,6 +80,8 @@ pub fn run(out: &mut impl Write) {
                     rate(POOL_BYTES, ms.saturating_sub(warmup)),
                     warmup
                 );
+                line.read_ok = true;
+                line.rate = rate(POOL_BYTES, ms.saturating_sub(warmup));
             }
             Err(e) => {
                 let _ = writeln!(out, "rng {:9}: read failed: {e}", which.label());
@@ -57,6 +90,8 @@ pub fn run(out: &mut impl Write) {
         buf.zeroize();
 
         if let Some(st) = pool.status(which.source()) {
+            line.startup_passed = matches!(st.startup, catcard_entropy::Startup::Passed);
+            line.trips = st.trips;
             let _ = writeln!(
                 out,
                 "rng {:9}: start-up {:?}, last read ok {:?}, trips {}",
@@ -90,14 +125,22 @@ pub fn run(out: &mut impl Write) {
         pool.credited_bits(),
         pool.hardware_sources()
     );
-    match pool.draw_seed() {
+    let granted = match pool.draw_seed() {
         Ok(mut seed) => {
             seed.zeroize();
             let _ = writeln!(out, "rng pool: seed draw GRANTED (self-test; wiped unread)");
+            true
         }
         Err(e) => {
             let _ = writeln!(out, "rng pool: seed draw REFUSED: {e}");
+            false
         }
+    };
+    Summary {
+        sources: lines,
+        hardware_sources: pool.hardware_sources(),
+        credited_bits: pool.credited_bits(),
+        granted,
     }
 }
 

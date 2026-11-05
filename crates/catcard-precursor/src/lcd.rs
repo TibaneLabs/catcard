@@ -14,7 +14,8 @@
 //! its first pixel the leftmost -- seen on the bench unit with a CPU-less test design
 //! driving the panel directly, which also showed the block's documentation (MSB leftmost,
 //! bottom line first) does not describe this panel as mounted. So pixel (x, y), origin
-//! top left, is bit `x % 32` of word `y * 11 + x / 32`.
+//! top left, is bit `x % 32` of word `y * 11 + x / 32` -- the layout `catcard_ui::memlcd`
+//! draws in, so a frame is copied out word for word.
 //! Source: memlcd.py fetch/shift logic [C]; panel orientation, hw test 2026-11-05 [C];
 //! the combination through this block [C]: this firmware's test card, photographed on the
 //! bench unit 2026-11-06, has the triangle top left and the checkerboard bottom right, and
@@ -25,11 +26,9 @@
 //! it cannot be cleared short of a full reset -- see memlcd.py `devboot`.
 
 use crate::csr::{self, mem, reg};
+use catcard_ui::memlcd::{self, MemLcd};
 
-pub const WIDTH: usize = 336;
-pub const HEIGHT: usize = 536;
-const WORDS_PER_LINE: usize = 11;
-const FB_WORDS: usize = WORDS_PER_LINE * HEIGHT;
+const FB_WORDS: usize = memlcd::WORDS;
 
 const _: () = assert!(mem::MEMLCD_LEN == FB_WORDS * 4);
 
@@ -71,25 +70,12 @@ fn wait_idle() -> Result<(), Error> {
     Ok(())
 }
 
-/// Draws an orientation test card and pushes it to the panel. Returns how long the
-/// panel update took, in milliseconds.
-///
-/// A black frame, a solid black triangle in the top-left corner and a checkerboard in
-/// the bottom-right one: if the triangle is not at the top left, the placement in the
-/// module comment is wrong, and in which way is obvious from where it ended up.
-pub fn draw_test_card() -> Result<u64, Error> {
+/// Copies a frame to the panel and waits for the update. Returns how long the panel update
+/// took, in milliseconds.
+pub fn show(frame: &MemLcd) -> Result<u64, Error> {
     wait_idle()?;
-    for y in 0..HEIGHT {
-        for w in 0..WORDS_PER_LINE {
-            let mut word = 0u32;
-            for bit in 0..32 {
-                let x = w * 32 + bit;
-                if x < WIDTH && pixel_is_white(x, y) {
-                    word |= 1 << bit;
-                }
-            }
-            fb_write(y * WORDS_PER_LINE + w, word);
-        }
+    for (i, &w) in frame.words().iter().enumerate() {
+        fb_write(i, w);
     }
     let start = crate::timer::now_ms();
     csr::write(reg::MEMLCD_COMMAND, CMD_UPDATE_ALL);
@@ -99,15 +85,4 @@ pub fn draw_test_card() -> Result<u64, Error> {
     while crate::timer::now_ms() < settle {}
     wait_idle()?;
     Ok(crate::timer::now_ms() - start)
-}
-
-fn pixel_is_white(x: usize, y: usize) -> bool {
-    let frame = x < 4 || y < 4 || x >= WIDTH - 4 || y >= HEIGHT - 4;
-    let triangle = x >= 12 && y >= 12 && (x - 12) + (y - 12) < 80;
-    let checker = x >= WIDTH - 92
-        && y >= HEIGHT - 92
-        && x < WIDTH - 12
-        && y < HEIGHT - 12
-        && ((x / 8) + (y / 8)).is_multiple_of(2);
-    !(frame || triangle || checker)
 }

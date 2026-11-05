@@ -11,7 +11,7 @@ element, no Coldcard bootloader, no callgate -- so it is its own crate,
 `crates/catcard-precursor`, built on the portable crates, rather than a `catcard-fw`
 board feature.
 
-**Status: milestone 1 done; milestone 2 under way (TRNG done).** The image runs from SRAM on a bench unit: it takes over from
+**Status: milestone 1 done; milestone 2 under way (TRNG and UI done, keyboard next).** The image runs from SRAM on a bench unit: it takes over from
 Xous, feeds the watchdog, prints on the UART and draws a test card, which comes out the
 right way up. No wallet yet.
 
@@ -23,7 +23,8 @@ right way up. No wallet yet.
 1. **Board layer and toolchain** -- RV32IMAC image entered from SRAM, UART, LCD,
    watchdog, timer. Done.
 2. The gateware TRNG as two entropy sources for `catcard-entropy` (done, see "TRNG");
-   the UI layout engine at 336x536; keyboard; seed creation, not yet stored.
+   catcard-ui on the 336x536 panel (done, see "Screens"); keyboard; seed creation, not
+   yet stored.
 3. Menus and wallet flows that need no storage.
 4. Storage on the SPI-NOR and a PIN / secret design. Precursor has no secure element, so
    this is a real design decision (FPGA key ROM, BBRAM key, PIN-stretched keys), taken
@@ -71,6 +72,21 @@ for a GDB load would be reset under the debugger 2.5-7.5 s later.
 
 The debug hat carries the gateware's UART (115200 8N1) to the Raspberry Pi's
 `/dev/ttyAMA0`, so output is readable without anyone at the bench.
+
+## Screens
+
+The screens are catcard-ui's own -- `widgets::menu`, `info`, `message` -- drawn into
+`catcard_ui::memlcd::MemLcd`, a canvas in the panel's native framebuffer layout, and
+copied out by `lcd::show` (one full update, ~100 ms). `Layout::large()` is `roomy()`'s
+faces doubled through `face::Scaled` (20x40 titles over 14x28 body text): at 200 ppi
+unscaled 7x14 is under a millimetre wide. It fits 23 columns and fifteen menu rows.
+
+Boot currently shows a splash, the entropy self-test's verdicts, then a blank device's
+main menu (New, Import, Utils, Settings, Help), not yet wired to keys.
+
+`tools/precursor/screenshot.py` reads the framebuffer back over the USB bridge and writes
+a PBM, so what is on the panel can be checked without being at the bench (it shows what
+was sent, not what the gateware overlays -- the devboot line is not in it).
 
 ## TRNG
 

@@ -49,6 +49,43 @@ impl Face for Font {
     }
 }
 
+/// Another face drawn `factor` times larger: every pixel of the source cell becomes a
+/// `factor` x `factor` block.
+///
+/// For panels whose pixels are small. The Precursor's memory LCD is 200 ppi, where the
+/// 7x14 face is under a millimetre wide; doubled it reads like a phone's body text. Integer
+/// factors only, so a 1-bit face stays crisp -- no resampling, no new levels.
+#[derive(Copy, Clone)]
+pub struct Scaled<'a> {
+    face: &'a dyn Face,
+    factor: usize,
+}
+
+impl<'a> Scaled<'a> {
+    /// `factor` 0 is treated as 1: a face that draws nothing is never what was meant.
+    pub const fn new(face: &'a dyn Face, factor: usize) -> Self {
+        Self {
+            face,
+            factor: if factor == 0 { 1 } else { factor },
+        }
+    }
+}
+
+impl Face for Scaled<'_> {
+    fn line_height(&self) -> usize {
+        self.face.line_height() * self.factor
+    }
+    fn advance(&self, c: u8) -> usize {
+        self.face.advance(c) * self.factor
+    }
+    fn coverage(&self, c: u8, x: usize, y: usize) -> Level {
+        self.face.coverage(c, x / self.factor, y / self.factor)
+    }
+    fn cell_width(&self, c: u8) -> usize {
+        self.face.cell_width(c) * self.factor
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +108,27 @@ mod tests {
             );
             assert_eq!(face.coverage(b'#', 100, 100), PAPER, "outside the cell");
         }
+    }
+
+    #[test]
+    fn a_scaled_face_is_its_source_in_blocks() {
+        let src: &dyn Face = &peep7x14::FONT;
+        let big = Scaled::new(src, 2);
+        assert_eq!(big.line_height(), 2 * src.line_height());
+        assert_eq!(big.advance(b'A'), 2 * src.advance(b'A'));
+        assert_eq!(big.cell_width(b'A'), 2 * src.cell_width(b'A'));
+        for y in 0..big.line_height() {
+            for x in 0..big.cell_width(b'A') {
+                assert_eq!(big.coverage(b'A', x, y), src.coverage(b'A', x / 2, y / 2));
+            }
+        }
+        // Some ink at all, so the comparison above was not 0 == 0 throughout.
+        assert!((0..28).any(|y| (0..14).any(|x| big.coverage(b'A', x, y) == INK)));
+    }
+
+    #[test]
+    fn scale_zero_means_one() {
+        let src: &dyn Face = &misc4x6::FONT;
+        assert_eq!(Scaled::new(src, 0).line_height(), src.line_height());
     }
 }

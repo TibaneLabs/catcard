@@ -305,6 +305,8 @@ name = "catcard-precursor"
 version = "7.0.0"
 dependencies = [
  "catcard-entropy",
+ "catcard-ui",
+ "heapless",
  "zeroize",
 ]
 

@@ -2,7 +2,8 @@
 //!
 //! Panel-independent drawing lives in [`framebuffer`]; per-controller drivers in
 //! [`ssd1306`] (the mk3/mk4/mk5 OLED) and [`st7789`] (the Q1 LCD). Input scanners are
-//! [`keypad`] (the 4x3 numpad) and [`qwerty`] (the Q1 keyboard).
+//! [`keypad`] (the 4x3 numpad) and [`qwerty`] (the Q1 keyboard). [`memlcd`] is a canvas in the
+//! Precursor memory LCD's framebuffer format.
 //! Neither knows about SPI or GPIO — the board layer supplies those, so everything
 //! here is testable on the host.
 
@@ -24,6 +25,7 @@ pub mod grid;
 pub mod helpstrip;
 pub mod icons;
 pub mod keypad;
+pub mod memlcd;
 pub mod menu;
 pub mod nav;
 pub mod pager;

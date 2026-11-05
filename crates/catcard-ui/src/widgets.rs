@@ -7,7 +7,7 @@
 //! rows of 4x6 on an mk4 and a dozen rows of 7x14 across a Q1's whole 320x240.
 
 use crate::canvas::Canvas;
-use crate::face::Face;
+use crate::face::{Face, Scaled};
 use crate::font::{misc4x6, peep7x14, peep10x20};
 use crate::menu::Scroll;
 use crate::text::{centred, draw_text};
@@ -68,6 +68,26 @@ impl Layout<'static> {
             body: &peep10x20::FONT,
             gap: 2,
             margin: 6,
+        }
+    }
+}
+
+/// The 7x14 face doubled, for high-density panels.
+const PEEP7X14_X2: Scaled<'static> = Scaled::new(&peep7x14::FONT, 2);
+/// The 10x20 face doubled, for titles on high-density panels.
+const PEEP10X20_X2: Scaled<'static> = Scaled::new(&peep10x20::FONT, 2);
+
+impl Layout<'static> {
+    /// A small, sharp panel: [`roomy`](Self::roomy)'s faces at twice the size, a 20x40 title
+    /// over 14x28 body text. Written for the Precursor's 336x536 memory LCD at 200 ppi,
+    /// where unscaled 7x14 is under a millimetre wide; there this gives 24 columns and
+    /// fifteen menu rows.
+    pub const fn large() -> Self {
+        Self {
+            title: &PEEP10X20_X2,
+            body: &PEEP7X14_X2,
+            gap: 4,
+            margin: 12,
         }
     }
 }

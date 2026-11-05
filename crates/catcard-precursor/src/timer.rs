@@ -32,3 +32,11 @@ pub fn now_ms() -> u64 {
     let hi = csr::read(hi_addr);
     (u64::from(hi) << 32) | u64::from(csr::read(lo_addr))
 }
+
+/// Spins for at least `ms` milliseconds, feeding the watchdog while it waits.
+pub fn delay_ms(ms: u64) {
+    let until = now_ms() + ms;
+    while now_ms() < until {
+        crate::wdt::feed();
+    }
+}

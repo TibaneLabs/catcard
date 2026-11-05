@@ -22,6 +22,8 @@ mod lcd;
 #[cfg(target_arch = "riscv32")]
 mod rngcheck;
 #[cfg(target_arch = "riscv32")]
+mod screens;
+#[cfg(target_arch = "riscv32")]
 mod start;
 #[cfg(target_arch = "riscv32")]
 mod timer;
@@ -61,16 +63,38 @@ extern "C" fn rust_main() -> ! {
     );
     let _ = writeln!(out, "uptime at entry: {} ms", timer::now_ms());
 
-    match lcd::draw_test_card() {
-        Ok(ms) => {
-            let _ = writeln!(out, "lcd: test card drawn ({ms} ms)");
-        }
-        Err(e) => {
-            let _ = writeln!(out, "lcd: {e}");
-        }
-    }
+    // The screens are catcard-ui's, laid out for this panel by `Layout::large()`. The frame
+    // lives on the stack: 23.6 KB against a stack of most of 16 MiB.
+    let layout = catcard_ui::widgets::Layout::large();
+    let mut frame = catcard_ui::memlcd::MemLcd::new();
 
-    rngcheck::run(&mut out);
+    catcard_ui::widgets::message(
+        &mut frame,
+        &layout,
+        "CatCard",
+        "for Precursor",
+        "checking entropy",
+    );
+    show(&mut out, &frame, "splash");
+
+    let summary = rngcheck::run(&mut out);
+    let lines = screens::entropy_lines(&summary);
+    catcard_ui::widgets::info(&mut frame, &layout, "Entropy", &lines);
+    show(&mut out, &frame, "entropy");
+    timer::delay_ms(3000);
+
+    // A blank device's main menu, as CatCard has it (catcard-fw MAIN_ITEMS_BLANK, the
+    // boards with a Help row). Not wired to anything yet: no keyboard driver.
+    let items = ["New", "Import", "Utils", "Settings", "Help"];
+    catcard_ui::widgets::menu(
+        &mut frame,
+        &layout,
+        "CatCard",
+        "no seed",
+        &items,
+        catcard_ui::menu::Scroll::default(),
+    );
+    show(&mut out, &frame, "main menu");
 
     let mut next_print = timer::now_ms() + 1000;
     let mut seconds = 0u32;
@@ -81,6 +105,19 @@ extern "C" fn rust_main() -> ! {
             seconds += 1;
             next_print += 1000;
             let _ = writeln!(out, "alive {seconds}s (ticktimer {now} ms)");
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+fn show(out: &mut uart::Uart, frame: &catcard_ui::memlcd::MemLcd, what: &str) {
+    use core::fmt::Write as _;
+    match lcd::show(frame) {
+        Ok(ms) => {
+            let _ = writeln!(out, "lcd: {what} shown ({ms} ms)");
+        }
+        Err(e) => {
+            let _ = writeln!(out, "lcd: {what}: {e}");
         }
     }
 }
