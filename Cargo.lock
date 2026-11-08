@@ -145,6 +145,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-bitstream"
+version = "7.0.0"
+dependencies = [
+ "purecrypto",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-board"
 version = "7.0.0"
 

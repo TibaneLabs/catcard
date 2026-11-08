@@ -1,0 +1,13 @@
+[package]
+name = "catcard-bitstream"
+description = "Encrypted Spartan-7 bitstream rewriting for the Precursor: re-key, re-target, patch the key ROM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+purecrypto = { workspace = true, features = ["hash", "cipher"] }
+zeroize = { workspace = true, features = ["derive"] }

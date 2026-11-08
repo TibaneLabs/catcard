@@ -146,3 +146,16 @@ addresses; `build.rs` turns them into constants.
 By Sutajio Ko-Usagi Pte. Ltd. and the betrusted.io contributors.
 Upstream: <https://github.com/betrusted-io/betrusted-soc>, under the CERN Open Hardware
 Licence v1.2.
+
+## Xous key ROM bit map
+
+`crates/catcard-bitstream/src/keyrom-map.bin` is the table locating each betrusted-soc
+key ROM bit in the Spartan-7 bitstream (frame, word, bit -> key ROM address, bit). It is
+the data of the two `PATCH_TABLE_*` arrays in Xous's
+`services/root-keys/src/key2bits/patch.rs`, concatenated unchanged by
+`tools/precursor/keyrom-map.py`; no Xous code is used. Xous derived it from Project
+X-Ray's Spartan-7 database and the key ROM's placement constraints.
+
+Copyright Sutajio Ko-Usagi Pte. Ltd. and the Xous contributors.
+Upstream: <https://github.com/betrusted-io/xous-core> (commit 99bbfcc), under the
+Apache License 2.0.

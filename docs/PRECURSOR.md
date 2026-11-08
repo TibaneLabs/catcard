@@ -31,9 +31,8 @@ right way up. No wallet yet.
    catcard-ui on the 336x536 panel (done, see "Screens"); keyboard (done, see
    "Keyboard"); seed creation, not yet stored.
 3. Menus and wallet flows that need no storage.
-4. Storage on the SPI-NOR and a PIN / secret design. Precursor has no secure element, so
-   this is a real design decision (FPGA key ROM, BBRAM key, PIN-stretched keys), taken
-   then, not now.
+4. Storage on the SPI-NOR under a key-ROM device secret and a passphrase; see
+   `docs/PRECURSOR-KEYS.md`. In progress: `catcard-bitstream` rewrites the gateware.
 5. Boot from flash in place of the Xous loader. The boot ROM verifies the loader slot
    with Ed25519; see "Booting from flash".
 6. USB HID and FIDO. Needs gateware v0.9.14 or later; see "Gateware".
@@ -104,19 +103,12 @@ USB on this board needs, in order:
    separation from the board the wallet flows here got. Sign PSBT would then take its
    PSBT over USB instead of the UART; nothing else about it changes.
 
-## Not decided: storage and PIN
+## Storage and PIN
 
-The wallet is per power cycle because what keeps a seed safe at rest on this board is a
-design decision, not a port. The Precursor has no secure element and no Coldcard
-bootloader callgate; what it does have: an FPGA bitstream key (BBRAM or eFuse) that
-keeps the gateware -- and a key ROM inside it -- secret, a 128 MiB SPI flash outside the
-FPGA, and a keyboard for a long passphrase. Options to weigh: a PIN/passphrase-stretched
-key encrypting the seed in flash (portable, but offline-guessable without rate limits
-from hardware); a device key in the bitstream's key ROM mixed in (binds the seed to this
-unit, safe only once the bitstream is encrypted to a key this unit generated -- which
-also means owning the gateware build); attempt counters (in flash, so resettable by
-anyone with a programmer). catcard-settings already gives an authenticated, power-fail-
-safe store over SPI-NOR once the key question is settled.
+Chosen 2026-11-08: a device secret in the key ROM of gateware encrypted to a BBRAM key
+this unit generates, mixed with the owner's passphrase by Argon2id. See
+`docs/PRECURSOR-KEYS.md` for the facts it rests on, the threat table and the staged plan.
+Until it lands the wallet is per power cycle.
 
 ## Development loop (no flash writes)
 
