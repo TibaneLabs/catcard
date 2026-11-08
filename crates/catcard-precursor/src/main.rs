@@ -29,6 +29,8 @@ mod input;
 #[cfg(target_arch = "riscv32")]
 mod kbd;
 #[cfg(target_arch = "riscv32")]
+mod keyrom;
+#[cfg(target_arch = "riscv32")]
 mod keywork;
 #[cfg(target_arch = "riscv32")]
 mod lcd;
@@ -80,6 +82,7 @@ extern "C" fn rust_main() -> ! {
         }
     );
     let _ = writeln!(out, "uptime at entry: {} ms", timer::now_ms());
+    keyrom::report(&mut out);
 
     heap::init();
     let mut ui = ui::Ui::new(out);
